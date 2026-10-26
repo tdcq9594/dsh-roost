@@ -60,7 +60,7 @@ export async function postReply(payload, text, done = true) {
  * @param {(payload:object)=>void} p.onInbound 收到消息（不要 await，别拖住响应）
  * @param {(msg:string)=>void} [p.log]
  */
-export function createInboundServer({ port, token = '', onInbound, log = () => {} }) {
+export function createInboundServer({ port, ports, token = '', onInbound, onListening, log = () => {} }) {
   const server = createServer(async (req, res) => {
     const send = (code, body) => {
       try {
@@ -126,29 +126,61 @@ export function createInboundServer({ port, token = '', onInbound, log = () => {
   });
 
   /**
-   * 把最后一次错误挂在 server 上。
+   * 端口被占就往后试下一个。
    *
-   * 光打日志不够——面板只说「宿主没在听」，用户不知道是端口被占还是别的原因。
-   * 记下来，/status 带出去，概览直接显示。
+   * 之前只试一个端口，被占就彻底没人听了——ai-chat 推过来全是 fetch failed，
+   * 而面板只说「宿主没在听」，看不出原因。DSH 重载插件时旧 server 还占着端口，
+   * 这个场景太常见了，必须能自己绕过去。
+   *
+   * `ports` 是候选列表（[want, want+1, ...]），`port` 是兼容旧调用的单端口写法。
    */
+  const tries = (Array.isArray(ports) && ports.length ? ports : [port]).filter(Boolean);
+  let idx = 0;
+  let current = tries[0];
+
   server.lastError = '';
-  server.on('error', (e) => {
-    server.lastError = e.code === 'EADDRINUSE' ? `端口 ${port} 被占用` : (e.message || String(e));
-    if (e.code === 'EADDRINUSE') {
-      log(`端口 ${port} 被占用了。改 config.json 里的 server.port，或关掉占用它的程序`);
-    } else {
-      log(`服务出错：${e.message}`);
+  server.actualPort = 0;
+
+  const listenNext = () => {
+    current = tries[idx];
+    if (current == null) {
+      server.lastError = `端口 ${tries[0]}–${tries[tries.length - 1]} 全被占了`;
+      log(server.lastError);
+      return;
     }
+    server.listen(current, '127.0.0.1');
+  };
+
+  server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+      server.lastError = `端口 ${current} 被占用`;
+      log(`端口 ${current} 被占用，试下一个`);
+      idx += 1;
+      // listen 失败后 server 可以再 listen 一次
+      setTimeout(listenNext, 0);
+      return;
+    }
+    server.lastError = e.message || String(e);
+    log(`服务出错：${e.message}`);
   });
 
-  server.listen(port, '127.0.0.1', () => {
+  server.on('listening', () => {
     server.lastError = '';
-    log(`监听 127.0.0.1:${port}${token ? '（需要共享密钥）' : '（未设密钥，仅本机可访问）'}`);
+    server.actualPort = current;
+    log(
+      `监听 127.0.0.1:${current}${token ? '（需要共享密钥）' : '（未设密钥，仅本机可访问）'}`
+      + (current !== tries[0] ? `　← 配置里写的是 ${tries[0]}，那个被占了` : ''),
+    );
+    onListening?.(current);
   });
+
+  listenNext();
 
   return {
     server,
     port,
+    /** 实际 bind 成功的端口（可能和配置的不一样） */
+    actualPort: () => server.actualPort,
     close() {
       try {
         server.close();

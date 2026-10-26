@@ -23,6 +23,7 @@ import { createSetup } from './setup.js';
 import { createPersonas } from './personas.js';
 import { createStickers } from './stickers.js';
 import { createSpeakUp } from './speakup.js';
+import { createLease, candidates } from './lease.js';
 
 export const name = 'roost';
 
@@ -115,6 +116,9 @@ export function apply(ctx) {
   speakTimer.unref?.();
 
   /** 已经挂过人格/权限上下文的 agent，避免每轮重复挂 */
+  /** 端口租约：跟 Roost 互通「实际在哪个端口」 */
+  const lease = createLease({ file: join(dataDir(), 'ports.json'), log: (m) => log.warn(m) });
+
   const mounted = new WeakSet();
   /** mount() 挂上去的取消函数。不能在 mount 里调 ctx.onTeardown，见下面注释 */
   const mountOffs = [];
@@ -390,12 +394,44 @@ export function apply(ctx) {
 
   function startServer() {
     server?.close();
+
+    /**
+     * 候选端口：配置里的 → 上次实际用的 → 往后 +1 一直到 +20。
+     *
+     * 「上次实际用的」放前面，是为了重启后尽量落回同一个端口——
+     * 用户可能在书签/反代里记着它。
+     */
+    const want = cfg.server.port;
+    const list = candidates(want, lease.actualOf('dsh'));
+
     server = createInboundServer({
-      port: cfg.server.port,
+      port: want,
+      ports: list,
       token: cfg.server.token,
       onInbound,
       log: (m) => log.info(m),
+      /**
+       * bind 成功后：写租约 + 同步 ai-chat。
+       *
+       * ai-chat 在 Roost 进程里，它读不到租约，只能被主动通知——
+       * 不通知的话它还往旧端口推，connection refused，两边都不报错。
+       */
+      onListening: (actual) => {
+        lease.claim('dsh', { want, actual });
+        if (actual !== want) log.warn(`dsh-roost 换到 ${actual}（${want} 被占），正在通知 ai-chat`);
+        syncAdapterPort(actual).catch((e) => log.warn(`通知 ai-chat 失败：${e.message}`));
+      },
     });
+  }
+
+  /** 把 ai-chat 的 dshUrl 指到实际端口。只在它已经配过 DSH 时改 */
+  async function syncAdapterPort(actual) {
+    try {
+      const r = await setup.syncDshUrl(actual);
+      if (r && !r.ok && !r.skipped) log.warn(`ai-chat 的地址没同步：${r.message}`);
+    } catch (e) {
+      log.warn(`ai-chat 的地址没同步：${e?.message ?? e}`);
+    }
   }
 
   ctx.effect(() => {
@@ -445,6 +481,8 @@ export function apply(ctx) {
           ok: true,
           listening: Boolean(server?.listening),
           serverError: server?.lastError || '',
+          wantPort: cfg.server.port,
+          actualPort: server?.actualPort || 0,
           port: cfg.server.port,
           tokenSet: Boolean(cfg.server.token),
           chats: sessions.size,

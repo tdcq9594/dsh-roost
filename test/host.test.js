@@ -18,6 +18,7 @@ import { bucketOf, modeFor, describeSpeaker, rulesFor } from '../src/permissions
 import { createSetup } from '../src/setup.js';
 import { createPersonas } from '../src/personas.js';
 import { createStickers, tagsOf } from '../src/stickers.js';
+import { createLease, candidates } from '../src/lease.js';
 import { shouldFire, inAwakeWindow, scheduleNext, DEFAULTS as SPEAK_DEFAULTS } from '../src/speakup.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dsh-roost-'));
@@ -603,6 +604,57 @@ test('搭话: 间隔是随机的，落在区间内', () => {
     seen.add(Math.round(d));
   }
   assert.ok(seen.size > 1, '应该是随机的，不能每次都一样');
+});
+
+/* ---------------- 端口租约 ---------------- */
+
+test('租约: 候选端口从 want 往后排，上次的 actual 优先', () => {
+  const list = candidates(17321, 17323, 3);
+  assert.equal(list[0], 17323, '上次实际用的排最前');
+  assert.equal(list[1], 17321);
+  assert.deepEqual(list.slice(2), [17322, 17323, 17324].filter((p) => p !== 17323));
+  assert.equal(new Set(list).size, list.length, '不能有重复');
+});
+
+test('租约: 没有上次记录就从 want 开始', () => {
+  const list = candidates(17321, null, 2);
+  assert.deepEqual(list, [17321, 17322, 17323]);
+});
+
+test('租约: 写进去能读出来（want 和 actual 分开存）', () => {
+  const dir = tmp();
+  const lease = createLease({ file: join(dir, 'ports.json') });
+  lease.claim('dsh', { want: 17321, actual: 17322, pid: 123 });
+
+  assert.equal(lease.actualOf('dsh'), 17322);
+  assert.equal(lease.wantOf('dsh'), 17321);
+  assert.equal(lease.actualOf('roost'), null, '没写过的槽位是 null');
+});
+
+test('租约: 两个槽位互不覆盖', () => {
+  const dir = tmp();
+  const lease = createLease({ file: join(dir, 'ports.json') });
+  lease.claim('dsh', { want: 17321, actual: 17322 });
+  lease.claim('roost', { want: 15210, actual: 15211 });
+
+  assert.equal(lease.actualOf('dsh'), 17322);
+  assert.equal(lease.actualOf('roost'), 15211);
+});
+
+test('租约: 文件坏了当作没有，不能因此起不来', () => {
+  const dir = tmp();
+  const file = join(dir, 'ports.json');
+  writeFileSync(file, '{ 这不是 JSON', 'utf8');
+  const lease = createLease({ file });
+  assert.equal(lease.actualOf('dsh'), null);
+  // 坏了也要能重新写
+  lease.claim('dsh', { want: 17321, actual: 17322 });
+  assert.equal(lease.actualOf('dsh'), 17322);
+});
+
+test('租约: 文件不存在也不炸', () => {
+  const lease = createLease({ file: join(tmp(), 'nope', 'ports.json') });
+  assert.equal(lease.actualOf('roost'), null);
 });
 
 /* ---------------- 配置 ---------------- */

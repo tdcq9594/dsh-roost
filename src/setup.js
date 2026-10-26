@@ -17,6 +17,7 @@ import { createServer as createNetServer } from 'node:net';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { createLease } from './lease.js';
 import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 
@@ -124,8 +125,16 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     }
   }
 
+  /**
+   * Roost 面板的实际端口。
+   *
+   * 先看租约：Roost 端口被占时会自己换一个并写进租约，
+   * 配置里的 webui.port 是「意愿」，不能直接当现实用。
+   * 租约没有（旧版本 / 没换过）才退回配置值。
+   */
   function portOf() {
-    return Number(roostGlobal().webui?.port) || 8080;
+    const leased = createLease({ file: join(dirOf(), 'data', 'ports.json') }).actualOf('roost');
+    return leased || Number(roostGlobal().webui?.port) || 8080;
   }
   function keyOf() {
     return String(roostGlobal().webui?.accessKey || '');
@@ -523,8 +532,9 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
    * 只在 ai-chat 已经配过（adapter=dsh 或有 dshUrl）时才改，
    * 不擅自把一个没配过的插件改成 DSH 模式。
    */
-  async function syncDshUrl() {
-    const want = `http://127.0.0.1:${cfgOf().server.port}`;
+  async function syncDshUrl(portOverride) {
+    // 传了端口就用传的（实际 bind 成功的那个），否则用配置里的
+    const want = `http://127.0.0.1:${portOverride || cfgOf().server.port}`;
     let cur = null;
     try {
       cur = (await api('/api/plugins/ai-chat/config'))?.config ?? null;
