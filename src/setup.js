@@ -106,7 +106,13 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
   let child = null;
   let busy = '';
 
-  const dirOf = () => cfgOf().setup.roostDir || join(dataDir(), 'roost');
+  /**
+   * 当前在用的 Roost 目录。
+   *
+   * **不再死认配置**：用户会移动目录（配置指着桌面、实际在别处）。
+   * 这里走 resolveRoostDir()，端口、密钥、插件配置全都跟着真实安装位置。
+   */
+  const dirOf = () => resolveRoostDir().dir || join(dataDir(), 'roost');
   const versionOf = () => cfgOf().setup.version || 'v0.8.1';
 
   /** Roost 自己的全局配置（端口、密钥都在里面） */
@@ -151,6 +157,83 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
   }
 
   /** 是不是在跑（直接问它自己） */
+  /* ---------------- 定位 Roost 安装目录 ---------------- */
+
+  /**
+   * 这个目录是不是一份 Roost？
+   *
+   * 认三个特征，命中任意两个就算——只看 `package.json` 的话，
+   * 用户改过名字（或从压缩包解出来）就认不出了。
+   */
+  function looksLikeRoost(dir) {
+    if (!dir) return false;
+    try {
+      if (!existsSync(join(dir, 'src', 'main.js'))) return false;
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+      return pkg?.name === 'qq-bot-roost' || existsSync(join(dir, 'plugins'));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 找到真正在用的那份 Roost。
+   *
+   * **只在没配的时候自动找。** 用户明确配了路径就认他配的——
+   * 猜错了比不猜更糟（会把端口、密钥、插件配置全指向另一份实例，
+   * 而且看起来一切正常）。配了但不像 Roost 时，如实返回 `dirOk: false`，
+   * 让面板提示「路径不对，去设置里改」，而不是偷偷换一个。
+   */
+  function resolveRoostDir() {
+    const configured = String(cfgOf().setup.roostDir || '').trim();
+    if (configured) {
+      return looksLikeRoost(configured)
+        ? { dir: configured, how: '配置' }
+        : { dir: configured, how: '配置的路径不是一份 Roost（缺 src/main.js 或 package.json）' };
+    }
+
+    const home = process.env.USERPROFILE || process.env.HOME || '';
+    const candidates = [
+      join(dataDir(), 'roost'),
+      join(home, 'Desktop', 'qq-bot-roost'),
+      join(home, 'qq-bot-roost'),
+    ];
+    for (const c of candidates) {
+      if (looksLikeRoost(c)) {
+        return { dir: c, how: c === join(dataDir(), 'roost') ? '一键安装目录' : '自动找到' };
+      }
+    }
+    return { dir: join(dataDir(), 'roost'), how: '没配，也没找到现成的' };
+  }
+
+  /**
+   * 从磁盘读某个插件的配置。
+   *
+   * 为什么要读文件：Roost 的 `/api/plugins/<id>/config` **只实现了 PUT，GET 返回 404**，
+   * 列表接口又**不带 config**。所以除了翻磁盘没别的可靠来源。
+   * 位置是 `<roost>/data/bots/<bot>/plugins/<id>.json`，多个 bot 时优先 main。
+   */
+  function readPluginConfigFromDisk(id) {
+    const { dir } = resolveRoostDir();
+    if (!dir) return null;
+    const botsDir = join(dir, 'data', 'bots');
+    let botIds = [];
+    try {
+      botIds = readdirSync(botsDir);
+    } catch {
+      return null;
+    }
+    // main 排前面
+    botIds.sort((a, b) => (a === 'main' ? -1 : b === 'main' ? 1 : 0));
+    for (const bot of botIds) {
+      try {
+        const p = join(botsDir, bot, 'plugins', `${id}.json`);
+        if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf8'));
+      } catch {}
+    }
+    return null;
+  }
+
   async function isRunning() {
     try {
       const r = await fetch(`${baseUrl()}/api/status`, { signal: AbortSignal.timeout(1500) });
@@ -204,17 +287,24 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     let pluginConfig = null;
     if (running) {
       /**
-       * 直接读配置接口，不读 `/api/plugins` 列表。
+       * 读插件配置有三条路，按可靠程度排：
        *
-       * 列表里的 `config` 是给「插件卡片」用的简化视图，不一定带全字段——
-       * 之前就因为拿它判断 `adapter === 'dsh'`，明明切换成功了却一直显示未完成。
-       * `/api/plugins/<id>/config` 才是权威来源（configurePlugin 写的就是这里）。
+       * 1. `GET /api/plugins/<id>/config` —— **Roost 只实现了 PUT，GET 是 404**，
+       *    试一下就行，将来支持了自动用上。
+       * 2. **直接读磁盘**：`<roost>/data/bots/<bot>/plugins/<id>.json`。
+       *    这是权威来源，面板上看到的就是它。
+       * 3. 列表接口 —— 它**不带 config**，只能算兜底。
+       *
+       * 之前只走第 3 条，等于永远读不到 adapter，所以「切成功了却一直不显示完成」。
        */
       try {
         const one = await api('/api/plugins/ai-chat/config');
         pluginConfig = one?.config ?? one ?? null;
-      } catch {
-        // 插件没装 / 没启用时这个接口会 404，退回列表视图碰碰运气
+      } catch {}
+
+      if (!pluginConfig) pluginConfig = readPluginConfigFromDisk('ai-chat');
+
+      if (!pluginConfig) {
         try {
           const pl = await api('/api/plugins');
           const arr = pl?.plugins ?? pl ?? [];
@@ -228,6 +318,8 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
 
     return {
       dir,
+      dirHow: resolveRoostDir().how,
+      dirOk: looksLikeRoost(dir),
       version,
       installed,
       running,
@@ -448,23 +540,19 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       // 交给 DSH 之后，本插件说了算，别让 AI 再按「只在被 @ 时说话」缩着
       decide: 'ai',
     };
-    await api('/api/plugins/ai-chat/config', { method: 'PUT', body: JSON.stringify(patch) });
-
     /**
-     * 写完要**读回来核对**。
+     * 写完之后**用 PUT 的返回核对**。
      *
-     * 之前直接 return ok:true，但那只是「PUT 没抛错」——
-     * 插件可能把不认识的键丢了、或者 schema 里 adapter 的值域不含 'dsh'，
-     * 结果面板显示「已切换」而节点一直不绿。自己说成功不算数，读回来才算。
+     * 不能再去 GET 一遍：Roost 的 `/api/plugins/<id>/config` **只实现了 PUT**，
+     * GET 是 404 —— 之前就是因此误判成「写进去了但读回来是空」，
+     * 其实早就写成功了。PUT 的响应里带着合并后的完整 config，够用来核对。
      */
-    let back = null;
-    try {
-      back = (await api('/api/plugins/ai-chat/config'))?.config ?? null;
-    } catch {}
+    const res = await api('/api/plugins/ai-chat/config', { method: 'PUT', body: JSON.stringify(patch) });
+    const back = res?.config ?? null;
     const actual = back?.adapter;
-    if (actual !== 'dsh') {
+    if (back && actual !== 'dsh') {
       throw new Error(
-        `写进去了但读回来还是 adapter=${actual ?? '空'}。`
+        `写进去了但返回的 adapter=${actual ?? '空'}。`
         + '可能这个版本的 ai-chat 配置里没有 adapter 这一项，去 Roost 面板 → 插件 → ai-chat → 设置里手动改一下。',
       );
     }
@@ -473,7 +561,7 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       ok: true,
       message: `ai-chat 已切到 DSH 适配器（dshUrl=${back?.dshUrl || patch.dshUrl}）`,
       patch,
-      config: { adapter: back.adapter, dshUrl: back.dshUrl },
+      config: back ? { adapter: back.adapter, dshUrl: back.dshUrl } : null,
     };
   }
 
