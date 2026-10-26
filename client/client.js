@@ -287,18 +287,44 @@ window.__ModuleLoader__.load({
             desc: st.installed ? `已装 v${st.version || '?'}` : '下载解压就行——Roost 零依赖，不用 npm install',
           },
             st.installed
-              ? h('button', { className: 'roost-btn', onClick: () => copy(st.dir), title: st.dir }, '复制路径')
-              : h('button', { className: 'roost-btn', onClick: () => setPathOpen((v) => !v) }, pathOpen ? '收起' : '已装过？'),
-            st.installed ? null : h('button', { className: 'roost-btn', disabled: Boolean(busy), onClick: () => run({ only: 'install' }) }, '安装'),
+              ? h('button', { className: 'roost-btn', onClick: () => setPathOpen((v) => !v) }, pathOpen ? '收起' : '更改路径')
+              : h('button', { className: 'roost-btn', onClick: () => setPathOpen((v) => !v) }, pathOpen ? '收起' : '改路径'),
+            st.installed
+              ? null
+              : h('button', {
+                  className: 'roost-btn',
+                  disabled: Boolean(busy),
+                  onClick: async () => {
+                    /**
+                     * 装了自定义路径就先落盘再下载。
+                     * 不先存的话 install() 还会按旧的 dirOf() 装到默认位置。
+                     */
+                    const want = (dir || '').trim()
+                    if (want && want !== st.dir) {
+                      const r = await post('/setup/dir', { dir: want })
+                      if (r.ok === false) return toast(r.message || '路径不可用')
+                    }
+                    run({ only: 'install' })
+                  },
+                }, '安装'),
           ),
 
-          /* 已经自己装过的人：直接指过去，不用再下一份 */
-          pathOpen && !st.installed
+          /* 路径：装之前选装到哪，装完也能改（改了要重启才生效） */
+          pathOpen
             ? h('div', { style: { marginTop: -10, marginBottom: 16, paddingLeft: 40, maxWidth: 470 } },
-                h('div', { className: 'roost-desc', style: { marginBottom: 6 } }, '填 Roost 所在目录（里面要有 src/main.js）'),
+                h('div', { className: 'roost-desc', style: { marginBottom: 6 } },
+                  st.installed
+                    ? '换到别的目录（里面要有 src/main.js）。改完要重启 Roost 才生效'
+                    : `装到哪。默认 ${st.dir || '（数据目录下的 roost）'}，留空就用默认`),
                 h('div', { style: { display: 'flex', gap: 6 } },
-                  h('input', { className: 'roost-input', placeholder: 'D:\\bots\\qq-bot-roost', value: dir, onChange: (e) => setDir(e.target.value) }),
-                  h('button', { className: 'roost-btn', disabled: !dir || Boolean(busy), onClick: bindDir }, '绑定'),
+                  h('input', {
+                    className: 'roost-input',
+                    placeholder: st.dir || 'D:\\bots\\qq-bot-roost',
+                    value: dir,
+                    onChange: (e) => setDir(e.target.value),
+                  }),
+                  h('button', { className: 'roost-btn', disabled: !dir || Boolean(busy), onClick: bindDir },
+                    st.installed ? '更改' : '绑定'),
                 ),
               )
             : null,
