@@ -368,6 +368,42 @@ test('一键：WebUI 地址带上面板密钥', () => {
   assert.equal(s.webuiUrl(), 'http://127.0.0.1:8090/?key=k1');
 });
 
+test('一键：绑定已有安装（目录里有 src/main.js 才算）', () => {
+  const dir = tmp();
+  const roost = tmp();
+  mkdirSync(join(roost, 'src'), { recursive: true });
+  writeFileSync(join(roost, 'src', 'main.js'), '// fake', 'utf8');
+
+  let cfg = { setup: { roostDir: '', version: 'v0.8.1' }, server: { port: 17321 } };
+  const s = createSetup({ cfgOf: () => cfg, setCfg: (p) => (cfg = { ...cfg, ...p }), dataDir: dir });
+
+  const r = s.setDir(roost);
+  assert.equal(r.ok, true);
+  assert.equal(cfg.setup.roostDir, roost);
+});
+
+test('一键：绑定的目录不对要明确报错', () => {
+  const dir = tmp();
+  let cfg = { setup: { roostDir: '' }, server: { port: 17321 } };
+  const s = createSetup({ cfgOf: () => cfg, setCfg: (p) => (cfg = { ...cfg, ...p }), dataDir: dir });
+
+  assert.throws(() => s.setDir(dir), /没找到 src\/main\.js/);
+  assert.throws(() => s.setDir(''), /不能为空/);
+});
+
+test('一键：绑定时去掉尾斜杠和引号（从资源管理器复制来的路径）', () => {
+  const dir = tmp();
+  const roost = tmp();
+  mkdirSync(join(roost, 'src'), { recursive: true });
+  writeFileSync(join(roost, 'src', 'main.js'), '// fake', 'utf8');
+
+  let cfg = { setup: { roostDir: '' }, server: { port: 17321 } };
+  const s = createSetup({ cfgOf: () => cfg, setCfg: (p) => (cfg = { ...cfg, ...p }), dataDir: dir });
+
+  s.setDir(`"${roost}/"`);
+  assert.equal(cfg.setup.roostDir.replace(/\\/g, '/'), roost.replace(/\\/g, '/'));
+});
+
 /* ---------------- 配置 ---------------- */
 
 test('配置：密钥打码，但能看出有没有设', () => {

@@ -84,7 +84,8 @@ git clone https://github.com/tdcq9594/dsh-roost.git
 ```
 
 > 前提：DSH 桌面版 / Web 组合（需要 `sessionController` 和 `agents`）。
-> Roost 和 ai-chat 不用提前准备——「接入」里会装。
+> Roost 和 ai-chat 不用提前准备——「接入」里会装；
+> 已经自己装过 Roost 的，在第 1 步点「已装过？」填一下目录就行，不会重复下载。
 
 ---
 
@@ -94,7 +95,7 @@ git clone https://github.com/tdcq9594/dsh-roost.git
 
 | 步 | 做什么 | 自动？ |
 |---|---|---|
-| 1 | 下载解压 Roost（零依赖，不用 npm install） | ✅ 点一下 |
+| 1 | 下载解压 Roost（零依赖，不用 npm install） | ✅ 点一下 · 已经装过可点「已装过？」填路径绑定 |
 | 2 | 填 AppID / AppSecret | ✋ 开放平台拿，只能你填 |
 | 3 | 启动 Roost | ✅ 点一下 |
 | 4 | 装 ai-chat 插件（走 Roost 的市场） | ✅ 点一下 |

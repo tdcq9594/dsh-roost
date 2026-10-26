@@ -46,7 +46,13 @@ export function apply(ctx) {
   const turns = createTurnRunner({ ctx, log, timeoutSec: cfg.chat.turnTimeoutSec });
 
   /** 一键流程：装 Roost、配插件、起停、打开面板 */
-  const setup = createSetup({ cfgOf: () => cfg, dataDir: dataDir(), log: (m) => log.info(m) });
+  const setup = createSetup({
+    cfgOf: () => cfg,
+    // 面板改配置时要同时更新这里的 cfg 引用，否则下次 detect 还是旧路径
+    setCfg: (patch) => (cfg = saveConfig(patch)),
+    dataDir: dataDir(),
+    log: (m) => log.info(m),
+  });
 
   /** 已经挂过人格/权限上下文的 agent，避免每轮重复挂 */
   const mounted = new WeakSet();
@@ -355,6 +361,11 @@ export function apply(ctx) {
       route('/setup', (req, res) => setup.detect().then((s) => send(res, 200, { ok: true, ...s }))),
 
       route('/setup/install', (req, res) => setup.install().then((r) => send(res, 200, r))),
+
+      route('/setup/dir', async (req, res) => {
+        const b = await readBody(req);
+        return send(res, 200, setup.setDir(b.dir));
+      }),
 
       route('/setup/bot', async (req, res) => {
         const b = await readBody(req);

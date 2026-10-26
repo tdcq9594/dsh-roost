@@ -75,7 +75,7 @@ async function unzip(zipPath, dest) {
   throw new Error(`解压失败（${errs.join('；')}）。可以手动下载解压到目标目录`);
 }
 
-export function createSetup({ cfgOf, dataDir, log = () => {} }) {
+export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
   /** 我们自己拉起来的那个进程。DSH 重启后为 null，但 Roost 可能还在跑 */
   let child = null;
   let busy = '';
@@ -205,6 +205,25 @@ export function createSetup({ cfgOf, dataDir, log = () => {} }) {
       dshUrl: `http://127.0.0.1:${cfgOf().server.port}`,
       busy,
     };
+  }
+
+  /* ---------------- 绑定已有安装 ---------------- */
+
+  /**
+   * 已经自己装过 Roost 的人，不用再下一份。
+   *
+   * 只认「目录里有 src/main.js」——这是 Roost 的入口，有它就说明是个能跑的安装，
+   * 比让用户对着文档猜「我装的是不是对的」靠谱。
+   */
+  function setDir(input) {
+    const dir = String(input ?? '').trim().replace(/^["']|["']$/g, '').replace(/[/\\]+$/, '');
+    if (!dir) throw new Error('路径不能为空');
+    if (!existsSync(join(dir, 'src', 'main.js'))) {
+      throw new Error(`这个目录不像 Roost（没找到 src/main.js）：${dir}`);
+    }
+    setCfg({ setup: { roostDir: dir } });
+    log(`已绑定已有安装：${dir}`);
+    return { ok: true, message: '已绑定', dir };
   }
 
   /* ---------------- 装 ---------------- */
@@ -370,6 +389,7 @@ export function createSetup({ cfgOf, dataDir, log = () => {} }) {
   return {
     detect,
     install,
+    setDir,
     createBot,
     start,
     stop,
