@@ -211,25 +211,33 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
    *
    * 为什么要读文件：Roost 的 `/api/plugins/<id>/config` **只实现了 PUT，GET 返回 404**，
    * 列表接口又**不带 config**。所以除了翻磁盘没别的可靠来源。
-   * 位置是 `<roost>/data/bots/<bot>/plugins/<id>.json`，多个 bot 时优先 main。
+   * 位置是 **`<roost>/config/bots/<bot>/plugins/<id>.json`**
+   * （老版本可能在 `data/bots/...`，两个都试），多个 bot 时优先 main。
    */
   function readPluginConfigFromDisk(id) {
     const { dir } = resolveRoostDir();
     if (!dir) return null;
-    const botsDir = join(dir, 'data', 'bots');
-    let botIds = [];
-    try {
-      botIds = readdirSync(botsDir);
-    } catch {
-      return null;
-    }
-    // main 排前面
-    botIds.sort((a, b) => (a === 'main' ? -1 : b === 'main' ? 1 : 0));
-    for (const bot of botIds) {
+    /**
+     * 配置在 `config/bots/...` 下（loader.js 的 paths.pluginConfig）。
+     * 我第一版写成 `data/bots/...` —— 结果明明切换成功了也读不到，
+     * 白让用户以为没生效。老版本可能用 data/，两个都试。
+     */
+    for (const root of ['config', 'data']) {
+      const botsDir = join(dir, root, 'bots');
+      let botIds = [];
       try {
-        const p = join(botsDir, bot, 'plugins', `${id}.json`);
-        if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf8'));
-      } catch {}
+        botIds = readdirSync(botsDir);
+      } catch {
+        continue;
+      }
+      // main 排前面
+      botIds.sort((a, b) => (a === 'main' ? -1 : b === 'main' ? 1 : 0));
+      for (const bot of botIds) {
+        try {
+          const p = join(botsDir, bot, 'plugins', `${id}.json`);
+          if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf8'));
+        } catch {}
+      }
     }
     return null;
   }
