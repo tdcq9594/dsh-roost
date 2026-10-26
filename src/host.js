@@ -22,6 +22,7 @@ import { bucketOf, modeFor, describeSpeaker, rulesFor, LOCAL_TOOLS } from './per
 import { createSetup } from './setup.js';
 import { createPersonas } from './personas.js';
 import { createStickers } from './stickers.js';
+import { createSpeakUp } from './speakup.js';
 
 export const name = 'roost';
 
@@ -72,6 +73,34 @@ export function apply(ctx) {
   /** 表情包：只做「把清单写进提示词」，发图复用已有的 <<image:>> */
   const stickers = createStickers({ dataDir: dataDir(), log: (m) => log.warn(m) });
 
+  /**
+   * 主动搭话：算好「该说话了」→ 跑一轮 DSH 生成一句 → 让 ai-chat 发出去。
+   *
+   * 为什么发消息要绕一圈找 ai-chat：主动消息只能由持有 QQ 连接的一方发，
+   * dsh-roost 没有 api。所以 ai-chat 开了 `POST /send`，这里去调它。
+   */
+  const speakUp = createSpeakUp({
+    dataDir: dataDir(),
+    cfgOf: () => cfg,
+    log: (m) => log.info(m),
+    generate: async (prompt) => {
+      const chat = { kind: 'c2c', chatId: cfg.speakUp?.chatId || 'speakup', name: '主动搭话', preset: 'roost-private' };
+      const { agent } = await agentFor(chat);
+      mount(agent, chat);
+      return turns.run(agent, prompt, { source: { kind: 'roost-speakup' } });
+    },
+    send: async (payload) => {
+      const url = `${setup.baseUrl()}/api/plugins/ai-chat/r/send${setup.keyQuery()}`;
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(15000),
+      });
+      return r.json().catch(() => ({ ok: false, message: 'ai-chat 没回话' }));
+    },
+  });
+
   /** 一键流程：装 Roost、配插件、起停、打开面板 */
   const setup = createSetup({
     cfgOf: () => cfg,
@@ -80,6 +109,10 @@ export function apply(ctx) {
     dataDir: dataDir(),
     log: (m) => log.info(m),
   });
+
+  /** 每分钟问一次「该说话了吗」。unref 是为了不拖住进程退出 */
+  const speakTimer = setInterval(() => speakUp.tick().catch(() => {}), 60_000);
+  speakTimer.unref?.();
 
   /** 已经挂过人格/权限上下文的 agent，避免每轮重复挂 */
   const mounted = new WeakSet();
@@ -272,6 +305,9 @@ export function apply(ctx) {
       sid = sessionId;
       mount(agent, chat);
 
+      // 主人自己说话了 → 主动搭话重新排期
+      if (chat.kind === 'c2c') speakUp.noteOwner(chat.chatId);
+
       // 告诉 AI 谁在说话（软提醒，每轮现读）
       speaker.set(sid, { payload, bucket, system: payload.system || '' });
 
@@ -458,6 +494,12 @@ export function apply(ctx) {
 
       route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
 
+      route('/speakup', (req, res) =>
+        send(res, 200, { ok: true, state: speakUp.state(), cfg: cfg.speakUp }),
+      ),
+
+      route('/speakup/fire', async (req, res) => send(res, 200, await speakUp.fire('手动'))),
+
       route('/stickers', (req, res) =>
         send(res, 200, { ok: true, dir: stickers.dir(cfg.stickers), items: stickers.list(cfg.stickers) }),
       ),
@@ -510,6 +552,7 @@ export function apply(ctx) {
     ];
 
     return () => {
+      clearInterval(speakTimer);
       for (const off of offs) {
         try {
           off?.();

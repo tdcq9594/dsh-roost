@@ -52,6 +52,21 @@ export const DEFAULTS = {
     version: 'v0.8.1',
   },
   /**
+   * 主动搭话：主人一阵子没找你，你主动在私聊里说句话。
+   * **只在私聊，不在群里**；默认关着。
+   */
+  speakUp: {
+    enabled: false,
+    /** 主人私聊的 openid，空 = 不工作 */
+    chatId: '',
+    awakeFrom: 8,
+    awakeTo: 23,
+    minIntervalMinutes: 180,
+    maxIntervalMinutes: 480,
+    maxPerDay: 3,
+    prompt: '',
+  },
+  /**
    * 表情包库：往目录里丢图就行，文件名当标签（`开心_猫.png` → 开心、猫）。
    * 插件把清单写进提示词，AI 用 `<<image: 完整路径>>` 发。
    */

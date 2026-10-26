@@ -423,6 +423,10 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     installPlugin,
     configurePlugin,
     webuiUrl,
+    /** 面板根地址（不带 key），拼别的接口用 */
+    baseUrl,
+    /** 面板密钥的 query 片段，没有就是空串 */
+    keyQuery: () => (keyOf() ? `?key=${encodeURIComponent(keyOf())}` : ''),
     get busy() {
       return busy;
     },

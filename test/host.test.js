@@ -18,6 +18,7 @@ import { bucketOf, modeFor, describeSpeaker, rulesFor } from '../src/permissions
 import { createSetup } from '../src/setup.js';
 import { createPersonas } from '../src/personas.js';
 import { createStickers, tagsOf } from '../src/stickers.js';
+import { shouldFire, inAwakeWindow, scheduleNext, DEFAULTS as SPEAK_DEFAULTS } from '../src/speakup.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dsh-roost-'));
 
@@ -530,14 +531,88 @@ test('表情: 能把「表情:标签」解析成路径', () => {
   assert.equal(s.resolve({}, '表情:不存在'), null);
 });
 
+/* ---------------- 主动搭话 ---------------- */
+
+const HOUR = 3600_000;
+
+test('搭话: 免打扰时段判断（含跨零点）', () => {
+  assert.equal(inAwakeWindow(9, 8, 23), true);
+  assert.equal(inAwakeWindow(3, 8, 23), false);
+  assert.equal(inAwakeWindow(23, 8, 23), false, '右边界不含');
+  // 跨零点：22 点到次日 6 点
+  assert.equal(inAwakeWindow(23, 22, 6), true);
+  assert.equal(inAwakeWindow(2, 22, 6), true);
+  assert.equal(inAwakeWindow(12, 22, 6), false);
+  // from === to 表示全天
+  assert.equal(inAwakeWindow(4, 0, 0), true);
+});
+
+test('搭话: 默认关着，没配 chatId 也不工作', () => {
+  const now = Date.now();
+  assert.equal(shouldFire({ nextAt: now - 1 }, SPEAK_DEFAULTS, now).fire, false);
+  assert.match(shouldFire({ nextAt: now - 1 }, SPEAK_DEFAULTS, now).why, /没开/);
+
+  const on = { ...SPEAK_DEFAULTS, enabled: true };
+  assert.match(shouldFire({ nextAt: now - 1 }, on, now).why, /chatId/);
+});
+
+test('搭话: 主人刚说过话就不打扰', () => {
+  const now = new Date(2026, 9, 26, 14, 0, 0).getTime();
+  const cfg = { ...SPEAK_DEFAULTS, enabled: true, chatId: 'u1', minIntervalMinutes: 180 };
+  const st = { nextAt: now - 1, lastOwnerAt: now - 60_000, day: new Date(now).toDateString(), todayCount: 0 };
+  assert.equal(shouldFire(st, cfg, now).fire, false);
+  assert.match(shouldFire(st, cfg, now).why, /刚说过话/);
+});
+
+test('搭话: 到点且主人冷场了才说', () => {
+  const now = new Date(2026, 9, 26, 14, 0, 0).getTime();
+  const cfg = { ...SPEAK_DEFAULTS, enabled: true, chatId: 'u1', minIntervalMinutes: 180 };
+  const st = { nextAt: now - 1, lastOwnerAt: now - 5 * HOUR, day: new Date(now).toDateString(), todayCount: 0 };
+  assert.equal(shouldFire(st, cfg, now).fire, true);
+});
+
+test('搭话: 每天有上限，跨天归零', () => {
+  const now = new Date(2026, 9, 26, 14, 0, 0).getTime();
+  const cfg = { ...SPEAK_DEFAULTS, enabled: true, chatId: 'u1', maxPerDay: 2 };
+  const today = new Date(now).toDateString();
+
+  const full = { nextAt: now - 1, lastOwnerAt: now - 5 * HOUR, day: today, todayCount: 2 };
+  assert.equal(shouldFire(full, cfg, now).fire, false);
+  assert.match(shouldFire(full, cfg, now).why, /已经说了 2 次/);
+
+  // 昨天说了两次，今天重新开始
+  const fresh = { nextAt: now - 1, lastOwnerAt: now - 5 * HOUR, day: 'Wed Jan 01 2025', todayCount: 2 };
+  assert.equal(shouldFire(fresh, cfg, now).fire, true);
+});
+
+test('搭话: 半夜不吵人', () => {
+  const night = new Date(2026, 9, 26, 3, 0, 0).getTime();
+  const cfg = { ...SPEAK_DEFAULTS, enabled: true, chatId: 'u1' };
+  const st = { nextAt: night - 1, lastOwnerAt: night - 9 * HOUR };
+  assert.equal(shouldFire(st, cfg, night).fire, false);
+  assert.match(shouldFire(st, cfg, night).why, /免打扰/);
+});
+
+test('搭话: 间隔是随机的，落在区间内', () => {
+  const now = Date.now();
+  const cfg = { ...SPEAK_DEFAULTS, minIntervalMinutes: 10, maxIntervalMinutes: 20 };
+  const seen = new Set();
+  for (let i = 0; i < 20; i++) {
+    const d = (scheduleNext(cfg, now) - now) / 60_000;
+    assert.ok(d >= 10 && d <= 20, `间隔 ${d} 超出范围`);
+    seen.add(Math.round(d));
+  }
+  assert.ok(seen.size > 1, '应该是随机的，不能每次都一样');
+});
+
 /* ---------------- 配置 ---------------- */
 
 test('配置：密钥打码，但能看出有没有设', () => {
-  const a = publicConfig({ ...DEFAULTS, server: { port: 1, token: 'secret' } });
+  const a = publicConfig({ ...SPEAK_DEFAULTS, server: { port: 1, token: 'secret' } });
   assert.equal(a.server.token, '******');
   assert.equal(a.tokenSet, true);
 
-  const b = publicConfig({ ...DEFAULTS, server: { port: 1, token: '' } });
+  const b = publicConfig({ ...SPEAK_DEFAULTS, server: { port: 1, token: '' } });
   assert.equal(b.tokenSet, false);
 });
 
