@@ -62,7 +62,19 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150 }) {
 
     if (!ok) {
       const kind = reason?.kind ?? 'unknown';
-      w.reject(Object.assign(new Error(`这一轮没正常结束（${kind}）`), { kind }));
+      /**
+       * 把完整 reason 一起打出来。
+       *
+       * 只报 kind 等于什么都没说：'blocked' 可能是审批没通过、可能是模型被拦、
+       * 也可能是会话状态不对。DSH 在 reason 里通常还带 message/detail，
+       * 不打印的话只能靠猜（前面就猜错了一次，怪到「模型去读图片」头上）。
+       */
+      let extra = '';
+      try {
+        const j = JSON.stringify(reason);
+        if (j && j !== '{}') extra = '：' + (j.length > 300 ? j.slice(0, 300) + '…' : j);
+      } catch {}
+      w.reject(Object.assign(new Error(`这一轮没正常结束（${kind}）${extra}`), { kind, reason }));
       return;
     }
     if (!text) {
@@ -146,7 +158,7 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150 }) {
        *   'both'  两个都要
        */
       const cfg = loadConfig();
-      const mode = String(cfg?.images?.mode || 'file');
+      const mode = String(cfg?.images?.mode || 'block');
       const content = [{ type: 'text', text }];
       const saved = [];
       for (const img of images ?? []) {
@@ -158,7 +170,14 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150 }) {
         }
       }
       if (saved.length) {
-        content[0].text += `\n\n（图已存到本地，需要看就直接读：${saved.join('、')}）`;
+        /**
+         * **不要引导模型去读文件。**
+         * 群消息里普通成员的工具是被收走的（permissions 的 chat 档），
+         * 它真去调 fs 会失败，DSH 直接把这一轮判成 blocked：
+         *   「这一轮没正常结束（blocked）」
+         * 所以只陈述「存了一份」，别让它动工具。
+         */
+        content[0].text += `\n\n（另外存了一份到本地：${saved.join('、')}）`;
       }
 
       await agent.followup({
