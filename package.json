@@ -1,9 +1,8 @@
 {
   "name": "dsh-roost",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "ai-chat 插件的 DSH 宿主：把 QQ 消息交给 DSH 会话回答，带一键接入",
   "license": "SEE LICENSE IN LICENSE",
-  "private": true,
   "type": "module",
   "main": "src/host.js",
   "exports": {
@@ -50,5 +49,8 @@
   "homepage": "https://github.com/tdcq9594/dsh-roost",
   "engines": {
     "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

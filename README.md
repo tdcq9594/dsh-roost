@@ -62,15 +62,29 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ 本插件 ⇄ DSH �
 
 ## 装
 
-前提：
-1. Roost ≥ 0.8.1 跑着
-2. 装了 `ai-chat` 插件（v3.0.0+），适配器选 `dsh`
+**在 DSH 里直接输入包名**：
+
+```
+dsh-roost
+```
+
+或者命令行：
+
+```bash
+npm i -g dsh-roost
+```
+
+装好后侧栏会出现「**Roost**」入口，进去点「接入」按六步走就行——
+Roost 本体和 ai-chat 插件都由它帮你装（见下一节）。
+
+从源码装也行：
 
 ```bash
 git clone https://github.com/tdcq9594/dsh-roost.git
 ```
 
-在 DSH 里指向这个目录装。装好后侧栏会出现「**Roost**」入口。
+> 前提：DSH 桌面版 / Web 组合（需要 `sessionController` 和 `agents`）。
+> Roost 和 ai-chat 不用提前准备——「接入」里会装。
 
 ---
 
