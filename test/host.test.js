@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,6 +15,7 @@ import { createInboundServer, postReply } from '../src/server.js';
 import { createTurnRunner, textOf } from '../src/turn.js';
 import { DEFAULTS, publicConfig } from '../src/config.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor } from '../src/permissions.js';
+import { createSetup } from '../src/setup.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dsh-roost-'));
 
@@ -305,6 +306,66 @@ test('权限：普通成员和身份不明的硬规则都提到不跑命令/不�
 test('权限：默认配置里 unknown 是 chat', () => {
   assert.equal(DEFAULTS.permissions.unknown, 'chat');
   assert.equal(DEFAULTS.permissions.owner, 'all');
+});
+
+/* ---------------- 一键流程 ---------------- */
+
+test('一键：空目录检测出「什么都没装」', async () => {
+  const dir = tmp();
+  const s = createSetup({
+    cfgOf: () => ({ setup: { roostDir: dir, version: 'v0.8.1' }, server: { port: 17321 } }),
+    dataDir: dir,
+  });
+  const st = await s.detect();
+  assert.equal(st.installed, false);
+  assert.equal(st.running, false);
+  assert.equal(st.hasBot, false);
+  assert.equal(st.pluginInstalled, false);
+  assert.equal(st.pluginConfigured, false);
+});
+
+test('一键：写了机器人配置之后，检测立刻看得到', async () => {
+  const dir = tmp();
+  // 先钉一个不会被占用的端口，免得 detect 打到本机真的 Roost
+  mkdirSync(join(dir, 'config', 'bots'), { recursive: true });
+  writeFileSync(join(dir, 'config', 'bot.json'), JSON.stringify({ webui: { port: 59999 } }), 'utf8');
+
+  const s = createSetup({
+    cfgOf: () => ({ setup: { roostDir: dir, version: 'v0.8.1' }, server: { port: 17321 } }),
+    dataDir: dir,
+  });
+
+  s.createBot({ name: 'main', appId: '102000000', appSecret: 'sec' });
+
+  const st = await s.detect();
+  assert.equal(st.hasBot, true);
+  assert.equal(st.bots[0].appId, '102000000');
+  // 已有的端口不能被覆盖
+  assert.equal(st.port, 59999);
+});
+
+test('一键：AppID / AppSecret 缺一个就报错', () => {
+  const dir = tmp();
+  const s = createSetup({
+    cfgOf: () => ({ setup: { roostDir: dir }, server: { port: 17321 } }),
+    dataDir: dir,
+  });
+  assert.throws(() => s.createBot({ name: 'main', appId: 'x' }), /都要填/);
+});
+
+test('一键：WebUI 地址带上面板密钥', () => {
+  const dir = tmp();
+  mkdirSync(join(dir, 'config'), { recursive: true });
+  writeFileSync(
+    join(dir, 'config', 'bot.json'),
+    JSON.stringify({ webui: { port: 8090, accessKey: 'k1' } }),
+    'utf8',
+  );
+  const s = createSetup({
+    cfgOf: () => ({ setup: { roostDir: dir }, server: { port: 17321 } }),
+    dataDir: dir,
+  });
+  assert.equal(s.webuiUrl(), 'http://127.0.0.1:8090/?key=k1');
 });
 
 /* ---------------- 配置 ---------------- */

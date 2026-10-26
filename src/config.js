@@ -33,16 +33,23 @@ export const DEFAULTS = {
   /**
    * 每一档权限能用什么：`all` = 全部工具，`chat` = 只能聊天。
    *
-   * 默认 member 也是 all——这是明确选的「群聊也给本地工具」。
-   * 想收紧就把 member 改成 chat。
+   * **默认只有主人能用工具。** 群聊里说话的是谁不受你控制，
+   * 所以默认收紧——想让普通群友也能用（比如让他帮你看个文件），
+   * 自己把 member 改成 all。
    *
-   * `unknown` 是**兜底**：拿不到权限信息时按最严处理。这一项不建议放开。
+   * `unknown` 是兜底：拿不到权限信息时按最严处理。不建议放开。
    */
   permissions: {
     owner: 'all',
-    admin: 'all',
-    member: 'all',
+    admin: 'chat',
+    member: 'chat',
     unknown: 'chat',
+  },
+  /** 一键流程用：装到哪、装哪个版本 */
+  setup: {
+    /** 留空 = <数据目录>/roost */
+    roostDir: '',
+    version: 'v0.8.1',
   },
   persona: {
     name: '小栖',

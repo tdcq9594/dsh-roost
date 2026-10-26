@@ -1,7 +1,7 @@
 {
   "name": "dsh-roost",
-  "version": "0.2.0",
-  "description": "ai-chat 插件的 DSH 宿主：把 QQ 消息交给 DSH 会话回答",
+  "version": "0.3.0",
+  "description": "ai-chat 插件的 DSH 宿主：把 QQ 消息交给 DSH 会话回答，带一键接入",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",
@@ -21,8 +21,12 @@
     },
     "client": {
       "platform": "web",
-      "inject": ["slots"],
-      "external": ["react"]
+      "inject": [
+        "slots"
+      ],
+      "external": [
+        "react"
+      ]
     }
   },
   "keywords": [

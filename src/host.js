@@ -19,6 +19,7 @@ import { createTurnRunner } from './turn.js';
 import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, LOCAL_TOOLS } from './permissions.js';
+import { createSetup } from './setup.js';
 
 export const name = 'roost';
 
@@ -43,6 +44,9 @@ export function apply(ctx) {
 
   const sessions = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
   const turns = createTurnRunner({ ctx, log, timeoutSec: cfg.chat.turnTimeoutSec });
+
+  /** 一键流程：装 Roost、配插件、起停、打开面板 */
+  const setup = createSetup({ cfgOf: () => cfg, dataDir: dataDir(), log: (m) => log.info(m) });
 
   /** 已经挂过人格/权限上下文的 agent，避免每轮重复挂 */
   const mounted = new WeakSet();
@@ -342,6 +346,27 @@ export function apply(ctx) {
         startServer();
         return send(res, 200, { ok: true, config: publicConfig(cfg), message: '已保存，服务已重载' });
       }),
+      /**
+       * 一键流程的接口。
+       *
+       * 都是「跑一个动作，返回结果」，没有状态机——每一步都能单独重试，
+       * 用户跳着点也不会把东西搞坏（每步自己先检测前置条件）。
+       */
+      route('/setup', (req, res) => setup.detect().then((s) => send(res, 200, { ok: true, ...s }))),
+
+      route('/setup/install', (req, res) => setup.install().then((r) => send(res, 200, r))),
+
+      route('/setup/bot', async (req, res) => {
+        const b = await readBody(req);
+        return send(res, 200, setup.createBot(b));
+      }),
+
+      route('/setup/start', (req, res) => setup.start().then((r) => send(res, 200, r))),
+      route('/setup/stop', (req, res) => setup.stop().then((r) => send(res, 200, r))),
+      route('/setup/plugin', (req, res) => setup.installPlugin().then((r) => send(res, 200, r))),
+      route('/setup/configure', (req, res) => setup.configurePlugin().then((r) => send(res, 200, r))),
+
+      route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
     ];
 
     return () => {
