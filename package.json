@@ -1,0 +1,44 @@
+{
+  "name": "dsh-roost",
+  "version": "0.1.0",
+  "description": "让 AI 通过 Roost 住进 QQ —— DSH 插件（官方接口，不 hook 客户端）",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "module",
+  "main": "src/host.js",
+  "exports": {
+    ".": "./src/host.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "qq",
+    "roost",
+    "qq-bot-roost"
+  ],
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "docs",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tdcq9594/dsh-roost.git"
+  },
+  "homepage": "https://github.com/tdcq9594/dsh-roost",
+  "engines": {
+    "node": ">=22"
+  }
+}

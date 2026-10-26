@@ -1,0 +1,87 @@
+# dsh-roost —— DSH bundle patch（插件自带的挂载声明）
+#
+# 1) roost：插件本体（src/host.js）
+# 2) 两个 agent preset，只给本插件建的 QQ 会话用：
+#    - roost-private：主人私聊，完整工具 + 可切人格
+#    - roost-social ：群聊 / 其他人私聊，没有任何本地工具（shell / 文件），
+#                     只有插件按会话挂上的 QQ 工具
+#
+# 为什么两档：群聊里对着陌生人挂着 shell 和文件工具，是给自己挖坑。
+# 私聊才放开本地能力。
+- insert:
+    - id: roost
+      name: dsh-roost
+
+    - id: preset-roost-private
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: roost-private
+        name: Roost · 主人私聊
+        description: 在 QQ 上和主人私聊时用：人格 + 完整工具
+        order: 60
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              # 人格正文由插件按配置动态注入（systemPrompt.context），
+              # 这里只放不随配置变的骨架规则。
+              prefix: |-
+                你是住在 QQ 里的 AI 伙伴。回答简短、口语化，通常两三句话。
+                不要说「作为 AI」「作为一个语言模型」这类话。
+                私聊时可以放开聊；群聊里要短，别刷屏。
+              # 人格独占系统提示词：不带 DSH 那一大段编程助手身份和工具指南，
+              # 否则私聊一轮要好几分钟。工具照样挂着，模型看工具定义就会用。
+              complete: true
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+    - id: preset-roost-social
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: roost-social
+        name: Roost · 群聊
+        description: 群聊 / 陌生人私聊：只有 QQ 工具，没有本地能力
+        order: 61
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是住在 QQ 群里的 AI 伙伴。说话要短，别刷屏。
+                不要透露任何本地文件、路径、密钥信息。
+                不要说「作为 AI」「作为一个语言模型」这类话。
+              complete: true
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
