@@ -631,12 +631,21 @@ export function apply(ctx) {
 
     return () => {
       clearInterval(speakTimer);
-      // offs 是路由表（不是函数）；真正要取消的是 mount() 挂上去的那些上下文
-      for (const off of mountOffs) {
+      /**
+       * **两条都要清。**
+       *
+       * `offs` 是 `route()` 的返回值——也就是 `ctx.webServer.register()` 返回的
+       * **取消订阅函数**。之前我误以为它是「路由表」，把这段删了，
+       * 结果重载后同一路径注册两次，DSH 直接拒绝激活：
+       *   `webserver: duplicate exact route "/roost/api/status"`
+       * `mountOffs` 是 mount() 挂上去的权限上下文，也要一起清。
+       */
+      for (const off of [...offs, ...mountOffs]) {
         try {
           off?.();
         } catch {}
       }
+      mountOffs.length = 0;
     };
   }, 'dsh-roost: 面板接口');
 }

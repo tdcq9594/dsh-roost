@@ -706,6 +706,64 @@ test('服务: 端口被占时自动顺延到下一个', async () => {
   }
 });
 
+/* ---------------- 激活 / 清理 ---------------- */
+
+test('激活: 清理函数要把每条路由都注销掉', async () => {
+  /**
+   * 这个坑踩过：清理时只清了 mountOffs，把 `offs`（route 的返回值 =
+   * register 的取消订阅函数）当成了「路由表」跳过。
+   * 结果重载后同一路径注册两次，DSH 直接拒绝激活：
+   *   `webserver: duplicate exact route "/roost/api/status"`
+   *
+   * 注意：apply() 用 ctx.effect 管生命周期，**不返回值**——
+   * 清理函数得从 effect 里接。而且它会真的 bind 端口，必须 finally 关掉，
+   * 否则测试进程不退出。
+   */
+  const host = await import('../src/host.js');
+
+  let registered = 0;
+  let unsubscribed = 0;
+  const cleanups = [];
+  const noop = () => () => {};
+
+  const ctx = {
+    agents: { get: () => null, list: () => [], create: async () => ({ id: 'a', ctx: {} }) },
+    sessions: { get: () => null, list: () => [], create: () => ({ id: 's' }) },
+    systemPrompt: { context: noop },
+    webServer: {
+      register: () => {
+        registered += 1;
+        return () => {
+          unsubscribed += 1;
+        };
+      },
+    },
+    config: {},
+    logger: { info: noop, warn: noop, error: noop, debug: noop },
+    effect: (cb) => {
+      const off = cb();
+      if (typeof off === 'function') cleanups.push(off);
+      return noop;
+    },
+    on: () => noop,
+    dataDir: join(tmp(), 'data'),
+    dir: tmp(),
+  };
+
+  try {
+    host.apply(ctx);
+    assert.ok(registered > 0, '应该注册了路由');
+  } finally {
+    for (const c of cleanups) {
+      try {
+        c();
+      } catch {}
+    }
+  }
+
+  assert.equal(unsubscribed, registered, `注销数要等于注册数（${unsubscribed}/${registered}）`);
+});
+
 /* ---------------- 配置 ---------------- */
 
 test('配置：密钥打码，但能看出有没有设', () => {
