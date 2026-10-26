@@ -566,7 +566,9 @@ export function apply(ctx) {
       route('/setup/start', (req, res) => setup.start().then((r) => send(res, 200, r))),
       route('/setup/stop', (req, res) => setup.stop().then((r) => send(res, 200, r))),
       route('/setup/plugin', (req, res) => setup.installPlugin().then((r) => send(res, 200, r))),
-      route('/setup/configure', (req, res) => setup.configurePlugin().then((r) => send(res, 200, r))),
+      // 传实际监听的端口：端口被占会顺延，写配置值的话 ai-chat 会连到错的端口
+      route('/setup/configure', (req, res) =>
+        setup.configurePlugin(server?.actualPort?.() || undefined).then((r) => send(res, 200, r))),
 
       route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
 

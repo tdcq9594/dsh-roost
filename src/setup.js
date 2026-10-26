@@ -547,13 +547,15 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       return { ok: true, skipped: true, message: 'Roost 还没起来，等它起来再说' };
     }
 
-    let cur = null;
-    try {
-      cur = (await api('/api/plugins/ai-chat/config'))?.config ?? null;
-    } catch {
-      return { ok: false, message: 'ai-chat 没在跑，跳过同步' };
-    }
-    if (!cur) return { ok: false, message: '读不到 ai-chat 配置' };
+    /**
+     * 读当前配置**必须翻磁盘**，不能 GET。
+     *
+     * Roost 的 `/api/plugins/<id>/config` **只实现了 PUT，GET 返回 404**，
+     * 之前这里用 GET，一抛错就 return「ai-chat 没在跑，跳过同步」——
+     * 于是端口换了却永远同步不过去，面板红字一直说「对不上」。
+     */
+    const cur = readPluginConfigFromDisk('ai-chat');
+    if (!cur) return { ok: true, skipped: true, message: '还没读到 ai-chat 的配置（可能还没装）' };
     if (cur.adapter !== 'dsh' && !cur.dshUrl) return { ok: true, skipped: true, message: 'ai-chat 没在用 DSH，不用改' };
     if (cur.dshUrl === want) return { ok: true, message: '已经是当前端口' };
 
@@ -561,11 +563,13 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     return { ok: true, message: `ai-chat 的 DSH 地址已改成 ${want}`, from: cur.dshUrl, to: want };
   }
 
-  async function configurePlugin() {
+  async function configurePlugin(portOverride) {
     if (!(await isRunning())) throw new Error('Roost 没在跑，先启动');
     const patch = {
       adapter: 'dsh',
-      dshUrl: `http://127.0.0.1:${cfgOf().server.port}`,
+      // 用**实际**监听的端口，不是配置里的——端口被占时会顺延，
+      // 写成配置值的话 ai-chat 会一直往那个连不上的端口推
+      dshUrl: `http://127.0.0.1:${portOverride || cfgOf().server.port}`,
       publicUrl: baseUrl(),
       // 交给 DSH 之后，本插件说了算，别让 AI 再按「只在被 @ 时说话」缩着
       decide: 'ai',
