@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,6 +16,8 @@ import { createTurnRunner, textOf } from '../src/turn.js';
 import { DEFAULTS, publicConfig } from '../src/config.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor } from '../src/permissions.js';
 import { createSetup } from '../src/setup.js';
+import { createPersonas } from '../src/personas.js';
+import { createStickers, tagsOf } from '../src/stickers.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dsh-roost-'));
 
@@ -402,6 +404,130 @@ test('一键：绑定时去掉尾斜杠和引号（从资源管理器复制来�
 
   s.setDir(`"${roost}/"`);
   assert.equal(cfg.setup.roostDir.replace(/\\/g, '/'), roost.replace(/\\/g, '/'));
+});
+
+/* ---------------- 人格库 ---------------- */
+
+test('人格: 首次运行会把内置的种进去', () => {
+  const dir = tmp();
+  const p = createPersonas({ dataDir: dir });
+  const list = p.list();
+  assert.ok(list.length >= 3, `只种了 ${list.length} 个`);
+  assert.ok(list.some((x) => x.id === 'default'));
+  assert.equal(list[0].id, 'default'); // default 排最前
+});
+
+test('人格: 解析 --- 头里的 name 和 tags', () => {
+  const dir = tmp();
+  const p = createPersonas({ dataDir: dir });
+  const one = p.read('terse');
+  assert.equal(one.name, '惜字如金');
+  assert.ok(one.tags.includes('极简'));
+  assert.ok(one.body.length > 0);
+  assert.ok(!one.body.includes('---'), '正文里不该残留 --- 头');
+});
+
+test('人格: 存了能读回来，也会出现在列表里', () => {
+  const dir = tmp();
+  const p = createPersonas({ dataDir: dir });
+  p.save('mine', '---\nname: 我的\n---\n你是我调过的人格。');
+  const one = p.read('mine');
+  assert.equal(one.name, '我的');
+  assert.match(one.body, /调过/);
+  assert.ok(p.list().some((x) => x.id === 'mine'));
+});
+
+test('人格: 按会话覆盖 > 全局当前 > default', () => {
+  const dir = tmp();
+  const p = createPersonas({ dataDir: dir });
+
+  const r1 = p.resolve('g1', { current: 'terse', byChat: { g1: 'snarky' } });
+  assert.equal(r1.id, 'snarky', '按群指定的应该赢');
+
+  const r2 = p.resolve('g2', { current: 'terse', byChat: { g1: 'snarky' } });
+  assert.equal(r2.id, 'terse', '没指定的群用全局');
+
+  const r3 = p.resolve('g3', {});
+  assert.equal(r3.id, 'default', '都没配就 default');
+});
+
+test('人格: 指定的文件被删了要静默回退，不能让机器人失声', () => {
+  const dir = tmp();
+  const p = createPersonas({ dataDir: dir });
+  const r = p.resolve('g1', { current: 'not-exist' });
+  assert.equal(r.id, 'default');
+  assert.ok(r.body.length > 0);
+});
+
+test('人格: id 做安全过滤，挡路径穿越', () => {
+  const dir = tmp();
+  const p = createPersonas({ dataDir: dir });
+  p.save('../../evil', 'x');
+  // 不能写到数据目录外面去
+  assert.ok(!existsSync(join(dir, '..', '..', 'evil.md')));
+  assert.ok(p.list().every((x) => !x.id.includes('/')));
+});
+
+test('人格: 默认人格不让删', () => {
+  const dir = tmp();
+  const p = createPersonas({ dataDir: dir });
+  assert.throws(() => p.remove('default'), /不能删/);
+});
+
+/* ---------------- 表情包库 ---------------- */
+
+test('表情: 文件名拆标签', () => {
+  assert.deepEqual(tagsOf('开心_猫.png'), ['开心', '猫']);
+  assert.deepEqual(tagsOf('无语-2.gif'), ['无语']);
+  assert.deepEqual(tagsOf('a b.webp'), ['a', 'b']);
+  assert.deepEqual(tagsOf('纯数字.png'), ['纯数字']);
+});
+
+test('表情: 只认图片，按文件名排序', () => {
+  const dir = tmp();
+  const s = createStickers({ dataDir: dir });
+  const d = s.dir({});
+  writeFileSync(join(d, 'b_开心.png'), 'x');
+  writeFileSync(join(d, 'a_无语.gif'), 'x');
+  writeFileSync(join(d, 'note.txt'), 'x');
+
+  const list = s.list({});
+  assert.equal(list.length, 2, 'txt 不该被算进来');
+  assert.equal(list[0].file, 'a_无语.gif');
+  assert.ok(list[0].path.endsWith('a_无语.gif'));
+});
+
+test('表情: 清单里给完整路径（不然模型拼不对）', () => {
+  const dir = tmp();
+  const s = createStickers({ dataDir: dir });
+  const d = s.dir({});
+  writeFileSync(join(d, '开心_猫.png'), 'x');
+
+  const p = s.prompt({});
+  assert.match(p, /表情包/);
+  assert.match(p, /开心\/猫/); // 标签
+  assert.ok(p.includes(join(d, '开心_猫.png')), '要给完整路径');
+  assert.match(p, /<<image:/);
+});
+
+test('表情: 没图 / 关掉时不注入', () => {
+  const dir = tmp();
+  const s = createStickers({ dataDir: dir });
+  s.dir({});
+  assert.equal(s.prompt({}), '');
+  assert.equal(s.prompt({ enabled: false }), '');
+});
+
+test('表情: 能把「表情:标签」解析成路径', () => {
+  const dir = tmp();
+  const s = createStickers({ dataDir: dir });
+  const d = s.dir({});
+  writeFileSync(join(d, '开心_猫.png'), 'x');
+  writeFileSync(join(d, '无语_人.png'), 'x');
+
+  assert.ok(s.resolve({}, '表情:开心').endsWith('开心_猫.png'));
+  assert.ok(s.resolve({}, '无语_人.png').endsWith('无语_人.png'));
+  assert.equal(s.resolve({}, '表情:不存在'), null);
 });
 
 /* ---------------- 配置 ---------------- */

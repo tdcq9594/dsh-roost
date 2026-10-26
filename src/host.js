@@ -21,6 +21,7 @@ import { renderInbound, chatOf } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, LOCAL_TOOLS } from './permissions.js';
 import { createSetup } from './setup.js';
 import { createPersonas } from './personas.js';
+import { createStickers } from './stickers.js';
 
 export const name = 'roost';
 
@@ -67,6 +68,9 @@ export function apply(ctx) {
 
   /** 人格库：正文在 personas/*.md 里，配置只记用哪个 */
   const personas = createPersonas({ dataDir: dataDir(), log: (m) => log.warn(m) });
+
+  /** 表情包：只做「把清单写进提示词」，发图复用已有的 <<image:>> */
+  const stickers = createStickers({ dataDir: dataDir(), log: (m) => log.warn(m) });
 
   /** 一键流程：装 Roost、配插件、起停、打开面板 */
   const setup = createSetup({
@@ -200,6 +204,19 @@ export function apply(ctx) {
       );
     } catch (e) {
       log.warn('挂插件提示词失败：', e.message);
+    }
+
+    /** 表情包清单：让 AI 知道有哪些图可用（没有图就不注入） */
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-stickers',
+          order: 901,
+          text: () => stickers.prompt(cfg.stickers),
+        }),
+      );
+    } catch (e) {
+      log.warn('挂表情包清单失败：', e.message);
     }
 
     /**
@@ -440,6 +457,10 @@ export function apply(ctx) {
       route('/setup/configure', (req, res) => setup.configurePlugin().then((r) => send(res, 200, r))),
 
       route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
+
+      route('/stickers', (req, res) =>
+        send(res, 200, { ok: true, dir: stickers.dir(cfg.stickers), items: stickers.list(cfg.stickers) }),
+      ),
 
       route('/personas', (req, res) => send(res, 200, { ok: true, personas: personas.list(), current: cfg.persona?.current || 'default', byChat: cfg.persona?.byChat || {} })),
 

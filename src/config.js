@@ -51,9 +51,24 @@ export const DEFAULTS = {
     roostDir: '',
     version: 'v0.8.1',
   },
+  /**
+   * 表情包库：往目录里丢图就行，文件名当标签（`开心_猫.png` → 开心、猫）。
+   * 插件把清单写进提示词，AI 用 `<<image: 完整路径>>` 发。
+   */
+  stickers: {
+    enabled: true,
+    /** 留空 = <数据目录>/stickers */
+    dir: '',
+  },
   persona: {
-    name: '小栖',
-    text: '你住在 QQ 里，是个话不多但有意思的人。回答简短口语化，通常两三句话。别用「作为 AI」这类说法。',
+    /** 当前用哪个人格（对应 personas/<id>.md） */
+    current: 'default',
+    /** 按会话指定：{ "群openid": "personaId" }，留空就用 current */
+    byChat: {},
+    /** 名字留空时用文件里 `---` 头的 name */
+    name: '',
+    /** 追加到人格正文后面的内容（旧配置兼容，也可以当「补充说明」用） */
+    text: '',
     rulesPrivate: '这是和主人的私聊，可以放开聊。',
     rulesSocial: '这是群聊，说话要短，别刷屏。',
   },
