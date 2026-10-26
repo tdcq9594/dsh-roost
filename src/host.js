@@ -116,6 +116,8 @@ export function apply(ctx) {
 
   /** 已经挂过人格/权限上下文的 agent，避免每轮重复挂 */
   const mounted = new WeakSet();
+  /** mount() 挂上去的取消函数。不能在 mount 里调 ctx.onTeardown，见下面注释 */
+  const mountOffs = [];
 
   /**
    * 当前这一轮是谁在说话。
@@ -276,13 +278,17 @@ export function apply(ctx) {
     }
 
     mounted.add(agent);
-    ctx.onTeardown?.(() => {
-      for (const off of offs) {
-        try {
-          off?.();
-        } catch {}
-      }
-    });
+    /**
+     * **不能在这里调 `ctx.onTeardown`。**
+     *
+     * mount() 是收到消息时才惰性跑的（新会话的第一句），
+     * 而 DSH 只允许在**插件激活阶段**访问这些能力。在消息处理里碰它会被拒：
+     * 「cannot get property onTeardown without inject」——
+     * 而且这个异常会把整条消息吞掉，表现是「每个新会话第一句都不回」。
+     *
+     * 改成把取消函数收进 mountOffs，由激活时注册的清理统一处理。
+     */
+    mountOffs.push(...offs);
   }
 
   /* ---------------- 收消息 → 跑一轮 → 回话 ---------------- */
@@ -569,7 +575,8 @@ export function apply(ctx) {
 
     return () => {
       clearInterval(speakTimer);
-      for (const off of offs) {
+      // offs 是路由表（不是函数）；真正要取消的是 mount() 挂上去的那些上下文
+      for (const off of mountOffs) {
         try {
           off?.();
         } catch {}

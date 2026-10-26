@@ -203,12 +203,25 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
 
     let pluginConfig = null;
     if (running) {
+      /**
+       * 直接读配置接口，不读 `/api/plugins` 列表。
+       *
+       * 列表里的 `config` 是给「插件卡片」用的简化视图，不一定带全字段——
+       * 之前就因为拿它判断 `adapter === 'dsh'`，明明切换成功了却一直显示未完成。
+       * `/api/plugins/<id>/config` 才是权威来源（configurePlugin 写的就是这里）。
+       */
       try {
-        const pl = await api('/api/plugins');
-        const arr = pl?.plugins ?? pl ?? [];
-        const one = Array.isArray(arr) ? arr.find((p) => p.id === 'ai-chat') : null;
-        pluginConfig = one?.config ?? null;
-      } catch {}
+        const one = await api('/api/plugins/ai-chat/config');
+        pluginConfig = one?.config ?? one ?? null;
+      } catch {
+        // 插件没装 / 没启用时这个接口会 404，退回列表视图碰碰运气
+        try {
+          const pl = await api('/api/plugins');
+          const arr = pl?.plugins ?? pl ?? [];
+          const one = Array.isArray(arr) ? arr.find((p) => p.id === 'ai-chat') : null;
+          pluginConfig = one?.config ?? null;
+        } catch {}
+      }
     }
 
     const configured = Boolean(pluginConfig && pluginConfig.adapter === 'dsh');
@@ -436,7 +449,32 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       decide: 'ai',
     };
     await api('/api/plugins/ai-chat/config', { method: 'PUT', body: JSON.stringify(patch) });
-    return { ok: true, message: 'ai-chat 已切到 DSH 适配器', patch };
+
+    /**
+     * 写完要**读回来核对**。
+     *
+     * 之前直接 return ok:true，但那只是「PUT 没抛错」——
+     * 插件可能把不认识的键丢了、或者 schema 里 adapter 的值域不含 'dsh'，
+     * 结果面板显示「已切换」而节点一直不绿。自己说成功不算数，读回来才算。
+     */
+    let back = null;
+    try {
+      back = (await api('/api/plugins/ai-chat/config'))?.config ?? null;
+    } catch {}
+    const actual = back?.adapter;
+    if (actual !== 'dsh') {
+      throw new Error(
+        `写进去了但读回来还是 adapter=${actual ?? '空'}。`
+        + '可能这个版本的 ai-chat 配置里没有 adapter 这一项，去 Roost 面板 → 插件 → ai-chat → 设置里手动改一下。',
+      );
+    }
+
+    return {
+      ok: true,
+      message: `ai-chat 已切到 DSH 适配器（dshUrl=${back?.dshUrl || patch.dshUrl}）`,
+      patch,
+      config: { adapter: back.adapter, dshUrl: back.dshUrl },
+    };
   }
 
   return {
