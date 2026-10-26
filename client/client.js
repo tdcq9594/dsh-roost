@@ -327,9 +327,21 @@ window.__ModuleLoader__.load({
               ? `ai-chat 已经指向 ${st.pluginConfig?.dshUrl || st.dshUrl}`
               : '把 ai-chat 的「交给谁去想」改成 DSH，并填好回话地址',
           },
-            st.pluginConfigured
-              ? null
-              : h('button', { className: 'roost-btn', disabled: !st.pluginInstalled || Boolean(busy), onClick: () => run({ only: 'configure' }) }, '配置'),
+            /**
+             * 永远给个能点的按钮。
+             *
+             * 之前「已配置就隐藏、没装插件就禁用」，两种情况下点下去都毫无反应，
+             * 用户根本不知道发生了什么。现在一律可点，不能做就在提示里说清楚。
+             */
+            h('button', {
+              className: 'roost-btn',
+              disabled: Boolean(busy),
+              onClick: () => {
+                if (!st.pluginInstalled) return toast('先装 ai-chat 插件（第 4 步）')
+                if (!st.running) return toast('Roost 没在跑，先启动（第 3 步）')
+                run({ only: 'configure' })
+              },
+            }, st.pluginConfigured ? '重新配置' : '配置'),
           ),
 
           h(Step, {
@@ -389,7 +401,7 @@ window.__ModuleLoader__.load({
       return null
     }
 
-    function OverviewTab({ st, toast, reload }) {
+    function OverviewTab({ st, setupSt, toast, reload }) {
       const [logs, setLogs] = useState(null)
       const perms = st.permissions || {}
       const toolable = ['owner', 'admin', 'member'].filter((k) => perms[k] === 'all')
@@ -432,7 +444,13 @@ window.__ModuleLoader__.load({
             h('button', {
               className: 'roost-btn',
               disabled: !st.listening,
-              onClick: () => window.open(`http://127.0.0.1:${st.port}`, '_blank', 'noopener'),
+              onClick: () => {
+                // Roost 面板的地址来自 /setup（它有真实的 webui 端口），
+                // 不是 st.port——那是 dsh-roost 自己的监听端口，打开是错的网页
+                const url = setupSt?.webui;
+                if (url) window.open(url, '_blank', 'noopener');
+                else toast('还没装好 Roost，没有面板可开');
+              },
             }, '打开 Roost 面板 ↗'),
             h('button', { className: 'roost-btn', onClick: reload }, '刷新'),
           ),
@@ -523,6 +541,147 @@ window.__ModuleLoader__.load({
                   ),
                 ),
               ),
+      )
+    }
+
+    /* ---------------- 功能（人格 / 表情 / 语音 / 搭话） ---------------- */
+
+    /**
+     * 这一页是「后端做好了但面板没入口」的补课。
+     *
+     * 人格库、表情包、主动搭话的后端和接口早就有了，但面板上只能去「设置」里
+     * 改原始字段——等于没有。这里给每个功能一块卡：看到状态，能直接操作。
+     */
+    function FeaturesTab({ config, toast, save, reload }) {
+      const [personas, setPersonas] = useState(null)
+      const [stickers, setStickers] = useState(null)
+      const [sp, setSp] = useState(null)
+
+      const load = useCallback(() => {
+        get('/personas').then((r) => setPersonas(r.ok === false ? null : r))
+        get('/stickers').then((r) => setStickers(r.ok === false ? null : r))
+        get('/speakup').then((r) => setSp(r.ok === false ? null : r))
+      }, [])
+
+      useEffect(() => {
+        load()
+        const t = setInterval(load, 8000)
+        return () => clearInterval(t)
+      }, [load])
+
+      if (!config) return h('div', { className: 'roost-desc' }, '读取配置…')
+
+      const p = config.persona || {}
+      const su = config.speakUp || {}
+      const pick = (id) => save({ ...config, persona: { ...p, current: id } })
+      const setSu = (k, v) => save({ ...config, speakUp: { ...su, [k]: v } })
+
+      return h('div', null,
+
+        /* —— 人格 —— */
+        h('div', { className: 'roost-card' },
+          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 } },
+            h('div', { style: { fontWeight: 600 } }, '人格'),
+            h('button', { className: 'roost-btn', onClick: load }, '刷新'),
+          ),
+          h('div', { className: 'roost-desc', style: { marginBottom: 10 } },
+            '一个人格一个 Markdown 文件，放在数据目录 personas/ 下。按群指定在「设置 → 人格」里改 byChat。'),
+          personas
+            ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
+                personas.personas.map((x) =>
+                  h('button', {
+                    key: x.id,
+                    className: x.id === personas.current ? 'roost-primary' : 'roost-btn',
+                    onClick: () => pick(x.id),
+                  }, `${x.name}${x.tags.length ? ' · ' + x.tags.join('/') : ''}`),
+                ),
+              )
+            : h('div', { className: 'roost-desc' }, '读取中…'),
+        ),
+
+        /* —— 表情包 —— */
+        h('div', { className: 'roost-card' },
+          h('div', { style: { fontWeight: 600, marginBottom: 4 } }, '表情包'),
+          h('div', { className: 'roost-desc', style: { marginBottom: 8 } },
+            stickers
+              ? `共 ${stickers.items.length} 张。把图丢进下面这个目录就行，文件名当标签（开心_猫.png → 开心、猫）。`
+              : '读取中…'),
+          stickers
+            ? h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+                h('code', { className: 'roost-mono', style: { flex: 1, minWidth: 200 } }, stickers.dir),
+                h('button', {
+                  className: 'roost-btn',
+                  onClick: () => {
+                    try {
+                      navigator.clipboard?.writeText(stickers.dir)
+                      toast('路径已复制')
+                    } catch { toast('复制失败，手动选一下') }
+                  },
+                }, '复制路径'),
+              )
+            : null,
+          stickers && stickers.items.length
+            ? h('div', { className: 'roost-mono roost-dim', style: { marginTop: 8 } },
+                stickers.items.slice(0, 12).map((x) => x.file).join('、') + (stickers.items.length > 12 ? ' …' : ''))
+            : null,
+        ),
+
+        /* —— 语音 —— */
+        h('div', { className: 'roost-card' },
+          h('div', { style: { fontWeight: 600, marginBottom: 4 } }, '语音条'),
+          h('div', { className: 'roost-desc' },
+            '语音是在 Roost 那边的 ai-chat 里开的：面板 → 插件 → ai-chat → 设置 → 「语音音色」，'
+            + '填 zh-CN-XiaoxiaoNeural（女）或 zh-CN-YunxiNeural（男）。留空就是关闭。'),
+          h('div', { className: 'roost-desc', style: { marginTop: 6 } },
+            '要能出声还得在插件目录装三个依赖（纯 JS，不要 Python）：',
+            h('code', { className: 'roost-mono' }, ' npm i @andresaya/edge-tts mpg123-decoder silk-wasm'),
+            '。QQ 语音只认 silk，所以中间会转两道。'),
+        ),
+
+        /* —— 主动搭话 —— */
+        h('div', { className: 'roost-card' },
+          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 4 } },
+            h('div', { style: { fontWeight: 600 } }, '主动搭话'),
+            h('button', {
+              className: su.enabled ? 'roost-btn' : 'roost-primary',
+              onClick: () => setSu('enabled', !su.enabled),
+            }, su.enabled ? '关闭' : '开启'),
+          ),
+          h('div', { className: 'roost-desc', style: { marginBottom: 12 } },
+            '主人一阵子没找你，你在私聊里主动说句话。只在私聊，群里不会。'),
+          h(Field, { label: '发给谁（私聊 openid）', desc: '填主人的 openid。留空就不工作' },
+            h('input', { className: 'roost-input', value: su.chatId || '', onChange: (e) => setSu('chatId', e.target.value) })),
+          h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap' } },
+            h(Field, { label: '最短间隔（分钟）' },
+              h('input', { className: 'roost-input', type: 'number', value: su.minIntervalMinutes ?? 180, onChange: (e) => setSu('minIntervalMinutes', Number(e.target.value) || 0) })),
+            h(Field, { label: '最长间隔（分钟）' },
+              h('input', { className: 'roost-input', type: 'number', value: su.maxIntervalMinutes ?? 480, onChange: (e) => setSu('maxIntervalMinutes', Number(e.target.value) || 0) })),
+            h(Field, { label: '每天最多几次' },
+              h('input', { className: 'roost-input', type: 'number', value: su.maxPerDay ?? 3, onChange: (e) => setSu('maxPerDay', Number(e.target.value) || 0) })),
+          ),
+          h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap' } },
+            h(Field, { label: '几点开始（0–23）' },
+              h('input', { className: 'roost-input', type: 'number', value: su.awakeFrom ?? 8, onChange: (e) => setSu('awakeFrom', Number(e.target.value) || 0) })),
+            h(Field, { label: '几点结束（0–23）' },
+              h('input', { className: 'roost-input', type: 'number', value: su.awakeTo ?? 23, onChange: (e) => setSu('awakeTo', Number(e.target.value) || 0) })),
+          ),
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 } },
+            h('button', {
+              className: 'roost-btn',
+              disabled: !su.enabled || !su.chatId,
+              onClick: async () => {
+                toast('正在让她说一句…')
+                const r = await post('/speakup/fire', {})
+                toast(r.ok ? `说了：${String(r.text).slice(0, 30)}` : r.message || '没说出来')
+                load()
+              },
+            }, '现在说一句'),
+            sp
+              ? h('span', { className: 'roost-desc' },
+                  `今天已说 ${sp.state?.todayCount || 0} 次${sp.state?.lastBotAt ? '，上次 ' + ago(sp.state.lastBotAt) : ''}`)
+              : null,
+          ),
+        ),
       )
     }
 
@@ -666,7 +825,7 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         if (tab === 'chats') loadChats()
-        if (tab === 'config' && !config) loadConfig()
+        if ((tab === 'config' || tab === 'features') && !config) loadConfig()
       }, [tab, config, loadChats, loadConfig])
 
       const run = useCallback(async ({ only, appId, secret } = {}) => {
@@ -727,7 +886,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'roost-desc', style: { marginTop: 3 } }, 'QQ 消息从这里交给 DSH 会话回答。'),
 
         h('div', { style: { display: 'flex', gap: 2, margin: '18px 0 16px', borderBottom: '1px solid var(--line-soft)' } },
-          [['overview', '概览'], ['setup', '接入'], ['chats', '会话'], ['config', '设置'], ['logs', '日志']].map(([id, label]) =>
+          [['overview', '概览'], ['setup', '接入'], ['features', '功能'], ['chats', '会话'], ['config', '设置'], ['logs', '日志']].map(([id, label]) =>
             h('button', {
               key: id, type: 'button', className: 'roost-tab',
               'data-on': tab === id ? '1' : '0',
@@ -738,8 +897,9 @@ window.__ModuleLoader__.load({
 
         h('div', { className: 'roost-fade', key: tab },
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload, toast, busy, run }) : null,
-          tab === 'overview' ? h(OverviewTab, { st, toast, reload }) : null,
+          tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload }) : null,
           tab === 'logs' ? h(LogsTab, null) : null,
+          tab === 'features' ? h(FeaturesTab, { config, toast, save, reload: loadConfig }) : null,
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
           tab === 'config' ? (config ? h(ConfigTab, { config, save, toast }) : h('div', { className: 'roost-desc' }, '读取配置…')) : null,
         ),
