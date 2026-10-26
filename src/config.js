@@ -49,7 +49,7 @@ export const DEFAULTS = {
   setup: {
     /** 留空 = <数据目录>/roost */
     roostDir: '',
-    version: 'v0.8.2',
+    version: 'v0.8.3',
   },
   /**
    * 主动搭话：主人一阵子没找你，你主动在私聊里说句话。

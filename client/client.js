@@ -454,6 +454,19 @@ window.__ModuleLoader__.load({
       return null
     }
 
+    /**
+     * 端口怎么显示。
+     *
+     * 配置是**意愿**，实际 bind 的是**现实**，被占后会顺延。
+     * 「配置 17321，实际 17322」必须让用户看见——否则他按 17321 去连，
+     * 怎么都连不上还以为是插件坏了。
+     */
+    const portCell = (st) => {
+      const actual = st?.actualPort
+      if (!actual) return st?.port ?? '—'
+      return st.wantPort && st.wantPort !== actual ? `${actual}（配置 ${st.wantPort}，被占了）` : String(actual)
+    }
+
     function OverviewTab({ st, setupSt, toast, reload }) {
       const [logs, setLogs] = useState(null)
       const perms = st.permissions || {}
@@ -535,8 +548,8 @@ window.__ModuleLoader__.load({
         h('div', { className: 'roost-card' },
           h('div', { style: { fontWeight: 600, marginBottom: 8 } }, '端口'),
           [
-            ['dsh-roost 监听', st.port, 'dsh-roost 的 server.port'],
-            ['Roost 面板', setupSt?.port ?? '—', 'Roost 的 webui.port'],
+            ['dsh-roost 监听', portCell(st), 'dsh-roost 的 server.port（实际 bind 的）'],
+            ['Roost 面板', setupSt?.port ?? '—', 'Roost 的 webui.port（实际 bind 的）'],
             ['ai-chat 指向', setupSt?.pluginConfig?.dshUrl || '未配置', 'ai-chat 的 dshUrl，应等于监听端口'],
           ].map(([k, v, why]) =>
             h('div', { key: k, style: { display: 'flex', justifyContent: 'space-between', gap: 12, padding: '4px 0' } },
@@ -548,7 +561,9 @@ window.__ModuleLoader__.load({
             ),
           ),
           (() => {
-            const want = `http://127.0.0.1:${st.port}`
+            // 比对用**实际端口**，不是配置里的——配置是意愿，实际可能被占后顺延了
+            const actual = st.actualPort || st.port
+            const want = `http://127.0.0.1:${actual}`
             const got = setupSt?.pluginConfig?.dshUrl
             if (!got) return h('div', { className: 'roost-desc', style: { marginTop: 6 } }, 'ai-chat 还没配，去「接入」第 5 步')
             return got === want
