@@ -13,6 +13,32 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+import { dataDir, loadConfig } from './config.js';
+
+/**
+ * 把 base64 图片存到本地，返回路径。
+ *
+ * 按内容哈希命名：同一张图发两次只存一份，也不会覆盖别的图。
+ * 存不下（磁盘满/权限）就返回 null——**不能因为存图失败把整轮弄挂**。
+ */
+function saveImage(data, mediaType) {
+  try {
+    const b64 = String(data).replace(/^data:[^;]+;base64,/, '');
+    const buf = Buffer.from(b64, 'base64');
+    if (!buf.length) return null;
+    const ext = String(mediaType || 'image/jpeg').split('/')[1]?.replace('jpeg', 'jpg') || 'jpg';
+    const dir = join(dataDir(), 'images');
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, createHash('sha1').update(buf).digest('hex').slice(0, 16) + '.' + ext);
+    writeFileSync(file, buf);
+    return file;
+  } catch {
+    return null;
+  }
+}
 
 /** 从 assistant 消息里把文本块拼起来 */
 export function textOf(message) {
@@ -107,13 +133,32 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150 }) {
       /**
        * 文字在前、图片在后。
        *
-       * 图片块用 DSH 的形状 `{type:'image', data, mediaType, name}`
-       * （跟 Aurabot 一致）。插件那边已经 base64 好了，这里不再处理。
+       * **图片默认存盘，不内联 base64。**
+       *
+       * 一张 QQ 图 base64 出来 32 万字符（约 320KB），整段塞进请求体，
+       * 实测会导致 `DeepSeek Messages transport failed`（重试 5 次全挂）。
+       * 存成本地文件、把路径写进文本，DSH 是编码代理，有读文件的工具，
+       * 需要看图时自己读就行——请求体也就几百字节。
+       *
+       * `images.mode` 可调：
+       *   'file'  存盘 + 文本给路径（默认）
+       *   'block' 老做法，直接塞 base64 块
+       *   'both'  两个都要
        */
+      const cfg = loadConfig();
+      const mode = String(cfg?.images?.mode || 'file');
       const content = [{ type: 'text', text }];
+      const saved = [];
       for (const img of images ?? []) {
-        if (!img?.data || !img?.mediaType) continue;
-        content.push({ type: 'image', data: img.data, mediaType: img.mediaType, name: img.name || 'qq-image' });
+        if (!img?.data) continue;
+        const file = saveImage(img.data, img.mediaType);
+        if (file) saved.push(file);
+        if (mode === 'block' || mode === 'both') {
+          content.push({ type: 'image', data: img.data, mediaType: img.mediaType, name: img.name || 'qq-image' });
+        }
+      }
+      if (saved.length) {
+        content[0].text += `\n\n（图已存到本地，需要看就直接读：${saved.join('、')}）`;
       }
 
       await agent.followup({
