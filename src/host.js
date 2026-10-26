@@ -13,6 +13,7 @@
 // ⚠️ 权限按**每一条消息**判定：主人、管理员、普通成员拿到的工具不一样，
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
+import { join } from 'node:path';
 import { loadConfig, saveConfig, publicConfig, dataDir } from './config.js';
 import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
