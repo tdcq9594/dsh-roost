@@ -80,9 +80,12 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150 }) {
    * @param {object} agent 活的 DSH agent
    * @param {string} text 要投给 AI 的话（已经整形好的）
    * @param {object} [opts]
+   * @param {Array<{data:string,mediaType:string,name?:string}>} [opts.images]
+   *   图片块（base64）。插件那边下载好的，直接当 image 内容块投进去——
+   *   模型这才「看得见」图，否则它只看到一行「（发了一张图）」。
    * @returns {Promise<string>} AI 的最终文本
    */
-  async function run(agent, text, { source = { kind: 'roost' } } = {}) {
+  async function run(agent, text, { source = { kind: 'roost' }, images = [] } = {}) {
     const sid = agent?.session?.id ?? agent?.sessionId;
     if (!sid) throw new Error('拿不到 DSH 会话 id，没法投递');
 
@@ -101,10 +104,22 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150 }) {
 
     // 先挂上等待，再投递——反过来的话可能「AI 秒回」而我们还没开始等
     try {
+      /**
+       * 文字在前、图片在后。
+       *
+       * 图片块用 DSH 的形状 `{type:'image', data, mediaType, name}`
+       * （跟 Aurabot 一致）。插件那边已经 base64 好了，这里不再处理。
+       */
+      const content = [{ type: 'text', text }];
+      for (const img of images ?? []) {
+        if (!img?.data || !img?.mediaType) continue;
+        content.push({ type: 'image', data: img.data, mediaType: img.mediaType, name: img.name || 'qq-image' });
+      }
+
       await agent.followup({
         id: randomUUID(),
         role: 'user',
-        content: [{ type: 'text', text }],
+        content,
         source,
       });
       await ctx.sessions?.flush?.(agent.session);

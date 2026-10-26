@@ -20,6 +20,7 @@ import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, LOCAL_TOOLS } from './permissions.js';
 import { createSetup } from './setup.js';
+import { createPersonas } from './personas.js';
 
 export const name = 'roost';
 
@@ -63,6 +64,9 @@ export function apply(ctx) {
 
   const sessions = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
   const turns = createTurnRunner({ ctx, log, timeoutSec: cfg.chat.turnTimeoutSec });
+
+  /** 人格库：正文在 personas/*.md 里，配置只记用哪个 */
+  const personas = createPersonas({ dataDir: dataDir(), log: (m) => log.warn(m) });
 
   /** 一键流程：装 Roost、配插件、起停、打开面板 */
   const setup = createSetup({
@@ -152,8 +156,20 @@ export function apply(ctx) {
           order: 905,
           text: () => {
             const p = cfg.persona;
+            /**
+             * 人格正文在文件里（`personas/*.md`），配置只记「用哪个」。
+             * 按群覆盖 > 全局当前 > default；指定的文件被删了会静默回退。
+             */
+            const persona = personas.resolve(chat.chatId, p);
             const extra = chat.kind === 'c2c' ? p.rulesPrivate : p.rulesSocial;
-            return [`你现在叫「${p.name}」。`, p.text, extra].filter(Boolean).join('\n');
+            return [
+              `你现在叫「${persona.name}」。`,
+              persona.body,
+              extra,
+              p.text, // 旧配置里的追加内容，留着兼容
+            ]
+              .filter(Boolean)
+              .join('\n');
           },
         }),
       );
@@ -261,6 +277,8 @@ export function apply(ctx) {
       const text = renderInbound(payload);
       const reply = await turns.run(agent, text, {
         source: { kind: 'roost', chatId: chat.chatId, msgId: payload.id },
+        // 插件下载好的图片块，让模型真的看得见图
+        images: payload.images ?? [],
       });
 
       await postReply(payload, reply, true);
@@ -422,6 +440,20 @@ export function apply(ctx) {
       route('/setup/configure', (req, res) => setup.configurePlugin().then((r) => send(res, 200, r))),
 
       route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
+
+      route('/personas', (req, res) => send(res, 200, { ok: true, personas: personas.list(), current: cfg.persona?.current || 'default', byChat: cfg.persona?.byChat || {} })),
+
+      route('/personas/save', async (req, res) => {
+        const b = await readBody(req);
+        if (!b.id) return send(res, 400, { ok: false, message: '缺 id' });
+        personas.save(b.id, b.raw ?? '');
+        return send(res, 200, { ok: true, message: '已保存', id: b.id });
+      }),
+
+      route('/personas/remove', async (req, res) => {
+        const b = await readBody(req);
+        return send(res, 200, { ok: true, ...personas.remove(b.id) });
+      }),
 
       route('/logs', (req, res) => {
         const u = new URL(req.url || '/', 'http://x');

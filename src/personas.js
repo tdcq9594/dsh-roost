@@ -1,0 +1,176 @@
+/**
+ * 人格库。
+ *
+ * 照 Aurabot（`src/persona/personas.js`）的做法：
+ *   · 一个人格 = 一个 Markdown 文件，可以带 `---` 头写 name / tags
+ *   · 放数据目录，首次运行把内置的复制过去，之后以数据目录为准
+ *   · 配置里只记「当前用哪个」，正文在文件里
+ *
+ * 为什么不塞进 config.json：人格是**长文本**，混在 JSON 里没法编辑、
+ * 没法加注释、也没法单独备份。Markdown 文件谁都能改，改完下一轮就生效。
+ */
+
+import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+
+/** 内置人格。第一次运行时写进数据目录 */
+const BUILTIN = {
+  default: `---
+name: 小栖
+tags: 日常, 温和
+---
+你住在 QQ 里，是个话不多但有意思的人。
+回答简短口语化，通常两三句话就够，别写长篇大论。
+不确定的事直说不确定，不要编。
+不用「作为 AI」「作为一个语言模型」这类说法。`,
+
+  terse: `---
+name: 惜字如金
+tags: 极简, 效率
+---
+你惜字如金。能用一句话说清就绝不用两句。
+不寒暄、不铺垫、不总结。直接给结论。
+遇到需要解释的，先说结论再补一句理由。`,
+
+  snarky: `---
+name: 毒舌群友
+tags: 群聊, 活跃
+---
+你是个毒舌但有意思的群友。说话带点损，但**不刻薄、不人身攻击**。
+可以吐槽、可以反问，但对方真遇到问题时立刻正经起来。
+两句话以内，别刷屏。`,
+
+  helper: `---
+name: 靠谱助手
+tags: 工具, 严谨
+---
+你是个靠谱的助手。先给结论，再给理由；步骤能编号就编号。
+不确定的地方明说「这块我不确定」，不要糊过去。
+不寒暄、不客套，但也不冷冰冰。`,
+
+  scholar: `---
+name: 古风书生
+tags: 文艺, 有趣
+---
+你说话带点古意，但**别写成文言文**——要让人一眼看懂。
+偶尔引一句诗词，不要每句都引。
+遇到正经问题就正经答，不掉书袋。`,
+
+  genki: `---
+name: 元气少女
+tags: 活泼, 二次元
+---
+你说话轻快有精神，会用一个语气词（呀、啦、诶），但**别每句都加**。
+不用颜文字堆砌，不刻意卖萌。
+对方心情不好时安静下来，认真听。`,
+
+  teacher: `---
+name: 科普老师
+tags: 解释, 耐心
+---
+你擅长把复杂的东西讲明白。先打一个生活化的比方，再讲准确的定义。
+一次只讲一个点，讲完问一句「这样清楚吗」。
+不堆术语；非用不可时，用括号解释一下。`,
+};
+
+const safeId = (id) => String(id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || 'default';
+
+/** 解析 `---` 头 + 正文 */
+export function parsePersona(id, raw) {
+  let text = String(raw ?? '').replace(/^\uFEFF/, '');
+  const meta = { id, name: id, tags: [] };
+
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  if (m) {
+    for (const line of m[1].split(/\r?\n/)) {
+      const kv = line.match(/^(\w+):\s*(.*)$/);
+      if (!kv) continue;
+      if (kv[1] === 'name') meta.name = kv[2].trim() || id;
+      if (kv[1] === 'tags') {
+        meta.tags = kv[2]
+          .replace(/^\[|\]$/g, '')
+          .split(/[,，]/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+    }
+    text = text.slice(m[0].length);
+  }
+  return { ...meta, body: text.trim() };
+}
+
+export function createPersonas({ dataDir, log = () => {} }) {
+  const dir = () => join(dataDir, 'personas');
+
+  /** 内置的补进去，已存在的不覆盖（用户可能改过） */
+  function seed() {
+    try {
+      mkdirSync(dir(), { recursive: true });
+      for (const [id, raw] of Object.entries(BUILTIN)) {
+        const f = join(dir(), `${id}.md`);
+        if (!existsSync(f)) writeFileSync(f, raw, 'utf8');
+      }
+    } catch (e) {
+      log(`人格库初始化失败：${e.message}`);
+    }
+  }
+
+  return {
+    seed,
+
+    /** 列出来给面板用（不含正文，正文可能很长） */
+    list() {
+      seed();
+      const out = [];
+      try {
+        for (const n of readdirSync(dir())) {
+          if (!n.endsWith('.md')) continue;
+          const id = n.slice(0, -3);
+          try {
+            const p = parsePersona(id, readFileSync(join(dir(), n), 'utf8'));
+            out.push({ id, name: p.name, tags: p.tags, chars: p.body.length });
+          } catch {}
+        }
+      } catch {}
+      return out.sort((a, b) => (a.id === 'default' ? -1 : b.id === 'default' ? 1 : a.id.localeCompare(b.id)));
+    },
+
+    read(id) {
+      seed();
+      const f = join(dir(), `${safeId(id)}.md`);
+      if (!existsSync(f)) return null;
+      const raw = readFileSync(f, 'utf8');
+      return { ...parsePersona(safeId(id), raw), raw };
+    },
+
+    /** 存一个人格（面板编辑用）。id 会做安全过滤，防路径穿越 */
+    save(id, raw) {
+      seed();
+      const clean = safeId(id);
+      writeFileSync(join(dir(), `${clean}.md`), String(raw ?? ''), 'utf8');
+      return { id: clean };
+    },
+
+    remove(id) {
+      const clean = safeId(id);
+      if (clean === 'default') throw new Error('默认人格不能删');
+      const f = join(dir(), `${clean}.md`);
+      if (existsSync(f)) unlinkSync(f);
+      return { id: clean };
+    },
+
+    /**
+     * 这个会话该用哪个人格。
+     *
+     * 优先级：按群指定 > 全局当前 > default。
+     * 指定的不存在时**静默回退**——人格文件被删了不该让机器人失声。
+     */
+    resolve(chatId, personaCfg = {}) {
+      seed();
+      const byChat = personaCfg.byChat ?? {};
+      const want = byChat[chatId] || personaCfg.current || 'default';
+      const got = this.read(want) || this.read('default');
+      return got || { id: 'default', name: '小栖', body: '', tags: [] };
+    },
+  };
+}
