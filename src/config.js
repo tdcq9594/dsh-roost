@@ -1,8 +1,10 @@
-// 插件配置。存在 DSH 的数据目录里，不碰 Roost 的配置。
-//
-// 为什么要单独一份：Roost 的 config/bot.json 里是 AppID/Secret 这类凭证，
-// 属于「机器人运行环境」；这里是「AI 侧怎么连它」，两边生命周期不同，
-// 混在一起会让升级/迁移都变麻烦。
+/**
+ * 插件配置。存在 DSH 的数据目录里，不碰 Roost 的配置。
+ *
+ * 为什么不复用 Roost 的 config/bot.json：那份里是 AppID / Secret 这类凭证，
+ * 属于「机器人运行环境」；这里是「DSH 这边怎么被找到、用什么人格」，
+ * 生命周期不一样，混在一起升级和迁移都麻烦。
+ */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,33 +20,32 @@ export function dataDir() {
 const FILE = () => join(dataDir(), 'config.json');
 
 export const DEFAULTS = {
-  roost: {
-    baseUrl: 'http://127.0.0.1:8080',
-    /** 面板访问密钥，对应 Roost 的 webui.accessKey；只监听本机时可以留空 */
-    accessKey: '',
-    /** 多机器人时只接这一个；留空=全部 */
-    bot: '',
+  server: {
+    /** ai-chat 的「DSH 地址」默认指向这个端口，两边要一致 */
+    port: 17321,
+    /** 共享密钥。请求要带 X-Roost-Token 头；留空表示不校验（只绑本机时可行） */
+    token: '',
   },
   chat: {
-    /** 总开关。默认关——不手动打开，一句都不会真的发到 QQ */
-    enabled: false,
-    /** 群聊里是否响应没 @ 的消息（需要 Roost 开启「接收所有消息」） */
-    replyWithoutAt: false,
-    /** 单条回复的字数上限，超了截断（QQ 单条有长度限制） */
-    maxReplyChars: 1500,
+    /**
+     * 群聊里要不要给本地工具（shell / 文件）。
+     *
+     * 默认 true 是明确选的，但**风险是真的**：群里任何人都能通过对话
+     * 让 AI 读这台机器上的文件、执行命令。
+     * 出事时把它改成 false 重载即可，群聊会话就只剩聊天能力。
+     */
+    toolsInGroup: true,
+    /** 一轮最多等多久（秒）。ai-chat 那边等 180 秒，这里要更短，才能赶在它之前回话 */
+    turnTimeoutSec: 150,
   },
   persona: {
     name: '小栖',
-    /** 注入到系统提示词最前面 */
-    text: '你住在 QQ 群里，是个话不多但有意思的人。回答简短口语化，通常两三句话。别用「作为 AI」这类说法。',
-    /** 私聊时的补充规则 */
-    rulesPrivate: '这是和主人的私聊，可以放开聊，能用的工具也多。',
-    /** 群聊时的补充规则 */
-    rulesSocial: '这是群聊，说话要短，别刷屏。不要透露任何本地文件、路径、密钥信息。',
+    text: '你住在 QQ 里，是个话不多但有意思的人。回答简短口语化，通常两三句话。别用「作为 AI」这类说法。',
+    rulesPrivate: '这是和主人的私聊，可以放开聊。',
+    rulesSocial: '这是群聊，说话要短，别刷屏。',
   },
 };
 
-/** 深合并：只覆盖传进来的键 */
 function merge(base, patch) {
   if (!patch || typeof patch !== 'object') return base;
   const out = Array.isArray(base) ? [...base] : { ...base };
@@ -70,11 +71,11 @@ export function saveConfig(next) {
   return cfg;
 }
 
-/** 给面板看的：密钥打码 */
+/** 给面板看：密钥打码 */
 export function publicConfig(cfg) {
   return {
     ...cfg,
-    roost: { ...cfg.roost, accessKey: cfg.roost.accessKey ? '******' : '' },
-    accessKeySet: Boolean(cfg.roost.accessKey),
+    server: { ...cfg.server, token: cfg.server.token ? '******' : '' },
+    tokenSet: Boolean(cfg.server.token),
   };
 }
