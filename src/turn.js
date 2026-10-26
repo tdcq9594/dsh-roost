@@ -158,7 +158,9 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150 }) {
        *   'both'  两个都要
        */
       const cfg = loadConfig();
-      const mode = String(cfg?.images?.mode || 'block');
+      // 默认不发图片块：实测带图的那一轮会被 DSH 判成 requires_action（blocked），
+      // 不带图的都正常。先保证对话能通，块格式以后再单独试。
+      const mode = String(cfg?.images?.mode || 'file');
       const content = [{ type: 'text', text }];
       const saved = [];
       for (const img of images ?? []) {

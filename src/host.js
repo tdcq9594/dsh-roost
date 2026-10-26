@@ -370,6 +370,22 @@ export function apply(ctx) {
       log.warn(`处理 ${chat.chatId.slice(0, 8)} 失败：${e?.message ?? e}`);
 
       /**
+       * **会话被归档了要自动恢复。**
+       *
+       * 主人把 DSH 里的对话归档之后，我们还在往那个会话里推消息——
+       * DSH 直接判 `requires_action`（turn/end 的 kind 是 blocked），
+       * 表现就是「这一轮没正常结束（blocked）」，而且会一直失败。
+       *
+       * 这里把绑定清掉（sessionId 置空），下一条消息会自动开新会话。
+       */
+      if (e?.kind === 'blocked') {
+        try {
+          sessions.set(chat.chatId, '', { preset: chat.preset, title: chat.name });
+          log.warn(`会话被归档或需要人工处理，已解绑 ${chat.chatId.slice(0, 8)}，下一条开新会话`);
+        } catch {}
+      }
+
+      /**
        * **出错也要回话**。
        *
        * 不回的话 ai-chat 那边会一直等到 180 秒超时，用户看到的是
@@ -380,7 +396,9 @@ export function apply(ctx) {
           ? '上一条还在想，稍等一下。'
           : e?.kind === 'timeout'
             ? '想太久了，先算了。'
-            : `这边出了点问题：${e?.message ?? e}`;
+            : e?.kind === 'blocked'
+              ? '这条对话在 DSH 里被归档了，我开个新的——再说一遍就行。'
+              : `这边出了点问题：${e?.message ?? e}`;
       await postReply(payload, friendly, true).catch((err) => log.warn(`回话失败：${err.message}`));
     } finally {
       // 工具权限和「谁在说话」都要还原，别串到下一轮
