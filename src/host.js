@@ -443,7 +443,8 @@ export function apply(ctx) {
       route('/status', (req, res) =>
         send(res, 200, {
           ok: true,
-          listening: Boolean(server),
+          listening: Boolean(server?.listening),
+          serverError: server?.lastError || '',
           port: cfg.server.port,
           tokenSet: Boolean(cfg.server.token),
           chats: sessions.size,

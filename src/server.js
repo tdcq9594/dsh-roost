@@ -125,7 +125,15 @@ export function createInboundServer({ port, token = '', onInbound, log = () => {
     }
   });
 
+  /**
+   * 把最后一次错误挂在 server 上。
+   *
+   * 光打日志不够——面板只说「宿主没在听」，用户不知道是端口被占还是别的原因。
+   * 记下来，/status 带出去，概览直接显示。
+   */
+  server.lastError = '';
   server.on('error', (e) => {
+    server.lastError = e.code === 'EADDRINUSE' ? `端口 ${port} 被占用` : (e.message || String(e));
     if (e.code === 'EADDRINUSE') {
       log(`端口 ${port} 被占用了。改 config.json 里的 server.port，或关掉占用它的程序`);
     } else {
@@ -134,6 +142,7 @@ export function createInboundServer({ port, token = '', onInbound, log = () => {
   });
 
   server.listen(port, '127.0.0.1', () => {
+    server.lastError = '';
     log(`监听 127.0.0.1:${port}${token ? '（需要共享密钥）' : '（未设密钥，仅本机可访问）'}`);
   });
 

@@ -414,7 +414,10 @@ window.__ModuleLoader__.load({
       if (!st.listening) {
         return h('div', { className: 'roost-card', style: { borderColor: 'var(--bad)' } },
           h('b', null, '宿主没在听。'),
-          h('span', { className: 'roost-desc' }, ` 端口 ${st.port} 没起来，ai-chat 推过来的消息会全部失败。去「接入」看看。`))
+          h('span', { className: 'roost-desc' },
+            ` 端口 ${st.port} 没起来，ai-chat 推过来的消息会全部失败。`
+            + (st.serverError ? `原因：${st.serverError}。` : '')
+            + ' 重启 DSH 让端口释放，或者去「接入」看看。'))
       }
       if (!st.chats) {
         return h('div', { className: 'roost-card' },
