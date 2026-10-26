@@ -216,6 +216,8 @@ window.__ModuleLoader__.load({
       const [appId, setAppId] = useState('')
       const [secret, setSecret] = useState('')
       const [pathOpen, setPathOpen] = useState(false)
+      /** 第 5 步的结果，直接显示在步骤下面 */
+      const [cfgMsg, setCfgMsg] = useState('')
       const [dir, setDir] = useState('')
 
       const s = {
@@ -336,13 +338,39 @@ window.__ModuleLoader__.load({
             h('button', {
               className: 'roost-btn',
               disabled: Boolean(busy),
-              onClick: () => {
-                if (!st.pluginInstalled) return toast('先装 ai-chat 插件（第 4 步）')
-                if (!st.running) return toast('Roost 没在跑，先启动（第 3 步）')
-                run({ only: 'configure' })
+              onClick: async () => {
+                if (!st.pluginInstalled) {
+                  setCfgMsg('✗ 还没装 ai-chat 插件，先走第 4 步')
+                  return toast('先装 ai-chat 插件（第 4 步）')
+                }
+                if (!st.running) {
+                  setCfgMsg(`✗ Roost 没在跑（${st.webui || '面板端口'} 连不上），先点第 3 步的「启动」`)
+                  return toast('Roost 没在跑，先启动（第 3 步）')
+                }
+                /**
+                 * 直接把结果显示在这一步下面。
+                 *
+                 * 光靠底部提示条不够——用户点了以后眼睛盯着按钮，
+                 * 得让他不用移开视线就能看到成没成、为什么没成。
+                 */
+                setCfgMsg('正在切换…')
+                const r = await post('/setup/configure', {})
+                setCfgMsg(r.ok ? `✓ ${r.message || '已切换'}` : `✗ ${r.message || '切换失败'}`)
+                toast(r.ok ? r.message || '已切换' : r.message || '切换失败')
+                reload()
               },
             }, st.pluginConfigured ? '重新配置' : '配置'),
           ),
+
+          cfgMsg
+            ? h('div', {
+                className: 'roost-mono',
+                style: {
+                  marginTop: -10, marginBottom: 14, paddingLeft: 40,
+                  color: cfgMsg.startsWith('✗') ? 'var(--bad)' : cfgMsg.startsWith('✓') ? 'var(--ok)' : 'inherit',
+                },
+              }, cfgMsg)
+            : null,
 
           h(Step, {
             n: 6, state: s.ready, title: '在群里说句话',
@@ -904,7 +932,23 @@ window.__ModuleLoader__.load({
           tab === 'config' ? (config ? h(ConfigTab, { config, save, toast }) : h('div', { className: 'roost-desc' }, '读取配置…')) : null,
         ),
 
-        toastMsg ? h('div', { className: 'roost-desc', style: { marginTop: 14 } }, toastMsg) : null,
+        /**
+         * 提示条固定在屏幕底部。
+         *
+         * 之前是普通 div 放在内容最后——「接入」页很长，
+         * 点了第 5 步的按钮，提示出现在屏幕外，看起来就是「点了没反应」。
+         */
+        toastMsg
+          ? h('div', {
+              style: {
+                position: 'fixed', left: '50%', bottom: 30, transform: 'translateX(-50%)',
+                zIndex: 2147483000, maxWidth: 520, padding: '10px 18px',
+                borderRadius: 9, border: '1px solid var(--line)',
+                background: 'var(--surface)', color: 'inherit',
+                boxShadow: '0 8px 28px rgba(0,0,0,.32)', fontSize: 13, lineHeight: 1.5,
+              },
+            }, toastMsg)
+          : null,
       )
     }
 
