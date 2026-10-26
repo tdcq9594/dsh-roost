@@ -51,16 +51,20 @@ Aurabot 是 MIT，本项目沿用 Roost 的许可（免费、禁商用）。如�
 
 ## 当前状态
 
-**骨架阶段（0.1.0）**。能装、能连、能收消息、能把消息喂给 AI，但**还不能跑通一轮完整对话**，
-因为它依赖 Roost 侧两个还没实现的接口：
+**骨架阶段（0.1.0）**。Roost 侧的两个通道**已经实现**（框架 v0.8.0），
+所以本插件现在能收到消息、能调官方接口。
 
 | 依赖 | 状态 |
 |---|---|
-| `GET /api/stream` 推 `message` 事件 | ⬜ Roost 待加（现在只推 log/status） |
-| `POST /api/qq/call` 通用能力调用 | ⬜ Roost 待加 |
-| `GET /api/qq/capabilities` 能力清单 | ⬜ Roost 待加 |
+| `GET /api/stream` 推 `message` 事件 | ✅ Roost v0.8.0 |
+| `POST /api/qq/call` 通用能力调用 | ✅ Roost v0.8.0 |
+| `GET /api/qq/capabilities` 能力清单 | ✅ Roost v0.8.0 |
 
-设计见 Roost 仓库的 [`docs/DSH-Aurabot适配方案-v2.md`](https://github.com/tdcq9594/qq-bot-roost/blob/master/docs/DSH-Aurabot适配方案-v2.md)。
+还差的（本仓库自己的活）：群聊分段回复、记忆、心情、语音。见
+[`docs/接入说明.md`](./docs/接入说明.md) 与 Roost 的
+[`docs/DSH-Aurabot适配方案-v2.md`](https://github.com/tdcq9594/qq-bot-roost/blob/master/docs/DSH-Aurabot适配方案-v2.md) 的 P2~P5。
+
+**前提**：Roost 要 ≥ 0.8.0。
 
 ---
 
