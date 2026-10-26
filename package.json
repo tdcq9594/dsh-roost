@@ -1,6 +1,6 @@
 {
   "name": "dsh-roost",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "ai-chat 插件的 DSH 宿主：把 QQ 消息交给 DSH 会话回答，带一键接入",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
@@ -44,7 +44,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/tdcq9594/dsh-roost.git"
+    "url": "git+https://github.com/tdcq9594/dsh-roost.git"
   },
   "homepage": "https://github.com/tdcq9594/dsh-roost",
   "engines": {
