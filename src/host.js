@@ -475,13 +475,30 @@ export function apply(ctx) {
       }
     };
 
-    const route = (path, handler) =>
-      ctx.webServer.register({
-        kind: 'exact',
-        path: API + path,
-        handler: (req, res) =>
-          Promise.resolve(handler(req, res)).catch((e) => send(res, 500, { ok: false, message: e.message })),
-      });
+    /**
+     * 注册一条路由。
+     *
+     * **单条失败不能拖死整个插件**：如果上一次激活的清理没跑干净
+     * （0.5.5 那个 bug 就是），DSH 会在这里抛
+     * `duplicate exact route "..."`，整个 apply 直接中断——
+     * 于是连收消息服务都起不来，17321 根本没人听。
+     *
+     * 现在改成：这条注册不上就跳过并记日志，其余照常。
+     * 代价是那一两个接口 404，但插件整体能起来，比全死强。
+     */
+    const route = (path, handler) => {
+      try {
+        return ctx.webServer.register({
+          kind: 'exact',
+          path: API + path,
+          handler: (req, res) =>
+            Promise.resolve(handler(req, res)).catch((e) => send(res, 500, { ok: false, message: e.message })),
+        });
+      } catch (e) {
+        log.warn(`路由 ${path} 没注册上（可能上次激活没清理干净，重启 DSH 可解决）：${e?.message ?? e}`);
+        return () => {};
+      }
+    };
 
     const offs = [
       route('/status', (req, res) =>
