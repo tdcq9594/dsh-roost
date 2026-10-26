@@ -451,7 +451,14 @@ export function apply(ctx) {
         res.statusCode = code;
         res.setHeader?.('content-type', 'application/json; charset=utf-8');
         res.setHeader?.('cache-control', 'no-store');
-        res.end?.(JSON.stringify(body));
+        /**
+         * body 是 undefined 时必须兜一个 {}。
+         *
+         * `JSON.stringify(undefined)` 返回 undefined，`res.end(undefined)` 写出**空 body**，
+         * 前端 `r.json()` 就会报 `Unexpected end of JSON input`——
+         * 表现是「连不上插件」，但其实是某个接口少返回了一个值。
+         */
+        res.end?.(JSON.stringify(body === undefined ? { ok: true } : body));
       } catch {}
     };
 

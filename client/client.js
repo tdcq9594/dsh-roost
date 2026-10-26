@@ -32,15 +32,37 @@ window.__ModuleLoader__.load({
 
     /* ---------------- 请求 ---------------- */
 
-    const get = (p) =>
-      fetch(API + p, { cache: 'no-store' })
-        .then((r) => r.json())
-        .catch((e) => ({ ok: false, message: '连不上插件：' + e.message }))
+    /**
+     * 所有请求走这一个，别再用裸 `r.json()`。
+     *
+     * 裸 json() 遇到空 body 只会抛 `Unexpected end of JSON input`，
+     * 完全看不出是哪个接口、什么状态码——之前就因此只能显示「连不上插件」，
+     * 查了半天。现在把状态码和路径都带上，回的不是 JSON 也把前 80 字打出来。
+     */
+    const req = async (p, init) => {
+      try {
+        const r = await fetch(API + p, { cache: 'no-store', ...init });
+        const text = await r.text();
+        if (!text) {
+          return {
+            ok: false,
+            message: `插件没回内容（HTTP ${r.status}，${p}）—— 多半是插件没加载完或路由没注册，重载 DSH 再试`,
+          };
+        }
+        try {
+          return JSON.parse(text);
+        } catch {
+          return { ok: false, message: `插件回的不是 JSON（HTTP ${r.status}，${p}）：${text.slice(0, 80)}` };
+        }
+      } catch (e) {
+        return { ok: false, message: '连不上插件：' + e.message };
+      }
+    };
+
+    const get = (p) => req(p);
 
     const post = (p, body) =>
-      fetch(API + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) })
-        .then((r) => r.json())
-        .catch((e) => ({ ok: false, message: '连不上插件：' + e.message }))
+      req(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
 
     const clone = (o) => JSON.parse(JSON.stringify(o))
     const setPath = (obj, path, value) => {
