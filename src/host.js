@@ -162,6 +162,31 @@ export function apply(ctx) {
     }
 
     /**
+     * 插件推过来的系统提示词。
+     *
+     * **必须用**：动作标记（skip / remember / image / button）的契约写在里面，
+     * 宿主自己另写一份人格就等于让这些标记全部失效。
+     * 之前就是这个 bug——DSH 模式下模型完全不知道有标记可用。
+     *
+     * order 900：排在人格（905）前面，先立规矩再谈性格。
+     */
+    const sid0 = agent?.session?.id;
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-plugin-prompt',
+          order: 900,
+          text: () => {
+            const cur = sid0 ? speaker.get(sid0) : null;
+            return cur?.system ? String(cur.system) : '';
+          },
+        }),
+      );
+    } catch (e) {
+      log.warn('挂插件提示词失败：', e.message);
+    }
+
+    /**
      * 每轮告诉 AI：这句话是谁说的、他能让你干到什么程度。
      *
      * 这是**软提醒**，硬限制在 onInbound 里（按档位收工具）。
@@ -215,7 +240,7 @@ export function apply(ctx) {
       mount(agent, chat);
 
       // 告诉 AI 谁在说话（软提醒，每轮现读）
-      speaker.set(sid, { payload, bucket });
+      speaker.set(sid, { payload, bucket, system: payload.system || '' });
 
       /**
        * 硬限制：按档位收走本地工具。
