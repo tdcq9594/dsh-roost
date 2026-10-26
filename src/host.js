@@ -462,10 +462,26 @@ export function apply(ctx) {
         const body = await readBody(req);
         // 面板拿到的是打码后的密钥，原样提交回来时别把真密钥冲掉
         if (body?.server?.token === '******') delete body.server.token;
+        const beforePort = cfg.server.port;
         cfg = saveConfig(body);
         // 端口/密钥变了要重起服务；人格和开关下一轮自然生效
         startServer();
-        return send(res, 200, { ok: true, config: publicConfig(cfg), message: '已保存，服务已重载' });
+
+        /**
+         * 端口变了必须回头改 ai-chat 的 DSH 地址。
+         *
+         * 不改的话：我们监听新端口，ai-chat 还往旧端口推 —— connection refused，
+         * 而且两边都不报错，表现就是「突然不回话了」。这种静默断链最坑。
+         */
+        let syncNote = '';
+        if (cfg.server.port !== beforePort) {
+          const r = await setup.syncDshUrl();
+          syncNote = r?.ok
+            ? (r.skipped ? '' : '；' + r.message)
+            : '；但 ai-chat 没同步（' + (r?.message || '未知') + '）';
+        }
+
+        return send(res, 200, { ok: true, config: publicConfig(cfg), message: '已保存，服务已重载' + syncNote });
       }),
       /**
        * 一键流程的接口。

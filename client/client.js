@@ -506,10 +506,32 @@ window.__ModuleLoader__.load({
                 ),
         ),
 
-        h('div', { className: 'roost-desc' },
-          'ai-chat 的「DSH 地址」要填 ',
-          h('code', { className: 'roost-mono' }, `http://127.0.0.1:${st.port}`),
-          '，两边端口一致才连得上。'),
+        /* —— 端口：全部来自配置，列出来方便核对 —— */
+        h('div', { className: 'roost-card' },
+          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, '端口'),
+          [
+            ['dsh-roost 监听', st.port, 'dsh-roost 的 server.port'],
+            ['Roost 面板', setupSt?.port ?? '—', 'Roost 的 webui.port'],
+            ['ai-chat 指向', setupSt?.pluginConfig?.dshUrl || '未配置', 'ai-chat 的 dshUrl，应等于监听端口'],
+          ].map(([k, v, why]) =>
+            h('div', { key: k, style: { display: 'flex', justifyContent: 'space-between', gap: 12, padding: '4px 0' } },
+              h('div', { style: { minWidth: 0 } },
+                h('div', { style: { fontSize: 12.5 } }, k),
+                h('div', { className: 'roost-desc', style: { marginTop: 0 } }, why),
+              ),
+              h('span', { className: 'roost-mono', style: { flexShrink: 0 } }, String(v)),
+            ),
+          ),
+          (() => {
+            const want = `http://127.0.0.1:${st.port}`
+            const got = setupSt?.pluginConfig?.dshUrl
+            if (!got) return h('div', { className: 'roost-desc', style: { marginTop: 6 } }, 'ai-chat 还没配，去「接入」第 5 步')
+            return got === want
+              ? h('div', { className: 'roost-desc', style: { marginTop: 6, color: 'var(--ok)' } }, '✓ 两端端口一致')
+              : h('div', { className: 'roost-desc', style: { marginTop: 6, color: 'var(--bad)' } },
+                  `✗ 对不上：ai-chat 指向 ${got}，我们监听 ${want}。消息推不过来，去「接入」第 5 步重新配置。`)
+          })(),
+        ),
       )
     }
 

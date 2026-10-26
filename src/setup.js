@@ -400,6 +400,32 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
    * 只改这几个字段，别的（人格、模型、冷却）保持默认——用户之后在面板里改。
    * 特别是 **apiKey 不动**：直连模型的密钥跟这条链路无关。
    */
+  /**
+   * 把 ai-chat 的「DSH 地址」同步成当前端口。
+   *
+   * **为什么需要**：用户在设置里改了 `server.port`，服务重起后监听新端口，
+   * 但 ai-chat 那边还指着旧端口——消息推过来全是 connection refused，
+   * 而且没有任何报错提示。这是个静默断链，必须主动补。
+   *
+   * 只在 ai-chat 已经配过（adapter=dsh 或有 dshUrl）时才改，
+   * 不擅自把一个没配过的插件改成 DSH 模式。
+   */
+  async function syncDshUrl() {
+    const want = `http://127.0.0.1:${cfgOf().server.port}`;
+    let cur = null;
+    try {
+      cur = (await api('/api/plugins/ai-chat/config'))?.config ?? null;
+    } catch {
+      return { ok: false, message: 'ai-chat 没在跑，跳过同步' };
+    }
+    if (!cur) return { ok: false, message: '读不到 ai-chat 配置' };
+    if (cur.adapter !== 'dsh' && !cur.dshUrl) return { ok: true, skipped: true, message: 'ai-chat 没在用 DSH，不用改' };
+    if (cur.dshUrl === want) return { ok: true, message: '已经是当前端口' };
+
+    await api('/api/plugins/ai-chat/config', { method: 'PUT', body: JSON.stringify({ dshUrl: want }) });
+    return { ok: true, message: `ai-chat 的 DSH 地址已改成 ${want}`, from: cur.dshUrl, to: want };
+  }
+
   async function configurePlugin() {
     if (!(await isRunning())) throw new Error('Roost 没在跑，先启动');
     const patch = {
@@ -416,6 +442,7 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
   return {
     detect,
     install,
+    syncDshUrl,
     setDir,
     createBot,
     start,
