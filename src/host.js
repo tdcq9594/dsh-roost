@@ -10,15 +10,15 @@
 //   2. 把消息喂给对应的 DSH 会话，等 AI 说完
 //   3. 把回复发回 ai-chat 给的地址
 //
-// ⚠️ 群聊默认也给本地工具（shell / 文件），这是明确选的配置。
-//    意味着群里任何人都能通过对话读这台机器的文件、执行命令。
-//    config.json 里 `chat.toolsInGroup` 改成 false 可以关掉。
+// ⚠️ 权限按**每一条消息**判定：主人、管理员、普通成员拿到的工具不一样，
+//    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
 import { loadConfig, saveConfig, publicConfig, dataDir } from './config.js';
 import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
 import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf } from './inbound.js';
+import { bucketOf, modeFor, describeSpeaker, rulesFor, LOCAL_TOOLS } from './permissions.js';
 
 export const name = 'roost';
 
@@ -26,9 +26,6 @@ export const name = 'roost';
 export const inject = ['agents', 'sessions', 'systemPrompt', 'webServer'];
 
 const API = '/roost/api';
-
-/** 群聊里要收走的工具（toolsInGroup=false 时生效） */
-const GROUP_DENY = ['bash', 'pwsh', 'shell', 'fs', 'fs-search', 'fs_search', 'web', 'web-fetch'];
 
 function makeLogger(ctx) {
   const L = ctx.logger ?? console;
@@ -47,8 +44,20 @@ export function apply(ctx) {
   const sessions = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
   const turns = createTurnRunner({ ctx, log, timeoutSec: cfg.chat.turnTimeoutSec });
 
-  /** 已经挂过人格/工具限制的 agent，避免每轮重复挂 */
+  /** 已经挂过人格/权限上下文的 agent，避免每轮重复挂 */
   const mounted = new WeakSet();
+
+  /**
+   * 当前这一轮是谁在说话。
+   *
+   * 为什么要一张表而不是直接塞进提示词：`systemPrompt.context` 是**注册一次、
+   * 每轮现读**的，所以这里放一个可变状态，text() 里读最新值就行。
+   * 同一会话的轮次是串行的（turn.js 有 busy 锁），不会有并发覆盖。
+   *
+   * @type {Map<string, {payload:object, bucket:string}>}
+   */
+  const speaker = new Map();
+
   let server = null;
   /** 最近一轮的耗时与结果，面板上显示用 */
   let lastTurn = null;
@@ -102,7 +111,7 @@ export function apply(ctx) {
     return { agent: await resolveAgent(newSid), sessionId: newSid };
   }
 
-  /** 挂人格；群聊且关了工具时收走本地工具 */
+  /** 挂人格 + 权限上下文（每个 agent 只挂一次，内容每轮现读） */
   function mount(agent, chat) {
     if (mounted.has(agent)) return;
     const offs = [];
@@ -123,12 +132,27 @@ export function apply(ctx) {
       log.debug('挂人格失败：', e.message);
     }
 
-    if (chat.kind !== 'c2c' && cfg.chat.toolsInGroup === false) {
-      try {
-        offs.push(agent.ctx.tools.restrict({ deny: GROUP_DENY }));
-      } catch (e) {
-        log.warn('收走群聊本地工具失败：', e.message);
-      }
+    /**
+     * 每轮告诉 AI：这句话是谁说的、他能让你干到什么程度。
+     *
+     * 这是**软提醒**，硬限制在 onInbound 里（按档位收工具）。
+     * 两层都要：工具没收干净时软提醒还在；模型被说服时硬限制还在。
+     */
+    const sid = agent?.session?.id;
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-permission',
+          order: 906,
+          text: () => {
+            const cur = sid ? speaker.get(sid) : null;
+            if (!cur) return '';
+            return `${describeSpeaker(cur.payload, cur.bucket)}\n${rulesFor(cur.bucket)}`;
+          },
+        }),
+      );
+    } catch (e) {
+      log.warn('挂权限上下文失败：', e.message);
     }
 
     mounted.add(agent);
@@ -151,9 +175,34 @@ export function apply(ctx) {
     }
 
     const started = Date.now();
+    /** 这一句是谁说的、他能让 AI 干到什么程度 */
+    const bucket = bucketOf(payload);
+    let sid = '';
+    let restore = null;
+
     try {
       const { agent, sessionId } = await agentFor(chat);
+      sid = sessionId;
       mount(agent, chat);
+
+      // 告诉 AI 谁在说话（软提醒，每轮现读）
+      speaker.set(sid, { payload, bucket });
+
+      /**
+       * 硬限制：按档位收走本地工具。
+       *
+       * 只在「这一档不该用工具」时挂 restrict，轮末释放——
+       * 所以同一个群里主人问完、路人接着问，权限是逐条生效的，
+       * 不像 Aurabot 那样整群一个档位。
+       */
+      const mode = modeFor(bucket, cfg.permissions);
+      if (mode === 'chat') {
+        try {
+          restore = agent.ctx.tools.restrict({ deny: LOCAL_TOOLS });
+        } catch (e) {
+          log.warn('收走本地工具失败：', e.message);
+        }
+      }
 
       const text = renderInbound(payload);
       const reply = await turns.run(agent, text, {
@@ -161,12 +210,27 @@ export function apply(ctx) {
       });
 
       await postReply(payload, reply, true);
-      lastTurn = { at: Date.now(), chatId: chat.chatId, ms: Date.now() - started, ok: true, len: reply.length };
+      lastTurn = {
+        at: Date.now(),
+        chatId: chat.chatId,
+        bucket,
+        mode,
+        ms: Date.now() - started,
+        ok: true,
+        len: reply.length,
+      };
       log.info(
-        `${chat.chatId.slice(0, 8)} 会话 ${sessionId.slice(-8)} 回了 ${reply.length} 字 · ${Date.now() - started}ms`,
+        `${chat.chatId.slice(0, 8)} 会话 ${sessionId.slice(-8)} [${bucket}/${mode}] 回了 ${reply.length} 字 · ${Date.now() - started}ms`,
       );
     } catch (e) {
-      lastTurn = { at: Date.now(), chatId: chat.chatId, ms: Date.now() - started, ok: false, error: e?.message ?? String(e) };
+      lastTurn = {
+        at: Date.now(),
+        chatId: chat.chatId,
+        bucket,
+        ms: Date.now() - started,
+        ok: false,
+        error: e?.message ?? String(e),
+      };
       log.warn(`处理 ${chat.chatId.slice(0, 8)} 失败：${e?.message ?? e}`);
 
       /**
@@ -182,6 +246,12 @@ export function apply(ctx) {
             ? '想太久了，先算了。'
             : `这边出了点问题：${e?.message ?? e}`;
       await postReply(payload, friendly, true).catch((err) => log.warn(`回话失败：${err.message}`));
+    } finally {
+      // 工具权限和「谁在说话」都要还原，别串到下一轮
+      try {
+        restore?.();
+      } catch {}
+      if (sid) speaker.delete(sid);
     }
   }
 
@@ -247,7 +317,7 @@ export function apply(ctx) {
           tokenSet: Boolean(cfg.server.token),
           chats: sessions.size,
           waiting: turns.waiting,
-          toolsInGroup: cfg.chat.toolsInGroup !== false,
+          permissions: cfg.permissions,
           lastTurn,
         }),
       ),

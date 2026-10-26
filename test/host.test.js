@@ -14,6 +14,7 @@ import { createSessions } from '../src/sessions.js';
 import { createInboundServer, postReply } from '../src/server.js';
 import { createTurnRunner, textOf } from '../src/turn.js';
 import { DEFAULTS, publicConfig } from '../src/config.js';
+import { bucketOf, modeFor, describeSpeaker, rulesFor } from '../src/permissions.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dsh-roost-'));
 
@@ -248,6 +249,62 @@ test('跑一轮：同一会话不许并发', async () => {
   runner.run(agent, 'a').catch(() => {});
   await assert.rejects(() => runner.run(agent, 'b'), /上一轮还没结束/);
   runner.dispose();
+});
+
+/* ---------------- 权限 ---------------- */
+
+test('权限：优先用插件给的 bucket', () => {
+  assert.equal(bucketOf({ sender: { bucket: 'owner' } }), 'owner');
+  assert.equal(bucketOf({ sender: { bucket: 'admin' } }), 'admin');
+  assert.equal(bucketOf({ sender: { bucket: 'member' } }), 'member');
+});
+
+test('权限：只给数字等级时按 0/1 分档', () => {
+  assert.equal(bucketOf({ sender: { level: 0 } }), 'owner');
+  assert.equal(bucketOf({ sender: { level: 1 } }), 'admin');
+  assert.equal(bucketOf({ sender: { level: 2 } }), 'member');
+  assert.equal(bucketOf({ sender: { level: 99 } }), 'member');
+});
+
+test('权限：拿不到信息就是 unknown（兜底）', () => {
+  assert.equal(bucketOf({}), 'unknown');
+  assert.equal(bucketOf({ sender: {} }), 'unknown');
+  assert.equal(bucketOf({ sender: { bucket: '随便写的' } }), 'unknown');
+  assert.equal(bucketOf({ sender: { level: 'abc' } }), 'unknown');
+});
+
+test('权限：unknown 默认只给聊天', () => {
+  const perms = { owner: 'all', admin: 'all', member: 'all', unknown: 'chat' };
+  assert.equal(modeFor('owner', perms), 'all');
+  assert.equal(modeFor('member', perms), 'all');
+  assert.equal(modeFor('unknown', perms), 'chat');
+});
+
+test('权限：没配或配错一律按最严处理', () => {
+  assert.equal(modeFor('member', {}), 'chat');
+  assert.equal(modeFor('member', { member: '随便' }), 'chat');
+  assert.equal(modeFor('owner', undefined), 'chat');
+});
+
+test('权限：告诉 AI 谁在说话', () => {
+  const line = describeSpeaker({ sender: { name: '小明' } }, 'member');
+  assert.match(line, /小明/);
+  assert.match(line, /普通成员/);
+
+  const unknown = describeSpeaker({ sender: {} }, 'unknown');
+  assert.match(unknown, /身份不明/);
+});
+
+test('权限：普通成员和身份不明的硬规则都提到不跑命令/不读文件', () => {
+  assert.match(rulesFor('member'), /不要执行任何会改动这台机器的操作/);
+  assert.match(rulesFor('unknown'), /按最低权限对待/);
+  assert.match(rulesFor('unknown'), /不调用任何本地工具/);
+  assert.match(rulesFor('owner'), /可以正常使用工具/);
+});
+
+test('权限：默认配置里 unknown 是 chat', () => {
+  assert.equal(DEFAULTS.permissions.unknown, 'chat');
+  assert.equal(DEFAULTS.permissions.owner, 'all');
 });
 
 /* ---------------- 配置 ---------------- */

@@ -143,12 +143,14 @@ window.__ModuleLoader__.load({
     /* ---------------- 状态页 ---------------- */
 
     function StatusTab({ st, reload }) {
+      const perms = st.permissions || {}
+      const toolable = ['owner', 'admin', 'member'].filter((k) => perms[k] === 'all')
       const rows = [
         ['监听', st.listening ? `127.0.0.1:${st.port}` : '未启动', st.listening],
         ['共享密钥', st.tokenSet ? '已设置' : '未设置（仅本机可访问）', st.tokenSet],
         ['已连 QQ 会话', `${st.chats} 个`, st.chats > 0],
         ['正在等回复', `${st.waiting} 个`, null],
-        ['群聊本地工具', st.toolsInGroup ? '给（有风险）' : '不给', null],
+        ['能用本地工具', toolable.length ? toolable.join(' / ') : '只有主人', null],
       ]
 
       return h(
@@ -165,7 +167,8 @@ window.__ModuleLoader__.load({
           ? h('div', { style: S.card },
               h('div', { style: { fontWeight: 500, marginBottom: 6 } }, '最近一轮'),
               h('div', { style: S.muted },
-                `${st.lastTurn.chatId.slice(0, 8)} · ${st.lastTurn.ok ? `回了 ${st.lastTurn.len} 字` : `失败：${st.lastTurn.error}`} · ${st.lastTurn.ms}ms · ${ago(st.lastTurn.at)}`,
+                `${st.lastTurn.chatId.slice(0, 8)} · ${st.lastTurn.bucket || '?'}/${st.lastTurn.mode || '?'} · `
+                + `${st.lastTurn.ok ? `回了 ${st.lastTurn.len} 字` : `失败：${st.lastTurn.error}`} · ${st.lastTurn.ms}ms · ${ago(st.lastTurn.at)}`,
               ),
             )
           : null,
@@ -226,10 +229,10 @@ window.__ModuleLoader__.load({
         null,
 
         h('div', { style: S.warn },
-          h('b', null, '关于「群聊本地工具」'),
+          h('b', null, '关于本地工具'),
           h('br'),
-          '开着时，群里任何人都能通过对话让 AI 读这台机器的文件、执行命令。',
-          '出事时把这里关掉，群聊会话就只剩聊天能力。私聊不受影响。',
+          '默认「普通成员」也能用本地工具——意味着群里任何人都能通过对话让 AI 读这台机器的文件、执行命令。',
+          '想收紧就把下面的「普通成员」改成「只能聊天」。',
         ),
 
         h('div', { style: S.card },
@@ -243,18 +246,41 @@ window.__ModuleLoader__.load({
         ),
 
         h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600, marginBottom: 10 } }, '行为'),
-          h('div', { style: S.row },
-            h('div', null,
-              h('div', { style: { fontWeight: 500 } }, '群聊也给本地工具'),
-              h('div', { style: S.muted }, '关掉后群里只能聊天，私聊不受影响'),
-            ),
-            h('input', {
-              type: 'checkbox',
-              checked: val('chat.toolsInGroup') !== false,
-              onChange: (e) => set('chat.toolsInGroup', e.target.checked),
-            }),
+          h('div', { style: { fontWeight: 600, marginBottom: 10 } }, '权限'),
+          h('div', { style: { ...S.muted, marginBottom: 10 } },
+            '每一档能用什么：all = 全部工具，chat = 只能聊天。权限按**每一条消息**生效，' +
+            '同一个群里主人问完、路人接着问，待遇不一样。',
           ),
+          [
+            ['owner', '主人'],
+            ['admin', '管理员'],
+            ['member', '普通成员'],
+            ['unknown', '身份不明（兜底）'],
+          ].map(([k, label]) =>
+            h('div', { key: k, style: S.row },
+              h('div', null,
+                h('div', { style: { fontWeight: 500 } }, label),
+                k === 'unknown'
+                  ? h('div', { style: S.muted }, '拿不到权限信息时用这一档。不建议放开')
+                  : null,
+              ),
+              h('select', {
+                style: { ...S.input, width: 120 },
+                value: getPath(draft, 'permissions.' + k) ?? (k === 'unknown' ? 'chat' : 'all'),
+                onChange: (e) => set('permissions.' + k, e.target.value),
+              },
+                h('option', { value: 'all' }, '全部工具'),
+                h('option', { value: 'chat' }, '只能聊天'),
+              ),
+            ),
+          ),
+          h('div', { style: { ...S.muted, marginTop: 8 } },
+            '担心安全就把「普通成员」也改成「只能聊天」——群里就只剩主人和管理员能用工具。',
+          ),
+        ),
+
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: 10 } }, '行为'),
           h(Field, { label: '一轮最多等多久（秒）', desc: '要小于 ai-chat 那边的 180 秒，才能赶在它超时前回话' },
             h('input', { style: S.input, value: val('chat.turnTimeoutSec') ?? '', onChange: (e) => set('chat.turnTimeoutSec', Number(e.target.value) || 0) }),
           ),

@@ -27,16 +27,22 @@ export const DEFAULTS = {
     token: '',
   },
   chat: {
-    /**
-     * 群聊里要不要给本地工具（shell / 文件）。
-     *
-     * 默认 true 是明确选的，但**风险是真的**：群里任何人都能通过对话
-     * 让 AI 读这台机器上的文件、执行命令。
-     * 出事时把它改成 false 重载即可，群聊会话就只剩聊天能力。
-     */
-    toolsInGroup: true,
     /** 一轮最多等多久（秒）。ai-chat 那边等 180 秒，这里要更短，才能赶在它之前回话 */
     turnTimeoutSec: 150,
+  },
+  /**
+   * 每一档权限能用什么：`all` = 全部工具，`chat` = 只能聊天。
+   *
+   * 默认 member 也是 all——这是明确选的「群聊也给本地工具」。
+   * 想收紧就把 member 改成 chat。
+   *
+   * `unknown` 是**兜底**：拿不到权限信息时按最严处理。这一项不建议放开。
+   */
+  permissions: {
+    owner: 'all',
+    admin: 'all',
+    member: 'all',
+    unknown: 'chat',
   },
   persona: {
     name: '小栖',
