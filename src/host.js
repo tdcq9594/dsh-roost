@@ -39,7 +39,26 @@ function makeLogger(ctx) {
 }
 
 export function apply(ctx) {
-  const log = makeLogger(ctx);
+  /**
+   * 最近的动静，面板「日志」页读它。
+   *
+   * 内存环形缓冲就够：用户要看的是「刚才那条为什么没回」，
+   * 不是三个月前的审计记录。完整日志还在 DSH 自己的日志里。
+   */
+  const logs = [];
+  function addLog(level, area, text) {
+    logs.push({ time: new Date().toTimeString().slice(0, 8), at: Date.now(), level, area, text: String(text) });
+    if (logs.length > 400) logs.shift();
+  }
+
+  const raw = makeLogger(ctx);
+  // 包一层：所有走 log.* 的都同时进面板日志
+  const log = {
+    debug: raw.debug,
+    info: (m) => { raw.info(m); addLog('info', 'core', m); },
+    warn: (m) => { raw.warn(m); addLog('warn', 'core', m); },
+    error: (m) => { raw.error(m); addLog('error', 'core', m); },
+  };
   let cfg = loadConfig();
 
   const sessions = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
@@ -369,7 +388,7 @@ export function apply(ctx) {
 
       route('/setup/bot', async (req, res) => {
         const b = await readBody(req);
-        return send(res, 200, setup.createBot(b));
+        return send(res, 200, await setup.createBot(b));
       }),
 
       route('/setup/start', (req, res) => setup.start().then((r) => send(res, 200, r))),
@@ -378,6 +397,38 @@ export function apply(ctx) {
       route('/setup/configure', (req, res) => setup.configurePlugin().then((r) => send(res, 200, r))),
 
       route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
+
+      route('/logs', (req, res) => {
+        const u = new URL(req.url || '/', 'http://x');
+        const limit = Math.min(400, Number(u.searchParams.get('limit')) || 200);
+        const level = u.searchParams.get('level') || '';
+        const items = level ? logs.filter((e) => e.level === level) : logs;
+        return send(res, 200, { ok: true, entries: items.slice(-limit) });
+      }),
+
+      /**
+       * 自测：不经过 QQ，直接跑一轮 DSH 对话。
+       *
+       * 验的是链路里最容易坏的那段——会话能不能建、AI 能不能回、
+       * 回复能不能取到。QQ 那半边（收消息、发消息）它测不到，
+       * 那部分出问题会在日志里看到。
+       */
+      route('/selftest', async (req, res) => {
+        const started = Date.now();
+        try {
+          const chat = { kind: 'c2c', chatId: 'selftest', name: '自测', preset: 'roost-private' };
+          const { agent } = await agentFor(chat);
+          mount(agent, chat);
+          const reply = await turns.run(agent, '这是一条自测消息。请用一句话回答：你收到我了吗？', {
+            source: { kind: 'roost-selftest' },
+          });
+          addLog('info', 'selftest', `自测通过：${reply.slice(0, 80)}`);
+          return send(res, 200, { ok: true, reply, ms: Date.now() - started });
+        } catch (e) {
+          addLog('error', 'selftest', `自测失败：${e?.message ?? e}`);
+          return send(res, 500, { ok: false, message: e?.message ?? String(e), ms: Date.now() - started });
+        }
+      }),
     ];
 
     return () => {

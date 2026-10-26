@@ -305,7 +305,7 @@ window.__ModuleLoader__.load({
 
           h(Step, {
             n: 3, state: s.start, title: '启动 Roost',
-            desc: st.running ? '在跑，面板已就绪' : '启动后它的面板在本机 8080',
+            desc: st.running ? `在跑，面板 ${st.port}` : `启动后它的面板在本机 ${st.port}`,
           },
             st.running
               ? h('button', { className: 'roost-btn', onClick: () => window.open(st.webui, '_blank', 'noopener') }, '打开面板')
@@ -347,7 +347,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'roost-card', style: { marginTop: 6 } },
           h('div', { style: { fontWeight: 600, marginBottom: 6 } }, '常见卡点'),
           h('ul', { className: 'roost-desc', style: { margin: 0, paddingLeft: 18 } },
-            h('li', null, '启动后马上退出：多半是 AppID/AppSecret 填错了，或 8080 被占'),
+            h('li', null, `启动后马上退出：多半是 AppID/AppSecret 填错了，或 ${st.port} 被占`),
             h('li', null, '群里没反应：开放平台没开「接收所有消息」，或机器人不在群里'),
             h('li', null, '有反应但答非所问：ai-chat 的「什么时候接话」被设成了「只在被 @ 时」'),
           ),
@@ -355,49 +355,174 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /* ---------------- 状态 ---------------- */
+    /* ---------------- 概览 ---------------- */
 
-    function StatusTab({ st, reload }) {
+    const Stat = ({ n, label, tone }) =>
+      h('div', { className: 'roost-card', style: { margin: 0, padding: '12px 14px' } },
+        h('div', {
+          style: {
+            fontSize: 20, fontWeight: 650, letterSpacing: '-0.02em',
+            fontVariantNumeric: 'tabular-nums',
+            color: tone === 'bad' ? 'var(--bad)' : tone === 'ok' ? 'var(--ok)' : 'inherit',
+          },
+        }, n),
+        h('div', { className: 'roost-desc', style: { marginTop: 1 } }, label),
+      )
+
+    /** 一行状态提示：只在真有问题时出现 */
+    function Banner({ st }) {
+      if (!st.listening) {
+        return h('div', { className: 'roost-card', style: { borderColor: 'var(--bad)' } },
+          h('b', null, '宿主没在听。'),
+          h('span', { className: 'roost-desc' }, ` 端口 ${st.port} 没起来，ai-chat 推过来的消息会全部失败。去「接入」看看。`))
+      }
+      if (!st.chats) {
+        return h('div', { className: 'roost-card' },
+          h('b', null, '还没有 QQ 会话接进来。'),
+          h('span', { className: 'roost-desc' }, ' 在群里说一句话就会自动建一个。没说之前这里当然是空的。'))
+      }
+      if (st.lastTurn && !st.lastTurn.ok) {
+        return h('div', { className: 'roost-card', style: { borderColor: 'var(--bad)' } },
+          h('b', null, '最近一轮失败了。'),
+          h('span', { className: 'roost-desc' }, ` ${st.lastTurn.error} —— 细节看「日志」。`))
+      }
+      return null
+    }
+
+    function OverviewTab({ st, toast, reload }) {
+      const [logs, setLogs] = useState(null)
       const perms = st.permissions || {}
       const toolable = ['owner', 'admin', 'member'].filter((k) => perms[k] === 'all')
-      const rows = [
-        ['监听', st.listening ? `127.0.0.1:${st.port}` : '未启动', st.listening],
-        ['共享密钥', st.tokenSet ? '已设置' : '未设置（仅本机可访问）', st.tokenSet],
-        ['已连 QQ 会话', `${st.chats} 个`, st.chats > 0],
-        ['正在等回复', `${st.waiting} 个`, null],
-        ['能用本地工具', toolable.length ? toolable.join(' / ') : '只有主人', null],
-      ]
+      const lt = st.lastTurn
+
+      useEffect(() => {
+        let alive = true
+        const load = () => get('/logs?limit=6').then((r) => alive && setLogs(r.entries || []))
+        load()
+        const t = setInterval(load, 5000)
+        return () => { alive = false; clearInterval(t) }
+      }, [])
+
+      const selftest = async () => {
+        toast('正在自测…')
+        const r = await post('/selftest', {})
+        toast(r.ok ? `自测通过（${r.ms}ms）：${String(r.reply).slice(0, 40)}` : `自测失败：${r.message}`)
+      }
 
       return h('div', null,
-        h('div', { className: 'roost-card' }, rows.map(([k, v, ok]) =>
-          h('div', { key: k, style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '6px 0' } },
-            h('span', { className: 'roost-dim' }, k),
-            h('span', { style: { display: 'flex', alignItems: 'center', gap: 7 } },
-              ok === null ? null : h('i', {
-                style: { width: 6, height: 6, borderRadius: 9, background: ok ? 'var(--ok)' : 'var(--line)' },
-              }),
-              v,
-            ),
-          ),
-        )),
+        h(Banner, { st }),
 
-        st.lastTurn
-          ? h('div', { className: 'roost-card' },
-              h('div', { style: { fontWeight: 600, marginBottom: 6 } }, '最近一轮'),
-              h('div', { className: 'roost-desc' },
-                `${st.lastTurn.chatId.slice(0, 8)} · ${st.lastTurn.bucket || '?'}/${st.lastTurn.mode || '?'} · `
-                + `${st.lastTurn.ok ? `回了 ${st.lastTurn.len} 字` : `失败：${st.lastTurn.error}`} · ${st.lastTurn.ms}ms · ${ago(st.lastTurn.at)}`),
-            )
-          : null,
-
-        h('div', { style: { display: 'flex', gap: 8 } },
-          h('button', { className: 'roost-btn', onClick: reload }, '刷新'),
+        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(120px,1fr))', gap: 10, marginBottom: 12 } },
+          h(Stat, { n: st.chats ?? 0, label: 'QQ 会话' }),
+          h(Stat, { n: st.waiting ?? 0, label: '正在等回复' }),
+          h(Stat, {
+            n: lt ? `${lt.ms}ms` : '—',
+            label: lt ? (lt.ok ? `最近一轮回了 ${lt.len} 字` : '最近一轮失败') : '还没跑过',
+            tone: lt ? (lt.ok ? 'ok' : 'bad') : null,
+          }),
+          h(Stat, { n: toolable.length ? toolable.length : 1, label: '能用本地工具的档位' }),
         ),
 
-        h('div', { className: 'roost-desc', style: { marginTop: 14 } },
+        h('div', { className: 'roost-card' },
+          h('div', { style: { fontWeight: 600, marginBottom: 4 } }, '快捷操作'),
+          h('div', { className: 'roost-desc', style: { marginBottom: 10 } },
+            '自测不经过 QQ，直接跑一轮 DSH 对话——验的是「会话建得起来、AI 回得来」。'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            h('button', { className: 'roost-primary', onClick: selftest }, '跑一次自测'),
+            h('button', {
+              className: 'roost-btn',
+              disabled: !st.listening,
+              onClick: () => window.open(`http://127.0.0.1:${st.port}`, '_blank', 'noopener'),
+            }, '打开 Roost 面板 ↗'),
+            h('button', { className: 'roost-btn', onClick: reload }, '刷新'),
+          ),
+        ),
+
+        h('div', { className: 'roost-card' },
+          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, '最近动态'),
+          logs === null
+            ? h('div', { className: 'roost-desc' }, '读取中…')
+            : logs.length === 0
+              ? h('div', { className: 'roost-desc' }, '还没有动静。群里说句话，或者跑一次自测。')
+              : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 3 } },
+                  logs.slice(-6).reverse().map((e, i) =>
+                    h('div', { key: i, style: { display: 'flex', gap: 8, fontSize: 12 } },
+                      h('span', { className: 'roost-mono roost-dim', style: { flexShrink: 0 } }, e.time),
+                      h('span', {
+                        style: {
+                          flexShrink: 0, width: 6, height: 6, borderRadius: 9, marginTop: 7,
+                          background: e.level === 'error' ? 'var(--bad)' : e.level === 'warn' ? 'var(--warn)' : 'var(--ok)',
+                        },
+                      }),
+                      h('span', { style: { opacity: e.level === 'error' ? 1 : 0.85 } }, e.text),
+                    ),
+                  ),
+                ),
+        ),
+
+        h('div', { className: 'roost-desc' },
           'ai-chat 的「DSH 地址」要填 ',
           h('code', { className: 'roost-mono' }, `http://127.0.0.1:${st.port}`),
           '，两边端口一致才连得上。'),
+      )
+    }
+
+    /* ---------------- 日志 ---------------- */
+
+    function LogsTab() {
+      const [items, setItems] = useState(null)
+      const [level, setLevel] = useState('')
+      const [auto, setAuto] = useState(true)
+
+      const load = useCallback(
+        () => get('/logs?limit=300' + (level ? '&level=' + level : '')).then((r) => setItems(r.entries || [])),
+        [level],
+      )
+
+      useEffect(() => {
+        load()
+        if (!auto) return
+        const t = setInterval(load, 3000)
+        return () => clearInterval(t)
+      }, [load, auto])
+
+      return h('div', { className: 'roost-card' },
+        h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10 } },
+          h('div', { style: { fontWeight: 600 } }, '日志'),
+          h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+            h('select', {
+              className: 'roost-input', style: { width: 110 },
+              value: level, onChange: (e) => setLevel(e.target.value),
+            },
+              h('option', { value: '' }, '全部'),
+              h('option', { value: 'info' }, '一般'),
+              h('option', { value: 'warn' }, '警告'),
+              h('option', { value: 'error' }, '错误'),
+            ),
+            h('button', { className: 'roost-btn', onClick: () => setAuto((v) => !v) }, auto ? '暂停刷新' : '自动刷新'),
+            h('button', { className: 'roost-btn', onClick: load }, '刷新'),
+          ),
+        ),
+        h('div', { className: 'roost-desc', style: { marginBottom: 10 } },
+          '内存里保留最近 400 条，DSH 重启就清空。完整日志在 DSH 自己的日志里。'),
+        items === null
+          ? h('div', { className: 'roost-desc' }, '读取中…')
+          : items.length === 0
+            ? h('div', { className: 'roost-desc' }, '没有符合条件的日志')
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 460, overflowY: 'auto' } },
+                items.slice().reverse().map((e, i) =>
+                  h('div', { key: i, style: { display: 'flex', gap: 8, fontSize: 12 } },
+                    h('span', { className: 'roost-mono roost-dim', style: { flexShrink: 0 } }, e.time),
+                    h('span', {
+                      style: {
+                        flexShrink: 0, width: 6, height: 6, borderRadius: 9, marginTop: 7,
+                        background: e.level === 'error' ? 'var(--bad)' : e.level === 'warn' ? 'var(--warn)' : 'var(--ok)',
+                      },
+                    }),
+                    h('span', { style: { opacity: e.level === 'error' ? 1 : 0.85 } }, e.text),
+                  ),
+                ),
+              ),
       )
     }
 
@@ -504,7 +629,7 @@ window.__ModuleLoader__.load({
       const rootRef = useRef(null)
       const dark = useDark(rootRef)
 
-      const [tab, setTab] = useState('setup')
+      const [tab, setTab] = useState('overview')
       const [setupSt, setSetupSt] = useState({})
       const [st, setSt] = useState({})
       const [chats, setChats] = useState([])
@@ -602,7 +727,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'roost-desc', style: { marginTop: 3 } }, 'QQ 消息从这里交给 DSH 会话回答。'),
 
         h('div', { style: { display: 'flex', gap: 2, margin: '18px 0 16px', borderBottom: '1px solid var(--line-soft)' } },
-          [['setup', '接入'], ['status', '状态'], ['chats', '会话'], ['config', '设置']].map(([id, label]) =>
+          [['overview', '概览'], ['setup', '接入'], ['chats', '会话'], ['config', '设置'], ['logs', '日志']].map(([id, label]) =>
             h('button', {
               key: id, type: 'button', className: 'roost-tab',
               'data-on': tab === id ? '1' : '0',
@@ -613,7 +738,8 @@ window.__ModuleLoader__.load({
 
         h('div', { className: 'roost-fade', key: tab },
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload, toast, busy, run }) : null,
-          tab === 'status' ? h(StatusTab, { st, reload: loadStatus }) : null,
+          tab === 'overview' ? h(OverviewTab, { st, toast, reload }) : null,
+          tab === 'logs' ? h(LogsTab, null) : null,
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
           tab === 'config' ? (config ? h(ConfigTab, { config, save, toast }) : h('div', { className: 'roost-desc' }, '读取配置…')) : null,
         ),

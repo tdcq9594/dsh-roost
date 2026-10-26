@@ -13,6 +13,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { createServer as createNetServer } from 'node:net';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
@@ -28,8 +29,7 @@ const SOURCES = (v) => [
 ];
 
 /** 跑个命令，返回 {code, out} */
-function run(cmd, args, opts = {}) {
-  return new Promise((resolve) => {
+function run(cmd, args, opts = {}) {  return new Promise((resolve) => {
     let out = '';
     let err = '';
     let child;
@@ -73,6 +73,32 @@ async function unzip(zipPath, dest) {
     errs.push(`${cmd}: ${(r.err || r.out || '').trim().split('\n')[0] || `退出码 ${r.code}`}`);
   }
   throw new Error(`解压失败（${errs.join('；')}）。可以手动下载解压到目标目录`);
+}
+
+/**
+ * 挑一个空着的面板端口。
+ *
+ * 不写死 8080：那是最容易被别的程序占掉的端口（一堆本地服务都用它）。
+ * 从 8080 往上试，第一个能 bind 的就用。这样装完直接能打开，
+ * 不会出现「装好了但面板打不开」。
+ */
+function pickPort(start = 8080, tries = 20) {
+  return new Promise((resolve) => {
+    let port = start;
+    const attempt = () => {
+      if (port >= start + tries) return resolve(start); // 都占着就还回原值，让用户自己改
+      const srv = createNetServer();
+      srv.once('error', () => {
+        port += 1;
+        attempt();
+      });
+      srv.once('listening', () => {
+        srv.close(() => resolve(port));
+      });
+      srv.listen(port, '127.0.0.1');
+    };
+    attempt();
+  });
 }
 
 export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
@@ -291,7 +317,7 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
    * 没有就直接退出——所以这时候还没有 API 可调。
    * 只写必需的几个字段，其余由 Roost 自己跟默认值合并。
    */
-  function createBot({ name = 'main', appId, appSecret }) {
+  async function createBot({ name = 'main', appId, appSecret }) {
     if (!appId || !appSecret) throw new Error('AppID 和 AppSecret 都要填');
     const dir = dirOf();
     const botsDir = join(dir, 'config', 'bots');
@@ -308,7 +334,8 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       global = JSON.parse(readFileSync(g, 'utf8'));
     } catch {}
     global.webui = { openBrowser: false, ...(global.webui || {}) };
-    if (!global.webui.port) global.webui.port = 8080;
+    // 没有就挑一个空着的（8080 常被别的本地服务占掉）
+    if (!global.webui.port) global.webui.port = await pickPort();
     writeFileSync(g, JSON.stringify(global, null, 2), 'utf8');
 
     log(`已写入机器人配置 ${file}`);

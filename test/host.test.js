@@ -335,7 +335,7 @@ test('一键：写了机器人配置之后，检测立刻看得到', async () =>
     dataDir: dir,
   });
 
-  s.createBot({ name: 'main', appId: '102000000', appSecret: 'sec' });
+  await s.createBot({ name: 'main', appId: '102000000', appSecret: 'sec' });
 
   const st = await s.detect();
   assert.equal(st.hasBot, true);
@@ -344,13 +344,13 @@ test('一键：写了机器人配置之后，检测立刻看得到', async () =>
   assert.equal(st.port, 59999);
 });
 
-test('一键：AppID / AppSecret 缺一个就报错', () => {
+test('一键：AppID / AppSecret 缺一个就报错', async () => {
   const dir = tmp();
   const s = createSetup({
     cfgOf: () => ({ setup: { roostDir: dir }, server: { port: 17321 } }),
     dataDir: dir,
   });
-  assert.throws(() => s.createBot({ name: 'main', appId: 'x' }), /都要填/);
+  await assert.rejects(() => s.createBot({ name: 'main', appId: 'x' }), /都要填/);
 });
 
 test('一键：WebUI 地址带上面板密钥', () => {
