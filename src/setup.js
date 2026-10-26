@@ -535,6 +535,18 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
   async function syncDshUrl(portOverride) {
     // 传了端口就用传的（实际 bind 成功的那个），否则用配置里的
     const want = `http://127.0.0.1:${portOverride || cfgOf().server.port}`;
+
+    /**
+     * Roost 没跑就**不算失败**，直接跳过。
+     *
+     * 启动瞬间两边谁先起来不确定，dsh-roost 常常先起——
+     * 那时候 Roost 还没监听，这里报「没同步」只会让用户以为出了问题。
+     * 等 Roost 起来后再点第 5 步、或者下次保存配置时自然会同步。
+     */
+    if (!(await isRunning())) {
+      return { ok: true, skipped: true, message: 'Roost 还没起来，等它起来再说' };
+    }
+
     let cur = null;
     try {
       cur = (await api('/api/plugins/ai-chat/config'))?.config ?? null;

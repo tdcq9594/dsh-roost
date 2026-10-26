@@ -487,10 +487,17 @@ export function apply(ctx) {
       route('/status', (req, res) =>
         send(res, 200, {
           ok: true,
-          listening: Boolean(server?.listening),
+          /**
+           * 这里 `server` 是 createInboundServer 返回的**包装对象**，
+           * 不是 net.Server——真正的 server 在 `server.server` 里。
+           * 之前写成 `server?.listening` 永远是 undefined，
+           * 于是日志说「监听成功」、红条却说「端口没起来」，自相矛盾。
+           */
+          listening: Boolean(server?.server?.listening),
           serverError: server?.lastError || '',
           wantPort: cfg.server.port,
-          actualPort: server?.actualPort || 0,
+          // actualPort 是个函数，忘了加括号会得到「函数本身」（JSON 里直接消失）
+          actualPort: server?.actualPort?.() ?? 0,
           port: cfg.server.port,
           tokenSet: Boolean(cfg.server.token),
           chats: sessions.size,

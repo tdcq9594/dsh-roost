@@ -657,6 +657,55 @@ test('租约: 文件不存在也不炸', () => {
   assert.equal(lease.actualOf('roost'), null);
 });
 
+/* ---------------- 收消息服务 ---------------- */
+
+test('服务: 包装对象的 listening 在真 server 上，不在自己身上', async () => {
+  /**
+   * 这个坑踩过：/status 写成 `Boolean(server?.listening)`，
+   * 但 `server` 是 createInboundServer 返回的包装对象，
+   * 真正的 net.Server 在 `server.server` 里 —— 于是永远是 undefined，
+   * 日志说「监听成功」、红条却说「端口没起来」，自相矛盾。
+   */
+  const port = 41000 + Math.floor(Math.random() * 2000);
+  const srv = createInboundServer({ port, onInbound: () => {}, log: () => {} });
+  try {
+    await new Promise((r) => setTimeout(r, 150));
+
+    assert.equal(srv.listening, undefined, '包装对象自己没有 listening');
+    assert.equal(srv.server.listening, true, '真 server 在 listening');
+    assert.equal(srv.actualPort(), port, 'actualPort() 要返回数字，不是函数');
+    assert.equal(typeof srv.actualPort(), 'number');
+  } finally {
+    srv.close();
+  }
+});
+
+test('服务: 端口被占时自动顺延到下一个', async () => {
+  const port = 43000 + Math.floor(Math.random() * 2000);
+  const first = createInboundServer({ port, onInbound: () => {}, log: () => {} });
+  try {
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(first.actualPort(), port);
+
+    // 同一个端口再起一个，应该落到 port+1
+    const second = createInboundServer({
+      port,
+      ports: [port, port + 1, port + 2],
+      onInbound: () => {},
+      log: () => {},
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(second.actualPort(), port + 1, '被占就换下一个');
+      assert.equal(second.server.listening, true);
+    } finally {
+      second.close();
+    }
+  } finally {
+    first.close();
+  }
+});
+
 /* ---------------- 配置 ---------------- */
 
 test('配置：密钥打码，但能看出有没有设', () => {
