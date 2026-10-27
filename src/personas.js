@@ -14,6 +14,18 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlink
 import { join } from 'node:path';
 
 /** 内置人格。第一次运行时写进数据目录 */
+const BUILTIN_DEMOS = {
+  default: '用户：今天加班到十点\n你：辛苦了。吃了吗\n\n用户：吃了，泡面\n你：……那不叫吃了',
+  genki: '用户：今天好累啊\n你：诶？怎么啦\n\n用户：改了一整天 bug\n你：啊…那先别管了，吃点东西吧',
+  terse: '用户：这个报错怎么办\n你：少个分号。\n\n用户：为什么\n你：第 42 行。',
+  helper:
+    '用户：怎么清缓存\n你：三步：1. 关掉进程 2. 删 cache 目录 3. 重开\n\n用户：删了还是不行\n你：那可能是权限问题，这块我不确定，得看日志',
+  scholar:
+    '用户：为什么月亮有圆缺\n你：月有阴晴圆缺——其实是太阳照到的那一半，在我们眼里角度变了\n\n用户：哦…听不懂\n你：打个比方：拿手电照球，你站的角度不同，看到亮的面积就不一样',
+  snarky:
+    '用户：我把生产库删了\n你：恭喜，这下真·生产环境了。备份呢\n\n用户：没有…\n你：……行，先别动任何东西，我看看能不能救',
+};
+
 const BUILTIN = {
   default: `---
 name: 小栖
@@ -96,7 +108,22 @@ export function parsePersona(id, raw) {
     }
     text = text.slice(m[0].length);
   }
-  return { ...meta, body: text.trim() };
+  /**
+   * 把正文切成「性格」和「说话示例」两段。
+   *
+   * 为什么要示例：散文写「活泼」，模型可能理解成「堆颜文字卖萌」；
+   * 给两轮真实对话，长度、语气词密度、标点习惯一次校准到位。
+   * **形容词告诉它方向，示例告诉它尺度。**（AstrBot 的 begin_dialogs 就是干这个的）
+   */
+  let body = text.trim();
+  let demos = '';
+  const d = body.match(/^##\s*说话示例\s*\r?\n([\s\S]*)$/m);
+  if (d) {
+    demos = d[1].trim();
+    body = body.slice(0, d.index).trim();
+  }
+
+  return { ...meta, body, demos };
 }
 
 export function createPersonas({ dataDir, log = () => {} }) {
@@ -108,7 +135,11 @@ export function createPersonas({ dataDir, log = () => {} }) {
       mkdirSync(dir(), { recursive: true });
       for (const [id, raw] of Object.entries(BUILTIN)) {
         const f = join(dir(), `${id}.md`);
-        if (!existsSync(f)) writeFileSync(f, raw, 'utf8');
+        // 新装也带示例对话——否则只有老用户手动补过的那几份有效
+        if (!existsSync(f)) {
+          const demo = BUILTIN_DEMOS[id];
+          writeFileSync(f, demo ? `${raw.trimEnd()}\n\n## 说话示例\n${demo}\n` : raw, 'utf8');
+        }
       }
     } catch (e) {
       log(`人格库初始化失败：${e.message}`);

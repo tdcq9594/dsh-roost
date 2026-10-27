@@ -137,6 +137,20 @@ export function apply(ctx) {
    */
   const speaker = new Map();
 
+  /**
+   * 公共行为基线。
+   *
+   * 为什么不写进每个人格文件：人格文件只管"这个人什么性格"，
+   * "怎么说话才不讨厌"是所有人共用的。写 6 遍必然漂移——
+   * 事实是上一版只有 default.md 有这几条，其余 5 个都缺。
+   *
+   * （这几条原本在 ai-chat 的 systemPrompt 里，那个配置项删掉之后
+   *  就该落到这儿，否则换个人格就变成话痨/爱编。）
+   */
+  const PERSONA_BASE =
+    '说话简短口语化，通常两三句话；不确定就直说不确定，不要编；' +
+    '不用「作为 AI」「作为一个语言模型」这类说法。';
+
   let server = null;
   /** 最近一轮的耗时与结果，面板上显示用 */
   let lastTurn = null;
@@ -369,7 +383,13 @@ export function apply(ctx) {
             const extra = chat.kind === 'c2c' ? p.rulesPrivate : p.rulesSocial;
             return [
               `你现在叫「${persona.name}」。`,
+              PERSONA_BASE,
               override ? `（本群临时人设）\n${override}` : persona.body,
+              /**
+               * 示例对话：比形容词准得多。
+               * 放在性格后面读，作为"她平时具体怎么说话"的锚。
+               */
+              persona.demos ? `【她平时这么说话】\n${persona.demos}` : '',
               extra,
               p.text, // 旧配置里的追加内容，留着兼容
             ]
