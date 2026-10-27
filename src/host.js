@@ -598,6 +598,20 @@ export function apply(ctx) {
         return send(res, 200, await setup.createBot(b));
       }),
 
+      // 扫码建机器人：转发给框架（协议/密钥/二维码都在那边，这里不重实现）
+      route('/setup/qr/start', (req, res) =>
+        setup.qrStart().then((r) => send(res, 200, { ok: true, ...r })).catch((e) => send(res, 502, { ok: false, message: e.message })),
+      ),
+      route('/setup/qr/poll', async (req, res) => {
+        const body = await readBody(req);
+        try {
+          const r = await setup.qrPoll(String(body.taskId ?? '').trim());
+          send(res, 200, { ok: true, ...r });
+        } catch (e) {
+          send(res, 502, { ok: false, message: e.message });
+        }
+      }),
+
       route('/setup/start', (req, res) => setup.start().then((r) => send(res, 200, r))),
       route('/setup/stop', (req, res) => setup.stop().then((r) => send(res, 200, r))),
       route('/setup/plugin', (req, res) => setup.installPlugin().then((r) => send(res, 200, r))),

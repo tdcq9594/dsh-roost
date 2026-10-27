@@ -242,6 +242,64 @@ window.__ModuleLoader__.load({
       const [cfgMsg, setCfgMsg] = useState('')
       const [dir, setDir] = useState('')
 
+      /**
+       * 扫码建机器人。
+       *
+       * 协议、密钥、二维码全在框架那边（/api/bots/qr/*），
+       * 这里只负责发起、显示、轮询，拿到就把 AppID / AppSecret 填进输入框。
+       * 手填那条路一点没动——扫码失败、已有机器人、想直接粘 key 都还能用。
+       */
+      const [qrSvg, setQrSvg] = useState('')
+      const [qrTip, setQrTip] = useState('')
+      const qrTimer = useRef(null)
+
+      const stopQr = useCallback(() => {
+        if (qrTimer.current) {
+          clearInterval(qrTimer.current)
+          qrTimer.current = null
+        }
+      }, [])
+
+      const pollQr = useCallback(
+        async (taskId) => {
+          const r = await post('/setup/qr/poll', { taskId })
+          if (r.ok === false) {
+            stopQr()
+            setQrTip(r.message || '扫码失败了，重试一次')
+            return
+          }
+          if (r.status === 'pending') return
+          stopQr()
+          if (r.status === 'done') {
+            setAppId(r.appId || '')
+            setSecret(r.appSecret || '')
+            setQrSvg('')
+            setQrTip(`✓ 已拿到 AppID ${r.appId}，点下面「保存」就行`)
+          } else {
+            setQrSvg('')
+            setQrTip(r.message || '二维码过期了，重新生成一个')
+          }
+        },
+        [stopQr],
+      )
+
+      const startQr = useCallback(async () => {
+        setQrTip('正在生成二维码…')
+        setQrSvg('')
+        const r = await post('/setup/qr/start', {})
+        if (r.ok === false) {
+          setQrTip(r.message || '生成失败')
+          return
+        }
+        setQrSvg(r.qrSvg || '')
+        setQrTip('用手机 QQ 扫码，确认后自动填好')
+        stopQr()
+        qrTimer.current = setInterval(() => pollQr(r.taskId), 2000)
+      }, [pollQr, stopQr])
+
+      // 切走页面就停轮询，别在后台一直打
+      useEffect(() => () => stopQr(), [stopQr])
+
       const s = {
         install: st.installed ? 'done' : 'current',
         bot: st.hasBot ? 'done' : st.installed ? 'current' : 'todo',
@@ -335,12 +393,27 @@ window.__ModuleLoader__.load({
 
           h(Step, {
             n: 2, state: s.bot, title: '填 AppID / AppSecret',
-            desc: '开放平台 → 你的机器人 → 开发设置。这一步没法自动，只能你填',
+            desc: '推荐扫码一键创建；也可以去开放平台手动复制',
           }),
           st.hasBot
             ? h('div', { className: 'roost-mono roost-dim', style: { marginTop: -12, marginBottom: 14, paddingLeft: 40 } },
                 '已配置：' + st.bots.map((b) => `${b.name}（${b.appId || '无 AppID'}）`).join('、'))
             : h('div', { style: { marginTop: -8, marginBottom: 18, paddingLeft: 40, maxWidth: 420 } },
+                h('button', { className: 'roost-primary', style: { width: '100%' }, onClick: startQr }, '扫码一键创建'),
+                h('div', { className: 'roost-desc', style: { marginTop: 6, marginBottom: 12 } },
+                  '手机 QQ 扫一下，AppID / AppSecret 自动填好（要 Roost 在跑）'),
+
+                qrSvg
+                  ? h('div', {
+                      style: { background: '#fff', padding: 8, borderRadius: 10, lineHeight: 0, marginBottom: 8 },
+                      // 服务端已经画好 SVG，这里直接塞进去，前端不用带 QR 库
+                      dangerouslySetInnerHTML: { __html: qrSvg },
+                    })
+                  : null,
+                qrTip ? h('div', { className: 'roost-desc', style: { marginBottom: 10 } }, qrTip) : null,
+
+                h('div', { className: 'roost-desc', style: { margin: '4px 0 8px', opacity: 0.7 } },
+                  '—— 或者手动填（已有机器人、或扫码用不了时）——'),
                 h('input', { className: 'roost-input', style: { marginBottom: 8 }, placeholder: 'AppID', value: appId, onChange: (e) => setAppId(e.target.value) }),
                 h('input', { className: 'roost-input', style: { marginBottom: 8 }, placeholder: 'AppSecret', type: 'password', value: secret, onChange: (e) => setSecret(e.target.value) }),
                 h('button', {

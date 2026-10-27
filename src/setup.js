@@ -599,8 +599,30 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     };
   }
 
+  /**
+   * 扫码建机器人：**转发给框架**，不在插件里重实现。
+   *
+   * 框架面板有 `/api/bots/qr/start` 和 `/api/bots/qr/poll`，
+   * 协议、bindKey、解密、二维码全在那边。这里只做透传——
+   * 一份实现两处用，插件不用跟着改协议（也不该存 bindKey）。
+   *
+   * 前提：Roost 得在跑（框架 0.8.4+ 才有这两个接口）。
+   */
+  async function qrStart() {
+    if (!(await isRunning())) throw new Error('Roost 没在跑，先启动（扫码要用它的接口）');
+    return api('/api/bots/qr/start', { method: 'POST', body: '{}' });
+  }
+
+  async function qrPoll(taskId) {
+    if (!(await isRunning())) throw new Error('Roost 没在跑，先启动');
+    if (!taskId) throw new Error('缺 taskId');
+    return api('/api/bots/qr/poll', { method: 'POST', body: JSON.stringify({ taskId }) });
+  }
+
   return {
     detect,
+    qrStart,
+    qrPoll,
     install,
     syncDshUrl,
     setDir,
