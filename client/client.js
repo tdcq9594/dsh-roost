@@ -199,9 +199,64 @@ window.__ModuleLoader__.load({
 .roost-desc{opacity:.66;font-size:12px;margin-top:2px}
 .roost-fade{animation:roost-in .22s cubic-bezier(.2,.8,.2,1)}
 @keyframes roost-in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+
+/* —— 功能页：分节账本 ——
+   刻意不堆卡片：DSH 自己是深色仪表盘，一层层圆角方块会把宿主原有的层次压平。
+   分节靠「序号 + 标题 + 一条细线」，条目靠上边线分隔，只有情绪用条形图。 */
+.roost-sec{margin:22px 0 0}
+.roost-sec:first-child{margin-top:2px}
+.roost-sec-h{display:flex;align-items:baseline;gap:9px;margin-bottom:10px}
+.roost-sec-n{font-size:10.5px;opacity:.38;font-variant-numeric:tabular-nums}
+.roost-sec-t{font-size:13px;font-weight:600;letter-spacing:.01em;flex-shrink:0}
+.roost-sec-h::after{content:'';flex:1;height:1px;background:var(--line-soft);transform:translateY(-2px)}
+.roost-note{font-size:11.5px;line-height:1.62;opacity:.55;margin-top:4px}
+.roost-empty{font-size:12px;line-height:1.65;opacity:.55;padding:4px 0}
+.roost-row{display:flex;gap:14px;padding:11px 0;border-top:1px solid var(--line-soft)}
+.roost-row:first-of-type{border-top:none;padding-top:2px}
+.roost-k{flex:0 0 58px;font-size:12px;opacity:.55;padding-top:1px}
+.roost-v{flex:1;min-width:0}
+.roost-v-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+
+/* 情绪条：双向的从中线往两边长，单向的从左边长。数字不显示，形态就是信息 */
+.roost-mood{display:flex;flex-direction:column;gap:8px;margin-bottom:2px}
+.roost-mood-row{display:flex;align-items:center;gap:10px}
+.roost-mood-k{flex:0 0 42px;font-size:11.5px;opacity:.55}
+.roost-mood-w{flex:0 0 52px;text-align:right;font-size:11.5px;opacity:.8}
+.roost-bar{position:relative;flex:1;height:6px;border-radius:3px;background:color-mix(in srgb,currentColor 8%,transparent);overflow:hidden}
+.roost-bar-mid{position:absolute;left:50%;top:0;bottom:0;width:1px;background:color-mix(in srgb,currentColor 26%,transparent)}
+.roost-bar-fill{position:absolute;top:0;bottom:0;border-radius:3px;background:color-mix(in srgb,currentColor 42%,transparent);
+  transition:left .5s cubic-bezier(.16,1,.3,1),width .5s cubic-bezier(.16,1,.3,1)}
+
+/* 文字按钮：次要操作一律降权，整页不设 primary —— 没有哪个动作值得抢焦点 */
+.roost-link{border:none;background:none;color:inherit;font:inherit;font-size:11.5px;padding:0;opacity:.5;cursor:pointer;transition:opacity .12s}
+.roost-link:hover:not(:disabled){opacity:.92;text-decoration:underline;text-underline-offset:2px}
+.roost-link:disabled{opacity:.25;cursor:not-allowed}
+.roost-link-warn{opacity:1;color:var(--bad);text-decoration:underline;text-underline-offset:2px}
+.roost-chip{padding:3px 9px;border-radius:999px;border:1px solid var(--line-soft);background:transparent;color:inherit;
+  font:inherit;font-size:11.5px;cursor:pointer;opacity:.7;transition:opacity .12s,background .12s,border-color .12s}
+.roost-chip:hover{opacity:1;background:var(--field)}
+.roost-chip[data-on="1"]{opacity:1;font-weight:600;border-color:transparent;background:color-mix(in srgb,currentColor 15%,transparent)}
+.roost-switch{position:relative;flex:0 0 32px;width:32px;height:17px;padding:0;border-radius:9px;border:1px solid var(--line);
+  background:transparent;color:inherit;cursor:pointer;transition:background .16s ease,border-color .16s ease}
+.roost-switch::after{content:'';position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:currentColor;
+  opacity:.7;transition:transform .18s cubic-bezier(.2,.8,.2,1),opacity .18s}
+.roost-switch[data-on="1"]{border-color:transparent;background:color-mix(in srgb,currentColor 22%,transparent)}
+.roost-switch[data-on="1"]::after{transform:translateX(15px);opacity:.95}
+.roost-list{display:flex;flex-direction:column}
+.roost-fact{display:flex;align-items:flex-start;gap:8px;padding:4px 0;font-size:12px;line-height:1.55}
+.roost-fact-x{flex:0 0 auto;border:none;background:none;color:inherit;font:inherit;font-size:13px;line-height:1;padding:3px 4px;
+  opacity:.22;cursor:pointer;transition:opacity .12s,color .12s}
+.roost-fact:hover .roost-fact-x{opacity:.55}
+.roost-fact-x:hover{opacity:1;color:var(--bad)}
+.roost-add{display:flex;gap:6px;align-items:center;margin-top:10px}
+
+/* 键盘用户也要看得见焦点：只给按钮加环，输入框已有自己的处理 */
+.roost-root button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
 @media (prefers-reduced-motion: reduce){
   .roost-node.current::after{animation:none}
   .roost-fade{animation:none}
+  .roost-bar-fill{transition:none}
 }
 `
         document.head.appendChild(el)
@@ -733,23 +788,251 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /* ---------------- 功能（人格 / 表情 / 语音 / 搭话） ---------------- */
+    /* ---------------- 功能：她现在 / 她记得 / 她能做 ---------------- */
 
     /**
-     * 这一页是「后端做好了但面板没入口」的补课。
+     * 这一页不按「能力清单」排，按用户真正会问的三个问题排：
+     *   ① 她现在什么状态 —— 情绪，只读
+     *   ② 她记得什么     —— 两层记忆，能加能删
+     *   ③ 她能做什么     —— 人格 / 表情 / 搭话 / 授权
      *
-     * 人格库、表情包、主动搭话的后端和接口早就有了，但面板上只能去「设置」里
-     * 改原始字段——等于没有。这里给每个功能一块卡：看到状态，能直接操作。
+     * 为什么改：原来四张卡（人格 / 表情 / 语音 / 搭话）是「后端有什么就列什么」，
+     * 用户看完仍然不知道她此刻在想什么、记住了什么。能力是**手段**，状态才是他想知道的。
+     *
+     * 视觉上刻意**不堆卡片**：DSH 自己是深色仪表盘，一层层圆角方块摞起来会把
+     * 宿主原本的层次压平。这里用「分节 + 细线」的账本式排版，只有情绪用条形图——
+     * 数字（0.35 / 0.80）用户不关心，形态才说明问题。
      */
-    function FeaturesTab({ config, toast, save, reload }) {
+
+    /** 三个维度怎么翻成人话。阈值和 mood.js 的注入语气对齐，别各说各的 */
+    const MOOD = [
+      {
+        key: 'valence', label: '心情', bi: true,
+        words: [[0.5, '很好'], [0.15, '还不错'], [-0.15, '一般'], [-0.5, '有点烦'], [-9, '很烦']],
+      },
+      {
+        key: 'energy', label: '精力',
+        words: [[0.75, '很足'], [0.45, '还行'], [0.25, '有点累'], [-9, '很累']],
+      },
+      {
+        key: 'sociability', label: '想聊天',
+        words: [[0.75, '很想'], [0.45, '一般'], [0.25, '不太想'], [-9, '想安静']],
+      },
+    ]
+
+    const wordOf = (v, words) => (words.find(([t]) => v > t) || words[words.length - 1])[1]
+
+    const SCOPE_LABEL = { group_push: '群聊主动', c2c_push: '私聊主动' }
+
+    const Sec = ({ n, title, children }) =>
+      h('section', { className: 'roost-sec' },
+        h('div', { className: 'roost-sec-h' },
+          h('span', { className: 'roost-sec-n' }, n),
+          h('span', { className: 'roost-sec-t' }, title),
+        ),
+        children,
+      )
+
+    const Row = ({ k, children }) =>
+      h('div', { className: 'roost-row' },
+        h('div', { className: 'roost-k' }, k),
+        h('div', { className: 'roost-v' }, children),
+      )
+
+    /**
+     * 破坏性操作用「点两次」代替弹窗。
+     *
+     * 弹窗会被无脑点掉（impeccable 那条：Undo > Confirm），但这几件事没有 undo——
+     * 记忆清掉就没了。折中：第一次点变成「确认？」，3.5 秒不点自己退回。
+     * 比弹窗轻，又比直接执行安全。
+     */
+    function ConfirmLink({ label, confirmLabel, onConfirm, disabled }) {
+      const [armed, setArmed] = useState(false)
+      const timer = useRef(null)
+      useEffect(() => () => clearTimeout(timer.current), [])
+      return h('button', {
+        type: 'button',
+        className: 'roost-link' + (armed ? ' roost-link-warn' : ''),
+        disabled: Boolean(disabled),
+        onClick: () => {
+          if (armed) {
+            clearTimeout(timer.current)
+            setArmed(false)
+            onConfirm()
+          } else {
+            setArmed(true)
+            timer.current = setTimeout(() => setArmed(false), 3500)
+          }
+        },
+      }, armed ? confirmLabel || '确认？' : label)
+    }
+
+    /** 一行情绪条：双向的（心情）从中线往两边长，单向的从左边长 */
+    function MoodBar({ v, bi }) {
+      const x = bi ? (v + 1) / 2 : v
+      const left = bi ? Math.min(0.5, x) : 0
+      const width = bi ? Math.abs(x - 0.5) : x
+      return h('div', { className: 'roost-bar', 'aria-hidden': 'true' },
+        bi ? h('span', { className: 'roost-bar-mid' }) : null,
+        h('span', {
+          className: 'roost-bar-fill',
+          style: { left: left * 100 + '%', width: Math.max(1.2, width * 100) + '%' },
+        }),
+      )
+    }
+
+    function MoodBlock({ mood }) {
+      if (!mood) {
+        return h('div', { className: 'roost-empty' },
+          '读不到情绪——插件刚起来时这里会空几秒，等一下再看。')
+      }
+      return h('div', null,
+        h('div', { className: 'roost-mood' },
+          MOOD.map((m) => {
+            const v = Math.max(-1, Math.min(1, Number(mood[m.key] ?? 0)))
+            return h('div', { key: m.key, className: 'roost-mood-row' },
+              h('span', { className: 'roost-mood-k' }, m.label),
+              h(MoodBar, { v, bi: m.bi }),
+              h('span', { className: 'roost-mood-w' }, wordOf(v, m.words)),
+            )
+          }),
+        ),
+        h('div', { className: 'roost-note' },
+          mood.reason ? '原因：' + mood.reason : '还没被什么事影响过',
+          mood.updatedAt ? ' · ' + ago(mood.updatedAt) : '',
+        ),
+        h('div', { className: 'roost-note' },
+          '这三项只决定她接不接话、说多长，不会当成数字喂给模型。没人理她，几小时后会自己回到中间。'),
+      )
+    }
+
+    /** 一层记忆：标题 + 条目 + 清空 */
+    function MemLayer({ title, hint, items, onForget, onClear, empty }) {
+      return h('div', { style: { marginBottom: 16 } },
+        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 2 } },
+          h('span', { style: { fontSize: 12, fontWeight: 600, flexShrink: 0 } }, title),
+          h('span', { className: 'roost-note', style: { marginTop: 0, flex: 1, minWidth: 0 } }, hint),
+          items.length
+            ? h(ConfirmLink, { label: '清空', confirmLabel: '确认清空？', onConfirm: onClear })
+            : null,
+        ),
+        items.length
+          ? h('div', { className: 'roost-list' },
+              items.map((f, i) =>
+                h('div', { key: i, className: 'roost-fact' },
+                  h('span', { style: { flex: 1, minWidth: 0 } }, f),
+                  h('button', {
+                    type: 'button', className: 'roost-fact-x',
+                    title: '忘掉这条', 'aria-label': '忘掉这条',
+                    onClick: () => onForget(f),
+                  }, '×'),
+                ),
+              ),
+            )
+          : h('div', { className: 'roost-empty' }, empty),
+      )
+    }
+
+    function MemoryBlock({ mem, quick, reload, toast }) {
+      const [fact, setFact] = useState('')
+      const [scope, setScope] = useState('global')
+      const [saving, setSaving] = useState(false)
+
+      const g = mem?.global || []
+      const c = mem?.chat || []
+      const chatName = mem?.scene?.name || (mem?.scene?.kind === 'c2c' ? '当前私聊' : '本群')
+
+      const add = async () => {
+        const f = fact.trim()
+        if (!f || saving) return
+        setSaving(true)
+        const body = { fact: f, scope }
+        // 空 chatId 会被后端当成「就是这个会话」，宁可传对也不传空
+        if (scope === 'chat' && mem?.chatId) body.chatId = mem.chatId
+        const r = await post('/memory/add', body)
+        setSaving(false)
+        if (r.ok === false) return toast(r.message || '没记上')
+        setFact('')
+        toast(scope === 'chat' ? '记进这一处了' : '记进跨群了')
+        reload()
+      }
+
+      const forget = async (text) => {
+        const r = await quick('memory.remove', text)
+        toast(r.ok ? r.message || '忘了' : r.message || '没删掉')
+        reload()
+      }
+
+      const clearGlobal = async () => {
+        const r = await quick('memory.clearGlobal')
+        toast(r.message || '清空了')
+        reload()
+      }
+
+      const clearChat = async () => {
+        const r = await quick('memory.clear')
+        toast(r.message || '清空了')
+        reload()
+      }
+
+      if (!mem) return h('div', { className: 'roost-empty' }, '读取记忆…')
+
+      return h('div', null,
+        h(MemLayer, {
+          title: '跨群',
+          hint: `走到哪个群都带着 · ${g.length} 条`,
+          items: g,
+          onForget: forget,
+          onClear: clearGlobal,
+          empty: '还没有跨群记忆。关于「他是谁」的事应该放这儿。',
+        }),
+        h(MemLayer, {
+          title: chatName,
+          hint: mem.scene ? `只在这里生效 · ${c.length} 条` : `还没有消息进来 · ${c.length} 条`,
+          items: c,
+          onForget: forget,
+          onClear: clearChat,
+          empty: '这个会话还没记下什么。群里的梗、绰号、小圈子关系放这儿，不会串到别的群。',
+        }),
+        h('div', { className: 'roost-add' },
+          h('input', {
+            className: 'roost-input',
+            value: fact,
+            placeholder: '记一条，比如「他养了只叫豆豆的猫」',
+            onChange: (e) => setFact(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === 'Enter') add()
+            },
+          }),
+          h('select', {
+            className: 'roost-input', style: { width: 84, flexShrink: 0 },
+            value: scope, onChange: (e) => setScope(e.target.value),
+            'aria-label': '记到哪一层',
+          },
+            h('option', { value: 'global' }, '跨群'),
+            h('option', { value: 'chat' }, '本处'),
+          ),
+          h('button', { className: 'roost-btn', disabled: !fact.trim() || saving, onClick: add },
+            saving ? '记…' : '记住'),
+        ),
+        h('div', { className: 'roost-note' },
+          '在群里说「记住……」她也会自己记。删是按内容匹配的，两层一起删。'),
+      )
+    }
+
+    function FeaturesTab({ config, st, setupSt, toast, save, reload }) {
       const [personas, setPersonas] = useState(null)
       const [stickers, setStickers] = useState(null)
       const [sp, setSp] = useState(null)
+      const [mem, setMem] = useState(null)
+      const [pickPersona, setPickPersona] = useState(false)
+      const [openSu, setOpenSu] = useState(false)
 
       const load = useCallback(() => {
         get('/personas').then((r) => setPersonas(r.ok === false ? null : r))
         get('/stickers').then((r) => setStickers(r.ok === false ? null : r))
         get('/speakup').then((r) => setSp(r.ok === false ? null : r))
+        get('/memory').then((r) => setMem(r.ok === false ? null : r))
       }, [])
 
       useEffect(() => {
@@ -758,117 +1041,228 @@ window.__ModuleLoader__.load({
         return () => clearInterval(t)
       }, [load])
 
-      if (!config) return h('div', { className: 'roost-desc' }, '读取配置…')
+      /**
+       * 快捷操作统一从这里走 `/quick`。
+       *
+       * 那个接口的第二道门是校验 `actor.bucket`——防的是「QQ 那边转过来的请求
+       * 谎称自己是主人」。面板不是转发方，它就是主人自己在本机点的界面，
+       * 所以这里如实标 owner；ai-chat 转发那条路一点没松。
+       */
+      const quick = useCallback(
+        (op, arg) =>
+          post('/quick', {
+            op, arg,
+            chatId: mem?.chatId || '',
+            actor: { bucket: 'owner', openid: 'panel' },
+          }),
+        [mem?.chatId],
+      )
+
+      if (!config) return h('div', { className: 'roost-empty' }, '读取配置…')
 
       const p = config.persona || {}
       const su = config.speakUp || {}
-      const pick = (id) => save({ ...config, persona: { ...p, current: id } })
       const setSu = (k, v) => save({ ...config, speakUp: { ...su, [k]: v } })
+
+      const byChat = personas?.byChat || {}
+      const curId = byChat[mem?.chatId] || p.current || 'default'
+      const curPersona = personas?.personas?.find((x) => x.id === curId)
+      const byChatCount = Object.keys(byChat).length
+      const override = mem?.personaOverride || ''
+      const authz = mem?.authz
+      const tts = setupSt?.pluginConfig?.ttsVoice
+
+      const pick = (id) => save({ ...config, persona: { ...p, current: id } })
 
       return h('div', null,
 
-        /* —— 人格 —— */
-        h('div', { className: 'roost-card' },
-          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 } },
-            h('div', { style: { fontWeight: 600 } }, '人格'),
-            h('button', { className: 'roost-btn', onClick: load }, '刷新'),
-          ),
-          h('div', { className: 'roost-desc', style: { marginBottom: 10 } },
-            '一个人格一个 Markdown 文件，放在数据目录 personas/ 下。按群指定在「设置 → 人格」里改 byChat。'),
-          personas
-            ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
-                personas.personas.map((x) =>
-                  h('button', {
-                    key: x.id,
-                    className: x.id === personas.current ? 'roost-primary' : 'roost-btn',
-                    onClick: () => pick(x.id),
-                  }, `${x.name}${x.tags.length ? ' · ' + x.tags.join('/') : ''}`),
-                ),
-              )
-            : h('div', { className: 'roost-desc' }, '读取中…'),
+        /* —— ① 状态 —— */
+        h(Sec, { n: '①', title: '她现在什么状态' },
+          h(MoodBlock, { mood: st?.mood }),
         ),
 
-        /* —— 表情包 —— */
-        h('div', { className: 'roost-card' },
-          h('div', { style: { fontWeight: 600, marginBottom: 4 } }, '表情包'),
-          h('div', { className: 'roost-desc', style: { marginBottom: 8 } },
-            stickers
-              ? `共 ${stickers.items.length} 张。把图丢进下面这个目录就行，文件名当标签（开心_猫.png → 开心、猫）。`
-              : '读取中…'),
-          stickers
-            ? h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
-                h('code', { className: 'roost-mono', style: { flex: 1, minWidth: 200 } }, stickers.dir),
-                h('button', {
-                  className: 'roost-btn',
-                  onClick: () => {
-                    try {
-                      navigator.clipboard?.writeText(stickers.dir)
-                      toast('路径已复制')
-                    } catch { toast('复制失败，手动选一下') }
-                  },
-                }, '复制路径'),
-              )
-            : null,
-          stickers && stickers.items.length
-            ? h('div', { className: 'roost-mono roost-dim', style: { marginTop: 8 } },
-                stickers.items.slice(0, 12).map((x) => x.file).join('、') + (stickers.items.length > 12 ? ' …' : ''))
-            : null,
+        /* —— ② 记忆 —— */
+        h(Sec, { n: '②', title: '她记得什么' },
+          h(MemoryBlock, { mem, quick, reload: load, toast }),
         ),
 
-        /* —— 语音 —— */
-        h('div', { className: 'roost-card' },
-          h('div', { style: { fontWeight: 600, marginBottom: 4 } }, '语音条'),
-          h('div', { className: 'roost-desc' },
-            '语音是在 Roost 那边的 ai-chat 里开的：面板 → 插件 → ai-chat → 设置 → 「语音音色」，'
-            + '填 zh-CN-XiaoxiaoNeural（女）或 zh-CN-YunxiNeural（男）。留空就是关闭。'),
-          h('div', { className: 'roost-desc', style: { marginTop: 6 } },
-            '要能出声还得在插件目录装三个依赖（纯 JS，不要 Python）：',
-            h('code', { className: 'roost-mono' }, ' npm i @andresaya/edge-tts mpg123-decoder silk-wasm'),
-            '。QQ 语音只认 silk，所以中间会转两道。'),
-        ),
+        /* —— ③ 能力 —— */
+        h(Sec, { n: '③', title: '她能做什么' },
 
-        /* —— 主动搭话 —— */
-        h('div', { className: 'roost-card' },
-          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 4 } },
-            h('div', { style: { fontWeight: 600 } }, '主动搭话'),
-            h('button', {
-              className: su.enabled ? 'roost-btn' : 'roost-primary',
-              onClick: () => setSu('enabled', !su.enabled),
-            }, su.enabled ? '关闭' : '开启'),
-          ),
-          h('div', { className: 'roost-desc', style: { marginBottom: 12 } },
-            '主人一阵子没找你，你在私聊里主动说句话。只在私聊，群里不会。'),
-          h(Field, { label: '发给谁（私聊 openid）', desc: '填主人的 openid。留空就不工作' },
-            h('input', { className: 'roost-input', value: su.chatId || '', onChange: (e) => setSu('chatId', e.target.value) })),
-          h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap' } },
-            h(Field, { label: '最短间隔（分钟）' },
-              h('input', { className: 'roost-input', type: 'number', value: su.minIntervalMinutes ?? 180, onChange: (e) => setSu('minIntervalMinutes', Number(e.target.value) || 0) })),
-            h(Field, { label: '最长间隔（分钟）' },
-              h('input', { className: 'roost-input', type: 'number', value: su.maxIntervalMinutes ?? 480, onChange: (e) => setSu('maxIntervalMinutes', Number(e.target.value) || 0) })),
-            h(Field, { label: '每天最多几次' },
-              h('input', { className: 'roost-input', type: 'number', value: su.maxPerDay ?? 3, onChange: (e) => setSu('maxPerDay', Number(e.target.value) || 0) })),
-          ),
-          h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap' } },
-            h(Field, { label: '几点开始（0–23）' },
-              h('input', { className: 'roost-input', type: 'number', value: su.awakeFrom ?? 8, onChange: (e) => setSu('awakeFrom', Number(e.target.value) || 0) })),
-            h(Field, { label: '几点结束（0–23）' },
-              h('input', { className: 'roost-input', type: 'number', value: su.awakeTo ?? 23, onChange: (e) => setSu('awakeTo', Number(e.target.value) || 0) })),
-          ),
-          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 } },
-            h('button', {
-              className: 'roost-btn',
-              disabled: !su.enabled || !su.chatId,
-              onClick: async () => {
-                toast('正在让她说一句…')
-                const r = await post('/speakup/fire', {})
-                toast(r.ok ? `说了：${String(r.text).slice(0, 30)}` : r.message || '没说出来')
-                load()
-              },
-            }, '现在说一句'),
-            sp
-              ? h('span', { className: 'roost-desc' },
-                  `今天已说 ${sp.state?.todayCount || 0} 次${sp.state?.lastBotAt ? '，上次 ' + ago(sp.state.lastBotAt) : ''}`)
+          h(Row, { k: '人格' },
+            h('div', { className: 'roost-v-h' },
+              h('span', { style: { fontWeight: 600 } }, curPersona ? curPersona.name : '没读到人格文件'),
+              personas && personas.personas.length > 1
+                ? h('button', { className: 'roost-link', onClick: () => setPickPersona((v) => !v) },
+                    pickPersona ? '收起' : '换')
+                : null,
+              byChatCount
+                ? h('span', { className: 'roost-note', style: { marginTop: 0 } },
+                    `另有 ${byChatCount} 个会话单独指定了人格`)
+                : null,
+            ),
+            pickPersona && personas
+              ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 } },
+                  personas.personas.map((x) =>
+                    h('button', {
+                      key: x.id, type: 'button', className: 'roost-chip',
+                      'data-on': x.id === curId ? '1' : '0',
+                      onClick: () => { pick(x.id); setPickPersona(false) },
+                    }, x.name),
+                  ),
+                )
               : null,
+            override
+              ? h('div', { className: 'roost-note', style: { marginTop: 7, display: 'flex', gap: 8, alignItems: 'baseline' } },
+                  h('span', { style: { minWidth: 0 } },
+                    '本群已覆盖：',
+                    h('span', { style: { opacity: 0.88 } }, override.slice(0, 40) + (override.length > 40 ? '…' : '')),
+                  ),
+                  h(ConfirmLink, {
+                    label: '恢复默认', confirmLabel: '确认恢复？',
+                    onConfirm: async () => {
+                      const r = await quick('persona.set', '')
+                      toast(r.ok ? r.message || '回到默认人格' : r.message || '没恢复')
+                      load()
+                    },
+                  }),
+                )
+              : null,
+            override
+              ? h('div', { className: 'roost-note' },
+                  '覆盖是模型自己用 <<persona:>> 写的，存在记忆文件里，不是配置。清掉就回到上面那个人格。')
+              : null,
+          ),
+
+          h(Row, { k: '表情包' },
+            stickers === null
+              ? h('div', { className: 'roost-empty' }, '读取中…')
+              : h('div', null,
+                  h('div', { className: 'roost-v-h' },
+                    h('span', null, stickers.items.length ? `${stickers.items.length} 张` : '一张都没有'),
+                    h('button', {
+                      className: 'roost-link',
+                      onClick: () => {
+                        try {
+                          navigator.clipboard?.writeText(stickers.dir)
+                          toast('目录路径已复制')
+                        } catch { toast('复制失败，手动选一下吧') }
+                      },
+                    }, '复制目录'),
+                    h('button', { className: 'roost-link', onClick: load }, '刷新'),
+                  ),
+                  stickers.items.length === 0
+                    ? h('div', { className: 'roost-note' },
+                        '目录已经建好了，把图丢进去就行——文件名当标签：',
+                        h('code', { className: 'roost-mono' }, '开心_猫.png'),
+                        ' 她会理解成「开心 / 猫」。丢完点上面的「刷新」。')
+                    : h('div', { className: 'roost-note' },
+                        stickers.items.slice(0, 6).map((x) => x.file).join('、')
+                        + (stickers.items.length > 6 ? ' …' : '')),
+                  h('div', { className: 'roost-mono roost-dim', style: { marginTop: 4 } }, stickers.dir),
+                ),
+          ),
+
+          h(Row, { k: '主动搭话' },
+            h('div', { className: 'roost-v-h' },
+              h('button', {
+                type: 'button', className: 'roost-switch', role: 'switch',
+                'aria-checked': su.enabled ? 'true' : 'false',
+                'aria-label': '主动搭话',
+                'data-on': su.enabled ? '1' : '0',
+                onClick: () => setSu('enabled', !su.enabled),
+              }),
+              h('span', null, su.enabled ? '开着' : '关着'),
+              h('span', { className: 'roost-note', style: { marginTop: 0 } }, '只在私聊'),
+              sp ? h('span', { className: 'roost-note', style: { marginTop: 0 } },
+                `今天已说 ${sp.state?.todayCount || 0} 次`) : null,
+              h('button', { className: 'roost-link', onClick: () => setOpenSu((v) => !v) },
+                openSu ? '收起设置' : '设置'),
+            ),
+            h('div', { className: 'roost-note' },
+              '她多久没听到你说话就主动开口。群里不会——群里的主动是另一件事，要 group_push 授权，见下一行。'),
+            openSu
+              ? h('div', { style: { marginTop: 10 } },
+                  h(Field, { label: '发给谁（私聊 openid）', desc: '留空就不工作' },
+                    h('input', { className: 'roost-input', value: su.chatId || '', onChange: (e) => setSu('chatId', e.target.value) })),
+                  h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap' } },
+                    h(Field, { label: '最短间隔（分钟）' },
+                      h('input', { className: 'roost-input', type: 'number', value: su.minIntervalMinutes ?? 180, onChange: (e) => setSu('minIntervalMinutes', Number(e.target.value) || 0) })),
+                    h(Field, { label: '最长间隔（分钟）' },
+                      h('input', { className: 'roost-input', type: 'number', value: su.maxIntervalMinutes ?? 480, onChange: (e) => setSu('maxIntervalMinutes', Number(e.target.value) || 0) })),
+                    h(Field, { label: '每天最多' },
+                      h('input', { className: 'roost-input', type: 'number', value: su.maxPerDay ?? 3, onChange: (e) => setSu('maxPerDay', Number(e.target.value) || 0) })),
+                  ),
+                  h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap' } },
+                    h(Field, { label: '几点开始（0–23）' },
+                      h('input', { className: 'roost-input', type: 'number', value: su.awakeFrom ?? 8, onChange: (e) => setSu('awakeFrom', Number(e.target.value) || 0) })),
+                    h(Field, { label: '几点结束（0–23）' },
+                      h('input', { className: 'roost-input', type: 'number', value: su.awakeTo ?? 23, onChange: (e) => setSu('awakeTo', Number(e.target.value) || 0) })),
+                  ),
+                  h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+                    h('button', {
+                      className: 'roost-btn',
+                      disabled: !su.enabled || !su.chatId,
+                      onClick: async () => {
+                        toast('正在让她说一句…')
+                        const r = await post('/speakup/fire', {})
+                        toast(r.ok ? `说了：${String(r.text).slice(0, 30)}` : r.message || '没说出来')
+                        load()
+                      },
+                    }, '现在说一句'),
+                    sp?.state?.lastBotAt
+                      ? h('span', { className: 'roost-note', style: { marginTop: 0 } },
+                          `上次 ${ago(sp.state.lastBotAt)}`)
+                      : null,
+                  ),
+                )
+              : null,
+          ),
+
+          h(Row, { k: '授权' },
+            authz
+              ? h('div', { className: 'roost-v-h' },
+                  h('span', null, `${SCOPE_LABEL[authz.scope] || authz.scope} · 已授权`),
+                  h('span', { className: 'roost-note', style: { marginTop: 0 } }, ago(authz.at)),
+                )
+              : h('div', null,
+                  h('div', null, '这个会话还没授权'),
+                  h('div', { className: 'roost-note' },
+                    '群里的主动消息必须先拿到 group_push——这是官方前置，不是限频问题。她发授权卡时点「允许」就会记在这儿。'),
+                ),
+          ),
+
+          h(Row, { k: '语音条' },
+            setupSt?.pluginInstalled === false
+              ? h('div', { className: 'roost-note', style: { marginTop: 0 } }, 'ai-chat 还没装')
+              : tts === undefined
+                ? h('div', { className: 'roost-note', style: { marginTop: 0 } }, '读不到 ai-chat 的配置（Roost 没在跑？）')
+                : h('div', null,
+                    h('div', null, tts ? '开 · ' + tts : '关着'),
+                    tts ? null : h('div', { className: 'roost-note' }, '音色是 ai-chat 的设置项，这里只读。'),
+                  ),
+          ),
+
+          h(Row, { k: '撤回' },
+            h('div', null,
+              h('div', null, '开'),
+              h('div', { className: 'roost-note' },
+                '她说错话会撤回上一条，2 分钟内有效。ai-chat 侧的固定行为，没有开关。'),
+            ),
+          ),
+
+          h(Row, { k: '重置' },
+            h('div', { className: 'roost-v-h' },
+              h(ConfirmLink, {
+                label: '清上下文', confirmLabel: '确认断开？',
+                onConfirm: async () => {
+                  const r = await quick('context.clear')
+                  toast(r.message || '上下文清了')
+                },
+              }),
+              h('span', { className: 'roost-note', style: { marginTop: 0 } },
+                '断开会话映射，下一条重新开始；旧会话还在，能回溯'),
+            ),
           ),
         ),
       )
@@ -1088,7 +1482,7 @@ window.__ModuleLoader__.load({
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload, toast, busy, run }) : null,
           tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload }) : null,
           tab === 'logs' ? h(LogsTab, null) : null,
-          tab === 'features' ? h(FeaturesTab, { config, toast, save, reload: loadConfig }) : null,
+          tab === 'features' ? h(FeaturesTab, { config, st, setupSt, toast, save, reload: loadConfig }) : null,
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
           tab === 'config' ? (config ? h(ConfigTab, { config, save, toast }) : h('div', { className: 'roost-desc' }, '读取配置…')) : null,
         ),

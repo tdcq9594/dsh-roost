@@ -822,6 +822,23 @@ export function apply(ctx) {
             case 'memory.list':
               return send(res, 200, { ok: true, chatId, ...memory.list(chatId) });
 
+            /**
+             * 删一条（按关键词，两层都搜）。
+             *
+             * 之前只有 `memory.clear`（整层清空），面板上「她记错了」只能全清，
+             * 代价太大——用户宁可忍着不改。按关键词删才是日常要用的那个。
+             */
+            case 'memory.remove': {
+              const word = String(arg ?? '').trim();
+              if (!word) return send(res, 400, { ok: false, message: '要删哪条？给个关键词' });
+              const n = memory.remove(chatId, word);
+              return send(res, 200, {
+                ok: true,
+                removed: n,
+                message: n ? `忘了 ${n} 条` : '没找到匹配的记忆',
+              });
+            }
+
             case 'memory.clear':
               memory.clearChat(chatId);
               return send(res, 200, { ok: true, message: '这个群的记忆清了（通用记忆没动）' });
@@ -869,10 +886,25 @@ export function apply(ctx) {
         send(res, 200, { ok: true, ...mood.get() });
       }),
 
-      /** 记忆：查看 / 手动加 / 从旧版导入 */
+      /**
+       * 记忆：两层 + 这个会话的授权/人格覆盖。
+       *
+       * 授权和人格覆盖一起返回，是为了**别再开新路由**：面板要回答的三个问题
+       * （她什么状态 / 她记得什么 / 她能做什么）都落在这一份快照里，
+       * 一次请求拿全，少一个会 404 的地方。
+       */
       route('/memory', (req, res) => {
         const chatId = lastScene?.chatId || '';
-        send(res, 200, { ok: true, chatId, ...memory.list(chatId) });
+        send(res, 200, {
+          ok: true,
+          chatId,
+          scene: lastScene
+            ? { kind: lastScene.kind, name: lastScene.name, chatId: lastScene.chatId, at: lastScene.at }
+            : null,
+          ...memory.list(chatId),
+          authz: memory.authz(chatId),
+          personaOverride: memory.getPersonaOverride(chatId),
+        });
       }),
 
       route('/memory/add', async (req, res) => {

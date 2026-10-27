@@ -168,6 +168,19 @@ export function createMemory() {
     },
 
     /**
+     * 这个会话的授权记录，给面板看。
+     *
+     * 以前只有 `hasAuthz` 这种问句形式，面板拿不到「是什么授权、什么时候给的」，
+     * 于是群主动搭话的门槛在界面上完全看不见——用户只知道「群里她不说话」。
+     */
+    authz(chatId) {
+      const m = load();
+      const a = chatId ? m.authz?.[chatId] : null;
+      if (!a) return null;
+      return { scope: String(a.scope || ''), at: Number(a.at || 0), type: a.type, optScene: a.optScene };
+    },
+
+    /**
      * 从旧版本（记忆还放在 ai-chat 时）导入。
      * 幂等：重复导入不会产生重复条目（pushInto 会去重）。
      */

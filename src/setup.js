@@ -348,7 +348,19 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       pluginInstalled,
       pluginConfigured: configured,
       pluginConfig: pluginConfig
-        ? { adapter: pluginConfig.adapter, dshUrl: pluginConfig.dshUrl, publicUrl: pluginConfig.publicUrl, apiKey: pluginConfig.apiKey ? '******' : '' }
+        ? {
+            adapter: pluginConfig.adapter,
+            dshUrl: pluginConfig.dshUrl,
+            publicUrl: pluginConfig.publicUrl,
+            apiKey: pluginConfig.apiKey ? '******' : '',
+            /**
+             * 只读地把它露出来：功能页要显示「语音条开没开」。
+             *
+             * 音色本来就只能在这边填（ai-chat 的配置），面板能读到状态就不用
+             * 再写一段「去插件设置里填 xxx」的跨插件教程——那种指引最容易过期。
+             */
+            ttsVoice: pluginConfig.ttsVoice ?? '',
+          }
         : null,
       dshUrl: `http://127.0.0.1:${cfgOf().server.port}`,
       busy,
