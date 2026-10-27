@@ -29,9 +29,16 @@
     }
   },
   "keywords": [
-    "deepseek-harness",
+    "dsh",
     "dsh-plugin",
+    "deepseek-harness",
     "qq",
+    "qq-bot",
+    "qqbot",
+    "im-bridge",
+    "memory",
+    "agent",
+    "ai-companion",
     "roost"
   ],
   "files": [

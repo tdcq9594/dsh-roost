@@ -6,6 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/dsh-roost?color=6c5ce7)](https://www.npmjs.com/package/dsh-roost)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-roost?color=4b6fff)](https://www.npmjs.com/package/dsh-roost)
+[![CI](https://github.com/tdcq9594/dsh-roost/actions/workflows/ci.yml/badge.svg)](https://github.com/tdcq9594/dsh-roost/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/tdcq9594/dsh-roost?color=eab308)](https://github.com/tdcq9594/dsh-roost)
 [![DSH plugin](https://img.shields.io/badge/dsh--plugin-✅-green)](https://github.com/topics/dsh-plugin)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](#)
@@ -62,6 +63,7 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ 本插件 ⇄ DSH �
 - 🌅 **觉醒**：约定/想你/随性三类机会打分，到点「问她要不要说」，不是到点硬发
 - 🗜️ **上下文压缩**：到阈值开新会话 + 摘要开场，旧会话保留可回查
 - 📱 **侧栏面板**：九页仪表盘，状态、记忆、人格、排期、日志全在 DSH 里看
+- 🧬 **人格四段式**：人格文件分性格 / 开场白 / 说话示例 / 世界书四段。世界书一行一条 `触发词 | 内容`，**命中才注入**；开场白给主动搭话一个语气锚；近处指令贴在离历史最近的位置，聊到几十轮人设也不被冲淡
 - 🎭 **双人格 preset**：私聊（`roost-private`）/ 群聊（`roost-social`）各一套提示词
 
 ---
@@ -93,18 +95,23 @@ git clone https://github.com/tdcq9594/dsh-roost.git
 
 ## 一键接入
 
-装好插件后，侧栏「Roost → 接入」是一条六步路径，**能自动的都自动做掉**：
+装好插件后，侧栏「Roost → 接入」是一条七步路径，**能自动的都自动做掉**：
 
 | 步 | 做什么 | 自动？ |
 |---|---|---|
-| 1 | 下载解压 Roost（零依赖，不用 npm install） | ✅ 点一下 · 已装过可点「已装过？」填路径绑定 |
-| 2 | 填 AppID / AppSecret | ✋ 开放平台拿，只能你填 |
-| 3 | 启动 Roost | ✅ 点一下 |
+| 1 | 装 Roost（下载解压，零依赖，不用 npm install） | ✅ 点一下 · 已装过可点「已装过？」填路径绑定 |
+| 2 | 启动 Roost | ✅ 点一下（没填凭据也能起，正好用来扫码） |
+| 3 | 扫码 / 填 AppID、AppSecret | ✋ 开放平台拿；存完自动重启 Roost 让新凭据生效 |
 | 4 | 装 ai-chat 插件（走 Roost 的市场） | ✅ 点一下 |
 | 5 | 把 ai-chat 切成 DSH 适配器，填好回话地址 | ✅ 点一下 |
-| 6 | 去群里说话 | ✋ 开放平台开「接收所有消息」+ 机器人进群 |
+| 6 | 去群里说句话 | ✋ 开放平台开「接收所有消息」+ 机器人进群 |
+| 7 | 配置主人 | ✅ 点一下，直接跳到 Roost 面板的「主人与群组」 |
 
-顶上的「**一键就绪**」把 1、3、4、5 连着做完，卡在 2 就停下来提示你填。每一步也能单独点，跳着点不会把东西搞坏（每步先检测前置条件）。第 3 步「启动」之后，旁边按钮直接**打开 Roost 的 WebUI**（带上面板密钥）。
+顶上的「**一键就绪**」把 1、2、4、5 连着做完，卡在 3 就停下来提示你扫码或填。每一步也能单独点，跳着点不会把东西搞坏（每步先检测前置条件）。第 2 步「启动」之后，旁边按钮直接**打开 Roost 的 WebUI**（带上面板密钥）。
+
+**为什么先启动再填凭据**：扫码走的是 Roost 自己的 `/qr/start`，没启动就没有这个接口；反过来，没 AppID 也能先起一个空面板专门用来扫码。这个顺序以前是反的，两边互相等死。
+
+**下载地址**：优先 GitHub Release（自动补 `v` 前缀、自动查最新版），拿不到就回退 npm 包。早期版本写死过地址，Release 一换就整片 404。
 
 **装到哪**：默认 `~/.dsh/dsh-roost/roost`，可在设置里改 `setup.roostDir`。
 
@@ -144,7 +151,7 @@ git clone https://github.com/tdcq9594/dsh-roost.git
 | 标签 | 内容 |
 |---|---|
 | **概览** | 四个数字（会话数 / 正在等 / 最近一轮耗时 / 能用工具的档位）、状态条、**一键自测**、最近动态 |
-| **接入** | 六步一键流程（上面那张表） |
+| **接入** | 七步一键流程（上面那张表） |
 | **她** | 人格列表与编辑（新建入口在标题右侧）、此刻情绪（三维条形图，只读）、表情包、语音条 |
 | **记忆** | 会话选择器 + 三层：跨群/本群事实、日记（三级）、知识图谱；检索、手动记、从旧版导入、清空 |
 | **醒着** | 这一轮算出来的机会、私聊排期、群聊主动（默认全关）、现在试一次 |
@@ -261,6 +268,12 @@ npm test
 ```
 
 270 条测试，覆盖整形、会话映射、HTTP 契约（立刻 200 / 鉴权 / 健康检查 / SSRF 防护）、一轮的状态机、权限分档与兜底、记忆三层、觉醒打分、压缩、通道/接入抽象、工具定义与权限、上游错误分类与补重试、会话类型标签（群 / 私聊）、前端九页空数据渲染。
+
+CI（GitHub Actions，Node 22 / 24 矩阵）跑同样这些，外加三件单测覆盖不到的：
+
+- `node --check` 全量语法检查（TDZ 这类运行时错它查不出，但拼错、少括号能拦住）
+- `scripts/dry-run.mjs` 用假 ctx 真跑一遍 `apply()`，确认插件能加载、路由能注册
+- `npm pack --dry-run` 检查 `files` 字段没漏 `src/host.js` / `client/client.js`——打包漏文件，用户装上去就是坏的
 
 ---
 
