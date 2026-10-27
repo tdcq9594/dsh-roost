@@ -21,6 +21,7 @@ import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, LOCAL_TOOLS } from './permissions.js';
 import { createSetup } from './setup.js';
+import { createMemory } from './memory.js';
 import { createPersonas } from './personas.js';
 import { createStickers } from './stickers.js';
 import { createSpeakUp } from './speakup.js';
@@ -139,6 +140,113 @@ export function apply(ctx) {
   /** 最近一轮的耗时与结果，面板上显示用 */
   let lastTurn = null;
 
+  /** 最近一次的场景快照：给 roost-scene 和 /mind 调试接口用 */
+  let lastScene = null;
+
+  /** 动态块的字数硬上限（token 预算的粗护栏，先粗后细） */
+  const SCENE_MAX = 240;
+  const MEMORY_MAX = 600;
+
+  const memory = createMemory();
+
+  /**
+   * 记忆块：两层分开标，并给一句"能不能说"的规则。
+   *
+   * 记忆跨群之后，最大的风险是串场——A 群的内部梗拿到 B 群说。
+   * 所以这里不只给内容，还要给边界。
+   */
+  function memoryText() {
+    const chatId = lastScene?.chatId || '';
+    const m = memory.list(chatId);
+    if (!m.global.length && !m.chat.length) return '';
+    const parts = [];
+    if (m.global.length) parts.push(`【你记得的事（通用）】\n${m.global.map((f) => `· ${f}`).join('\n')}`);
+    if (m.chat.length) parts.push(`【这个群特有的事】\n${m.chat.map((f) => `· ${f}`).join('\n')}`);
+    parts.push('记着的事可以拿来用，但**只在这个群发生过的事别拿到别处说**；判断不了就当作不知道。');
+    return clip(parts.join('\n\n'), MEMORY_MAX);
+  }
+
+  /**
+   * 把回复里的记忆标记摘出来执行，返回干净文本。
+   *
+   * 标记是模型写在回复里的，所以只能等回复到手再处理。
+   * 摘干净再发出去——群里不该看到 `<<remember: ...>>`。
+   */
+  function applyMemoryMarkers(text, chatId) {
+    let out = String(text ?? '');
+    let touched = '';
+
+    out = out.replace(/<<remember-here:\s*([\s\S]*?)>>/gi, (_, v) => {
+      const f = String(v || '').trim();
+      if (f) {
+        memory.add(chatId, f, 'chat');
+        touched = '记住了（只这个群）';
+      }
+      return '';
+    });
+
+    out = out.replace(/<<remember:\s*([\s\S]*?)>>/gi, (_, v) => {
+      const f = String(v || '').trim();
+      if (f) {
+        memory.add(chatId, f, 'global');
+        touched = '记住了';
+      }
+      return '';
+    });
+
+    out = out.replace(/<<persona:\s*([\s\S]*?)>>/gi, (_, v) => {
+      const t = String(v || '').trim();
+      if (t) {
+        memory.setPersonaOverride(chatId, t);
+        touched = '人设改了（只这个群）';
+      }
+      return '';
+    });
+
+    out = out.replace(/<<clear>>/gi, () => {
+      memory.clearChat(chatId);
+      memory.setPersonaOverride(chatId, '');
+      touched = '清了这个群的记忆和人设';
+      return '';
+    });
+
+    out = out.replace(/<<forget:\s*([\s\S]*?)>>/gi, (_, v) => {
+      const n = memory.remove(chatId, String(v || '').trim());
+      if (n) touched = `忘掉了 ${n} 条`;
+      return '';
+    });
+
+    return { text: out.trim(), touched };
+  }
+
+
+  /** 裁到上限，超了加省略号 */
+  function clip(text, max) {
+    const s = String(text || '').trim();
+    if (s.length <= max) return s;
+    return s.slice(0, max - 1) + '…';
+  }
+
+  /**
+   * 场景块：告诉模型「你现在在哪、跟谁说话」。
+   *
+   * 官方**没有群号**，只有群 openid（每个机器人独立、不可读），
+   * 所以标识用「群名 + openid 前 8 位」，不要写"群号 xxx"。
+   */
+  function sceneText() {
+    const s = lastScene;
+    if (!s) return '';
+    const isGroup = s.kind === 'group';
+    const parts = [
+      isGroup
+        ? `你现在在 QQ 群${s.name ? `「${s.name}」` : ''}里说话（群标识 ${s.idShort}）。这是群聊，不是私聊。`
+        : `你现在在和${s.name ? `「${s.name}」` : '对方'}私聊（标识 ${s.idShort}）。`,
+    ];
+    if (s.sender) parts.push(`刚说话的是「${s.sender}」${s.bucket ? `（${s.bucket}）` : ''}。`);
+    if (isGroup) parts.push('群里可能还有别人在聊，不必每句都接；接不上就不说。');
+    return clip(parts.join(''), SCENE_MAX);
+  }
+
   /* ---------------- 宿主服务 ---------------- */
 
   function controller() {
@@ -205,10 +313,12 @@ export function apply(ctx) {
              * 按群覆盖 > 全局当前 > default；指定的文件被删了会静默回退。
              */
             const persona = personas.resolve(chat.chatId, p);
+            // 按群覆盖优先（模型用 <<persona:>> 写的），没有才用文件里那个人格
+            const override = memory.getPersonaOverride(chat.chatId);
             const extra = chat.kind === 'c2c' ? p.rulesPrivate : p.rulesSocial;
             return [
               `你现在叫「${persona.name}」。`,
-              persona.body,
+              override ? `（本群临时人设）\n${override}` : persona.body,
               extra,
               p.text, // 旧配置里的追加内容，留着兼容
             ]
@@ -257,6 +367,48 @@ export function apply(ctx) {
       );
     } catch (e) {
       log.warn('挂表情包清单失败：', e.message);
+    }
+
+    /**
+     * **场景**：告诉 AI「你现在在哪个群 / 这是私聊 / 刚说话的是谁」。
+     *
+     * 为什么需要：`chat.name` 一直传给了宿主，但从来没进过提示词——
+     * 于是模型根本不知道自己在一个群里，也不知道对面是谁。
+     * 表现就是「对谁都一个腔调」，像客服。
+     *
+     * 注意：官方**没有群号**，只有群 openid（每个机器人独立、不可读）。
+     * 所以这里只能给「群名 + openid 前 8 位」当标识，别写成"群号 123456"。
+     *
+     * order 902：在表情包之后、身份之前。场景是"当下"，不该压过身份。
+     */
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-scene',
+          order: 902,
+          text: () => sceneText(),
+        }),
+      );
+    } catch (e) {
+      log.warn('挂场景提示失败：', e.message);
+    }
+
+    /**
+     * **记忆**：order 903，紧跟场景。
+     *
+     * 记忆已经从 ai-chat 挪到这边了——情绪要调制它、抽取要调模型，
+     * 两者必须同处一地。ai-chat 那边只留通道，不再存记忆。
+     */
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-memory',
+          order: 903,
+          text: () => memoryText(),
+        }),
+      );
+    } catch (e) {
+      log.warn('挂记忆提示失败：', e.message);
     }
 
     /**
@@ -321,6 +473,16 @@ export function apply(ctx) {
 
       // 告诉 AI 谁在说话（软提醒，每轮现读）
       speaker.set(sid, { payload, bucket, system: payload.system || '' });
+      // 场景快照：roost-scene 和 /mind 都读它
+      lastScene = {
+        at: Date.now(),
+        kind: chat.kind,
+        chatId: chat.chatId,
+        name: String(chat.name || '').trim(),
+        idShort: String(chat.chatId || '').slice(0, 8),
+        sender: String(payload?.sender?.name || '').trim(),
+        bucket,
+      };
 
       /**
        * 硬限制：按档位收走本地工具。
@@ -339,11 +501,21 @@ export function apply(ctx) {
       }
 
       const text = renderInbound(payload);
-      const reply = await turns.run(agent, text, {
+      const rawReply = await turns.run(agent, text, {
         source: { kind: 'roost', chatId: chat.chatId, msgId: payload.id },
         // 插件下载好的图片块，让模型真的看得见图
         images: payload.images ?? [],
       });
+
+      /**
+       * 记忆标记在这里处理，**不在 ai-chat 那边**。
+       *
+       * 记忆已经归 dsh-roost 了（情绪要调制它、抽取要调模型），
+       * 所以「模型说记住了什么」也该由这边落盘，然后把标记从回复里摘掉，
+       * 发到群里的就是干净的一句话。
+       */
+      const { text: reply, touched } = applyMemoryMarkers(rawReply, chat.chatId);
+      if (touched) log.info(`记忆：${touched}`);
 
       await postReply(payload, reply, true);
       lastTurn = {
@@ -541,6 +713,49 @@ export function apply(ctx) {
           lastTurn,
         }),
       ),
+
+      /**
+       * 心智状态调试接口。
+       *
+       * 情绪/记忆都是看不见的状态，没有这个接口，
+       * 改完只能凭感觉判断好像有点不一样——既调不准也回不了滚。
+       */
+      /** 记忆：查看 / 手动加 / 从旧版导入 */
+      route('/memory', (req, res) => {
+        const chatId = lastScene?.chatId || '';
+        send(res, 200, { ok: true, chatId, ...memory.list(chatId) });
+      }),
+
+      route('/memory/add', async (req, res) => {
+        const body = await readBody(req);
+        const fact = String(body.fact ?? '').trim();
+        if (!fact) return send(res, 400, { ok: false, message: '缺 fact' });
+        memory.add(String(body.chatId ?? lastScene?.chatId ?? ''), fact, body.scope === 'chat' ? 'chat' : 'global');
+        send(res, 200, { ok: true });
+      }),
+
+      /**
+       * 从旧版导入：记忆以前放在 ai-chat 的 storage 里，
+       * 升级后要搬过来，别让用户白记。幂等，重复导不会重复。
+       */
+      route('/memory/import', async (req, res) => {
+        const body = await readBody(req);
+        const n = memory.import(body ?? {});
+        log.info(`从旧版导入记忆 ${n} 条`);
+        send(res, 200, { ok: true, imported: n });
+      }),
+
+      route('/mind', (req, res) => {
+        const text = sceneText();
+        send(res, 200, {
+          ok: true,
+          scene: lastScene
+            ? { ...lastScene, text }
+            : null,
+          lastTurn,
+          budgets: { sceneMax: SCENE_MAX, sceneLen: text.length },
+        });
+      }),
 
       route('/chats', (req, res) => send(res, 200, { ok: true, chats: sessions.list() })),
 
