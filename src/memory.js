@@ -147,6 +147,27 @@ export function createMemory() {
     },
 
     /**
+     * 记一条授权（`c2c_push` / `group_push`）。
+     *
+     * 为什么要记：**群主动消息必须有 `group_push` 授权**，
+     * 这是比限频更根本的前置。没这条记录，C7 群聊主动一发就失败。
+     */
+    setAuthz(chatId, scope, extra = {}) {
+      if (!chatId || !scope) return;
+      const m = load();
+      if (!m.authz || typeof m.authz !== 'object') m.authz = {};
+      m.authz[chatId] = { scope, at: Date.now(), ...extra };
+      save();
+    },
+
+    /** 查这个会话有没有某个授权 */
+    hasAuthz(chatId, scope) {
+      const m = load();
+      const a = m.authz?.[chatId];
+      return Boolean(a && (!scope || a.scope === scope));
+    },
+
+    /**
      * 从旧版本（记忆还放在 ai-chat 时）导入。
      * 幂等：重复导入不会产生重复条目（pushInto 会去重）。
      */

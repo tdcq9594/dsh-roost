@@ -22,6 +22,7 @@ import { renderInbound, chatOf } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, LOCAL_TOOLS } from './permissions.js';
 import { createSetup } from './setup.js';
 import { createMemory } from './memory.js';
+import { createMood } from './mood.js';
 import { createPersonas } from './personas.js';
 import { createStickers } from './stickers.js';
 import { createSpeakUp } from './speakup.js';
@@ -148,22 +149,51 @@ export function apply(ctx) {
   const MEMORY_MAX = 600;
 
   const memory = createMemory();
+  const mood = createMood();
+
+  /**
+   * 按优先级把若干块塞进预算：**前面的先留，后面的先砍**。
+   *
+   * 为什么不是"整段截断"：动态块每轮都注入，写多了直接吃 token。
+   * 一刀切会把最要紧的那块也切掉一半；按优先级砍，至少保住重要的。
+   */
+  function fitBudget(sections, max) {
+    const out = [];
+    let used = 0;
+    for (const s of sections) {
+      const text = String(s || '');
+      if (!text) continue;
+      const room = max - used;
+      if (room <= 0) break;
+      if (text.length <= room) {
+        out.push(text);
+        used += text.length;
+      } else {
+        out.push(text.slice(0, Math.max(0, room - 1)) + '…');
+        break;
+      }
+    }
+    return out.join('\n\n');
+  }
 
   /**
    * 记忆块：两层分开标，并给一句"能不能说"的规则。
    *
    * 记忆跨群之后，最大的风险是串场——A 群的内部梗拿到 B 群说。
-   * 所以这里不只给内容，还要给边界。
+   * 所以这里不只给内容，还要给边界。**规则排第一**，预算不够时它不能被砍掉。
    */
   function memoryText() {
     const chatId = lastScene?.chatId || '';
     const m = memory.list(chatId);
     if (!m.global.length && !m.chat.length) return '';
-    const parts = [];
-    if (m.global.length) parts.push(`【你记得的事（通用）】\n${m.global.map((f) => `· ${f}`).join('\n')}`);
-    if (m.chat.length) parts.push(`【这个群特有的事】\n${m.chat.map((f) => `· ${f}`).join('\n')}`);
-    parts.push('记着的事可以拿来用，但**只在这个群发生过的事别拿到别处说**；判断不了就当作不知道。');
-    return clip(parts.join('\n\n'), MEMORY_MAX);
+    return fitBudget(
+      [
+        '记着的事可以拿来用，但**只在这个群发生过的事别拿到别处说**；判断不了就当作不知道。',
+        m.global.length ? `【你记得的事（通用）】\n${m.global.map((f) => `· ${f}`).join('\n')}` : '',
+        m.chat.length ? `【这个群特有的事】\n${m.chat.map((f) => `· ${f}`).join('\n')}` : '',
+      ],
+      MEMORY_MAX,
+    );
   }
 
   /**
@@ -207,6 +237,27 @@ export function apply(ctx) {
       memory.clearChat(chatId);
       memory.setPersonaOverride(chatId, '');
       touched = '清了这个群的记忆和人设';
+      return '';
+    });
+
+    out = out.replace(/<<mood:\s*([\s\S]*?)>>/gi, (_, v) => {
+      const s = String(v || '').trim();
+      if (s) {
+        // 支持 `valence=-0.3, reason=被凶了`；只有一段文字时当原因处理
+        const kv = {};
+        for (const part of s.split(/[,，;；]/)) {
+          const m = part.match(/^\s*(valence|energy|sociability|reason)\s*[=:：]\s*(.+)$/i);
+          if (m) kv[m[1].toLowerCase()] = m[2].trim();
+          else if (!kv.reason) kv.reason = part.trim();
+        }
+        mood.set({
+          valence: kv.valence != null ? Number(kv.valence) : undefined,
+          energy: kv.energy != null ? Number(kv.energy) : undefined,
+          sociability: kv.sociability != null ? Number(kv.sociability) : undefined,
+          reason: kv.reason,
+        });
+        touched = '情绪变了';
+      }
       return '';
     });
 
@@ -412,6 +463,22 @@ export function apply(ctx) {
     }
 
     /**
+     * **情绪**：order 904，记忆之后、身份之前。
+     * 注入的是**语气指令**，不是数字——数字会让它像在演。
+     */
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-mood',
+          order: 904,
+          text: () => mood.text(),
+        }),
+      );
+    } catch (e) {
+      log.warn('挂情绪提示失败：', e.message);
+    }
+
+    /**
      * 每轮告诉 AI：这句话是谁说的、他能让你干到什么程度。
      *
      * 这是**软提醒**，硬限制在 onInbound 里（按档位收工具）。
@@ -473,6 +540,9 @@ export function apply(ctx) {
 
       // 告诉 AI 谁在说话（软提醒，每轮现读）
       speaker.set(sid, { payload, bucket, system: payload.system || '' });
+      // 有人来找，精力和社交意愿回升（不衰减的话会越聊越冷）
+      mood.touched();
+
       // 场景快照：roost-scene 和 /mind 都读它
       lastScene = {
         at: Date.now(),
@@ -711,6 +781,7 @@ export function apply(ctx) {
           waiting: turns.waiting,
           permissions: cfg.permissions,
           lastTurn,
+          mood: mood.get(),
         }),
       ),
 
@@ -720,6 +791,84 @@ export function apply(ctx) {
        * 情绪/记忆都是看不见的状态，没有这个接口，
        * 改完只能凭感觉判断好像有点不一样——既调不准也回不了滚。
        */
+      /**
+       * 快捷操作：面板/按钮点完由 ai-chat 转发到这里执行。
+       *
+       * **两道鉴权，这是第二道。** ai-chat 那边已经按 sender 拦过一次，
+       * 但这里必须再校验 `actor.bucket`——不能只信转发方，
+       * 以后要是有别的调用方接进来，鉴权不能只有一道。
+       *
+       * 只有 owner(主人) / admin(管理) 能改设置。
+       * 消息反馈（点赞点踩）和授权不走这里，那些是"表达态度"，谁都能做。
+       */
+      route('/quick', async (req, res) => {
+        const body = await readBody(req);
+        const actor = body?.actor ?? {};
+        const bucket = String(actor.bucket || 'unknown');
+        if (bucket !== 'owner' && bucket !== 'admin') {
+          return send(res, 403, { ok: false, message: '只有主人或管理员能改设置' });
+        }
+
+        const chatId = String(body?.chatId || lastScene?.chatId || '');
+        const op = String(body?.op || '');
+        const arg = body?.arg;
+
+        try {
+          switch (op) {
+            case 'persona.set':
+              memory.setPersonaOverride(chatId, String(arg ?? ''));
+              return send(res, 200, { ok: true, message: arg ? '这个群的人设换了' : '回到默认人格' });
+
+            case 'memory.list':
+              return send(res, 200, { ok: true, chatId, ...memory.list(chatId) });
+
+            case 'memory.clear':
+              memory.clearChat(chatId);
+              return send(res, 200, { ok: true, message: '这个群的记忆清了（通用记忆没动）' });
+
+            case 'memory.clearGlobal':
+              memory.clearGlobal();
+              return send(res, 200, { ok: true, message: '通用记忆清空了' });
+
+            case 'context.clear':
+              // 解绑 = 下一条消息开新会话，旧会话还留着可以回溯
+              sessions.set(chatId, '', {});
+              return send(res, 200, { ok: true, message: '上下文清了，下一条重新开始' });
+
+            default:
+              return send(res, 400, { ok: false, message: `不认识的快捷操作：${op}` });
+          }
+        } catch (e) {
+          return send(res, 500, { ok: false, message: e.message });
+        }
+      }),
+
+      /**
+       * 记录授权（c2c_push / group_push）。
+       * **不鉴权**——授权是用户处置自己的权利；但必须记，群主动靠它。
+       */
+      route('/authz', async (req, res) => {
+        const body = await readBody(req);
+        const chatId = String(body?.chatId || '').trim();
+        const scope = String(body?.scope || '').trim();
+        if (!chatId || !scope) return send(res, 400, { ok: false, message: '缺 chatId 或 scope' });
+        memory.setAuthz(chatId, scope, { type: body?.type, optScene: body?.optScene });
+        log.info(`授权记录 ${scope} @ ${chatId}`);
+        send(res, 200, { ok: true });
+      }),
+
+      /**
+       * 点赞/点踩（interaction type 13）。
+       * **不鉴权**——这是表达态度，谁都能点。
+       * 这是 doc2 说的「被对待的反馈」最直接的来源。
+       */
+      route('/mood', async (req, res) => {
+        if (req.method === 'GET') return send(res, 200, { ok: true, ...mood.get() });
+        const body = await readBody(req);
+        if (body?.feedback) mood.feedback(String(body.feedback));
+        send(res, 200, { ok: true, ...mood.get() });
+      }),
+
       /** 记忆：查看 / 手动加 / 从旧版导入 */
       route('/memory', (req, res) => {
         const chatId = lastScene?.chatId || '';
@@ -753,7 +902,11 @@ export function apply(ctx) {
             ? { ...lastScene, text }
             : null,
           lastTurn,
-          budgets: { sceneMax: SCENE_MAX, sceneLen: text.length },
+          budgets: {
+            scene: { max: SCENE_MAX, len: text.length },
+            memory: { max: MEMORY_MAX, len: memoryText().length },
+          },
+          memory: memory.list(lastScene?.chatId || ''),
         });
       }),
 
