@@ -1179,9 +1179,6 @@ export function apply(ctx) {
         bucket,
       };
 
-      // 这一轮用户说了什么：世界书按它匹配触发词
-      lastMsgText = String(text || '').slice(0, 2000);
-
       /**
        * 硬限制：按档位收走本地工具。
        *
@@ -1215,6 +1212,14 @@ export function apply(ctx) {
       awake.noteUser(chat.chatId);
 
       let text = renderInbound(payload);
+
+      /**
+       * 这一轮用户说了什么：世界书按它匹配触发词。
+       *
+       * **必须放在 `text` 声明之后**——放到场景快照那里会踩 TDZ：
+       * `Cannot access 'text' before initialization`，整个插件挂掉、DSH 起不来。
+       */
+      lastMsgText = String(text || '').slice(0, 2000);
 
       /**
        * 刚压缩过的话，这一轮的正文前面要带上开场白。
