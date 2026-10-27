@@ -495,6 +495,19 @@ export function apply(ctx) {
     out = out.replace(/<<clear>>/gi, () => {
       memory.clearChat(chatId);
       memory.setPersonaOverride(chatId, '');
+      /**
+       * **日记也要清。**
+       *
+       * 只清 facts 的话会出现："她说清了这个群的记忆，可我一问上周的事她又答上来了"——
+       * 因为日记里原文还在，检索照样命中。用户要的"清掉"是清干净。
+       * `journal.clearChat` 抹正文但不删行：时间线仍连续（哪天真有纠纷能看出
+       * "这天有过东西，是被人清掉的"），内容本身已经没了。
+       */
+      try {
+        journal.clearChat(chatId);
+      } catch (e) {
+        log.warn(`清日记失败：${e.message}`);
+      }
       touched = '清了这个群的记忆和人设';
       return '';
     });
@@ -1150,16 +1163,43 @@ export function apply(ctx) {
               const word = String(arg ?? '').trim();
               if (!word) return send(res, 400, { ok: false, message: '要删哪条？给个关键词' });
               const n = memory.remove(chatId, word);
+              /**
+               * 日记同删。
+               *
+               * 这是「她记错了」在面板上的入口。只删 facts 不删日记，
+               * 用户改完再问一句，她又能从日记里把那条翻出来——
+               * 用户看到的是"改了没用"，比没改更糟。
+               */
+              let j = 0;
+              try {
+                j = journal.forget({ chatId, word });
+              } catch (e) {
+                log.warn(`日记遗忘失败：${e.message}`);
+              }
+              const total = n + j;
               return send(res, 200, {
                 ok: true,
-                removed: n,
-                message: n ? `忘了 ${n} 条` : '没找到匹配的记忆',
+                removed: total,
+                facts: n,
+                journal: j,
+                message: total ? `忘了 ${total} 条` : '没找到匹配的记忆',
               });
             }
 
-            case 'memory.clear':
+            case 'memory.clear': {
               memory.clearChat(chatId);
-              return send(res, 200, { ok: true, message: '这个群的记忆清了（通用记忆没动）' });
+              let j = 0;
+              try {
+                j = journal.clearChat(chatId);
+              } catch (e) {
+                log.warn(`清日记失败：${e.message}`);
+              }
+              return send(res, 200, {
+                ok: true,
+                journal: j,
+                message: `这个群的记忆清了（含日记 ${j} 条，通用记忆没动）`,
+              });
+            }
 
             case 'memory.clearGlobal':
               memory.clearGlobal();
