@@ -222,10 +222,14 @@ window.__ModuleLoader__.load({
 .roost-mood-row{display:flex;align-items:center;gap:10px}
 .roost-mood-k{flex:0 0 42px;font-size:11.5px;opacity:.55}
 .roost-mood-w{flex:0 0 52px;text-align:right;font-size:11.5px;opacity:.8}
-.roost-bar{position:relative;flex:1;height:6px;border-radius:3px;background:color-mix(in srgb,currentColor 8%,transparent);overflow:hidden}
-.roost-bar-mid{position:absolute;left:50%;top:0;bottom:0;width:1px;background:color-mix(in srgb,currentColor 26%,transparent)}
-.roost-bar-fill{position:absolute;top:0;bottom:0;border-radius:3px;background:color-mix(in srgb,currentColor 42%,transparent);
+.roost-bar{position:relative;flex:1;height:6px;border-radius:3px;background:color-mix(in srgb,currentColor 8%,transparent)}
+/* 双向条的中性区：给「0」一个可见的位置，否则中性看起来像没渲染出来 */
+.roost-bar-zone{position:absolute;left:42%;width:16%;top:0;bottom:0;background:color-mix(in srgb,currentColor 14%,transparent)}
+.roost-bar-fill{position:absolute;top:0;bottom:0;z-index:1;border-radius:3px;background:color-mix(in srgb,currentColor 42%,transparent);
   transition:left .5s cubic-bezier(.16,1,.3,1),width .5s cubic-bezier(.16,1,.3,1)}
+/* 游标：当前位置。中性时它停在中性区中间，这才读得出「在中间」 */
+.roost-bar-knob{position:absolute;top:0;bottom:0;z-index:2;width:3px;margin-left:-1.5px;border-radius:2px;
+  background:currentColor;opacity:.8;transition:left .5s cubic-bezier(.16,1,.3,1)}
 
 /* 文字按钮：次要操作一律降权，整页不设 primary —— 没有哪个动作值得抢焦点 */
 .roost-link{border:none;background:none;color:inherit;font:inherit;font-size:11.5px;padding:0;opacity:.5;cursor:pointer;transition:opacity .12s}
@@ -257,6 +261,7 @@ window.__ModuleLoader__.load({
   .roost-node.current::after{animation:none}
   .roost-fade{animation:none}
   .roost-bar-fill{transition:none}
+  .roost-bar-knob{transition:none}
 }
 `
         document.head.appendChild(el)
@@ -867,17 +872,29 @@ window.__ModuleLoader__.load({
       }, armed ? confirmLabel || '确认？' : label)
     }
 
-    /** 一行情绪条：双向的（心情）从中线往两边长，单向的从左边长 */
+    /**
+     * 一行情绪条：双向的（心情）从中线往两边长，单向的从左边长。
+     *
+     * **零态最容易画错**：valence≈0 时填充宽度是 0，之前用「最小 1.2% 宽度」
+     * 兜底，结果是一块浮在中线上的小方块——看着像渲染坏了，而不是「她心情一般」。
+     *
+     * 现在的画法：条上永远有一个游标表示「现在在哪」，双向条中间再加一段淡的中性区。
+     * 中性时游标停在中性区里，读作「在中间」；单向条游标停在填充的右端，读作「到这儿」。
+     * 两种条因此是同一套视觉语言，不再是「一条有方块、两条有长条」。
+     */
     function MoodBar({ v, bi }) {
       const x = bi ? (v + 1) / 2 : v
       const left = bi ? Math.min(0.5, x) : 0
       const width = bi ? Math.abs(x - 0.5) : x
+      // 游标别贴死在两端，否则会被圆角裁掉一半
+      const knob = Math.min(0.988, Math.max(0.012, x))
       return h('div', { className: 'roost-bar', 'aria-hidden': 'true' },
-        bi ? h('span', { className: 'roost-bar-mid' }) : null,
+        bi ? h('span', { className: 'roost-bar-zone' }) : null,
         h('span', {
           className: 'roost-bar-fill',
-          style: { left: left * 100 + '%', width: Math.max(1.2, width * 100) + '%' },
+          style: { left: left * 100 + '%', width: width * 100 + '%' },
         }),
+        h('span', { className: 'roost-bar-knob', style: { left: knob * 100 + '%' } }),
       )
     }
 
@@ -902,7 +919,7 @@ window.__ModuleLoader__.load({
           mood.updatedAt ? ' · ' + ago(mood.updatedAt) : '',
         ),
         h('div', { className: 'roost-note' },
-          '这三项只决定她接不接话、说多长，不会当成数字喂给模型。没人理她，几小时后会自己回到中间。'),
+          '心情左边是差、右边是好；另两条从左到右是程度。这三项只决定她接不接话、说多长，不会当成数字喂给模型；没人理她，几小时后会自己回到中间。'),
       )
     }
 
