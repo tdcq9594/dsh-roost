@@ -168,9 +168,6 @@ window.__ModuleLoader__.load({
 .roost-mood-row{display:flex;align-items:center;gap:10px}
 .roost-mood-k{flex:0 0 42px;font-size:11.5px;color:var(--dsw-alias-label-secondary, inherit)}
 .roost-mood-w{flex:0 0 46px;text-align:right;font-size:11.5px;font-variant-numeric:tabular-nums}
-.roost-bar{position:relative;flex:1;height:6px;border-radius:3px;background:var(--field)}
-.roost-bar i{position:absolute;top:0;bottom:0;border-radius:3px;background:var(--accent);transition:width .3s ease,left .3s ease}
-.roost-bar i.bi{background:var(--warn)}
 
 .roost-node{
   position:relative;flex:0 0 26px;height:26px;border-radius:50%;display:flex;
@@ -269,9 +266,16 @@ window.__ModuleLoader__.load({
 .roost-link:hover{filter:brightness(1.12)}
 
 /* 双向条：中轴线 + 游标，正负一眼看得出 */
-.roost-bar-zone{position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--line)}
-.roost-bar-knob{position:absolute;top:50%;width:2px;height:10px;margin-left:-1px;border-radius:1px;
-  transform:translateY(-50%);background:var(--dsw-alias-label-secondary,currentColor);opacity:.6}
+// 条形（只读读数，不是滑块：不给手柄，免得让人以为能拖）
+.roost-bar{position:relative;flex:1;height:8px;border-radius:4px;
+  background:var(--dsw-alias-fill-l2, color-mix(in srgb, currentColor 13%, transparent));
+  box-shadow:inset 0 0 0 1px var(--line-soft)}
+.roost-bar i{position:absolute;top:0;bottom:0;border-radius:4px;background:var(--accent);
+  transition:width .3s ease,left .3s ease}
+.roost-bar i.bi{background:var(--warn)}
+/* 双向条的中轴线：分清正负，本身就是信息 */
+.roost-bar-zone{position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;
+  background:var(--line);pointer-events:none}
 `
 
     function useStyle() {
@@ -312,23 +316,28 @@ window.__ModuleLoader__.load({
     /**
      * 条形：单向从左往右，双向从中线往两边长。
      *
-     * 双向那条必须画中轴线和游标——只有一根横杠的话，
-     * 「-0.2」和「0」看起来几乎一样，等于把信息丢了。
+     * **这是读数，不是滑块**：所以不给手柄、不接受拖动。
+     * 之前画了个竖向游标，看起来像能拖，实际拖不动——暗示错了比没画更糟。
+     * 双向那条保留中轴线，正负一眼看得出就够了。
      */
     const Bar = ({ v, bi }) => {
       const val = Math.max(-1, Math.min(1, Number(v) || 0))
+      const pct = bi ? Math.round(((val + 1) / 2) * 100) : Math.round(Math.max(0, val) * 100)
       if (bi) {
         const w = Math.abs(val) * 50
-        const knob = Math.min(0.985, Math.max(0.015, (val + 1) / 2))
-        return h('div', { className: 'roost-bar', role: 'img', 'aria-label': `取值 ${val}` },
+        return h('div', {
+          className: 'roost-bar', role: 'img', 'aria-label': `${pct}%`,
+          title: `${pct}%（只读，情绪由她自己变）`,
+        },
           h('span', { className: 'roost-bar-zone' }),
           h('i', { className: 'bi', style: { left: val >= 0 ? '50%' : 50 - w + '%', width: w + '%' } }),
-          h('span', { className: 'roost-bar-knob', style: { left: knob * 100 + '%' } }),
         )
       }
       const w = Math.max(0, Math.min(1, val)) * 100
-      return h('div', { className: 'roost-bar', role: 'img', 'aria-label': `取值 ${val}` },
-        h('i', { style: { left: '0%', width: w + '%' } }))
+      return h('div', {
+        className: 'roost-bar', role: 'img', 'aria-label': `${pct}%`,
+        title: `${pct}%（只读）`,
+      }, h('i', { style: { left: '0%', width: w + '%' } }))
     }
 
     /** 情绪三项的读法：数字是内部量，人看的是词 */
@@ -1091,6 +1100,8 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'roost-note' },
                   '心情左边差、右边好；另两条从左到右是程度。这三项只决定她接不接话、说多长，'
                   + '不会当成数字喂给模型；没人理她，几小时后会自己回到中间。'),
+                h('div', { className: 'roost-note' },
+                  '这三条是读数、不能拖——她的情绪由聊天的结果自己变；想影响就用下面的赞 / 踩。'),
                 /* 后端接受 feedback（QQ 里点赞/点踩会打到这），这里给手动入口方便调 */
                 h('div', { style: { display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' } },
                   h('span', { className: 'roost-note', style: { margin: 0 } }, '手动喂一次反馈：'),
