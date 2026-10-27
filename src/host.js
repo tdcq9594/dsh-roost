@@ -122,7 +122,15 @@ export function apply(ctx) {
     cfgOf: () => cfg,
     // 面板改配置时要同时更新这里的 cfg 引用，否则下次 detect 还是旧路径
     setCfg: (patch) => (cfg = saveConfig(patch)),
-    dataDir: dataDir(),
+    /**
+     * 传**函数**，不是 `dataDir()` 的返回值。
+     *
+     * `setup.js` 里是 `join(dataDir(), 'roost')` 这么用的（116/206/212/215 行），
+     * 传字符串就抛 `dataDir is not a function`。这条只在「`setup.roostDir` 空着」
+     * 时才走到——也就是全新用户第一次打开面板：/setup 直接 500，
+     * 一键装也跟着抛。本机因为手填了 roostDir 提前 return，一直没暴露。
+     */
+    dataDir,
     log: (m) => log.info(m),
   });
 
@@ -1556,8 +1564,47 @@ export function apply(ctx) {
        * 光看 facts 是判断不了的，得能看见日记和图。
        */
       route('/memory', (req, res) => {
-        const chatId = lastScene?.chatId || '';
+        /**
+         * 「本群」到底指哪个群，必须能指定、也必须能显示出来。
+         *
+         * 原来这里是 `lastScene?.chatId || ''`：面板永远只看**最近说话的那个会话**，
+         * 用户改不了；一个会话都还没进来时拿到空串，而空串那一层是写不进去的
+         * （`memory.add` 没 chatId 直接返回 false）——界面却照样显示「本群」。
+         * 结果就是「我在哪一层记的？」和「记了却没记住」。
+         *
+         * 现在：`?chatId=` 优先，没给才退回最近那个；同时把**所有会话**和
+         * 这个 chatId 对应的名字一起返回，前端才能让人选、也才敢说「本群」是谁。
+         */
+        const url = new URL(req.url || '/', 'http://x');
+        const asked = String(url.searchParams.get('chatId') || '').trim();
+        const chatId = asked || lastScene?.chatId || '';
         const facts = memory.list(chatId);
+
+        /** 会话清单：chatId + 能看懂的标题（群名 / 私聊昵称） */
+        const chats = sessions
+          .list()
+          .map((c) => ({
+            chatId: c.chatId,
+            title: String(c.title || ''),
+            preset: String(c.preset || ''),
+            at: c.at,
+          }))
+          .sort((a, b) => (b.at || 0) - (a.at || 0));
+
+        /**
+         * 当前这个 chatId 是谁。
+         * 最近说话的那个有准确名字（`lastScene.name`）；别的是从会话表里的 title 取，
+         * 取不到就只剩短码——宁可显示短码，也不能再拿「本群」两个字糊过去。
+         */
+        const hit = chats.find((c) => c.chatId === chatId);
+        const scene = chatId
+          ? {
+              chatId,
+              kind: lastScene?.chatId === chatId ? lastScene.kind : hit?.preset || '',
+              name: (lastScene?.chatId === chatId ? lastScene.name : hit?.title) || '',
+              at: lastScene?.chatId === chatId ? lastScene.at : hit?.at || 0,
+            }
+          : null;
 
         let jr = null;
         try {
@@ -1608,9 +1655,9 @@ export function apply(ctx) {
         send(res, 200, {
           ok: true,
           chatId,
-          scene: lastScene
-            ? { kind: lastScene.kind, name: lastScene.name, chatId: lastScene.chatId, at: lastScene.at }
-            : null,
+          scene,
+          /** 可以切换的会话；空数组 = 还没有任何群/私聊说过话 */
+          chats,
           ...facts,
           // 显式再给一份带名字的，前端读 facts.global 比读 global 清楚
           facts: { global: facts.global, chat: facts.chat },
@@ -1672,7 +1719,9 @@ export function apply(ctx) {
 
       /** 图谱：实体 / 现在的关系 / 已经结束的关系（双时态的两面都给人看） */
       route('/graph', (req, res) => {
-        const chatId = lastScene?.chatId || '';
+        // 和 /memory 一样：能指定看哪个会话，别死盯「最近说话的那个」
+        const u = new URL(req.url || '/', 'http://x');
+        const chatId = String(u.searchParams.get('chatId') || '').trim() || lastScene?.chatId || '';
         try {
           send(res, 200, {
             ok: true,

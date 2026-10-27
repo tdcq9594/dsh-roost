@@ -248,3 +248,77 @@ test('对齐：设置页列出的配置段后端都有', async () => {
   const missing = keys.filter((k) => !(k in DEFAULTS));
   assert.deepEqual(missing, [], `设置页列了后端没有的配置段：${missing.join('、')}`);
 });
+
+/* ---------------- 字段级对齐（比路由级更细一层） ---------------- */
+
+/**
+ * 为什么还要这一层。
+ *
+ * 上一版的对齐断言只比对**路由名**：`/logs` 后端有、前端也在调，测试全绿——
+ * 但后端返回 `entries`、前端读 `r.logs`，于是日志页永远是「还没有日志」。
+ * 同理「接入进度」读的是后端根本不返回的 `steps`，于是永远 0/4。
+ *
+ * 这两类错误**不报错、不崩**，只能靠显式钉住键名。
+ */
+
+test('字段：/logs 返回 entries，前端读的也是 entries', async () => {
+  const { call, off } = await bootHost();
+  const r = await call('/logs');
+  assert.equal(r.status, 200);
+  assert.ok(Array.isArray(r.json.entries), '后端必须返回 entries');
+
+  const { readFileSync } = await import('node:fs');
+  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  assert.ok(client.includes('r.entries'), '前端必须读 entries');
+  assert.ok(!/r\.logs\s*\|\|/.test(client), '前端不能读不存在的 r.logs');
+  off?.();
+});
+
+test('字段：/setup 的五个判据都在且是布尔（前端靠它们推进度）', async () => {
+  // 指一个不存在的目录：detect 就不会去连真实 Roost，测试与机器状态无关
+  const { call, off } = await bootHost({ setup: { roostDir: join(tmpdir(), 'no-such-roost-xyz') } });
+  const r = await call('/setup');
+  assert.equal(r.status, 200, '/setup 不能 500');
+  for (const k of ['installed', 'hasBot', 'running', 'pluginInstalled', 'pluginConfigured']) {
+    assert.equal(typeof r.json[k], 'boolean', `${k} 必须是布尔`);
+  }
+  assert.equal(r.json.installed, false);
+  // 目录填错时要能说清为什么，而不是只说"没装"
+  assert.match(String(r.json.dirHow), /不是一份 Roost/);
+
+  const { readFileSync } = await import('node:fs');
+  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  for (const k of ['installed', 'hasBot', 'pluginInstalled', 'pluginConfigured', 'dirHow']) {
+    assert.ok(client.includes(k), `前端应该用到 ${k}`);
+  }
+  // 只禁"读这个字段"，不禁注释里提到它（注释正是在记录这个坑）
+  assert.ok(!/setupSt\??\.steps/.test(client), '前端不许再读后端不存在的 setupSt.steps');
+  off?.();
+});
+
+test('记忆：/memory 能指定 chatId，并回 chats + scene', async () => {
+  const { call, off } = await bootHost({}, SEED);
+  const r = await call('/memory?chatId=g1');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.chatId, 'g1', '指定了就必须用指定的，不能还跟着 lastScene 走');
+  assert.deepEqual(r.json.chat, ['这群管张三叫鱼头'], '本群的记忆要按 chatId 取');
+  assert.ok(Array.isArray(r.json.chats), '要给出可切换的会话清单');
+  off?.();
+});
+
+test('记忆：没给 chatId 时退回最近会话（不传就还是旧行为）', async () => {
+  const { call, off } = await bootHost({}, SEED);
+  const r = await call('/memory');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.chatId, '', '没聊过天时是空串，前端据此禁用「本群」写入');
+  assert.equal(r.json.scene, null);
+  off?.();
+});
+
+test('记忆：/graph 也认 chatId', async () => {
+  const { call, off } = await bootHost({}, SEED);
+  const r = await call('/graph?chatId=g1');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.chatId, 'g1');
+  off?.();
+});

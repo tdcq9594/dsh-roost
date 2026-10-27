@@ -218,6 +218,60 @@ window.__ModuleLoader__.load({
 .roost-item .t{flex:1;min-width:0;word-break:break-word}
 .roost-item .d{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary, inherit)}
 .roost-scroll{max-height:320px;overflow:auto}
+
+/* ── 概览用的统计块与故障条 ── */
+.roost-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:9px}
+.roost-stat{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border-radius:9px;
+  border:1px solid var(--line-soft);background:var(--surface)}
+.roost-stat b{font-size:19px;font-weight:650;letter-spacing:-.02em;line-height:1.25;
+  font-variant-numeric:tabular-nums}
+.roost-stat span{font-size:11px;color:var(--dsw-alias-label-tertiary,inherit);line-height:1.4}
+.roost-banner{display:flex;flex-direction:column;gap:3px;padding:10px 12px;margin-bottom:12px;
+  border-radius:9px;border:1px solid var(--line-soft);background:var(--surface)}
+.roost-banner.bad{border-color:color-mix(in srgb,var(--bad) 45%,transparent);
+  background:color-mix(in srgb,var(--bad) 9%,transparent)}
+.roost-banner b{font-size:12.5px;font-weight:600}
+.roost-banner i{font-style:normal;font-size:11.5px;line-height:1.6;
+  color:var(--dsw-alias-label-tertiary,inherit)}
+
+/* ── 开关 / 芯片 / 单条记忆 / 文字链接 ── */
+.roost-switch{position:relative;width:32px;height:18px;border-radius:9px;border:1px solid var(--line);
+  background:var(--field);cursor:pointer;padding:0;flex:0 0 auto;
+  transition:background .16s ease,border-color .16s ease}
+.roost-switch::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;
+  background:var(--dsw-alias-label-secondary,currentColor);
+  transition:transform .16s cubic-bezier(.2,.8,.2,1),background .16s ease}
+.roost-switch[data-on="1"]{background:var(--accent);border-color:var(--accent)}
+.roost-switch[data-on="1"]::after{transform:translateX(14px);background:#fff}
+.roost-switch:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.roost-chip{padding:3px 10px;border-radius:20px;border:1px solid var(--line-soft);background:transparent;
+  color:inherit;font:inherit;font-size:12px;cursor:pointer;transition:background .14s,border-color .14s}
+.roost-chip:hover{background:var(--hover)}
+.roost-chip[data-on="1"]{border-color:var(--accent);font-weight:600;
+  background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.roost-fact{display:flex;gap:8px;align-items:flex-start;padding:5px 0;font-size:12.5px;
+  border-top:1px solid var(--line-soft)}
+.roost-fact:first-child{border-top:none}
+.roost-fact span{flex:1;min-width:0;word-break:break-word}
+.roost-fact-x{flex:0 0 auto;border:none;background:transparent;color:inherit;opacity:.42;cursor:pointer;
+  font:inherit;font-size:14px;line-height:1;padding:2px 5px;border-radius:5px}
+/* 删除只在鼠标移到这一行时才显眼：平时淡到几乎看不见，避免误点 */
+.roost-fact:hover .roost-fact-x,.roost-fact-x:focus-visible{opacity:.75}
+.roost-fact-x:hover{opacity:1;color:var(--bad);background:var(--hover)}
+.roost-fact-x:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+@media (hover:none){.roost-fact-x{opacity:.6}}
+/* 危险动作：默认低饱和红，二次确认后实心红——和普通按钮明确区分 */
+.roost-btn.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 35%,transparent)}
+.roost-btn.danger:hover:not(:disabled){background:color-mix(in srgb,var(--bad) 12%,transparent)}
+.roost-btn.armed{background:var(--bad);border-color:var(--bad);color:#fff}
+.roost-link{border:none;background:transparent;color:var(--accent);font:inherit;font-size:11.5px;
+  cursor:pointer;padding:0 2px;text-decoration:underline;text-underline-offset:2px}
+.roost-link:hover{filter:brightness(1.12)}
+
+/* 双向条：中轴线 + 游标，正负一眼看得出 */
+.roost-bar-zone{position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--line)}
+.roost-bar-knob{position:absolute;top:50%;width:2px;height:10px;margin-left:-1px;border-radius:1px;
+  transform:translateY(-50%);background:var(--dsw-alias-label-secondary,currentColor);opacity:.6}
 `
 
     function useStyle() {
@@ -255,21 +309,108 @@ window.__ModuleLoader__.load({
         h('div', { className: 'roost-v' }, children),
       )
 
-    /** 双向条形：从中线往两边长。数字不显示，形态就是信息 */
+    /**
+     * 条形：单向从左往右，双向从中线往两边长。
+     *
+     * 双向那条必须画中轴线和游标——只有一根横杠的话，
+     * 「-0.2」和「0」看起来几乎一样，等于把信息丢了。
+     */
     const Bar = ({ v, bi }) => {
       const val = Math.max(-1, Math.min(1, Number(v) || 0))
       if (bi) {
         const w = Math.abs(val) * 50
-        return h('div', { className: 'roost-bar' },
+        const knob = Math.min(0.985, Math.max(0.015, (val + 1) / 2))
+        return h('div', { className: 'roost-bar', role: 'img', 'aria-label': `取值 ${val}` },
+          h('span', { className: 'roost-bar-zone' }),
           h('i', { className: 'bi', style: { left: val >= 0 ? '50%' : 50 - w + '%', width: w + '%' } }),
+          h('span', { className: 'roost-bar-knob', style: { left: knob * 100 + '%' } }),
         )
       }
       const w = Math.max(0, Math.min(1, val)) * 100
-      return h('div', { className: 'roost-bar' }, h('i', { style: { left: '0%', width: w + '%' } }))
+      return h('div', { className: 'roost-bar', role: 'img', 'aria-label': `取值 ${val}` },
+        h('i', { style: { left: '0%', width: w + '%' } }))
     }
 
-    /** 二次确认的行内按钮：删/清这类不可逆动作都要过一次 */
-    function ConfirmLink({ label, confirmLabel, onConfirm, disabled }) {
+    /** 情绪三项的读法：数字是内部量，人看的是词 */
+    const MOOD = [
+      { key: 'valence', label: '心情', bi: true, words: ['很糟', '不太好', '一般', '还行', '不错'] },
+      { key: 'energy', label: '精力', bi: false, words: ['很累', '有点累', '一般', '有精神', '很活跃'] },
+      { key: 'sociability', label: '想说话', bi: false, words: ['不想理人', '有点闷', '一般', '想聊', '很想说'] },
+    ]
+
+    /**
+     * 取值 → 五个词里挑一个。
+     *
+     * `bi` 决定量纲：心情是 -1..1（要折成 0..1），另外两条本来就是 0..1。
+     * 不区分就会把 -0.6 的心情说成「还行」。
+     */
+    function wordOf(v, words, bi) {
+      if (!words) return ''
+      const raw = Number(v) || 0
+      const x = bi ? (raw + 1) / 2 : raw
+      const i = Math.min(words.length - 1, Math.max(0, Math.floor(x * words.length)))
+      return words[i]
+    }
+
+    /** 概览上的一个数字格 */
+    const Stat = ({ n, label, tone }) =>
+      h('div', { className: 'roost-stat' },
+        h('b', {
+          style: tone === 'bad' ? { color: 'var(--bad)' } : tone === 'ok' ? { color: 'var(--ok)' } : null,
+        }, n),
+        h('span', null, label),
+      )
+
+    /** 一行状态提示：只在真有问题（或真的好）时出现 */
+    function Banner({ st, setupSt }) {
+      if (!st) return h('div', { className: 'roost-banner bad' },
+        h('b', null, '读不到宿主状态。'),
+        h('i', null, '「刷新」再试一次；一直这样说明插件没加载完，重载 DSH。'))
+      const lt = st.lastTurn
+      if (!st.listening) {
+        return h('div', { className: 'roost-banner bad' },
+          h('b', null, `宿主没在听（端口 ${st.port}）。`),
+          h('i', null,
+            'ai-chat 推过来的消息会全部失败。'
+            + (st.serverError ? `原因：${st.serverError}。` : '')
+            + ' 常见是端口被占或上一轮没退干净——重启 DSH 让端口释放。'))
+      }
+      if (!st.chats) {
+        return h('div', { className: 'roost-banner' },
+          h('b', null, '还没有会话接进来。'),
+          h('i', null, '在群里说一句话就会自动建一个；也可以先跑一次自测。'))
+      }
+      if (lt && !lt.ok) {
+        return h('div', { className: 'roost-banner bad' },
+          h('b', null, '最近一轮失败了。'),
+          h('i', null, `${lt.error || '未知错误'} —— 细节看「日志」。`))
+      }
+      return null
+    }
+
+    /** 分步：编号节点 + 竖线 + 标题说明 + 右侧动作 */
+    const Step = ({ n, state, title, desc, children, extra }) =>
+      h('div', { className: 'roost-step ' + (state || 'todo') },
+        h('div', { className: 'roost-node ' + (state || 'todo') },
+          state === 'done' ? '✓' : state === 'bad' ? '!' : n),
+        h('div', { className: 'roost-rail' }),
+        h('div', { className: 'roost-body' },
+          h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' } },
+            h('div', { className: 'roost-title' }, title),
+            children ? h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 6, flexWrap: 'wrap' } }, children) : null,
+          ),
+          h('div', { className: 'roost-note', style: { marginTop: 2 } }, desc),
+          extra || null,
+        ),
+      )
+
+    /**
+     * 二次确认的行内按钮：删/清这类不可逆动作都要过一次。
+     *
+     * 习惯上分三段：平时是灰底普通按钮 → 点一下变成红底「确认删除」→ 再点才执行。
+     * 4 秒没点就自己退回，不会一直挂在「确认」状态等人误触。
+     */
+    function ConfirmLink({ label, confirmLabel, onConfirm, disabled, danger = true }) {
       const [arm, setArm] = useState(false)
       useEffect(() => {
         if (!arm) return
@@ -278,9 +419,8 @@ window.__ModuleLoader__.load({
       }, [arm])
       return h('button', {
         type: 'button',
-        className: 'roost-btn',
+        className: 'roost-btn' + (danger ? ' danger' : '') + (arm ? ' armed' : ''),
         disabled,
-        style: arm ? { color: 'var(--bad)', borderColor: 'var(--bad)' } : null,
         onClick: () => {
           if (!arm) return setArm(true)
           setArm(false)
@@ -291,63 +431,167 @@ window.__ModuleLoader__.load({
 
     /* ---------------- 概览 ---------------- */
 
-    function OverviewTab({ st, setupSt, toast, reload, busy, run, onGo }) {
-      const listening = st?.listening
-      const steps = setupSt?.steps || []
-      const doneCount = steps.filter((s) => s.state === 'done').length
+    /**
+     * 端口怎么显示。
+     *
+     * 配置是**意愿**，实际 bind 的是**现实**，被占后会顺延。
+     * 「配置 17321、实际 17322」必须让用户看见——否则他按 17321 去连，
+     * 怎么都连不上还以为是插件坏了。
+     */
+    const portCell = (st) => {
+      const actual = st?.actualPort
+      if (!actual) return st?.port ?? '—'
+      return st.wantPort && st.wantPort !== actual ? `${actual}（配置 ${st.wantPort}，被占了）` : String(actual)
+    }
+
+    function OverviewTab({ st, setupSt, toast, reload, busy, onGo }) {
+      const [logs, setLogs] = useState(null)
+      const perms = st?.permissions || {}
+      const toolable = ['owner', 'admin', 'member'].filter((k) => perms[k] === 'all')
+      const lt = st?.lastTurn
+
+      /** 概览上的最近动态：不用切到日志页就能看到刚刚发生了什么 */
+      useEffect(() => {
+        let alive = true
+        const load = () => get('/logs?limit=6').then((r) => alive && setLogs(r.ok === false ? [] : r.entries || []))
+        load()
+        const t = setInterval(load, 5000)
+        return () => { alive = false; clearInterval(t) }
+      }, [])
+
+      /**
+       * 接入进度用**真实字段**推，不再靠一个后端不存在的 `steps`。
+       * 五点全部来自 `/setup`：装好 → 有机器人 → 在跑 → 插件装了 → 已指向我们。
+       */
+      const s = setupSt || {}
+      const checks = [
+        ['Roost 装好', s.installed],
+        ['机器人凭证', s.hasBot],
+        ['Roost 在跑', s.running],
+        ['ai-chat 插件', s.pluginInstalled],
+        ['已指向 dsh-roost', s.pluginConfigured],
+      ]
+      const doneCount = checks.filter(([, v]) => v).length
+      const allReady = doneCount === checks.length
+
+      const selftest = async () => {
+        toast('正在自测…')
+        const r = await post('/selftest', {})
+        toast(r.ok ? `自测通过（${r.ms}ms）：${String(r.reply || '').slice(0, 40)}` : `自测失败：${r.message || '未知'}`)
+        reload()
+      }
+
+      const actual = st?.actualPort || st?.port
+      const wantUrl = actual ? `http://127.0.0.1:${actual}` : ''
+      const gotUrl = s.pluginConfig?.dshUrl || ''
 
       return h('div', null,
-        h(Sec, { n: '01', title: '现在这样' },
-          h(Row, { k: '收消息' },
-            listening
-              ? h('span', null, '在听 ', h('span', { className: 'roost-code' }, ':' + (st.actualPort || st.port)))
-              : h('span', { style: { color: 'var(--bad)' } }, st?.serverError || '端口没起来'),
+        h(Banner, { st, setupSt }),
+        h('div', { className: 'roost-sec', style: { marginTop: 0 } },
+          h('div', { className: 'roost-sec-h' },
+            h('span', { className: 'roost-sec-n' }, '01'),
+            h('span', { className: 'roost-sec-t' }, '现在这样'),
+            h('span', { style: { marginLeft: 'auto' } },
+              h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新')),
           ),
-          h(Row, { k: 'DSH 会话' },
-            st?.lastTurn
-              ? h('span', null,
-                  h(Pill, { tone: st.lastTurn.ok ? 'ok' : 'bad' }, st.lastTurn.ok ? '正常' : '出错'),
-                  ' ',
-                  h('span', { className: 'roost-muted' }, ago(st.lastTurn.at)),
-                  st.lastTurn.ok
-                    ? h('span', { className: 'roost-muted' }, ` · ${st.lastTurn.len} 字 · ${st.lastTurn.ms}ms`)
-                    : h('span', { style: { color: 'var(--bad)' } }, ' · ' + (st.lastTurn.error || '未知错误')),
-                )
-              : h('span', { className: 'roost-empty' }, '还没收到过消息'),
-          ),
-          h(Row, { k: '接入进度' },
-            h('span', null, `${doneCount} / ${steps.length || 4} 步完成`),
-            doneCount < (steps.length || 4)
-              ? h('button', { type: 'button', className: 'roost-btn', style: { marginLeft: 10 }, onClick: () => onGo('setup') }, '去接入')
-              : null,
+          h('div', { className: 'roost-grid' },
+            h(Stat, { n: st?.chats ?? 0, label: 'QQ 会话' }),
+            h(Stat, { n: st?.waiting ?? 0, label: '正在等回复' }),
+            h(Stat, {
+              n: lt ? `${lt.ms}ms` : '—',
+              label: lt ? (lt.ok ? `最近一轮回了 ${lt.len} 字` : '最近一轮失败') : '还没跑过',
+              tone: lt ? (lt.ok ? 'ok' : 'bad') : null,
+            }),
+            h(Stat, {
+              n: toolable.length || 1,
+              label: toolable.length ? `能用本地工具的档位：${toolable.join('/')}` : '只有主人能用本地工具',
+            }),
           ),
         ),
 
-        h(Sec, { n: '02', title: '归途', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
-          h('div', null,
-            steps.map((s, i) =>
-              h('div', { key: s.key || i, className: 'roost-step ' + s.state },
-                h('div', { className: 'roost-node ' + s.state }, s.state === 'done' ? '✓' : s.state === 'bad' ? '!' : i + 1),
-                h('div', { className: 'roost-rail' }),
-                h('div', { className: 'roost-body' },
-                  h('div', { className: 'roost-title' }, s.title),
-                  h('div', { className: 'roost-desc roost-muted' }, s.desc),
-                ),
+        h(Sec, { n: '02', title: '接入进度',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } }, `${doneCount} / ${checks.length}`) },
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
+            checks.map(([label, ok]) =>
+              h('span', { key: label, className: 'roost-pill' + (ok ? ' ok' : '') },
+                (ok ? '✓ ' : '· ') + label),
+            ),
+          ),
+          allReady
+            ? h('div', { className: 'roost-note' },
+                '五项都齐了。还差两件手工的事在 QQ 开放平台：开「接收所有消息」、把机器人拉进群。')
+            : h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+                h('button', { type: 'button', className: 'roost-btn', onClick: () => onGo('setup') }, '去接入'),
+                h('span', { className: 'roost-note', style: { margin: 0 } },
+                  '缺哪一步在那一页有单独说明和按钮。'),
+              ),
+        ),
+
+        h(Sec, { n: '03', title: '端口对得上吗' },
+          h('div', { className: 'roost-list' },
+            [
+              ['dsh-roost 实际监听', portCell(st) || '—', 'ai-chat 要往这里推'],
+              ['Roost 面板', s.port || '—', 'Roost 自己的 webui 端口，和上面不是一回事'],
+              ['ai-chat 指向', gotUrl || '未配置', '它以为该推给谁'],
+            ].map(([k, v, why]) =>
+              h('div', { key: k, className: 'roost-item' },
+                h('span', { className: 't' }, k, h('span', { className: 'd' }, ' ' + why)),
+                h('span', { className: 'roost-mono', style: { flex: '0 0 auto' } }, String(v)),
               ),
             ),
-            !steps.length ? h('div', { className: 'roost-empty' }, '读不到接入状态') : null,
           ),
+          (() => {
+            if (!wantUrl) return null
+            if (!gotUrl) {
+              return h('div', { className: 'roost-note' },
+                'ai-chat 还没配好，消息推不过来 —— 去「接入」第 5 步。')
+            }
+            return gotUrl === wantUrl
+              ? h('div', { className: 'roost-note', style: { color: 'var(--ok)' } }, '✓ 两端一致，链路通')
+              : h('div', { className: 'roost-note', style: { color: 'var(--bad)' } },
+                  `✗ 对不上：ai-chat 指向 ${gotUrl}，我们监听 ${wantUrl}。消息推到没人听的端口上，去「接入」第 5 步重新写一次。`)
+          })(),
         ),
 
-        h(Sec, { n: '03', title: '自测' },
-          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-            '往下发一句「你收到我了吗」。它不经过 QQ，只验证「插件 → DSH 会话 → 回话」这条链。'),
-          h('button', {
-            type: 'button',
-            className: 'roost-primary',
-            disabled: busy,
-            onClick: () => run('/selftest', '自测'),
-          }, busy ? '跑着…' : '跑一次自测'),
+        h(Sec, { n: '04', title: '快捷',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } }, '自测不经过 QQ') },
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            h('button', { type: 'button', className: 'roost-primary', disabled: busy, onClick: selftest },
+              busy ? '跑着…' : '跑一次自测'),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: async () => {
+                // 现读一次，别用可能过期的 setupSt（Roost 刚起来时它是旧的）
+                const r = await get('/setup/webui')
+                const url = r.ok !== false ? r.url : ''
+                if (url || s.webui) window.open(url || s.webui, '_blank', 'noopener')
+                else toast('还没装好 Roost，没有面板可开')
+              },
+            }, '打开 Roost 面板 ↗'),
+          ),
+          h('div', { className: 'roost-note' },
+            '自测直接跑一轮 DSH 对话，验「会话建得起来、AI 回得来」；QQ 那一段不在里面。'),
+        ),
+
+        h(Sec, { n: '05', title: '最近动态' },
+          logs === null
+            ? h('div', { className: 'roost-empty' }, '读取中…')
+            : logs.length === 0
+              ? h('div', { className: 'roost-empty' }, '还没有动静。群里说句话，或者跑一次自测。')
+              : h('div', { className: 'roost-list' },
+                  logs.slice().reverse().map((e, i) =>
+                    h('div', { key: i, className: 'roost-item' },
+                      h('span', { className: 'roost-mono', style: { flex: '0 0 auto', opacity: 0.7 } }, e.time),
+                      h('span', {
+                        style: {
+                          flex: '0 0 5px', height: 5, borderRadius: 3, marginTop: 7,
+                          background: e.level === 'error' ? 'var(--bad)' : e.level === 'warn' ? 'var(--warn)' : 'var(--ok)',
+                        },
+                      }),
+                      h('span', { className: 't', style: { opacity: e.level === 'error' ? 1 : 0.86 } }, e.text),
+                    ),
+                  ),
+                ),
         ),
       )
     }
@@ -355,143 +599,335 @@ window.__ModuleLoader__.load({
     /* ---------------- 接入 ---------------- */
 
     function SetupTab({ st, reload, toast, busy, run, reg, onSaved }) {
-      const [qr, setQr] = useState(null)
-      const [taskId, setTaskId] = useState('')
+      const [qrSvg, setQrSvg] = useState('')
+      const [qrTip, setQrTip] = useState('')
       const [appId, setAppId] = useState('')
-      const [appSecret, setAppSecret] = useState('')
-      const [dirDraft, setDirDraft] = useState('')
+      const [secret, setSecret] = useState('')
+      const [pathOpen, setPathOpen] = useState(false)
+      const [dir, setDir] = useState('')
+      const [cfgMsg, setCfgMsg] = useState('')
+      const [work, setWork] = useState('')
+      const qrTimer = useRef(null)
       const mode = reg?.current || 'qr'
+      const s = st || {}
+      const locked = Boolean(work) || Boolean(busy)
+
+      const stopQr = useCallback(() => {
+        if (qrTimer.current) {
+          clearInterval(qrTimer.current)
+          qrTimer.current = null
+        }
+      }, [])
+
+      const pollQr = useCallback(
+        async (taskId) => {
+          const r = await post('/setup/qr/poll', { taskId })
+          if (r.ok === false) {
+            stopQr()
+            setQrTip(r.message || '扫码失败了，重试一次')
+            return
+          }
+          if (r.status === 'pending') return
+          stopQr()
+          if (r.status === 'done') {
+            setAppId(r.appId || '')
+            setSecret(r.appSecret || '')
+            setQrSvg('')
+            setQrTip(`✓ 已拿到 AppID ${r.appId || ''}，点下面「保存」就写进去`)
+            await reload()
+            onSaved?.()
+          } else {
+            setQrSvg('')
+            setQrTip(r.message || '二维码过期了，重新生成一个')
+          }
+        },
+        [stopQr, reload, onSaved],
+      )
+
+      const startQr = useCallback(async () => {
+        setQrTip('正在生成二维码…')
+        setQrSvg('')
+        const r = await post('/setup/qr/start', {})
+        if (r.ok === false) {
+          setQrTip(r.message || '生成失败')
+          return
+        }
+        setQrSvg(r.qrSvg || '')
+        setQrTip('用手机 QQ 扫码，确认后自动填好')
+        stopQr()
+        qrTimer.current = setInterval(() => pollQr(r.taskId), 2000)
+      }, [pollQr, stopQr])
+
+      // 切走页面就停轮询，别在后台一直打
+      useEffect(() => () => stopQr(), [stopQr])
+
+      const copy = (t) => {
+        try {
+          navigator.clipboard?.writeText(t)
+          toast('已复制')
+        } catch {
+          toast('复制失败，手动选一下吧')
+        }
+      }
+
+      /** 回车即提交——表单里没这个会让人以为按钮才有用 */
+      const enter = (fn) => (e) => {
+        if (e.key !== 'Enter') return
+        e.preventDefault()
+        fn()
+      }
+
+      const saveBot = () => {
+        if (!appId || !secret) return toast('AppID 和 AppSecret 都要填')
+        step('写入凭证', '/setup/bot', { name: 'main', appId, appSecret: secret })
+      }
 
       /**
-       * 扫码轮询。
+       * 一步一个请求，失败就停。
        *
-       * 三态就够：pending 继续等、done 拿凭证、别的都当失败停下。
-       * 拿到凭证必须**立刻**落配置——框架不解密第二次。
+       * 「一键」不该在第一步失败之后还继续往下点——那只会刷出一串
+       * 互相矛盾的报错，用户反而不知道哪一步是真问题。
        */
-      useEffect(() => {
-        if (!taskId) return
-        let alive = true
-        const tick = async () => {
-          const r = await post('/setup/qr/poll', { taskId })
-          if (!alive) return
-          if (r.status === 'done') {
-            setTaskId('')
-            toast('扫码成功，机器人已写好')
-            reload()
-            onSaved?.()
-            return
-          }
-          if (r.status === 'expired' || r.status === 'error') {
-            setTaskId('')
-            setQr(null)
-            toast(r.message || '二维码失效，重新生成一个')
-            return
-          }
-          setTimeout(tick, 1800)
-        }
-        const t = setTimeout(tick, 800)
-        return () => {
-          alive = false
-          clearTimeout(t)
-        }
-      }, [taskId])
+      const step = async (label, path, body) => {
+        setWork(label)
+        const r = await post(path, body)
+        setWork('')
+        toast(r.ok === false ? r.message || label + '失败' : r.message || label + '完成')
+        await reload()
+        onSaved?.()
+        return r.ok !== false
+      }
 
-      const startQr = async () => {
-        const r = await post('/setup/qr/start', {})
-        if (!r.ok) return toast(r.message || '生成二维码失败')
-        setQr(r.qrSvg || r.qrUrl)
-        setTaskId(r.taskId)
+      const oneKey = async () => {
+        const s0 = await get('/setup')
+        if (s0.ok === false) return toast(s0.message || '读不到状态')
+        if (!s0.installed && !(await step('安装', '/setup/install', dir.trim() ? { dir: dir.trim() } : {}))) return
+        if (!s0.hasBot) {
+          if (!appId || !secret) {
+            toast('还没有机器人：先扫码，或在第 2 步手填 AppID / AppSecret')
+            return
+          }
+          if (!(await step('写入凭证', '/setup/bot', { name: 'main', appId, appSecret: secret }))) return
+        }
+        if (!s0.running && !(await step('启动', '/setup/start'))) return
+        if (!s0.pluginInstalled && !(await step('安装插件', '/setup/plugin'))) return
+        if (!s0.pluginConfigured && !(await step('写配置', '/setup/configure'))) return
+        toast('链路就绪 —— 去群里说一句话试试')
+      }
+
+      /**
+       * 六步的状态全部由 `/setup` 的真实字段推出来。
+       *
+       * 原来概览那套「4 步 / 0 完成」是读一个后端根本不返回的 `steps`，
+       * 所以永远显示 0 —— 这里不许再猜：每一步都必须有一份可核对的判据。
+       */
+      const mark = {
+        install: s.installed ? 'done' : 'current',
+        bot: s.hasBot ? 'done' : s.installed ? 'current' : 'todo',
+        start: s.running ? 'done' : s.hasBot ? 'current' : 'todo',
+        plugin: s.pluginInstalled ? 'done' : s.running ? 'current' : 'todo',
+        configure: s.pluginConfigured ? 'done' : s.pluginInstalled ? 'current' : 'todo',
+        ready: s.pluginConfigured ? 'done' : 'todo',
       }
 
       return h('div', null,
-        h(Sec, { n: '01', title: '机器人凭证' },
-          h('div', { className: 'roost-note', style: { marginBottom: 10 } },
-            reg?.list?.length
-              ? '接入方式：' + reg.list.map((x) => x.label).join(' / ') + '（当前：' + (reg.list.find((x) => x.name === mode)?.label || mode) + '）'
-              : '读不到接入方式'),
 
-          mode === 'manual'
-            ? h('div', null,
-                h('input', {
-                  className: 'roost-input', placeholder: 'AppID', value: appId,
-                  onChange: (e) => setAppId(e.target.value), style: { marginBottom: 8 },
-                }),
-                h('input', {
-                  className: 'roost-input', placeholder: 'AppSecret', type: 'password', value: appSecret,
-                  onChange: (e) => setAppSecret(e.target.value), style: { marginBottom: 8 },
-                }),
-                h('button', {
-                  type: 'button', className: 'roost-primary',
-                  onClick: async () => {
-                    const r = await post('/setup/bot', { appId, appSecret })
-                    toast(r.ok === false ? (r.message || '没写成') : '写好了')
-                    if (r.ok !== false) { setAppSecret(''); reload(); onSaved?.() }
-                  },
-                }, '保存凭证'),
-              )
-            : h('div', null,
-                qr
-                  ? h('div', { style: { marginBottom: 10 } },
-                      typeof qr === 'string' && qr.startsWith('<')
-                        ? h('div', { dangerouslySetInnerHTML: { __html: qr }, style: { width: 190, background: '#fff', padding: 8, borderRadius: 8 } })
-                        : h('a', { href: qr, target: '_blank', rel: 'noreferrer' }, '打开二维码'),
-                      h('div', { className: 'roost-note' }, '用手机 QQ 扫，扫完这里会自动继续'),
-                    )
-                  : null,
-                h('div', { style: { display: 'flex', gap: 8 } },
-                  h('button', { type: 'button', className: 'roost-primary', onClick: startQr },
-                    qr ? '重新生成' : '扫码添加机器人'),
-                  h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新状态'),
-                ),
-              ),
-        ),
-
-        h(Sec, { n: '02', title: 'Roost 本体' },
-          h(Row, { k: '位置' },
-            st?.dir
-              ? h('span', { className: 'roost-mono' }, st.dir)
-              : h('span', { className: 'roost-empty' }, '还没装'),
-          ),
-          h('div', { style: { display: 'flex', gap: 8, marginBottom: 10 } },
-            h('input', {
-              className: 'roost-input',
-              placeholder: '换一个安装目录（留空/填已有 Roost 目录可绑定）',
-              value: dirDraft, onChange: (e) => setDirDraft(e.target.value), style: { flex: 1 },
-            }),
+        h('div', { className: 'roost-banner', style: s.pluginConfigured ? { borderColor: 'color-mix(in srgb, var(--ok) 40%, transparent)' } : null },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
+            h('div', { style: { flex: 1, minWidth: 0 } },
+              h('b', null, s.pluginConfigured ? '链路已就绪' : '还没配好'),
+              h('i', { style: { display: 'block' } }, s.pluginConfigured
+                ? '群里说一句话试试。没反应看下面的「常见卡点」。'
+                : '点右边「一键就绪」，能自动做的都会做掉；做不了的会停在哪一步并说明原因。'),
+            ),
             h('button', {
-              type: 'button', className: 'roost-btn',
-              onClick: async () => {
-                const r = await post('/setup/dir', { dir: dirDraft.trim() })
-                toast(r.ok === false ? (r.message || '没改成') : (r.message || '改好了'))
-                reload()
-              },
-            }, '应用'),
-          ),
-          h(Row, { k: '进程' },
-            st?.running
-              ? h('span', null, h(Pill, { tone: 'ok' }, '在跑'),
-                  h('button', { type: 'button', className: 'roost-btn', style: { marginLeft: 10 }, onClick: () => run('/setup/stop', '停止') }, '停止'))
-              : h('span', null, h(Pill, null, '没跑'),
-                  h('button', { type: 'button', className: 'roost-btn', style: { marginLeft: 10 }, onClick: () => run('/setup/start', '启动') }, '启动')),
-          ),
-          h(Row, { k: '插件' },
-            h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: () => run('/setup/plugin', '装插件') }, '安装 / 更新 ai-chat'),
-          ),
-          h(Row, { k: '一键' },
-            h('button', { type: 'button', className: 'roost-primary', disabled: busy, onClick: () => run('/setup/install', '一键接入') },
-              busy ? '跑着…' : '一键装好（装 Roost + 配插件）'),
+              type: 'button', className: 'roost-primary', disabled: locked,
+              onClick: s.pluginConfigured ? () => oneKey() : oneKey,
+            }, work ? work + '…' : s.pluginConfigured ? '重新检查一遍' : '一键就绪'),
           ),
         ),
 
-        h(Sec, { n: '03', title: '配置对接' },
-          h('div', { className: 'roost-note' },
-            '把 dsh-roost 的地址写进 ai-chat，它才知道把消息推到哪。端口换了会自动同步，手动再点一次也无害。'),
-          h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
-            h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: () => run('/setup/configure', '写入配置') }, '重新写入'),
-            h('button', { type: 'button', className: 'roost-btn', onClick: () => get('/setup/webui').then((r) => {
-              if (r.ok && r.url) window.open(r.url, '_blank', 'noreferrer')
-              else toast('拿不到面板地址')
-            }) }, '打开 Roost 面板'),
+        h('div', { style: { padding: '2px 2px 0' } },
+
+          h(Step, {
+            n: 1, state: mark.install, title: '装 Roost',
+            desc: s.installed
+              ? `已装 v${s.version || '?'} · ${s.dirHow || ''}${s.dirOk ? '' : '（但目录里没有 src/main.js）'}`
+              : '下载解压就行——Roost 零依赖，不用 npm install',
+          },
+            h('button', { type: 'button', className: 'roost-btn', onClick: () => setPathOpen((v) => !v) },
+              pathOpen ? '收起' : s.installed ? '更改路径' : '改路径'),
+            s.installed
+              ? null
+              : h('button', {
+                  type: 'button', className: 'roost-btn', disabled: locked,
+                  onClick: async () => {
+                    // 装了自定义路径就先落盘再下载，否则 install() 还按旧 dirOf() 装到默认位置
+                    if (dir.trim() && dir.trim() !== s.dir && !(await step('绑定目录', '/setup/dir', { dir: dir.trim() }))) return
+                    step('安装', '/setup/install')
+                  },
+                }, '安装'),
+          ),
+            pathOpen
+              ? h('div', { style: { marginTop: -6, marginBottom: 16, paddingLeft: 40 } },
+                  h('div', { className: 'roost-note', style: { marginBottom: 6 } },
+                    s.installed
+                      ? '换到别的目录（里面要有 src/main.js）。改完要重启 Roost 才生效'
+                      : '装到哪。留空就用默认（数据目录下的 roost）'),
+                  h('div', { style: { display: 'flex', gap: 6 } },
+                    h('input', {
+                      className: 'roost-input', placeholder: s.dir || 'D:\\bots\\qq-bot-roost',
+                      value: dir, onChange: (e) => setDir(e.target.value), style: { flex: 1 },
+                      onKeyDown: (e) => {
+                        if (e.key === 'Enter' && dir.trim()) step(s.installed ? '更改' : '绑定', '/setup/dir', { dir: dir.trim() })
+                        if (e.key === 'Escape') setPathOpen(false)
+                      },
+                    }),
+                    h('button', {
+                      type: 'button', className: 'roost-btn', disabled: !dir.trim() || locked,
+                      onClick: () => step(s.installed ? '更改' : '绑定', '/setup/dir', { dir: dir.trim() }),
+                    }, s.installed ? '更改' : '绑定'),
+                  ),
+                  s.dir ? h('div', { style: { marginTop: 6, display: 'flex', gap: 6, alignItems: 'center' } },
+                    h('span', { className: 'roost-mono' }, s.dir),
+                    h('button', { type: 'button', className: 'roost-link', onClick: () => copy(s.dir) }, '复制'),
+                  ) : null,
+                )
+              : null,
+
+          h(Step, {
+            n: 2, state: mark.bot, title: '填 AppID / AppSecret',
+            desc: s.hasBot ? '已配置' : '推荐扫码一键创建；也可以去开放平台手动复制',
+          }),
+            s.hasBot
+              ? h('div', { style: { marginTop: -6, marginBottom: 16, paddingLeft: 40, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                  h('div', { className: 'roost-mono' },
+                    (s.bots || []).map((b) => `${b.name || b.id}（${b.appId || '无 AppID'}）`).join('、')),
+                  h('button', { type: 'button', className: 'roost-link', onClick: () => copy((s.bots || []).map((b) => b.appId).filter(Boolean).join(' ')) }, '复制 AppID'),
+                )
+              : mode === 'manual'
+                ? h('div', { style: { marginTop: -6, marginBottom: 16, paddingLeft: 40, maxWidth: 470 } },
+                    h('input', { className: 'roost-input', placeholder: 'AppID', value: appId, onChange: (e) => setAppId(e.target.value), onKeyDown: enter(saveBot), style: { marginBottom: 8 } }),
+                    h('input', { className: 'roost-input', placeholder: 'AppSecret', type: 'password', value: secret, onChange: (e) => setSecret(e.target.value), onKeyDown: enter(saveBot), style: { marginBottom: 8 } }),
+                    h('button', {
+                      type: 'button', className: 'roost-primary', disabled: !appId || !secret || locked,
+                      onClick: saveBot,
+                    }, '保存凭证'),
+                  )
+                : h('div', { style: { marginTop: 10, maxWidth: 430 } },
+                    h('button', { type: 'button', className: 'roost-primary', disabled: locked, onClick: startQr, style: { width: '100%' } },
+                      qrSvg ? '重新生成' : '扫码一键创建'),
+                    h('div', { className: 'roost-note', style: { marginTop: 6 } },
+                      '手机 QQ 扫一下，AppID / AppSecret 自动填好（要 Roost 在跑）'),
+                    qrSvg
+                      ? h('div', {
+                          style: { background: '#fff', padding: 8, borderRadius: 10, lineHeight: 0, margin: '8px 0' },
+                          dangerouslySetInnerHTML: { __html: qrSvg },
+                        })
+                      : null,
+                    qrTip ? h('div', { className: 'roost-note' }, qrTip) : null,
+                    (appId || secret)
+                      ? h('div', { style: { marginTop: 10 } },
+                          h('input', { className: 'roost-input', placeholder: 'AppID', value: appId, onChange: (e) => setAppId(e.target.value), style: { marginBottom: 8 } }),
+                          h('input', { className: 'roost-input', placeholder: 'AppSecret', type: 'password', value: secret, onChange: (e) => setSecret(e.target.value), style: { marginBottom: 8 } }),
+                          h('button', {
+                            type: 'button', className: 'roost-btn', disabled: !appId || !secret || locked,
+                            onClick: saveBot,
+                          }, '保存'),
+                        )
+                      : h('div', { className: 'roost-note', style: { marginTop: 10, opacity: 0.75 } },
+                          '—— 已有机器人、或扫码用不了，也可以手动填（在「设置」里切换接入方式）——'),
+                  ),
+
+          h(Step, {
+            n: 3, state: mark.start, title: '启动 Roost',
+            desc: s.running
+              ? `在跑，面板 ${s.webui || ':' + (s.port || '')}`
+              : `启动后它的面板在本机 ${s.webui || ':' + (s.port || '')}`,
+          },
+            s.running
+              ? h('button', { type: 'button', className: 'roost-btn', onClick: () => window.open(s.webui, '_blank', 'noopener') }, '打开面板')
+              : h('button', {
+                  type: 'button', className: 'roost-btn', disabled: !s.hasBot || locked,
+                  onClick: () => step('启动', '/setup/start'),
+                }, '启动'),
+            s.running
+              ? h('button', { type: 'button', className: 'roost-btn', disabled: locked, onClick: () => step('停止', '/setup/stop') }, '停止')
+              : null,
+          ),
+
+          h(Step, {
+            n: 4, state: mark.plugin, title: '装 ai-chat 插件',
+            desc: s.pluginInstalled ? '已装 —— Roost 那边负责收发 QQ 消息的那个插件' : 'Roost 那边负责收发 QQ 消息的插件',
+          },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: !s.running || locked,
+              onClick: () => step('安装插件', '/setup/plugin'),
+            }, s.pluginInstalled ? '重装 / 更新' : '安装'),
+          ),
+
+          h(Step, {
+            n: 5, state: mark.configure, title: '切到 DSH 适配器',
+            desc: s.pluginConfigured
+              ? `ai-chat 已指向 ${s.pluginConfig?.dshUrl || s.dshUrl}`
+              : '把 ai-chat 的「交给谁去想」改成 DSH，并填好回话地址',
+          },
+            /**
+             * 永远给个能点的按钮。
+             *
+             * 之前「已配置就隐藏、没装插件就禁用」，两种情况下点下去都毫无反应，
+             * 用户不知道发生了什么。现在一律可点，做不了就在提示里说清原因。
+             */
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: locked,
+              onClick: async () => {
+                if (!s.pluginInstalled) {
+                  setCfgMsg('✗ 还没装 ai-chat 插件，先走第 4 步')
+                  return toast('先装 ai-chat 插件（第 4 步）')
+                }
+                if (!s.running) {
+                  setCfgMsg(`✗ Roost 没在跑（${s.webui || '面板端口'} 连不上），先点第 3 步的「启动」`)
+                  return toast('Roost 没在跑，先启动（第 3 步）')
+                }
+                setCfgMsg('正在写…')
+                const r = await post('/setup/configure', {})
+                setCfgMsg(r.ok === false ? `✗ ${r.message || '没写成'}` : `✓ ${r.message || '已指向 dsh-roost'}`)
+                toast(r.ok === false ? r.message || '没写成' : r.message || '已切换')
+                await reload()
+              },
+            }, s.pluginConfigured ? '重新写一次' : '配置'),
+          ),
+            cfgMsg
+              ? h('div', {
+                  className: 'roost-mono',
+                  style: {
+                    marginTop: 6,
+                    color: cfgMsg.startsWith('✗') ? 'var(--bad)' : cfgMsg.startsWith('✓') ? 'var(--ok)' : 'inherit',
+                  },
+                }, cfgMsg)
+              : null,
+
+          h(Step, {
+            n: 6, state: mark.ready, title: '在群里说句话',
+            desc: s.pluginConfigured
+              ? '还差两件手工的事：开放平台开「接收所有消息」，机器人先进群'
+              : '前面五步走完就能试了',
+          },
+            s.pluginConfigured
+              ? h('button', { type: 'button', className: 'roost-btn', onClick: () => window.open('https://q.qq.com', '_blank', 'noopener') }, '开放平台')
+              : null,
+          ),
+        ),
+
+        h(Sec, { n: '07', title: '常见卡点' },
+          h('ul', { className: 'roost-note', style: { margin: 0, paddingLeft: 18 } },
+            h('li', null, `启动后马上退出：多半是 AppID / AppSecret 填错了，或端口 ${s.port || ''} 被占`),
+            h('li', null, '群里没反应：开放平台没开「接收所有消息」，或机器人不在群里'),
+            h('li', null, '有反应但答非所问：ai-chat 的「什么时候接话」被设成了「只在被 @ 时」'),
+            h('li', null, '面板上一切正常但消息全失败：看「概览 → 端口对得上吗」，八成是 ai-chat 指错端口'),
+            s.accessKeySet === false
+              ? h('li', null, '访问密钥还没设过：Roost 面板默认只监听本机，够用；要远程访问再去设')
+              : null,
           ),
         ),
       )
@@ -499,12 +935,18 @@ window.__ModuleLoader__.load({
 
     /* ---------------- 她 ---------------- */
 
-    function HerTab({ config, personas, mood, stickers, toast, save, reload }) {
-      const curId = personas?.current || config?.persona?.current || 'default'
+    function HerTab({ config, personas, mood, stickers, mem, setupSt, toast, save, reload, quick }) {
       const [editId, setEditId] = useState('')
       const [raw, setRaw] = useState('')
       const [newId, setNewId] = useState('')
       const [dirty, setDirty] = useState(false)
+
+      /** 这一页说的是「当前这个会话里她是谁」，不是「全局默认是谁」 */
+      const byChat = personas?.byChat || {}
+      const byChatCount = Object.keys(byChat).length
+      const curId = byChat[mem?.chatId] || personas?.current || config?.persona?.current || 'default'
+      const override = mem?.personaOverride || ''
+      const tts = setupSt?.pluginConfig?.ttsVoice
 
       /** 打开一个人格的正文。列表里没有 raw，得单独读一次 */
       const openPersona = async (id) => {
@@ -549,8 +991,36 @@ window.__ModuleLoader__.load({
             ),
             !(personas?.personas || []).length ? h('div', { className: 'roost-empty' }, '读不到人格列表') : null,
           ),
+
+          /**
+           * 按群覆盖：模型用 `<<persona:>>` 写进来的那一段。
+           *
+           * 它是**记忆文件里**的内容，不是配置——所以只在有会话时才有，
+           * 而且必须能一键清掉。之前这一行被删了，覆盖一旦写进去就再也
+           * 看不见、也删不掉，只能去翻记忆页。
+           */
+          override
+            ? h('div', { style: { marginTop: 12, display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' } },
+                h('div', { style: { flex: 1, minWidth: 0 } },
+                  h('div', { style: { fontSize: 12, fontWeight: 600 } }, '本群已被覆盖'),
+                  h('div', { className: 'roost-note', style: { marginTop: 2 } },
+                    override.slice(0, 60) + (override.length > 60 ? '…' : '')),
+                ),
+                h(ConfirmLink, {
+                  label: '恢复默认', confirmLabel: '确认恢复？',
+                  onConfirm: async () => {
+                    const r = await quick('persona.set', '')
+                    toast(r.message || '回到默认人格')
+                    reload()
+                  },
+                }),
+              )
+            : null,
+
           h('div', { className: 'roost-note' },
-            '人格正文在 personas/*.md。按群覆盖（模型用 <<persona:>> 写的）优先级更高，要清掉去「记忆 → 清空」。'),
+            '人格正文在 personas/*.md，这里改的是文件本身。'
+            + (byChatCount ? `另有 ${byChatCount} 个会话单独指定了人格（在上面的「正在用」里会显示成那个）。` : '')
+            + ' 模型自己用 <<persona:>> 写的覆盖优先级更高，出现在上面那一行。'),
         ),
 
         h(Sec, { n: '02', title: editId ? '编辑「' + editId + '」' : '编辑人格' },
@@ -605,26 +1075,22 @@ window.__ModuleLoader__.load({
           mood
             ? h('div', null,
                 h('div', { className: 'roost-mood' },
-                  h('div', { className: 'roost-mood-row' },
-                    h('span', { className: 'roost-mood-k' }, '心情'),
-                    h(Bar, { v: mood.valence, bi: true }),
-                    h('span', { className: 'roost-mood-w' }, (mood.valence >= 0 ? '+' : '') + Number(mood.valence || 0).toFixed(2)),
-                  ),
-                  h('div', { className: 'roost-mood-row' },
-                    h('span', { className: 'roost-mood-k' }, '精力'),
-                    h(Bar, { v: mood.energy }),
-                    h('span', { className: 'roost-mood-w' }, Number(mood.energy || 0).toFixed(2)),
-                  ),
-                  h('div', { className: 'roost-mood-row' },
-                    h('span', { className: 'roost-mood-k' }, '想说话'),
-                    h(Bar, { v: mood.sociability }),
-                    h('span', { className: 'roost-mood-w' }, Number(mood.sociability || 0).toFixed(2)),
-                  ),
+                  MOOD.map((m) => {
+                    const v = Math.max(-1, Math.min(1, Number(mood[m.key] ?? 0)))
+                    return h('div', { key: m.key, className: 'roost-mood-row' },
+                      h('span', { className: 'roost-mood-k' }, m.label),
+                      h(Bar, { v, bi: m.bi }),
+                      h('span', { className: 'roost-mood-w' }, wordOf(v, m.words, m.bi)),
+                    )
+                  }),
                 ),
                 h('div', { className: 'roost-note' },
-                  '只做内部决策用（主动概率、接话门槛）。注入给模型的是语气指令，不是这些数字。',
-                  mood.reason ? ` 当前原因：${mood.reason}` : '',
+                  mood.reason ? '原因：' + mood.reason : '还没被什么事影响过',
+                  mood.updatedAt ? ' · ' + ago(mood.updatedAt) : '',
                 ),
+                h('div', { className: 'roost-note' },
+                  '心情左边差、右边好；另两条从左到右是程度。这三项只决定她接不接话、说多长，'
+                  + '不会当成数字喂给模型；没人理她，几小时后会自己回到中间。'),
                 /* 后端接受 feedback（QQ 里点赞/点踩会打到这），这里给手动入口方便调 */
                 h('div', { style: { display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' } },
                   h('span', { className: 'roost-note', style: { margin: 0 } }, '手动喂一次反馈：'),
@@ -638,10 +1104,20 @@ window.__ModuleLoader__.load({
                   }, '👎 踩'),
                 ),
               )
-            : h('div', { className: 'roost-empty' }, '读不到情绪'),
+            : h('div', { className: 'roost-empty' }, '读不到情绪——插件刚起来时会空几秒'),
         ),
 
-        h(Sec, { n: '04', title: '表情包' },
+        h(Sec, { n: '04', title: '表情包',
+          right: h('div', { style: { display: 'flex', gap: 6 } },
+            h('button', {
+              type: 'button', className: 'roost-link',
+              onClick: () => {
+                try { navigator.clipboard?.writeText(stickers?.dir || ''); toast('目录路径已复制') }
+                catch { toast('复制失败，手动选一下吧') }
+              },
+            }, '复制目录'),
+            h('button', { type: 'button', className: 'roost-link', onClick: reload }, '刷新'),
+          ) },
           stickers?.items?.length
             ? h('div', null,
                 h('div', { className: 'roost-muted' }, `${stickers.items.length} 张`),
@@ -650,19 +1126,42 @@ window.__ModuleLoader__.load({
                     h('span', { key: i, className: 'roost-pill' }, s.tags?.join(' / ') || s.name || '图'),
                   ),
                 ),
+                h('div', { className: 'roost-note', style: { marginTop: 8 } },
+                  stickers.items.slice(0, 6).map((x) => x.file).filter(Boolean).join('、')
+                  + (stickers.items.length > 6 ? ' …' : '')),
               )
             : h('div', { className: 'roost-empty' },
-                '还没有图。往 ',
+                '一张图都没有。往 ',
                 h('span', { className: 'roost-code' }, stickers?.dir || 'stickers/'),
-                ' 丢图片，文件名当标签（开心_猫.png → 开心、猫）。'),
+                ' 丢图片，文件名当标签（开心_猫.png → 开心、猫），丢完点「刷新」。'),
+          h('div', { className: 'roost-mono roost-dim', style: { marginTop: 4 } }, stickers?.dir || ''),
           h('div', { className: 'roost-note' }, '她只在合适的时候发，不会每句都配图。'),
+        ),
+
+        /**
+         * 语音条只读。
+         *
+         * 音色是 ai-chat 的设置项，面板改不了——但「现在开没开」必须能看见，
+         * 否则每次都要跨插件去翻配置才知道她为什么不发语音。
+         */
+        h(Sec, { n: '05', title: '语音条' },
+          setupSt?.pluginInstalled === false
+            ? h('div', { className: 'roost-empty' }, 'ai-chat 还没装')
+            : tts === undefined
+              ? h('div', { className: 'roost-empty' }, '读不到 ai-chat 的配置（Roost 没在跑？）')
+              : h('div', null,
+                  h('div', null, tts ? '开 · ' + tts : '关着'),
+                  tts
+                    ? null
+                    : h('div', { className: 'roost-note' }, '音色在 ai-chat 的设置里填，这里只读。'),
+                ),
         ),
       )
     }
 
     /* ---------------- 记忆（三层） ---------------- */
 
-    function MemoryTab({ mem, toast, reload, quick, busy }) {
+    function MemoryTab({ mem, toast, reload, quick, busy, onPickChat }) {
       const [q, setQ] = useState('')
       const [hits, setHits] = useState(null)
       const [fact, setFact] = useState('')
@@ -670,6 +1169,19 @@ window.__ModuleLoader__.load({
       const jr = mem?.journal
       const gp = mem?.graph
       const canChat = Boolean(mem?.chatId)
+      const chats = mem?.chats || []
+      const scene = mem?.scene || null
+
+      /**
+       * 这个会话叫什么。
+       *
+       * 「本群」两个字必须变成具体名字：`scene.name` 是最近说话那个的准确名字，
+       * 别的会话从会话表的 title 取；再取不到就退到 chatId 短码——
+       * 显示短码也比显示「本群」强，至少能和「会话」页对上。
+       */
+      const nameOf = (c) => c?.title || (c?.chatId ? c.chatId.slice(0, 10) : '')
+      const sceneName = nameOf(scene) || (canChat ? String(mem.chatId).slice(0, 10) : '')
+      const sceneKind = scene?.kind === 'c2c' ? '私聊' : scene?.kind === 'group' ? '群' : scene?.kind || '会话'
 
       const doSearch = async () => {
         const term = q.trim()
@@ -680,6 +1192,37 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', null,
+        /**
+         * 先回答「本群是哪个群」。
+         *
+         * 之前这一页的「本群」其实是 `lastScene.chatId || ''`——你没得选，
+         * 也不告诉你是哪个；一个会话都没进来时它甚至是空串那层，
+         * 写进去等于没写。所以选择器放在最上面，标题就用真名。
+         */
+        h('div', { className: 'roost-banner', style: { marginTop: 0 } },
+          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
+            h('b', { style: { flexShrink: 0 } }, canChat ? `${sceneKind}：${sceneName}` : '还没有会话'),
+            canChat ? h(Pill, null, String(mem.chatId).slice(0, 10)) : null,
+            chats.length > 1
+              ? h('select', {
+                  className: 'roost-input',
+                  value: mem.chatId || '',
+                  onChange: (e) => { setHits(null); onPickChat?.(e.target.value) },
+                  style: { flex: 1, minWidth: 170, marginLeft: 'auto' },
+                  'aria-label': '看哪个会话的记忆',
+                },
+                  chats.map((c) =>
+                    h('option', { key: c.chatId, value: c.chatId },
+                      `${nameOf(c)}${c.chatId === mem.chatId ? '（正在看）' : ''}`),
+                  ),
+                )
+              : null,
+          ),
+          h('i', null, canChat
+            ? '下面「本群特有」说的就是这个会话。切到别的会话，日记和关系跟着一起换。'
+            : '还没有任何群或私聊说过话，所以没有「本群」可看——先聊一句，或者只看跨群事实。'),
+        ),
+
         /* ── 第一层：事实 ── */
         h(Sec, { n: '01', title: '事实', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
@@ -708,7 +1251,7 @@ window.__ModuleLoader__.load({
 
           h('div', { style: { marginBottom: 10 } },
             h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 4 } },
-              canChat ? '本群特有' : '本群特有（还没有活跃会话，先聊一句才会有）'),
+              canChat ? `本群特有 · ${sceneName}` : '本群特有（还没有活跃会话，先聊一句才会有）'),
             (mem?.chat || []).length
               ? h('div', { className: 'roost-list' },
                   mem.chat.map((f, i) =>
@@ -740,7 +1283,7 @@ window.__ModuleLoader__.load({
               style: { width: 92, flex: '0 0 92px' },
             },
               h('option', { value: 'global' }, '跨群'),
-              h('option', { value: 'chat' }, '本群'),
+              h('option', { value: 'chat', disabled: !canChat }, '本群'),
             ),
             h('button', { type: 'button', className: 'roost-primary', onClick: doAdd }, '记下'),
           ),
@@ -923,8 +1466,20 @@ window.__ModuleLoader__.load({
       function doAdd() {
         const text = fact.trim()
         if (!text) return
-        post('/memory/add', { fact: text, scope, chatId: mem?.chatId || '' }).then((r) => {
-          toast(r.ok === false ? (r.message || '没记上') : '记下了')
+        /**
+         * 没有会话时选「本群」= 写进空 chatId 那层。
+         * 后端 `memory.add` 拿不到 chatId 会返回 false，但接口照样回 ok，
+         * 于是界面提示「记下了」、实际什么都没存（0.8.1 修过同一个坑）。
+         * 这里先拦住，并且说清该记到哪。
+         */
+        if (scope === 'chat' && !canChat) {
+          toast('还没有会话进来，先记到「跨群」')
+          return
+        }
+        const body = { fact: text, scope }
+        if (scope === 'chat') body.chatId = mem.chatId
+        post('/memory/add', body).then((r) => {
+          toast(r.ok === false ? (r.message || '没记上') : scope === 'chat' ? '记进这个会话了' : '记进跨群了')
           if (r.ok !== false) { setFact(''); reload() }
         })
       }
@@ -1286,7 +1841,8 @@ window.__ModuleLoader__.load({
         let alive = true
         const load = async () => {
           const r = await get('/logs')
-          if (alive) setLogs(r.ok === false ? [] : r.logs || [])
+          // 路由返回的键是 entries；写成 r.logs 会永远是空列表（且不报错）
+          if (alive) setLogs(r.ok === false ? [] : r.entries || [])
         }
         load()
         const t = setInterval(load, 3000)
@@ -1314,13 +1870,45 @@ window.__ModuleLoader__.load({
 
     /* ---------------- 页面 ---------------- */
 
+    /** 页签顺序固定；「概览」永远第一个——它是首屏 */
+    const TABS = [
+      ['overview', '概览'],
+      ['setup', '接入'],
+      ['her', '她'],
+      ['memory', '记忆'],
+      ['awake', '醒着'],
+      ['context', '上下文'],
+      ['chats', '会话'],
+      ['config', '设置'],
+      ['logs', '日志'],
+    ]
+
     function RoostPage() {
       useStyle()
-      const [tab, setTab] = useState('overview')
+      /**
+       * 记住上次停在哪一页。
+       *
+       * 习惯上仪表盘会记位置：关掉再打开还回到刚才那页，
+       * 而不是每次都弹回概览让人重新点。localStorage 不可用时静默退回概览。
+       */
+      const [tab, setTabState] = useState(() => {
+        try {
+          const last = localStorage.getItem('roost.tab')
+          return TABS.some(([id]) => id === last) ? last : 'overview'
+        } catch {
+          return 'overview'
+        }
+      })
+      const setTab = useCallback((id) => {
+        setTabState(id)
+        try { localStorage.setItem('roost.tab', id) } catch {}
+      }, [])
       const [st, setSt] = useState(null)
       const [setupSt, setSetupSt] = useState(null)
       const [config, setConfig] = useState(null)
       const [mem, setMem] = useState(null)
+      /** 记忆页选中的会话；空串 = 跟随「最近说话的那个」 */
+      const [memPick, setMemPick] = useState('')
       const [mood, setMood] = useState(null)
       const [personas, setPersonas] = useState(null)
       const [stickers, setStickers] = useState(null)
@@ -1359,7 +1947,11 @@ window.__ModuleLoader__.load({
         setConfig(r.ok === false ? null : r.config)
       }, [])
 
-      const loadMemory = useCallback(async () => {
+      /**
+       * `pick` 是记忆页上选中的会话（空 = 跟随「最近说话的那个」）。
+       * 两个接口都带上它，否则切了会话看到的还是原来那个群的日记和图谱。
+       */
+      const loadMemory = useCallback(async (pick = memPick) => {
         /**
          * 两个接口一起拉，合并成一份。
          *
@@ -1368,7 +1960,8 @@ window.__ModuleLoader__.load({
          * 只读 `/memory` 的话"她改过什么主意"那块永远是空的——
          * 字段缺失不会报错，只会静默少一块内容，这种最容易漏。
          */
-        const [r, g] = await Promise.all([get('/memory'), get('/graph')])
+        const qs = pick ? '?chatId=' + encodeURIComponent(pick) : ''
+        const [r, g] = await Promise.all([get('/memory' + qs), get('/graph' + qs)])
         if (r.ok === false) {
           setMem(null)
           return
@@ -1380,7 +1973,13 @@ window.__ModuleLoader__.load({
             ...(g.ok === false ? {} : { stats: g.stats, entities: g.entities, edges: g.edges, ended: g.ended }),
           },
         })
-      }, [])
+      }, [memPick])
+
+      /** 切会话：记住选择，再拉一次（日记/图谱/授权都跟着换） */
+      const pickChat = useCallback(async (chatId) => {
+        setMemPick(chatId)
+        await loadMemory(chatId)
+      }, [loadMemory])
 
       const loadHer = useCallback(async () => {
         const [p, m, s] = await Promise.all([get('/personas'), get('/mood'), get('/stickers')])
@@ -1450,18 +2049,6 @@ window.__ModuleLoader__.load({
         return r
       }, [])
 
-      const TABS = [
-        ['overview', '概览'],
-        ['setup', '接入'],
-        ['her', '她'],
-        ['memory', '记忆'],
-        ['awake', '醒着'],
-        ['context', '上下文'],
-        ['chats', '会话'],
-        ['config', '设置'],
-        ['logs', '日志'],
-      ]
-
       return h('div', { className: 'roost-root', style: { padding: '18px 22px 40px', maxWidth: 860 } },
         h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
           h('div', { style: { fontSize: 17, fontWeight: 650, letterSpacing: '-0.01em' } }, 'Roost'),
@@ -1472,10 +2059,16 @@ window.__ModuleLoader__.load({
         ),
         h('div', { className: 'roost-note', style: { marginTop: 3 } }, 'QQ 消息从这里交给 DSH 会话回答。'),
 
-        h('div', { style: { display: 'flex', gap: 2, margin: '18px 0 16px', borderBottom: '1px solid var(--line-soft)', overflowX: 'auto' } },
+        h('div', {
+          role: 'tablist',
+          'aria-label': 'Roost 各页',
+          style: { display: 'flex', gap: 2, margin: '18px 0 16px', borderBottom: '1px solid var(--line-soft)', overflowX: 'auto' },
+        },
           TABS.map(([id, label]) =>
             h('button', {
               key: id, type: 'button', className: 'roost-tab',
+              role: 'tab',
+              'aria-selected': tab === id ? 'true' : 'false',
               'data-on': tab === id ? '1' : '0',
               onClick: () => setTab(id),
             }, label),
@@ -1485,8 +2078,8 @@ window.__ModuleLoader__.load({
         h('div', { className: 'roost-fade', key: tab },
           tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab }) : null,
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta }) : null,
-          tab === 'her' ? h(HerTab, { config, personas, mood, stickers, toast, save: saveCfg, reload: loadHer }) : null,
-          tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy }) : null,
+          tab === 'her' ? h(HerTab, { config, personas, mood, stickers, mem, setupSt, toast, save: saveCfg, reload: loadHer, quick }) : null,
+          tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat }) : null,
           tab === 'awake' ? h(AwakeTab, { aw, mem, sp, chats, toast, reload: loadAwake, reloadSp: loadAwake, busy }) : null,
           tab === 'context' ? h(ContextTab, { ctxInfo, mind, toast, reload: loadCtx, busy }) : null,
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
