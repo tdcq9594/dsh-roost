@@ -160,3 +160,38 @@ test('前端渲染：页签条不许设 overflow（会长出拖不动的竖向�
   assert.equal(style.overflowY, undefined)
   assert.equal(style.flexWrap, 'wrap', '窄窗口应该换行，而不是横向滚')
 })
+
+test('前端渲染：页头与页签在滚动区之外，只有正文滚', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'memory'
+  rt.reset()
+  const tree = expand(mod.RoostPage(), rt)
+
+  const kids = tree.props.children
+  const cls = (n) => (n && n.props && n.props.className) || ''
+  const head = kids.find((n) => cls(n).includes('roost-head'))
+  const body = kids.find((n) => cls(n).includes('roost-scroll-body'))
+  assert.ok(head, '缺 roost-head（页头 + 页签）')
+  assert.ok(body, '缺 roost-scroll-body（正文滚动区）')
+
+  // 页签必须在页头里，不能跟着正文滚走
+  let sawTablistInHead = false
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.role === 'tablist') sawTablistInHead = true
+    walk(n.props?.children)
+  })(head)
+  assert.ok(sawTablistInHead, '页签不在页头里，会跟着正文一起滚走')
+
+  // 正文区里不许再有页签（那会让页签被滚两次）
+  let tablistInBody = false
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.role === 'tablist') tablistInBody = true
+    walk(n.props?.children)
+  })(body)
+  assert.equal(tablistInBody, false, '页签不该出现在滚动区里')
+})

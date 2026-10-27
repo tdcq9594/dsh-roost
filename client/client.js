@@ -102,10 +102,12 @@ window.__ModuleLoader__.load({
        兜底用 color-mix(currentColor…)：令牌没了只是变淡，不会隐形。 */
     const CSS = `
 .roost-root{
+  display:flex;flex-direction:column;
+  /* 页头固定、正文滚：height:100% 撑满宿主给的槽位，
+     max-height:100vh 是兜底——万一外层没给确定高度，至少不会溢出到看不见 */
+  height:100%;max-height:100vh;min-height:0;overflow:hidden;
   color:var(--dsw-alias-label-primary, inherit);
   font-size:13px;line-height:1.62;
-  /* 自己不滚：整页交给 DSH 的外层容器滚，避免出现第二条滚动条 */
-  overflow:visible;
   --line:var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 22%, transparent));
   --line-soft:var(--dsw-alias-border-l1, color-mix(in srgb, currentColor 12%, transparent));
   --surface:var(--dsw-alias-bg-l1, color-mix(in srgb, currentColor 6%, transparent));
@@ -116,6 +118,18 @@ window.__ModuleLoader__.load({
   --bad:var(--dsw-alias-state-error-primary, #b42318);
   --accent:var(--dsw-alias-brand-primary, #2563eb);
 }
+/* 页头：标题 + 通道 + 页签，永远在、不参与滚动 */
+.roost-head{flex:0 0 auto;width:100%;max-width:860px;box-sizing:border-box;padding:18px 22px 0}
+/* 唯一的滚动区。滚动条要看得见、拖得动，但别太抢眼 */
+.roost-scroll-body{flex:1 1 auto;min-height:0;width:100%;max-width:860px;box-sizing:border-box;
+  padding:16px 22px 40px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+.roost-scroll-body::-webkit-scrollbar{width:10px}
+.roost-scroll-body::-webkit-scrollbar-track{background:transparent}
+.roost-scroll-body::-webkit-scrollbar-thumb{
+  background:color-mix(in srgb, currentColor 24%, transparent);
+  border-radius:6px;border:3px solid transparent;background-clip:content-box}
+.roost-scroll-body::-webkit-scrollbar-thumb:hover{
+  background:color-mix(in srgb, currentColor 42%, transparent);background-clip:content-box}
 .roost-dim{color:var(--dsw-alias-label-tertiary, inherit);opacity:.9}
 .roost-muted{color:var(--dsw-alias-label-secondary, inherit);opacity:.92}
 .roost-mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;word-break:break-all;color:var(--dsw-alias-label-secondary, inherit)}
@@ -2062,41 +2076,43 @@ window.__ModuleLoader__.load({
         return r
       }, [])
 
-      return h('div', { className: 'roost-root', style: { padding: '18px 22px 40px', maxWidth: 860 } },
-        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
-          h('div', { style: { fontSize: 17, fontWeight: 650, letterSpacing: '-0.01em' } }, 'Roost'),
-          st
-            ? h(Pill, { tone: st.listening ? 'ok' : 'bad' }, st.listening ? `:${st.actualPort || st.port}` : '端口没起')
-            : null,
-          ch?.current ? h(Pill, null, '通道 ' + ch.current) : null,
-        ),
-        h('div', { className: 'roost-note', style: { marginTop: 3 } }, 'QQ 消息从这里交给 DSH 会话回答。'),
+      /**
+       * 结构：**页头和页签固定，只有正文滚**。
+       *
+       * 上一版是整页一个大 div，滚动条跑到哪由 DSH 外层决定——结果是
+       * 页签行自己长了一条竖滚动条（还拖不动），而下面的正文没有滚动条、
+       * 长页面直接被切掉。仪表盘该有的样子正好相反：切换栏永远在，
+       * 内容在它下面滚。
+       */
+      return h('div', { className: 'roost-root' },
+        h('div', { className: 'roost-head' },
+          h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
+            h('div', { style: { fontSize: 17, fontWeight: 650, letterSpacing: '-0.01em' } }, 'Roost'),
+            st
+              ? h(Pill, { tone: st.listening ? 'ok' : 'bad' }, st.listening ? `:${st.actualPort || st.port}` : '端口没起')
+              : null,
+            ch?.current ? h(Pill, null, '通道 ' + ch.current) : null,
+          ),
+          h('div', { className: 'roost-note', style: { marginTop: 3 } }, 'QQ 消息从这里交给 DSH 会话回答。'),
 
-        /**
-         * 页签条不设 `overflow`。
-         *
-         * 之前写的是 `overflowX:'auto'`——CSS 规定：一轴非 visible 时，另一轴的
-         * `visible` 会被算成 `auto`，于是这条**只有一行高**的页签条凭空长出一条
-         * 竖向滚动条（就是那个"拖不动的进度条"）。九页在 860px 内本来放得下，
-         * 窗口窄时换行比横向滚动更好找。
-         */
-        h('div', {
-          role: 'tablist',
-          'aria-label': 'Roost 各页',
-          style: { display: 'flex', gap: 2, flexWrap: 'wrap', margin: '18px 0 16px', borderBottom: '1px solid var(--line-soft)' },
-        },
-          TABS.map(([id, label]) =>
-            h('button', {
-              key: id, type: 'button', className: 'roost-tab',
-              role: 'tab',
+          h('div', {
+            role: 'tablist',
+            'aria-label': 'Roost 各页',
+            style: { display: 'flex', gap: 2, flexWrap: 'wrap', margin: '16px 0 0', borderBottom: '1px solid var(--line-soft)' },
+          },
+            TABS.map(([id, label]) =>
+              h('button', {
+                key: id, type: 'button', className: 'roost-tab',
+                role: 'tab',
               'aria-selected': tab === id ? 'true' : 'false',
               'data-on': tab === id ? '1' : '0',
               onClick: () => setTab(id),
             }, label),
           ),
+          ),
         ),
 
-        h('div', { className: 'roost-fade', key: tab },
+        h('div', { className: 'roost-scroll-body roost-fade', key: tab },
           tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab }) : null,
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta }) : null,
           tab === 'her' ? h(HerTab, { config, personas, mood, stickers, mem, setupSt, toast, save: saveCfg, reload: loadHer, quick }) : null,
