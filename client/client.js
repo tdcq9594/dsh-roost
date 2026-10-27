@@ -942,18 +942,31 @@ window.__ModuleLoader__.load({
       const c = mem?.chat || []
       const chatName = mem?.scene?.name || (mem?.scene?.kind === 'c2c' ? '当前私聊' : '本群')
 
+      /**
+       * 还没有任何会话进来时，chatId 是空串。
+       * 这时选「本处」写进去，后端 `memory.add` 会因为没 chatId 直接返回 false，
+       * 但接口照样回 ok——用户看到「记进这一处了」，其实什么都没存。
+       * 所以这里不让他选，也不让他发。
+       */
+      const canChat = Boolean(mem?.chatId)
+      const effScope = canChat ? scope : 'global'
+
       const add = async () => {
         const f = fact.trim()
         if (!f || saving) return
+        if (effScope === 'chat' && !canChat) {
+          toast('还没有会话进来，先记到「跨群」')
+          return
+        }
         setSaving(true)
-        const body = { fact: f, scope }
+        const body = { fact: f, scope: effScope }
         // 空 chatId 会被后端当成「就是这个会话」，宁可传对也不传空
-        if (scope === 'chat' && mem?.chatId) body.chatId = mem.chatId
+        if (effScope === 'chat' && mem?.chatId) body.chatId = mem.chatId
         const r = await post('/memory/add', body)
         setSaving(false)
         if (r.ok === false) return toast(r.message || '没记上')
         setFact('')
-        toast(scope === 'chat' ? '记进这一处了' : '记进跨群了')
+        toast(effScope === 'chat' ? '记进这一处了' : '记进跨群了')
         reload()
       }
 
@@ -1006,17 +1019,19 @@ window.__ModuleLoader__.load({
           }),
           h('select', {
             className: 'roost-input', style: { width: 84, flexShrink: 0 },
-            value: scope, onChange: (e) => setScope(e.target.value),
+            value: effScope, onChange: (e) => setScope(e.target.value),
             'aria-label': '记到哪一层',
           },
             h('option', { value: 'global' }, '跨群'),
-            h('option', { value: 'chat' }, '本处'),
+            h('option', { value: 'chat', disabled: !canChat }, '本处'),
           ),
           h('button', { className: 'roost-btn', disabled: !fact.trim() || saving, onClick: add },
             saving ? '记…' : '记住'),
         ),
         h('div', { className: 'roost-note' },
-          '在群里说「记住……」她也会自己记。删是按内容匹配的，两层一起删。'),
+          canChat
+            ? '在群里说「记住……」她也会自己记。删是按内容匹配的，两层一起删。'
+            : '还没有会话进来，只能先记「跨群」；等这个群说过话，「本处」才能选。'),
       )
     }
 
@@ -1091,7 +1106,8 @@ window.__ModuleLoader__.load({
 
           h(Row, { k: '人格' },
             h('div', { className: 'roost-v-h' },
-              h('span', { style: { fontWeight: 600 } }, curPersona ? curPersona.name : '没读到人格文件'),
+              h('span', { style: { fontWeight: 600 } },
+                curPersona ? curPersona.name : personas ? '没读到人格文件' : '读取中…'),
               personas && personas.personas.length > 1
                 ? h('button', { className: 'roost-link', onClick: () => setPickPersona((v) => !v) },
                     pickPersona ? '收起' : '换')
