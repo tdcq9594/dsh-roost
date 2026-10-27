@@ -106,6 +106,15 @@ window.__ModuleLoader__.load({
   /* 页头固定、正文滚：height:100% 撑满宿主给的槽位，
      max-height:100vh 是兜底——万一外层没给确定高度，至少不会溢出到看不见 */
   height:100%;max-height:100vh;min-height:0;overflow:hidden;
+  /**
+   * 自己画底色，不靠父亲的透明。
+   *
+   * 滚动容器在 Chromium 里是独立合成层，栅格化是**分块、异步**的：
+   * 某一块还没画完时露出的是**文档默认白底**。从录屏抽帧能看到典型表现——
+   * 切页瞬间左半边整块变白、右半边正常，而且是一闪一闪的。
+   * 只要这层自己有背景色，没画完的块也是深色，不会出现白板。
+   */
+  background:var(--dsw-alias-bg-base, #16181c);
   color:var(--dsw-alias-label-primary, inherit);
   font-size:13px;line-height:1.62;
   --line:var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 22%, transparent));
@@ -122,7 +131,9 @@ window.__ModuleLoader__.load({
 .roost-head{flex:0 0 auto;width:100%;max-width:860px;box-sizing:border-box;padding:18px 22px 0}
 /* 唯一的滚动区。滚动条要看得见、拖得动，但别太抢眼 */
 .roost-scroll-body{flex:1 1 auto;min-height:0;width:100%;max-width:860px;box-sizing:border-box;
-  padding:16px 22px 40px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+  padding:16px 22px 40px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;
+  /* 滚动元素本身也带一层底色：它的层先画，再画子内容 */
+  background:var(--dsw-alias-bg-base, #16181c)}
 .roost-scroll-body::-webkit-scrollbar{width:10px}
 .roost-scroll-body::-webkit-scrollbar-track{background:transparent}
 .roost-scroll-body::-webkit-scrollbar-thumb{
@@ -157,6 +168,12 @@ window.__ModuleLoader__.load({
 }
 .roost-input::placeholder{opacity:.5}
 .roost-input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+/* select 的原生弹层不跟深色主题走：--field 是半透明的（9% currentColor），
+   弹层里合成到系统白底上，再加 color:inherit（深色主题下是浅色字），
+   结果就是**选项文字隐形**——只能看见被系统高亮的那一条，其余是空白行。
+   弹层由系统绘制，拿不到我们的变量，必须给不透底的显式颜色。 */
+select.roost-input{color-scheme:dark}
+.roost-input option{background:#1c1d22;color:#e9eaee}
 .roost-tab{
   padding:8px 13px;border:none;border-bottom:2px solid transparent;background:transparent;
   color:inherit;opacity:.58;cursor:pointer;font:inherit;font-size:12.5px;margin-bottom:-1px;
@@ -213,6 +230,7 @@ window.__ModuleLoader__.load({
 .roost-body{flex:1;min-width:0;padding-top:2px}
 .roost-title{font-weight:600;font-size:13px}
 .roost-fade{animation:roost-in .22s cubic-bezier(.2,.8,.2,1)}
+@keyframes roost-in{from{opacity:0}to{opacity:1}}
 @keyframes roost-in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 
 .roost-pill{display:inline-flex;align-items:center;gap:5px;padding:1px 8px;border-radius:20px;font-size:11px;
@@ -231,6 +249,9 @@ window.__ModuleLoader__.load({
 .roost-item .t{flex:1;min-width:0;word-break:break-word}
 .roost-item .d{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary, inherit)}
 .roost-scroll{max-height:320px;overflow:auto}
+/* 人格行：左两行文字、右一排动作。窗口窄时优先保住名字 */
+.roost-persona{align-items:flex-start;padding:9px 0}
+.roost-acts{flex:0 0 auto;display:flex;gap:6px;align-items:center}
 
 /* ── 概览用的统计块与故障条 ── */
 .roost-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:9px}
@@ -274,24 +295,24 @@ window.__ModuleLoader__.load({
 .roost-fact-x:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 @media (hover:none){.roost-fact-x{opacity:.6}}
 /* 危险动作：默认低饱和红，二次确认后实心红——和普通按钮明确区分 */
-.roost-btn.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 35%,transparent)}
-.roost-btn.danger:hover:not(:disabled){background:color-mix(in srgb,var(--bad) 12%,transparent)}
+/* 危险动作：平时和普通按钮一样（列表里挂一排红框非常吵），点一下才变红 */
+.roost-btn.danger{color:inherit;border-color:var(--line)}
 .roost-btn.armed{background:var(--bad);border-color:var(--bad);color:#fff}
 .roost-link{border:none;background:transparent;color:var(--accent);font:inherit;font-size:11.5px;
   cursor:pointer;padding:0 2px;text-decoration:underline;text-underline-offset:2px}
 .roost-link:hover{filter:brightness(1.12)}
 
-/* 双向条：中轴线 + 游标，正负一眼看得出 */
-// 条形（只读读数，不是滑块：不给手柄，免得让人以为能拖）
-.roost-bar{position:relative;flex:1;height:8px;border-radius:4px;
+/* 条形（只读读数，不是滑块：不给手柄，免得让人以为能拖） */
+.roost-bar{display:flex;flex:1;height:8px;border-radius:4px;overflow:hidden;
   background:var(--dsw-alias-fill-l2, color-mix(in srgb, currentColor 13%, transparent));
   box-shadow:inset 0 0 0 1px var(--line-soft)}
-.roost-bar i{position:absolute;top:0;bottom:0;border-radius:4px;background:var(--accent);
-  transition:width .3s ease,left .3s ease}
-.roost-bar i.bi{background:var(--warn)}
-/* 双向条的中轴线：分清正负，本身就是信息 */
-.roost-bar-zone{position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;
-  background:var(--line);pointer-events:none}
+/* 双向条的中轴线：用渐变画，不额外放元素（少一个绝对定位的隐患） */
+.roost-bar.is-bi{
+  background-image:linear-gradient(90deg,transparent 49.6%,var(--line) 49.6%,var(--line) 50.4%,transparent 50.4%)}
+.roost-bar i{display:block;height:100%;border-radius:4px;background:var(--accent)}
+/* 条形不做过渡：这是读数，不是会连续变化的控件；
+   过渡会在数据落地那一下给元素提层，紧接着又整页重排，白白多一轮重绘 */
+.roost-bar.is-bi i{background:var(--warn)}
 `
 
     function useStyle() {
@@ -336,24 +357,27 @@ window.__ModuleLoader__.load({
      * 之前画了个竖向游标，看起来像能拖，实际拖不动——暗示错了比没画更糟。
      * 双向那条保留中轴线，正负一眼看得出就够了。
      */
+    /**
+     * 条形：单向从左往右，双向从中线往两边长。**只读**，不给手柄、不能拖。
+     *
+     * 刻意不用绝对定位：填充条用 margin-left + width 排在正常流里。
+     * 之前是 `i{position:absolute;top:0;bottom:0}` + `.roost-bar{position:relative}`，
+     * 一旦 `.roost-bar` 那条规则失效（这次是 CSS 里混进了 JS 的 `//` 注释，
+     * 把它粘成非法选择器），填充条就脱离父容器、按视口铺满整页——
+     * 而且它本身可点，会把下面所有按钮的点击全吃掉。
+     * 正常流里最坏只是条画歪，不会变成盖住半屏的挡板。
+     */
     const Bar = ({ v, bi }) => {
       const val = Math.max(-1, Math.min(1, Number(v) || 0))
       const pct = bi ? Math.round(((val + 1) / 2) * 100) : Math.round(Math.max(0, val) * 100)
-      if (bi) {
-        const w = Math.abs(val) * 50
-        return h('div', {
-          className: 'roost-bar', role: 'img', 'aria-label': `${pct}%`,
-          title: `${pct}%（只读，情绪由她自己变）`,
-        },
-          h('span', { className: 'roost-bar-zone' }),
-          h('i', { className: 'bi', style: { left: val >= 0 ? '50%' : 50 - w + '%', width: w + '%' } }),
-        )
-      }
-      const w = Math.max(0, Math.min(1, val)) * 100
+      const w = bi ? Math.abs(val) * 50 : Math.max(0, val) * 100
+      const left = bi ? (val >= 0 ? 50 : 50 - w) : 0
       return h('div', {
-        className: 'roost-bar', role: 'img', 'aria-label': `${pct}%`,
-        title: `${pct}%（只读）`,
-      }, h('i', { style: { left: '0%', width: w + '%' } }))
+        className: 'roost-bar' + (bi ? ' is-bi' : ''),
+        role: 'img',
+        'aria-label': `${pct}%`,
+        title: `${pct}%（只读，情绪由她自己变）`,
+      }, h('i', { style: { marginLeft: left + '%', width: w + '%' } }))
     }
 
     /** 情绪三项的读法：数字是内部量，人看的是词 */
@@ -487,6 +511,9 @@ window.__ModuleLoader__.load({
       /**
        * 接入进度用**真实字段**推，不再靠一个后端不存在的 `steps`。
        * 五点全部来自 `/setup`：装好 → 有机器人 → 在跑 → 插件装了 → 已指向我们。
+       *
+       * **不包含「主人」**——主人是「谁能指挥她」，不是「链路通不通」。
+       * 没设主人也能正常聊天，所以它不进这个进度条，在「接入」页单独一步。
        */
       const s = setupSt || {}
       const checks = [
@@ -552,7 +579,27 @@ window.__ModuleLoader__.load({
               ),
         ),
 
-        h(Sec, { n: '03', title: '端口对得上吗' },
+        h(Sec, { n: '03', title: '快捷',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } }, '自测不经过 QQ') },
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            h('button', { type: 'button', className: 'roost-primary', disabled: busy, onClick: selftest },
+              busy ? '跑着…' : '跑一次自测'),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: async () => {
+                // 现读一次，别用可能过期的 setupSt（Roost 刚起来时它是旧的）
+                const r = await get('/setup/webui')
+                const url = r.ok !== false ? r.url : ''
+                if (url || s.webui) window.open(url || s.webui, '_blank', 'noopener')
+                else toast('还没装好 Roost，没有面板可开')
+              },
+            }, '打开 Roost 面板 ↗'),
+          ),
+          h('div', { className: 'roost-note' },
+            '自测直接跑一轮 DSH 对话，验「会话建得起来、AI 回得来」；QQ 那一段不在里面。'),
+        ),
+
+        h(Sec, { n: '04', title: '端口对得上吗' },
           h('div', { className: 'roost-list' },
             [
               ['dsh-roost 实际监听', portCell(st) || '—', 'ai-chat 要往这里推'],
@@ -576,26 +623,6 @@ window.__ModuleLoader__.load({
               : h('div', { className: 'roost-note', style: { color: 'var(--bad)' } },
                   `✗ 对不上：ai-chat 指向 ${gotUrl}，我们监听 ${wantUrl}。消息推到没人听的端口上，去「接入」第 5 步重新写一次。`)
           })(),
-        ),
-
-        h(Sec, { n: '04', title: '快捷',
-          right: h('span', { className: 'roost-note', style: { margin: 0 } }, '自测不经过 QQ') },
-          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-            h('button', { type: 'button', className: 'roost-primary', disabled: busy, onClick: selftest },
-              busy ? '跑着…' : '跑一次自测'),
-            h('button', {
-              type: 'button', className: 'roost-btn',
-              onClick: async () => {
-                // 现读一次，别用可能过期的 setupSt（Roost 刚起来时它是旧的）
-                const r = await get('/setup/webui')
-                const url = r.ok !== false ? r.url : ''
-                if (url || s.webui) window.open(url || s.webui, '_blank', 'noopener')
-                else toast('还没装好 Roost，没有面板可开')
-              },
-            }, '打开 Roost 面板 ↗'),
-          ),
-          h('div', { className: 'roost-note' },
-            '自测直接跑一轮 DSH 对话，验「会话建得起来、AI 回得来」；QQ 那一段不在里面。'),
         ),
 
         h(Sec, { n: '05', title: '最近动态' },
@@ -753,6 +780,17 @@ window.__ModuleLoader__.load({
         plugin: s.pluginInstalled ? 'done' : s.running ? 'current' : 'todo',
         configure: s.pluginConfigured ? 'done' : s.pluginInstalled ? 'current' : 'todo',
         ready: s.pluginConfigured ? 'done' : 'todo',
+        /**
+         * 主人在 Roost 面板里设了没有。
+         *
+         * 这一步**只能在 Roost 面板里做**——面板里有「主人与群组」那块，
+         * 能加能删。dsh-roost 这边只读状态，不代劳：
+         * 主人是「谁能指挥这台机器」的根，不该由一个插件代写。
+         *
+         * Roost 都没装的时候别标 current——主人根本无从谈起，
+         * 让它跟着前头一起待着就行。
+         */
+        owner: s.ownersConfigured ? 'done' : s.installed ? 'current' : 'todo',
       }
 
       return h('div', null,
@@ -942,9 +980,32 @@ window.__ModuleLoader__.load({
               ? h('button', { type: 'button', className: 'roost-btn', onClick: () => window.open('https://q.qq.com', '_blank', 'noopener') }, '开放平台')
               : null,
           ),
+
+          /**
+           * 第七步：配置主人。**放在最后**——前面六步是「能跑起来」，
+           * 这一步是「谁能指挥它」，是跑起来之后才需要定的事。
+           *
+           * 主人只能在 **Roost 面板**里设（面板有「主人与群组」那块），
+           * 这里只读状态 + 给个跳转按钮，不代劳——
+           * 主人是「谁能指挥这台机器」的根，不该由插件代写。
+           */
+          h(Step, {
+            n: 7, state: mark.owner, title: '配置主人',
+            desc: s.ownersConfigured
+              ? `已设 ${s.ownerCount || 1} 个主人 —— 群友的话她只当聊天，主人才能指挥她动工具`
+              : '去 Roost 面板的「主人与群组」里把你自己设成主人，不然她只能聊天、不能动工具',
+          },
+            h('button', {
+              type: 'button',
+              className: 'roost-btn',
+              disabled: !s.webui,
+              onClick: () => window.open(s.webui || '', '_blank', 'noopener'),
+            }, s.ownersConfigured ? '打开面板看看' : '打开 Roost 面板设置'),
+          ),
         ),
 
-        h(Sec, { n: '07', title: '常见卡点' },
+        /* 接入这几步用的是圆圈编号，这里就不再编号了 —— 混用两套编号会读成"第 8 步" */
+        h(Sec, { title: '常见卡点' },
           h('ul', { className: 'roost-note', style: { margin: 0, paddingLeft: 18 } },
             h('li', null, `启动后马上退出：多半是 AppID / AppSecret 填错了，或端口 ${s.port || ''} 被占`),
             h('li', null, '群里没反应：开放平台没开「接收所有消息」，或机器人不在群里'),
@@ -965,6 +1026,20 @@ window.__ModuleLoader__.load({
       const [raw, setRaw] = useState('')
       const [newId, setNewId] = useState('')
       const [dirty, setDirty] = useState(false)
+      const [showNew, setShowNew] = useState(false)
+
+      /**
+       * 分节编号自己算，不写死。
+       *
+       * 之前每节把 '01' '02' 硬写在标题里，于是「编辑人格」那一节
+       * 平时是空的占位，编号却照样占着 02 —— 情绪就跳到 03 了，
+       * 看上去像少了一节。现在按实际渲染顺序编号，缺哪节后面自动跟上。
+       */
+      let _seq = 0
+      const sec = (title, extra, children) => {
+        _seq += 1
+        return h(Sec, Object.assign({ n: String(_seq).padStart(2, '0'), title }, extra || {}), children)
+      }
 
       /** 这一页说的是「当前这个会话里她是谁」，不是「全局默认是谁」 */
       const byChat = personas?.byChat || {}
@@ -983,37 +1058,57 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', null,
-        h(Sec, { n: '01', title: '人格' },
+        sec('人格', {
+          right: h('button', {
+            type: 'button', className: 'roost-btn',
+            onClick: () => setShowNew((v) => !v),
+          }, showNew ? '收起新建' : '新建'),
+        },
           h('div', { className: 'roost-list' },
-            (personas?.personas || []).map((p) =>
-              h('div', { key: p.id, className: 'roost-item' },
-                h('span', { className: 't' },
-                  h('span', { style: { fontWeight: p.id === curId ? 600 : 400 } }, p.name || p.id),
-                  p.id === curId ? h(Pill, { tone: 'ok' }, '正在用') : null,
-                  h('span', { className: 'd' }, ` ${p.chars} 字`),
-                  (p.tags || []).length ? h('span', { className: 'd' }, ' · ' + p.tags.join('/')) : null,
+            (personas?.personas || []).map((p) => {
+              const isCur = p.id === curId
+              const isDefault = p.id === 'default'
+              return h('div', { key: p.id, className: 'roost-item roost-persona' },
+                /**
+                 * 两行：名字一行、字数与标签一行。
+                 *
+                 * 之前全挤在一行，右侧还要放三个按钮——窗口一窄，名字就被压没了。
+                 * 「当前」也不再做成禁用按钮（禁用态看着像坏了），改用标签。
+                 */
+                h('div', { className: 't' },
+                  h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+                    h('span', { style: { fontWeight: isCur ? 650 : 500 } }, p.name || p.id),
+                    isCur ? h(Pill, { tone: 'ok' }, '正在用') : null,
+                  ),
+                  h('div', { className: 'roost-note', style: { marginTop: 1 } },
+                    `${p.chars ?? 0} 字` + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')),
                 ),
-                h('button', {
-                  type: 'button', className: 'roost-btn', disabled: p.id === curId,
-                  onClick: async () => {
-                    const r = await save({ persona: { current: p.id } })
-                    toast(r.ok === false ? '没换成' : '换好了')
-                  },
-                }, p.id === curId ? '当前' : '用这个'),
-                h('button', { type: 'button', className: 'roost-btn', onClick: () => openPersona(p.id) }, '编辑'),
-                p.id === 'default'
-                  ? null
-                  : h(ConfirmLink, {
-                      label: '删', confirmLabel: '确认删除',
-                      onConfirm: async () => {
-                        const r = await post('/personas/remove', { id: p.id })
-                        toast(r.ok === false ? (r.message || '没删掉') : '删了')
-                        if (editId === p.id) { setEditId(''); setRaw('') }
-                        reload()
-                      },
-                    }),
-              ),
-            ),
+                h('div', { className: 'roost-acts' },
+                  isCur
+                    ? null
+                    : h('button', {
+                        type: 'button', className: 'roost-btn',
+                        onClick: async () => {
+                          const r = await save({ persona: { current: p.id } })
+                          toast(r.ok === false ? (r.message || '没换成') : '换好了')
+                          reload()
+                        },
+                      }, '用这个'),
+                  h('button', { type: 'button', className: 'roost-btn', onClick: () => openPersona(p.id) }, '编辑'),
+                  isDefault
+                    ? null
+                    : h(ConfirmLink, {
+                        label: '删除', confirmLabel: '确认删除',
+                        onConfirm: async () => {
+                          const r = await post('/personas/remove', { id: p.id })
+                          toast(r.ok === false ? (r.message || '没删掉') : '删了')
+                          if (editId === p.id) { setEditId(''); setRaw('') }
+                          reload()
+                        },
+                      }),
+                ),
+              )
+            }),
             !(personas?.personas || []).length ? h('div', { className: 'roost-empty' }, '读不到人格列表') : null,
           ),
 
@@ -1027,7 +1122,7 @@ window.__ModuleLoader__.load({
           override
             ? h('div', { style: { marginTop: 12, display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' } },
                 h('div', { style: { flex: 1, minWidth: 0 } },
-                  h('div', { style: { fontSize: 12, fontWeight: 600 } }, '本群已被覆盖'),
+                  h('div', { style: { fontSize: 12, fontWeight: 600 } }, '本会话已被覆盖'),
                   h('div', { className: 'roost-note', style: { marginTop: 2 } },
                     override.slice(0, 60) + (override.length > 60 ? '…' : '')),
                 ),
@@ -1046,11 +1141,75 @@ window.__ModuleLoader__.load({
             '人格正文在 personas/*.md，这里改的是文件本身。'
             + (byChatCount ? `另有 ${byChatCount} 个会话单独指定了人格（在上面的「正在用」里会显示成那个）。` : '')
             + ' 模型自己用 <<persona:>> 写的覆盖优先级更高，出现在上面那一行。'),
+
+          /**
+           * 新建入口放在「人格」这一节里，而不是单开一节。
+           *
+           * 之前它单独占一节「编辑人格」，可那一节平时是空的（占位），
+           * 真正的编辑动作又发生在点开某一行之后——入口和动作被拆到两处。
+           * 现在：标题右边「新建」开输入框；点某行的「编辑」就地展开正文。
+           */
+          showNew
+            ? h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
+                h('input', {
+                  className: 'roost-input', placeholder: '新建一个：英文 id（如 lazycat）', value: newId,
+                  onChange: (e) => setNewId(e.target.value), style: { flex: 1 },
+                }),
+                h('button', {
+                  type: 'button', className: 'roost-primary',
+                  onClick: async () => {
+                    const id = newId.trim()
+                    if (!id) return toast('先给个 id')
+                    const seedText = `---\nname: ${id}\ntags: \n---\n\n（在这里写这个人格怎么说话）\n`
+                    const r = await post('/personas/save', { id, raw: seedText })
+                    if (r.ok === false) return toast(r.message || '没建成')
+                    setNewId('')
+                    setShowNew(false)
+                    toast('建好了，接着改正文')
+                    await reload()
+                    openPersona(id)
+                  },
+                }, '建'),
+                /**
+                 * 粘贴导入：把别人分享的人格 markdown 直接存成一个新人格。
+                 *
+                 * 配合上面的「复制这份」，两个人之间就能传人格了——
+                 * 不需要远端仓库，也不需要格式转换（本来就是 markdown）。
+                 */
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  onClick: async () => {
+                    const id = newId.trim()
+                    if (!id) return toast('先给个 id，再点粘贴导入')
+                    let text = ''
+                    try {
+                      text = await navigator.clipboard.readText()
+                    } catch {
+                      return toast('读不到剪贴板，请允许读取或手动粘贴到编辑框')
+                    }
+                    if (!text.trim()) return toast('剪贴板是空的')
+                    const r = await post('/personas/save', { id, raw: text })
+                    if (r.ok === false) return toast(r.message || '没导入成功')
+                    setNewId('')
+                    setShowNew(false)
+                    toast('导入好了')
+                    await reload()
+                    openPersona(id)
+                  },
+                }, '粘贴导入'),
+              )
+            : null,
         ),
 
-        h(Sec, { n: '02', title: editId ? '编辑「' + editId + '」' : '编辑人格' },
-          editId
-            ? h('div', null,
+        /**
+         * 编辑区：**只在真的打开了某个人格时**才占一节。
+         *
+         * 之前无论有没有打开都渲染一节「编辑人格」，空的时候留一句
+         * 「点上面某一行的编辑读正文」——占位 + 指路，占了版面也占了编号。
+         */
+        editId
+          ? sec('编辑「' + editId + '」', null,
+              h('div', null,
                 h('textarea', {
                   className: 'roost-input',
                   style: { minHeight: 300, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 12, lineHeight: 1.7, resize: 'vertical' },
@@ -1067,36 +1226,34 @@ window.__ModuleLoader__.load({
                       if (r.ok !== false) { setDirty(false); reload() }
                     },
                   }, dirty ? '保存（有未保存改动）' : '保存'),
-                  h('button', { type: 'button', className: 'roost-btn', onClick: () => openPersona(editId) }, '放弃改动'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: () => { setEditId(''); setRaw(''); setDirty(false) },
+                  }, '放弃改动'),
+                  /**
+                   * 导出 = 把整份 markdown 复制出去。
+                   *
+                   * 这就是「人格仓库」的最小形态：人格本来就是一个 .md 文件，
+                   * 能复制就能分享，别人粘贴进去就能用——不需要先做一个远端服务。
+                   */
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: async () => {
+                      try {
+                        await navigator.clipboard.writeText(raw)
+                        toast('已复制，发给别人就能用')
+                      } catch {
+                        toast('复制不了，手动全选文本框吧')
+                      }
+                    },
+                  }, '复制这份'),
                   h('span', { className: 'roost-note', style: { margin: 0 } }, '文件头 --- 之间是 name/tags，下面是正文'),
                 ),
-              )
-            : h('div', null,
-                h('div', { className: 'roost-empty' }, '点上面某一行的「编辑」读正文。'),
-                h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
-                  h('input', {
-                    className: 'roost-input', placeholder: '新建一个：英文 id（如 lazycat）', value: newId,
-                    onChange: (e) => setNewId(e.target.value), style: { flex: 1 },
-                  }),
-                  h('button', {
-                    type: 'button', className: 'roost-primary',
-                    onClick: async () => {
-                      const id = newId.trim()
-                      if (!id) return toast('先给个 id')
-                      const seedText = `---\nname: ${id}\ntags: \n---\n\n（在这里写这个人格怎么说话）\n`
-                      const r = await post('/personas/save', { id, raw: seedText })
-                      if (r.ok === false) return toast(r.message || '没建成')
-                      setNewId('')
-                      toast('建好了，接着改正文')
-                      await reload()
-                      openPersona(id)
-                    },
-                  }, '新建'),
-                ),
               ),
-        ),
+            )
+          : null,
 
-        h(Sec, { n: '03', title: '此刻情绪' },
+        sec('此刻情绪', null,
           mood
             ? h('div', null,
                 h('div', { className: 'roost-mood' },
@@ -1134,7 +1291,7 @@ window.__ModuleLoader__.load({
             : h('div', { className: 'roost-empty' }, '读不到情绪——插件刚起来时会空几秒'),
         ),
 
-        h(Sec, { n: '04', title: '表情包',
+        sec('表情包', {
           right: h('div', { style: { display: 'flex', gap: 6 } },
             h('button', {
               type: 'button', className: 'roost-link',
@@ -1171,7 +1328,7 @@ window.__ModuleLoader__.load({
          * 音色是 ai-chat 的设置项，面板改不了——但「现在开没开」必须能看见，
          * 否则每次都要跨插件去翻配置才知道她为什么不发语音。
          */
-        h(Sec, { n: '05', title: '语音条' },
+        sec('语音条', null,
           setupSt?.pluginInstalled === false
             ? h('div', { className: 'roost-empty' }, 'ai-chat 还没装')
             : tts === undefined
@@ -1205,8 +1362,18 @@ window.__ModuleLoader__.load({
        * 「本群」两个字必须变成具体名字：`scene.name` 是最近说话那个的准确名字，
        * 别的会话从会话表的 title 取；再取不到就退到 chatId 短码——
        * 显示短码也比显示「本群」强，至少能和「会话」页对上。
+       *
+       * **名字后面必须带类型标签。**
+       * QQ 官方事件里没有群名（只有 openid），ai-chat 取不到群名就回退成
+       * 发消息那个人的昵称——于是群和私聊的 title 变成同一个人的名字。
+       * 光看名字分不出哪个是群，标上「群」「私聊」才分得开。
        */
-      const nameOf = (c) => c?.title || (c?.chatId ? c.chatId.slice(0, 10) : '')
+      const kindTag = (c) => (c?.kind === 'c2c' ? '私聊' : c?.kind === 'group' ? '群' : '')
+      const nameOf = (c) => {
+        const tag = kindTag(c)
+        const nm = c?.title || (c?.chatId ? c.chatId.slice(0, 10) : '')
+        return tag ? `${nm}（${tag}）` : nm
+      }
       const sceneName = nameOf(scene) || (canChat ? String(mem.chatId).slice(0, 10) : '')
       const sceneKind = scene?.kind === 'c2c' ? '私聊' : scene?.kind === 'group' ? '群' : scene?.kind || '会话'
 
@@ -1228,8 +1395,14 @@ window.__ModuleLoader__.load({
          */
         h('div', { className: 'roost-banner', style: { marginTop: 0 } },
           h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
-            h('b', { style: { flexShrink: 0 } }, canChat ? `${sceneKind}：${sceneName}` : '还没有会话'),
-            canChat ? h(Pill, null, String(mem.chatId).slice(0, 10)) : null,
+            /**
+             * 标题里已经带了「（群）」「（私聊）」，前面就不再写「群：」了。
+             *
+             * 那个短码徽章也去掉了——它和标题里的是同一个值
+             * （`chatId.slice(0,10)`），并排显示像两串不同的数字。
+             * 要看完整 openid 去「会话」页，那里有一整串。
+             */
+            h('b', { style: { flexShrink: 0 } }, canChat ? sceneName : '还没有会话'),
             chats.length > 1
               ? h('select', {
                   className: 'roost-input',
@@ -1246,14 +1419,14 @@ window.__ModuleLoader__.load({
               : null,
           ),
           h('i', null, canChat
-            ? '下面「本群特有」说的就是这个会话。切到别的会话，日记和关系跟着一起换。'
-            : '还没有任何群或私聊说过话，所以没有「本群」可看——先聊一句，或者只看跨群事实。'),
+            ? '下面「本会话特有」说的就是这个会话。切到别的会话，日记和关系跟着一起换。'
+            : '还没有任何群或私聊说过话，所以没有「本会话」可看——先聊一句，或者只看跨群事实。'),
         ),
 
         /* ── 第一层：事实 ── */
         h(Sec, { n: '01', title: '事实', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-            '跨群的事实她带去任何会话；本群特有的只在这个群提。串场就是从这条线漏出去的，所以要分开看。'),
+            '跨群的事实她带去任何会话；本会话特有的只在这个会话提。串场就是从这条线漏出去的，所以要分开看。'),
 
           h('div', { style: { marginBottom: 10 } },
             h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 4 } }, '通用（跨群）'),
@@ -1278,7 +1451,14 @@ window.__ModuleLoader__.load({
 
           h('div', { style: { marginBottom: 10 } },
             h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 4 } },
-              canChat ? `本群特有 · ${sceneName}` : '本群特有（还没有活跃会话，先聊一句才会有）'),
+              /**
+               * 「本群特有」改成「本会话特有」。
+               *
+               * 这个会话可能是私聊——说「本群」就不准了。
+               * 而且标题区已经把「（群）」「（私聊）」标出来了，这里再写一遍
+               * 「群」会和上面的标签打架。
+               */
+              canChat ? `本会话特有 · ${sceneName}` : '本会话特有（还没有活跃会话，先聊一句才会有）'),
             (mem?.chat || []).length
               ? h('div', { className: 'roost-list' },
                   mem.chat.map((f, i) =>
@@ -1310,7 +1490,7 @@ window.__ModuleLoader__.load({
               style: { width: 92, flex: '0 0 92px' },
             },
               h('option', { value: 'global' }, '跨群'),
-              h('option', { value: 'chat', disabled: !canChat }, '本群'),
+              h('option', { value: 'chat', disabled: !canChat }, '本会话'),
             ),
             h('button', { type: 'button', className: 'roost-primary', onClick: doAdd }, '记下'),
           ),
@@ -1444,13 +1624,39 @@ window.__ModuleLoader__.load({
               ),
         ),
 
+        /**
+         * 一次性迁移：记忆以前放在 ai-chat 的 storage 里，4.0 之后搬到这里。
+         *
+         * 原来它塞在「清空与迁移」那节里，跟「清空本群记忆」这种不可逆的
+         * 危险操作摆在一起——一个是加法一个是减法，混在一处容易误点。
+         * 现在单开一节放在危险区之前，并且默认折叠。
+         */
+        h(Sec, { n: '04', title: '从旧版导入' },
+          h('details', null,
+            h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer' } },
+              '只有从 ai-chat 4.0 之前升级上来的才用得上'),
+            h('div', { style: { marginTop: 8 } },
+              h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+                '记忆以前存在 ai-chat 的 storage 里。这条会把那份搬过来，重复点不会重复导。'),
+              h('button', {
+                type: 'button', className: 'roost-btn',
+                onClick: async () => {
+                  const r = await post('/memory/import', {})
+                  toast(r.ok === false ? (r.message || '没导成') : `导进来 ${r.imported ?? 0} 条`)
+                  reload()
+                },
+              }, '导入旧版记忆'),
+            ),
+          ),
+        ),
+
         /* 危险区放最后 */
-        h(Sec, { n: '04', title: '清空与迁移' },
+        h(Sec, { n: '05', title: '清空' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '清空会同时抹掉事实和日记正文（行还留着，时间线不断），不可恢复。'),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h(ConfirmLink, {
-              label: '清空本群记忆', confirmLabel: '确认清空本群',
+              label: '清空本会话记忆', confirmLabel: '确认清空本会话',
               onConfirm: async () => {
                 const r = await quick('memory.clear')
                 toast(r.message || '清了')
@@ -1465,27 +1671,6 @@ window.__ModuleLoader__.load({
                 reload()
               },
             }),
-          ),
-          /**
-           * 一次性迁移：记忆以前放在 ai-chat 的 storage 里，4.0 之后搬到这里。
-           * 幂等（重复导不会重复），所以留着入口没有副作用；
-           * 但**默认折叠**——它不属于日常操作，摆在台面上会让人以为每次都要点。
-           */
-          h('details', { style: { marginTop: 14 } },
-            h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer' } },
-              '从旧版导入（只有从 ai-chat 4.0 之前升级上来的才用得上）'),
-            h('div', { style: { marginTop: 8 } },
-              h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-                '记忆以前存在 ai-chat 的 storage 里。这条会把那份搬过来，重复点不会重复导。'),
-              h('button', {
-                type: 'button', className: 'roost-btn',
-                onClick: async () => {
-                  const r = await post('/memory/import', {})
-                  toast(r.ok === false ? (r.message || '没导成') : `导进来 ${r.imported ?? 0} 条`)
-                  reload()
-                },
-              }, '导入旧版记忆'),
-            ),
           ),
         ),
       )
@@ -1547,19 +1732,22 @@ window.__ModuleLoader__.load({
                   : '现在没有值得开口的理由 —— 这是正常的，不是坏了。'),
           h('div', { className: 'roost-note' },
             `清醒时段 ${cfg.awakeFrom ?? 8}–${cfg.awakeTo ?? 23} 点 · 沉默超过 ${cfg.missAfterHours ?? 6} 小时算「想你」 · 随性每天最多 ${cfg.casualPerDay ?? 1} 次`),
-        ),
 
-        h(Sec, { n: '02', title: '上次的决定' },
-          aw?.lastKind
-            ? h('div', null,
-                h(Row, { k: '机会' }, aw.lastKind === 'agreement' ? '约定' : aw.lastKind === 'miss' ? '想你' : '随性'),
-                h(Row, { k: '理由' }, aw.lastWhy || '—'),
-              )
-            : h('div', { className: 'roost-empty' }, '还没醒过'),
+          /**
+           * 「上次的决定」原来是独立一节，但只有两行读数，
+           * 而且它讲的还是上一轮的机会——和上面那节是同一件事，
+           * 拆开反而把「机会 → 排期」的因果链切断了。
+           * 现在并到这一节底部，当成「上一轮的结果」。
+           */
+          h('div', { className: 'roost-note', style: { marginTop: 6 } },
+            aw?.lastKind
+              ? '上一轮：' + (aw.lastKind === 'agreement' ? '约定' : aw.lastKind === 'miss' ? '想你' : '随性')
+                + (aw.lastWhy ? '（' + aw.lastWhy + '）' : '')
+              : '上一轮：还没醒过。'),
         ),
 
         /* 私聊排期：speakup.js 管"什么时候轮到她"，awake 只管"要不要说" */
-        h(Sec, { n: '03', title: '私聊排期', right: h('button', { type: 'button', className: 'roost-btn', onClick: reloadSp }, '刷新') },
+        h(Sec, { n: '02', title: '私聊排期', right: h('button', { type: 'button', className: 'roost-btn', onClick: reloadSp }, '刷新') },
           h(Row, { k: '下次' }, state.nextAt ? ago(state.nextAt).replace('前', '后') : '还没排'),
           h(Row, { k: '今天' }, `${state.day && state.day === new Date().toDateString() ? state.todayCount : 0} / ${spCfg.maxPerDay ?? 3} 次`),
           h(Row, { k: '上次' },
@@ -1581,7 +1769,7 @@ window.__ModuleLoader__.load({
             '间隔随机、免打扰、每日上限都在这里管；「要不要说」交给上面的机会判断。'),
         ),
 
-        h(Sec, { n: '04', title: '群聊主动（默认全关）' },
+        h(Sec, { n: '03', title: '群聊主动（默认全关）' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '群里主动说话极易被踢。四道门全过才会说：白名单显式开 → 有 group_push 授权 → 不在静默时段 → 当天没到上限且真冷场。'),
           groups.length
@@ -1644,7 +1832,7 @@ window.__ModuleLoader__.load({
           ),
         ),
 
-        h(Sec, { n: '05', title: '现在试一次' },
+        h(Sec, { n: '04', title: '现在试一次' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '私聊直接问一次要不要说；群里跑一遍四道门。真发出去会出现在 QQ 上。'),
           h('div', { style: { display: 'flex', gap: 8 } },
@@ -1797,7 +1985,8 @@ window.__ModuleLoader__.load({
       ['stickers', '表情包', '图放哪、要不要注入'],
       ['permissions', '权限', '主人/管理员/成员各能用什么工具'],
       ['channel', '通道', '当前用哪个通道'],
-      ['chat', '会话', '一轮最多等多久'],
+      ['chat', '会话', '一轮最多等多久；上游 502/429 时的补重试（attempts 是「补几次」，budgetSec 是整轮总预算）'],
+      ['workspace', '工作区', '机器人会话挂哪个工作区：dir 留空单开、__default__ 用默认'],
       ['server', '服务', '端口与密钥'],
       ['setup', '接入', '装在哪、用哪种接入方式'],
     ]
@@ -1828,21 +2017,7 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', null,
-        h(Sec, { n: '01', title: '这一段是干什么的' },
-          h('div', { className: 'roost-list' },
-            JSON_SECTIONS.map(([k, label, desc]) =>
-              h('div', { key: k, className: 'roost-item' },
-                h('span', { className: 't' },
-                  h('span', { className: 'roost-code', style: { cursor: 'pointer' }, onClick: () => toast('在下面的配置全文里搜 «' + k + '»') }, k),
-                  ' ',
-                  h('span', null, label),
-                  h('span', { className: 'd' }, ' · ' + desc),
-                ),
-              ),
-            ),
-          ),
-        ),
-        h(Sec, { n: '02', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
+        h(Sec, { n: '01', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
           h('button', { type: 'button', className: 'roost-btn', onClick: () => setDraft(JSON.stringify(config, null, 2)) }, '还原'),
           h('button', { type: 'button', className: 'roost-primary', onClick: doSave }, '保存'),
         ) },
@@ -1856,6 +2031,21 @@ window.__ModuleLoader__.load({
           }),
           h('div', { className: 'roost-note' },
             '密钥显示成 ******。原样提交回来不会覆盖真密钥，只有填了新的才会改。'),
+        ),
+
+        h(Sec, { n: '02', title: '各段是干什么的' },
+          h('div', { className: 'roost-list' },
+            JSON_SECTIONS.map(([k, label, desc]) =>
+              h('div', { key: k, className: 'roost-item' },
+                h('span', { className: 't' },
+                  h('span', { className: 'roost-code', style: { cursor: 'pointer' }, onClick: () => toast('在下面的配置全文里搜 «' + k + '»') }, k),
+                  ' ',
+                  h('span', null, label),
+                  h('span', { className: 'd' }, ' · ' + desc),
+                ),
+              ),
+            ),
+          ),
         ),
       )
     }
@@ -1936,9 +2126,14 @@ window.__ModuleLoader__.load({
       const [mem, setMem] = useState(null)
       /** 记忆页选中的会话；空串 = 跟随「最近说话的那个」 */
       const [memPick, setMemPick] = useState('')
-      const [mood, setMood] = useState(null)
-      const [personas, setPersonas] = useState(null)
-      const [stickers, setStickers] = useState(null)
+      /**
+       * 她页一次要三份数据，合成**一个** state。
+       *
+       * 原来三个独立 setState：接口回来时如果 React 没批处理，就是三次渲染、
+       * 三次整页重排。她页是唯一这样的页面（其余页最多两份，且多数是分开用），
+       * 所以「切到她页」更容易看到没画完的白块。
+       */
+      const [her, setHer] = useState(null)
       const [aw, setAw] = useState(null)
       const [sp, setSp] = useState(null)
       const [ctxInfo, setCtxInfo] = useState(null)
@@ -2010,9 +2205,12 @@ window.__ModuleLoader__.load({
 
       const loadHer = useCallback(async () => {
         const [p, m, s] = await Promise.all([get('/personas'), get('/mood'), get('/stickers')])
-        setPersonas(p.ok === false ? null : p)
-        setMood(m.ok === false ? null : m)
-        setStickers(s.ok === false ? null : s)
+        // 一次落地：三份数据合成一次 setState，只重排一次
+        setHer({
+          personas: p.ok === false ? null : p,
+          mood: m.ok === false ? null : m,
+          stickers: s.ok === false ? null : s,
+        })
       }, [])
 
       const loadAwake = useCallback(async () => {
@@ -2115,7 +2313,15 @@ window.__ModuleLoader__.load({
         h('div', { className: 'roost-scroll-body roost-fade', key: tab },
           tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab }) : null,
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta }) : null,
-          tab === 'her' ? h(HerTab, { config, personas, mood, stickers, mem, setupSt, toast, save: saveCfg, reload: loadHer, quick }) : null,
+          tab === 'her'
+            ? h(HerTab, {
+                config,
+                personas: her?.personas ?? null,
+                mood: her?.mood ?? null,
+                stickers: her?.stickers ?? null,
+                mem, setupSt, toast, save: saveCfg, reload: loadHer, quick,
+              })
+            : null,
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat }) : null,
           tab === 'awake' ? h(AwakeTab, { aw, mem, sp, chats, toast, reload: loadAwake, reloadSp: loadAwake, busy }) : null,
           tab === 'context' ? h(ContextTab, { ctxInfo, mind, toast, reload: loadCtx, busy }) : null,

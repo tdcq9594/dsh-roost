@@ -239,8 +239,20 @@ export function createCompact({
     if (!sid) return { tokens: null, projected: null, window: null, percent: null };
     try {
       const c = controllerOf();
-      const v = await c.projections({ sessionId: sid });
-      return readPressure(v);
+      /**
+       * `projections(request, signal)` 的第二个参数是**必填**的 AbortSignal。
+       * 只传 request 时，DSH 内部 `signal.throwIfAborted()` 读到 undefined，
+       * 抛 `Cannot read properties of undefined (reading 'aborted')`——
+       * 于是压缩每轮都报「读上下文占用失败」，永远拿不到压力、永远不压。
+       */
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), 5000);
+      try {
+        const v = await c.projections({ sessionId: sid }, ac.signal);
+        return readPressure(v);
+      } finally {
+        clearTimeout(t);
+      }
     } catch (e) {
       log(`读上下文占用失败（不影响对话）：${e?.message ?? e}`);
       return { tokens: null, projected: null, window: null, percent: null };

@@ -282,6 +282,16 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
      * 「还没起来」阶段用户最需要看到的反馈（填完 AppID 那一步要立刻变绿）。
      */
     let bots = [];
+    /**
+     * **主人设了没有。**
+     *
+     * `owners` 是**每个 bot 一份**（`config/bots/<id>.json`），不是全局的——
+     * 我一开始以为在 `config/bot.json` 里，找了半天。
+     *
+     * 面板上「主人与群组」那块改的就是这里，所以这个状态直接读磁盘最准。
+     * 任一 bot 有主人就算设了——用户装一个机器人就够用了。
+     */
+    let ownerCount = 0;
     try {
       const bd = join(dir, 'config', 'bots');
       if (existsSync(bd)) {
@@ -290,7 +300,14 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
           .map((f) => {
             try {
               const j = JSON.parse(readFileSync(join(bd, f), 'utf8'));
-              return { id: j.id || f.replace(/\.json$/, ''), name: j.name || '', appId: j.appId || '' };
+              const owners = Array.isArray(j.owners) ? j.owners : [];
+              ownerCount += owners.length;
+              return {
+                id: j.id || f.replace(/\.json$/, ''),
+                name: j.name || '',
+                appId: j.appId || '',
+                ownerCount: owners.length,
+              };
             } catch {
               return null;
             }
@@ -345,6 +362,9 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       webui: webuiUrl(),
       bots,
       hasBot: bots.length > 0,
+      /** 主人在 Roost 面板里设了没有（读 config/bots/<id>.json 的 owners） */
+      ownersConfigured: ownerCount > 0,
+      ownerCount,
       pluginInstalled,
       pluginConfigured: configured,
       pluginConfig: pluginConfig

@@ -87,7 +87,13 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf }) {
     },
     output: {
       schema: { type: 'object' },
-      render: () => '',
+      /**
+       * render 必须返回**内容块数组**（`[{type:'text',text:...}]`），
+       * 不能返回字符串——DSH 拿到结果会对 content 调 `.some()`，
+       * 字符串没有这个方法，直接炸成 `content.some is not a function`，
+       * 模型看到的就是「接口报错了」。真实事故：0.9.x 两轮检索全挂在这。
+       */
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },
     async execute({ query, scope } = {}) {
       const q = String(query || '').trim();
@@ -137,7 +143,8 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf }) {
     },
     output: {
       schema: { type: 'object' },
-      render: () => '',
+      /** 同 memory_search：必须是内容块数组，字符串会让 DSH 的 content.some 炸掉 */
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },
     async execute({ text, level } = {}) {
       /**

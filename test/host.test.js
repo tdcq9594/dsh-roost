@@ -326,6 +326,42 @@ test('一键：空目录检测出「什么都没装」', async () => {
   assert.equal(st.hasBot, false);
   assert.equal(st.pluginInstalled, false);
   assert.equal(st.pluginConfigured, false);
+  assert.equal(st.ownersConfigured, false, '没装 Roost 就没有主人');
+});
+
+test('一键：bot 配置里写了 owners，检测就报主人已设', async () => {
+  const dir = tmp();
+  mkdirSync(join(dir, 'config', 'bots'), { recursive: true });
+  writeFileSync(join(dir, 'config', 'bot.json'), JSON.stringify({ webui: { port: 59999 } }), 'utf8');
+  // owners 是每个 bot 一份（config/bots/<id>.json），不是全局 bot.json
+  writeFileSync(
+    join(dir, 'config', 'bots', 'main.json'),
+    JSON.stringify({ name: '主', appId: 'x', owners: ['OPENID_A', 'OPENID_B'] }),
+    'utf8',
+  );
+
+  const s = createSetup({
+    cfgOf: () => ({ setup: { roostDir: dir, version: 'v0.8.1' }, server: { port: 17321 } }),
+    dataDir: dir,
+  });
+  const st = await s.detect();
+  assert.equal(st.ownersConfigured, true, 'owners 非空就该报已设');
+  assert.equal(st.ownerCount, 2);
+  assert.equal(st.bots[0].ownerCount, 2);
+});
+
+test('一键：owners 是空数组时不算已设', async () => {
+  const dir = tmp();
+  mkdirSync(join(dir, 'config', 'bots'), { recursive: true });
+  writeFileSync(join(dir, 'config', 'bot.json'), JSON.stringify({ webui: { port: 59999 } }), 'utf8');
+  writeFileSync(join(dir, 'config', 'bots', 'main.json'), JSON.stringify({ name: '主', appId: 'x', owners: [] }), 'utf8');
+
+  const s = createSetup({
+    cfgOf: () => ({ setup: { roostDir: dir, version: 'v0.8.1' }, server: { port: 17321 } }),
+    dataDir: dir,
+  });
+  const st = await s.detect();
+  assert.equal(st.ownersConfigured, false, 'owners 空 = 没设主人');
 });
 
 test('一键：写了机器人配置之后，检测立刻看得到', async () => {

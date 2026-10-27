@@ -195,3 +195,247 @@ test('前端渲染：页头与页签在滚动区之外，只有正文滚', () =>
   })(body)
   assert.equal(tablistInBody, false, '页签不该出现在滚动区里')
 })
+
+/**
+ * 她页：给了人格数据之后，每行的**名字**必须出现。
+ *
+ * 截图里那一列只剩右边三个按钮、左边一片空，我先按"名字没渲染"怀疑过——
+ * 用假数据真渲染一遍才确认名字是在的（那是被别的窗口盖住了）。
+ * 但「名字被右侧按钮挤没」是真会发生的，所以还是钉一条：
+ * 名字、字数、标签、正在用标签，四样都得在。
+ */
+test('前端渲染：她页人格列表显示名字/字数/标签', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'her'
+  rt.reset()
+
+  // 从渲染树里把 HerTab 那个元素拎出来，喂真实形状的数据再渲染一次
+  const raw = mod.RoostPage()
+  const body = raw.props.children.find((n) => String(n?.props?.className || '').includes('roost-scroll-body'))
+  const el = body.props.children.find(Boolean)
+  assert.equal(el.type.name, 'HerTab', '滚动区第一个组件应该就是 HerTab')
+
+  rt.reset()
+  const tree = expand(
+    el.type({
+      ...el.props,
+      personas: {
+        ok: true,
+        current: 'default',
+        byChat: { g1: 'lazycat' },
+        personas: [
+          { id: 'default', name: '小栖', tags: ['日常', '温和'], chars: 87 },
+          { id: 'lazycat', name: '懒猫', tags: ['懒'], chars: 120 },
+        ],
+      },
+      config: { persona: { current: 'default' } },
+      mem: { chatId: 'g1', personaOverride: '', authz: null },
+      mood: { valence: -0.3, energy: 0.2, sociability: 0.7, updatedAt: Date.now() },
+      stickers: { dir: 'C:/x/stickers', items: [] },
+      setupSt: { pluginInstalled: true, pluginConfig: { ttsVoice: '' } },
+      quick: () => {},
+      save: () => {},
+      reload: () => {},
+      toast: () => {},
+    }),
+    rt,
+  )
+
+  const txt = textOf(tree)
+  for (const must of ['小栖', '懒猫', '87 字', '日常 / 温和', '正在用', '用这个', '编辑']) {
+    assert.ok(txt.includes(must), `人格列表缺少「${must}」`)
+  }
+  // 默认人格不给删，别的给
+  assert.equal((txt.match(/删除/g) || []).length, 1, '只有非默认人格才应该出现删除')
+})
+
+/**
+ * 抽出某一页里所有分节的「编号 + 标题」。
+ *
+ * 分节在 DOM 上是 `div.roost-sec > div.roost-sec-h > span.roost-sec-n / span.roost-sec-t`。
+ */
+function sectionsOf(node) {
+  const out = []
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (String(n.props?.className || '').includes('roost-sec')) {
+      const h = n.props?.children
+      const head = Array.isArray(h) ? h.find((c) => String(c?.props?.className || '').includes('roost-sec-h')) : null
+      const kids = Array.isArray(head?.props?.children) ? head.props.children : []
+      const num = kids.find((c) => String(c?.props?.className || '').includes('roost-sec-n'))
+      const title = kids.find((c) => String(c?.props?.className || '').includes('roost-sec-t'))
+      out.push({ n: textOf(num), title: textOf(title) })
+      return
+    }
+    walk(n.props?.children)
+  })(node)
+  return out
+}
+
+/**
+ * 分节编号必须连号，且从 01 起。
+ *
+ * 之前编号是硬写在标题里的（`n: '03'`），于是删掉/合并一节之后，
+ * 后面全部错位——情绪跳到 03、中间空着一个 02，看着像少了一节。
+ * 现在编号按渲染顺序算，这条断言就是防止它再退回去。
+ */
+test('前端渲染：每页分节编号连号，从 01 起', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+
+  for (const tab of TABS) {
+    store['roost.tab'] = tab
+    rt.reset()
+    const tree = expand(mod.RoostPage(), rt)
+    const secs = sectionsOf(tree).filter((s) => s.n)
+    if (!secs.length) continue // 这一页本来就没编号节（接入页用 1–6 圆点向导）
+    secs.forEach((s, i) => {
+      assert.equal(s.n, String(i + 1).padStart(2, '0'),
+        `${tab} 页第 ${i + 1} 节编号应为 ${String(i + 1).padStart(2, '0')}，实际「${s.n} ${s.title}」`)
+    })
+  }
+})
+
+/**
+ * 不许有空占位节。
+ *
+ * 「编辑人格」那一节以前无论有没有打开都渲染，空的时候只留一句
+ * 「点上面某一行的编辑读正文」——占版面又占编号。
+ * 现在编辑区只在真的打开了某个人格时才出现。
+ */
+test('前端渲染：她页没有打开人格时不出现「编辑人格」占位节', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'her'
+  rt.reset()
+  const tree = expand(mod.RoostPage(), rt)
+  const titles = sectionsOf(tree).map((s) => s.title)
+  assert.ok(!titles.includes('编辑人格'), '「编辑人格」占位节还在')
+  assert.ok(titles.includes('人格'), '「人格」节没了')
+})
+
+/**
+ * 危险操作不能跟日常操作混在一节。
+ *
+ * 「从旧版导入」是加法（把老记忆搬进来），「清空」是减法（抹掉），
+ * 原来两者同处「清空与迁移」一节，容易误点。现在必须分开，
+ * 且清空在最后。
+ */
+test('前端渲染：记忆页把导入和清空分成两节，清空在最后', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'memory'
+  rt.reset()
+  const tree = expand(mod.RoostPage(), rt)
+  const titles = sectionsOf(tree).map((s) => s.title)
+  const iImp = titles.indexOf('从旧版导入')
+  const iClr = titles.indexOf('清空')
+  assert.ok(iImp >= 0, '没有独立的「从旧版导入」节')
+  assert.ok(iClr >= 0, '没有独立的「清空」节')
+  assert.ok(iImp < iClr, '清空（危险）应在导入（无害）之后')
+  assert.ok(!titles.some((t) => t.includes('清空与迁移')), '「清空与迁移」这种混装节还在')
+})
+
+/**
+ * 记忆页的会话下拉必须能分出「群」和「私聊」。
+ *
+ * QQ 官方事件里群名是空的（只有 openid），ai-chat 取不到群名就回退成
+ * 发消息那个人的昵称——于是群和私聊的 title 变成**同一个人名**。
+ * 不标类型的话，下拉里两行字一模一样，用户根本不知道自己在看哪个。
+ */
+test('前端渲染：会话下拉标出「群 / 私聊」，且标题旁不再重复短码', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'memory'
+  rt.reset()
+
+  const raw = mod.RoostPage()
+  const body = raw.props.children.find((n) => String(n?.props?.className || '').includes('roost-scroll-body'))
+  const el = body.props.children.find(Boolean)
+  assert.equal(el.type.name, 'MemoryTab', '滚动区第一个组件应该就是 MemoryTab')
+
+  rt.reset()
+  const tree = expand(
+    el.type({
+      ...el.props,
+      mem: {
+        chatId: 'g1',
+        chats: [
+          { chatId: 'g1', title: '倦飞之鸟', preset: 'roost-social', kind: 'group' },
+          { chatId: 'u1', title: '倦飞之鸟', preset: 'roost-private', kind: 'c2c' },
+        ],
+        scene: { chatId: 'g1', title: '倦飞之鸟', kind: 'group' },
+        global: [],
+        chat: [],
+        journal: null,
+        graph: null,
+      },
+      toast: () => {},
+      reload: () => {},
+      quick: () => {},
+      busy: false,
+      onPickChat: () => {},
+    }),
+    rt,
+  )
+
+  const txt = textOf(tree)
+  assert.ok(txt.includes('（群）'), '下拉里没有标出「群」')
+  assert.ok(txt.includes('（私聊）'), '下拉里没有标出「私聊」')
+  assert.ok(txt.includes('正在看'), '当前会话应有「正在看」标记')
+  // 标题旁那个短码徽章已经删了——它和标题里的是同一个值，并排像两串不同的数字
+  assert.ok(!txt.includes('g1'), '短码不该在正文里再出现一次（完整 openid 去会话页看）')
+})
+
+/**
+ * 样式表是**模板字符串**：里面出现反引号会直接截断 JS，出现 `${` 会被求值。
+ * 前者 `node --check` 能抓到，后者不会——它会安静地把样式变成一个奇怪的值。
+ * 今天就在 CSS 注释里写了反引号，整段样式被截断，语法检查当场报错。
+ */
+test('样式：CSS 里不许出现 ${（模板字符串插值）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const a = src.indexOf('const CSS = `') + 'const CSS = `'.length
+  const b = src.indexOf('`', a)
+  const css = src.slice(a, b)
+  assert.ok(css.length > 4000, '没提到样式表，锚点可能失效了')
+  assert.equal(css.includes('${'), false, 'CSS 里出现 ${ 会被求值，样式会坏')
+  assert.equal(css.includes('`'), false, 'CSS 里出现反引号会截断模板字符串')
+})
+
+/**
+ * CSS 里混进 JS 注释 → 整条规则被粘成非法选择器 → 规则静默失效。
+ *
+ * 这次的真实事故：写了 `// 条形（只读…）` 这一行，
+ * `.roost-bar{...}` 就被当成同一个选择器的一部分，`position:relative` 没了；
+ * 而它的绝对定位子元素 `i{position:absolute;top:0;bottom:0}` 仍然生效，
+ * 于是那根 8px 的填充条按**视口**铺满整页、还吃掉了所有点击。
+ * 语法检查、括号平衡检查都发现不了，只有渲染出来才看得见。
+ */
+test('样式：CSS 里不许出现 JS 风格的 // 注释', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const tag = 'const CSS = `'
+  const a = src.indexOf(tag) + tag.length
+  const css = src.slice(a, src.indexOf('`', a))
+  const bad = css
+    .split('\n')
+    .map((l, i) => [i + 1, l])
+    .filter(([, l]) => l.trim().startsWith('//'))
+  assert.deepEqual(bad, [], `CSS 里有 // 注释，会让下一条规则失效：${JSON.stringify(bad)}`)
+})
+
+test('样式：条形不能依赖绝对定位（父规则一失效就会铺满整页）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const tag = 'const CSS = `'
+  const a = src.indexOf(tag) + tag.length
+  const css = src.slice(a, src.indexOf('`', a))
+
+  assert.ok(css.includes('.roost-bar{'), '缺 .roost-bar 主规则')
+  const fill = css.match(/\.roost-bar i\{([^}]*)\}/)
+  assert.ok(fill, '缺 .roost-bar i 规则')
+  assert.equal(/position\s*:\s*absolute/.test(fill[1]), false, '填充条不许用绝对定位')
+})

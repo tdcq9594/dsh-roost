@@ -14,6 +14,7 @@
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
 import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { loadConfig, saveConfig, publicConfig, dataDir } from './config.js';
 import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
@@ -43,6 +44,18 @@ export const name = 'roost';
 export const inject = ['agents', 'sessions', 'systemPrompt', 'webServer'];
 
 const API = '/roost/api';
+
+/**
+ * 老会话没有 `kind` 字段，但有 preset。
+ *
+ * preset 是按群/私聊分的（roost-social 走群里的规则、roost-private 走私聊的），
+ * 所以它能反推出 kind——用来给存量会话补上标签，不至于下拉里还是分不清。
+ */
+function kindFromPreset(preset) {
+  if (preset === 'roost-social') return 'group';
+  if (preset === 'roost-private') return 'c2c';
+  return '';
+}
 
 function makeLogger(ctx) {
   const L = ctx.logger ?? console;
@@ -774,8 +787,36 @@ export function apply(ctx) {
     return c;
   }
 
-  /** 给 QQ 会话找个 DSH 工作区。没有登记过就取第一个 */
+  /**
+   * QQ 会话用的工作区 id。
+   *
+   * 默认给机器人**单开一个工作区**（`<数据目录>/workspace`），不和日常会话
+   * 混在默认工作区里。DSH 的 `workspaceController.create({ path })` 按目录
+   * 幂等建（已存在就返回原 id），所以这里可以每次都调、不用自己缓存。
+   *
+   * `workspace.dir` 三个取值：
+   *   · 空 / 未设 → <数据目录>/workspace
+   *   · `__default__` → 退回 DSH 默认工作区（老行为）
+   *   · 其它 → 就当作目录路径用
+   */
   async function workspaceId() {
+    const want = cfg.workspace?.dir ?? '';
+
+    if (want !== '__default__') {
+      const dir = want ? String(want) : join(dataDir(), 'workspace');
+      const wc = ctx.get('workspaceController');
+      if (wc?.create) {
+        try {
+          mkdirSync(dir, { recursive: true });
+          const r = await wc.create({ path: dir });
+          const id = r?.workspace?.workspaceId;
+          if (id) return id;
+        } catch (e) {
+          log.warn(`单开工作区失败（${e.message}），退回默认工作区`);
+        }
+      }
+    }
+
     const reg = ctx.get('workspaceRegistry');
     try {
       const list = (await reg?.list?.()) ?? [];
@@ -810,7 +851,7 @@ export function apply(ctx) {
     try {
       await controller().rename({ sessionId: newSid, title: `QQ · ${chat.name || chat.chatId}` });
     } catch {}
-    sessions.set(chat.chatId, newSid, { preset: chat.preset, title: chat.name });
+    sessions.set(chat.chatId, newSid, { preset: chat.preset, title: chat.name, kind: chat.kind });
     log.info(`为 ${chat.chatId} 新建 DSH 会话 ${newSid.slice(-8)}（${chat.preset}）`);
     return { agent: await resolveAgent(newSid), sessionId: newSid };
   }
@@ -1066,6 +1107,15 @@ export function apply(ctx) {
       // 有人来找，精力和社交意愿回升（不衰减的话会越聊越冷）
       mood.touched();
 
+      /**
+       * 顺手补老映射的标题。
+       *
+       * 早期版本 `sessions.set` 没传 `title`，那些会话在面板上一直显示
+       * openid 短码（私聊最明显——群还有群名兜着，私聊就只剩一串乱码）。
+       * 这里不新建映射、不改 sessionId，只把空字段补上。
+       */
+      sessions.patch(chat.chatId, { title: chat.name, kind: chat.kind, preset: chat.preset });
+
       // 场景快照：roost-scene 和 /mind 都读它
       lastScene = {
         at: Date.now(),
@@ -1249,7 +1299,18 @@ export function apply(ctx) {
         ok: false,
         error: e?.message ?? String(e),
       };
-      log.warn(`处理 ${chat.chatId.slice(0, 8)} 失败：${e?.message ?? e}`);
+      /**
+       * 日志里也别糊 JSON。
+       *
+       * 上游错误的原始 reason 是一坨 `{"kind":"error","error":{...}}`，
+       * 打出来占一行又看不懂。日志只留状态码和一句人话，
+       * 完整 reason 要看就去 DSH 自己的日志里查。
+       */
+      log.warn(
+        e?.kind === 'upstream'
+          ? `处理 ${chat.chatId.slice(0, 8)} 失败：模型服务不可用（${e.status || '?'}）`
+          : `处理 ${chat.chatId.slice(0, 8)} 失败：${e?.message ?? e}`,
+      );
 
       /**
        * **会话被归档了要自动恢复。**
@@ -1262,7 +1323,7 @@ export function apply(ctx) {
        */
       if (e?.kind === 'blocked') {
         try {
-          sessions.set(chat.chatId, '', { preset: chat.preset, title: chat.name });
+          sessions.set(chat.chatId, '', { preset: chat.preset, title: chat.name, kind: chat.kind });
           log.warn(`会话被归档或需要人工处理，已解绑 ${chat.chatId.slice(0, 8)}，下一条开新会话`);
         } catch {}
       }
@@ -1272,6 +1333,10 @@ export function apply(ctx) {
        *
        * 不回的话 ai-chat 那边会一直等到 180 秒超时，用户看到的是
        * 「宿主没回话」——比「这边出了点问题：xxx」难受得多。
+       *
+       * 话术按 kind 分：上游挂了要说「等会儿」，会话归档了要说「重说一遍」，
+       * 其余才报具体错。**不要把内部 JSON 原文糊到群里**——
+       * 用户看不懂「{"kind":"error","error":{...}}」，只会觉得机器人坏了。
        */
       const friendly =
         e?.kind === 'busy'
@@ -1280,7 +1345,9 @@ export function apply(ctx) {
             ? '想太久了，先算了。'
             : e?.kind === 'blocked'
               ? '这条对话在 DSH 里被归档了，我开个新的——再说一遍就行。'
-              : `这边出了点问题：${e?.message ?? e}`;
+              : e?.kind === 'upstream'
+                ? '模型服务那边暂时抽风了，等会儿再问我一次。'
+                : `这边出了点问题：${e?.message ?? e}`;
       await postReply(payload, friendly, true).catch((err) => log.warn(`回话失败：${err.message}`));
     } finally {
       // 工具权限和「谁在说话」都要还原，别串到下一轮
@@ -1343,6 +1410,54 @@ export function apply(ctx) {
       turns.dispose();
     };
   }, 'dsh-roost: 收消息服务');
+
+  /**
+   * 群成员进出：**记进日记**，不直接说话。
+   *
+   * 框架本来就会把非消息事件派给监听器（`bot.js` 里按事件名分发），
+   * 只是一直没人监听——所以这个订阅位是空的。
+   *
+   * 为什么只记不说：主动打招呼很容易变成骚扰，而且群里新人多的时候会刷屏。
+   * 记进日记后，觉醒（awake）在"有没有必要开口"时能看到它，
+   * 要不要打招呼由那一层按概率和授权决定。
+   */
+  ctx.effect(() => {
+    const offs = [];
+    const onMember = (kind) => async (d) => {
+      try {
+        const gid = String(d?.group_openid || '');
+        const openid = String(d?.member_openid || d?.op_member_openid || '');
+        if (!gid) return;
+        journal.add({
+          id: `evt-${kind}-${openid || 'x'}-${Date.now()}`,
+          at: Date.now(),
+          chatId: gid,
+          sender: openid,
+          role: 'system',
+          text: kind === 'add' ? '有新人入群' : '有人退群或被移出',
+          level: 'normal',
+          kind: 'event',
+        });
+      } catch (e) {
+        log.warn(`群成员事件记录失败：${e?.message ?? e}`);
+      }
+    };
+    try {
+      offs.push(ctx.on?.('GROUP_MEMBER_ADD', onMember('add')));
+      offs.push(ctx.on?.('GROUP_MEMBER_REMOVE', onMember('remove')));
+    } catch (e) {
+      log.warn(`订阅群成员事件失败：${e?.message ?? e}`);
+    }
+    return () => {
+      for (const off of offs) {
+        try {
+          off?.();
+        } catch {
+          /* 取消订阅失败无所谓 */
+        }
+      }
+    };
+  }, 'dsh-roost: 群成员事件');
 
   /* ---------------- 面板接口 ---------------- */
 
@@ -1515,8 +1630,17 @@ export function apply(ctx) {
               return send(res, 200, { ok: true, message: '通用记忆清空了' });
 
             case 'context.clear':
-              // 解绑 = 下一条消息开新会话，旧会话还留着可以回溯
-              sessions.set(chatId, '', {});
+              /**
+               * 解绑 = 下一条消息开新会话，旧会话还留着可以回溯。
+               *
+               * **保留 preset/title/kind**：只清 sessionId。
+               * 全清的话，面板的会话下拉会先变成一排空标题，
+               * 等下一条消息来了才恢复——中间那一小段很难看。
+               */
+              {
+                const old = sessions.list().find((c) => c.chatId === chatId) || {};
+                sessions.set(chatId, '', { preset: old.preset || '', title: old.title || '', kind: old.kind || '' });
+              }
               return send(res, 200, { ok: true, message: '上下文清了，下一条重新开始' });
 
             default:
@@ -1587,6 +1711,14 @@ export function apply(ctx) {
             chatId: c.chatId,
             title: String(c.title || ''),
             preset: String(c.preset || ''),
+            /**
+             * 群还是私聊。
+             *
+             * 没有它，下拉里群和私聊会长得一模一样——
+             * 群名在 QQ 那边取不到（官方只有 openid），ai-chat 就回退成
+             * 发消息那个人的昵称，于是两边 title 都是同一个人名。
+             */
+            kind: String(c.kind || kindFromPreset(c.preset)),
             at: c.at,
           }))
           .sort((a, b) => (b.at || 0) - (a.at || 0));
@@ -1600,7 +1732,7 @@ export function apply(ctx) {
         const scene = chatId
           ? {
               chatId,
-              kind: lastScene?.chatId === chatId ? lastScene.kind : hit?.preset || '',
+              kind: lastScene?.chatId === chatId ? lastScene.kind : (hit?.kind || ''),
               name: (lastScene?.chatId === chatId ? lastScene.name : hit?.title) || '',
               at: lastScene?.chatId === chatId ? lastScene.at : hit?.at || 0,
             }

@@ -171,3 +171,22 @@ test('注册：注册抛错时返回失败原因（不许静默吞掉）', async
   assert.equal(r.ok, false);
   assert.match(r.reason, /schema 不合法/);
 });
+
+/**
+ * render 必须返回**内容块数组**，不能是字符串。
+ *
+ * 真实事故：render 返回 ''，DSH 对 content 调 `.some()` 时炸成
+ * `content.some is not a function`，模型看到「接口报错了」，
+ * 两轮记忆检索全挂在结果投影这一步——执行本身是成功的。
+ */
+test('工具：render 返回内容块数组（字符串会让 DSH 的 content.some 炸掉）', () => {
+  const { byName } = rig();
+  for (const name of ['memory_search', 'memory_note']) {
+    const rendered = byName[name].output.render({}, { ok: true });
+    assert.ok(Array.isArray(rendered), `${name}.output.render 必须返回数组`);
+    for (const block of rendered) {
+      assert.equal(typeof block, 'object', '内容块必须是对象');
+      assert.ok('type' in block && 'text' in block, `内容块缺 type/text：${JSON.stringify(block)}`);
+    }
+  }
+});

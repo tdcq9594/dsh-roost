@@ -27,6 +27,10 @@ async function bootHost(cfgPatch = {}, seed = {}) {
   if (seed.memory) {
     writeFileSync(join(dir, 'memory.json'), JSON.stringify(seed.memory), 'utf8');
   }
+  // 种子会话映射：面板的会话下拉读它
+  if (seed.sessions) {
+    writeFileSync(join(dir, 'sessions.json'), JSON.stringify({ chats: seed.sessions }), 'utf8');
+  }
   // 种子日记：用同一个模块写库，路径和 host 里的一致
   if (seed.journal?.length) {
     const { createJournal } = await import('../src/journal.js');
@@ -320,5 +324,44 @@ test('记忆：/graph 也认 chatId', async () => {
   const r = await call('/graph?chatId=g1');
   assert.equal(r.status, 200);
   assert.equal(r.json.chatId, 'g1');
+  off?.();
+});
+
+/**
+ * 会话清单必须带「群 / 私聊」。
+ *
+ * QQ 官方事件里没有群名（只有 openid），ai-chat 取不到群名就回退成
+ * 发消息那个人的昵称——于是群和私聊的 title 变成**同一个人名**，
+ * 面板下拉两行长得一模一样，用户根本分不出哪个是群。
+ * `kind` 就是为了补这个洞：没有它，前端没法标出类型。
+ */
+test('记忆：/memory 的会话清单带 kind（群 / 私聊能分开）', async () => {
+  const { call, off } = await bootHost({}, {
+    sessions: {
+      g1: { sessionId: 's1', preset: 'roost-social', title: '倦飞之鸟', kind: 'group', at: 2 },
+      u1: { sessionId: 's2', preset: 'roost-private', title: '倦飞之鸟', kind: 'c2c', at: 1 },
+    },
+  });
+  const r = await call('/memory?chatId=g1');
+  assert.equal(r.status, 200);
+  const byId = Object.fromEntries((r.json.chats || []).map((c) => [c.chatId, c]));
+  assert.equal(byId.g1?.kind, 'group', '群会话的 kind 必须是 group');
+  assert.equal(byId.u1?.kind, 'c2c', '私聊会话的 kind 必须是 c2c');
+  // 两者 title 一样，但 kind 不同 —— 前端靠它加标签
+  assert.equal(byId.g1?.title, byId.u1?.title, '这个测试的前提：两条 title 相同');
+  off?.();
+});
+
+test('记忆：老会话没有 kind 时，从 preset 反推（存量数据也能标）', async () => {
+  const { call, off } = await bootHost({}, {
+    sessions: {
+      g1: { sessionId: 's1', preset: 'roost-social', title: '某群', at: 2 },
+      u1: { sessionId: 's2', preset: 'roost-private', title: '某人', at: 1 },
+    },
+  });
+  const r = await call('/memory?chatId=g1');
+  const byId = Object.fromEntries((r.json.chats || []).map((c) => [c.chatId, c]));
+  assert.equal(byId.g1?.kind, 'group', 'roost-social 应反推成 group');
+  assert.equal(byId.u1?.kind, 'c2c', 'roost-private 应反推成 c2c');
   off?.();
 });

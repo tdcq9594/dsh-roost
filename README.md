@@ -1,7 +1,36 @@
+<div align="center">
+
 # dsh-roost
 
-> [ai-chat](https://github.com/tdcq9594/qq-bot-roost-plugins) 插件的 **DSH 宿主**：
-> QQ 消息推过来，交给 DSH 会话回答，再把回答送回去。
+> [ai-chat](https://github.com/tdcq9594/qq-bot-roost-plugins) 插件的 **DSH 宿主**：QQ 消息推过来，交给 DSH 会话回答，再把回答送回去。
+
+[![npm version](https://img.shields.io/npm/v/dsh-roost?color=6c5ce7)](https://www.npmjs.com/package/dsh-roost)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-roost?color=4b6fff)](https://www.npmjs.com/package/dsh-roost)
+[![GitHub stars](https://img.shields.io/github/stars/tdcq9594/dsh-roost?color=eab308)](https://github.com/tdcq9594/dsh-roost)
+[![DSH plugin](https://img.shields.io/badge/dsh--plugin-✅-green)](https://github.com/topics/dsh-plugin)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](#)
+[![License](https://img.shields.io/badge/license-非商业自定义-blue.svg)](LICENSE)
+
+**让 QQ 机器人从「只会聊天」变成「能用 DSH 的全部能力」** —— 工具、记忆、上下文压缩、主动搭话，都归它。
+
+</div>
+
+---
+
+## 📚 目录
+
+- [它是什么（以及不是什么）](#它是什么以及不是什么)
+- [特性](#特性)
+- [安装](#安装)
+- [一键接入](#一键接入)
+- [权限：AI 知道是谁在说话](#权限ai-知道是谁在说话)
+- [面板](#面板)
+- [配置](#配置)
+- [目录结构](#目录结构)
+- [和 Aurabot 的对比](#和-aurabot-的对比)
+- [已知限制](#已知限制)
+- [开发与测试](#开发与测试)
+- [许可](#许可)
 
 ---
 
@@ -12,27 +41,82 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ 本插件 ⇄ DSH �
                                ⇄ POST /reply  ⇄
 ```
 
-**它不碰 QQ**。收消息、整形（语音 ASR / 引用 / 合并转发）、发消息、切段、
-防吵（冷却 / 配额 / 认领）全在 ai-chat 那边。这边只做三件事：
+**它不碰 QQ。** 收消息、整形（语音 ASR / 引用 / 合并转发）、发消息、切段、防吵（冷却 / 配额 / 认领）全在 ai-chat 那边。这边只做三件事：
 
 1. 起一个固定端口的 HTTP 服务，等 ai-chat 推消息
 2. 把消息喂给对应的 DSH 会话，等 AI 说完
 3. 把回复发回 ai-chat 给的地址
 
-**为什么要它**：ai-chat 直连模型时，AI 只有「聊天」这一件事。
-挂到 DSH 上之后，它能用 DSH 的工具（文件、命令）、记忆、上下文压缩——
-这是 `adapter: dsh` 唯一的价值，也是它比直连贵的地方。
+**为什么要它**：ai-chat 直连模型时，AI 只有「聊天」这一件事。挂到 DSH 上之后，它能用 DSH 的工具（文件、命令）、三层记忆、上下文压缩——这是 `adapter: dsh` 唯一的价值，也是它比直连贵的地方。
+
+---
+
+## 特性
+
+- 🗨️ **一个 QQ 会话 = 一个 DSH 会话**：断线重连、重启之后映射还在，会话不丢
+- 🧭 **一键接入**：六步向导 + 「一键就绪」，Roost 本体、ai-chat 插件、适配器配置都能自动装
+- 🔐 **逐条权限判定**：每一句都告诉 AI「谁在说、什么档位」，并按档位收本地工具（不是整群一刀切）
+- 🧠 **三层记忆**：跨群/本群事实 + 日记（三级衰减 + 关键词/向量检索）+ 知识图谱（实体·关系·结束时间）
+- 🛠️ **记忆工具**：给模型 `memory_search` / `memory_note` 两把「拉」的手，能主动翻旧账
+- 🌙 **凌晨巩固**：打分、升降级、到期压缩、抽三元组、提取约定，全在凌晨做，不花白天的钱
+- 🌅 **觉醒**：约定/想你/随性三类机会打分，到点「问她要不要说」，不是到点硬发
+- 🗜️ **上下文压缩**：到阈值开新会话 + 摘要开场，旧会话保留可回查
+- 📱 **侧栏面板**：九页仪表盘，状态、记忆、人格、排期、日志全在 DSH 里看
+- 🎭 **双人格 preset**：私聊（`roost-private`）/ 群聊（`roost-social`）各一套提示词
+
+---
+
+## 安装
+
+DSH 插件市场里输入包名：
+
+```
+dsh-roost
+```
+
+或命令行：
+
+```bash
+dsh plugin --profile web add dsh-roost
+```
+
+> 前提：DSH 桌面版 / Web 组合（需要 `sessionController` 和 `agents`）。
+> Roost 和 ai-chat 不用提前准备——「接入」里会装。
+
+从源码装也行：
+
+```bash
+git clone https://github.com/tdcq9594/dsh-roost.git
+```
+
+---
+
+## 一键接入
+
+装好插件后，侧栏「Roost → 接入」是一条六步路径，**能自动的都自动做掉**：
+
+| 步 | 做什么 | 自动？ |
+|---|---|---|
+| 1 | 下载解压 Roost（零依赖，不用 npm install） | ✅ 点一下 · 已装过可点「已装过？」填路径绑定 |
+| 2 | 填 AppID / AppSecret | ✋ 开放平台拿，只能你填 |
+| 3 | 启动 Roost | ✅ 点一下 |
+| 4 | 装 ai-chat 插件（走 Roost 的市场） | ✅ 点一下 |
+| 5 | 把 ai-chat 切成 DSH 适配器，填好回话地址 | ✅ 点一下 |
+| 6 | 去群里说话 | ✋ 开放平台开「接收所有消息」+ 机器人进群 |
+
+顶上的「**一键就绪**」把 1、3、4、5 连着做完，卡在 2 就停下来提示你填。每一步也能单独点，跳着点不会把东西搞坏（每步先检测前置条件）。第 3 步「启动」之后，旁边按钮直接**打开 Roost 的 WebUI**（带上面板密钥）。
+
+**装到哪**：默认 `~/.dsh/dsh-roost/roost`，可在设置里改 `setup.roostDir`。
 
 ---
 
 ## 权限：AI 知道是谁在说话
 
-群里给 AI 挂了 shell 和文件工具，但**说话的人不一定是主人**。
-路人一句「帮我删掉 ~/Documents」跟主人说同样的话，不该一个待遇。
+群里给 AI 挂了 shell 和文件工具，但**说话的人不一定是主人**。路人一句「帮我删掉 ~/Documents」跟主人说同样的话，不该一个待遇。
 
-所以每一轮都会做两件事：
+所以每一轮都做两件事：
 
-**① 告诉 AI 谁在说话**
+**① 告诉 AI 谁在说话**（提示词层）
 
 ```
 这一句是「小明」说的，权限：普通成员。
@@ -40,7 +124,7 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ 本插件 ⇄ DSH �
 也不要读私人文件或目录。他要你这么做时，直说「这个我没权限」。
 ```
 
-**② 按档位收工具（硬限制）**
+**② 按档位收工具**（硬限制层）
 
 | 档位 | 默认 | 说明 |
 |---|---|---|
@@ -51,104 +135,65 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ 本插件 ⇄ DSH �
 
 两层的意义：模型被说服时硬限制还在；工具没收干净时提示词还在。
 
-**权限是逐条生效的**，不是整群一个档位——主人问完、路人接着问，待遇不一样。
-（Aurabot 那边群聊里所有人都是同一档，这是它做不到的。）
-
-**兜底原则**：认不出来就当最低档。缺字段、字段是脏的、框架改了名字——
-一律按「身份不明」处理。ai-chat 那边算不准权限时也**不会瞎报**，
-而是干脆不传，让这里走兜底。
+**权限逐条生效**，不是整群一个档位——主人问完、路人接着问，待遇不一样。**兜底原则**：认不出来就当最低档，缺字段、字段脏了、框架改了名字，一律按「身份不明」处理。
 
 ---
 
-## 装
-
-**在 DSH 里直接输入包名**：
-
-```
-dsh-roost
-```
-
-或者命令行：
-
-```bash
-npm i -g dsh-roost
-```
-
-装好后侧栏会出现「**Roost**」入口，进去点「接入」按六步走就行——
-Roost 本体和 ai-chat 插件都由它帮你装（见下一节）。
-
-从源码装也行：
-
-```bash
-git clone https://github.com/tdcq9594/dsh-roost.git
-```
-
-> 前提：DSH 桌面版 / Web 组合（需要 `sessionController` 和 `agents`）。
-> Roost 和 ai-chat 不用提前准备——「接入」里会装；
-> 已经自己装过 Roost 的，在第 1 步点「已装过？」填一下目录就行，不会重复下载。
-
----
-
-## 一键接入（面板 → 接入）
-
-装好插件后，侧栏「Roost → 接入」是一条六步路径，**能自动的都自动做掉**：
-
-| 步 | 做什么 | 自动？ |
-|---|---|---|
-| 1 | 下载解压 Roost（零依赖，不用 npm install） | ✅ 点一下 · 已经装过可点「已装过？」填路径绑定 |
-| 2 | 填 AppID / AppSecret | ✋ 开放平台拿，只能你填 |
-| 3 | 启动 Roost | ✅ 点一下 |
-| 4 | 装 ai-chat 插件（走 Roost 的市场） | ✅ 点一下 |
-| 5 | 把 ai-chat 切成 DSH 适配器，填好回话地址 | ✅ 点一下 |
-| 6 | 去群里说话 | ✋ 开放平台开「接收所有消息」+ 机器人进群 |
-
-顶上的「**一键就绪**」会把 1、3、4、5 连着做完，卡在 2 就停下来提示你填。
-每一步也能单独点，跳着点不会把东西搞坏（每步自己先检测前置条件）。
-
-第 3 步「启动」之后，旁边的按钮直接**打开 Roost 的 WebUI**（带上面板密钥）。
-
-**装到哪**：默认 `~/.dsh/dsh-roost/roost`，可在设置里改 `setup.roostDir`。
-
-## 面板（侧栏 → Roost）
+## 面板
 
 | 标签 | 内容 |
 |---|---|
-| **概览** | 四个数字（会话数 / 正在等 / 最近一轮耗时 / 能用工具的档位）、状态提示条、**一键自测**、最近动态 |
+| **概览** | 四个数字（会话数 / 正在等 / 最近一轮耗时 / 能用工具的档位）、状态条、**一键自测**、最近动态 |
 | **接入** | 六步一键流程（上面那张表） |
-| **功能** | 按三个问题排：① 她现在什么状态（情绪三维条形图 + 原因，只读）② 她记得什么（跨群 / 本群两层记忆，可加可删）③ 她能做什么（人格 + 本群覆盖、表情包、主动搭话、授权状态、语音/撤回、清上下文） |
-| **会话** | 每个 QQ 会话对应的 DSH 会话，可以「清空」（下一句重建会话） |
-| **设置** | 端口、共享密钥、Roost 安装目录、四档权限、超时、人格 |
-| **日志** | 最近 400 条动静，可按级别筛，3 秒自动刷新 |
+| **她** | 人格列表与编辑（新建入口在标题右侧）、此刻情绪（三维条形图，只读）、表情包、语音条 |
+| **记忆** | 会话选择器 + 三层：跨群/本群事实、日记（三级）、知识图谱；检索、手动记、从旧版导入、清空 |
+| **醒着** | 这一轮算出来的机会、私聊排期、群聊主动（默认全关）、现在试一次 |
+| **上下文** | 窗口占用、压缩触发、这一轮注入了什么、记忆工具状态 |
+| **会话** | 每个 QQ 会话对应的 DSH 会话，可「清空」（下一句重建） |
+| **设置** | 配置全文（JSON）+ 分节说明，改完保存即热重载 |
+| **日志** | 最近 400 条动静，按级别筛，3 秒自动刷新 |
 
-**自测**值得单独说：它不经过 QQ，直接跑一轮 DSH 对话。
-验的是「会话建得起来、AI 回得来、回复取得回来」——链路里最容易坏的那段。
-QQ 那半边（收消息、发消息）它测不到，那部分出问题会在日志里看到。
-
-改完点保存，服务会自动重载——不用重启 DSH。
+**自测**不经过 QQ，直接跑一轮 DSH 对话，验的是「会话建得起来、AI 回得来、回复取得回来」——链路里最容易坏的那段。QQ 那半边（收消息、发消息）它测不到，那部分出问题看日志。
 
 ---
 
 ## 配置
 
-存在 `~/.dsh/dsh-roost/config.json`（可用 `DSH_ROOST_DATA` 改目录）。
+存在 `~/.dsh/dsh-roost/config.json`（可用 `DSH_ROOST_DATA` 改目录），面板「设置」页直接编辑。
 
 ```jsonc
 {
   "server": {
-    "port": 17321,        // ai-chat 的「DSH 地址」默认指向这里，两边要一致
-    "token": ""           // 共享密钥；留空表示不校验（只绑本机时可行）
+    "port": 17321,          // ai-chat 的「DSH 地址」默认指向这里，两边要一致
+    "token": ""             // 共享密钥；留空不校验（只绑本机时可行）
   },
   "chat": {
-    "turnTimeoutSec": 150 // 要小于 ai-chat 那边的 180 秒
+    "turnTimeoutSec": 150,  // 要小于 ai-chat 那边的 180 秒
+    "upstreamRetry": {       // 上游 502/429/超时时的补重试
+      "enabled": true,
+      "attempts": 1,         // 补几次（1 = 失败后再补 1 轮，总共 2 轮）
+      "delayMs": 3000,       // 补之前等多久
+      "budgetSec": 170       // 整轮总预算，必须小于 ai-chat 的 180
+    }
+  },
+  "workspace": {
+    "dir": ""               // QQ 会话挂哪个工作区：留空=单开 <数据目录>/workspace，
+                            // __default__=用 DSH 默认工作区，其它值=自定义目录
   },
   "permissions": {
-    "owner": "all",       // 主人：全部工具
-    "admin": "chat",      // 管理员：只能聊天
-    "member": "chat",     // 普通成员：只能聊天
-    "unknown": "chat"     // 兜底：认不出身份只给聊天
+    "owner": "all",         // 主人：全部工具
+    "admin": "chat",        // 管理员：只能聊天
+    "member": "chat",       // 普通成员：只能聊天
+    "unknown": "chat"       // 兜底：认不出身份只给聊天
   },
-  "setup": { "roostDir": "", "version": "v0.8.1" },
-  "persona": { "name": "小栖", "text": "…", "rulesPrivate": "…", "rulesSocial": "…" }
+  "setup": { "roostDir": "", "version": "v0.8.6", "registration": "qr" },
+  "memory":  { /* 日记寿命、注入条数、多少轮全量重注、记忆工具开关、向量检索 */ },
+  "compact": { /* 群聊/私聊两档压缩阈值、开场带几条原话 */ },
+  "awake":   { /* 清醒时段、机会分门槛、群白名单 */ },
+  "speakUp": { /* 私聊排期：间隔/免打扰/每日上限 */ },
+  "persona": { "current": "default", "byChat": {} },
+  "stickers": { "enabled": true, "dir": "" },
+  "channel": { "current": "qq" }
 }
 ```
 
@@ -156,55 +201,69 @@ QQ 那半边（收消息、发消息）它测不到，那部分出问题会在�
 
 ---
 
-## 结构
+## 目录结构
 
 ```
 src/
-  host.js      插件入口：起服务、会话映射、面板接口
-  server.js    HTTP /inbound（鉴权、立刻 200、回话）
-  sessions.js  chatId → DSH 会话（存盘）
-  turn.js      跑一轮：投递 + 从 session/event 等结果
-  inbound.js   payload → 给 AI 看的一段话
+  host.js        插件入口：起服务、会话映射、面板接口、记忆工具挂载
+  server.js      HTTP /inbound（鉴权、立刻 200、回话）
+  inbound.js     payload → 给 AI 看的一段话
+  turn.js        跑一轮：投递 + 从 session/event 等结果
+  sessions.js    chatId → DSH 会话（存盘）
   permissions.js 权限：谁在说话、能用什么工具
-  setup.js     一键流程：下载解压、写机器人配置、起停、装插件、配适配器
-  config.js    配置读写
+  setup.js       一键流程：下载解压、写配置、起停、装插件、配适配器
+  config.js      配置读写（默认值 + 合并）
+  memory.js      三层记忆第一层：跨群/本群事实
+  journal.js     日记：三级衰减 + FTS5 关键词 + 可选向量检索（RRF 融合）
+  graph.js       知识图谱：实体 / 关系（双时态） / 原始记录
+  embed.js       可选向量：只接一个 /embeddings 端点，不配就纯关键词
+  tokenize.js    中文切词（索引侧存二元组，FTS5 对中文是废的）
+  consolidate.js 凌晨巩固：打分 → 升降级 → 到期压缩 → 抽三元组 → 提取约定
+  awake.js       觉醒：约定/想你/随性三类机会纯函数打分
+  compact.js     上下文压缩：读占用 → 开新会话 + 摘要开场
+  channel.js     通道抽象（以后接别的平台时切这里）
+  registration.js 接入方式抽象（扫码 / 手动填）
+  lease.js       端口租约：端口被占时自动换
+  tools.js       记忆工具（memory_search / memory_note）定义与挂载
 client/
-  client.js    侧栏面板（React，沿用 DSH 主题变量）
-cordis.patch.yml  两档 preset（私聊 / 群聊）
+  client.js      侧栏面板（React，沿用 DSH 主题变量）
+cordis.patch.yml 两档 agent preset（私聊 / 群聊）
+docs/            设计文档、调研、和 Aurabot 的对比
 ```
 
-**核心技术点**：DSH 没有「发一句返回一句」的接口，是事件驱动的。
-`turn.js` 监听 `session/event`，收 `assistant/message`（可能来多次，取最后一次）
-和 `turn/end`（`reason.kind === 'completed'` 才算说完）。
+**核心技术点**：DSH 没有「发一句返回一句」的接口，是事件驱动的。`turn.js` 监听 `session/event`，收 `assistant/message`（可能来多次，取最后一次）和 `turn/end`（`reason.kind === 'completed'` 才算说完）。
 
 ---
 
-## 测试
+## 和 Aurabot 的对比
+
+角色设计参考了 [Aurabot（dsh-aurabot-qq）](https://github.com/accomplish07zrh-eng/dsh-aurabot-qq)：一个 QQ 会话对一个 DSH 会话、人格独占系统提示词、安全默认、按会话挂东西、用 `agent.followup` + `sessions.flush` 投递、从 `session/event` 取回复。
+
+**传输层完全不同**：Aurabot 走 OneBot（SnowLuma，hook 本机 QQ 客户端），这里走 ai-chat 插件（Roost 官方接口）。所以 Aurabot 里那批 OneBot 特有的东西（数字 QQ 号、base64 语音段）这里一个都不需要。
+
+一句话：**传输层我们更稳（官方接口），对话体验它更成熟。** 只想用现成的，先去试试 Aurabot。
+
+---
+
+## 已知限制
+
+- 只支持 QQ（`channel.current = 'qq'`），通道抽象已备好但还没接第二个平台
+- 语音靠官方 ASR（`asr_refer_text`），没有本地语音模型；TTS 音色由 ai-chat 设置，面板只读
+- 面板是 JSON 直编辑配置（不是逐字段表单），代价是要看得懂结构——所以配了分节说明
+- **模型服务挂了插件救不了**：DeepSeek 网关 502 时，补重试能救回一部分，但网关整体挂掉时只能等它自己恢复。这种时候插件回一句「模型服务那边暂时抽风了」，不会把内部报错糊给你
+
+---
+
+## 开发与测试
 
 ```bash
 npm test
 ```
 
-33 条，覆盖整形、会话映射、HTTP 契约（立刻 200 / 鉴权 / 健康检查）、
-回话的 SSRF 防护、一轮的状态机（多段取最后、非正常结束报错、同会话不许并发）、
-权限分档与兜底、一键流程的检测与配置写入。
-
----
-
-## 致敬
-
-角色设计参考了 [Aurabot（dsh-aurabot-qq）](https://github.com/accomplish07zrh-eng/dsh-aurabot-qq)：
-一个 QQ 会话对一个 DSH 会话、人格独占系统提示词、安全默认、按会话挂东西、
-用 `agent.followup` + `sessions.flush` 投递、从 `session/event` 取回复。
-
-**传输层完全不同**：Aurabot 走 OneBot（SnowLuma，hook 本机 QQ 客户端），
-这里走 ai-chat 插件（Roost 官方接口）。所以 Aurabot 里那批 OneBot 特有的东西
-（数字 QQ 号、base64 语音段）这里一个都不需要。
-
-如果你只是想用现成的，**先去试试 Aurabot**——它比这个项目成熟得多。
+270 条测试，覆盖整形、会话映射、HTTP 契约（立刻 200 / 鉴权 / 健康检查 / SSRF 防护）、一轮的状态机、权限分档与兜底、记忆三层、觉醒打分、压缩、通道/接入抽象、工具定义与权限、上游错误分类与补重试、会话类型标签（群 / 私聊）、前端九页空数据渲染。
 
 ---
 
 ## 许可
 
-沿用 [Roost](https://github.com/tdcq9594/qq-bot-roost) 的许可：**永久免费，禁止任何形式的收费与商业使用**。
+沿用 [Roost](https://github.com/tdcq9594/qq-bot-roost) 的许可：**永久免费，禁止任何形式的收费与商业使用**。全文见 [LICENSE](LICENSE)。
