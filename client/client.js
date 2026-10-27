@@ -518,7 +518,7 @@ select.roost-input{color-scheme:dark}
       const s = setupSt || {}
       const checks = [
         ['Roost 装好', s.installed],
-        ['机器人凭证', s.hasBot],
+        ['机器人凭证', s.hasCreds],
         ['Roost 在跑', s.running],
         ['ai-chat 插件', s.pluginInstalled],
         ['已指向 dsh-roost', s.pluginConfigured],
@@ -655,6 +655,14 @@ select.roost-input{color-scheme:dark}
       const [qrTip, setQrTip] = useState('')
       const [appId, setAppId] = useState('')
       const [secret, setSecret] = useState('')
+      /**
+       * 手动填写的入口。
+       *
+       * 之前这条只留了一行灰字「在『设置』里切换接入方式」——
+       * 用户在一个四步向导里被指去别的页面找开关，等于没有。
+       * 现在就地展开，不用离开这一步。
+       */
+      const [showManual, setShowManual] = useState(false)
       const [pathOpen, setPathOpen] = useState(false)
       const [dir, setDir] = useState('')
       const [cfgMsg, setCfgMsg] = useState('')
@@ -754,9 +762,9 @@ select.roost-input{color-scheme:dark}
         const s0 = await get('/setup')
         if (s0.ok === false) return toast(s0.message || '读不到状态')
         if (!s0.installed && !(await step('安装', '/setup/install', dir.trim() ? { dir: dir.trim() } : {}))) return
-        if (!s0.hasBot) {
+        if (!s0.hasCreds) {
           if (!appId || !secret) {
-            toast('还没有机器人：先扫码，或在第 2 步手填 AppID / AppSecret')
+            toast('还没有机器人：先启动 Roost，再在第 3 步扫码或手动填 AppID / AppSecret')
             return
           }
           if (!(await step('写入凭证', '/setup/bot', { name: 'main', appId, appSecret: secret }))) return
@@ -773,10 +781,22 @@ select.roost-input{color-scheme:dark}
        * 原来概览那套「4 步 / 0 完成」是读一个后端根本不返回的 `steps`，
        * 所以永远显示 0 —— 这里不许再猜：每一步都必须有一份可核对的判据。
        */
+      /**
+       * 「到底配好了没有」要按 **AppID 在不在** 判断，不能按「有没有 bot 记录」。
+       *
+       * `s.hasBot` 只要有 bot 条目就是 true——而全新装好的 Roost 本来就带一个
+       * 「默认机器人（无 AppID）」。于是这一步显示「已配置」+ 绿勾，
+       * 实际上什么都没填，后面启动才报缺 AppID。
+       */
+      const hasCreds = s.hasCreds ?? (s.bots || []).some((b) => String(b?.appId || '').trim())
+
       const mark = {
         install: s.installed ? 'done' : 'current',
-        bot: s.hasBot ? 'done' : s.installed ? 'current' : 'todo',
-        start: s.running ? 'done' : s.hasBot ? 'current' : 'todo',
+        /**
+         * 启动排在扫码前面（扫码要用 Roost 的接口），所以它只依赖「装好了」。
+         */
+        start: s.running ? 'done' : s.installed ? 'current' : 'todo',
+        bot: hasCreds ? 'done' : s.running ? 'current' : 'todo',
         plugin: s.pluginInstalled ? 'done' : s.running ? 'current' : 'todo',
         configure: s.pluginConfigured ? 'done' : s.pluginInstalled ? 'current' : 'todo',
         ready: s.pluginConfigured ? 'done' : 'todo',
@@ -858,11 +878,38 @@ select.roost-input{color-scheme:dark}
                 )
               : null,
 
+          /**
+           * **先启动，再扫码**——顺序不能反。
+           *
+           * 扫码是 Roost 那边的接口（`/qr/start`），Roost 没跑就没有接口可调。
+           * 之前这一步排在扫码后面，还把「启动」按钮绑成 `!s.hasBot`，
+           * 于是死锁：想扫码得先启动，想启动得先有 AppID。
+           *
+           * 后端 `start()` 其实只要求框架装好，不要求配了机器人
+           * （没配就是一个没有 bot 的空面板，正好用来扫码）。
+           */
           h(Step, {
-            n: 2, state: mark.bot, title: '填 AppID / AppSecret',
-            desc: s.hasBot ? '已配置' : '推荐扫码一键创建；也可以去开放平台手动复制',
+            n: 2, state: mark.start, title: '启动 Roost',
+            desc: s.running
+              ? `在跑，面板 ${s.webui || ':' + (s.port || '')}`
+              : `启动后它的面板在本机 ${s.webui || ':' + (s.port || '')}`,
+          },
+            s.running
+              ? h('button', { type: 'button', className: 'roost-btn', onClick: () => window.open(s.webui, '_blank', 'noopener') }, '打开面板')
+              : h('button', {
+                  type: 'button', className: 'roost-btn', disabled: locked,
+                  onClick: () => step('启动', '/setup/start'),
+                }, '启动'),
+            s.running
+              ? h('button', { type: 'button', className: 'roost-btn', disabled: locked, onClick: () => step('停止', '/setup/stop') }, '停止')
+              : null,
+          ),
+
+          h(Step, {
+            n: 3, state: mark.bot, title: '扫码 / 填 AppID、AppSecret',
+            desc: hasCreds ? '已配置' : '推荐扫码；扫码用不了就在下面手动填',
           }),
-            s.hasBot
+            hasCreds
               ? h('div', { style: { marginTop: -6, marginBottom: 16, paddingLeft: 40, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
                   h('div', { className: 'roost-mono' },
                     (s.bots || []).map((b) => `${b.name || b.id}（${b.appId || '无 AppID'}）`).join('、')),
@@ -881,7 +928,9 @@ select.roost-input{color-scheme:dark}
                     h('button', { type: 'button', className: 'roost-primary', disabled: locked, onClick: startQr, style: { width: '100%' } },
                       qrSvg ? '重新生成' : '扫码一键创建'),
                     h('div', { className: 'roost-note', style: { marginTop: 6 } },
-                      '手机 QQ 扫一下，AppID / AppSecret 自动填好（要 Roost 在跑）'),
+                      s.running
+                        ? '手机 QQ 扫一下，AppID / AppSecret 自动填好'
+                        : '先完成上一步「启动 Roost」——扫码用的是它的接口'),
                     qrSvg
                       ? h('div', {
                           style: { background: '#fff', padding: 8, borderRadius: 10, lineHeight: 0, margin: '8px 0' },
@@ -889,7 +938,7 @@ select.roost-input{color-scheme:dark}
                         })
                       : null,
                     qrTip ? h('div', { className: 'roost-note' }, qrTip) : null,
-                    (appId || secret)
+                    (appId || secret || showManual)
                       ? h('div', { style: { marginTop: 10 } },
                           h('input', { className: 'roost-input', placeholder: 'AppID', value: appId, onChange: (e) => setAppId(e.target.value), style: { marginBottom: 8 } }),
                           h('input', { className: 'roost-input', placeholder: 'AppSecret', type: 'password', value: secret, onChange: (e) => setSecret(e.target.value), style: { marginBottom: 8 } }),
@@ -898,26 +947,13 @@ select.roost-input{color-scheme:dark}
                             onClick: saveBot,
                           }, '保存'),
                         )
-                      : h('div', { className: 'roost-note', style: { marginTop: 10, opacity: 0.75 } },
-                          '—— 已有机器人、或扫码用不了，也可以手动填（在「设置」里切换接入方式）——'),
+                      : h('div', { style: { marginTop: 10 } },
+                          h('button', {
+                            type: 'button', className: 'roost-link',
+                            onClick: () => setShowManual(true),
+                          }, '扫码用不了？手动填 AppID / AppSecret'),
+                        ),
                   ),
-
-          h(Step, {
-            n: 3, state: mark.start, title: '启动 Roost',
-            desc: s.running
-              ? `在跑，面板 ${s.webui || ':' + (s.port || '')}`
-              : `启动后它的面板在本机 ${s.webui || ':' + (s.port || '')}`,
-          },
-            s.running
-              ? h('button', { type: 'button', className: 'roost-btn', onClick: () => window.open(s.webui, '_blank', 'noopener') }, '打开面板')
-              : h('button', {
-                  type: 'button', className: 'roost-btn', disabled: !s.hasBot || locked,
-                  onClick: () => step('启动', '/setup/start'),
-                }, '启动'),
-            s.running
-              ? h('button', { type: 'button', className: 'roost-btn', disabled: locked, onClick: () => step('停止', '/setup/stop') }, '停止')
-              : null,
-          ),
 
           h(Step, {
             n: 4, state: mark.plugin, title: '装 ai-chat 插件',
@@ -999,7 +1035,7 @@ select.roost-input{color-scheme:dark}
               type: 'button',
               className: 'roost-btn',
               disabled: !s.webui,
-              onClick: () => window.open(s.webui || '', '_blank', 'noopener'),
+              onClick: () => window.open(`${s.webui || ''}#groups`, '_blank', 'noopener'),
             }, s.ownersConfigured ? '打开面板看看' : '打开 Roost 面板设置'),
           ),
         ),

@@ -23,10 +23,21 @@ import { tmpdir } from 'node:os';
 
 const REPO = 'tdcq9594/qq-bot-roost';
 
-/** 国内优先 Gitee，失败再试 GitHub */
+/**
+ * 下载源，**按可用性排序**。
+ *
+ * 三条都是实测出来的，不是猜的：
+ *
+ * 1. **tag 带 `v` 前缀**——仓库里打的是 `v0.8.6`，拼成 `0.8.6` 会 404。
+ *    一键安装之前一直失败就是这个原因（Gitee 和 GitHub 都 404）。
+ * 2. **npm 放第二**——它的地址用纯版本号（没有 v），registry 比 codeload 稳。
+ *    实测 codeload 对「用 Git Data API 造的 tag」会返回 404，哪怕 tag 确实存在。
+ * 3. GitHub 放最后——留着兜底，但它目前对这个仓库不可靠。
+ */
 const SOURCES = (v) => [
-  `https://gitee.com/${REPO}/repository/archive/${v}.zip`,
-  `https://codeload.github.com/${REPO}/zip/refs/tags/${v}`,
+  { url: `https://gitee.com/${REPO}/repository/archive/v${v}.zip`, kind: 'zip' },
+  { url: `https://registry.npmjs.org/qq-bot-roost/-/qq-bot-roost-${v}.tgz`, kind: 'tgz' },
+  { url: `https://codeload.github.com/${REPO}/zip/refs/tags/v${v}`, kind: 'zip' },
 ];
 
 /** 跑个命令，返回 {code, out} */
@@ -53,10 +64,16 @@ function run(cmd, args, opts = {}) {  return new Promise((resolve) => {
  * 不行再试 unzip / PowerShell。三个都失败才报错，并把三条错误一起给出来，
  * 免得用户只看到「解压失败」不知道怎么办。
  */
-async function unzip(zipPath, dest) {
+async function unzip(zipPath, dest, kind = 'zip') {
   const tries = [];
 
-  if (process.platform === 'win32') {
+  /**
+   * npm 的包是 `.tgz`（gzip tar），不是 zip。
+   * `tar -xzf` 各平台都有（Windows 10+ 自带 bsdtar），所以单独走一条就行。
+   */
+  if (kind === 'tgz') {
+    tries.push(['tar', ['-xzf', zipPath, '-C', dest]]);
+  } else if (process.platform === 'win32') {
     tries.push(['tar', ['-xf', zipPath, '-C', dest]]);
     tries.push([
       'powershell',
@@ -115,6 +132,64 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
    */
   const dirOf = () => resolveRoostDir().dir || join(dataDir(), 'roost');
   const versionOf = () => cfgOf().setup.version || 'v0.8.1';
+
+  /** 比大小用的：把 "0.10.2" 拆成 [0,10,2] */
+  const parseVer = (s) =>
+    String(s || '')
+      .replace(/^v/i, '')
+      .split('.')
+      .map((x) => Number(x.replace(/\D.*$/, '')) || 0);
+
+  const newer = (a, b) => {
+    const x = parseVer(a);
+    const y = parseVer(b);
+    for (let i = 0; i < 3; i++) {
+      if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0);
+    }
+    return 0;
+  };
+
+  /**
+   * 问一次「现在最新是哪个版本」，**不要写死在配置里**。
+   *
+   * 为什么必须动态问：`setup.version` 是人手填的，发版时忘了改就会一直装旧版
+   * （0.8.1 那个默认值就陈旧了很久，新机器装上去还带着一堆已修的 bug）。
+   *
+   * 顺序：npm → Gitee tags → 配置里那个。
+   * npm 放第一是因为 `latest` 这个 dist-tag 是发布时明确指定的，
+   * 而 Gitee tags 只能按版本号猜最大值（万一打了个预发布 tag 就会选错）。
+   */
+  async function resolveLatest() {
+    const pick = (list) => list.filter((v) => /^\d+\.\d+\.\d+$/.test(v)).sort(newer).pop() || '';
+
+    try {
+      const r = await fetch('https://registry.npmjs.org/qq-bot-roost/latest', {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const v = String(j?.version || '');
+        if (/^\d+\.\d+\.\d+$/.test(v)) return { version: v, from: 'npm' };
+      }
+    } catch {
+      /* 问不到就换下一个源 */
+    }
+
+    try {
+      const r = await fetch(`https://gitee.com/api/v5/repos/${REPO}/tags`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (r.ok) {
+        const arr = await r.json();
+        const v = pick((Array.isArray(arr) ? arr : []).map((t) => String(t?.name || '').replace(/^v/i, '')));
+        if (v) return { version: v, from: 'gitee' };
+      }
+    } catch {
+      /* 同上 */
+    }
+
+    return { version: versionOf().replace(/^v/i, ''), from: 'config' };
+  }
 
   /** Roost 自己的全局配置（端口、密钥都在里面） */
   function roostGlobal() {
@@ -361,7 +436,16 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       accessKeySet: Boolean(keyOf()),
       webui: webuiUrl(),
       bots,
+      /**
+       * 有没有 bot **条目**。
+       *
+       * ⚠️ 别拿它判断「配好了没有」——全新装好的 Roost 本来就带一个
+       * 「默认机器人（无 AppID）」，所以这个值一开始就是 true。
+       * 判断凭证齐不齐要用下面的 `hasCreds`。
+       */
       hasBot: bots.length > 0,
+      /** 至少有一个 bot 真的填了 AppID */
+      hasCreds: bots.some((b) => String(b?.appId || '').trim()),
       /** 主人在 Roost 面板里设了没有（读 config/bots/<id>.json 的 owners） */
       ownersConfigured: ownerCount > 0,
       ownerCount,
@@ -421,25 +505,38 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       }
       mkdirSync(stage, { recursive: true });
 
-      // 1) 下载（Gitee 优先，国内快）
+      /**
+       * 装哪个版本：**自动问最新**，不用配置里那个手填的。
+       * 配置里的值只在问不到时兜底（比如整台机器断网）。
+       */
+      const target = await resolveLatest();
+      log(`目标版本 ${target.version}（来源：${target.from}）`);
+
+      // 1) 下载（Gitee → npm → GitHub，见 SOURCES）
       let lastErr = null;
-      for (const url of SOURCES(versionOf())) {
+      let kind = 'zip';
+      for (const src of SOURCES(target.version)) {
         try {
-          log(`下载 ${url}`);
-          const res = await fetch(url, { signal: AbortSignal.timeout(120000), redirect: 'follow' });
+          log(`下载 ${src.url}`);
+          const res = await fetch(src.url, { signal: AbortSignal.timeout(120000), redirect: 'follow' });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           await pipeline(Readable.fromWeb(res.body), createWriteStream(tmp));
+          kind = src.kind;
           lastErr = null;
           break;
         } catch (e) {
           lastErr = e;
-          log(`下载失败（${url}）：${e.message}`);
+          log(`下载失败（${src.url}）：${e.message}`);
         }
       }
-      if (lastErr) throw new Error(`下载失败：${lastErr.message}。可以手动下载 ${versionOf()} 解压到 ${dir}`);
+      if (lastErr) {
+        throw new Error(
+          `下载失败：${lastErr.message}。可以手动下载 ${target.version} 解压到 ${dir}`,
+        );
+      }
 
       // 2) 解压
-      await unzip(tmp, stage);
+      await unzip(tmp, stage, kind);
 
       // 3) zip 里有一层同名目录，把内容提到目标位置
       const entries = readdirSync(stage);
@@ -493,7 +590,34 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     writeFileSync(g, JSON.stringify(global, null, 2), 'utf8');
 
     log(`已写入机器人配置 ${file}`);
-    return { ok: true, message: `机器人 ${name} 配置好了`, webui: webuiUrl() };
+
+    /**
+     * 写完要**重启 Roost** 才生效。
+     *
+     * 框架只在启动时读 `config/bots/*.json`，不重启的话新凭证根本没被加载，
+     * 用户会看到「配置好了」但群里一点反应都没有——这种"成功了却没生效"
+     * 比直接报错更难查。
+     *
+     * 重启失败不算致命：配置已经落盘，用户手动重启也能好，所以只记日志。
+     */
+    let restarted = false;
+    try {
+      if (await isRunning()) {
+        await stop();
+        await start();
+        restarted = true;
+        log('已重启 Roost，新凭证生效');
+      }
+    } catch (e) {
+      log(`保存后重启失败（配置已写入，手动重启也能生效）：${e?.message ?? e}`);
+    }
+
+    return {
+      ok: true,
+      message: restarted ? `机器人 ${name} 配置好了，Roost 已重启` : `机器人 ${name} 配置好了`,
+      webui: webuiUrl(),
+      restarted,
+    };
   }
 
   /* ---------------- 起停 ---------------- */
