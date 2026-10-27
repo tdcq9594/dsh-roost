@@ -30,6 +30,10 @@ import { createMood } from './mood.js';
 import { createPersonas } from './personas.js';
 import { createStickers } from './stickers.js';
 import { createSpeakUp } from './speakup.js';
+import { createAwake, readAgreements, groupCandidates } from './awake.js';
+import { createCompact } from './compact.js';
+import { createQqChannel, createChannelRegistry } from './channel.js';
+import { createQrRegistration, createManualRegistration, createRegistrationRegistry } from './registration.js';
 import { createLease, candidates } from './lease.js';
 
 export const name = 'roost';
@@ -91,22 +95,25 @@ export function apply(ctx) {
     dataDir: dataDir(),
     cfgOf: () => cfg,
     log: (m) => log.info(m),
+    /**
+     * 第 5 期起，这里不再是"照着固定 prompt 说一句"，而是**先问她要不要说**。
+     *
+     * 返回 `<<skip>>` 就是她的答案：不想说。`speakup.js` 认得这个标记，
+     * 会当作正常结局重新排期、不占今日额度（`awake.enabled=false` 时退回老行为）。
+     */
     generate: async (prompt) => {
-      const chat = { kind: 'c2c', chatId: cfg.speakUp?.chatId || 'speakup', name: '主动搭话', preset: 'roost-private' };
-      const { agent } = await agentFor(chat);
-      mount(agent, chat);
-      return turns.run(agent, prompt, { source: { kind: 'roost-speakup' } });
+      const a = { ...(cfg.awake ?? {}) };
+      if (a.enabled === false) {
+        const chat = { kind: 'c2c', chatId: cfg.speakUp?.chatId || 'speakup', name: '主动搭话', preset: 'roost-private' };
+        const { agent } = await agentFor(chat);
+        mount(agent, chat);
+        return turns.run(agent, prompt, { source: { kind: 'roost-speakup' } });
+      }
+      const v = await awake.compose({ kind: 'c2c' });
+      return v.speak ? v.text : '<<skip>>';
     },
-    send: async (payload) => {
-      const url = `${setup.baseUrl()}/api/plugins/ai-chat/r/send${setup.keyQuery()}`;
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(15000),
-      });
-      return r.json().catch(() => ({ ok: false, message: 'ai-chat 没回话' }));
-    },
+    /** 发送统一走通道层，不再各处自己 fetch */
+    send: async (payload) => channels.active().send(payload),
   });
 
   /** 一键流程：装 Roost、配插件、起停、打开面板 */
@@ -313,6 +320,134 @@ export function apply(ctx) {
   consolidateBoot.unref?.();
   const consolidateTimer = setInterval(() => consolidateTick(), 10 * 60_000);
   consolidateTimer.unref?.();
+
+  /* ---------------- 通道 / 注册方式 / 觉醒 / 压缩 ---------------- */
+
+  /**
+   * 通道注册表。
+   *
+   * 现在只有 QQ 一个实现（走 ai-chat 的 `/send`），抽这一层是为了
+   * 第 5 期的"主动说话"和面板的"发测试消息"共用一条路径，
+   * 而不是各自 fetch 一遍。以后接别的平台，注册进来即可。
+   */
+  const channels = createChannelRegistry({
+    impls: {
+      qq: createQqChannel({
+        baseUrl: () => setup.baseUrl(),
+        keyQuery: () => setup.keyQuery(),
+        log: (m) => log.warn(m),
+      }),
+    },
+    pick: () => cfg.channel?.current || 'qq',
+    log: (m) => log.warn(m),
+  });
+
+  /**
+   * 注册方式注册表（C4）。
+   *
+   * 扫码是**一个实现**，不是唯一的做法。手动填 AppID/Secret 也注册进来，
+   * 这样"选一种方式接入"这件事在代码里有形状，不是写死的一个分支。
+   */
+  const registrations = createRegistrationRegistry({
+    impls: [
+      createQrRegistration({ setup }),
+      createManualRegistration({
+        submit: async ({ appId, appSecret }) => {
+          const r = await setup.createBot({ name: 'main', appId, appSecret });
+          return r ?? { ok: true };
+        },
+      }),
+    ],
+    pick: () => cfg.setup?.registration || 'qr',
+    log: (m) => log.warn(m),
+  });
+
+  /** 压缩后要拼在下一条用户消息前面的开场白 */
+  const pendingOpening = new Map();
+
+  /**
+   * 觉醒（第 5 期）：只决定"要不要说、说什么"，排期仍归 speakup。
+   *
+   * `contextOf` 是唯一的上下文入口——决策层不自己去翻文件，
+   * 所有输入从一个口子进来，测试时塞假数据就行。
+   */
+  const awake = createAwake({
+    dataDir: dataDir(),
+    cfgOf: () => cfg,
+    channelOf: () => channels.active(),
+    log: (m) => log.info(m),
+    authzOf: (chatId) => memory.hasAuthz(chatId, 'group_push'),
+    contextOf: ({ kind, chatId = '' } = {}) => {
+      const cid = chatId || cfg.speakUp?.chatId || '';
+      const m = mood.get();
+      return {
+        chatId: cid,
+        name: kind === 'group' ? cfg.awake?.groups?.find?.((g) => g.chatId === chatId)?.name || '' : '',
+        hour: new Date().getHours(),
+        mood: { valence: m.valence, energy: m.energy, sociability: m.sociability },
+        agreements: readAgreements({ memory, graph, chatId: cid }),
+        recent: journal
+          .recent(cid, 4)
+          .reverse()
+          .map((r) => `${r.role === 'bot' ? '你' : r.sender || '对方'}：${String(r.digest || r.text).slice(0, 60)}`),
+        state: { lastOwnerAt: speakUp.state?.().lastOwnerAt || 0 },
+      };
+    },
+    /** 觉醒要用"她的嘴"问，所以借 speakup 那个内部会话，不新开一个 */
+    generate: async (prompt) => {
+      const chat = { kind: 'c2c', chatId: cfg.speakUp?.chatId || 'speakup', name: '主动搭话', preset: 'roost-private' };
+      const { agent } = await agentFor(chat);
+      mount(agent, chat);
+      return turns.run(agent, prompt, { source: { kind: 'roost-awake' } });
+    },
+  });
+
+  /**
+   * 压缩（第 6 期）：上下文到阈值 → 开新会话 + 摘要开场，旧会话保留。
+   *
+   * 开场不单独跑一轮模型，而是交给宿主在下一条消息前拼进去：
+   * 少一次调用，也不会出现"她先回一句'好的我了解了'"这种尴尬开场。
+   */
+  const compact = createCompact({
+    controllerOf: () => controller(),
+    workspaceIdOf: () => workspaceId(),
+    sessions,
+    journal,
+    agreementsOf: (chatId) => readAgreements({ memory, graph, chatId }),
+    onOpening: (chatId, text) => {
+      if (text) pendingOpening.set(chatId, text);
+    },
+    log: (m) => log.info(m),
+    cfgOf: () => cfg,
+  });
+
+  /**
+   * 群主动的检查循环（C7）。
+   *
+   * 五分钟一次，比私聊稀疏得多——群里插话的成本高，不值得每分钟算一遍。
+   * 白名单为空时 `wakeGroups` 第一行就返回，等于零开销。
+   */
+  const groupTimer = setInterval(() => {
+    if (cfg.awake?.enabled === false) return;
+    awake.wakeGroups().catch((e) => log.warn(`群主动失败：${e?.message ?? e}`));
+  }, 5 * 60_000);
+  groupTimer.unref?.();
+
+  /**
+   * 群白名单的逐项判定（面板要看"这个群为什么不能主动"）。
+   *
+   * 判据和真正发消息时**用同一个函数**——面板说"可以"、实际却不发，
+   * 这种不一致最难查。
+   */
+  const groupCandidatesView = () =>
+    groupCandidates({
+      groups: cfg.awake?.groups || [],
+      authzOf: (chatId) => memory.hasAuthz(chatId, 'group_push'),
+      stateOf: (chatId) => awake.groupState(chatId),
+      cfg: cfg.awake || {},
+    });
+
+
 
   /**
    * 按优先级把若干块塞进预算：**前面的先留，后面的先砍**。
@@ -862,7 +997,29 @@ export function apply(ctx) {
         }
       }
 
-      const text = renderInbound(payload);
+      /**
+       * 有人说话 → 觉醒那边记一笔。
+       *
+       * 私聊用来算"多久没聊"，群里用来算"冷场多久了"（C7 的插话前提）。
+       * 放在这里而不是通道层：通道层不知道谁是"用户"。
+       */
+      awake.noteUser(chat.chatId);
+
+      let text = renderInbound(payload);
+
+      /**
+       * 刚压缩过的话，这一轮的正文前面要带上开场白。
+       *
+       * 为什么拼在用户消息里而不是单独发一条：单独发会多跑一轮模型，
+       * 而且她会先回一句"好的我了解了"——最像机器人的那种开场。
+       * 拼进来等于"用户说完，顺带把上文递过去"，历史里也只占一条。
+       */
+      const opening = pendingOpening.get(chat.chatId);
+      if (opening) {
+        pendingOpening.delete(chat.chatId);
+        text = `${opening}\n\n${text}`;
+        log.info(`压缩后的第一条消息带上了开场白（${opening.length} 字）`);
+      }
 
       /**
        * 落一条日记（用户这边）。
@@ -919,6 +1076,22 @@ export function apply(ctx) {
       journalAdd(payload, chat, reply, 'bot');
 
       await postReply(payload, reply, true);
+
+      /**
+       * 上下文压缩（第 6 期）：到阈值就开新会话 + 摘要开场。
+       *
+       * **放在回话之后**：压缩会改 `chatId → sessionId` 映射，
+       * 边回边说等于把话说进一个刚被换掉的窗口。回完再换，下一句才进新窗口。
+       * 压失败只记日志——它是优化，不该影响对话。
+       */
+      compact.noteTurn(chat.chatId);
+      try {
+        const cp = await compact.maybe(chat.chatId, chat);
+        if (cp.compacted) log.info(`上下文压缩完成（${cp.trigger}）`);
+      } catch (e) {
+        log.warn(`上下文压缩失败（不影响对话）：${e?.message ?? e}`);
+      }
+
       lastTurn = {
         at: Date.now(),
         chatId: chat.chatId,
@@ -1526,17 +1699,97 @@ export function apply(ctx) {
       }),
 
       // 扫码建机器人：转发给框架（协议/密钥/二维码都在那边，这里不重实现）
-      route('/setup/qr/start', (req, res) =>
-        setup.qrStart().then((r) => send(res, 200, { ok: true, ...r })).catch((e) => send(res, 502, { ok: false, message: e.message })),
-      ),
+      /**
+       * 扫码改走**注册表**（C4）。
+       *
+       * 行为完全不变（`createQrRegistration` 内部就是包着 `setup.qrStart/qrPoll`），
+       * 变化在于：以后加别的接入方式，这两条路由不用再动一次。
+       * 上一轮的教训是"抽象写好了但没人调"（`journal.clearChat` 成了死函数），
+       * 所以这里直接把唯一实现接上，不留空壳。
+       */
+      route('/setup/qr/start', async (req, res) => {
+        const impl = registrations.active();
+        if (!impl) return send(res, 500, { ok: false, message: '没有可用的注册方式' });
+        const r = await impl.start();
+        return send(res, r.ok ? 200 : 502, r);
+      }),
+
       route('/setup/qr/poll', async (req, res) => {
         const body = await readBody(req);
-        try {
-          const r = await setup.qrPoll(String(body.taskId ?? '').trim());
-          send(res, 200, { ok: true, ...r });
-        } catch (e) {
-          send(res, 502, { ok: false, message: e.message });
+        const impl = registrations.active();
+        if (!impl) return send(res, 500, { ok: false, message: '没有可用的注册方式' });
+        const r = await impl.poll(String(body.taskId ?? '').trim());
+        return send(res, r.status === 'error' ? 502 : 200, r);
+      }),
+
+      /** 有哪些接入方式、各自叫什么（面板据此渲染选择项，不必知道有哪几个） */
+      route('/registrations', (req, res) =>
+        send(res, 200, {
+          ok: true,
+          current: cfg.setup?.registration || 'qr',
+          list: registrations.list(),
+          statuses: ['pending', 'done', 'expired', 'error'],
+        }),
+      ),
+
+      /** 通道能力表：面板上让人一眼看出"这个平台能干什么、不能干什么" */
+      route('/channels', (req, res) =>
+        send(res, 200, {
+          ok: true,
+          current: cfg.channel?.current || 'qq',
+          names: channels.names(),
+          capabilities: channels.describe(),
+        }),
+      ),
+
+      /**
+       * 觉醒状态：为什么说 / 为什么没说。
+       *
+       * "她怎么不主动"和"她怎么老说话"这两类问题，光看日志判断不了——
+       * 得能看见"当前算出来有哪些机会、各多少分"。
+       */
+      route('/awake', async (req, res) => {
+        if (req.method === 'GET') {
+          const st = awake.status();
+          const groups = groupCandidatesView();
+          return send(res, 200, { ok: true, ...st, groups });
         }
+        const body = await readBody(req);
+        try {
+          if (body?.target === 'group') {
+            const r = await awake.wakeGroups();
+            return send(res, 200, { ok: true, results: r });
+          }
+          const v = await awake.compose({ kind: 'c2c' });
+          if (!v.speak) return send(res, 200, { ok: true, spoke: false, why: v.why, kind: v.kind });
+          const sent = await channels.active().send({ scene: 'c2c', target: cfg.speakUp?.chatId || '', text: v.text });
+          return send(res, 200, { ok: Boolean(sent?.ok), spoke: Boolean(sent?.ok), text: v.text, message: sent?.message });
+        } catch (e) {
+          return send(res, 500, { ok: false, message: e.message });
+        }
+      }),
+
+      /**
+       * 上下文压缩：GET 看占用与阈值，POST 手动压一次（调试/救急用）。
+       *
+       * 手动入口必要：阈值配高了会把窗口撑爆，配低了会频繁换会话，
+       * 调参数时得能立刻看到"当前多少"并手动压一次验证效果。
+       */
+      route('/compact', async (req, res) => {
+        const chatId = lastScene?.chatId || '';
+        if (req.method === 'GET') {
+          const p = await compact.pressure(chatId);
+          return send(res, 200, { ok: true, chatId, pressure: p, ...compact.status() });
+        }
+        const body = await readBody(req);
+        const target = String(body?.chatId || chatId);
+        if (!target) return send(res, 400, { ok: false, message: '缺 chatId' });
+        const r = await compact.compact(target, {
+          kind: lastScene?.kind,
+          name: lastScene?.name,
+          preset: lastScene?.kind === 'c2c' ? 'roost-private' : 'roost-social',
+        });
+        return send(res, r.ok ? 200 : 500, r);
       }),
 
       route('/setup/start', (req, res) => setup.start().then((r) => send(res, 200, r))),
@@ -1607,6 +1860,7 @@ export function apply(ctx) {
 
     return () => {
       clearInterval(speakTimer);
+      clearInterval(groupTimer);
       clearTimeout(consolidateBoot);
       clearInterval(consolidateTimer);
       /**

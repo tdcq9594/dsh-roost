@@ -50,6 +50,11 @@ export const DEFAULTS = {
     /** 留空 = <数据目录>/roost */
     roostDir: '',
     version: 'v0.8.3',
+    /**
+     * 用哪种方式接入机器人（第 7 期起可切）。
+     * `qr` = 官方扫码；`manual` = 自己填 AppID / AppSecret。
+     */
+    registration: 'qr',
   },
   /**
    * 记忆：日记（三级）/ 知识图谱 / 检索 / 凌晨巩固。
@@ -81,6 +86,50 @@ export const DEFAULTS = {
      * 才开；留空就是纯关键词，不报错。
      */
     embedding: null,
+  },
+  /**
+   * 觉醒（第 5 期）：**只唤醒，做不做她自己定**。
+   *
+   * 以前 `speakUp` 是"到点就发一句"，现在是"到点问她一句，她可以说不"。
+   * 总开关仍是 `speakUp.enabled`；这里管的是"怎么判断值不值得说"。
+   */
+  awake: {
+    enabled: true,
+    /** 清醒时段（小时）。半夜叫醒人是最糟的一种主动 */
+    awakeFrom: 8,
+    awakeTo: 23,
+    /** 多久没聊才算「想你」 */
+    missAfterHours: 6,
+    /** 机会分低于这个值，连模型都不问 */
+    minScore: 0.35,
+    /** 「随性」每天最多几次。最尴尬的一类，必须限量 */
+    casualPerDay: 1,
+    /**
+     * 群聊主动白名单：`[{ chatId, name, enabled }]`。
+     * **默认空 = 群主动全关**。群里主动极易被踢，必须手动一个个开。
+     */
+    groups: [],
+    /** 每个群每天最多几次 */
+    maxPerGroupPerDay: 3,
+    /** 群里冷场多少分钟才考虑插话 */
+    groupQuietMinutes: 45,
+  },
+  /**
+   * 上下文压缩（第 6 期）：到阈值就开新会话 + 摘要开场，旧会话保留。
+   * 不用 `session/fork`（它是复制前缀，方向相反，见 compact.js 文件头）。
+   */
+  compact: {
+    enabled: true,
+    /** 占用到这个百分比就压。25% 是实证里给的触发线 */
+    atPercent: 25,
+    /** 新会话开场带几条最近原话（保住"刚才那个"的指代） */
+    keepRecent: 8,
+    /** 读不到用量时的兜底：聊到这么多轮就压 */
+    maxTurns: 40,
+  },
+  /** 通道：以后接别的平台时切这里 */
+  channel: {
+    current: 'qq',
   },
   /**
    * 主动搭话：主人一阵子没找你，你主动在私聊里说句话。

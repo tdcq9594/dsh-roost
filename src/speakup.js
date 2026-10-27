@@ -120,11 +120,43 @@ export function createSpeakUp({ dataDir, cfgOf, generate, send, log = () => {} }
   async function fire(reason = '定时') {
     const cfg = { ...DEFAULTS, ...(cfgOf().speakUp ?? {}) };
     try {
-      const text = String((await generate(cfg.prompt)) ?? '').trim();
-      if (!text) return { ok: false, message: 'AI 没说话' };
+      const raw = String((await generate(cfg.prompt)) ?? '').trim();
+
+      /**
+       * **她自己决定不说** —— 这是正常结局，不是失败。
+       *
+       * 第 5 期把"到点就发一句"改成了"到点问她要不要说"，她能说不。
+       * 两种情况（空回答 / `<<skip>>`）都必须**重新排期**：
+       * 不排的话 `tick` 每分钟都会再问她一次，等于每 60 秒叫醒一次，
+       * 正好违反"只唤醒"这条铁律。
+       *
+       * 也不计入今日次数——她没说，就不该占掉今天开口的额度。
+       */
+      const skipped = !raw || /<<\s*skip\s*>>/i.test(raw);
+      if (skipped) {
+        state.nextAt = scheduleNext(cfg);
+        save();
+        log(`醒了但决定不说（${reason}）：${raw ? '模型给了 skip' : '没内容'}`);
+        return { ok: false, skipped: true, why: raw ? '她自己决定不说' : 'AI 没说话' };
+      }
+
+      const text = raw.replace(/<<[^>]*>>/g, '').trim();
+      if (!text) {
+        state.nextAt = scheduleNext(cfg);
+        save();
+        return { ok: false, skipped: true, why: '去掉标记后没内容' };
+      }
 
       const r = await send({ scene: 'c2c', target: cfg.chatId, text });
-      if (!r?.ok) return { ok: false, message: r?.message || '发失败' };
+      if (!r?.ok) {
+        /**
+         * 发失败也要排下一次。
+         * 否则失败会变成每分钟重试，直到把配额打满。
+         */
+        state.nextAt = scheduleNext(cfg);
+        save();
+        return { ok: false, message: r?.message || '发失败' };
+      }
 
       state.lastBotAt = Date.now();
       state.lastText = text.slice(0, 100);

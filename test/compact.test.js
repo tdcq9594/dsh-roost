@@ -1,0 +1,207 @@
+// 第 6 期（压缩）：占用读取 / 阈值 / 开场 / 换会话。
+//
+// 最要紧的一条断言：**换会话失败时映射必须不变**。
+// 映射错了下一句会进到刚被换掉的旧窗口，等于白压 —— 而且现象是静默的。
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  readPressure,
+  shouldCompact,
+  buildOpening,
+  createCompact,
+  DEFAULTS,
+} from '../src/compact.js';
+
+const HOUR = 3_600_000;
+
+/* ---------------- 占用读取 ---------------- */
+
+test('压缩：能从投影里找到 contextPressure（按字段名找，不写死路径）', () => {
+  const v = {
+    asOfSeq: 42,
+    values: { turn: { contextPressure: { pressureTokens: 1000, projectedTokens: 2000, contextWindow: 10000 } } },
+  };
+  const p = readPressure(v);
+  assert.equal(p.tokens, 1000);
+  assert.equal(p.projected, 2000);
+  assert.equal(p.window, 10000);
+  assert.equal(p.percent, 20, '优先用 projected 算');
+});
+
+test('压缩：投影里没有这个字段时给空值，不抛错', () => {
+  assert.equal(readPressure(null).percent, null);
+  assert.equal(readPressure({}).percent, null);
+  assert.equal(readPressure({ values: { inbox: {} } }).percent, null);
+  assert.equal(readPressure('字符串').percent, null);
+});
+
+test('压缩：只有 pressureTokens 时也能算', () => {
+  const p = readPressure({ x: { contextPressure: { pressureTokens: 500, contextWindow: 1000 } } });
+  assert.equal(p.percent, 50);
+});
+
+test('压缩：容量缺失时百分比为空（不能拿 0 当分母）', () => {
+  const p = readPressure({ x: { contextPressure: { pressureTokens: 500 } } });
+  assert.equal(p.percent, null);
+});
+
+test('压缩：环状对象不会把扫描卡死', () => {
+  const a = { contextPressure: { pressureTokens: 1, contextWindow: 2 } };
+  a.self = a;
+  assert.equal(readPressure(a).percent, 50);
+});
+
+/* ---------------- 阈值 ---------------- */
+
+test('压缩：到阈值才压', () => {
+  assert.equal(shouldCompact({ percent: 25, cfg: DEFAULTS }).compact, true);
+  assert.equal(shouldCompact({ percent: 24.9, cfg: DEFAULTS }).compact, false);
+});
+
+test('压缩：拿不到用量时按轮数兜底（没上报不等于没涨）', () => {
+  assert.equal(shouldCompact({ percent: null, turnsSince: 40, cfg: DEFAULTS }).compact, true);
+  assert.equal(shouldCompact({ percent: null, turnsSince: 39, cfg: DEFAULTS }).compact, false);
+  // 有百分比时轮数不参与
+  assert.equal(shouldCompact({ percent: 5, turnsSince: 999, cfg: DEFAULTS }).compact, false);
+});
+
+test('压缩：关掉就完全不压', () => {
+  assert.equal(shouldCompact({ percent: 99, cfg: { enabled: false } }).compact, false);
+});
+
+/* ---------------- 开场 ---------------- */
+
+test('开场：带上最近原话（不然「刚才那个」指代会断）', () => {
+  const s = buildOpening({
+    recent: [{ role: 'user', sender: '张三', at: Date.now(), text: '我说的那个方案' }],
+  });
+  assert.match(s, /刚才说到/);
+  assert.match(s, /我说的那个方案/);
+});
+
+test('开场：明说这是接着聊，且不许提「摘要」', () => {
+  const s = buildOpening({ recent: [], digests: [{ at: Date.now(), text: '聊了搬家' }] });
+  assert.match(s, /接着/);
+  assert.match(s, /不要说"根据摘要"/);
+  // 正文里不能出现"以下是摘要"这种会让模型复述的话
+  assert.doesNotMatch(s, /以上是摘要|以下是摘要/);
+});
+
+test('开场：带日期和没办完的约定', () => {
+  const s = buildOpening({
+    digests: [{ at: Date.parse('2026-10-26T10:00:00'), text: '聊了搬家' }],
+    agreements: ['周末看电影'],
+  });
+  assert.match(s, /2026-10-26/);
+  assert.match(s, /周末看电影/);
+});
+
+test('开场：什么数据都没有也能给出可用的一段（不能是空串）', () => {
+  const s = buildOpening({});
+  assert.ok(s.length > 10);
+  assert.match(s, /接着/);
+});
+
+/* ---------------- 换会话 ---------------- */
+
+function fakeRig({ failCreate = false } = {}) {
+  const map = new Map([['g1', 'old-sid']]);
+  const made = [];
+  const openings = [];
+  const controller = {
+    async create({ workspaceId, agentPreset }) {
+      if (failCreate) throw new Error('建会话失败');
+      const sid = `new-${made.length + 1}`;
+      made.push({ sid, workspaceId, agentPreset });
+      return { sessionId: sid };
+    },
+    async rename() {
+      return {};
+    },
+    async projections() {
+      return { values: { t: { contextPressure: { projectedTokens: 300, contextWindow: 1000 } } } };
+    },
+  };
+  const sessions = {
+    get: (c) => map.get(c) || '',
+    set: (c, s) => map.set(c, s),
+  };
+  const journal = {
+    digests: () => [{ at: Date.now(), text: '聊了搬家' }],
+    recent: () => [{ role: 'user', sender: '张三', at: Date.now(), text: '那个方案' }],
+  };
+  const compact = createCompact({
+    controllerOf: () => controller,
+    workspaceIdOf: async () => 'ws-1',
+    sessions,
+    journal,
+    agreementsOf: () => ['周末看电影'],
+    onOpening: (chatId, text) => openings.push({ chatId, text }),
+    log: () => {},
+    cfgOf: () => ({ compact: DEFAULTS }),
+    now: () => Date.now(),
+  });
+  return { compact, map, made, openings };
+}
+
+test('压缩：压一次 = 新建同 preset 会话 + 映射改指向 + 交出开场', async () => {
+  const { compact, map, made, openings } = fakeRig();
+  const r = await compact.compact('g1', { preset: 'roost-social', name: '摸鱼群' });
+  assert.equal(r.ok, true);
+  assert.equal(r.from, 'old-sid');
+  assert.equal(made[0].agentPreset, 'roost-social');
+  assert.equal(map.get('g1'), 'new-1', '映射要指向新会话');
+  assert.equal(openings.length, 1);
+  assert.match(openings[0].text, /接着/);
+});
+
+test('压缩：建会话失败时映射一点都不许动', async () => {
+  const { compact, map, openings } = fakeRig({ failCreate: true });
+  const r = await compact.compact('g1', { preset: 'roost-social' });
+  assert.equal(r.ok, false);
+  assert.equal(map.get('g1'), 'old-sid', '失败必须保持原映射，否则下一句进错窗口');
+  assert.equal(openings.length, 0);
+});
+
+test('压缩：没有 DSH 会话时不压', async () => {
+  const { compact } = fakeRig();
+  const r = await compact.compact('不存在的会话');
+  assert.equal(r.ok, false);
+  assert.match(r.why, /还没有/);
+});
+
+test('压缩：到阈值时 maybe 会自动压，没到就不动', async () => {
+  const { compact, map } = fakeRig();
+  const c1 = await compact.maybe('g1', { preset: 'roost-social' });
+  assert.equal(c1.compacted, true, '30% ≥ 25% 应该压');
+  assert.equal(map.get('g1'), 'new-1');
+
+  // 再压一次：刚换过，轮数归零，且投影仍报 30% → 会再压。
+  // 这里验的是"不会抛错"，真实使用中轮数归零 + 新会话占用低，自然不会再触发。
+  const c2 = await compact.maybe('g1', { preset: 'roost-social' });
+  assert.equal(typeof c2.compacted, 'boolean');
+});
+
+test('压缩：读占用失败不影响对话（maybe 返回未压而不是抛错）', async () => {
+  const rig = fakeRig();
+  const broken = createCompact({
+    controllerOf: () => ({
+      async create() {
+        throw new Error('不该被调用');
+      },
+      async projections() {
+        throw new Error('读不了');
+      },
+    }),
+    workspaceIdOf: async () => 'ws',
+    sessions: rig.map,
+    journal: { digests: () => [], recent: () => [] },
+    agreementsOf: () => [],
+    log: () => {},
+    cfgOf: () => ({ compact: DEFAULTS }),
+  });
+  const r = await broken.maybe('g1', {});
+  assert.equal(r.compacted, false);
+});
