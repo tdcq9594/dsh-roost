@@ -22,6 +22,10 @@ import { renderInbound, chatOf } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, LOCAL_TOOLS } from './permissions.js';
 import { createSetup } from './setup.js';
 import { createMemory } from './memory.js';
+import { createJournal } from './journal.js';
+import { createGraph } from './graph.js';
+import { createConsolidate } from './consolidate.js';
+import { createEmbedder } from './embed.js';
 import { createMood } from './mood.js';
 import { createPersonas } from './personas.js';
 import { createStickers } from './stickers.js';
@@ -160,10 +164,155 @@ export function apply(ctx) {
 
   /** 动态块的字数硬上限（token 预算的粗护栏，先粗后细） */
   const SCENE_MAX = 240;
+  /** 平时的记忆预算（只放检索命中 + 最近说的） */
   const MEMORY_MAX = 600;
+  /**
+   * 每 15 轮那次**全量**重注的预算。
+   *
+   * 比平时大一倍是刻意的：它 15 轮才来一次，摊下来每轮不到 80 字，
+   * 比"每轮都给全量"便宜一个数量级，却能在上下文被压掉之后把细节铺回来。
+   */
+  const MEMORY_DEEP_MAX = 1200;
 
   const memory = createMemory();
   const mood = createMood();
+
+  /* ---------------- 日记 / 图谱 / 巩固 ---------------- */
+
+  /** 向量（可选）。没配 `memory.embedding` 时 enabled() 是 false，检索自动只用关键词 */
+  const embedder = createEmbedder({
+    cfgOf: () => cfg.memory?.embedding,
+    log: (m) => log.warn(m),
+  });
+
+  /**
+   * 日记：每次对话落一条，遗忘靠压缩不是删除。
+   *
+   * 为什么和 facts 分两个存储：facts 是"提炼过的结论"（几十条），
+   * 日记是"发生过什么"（成千条，要检索）。混在 memory.json 里，
+   * 一个是文件会无限长，另一个是每轮读全量会拖慢。
+   */
+  const journal = createJournal({
+    file: join(dataDir(), 'journal.sqlite'),
+    embed: embedder,
+    log: (m) => log.warn(m),
+  });
+
+  /**
+   * 知识图谱：三表 + 双时态。
+   *
+   * 抽错不怕——原始片段在 episode 表里，能重建。
+   */
+  const graph = createGraph({
+    file: join(dataDir(), 'graph.sqlite'),
+    log: (m) => log.warn(m),
+  });
+
+  /**
+   * 每轮记忆注入用的临时状态：deep（这次要不要全量）+ hits（这一句检索到什么）。
+   *
+   * 为什么放这儿而不是现算：`systemPrompt.context` 的 text() 是**同步**的，
+   * 而检索要 async（可能还要调向量接口）。所以检索在 onInbound 里先做好，
+   * text() 只负责读。
+   */
+  const memState = new Map();
+
+  /**
+   * 每个会话聊到第几轮了 —— 用来算"这次要不要全量重注记忆"。
+   *
+   * 放内存不落盘：重启后从 1 重新数，第一次必然全量，
+   * 这反而是对的（新进程没有上下文，正需要铺一次）。
+   */
+  const rounds = new Map();
+
+  /**
+   * 往日记里落一条。**任何失败都不许影响这一轮对话。**
+   *
+   * 日记是"第二天还是同一个人"的基础，但它坏了不该让人连话都说不了。
+   */
+  function journalAdd(payload, chat, text, role) {
+    if (cfg.memory?.enabled === false) return;
+    try {
+      const base = String(payload?.id ?? '').trim();
+      journal.add({
+        // 没有 msg_id 时给空串，journal 内部会生成随机 id（宁可重复也不丢）
+        id: base ? `${base}${role === 'bot' ? ':bot' : ''}` : '',
+        at: Date.now(),
+        chatId: chat.chatId,
+        sender: role === 'bot' ? '' : String(payload?.sender?.name ?? '').trim(),
+        role,
+        text,
+      });
+    } catch (e) {
+      log.warn(`日记没写进去（不影响这轮）：${e.message}`);
+    }
+  }
+
+  /**
+   * 巩固：凌晨把昨天消化掉。
+   *
+   * 它要调模型，所以 `generate` 复用 DSH 会话（跟主动搭话同一套办法）——
+   * 单独一个内部会话，不碰任何 QQ 会话的上下文。
+   */
+  const consolidate = createConsolidate({
+    journal,
+    graph,
+    memory,
+    log: (m) => log.info(m),
+    generate: async (prompt) => {
+      const chat = {
+        kind: 'c2c',
+        chatId: cfg.memory?.consolidateChat || 'consolidate',
+        name: '巩固',
+        preset: 'roost-private',
+      };
+      const { agent } = await agentFor(chat);
+      mount(agent, chat);
+      return turns.run(agent, prompt, { source: { kind: 'roost-consolidate' } });
+    },
+  });
+
+  /**
+   * 凌晨巩固的检查循环。
+   *
+   * 为什么不用 DSH 的 `ctx.schedule`：那是**提醒**服务——它会在 DSH 界面上
+   * 建一个用户可见的定时任务卡，到点把一句 prompt 投进某个会话。
+   * 那是给"明早九点提醒我开会"用的，不是给内部维护任务用的。
+   * 巩固是无人值守的后台活，塞进去会在用户的任务列表里凭空多出一条
+   * 他从来没建过的提醒。所以这里用进程内定时器 + 自查"该跑没跑"。
+   *
+   * 十分钟一次、只在过了巩固点钟且昨天的摘要还不存在时才动，
+   * 所以平时它只是个空转的判断（一次查库，几十微秒）。
+   */
+  const consolidateTick = async () => {
+    if (cfg.memory?.enabled === false) return;
+    try {
+      const hour = Number(cfg.memory?.consolidateHour) || 4;
+      const day = consolidate.dueDay({ hour });
+      if (!day) return;
+      log.info(`巩固定时器：开始处理 ${day}`);
+      const r = await consolidate.run({ day });
+      if (r.ok) {
+        log.info(
+          `巩固 ${day} 完成：${r.chats} 个会话、评级 ${r.ranked}、压缩 ${r.compressed}、` +
+            `三元组 ${r.triples}、约定 ${r.agreements}、摘要 ${r.digests}（${r.mode}）`,
+        );
+      } else {
+        log.warn(`巩固 ${day} 没跑成：${r.reason}`);
+      }
+    } catch (e) {
+      log.warn(`巩固出错：${e?.message ?? e}`);
+    }
+  };
+
+  /**
+   * 启动 60 秒后先补跑一次（多半是昨天关机错过了四点），
+   * 之后每十分钟看一眼。两个都 unref：不能因为定时器让进程退不出去。
+   */
+  const consolidateBoot = setTimeout(() => consolidateTick(), 60_000);
+  consolidateBoot.unref?.();
+  const consolidateTimer = setInterval(() => consolidateTick(), 10 * 60_000);
+  consolidateTimer.unref?.();
 
   /**
    * 按优先级把若干块塞进预算：**前面的先留，后面的先砍**。
@@ -191,23 +340,119 @@ export function apply(ctx) {
   }
 
   /**
-   * 记忆块：两层分开标，并给一句"能不能说"的规则。
+   * 日记总条数的缓存。
    *
-   * 记忆跨群之后，最大的风险是串场——A 群的内部梗拿到 B 群说。
-   * 所以这里不只给内容，还要给边界。**规则排第一**，预算不够时它不能被砍掉。
+   * `stats()` 每次要跑 7 条 COUNT。这个数只是拿来给模型一句"你有本日记，
+   * 记着多少条"的索引，不需要秒级准确——一分钟刷一次足够，
+   * 免得每轮五次数据库往返。
    */
-  function memoryText() {
+  let statCache = { at: 0, v: null };
+  function journalStat() {
+    const t = Date.now();
+    if (statCache.v && t - statCache.at < 60_000) return statCache.v;
+    try {
+      statCache = { at: t, v: journal.stats() };
+    } catch {
+      statCache = { at: t, v: null };
+    }
+    return statCache.v;
+  }
+
+  const dayStr = (ts) => {
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+
+  /**
+   * 记忆块：两层 facts + 日记摘要 + 重要记忆 + 图谱 + 这一句检索到的旧事。
+   *
+   * 三档强度，按**每轮都付**的代价定的：
+   *   · 平时：规则 + 少量 facts + 刚才说到 + 检索命中 + 一行日记索引
+   *   · 每 15 轮（deep）：把 facts 全量、日记摘要、TopK、图谱一次铺满
+   * 为什么不全量每轮：`systemPrompt.context` 每个请求都重发，
+   * 600 字全量乘 15 轮等于白烧十几倍 token（实证里"人设/记忆每 15 轮重注"就是这个意思）。
+   *
+   * 两条不能动的：
+   *   1. **串场规则排第一**，预算不够时它不能被砍掉——A 群的梗拿到 B 群说，
+   *      比"记不住"严重得多。
+   *   2. **「刚才说到」必须留着**。上下文一压缩，「那个」「上面说的第二个」
+   *      就没了指代对象；把最近两三条原话（截短）铺在这儿，指代才连得上。
+   */
+  function memoryText(override = null) {
     const chatId = lastScene?.chatId || '';
     const m = memory.list(chatId);
-    if (!m.global.length && !m.chat.length) return '';
-    return fitBudget(
-      [
-        '记着的事可以拿来用，但**只在这个群发生过的事别拿到别处说**；判断不了就当作不知道。',
-        m.global.length ? `【你记得的事（通用）】\n${m.global.map((f) => `· ${f}`).join('\n')}` : '',
-        m.chat.length ? `【这个群特有的事】\n${m.chat.map((f) => `· ${f}`).join('\n')}` : '',
-      ],
-      MEMORY_MAX,
-    );
+    const st = memState.get(chatId) || {};
+    const deep = typeof override === 'boolean' ? override : Boolean(st.deep);
+
+    const rules = '记着的事可以拿来用，但**只在这个群发生过的事别拿到别处说**；判断不了就当作不知道。';
+
+    const lines = (arr) => arr.map((f) => `· ${f}`).join('\n');
+
+    // 平时只给最近的几条（数组是追加序，所以取尾部）；深度时才全量
+    const factsGlobal = m.global.length
+      ? `【你记得的事（通用）】\n${lines(deep ? m.global : m.global.slice(-6))}`
+      : '';
+    const factsChat = m.chat.length
+      ? `【这个群特有的事】\n${lines(deep ? m.chat : m.chat.slice(-3))}`
+      : '';
+
+    let digestSec = '';
+    let topSec = '';
+    let graphSec = '';
+    if (deep) {
+      try {
+        const ds = journal.digests(chatId, 5);
+        if (ds.length) {
+          digestSec = `【这几天】\n${ds
+            .reverse()
+            .map((d) => `· ${dayStr(d.at)} ${d.text}`)
+            .join('\n')}`;
+        }
+        const top = journal.top(chatId, { limit: cfg.memory?.topK || 6 });
+        if (top.length) {
+          topSec = `【记得比较深的】\n${top.map((r) => `· ${clip(r.digest || r.text, 60)}`).join('\n')}`;
+        }
+        const g = graph.text({ chatId, max: 240 });
+        if (g) graphSec = `【关系】\n${g}`;
+      } catch (e) {
+        log.debug(`取记忆深度块失败：${e.message}`);
+      }
+    }
+
+    /** 刚才说到：最近三条原话，保住指代 */
+    let recentSec = '';
+    try {
+      const recent = journal.recent(chatId, 3).reverse();
+      if (recent.length) {
+        recentSec = `【刚才说到】\n${recent
+          .map((r) => `· ${r.role === 'bot' ? '你' : r.sender || '对方'}：${clip(r.text, 40)}`)
+          .join('\n')}`;
+      }
+    } catch {}
+
+    /** 这一句检索到的旧事（onInbound 里已经查好） */
+    let hitSec = '';
+    if (st.hits?.length) {
+      hitSec = `【可能有关的旧事】\n${st.hits
+        .map((r) => `· ${dayStr(r.at)} ${clip(r.digest || r.text, 60)}`)
+        .join('\n')}`;
+    }
+
+    /** 一行索引：让她知道"还有东西在，只是没铺开"（对照表 1.14） */
+    let idxSec = '';
+    const st2 = journalStat();
+    if (st2?.total) {
+      idxSec = `（还有一本日记，记着 ${st2.total} 条，最早到 ${dayStr(st2.firstAt || Date.now())}；翻细节时按需要回忆）`;
+    }
+
+    const sections = deep
+      ? [rules, factsGlobal, factsChat, digestSec, topSec, graphSec, recentSec, hitSec, idxSec]
+      : [rules, factsGlobal, factsChat, recentSec, hitSec, idxSec];
+
+    const body = fitBudget(sections, deep ? MEMORY_DEEP_MAX : MEMORY_MAX);
+    // 一句都没有（新装的、什么都没聊过）就别占地方
+    return body.replace(rules, '').trim() ? body : '';
   }
 
   /**
@@ -276,8 +521,22 @@ export function apply(ctx) {
     });
 
     out = out.replace(/<<forget:\s*([\s\S]*?)>>/gi, (_, v) => {
-      const n = memory.remove(chatId, String(v || '').trim());
-      if (n) touched = `忘掉了 ${n} 条`;
+      const word = String(v || '').trim();
+      /**
+       * 两边都要忘。
+       *
+       * 只删 facts 不删日记，会出现"她嘴上说不记得了，一检索又想起来"——
+       * 用户说"别记这个"要的是真的不存在，所以日记里那几条正文也抹掉
+       * （`journal.forget` 是抹正文不删行，时间线还连着）。
+       */
+      const n = memory.remove(chatId, word);
+      let j = 0;
+      try {
+        j = journal.forget({ chatId, word });
+      } catch (e) {
+        log.warn(`日记遗忘失败：${e.message}`);
+      }
+      if (n || j) touched = `忘掉了 ${n + j} 条`;
       return '';
     });
 
@@ -591,6 +850,42 @@ export function apply(ctx) {
       }
 
       const text = renderInbound(payload);
+
+      /**
+       * 落一条日记（用户这边）。
+       *
+       * 用 `payload.id` 当主键：合并窗口 + 重试会让同一条消息来两次，
+       * 按 msg_id 去重才不会写出两条（对照表 12.4）。
+       *
+       * 放在调模型**之前**：即使这一轮请求失败了，"他说过这句话"这件事
+       * 仍然发生过，不记就永远丢了。
+       */
+      journalAdd(payload, chat, text, 'user');
+
+      /**
+       * 决定这一轮记忆注入的强度，并先把检索做好。
+       *
+       * 为什么检索要在这儿做：`systemPrompt.context` 的 text() 是同步的，
+       * 检索要 async（可能还要调向量接口）。这轮真正读注入内容是在
+       * turns.run 里面，所以只要在那之前把结果放进 memState 就行。
+       */
+      const mr = rounds.get(chat.chatId) || { n: 0, lastDeep: -999 };
+      mr.n += 1;
+      const every = Math.max(1, Number(cfg.memory?.deepEvery) || 15);
+      const deep = mr.n === 1 || mr.n - mr.lastDeep >= every;
+      if (deep) mr.lastDeep = mr.n;
+      rounds.set(chat.chatId, mr);
+
+      let hits = [];
+      if (cfg.memory?.enabled !== false) {
+        try {
+          hits = await journal.search(text, { chatId: chat.chatId, limit: Number(cfg.memory?.hits) || 3 });
+        } catch (e) {
+          log.warn(`日记检索失败（不影响这轮）：${e.message}`);
+        }
+      }
+      memState.set(chat.chatId, { deep, hits, round: mr.n, at: Date.now() });
+
       const rawReply = await turns.run(agent, text, {
         source: { kind: 'roost', chatId: chat.chatId, msgId: payload.id },
         // 插件下载好的图片块，让模型真的看得见图
@@ -606,6 +901,9 @@ export function apply(ctx) {
        */
       const { text: reply, touched } = applyMemoryMarkers(rawReply, chat.chatId);
       if (touched) log.info(`记忆：${touched}`);
+
+      /** 她说的那句也进日记——不然日记只剩对方一个人的独白 */
+      journalAdd(payload, chat, reply, 'bot');
 
       await postReply(payload, reply, true);
       lastTurn = {
@@ -907,24 +1205,165 @@ export function apply(ctx) {
       }),
 
       /**
-       * 记忆：两层 + 这个会话的授权/人格覆盖。
+       * 记忆三层：facts（跨群/本群）+ 日记（摘要/重要/最近）+ 图谱（实体/关系）。
        *
        * 授权和人格覆盖一起返回，是为了**别再开新路由**：面板要回答的三个问题
        * （她什么状态 / 她记得什么 / 她能做什么）都落在这一份快照里，
        * 一次请求拿全，少一个会 404 的地方。
+       *
+       * 三层都给是为了**能查**：串场、记错、忘不掉，这三类问题
+       * 光看 facts 是判断不了的，得能看见日记和图。
        */
       route('/memory', (req, res) => {
         const chatId = lastScene?.chatId || '';
+        const facts = memory.list(chatId);
+
+        let jr = null;
+        try {
+          jr = {
+            backend: journal.backend(),
+            stats: journalStat(),
+            /** 每天的摘要（巩固产出的那种一句话） */
+            digests: journal.digests(chatId, 7).map((d) => ({ at: d.at, day: d.day, text: d.text })),
+            /** 重要记忆 TopK（重要性×衰减+访问频率） */
+            top: journal
+              .top(chatId, { limit: Number(cfg.memory?.topK) || 6 })
+              .map((r) => ({
+                id: r.id,
+                at: r.at,
+                level: r.level,
+                text: clip(r.digest || r.text, 80),
+                score: Number(r.score.toFixed(3)),
+                accessed: r.accessed,
+              })),
+            /** 最近说的几条（含原文，方便看"她到底记得什么"） */
+            recent: journal.recent(chatId, 10).map((r) => ({
+              id: r.id,
+              at: r.at,
+              level: r.level,
+              role: r.role,
+              sender: r.sender,
+              text: clip(r.text, 120),
+              digest: r.digest,
+            })),
+          };
+        } catch (e) {
+          jr = { error: e.message };
+        }
+
+        let gp = null;
+        try {
+          gp = {
+            stats: graph.stats(),
+            /** 现在的实体（人/地点/东西） */
+            entities: graph.entities({ chatId, limit: 20 }),
+            /** 现在还成立的关系（双时态里 valid_to IS NULL 的那些） */
+            edges: graph.nowEdges({ chatId, limit: 20 }),
+          };
+        } catch (e) {
+          gp = { error: e.message };
+        }
+
         send(res, 200, {
           ok: true,
           chatId,
           scene: lastScene
             ? { kind: lastScene.kind, name: lastScene.name, chatId: lastScene.chatId, at: lastScene.at }
             : null,
-          ...memory.list(chatId),
+          ...facts,
+          // 显式再给一份带名字的，前端读 facts.global 比读 global 清楚
+          facts: { global: facts.global, chat: facts.chat },
+          journal: jr,
+          graph: gp,
           authz: memory.authz(chatId),
           personaOverride: memory.getPersonaOverride(chatId),
         });
+      }),
+
+      /**
+       * 日记：查 / 搜 / 忘。
+       *
+       * 单开一条路由而不是塞进 /memory，是因为搜索要带关键词、
+       * 遗忘是写操作，语义和"看一眼状态"不一样。
+       */
+      route('/journal', async (req, res) => {
+        const url = new URL(req.url || '/', 'http://x');
+        const chatId = String(url.searchParams.get('chatId') || lastScene?.chatId || '');
+        const q = String(url.searchParams.get('q') || '').trim();
+
+        if (req.method === 'GET') {
+          try {
+            if (q) {
+              const rows = await journal.search(q, { chatId, limit: Number(url.searchParams.get('limit')) || 8 });
+              return send(res, 200, {
+                ok: true,
+                q,
+                backend: journal.backend(),
+                results: rows.map((r) => ({
+                  id: r.id,
+                  at: r.at,
+                  level: r.level,
+                  text: clip(r.text, 200),
+                  digest: r.digest,
+                  score: Number(r.score.toFixed(4)),
+                  why: r.why,
+                })),
+              });
+            }
+            return send(res, 200, {
+              ok: true,
+              backend: journal.backend(),
+              stats: journalStat(),
+              recent: journal.recent(chatId, 20),
+              digests: journal.digests(chatId, 7),
+            });
+          } catch (e) {
+            return send(res, 500, { ok: false, message: e.message });
+          }
+        }
+
+        const body = await readBody(req);
+        const word = String(body?.word ?? '').trim();
+        if (!word) return send(res, 400, { ok: false, message: '要忘哪件事？给个关键词' });
+        const n = journal.forget({ chatId: String(body?.chatId || chatId), word });
+        return send(res, 200, { ok: true, removed: n, message: n ? `忘掉了 ${n} 条` : '日记里没有匹配的' });
+      }),
+
+      /** 图谱：实体 / 现在的关系 / 已经结束的关系（双时态的两面都给人看） */
+      route('/graph', (req, res) => {
+        const chatId = lastScene?.chatId || '';
+        try {
+          send(res, 200, {
+            ok: true,
+            chatId,
+            stats: graph.stats(),
+            entities: graph.entities({ chatId, limit: 50 }),
+            edges: graph.nowEdges({ chatId, limit: 50 }),
+            ended: graph.endedEdges({ chatId, limit: 20 }),
+          });
+        } catch (e) {
+          send(res, 500, { ok: false, message: e.message });
+        }
+      }),
+
+      /**
+       * 巩固：GET 看状态，POST 手动跑（调试/补跑用）。
+       *
+       * 手动入口是必要的：凌晨那次如果因为进程没开而错过，
+       * 得有个地方能立刻补，而不是等到明天。
+       */
+      route('/consolidate', async (req, res) => {
+        if (req.method === 'GET') {
+          return send(res, 200, {
+            ok: true,
+            last: consolidate.status(),
+            due: consolidate.dueDay({ hour: Number(cfg.memory?.consolidateHour) || 4 }),
+            hour: Number(cfg.memory?.consolidateHour) || 4,
+          });
+        }
+        const body = await readBody(req);
+        const r = await consolidate.run({ day: String(body?.day || ''), dry: Boolean(body?.dry) });
+        return send(res, 200, r);
       }),
 
       route('/memory/add', async (req, res) => {
@@ -948,6 +1387,19 @@ export function apply(ctx) {
 
       route('/mind', (req, res) => {
         const text = sceneText();
+        const chatId = lastScene?.chatId || '';
+        const st = memState.get(chatId) || {};
+        /**
+         * `?deep=1` / `?light=1` 强制指定注入强度。
+         *
+         * 为什么需要：平时 15 轮才深度重注一次，想看"全量长什么样"
+         * 得等半天。"她怎么突然忘了"这类问题也全靠这个能一眼看清
+         * 当前那一轮拿到的是哪一档。
+         */
+        const url = new URL(req.url || '/', 'http://x');
+        const forced = url.searchParams.get('deep') === '1' ? true : url.searchParams.get('light') === '1' ? false : null;
+        const mtext = memoryText(forced);
+        const deep = forced === null ? Boolean(st.deep) : forced;
         send(res, 200, {
           ok: true,
           scene: lastScene
@@ -956,9 +1408,24 @@ export function apply(ctx) {
           lastTurn,
           budgets: {
             scene: { max: SCENE_MAX, len: text.length },
-            memory: { max: MEMORY_MAX, len: memoryText().length },
+            memory: {
+              max: deep ? MEMORY_DEEP_MAX : MEMORY_MAX,
+              len: mtext.length,
+              /**
+               * 这一轮是"平时"还是"全量重注"，以及为什么。
+               * 调注入时最常问的就是"为什么她突然忘了" ——
+               * 先看这里是不是刚好卡在两个 deep 之间。
+               */
+              deep,
+              round: st.round ?? 0,
+              deepEvery: Number(cfg.memory?.deepEvery) || 15,
+              hits: (st.hits || []).map((r) => ({ at: r.at, why: r.why, text: clip(r.digest || r.text, 60) })),
+            },
           },
-          memory: memory.list(lastScene?.chatId || ''),
+          memory: memory.list(chatId),
+          journal: journalStat(),
+          graph: graph.stats(),
+          memoryText: mtext,
         });
       }),
 
@@ -1100,6 +1567,20 @@ export function apply(ctx) {
 
     return () => {
       clearInterval(speakTimer);
+      clearTimeout(consolidateBoot);
+      clearInterval(consolidateTimer);
+      /**
+       * 数据库连接也要关。
+       *
+       * 插件重载时会重新 apply，旧的连接不关，WAL 文件会越积越多，
+       * Windows 上还会因为文件句柄没释放导致下一次打不开。
+       */
+      try {
+        journal.close();
+      } catch {}
+      try {
+        graph.close();
+      } catch {}
       /**
        * **两条都要清。**
        *

@@ -52,6 +52,37 @@ export const DEFAULTS = {
     version: 'v0.8.3',
   },
   /**
+   * 记忆：日记（三级）/ 知识图谱 / 检索 / 凌晨巩固。
+   *
+   * 全部默认开着且**不花白天的钱**：日记写入是本地 SQLite，巩固在凌晨做，
+   * 向量默认关（要额外一个 /embeddings 端点，不配就纯关键词）。
+   */
+  memory: {
+    enabled: true,
+    /** 到期天数：普通几天后压成半句，重要两三周后压成一句。critical 永不到期 */
+    keepDays: { normal: 3, important: 21 },
+    /**
+     * 每多少轮**全量**重注一次记忆。
+     *
+     * 为什么不全量每轮注：`systemPrompt.context` 每个请求都要重发一遍，
+     * 全量记忆几百字，15 轮就是白烧十几倍 token。平时只给"最近说的 + 检索引擎命中的几条"，
+     * 每 15 轮把全量铺一次，防止细节被上下文压缩吃掉。
+     */
+    deepEvery: 15,
+    /** 注入的条数 */
+    topK: 6,
+    hits: 3,
+    /** 凌晨几点巩固（本地时间）。错过就下次检查时补跑 */
+    consolidateHour: 4,
+    /** 巩固用的会话标识（内部用，不连 QQ） */
+    consolidateChat: 'consolidate',
+    /**
+     * 向量检索（可选）。填成 `{ model:'bge-m3', baseUrl:'http://x/v1', apiKey:'k' }`
+     * 才开；留空就是纯关键词，不报错。
+     */
+    embedding: null,
+  },
+  /**
    * 主动搭话：主人一阵子没找你，你主动在私聊里说句话。
    * **只在私聊，不在群里**；默认关着。
    */
