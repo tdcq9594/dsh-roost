@@ -688,19 +688,34 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      *
      * @returns {Promise<Array>} 按相关度排序的日记（带 score/why）
      */
-    async search(query, { chatId = '', limit = 5, crossCritical = true } = {}) {
+    async search(query, { chatId = '', limit = 5, crossCritical = true, entityJournalIds = [] } = {}) {
       const terms = queryTerms(query);
-      if (!terms.length) return [];
+      const entIds = [...new Set((entityJournalIds || []).filter(Boolean))];
+      // 有实体路也能搜（查询词为空但提到了某个人）
+      if (!terms.length && !entIds.length) return [];
       const s = get();
 
-      const kw = s
-        .searchTerms(terms, { chatId, limit: 40, crossCritical })
-        .filter((r) => passesCoverage(terms, indexTerms(r.text)));
+      const kw = terms.length
+        ? s.searchTerms(terms, { chatId, limit: 40, crossCritical }).filter((r) => passesCoverage(terms, indexTerms(r.text)))
+        : [];
       const ranks = new Map();
-      const bump = (id, i) => ranks.set(id, (ranks.get(id) || 0) + 1 / (60 + i + 1));
+      /**
+       * `w` 是这一路的权重。关键词和向量都是 1；实体只给 0.5——
+       * 「她提到了张三」比字面命中弱，不该盖过关键词。
+       */
+      const bump = (id, i, w = 1) => ranks.set(id, (ranks.get(id) || 0) + w / (60 + i + 1));
       kw.forEach((r, i) => bump(r.id, i));
 
       const byId = new Map(kw.map((r) => [r.id, r]));
+
+      /* 第三路：实体。不用算向量，纯靠图谱把候选日记拉进来 */
+      entIds.forEach((id, i) => {
+        bump(id, i, 0.5);
+        if (!byId.has(id)) {
+          const row = s.get(id);
+          if (row) byId.set(id, row);
+        }
+      });
       let vecHits = [];
       if (embed?.enabled?.()) {
         try {

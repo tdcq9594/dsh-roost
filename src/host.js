@@ -29,6 +29,7 @@ import { createEmbedder } from './embed.js';
 import { createMood } from './mood.js';
 import { createPersonas } from './personas.js';
 import { createStickers } from './stickers.js';
+import { registerMemoryTools } from './tools.js';
 import { createSpeakUp } from './speakup.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
@@ -784,10 +785,52 @@ export function apply(ctx) {
     return { agent: await resolveAgent(newSid), sessionId: newSid };
   }
 
-  /** 挂人格 + 权限上下文（每个 agent 只挂一次，内容每轮现读） */
+  /** 记忆工具的注册结果（面板要能看见"装上了没"，别静默失败） */
+  const toolState = { ok: false, names: [], reason: '还没挂' };
+
+  /**
+   * 挂人格 + 权限上下文（每个 agent 只挂一次，内容每轮现读）
+   */
   function mount(agent, chat) {
     if (mounted.has(agent)) return;
     const offs = [];
+
+    /**
+     * 记忆工具（第 2 批 M2）：给她两把"拉"的手。
+     *
+     * 挂在这里而不是插件的 ctx：`agent.ctx.tools` 是每轮都在用的那个
+     * （restrict 也走它），而插件的 inject 里没有 tools 服务——
+     * 往 inject 里加一个不存在的服务会让整个插件激活失败。
+     *
+     * 权限不在这里判：注册是一次性的，而"这一句是谁说的"每轮变，
+     * 所以档位检查放在工具 execute 里（见 tools.js）。
+     */
+    if (cfg.memory?.enabled !== false && cfg.memory?.tools !== false) {
+      const sidFor = () => agent?.session?.id;
+      registerMemoryTools({
+        agent,
+        journal,
+        graphOf: () => graph,
+        callerOf: () => {
+          const cur = sidFor() ? speaker.get(sidFor()) : null;
+          return { bucket: cur?.bucket, chatId: cur?.payload?.chat?.chatId || chat.chatId || '' };
+        },
+        cfgOf: () => cfg,
+        log: (m) => log.warn(m),
+      })
+        .then((r) => {
+          toolState.ok = r.ok;
+          toolState.names = r.names;
+          toolState.reason = r.reason || '';
+          if (r.ok) log.info(`记忆工具已挂上：${r.names.join('、')}（${r.mode}）`);
+          else log.warn(`记忆工具没挂上：${r.reason}`);
+          if (r.off) mountOffs.push(r.off);
+        })
+        .catch((e) => {
+          toolState.reason = e?.message ?? String(e);
+          log.warn(`记忆工具挂载异常：${toolState.reason}`);
+        });
+    }
 
     try {
       offs.push(
@@ -1007,7 +1050,15 @@ export function apply(ctx) {
       const mode = modeFor(bucket, cfg.permissions);
       if (mode === 'chat') {
         try {
-          restore = agent.ctx.tools.restrict({ deny: LOCAL_TOOLS });
+          /**
+           * 群友：本地工具全收，外加**记忆写入工具**。
+           *
+           * 给他写长期记忆的能力，等于允许往每轮都注入的记忆里投毒
+           * （写一句"主人讨厌张三"，以后每次对话都带着）。
+           * `memory_search` 留着——他能查本群的事，但跨群和 sender 已由
+           * 工具内部按档位掐掉（纵深两道，不只靠这一个开关）。
+           */
+          restore = agent.ctx.tools.restrict({ deny: [...LOCAL_TOOLS, 'memory_note'] });
         } catch (e) {
           log.warn('收走本地工具失败：', e.message);
         }
@@ -1065,7 +1116,28 @@ export function apply(ctx) {
       let hits = [];
       if (cfg.memory?.enabled !== false) {
         try {
-          hits = await journal.search(text, { chatId: chat.chatId, limit: Number(cfg.memory?.hits) || 3 });
+          /**
+           * 第三路（M3）：查询里提到的实体，把相关日记拉进来。
+           *
+           * 为什么只在关键词之外再补这一路：问"张三最近在忙什么"时，
+           * 字面命中经常很差（日记里写的是"他"），但图谱里
+           * "张三—工作在→某公司"是现成的。实体路只给 0.5 权重，
+           * 不会盖过关键词命中。
+           */
+          let entIds = [];
+          try {
+            const named = graph
+              .entities({ chatId: chat.chatId, limit: 40 })
+              .filter((e) => e.name && e.name.length >= 2 && text.includes(e.name));
+            entIds = named.flatMap((e) => graph.linkedJournalIds(e.name, { chatId: chat.chatId, limit: 5 }));
+          } catch (e) {
+            log.debug(`实体路跳过：${e.message}`);
+          }
+          hits = await journal.search(text, {
+            chatId: chat.chatId,
+            limit: Number(cfg.memory?.hits) || 3,
+            entityJournalIds: entIds,
+          });
         } catch (e) {
           log.warn(`日记检索失败（不影响这轮）：${e.message}`);
         }
@@ -1654,6 +1726,8 @@ export function apply(ctx) {
           memory: memory.list(chatId),
           journal: journalStat(),
           graph: graph.stats(),
+          /** 记忆工具装上了没——静默失败最难查，面板必须看得见 */
+          tools: { ...toolState },
           memoryText: mtext,
         });
       }),

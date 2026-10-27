@@ -77,6 +77,11 @@ export const DEFAULTS = {
     /** 注入的条数 */
     topK: 6,
     hits: 3,
+    /**
+     * 给模型注册记忆工具（`memory_search` / `memory_note`），让她能主动翻日记。
+     * 关掉只是不注册，自动注入那条路照常。
+     */
+    tools: true,
     /** 凌晨几点巩固（本地时间）。错过就下次检查时补跑 */
     consolidateHour: 4,
     /** 巩固用的会话标识（内部用，不连 QQ） */

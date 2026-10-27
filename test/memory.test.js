@@ -577,3 +577,105 @@ test('巩固：压缩提示词必须逐条点名要保留的类别', () => {
   assert.match(p, /scope/);
   assert.match(p, /summary/);
 });
+
+/* ---------------- 第三路检索 / 改主意（优化批次 2） ---------------- */
+
+test('检索第三路：实体能把没有字面命中的日记拉进来', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  // 这句里没有"张三"两个字，关键词路搜不到
+  j.add({ id: 'a', at: Date.now(), chatId: 'g1', text: '他最近换工作了，忙得很' });
+  return (async () => {
+    const without = await j.search('张三', { chatId: 'g1' });
+    assert.equal(without.length, 0, '没有实体路时确实搜不到');
+    const withEnt = await j.search('张三', { chatId: 'g1', entityJournalIds: ['a'] });
+    assert.equal(withEnt.length, 1, '实体路要能把它拉进来');
+    assert.equal(withEnt[0].id, 'a');
+  })();
+});
+
+test('检索第三路：实体权重低于关键词（不会盖过字面命中）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const t = Date.now();
+  j.add({ id: 'kw', at: t, chatId: 'g1', text: '张三说他下周搬家' });   // 字面命中
+  j.add({ id: 'ent', at: t, chatId: 'g1', text: '他最近换工作了' });     // 只有实体命中
+  return (async () => {
+    const r = await j.search('张三', { chatId: 'g1', entityJournalIds: ['ent'] });
+    assert.equal(r[0].id, 'kw', '字面命中要排在实体命中前面');
+  })();
+});
+
+test('图谱：linkedJournalIds 能顺着 episode.journal_id 反查', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const t = Date.now();
+  const ep = g.addEpisode({ at: t, chatId: '', text: '张三换了工作', journalId: 'j-1' });
+  g.addEdge({ src: '张三', rel: '工作于', dst: '某公司', at: t, chatId: '', episodeId: ep });
+  assert.deepEqual(g.linkedJournalIds('张三'), ['j-1']);
+  assert.deepEqual(g.linkedJournalIds('李四'), []);
+});
+
+test('图谱：hasActive 只在有活边时返回 true', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const t = Date.now();
+  assert.equal(g.hasActive('主人', '住在'), false);
+  g.addEdge({ src: '主人', rel: '住在', dst: '杭州', at: t });
+  assert.equal(g.hasActive('主人', '住在'), true);
+  g.closeEdge({ src: '主人', rel: '住在', at: t + 1 });
+  assert.equal(g.hasActive('主人', '住在'), false, '关掉之后就不算活边');
+});
+
+test('改主意：op=update 作废旧值（不靠关系名里有没有"住"字）', async () => {
+  const now = Date.now();
+  const day = Y(now);
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+
+  // 先有一条旧事实
+  g.addEdge({ src: '主人', rel: '定居', dst: '杭州', at: base - 30 * DAY });
+
+  j.add({ id: 'a1', at: base, chatId: 'g1', text: '我搬到上海了' });
+  // 「定居」不含"住/在"，旧的正则 FUNCTIONAL 判不出来——这正是要修的漏判
+  const gen = async () =>
+    JSON.stringify({
+      summary: '搬到上海。',
+      triples: [{ s: '主人', rel: '定居', o: '上海', scope: 'global', op: 'update' }],
+    });
+  const c = createConsolidate({ journal: j, graph: g, memory: fakeMemory(), generate: gen, now: () => now });
+  await c.run({ day });
+
+  const live = g.nowEdges({ chatId: '' }).filter((e) => e.rel === '定居').map((e) => e.dst);
+  assert.deepEqual(live, ['上海'], '旧值必须被作废，不能两条并存');
+  assert.equal(g.endedEdges({ chatId: '' }).filter((e) => e.rel === '定居').length, 1, '旧边保留可回溯');
+});
+
+test('改主意：op=add 不许动旧值（护栏，防止模型滥用作废）', async () => {
+  const now = Date.now();
+  const day = Y(now);
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  g.addEdge({ src: '主人', rel: '喜欢', dst: '龙井', at: base });
+
+  j.add({ id: 'a1', at: base, chatId: 'g1', text: '我也喜欢火锅' });
+  const gen = async () =>
+    JSON.stringify({ summary: '喜欢火锅。', triples: [{ s: '主人', rel: '喜欢', o: '火锅', scope: 'global', op: 'add' }] });
+  const c = createConsolidate({ journal: j, graph: g, memory: fakeMemory(), generate: gen, now: () => now });
+  await c.run({ day });
+
+  const live = g.nowEdges({ chatId: '' }).filter((e) => e.rel === '喜欢').map((e) => e.dst).sort();
+  assert.deepEqual(live, ['火锅', '龙井'], 'add 不该关掉任何旧值');
+});
+
+test('改主意：没有活边时 op=update 退化成 add（不能因为多写一个 update 就丢数据）', async () => {
+  const now = Date.now();
+  const day = Y(now);
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  j.add({ id: 'a1', at: base, chatId: 'g1', text: '我养了只猫' });
+  const gen = async () =>
+    JSON.stringify({ summary: '养猫。', triples: [{ s: '主人', rel: '养了', o: '猫', scope: 'global', op: 'update' }] });
+  const c = createConsolidate({ journal: j, graph: g, memory: fakeMemory(), generate: gen, now: () => now });
+  await c.run({ day });
+  assert.equal(g.nowEdges({ chatId: '' }).filter((e) => e.rel === '养了').length, 1, '退化为 add，事实要留下');
+});

@@ -108,7 +108,12 @@ export function buildPrompt({ day, chatName, items }) {
     '   不要写成“某个地方”“那个东西”——以后要靠这些名词才找得到。真正重要的事不要放进这里。',
     '   （为什么要逐条点名：只说“保留重要信息”时，模型会把“答应下周三前给答复”这种带时间的承诺压掉，',
     '     它在模型的判断里不够“重要”，但漏掉就是忘了答应过的事。）',
-    '4. triples：从里面抽出"谁—什么关系—什么"的三元组，格式 {"s":"主语","rel":"关系","o":"宾语","scope":"global"|"chat"}。',
+    '4. triples：从里面抽出"谁—什么关系—什么"的三元组，格式',
+    '   {"s":"主语","rel":"关系","o":"宾语","scope":"global"|"chat","op":"add"|"update"|"invalidate"}。',
+    '   · op=add：新事实，和已有的不冲突',
+    '   · op=update：**同一个人同一关系换了值**（"住在"从杭州变上海）→ 会自动把旧的那条作废',
+    '   · op=invalidate：这条不再成立，而且没有新值（分手了、搬走了但没说去哪）',
+    '   · 拿不准就写 add——写 update 会关掉旧值，宁可多留一条也不要误删',
     '   · scope=global：关于主人本人的事实（住处、名字、生日、工作、长期偏好）',
     '   · scope=chat：只在这个群成立的（群友的绰号、群内梗、小圈子关系）',
     '   · rel 用两三个字的动词或名词（住在/喜欢/叫/生日是/工作在/养了/认识）',
@@ -336,6 +341,23 @@ export function createConsolidate({ journal, graph, memory, generate = null, log
         if (!s || !rel || !o) continue;
         // scope=global 的边挂在跨群，chat 的只挂这个群
         const scope = String(tr?.scope ?? 'chat') === 'global' ? '' : chatId;
+        /**
+         * 改主意靠模型给 `op`，不再靠"关系名里有没有'住'字"这种正则。
+         * 「我搬到上海了」不含"住/在"，正则漏判 → 两条"住在"并存，
+         * 问"现在住哪"两个都返回。
+         *
+         * 护栏：`update` 只有在**确实存在同名活边**时才作废旧值；
+         * 没有活边就退化成 add —— 宁可多留一条，也不要因为模型多写一个
+         * `update` 把唯一那条事实关掉。
+         */
+        const op = String(tr?.op ?? '').toLowerCase();
+        if (op === 'invalidate') {
+          if (graph.closeEdge({ src: s, rel, dst: o, at, chatId: scope })) out.closed += 1;
+          continue;
+        }
+        if (op === 'update' && graph.hasActive?.(s, rel, { chatId: scope })) {
+          graph.closeEdge({ src: s, rel, at, chatId: scope });
+        }
         if (graph.addEdge({ src: s, rel, dst: o, at, chatId: scope, episodeId: ep })) out.triples += 1;
       }
     } else if (dry) {

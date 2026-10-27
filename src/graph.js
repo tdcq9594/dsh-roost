@@ -302,6 +302,56 @@ export function createGraph({ file, log = () => {} } = {}) {
     return out;
   }
 
+  /**
+   * 某个实体牵涉到的日记 id。
+   *
+   * 用途：检索的**第三路**（关键词 / 向量 / 实体）。问"张三最近在忙什么"时
+   * 字面命中往往很差，但图谱里"张三—工作在→X"是现成的，能把她带到对的日记上。
+   *
+   * 走 `episode.journal_id` 反查，**不改表结构**——episode 本来就记着来源日记。
+   * （更准的做法是 edge 直接存 journal_id，但那要迁移；先用现成的。）
+   */
+  function linkedJournalIds(entityName, { chatId = '', limit = 20 } = {}) {
+    const d = open();
+    if (!d) return [];
+    const key = normKey(entityName);
+    if (!key) return [];
+    try {
+      const sql = chatId
+        ? `SELECT DISTINCT e.journal_id AS jid
+           FROM entity n
+           JOIN edge g ON (g.src_id = n.id OR g.dst_id = n.id)
+           JOIN episode e ON e.id = g.episode_id
+           WHERE n.key = ? AND e.journal_id IS NOT NULL AND (g.chat_id = ? OR g.chat_id = '')
+           LIMIT ?`
+        : `SELECT DISTINCT e.journal_id AS jid
+           FROM entity n
+           JOIN edge g ON (g.src_id = n.id OR g.dst_id = n.id)
+           JOIN episode e ON e.id = g.episode_id
+           WHERE n.key = ? AND e.journal_id IS NOT NULL
+           LIMIT ?`;
+      const rows = d.prepare(sql).all(...(chatId ? [key, chatId, limit] : [key, limit]));
+      return rows.map((r) => String(r.jid)).filter(Boolean);
+    } catch (e) {
+      log(`实体反查日记失败：${e.message}`);
+      return [];
+    }
+  }
+
+  /** 这条 (主语, 关系) 现在有没有活边。给"改主意"的护栏用 */
+  function hasActive(src, rel, { chatId = '' } = {}) {
+    const d = open();
+    if (!d) return false;
+    const r0 = String(rel ?? '').trim();
+    if (!src || !r0) return false;
+    const sid = ensureEntity(src, { chatId, at: Date.now() });
+    if (!sid) return false;
+    const row = d
+      .prepare('SELECT id FROM edge WHERE src_id=? AND rel=? AND valid_to IS NULL LIMIT 1')
+      .get(sid, r0);
+    return Boolean(row);
+  }
+
   function stats() {
     const d = open();
     if (!d) return { enabled: false, entities: 0, edges: 0, episodes: 0 };
@@ -350,6 +400,8 @@ export function createGraph({ file, log = () => {} } = {}) {
     endedEdges,
     entities,
     episodes,
+    linkedJournalIds,
+    hasActive,
     text,
     stats,
     reset,
