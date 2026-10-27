@@ -78,6 +78,13 @@ export const DEFAULTS = {
     topK: 6,
     hits: 3,
     /**
+     * 把易变内容（刚才说到 / 命中 / 条数）移出 system prompt，改拼进用户消息。
+     *
+     * 为什么要移：system prompt 每个请求都重发，内容一变整段 prompt cache
+     * 就失效。`false` 退回旧行为（全部塞 system prompt，前缀每轮都变）。
+     */
+    freezeSystem: true,
+    /**
      * 给模型注册记忆工具（`memory_search` / `memory_note`），让她能主动翻日记。
      * 关掉只是不注册，自动注入那条路照常。
      */

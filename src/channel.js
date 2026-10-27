@@ -62,6 +62,51 @@ export function can(caps, name, scene = 'c2c') {
 }
 
 /**
+ * 降级链：某个能力用不了时，退成什么。
+ *
+ * 为什么能力表不够（第 3 批 E4）：`capabilities` 只回答"能不能"，
+ * 不回答"不能时怎么办"。结果是降级逻辑散在发消息的地方
+ * （框架里 `mdToPlain` 就在 `message.js` 里自己判一次），
+ * 加平台就得再写一遍。
+ *
+ * 对照：NoneBot-Alconna 用 adapter + exporter 做段类型映射，
+ * Satori 把平台差异收在协议层——上层都不自己判。
+ */
+export const QQ_FALLBACKS = Object.freeze({
+  markdown: 'text',
+  button: 'text',
+  panel: 'text',
+  stream: 'text',
+  voice: 'text',
+  image: 'text',
+  file: 'text',
+  video: 'text',
+  retract: 'none',
+});
+
+/**
+ * 把"想用什么"降级成"这个场景真能用什么"。
+ *
+ * @param {object} caps 能力表
+ * @param {string} intent 想用的能力
+ * @param {'c2c'|'group'} [scene]
+ * @param {object} [fallbacks]
+ * @returns {string|null} 能用的能力名；连 text 都不行（理论上不会）返回 null
+ */
+export function downgrade(caps, intent, scene = 'c2c', fallbacks = QQ_FALLBACKS) {
+  if (can(caps, intent, scene)) return intent;
+  let cur = intent;
+  const seen = new Set();
+  while (fallbacks?.[cur] && !seen.has(cur)) {
+    seen.add(cur);
+    cur = fallbacks[cur];
+    if (cur === 'none') return null;
+    if (can(caps, cur, scene)) return cur;
+  }
+  return null;
+}
+
+/**
  * QQ 通道：真正的发送动作在 ai-chat 那边（它持有 QQ 连接）。
  *
  * 为什么走 HTTP 而不是进程内调用：dsh-roost 和 ai-chat 分属两个进程
@@ -91,6 +136,8 @@ export function createQqChannel({ baseUrl, keyQuery = () => '', log = () => {}, 
   return {
     name: 'qq',
     capabilities: QQ_CAPABILITIES,
+    /** 能力用不了时退成什么，和 capabilities 一起交给上层 */
+    fallbacks: QQ_FALLBACKS,
 
     /**
      * 主动发一条。

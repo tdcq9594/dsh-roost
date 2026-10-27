@@ -522,15 +522,18 @@ export function apply(ctx) {
    *   2. **「刚才说到」必须留着**。上下文一压缩，「那个」「上面说的第二个」
    *      就没了指代对象；把最近两三条原话（截短）铺在这儿，指代才连得上。
    */
-  function memoryText(override = null) {
-    /**
-     * **关掉记忆时一个字都不注入。**
-     *
-     * 写日记、巩固、检索三条路径早就各自挡过了，漏的正是"注入"这一条：
-     * facts、日记摘要、图谱照样每轮进 system prompt，用户以为自己关掉了。
-     * Open WebUI 踩过同一个坑（PR #30228：关掉 Memories 只隐藏了功能，
-     * 已保存的记忆仍被加进每一次 chat 的 system prompt）。
-     */
+  /**
+   * **稳定段**：规则 / facts / 摘要 / TopK / 图谱。进 system prompt。
+   *
+   * 为什么单独拆出来（第 3 批 C2）：system prompt 里的内容**每个请求都要重发**，
+   * 而且一变就让整段 prompt cache 失效。这一段只在"巩固之后"或"每 15 轮深度重注"
+   * 时才变——天级/十几轮级的变化，前缀基本稳定，缓存能复用。
+   *
+   * Claude Code 把"压缩后前缀仍可复用"当招牌特性，Qvink 专门做"冻结注入点"，
+   * 都是为了这件事。反过来看，把每轮都变的检索命中塞进 system prompt，
+   * 等于每轮主动作废一次缓存。
+   */
+  function memoryStatic(override = null) {
     if (cfg.memory?.enabled === false) return '';
     const chatId = lastScene?.chatId || '';
     const m = memory.list(chatId);
@@ -538,7 +541,6 @@ export function apply(ctx) {
     const deep = typeof override === 'boolean' ? override : Boolean(st.deep);
 
     const rules = '记着的事可以拿来用，但**只在这个群发生过的事别拿到别处说**；判断不了就当作不知道。';
-
     const lines = (arr) => arr.map((f) => `· ${f}`).join('\n');
 
     // 平时只给最近的几条（数组是追加序，所以取尾部）；深度时才全量
@@ -572,7 +574,29 @@ export function apply(ctx) {
       }
     }
 
-    /** 刚才说到：最近三条原话，保住指代 */
+    const sections = deep
+      ? [rules, factsGlobal, factsChat, digestSec, topSec, graphSec]
+      : [rules, factsGlobal, factsChat];
+
+    const body = fitBudget(sections, deep ? MEMORY_DEEP_MAX : MEMORY_MAX);
+    // 一句都没有（新装的、什么都没聊过）就别占地方
+    return body.replace(rules, '').trim() ? body : '';
+  }
+
+  /**
+   * **易变段**：刚才说到 / 这一句命中 / 日记条数索引。拼进**用户消息**。
+   *
+   * 每轮都会变，所以不能进 system prompt——放用户消息里同样是注入，
+   * 但不影响 system 前缀的缓存，也不占"系统提示"的位置。
+   * 走的是和压缩开场同一个位置（`onInbound` 里拼在正文前）。
+   *
+   * 「刚才说到」必须留着：上下文一压缩，`那个`/`上面第二个` 就没了指代对象。
+   */
+  function memoryDynamic() {
+    if (cfg.memory?.enabled === false) return '';
+    const chatId = lastScene?.chatId || '';
+    const st = memState.get(chatId) || {};
+
     let recentSec = '';
     try {
       const recent = journal.recent(chatId, 3).reverse();
@@ -583,7 +607,6 @@ export function apply(ctx) {
       }
     } catch {}
 
-    /** 这一句检索到的旧事（onInbound 里已经查好） */
     let hitSec = '';
     if (st.hits?.length) {
       hitSec = `【可能有关的旧事】\n${st.hits
@@ -598,13 +621,12 @@ export function apply(ctx) {
       idxSec = `（还有一本日记，记着 ${st2.total} 条，最早到 ${dayStr(st2.firstAt || Date.now())}；翻细节时按需要回忆）`;
     }
 
-    const sections = deep
-      ? [rules, factsGlobal, factsChat, digestSec, topSec, graphSec, recentSec, hitSec, idxSec]
-      : [rules, factsGlobal, factsChat, recentSec, hitSec, idxSec];
+    return [recentSec, hitSec, idxSec].filter(Boolean).join('\n');
+  }
 
-    const body = fitBudget(sections, deep ? MEMORY_DEEP_MAX : MEMORY_MAX);
-    // 一句都没有（新装的、什么都没聊过）就别占地方
-    return body.replace(rules, '').trim() ? body : '';
+  /** 两段拼起来（调试接口和面板用；真正注入是分开走的，别在这里合并回去） */
+  function memoryText(override = null) {
+    return [memoryStatic(override), memoryDynamic()].filter(Boolean).join('\n\n');
   }
 
   /**
@@ -941,7 +963,14 @@ export function apply(ctx) {
         agent.ctx.systemPrompt.context({
           name: 'roost-memory',
           order: 903,
-          text: () => memoryText(),
+          /**
+           * 只放**稳定段**（规则 / facts / 摘要 / TopK / 图谱）。
+           *
+           * 易变段（刚才说到 / 命中 / 条数）走 `memoryDynamic()` 拼进用户消息，
+           * 否则 system prompt 每轮都不一样，prompt cache 轮轮作废。
+           * `freezeSystem: false` 可以退回旧行为（全塞 system prompt）。
+           */
+          text: () => (cfg.memory?.freezeSystem === false ? memoryText() : memoryStatic()),
         }),
       );
     } catch (e) {
@@ -1143,6 +1172,17 @@ export function apply(ctx) {
         }
       }
       memState.set(chat.chatId, { deep, hits, round: mr.n, at: Date.now() });
+
+      /**
+       * 易变段拼进这一轮的正文（第 3 批 C2）。
+       *
+       * 为什么放这儿：`memState` 刚写好，动态段才有"这一句命中了什么"可读。
+       * 为什么不放 system prompt：它每轮都变，会把 system 前缀的缓存废掉。
+       */
+      if (cfg.memory?.freezeSystem !== false) {
+        const dyn = memoryDynamic();
+        if (dyn) text = `${dyn}\n\n${text}`;
+      }
 
       const rawReply = await turns.run(agent, text, {
         source: { kind: 'roost', chatId: chat.chatId, msgId: payload.id },
@@ -1713,6 +1753,14 @@ export function apply(ctx) {
               max: deep ? MEMORY_DEEP_MAX : MEMORY_MAX,
               len: mtext.length,
               /**
+               * 拆开看：`static` 进 system prompt（稳定，可缓存）；
+               * `dynamic` 拼进用户消息（每轮变，不污染缓存）。
+               * 调注入时最常见的误解是"记忆没生效"，其实是它搬到动态段去了。
+               */
+              staticLen: memoryStatic(forced).length,
+              dynamicLen: memoryDynamic().length,
+              freezeSystem: cfg.memory?.freezeSystem !== false,
+              /**
                * 这一轮是"平时"还是"全量重注"，以及为什么。
                * 调注入时最常问的就是"为什么她突然忘了" ——
                * 先看这里是不是刚好卡在两个 deep 之间。
@@ -1728,6 +1776,9 @@ export function apply(ctx) {
           graph: graph.stats(),
           /** 记忆工具装上了没——静默失败最难查，面板必须看得见 */
           tools: { ...toolState },
+          /** 分开给：调注入时最常搞混的就是"这段到底进 system 还是进用户消息" */
+          memoryStaticText: memoryStatic(forced),
+          memoryDynamicText: memoryDynamic(),
           memoryText: mtext,
         });
       }),
@@ -1829,6 +1880,8 @@ export function apply(ctx) {
           current: cfg.channel?.current || 'qq',
           names: channels.names(),
           capabilities: channels.describe(),
+          /** 能力用不了时退成什么——上层不该自己判"平台不支持怎么办" */
+          fallbacks: channels.active()?.fallbacks ?? {},
         }),
       ),
 

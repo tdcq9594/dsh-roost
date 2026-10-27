@@ -261,9 +261,24 @@ export function createCompact({
     const c = cfg();
     let opening = '';
     try {
+      /**
+       * 开场按角色配额挑，不是简单取最近 N 条（第 3 批 C4）。
+       *
+       * 依据：Codex CLI 是"用户消息永久逐字保留、只压缩模型回复"；
+       * SillyTavern 的 Summaryception 用 3/9/27 分层。共同点是
+       * **用户原话权重更高**——指代（"那个""上面第二个"）几乎都在用户话里，
+       * 而她自己的话被复述错一句，反而是"人设崩塌"。
+       *
+       * 多取一些再分（40 条），因为 8 条用户消息可能散落在 30 条里。
+       */
+      const pool = journal.recent(chatId, 40);
+      const users = pool.filter((r) => r.role !== 'bot').slice(0, Number(c.keepRecentUser) || 8);
+      const bots = pool.filter((r) => r.role === 'bot').slice(0, Number(c.keepRecentBot) || 3);
+      const recent = [...users, ...bots].sort((a, b) => a.at - b.at);
+
       opening = buildOpening({
         digests: journal.digests(chatId, c.keepDigests),
-        recent: journal.recent(chatId, c.keepRecent).reverse(),
+        recent,
         agreements: agreementsOf(chatId) || [],
         now: now(),
       });

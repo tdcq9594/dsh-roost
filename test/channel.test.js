@@ -8,7 +8,9 @@ import assert from 'node:assert/strict';
 
 import {
   QQ_CAPABILITIES,
+  QQ_FALLBACKS,
   can,
+  downgrade,
   createQqChannel,
   createFakeChannel,
   createChannelRegistry,
@@ -188,4 +190,36 @@ test('注册注册表：两种方式都在，能列出、能按配置选', () =>
   assert.deepEqual(reg.list().map((x) => x.name), ['qr', 'manual']);
   assert.equal(reg.active(), manual);
   assert.equal(reg.get('qr'), qr);
+});
+
+/* ---------------- 降级路径（第 3 批 E4） ---------------- */
+
+test('降级：能力可用就原样返回', () => {
+  assert.equal(downgrade(QQ_CAPABILITIES, 'markdown', 'group'), 'markdown');
+  assert.equal(downgrade(QQ_CAPABILITIES, 'text', 'c2c'), 'text');
+});
+
+test('降级：markdown 用不了时退成 text（而不是什么都不发）', () => {
+  const caps = { ...QQ_CAPABILITIES, markdown: false };
+  assert.equal(downgrade(caps, 'markdown', 'group'), 'text');
+});
+
+test('降级：流式在群里不可用 → 退成 text', () => {
+  // stream 是 'c2c'，在群场景下 can() 判 false
+  assert.equal(downgrade(QQ_CAPABILITIES, 'stream', 'group'), 'text');
+  assert.equal(downgrade(QQ_CAPABILITIES, 'stream', 'c2c'), 'stream');
+});
+
+test('降级：撤回退成 none，明确返回 null 而不是硬发', () => {
+  assert.equal(downgrade(QQ_CAPABILITIES, 'retract', 'group', { retract: 'none' }), null);
+});
+
+test('降级：退到底也没有可用能力时返回 null', () => {
+  const caps = { text: false };
+  assert.equal(downgrade(caps, 'markdown'), null);
+});
+
+test('降级：降级链不会成环（自引用配置也不会卡死）', () => {
+  const caps = {};
+  assert.equal(downgrade(caps, 'a', 'c2c', { a: 'b', b: 'a' }), null);
 });

@@ -27,6 +27,13 @@ async function bootHost(cfgPatch = {}, seed = {}) {
   if (seed.memory) {
     writeFileSync(join(dir, 'memory.json'), JSON.stringify(seed.memory), 'utf8');
   }
+  // 种子日记：用同一个模块写库，路径和 host 里的一致
+  if (seed.journal?.length) {
+    const { createJournal } = await import('../src/journal.js');
+    const j = createJournal({ file: join(dir, 'journal.sqlite') });
+    for (const row of seed.journal) j.add(row);
+    j.close();
+  }
   // host 里的 dataDir() 读这个环境变量，必须在 import 之前设
   process.env.DSH_ROOST_DATA = dir;
 
@@ -140,5 +147,53 @@ test('路由：/registrations 列出两种接入方式', async () => {
   const { call, off } = await bootHost();
   const r = await call('/registrations');
   assert.deepEqual(r.json.list.map((x) => x.name), ['qr', 'manual']);
+  off?.();
+});
+
+/* ---------------- 第 3 批：注入拆两段 ---------------- */
+
+const NOW = Date.now();
+const JOURNAL_SEED = [
+  { id: 'j1', at: NOW - 3000, chatId: 'g1', sender: '张三', text: '我住在杭州，喜欢喝龙井' },
+  { id: 'j2', at: NOW - 2000, chatId: 'g1', role: 'bot', text: '那下次给你带点龙井' },
+];
+
+test('注入分段：易变内容（刚才说到/条数）不在 system 段里', async () => {
+  const { call, off } = await bootHost({}, { journal: JOURNAL_SEED });
+  const r = await call('/mind?deep=1');
+  assert.equal(r.status, 200);
+  const stat = r.json.memoryStaticText;
+  const dyn = r.json.memoryDynamicText;
+
+  // 稳定段：可以进 system prompt 的
+  assert.match(stat, /只在这个群发生过的事别拿到别处说/, '串场规则必须在稳定段');
+  // 易变段：每轮变的，必须挪出去
+  assert.match(dyn, /刚才说到/, '最近说的属于易变段');
+  assert.doesNotMatch(stat, /刚才说到/, '稳定段里不能有每轮都变的内容，否则缓存轮轮失效');
+  assert.doesNotMatch(stat, /还有一本日记/, '日记条数每轮会变，属于易变段');
+  off?.();
+});
+
+test('注入分段：两段合起来等于 memoryText（没有内容丢失）', async () => {
+  const { call, off } = await bootHost({}, { journal: JOURNAL_SEED });
+  const r = await call('/mind?deep=1');
+  const { memoryStaticText: s, memoryDynamicText: d, memoryText: t } = r.json;
+  assert.equal(t, [s, d].filter(Boolean).join('\n\n'));
+  assert.ok(s.length > 0 && d.length > 0);
+  off?.();
+});
+
+test('注入分段：关掉记忆时两段都为空', async () => {
+  const { call, off } = await bootHost({ memory: { enabled: false } }, { journal: JOURNAL_SEED });
+  const r = await call('/mind');
+  assert.equal(r.json.memoryStaticText, '');
+  assert.equal(r.json.memoryDynamicText, '');
+  off?.();
+});
+
+test('注入分段：freezeSystem=false 能退回旧行为（全部进 system）', async () => {
+  const { call, off } = await bootHost({ memory: { freezeSystem: false } });
+  const r = await call('/mind');
+  assert.equal(r.json.budgets.memory.freezeSystem, false);
   off?.();
 });

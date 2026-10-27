@@ -223,3 +223,71 @@ test('压缩：读占用失败不影响对话（maybe 返回未压而不是抛�
   const r = await broken.maybe('g1', {});
   assert.equal(r.compacted, false);
 });
+
+/* ---------------- 开场配额（第 3 批 C4） ---------------- */
+
+test('开场：用户消息多留、她自己的少留', async () => {
+  const map = new Map([['g1', 'old-sid']]);
+  const openings = [];
+  // 30 条里 20 条用户、10 条她自己的，交错排布
+  const pool = [];
+  for (let i = 0; i < 30; i += 1) {
+    pool.push({
+      id: `r${i}`,
+      at: Date.now() - (30 - i) * 1000,
+      role: i % 3 === 0 ? 'bot' : 'user',
+      sender: i % 3 === 0 ? '' : `人${i}`,
+      text: i % 3 === 0 ? `她说的第${i}句` : `用户说的第${i}句`,
+    });
+  }
+  const compact = createCompact({
+    controllerOf: () => ({
+      async create() {
+        return { sessionId: 'new-1' };
+      },
+      async rename() {
+        return {};
+      },
+    }),
+    workspaceIdOf: async () => 'ws',
+    sessions: { get: (c) => map.get(c) || '', set: (c, s) => map.set(c, s) },
+    journal: { digests: () => [], recent: () => pool },
+    agreementsOf: () => [],
+    onOpening: (_c, t) => openings.push(t),
+    log: () => {},
+    cfgOf: () => ({ compact: DEFAULTS }),
+  });
+  const r = await compact.compact('g1', { preset: 'roost-social' });
+  assert.equal(r.ok, true);
+  const text = openings[0];
+  const userLines = (text.match(/用户说的第/g) || []).length;
+  const botLines = (text.match(/她说的第/g) || []).length;
+  assert.ok(userLines <= DEFAULTS.keepRecentUser, `用户话不该超过 ${DEFAULTS.keepRecentUser} 条，实际 ${userLines}`);
+  assert.ok(botLines <= DEFAULTS.keepRecentBot, `她的话不该超过 ${DEFAULTS.keepRecentBot} 条，实际 ${botLines}`);
+  assert.ok(userLines > botLines, '用户原话要比她自己的多——指代都在用户话里');
+});
+
+test('开场：配额可配（配置改了要真的生效）', async () => {
+  const map = new Map([['g1', 'old-sid']]);
+  const openings = [];
+  const pool = Array.from({ length: 12 }, (_, i) => ({
+    id: `r${i}`,
+    at: Date.now() - (12 - i) * 1000,
+    role: i % 2 === 0 ? 'bot' : 'user',
+    sender: '张三',
+    text: `第${i}句`,
+  }));
+  const compact = createCompact({
+    controllerOf: () => ({ async create() { return { sessionId: 'n' }; }, async rename() { return {}; } }),
+    workspaceIdOf: async () => 'ws',
+    sessions: { get: (c) => map.get(c) || '', set: (c, s) => map.set(c, s) },
+    journal: { digests: () => [], recent: () => pool },
+    agreementsOf: () => [],
+    onOpening: (_c, t) => openings.push(t),
+    log: () => {},
+    cfgOf: () => ({ compact: { ...DEFAULTS, keepRecentUser: 2, keepRecentBot: 1 } }),
+  });
+  await compact.compact('g1', {});
+  const lines = (openings[0].match(/· /g) || []).length;
+  assert.ok(lines <= 3, `按配置最多 3 条，实际 ${lines}`);
+});
