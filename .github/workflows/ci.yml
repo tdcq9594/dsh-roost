@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 测试（Node ${{ matrix.node }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 零依赖：没有 dependencies，不跑 npm ci
+      - name: 语法检查
+        run: |
+          for f in src/*.js client/client.js scripts/*.mjs; do
+            node --check "$f" || exit 1
+          done
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 插件能否加载（apply 冒烟）
+        run: node scripts/dry-run.mjs
+
+      - name: 打包内容检查
+        # npm pack 会按 files 字段打包，漏了文件用户装上去就是坏的。
+        # 这里只检查关键文件在不在包里，不做内容比对。
+        run: |
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          for f in package.json src/host.js client/client.js; do
+            grep -q "$f" /tmp/pack.txt || { echo "::error::打包漏了 $f"; exit 1; }
+          done

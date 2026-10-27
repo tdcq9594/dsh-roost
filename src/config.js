@@ -228,6 +228,13 @@ export const DEFAULTS = {
     text: '',
     rulesPrivate: '这是和主人的私聊，可以放开聊。',
     rulesSocial: '这是群聊，说话要短，别刷屏。',
+    /**
+     * 近处指令（SillyTavern `post_history_instructions` 的近似）。
+     *
+     * DSH 没有「插到对话历史之后」的入口，我们只能把 order 排到最后，
+     * 至少在 system 块里离历史最近。留空就用内置那一句。
+     */
+    near: '',
   },
 };
 

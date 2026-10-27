@@ -130,21 +130,61 @@ export function parsePersona(id, raw) {
     text = text.slice(m[0].length);
   }
   /**
-   * 把正文切成「性格」和「说话示例」两段。
+   * 把正文切成四段：性格 / 开场白 / 说话示例 / 世界书。
    *
    * 为什么要示例：散文写「活泼」，模型可能理解成「堆颜文字卖萌」；
    * 给两轮真实对话，长度、语气词密度、标点习惯一次校准到位。
    * **形容词告诉它方向，示例告诉它尺度。**（AstrBot 的 begin_dialogs 就是干这个的）
+   *
+   * 另外两段抄的是 SillyTavern 角色卡 V2 的思路：
+   *   · `## 开场白` = first_mes，主动搭话时直接用，不用每次现编
+   *   · `## 世界书` = character_book，**命中关键词才注入**，比全量注入省 token
    */
   let body = text.trim();
-  let demos = '';
-  const d = body.match(/^##\s*说话示例\s*\r?\n([\s\S]*)$/m);
-  if (d) {
-    demos = d[1].trim();
-    body = body.slice(0, d.index).trim();
-  }
+  const take = (title) => {
+    /**
+     * 注意：**不能用 `m` 标志**。
+     * 多行模式下 `$` 只匹配行尾，`[\s\S]*?` 会停在第一行结束——
+     * 结果「说话示例」只切出一行，剩下的示例全被当成性格正文。
+     * 所以这里用 `(?:^|\n)##` 锚行首、`$` 靠非多行模式锚字符串末尾。
+     */
+    const re = new RegExp(`(?:^|\\n)##\\s*${title}\\s*\\r?\\n([\\s\\S]*?)(?=\\r?\\n##\\s|$)`);
+    const hit = body.match(re);
+    if (!hit) return '';
+    body = (body.slice(0, hit.index) + body.slice(hit.index + hit[0].length)).trim();
+    return hit[1].trim();
+  };
 
-  return { ...meta, body, demos };
+  // 顺序有讲究：先取长的，避免「说话示例」被「说话」之类的前缀误吃
+  const demos = take('说话示例');
+  const firstMes = take('开场白');
+  const loreRaw = take('世界书');
+  body = body.trim();
+
+  /**
+   * 世界书一行一条：`触发词1, 触发词2 | 内容`
+   *
+   * 用 `|` 分隔而不是冒号，是因为内容里经常有冒号（"她说过：..."）。
+   * 解析不了的行直接跳过——宁可少一条设定，也不能让整份人格崩掉。
+   */
+  const lore = loreRaw
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[-*·]\s*/, '').trim())
+    .filter(Boolean)
+    .map((line) => {
+      const i = line.indexOf('|');
+      if (i < 0) return null;
+      const keys = line
+        .slice(0, i)
+        .split(/[,，]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const text2 = line.slice(i + 1).trim();
+      return keys.length && text2 ? { keys, text: text2 } : null;
+    })
+    .filter(Boolean);
+
+  return { ...meta, body, demos, firstMes, lore };
 }
 
 export function createPersonas({ dataDir, log = () => {} }) {

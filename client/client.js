@@ -1143,6 +1143,18 @@ select.roost-input{color-scheme:dark}
             + ' 模型自己用 <<persona:>> 写的覆盖优先级更高，出现在上面那一行。'),
 
           /**
+           * 四段式说明。
+           *
+           * 不写这段的话，用户只会往正文里堆散文——
+           * 而「开场白」「世界书」这两段是**结构**，堆在散文里不生效。
+           */
+          h('div', { className: 'roost-note' },
+            '正文可以分四段：默认那段是性格；'
+            + '「## 开场白」是她主动搭话时习惯的第一句（不会每次照抄）；'
+            + '「## 世界书」一行一条，写 `触发词1, 触发词2 | 内容`，只有聊到这些词才注入（省 token）；'
+            + '「## 说话示例」写 2~3 轮对话，比任何形容词都准。'),
+
+          /**
            * 新建入口放在「人格」这一节里，而不是单开一节。
            *
            * 之前它单独占一节「编辑人格」，可那一节平时是空的（占位），
@@ -1196,9 +1208,8 @@ select.roost-input{color-scheme:dark}
                     await reload()
                     openPersona(id)
                   },
-                }, '粘贴导入'),
-              )
-            : null,
+                  }, '粘贴导入'),
+              )            : null,
         ),
 
         /**
@@ -1247,7 +1258,8 @@ select.roost-input{color-scheme:dark}
                       }
                     },
                   }, '复制这份'),
-                  h('span', { className: 'roost-note', style: { margin: 0 } }, '文件头 --- 之间是 name/tags，下面是正文'),
+                  h('span', { className: 'roost-note', style: { margin: 0 } },
+                    '--- 之间是 name/tags；正文可分四段：性格（默认）、## 开场白、## 世界书、## 说话示例'),
                 ),
               ),
             )

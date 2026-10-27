@@ -186,6 +186,14 @@ export function buildWakePrompt({ opp, ctx = {}, group = null } = {}) {
   const lines = [
     `${where}。现在 ${ctx.hour ?? ''} 点，${opp?.reason || '没什么特别的事'}。`,
     ctx.moodText ? `你现在的心情：${ctx.moodText}` : '',
+    /**
+     * 开场白（SillyTavern 的 `first_mes`）。
+     *
+     * 为什么要给：不给的话每次开口都是现编，隔几次就一个调子、越编越像客服。
+     * 给了但**不要求照抄**——照抄会变成每次都同一句，那比现编更假。
+     * 所以是「她习惯这样开口」，让模型顺着这个感觉说。
+     */
+    ctx.opener ? `她习惯这样开口：「${ctx.opener}」——可以照这个感觉说，别每次一模一样。` : '',
     ctx.recent?.length ? `【最近说过的话】\n${ctx.recent.map((r) => `· ${r}`).join('\n')}` : '',
     ctx.agreements?.length ? `【答应过还没做的】\n${ctx.agreements.map((a) => `· ${a}`).join('\n')}` : '',
     '',

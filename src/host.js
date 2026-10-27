@@ -191,6 +191,9 @@ export function apply(ctx) {
   /** 最近一次的场景快照：给 roost-scene 和 /mind 调试接口用 */
   let lastScene = null;
 
+  /** 这一轮用户说的话（截断），世界书按它匹配触发词 */
+  let lastMsgText = '';
+
   /** 动态块的字数硬上限（token 预算的粗护栏，先粗后细） */
   const SCENE_MAX = 240;
   /** 平时的记忆预算（只放检索命中 + 最近说的） */
@@ -407,6 +410,10 @@ export function apply(ctx) {
         name: kind === 'group' ? cfg.awake?.groups?.find?.((g) => g.chatId === chatId)?.name || '' : '',
         hour: new Date().getHours(),
         mood: { valence: m.valence, energy: m.energy, sociability: m.sociability },
+        /** 语气指令版的心情（`moodText` 在 awake 里早就有引用，一直没人传） */
+        moodText: mood.text(),
+        /** 这个人格习惯怎么开口：主动搭话时用来锚语气，不必逐字照抄 */
+        opener: personas.resolve(cid, cfg.persona).firstMes || '',
         agreements: readAgreements({ memory, graph, chatId: cid }),
         recent: journal
           .recent(cid, 4)
@@ -918,6 +925,19 @@ export function apply(ctx) {
             // 按群覆盖优先（模型用 <<persona:>> 写的），没有才用文件里那个人格
             const override = memory.getPersonaOverride(chat.chatId);
             const extra = chat.kind === 'c2c' ? p.rulesPrivate : p.rulesSocial;
+
+            /**
+             * 世界书：**命中关键词才注入**。
+             *
+             * 抄的是 SillyTavern 角色卡的 character_book。
+             * 为什么比全量注入好：人格里的背景设定（在哪工作、养了什么）
+             * 大部分轮次根本用不上，全塞进去白吃 token 还稀释重点。
+             * 这里只在这一轮提到相关词时才带出来。
+             */
+            const hits = (persona.lore || []).filter((l) =>
+              l.keys.some((k) => k && lastMsgText.includes(k)),
+            );
+
             return [
               `你现在叫「${persona.name}」。`,
               PERSONA_BASE,
@@ -927,6 +947,7 @@ export function apply(ctx) {
                * 放在性格后面读，作为"她平时具体怎么说话"的锚。
                */
               persona.demos ? `【她平时这么说话】\n${persona.demos}` : '',
+              hits.length ? `【跟这会儿有关的事】\n${hits.map((h) => `· ${h.text}`).join('\n')}` : '',
               extra,
               p.text, // 旧配置里的追加内容，留着兼容
             ]
@@ -937,6 +958,37 @@ export function apply(ctx) {
       );
     } catch (e) {
       log.debug('挂人格失败：', e.message);
+    }
+
+    /**
+     * **近处指令**（SillyTavern `post_history_instructions` 的近似）。
+     *
+     * 那张角色卡里有一段指令放在对话历史**之后**，比 system 更「近」，
+     * 模型更难忽略。DSH 没给「历史之后」的注入点，我们能做的只有把 order 排到最后，
+     * 至少在 system 块里离历史最近。
+     *
+     * 解决的是真问题：聊到几十轮以后人设被历史冲淡，说话开始像通用助手。
+     */
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-near',
+          order: 908,
+          text: () => {
+            const p = cfg.persona;
+            const persona = personas.resolve(chat.chatId, p);
+            return [
+              `别忘了你是谁：${persona.name}。`,
+              '上面那些历史是发生过的事，不是你说话的方式——别聊着聊着变成通用助手。',
+              p.near || '',
+            ]
+              .filter(Boolean)
+              .join('');
+          },
+        }),
+      );
+    } catch (e) {
+      log.debug('挂近处指令失败：', e.message);
     }
 
     /**
@@ -1126,6 +1178,9 @@ export function apply(ctx) {
         sender: String(payload?.sender?.name || '').trim(),
         bucket,
       };
+
+      // 这一轮用户说了什么：世界书按它匹配触发词
+      lastMsgText = String(text || '').slice(0, 2000);
 
       /**
        * 硬限制：按档位收走本地工具。
