@@ -136,3 +136,27 @@ test('前端渲染：localStorage 写坏了也退回概览，不白屏', () => {
   assert.doesNotThrow(() => { tree = expand(mod.RoostPage(), rt) })
   assert.ok(textOf(tree).includes('现在这样'))
 })
+
+test('前端渲染：页签条不许设 overflow（会长出拖不动的竖向滚动条）', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'overview'
+  rt.reset()
+  const tree = expand(mod.RoostPage(), rt)
+
+  // 找到 tablist 那个节点
+  let bar = null
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.role === 'tablist') bar = n
+    walk(n.props?.children)
+  })(tree)
+
+  assert.ok(bar, '没找到页签条')
+  const style = bar.props.style || {}
+  assert.equal(style.overflow, undefined, '页签条不能设 overflow')
+  assert.equal(style.overflowX, undefined, 'overflowX:auto 会让另一轴也算成 auto，凭空长出竖滚动条')
+  assert.equal(style.overflowY, undefined)
+  assert.equal(style.flexWrap, 'wrap', '窄窗口应该换行，而不是横向滚')
+})

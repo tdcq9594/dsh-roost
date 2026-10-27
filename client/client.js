@@ -104,6 +104,8 @@ window.__ModuleLoader__.load({
 .roost-root{
   color:var(--dsw-alias-label-primary, inherit);
   font-size:13px;line-height:1.62;
+  /* 自己不滚：整页交给 DSH 的外层容器滚，避免出现第二条滚动条 */
+  overflow:visible;
   --line:var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 22%, transparent));
   --line-soft:var(--dsw-alias-border-l1, color-mix(in srgb, currentColor 12%, transparent));
   --surface:var(--dsw-alias-bg-l1, color-mix(in srgb, currentColor 6%, transparent));
@@ -2070,10 +2072,18 @@ window.__ModuleLoader__.load({
         ),
         h('div', { className: 'roost-note', style: { marginTop: 3 } }, 'QQ 消息从这里交给 DSH 会话回答。'),
 
+        /**
+         * 页签条不设 `overflow`。
+         *
+         * 之前写的是 `overflowX:'auto'`——CSS 规定：一轴非 visible 时，另一轴的
+         * `visible` 会被算成 `auto`，于是这条**只有一行高**的页签条凭空长出一条
+         * 竖向滚动条（就是那个"拖不动的进度条"）。九页在 860px 内本来放得下，
+         * 窗口窄时换行比横向滚动更好找。
+         */
         h('div', {
           role: 'tablist',
           'aria-label': 'Roost 各页',
-          style: { display: 'flex', gap: 2, margin: '18px 0 16px', borderBottom: '1px solid var(--line-soft)', overflowX: 'auto' },
+          style: { display: 'flex', gap: 2, flexWrap: 'wrap', margin: '18px 0 16px', borderBottom: '1px solid var(--line-soft)' },
         },
           TABS.map(([id, label]) =>
             h('button', {
