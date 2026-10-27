@@ -197,3 +197,54 @@ test('注入分段：freezeSystem=false 能退回旧行为（全部进 system）
   assert.equal(r.json.budgets.memory.freezeSystem, false);
   off?.();
 });
+
+/* ---------------- 前后端对齐（结构性检查） ---------------- */
+
+/**
+ * 这条不是测行为，是**防漂移**。
+ *
+ * 上一轮出现过「后端加了记忆层、前端还在展示旧的两层」；
+ * 这一轮出现过「后端有 /graph 的 ended 字段、前端没调，于是整块内容静默消失」。
+ * 两种都不会报错，只能靠人发现。
+ *
+ * 所以在测试里直接读两个源码文件比对：后端注册的每条路由，
+ * 前端那个文件里必须出现同名路径。
+ */
+test('对齐：后端每条路由在前端都有入口', async () => {
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+
+  const routes = [...host.matchAll(/route\('(\/[a-z/-]+)'/g)].map((m) => m[1]);
+  assert.ok(routes.length >= 30, `只解析到 ${routes.length} 条路由，正则可能失效了`);
+
+  const missing = routes.filter((p) => !client.includes(`'${p}`));
+  assert.deepEqual(missing, [], `这些后端路由前端没有入口：${missing.join('、')}`);
+});
+
+test('对齐：前端调用的每个路径后端都存在', async () => {
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+
+  const routes = new Set([...host.matchAll(/route\('(\/[a-z/-]+)'/g)].map((m) => m[1]));
+  const called = new Set([
+    ...[...client.matchAll(/(?:get|post)\('(\/[a-z/-]+)/g)].map((m) => m[1]),
+    ...[...client.matchAll(/run\('(\/[a-z/-]+)/g)].map((m) => m[1]),
+  ]);
+  const dead = [...called].filter((p) => !routes.has(p));
+  assert.deepEqual(dead, [], `前端在调不存在的接口：${dead.join('、')}`);
+});
+
+test('对齐：设置页列出的配置段后端都有', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { DEFAULTS } = await import('../src/config.js');
+  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+
+  const block = client.slice(client.indexOf('const JSON_SECTIONS'), client.indexOf('function ConfigTab'));
+  const keys = [...block.matchAll(/\['([a-zA-Z]+)',/g)].map((m) => m[1]);
+  assert.ok(keys.length >= 8, `只解析到 ${keys.length} 个配置段`);
+
+  const missing = keys.filter((k) => !(k in DEFAULTS));
+  assert.deepEqual(missing, [], `设置页列了后端没有的配置段：${missing.join('、')}`);
+});

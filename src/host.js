@@ -1956,6 +1956,22 @@ export function apply(ctx) {
 
       route('/personas', (req, res) => send(res, 200, { ok: true, personas: personas.list(), current: cfg.persona?.current || 'default', byChat: cfg.persona?.byChat || {} })),
 
+      /**
+       * 读一个人格的正文。
+       *
+       * 为什么要单开：`/personas` 的列表只给 id/名字/字数（列表不需要几百字正文），
+       * 而编辑必须拿到 raw。没有这条路由，面板上就只能"选人格"不能"改人格"——
+       * 于是"后端能存、前端改不了"，功能半截。
+       */
+      route('/personas/read', (req, res) => {
+        const u = new URL(req.url || '/', 'http://x');
+        const id = String(u.searchParams.get('id') || '').trim();
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        const p = personas.read(id);
+        if (!p) return send(res, 404, { ok: false, message: `没有「${id}」这个人格` });
+        return send(res, 200, { ok: true, id, name: p.name, raw: p.raw });
+      }),
+
       route('/personas/save', async (req, res) => {
         const b = await readBody(req);
         if (!b.id) return send(res, 400, { ok: false, message: '缺 id' });
