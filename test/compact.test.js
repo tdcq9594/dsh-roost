@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import {
   readPressure,
   shouldCompact,
+  thresholdFor,
   buildOpening,
   createCompact,
   DEFAULTS,
@@ -55,9 +56,25 @@ test('压缩：环状对象不会把扫描卡死', () => {
 
 /* ---------------- 阈值 ---------------- */
 
-test('压缩：到阈值才压', () => {
-  assert.equal(shouldCompact({ percent: 25, cfg: DEFAULTS }).compact, true);
-  assert.equal(shouldCompact({ percent: 24.9, cfg: DEFAULTS }).compact, false);
+test('压缩：群聊与私聊用不同阈值（不再一刀切 25%）', () => {
+  // 私聊 40%
+  assert.equal(shouldCompact({ percent: 40, scene: 'c2c', cfg: DEFAULTS }).compact, true);
+  assert.equal(shouldCompact({ percent: 39.9, scene: 'c2c', cfg: DEFAULTS }).compact, false);
+  // 群聊 60%
+  assert.equal(shouldCompact({ percent: 60, scene: 'group', cfg: DEFAULTS }).compact, true);
+  assert.equal(shouldCompact({ percent: 59, scene: 'group', cfg: DEFAULTS }).compact, false);
+  // 同一个占用值在两种场景下结论不同——这正是拆档的意义
+  assert.equal(shouldCompact({ percent: 45, scene: 'c2c', cfg: DEFAULTS }).compact, true);
+  assert.equal(shouldCompact({ percent: 45, scene: 'group', cfg: DEFAULTS }).compact, false);
+});
+
+test('压缩：旧配置里写了 atPercent 就以它为准（不破坏已有部署）', () => {
+  assert.equal(thresholdFor({ atPercent: 25 }, 'group'), 25);
+  assert.equal(shouldCompact({ percent: 25, scene: 'group', cfg: { atPercent: 25 } }).compact, true);
+});
+
+test('压缩：阈值 25% 这条老线不再触发（避免刚聊两句就换会话）', () => {
+  assert.equal(shouldCompact({ percent: 25, scene: 'c2c', cfg: DEFAULTS }).compact, false);
 });
 
 test('压缩：拿不到用量时按轮数兜底（没上报不等于没涨）', () => {
@@ -121,7 +138,8 @@ function fakeRig({ failCreate = false } = {}) {
       return {};
     },
     async projections() {
-      return { values: { t: { contextPressure: { projectedTokens: 300, contextWindow: 1000 } } } };
+      // 45% 占用：过了私聊的 40%，没过群聊的 60%
+      return { values: { t: { contextPressure: { projectedTokens: 450, contextWindow: 1000 } } } };
     },
   };
   const sessions = {

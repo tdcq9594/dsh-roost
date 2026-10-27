@@ -37,10 +37,33 @@ import { dayOf } from './journal.js';
 
 export const DEFAULTS = {
   enabled: true,
-  /** 占用到多少就压（百分比） */
-  atPercent: 25,
-  /** 新会话开场里带几条最近原话 */
+  /**
+   * 触发阈值**按场景分开**。
+   *
+   * 为什么不抄业界那个 70%~90%：那是编码 agent 的数字（工具输出巨大、
+   * 质量下滑来得早，所以撑到最后才压）。聊天场景不一样——单轮几百字，
+   * 而且我们有日记兜底，压掉的内容查得回来。
+   *
+   * 也不能沿用早期的 25%：用到四分之一就换会话，等于反复重铺上下文，
+   * **每次换会话都会让 prompt cache 整段失效**（Claude Code 把"压缩后
+   * 前缀仍可复用缓存"当招牌特性）。省下的 token 可能不够赔缓存。
+   * 60% 留出的余量够容纳一次长回复的突增。
+   */
+  atPercentGroup: 60,
+  atPercentC2C: 40,
+  /** 兼容旧配置：写了它就用它（两个场景同值） */
+  atPercent: 0,
+  /** 新会话开场里带几条最近原话（旧字段，被 keepRecent 覆盖后仅作兜底） */
   keepRecent: 8,
+  /**
+   * 开场配额：用户说的多留、她自己说的少留。
+   *
+   * 依据：Codex CLI 选择"用户消息永久逐字保留、只压缩模型回复"；
+   * SillyTavern 的 Summaryception 用 3/9/27 分层。共同点是**用户原话权重更高**
+   * ——指代（"那个""上面第二个"）几乎都出现在用户话里。
+   */
+  keepRecentUser: 8,
+  keepRecentBot: 3,
   /** 没有用量数据时，聊到多少轮就压 */
   maxTurns: 40,
   /** 开场摘要最多带几条每日摘要 */
@@ -94,24 +117,41 @@ export function readPressure(value) {
 }
 
 /**
+ * 这个场景用哪个阈值。
+ *
+ * 抽成函数是为了让"哪个群聊按 60%、哪个私聊按 40%"这件事可测——
+ * 阈值写错的表现是"该压的时候没压"或"刚聊两句就换会话"，两种都不报错。
+ */
+export function thresholdFor(cfg = {}, scene = 'c2c') {
+  const c = { ...DEFAULTS, ...(cfg || {}) };
+  if (Number(c.atPercent) > 0) return Number(c.atPercent); // 旧配置优先
+  return scene === 'group' ? Number(c.atPercentGroup) : Number(c.atPercentC2C);
+}
+
+/**
  * 该不该压。
  *
  * 两个入口取"或"：有百分比就按百分比（准），没有就按轮数（粗但不会不触发）。
  * 轮数兜底是必要的——`contextPressure` 在服务商第一次回报 usage 之前是空的，
  * 而"没上报"不等于"没涨"。
  */
-export function shouldCompact({ percent = null, turnsSince = 0, cfg = {} } = {}) {
+export function shouldCompact({ percent = null, turnsSince = 0, cfg = {}, scene = 'c2c' } = {}) {
   const c = { ...DEFAULTS, ...(cfg || {}) };
-  if (!c.enabled) return { compact: false, why: '没开' };
-  if (percent != null && percent >= c.atPercent) {
-    return { compact: true, why: `占用 ${percent.toFixed(1)}% ≥ ${c.atPercent}%` };
+  if (!c.enabled) return { compact: false, why: '没开', threshold: thresholdFor(c, scene) };
+  const at = thresholdFor(c, scene);
+  if (percent != null && percent >= at) {
+    return { compact: true, why: `占用 ${percent.toFixed(1)}% ≥ ${at}%`, threshold: at };
   }
   if (percent == null && turnsSince >= c.maxTurns) {
-    return { compact: true, why: `没有用量数据，已聊 ${turnsSince} 轮 ≥ ${c.maxTurns}` };
+    return { compact: true, why: `没有用量数据，已聊 ${turnsSince} 轮 ≥ ${c.maxTurns}`, threshold: at };
   }
   return {
     compact: false,
-    why: percent == null ? `没有用量数据，${turnsSince}/${c.maxTurns} 轮` : `占用 ${percent.toFixed(1)}% < ${c.atPercent}%`,
+    why:
+      percent == null
+        ? `没有用量数据，${turnsSince}/${c.maxTurns} 轮`
+        : `占用 ${percent.toFixed(1)}% < ${at}%`,
+    threshold: at,
   };
 }
 
@@ -263,11 +303,12 @@ export function createCompact({
   async function maybe(chatId, chat = {}) {
     const c = cfg();
     if (!c.enabled) return { compacted: false, why: '没开' };
+    const scene = chat.kind === 'group' ? 'group' : 'c2c';
     const p = await pressure(chatId);
-    const d = shouldCompact({ percent: p.percent, turnsSince: turns.get(chatId) || 0, cfg: c });
-    if (!d.compact) return { compacted: false, why: d.why, percent: p.percent };
+    const d = shouldCompact({ percent: p.percent, turnsSince: turns.get(chatId) || 0, cfg: c, scene });
+    if (!d.compact) return { compacted: false, why: d.why, percent: p.percent, threshold: d.threshold };
     const r = await compact(chatId, chat);
-    return { ...r, compacted: Boolean(r.ok), percent: p.percent, trigger: d.why };
+    return { ...r, compacted: Boolean(r.ok), percent: p.percent, trigger: d.why, threshold: d.threshold };
   }
 
   return {

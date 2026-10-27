@@ -120,10 +120,13 @@ export const DEFAULTS = {
    */
   compact: {
     enabled: true,
-    /** 占用到这个百分比就压。25% 是实证里给的触发线 */
-    atPercent: 25,
-    /** 新会话开场带几条最近原话（保住"刚才那个"的指代） */
-    keepRecent: 8,
+    /** 群聊到多少占用就压。60% 是折中：业界 70~90% 是编码 agent 的数字 */
+    atPercentGroup: 60,
+    /** 私聊长任务早一点压，避免生成质量下滑 */
+    atPercentC2C: 40,
+    /** 新会话开场带几条最近原话（用户多留、她自己少留） */
+    keepRecentUser: 8,
+    keepRecentBot: 3,
     /** 读不到用量时的兜底：聊到这么多轮就压 */
     maxTurns: 40,
   },

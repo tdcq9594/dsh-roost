@@ -483,6 +483,13 @@ export function apply(ctx) {
    */
   let statCache = { at: 0, v: null };
   function journalStat() {
+    /**
+     * 关掉记忆时连库都不查。
+     *
+     * 只挡"注入"不挡"查库"的话，关掉记忆每轮还要跑 7 条 COUNT——
+     * 用户看不出区别，但那是白花的 I/O。
+     */
+    if (cfg.memory?.enabled === false) return null;
     const t = Date.now();
     if (statCache.v && t - statCache.at < 60_000) return statCache.v;
     try {
@@ -515,6 +522,15 @@ export function apply(ctx) {
    *      就没了指代对象；把最近两三条原话（截短）铺在这儿，指代才连得上。
    */
   function memoryText(override = null) {
+    /**
+     * **关掉记忆时一个字都不注入。**
+     *
+     * 写日记、巩固、检索三条路径早就各自挡过了，漏的正是"注入"这一条：
+     * facts、日记摘要、图谱照样每轮进 system prompt，用户以为自己关掉了。
+     * Open WebUI 踩过同一个坑（PR #30228：关掉 Memories 只隐藏了功能，
+     * 已保存的记忆仍被加进每一次 chat 的 system prompt）。
+     */
+    if (cfg.memory?.enabled === false) return '';
     const chatId = lastScene?.chatId || '';
     const m = memory.list(chatId);
     const st = memState.get(chatId) || {};

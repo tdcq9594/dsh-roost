@@ -564,9 +564,16 @@ test('巩固：喂模型的条目按"等级高+时间新"挑，且不超字数',
   assert.deepEqual(both.map((i) => i.row.id), ['1', '2']);
 });
 
-test('巩固：提示词里必须写"保留具体名词"（指代不能压掉）', () => {
+test('巩固：压缩提示词必须逐条点名要保留的类别', () => {
   const p = buildPrompt({ day: '2026-10-26', chatName: 'g1', items: [] });
-  assert.match(p, /保留具体名词/);
+  /**
+   * 为什么要逐条断言：只说"保留重要信息"时，模型会把
+   * 「答应下周三前给答复」这种带时间的承诺压掉——它在模型看来不够"重要"。
+   * 所以类别必须是显式清单，少一类就漏一类。
+   */
+  for (const cat of ['人名', '地名', '物品名', '数字', '日期', '待办', '承诺', '否定', '金额']) {
+    assert.ok(p.includes(cat), `提示词里缺类别：${cat}`);
+  }
   assert.match(p, /scope/);
   assert.match(p, /summary/);
 });
