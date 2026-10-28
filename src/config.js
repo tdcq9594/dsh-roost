@@ -271,6 +271,28 @@ export const DEFAULTS = {
      * 至少在 system 块里离历史最近。留空就用内置那一句。
      */
     near: '',
+    /**
+     * 人格仓库（「从仓库更新」按钮用的）。
+     *
+     * 默认源写死在 `persona-repo.js`（GitHub raw → Gitee raw 自动换）。
+     * 这里留一个空数组当覆盖口：国内用户想换成自己的镜像或 fork 时填进来，
+     * 填了就不再用默认那两个。域名必须在白名单里（只认
+     * `raw.githubusercontent.com` / `gitee.com`），否则面板就成了内网探测器。
+     */
+    repo: {
+      /** 例：["https://raw.githubusercontent.com/我/我的fork/main/personas"] */
+      sources: [],
+    },
+  },
+
+  /**
+   * 本体自更新（设置页最上面那一块）。
+   *
+   * 默认走 npm 官方源；国内想换镜像填这里。空 = 用 DSH 自己配的 registry。
+   * 只更新 dsh-roost 这一个包，不接受任意包名。
+   */
+  update: {
+    registry: '',
   },
 };
 

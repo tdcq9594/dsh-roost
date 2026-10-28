@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "repo": "tdcq9594/dsh-roost",
+  "branch": "main",
+  "minVersion": "0.10.7",
+  "personas": [
+    {
+      "id": "default",
+      "name": "小栖",
+      "tags": [
+        "日常",
+        "温和"
+      ],
+      "file": "default.md",
+      "chars": 168,
+      "sha256": "c8bd975780aa9b1606868540ecc30286dd19819d2051505cdd68e004fa1204ba"
+    },
+    {
+      "id": "fatfish",
+      "name": "大肥鱼",
+      "tags": [
+        "短句",
+        "吐槽",
+        "鲸鱼娘"
+      ],
+      "file": "fatfish.md",
+      "chars": 297,
+      "sha256": "3ef5374d72387d5c24106567532190044363f7d7e027b6359a3cab7ace40026c"
+    },
+    {
+      "id": "genki",
+      "name": "元气少女",
+      "tags": [
+        "活泼",
+        "二次元"
+      ],
+      "file": "genki.md",
+      "chars": 157,
+      "sha256": "4f03d03b1ec3e6c2efce8657796d10bd707ba0ad87908e3054e90cc5c66dfe8e"
+    },
+    {
+      "id": "helper",
+      "name": "靠谱助手",
+      "tags": [
+        "工具",
+        "严谨"
+      ],
+      "file": "helper.md",
+      "chars": 186,
+      "sha256": "b9dbc828f599656eba05a9fe808a263fbd16999fb377bf752fbd154ca5811b97"
+    },
+    {
+      "id": "scholar",
+      "name": "古风书生",
+      "tags": [
+        "文艺",
+        "有趣"
+      ],
+      "file": "scholar.md",
+      "chars": 190,
+      "sha256": "6c593a6b3c0217a25bcdf59d527961040ad1d3bc0564546b629d291b00202ad5"
+    },
+    {
+      "id": "snarky",
+      "name": "毒舌群友",
+      "tags": [
+        "群聊",
+        "活跃"
+      ],
+      "file": "snarky.md",
+      "chars": 174,
+      "sha256": "3de63db7dee85d0ab9630627d765d220875eff984e822d6cfe7ecdcd94dae030"
+    },
+    {
+      "id": "teacher",
+      "name": "科普老师",
+      "tags": [
+        "解释",
+        "耐心"
+      ],
+      "file": "teacher.md",
+      "chars": 106,
+      "sha256": "67745304f33a865dc2792c3e0440bd19114d255adc368597a2df51119cc3ef71"
+    },
+    {
+      "id": "terse",
+      "name": "惜字如金",
+      "tags": [
+        "极简",
+        "效率"
+      ],
+      "file": "terse.md",
+      "chars": 138,
+      "sha256": "37420c5214dd071fcea2a1a25109595717fc48432e4f998966d481168b328466"
+    }
+  ]
+}

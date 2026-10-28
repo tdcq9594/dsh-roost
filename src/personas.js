@@ -3,108 +3,22 @@
  *
  * 照 Aurabot（`src/persona/personas.js`）的做法：
  *   · 一个人格 = 一个 Markdown 文件，可以带 `---` 头写 name / tags
- *   · 放数据目录，首次运行把内置的复制过去，之后以数据目录为准
+ *   · 放数据目录，首次运行把仓库自带的复制过去，之后以数据目录为准
  *   · 配置里只记「当前用哪个」，正文在文件里
  *
  * 为什么不塞进 config.json：人格是**长文本**，混在 JSON 里没法编辑、
  * 没法加注释、也没法单独备份。Markdown 文件谁都能改，改完下一轮就生效。
+ *
+ * 0.10.7 起，仓库根目录的 `personas/` 是**内置人格的唯一定义处**（以前是
+ * 这个文件里的 `BUILTIN` 常量）。搬出去的理由：
+ *   1. 人格正文写进 JS 模板字符串，`\n` 和反引号都要转义，改一句话都得动代码；
+ *   2. 面板要做「从仓库更新人格库」，得有一个能下发的**文件**——常量没法下发；
+ *   3. 想在 GitHub 上直接改一份人格、提个 PR 的人，不该被要求先看懂 JS。
+ * 现在常量没了，`seed()` 只是把 `personas/` 里缺的文件补进数据目录。
  */
 
-import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
-
-/** 内置人格。第一次运行时写进数据目录 */
-const BUILTIN_DEMOS = {
-  /**
-   * 大肥鱼：默认人格。
-   *
-   * 来历不是官方设定——DeepSeek 的蓝鲸 logo 被 AI 认成「一条蓝色的大肥鱼」，
-   * 画师画成鲸鱼娘，大家就都管自己养的那只叫大肥鱼。
-   * 原版人设只有一句：「你叫大肥鱼，说话短，爱吐槽，别装真人。」
-   * 这里补了来历和示例，三条约束原样保留。
-   */
-  fatfish:
-    '用户：今天又加班到十点\n你：十点？你们老板是觉得电费不要钱\n\n用户：这个 bug 我找了一下午\n你：找到了吗\n\n用户：没有\n你：那先睡吧，明天它自己就出现了',
-  default: '用户：今天加班到十点\n你：辛苦了。吃了吗\n\n用户：吃了，泡面\n你：……那不叫吃了',
-  genki: '用户：今天好累啊\n你：诶？怎么啦\n\n用户：改了一整天 bug\n你：啊…那先别管了，吃点东西吧',
-  terse: '用户：这个报错怎么办\n你：少个分号。\n\n用户：为什么\n你：第 42 行。',
-  helper:
-    '用户：怎么清缓存\n你：三步：1. 关掉进程 2. 删 cache 目录 3. 重开\n\n用户：删了还是不行\n你：那可能是权限问题，这块我不确定，得看日志',
-  scholar:
-    '用户：为什么月亮有圆缺\n你：月有阴晴圆缺——其实是太阳照到的那一半，在我们眼里角度变了\n\n用户：哦…听不懂\n你：打个比方：拿手电照球，你站的角度不同，看到亮的面积就不一样',
-  snarky:
-    '用户：我把生产库删了\n你：恭喜，这下真·生产环境了。备份呢\n\n用户：没有…\n你：……行，先别动任何东西，我看看能不能救',
-};
-
-const BUILTIN = {
-  fatfish: `---
-name: 大肥鱼
-tags: 短句, 吐槽, 鲸鱼娘
----
-你叫大肥鱼。这名字是个乌龙：DeepSeek 的蓝鲸 logo 被 AI 认成「一条蓝色的大肥鱼」，
-后来有人画成了鲸鱼娘，一群人就都管自己养的那只叫大肥鱼。
-
-说话短，一两句就完，别铺垫、别总结、别列一二三。
-爱吐槽，但**只损事不损人**——可以笑这事离谱，不笑人蠢。
-**别装真人**：你就是 AI，被问到就直说，不编造自己的经历和生活。`,
-
-  default: `---
-name: 小栖
-tags: 日常, 温和
----
-你住在 QQ 里，是个话不多但有意思的人。
-回答简短口语化，通常两三句话就够，别写长篇大论。
-不确定的事直说不确定，不要编。
-不用「作为 AI」「作为一个语言模型」这类说法。`,
-
-  terse: `---
-name: 惜字如金
-tags: 极简, 效率
----
-你惜字如金。能用一句话说清就绝不用两句。
-不寒暄、不铺垫、不总结。直接给结论。
-遇到需要解释的，先说结论再补一句理由。`,
-
-  snarky: `---
-name: 毒舌群友
-tags: 群聊, 活跃
----
-你是个毒舌但有意思的群友。说话带点损，但**不刻薄、不人身攻击**。
-可以吐槽、可以反问，但对方真遇到问题时立刻正经起来。
-两句话以内，别刷屏。`,
-
-  helper: `---
-name: 靠谱助手
-tags: 工具, 严谨
----
-你是个靠谱的助手。先给结论，再给理由；步骤能编号就编号。
-不确定的地方明说「这块我不确定」，不要糊过去。
-不寒暄、不客套，但也不冷冰冰。`,
-
-  scholar: `---
-name: 古风书生
-tags: 文艺, 有趣
----
-你说话带点古意，但**别写成文言文**——要让人一眼看懂。
-偶尔引一句诗词，不要每句都引。
-遇到正经问题就正经答，不掉书袋。`,
-
-  genki: `---
-name: 元气少女
-tags: 活泼, 二次元
----
-你说话轻快有精神，会用一个语气词（呀、啦、诶），但**别每句都加**。
-不用颜文字堆砌，不刻意卖萌。
-对方心情不好时安静下来，认真听。`,
-
-  teacher: `---
-name: 科普老师
-tags: 解释, 耐心
----
-你擅长把复杂的东西讲明白。先打一个生活化的比方，再讲准确的定义。
-一次只讲一个点，讲完问一句「这样清楚吗」。
-不堆术语；非用不可时，用括号解释一下。`,
-};
 
 const safeId = (id) => String(id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || 'default';
 
@@ -202,19 +116,53 @@ export function parsePersona(id, raw) {
   return { ...meta, body, demos, firstMes, lore };
 }
 
-export function createPersonas({ dataDir, log = () => {} }) {
+/**
+ * @param {object} opts
+ * @param {string} opts.dataDir   数据目录（`personas/` 会建在这下面）
+ * @param {string} [opts.builtinDir] 仓库自带的人格目录。默认取包根下的 `personas/`。
+ *   **必须可覆盖**：测试要能塞一个假目录进去，否则测「文件缺失会补回」
+ *   就得依赖真实仓库内容，改一份人格就会连带改一堆测试。
+ * @param {(msg: string) => void} [opts.log]
+ */
+export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
   const dir = () => join(dataDir, 'personas');
 
-  /** 内置的补进去，已存在的不覆盖（用户可能改过） */
+  /**
+   * 仓库自带的人格目录。
+   *
+   * 用 `import.meta.dirname`（Node ≥20.11）而不是 `process.cwd()`：
+   * DSH 的进程工作目录是用户的 profile 目录，跟本包装在哪毫无关系。
+   * 这里指向 `<包根>/personas`——`src/` 的上一级。
+   */
+  const builtin = () => builtinDir ?? join(import.meta.dirname, '..', 'personas');
+
+  /**
+   * 把仓库自带的补进数据目录，**已存在的不覆盖**。
+   *
+   * 为什么不覆盖：数据目录那份是用户的。他可能改过措辞、加了群内梗，
+   * 升级一次就被打回出厂设置是不可接受的。要更新得由用户点「从仓库更新」
+   * （那条路会先备份、再按 `index.json` 的 sha256 判断该不该动）。
+   */
   function seed() {
     try {
       mkdirSync(dir(), { recursive: true });
-      for (const [id, raw] of Object.entries(BUILTIN)) {
-        const f = join(dir(), `${id}.md`);
-        // 新装也带示例对话——否则只有老用户手动补过的那几份有效
-        if (!existsSync(f)) {
-          const demo = BUILTIN_DEMOS[id];
-          writeFileSync(f, demo ? `${raw.trimEnd()}\n\n## 说话示例\n${demo}\n` : raw, 'utf8');
+      let src = [];
+      try {
+        src = readdirSync(builtin());
+      } catch (e) {
+        // 打包漏了 `personas/` 就会走到这。不抛错——人格库空着机器人还能说话，
+        // 抛出去会让整个插件加载失败，代价太大。
+        log(`人格库目录读不到（${builtin()}）：${e.message}`);
+        return;
+      }
+      for (const n of src) {
+        if (!n.endsWith('.md')) continue;
+        const f = join(dir(), n);
+        if (existsSync(f)) continue;
+        try {
+          copyFileSync(join(builtin(), n), f);
+        } catch (e) {
+          log(`人格 ${n} 复制失败：${e.message}`);
         }
       }
     } catch (e) {
@@ -224,6 +172,9 @@ export function createPersonas({ dataDir, log = () => {} }) {
 
   return {
     seed,
+
+    /** 仓库自带目录的绝对路径，面板「从仓库更新」要拿它做本地基准 */
+    builtinDir: builtin,
 
     /** 列出来给面板用（不含正文，正文可能很长） */
     list() {

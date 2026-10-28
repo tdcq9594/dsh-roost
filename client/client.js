@@ -1080,6 +1080,66 @@ select.roost-input{color-scheme:dark}
       const [showNew, setShowNew] = useState(false)
 
       /**
+       * 人格仓库（「从仓库更新」）。
+       *
+       * `repo` 是 `GET /personas/repo` 的结果：仓库里有哪些人格、本地各自
+       * 什么状态（没装 / 已是最新 / 有更新 / 你改过）。服务端有 5 分钟缓存，
+       * 所以进这一页拉一次不会每次都打网络。
+       */
+      const [repo, setRepo] = useState(null)
+      const [repoErr, setRepoErr] = useState('')
+      const [repoBusy, setRepoBusy] = useState(false)
+      const [repoOpen, setRepoOpen] = useState(false)
+      const [preview, setPreview] = useState(null)
+      const [riskNote, setRiskNote] = useState(null)
+
+      const loadRepo = async (force) => {
+        try {
+          const r = await get('/personas/repo' + (force ? '?force=1' : ''))
+          if (r.ok === false) { setRepoErr(r.message || '连不上仓库'); return }
+          setRepo(r)
+          setRepoErr('')
+        } catch (e) {
+          setRepoErr(e?.message || '连不上仓库')
+        }
+      }
+
+      /**
+       * 进这一页就查一次有没有更新（用来显示角标）。
+       *
+       * 失败不弹 toast——断网是常态，为此打断用户没必要，`repoErr`
+       * 会在仓库面板里显示成一行灰字。
+       */
+      useEffect(() => { loadRepo(false) }, [])
+
+      const pending = repo?.pending || 0
+
+      /** 一键更新：只动「没改过」的文件，改过的跳过并报告 */
+      const runSync = async () => {
+        setRepoBusy(true)
+        try {
+          const r = await post('/personas/sync', {})
+          if (r.skipped) {
+            toast(r.why || '这次没更新')
+          } else {
+            const parts = []
+            if (r.updated?.length) parts.push(`更新 ${r.updated.length} 个（${r.updated.map((x) => x.name).join('、')}）`)
+            if (r.untouched?.length) parts.push(`跳过 ${r.untouched.length} 个（你改过）`)
+            if (r.failed?.length) parts.push(`失败 ${r.failed.length} 个（${r.failed[0].why}）`)
+            toast(parts.join('；') || '已经是最新的')
+            const risky = (r.updated || []).filter((x) => (x.risky || []).length)
+            if (risky.length) {
+              setRiskNote(risky.flatMap((x) => x.risky.map((y) => ({ ...y, id: x.id }))))
+            }
+          }
+          await reload()
+          await loadRepo(true)
+        } finally {
+          setRepoBusy(false)
+        }
+      }
+
+      /**
        * 分节编号自己算，不写死。
        *
        * 之前每节把 '01' '02' 硬写在标题里，于是「编辑人格」那一节
@@ -1110,10 +1170,28 @@ select.roost-input{color-scheme:dark}
 
       return h('div', null,
         sec('人格', {
-          right: h('button', {
-            type: 'button', className: 'roost-btn',
-            onClick: () => setShowNew((v) => !v),
-          }, showNew ? '收起新建' : '新建'),
+          /**
+           * 标题右边两个按钮。
+           *
+           * 「从仓库更新」带角标：有几个可更新就显示几。**不自动更新**——
+           * 人格突然变味比"版本旧"难受得多，必须用户自己点。
+           */
+          right: h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              disabled: repoBusy,
+              title: repoErr ? `仓库连不上：${repoErr}` : '从 dsh-roost 仓库拉最新人格（不碰你改过的）',
+              onClick: runSync,
+            }, repoBusy ? '更新中…' : `从仓库更新${pending ? ' ' + pending : ''}`),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => { setRepoOpen((v) => !v); if (!repoOpen && !repo) loadRepo(true) },
+            }, repoOpen ? '收起仓库' : '仓库'),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => setShowNew((v) => !v),
+            }, showNew ? '收起新建' : '新建'),
+          ),
         },
           h('div', { className: 'roost-list' },
             (personas?.personas || []).map((p) => {
@@ -1162,6 +1240,118 @@ select.roost-input{color-scheme:dark}
             }),
             !(personas?.personas || []).length ? h('div', { className: 'roost-empty' }, '读不到人格列表') : null,
           ),
+
+          /**
+           * 仓库面板：仓库里有哪些人格、本地各自什么状态。
+           *
+           * 刻意**不做单条安装**：安装动作只有「从仓库更新」一个按钮，
+           * 点一次装全部该装的。多一个入口就多一套状态，而这里的需求
+           * 本来就是"顺手点一下"，不是逐条挑着装。
+           * 面板存在的意义是**看清楚**：谁没装、谁有更新、谁是你改过的。
+           */
+          repoOpen
+            ? h('div', { style: { marginTop: 12 } },
+                h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+                  h('div', { style: { fontSize: 12, fontWeight: 650 } },
+                    `仓库 ${repo?.repo || 'tdcq9594/dsh-roost'} · personas/`),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: () => loadRepo(true),
+                  }, '刷新'),
+                  repo?.stale ? h(Pill, { tone: 'warn' }, '用的是缓存清单') : null,
+                ),
+                repoErr ? h('div', { className: 'roost-note', style: { color: '#c0392b' } }, '连不上仓库：' + repoErr) : null,
+                repo && repo.gate && repo.gate.ok === false
+                  ? h('div', { className: 'roost-note' }, repo.gate.why + '，先升级 dsh-roost 再看。')
+                  : null,
+
+                h('div', { className: 'roost-list', style: { marginTop: 8 } },
+                  (repo?.personas || []).map((p) => {
+                    const label = p.state === 'missing' ? '未安装'
+                      : p.state === 'update' ? '有更新'
+                        : p.state === 'modified' ? '你改过'
+                          : '已是最新'
+                    return h('div', { key: p.id, className: 'roost-item' },
+                      h('div', { className: 't' },
+                        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+                          h('span', { style: { fontWeight: 500 } }, p.name || p.id),
+                          h(Pill, { tone: p.state === 'modified' ? 'warn' : p.state === 'same' ? 'ok' : 'info' }, label),
+                        ),
+                        h('div', { className: 'roost-note', style: { marginTop: 1 } },
+                          `仓库 ${p.chars} 字` + (p.localChars ? ` · 本地 ${p.localChars} 字` : '')
+                          + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')),
+                      ),
+                      h('div', { className: 'roost-acts' },
+                        h('button', {
+                          type: 'button', className: 'roost-btn',
+                          onClick: async () => {
+                            const r = await get('/personas/repo/preview?id=' + encodeURIComponent(p.id))
+                            if (r.ok === false) return toast(r.message || '预览不了')
+                            setPreview(r)
+                          },
+                        }, '预览'),
+                        /**
+                         * 「恢复官方版本」只对**改过的**出现。
+                         * 一键更新刻意不碰你改过的文件，这里就是反悔的出口；
+                         * 服务端覆盖前会自动备份到 personas/.backup/。
+                         */
+                        p.state === 'modified'
+                          ? h(ConfirmLink, {
+                              label: '恢复官方', confirmLabel: '确认覆盖？',
+                              onConfirm: async () => {
+                                const r = await post('/personas/restore', { id: p.id })
+                                toast(r.ok === false ? (r.message || '没恢复成') : '已恢复官方版本（旧内容已备份）')
+                                await reload()
+                                await loadRepo(true)
+                              },
+                            })
+                          : null,
+                      ),
+                    )
+                  }),
+                  !(repo?.personas || []).length ? h('div', { className: 'roost-empty' }, '仓库里没读到人格') : null,
+                ),
+                h('div', { className: 'roost-note' },
+                  '只装「没被改过」的：一键更新会跳过你手改过的那几份，'
+                  + '自建的人格（不在仓库清单里的）完全不碰。'),
+              )
+            : null,
+
+          /** 预览：装之前先读一遍正文。人格是要读的，光看标签决定不了 */
+          preview
+            ? h('div', { style: { marginTop: 12, border: '1px solid currentColor', borderRadius: 8, padding: 10 } },
+                h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+                  h('div', { style: { fontSize: 12, fontWeight: 650 } }, `预览：${preview.name || preview.id}`),
+                  h('span', { className: 'roost-note', style: { margin: 0 } }, `${preview.chars || 0} 字`),
+                  h('button', { type: 'button', className: 'roost-btn', onClick: () => setPreview(null) }, '关闭'),
+                ),
+                (preview.risky || []).length
+                  ? h('div', { className: 'roost-note', style: { color: '#c0392b', marginTop: 6 } },
+                      `⚠ 提到工具或敏感路径 ${preview.risky.length} 处（只是提醒，不拦）：`,
+                      h('div', null, preview.risky.slice(0, 5).map((r, i) =>
+                        h('div', { key: i }, `第 ${r.line} 行 · ${r.why}：${r.text}`))))
+                  : null,
+                h('pre', {
+                  style: {
+                    marginTop: 8, maxHeight: 260, overflow: 'auto', fontSize: 12, lineHeight: 1.7,
+                    whiteSpace: 'pre-wrap', fontFamily: 'ui-monospace,Menlo,Consolas,monospace',
+                  },
+                }, preview.text || ''),
+              )
+            : null,
+
+          /** 更新完的高危提醒（不拦，只亮出来让人自己判断） */
+          riskNote && riskNote.length
+            ? h('div', { style: { marginTop: 10, border: '1px solid #c0392b', borderRadius: 8, padding: 10 } },
+                h('div', { style: { fontSize: 12, fontWeight: 650, color: '#c0392b' } },
+                  `刚更新的内容里有 ${riskNote.length} 处提到工具或敏感路径`),
+                h('div', { className: 'roost-note', style: { marginTop: 4 } },
+                  '人格正文会进系统提示词。这些命中只是提醒——正常人格也可能提到"工具"，自己看一眼判断。'),
+                h('div', { className: 'roost-note' },
+                  riskNote.slice(0, 6).map((r, i) => h('div', { key: i }, `[${r.id}] 第 ${r.line} 行 · ${r.why}：${r.text}`))),
+                h('button', { type: 'button', className: 'roost-btn', style: { marginTop: 6 }, onClick: () => setRiskNote(null) }, '知道了'),
+              )
+            : null,
 
           /**
            * 按群覆盖：模型用 `<<persona:>>` 写进来的那一段。
@@ -2108,6 +2298,145 @@ select.roost-input{color-scheme:dark}
       ['setup', '接入', '装在哪、用哪种接入方式'],
     ]
 
+    /**
+     * 更新块（设置页最上面）。
+     *
+     * 放在设置页顶部而不是单开一个侧边栏入口，是主人的决定：更新是低频动作，
+     * 为它多占一行侧边栏不划算；而设置页是"改这台机器"的地方，更新本来就属于这里。
+     *
+     * 两块东西各自独立：
+     *   · **本体**——走 DSH 的 pluginManager 装 npm 包，装完要重启 DSH
+     *   · **人格库**——从仓库拉 personas/*.md，即时生效、不碰你改过的
+     * 刻意**都不自动**：本体更新会改用户的安装，人格变味比版本旧难受得多。
+     */
+    function UpdatesBlock({ toast }) {
+      const [info, setInfo] = useState(null)
+      const [repo, setRepo] = useState(null)
+      const [busy, setBusy] = useState('')
+      const [at, setAt] = useState('')
+
+      const loadCheck = async () => {
+        const r = await get('/update/check')
+        setInfo(r && r.ok !== false ? r : { ok: false, own: r?.own || '', error: r?.error || '查不到', canSelf: false })
+        setAt(new Date().toLocaleTimeString())
+      }
+      const loadRepo = async () => {
+        try {
+          const r = await get('/personas/repo')
+          if (r.ok !== false) setRepo(r)
+        } catch {}
+      }
+      useEffect(() => { loadCheck(); loadRepo() }, [])
+
+      const doSelf = async (fresh) => {
+        setBusy(fresh ? 'fresh' : 'self')
+        try {
+          const r = await post('/update/self', { fresh })
+          toast(r.message || (r.ok ? '更新完成，重启 DSH 生效' : '没更新成'))
+          await loadCheck()
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const doPersonas = async () => {
+        setBusy('personas')
+        try {
+          const r = await post('/personas/sync', {})
+          if (r.skipped) toast(r.why || '这次没更新')
+          else {
+            const parts = []
+            if (r.updated?.length) parts.push(`更新 ${r.updated.length} 个`)
+            if (r.untouched?.length) parts.push(`跳过 ${r.untouched.length} 个（你改过）`)
+            if (r.failed?.length) parts.push(`失败 ${r.failed.length} 个`)
+            toast(parts.join('；') || '已经是最新的')
+          }
+          await loadRepo()
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const own = info?.own ? 'v' + info.own : '—'
+      const latest = info?.latest ? 'v' + info.latest : ''
+      const pending = repo?.pending || 0
+
+      return h(Sec, {
+        n: '01', title: '更新',
+        right: h('button', { type: 'button', className: 'roost-btn', onClick: () => { loadCheck(); loadRepo() } }, '重新检查'),
+      },
+        /* ---- 本体 ---- */
+        h('div', { className: 'roost-item' },
+          h('div', { className: 't' },
+            h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+              h('span', { style: { fontWeight: 600 } }, 'dsh-roost 本体'),
+              h('span', { className: 'roost-note', style: { margin: 0 } },
+                `当前 ${own}` + (latest ? ` · 最新 ${latest}` : '')
+                + (info?.ageText ? `（${info.ageText}）` : '')),
+              info?.hasUpdate ? h(Pill, { tone: 'info' }, '有新版') : null,
+            ),
+            /**
+             * 三种装法要说清，不然用户点不动按钮也不知道为什么：
+             * 开发模式（符号链接）根本不该更新，会把源码链路搞断。
+             */
+            h('div', { className: 'roost-note', style: { marginTop: 2 } },
+              info?.kind === 'linked'
+                ? '开发模式（node_modules 里是符号链接）：自更新已禁用，改完源码重启 DSH 即可。'
+                : info?.kind === 'real'
+                  ? '装完要**重启 DSH** 才生效。'
+                  : info?.hasManager === false
+                    ? '这个 DSH 版本没有 pluginManager，请去 DSH 插件管理里手动更新。'
+                    : (info?.error ? '查不到最新版：' + info.error : '')),
+            info?.cooling && info?.hasUpdate
+              ? h('div', { className: 'roost-note', style: { color: 'var(--warn)', marginTop: 2 } },
+                  `${latest} 发布不满 24 小时（pnpm 默认不装这么新的版本，会降级），${info.coolingLeftText}。`
+                  + '点「立即安装」会先给 dsh-roost 加一条豁免再装。')
+              : null,
+          ),
+          h('div', { className: 'roost-acts' },
+            info?.canSelf && info?.hasUpdate
+              ? h('button', {
+                  type: 'button', className: 'roost-primary', disabled: Boolean(busy),
+                  onClick: () => doSelf(false),
+                }, busy === 'self' ? '更新中…' : `更新到 ${latest}`)
+              : null,
+            info?.canSelf && info?.hasUpdate && info?.cooling
+              ? h('button', {
+                  type: 'button', className: 'roost-btn', disabled: Boolean(busy),
+                  title: '改 pnpm-workspace.yaml 加一条只对 dsh-roost 生效的豁免，然后立刻装',
+                  onClick: () => doSelf(true),
+                }, busy === 'fresh' ? '安装中…' : '立即安装（不等 24 小时）')
+              : null,
+          ),
+        ),
+
+        /* ---- 人格库 ---- */
+        h('div', { className: 'roost-item', style: { marginTop: 8 } },
+          h('div', { className: 't' },
+            h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+              h('span', { style: { fontWeight: 600 } }, '人格库'),
+              h('span', { className: 'roost-note', style: { margin: 0 } },
+                repo ? `${(repo.personas || []).length} 个` + (pending ? ` · ${pending} 个可更新` : ' · 都是最新的') : '读着…'),
+              repo?.stale ? h(Pill, { tone: 'warn' }, '缓存清单') : null,
+            ),
+            h('div', { className: 'roost-note', style: { marginTop: 2 } },
+              repo && repo.gate && repo.gate.ok === false
+                ? repo.gate.why + '，先升级本体。'
+                : '从 dsh-roost 仓库的 personas/ 拉。只覆盖没改过的，你自己改过和自建的一个不碰；即时生效不用重启。'),
+          ),
+          h('div', { className: 'roost-acts' },
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              disabled: Boolean(busy) || (repo?.gate && repo.gate.ok === false),
+              onClick: doPersonas,
+            }, busy === 'personas' ? '更新中…' : (pending ? `一键更新 ${pending} 个` : '一键更新')),
+          ),
+        ),
+
+        at ? h('div', { className: 'roost-note', style: { marginTop: 6 } }, `最后检查 ${at}`) : null,
+      )
+    }
+
     function ConfigTab({ config, save, toast }) {
       const [draft, setDraft] = useState(() => JSON.stringify(config, null, 2))
       const [err, setErr] = useState('')
@@ -2134,7 +2463,9 @@ select.roost-input{color-scheme:dark}
       }
 
       return h('div', null,
-        h(Sec, { n: '01', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
+        h(UpdatesBlock, { toast }),
+
+        h(Sec, { n: '02', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
           h('button', { type: 'button', className: 'roost-btn', onClick: () => setDraft(JSON.stringify(config, null, 2)) }, '还原'),
           h('button', { type: 'button', className: 'roost-primary', onClick: doSave }, '保存'),
         ) },
@@ -2150,7 +2481,7 @@ select.roost-input{color-scheme:dark}
             '密钥显示成 ******。原样提交回来不会覆盖真密钥，只有填了新的才会改。'),
         ),
 
-        h(Sec, { n: '02', title: '各段是干什么的' },
+        h(Sec, { n: '03', title: '各段是干什么的' },
           h('div', { className: 'roost-list' },
             JSON_SECTIONS.map(([k, label, desc]) =>
               h('div', { key: k, className: 'roost-item' },

@@ -33,6 +33,12 @@ jobs:
       - name: 单元测试
         run: npm test
 
+      - name: 人格索引与文件一致
+        # personas/index.json 里的 sha256 必须和 personas/*.md 对得上，
+        # 否则「从仓库更新」会拿着一个对不上的哈希去校验下载内容，
+        # 结果是所有用户都装不上。改了人格忘了重算索引，这里会红。
+        run: node scripts/build-persona-index.mjs --check
+
       - name: 插件能否加载（apply 冒烟）
         run: node scripts/dry-run.mjs
 
@@ -41,6 +47,6 @@ jobs:
         # 这里只检查关键文件在不在包里，不做内容比对。
         run: |
           npm pack --dry-run 2>&1 | tee /tmp/pack.txt
-          for f in package.json src/host.js client/client.js; do
+          for f in package.json src/host.js client/client.js personas/index.json; do
             grep -q "$f" /tmp/pack.txt || { echo "::error::打包漏了 $f"; exit 1; }
           done

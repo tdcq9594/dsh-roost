@@ -10,7 +10,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, unlinkSync, writeFileSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -135,3 +136,60 @@ test('解析：没有头就整段当正文，名字退回 id', () => {
   assert.equal(r.name, 'bare');
   assert.equal(r.body, '就是一段话');
 });
+
+/* ---------------- 人格搬成文件（0.10.7） ---------------- */
+
+const ROOT = join(import.meta.dirname, '..');
+const BUILTIN = join(ROOT, 'personas');
+
+test('仓库：personas/ 里 8 份内置人格都在，且每份都有 name', async () => {
+  const { readdirSync, readFileSync } = await import('node:fs');
+  const files = readdirSync(BUILTIN).filter((n) => n.endsWith('.md')).sort();
+  assert.equal(files.length, 8, `内置人格数量变了：${files}`);
+  for (const f of files) {
+    const p = parsePersona(f.slice(0, -3), readFileSync(join(BUILTIN, f), 'utf8'));
+    assert.ok(p.body.length > 0, `${f} 没有正文`);
+    assert.notEqual(p.name, f.slice(0, -3), `${f} 缺少 --- 头里的 name`);
+  }
+});
+
+test('索引：personas/index.json 与文件逐份对得上（改了人格忘了重算索引会红）', () => {
+  // 直接跑脚本的 --check，测的就是 CI 跑的那条路——自己再实现一遍比对
+  // 等于把「两套规则迟早不一致」的问题又造一次。
+  const r = spawnSync(process.execPath, [join(ROOT, 'scripts', 'build-persona-index.mjs'), '--check'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(r.status, 0, `索引校验失败：${r.stderr || r.stdout}`);
+});
+
+test('seed：只补缺的，用户在数据目录改过的不会被覆盖', () => {
+  const { dir, p, done } = fresh();
+  try {
+    p.list(); // 触发 seed
+    const f = join(dir, 'personas', 'terse.md');
+    const mine = '---\nname: 我改的\n---\n只剩一句。';
+    writeFileSync(f, mine, 'utf8');
+    p.seed(); // 再 seed 一次
+    assert.equal(readFileSync(f, 'utf8'), mine, 'seed 不能覆盖用户改过的文件');
+  } finally {
+    done();
+  }
+});
+
+test('seed：自带目录读不到时只记日志，不抛错（打包漏了 personas/ 也不能让插件起不来）', () => {
+  const logs = [];
+  const p = createPersonas({
+    dataDir: mkdtempSync(join(tmpdir(), 'roost-persona-')),
+    builtinDir: join(tmpdir(), 'roost-no-such-dir-' + Date.now()),
+    log: (m) => logs.push(m),
+  });
+  try {
+    assert.doesNotThrow(() => p.seed());
+    assert.ok(logs.some((m) => m.includes('人格库目录读不到')), `日志里要有提示：${logs}`);
+    assert.deepEqual(p.list(), [], '没有任何人格文件时列表为空');
+  } finally {
+    try { rmSync(p.builtinDir(), { recursive: true, force: true }); } catch {}
+  }
+});
+

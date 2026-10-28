@@ -12,7 +12,9 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node --test \"test/**/*.test.js\""
+    "test": "node --test \"test/**/*.test.js\"",
+    "persona-index": "node scripts/build-persona-index.mjs",
+    "persona-index:check": "node scripts/build-persona-index.mjs --check"
   },
   "dsh": {
     "bundle": {
@@ -44,6 +46,7 @@
   "files": [
     "src",
     "client",
+    "personas",
     "cordis.patch.yml",
     "README.md",
     "docs",

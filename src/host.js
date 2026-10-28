@@ -30,6 +30,8 @@ import { createEmbedder } from './embed.js';
 import { createMood, parseMoodMark } from './mood.js';
 import { createClosing, parseClose, acceptClose } from './closing.js';
 import { createPersonas, legacyPersonaText } from './personas.js';
+import { createPersonaRepo } from './persona-repo.js';
+import { createUpdater } from './update.js';
 import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools } from './qq-tools.js';
@@ -97,6 +99,33 @@ export function apply(ctx) {
 
   /** 人格库：正文在 personas/*.md 里，配置只记用哪个 */
   const personas = createPersonas({ dataDir: dataDir(), log: (m) => log.warn(m) });
+
+  /**
+   * 人格仓库：从 dsh-roost 仓库的 `personas/` 一键更新本地人格库。
+   *
+   * 单独一个模块而不是塞进 `personas.js`：一个只管「本地文件怎么读写」，
+   * 一个只管「怎么从网上拿」，混在一起以后想换源、加缓存策略都要动读写逻辑。
+   * `sources` 允许配置覆盖，是为了国内用户能换镜像（跟插件市场一个思路）。
+   */
+  const personaRepo = createPersonaRepo({
+    dataDir: dataDir(),
+    personas,
+    sources: cfg.persona?.repo?.sources,
+    log: (m) => log.warn(m),
+  });
+
+  /**
+   * 本体自更新。
+   *
+   * `ctx` 传进去是为了 `ctx.get('pluginManager')`——**不能写进 inject**：
+   * 老版本 DSH 没这个服务，写进 inject 会让插件直接激活失败，
+   * 而 `ctx.get()` 拿不到只是"这个版本不支持自更新"。
+   */
+  const updater = createUpdater({
+    ctx,
+    registry: cfg.update?.registry,
+    log: (m) => log.warn(m),
+  });
 
   /** 表情包：只做「把清单写进提示词」，发图复用已有的 <<image:>> */
   const stickers = createStickers({ dataDir: dataDir(), log: (m) => log.warn(m) });
@@ -2521,6 +2550,104 @@ export function apply(ctx) {
       route('/personas/remove', async (req, res) => {
         const b = await readBody(req);
         return send(res, 200, { ok: true, ...personas.remove(b.id) });
+      }),
+
+      /**
+       * 人格仓库：列清单 + 每个条目在本地的状态。
+       *
+       * `?force=1` 绕过 5 分钟缓存。为什么需要：用户刚在 GitHub 上推了一份人格，
+       * 回面板点刷新却还是旧清单，会以为没推上去。
+       */
+      route('/personas/repo', async (req, res) => {
+        const u = new URL(req.url || '/', 'http://x');
+        try {
+          const r = await personaRepo.list({ force: u.searchParams.get('force') === '1' });
+          return send(res, 200, r);
+        } catch (e) {
+          return send(res, 502, { ok: false, message: e.message });
+        }
+      }),
+
+      /** 预览一份人格的正文（只读，不落盘）。装之前得先能读——人格是要读的，光看标签决定不了 */
+      route('/personas/repo/preview', async (req, res) => {
+        const u = new URL(req.url || '/', 'http://x');
+        const id = String(u.searchParams.get('id') || '').trim();
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        try {
+          return send(res, 200, await personaRepo.preview(id));
+        } catch (e) {
+          return send(res, 404, { ok: false, message: e.message });
+        }
+      }),
+
+      /**
+       * 一键更新人格库。
+       *
+       * 只动「没被用户改过」的文件——判据在 `persona-repo.js:status()`。
+       * 返回报告而不是抛错：单个文件失败不该让整批停下。
+       */
+      route('/personas/sync', async (req, res) => {
+        try {
+          const r = await personaRepo.sync();
+          if (r.ok && r.updated.length) {
+            addLog('info', 'persona', `人格库更新 ${r.updated.length} 个：${r.updated.map((x) => x.name).join('、')}`);
+          }
+          return send(res, r.ok ? 200 : 500, r);
+        } catch (e) {
+          addLog('error', 'persona', `人格库更新失败：${e.message}`);
+          return send(res, 502, { ok: false, message: e.message });
+        }
+      }),
+
+      /** 单个强制恢复官方版本（覆盖前自动备份到 `personas/.backup/<时间戳>/`） */
+      route('/personas/restore', async (req, res) => {
+        const b = await readBody(req);
+        if (!b.id) return send(res, 400, { ok: false, message: '缺 id' });
+        try {
+          const r = await personaRepo.restore(String(b.id));
+          addLog('info', 'persona', `已恢复官方人格：${r.name || b.id}`);
+          return send(res, r.ok ? 200 : 500, r);
+        } catch (e) {
+          return send(res, 502, { ok: false, message: e.message });
+        }
+      }),
+
+      /**
+       * 查有没有新版本。
+       *
+       * 只读，不改任何东西。失败也返回 200（`error` 字段里带原因）——
+       * 断网是常态，前端要能照常显示「当前版本 + 查不到最新版」，
+       * 而不是整块变成错误页。
+       */
+      route('/update/check', async (req, res) => {
+        try {
+          return send(res, 200, await updater.check());
+        } catch (e) {
+          return send(res, 200, { ok: false, own: updater.own(), error: e.message, canSelf: false, hasUpdate: false });
+        }
+      }),
+
+      /**
+       * 执行自更新。
+       *
+       * `{ fresh: true }` = 「立即安装（不等 24 小时）」：先往
+       * `pnpm-workspace.yaml` 写一条只对 dsh-roost 生效的豁免，再装。
+       *
+       * 为什么这条要单独一个按钮：pnpm 的 24 小时冷却会把刚发的版本
+       * **降级**成旧版（不报错），我们每次发版都在和这个窗口赛跑。
+       * 但它只对本包开放——做成通用入口就等于给面板开了一个
+       * 「给任何包跳过防投毒保护」的洞。
+       */
+      route('/update/self', async (req, res) => {
+        const b = await readBody(req);
+        try {
+          const r = await updater.self({ fresh: Boolean(b?.fresh) });
+          addLog(r.ok ? 'info' : 'warn', 'update', r.message || `自更新：${r.code || r.version || ''}`);
+          return send(res, 200, r);
+        } catch (e) {
+          addLog('error', 'update', `自更新异常：${e.message}`);
+          return send(res, 500, { ok: false, message: e.message });
+        }
       }),
 
       route('/logs', (req, res) => {
