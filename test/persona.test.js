@@ -145,7 +145,12 @@ const BUILTIN = join(ROOT, 'personas');
 test('仓库：personas/ 里 8 份内置人格都在，且每份都有 name', async () => {
   const { readdirSync, readFileSync } = await import('node:fs');
   const files = readdirSync(BUILTIN).filter((n) => n.endsWith('.md')).sort();
-  assert.equal(files.length, 8, `内置人格数量变了：${files}`);
+  /**
+   * 用 `>=` 而不是 `===`：以后往仓库里加人格不该把这条测试弄红。
+   * 「索引和文件是否一致」由下一条（跑 `--check`）负责，那才是真正的守卫。
+   */
+  assert.ok(files.length >= 8, `内置人格少了：${files}`);
+  for (const must of ['default.md', 'fatfish.md']) assert.ok(files.includes(must), `缺 ${must}`);
   for (const f of files) {
     const p = parsePersona(f.slice(0, -3), readFileSync(join(BUILTIN, f), 'utf8'));
     assert.ok(p.body.length > 0, `${f} 没有正文`);
