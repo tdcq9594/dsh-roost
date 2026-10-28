@@ -99,6 +99,48 @@ test('觉醒：低于阈值的机会连模型都不问', () => {
   assert.deepEqual(out, []);
 });
 
+/* ---------------- 收尾冷却（第 1 条联动） ---------------- */
+
+/**
+ * 刚收过尾就别「随便说句话」。
+ *
+ * `closedAt` 由宿主从 `closing.json` 传进来。这里的断言盯的是
+ * 「说完晚安十分钟后又冒出来」——那不是功能 bug，是社交事故。
+ */
+const MINUTE = 60_000;
+const calmMood = { sociability: 0.6, energy: 0.6, valence: 0 };
+
+test('觉醒：刚收过尾就不「随性搭话」', () => {
+  const now = noon();
+  const state = { lastOwnerAt: now - HOUR, closedAt: now - 10 * MINUTE };
+  const out = opportunities({ now, mood: calmMood, state, cfg: CFG });
+  assert.equal(out.some((o) => o.kind === 'casual'), false, '冷却期内不该随性搭话');
+});
+
+test('觉醒：冷却过了「随性」回来', () => {
+  const now = noon();
+  const state = {
+    lastOwnerAt: now - HOUR,
+    closedAt: now - (DEFAULTS.closeCoolMinutes + 5) * MINUTE,
+  };
+  const out = opportunities({ now, mood: calmMood, state, cfg: CFG });
+  assert.equal(out.some((o) => o.kind === 'casual'), true);
+});
+
+test('觉醒：冷却不拦「约定」——答应过的事该提还是要提', () => {
+  const now = noon();
+  const state = { lastOwnerAt: now - HOUR, closedAt: now - 5 * MINUTE };
+  const out = opportunities({ now, agreements: ['周末看电影'], mood: calmMood, state, cfg: CFG });
+  assert.equal(out.some((o) => o.kind === 'agreement'), true, '收尾不该把约定一起按下去');
+});
+
+test('觉醒：没有收尾记录（closedAt=0）时随性照常', () => {
+  const now = noon();
+  const state = { lastOwnerAt: now - HOUR, closedAt: 0 };
+  const out = opportunities({ now, mood: calmMood, state, cfg: CFG });
+  assert.equal(out.some((o) => o.kind === 'casual'), true, '没记录过不能当成刚收尾');
+});
+
 test('觉醒：心情差时提约定会降权，但不会被降到不出现', () => {
   const arg = { now: noon(), agreements: ['还书'], state: {}, cfg: CFG };
   const good = opportunities({ ...arg, mood: { valence: 0.5 } });
@@ -144,6 +186,31 @@ test('觉醒：提示词里必须给出「不说话的出口」', () => {
 test('觉醒：群场景的提示词点明在哪说', () => {
   const p = buildWakePrompt({ opp: { reason: '冷场' }, ctx: {}, group: { name: '摸鱼群' } });
   assert.match(p, /摸鱼群/);
+});
+
+test('觉醒：有收尾记录时提示词接得上上次的话头', () => {
+  const p = buildWakePrompt({
+    opp: { reason: '很久没聊' },
+    ctx: { closing: { point: '聊到他说要去睡了', resume: '问他睡得好不好' } },
+  });
+  assert.match(p, /上次聊到这儿/);
+  assert.match(p, /聊到他说要去睡了/);
+  assert.match(p, /问他睡得好不好/);
+  assert.match(p, /别装作没发生过/);
+});
+
+test('觉醒：没有 resume 时只说收在哪，不出现「本来打算」', () => {
+  const p = buildWakePrompt({
+    opp: { reason: '很久没聊' },
+    ctx: { closing: { point: '聊完了', resume: '' } },
+  });
+  assert.match(p, /聊完了/);
+  assert.doesNotMatch(p, /本来打算/);
+});
+
+test('觉醒：没有收尾记录时不注入这一段（别写废话）', () => {
+  const p = buildWakePrompt({ opp: { reason: '很久没聊' }, ctx: {} });
+  assert.doesNotMatch(p, /上次聊到这儿/);
 });
 
 /* ---------------- 群白名单四道门 ---------------- */

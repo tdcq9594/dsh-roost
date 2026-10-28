@@ -26,9 +26,13 @@ let defineToolCache;
 
 /**
  * 试着拿 DSH 的 defineTool。
+ *
+ * 导出给 `qq-tools.js` 用——两个文件都要这套「有就用真的、没有就交普通对象」
+ * 的降级，复制一份必然漂。
+ *
  * @returns {Promise<Function|null>}
  */
-async function loadDefineTool() {
+export async function loadDefineTool() {
   if (defineToolCache !== undefined) return defineToolCache;
   try {
     const m = await import('@deepseek-ai/dsh-tools');

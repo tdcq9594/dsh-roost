@@ -38,6 +38,11 @@ export const DEFAULTS = {
   minScore: 0.35,
   /** 随性每天最多几次 */
   casualPerDay: 1,
+  /**
+   * 收尾后多久内不「随性搭话」（分钟）。**只是兜底默认值**——
+   * 真正的配置在 `closing.coolMinutes`，`cfg()` 会用它覆盖这里。
+   */
+  closeCoolMinutes: 90,
   /** 群聊主动：默认关。白名单里写了才考虑 */
   groups: [],
   /** 每个群每天最多主动几次 */
@@ -135,7 +140,18 @@ export function opportunities({ now = Date.now(), mood = {}, agreements = [], st
   /* 随性：权重最低，且每天一次封顶 */
   const today = dayKey(now);
   const casualUsed = state.casualDay === today ? Number(state.casualCount || 0) : 0;
-  if (casualUsed < c.casualPerDay) {
+  /**
+   * 刚收过尾就别「随便说句话」了。
+   *
+   * `closedAt` 由宿主从 `closing.json` 传进来（0 = 没记录）。
+   * 这里自己算冷却，不调用 closing 的 coolingDown——保持纯函数，
+   * 「刚说完晚安会不会又被叫醒」能直接测，不必等到半夜。
+   */
+  const closedAt = Number(state.closedAt || 0);
+  const closeCool = Math.max(0, Number(c.closeCoolMinutes) || 0) * MINUTE;
+  const inCloseCool = closedAt > 0 && now - closedAt < closeCool;
+
+  if (casualUsed < c.casualPerDay && !inCloseCool) {
     out.push({
       kind: 'casual',
       /**
@@ -194,6 +210,21 @@ export function buildWakePrompt({ opp, ctx = {}, group = null } = {}) {
      * 所以是「她习惯这样开口」，让模型顺着这个感觉说。
      */
     ctx.opener ? `她习惯这样开口：「${ctx.opener}」——可以照这个感觉说，别每次一模一样。` : '',
+    /**
+     * 上次收在哪。
+     *
+     * 主动搭话最容易假的地方是「装作没发生过」——明明上次聊到一半说了
+     * 晚安，这次又来一句「在干嘛」。接上话头就自然多了。
+     *
+     * 注意这里的措辞跟「下一轮被动接话」那边**不一样**：那边是同一段
+     * 聊天的延续（`closing.text()` 说「不用重新自我介绍」），这边是
+     * **重新开一段**，所以说「接上次的」而不是「延续」。
+     */
+    ctx.closing?.point
+      ? `【上次聊到这儿】\n收在：${ctx.closing.point}`
+        + (ctx.closing.resume ? `\n你本来打算下次这么接：${ctx.closing.resume}` : '')
+        + '\n（可以从这儿接着聊，也可以就着这件事起个头；别装作没发生过。）'
+      : '',
     ctx.recent?.length ? `【最近说过的话】\n${ctx.recent.map((r) => `· ${r}`).join('\n')}` : '',
     ctx.agreements?.length ? `【答应过还没做的】\n${ctx.agreements.map((a) => `· ${a}`).join('\n')}` : '',
     '',
@@ -307,7 +338,20 @@ export function createAwake({
     }
   }
 
-  const cfg = () => ({ ...DEFAULTS, ...(cfgOf()?.awake ?? {}) });
+  const cfg = () => {
+    const root = cfgOf() || {};
+    return {
+      ...DEFAULTS,
+      ...(root.awake ?? {}),
+      /**
+       * 收尾冷却的**唯一真相在 `closing.coolMinutes`**（跟 `closing.json` 同源）。
+       *
+       * 这里不另开一个 `awake.closeCoolMinutes` 让人配——两份配置必然会漂，
+       * 而漂的表现是「面板上调了 30 分钟，实际还是 90 分钟」，查起来很费劲。
+       */
+      closeCoolMinutes: root.closing?.coolMinutes ?? DEFAULTS.closeCoolMinutes,
+    };
+  };
 
   /** 群里有人说话时调一下，用来算冷场 */
   function noteUser(chatId) {

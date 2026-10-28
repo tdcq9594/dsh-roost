@@ -28,9 +28,11 @@ import { createGraph } from './graph.js';
 import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
 import { createMood } from './mood.js';
+import { createClosing, parseClose, acceptClose } from './closing.js';
 import { createPersonas } from './personas.js';
 import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
+import { registerQqTools } from './qq-tools.js';
 import { createSpeakUp } from './speakup.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
@@ -208,6 +210,8 @@ export function apply(ctx) {
 
   const memory = createMemory();
   const mood = createMood();
+  /** 对话收尾（只私聊）：记「收在哪 / 下次怎么接」，给下一轮和主动搭话用 */
+  const closing = createClosing(() => cfg.closing);
 
   /* ---------------- 日记 / 图谱 / 巩固 ---------------- */
 
@@ -405,6 +409,12 @@ export function apply(ctx) {
     contextOf: ({ kind, chatId = '' } = {}) => {
       const cid = chatId || cfg.speakUp?.chatId || '';
       const m = mood.get();
+      /**
+       * 收尾记录只读一次，两个地方用：
+       *   · `state.closedAt`  → 刚说完晚安别又冒出来（冷却）
+       *   · `closing`         → 主动搭话能接上「上次聊到哪儿」
+       */
+      const closed = closing.get(cid);
       return {
         chatId: cid,
         name: kind === 'group' ? cfg.awake?.groups?.find?.((g) => g.chatId === chatId)?.name || '' : '',
@@ -419,7 +429,17 @@ export function apply(ctx) {
           .recent(cid, 4)
           .reverse()
           .map((r) => `${r.role === 'bot' ? '你' : r.sender || '对方'}：${String(r.digest || r.text).slice(0, 60)}`),
-        state: { lastOwnerAt: speakUp.state?.().lastOwnerAt || 0 },
+        state: {
+          lastOwnerAt: speakUp.state?.().lastOwnerAt || 0,
+          /**
+           * 刚收过尾的时间戳（0 = 没有记录）。给「随性搭话」踩刹车用：
+           * 说完晚安 90 分钟内不该又冒出来。**不影响「约定」**——
+           * 答应过的事该提还是要提。
+           */
+          closedAt: closed?.at || 0,
+        },
+        /** 上次收在哪：主动搭话时用来接上话头，别装作没发生过 */
+        closing: closed ? { point: closed.point, resume: closed.resume } : null,
       };
     },
     /** 觉醒要用"她的嘴"问，所以借 speakup 那个内部会话，不新开一个 */
@@ -663,7 +683,7 @@ export function apply(ctx) {
    * 标记是模型写在回复里的，所以只能等回复到手再处理。
    * 摘干净再发出去——群里不该看到 `<<remember: ...>>`。
    */
-  function applyMemoryMarkers(text, chatId) {
+  function applyMemoryMarkers(text, chatId, said = '', kind = 'group') {
     let out = String(text ?? '');
     let touched = '';
 
@@ -752,6 +772,39 @@ export function apply(ctx) {
         log.warn(`日记遗忘失败：${e.message}`);
       }
       if (n || j) touched = `忘掉了 ${n + j} 条`;
+      return '';
+    });
+
+    /**
+     * 对话收尾（`<<close: 收在哪 | 下次怎么接>>`）。
+     *
+     * **不发消息、不动记忆**，只把"这段聊到哪结束"记下来，给两处用：
+     *   · 下一轮进来的提示词（`roost-closing`）——接得上，不用重新自我介绍
+     *   · 主动搭话的刹车（`awake.js`）——刚说完晚安不该十分钟后又冒出来
+     *
+     * 三条拒绝，任何一条命中都不收尾（**标记照样摘掉**，不能漏给用户看）：
+     *   1. 群聊——群里没有"聊完"这回事，一直有人说话
+     *   2. 没写"收在哪"——空收尾对下一轮毫无价值
+     *   3. 对方这一轮还在提问——问题没答完就退场，是最让人恼火的一种
+     *
+     * 注意**不要求**收尾必须带正文：`qq_close_conversation` 本来就是
+     * "不说话地退场"，说完晚安、下一轮只留一个 close 标记是正确的用法。
+     */
+    out = out.replace(/<<close:\s*([\s\S]*?)>>/gi, (_, v) => {
+      const { point, resume } = parseClose(v);
+      const gate = acceptClose({ point, kind, said });
+      if (!gate.ok) {
+        /**
+         * 「对方还在提问」用 info：它意味着她问题没答完就想跑，
+         * 是唯一值得事后翻日志的一种；另外两条（群聊 / 空收尾）是常态。
+         */
+        if (gate.why.includes('提问')) log.info(`收尾被忽略：${gate.why}`);
+        else log.debug(`收尾被忽略：${gate.why}`);
+        return '';
+      }
+      const r = closing.set(chatId, { point, resume, kind });
+      if (r.ok) touched = `收尾：${point}`;
+      else log.debug(`收尾没记上：${r.why}`);
       return '';
     });
 
@@ -867,6 +920,20 @@ export function apply(ctx) {
   const toolState = { ok: false, names: [], reason: '还没挂' };
 
   /**
+   * 本轮 QQ 动作工具的用量：`sessionId → { parts, texts, closed }`。
+   *
+   * 为什么按 sessionId 而不是 chatId：一个 agent 就是一个会话，
+   * 而工具拿到的 `agent` 是固定的，只有 session.id 能对上"这一轮"。
+   *
+   * 为什么需要它：模型调了 `qq_send` 之后，这一轮的正文**不能再发一遍**，
+   * 否则同一句话会重复两次。所以 turn 开始前清零、结束后按 `parts` 决定要不要 postReply。
+   */
+  const qqTurn = new Map();
+
+  /** QQ 动作工具的注册结果 */
+  const qqToolState = { ok: false, names: [], reason: '还没挂' };
+
+  /**
    * 挂人格 + 权限上下文（每个 agent 只挂一次，内容每轮现读）
    */
   function mount(agent, chat) {
@@ -907,6 +974,77 @@ export function apply(ctx) {
         .catch((e) => {
           toolState.reason = e?.message ?? String(e);
           log.warn(`记忆工具挂载异常：${toolState.reason}`);
+        });
+    }
+
+    /**
+     * QQ 动作工具（`qq_send` / `qq_close`）：让她自己决定说几句、什么时候退场。
+     *
+     * 挂载方式跟记忆工具一样，但**发送走被动回复**（`postReply(..., done:false)`）
+     * 而不是主动接口——正处在"对方刚说完话"的 5 分钟窗口里，
+     * 主动消息既浪费配额（20 条/分），群里还可能因为没 `group_push` 授权直接被拒。
+     */
+    if (cfg.qqTools?.enabled !== false) {
+      const sidFor = () => agent?.session?.id;
+      /**
+       * 这一轮是谁在说。工具 execute 时才读，不烤进定义——
+       * 注册是一次性的，而"这一句是谁说的"每轮都变。
+       */
+      const cur = () => {
+        const sid = sidFor();
+        const s = sid ? speaker.get(sid) : null;
+        return {
+          sid: sid || '',
+          payload: s?.payload || null,
+          bucket: s?.bucket || '',
+          chatId: s?.payload?.chat?.chatId || chat.chatId || '',
+          kind: chat.kind,
+          said: String(s?.payload?.text ?? ''),
+        };
+      };
+
+      registerQqTools({
+        agent,
+        callerOf: () => {
+          const c = cur();
+          return { ...c, hasPayload: Boolean(c.payload) };
+        },
+        sendOf: async (text) => {
+          const c = cur();
+          if (!c.payload) return { ok: false, message: '这一轮没有可回话的消息' };
+          await postReply(c.payload, text, false);
+          /** 记下这一轮发了什么：turn 结束时要拿它写日记，并且决定正文不再重发 */
+          const st = qqTurn.get(c.sid);
+          if (st) {
+            st.parts += 1;
+            st.texts.push(text);
+          }
+          return { ok: true };
+        },
+        closeOf: ({ chatId, point, resume, kind }) => {
+          const r = closing.set(chatId, { point, resume, kind });
+          /** 记下"这一轮她收尾了"：只收尾不说话时要用它回 `<skip>`，而不是回空串 */
+          if (r.ok) {
+            const st = qqTurn.get(cur().sid);
+            if (st) st.closed = true;
+          }
+          return r;
+        },
+        cfgOf: () => cfg,
+        stateOf: () => qqTurn.get(sidFor()) || { parts: 0 },
+        log: (m) => log.warn(m),
+      })
+        .then((r) => {
+          qqToolState.ok = r.ok;
+          qqToolState.names = r.names;
+          qqToolState.reason = r.reason || '';
+          if (r.ok) log.info(`QQ 工具已挂上：${r.names.join('、')}（${r.mode}）`);
+          else log.warn(`QQ 工具没挂上：${r.reason}`);
+          if (r.off) mountOffs.push(r.off);
+        })
+        .catch((e) => {
+          qqToolState.reason = e?.message ?? String(e);
+          log.warn(`QQ 工具挂载异常：${qqToolState.reason}`);
         });
     }
 
@@ -958,6 +1096,37 @@ export function apply(ctx) {
       );
     } catch (e) {
       log.debug('挂人格失败：', e.message);
+    }
+
+    /**
+     * 发言方式（第 1 条工具化）：告诉模型「说话要走工具」。
+     *
+     * 为什么必须写：工具挂上之后，**调了 `qq_send` 正文就不再发**（防重复）。
+     * 模型如果不知道这条，会既调工具又写正文——然后发现只有一段到了，
+     * 或者反过来，以为写了正文就够了、结果一个字都没发出去。
+     *
+     * 只在工具真挂上时才注入：没挂上却告诉它有，它就会一直调一个不存在的工具。
+     */
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-qq-tools',
+          order: 907,
+          text: () => {
+            if (!qqToolState.ok) return '';
+            return [
+              '【发言方式】',
+              '你手上有两个工具：`qq_send`（发一段话）和 `qq_close`（给这段对话收尾）。',
+              '· 想说话就调 `qq_send`，调几次由你定（一轮最多 3 段）。**别把要发的话写进正文**。',
+              '· 调过 `qq_send` 之后，你回复的正文**不会**再发出去——正文只当思考用。',
+              '· 聊到自然结束、对方要走的时候，用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后可以不说话。',
+              '· 一个工具都不调时，正文会照常发出去（旧方式）。**不要又调工具又写正文**，那样只算一次。',
+            ].join('\n');
+          },
+        }),
+      );
+    } catch (e) {
+      log.debug('挂发言方式失败：', e.message);
     }
 
     /**
@@ -1302,6 +1471,27 @@ export function apply(ctx) {
         if (dyn) text = `${dyn}\n\n${text}`;
       }
 
+      /**
+       * 上次收在哪（第 1 条：对话收尾）。
+       *
+       * **拼正文，不进 system**：它每轮都可能变（这一轮聊完就更新），
+       * 放 system 会把前缀缓存整段废掉。跟上面的动态段一个道理。
+       *
+       * 放最前面而不是最后：它是"这段聊天的语境"，要先知道接着什么聊，
+       * 再看对方这句话。
+       */
+      const closeText = closing.text(chat.chatId);
+      if (closeText) text = `${closeText}\n\n${text}`;
+
+      /**
+       * 清掉上一轮的 QQ 工具用量。
+       *
+       * **必须在 run 之前清**：`qq_send` 是在 run 期间被调用的，
+       * 如果等 run 回来再清，就把这一轮刚记下的段数一起抹了。
+       */
+      const sidTurn = agent?.session?.id || '';
+      if (sidTurn) qqTurn.set(sidTurn, { parts: 0, texts: [], closed: false });
+
       const rawReply = await turns.run(agent, text, {
         source: { kind: 'roost', chatId: chat.chatId, msgId: payload.id },
         // 插件下载好的图片块，让模型真的看得见图
@@ -1315,13 +1505,50 @@ export function apply(ctx) {
        * 所以「模型说记住了什么」也该由这边落盘，然后把标记从回复里摘掉，
        * 发到群里的就是干净的一句话。
        */
-      const { text: reply, touched } = applyMemoryMarkers(rawReply, chat.chatId);
+      const { text: reply, touched } = applyMemoryMarkers(
+        rawReply,
+        chat.chatId,
+        String(payload?.text ?? ''),
+        chat.kind,
+      );
       if (touched) log.info(`记忆：${touched}`);
 
-      /** 她说的那句也进日记——不然日记只剩对方一个人的独白 */
-      journalAdd(payload, chat, reply, 'bot');
+      /** 这一轮模型自己发了几段（用 `qq_send` 的话） */
+      const used = sidTurn ? qqTurn.get(sidTurn) : null;
 
-      await postReply(payload, reply, true);
+      /**
+       * 她说的那句也进日记——不然日记只剩对方一个人的独白。
+       *
+       * 用**实际发出去的内容**：模型走工具时正文只是思考过程，
+       * 拿正文写日记会把"她说了什么"记成一段没发出去的草稿。
+       */
+      journalAdd(payload, chat, (used?.texts?.length ? used.texts.join('\n') : reply), 'bot');
+
+      /**
+       * 回话。
+       *
+       * **模型走工具发过就不再发正文**：`qq_send` 已经把话送进 ai-chat 的
+       * parts 里了（`done:false` 累积），这里只需要用一个空文本 + `done:true`
+       * 把事件收掉——否则同一句话会重复两遍。
+       *
+       * 空文本不会增加 part（`bridge.handleReply` 里 `if (text)` 才 push），
+       * 所以之前发的几段会原样交回去。
+       */
+      if (used?.parts > 0) await postReply(payload, '', true);
+      else if (used?.closed && !reply) {
+        /**
+         * 只收尾、不说话 —— 回 `<skip>` 让 ai-chat 安静结束。
+         *
+         * 为什么不能回空字符串：`adapter/host.js` 里 `if (!r?.text?.trim()) throw`
+         * 会把它当成「宿主回了空内容」，用户看到的是「出错了」，
+         * 而其实她只是把话说完就退场了——这是**正常结局**。
+         *
+         * `<skip>` 是 ai-chat 的私有约定（`decide.js` 的 `SKIP_MARK`），
+         * 这里硬编码是**设计内的耦合**：dsh-roost 本来就是 ai-chat 的宿主，
+         * 标记契约也一直由它经 system prompt 传下来。
+         */
+        await postReply(payload, '<skip>', true);
+      } else await postReply(payload, reply, true);
 
       /**
        * 上下文压缩（第 6 期）：到阈值就开新会话 + 摘要开场。
@@ -2017,6 +2244,8 @@ export function apply(ctx) {
           graph: graph.stats(),
           /** 记忆工具装上了没——静默失败最难查，面板必须看得见 */
           tools: { ...toolState },
+          /** QQ 动作工具（qq_send / qq_close）装上了没，同样要看得见 */
+          qqTools: { ...qqToolState },
           /** 分开给：调注入时最常搞混的就是"这段到底进 system 还是进用户消息" */
           memoryStaticText: memoryStatic(forced),
           memoryDynamicText: memoryDynamic(),
@@ -2025,6 +2254,29 @@ export function apply(ctx) {
       }),
 
       route('/chats', (req, res) => send(res, 200, { ok: true, chats: sessions.list() })),
+
+      /**
+       * 对话收尾（只私聊）。面板「记忆」页底部用。
+       *
+       * 为什么给面板看：收尾是**静默发生**的——模型写个标记就没了，
+       * 用户只会感觉到"她今天话变少了"。不给看的话，出了问题只能翻日志。
+       */
+      route('/closing', (req, res) =>
+        send(res, 200, {
+          ok: true,
+          cfg: cfg.closing,
+          stat: closing.stat(),
+          chats: closing.list(),
+        }),
+      ),
+
+      route('/closing/clear', async (req, res) => {
+        const b = await readBody(req);
+        const chatId = String(b.chatId ?? '');
+        if (!chatId) return send(res, 400, { ok: false, message: '缺 chatId' });
+        const done = closing.clear(chatId);
+        return send(res, 200, { ok: true, message: done ? '清掉了' : '本来就没有' });
+      }),
 
       route('/chats/clear', async (req, res) => {
         const b = await readBody(req);

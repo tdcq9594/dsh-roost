@@ -351,6 +351,21 @@ select.roost-input{color-scheme:dark}
       )
 
     /**
+     * 多久以前。面板里只需要粗粒度（「3 小时前」就够），
+     * 不引 dayjs 那类库——一个插件为了一行字加个依赖不值得。
+     */
+    const sinceText = (t) => {
+      const n = Number(t) || 0
+      if (!n) return ''
+      const m = Math.round((Date.now() - n) / 60000)
+      if (m < 1) return '刚刚'
+      if (m < 60) return `${m} 分钟前`
+      const hr = Math.round(m / 60)
+      if (hr < 48) return `${hr} 小时前`
+      return `${Math.round(hr / 24)} 天前`
+    }
+
+    /**
      * 条形：单向从左往右，双向从中线往两边长。
      *
      * **这是读数，不是滑块**：所以不给手柄、不接受拖动。
@@ -1698,8 +1713,45 @@ select.roost-input{color-scheme:dark}
           ),
         ),
 
+        /* 对话收尾：静默发生的东西，必须能看见 */
+        h(Sec, {
+          n: '05',
+          title: '对话收尾',
+          right: mem?.closing?.stat
+            ? h(Pill, null, `${mem.closing.stat.total} 个会话`)
+            : null,
+        },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '她判断这段聊完了，就记一句「收在哪 / 下次怎么接」——不发言，也不动记忆。'
+            + '下一轮接得上；刚说完晚安 90 分钟内不会再随性搭话。只做私聊。'),
+          !mem?.closing?.chats?.length
+            ? h('div', { className: 'roost-note' }, '还没有收尾记录。')
+            : mem.closing.chats.map((c) =>
+                h(Row, { key: c.chatId, k: String(c.chatId || '').slice(0, 8) },
+                  h('div', { style: { display: 'flex', gap: 10, alignItems: 'flex-start' } },
+                    h('div', { style: { flex: 1, minWidth: 0 } },
+                      h('div', null, c.point),
+                      c.resume
+                        ? h('div', { className: 'roost-note' }, '下次：' + c.resume)
+                        : null,
+                      h('div', { className: 'roost-note' },
+                        sinceText(c.at) + (c.why ? ' · ' + c.why : '')),
+                    ),
+                    h('button', {
+                      className: 'roost-btn',
+                      onClick: async () => {
+                        const r = await post('/closing/clear', { chatId: c.chatId })
+                        toast(r.ok === false ? (r.message || '没清成') : '清掉了')
+                        reload()
+                      },
+                    }, '忘掉'),
+                  ),
+                ),
+              ),
+        ),
+
         /* 危险区放最后 */
-        h(Sec, { n: '05', title: '清空' },
+        h(Sec, { n: '06', title: '清空' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '清空会同时抹掉事实和日记正文（行还留着，时间线不断），不可恢复。'),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
@@ -2231,7 +2283,13 @@ select.roost-input{color-scheme:dark}
          * 字段缺失不会报错，只会静默少一块内容，这种最容易漏。
          */
         const qs = pick ? '?chatId=' + encodeURIComponent(pick) : ''
-        const [r, g] = await Promise.all([get('/memory' + qs), get('/graph' + qs)])
+        /**
+         * 三个接口一起拉。
+         *
+         * `/closing` 也在这儿拉：它是「这段聊到哪结束」的状态，跟记忆同页看最顺
+         * （收尾是静默发生的，不摆在面板上就只能翻日志）。
+         */
+        const [r, g, c] = await Promise.all([get('/memory' + qs), get('/graph' + qs), get('/closing')])
         if (r.ok === false) {
           setMem(null)
           return
@@ -2242,6 +2300,7 @@ select.roost-input{color-scheme:dark}
             ...(r.graph || {}),
             ...(g.ok === false ? {} : { stats: g.stats, entities: g.entities, edges: g.edges, ended: g.ended }),
           },
+          closing: c.ok === false ? null : c,
         })
       }, [memPick])
 
