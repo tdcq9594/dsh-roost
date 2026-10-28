@@ -19,7 +19,7 @@ import { loadConfig, saveConfig, publicConfig, dataDir } from './config.js';
 import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
 import { createInboundServer, postReply } from './server.js';
-import { renderInbound, chatOf } from './inbound.js';
+import { renderInbound, chatOf, speakerTag } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools } from './permissions.js';
 import { createSetup } from './setup.js';
 import { createMemory } from './memory.js';
@@ -34,7 +34,7 @@ import { createPersonaRepo } from './persona-repo.js';
 import { createUpdater } from './update.js';
 import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
-import { registerQqTools } from './qq-tools.js';
+import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { createSpeakUp } from './speakup.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
@@ -1111,7 +1111,7 @@ export function apply(ctx) {
           const c = cur();
           return { ...c, hasPayload: Boolean(c.payload) };
         },
-        sendOf: async (raw) => {
+        sendOf: async (raw, opts = {}) => {
           const c = cur();
           if (!c.payload) return { ok: false, message: '这一轮没有可回话的消息' };
 
@@ -1136,14 +1136,42 @@ export function apply(ctx) {
             return { ok: false, message: '这段话里只有标记，没有可发出去的内容' };
           }
 
-          await postReply(c.payload, text, false);
-          /** 记下这一轮发了什么：turn 结束时要拿它写日记，并且决定正文不再重发 */
-          const st = qqTurn.get(c.sid);
-          if (st) {
-            st.parts += 1;
-            st.texts.push(text);
+          /**
+           * @ 前缀由**宿主**拼，模型只负责说「@ 谁」。
+           *
+           * 模型自己写 `<qqbot-at-user id="…"/>` 的问题是抄错不报错：
+           * openid 是二十多位随机串，错一位官方照样 200，只是没 @ 到人。
+           * 放这儿还有一个好处——所有拒绝理由都能通过 `note` 回给模型，
+           * 它下一句就知道该怎么改，而不是一直发没效果的消息。
+           */
+          const st = qqTurn.get(c.sid) || { parts: 0 };
+          const at = buildAtPrefix({
+            at: opts.at,
+            kind: c.kind,
+            /**
+             * 通道有没有开 markdown 只有 ai-chat 知道，它会在 payload 里带
+             * `channel.markdown`。老版本不带 → 按默认 true（跟 ai-chat 默认一致）。
+             */
+            markdown: c.payload?.channel?.markdown !== false,
+            parts: st.parts,
+            senderId: String(c.payload?.sender?.id ?? ''),
+            senderName: String(c.payload?.sender?.name ?? ''),
+          });
+          if (at.note) log.info(`@ 没挂上：${at.note}`);
+
+          await postReply(c.payload, at.prefix ? at.prefix + text : text, false);
+          /**
+           * 记下这一轮发了什么：turn 结束时要拿它写日记，并且决定正文不再重发。
+           *
+           * 存的是**不带 @ 标签的原文**——日记里塞 `<qqbot-at-user>` 是脏数据，
+           * 检索和摘要都会把它当正文。
+           */
+          const st2 = qqTurn.get(c.sid);
+          if (st2) {
+            st2.parts += 1;
+            st2.texts.push(text);
           }
-          return { ok: true };
+          return { ok: true, note: at.note };
         },
         closeOf: ({ chatId, point, resume, kind }) => {
           const r = closing.set(chatId, { point, resume, kind });
@@ -1507,6 +1535,14 @@ export function apply(ctx) {
       let text = renderInbound(payload);
 
       /**
+       * 用户原话的副本。发送者标签要贴在**它**前面，而不是整段正文最前面。
+       *
+       * 下面还会往 text 前面拼开场白、动态记忆、收尾语境——标签要是放在
+       * 最前面，语义就变成「这堆上下文是谁说的」，而不是「这句话是谁说的」。
+       */
+      const said = text;
+
+      /**
        * 这一轮用户说了什么：世界书按它匹配触发词。
        *
        * **必须放在 `text` 声明之后**——放到场景快照那里会踩 TDZ：
@@ -1606,6 +1642,25 @@ export function apply(ctx) {
        */
       const closeText = closing.text(chat.chatId);
       if (closeText) text = `${closeText}\n\n${text}`;
+
+      /**
+       * 群聊：给这一句贴上发送者标签 `[昵称 (openid)] `。
+       *
+       * 放在这儿而不是 `renderInbound` 里，是因为上面已经用它写过日记、
+       * 做过检索（`journalAdd` / `journal.search`）——openid 进了 FTS 索引
+       * 就是纯噪音，还会让「刚才说到」里冒出一串乱码。
+       *
+       * `endsWith` 是防御：哪天有人在原话后面追加内容，标签就会贴到错位置，
+       * 那种情况宁可不加（模型少一个 openid 而已，不会说错话）。
+       */
+      const tag = speakerTag(payload, chat);
+      if (tag) {
+        if (text.endsWith(said)) {
+          text = text.slice(0, text.length - said.length) + tag + said;
+        } else {
+          log.warn('发送者标签没贴上（正文尾部不是原话），这一轮模型拿不到 openid');
+        }
+      }
 
       /**
        * 清掉上一轮的 QQ 工具用量。

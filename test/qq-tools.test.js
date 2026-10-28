@@ -6,15 +6,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildQqToolDefs, MAX_PARTS } from '../src/qq-tools.js';
+import { buildQqToolDefs, buildAtPrefix, MAX_PARTS, AT_ID_RE } from '../src/qq-tools.js';
 
 /**
  * 造一套工具，返回 { send, close } 和记账用的箱子。
  *
  * @param {object} [o]
  */
-function make({ kind = 'c2c', said = '', hasPayload = true, maxParts = MAX_PARTS, sendFails = false } = {}) {
-  const box = { sent: [], parts: 0, closed: false, closedWith: null };
+function make({ kind = 'c2c', said = '', hasPayload = true, maxParts = MAX_PARTS, sendFails = false, note = '' } = {}) {
+  const box = { sent: [], opts: [], parts: 0, closed: false, closedWith: null };
 
   const defs = buildQqToolDefs({
     callerOf: () => ({
@@ -24,11 +24,12 @@ function make({ kind = 'c2c', said = '', hasPayload = true, maxParts = MAX_PARTS
       hasPayload,
       bucket: 'owner',
     }),
-    sendOf: async (text) => {
+    sendOf: async (text, opts = {}) => {
       if (sendFails) return { ok: false, message: '通道断了' };
       box.sent.push(text);
+      box.opts.push(opts);
       box.parts += 1;
-      return { ok: true };
+      return note ? { ok: true, note } : { ok: true };
     },
     closeOf: (r) => {
       box.closed = true;
@@ -122,6 +123,118 @@ test('qq_send：maxParts 配成 0 或负数时退回默认值（不能变成"永
   const r = await send.execute({ text: '一' });
   assert.equal(r.ok, true);
   assert.equal(box.sent.length, 1);
+});
+
+/* ---------------- qq_send 的 at 参数 ---------------- */
+
+const OPENID = 'A1B2C3D4E5F60718293A4B5C6D7E8F90';
+
+test('qq_send：at 原样交给宿主（工具自己不管拼标签）', async () => {
+  const { send, box } = make({ kind: 'group' });
+  await send.execute({ text: '在的', at: 'sender' });
+  assert.deepEqual(box.opts[0], { at: 'sender' });
+  assert.deepEqual(box.sent, ['在的'], '工具不该自己往正文里塞标签');
+});
+
+test('qq_send：不传 at 时也带一个空串（宿主不用判 undefined）', async () => {
+  const { send, box } = make();
+  await send.execute({ text: '嗯' });
+  assert.deepEqual(box.opts[0], { at: '' });
+});
+
+/**
+ * 宿主说「@ 没挂上」时，理由必须回到模型手里。
+ *
+ * 不回的话模型会以为 @ 到了，下一句还用同样的方式——错到底而且看不出来。
+ */
+test('qq_send：宿主的 note 要透传给模型', async () => {
+  const { send } = make({ note: '@ 只能挂在这一轮的第一段上' });
+  const r = await send.execute({ text: '嗯', at: 'sender' });
+  assert.equal(r.ok, true);
+  assert.match(r.note, /第一段/);
+});
+
+test('qq_send：宿主没给 note 时用默认提示', async () => {
+  const { send } = make();
+  const r = await send.execute({ text: '嗯' });
+  assert.match(r.note, /发出去了/);
+});
+
+/* ---------------- buildAtPrefix ---------------- */
+
+test('@：不传就不加前缀', () => {
+  const r = buildAtPrefix({ at: '', kind: 'group', senderId: OPENID });
+  assert.equal(r.prefix, '');
+  assert.equal(r.note, '');
+});
+
+test('@：群聊 + sender + markdown → 官方标签', () => {
+  const r = buildAtPrefix({ at: 'sender', kind: 'group', senderId: OPENID });
+  assert.equal(r.prefix, `<qqbot-at-user id="${OPENID}" />\n`);
+  assert.equal(r.note, '');
+});
+
+test('@：可以直接给 openid（@ 刚才插话的那个人）', () => {
+  const other = 'ZZ99887766554433221100AABBCCDDEE';
+  const r = buildAtPrefix({ at: other, kind: 'group', senderId: OPENID });
+  assert.equal(r.prefix, `<qqbot-at-user id="${other}" />\n`);
+});
+
+test('@：私聊不加（官方只在群聊支持，加了就是露源码）', () => {
+  const r = buildAtPrefix({ at: 'sender', kind: 'c2c', senderId: OPENID });
+  assert.equal(r.prefix, '');
+  assert.match(r.note, /私聊/);
+});
+
+test('@：非第一段不加（那段是纯文本消息）', () => {
+  const r = buildAtPrefix({ at: 'sender', kind: 'group', parts: 1, senderId: OPENID });
+  assert.equal(r.prefix, '');
+  assert.match(r.note, /第一段/);
+});
+
+test('@：markdown 关着时退化成纯文字 @昵称', () => {
+  const r = buildAtPrefix({
+    at: 'sender', kind: 'group', markdown: false, senderId: OPENID, senderName: '小明',
+  });
+  assert.equal(r.prefix, '@小明 ');
+  assert.match(r.note, /markdown/);
+});
+
+test('@：markdown 关着又没昵称，就什么都不加并说明原因', () => {
+  const r = buildAtPrefix({ at: 'sender', kind: 'group', markdown: false, senderId: OPENID });
+  assert.equal(r.prefix, '');
+  assert.match(r.note, /markdown/);
+});
+
+/**
+ * 注入防护：id 会拼进 HTML 属性，一个引号就能把标签拆坏。
+ * 这条不测就会变成「模型往群里吐半截标签」。
+ */
+test('@：id 里带引号/尖括号一律拒绝', () => {
+  for (const bad of ['A1B2"><script>x</script>', 'A1B2C3D4E5" onload="x', '小明']) {
+    const r = buildAtPrefix({ at: bad, kind: 'group' });
+    assert.equal(r.prefix, '', `${bad} 不该通过`);
+    assert.ok(r.note, '拒绝时必须说明原因');
+  }
+});
+
+test('@：太短的值不当 openid（挡「把昵称当 id」）', () => {
+  const r = buildAtPrefix({ at: 'abcdefg', kind: 'group' });
+  assert.equal(r.prefix, '');
+  assert.match(r.note, /openid/);
+});
+
+test('@：sender 但这一轮没拿到 senderId → 不加并说明', () => {
+  const r = buildAtPrefix({ at: 'sender', kind: 'group', senderId: '' });
+  assert.equal(r.prefix, '');
+  assert.match(r.note, /不知道/);
+});
+
+test('@：AT_ID_RE 认官方 openid 的形状，不认中文和空格', () => {
+  assert.equal(AT_ID_RE.test(OPENID), true);
+  assert.equal(AT_ID_RE.test('a-b_c1234567'), true);
+  assert.equal(AT_ID_RE.test('小明12345678'), false);
+  assert.equal(AT_ID_RE.test('has space 1234'), false);
 });
 
 /* ---------------- qq_close ---------------- */

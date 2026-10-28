@@ -34,6 +34,72 @@ import { acceptClose } from './closing.js';
 export const MAX_PARTS = 3;
 
 /**
+ * openid 的合法形状：QQ 官方的 `member_openid` / `user_openid` 是
+ * base64url 风格的长串（大写字母、数字，偶有 `-` `_`）。
+ *
+ * **必须白名单校验**：这个值最终会拼进 `<qqbot-at-user id="…" />` 的
+ * 属性里，模型只要塞一个引号进来就能把标签拆坏，往群里吐半截 HTML。
+ * 长度下限 8 是为了挡掉「@小明」这种把昵称当 id 传上来的情况。
+ */
+export const AT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
+/**
+ * 算出这段发言要不要带 @ 前缀。**纯函数**，所有判断都在这里，
+ * 因为每条规则错了都是社交事故：
+ *   · 私聊发 @ 标签 → 官方不支持，标签原样露出
+ *   · 非第一段发 @ → 那段是纯文本消息，标签同样露出
+ *   · markdown 关掉还发标签 → 同上
+ *   · id 抄错 → 静默 @ 不到人，比报错更难查
+ *
+ * @param {object} o
+ * @param {string} [o.at] 模型给的：`sender` 或原始 openid
+ * @param {string} o.kind `group` / `c2c`
+ * @param {boolean} [o.markdown] 通道当前是否走 markdown 消息类型（默认 true）
+ * @param {number} [o.parts] 这一轮已经发了几段（0 = 这句是第一段）
+ * @param {string} [o.senderId] 当前说话人的 openid
+ * @param {string} [o.senderName] 当前说话人的昵称（降级成纯文字 @ 时用）
+ * @returns {{prefix:string, note:string}} `note` 非空时带回给模型解释为什么没 @
+ */
+export function buildAtPrefix({ at, kind, markdown = true, parts = 0, senderId = '', senderName = '' } = {}) {
+  const want = String(at ?? '').trim();
+  if (!want) return { prefix: '', note: '' };
+
+  // 官方文档：群聊 @用户 只在 markdown 消息里生效，文字子频道才支持文本消息
+  if (kind !== 'group') {
+    return { prefix: '', note: '私聊里没有 @ 这回事（官方只在群聊的 markdown 消息里支持），这句按普通消息发了' };
+  }
+
+  /**
+   * `qq_send` 每调一次是一段独立消息，而 ai-chat 那边**只有第一段**
+   * 走 `replyMarkdown`（`outbound.js` 的 `i === 0 && markdown`）。
+   * 所以第二段起拼标签等于往群里贴源码。
+   */
+  if (parts > 0) {
+    return { prefix: '', note: '@ 只能挂在这一轮的第一段上，这句没 @（想 @ 就把那句话放第一段）' };
+  }
+
+  const id = want === 'sender' ? String(senderId ?? '').trim() : want;
+  if (!id) return { prefix: '', note: '不知道要 @ 谁（这一轮没拿到对方的 openid）' };
+
+  if (!AT_ID_RE.test(id)) {
+    return { prefix: '', note: `「${id.slice(0, 40)}」不像 openid（要填消息头括号里那串，或者填 sender），没 @` };
+  }
+
+  /**
+   * markdown 关着的时候不能拼标签，但也不能什么都不做——
+   * 模型以为 @ 到了、用户什么都没看到，是最难查的那种。
+   * 降级成纯文字的 `@昵称 `：至少人能看懂在跟谁说话。
+   */
+  if (markdown === false) {
+    const name = String(senderName ?? '').replace(/[\s@]/g, '').slice(0, 24);
+    if (!name) return { prefix: '', note: 'markdown 关着，@ 发不出去（也没昵称可以退成纯文字）' };
+    return { prefix: `@${name} `, note: `markdown 关着，@ 退化成纯文字「@${name}」（要真 @ 到人得在 ai-chat 面板打开 markdown）` };
+  }
+
+  return { prefix: `<qqbot-at-user id="${id}" />\n`, note: '' };
+}
+
+/**
  * 拼工具定义。抽成纯函数是为了能单测——
  * 次数上限和「群聊不能收尾」这类判断写错，表现是刷屏或者群里莫名退场，
  * 都是只能靠线上观察才会发现的那种错。
@@ -67,6 +133,21 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
           type: 'string',
           description: '要发出去的话。口语、简短；一段一个意思，别把两件事塞进一段',
         },
+        /**
+         * @ 人。**只给「要 @ 谁」，不给「怎么拼标签」**——
+         * 标签由宿主拼，模型碰不到那串 id 的语法。
+         *
+         * 为什么不让模型自己写 `<qqbot-at-user id="…"/>`：openid 是二十多位的
+         * 随机串，抄错一位官方不报错、只是 @ 不到人，线上根本看不出来。
+         * 而模型只要吐 `sender` 就行，错了宿主还能拦住并告诉它。
+         */
+        at: {
+          type: 'string',
+          description:
+            '要 @ 谁。填 "sender" = @ 刚说话的那个人（最常用）；'
+            + '也可以填消息头括号里的那串 openid。不填就不 @。'
+            + '只有群聊、只有这一轮第一段有效。',
+        },
       },
       required: ['text'],
     },
@@ -75,7 +156,7 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
       /** 必须是内容块数组——字符串会让 DSH 的 content.some 炸掉（0.9.x 的真实事故） */
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },
-    async execute({ text } = {}) {
+    async execute({ text, at } = {}) {
       const t = String(text ?? '').trim();
       if (!t) return { ok: false, message: '要说什么？' };
       const c = caller();
@@ -90,9 +171,18 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
       }
 
       try {
-        const r = await sendOf(t);
+        const r = await sendOf(t, { at: String(at ?? '').trim() });
         if (!r?.ok) return { ok: false, message: r?.message || '没发出去' };
-        return { ok: true, part: st.parts + 1, note: '发出去了，正文不用再写一遍' };
+        /**
+         * 宿主可能**没 @ 成**（私聊 / 非第一段 / markdown 关 / id 不像）。
+         * 这种情况不能只说「发出去了」——模型会以为 @ 到了，
+         * 下一句继续用同样的方式，错到底。
+         */
+        return {
+          ok: true,
+          part: st.parts + 1,
+          note: r.note || '发出去了，正文不用再写一遍',
+        };
       } catch (e) {
         return { ok: false, message: `发送失败：${e?.message ?? e}` };
       }
