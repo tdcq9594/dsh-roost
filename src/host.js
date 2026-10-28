@@ -41,6 +41,7 @@ import { createCompact } from './compact.js';
 import { createQqChannel, createChannelRegistry } from './channel.js';
 import { createQrRegistration, createManualRegistration, createRegistrationRegistry } from './registration.js';
 import { createLease, candidates } from './lease.js';
+import { createSyncRetry } from './sync-retry.js';
 
 export const name = 'roost';
 
@@ -1772,6 +1773,9 @@ export function apply(ctx) {
 
   function startServer() {
     server?.close();
+    // 重启会重新 bind，端口可能又变；旧端口的重试队列必须作废，
+    // 否则它会把 ai-chat 改回一个已经没人听的端口
+    clearSyncRetry();
 
     /**
      * 候选端口：配置里的 → 上次实际用的 → 往后 +1 一直到 +20。
@@ -1797,18 +1801,58 @@ export function apply(ctx) {
       onListening: (actual) => {
         lease.claim('dsh', { want, actual });
         if (actual !== want) log.warn(`dsh-roost 换到 ${actual}（${want} 被占），正在通知 ai-chat`);
-        syncAdapterPort(actual).catch((e) => log.warn(`通知 ai-chat 失败：${e.message}`));
+        // syncAdapterPort 自己会吞错并排队重试（Roost 可能还没起来），
+        // 这里不用再接 catch——接了只会多一条误导人的「通知失败」
+        void syncAdapterPort(actual);
       },
     });
   }
 
-  /** 把 ai-chat 的 dshUrl 指到实际端口。只在它已经配过 DSH 时改 */
+  /**
+   * 同步 ai-chat 地址的重试队列。
+   *
+   * 为什么要重试：dsh-roost 常常比 Roost 先起，那一刻 `isRunning()` 是 false，
+   * `syncDshUrl` 只能跳过。以前跳过一次就再也不管了——于是端口换过、
+   * ai-chat 还指着旧地址，面板一直红着说「去第 5 步重新写一次」。
+   * 这件事它自己就能做完，没理由让用户跑一趟。
+   *
+   * 退避节奏和「不叠加 / 可作废」这些性质在 `sync-retry.js` 里，那边有测试。
+   */
+  const syncRetry = createSyncRetry({
+    log: (m) => log.warn(m),
+    run: (actual) => { void syncAdapterPort(actual); },
+  });
+
+  function clearSyncRetry() {
+    syncRetry.reset();
+  }
+
+  /**
+   * 把 ai-chat 的 dshUrl 指到实际端口。只在它已经配过 DSH 时改。
+   *
+   * `skipped + reason === 'roost-down'` 会自己排队再试，其它情况（没装、
+   * 没在用 DSH、已经是当前端口）就到此为止——那几种重试一万次也没用。
+   */
   async function syncAdapterPort(actual) {
     try {
       const r = await setup.syncDshUrl(actual);
-      if (r && !r.ok && !r.skipped) log.warn(`ai-chat 的地址没同步：${r.message}`);
+      if (r?.skipped && r.reason === 'roost-down') {
+        syncRetry.schedule(actual);
+        return r;
+      }
+      if (r && !r.ok) {
+        log.warn(`ai-chat 的地址没同步：${r.message}`);
+        // Roost 起来了但 PUT 失败（比如插件正被重载），也值得再试几次
+        syncRetry.schedule(actual);
+        return r;
+      }
+      // 成功或「本来就不用改」，都不用再试了
+      clearSyncRetry();
+      return r;
     } catch (e) {
       log.warn(`ai-chat 的地址没同步：${e?.message ?? e}`);
+      syncRetry.schedule(actual);
+      return { ok: false, message: String(e?.message ?? e) };
     }
   }
 
@@ -1817,6 +1861,7 @@ export function apply(ctx) {
     return () => {
       server?.close();
       server = null;
+      clearSyncRetry();
       turns.dispose();
     };
   }, 'dsh-roost: 收消息服务');
@@ -2567,6 +2612,22 @@ export function apply(ctx) {
       // 传实际监听的端口：端口被占会顺延，写配置值的话 ai-chat 会连到错的端口
       route('/setup/configure', (req, res) =>
         setup.configurePlugin(server?.actualPort?.() || undefined).then((r) => send(res, 200, r))),
+
+      /**
+       * 只改「ai-chat 的 DSH 地址」，别的都不动。
+       *
+       * 和 `/setup/configure` 的区别：那个会把 adapter 也改成 dsh、顺便写
+       * publicUrl 和 decide，等于重新配一遍。用户在面板上看到地址对不上时，
+       * 想要的是「就改这一行」，不是「把插件配置重刷一遍」。
+       *
+       * 自动重试已经在跑了（`syncRetry.schedule`），这个路由是给人一个
+       * **立刻生效**的按钮——不用等退避，也不用跑去「接入」第 5 步。
+       */
+      route('/setup/sync', async (req, res) => {
+        const r = await syncAdapterPort(server?.actualPort?.() || undefined);
+        if (r?.ok && !r.skipped) addLog('info', 'core', `ai-chat 的地址已对齐：${r.message}`);
+        return send(res, 200, r ?? { ok: false, message: '没有返回结果' });
+      }),
 
       route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
 

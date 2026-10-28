@@ -365,3 +365,24 @@ test('记忆：老会话没有 kind 时，从 preset 反推（存量数据也能
   assert.equal(byId.u1?.kind, 'c2c', 'roost-private 应反推成 c2c');
   off?.();
 });
+
+/**
+ * `/setup/sync`：面板红字旁边那个「现在就改过来」的后端。
+ *
+ * 为什么单独测：这条路由**只改 dshUrl 一行**，和 `/setup/configure`
+ * （会连 adapter / publicUrl / decide 一起重刷）不是一回事。混用会把用户
+ * 手动调过的插件配置冲掉。这里盯住「路由在、能回话、不抛」。
+ */
+test('路由：/setup/sync 在，且没装 Roost 时也老实回话不抛', async () => {
+  const { routes, call, off } = await bootHost();
+  assert.ok(routes.has('/roost/api/setup/sync'), '缺路由 /setup/sync');
+  const r = await call('/setup/sync', { method: 'POST', body: {} });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true, '同步不上不算请求失败，别让面板弹红');
+  // 测试环境里没有真的 Roost 在跑，只可能落在这两种
+  assert.ok(
+    r.json.skipped === true || r.json.message,
+    `要给出原因，不能只说 ok：${JSON.stringify(r.json)}`,
+  );
+  off?.();
+});

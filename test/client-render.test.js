@@ -439,3 +439,72 @@ test('样式：条形不能依赖绝对定位（父规则一失效就会铺满�
   assert.ok(fill, '缺 .roost-bar i 规则')
   assert.equal(/position\s*:\s*absolute/.test(fill[1]), false, '填充条不许用绝对定位')
 })
+
+/* ---------------- 端口那一节：不许撒谎 ---------------- */
+
+/**
+ * 这一段出过一次「面板在撒谎」的事故。
+ *
+ * 旧代码 `const actual = st?.actualPort || st?.port`：actualPort 还是 0
+ * （服务刚起、或重启那几百毫秒）时退回配置里的 17321，然后拿它去跟
+ * ai-chat 的 17322 比，报出「我们监听 http://127.0.0.1:17321」——
+ * 可我们根本没在 17321 上听。用户照着它改，反而把本来对的值改坏了。
+ *
+ * 教训：**不知道就说不知道**，别拿「意愿」冒充「现实」。
+ */
+const pvOf = () => {
+  const rt = makeReact()
+  return loadClient(rt.React).portView
+}
+
+test('端口：拿不到实际端口时不许报「我们监听 <配置端口>」', () => {
+  const portView = pvOf()
+  const pv = portView({ actualPort: 0, port: 17321, wantPort: 17321 }, 'http://127.0.0.1:17322')
+  assert.equal(pv.kind, 'unknown')
+  assert.equal(
+    pv.text.includes('17321'), false,
+    `不知道实际端口就不该提 17321（那是配置值）：${pv.text}`,
+  )
+  assert.equal(pv.action, undefined, '不知道的时候不该给「改过来」按钮')
+})
+
+test('端口：服务没起来时说「没在听」，不装成正常', () => {
+  const portView = pvOf()
+  const pv = portView({ actualPort: 0, listening: false, port: 17321 }, 'http://127.0.0.1:17322')
+  assert.equal(pv.kind, 'unknown')
+  assert.equal(pv.cell, '没在听')
+  assert.match(pv.text, /还没在听/)
+})
+
+test('端口：真对不上才报红，并给一键修复', () => {
+  const portView = pvOf()
+  const pv = portView({ actualPort: 17321, wantPort: 17321 }, 'http://127.0.0.1:17322')
+  assert.equal(pv.kind, 'bad')
+  assert.match(pv.text, /对不上/)
+  assert.equal(pv.wantUrl, 'http://127.0.0.1:17321')
+  assert.equal(pv.action, 'sync', '对不上必须给「现在就改过来」，别让用户跑去接入页重走一遍')
+})
+
+test('端口：对得上就是绿的，不给按钮', () => {
+  const portView = pvOf()
+  const pv = portView({ actualPort: 17322 }, 'http://127.0.0.1:17322')
+  assert.equal(pv.kind, 'ok')
+  assert.match(pv.text, /两端一致/)
+  assert.equal(pv.action, undefined)
+})
+
+test('端口：被占顺延时要标出配置值，别让用户以为配错了', () => {
+  const portView = pvOf()
+  const pv = portView({ actualPort: 17322, wantPort: 17321 }, 'http://127.0.0.1:17322')
+  assert.equal(pv.kind, 'ok')
+  assert.match(pv.cell, /17322/)
+  assert.match(pv.cell, /配置 17321/)
+})
+
+test('端口：ai-chat 没配时不报红，指去接入第 5 步', () => {
+  const portView = pvOf()
+  const pv = portView({ actualPort: 17321 }, '')
+  assert.equal(pv.kind, 'unset')
+  assert.match(pv.text, /第 5 步/)
+  assert.equal(pv.action, undefined)
+})

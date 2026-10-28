@@ -239,6 +239,7 @@ src/
   channel.js     通道抽象（以后接别的平台时切这里）
   registration.js 接入方式抽象（扫码 / 手动填）
   lease.js       端口租约：端口被占时自动换
+  sync-retry.js  「等一下再试」的退避调度（Roost 比我们晚起时用来补同步 ai-chat 地址）
   tools.js       记忆工具（memory_search / memory_note）定义与挂载
 client/
   client.js      侧栏面板（React，沿用 DSH 主题变量）

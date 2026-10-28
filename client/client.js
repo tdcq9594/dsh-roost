@@ -496,20 +496,50 @@ select.roost-input{color-scheme:dark}
     /* ---------------- 概览 ---------------- */
 
     /**
-     * 端口怎么显示。
+     * 端口那一节到底该显示什么。**纯函数，好测**。
      *
      * 配置是**意愿**，实际 bind 的是**现实**，被占后会顺延。
      * 「配置 17321、实际 17322」必须让用户看见——否则他按 17321 去连，
      * 怎么都连不上还以为是插件坏了。
+     *
+     * 但反过来更危险：`actualPort` 还是 0 的时候（服务刚起、或重启那几百毫秒），
+     * 拿配置值冒充「我们实际在听的端口」，就会给出一条**假红字**，
+     * 用户照着它去改一个本来就对的值。所以这里宁可说「还不知道」。
      */
-    const portCell = (st) => {
-      const actual = st?.actualPort
-      if (!actual) return st?.port ?? '—'
-      return st.wantPort && st.wantPort !== actual ? `${actual}（配置 ${st.wantPort}，被占了）` : String(actual)
+    function portView(st, gotUrl) {
+      const actual = st?.actualPort || 0
+      const want = actual ? `http://127.0.0.1:${actual}` : ''
+      if (!want) {
+        const down = st?.listening === false
+        return {
+          kind: 'unknown',
+          cell: down ? '没在听' : '—',
+          text: down
+            ? 'dsh-roost 还没在听（端口没起来），等它起来再对。'
+            : '还没拿到实际端口，点右上「刷新」再看。',
+        }
+      }
+      const cell = st.wantPort && st.wantPort !== actual
+        ? `${actual}（配置 ${st.wantPort}，被占了）`
+        : String(actual)
+      if (!gotUrl) {
+        return { kind: 'unset', cell, wantUrl: want, text: 'ai-chat 还没配好，消息推不过来 —— 去「接入」第 5 步。' }
+      }
+      if (gotUrl === want) return { kind: 'ok', cell, wantUrl: want, text: '✓ 两端一致，链路通' }
+      return {
+        kind: 'bad',
+        cell,
+        wantUrl: want,
+        // `action: 'sync'` 是给渲染层看的：这种情况配一个「现在就改过来」按钮
+        action: 'sync',
+        text: `✗ 对不上：ai-chat 指向 ${gotUrl}，我们监听 ${want}。消息会推到没人听的端口上。`,
+      }
     }
 
     function OverviewTab({ st, setupSt, toast, reload, busy, onGo }) {
       const [logs, setLogs] = useState(null)
+      /** 「现在就改过来」按钮的忙碌态，和外面的 busy（自测）分开 */
+      const [syncing, setSyncing] = useState(false)
       const perms = st?.permissions || {}
       const toolable = ['owner', 'admin', 'member'].filter((k) => perms[k] === 'all')
       const lt = st?.lastTurn
@@ -548,9 +578,20 @@ select.roost-input{color-scheme:dark}
         reload()
       }
 
-      const actual = st?.actualPort || st?.port
-      const wantUrl = actual ? `http://127.0.0.1:${actual}` : ''
-      const gotUrl = s.pluginConfig?.dshUrl || ''
+      /**
+       * 端口那一段的结论全部来自 `portView`——这里不再自己拼「我们监听 …」，
+       * 免得又出现「拿配置端口冒充实际端口」那种假红字。
+       */
+      const pv = portView(st, s.pluginConfig?.dshUrl || '')
+
+      /** 红字旁边那个「现在就改过来」：只改 dshUrl 一行，不重刷插件配置 */
+      const fixUrl = async () => {
+        setSyncing(true)
+        const r = await post('/setup/sync', {})
+        setSyncing(false)
+        toast(r?.ok && !r.skipped ? (r.message || '已改过来') : (r?.message || '没改成功'))
+        reload()
+      }
 
       return h('div', null,
         h(Banner, { st, setupSt }),
@@ -617,9 +658,9 @@ select.roost-input{color-scheme:dark}
         h(Sec, { n: '04', title: '端口对得上吗' },
           h('div', { className: 'roost-list' },
             [
-              ['dsh-roost 实际监听', portCell(st) || '—', 'ai-chat 要往这里推'],
+              ['dsh-roost 实际监听', pv.cell || '—', 'ai-chat 要往这里推'],
               ['Roost 面板', s.port || '—', 'Roost 自己的 webui 端口，和上面不是一回事'],
-              ['ai-chat 指向', gotUrl || '未配置', '它以为该推给谁'],
+              ['ai-chat 指向', s.pluginConfig?.dshUrl || '未配置', '它以为该推给谁'],
             ].map(([k, v, why]) =>
               h('div', { key: k, className: 'roost-item' },
                 h('span', { className: 't' }, k, h('span', { className: 'd' }, ' ' + why)),
@@ -627,17 +668,23 @@ select.roost-input{color-scheme:dark}
               ),
             ),
           ),
-          (() => {
-            if (!wantUrl) return null
-            if (!gotUrl) {
-              return h('div', { className: 'roost-note' },
-                'ai-chat 还没配好，消息推不过来 —— 去「接入」第 5 步。')
-            }
-            return gotUrl === wantUrl
-              ? h('div', { className: 'roost-note', style: { color: 'var(--ok)' } }, '✓ 两端一致，链路通')
-              : h('div', { className: 'roost-note', style: { color: 'var(--bad)' } },
-                  `✗ 对不上：ai-chat 指向 ${gotUrl}，我们监听 ${wantUrl}。消息推到没人听的端口上，去「接入」第 5 步重新写一次。`)
-          })(),
+          h('div', {
+            className: 'roost-note',
+            style: pv.kind === 'ok' ? { color: 'var(--ok)' } : pv.kind === 'bad' ? { color: 'var(--bad)' } : null,
+          },
+            pv.text,
+            // 对不上时给一个**立刻能点**的出口：这事它自己就能改，
+            // 没必要让用户跑去「接入」页重走一遍
+            pv.action === 'sync'
+              ? h('button', {
+                  type: 'button',
+                  className: 'roost-btn',
+                  style: { marginLeft: 8, flex: '0 0 auto' },
+                  disabled: syncing,
+                  onClick: fixUrl,
+                }, syncing ? '改着…' : '现在就改过来')
+              : null,
+          ),
         ),
 
         h(Sec, { n: '05', title: '最近动态' },
@@ -2838,6 +2885,11 @@ select.roost-input{color-scheme:dark}
     exports.inject = inject
     exports.RoostPage = RoostPage
     exports.RoostIcon = RoostIcon
+    /**
+     * 导出给测试盯住。这个函数出过一次「拿配置端口冒充实际端口」的事故——
+     * 语法合法、渲染不炸、测试全绿，但面板在撒谎。纯函数才能被断言。
+     */
+    exports.portView = portView
     return module.exports
   },
 })

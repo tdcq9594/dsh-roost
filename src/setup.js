@@ -693,14 +693,18 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     const want = `http://127.0.0.1:${portOverride || cfgOf().server.port}`;
 
     /**
-     * Roost 没跑就**不算失败**，直接跳过。
+     * Roost 没跑就**不算失败**，直接跳过——但要**说清是哪一种跳过**。
      *
-     * 启动瞬间两边谁先起来不确定，dsh-roost 常常先起——
-     * 那时候 Roost 还没监听，这里报「没同步」只会让用户以为出了问题。
-     * 等 Roost 起来后再点第 5 步、或者下次保存配置时自然会同步。
+     * 启动瞬间两边谁先起来不确定，dsh-roost 常常先起，那时候 Roost 还没监听，
+     * 这里报「没同步」只会让用户以为出了问题。
+     *
+     * `reason: 'roost-down'` 是给调用方看的：这种跳过**必须重试**。
+     * 以前只返回一个 `skipped`，调用方分不清「等一下就好」和「根本不用改」，
+     * 于是跳过一次就再也不管了——端口明明换过，ai-chat 还指着旧地址，
+     * 面板一直红着让用户「去第 5 步重新写一次」，明明是它自己能改的事。
      */
     if (!(await isRunning())) {
-      return { ok: true, skipped: true, message: 'Roost 还没起来，等它起来再说' };
+      return { ok: true, skipped: true, reason: 'roost-down', message: 'Roost 还没起来，等它起来再改' };
     }
 
     /**
@@ -711,8 +715,13 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
      * 于是端口换了却永远同步不过去，面板红字一直说「对不上」。
      */
     const cur = readPluginConfigFromDisk('ai-chat');
-    if (!cur) return { ok: true, skipped: true, message: '还没读到 ai-chat 的配置（可能还没装）' };
-    if (cur.adapter !== 'dsh' && !cur.dshUrl) return { ok: true, skipped: true, message: 'ai-chat 没在用 DSH，不用改' };
+    if (!cur) {
+      return { ok: true, skipped: true, reason: 'no-config', message: '还没读到 ai-chat 的配置（可能还没装）' };
+    }
+    if (cur.adapter !== 'dsh' && !cur.dshUrl) {
+      // 用户就是没打算走 DSH，不该硬改。**这个不用重试**
+      return { ok: true, skipped: true, reason: 'not-dsh', message: 'ai-chat 没在用 DSH，不用改' };
+    }
     if (cur.dshUrl === want) return { ok: true, message: '已经是当前端口' };
 
     await api('/api/plugins/ai-chat/config', { method: 'PUT', body: JSON.stringify({ dshUrl: want }) });
