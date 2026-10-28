@@ -152,3 +152,59 @@ test('同步：传了实际端口就用传的，不用配置值', async () => {
     },
   );
 });
+
+/* ---------------- 装插件：失败了不许说「装好了」 ---------------- */
+
+/**
+ * 真事：对方在没装 Node.js 的机器上点第 4 步，面板显示「ai-chat 装好了」，
+ * 但第 5 步怎么都过不去——因为插件加载失败（语音依赖要 npm），
+ * 而 `installPlugin()` 没看返回里的 `errors`。
+ *
+ * 装失败和装成功是两件事，不能都给一句「装好了」。
+ */
+function roostStub({ errors = [] } = {}) {
+  return async (url, init) => {
+    const u = String(url);
+    if (u.includes('/api/status')) return okRes({ ok: true });
+    if (u.includes('/api/market/install')) {
+      return okRes({ ok: true, id: 'ai-chat', added: [], removed: [], errors });
+    }
+    if (u.includes('/api/plugins')) return okRes({ plugins: [] });
+    return okRes({ ok: true });
+  };
+}
+
+test('装插件：插件加载失败时要如实报错，不能回「装好了」', async () => {
+  const dir = makeRoost({ aiChat: null });
+  const setup = makeSetup(dir);
+  await withFetch(roostStub({ errors: [{ id: 'ai-chat', error: '这个插件需要 npm 安装依赖，但系统里找不到 npm' }] }), async () => {
+    await assert.rejects(
+      () => setup.installPlugin(),
+      (e) => {
+        assert.match(e.message, /没加载起来/, '要明说「装好了但没跑起来」');
+        assert.match(e.message, /找不到 npm/, '原始原因要带出来，不然没法排查');
+        assert.match(e.message, /重启 Roost/, '要给下一步动作');
+        return true;
+      },
+    );
+  });
+});
+
+test('装插件：没报错就正常回「装好了」', async () => {
+  const dir = makeRoost({ aiChat: null });
+  const setup = makeSetup(dir);
+  await withFetch(roostStub({ errors: [] }), async () => {
+    const r = await setup.installPlugin();
+    assert.equal(r.ok, true);
+    assert.match(r.message, /装好了/);
+  });
+});
+
+test('装插件：别的插件加载失败不该算到 ai-chat 头上', async () => {
+  const dir = makeRoost({ aiChat: null });
+  const setup = makeSetup(dir);
+  await withFetch(roostStub({ errors: [{ id: 'kun', error: '别的东西炸了' }] }), async () => {
+    const r = await setup.installPlugin();
+    assert.equal(r.ok, true, 'kun 失败跟这一步无关');
+  });
+});

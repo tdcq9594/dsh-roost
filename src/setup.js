@@ -661,6 +661,17 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
 
   /* ---------------- 装插件 + 配好 ---------------- */
 
+  /**
+   * 装 ai-chat 插件。
+   *
+   * **必须看返回里的 `errors`。** `/api/market/install` 装完会 rescan 一遍，
+   * 把「文件装好了但插件加载失败」也带回来。以前这里不看，照样回
+   * 「ai-chat 装好了」——于是第 4 步打勾、第 5 步怎么都过不去，
+   * 用户完全不知道发生了什么。
+   *
+   * 真事：没装 Node.js 的机器上，ai-chat 的语音依赖触发「缺少 npm」，
+   * 整个插件不加载。装是装好了，可它没在跑。
+   */
   async function installPlugin() {
     if (!(await isRunning())) throw new Error('Roost 没在跑，先启动');
     const pl = await api('/api/plugins');
@@ -668,7 +679,15 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     if (Array.isArray(arr) && arr.some((p) => p.id === 'ai-chat')) {
       return { ok: true, message: 'ai-chat 已经装了' };
     }
-    await api('/api/market/install', { method: 'POST', body: JSON.stringify({ id: 'ai-chat' }) });
+    const res = await api('/api/market/install', { method: 'POST', body: JSON.stringify({ id: 'ai-chat' }) });
+
+    const failed = (Array.isArray(res?.errors) ? res.errors : []).find((e) => e?.id === 'ai-chat');
+    if (failed) {
+      throw new Error(
+        `ai-chat 的文件装好了，但插件没加载起来：${failed.error || '原因不明'}\n`
+          + '文件就在 plugins/ai-chat/ 里，按上面这个原因处理完，重启 Roost 就会加载。',
+      );
+    }
     return { ok: true, message: 'ai-chat 装好了' };
   }
 
