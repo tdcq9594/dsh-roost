@@ -175,6 +175,50 @@ test('回话：缺地址或令牌时说清楚', async () => {
   await assert.rejects(() => postReply({ id: 'e1', reply: { url: 'http://127.0.0.1:1/x' } }, 'hi'), /没有回话令牌/);
 });
 
+/**
+ * 这条是线上事故的回归测试。
+ *
+ * 曾经这里只把 `fetch` 的 `message`（永远是 `fetch failed`）抛出去，
+ * 模型拿到「发送失败：fetch failed」只能瞎猜，实测它会跟用户说
+ * 「网络没通，等会儿再试」——而真相是 ai-chat 的「面板地址」配错了、
+ * 那个端口根本没人监听。用户等一辈子也不会好。
+ *
+ * 不能拿 1 号端口测：那在 fetch 的黑名单里，报的是 `bad port`，
+ * 根本走不到连接这一步。要先占一个空闲端口再放掉，才是真的 ECONNREFUSED。
+ */
+async function deadPort() {
+  const net = await import('node:net');
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.on('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+}
+
+test('回话：连不上时带出地址和 errno（不能只说 fetch failed）', async () => {
+  const port = await deadPort();
+  await assert.rejects(
+    () => postReply({ id: 'e1', reply: { url: `http://127.0.0.1:${port}/reply`, token: 't' } }, 'hi'),
+    (e) => {
+      assert.match(e.message, new RegExp(`回话通道连不上（127\\.0\\.0\\.1:${port}）`));
+      // 端口刚被放掉，正常一定是 ECONNREFUSED；别的 errno 也算连不上，不苛求
+      assert.match(e.message, /ECONNREFUSED|EACCES|ECONNRESET|ETIMEDOUT/);
+      assert.doesNotMatch(e.message, /：fetch failed$/, '不能把 fetch failed 当最终原因');
+      return true;
+    },
+  );
+});
+
+test('回话：端口被 fetch 禁用时说明白（1 号端口走不到连接）', async () => {
+  await assert.rejects(
+    () => postReply({ id: 'e1', reply: { url: 'http://127.0.0.1:1/reply', token: 't' } }, 'hi'),
+    /回话通道连不上（127\.0\.0\.1:1）.*端口被 fetch 规范禁用/,
+  );
+});
+
 /* ---------------- 一轮的状态机 ---------------- */
 
 test('取文本：只拼 text 块', () => {

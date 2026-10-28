@@ -15,6 +15,25 @@ import { createServer } from 'node:http';
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 /**
+ * 连接失败的 errno 翻成人话。
+ *
+ * 为什么要翻：`fetch` 抛出来的 `message` 永远只是 `fetch failed`，
+ * 真正的原因藏在 `cause.code` 里。不翻的话模型只能瞎猜——实测它会
+ * 告诉用户「网络没通，等会儿再试」，而真相通常是**对面那个端口没人听**
+ * （插件面板地址配错、或者插件进程已经退了）。这两种情况的处置完全相反：
+ * 一个是等，一个是去改配置。
+ */
+const CONNECT_ERR = {
+  ECONNREFUSED: '那个端口没人监听',
+  ECONNRESET: '连接被对面掐断',
+  ETIMEDOUT: '连接超时',
+  EHOSTUNREACH: '主机不可达',
+  ENOTFOUND: '主机名解析不到',
+  EAI_AGAIN: 'DNS 暂时查不到',
+  UND_ERR_CONNECT_TIMEOUT: '连接超时',
+};
+
+/**
  * 把回复送回 ai-chat。
  *
  * @param {object} payload 收到的 inbound
@@ -37,12 +56,41 @@ export async function postReply(payload, text, done = true) {
     throw new Error(`回话地址不在本机（${u.hostname}），拒绝发送`);
   }
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: payload.id, token, text, done }),
-    signal: AbortSignal.timeout(15000),
-  });
+  /**
+   * 只报 `host:port`，不报整条 URL。
+   *
+   * 地址是本机回环，本身不敏感；但路径里带着插件内部路由，
+   * 这段话会原样进模型的工具结果、再被它复述给用户，越短越好。
+   */
+  const where = `${u.hostname}:${u.port || '80'}`;
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: payload.id, token, text, done }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (e) {
+    /**
+     * 超时不是「连不上」，得分开说：超时说明对面**接了**但不回
+     * （插件卡住、或者它正忙着等另一个宿主），改配置没用。
+     */
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+      throw new Error(`回话通道 ${where} 15 秒没响应（对面接了但不回，可能是插件卡住了）`);
+    }
+    const code = e?.cause?.code || e?.cause?.errno || e?.code || '';
+    /**
+     * `bad port` 是 fetch 规范自带的黑名单（1、7、9、25…），
+     * 还没出门就拒了。这不是网络问题，是地址本身不能用。
+     */
+    const why = CONNECT_ERR[code] || (/bad port/i.test(e?.cause?.message || '') ? '端口被 fetch 规范禁用' : '');
+    throw new Error(
+      `回话通道连不上（${where}）${code ? `：${code}` : ''}${why ? `，${why}` : ''}。`
+        + '多半是插件那边的「面板地址」填错了，或者插件进程已经退出',
+    );
+  }
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');

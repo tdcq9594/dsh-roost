@@ -1696,12 +1696,12 @@ export function apply(ctx) {
       const used = sidTurn ? qqTurn.get(sidTurn) : null;
 
       /**
-       * 她说的那句也进日记——不然日记只剩对方一个人的独白。
-       *
-       * 用**实际发出去的内容**：模型走工具时正文只是思考过程，
+       * 她说的那句。用**实际发出去的内容**：模型走工具时正文只是思考过程，
        * 拿正文写日记会把"她说了什么"记成一段没发出去的草稿。
+       *
+       * 注意这里只是**取**，不是**记**——记要等发出去之后（见下面）。
        */
-      journalAdd(payload, chat, (used?.texts?.length ? used.texts.join('\n') : reply), 'bot');
+      const spoken = used?.texts?.length ? used.texts.join('\n') : reply;
 
       /**
        * 回话。
@@ -1712,9 +1712,18 @@ export function apply(ctx) {
        *
        * 空文本不会增加 part（`bridge.handleReply` 里 `if (text)` 才 push），
        * 所以之前发的几段会原样交回去。
+       *
+       * **日记放在发送成功之后**。原来是先记后发，于是回话通道断掉的时候
+       * 日记里照样留下「我说过这句话」——下一轮拼【刚才说到】就会把它捞出来，
+       * 她拿一句**根本没发出去**的话当既定事实继续聊。线上真发生过：
+       * 通道死了三轮，她连着三轮跟自己的失败记录对话。
        */
-      if (used?.parts > 0) await postReply(payload, '', true);
-      else if (used?.closed && !reply) {
+      if (used?.parts > 0) {
+        // 分几段发的每一段都已经单独发成功过了（`qq_send` 一次一成功），
+        // 这里的空文本只是收尾——收尾失败也不影响"话已经说出去了"。
+        journalAdd(payload, chat, spoken, 'bot');
+        await postReply(payload, '', true);
+      } else if (used?.closed && !reply) {
         /**
          * 只收尾、不说话 —— 回 `<skip>` 让 ai-chat 安静结束。
          *
@@ -1725,9 +1734,14 @@ export function apply(ctx) {
          * `<skip>` 是 ai-chat 的私有约定（`decide.js` 的 `SKIP_MARK`），
          * 这里硬编码是**设计内的耦合**：dsh-roost 本来就是 ai-chat 的宿主，
          * 标记契约也一直由它经 system prompt 传下来。
+         *
+         * 这一支不写日记：她一个字都没说。
          */
         await postReply(payload, '<skip>', true);
-      } else await postReply(payload, reply, true);
+      } else {
+        await postReply(payload, reply, true);
+        journalAdd(payload, chat, spoken, 'bot');
+      }
 
       /**
        * 上下文压缩（第 6 期）：到阈值就开新会话 + 摘要开场。
