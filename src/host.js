@@ -172,6 +172,9 @@ export function apply(ctx) {
     personas,
     sources: cfg.persona?.repo?.sources,
     log: (m) => log.warn(m),
+    // 换源成功这类「不是错误」的消息走 info：国内 GitHub 常年连不上，
+    // 全打成 warn 的话面板上永远是两条红字，看着像功能坏了
+    note: (m) => log.info(m),
   });
 
   /**

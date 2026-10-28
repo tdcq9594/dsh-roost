@@ -48,32 +48,47 @@ function indexOf(entries) {
  * 刻意用真实的 raw.githubusercontent.com 域名 + 走真实的白名单校验：
  * 测试里把白名单放开，就等于永远测不到「有人往 index 里塞内网地址」这条。
  */
-function harness({ files = {}, index, bundled = {}, failAll = false } = {}) {
+function harness({ files = {}, index, bundled = {}, failAll = false, sources = [BASE], failUrls = [] } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'roost-repo-'));
   const bdir = join(dataDir, 'bundled');
   mkdirSync(bdir, { recursive: true });
   for (const [n, t] of Object.entries(bundled)) writeFileSync(join(bdir, n), t, 'utf8');
 
-  const routes = {
-    [`${BASE}/index.json`]: index ?? indexOf(Object.entries(files)),
-    ...Object.fromEntries(Object.entries(files).map(([id, t]) => [`${BASE}/${id}.md`, t])),
-  };
+  // 每个源都给同样的内容：测的是「换源」这件事，不是「两个源内容不同」
+  const routes = {};
+  for (const src of sources) {
+    routes[`${src}/index.json`] = index ?? indexOf(Object.entries(files));
+    for (const [id, t] of Object.entries(files)) routes[`${src}/${id}.md`] = t;
+  }
 
   const calls = [];
+  /** 记下 warn / info，用来断言「哪些消息该让人看见」 */
+  const logs = [];
+  const notes = [];
   const fetchImpl = async (url) => {
     calls.push(url);
-    if (failAll) throw new Error('网络断了');
+    if (failAll || failUrls.some((p) => url.startsWith(p))) throw new Error('fetch failed');
     if (!(url in routes)) return { ok: false, status: 404, text: async () => '' };
     return { ok: true, status: 200, text: async () => routes[url] };
   };
 
   const personas = createPersonas({ dataDir, builtinDir: bdir });
-  const repo = createPersonaRepo({ dataDir, personas, sources: [BASE], fetchImpl, log: () => {} });
+  const repo = createPersonaRepo({
+    dataDir,
+    personas,
+    sources,
+    fetchImpl,
+    log: (m) => logs.push(m),
+    note: (m) => notes.push(m),
+  });
   return {
     dataDir,
     repo,
     personas,
     calls,
+    logs,
+    notes,
+    failUrls,
     pdir: join(dataDir, 'personas'),
     done: () => { try { rmSync(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {} },
   };
@@ -380,4 +395,89 @@ test('扫描：人格里写了高危指令要亮出来（不拦，只提示）',
   assert.match(hits[0].why, /覆盖原有指令/);
   assert.equal(hits[1].line, 3);
   assert.deepEqual(scanPersona('你叫小明，说话短。'), []);
+});
+
+/* ---------------- 换源与日志噪音 ---------------- */
+
+/**
+ * 默认源是「GitHub 在前、Gitee 在后」，而国内 GitHub 经常连不上。
+ *
+ * 以前每失败一次就打一条 warn，面板上永远是两条红字
+ * 「拉人格索引失败（…/personas，第 1 次）」——看起来像整个功能坏了，
+ * 其实 Gitee 那次是成功的。这里盯的就是「别把成功的一次说成失败」。
+ */
+const BASE2 = 'https://gitee.com/t/personas/raw/main';
+
+test('换源：GitHub 挂了、Gitee 顶上，不该报错（只留一条提示）', async () => {
+  const h = harness({ files: { a: P1 }, sources: [BASE, BASE2], failUrls: [BASE] });
+  try {
+    const r = await h.repo.list();
+    assert.equal(r.ok, true);
+    assert.equal(r.personas.length, 1);
+    assert.equal(r.stale, false);
+    // 一条 warn 都不该有
+    assert.deepEqual(h.logs, []);
+    // 但要说清「在用哪个」
+    assert.equal(h.notes.length, 1);
+    assert.match(h.notes[0], /已改用 gitee\.com/);
+    assert.match(h.notes[0], /raw\.githubusercontent\.com/);
+  } finally {
+    h.done();
+  }
+});
+
+test('两个源都通：不该有任何提示（第一条就成功了）', async () => {
+  const h = harness({ files: { a: P1 }, sources: [BASE, BASE2] });
+  try {
+    const r = await h.repo.list();
+    assert.equal(r.ok, true);
+    assert.deepEqual(h.logs, []);
+    assert.deepEqual(h.notes, []);
+  } finally {
+    h.done();
+  }
+});
+
+test('全部失败但有缓存：用旧清单，只报一条 warn 且说明是缓存', async () => {
+  const h = harness({ files: { a: P1 } });
+  try {
+    await h.repo.list(); // 先成功一次，落下缓存
+    h.failUrls.push(BASE);
+
+    const r = await h.repo.list({ force: true });
+    assert.equal(r.ok, true);
+    assert.equal(r.stale, true, '要标成 stale，别让人以为是新的');
+    assert.equal(r.personas.length, 1);
+    assert.equal(h.logs.length, 1);
+    assert.match(h.logs[0], /全失败/);
+    assert.match(h.logs[0], /本地缓存/);
+  } finally {
+    h.done();
+  }
+});
+
+test('全部失败又没有缓存：错误里要带完整 URL，不然根本不知道该查哪', async () => {
+  const h = harness({ files: { a: P1 }, failAll: true });
+  try {
+    await assert.rejects(h.repo.list(), (e) => {
+      assert.match(e.message, /拉取人格索引失败/);
+      assert.match(e.message, /index\.json/, '要给完整地址，不能只给目录');
+      return true;
+    });
+    assert.deepEqual(h.logs, [], '抛错了就别再重复打 warn，面板会一条红字变三条');
+  } finally {
+    h.done();
+  }
+});
+
+test('换源时重试次数：一个源最多试 2 次，别死磕', async () => {
+  const h = harness({ files: { a: P1 }, sources: [BASE, BASE2], failUrls: [BASE] });
+  try {
+    await h.repo.list();
+    const gh = h.calls.filter((u) => u.startsWith(BASE));
+    assert.equal(gh.length, 2, `GitHub 应该试 2 次，实际 ${gh.length} 次`);
+    assert.ok(h.calls.some((u) => u.startsWith(BASE2)), '应该换到 Gitee');
+  } finally {
+    h.done();
+  }
 });

@@ -58,6 +58,20 @@ const DEFAULT_SOURCES = [
   'https://gitee.com/tdcq9594/dsh-roost/raw/main/personas',
 ];
 
+/**
+ * 从地址里取主机名，取不到就退回原文。
+ *
+ * 日志里只说「GitHub 连不上」比甩一整条 URL 好读，而 URL 已经在
+ * 「最后试的是 …」里给过一次了。
+ */
+function safeHost(raw) {
+  try {
+    return new URL(String(raw)).host;
+  } catch {
+    return String(raw);
+  }
+}
+
 /** 索引缓存多久算新鲜。太短会每次开面板都打网络，太长会看不到刚推的更新 */
 const INDEX_TTL = 5 * 60_000;
 
@@ -157,6 +171,8 @@ export function createPersonaRepo({
   fetchImpl = globalThis.fetch,
   allowHosts,
   log = () => {},
+  /** 提示级日志（换源成功这类「不是错误」的消息）。不传就静默 */
+  note = () => {},
 }) {
   const dir = () => join(dataDir, 'personas');
   const syncedPath = () => join(dir(), '.synced.json');
@@ -251,11 +267,23 @@ export function createPersonaRepo({
   async function loadIndex({ force = false } = {}) {
     if (!force && indexCache && Date.now() - indexAt < INDEX_TTL) return indexCache;
 
-    let lastErr;
+    /**
+     * 逐个源试，**失败只在最后统一报一次**。
+     *
+     * 以前每失败一次就打一条 warn，而默认源是「GitHub 在前、Gitee 在后」：
+     * 国内 GitHub 经常连不上，于是面板上永远是两条红字
+     * 「拉人格索引失败（…/personas，第 1 次）」，看起来像整个功能坏了——
+     * 其实 Gitee 那次是成功的，人格库好好的。
+     *
+     * 现在：单个源失败只进 info（面板上不刺眼），全部失败才 warn；
+     * 而且是换源成功时明说「已改用 Gitee」，别让人以为 GitHub 也能用。
+     */
+    const failed = [];
     for (const base of baseList()) {
       for (let attempt = 0; attempt < 2; attempt++) {
+        const url = `${base}/index.json`;
         try {
-          const txt = await getText(`${base}/index.json`);
+          const txt = await getText(url);
           const j = JSON.parse(txt);
           if (!Array.isArray(j?.personas)) throw new Error('index.json 结构不对（缺 personas 数组）');
           validateIndex(j);
@@ -264,21 +292,31 @@ export function createPersonaRepo({
           try {
             writeAtomic(cachePath(), JSON.stringify({ ...j, base }, null, 2) + '\n');
           } catch {}
+          if (failed.length) {
+            // 前面有源挂了、这个是好的：说清楚在用哪个，别让人以为 GitHub 也通了
+            note(`人格索引：${failed.map((f) => f.host).join('、')} 连不上，已改用 ${new URL(base).host}`);
+          }
           return indexCache;
         } catch (e) {
-          lastErr = e;
-          log(`拉人格索引失败（${base}，第 ${attempt + 1} 次）：${e.message}`);
+          failed.push({ base, url, host: safeHost(base), why: e?.message || String(e) });
         }
       }
     }
 
     const cached = readCache();
     if (cached) {
+      // 有缓存就还能用，但必须让人知道「这份是旧的」
+      log(
+        `拉人格索引全失败（${failed.map((f) => `${f.host}：${f.why}`).join('；')}），` +
+          `先用本地缓存（${cached.personas?.length ?? 0} 份）`,
+      );
       indexCache = { ...cached, stale: true };
       indexAt = Date.now();
       return indexCache;
     }
-    throw new Error(`拉取人格索引失败：${lastErr?.message ?? '所有源都不可用'}`);
+
+    const last = failed[failed.length - 1];
+    throw new Error(`拉取人格索引失败：${last?.why ?? '所有源都不可用'}（最后试的是 ${last?.url ?? '—'}）`);
   }
 
   /* ---------------- 本地状态 ---------------- */
