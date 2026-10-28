@@ -108,6 +108,21 @@ tags: 解释, 耐心
 
 const safeId = (id) => String(id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || 'default';
 
+/**
+ * 旧字段 `persona.text` 要不要拼进提示词。
+ *
+ * **只在人格文件读不出正文时才用**（`persona.body` 为空）。
+ *
+ * 为什么必须这么判：0.10.0 起人格正文在 `personas/<id>.md` 里，
+ * 而 `default.md` 的正文就是从这段 `text` 抄过去的，两段几乎一字不差。
+ * 以前是无条件追加到提示词末尾，于是「换了大肥鱼，提示词最后仍挂着小栖那段」——
+ * 而且它排最后、离历史最近，权重最大，表现出来就是「换了人格还是原来那个」。
+ */
+export function legacyPersonaText(persona, cfgText) {
+  if (persona?.body) return '';
+  return String(cfgText ?? '').trim();
+}
+
 /** 解析 `---` 头 + 正文 */
 export function parsePersona(id, raw) {
   let text = String(raw ?? '').replace(/^\uFEFF/, '');

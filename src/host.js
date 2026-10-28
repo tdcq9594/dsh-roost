@@ -29,7 +29,7 @@ import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
 import { createMood, parseMoodMark } from './mood.js';
 import { createClosing, parseClose, acceptClose } from './closing.js';
-import { createPersonas } from './personas.js';
+import { createPersonas, legacyPersonaText } from './personas.js';
 import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools } from './qq-tools.js';
@@ -1118,7 +1118,12 @@ export function apply(ctx) {
               persona.demos ? `【她平时这么说话】\n${persona.demos}` : '',
               hits.length ? `【跟这会儿有关的事】\n${hits.map((h) => `· ${h.text}`).join('\n')}` : '',
               extra,
-              p.text, // 旧配置里的追加内容，留着兼容
+              /**
+               * 旧字段 `persona.text`：**只在人格文件读不出正文时**兜底。
+               * 判据和原因都写在 `legacyPersonaText` 里（踩过的坑：
+               * 无条件追加会让「换人格」看起来没生效）。
+               */
+              legacyPersonaText(persona, p.text),
             ]
               .filter(Boolean)
               .join('\n');
