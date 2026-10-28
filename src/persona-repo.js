@@ -279,6 +279,14 @@ export function createPersonaRepo({
      * 而且是换源成功时明说「已改用 Gitee」，别让人以为 GitHub 也能用。
      */
     const failed = [];
+    /**
+     * 报给人看的源名去重。
+     *
+     * `failed` 是按**尝试次数**记的（一个源要试 2 次），直接 map 出主机名会得到
+     * 「raw.githubusercontent.com、raw.githubusercontent.com 连不上」——
+     * 用户会以为配了两个 GitHub 源。同一个源试几次都只算一个。
+     */
+    const failedHosts = () => [...new Set(failed.map((f) => f.host))];
     for (const base of baseList()) {
       for (let attempt = 0; attempt < 2; attempt++) {
         const url = `${base}/index.json`;
@@ -294,7 +302,7 @@ export function createPersonaRepo({
           } catch {}
           if (failed.length) {
             // 前面有源挂了、这个是好的：说清楚在用哪个，别让人以为 GitHub 也通了
-            note(`人格索引：${failed.map((f) => f.host).join('、')} 连不上，已改用 ${new URL(base).host}`);
+            note(`人格索引：${failedHosts().join('、')} 连不上，已改用 ${new URL(base).host}`);
           }
           return indexCache;
         } catch (e) {
@@ -305,11 +313,11 @@ export function createPersonaRepo({
 
     const cached = readCache();
     if (cached) {
-      // 有缓存就还能用，但必须让人知道「这份是旧的」
-      log(
-        `拉人格索引全失败（${failed.map((f) => `${f.host}：${f.why}`).join('；')}），` +
-          `先用本地缓存（${cached.personas?.length ?? 0} 份）`,
-      );
+      // 有缓存就还能用，但必须让人知道「这份是旧的」。同样按源去重
+      const detail = [...new Map(failed.map((f) => [f.host, f])).values()]
+        .map((f) => `${f.host}：${f.why}`)
+        .join('；');
+      log(`拉人格索引全失败（${detail}），先用本地缓存（${cached.personas?.length ?? 0} 份）`);
       indexCache = { ...cached, stale: true };
       indexAt = Date.now();
       return indexCache;

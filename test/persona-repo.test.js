@@ -421,6 +421,12 @@ test('换源：GitHub 挂了、Gitee 顶上，不该报错（只留一条提示�
     assert.equal(h.notes.length, 1);
     assert.match(h.notes[0], /已改用 gitee\.com/);
     assert.match(h.notes[0], /raw\.githubusercontent\.com/);
+    // 一个源要重试 2 次，但**报名字只能报一次**：报两遍会让人以为配了两个 GitHub 源
+    assert.equal(
+      h.notes[0].split('raw.githubusercontent.com').length - 1,
+      1,
+      `同一个源不该重复出现：${h.notes[0]}`,
+    );
   } finally {
     h.done();
   }
@@ -451,6 +457,11 @@ test('全部失败但有缓存：用旧清单，只报一条 warn 且说明是�
     assert.equal(h.logs.length, 1);
     assert.match(h.logs[0], /全失败/);
     assert.match(h.logs[0], /本地缓存/);
+    assert.equal(
+      h.logs[0].split('raw.githubusercontent.com').length - 1,
+      1,
+      `重试 2 次也只该报一次源名：${h.logs[0]}`,
+    );
   } finally {
     h.done();
   }
