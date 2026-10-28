@@ -1070,7 +1070,7 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    /* ---------------- 她 ---------------- */
+    /* ---------------- 人格与情绪（页签 key 仍是 her） ---------------- */
 
     function HerTab({ config, personas, mood, stickers, mem, setupSt, toast, save, reload, quick }) {
       const [editId, setEditId] = useState('')
@@ -1343,11 +1343,27 @@ select.roost-input{color-scheme:dark}
                   h('span', { className: 'roost-note', style: { margin: 0 } }, '手动喂一次反馈：'),
                   h('button', {
                     type: 'button', className: 'roost-btn',
-                    onClick: async () => { await post('/mood', { feedback: 'up' }); toast('记了个赞'); reload() },
+                    /**
+                     * 传 `LIKE` / `UNLIKE`，别传 `up` / `down`。
+                     *
+                     * 这里以前传的是 `up`/`down`，而后端只认 `LIKE`/`UNLIKE`——
+                     * **按钮点了完全没反应，toast 还照样说"记了个赞"**。
+                     * 后端现在也做归一化了（`normalizeFeedback`），
+                     * 但前端按契约传，别指望对面兜底。
+                     */
+                    onClick: async () => {
+                      const r = await post('/mood', { feedback: 'LIKE' })
+                      toast(r?.ok === false ? (r.message || '没记上') : '记了个赞')
+                      reload()
+                    },
                   }, '👍 赞'),
                   h('button', {
                     type: 'button', className: 'roost-btn',
-                    onClick: async () => { await post('/mood', { feedback: 'down' }); toast('记了个踩'); reload() },
+                    onClick: async () => {
+                      const r = await post('/mood', { feedback: 'UNLIKE' })
+                      toast(r?.ok === false ? (r.message || '没记上') : '记了个踩')
+                      reload()
+                    },
                   }, '👎 踩'),
                 ),
               )
@@ -2187,11 +2203,19 @@ select.roost-input{color-scheme:dark}
 
     /* ---------------- 页面 ---------------- */
 
-    /** 页签顺序固定；「概览」永远第一个——它是首屏 */
+    /**
+     * 页签顺序固定；「概览」永远第一个——它是首屏。
+     *
+     * `her` 这一页现在叫「人格与情绪」：里面是人格正文、当前情绪、
+     * 表情包、语音条。以前页签名只有一个「她」字，用户得点进去才知道
+     * 这页能改人格——名字写清楚比省两个字重要。key 仍是 `her`，
+     * 不动它是因为 `localStorage` 里存着上次停留的页签，改 key 会让
+     * 老用户回来时落空、退回概览。
+     */
     const TABS = [
       ['overview', '概览'],
       ['setup', '接入'],
-      ['her', '她'],
+      ['her', '人格与情绪'],
       ['memory', '记忆'],
       ['awake', '醒着'],
       ['context', '上下文'],
@@ -2227,11 +2251,11 @@ select.roost-input{color-scheme:dark}
       /** 记忆页选中的会话；空串 = 跟随「最近说话的那个」 */
       const [memPick, setMemPick] = useState('')
       /**
-       * 她页一次要三份数据，合成**一个** state。
+       * 「人格与情绪」页一次要三份数据，合成**一个** state。
        *
        * 原来三个独立 setState：接口回来时如果 React 没批处理，就是三次渲染、
-       * 三次整页重排。她页是唯一这样的页面（其余页最多两份，且多数是分开用），
-       * 所以「切到她页」更容易看到没画完的白块。
+       * 三次整页重排。这一页是唯一这样的页面（其余页最多两份，且多数是分开用），
+       * 所以「切到这一页」更容易看到没画完的白块。
        */
       const [her, setHer] = useState(null)
       const [aw, setAw] = useState(null)

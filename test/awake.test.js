@@ -99,6 +99,22 @@ test('觉醒：低于阈值的机会连模型都不问', () => {
   assert.deepEqual(out, []);
 });
 
+test('觉醒：mood 缺字段时按中性值算（跟 mood.js 的落点一致）', () => {
+  /**
+   * 老数据 / 面板刚清过 / 第一次启动都会拿到空 mood。
+   * 缺字段时的兜底值必须等于 `NEUTRAL`（0.5），
+   * 否则同一份情绪在两处算出不同结论（以前这里是 0.6）。
+   */
+  const missing = opportunities({ now: noon(), mood: {}, state: {}, cfg: CFG });
+  const neutral = opportunities({ now: noon(), mood: { sociability: 0.5, energy: 0.5, valence: 0 }, state: {}, cfg: CFG });
+  assert.deepEqual(
+    missing.map((o) => [o.kind, o.score]),
+    neutral.map((o) => [o.kind, o.score]),
+  );
+  // 中性精力下「随性」仍要过线，不然这一档等于不存在
+  assert.equal(neutral.some((o) => o.kind === 'casual'), true, '中性精力下随性应当可选');
+});
+
 /* ---------------- 收尾冷却（第 1 条联动） ---------------- */
 
 /**

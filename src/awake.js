@@ -21,6 +21,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { NEUTRAL } from './mood.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -104,8 +105,15 @@ export function opportunities({ now = Date.now(), mood = {}, agreements = [], st
   const hour = new Date(now).getHours();
   if (!inWindow(hour, c.awakeFrom, c.awakeTo)) return [];
 
-  const sociability = Number.isFinite(mood.sociability) ? mood.sociability : 0.6;
-  const energy = Number.isFinite(mood.energy) ? mood.energy : 0.6;
+  /**
+   * 缺省值取 `NEUTRAL`（0.5），跟 `mood.js` 的落点**必须一致**。
+   *
+   * 以前这里写的是 0.6，而情绪衰减的落点是 0.5——两处不一致的后果是：
+   * 传进来的 mood 一旦缺字段（老数据 / 面板刚清过），判分用的基准
+   * 就跟实际存着的值不是一回事，同一份数据两处算出不同结论。
+   */
+  const sociability = Number.isFinite(mood.sociability) ? mood.sociability : NEUTRAL;
+  const energy = Number.isFinite(mood.energy) ? mood.energy : NEUTRAL;
   const valence = Number.isFinite(mood.valence) ? mood.valence : 0;
   const out = [];
 
@@ -157,10 +165,10 @@ export function opportunities({ now = Date.now(), mood = {}, agreements = [], st
       /**
        * 基础分 + 精力项。
        *
-       * 系数是照着 `minScore` 定的：精力 0.6（默认值）时约 0.41，能过线；
+       * 系数是照着 `minScore` 定的：精力取中性值 0.5 时约 0.39，能过线（阈值 0.35）；
        * 精力掉到 0.2 时约 0.34，**自动不过线**——累了就不想随便搭话，
        * 这比"到点了硬说一句"自然。写成 `0.25 + 0.15*energy` 的话，
-       * 默认精力下只有 0.34，随性这一档等于永远选不到。
+       * 中性精力下只有 0.325，随性这一档等于永远选不到。
        */
       score: 0.3 + 0.18 * energy,
       reason: '没什么特别的事，就是想随便说句话',

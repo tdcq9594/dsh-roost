@@ -27,7 +27,7 @@ import { createJournal } from './journal.js';
 import { createGraph } from './graph.js';
 import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
-import { createMood } from './mood.js';
+import { createMood, parseMoodMark } from './mood.js';
 import { createClosing, parseClose, acceptClose } from './closing.js';
 import { createPersonas } from './personas.js';
 import { createStickers } from './stickers.js';
@@ -735,19 +735,18 @@ export function apply(ctx) {
     });
 
     out = out.replace(/<<mood:\s*([\s\S]*?)>>/gi, (_, v) => {
-      const s = String(v || '').trim();
-      if (s) {
-        // 支持 `valence=-0.3, reason=被凶了`；只有一段文字时当原因处理
-        const kv = {};
-        for (const part of s.split(/[,，;；]/)) {
-          const m = part.match(/^\s*(valence|energy|sociability|reason)\s*[=:：]\s*(.+)$/i);
-          if (m) kv[m[1].toLowerCase()] = m[2].trim();
-          else if (!kv.reason) kv.reason = part.trim();
-        }
+      /**
+       * 解析交给 `parseMoodMark`，别在这里自己按逗号切。
+       *
+       * 按逗号切的后果：`reason=被凶了，有点难受` 被切成两段，
+       * 第二段没有 key 而 reason 已经有值 → 直接丢掉，原因只剩「被凶了」。
+       */
+      const kv = parseMoodMark(v);
+      if (Object.keys(kv).length) {
         mood.set({
-          valence: kv.valence != null ? Number(kv.valence) : undefined,
-          energy: kv.energy != null ? Number(kv.energy) : undefined,
-          sociability: kv.sociability != null ? Number(kv.sociability) : undefined,
+          valence: kv.valence,
+          energy: kv.energy,
+          sociability: kv.sociability,
           reason: kv.reason,
         });
         touched = '情绪变了';
@@ -807,6 +806,16 @@ export function apply(ctx) {
       else log.debug(`收尾没记上：${r.why}`);
       return '';
     });
+
+    /**
+     * 兜底：任何剩下的 `<<名字>>` / `<<名字: 值>>` 都当标记摘掉。
+     *
+     * 标记协议是**两个仓库各自实现**的（这里是这套正则，ai-chat 的 `parseActions`
+     * 是另一套）。哪一边加了新标记、另一边没跟上，标记就会原样进群——
+     * `mood` 已经这么漏过一次（写进 `qq_send` 参数里，工具通道直接 `postReply`）。
+     * 只匹配「字母开头 + 可选冒号值」的形状，不会误伤正文里的尖括号。
+     */
+    out = out.replace(/<<[a-z][a-z-]{0,20}(?::[^<>]{0,2000})?>>/gi, '');
 
     return { text: out.trim(), touched };
   }
@@ -1009,9 +1018,31 @@ export function apply(ctx) {
           const c = cur();
           return { ...c, hasPayload: Boolean(c.payload) };
         },
-        sendOf: async (text) => {
+        sendOf: async (raw) => {
           const c = cur();
           if (!c.payload) return { ok: false, message: '这一轮没有可回话的消息' };
+
+          /**
+           * **工具参数里的标记也要摘掉。**
+           *
+           * 这是 0.10.4 加 `qq_send` 时漏掉的一条路：正文会过
+           * `applyMemoryMarkers`，但工具参数是**直接 postReply 原文**。
+           * 模型只要把 `<<mood: valence=-0.3>>` 写进 `qq_send`，
+           * 结果就是「情绪没改，标记原样发到群里」——两头都错。
+           *
+           * 复用同一个函数而不是另写一份清理：标记的语义不该因为
+           * 它出现在正文还是工具参数里而不同。
+           */
+          const { text, touched } = applyMemoryMarkers(raw, c.chatId, c.said, c.kind);
+          if (touched) log.info(`工具发言里的标记已执行：${touched}`);
+          if (!text) {
+            /**
+             * 整段都是标记，没有可发的内容。
+             * 不静默成功——不然模型会以为发出去了，实际什么都没说。
+             */
+            return { ok: false, message: '这段话里只有标记，没有可发出去的内容' };
+          }
+
           await postReply(c.payload, text, false);
           /** 记下这一轮发了什么：turn 结束时要拿它写日记，并且决定正文不再重发 */
           const st = qqTurn.get(c.sid);
@@ -1956,12 +1987,22 @@ export function apply(ctx) {
        * 点赞/点踩（interaction type 13）。
        * **不鉴权**——这是表达态度，谁都能点。
        * 这是 doc2 说的「被对待的反馈」最直接的来源。
+       *
+       * `applied` 必须如实回给调用方：面板以前发的是 `up`/`down`，
+       * 而这里只认 `LIKE`/`UNLIKE`，结果**按钮点了没反应，界面还弹"记了个赞"**。
+       * 现在两边都归一化（`normalizeFeedback`），认不出来就明说没生效。
        */
       route('/mood', async (req, res) => {
         if (req.method === 'GET') return send(res, 200, { ok: true, ...mood.get() });
         const body = await readBody(req);
-        if (body?.feedback) mood.feedback(String(body.feedback));
-        send(res, 200, { ok: true, ...mood.get() });
+        const raw = body?.feedback;
+        if (raw == null) return send(res, 400, { ok: false, message: '缺 feedback' });
+        const r = mood.feedback(String(raw));
+        if (!r.applied) {
+          log.warn(`不认识的反馈：${String(raw).slice(0, 20)}（只认 like/unlike/up/down）`);
+          return send(res, 400, { ok: false, message: `不认识的反馈：${String(raw).slice(0, 20)}`, ...mood.get() });
+        }
+        send(res, 200, { ok: true, applied: true, ...r });
       }),
 
       /**
