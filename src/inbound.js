@@ -61,6 +61,14 @@ export function speakerTag(payload, chat) {
   // 私聊只有一个人，给 id 没有意义，反而白占 token
   if (kind !== 'group') return '';
 
+  /**
+   * 多人批次（连着几句攒成一批）不套外层标签。
+   *
+   * ai-chat 那边已经把每条拼成 `昵称(openid)：正文` 了，这里再套一层
+   * `[最后那个人 (id)]` 会让人以为整段都是他说的——而批次里明明有别人。
+   */
+  if (payload?.batch?.multi) return '';
+
   const id = String(payload?.sender?.id ?? '').trim();
   if (!id) return '';
 

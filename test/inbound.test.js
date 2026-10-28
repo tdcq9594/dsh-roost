@@ -52,3 +52,27 @@ test('标签：昵称里的换行会被压掉（否则一条消息被劈成两�
   const tag = speakerTag({ sender: { id: OPENID, name: '小\n明' } }, { kind: 'group' });
   assert.ok(!tag.includes('\n'), '标签里不能有换行');
 });
+
+/**
+ * 多人批次不套外层标签。
+ *
+ * 那种正文长这样（ai-chat 拼的）：
+ *   小明(A1B2…)：在吗
+ *   小红(ZZ99…)：问你个事
+ * 外面再套一个 `[小红 (ZZ99…)]` 就等于说整段都是小红说的。
+ */
+test('标签：多人批次不套外层标签（每条已自带 id）', () => {
+  const payload = {
+    sender: { id: OPENID, name: '小红' },
+    batch: { multi: true, count: 2 },
+  };
+  assert.equal(speakerTag(payload, { kind: 'group' }), '');
+});
+
+test('标签：单条批次仍然要标签（batch 存在但 multi 是假）', () => {
+  const payload = {
+    sender: { id: OPENID, name: '小明' },
+    batch: { multi: false, count: 1 },
+  };
+  assert.equal(speakerTag(payload, { kind: 'group' }), `[小明 (${OPENID})] `);
+});
