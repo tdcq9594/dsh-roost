@@ -20,7 +20,7 @@ import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
 import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf } from './inbound.js';
-import { bucketOf, modeFor, describeSpeaker, rulesFor, LOCAL_TOOLS } from './permissions.js';
+import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools } from './permissions.js';
 import { createSetup } from './setup.js';
 import { createMemory } from './memory.js';
 import { createJournal } from './journal.js';
@@ -85,13 +85,73 @@ export function apply(ctx) {
   }
 
   const raw = makeLogger(ctx);
+
+  /**
+   * 把日志参数拼成一行。
+   *
+   * 以前 `log.warn` 只取**第一个**参数，多传的直接丢掉。于是调用处写着
+   * `log.warn('收走本地工具失败：', e.message)`——看起来完全正常，
+   * 面板上却是「收走本地工具失败：」后面一片空白，等于什么都没说
+   * （2026-10-28 实测，7 个调用点全踩了这个坑）。
+   *
+   * 与其把那 7 处逐个改成模板字符串（下次还会有人这么写），不如让这层
+   * 跟 `console` 一样收可变参数。Error 取 message（有 stack 就用 stack，
+   * 排查时能直接看到是哪一行），对象退化成 JSON。
+   */
+  const fmtLog = (a) => {
+    if (a instanceof Error) return a.stack || a.message || String(a);
+    if (a && typeof a === 'object') {
+      try {
+        return JSON.stringify(a);
+      } catch {
+        return String(a);
+      }
+    }
+    return String(a ?? '');
+  };
+  const joinLog = (args) => args.map(fmtLog).filter(Boolean).join(' ');
+
   // 包一层：所有走 log.* 的都同时进面板日志
   const log = {
     debug: raw.debug,
-    info: (m) => { raw.info(m); addLog('info', 'core', m); },
-    warn: (m) => { raw.warn(m); addLog('warn', 'core', m); },
-    error: (m) => { raw.error(m); addLog('error', 'core', m); },
+    info: (...a) => { const m = joinLog(a); raw.info(m); addLog('info', 'core', m); },
+    warn: (...a) => { const m = joinLog(a); raw.warn(m); addLog('warn', 'core', m); },
+    error: (...a) => { const m = joinLog(a); raw.error(m); addLog('error', 'core', m); },
   };
+
+  /**
+   * 群友这一轮允许保留的工具。
+   *
+   * **白名单而不是黑名单**，这是关键。原来这里写死了一张黑名单：
+   * `['bash','pwsh','shell','fs','fs-search','fs_search','web','web-fetch']`
+   * ——按 OneBot 时代的想象写的。这版 DSH 里这些名字一个都不存在，
+   * 而 `tools.restrict()` **会校验名字**，只要有一个对不上就整批拒绝：
+   *
+   *     tools.restrict() names unknown global tools "bash", "shell", …
+   *
+   * 结果是每次群友说话都失败一次，**权限从来没真正收住过**
+   * （2026-10-28 面板日志实锤，之前一直被日志层吞掉看不见）。
+   *
+   * 黑名单还有第二个毛病：DSH 每加一个新工具就漏一个，而漏掉的正好是
+   * 没人想起来补的那个。改成白名单 + fail-closed 之后，新工具默认是收走的。
+   *
+   * 名单本身在 `permissions.js` 的 `GUEST_KEEP_TOOLS`，算法在 `planGuestTools()`。
+   */
+  function restrictGuestTools(agent) {
+    const t = agent?.ctx?.tools;
+    if (!t || typeof t.restrict !== 'function') {
+      return { ok: false, reason: '这个 agent 的 tools 服务没有 restrict（版本差异）' };
+    }
+
+    const plan = planGuestTools(t);
+    if (!plan.ok) return plan;
+
+    try {
+      return { ok: true, off: t.restrict({ deny: plan.deny }), names: plan.deny };
+    } catch (e) {
+      return { ok: false, reason: `${e?.message || e}（清单：${plan.deny.join('、')}）` };
+    }
+  }
   let cfg = loadConfig();
 
   const sessions = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
@@ -1423,17 +1483,12 @@ export function apply(ctx) {
       const mode = modeFor(bucket, cfg.permissions);
       if (mode === 'chat') {
         try {
-          /**
-           * 群友：本地工具全收，外加**记忆写入工具**。
-           *
-           * 给他写长期记忆的能力，等于允许往每轮都注入的记忆里投毒
-           * （写一句"主人讨厌张三"，以后每次对话都带着）。
-           * `memory_search` 留着——他能查本群的事，但跨群和 sender 已由
-           * 工具内部按档位掐掉（纵深两道，不只靠这一个开关）。
-           */
-          restore = agent.ctx.tools.restrict({ deny: [...LOCAL_TOOLS, 'memory_note'] });
+          // 白名单在 permissions.js 的 GUEST_KEEP_TOOLS，算法在 planGuestTools()
+          const r = restrictGuestTools(agent);
+          if (r.ok) restore = r.off;
+          else log.warn(`收走本地工具失败：${r.reason}。这一轮群友会拿到完整本地工具`);
         } catch (e) {
-          log.warn('收走本地工具失败：', e.message);
+          log.warn(`收走本地工具失败：${e?.message || e}。这一轮群友会拿到完整本地工具`);
         }
       }
 
