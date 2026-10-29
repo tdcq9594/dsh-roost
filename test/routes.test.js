@@ -74,7 +74,7 @@ async function bootHost(cfgPatch = {}, seed = {}) {
   const host = await import(url.href);
   const off = host.apply(fakeCtx);
 
-  const call = async (path, { method = 'GET', body = null } = {}) => {
+  const call = async (path, { method = 'GET', body = null, headers = {} } = {}) => {
     const handler = routes.get('/roost/api' + path.split('?')[0]);
     if (!handler) throw new Error(`路由没注册：${path}`);
     let out = '';
@@ -88,6 +88,12 @@ async function bootHost(cfgPatch = {}, seed = {}) {
     const req = {
       url: path,
       method,
+      /**
+       * 真实面板请求就是这样：回环 Host + 同源标记。
+       * 路由层现在统一过栅栏（`fence.js`），少了这两个头会被 403——
+       * 那不是测试噪音，正是要断言的行为（见文件末尾那两条）。
+       */
+      headers: { host: '127.0.0.1:17321', 'sec-fetch-site': 'same-origin', ...headers },
       [Symbol.asyncIterator]: async function* () {
         if (body) yield Buffer.from(JSON.stringify(body));
       },
@@ -384,5 +390,33 @@ test('路由：/setup/sync 在，且没装 Roost 时也老实回话不抛', asyn
     r.json.skipped === true || r.json.message,
     `要给出原因，不能只说 ok：${JSON.stringify(r.json)}`,
   );
+  off?.();
+});
+
+/**
+ * 栅栏接没接上 —— 这一层最容易"写了但没挂"。
+ *
+ * 单测（`fence.test.js`）只证明判定表是对的；这里证明 `route()` 真的调了它。
+ * 两条都用同一份真实数据，只换请求头，排除别的变量。
+ */
+test('路由：非回环 Host 一律 403（局域网网页打不到本机面板）', async () => {
+  const { call, off } = await bootHost({}, SEED);
+  const ok = await call('/mind', { headers: { host: '127.0.0.1:17321' } });
+  assert.equal(ok.status, 200, '前提：本机请求是通的');
+
+  const bad = await call('/mind', { headers: { host: '192.168.1.9:17321' } });
+  assert.equal(bad.status, 403, '换成本机以外的 Host 必须被拒');
+  assert.equal(bad.json.ok, false);
+  off?.();
+});
+
+test('路由：跨站标记 403，写接口同样拦住', async () => {
+  const { call, off } = await bootHost({}, SEED);
+  const bad = await call('/journal', {
+    method: 'POST',
+    body: { id: 'whatever' },
+    headers: { 'sec-fetch-site': 'cross-site' },
+  });
+  assert.equal(bad.status, 403, 'POST /journal 是删日记的入口，跨站必须拒');
   off?.();
 });

@@ -37,6 +37,7 @@ import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
+import { createFence } from './fence.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
 import { createQqChannel, createChannelRegistry } from './channel.js';
@@ -586,6 +587,24 @@ export function apply(ctx) {
       if (journal.vacuum()) log.info('日记库已压：彻底删除后的旧页清掉了');
     } catch (e) {
       log.warn(`压库失败：${e?.message ?? e}`);
+    }
+    /**
+     * 过期压缩单独跑一轮（和按天巩固解耦）。
+     *
+     * 不放 `run(day)` 里：那个的入口判据是"昨天有日记"，没人说话的日子
+     * 直接返回空，积压的过期条目就停在那儿没人压。压的是机械摘要，
+     * 不调模型，所以每 10 分钟压几百条没有成本。
+     */
+    try {
+      const r = await consolidate.compressDue({ limit: 500 });
+      if (r.compressed || r.remaining) {
+        log.info(
+          `过期压缩：压了 ${r.compressed} 条`
+            + (r.remaining ? `，还剩 ${r.remaining} 条待压（下一轮继续）` : ''),
+        );
+      }
+    } catch (e) {
+      log.warn(`过期压缩失败：${e?.message ?? e}`);
     }
     try {
       const hour = Number(cfg.memory?.consolidateHour) || 4;
@@ -2424,13 +2443,42 @@ export function apply(ctx) {
      * 现在改成：这条注册不上就跳过并记日志，其余照常。
      * 代价是那一两个接口 404，但插件整体能起来，比全死强。
      */
+    /**
+     * 面板 API 的请求栅栏（详见 `fence.js` 顶部）。
+     *
+     * 为什么放在 `route()` 这一层而不是每条路由各写一遍：这里有 **48 条**路由，
+     * 逐条写必漏（上一轮我就漏了二十多条）。包在注册口上一次覆盖全部，
+     * 也不会因为以后新加路由而忘掉。
+     */
+    const fence = createFence({
+      connection: () => (typeof ctx.get === 'function' ? ctx.get('connection') : null),
+      log: (m) => log.warn(m),
+    });
+
     const route = (path, handler) => {
       try {
         return ctx.webServer.register({
           kind: 'exact',
           path: API + path,
-          handler: (req, res) =>
-            Promise.resolve(handler(req, res)).catch((e) => send(res, 500, { ok: false, message: e.message })),
+          handler: (req, res) => {
+            /**
+             * 先过栅栏再进 handler。
+             *
+             * 注意这里**包括读接口**：`GET /journal` 能翻出全部日记原文，
+             * 读和写一样是隐私。宿主自己的 API 也是这么做的。
+             */
+            let bad = null;
+            try {
+              bad = fence(req);
+            } catch (e) {
+              bad = { status: 403, why: `请求栅栏异常：${e?.message ?? e}` };
+            }
+            if (bad) {
+              log.warn(`面板 API 拒绝 ${path}：${bad.why}`);
+              return send(res, bad.status, { ok: false, message: bad.why });
+            }
+            return Promise.resolve(handler(req, res)).catch((e) => send(res, 500, { ok: false, message: e.message }));
+          },
         });
       } catch (e) {
         log.warn(`路由 ${path} 没注册上（可能上次激活没清理干净，重启 DSH 可解决）：${e?.message ?? e}`);

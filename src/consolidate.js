@@ -428,17 +428,16 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       }
       if (journal.compress(id, digest)) out.compressed += 1;
     }
-    // 到期的（模型没点名也要压，否则"普通条目几天后消失"这条就落不了地）
-    // 注意这里要比的是"现在"，不是昨天最后一条消息的时间——
-    // 否则 23:00 之后到期的那批要等到明天凌晨才被处理。
-    for (const row of journal.dueToCompress(now())) {
-      if (seen.has(row.id) || row.level === 'critical') continue;
-      if (dry) {
-        out.compressed += 1;
-        continue;
-      }
-      if (journal.compress(row.id, mechanicalDigest(row.text))) out.compressed += 1;
-    }
+    /**
+     * "到期自动压"**不在这里做了**。
+     *
+     * 原来这段在 `apply()` 里，而 `apply()` 是**按会话**调用的——
+     * 3 个群就扫 3 遍全库（每遍 5000 行全文）。更要紧的是它挂在 `run(day)` 上：
+     * `dueDay()` 只在"昨天有日记"时才跑，没人说话的日子积压就停在那儿。
+     *
+     * 现在由 `compressDue()` 独立跑（宿主每 10 分钟一轮），与按天摘要解耦。
+     * 模型在这里点名的条目照旧压（上面那段），两件事互不影响。
+     */
 
     /* 3. 三元组 → 图谱（先落 episode，抽错能重建） */
     const triples = Array.isArray(plan?.triples) ? plan.triples : [];
@@ -555,6 +554,43 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
   }
 
   /**
+   * 过期压缩：把"到期且还没压过"的条目各压成一句。
+   *
+   * 为什么独立成一个节拍，而不是留在 `run(day)` 里：
+   *   · `dueDay()` 的判据是"昨天有日记"，没人说话的日子它直接返回空，
+   *     积压的过期条目就停在那儿没人管；
+   *   · 原来它写在 `apply()` 里，而 `apply()` 是**按会话**跑的 —— N 个群扫 N 遍。
+   *
+   * 压的是机械摘要（本地截断 40 字），不调模型，所以每轮几百条也不花钱；
+   * 压不完的下一轮接着来（取料只返回 `digest IS NULL` 的，压过的自然退出）。
+   *
+   * @param {{limit?: number, dry?: boolean}} [o]
+   * @returns {Promise<{ok: boolean, compressed: number, due: number, remaining: number, reason?: string}>}
+   */
+  async function compressDue({ limit = 500, dry = false } = {}) {
+    const out = { ok: true, compressed: 0, due: 0, remaining: 0 };
+    try {
+      const rows = journal.dueToCompress(now(), limit);
+      out.due = rows.length;
+      for (const row of rows) {
+        if (dry) {
+          out.compressed += 1;
+          continue;
+        }
+        /** 只写 digest、不动 text —— 遗忘靠压缩，原文永远留着 */
+        if (journal.compress(row.id, mechanicalDigest(row.text))) out.compressed += 1;
+      }
+      out.remaining = typeof journal.dueCount === 'function' ? journal.dueCount(now()) : 0;
+      return out;
+    } catch (e) {
+      out.ok = false;
+      out.reason = e?.message ?? String(e);
+      log(`过期压缩失败：${out.reason}`);
+      return out;
+    }
+  }
+
+  /**
    * 该不该跑。
    *
    * 判定只看两件事：到了巩固点钟没有、这天的摘要存不存在。
@@ -576,6 +612,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
 
   return {
     run,
+    /** 过期压缩（宿主每 10 分钟调一次，和按天巩固解耦） */
+    compressDue,
     dueDay,
     done,
     status: () => last,

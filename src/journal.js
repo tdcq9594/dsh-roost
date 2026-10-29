@@ -276,6 +276,17 @@ function createSqliteStore(file, log) {
         );
         CREATE INDEX IF NOT EXISTS journal_day ON journal(day);
         CREATE INDEX IF NOT EXISTS journal_chat ON journal(chat_id, at);
+        /*
+         * 过期压缩的取料索引。
+         *
+         * 原来是 ORDER BY at DESC LIMIT 5000 再在内存里过滤：取的是**最新**
+         * 5000 条，总数一超，最该压的老条目永远排不进来。改成按 keep_until
+         * 直查之后，没有索引就是全表扫 + 临时排序。部分索引只覆盖"还没压过的"，
+         * 体积小，正好卡在这个查询上。
+         *
+         * 注意：这段注释在模板字符串里，**不能出现反引号**，否则会把 SQL 截断。
+         */
+        CREATE INDEX IF NOT EXISTS journal_due ON journal(keep_until) WHERE digest IS NULL;
       `);
       /**
        * 老库补列。
@@ -577,9 +588,51 @@ function createSqliteStore(file, log) {
       const d = open();
       if (!d) return [];
       return d
-        .prepare('SELECT * FROM journal WHERE vec IS NULL AND text<>? AND text<>? ORDER BY at DESC LIMIT ?')
+        /** 先补**老**条目的向量：按 DESC 取的话，最新的先补，最老的永远轮不到 */
+        .prepare('SELECT * FROM journal WHERE vec IS NULL AND text<>? AND text<>? ORDER BY at ASC LIMIT ?')
         .all(ERASED, CLEARED, limit)
         .map(normRow);
+    },
+
+    /**
+     * 到期待压的条目（最该压的在前）。
+     *
+     * 为什么不用 `listChat` 取完再过滤：那样取的是**最新** N 条，
+     * 老条目进了窗口就永远压不到；而且每次要把整行正文读进内存。
+     * 这里让 SQL 只把"已经到期、还没压过"的那批交出来，配合
+     * `journal_due` 部分索引是毫秒级。
+     *
+     * @param {number} limit 一次最多压几条（剩下的下一轮接着来）
+     * @param {number} at 判定"现在"的时间戳
+     */
+    due(limit = 500, at = Date.now()) {
+      const d = open();
+      if (!d) return [];
+      return d
+        .prepare(
+          `SELECT * FROM journal
+            WHERE kind='chat' AND level<>'critical' AND digest IS NULL
+              AND keep_until>0 AND keep_until<=?
+              AND text<>? AND text<>?
+            ORDER BY keep_until ASC LIMIT ?`,
+        )
+        .all(at, ERASED, CLEARED, Number(limit) || 500)
+        .map(normRow);
+    },
+
+    /** 还有多少条等着压（给日志看，不算在热路径上） */
+    dueCount(at = Date.now()) {
+      const d = open();
+      if (!d) return 0;
+      const r = d
+        .prepare(
+          `SELECT COUNT(*) c FROM journal
+            WHERE kind='chat' AND level<>'critical' AND digest IS NULL
+              AND keep_until>0 AND keep_until<=?
+              AND text<>? AND text<>?`,
+        )
+        .get(at, ERASED, CLEARED);
+      return Number(r?.c || 0);
     },
 
     stats() {
@@ -864,11 +917,41 @@ function createJsonlStore(file, log) {
     },
 
     noVec(limit = 64) {
-      // 同 SQLite 后端：占位符不补算向量
+      // 同 SQLite 后端：占位符不补算向量；先补**老**条目（DESC 会让最老的永远轮不到）
       return load()
         .filter((r) => !r.vec && r.text !== ERASED && r.text !== CLEARED)
-        .sort((a, b) => b.at - a.at)
+        .sort((a, b) => a.at - b.at)
         .slice(0, limit);
+    },
+
+    /** 同 SQLite 后端：到期待压的条目，最该压的在前 */
+    due(limit = 500, at = Date.now()) {
+      return load()
+        .filter(
+          (r) =>
+            r.kind === 'chat'
+            && r.level !== 'critical'
+            && !r.digest
+            && r.keepUntil > 0
+            && r.keepUntil <= at
+            && r.text !== ERASED
+            && r.text !== CLEARED,
+        )
+        .sort((a, b) => a.keepUntil - b.keepUntil || a.at - b.at)
+        .slice(0, Number(limit) || 500);
+    },
+
+    dueCount(at = Date.now()) {
+      return load().filter(
+        (r) =>
+          r.kind === 'chat'
+          && r.level !== 'critical'
+          && !r.digest
+          && r.keepUntil > 0
+          && r.keepUntil <= at
+          && r.text !== ERASED
+          && r.text !== CLEARED,
+      ).length;
     },
 
     stats() {
@@ -1185,21 +1268,27 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     },
 
     /** 到期该压的条目（巩固要处理的那批） */
-    dueToCompress(at = now()) {
-      return get()
-        .listChat('', 5000)
-        /**
-         * 占位符不压。
-         *
-         * 抹过的行 `level` 被降成 normal、`keepUntil` 还是原来那个，
-         * 一旦过期就会被挑出来"压缩"——给一句「（已按用户要求遗忘）」
-         * 生成摘要，纯浪费，还会在库里留下一条没意义的 digest。
-         */
-        .filter((r) => r.text !== ERASED && r.text !== CLEARED)
-        .filter((r) => r.kind === 'chat' && r.level !== 'critical' && !r.digest)
-        .filter((r) => r.keepUntil > 0 && r.keepUntil <= at)
-        .sort((a, b) => a.at - b.at);
+    /**
+     * 到期待压的条目（巩固要处理的那批）。
+     *
+     * 旧实现是 `listChat('', 5000)` 再在内存里过滤，有三个毛病：
+     *   1. 取的是**最新** 5000 条 —— 总数一超，最该压的老条目永远排不进窗口，
+     *      「普通 3 天、重要 21 天压成一句」对老数据直接失效；
+     *   2. 每次把 5000 行**全文**拉进内存只为挑出几十条；
+     *   3. 它是在 `apply()` 里被调用的，而 `apply()` 按会话跑 —— N 个群就是 N 遍。
+     *
+     * 现在交给 store 按 `keep_until` 直查（配 `journal_due` 部分索引），
+     * 顺序按"谁先到期"排，并带 `limit`：一次压不完，下一轮接着来。
+     *
+     * 占位符（已遗忘/已清空）不进这个队列：它们的 `keepUntil` 还留着旧值，
+     * 一旦过期就会被挑出来给「（已按用户要求遗忘）」生成摘要，纯浪费。
+     */
+    dueToCompress(at = now(), limit = 500) {
+      return get().due(Number(limit) || 500, at);
     },
+
+    /** 还有多少条等着压（只给日志看，不进热路径） */
+    dueCount: (at = now()) => get().dueCount(at),
 
     /** 写压缩结果。**只写 digest，不动 text** —— 原文永远留着 */
     compress(id, digest) {

@@ -1612,3 +1612,100 @@ test('图谱：拿会话 id 删全局边删不到（面板要传这条边自己�
   assert.equal(right.removed, 1);
   assert.equal(g.nowEdges({ chatId: 'g1' }).length, 0);
 });
+
+/* ---------------- 过期压缩（去掉 5000 条窗口） ---------------- */
+
+test('日记：超过 5000 条时，最老的到期条目也要能被挑出来', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const now = Date.now();
+  /** 最早 20 条是 30 天前说的，3 天保留期早过了 */
+  for (let i = 0; i < 20; i += 1) {
+    j.add({ id: 'old' + i, at: now - 30 * DAY + i, chatId: 'g1', text: '老记录' + i });
+  }
+  /** 再堆 5180 条新的，把老的挤出"最新 5000 条"这个窗口 */
+  for (let i = 0; i < 5180; i += 1) {
+    j.add({ id: 'new' + i, at: now - 1000 + i, chatId: 'g1', text: '闲聊' + i });
+  }
+
+  /**
+   * 旧实现是 `listChat('', 5000)` 取**最新** 5000 条再过滤，这 20 条在窗口外，
+   * 到期也不会被压——「普通 3 天压成一句」对老数据直接失效。
+   */
+  const due = j.dueToCompress(now, 500);
+  assert.equal(due.length, 20, '20 条过期条目一条都不能漏');
+  assert.equal(due[0].id, 'old0', '最该压的（最早到期的）排最前');
+});
+
+test('日记：到期队列按"谁先到期"排，limit 一次只给这么多', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const now = Date.now();
+  for (let i = 0; i < 5; i += 1) {
+    j.add({ id: 'd' + i, at: now - (10 - i) * DAY, chatId: 'g1', text: '过期' + i });
+  }
+  const one = j.dueToCompress(now, 1);
+  assert.equal(one.length, 1, 'limit 要生效');
+  assert.equal(one[0].id, 'd0', '越早到期越先压');
+  assert.equal(j.dueCount(now), 5, '还剩多少要数得出来');
+});
+
+test('巩固：compressDue 只写 digest、不动原文，压过的下一轮不再返回', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const now = Date.now();
+  for (let i = 0; i < 3; i += 1) {
+    j.add({ id: 'c' + i, at: now - 10 * DAY, chatId: 'g1', text: '这是一句要过期的话' + i });
+  }
+  const c = createConsolidate({ journal: j, graph: null, memory: fakeMemory(), generate: null, now: () => now });
+
+  return (async () => {
+    const r1 = await c.compressDue({ limit: 2 });
+    assert.equal(r1.compressed, 2);
+    assert.equal(r1.remaining, 1, '压不完要报还剩多少，下一轮接着来');
+
+    const one = j.get('c0');
+    assert.ok(one.digest, '要写 digest');
+    assert.equal(one.text, '这是一句要过期的话0', '正文不许动（遗忘靠压缩，不是删除）');
+
+    const r2 = await c.compressDue({ limit: 2 });
+    assert.equal(r2.compressed, 1, '压过的不会被重复挑出来');
+    assert.equal(j.dueCount(now), 0);
+  })();
+});
+
+test('日记：补向量先补最老的（DESC 会让老条目永远轮不到）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const now = Date.now();
+  for (let i = 0; i < 3; i += 1) j.add({ id: 'v' + i, at: now + i, chatId: 'g1', text: '向量' + i });
+  j.setVec('v2', [1, 0, 0]);
+  const ids = j.noVec(10).map((r) => r.id);
+  assert.deepEqual(ids, ['v0', 'v1'], '老的在前面；已经有向量的不再出现');
+});
+
+test('日记：老库打开时会补上 journal_due 索引', () => {
+  const file = join(tmp(), 'j.sqlite');
+  const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+
+  /** 手工造一个"上一版建的"库：表在、索引不在 */
+  const d = new DatabaseSync(file);
+  d.exec(`CREATE TABLE journal(
+    id TEXT PRIMARY KEY, at INTEGER NOT NULL, day TEXT NOT NULL,
+    chat_id TEXT NOT NULL DEFAULT '', sender TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user',
+    text TEXT NOT NULL, level TEXT NOT NULL DEFAULT 'normal', kind TEXT NOT NULL DEFAULT 'chat',
+    digest TEXT, keep_until INTEGER NOT NULL DEFAULT 0, accessed INTEGER NOT NULL DEFAULT 0,
+    last_access INTEGER NOT NULL DEFAULT 0, vec BLOB, event_ids TEXT, evidence TEXT)`);
+  assert.equal(
+    d.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='index' AND name='journal_due'").get().c,
+    0,
+    '前提：造出来的库确实没有这个索引',
+  );
+  d.close();
+
+  /** 打开一次（懒建库发生在第一次读写时）→ 索引应当被补上 */
+  const j = createJournal({ file });
+  j.add({ id: 'a', at: Date.now(), chatId: 'g1', text: '一句话' });
+  j.close();
+
+  const d2 = new DatabaseSync(file);
+  const n = d2.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='index' AND name='journal_due'").get().c;
+  d2.close();
+  assert.equal(n, 1, '老库升级后必须有这个索引，否则按 keep_until 直查会退化成全表扫');
+});
