@@ -112,7 +112,7 @@ for (const tab of TABS) {
     assert.equal(tree?.props?.className, 'roost-root', '根节点不对')
     // 页签条必须在每一页都在，且九个都在
     const txt = textOf(tree)
-    for (const label of ['概览', '接入', '记忆', '醒着', '上下文', '会话', '设置', '日志']) {
+    for (const label of ['概览', '接入', '人格与情绪', '记忆', '主动搭话', '上下文', '会话', '设置', '日志']) {
       assert.ok(txt.includes(label), `页签缺「${label}」`)
     }
   })

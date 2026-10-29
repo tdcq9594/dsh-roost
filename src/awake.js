@@ -52,6 +52,13 @@ export const DEFAULTS = {
   maxPerGroupPerDay: 3,
   /** 群里冷场多久才考虑插话（分钟） */
   groupQuietMinutes: 45,
+  /**
+   * 她决定不说（或调模型失败）之后，多久内不再问这个群（分钟）。
+   * **每跳过一次翻一倍**，到 `skipBackoffMaxMinutes` 封顶。
+   */
+  skipBackoffMinutes: 30,
+  /** 退避上限（分钟）。连续几次都不想说的群，就固定这么久问一次 */
+  skipBackoffMaxMinutes: 360,
 };
 
 /** 在不在清醒时段（跨零点也支持） */
@@ -100,9 +107,10 @@ export function readAgreements({ memory, graph, chatId = '' } = {}) {
  * @param {string[]} o.agreements 没办完的约定
  * @param {object} o.state     { lastOwnerAt, lastWakeAt, casualDay, casualCount, day }
  * @param {object} o.cfg
+ * @param {boolean} [o.noMiss] 不算「想你」这一档（群聊用）
  * @returns {Array<{kind:string, score:number, reason:string}>} 按分降序
  */
-export function opportunities({ now = Date.now(), mood = {}, agreements = [], state = {}, cfg = {} } = {}) {
+export function opportunities({ now = Date.now(), mood = {}, agreements = [], state = {}, cfg = {}, noMiss = false } = {}) {
   const c = { ...DEFAULTS, ...(cfg || {}) };
   const hour = new Date(now).getHours();
   if (!inWindow(hour, c.awakeFrom, c.awakeTo)) return [];
@@ -135,8 +143,16 @@ export function opportunities({ now = Date.now(), mood = {}, agreements = [], st
 
   /* 想你：沉默够久 + 社交意愿 */
   const lastOwner = Number(state.lastOwnerAt || 0);
+  /**
+   * `lastOwnerAt = 0` 按「很久没联系」算（沉默 99 小时）。
+   *
+   * 私聊要这个语义：一条记录都没有时，确实该先打个招呼。
+   * **群聊不能这么算**——群里没有「等谁」这回事，`noMiss` 显式关掉这一档。
+   * 以前是靠宿主传 `lastOwnerAt: 0` 想"跳过"miss，结果 0 反而触发了最高分的 miss，
+   * 于是群主动每轮都以「很久没联系了」为理由开口，把「约定」永远压下去了。
+   */
   const silentH = lastOwner ? (now - lastOwner) / HOUR : 99;
-  if (silentH >= c.missAfterHours) {
+  if (!noMiss && silentH >= c.missAfterHours) {
     // 沉默越久权重越高，但封顶；社交意愿是乘数（心情好才更容易想起人）
     const depth = Math.min(1, (silentH - c.missAfterHours) / (c.missAfterHours * 2));
     const score = (0.45 + 0.4 * depth) * (0.5 + sociability * 0.6);
@@ -273,6 +289,24 @@ export function parseVerdict(raw) {
 }
 
 /**
+ * 她刚说过「不想说」之后，要等多久再问同一个群（毫秒）。
+ *
+ * 逐次翻倍：30 → 60 → 120 → 240 → 360（封顶）分钟。
+ * 抽成纯函数是为了能测——这块写错的表现不是报错，是**账单**：
+ * 连续跳过的群会每 5 分钟被空问一次，一直到跨天。
+ *
+ * @param {number} streak 连续跳过几次（从 1 开始）
+ * @param {object} cfg
+ */
+export function skipBackoffMs(streak, cfg = {}) {
+  const base = Math.max(1, Number(cfg.skipBackoffMinutes) || DEFAULTS.skipBackoffMinutes);
+  const cap = Math.max(base, Number(cfg.skipBackoffMaxMinutes) || DEFAULTS.skipBackoffMaxMinutes);
+  // 上限 20 是为了别让 2**n 溢出成 Infinity（那样也能被 min 兜回来，但没必要）
+  const n = Math.min(Math.max(1, Math.floor(Number(streak) || 1)), 20);
+  return Math.min(base * 2 ** (n - 1), cap) * MINUTE;
+}
+
+/**
  * 群聊主动的候选群（C7）。
  *
  * 四道门，缺一不发：
@@ -320,6 +354,18 @@ export function groupCandidates({ groups = [], authzOf, stateOf, cfg = {}, now =
     if (st.blockedUntil && now < st.blockedUntil) {
       const mins = Math.ceil((st.blockedUntil - now) / MINUTE);
       out.push({ ...rec, ok: false, why: `主动额度用完，${mins} 分钟后再看` });
+      continue;
+    }
+    /**
+     * 她刚说过「不想说」，别过五分钟再问一遍。
+     *
+     * 这道门以前没有，于是 `<<skip>>` 之后状态原地不变、条件照样成立，
+     * 检查循环每 5 分钟空问一次：清醒 15 小时 = 180 次模型调用/群/天，
+     * 一个字都没发出去。这是纯烧钱，不是功能问题。
+     */
+    if (st.nextAskAt && now < st.nextAskAt) {
+      const mins = Math.ceil((st.nextAskAt - now) / MINUTE);
+      out.push({ ...rec, ok: false, why: `刚问过她，${mins} 分钟后再看` });
       continue;
     }
     const quietMin = st.lastUserAt ? (now - st.lastUserAt) / MINUTE : 9999;
@@ -384,7 +430,11 @@ export function createAwake({
   function noteUser(chatId) {
     if (!chatId) return;
     const g = state.groups[chatId] || {};
-    state.groups[chatId] = { ...g, lastUserAt: now() };
+    /**
+     * 顺带把退避清掉：有人说话了 = 场面变了，值得重新问她一次。
+     * 不清的话，冷场之后她连跳几次，新话题来了也轮不到她开口。
+     */
+    state.groups[chatId] = { ...g, lastUserAt: now(), skipStreak: 0, nextAskAt: 0 };
     save();
   }
 
@@ -410,15 +460,16 @@ export function createAwake({
       now: now(),
       mood: ctx.mood,
       agreements: ctx.agreements,
-      // 群里没有"主人多久没说话"这回事，用 0 让它自动跳过 miss
-      state: kind === 'group' ? { ...ctx.state, lastOwnerAt: 0 } : ctx.state || {},
+      state: ctx.state || {},
       // 群里不给"随性"机会：群聊随性插话最容易招人烦
       cfg: kind === 'group' ? { ...c, casualPerDay: 0 } : c,
+      // 群里也没有"想你"：她不在群里等谁，等谁的是私聊
+      noMiss: kind === 'group',
     });
-    if (!opps.length) return { speak: false, text: '', kind: '', why: '没有值得说的机会' };
+    if (!opps.length) return { speak: false, text: '', kind: '', why: '没有值得说的机会', asked: false };
 
     const opp = pickOpportunity(opps, rand);
-    if (!opp) return { speak: false, text: '', kind: '', why: '没有值得说的机会' };
+    if (!opp) return { speak: false, text: '', kind: '', why: '没有值得说的机会', asked: false };
 
     const prompt = buildWakePrompt({
       opp,
@@ -430,7 +481,7 @@ export function createAwake({
     try {
       raw = await generate(prompt);
     } catch (e) {
-      return { speak: false, text: '', kind: opp.kind, why: `调模型失败：${e.message}`, error: true };
+      return { speak: false, text: '', kind: opp.kind, why: `调模型失败：${e.message}`, error: true, asked: true };
     }
 
     const v = parseVerdict(raw);
@@ -438,9 +489,9 @@ export function createAwake({
     state.lastWhy = opp.reason;
     if (!v.speak) {
       log(`觉醒了但没说（${opp.kind}）：${v.why}`);
-      return { speak: false, text: '', kind: opp.kind, why: v.why };
+      return { speak: false, text: '', kind: opp.kind, why: v.why, asked: true };
     }
-    return { speak: true, text: v.text, kind: opp.kind, why: opp.reason };
+    return { speak: true, text: v.text, kind: opp.kind, why: opp.reason, asked: true };
   }
 
   /** 群主动的一轮检查：每群单独问，各自决定 */
@@ -462,6 +513,27 @@ export function createAwake({
       }
       const v = await compose({ kind: 'group', chatId: cand.chatId });
       if (!v.speak) {
+        /**
+         * 她决定不说 —— 记一笔退避，别原地重问。
+         *
+         * 不记的话状态一点没变，下一轮（5 分钟后）同样的条件再次成立，
+         * 于是一直问到跨天。逐次翻倍是为了让「连续几次都不想说话」的群自己静下来。
+         *
+         * **调模型失败也走这条路**：失败还每 5 分钟重试一遍，是另一种烧法。
+         *
+         * `asked === false` 是「压根没问模型」（没有值得说的机会），
+         * 那不花钱，也就不该退避——退避了反而会让面板显示一个不存在的理由。
+         */
+        if (v.asked) {
+          const g = state.groups[cand.chatId] || {};
+          const streak = Math.min(Number(g.skipStreak || 0) + 1, 20);
+          state.groups[cand.chatId] = {
+            ...g,
+            skipStreak: streak,
+            nextAskAt: now() + skipBackoffMs(streak, c),
+          };
+          save();
+        }
         results.push({ ...cand, ok: false, why: v.why, kind: v.kind });
         continue;
       }
@@ -481,8 +553,10 @@ export function createAwake({
           day: today,
           count: g.day === today ? Number(g.count || 0) + 1 : 1,
           lastBotAt: now(),
-          // 这次发成功了，之前的封禁自然作废
+          // 这次发成功了，之前的封禁和退避自然作废
           blockedUntil: 0,
+          skipStreak: 0,
+          nextAskAt: 0,
         };
         save();
         log(`在群 ${cand.name} 主动说了话（${v.kind}）：${v.text.slice(0, 40)}`);

@@ -2066,7 +2066,7 @@ select.roost-input{color-scheme:dark}
       }
     }
 
-    /* ---------------- 醒着（主动） ---------------- */
+    /* ---------------- 主动搭话 ---------------- */
 
     function AwakeTab({ aw, mem, sp, chats, toast, reload, reloadSp, busy }) {
       const cfg = aw?.cfg || {}
@@ -2612,7 +2612,7 @@ select.roost-input{color-scheme:dark}
       ['setup', '接入'],
       ['her', '人格与情绪'],
       ['memory', '记忆'],
-      ['awake', '醒着'],
+      ['awake', '主动搭话'],
       ['context', '上下文'],
       ['chats', '会话'],
       ['config', '设置'],

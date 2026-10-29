@@ -17,6 +17,7 @@ import {
   groupCandidates,
   readAgreements,
   inWindow,
+  skipBackoffMs,
   createAwake,
   DEFAULTS,
 } from '../src/awake.js';
@@ -342,6 +343,161 @@ test('群主动：四道门都过了才轮到说', () => {
   assert.match(r[0].why, /冷场/);
 });
 
+/* ---------------- 跳过之后要退避（P0：无限空问） ---------------- */
+
+test('觉醒：noMiss 关掉「想你」，私聊的语义不动', () => {
+  const cfg = { ...CFG, awakeFrom: 0, awakeTo: 0 };
+  const base = { now: noon(), mood: {}, agreements: [], state: {} };
+  assert.ok(
+    opportunities({ ...base, cfg }).some((o) => o.kind === 'miss'),
+    '私聊：一条记录都没有 = 很久没联系，该打招呼',
+  );
+  assert.ok(
+    !opportunities({ ...base, cfg, noMiss: true }).some((o) => o.kind === 'miss'),
+    '群聊：她不在群里等谁',
+  );
+});
+
+test('群主动：退避逐次翻倍，到上限就固定', () => {
+  // 30 → 60 → 120 → 240 → 360（封顶）分钟
+  const cfg = { skipBackoffMinutes: 30, skipBackoffMaxMinutes: 360 };
+  assert.equal(skipBackoffMs(1, cfg), 30 * MINUTE);
+  assert.equal(skipBackoffMs(2, cfg), 60 * MINUTE);
+  assert.equal(skipBackoffMs(3, cfg), 120 * MINUTE);
+  assert.equal(skipBackoffMs(4, cfg), 240 * MINUTE);
+  assert.equal(skipBackoffMs(5, cfg), 360 * MINUTE);
+  assert.equal(skipBackoffMs(9, cfg), 360 * MINUTE, '到顶就不再涨');
+  // 脏输入当第一次处理，别算出 0 或者负数（那等于没退避）
+  assert.equal(skipBackoffMs(0, cfg), 30 * MINUTE);
+  assert.equal(skipBackoffMs(-3, cfg), 30 * MINUTE);
+  assert.equal(skipBackoffMs('x', cfg), 30 * MINUTE);
+  assert.equal(skipBackoffMs(1e9, cfg), 360 * MINUTE, '别让 2**n 溢出成 Infinity');
+});
+
+test('群主动：刚问过她的群，到点之前不再问', () => {
+  const blocked = groupCandidates({
+    groups: [{ chatId: 'g1' }],
+    authzOf: () => true,
+    stateOf: () => ({ lastUserAt: noon() - 3 * HOUR, nextAskAt: noon() + 20 * MINUTE }),
+    cfg: GROUP_CFG,
+    now: noon(),
+  });
+  assert.equal(blocked[0].ok, false);
+  assert.match(blocked[0].why, /刚问过她/);
+
+  const free = groupCandidates({
+    groups: [{ chatId: 'g1' }],
+    authzOf: () => true,
+    stateOf: () => ({ lastUserAt: noon() - 3 * HOUR, nextAskAt: noon() - 1 }),
+    cfg: GROUP_CFG,
+    now: noon(),
+  });
+  assert.equal(free[0].ok, true, free[0].why);
+});
+
+/**
+ * 这一条是 P0 本身。
+ *
+ * 修复前的行为：`<<skip>>` 之后状态一个字都不写，下一轮（5 分钟后）条件照样成立，
+ * 于是无限空问 —— 清醒 15 小时 = 180 次模型调用/群/天，一个字都没发出去。
+ */
+test('群主动：她跳过之后，下一轮不再空问（P0）', async () => {
+  let t = noon();
+  let calls = 0;
+  const a = createAwake({
+    dataDir: tmp(),
+    cfgOf: () => ({ awake: { ...GROUP_CFG, groups: [{ chatId: 'g1', name: '摸鱼群' }] } }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    // 群里只剩「约定」这一档机会（miss 被置 0、casual 被强制为 0）
+    contextOf: ({ chatId }) => ({ chatId, mood: { sociability: 1 }, agreements: ['周末看电影'], state: {} }),
+    generate: async () => {
+      calls += 1;
+      return '<<skip>>';
+    },
+    log: () => {},
+    now: () => t,
+  });
+
+  const first = await a.wakeGroups();
+  assert.equal(calls, 1, '第一轮确实问了一次');
+  assert.equal(first[0].ok, false);
+  assert.match(first[0].why, /她自己决定不说/);
+
+  // 5 分钟后（检查循环的周期）再跑一轮：不许再问模型
+  t += 5 * MINUTE;
+  const second = await a.wakeGroups();
+  assert.equal(calls, 1, '刚跳过就不该再问一遍——这就是无限烧钱的那条路');
+  assert.match(second[0].why, /刚问过她/);
+  assert.ok(a.groupState('g1').skipStreak >= 1, '退避要记在状态里，重启才不丢');
+
+  // 退避到点了，才重新问
+  t += 30 * MINUTE;
+  await a.wakeGroups();
+  assert.equal(calls, 2, '退避到点后允许再问一次');
+});
+
+test('群主动：连着跳几次就退得更久，群里有人说话就清零', async () => {
+  let t = noon();
+  let calls = 0;
+  const a = createAwake({
+    dataDir: tmp(),
+    cfgOf: () => ({ awake: { ...GROUP_CFG, groups: [{ chatId: 'g1' }] } }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    contextOf: ({ chatId }) => ({ chatId, mood: { sociability: 1 }, agreements: ['周末看电影'], state: {} }),
+    generate: async () => {
+      calls += 1;
+      return '<<skip>>';
+    },
+    log: () => {},
+    now: () => t,
+  });
+
+  await a.wakeGroups(); // 第 1 次 → 退避 30 分钟
+  t += 30 * MINUTE;
+  await a.wakeGroups(); // 第 2 次 → 退避 60 分钟
+  assert.equal(calls, 2);
+  assert.equal(a.groupState('g1').skipStreak, 2);
+
+  // 才过 30 分钟，第二次的退避是 60 分钟，所以还不到点
+  t += 30 * MINUTE;
+  await a.wakeGroups();
+  assert.equal(calls, 2, '第二次退避更久，不该按第一次的节奏来');
+
+  // 群里有人说话了 → 场面变了，退避作废
+  a.noteUser('g1');
+  assert.equal(a.groupState('g1').skipStreak, 0);
+  assert.equal(a.groupState('g1').nextAskAt, 0);
+});
+
+test('觉醒：没机会时不算「问过」（不花钱就不该留退避）', async () => {
+  // 群里目前永远算得出「想你」这一档（见 MEMORY 里记的那个 bug），
+  // 所以这条用私聊来验 `asked` 这个标记本身。
+  let calls = 0;
+  const a = createAwake({
+    dataDir: tmp(),
+    cfgOf: () => ({ awake: { ...CFG, casualPerDay: 0 } }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    // 刚聊过（不触发「想你」），随性又被关掉，也没有约定 → 一个机会都没有
+    contextOf: () => ({ mood: { sociability: 1 }, agreements: [], state: { lastOwnerAt: noon() } }),
+    generate: async () => {
+      calls += 1;
+      return '嗯';
+    },
+    log: () => {},
+    now: () => noon(),
+  });
+
+  const v = await a.compose({ kind: 'c2c' });
+  assert.equal(v.speak, false);
+  assert.match(v.why, /没有值得说的机会/);
+  assert.equal(v.asked, false, '压根没问模型，就不算「问过」');
+  assert.equal(calls, 0);
+});
+
+
 /* ---------------- 约定来源 ---------------- */
 
 test('约定：facts 和图谱两个来源合并去重', () => {
@@ -449,22 +605,44 @@ test('群主动：过了四道门才真的发出去，并计入当日次数', as
   assert.equal(ch.sent.length, 0);
 });
 
-test('群主动：群里不给「随性」机会（casualPerDay 被强制为 0）', async () => {
-  const ch = createFakeChannel();
+test('群主动：群里不给「随性」也不给「想你」，只剩「约定」', async () => {
+  // 以前的 bug：宿主传 `lastOwnerAt: 0` 想"跳过" miss，实际是 0 → 沉默 99 小时
+  // → miss 以最高分（0.935）成立，把「约定」永远压下去，
+  //   于是群主动每轮都以「很久没联系了」为理由开口。
+  let asked = 0;
   const a = createAwake({
     dataDir: tmp(),
     cfgOf: () => ({
       awake: { ...CFG, awakeFrom: 0, awakeTo: 0, casualPerDay: 5, groups: [{ chatId: 'g1' }] },
     }),
-    channelOf: () => ch,
+    channelOf: () => createFakeChannel(),
     authzOf: () => true,
-    // 没有任何约定、也没有 miss（lastOwnerAt=0 在群里被置 0）→ 只剩 casual，而 casual 被禁
     contextOf: ({ chatId }) => ({ chatId, mood: { sociability: 1 }, agreements: [], state: {} }),
-    generate: async () => '无聊啊',
+    generate: async () => {
+      asked += 1;
+      return '无聊啊';
+    },
     log: () => {},
     now: () => noon(),
   });
   const v = await a.compose({ kind: 'group', chatId: 'g1' });
-  // 群里 lastOwnerAt 被置 0 → silentH=99 → 仍会产生 miss，所以这里只验 casual 不在
-  assert.notEqual(v.kind, 'casual');
+  assert.equal(v.speak, false);
+  assert.match(v.why, /没有值得说的机会/);
+  assert.equal(asked, 0, '没约定、没随性、也没想你 → 一个机会都不该有');
+});
+
+test('群主动：有约定时以「约定」为由开口，不是「想你」', async () => {
+  const a = createAwake({
+    dataDir: tmp(),
+    cfgOf: () => ({ awake: { ...CFG, awakeFrom: 0, awakeTo: 0, groups: [{ chatId: 'g1' }] } }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    contextOf: ({ chatId }) => ({ chatId, mood: { sociability: 1 }, agreements: ['周末看电影'], state: {} }),
+    generate: async () => '你们周末看电影不',
+    log: () => {},
+    now: () => noon(),
+  });
+  const v = await a.compose({ kind: 'group', chatId: 'g1' });
+  assert.equal(v.speak, true);
+  assert.equal(v.kind, 'agreement', '群里唯一的开口理由应该是「答应过的事」');
 });
