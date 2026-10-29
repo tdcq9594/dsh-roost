@@ -438,6 +438,17 @@ export function apply(ctx) {
    */
   const consolidateTick = async () => {
     if (cfg.memory?.enabled === false) return;
+    /**
+     * 压库：只有「彻底删过日记」之后才真做，平时一次判断就返回。
+     *
+     * 放在这个循环里是因为它要锁库几秒（`DatabaseSync` 是同步 API），
+     * 只能在没人在聊的时候跑。十分钟一轮，删完最多等十分钟。
+     */
+    try {
+      if (journal.vacuum()) log.info('日记库已压：彻底删除后的旧页清掉了');
+    } catch (e) {
+      log.warn(`压库失败：${e?.message ?? e}`);
+    }
     try {
       const hour = Number(cfg.memory?.consolidateHour) || 4;
       const day = consolidate.dueDay({ hour });
@@ -2200,6 +2211,30 @@ export function apply(ctx) {
                 ok: true,
                 journal: j,
                 message: `这个群的记忆清了（含日记 ${j} 条，通用记忆没动）`,
+              });
+            }
+
+            /**
+             * **彻底删**：行和索引都不留，和 `memory.clear` 是两档。
+             *
+             * 为什么要有这一档：`memory.clear` 是抹正文留行，时间线还在，
+             * 库里也还留着旧页。用户要「这些记录不许存在」时，那个不够。
+             * 磁盘上的旧页由巩固时的 `vacuum()` 压掉，不在请求里做——
+             * `DatabaseSync` 是同步 API，VACUUM 锁几秒会把消息全卡住。
+             */
+            case 'memory.purge': {
+              memory.clearChat(chatId);
+              let j = 0;
+              try {
+                j = journal.purgeChat(chatId);
+              } catch (e) {
+                log.warn(`彻底删日记失败：${e.message}`);
+              }
+              log.info(`彻底删除 ${chatId.slice(0, 8)} 的日记 ${j} 条（磁盘旧页待压库）`);
+              return send(res, 200, {
+                ok: true,
+                journal: j,
+                message: `彻底删了 ${j} 条日记，磁盘上的残留会在凌晨压库时清掉`,
               });
             }
 

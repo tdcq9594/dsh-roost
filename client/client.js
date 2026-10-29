@@ -2006,13 +2006,29 @@ select.roost-input{color-scheme:dark}
         /* 危险区放最后 */
         h(Sec, { n: '06', title: '清空' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-            '清空会同时抹掉事实和日记正文（行还留着，时间线不断），不可恢复。'),
+            '「清空」抹掉事实和日记正文，行还留着（时间线不断）；'
+            + '「彻底删除」连行一起删，磁盘上的旧页在凌晨压库时清掉。两者都不可恢复。'),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h(ConfirmLink, {
               label: '清空本会话记忆', confirmLabel: '确认清空本会话',
               onConfirm: async () => {
                 const r = await quick('memory.clear')
                 toast(r.message || '清了')
+                reload()
+              },
+            }),
+            /**
+             * 第二档：**连行一起删**。
+             *
+             * 和「清空」的区别是时间线：清空之后库里还留着「这天有过东西」，
+             * 彻底删除之后什么都没有了。用户要「这些记录不许存在」时用这个。
+             * 确认文案要写明差别，否则两个按钮看起来一样、点错不可逆。
+             */
+            h(ConfirmLink, {
+              label: '彻底删除本会话', confirmLabel: '确认彻底删除（行也不留）',
+              onConfirm: async () => {
+                const r = await quick('memory.purge')
+                toast(r.message || '删了')
                 reload()
               },
             }),

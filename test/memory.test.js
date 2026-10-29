@@ -234,6 +234,68 @@ test('日记：摘要里提到的人也要忘（原文和 digest 一起抹）', 
   assert.equal(j.digests('g1', 5).length, 0, '抹掉的摘要不该再进【这几天】');
 });
 
+test('日记：抹掉的条目不再喂给巩固（byDay 跳过占位符）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const t = new Date(2026, 9, 20, 10, 0, 0).getTime();
+  j.add({ id: 'a', at: t, chatId: 'g1', text: '我前女友叫小美' });
+  j.add({ id: 'b', at: t + 60_000, chatId: 'g1', text: '今天天气不错' });
+
+  /**
+   * 巩固按天取料（`byDay`）。占位符要是被当成原话喂进去，
+   * 模型会抽出「主人—说过→ 已按用户要求遗忘」这种三元组——
+   * 用户上午要求忘掉的事，凌晨被巩固重新「记住」。
+   */
+  j.forget({ chatId: 'g1', word: '小美' });
+  const rows = j.byDay(dayOf(t));
+  assert.equal(rows.length, 1, '被抹掉的那条不该出现在这一天里');
+  assert.equal(rows[0].id, 'b');
+});
+
+test('日记：忘掉关键词不受旧窗口限制（超过 2000 条也要扫到）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const base = new Date(2026, 9, 1, 10, 0, 0).getTime();
+
+  /**
+   * 以前 `forget` 只扫最近 2000 条。先写一条最早的，再堆 2100 条把它
+   * 挤出窗口——那条就会「搜不到也删不掉」，而用户以为已经忘了。
+   */
+  j.add({ id: 'old', at: base, chatId: 'g1', text: '我前女友叫小美' });
+  for (let i = 0; i < 2100; i += 1) {
+    j.add({ id: `n${i}`, at: base + 1000 * (i + 1), chatId: 'g1', text: `第 ${i} 句闲聊` });
+  }
+
+  const n = j.forget({ chatId: 'g1', word: '小美' });
+  assert.equal(n, 1, '超过 2000 条也要能忘掉最早那条');
+  assert.match(j.get('old').text, /已按用户要求遗忘/);
+});
+
+test('日记：清空留行、彻底删不留行（两档语义）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  /** 没删过行时压库是空转（巩固的定时器每十分钟调一次，不能白锁库） */
+  assert.equal(j.vacuum(), false, '没删过行就不该跑');
+
+  const t = new Date(2026, 9, 21, 10, 0, 0).getTime();
+  j.add({ id: 'a', at: t, chatId: 'g1', text: '第一句' });
+  j.add({ id: 'b', at: t + 1000, chatId: 'g1', text: '第二句' });
+  j.add({ id: 'c', at: t + 2000, chatId: 'g2', text: '别的群' });
+
+  /** 软抹：行还在（时间线连续），正文变占位符 */
+  assert.equal(j.clearChat('g1'), 2);
+  assert.equal(j.get('a').text, '（已清空）');
+  assert.ok(j.get('b'), '软抹不删行');
+
+  /** 彻底删：行没了，软抹过的也一起删；别的群不受影响 */
+  j.add({ id: 'd', at: t + 3000, chatId: 'g1', text: '第三句' });
+  assert.equal(j.purgeChat('g1'), 3);
+  assert.equal(j.get('a'), null);
+  assert.equal(j.get('d'), null);
+  assert.ok(j.get('c'), '别的群不受影响');
+
+  /** 删过之后压一次库，标记随即清掉 */
+  j.vacuum();
+  assert.equal(j.vacuum(), false, '压过一次标记要清掉，不能每次巩固都锁库');
+});
+
 test('日记：TopK 按"重要性×衰减+访问"排，critical 排前面', () => {
   const j = createJournal({ file: join(tmp(), 'j.sqlite') });
   const t = Date.now();

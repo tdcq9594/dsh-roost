@@ -182,6 +182,14 @@ function parseList(v) {
 function createSqliteStore(file, log) {
   let db = null;
   let broken = false;
+  /**
+   * 有没有「删过行、但还没 VACUUM」。
+   *
+   * VACUUM 会把整个库重写一遍，几万条时要锁几秒——**不能放在用户点按钮的
+   * 那条路上**（`DatabaseSync` 是同步 API，阻塞事件循环 = QQ 消息全卡住）。
+   * 所以这里只记一个标记，真正的压缩交给巩固的定时器在凌晨做。
+   */
+  let needVacuum = false;
 
   function open() {
     if (db || broken) return db;
@@ -329,19 +337,40 @@ function createSqliteStore(file, log) {
       return d.prepare(sql).all(...args).map(normRow);
     },
 
+    /**
+     * 某一天的全部记录（巩固按天取料）。
+     *
+     * **抹除过的行不返回。** 行还在库里（时间线连续），但它已经没有内容了：
+     * 喂给巩固只会让模型把「（已按用户要求遗忘）」当成一句用户原话，
+     * 进而抽出「主人—说过→ 已按用户要求遗忘」这种三元组。
+     * 用户上午要求忘掉的事，凌晨被巩固重新「记住」，是最难解释的一种复活。
+     */
     byDay(day) {
       const d = open();
       if (!d) return [];
-      return d.prepare('SELECT * FROM journal WHERE day=? ORDER BY at').all(day).map(normRow);
+      return d
+        .prepare('SELECT * FROM journal WHERE day=? AND text<>? AND text<>? ORDER BY at')
+        .all(day, ERASED, CLEARED)
+        .map(normRow);
     },
 
+    /**
+     * 某个会话的日记。
+     *
+     * `limit` 传 **0 或负数表示不限**——「按关键词抹掉」「清空这个会话」
+     * 这类操作必须扫全库，否则超过窗口的旧记录既搜不到也删不掉。
+     * 用户说「忘掉三个月前那件事」，实际没忘，是最不能接受的一种失败。
+     */
     listChat(chatId, limit = 500) {
       const d = open();
       if (!d) return [];
+      const n = Number(limit);
+      const all = !(n > 0);
       const sql = chatId
-        ? 'SELECT * FROM journal WHERE chat_id=? ORDER BY at DESC LIMIT ?'
-        : 'SELECT * FROM journal ORDER BY at DESC LIMIT ?';
-      return d.prepare(sql).all(...(chatId ? [chatId, limit] : [limit])).map(normRow);
+        ? `SELECT * FROM journal WHERE chat_id=? ORDER BY at DESC${all ? '' : ' LIMIT ?'}`
+        : `SELECT * FROM journal ORDER BY at DESC${all ? '' : ' LIMIT ?'}`;
+      const args = chatId ? (all ? [chatId] : [chatId, n]) : all ? [] : [n];
+      return d.prepare(sql).all(...args).map(normRow);
     },
 
     /** FTS 检索：bm25 排序（越小越相关，所以 ORDER BY 直接升序） */
@@ -410,6 +439,49 @@ function createSqliteStore(file, log) {
         firstAt: Number(by('SELECT MIN(at) m FROM journal').m || 0),
         lastAt: Number(by('SELECT MAX(at) m FROM journal').m || 0),
       };
+    },
+
+    /**
+     * **彻底删掉**某个会话的全部日记：行、FTS 索引一起删。
+     *
+     * 和 `clearChat`（抹正文、留行）是两档，用途不同：
+     *   · clearChat —— 「这个会话别再用这些记忆」，时间线还留着
+     *   · purgeChat —— 「这些记录不许存在」，行都没了
+     *
+     * 磁盘上的旧页要等 `vacuum()` 才真正清掉，这里只标记，不立刻压——
+     * VACUUM 会锁库几秒，不能在用户点按钮那条路上跑。
+     * @returns {number} 删掉几条
+     */
+    purgeChat(chatId) {
+      const d = open();
+      if (!d) return 0;
+      const ids = d.prepare('SELECT id FROM journal WHERE chat_id=?').all(chatId).map((r) => String(r.id));
+      if (!ids.length) return 0;
+      const delFts = d.prepare('DELETE FROM journal_fts WHERE jid=?');
+      for (const id of ids) delFts.run(id);
+      const r = d.prepare('DELETE FROM journal WHERE chat_id=?').run(chatId);
+      needVacuum = true;
+      return Number(r.changes || 0);
+    },
+
+    /**
+     * 压库。**只在删过行之后才真做**，平时是一次判断就返回。
+     *
+     * 调用点放在巩固的定时器里（凌晨），不在消息链路上。
+     * @returns {boolean} 这次有没有真的 VACUUM
+     */
+    vacuum() {
+      if (!needVacuum) return false;
+      const d = open();
+      if (!d) return false;
+      needVacuum = false;
+      try {
+        d.exec('VACUUM');
+        return true;
+      } catch (e) {
+        log(`压库失败（不影响使用，磁盘上多留一点旧页）：${e.message}`);
+        return false;
+      }
     },
 
     close() {
@@ -519,15 +591,20 @@ function createJsonlStore(file, log) {
         .slice(0, n);
     },
 
+    /** 同 SQLite 后端：抹除过的行不进巩固的原料 */
     byDay(day) {
-      return load().filter((r) => r.day === day).sort((a, b) => a.at - b.at);
+      return load()
+        .filter((r) => r.day === day && r.text !== ERASED && r.text !== CLEARED)
+        .sort((a, b) => a.at - b.at);
     },
 
     listChat(chatId, limit = 500) {
-      return load()
+      const rows = load()
         .filter((r) => !chatId || r.chatId === chatId)
-        .sort((a, b) => b.at - a.at)
-        .slice(0, limit);
+        .sort((a, b) => b.at - a.at);
+      const n = Number(limit);
+      // 同 SQLite 后端：0 / 负数 = 不限
+      return n > 0 ? rows.slice(0, n) : rows;
     },
 
     searchTerms(terms, { chatId = '', limit = 40, crossCritical = false } = {}) {
@@ -574,6 +651,22 @@ function createJsonlStore(file, log) {
         lastAt: rows.length ? Math.max(...rows.map((r) => r.at)) : 0,
       };
     },
+
+    /** 同 SQLite 后端：整行删掉，不是抹正文 */
+    purgeChat(chatId) {
+      load();
+      const before = rows.length;
+      rows = rows.filter((r) => r.chatId !== chatId);
+      const n = before - rows.length;
+      if (n) {
+        reindex();
+        rewrite();
+      }
+      return n;
+    },
+
+    /** JSONL 每次 rewrite 都是整文件重写，旧内容已经不在了，没有可压的 */
+    vacuum: () => false,
 
     close() {
       rows = null;
@@ -875,7 +968,19 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       if (!w) return 0;
       const terms = queryTerms(w);
       const s = get();
-      const pool = s.listChat(chatId, 2000);
+      /**
+       * **扫全库，不设窗口。**
+       *
+       * 以前这里是 `listChat(chatId, 2000)`，于是超过 2000 条之后，
+       * 更早的记录既搜不到也删不掉——用户说「忘掉三个月前那件事」，
+       * 实际没忘，而且没有任何地方会提示他「只忘了最近的」。
+       *
+       * 必须拉全文而不是在 SQL 里 `LIKE`：命中走两条路（字面子串 +
+       * `passesCoverage` 分词覆盖），后者要原文才能判断。
+       * 代价是一次性把整个会话读进内存（十万条约几十 MB），
+       * 但这是**用户主动要求删除**时才走的路，不在热路径上。
+       */
+      const pool = s.listChat(chatId, 0);
       let n = 0;
       for (const r of pool) {
         if (r.kind !== 'chat' && r.kind !== 'digest') continue;
@@ -887,16 +992,35 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       return n;
     },
 
-    /** 清掉某个会话的全部日记（面板"清空上下文"用，慎用） */
+    /**
+     * 清掉某个会话的全部日记（面板"清空上下文"用，慎用）。
+     *
+     * 同样**不设窗口**：`clearChat` 的语义是「这个会话的日记清空」，
+     * 留个 5000 条的上限等于「清了一部分」——用户以为清干净了，
+     * 实际更早的记录还在，而且他自己不会发现。
+     */
     clearChat(chatId) {
       const s = get();
       let n = 0;
-      for (const r of s.listChat(chatId, 5000)) {
+      for (const r of s.listChat(chatId, 0)) {
         s.update(r.id, { text: CLEARED, digest: null, level: 'normal' });
         n += 1;
       }
       return n;
     },
+
+    /**
+     * **彻底删掉**某个会话的日记：行和索引都不留。
+     *
+     * 和 `clearChat` 是两档，别混：
+     *   · clearChat —— 抹正文、留行（时间线连续，能看出「这天有过东西」）
+     *   · purgeChat —— 行都没了（用户要的是「这些记录不许存在」）
+     * 磁盘上的旧页由 `vacuum()` 在巩固时压掉，这里不等。
+     */
+    purgeChat: (chatId) => get().purgeChat(chatId),
+
+    /** 压库。没删过行时是一次判断就返回，可以放心在定时器里调 */
+    vacuum: () => get().vacuum(),
 
     stats: () => get().stats(),
     backend: () => get().kind,
