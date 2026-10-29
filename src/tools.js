@@ -47,6 +47,61 @@ export async function loadDefineTool() {
 const WRITABLE_LEVELS = ['normal', 'important'];
 
 /**
+ * 扁平参数表 → 标准 JSON Schema。
+ *
+ * **为什么需要这一步**：DSH 的 `defineTool` 要的参数表是**扁平 map**，
+ * 参数名直接当键、`required` 写在每个参数自己身上：
+ *
+ * ```js
+ * defineTool({ parameters: { title: { type: 'string', required: true } } })
+ * ```
+ *
+ * 而走 `ctx.tools.register` 的普通对象要的是标准 JSON Schema
+ * （`{ type:'object', properties:{…}, required:[…] }`）——本机的
+ * `dsh-ops/lib/shells/tool.js` 就是这么写的。
+ *
+ * 以前我们只写了后者。本机因为解析不到 `@deepseek-ai/dsh-tools`
+ * （它打包在 app.asar 里），一直走普通对象那条路，所以看不出问题；
+ * 别人的机器上 defineTool 解析成功，注册器把 `parameters` 当「参数名 →
+ * schema」遍历，撞到键 `type` 的值是字符串 `'object'`，报：
+ *
+ *   `unsupported JSON schema: parameters.type must be a value schema object`
+ *
+ * 四个工具全中，只是注册遇到第一个失败就 return，面板只显示 `memory_search`。
+ *
+ * 现在**只维护扁平这一份**（DSH 的原生形状），需要 JSON Schema 时现转，
+ * 两种注册路径都不会漂。
+ *
+ * @param {object} params 扁平参数表
+ * @returns {{type:'object', properties:object, required?:string[]}}
+ */
+export function toJsonSchema(params) {
+  const properties = {};
+  const required = [];
+  for (const [name, spec] of Object.entries(params || {})) {
+    const { required: req, ...rest } = spec || {};
+    properties[name] = rest;
+    if (req) required.push(name);
+  }
+  return { type: 'object', properties, ...(required.length ? { required } : {}) };
+}
+
+/**
+ * 按 DSH 有没有 `defineTool` 挑一种形状。
+ *
+ * 有就用扁平表直接交（DSH 自己认）；没有就转成 JSON Schema 交给
+ * `ctx.tools.register`。**不要反过来**——把 JSON Schema 交给 defineTool
+ * 就是上面那个报错的来源。
+ *
+ * @param {object} def 工具定义（`parameters` 是扁平表）
+ * @param {Function|null} defineTool
+ */
+export function shapeTool(def, defineTool) {
+  if (defineTool) return defineTool(def);
+  return { ...def, parameters: toJsonSchema(def.parameters) };
+}
+
+/**
  * 拼工具定义。抽成纯函数是为了能单测——权限判断写错的表现是
  * "群友也能写记忆"，那是最不能靠人工试出来的那种错。
  *
@@ -77,17 +132,17 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
     description:
       '在自己过去的记录里检索。当对方提到"上次""之前说过""那个方案"而你没有把握时，用它查，不要凭印象编。'
       + '只返回真实发生过的对话片段。',
+    /**
+     * 扁平参数表——DSH `defineTool` 的原生形状，`required` 写在参数自己身上。
+     * 走普通注册时由 `toJsonSchema()` 转成标准 JSON Schema（见 `shapeTool`）。
+     */
     parameters: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: '要查的内容，用几个关键词就够（如"杭州 搬家""电影 约定"）' },
-        scope: {
-          type: 'string',
-          enum: ['chat', 'global'],
-          description: 'chat=只查当前会话（默认）；global=连跨群的身份事实一起查（只有主人/管理员可用）',
-        },
+      query: { type: 'string', required: true, description: '要查的内容，用几个关键词就够（如"杭州 搬家""电影 约定"）' },
+      scope: {
+        type: 'string',
+        enum: ['chat', 'global'],
+        description: 'chat=只查当前会话（默认）；global=连跨群的身份事实一起查（只有主人/管理员可用）',
       },
-      required: ['query'],
     },
     output: {
       schema: { type: 'object' },
@@ -165,16 +220,12 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
       '把一件值得长期记住的事写进日记。只记关于对方本人的事实、约定、偏好；'
       + '不要记一次性的闲聊。"非常重要"这一档不能由这个工具写，需要对方明确要求。',
     parameters: {
-      type: 'object',
-      properties: {
-        text: { type: 'string', description: '一句话，写清楚是什么事（含人名/地点/时间）' },
-        level: {
-          type: 'string',
-          enum: WRITABLE_LEVELS,
-          description: 'normal=普通（几天后压成半句）；important=重要（两三周后压成一句）',
-        },
+      text: { type: 'string', required: true, description: '一句话，写清楚是什么事（含人名/地点/时间）' },
+      level: {
+        type: 'string',
+        enum: WRITABLE_LEVELS,
+        description: 'normal=普通（几天后压成半句）；important=重要（两三周后压成一句）',
       },
-      required: ['text'],
     },
     output: {
       schema: { type: 'object' },
@@ -239,9 +290,11 @@ export async function registerMemoryTools({ agent, journal, graphOf, callerOf, c
     try {
       /**
        * 有真 defineTool 就用它（会打上 marker，沙箱那条路也认）；
-       * 没有就交同形状的普通对象——注册器若不校验 marker，一样能用。
+       * 没有就转成标准 JSON Schema 交普通对象——注册器若不校验 marker，一样能用。
+       *
+       * 两条路的参数形状**不一样**，见 `shapeTool` 的注释。
        */
-      const tool = defineTool ? defineTool(def) : def;
+      const tool = shapeTool(def, defineTool);
       const off = registry.register(tool);
       made.push({ off, name: def.name });
     } catch (e) {

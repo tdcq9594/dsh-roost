@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildToolDefs, registerMemoryTools } from '../src/tools.js';
+import { buildToolDefs, registerMemoryTools, toJsonSchema, shapeTool } from '../src/tools.js';
 
 /** 造一个只看权限的假环境 */
 function rig({ bucket = 'member', chatId = 'g1', enabled = true, searchRows = [] } = {}) {
@@ -187,6 +187,76 @@ test('工具：render 返回内容块数组（字符串会让 DSH 的 content.so
     for (const block of rendered) {
       assert.equal(typeof block, 'object', '内容块必须是对象');
       assert.ok('type' in block && 'text' in block, `内容块缺 type/text：${JSON.stringify(block)}`);
+    }
+  }
+});
+
+/* ---------------- 参数表：两种注册路径两种形状 ---------------- */
+
+/**
+ * 这块盯的是一个**只在别人机器上出现**的故障。
+ *
+ * DSH 的 `defineTool` 要扁平参数表（参数名当键、`required` 写在参数身上），
+ * 而 `ctx.tools.register` 的普通对象要标准 JSON Schema。以前只写了后者：
+ * 本机解析不到 `@deepseek-ai/dsh-tools`（打包在 app.asar 里），走普通对象
+ * 那条路，一直没暴露；别人的机器上 defineTool 解析成功，注册器把
+ * `parameters` 当「参数名 → schema」遍历，撞到键 `type` 的值是 `'object'`：
+ *
+ *   unsupported JSON schema: parameters.type must be a value schema object
+ */
+test('参数表：扁平 map 转成标准 JSON Schema', () => {
+  const flat = {
+    query: { type: 'string', required: true, description: '查什么' },
+    scope: { type: 'string', enum: ['chat', 'global'], description: '范围' },
+  };
+  assert.deepEqual(toJsonSchema(flat), {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: '查什么' },
+      scope: { type: 'string', enum: ['chat', 'global'], description: '范围' },
+    },
+    required: ['query'],
+  });
+});
+
+test('参数表：没有必填项时不出现空的 required 数组', () => {
+  const out = toJsonSchema({ a: { type: 'string' } });
+  assert.equal(out.required, undefined, '空 required 数组在某些校验器里是非法写法');
+});
+
+test('参数表：转换不丢 enum / description', () => {
+  const out = toJsonSchema({ lv: { type: 'string', enum: ['a', 'b'], description: 'd' } });
+  assert.deepEqual(out.properties.lv, { type: 'string', enum: ['a', 'b'], description: 'd' });
+});
+
+test('参数表：有 defineTool 就原样交给它，不再转换', () => {
+  let got = null;
+  const fakeDefine = (def) => {
+    got = def;
+    return { ...def, marker: true };
+  };
+  const def = { name: 'x', parameters: { a: { type: 'string', required: true } } };
+  const tool = shapeTool(def, fakeDefine);
+  assert.equal(tool.marker, true);
+  assert.equal(got.parameters.a.type, 'string', 'defineTool 拿到的是扁平表，不是 JSON Schema');
+  assert.equal(got.parameters.type, undefined);
+});
+
+test('参数表：没有 defineTool 就转成 JSON Schema 交普通对象', () => {
+  const def = { name: 'x', parameters: { a: { type: 'string', required: true } } };
+  const tool = shapeTool(def, null);
+  assert.equal(tool.parameters.type, 'object');
+  assert.deepEqual(tool.parameters.required, ['a']);
+  assert.equal(tool.parameters.properties.a.type, 'string');
+  assert.equal(def.parameters.type, undefined, '不能就地改掉原定义');
+});
+
+test('参数表：四个工具的 parameters 都是扁平表', () => {
+  const rigged = rig();
+  for (const d of buildToolDefs(rigged)) {
+    assert.equal(d.parameters.type, undefined, `${d.name} 是标准 JSON Schema`);
+    for (const [k, v] of Object.entries(d.parameters)) {
+      assert.ok(v.type, `${d.name}.${k} 缺 type`);
     }
   }
 });

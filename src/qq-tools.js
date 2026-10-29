@@ -27,7 +27,7 @@
  * 所以 ai-chat 侧 `MAX_SEGMENTS` 也是 5，这里默认 3 是留余量。
  */
 
-import { loadDefineTool } from './tools.js';
+import { loadDefineTool, shapeTool } from './tools.js';
 import { acceptClose } from './closing.js';
 
 /** 单轮最多发几段。QQ 被动回复同一条消息只让回 5 次（msg_seq 1–5），留余量 */
@@ -126,30 +126,28 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
       + `一轮最多 ${maxParts()} 段，调多了会被拒。`
       + '**调过这个工具之后，回复正文就不会再自动发出去了**（正文只当思考用）——'
       + '所以要么调工具、要么直接写正文，别两边都写。不想说话就一次都别调。',
+    /** 扁平参数表（DSH defineTool 原生形状），普通注册时由 `shapeTool` 转换 */
     parameters: {
-      type: 'object',
-      properties: {
-        text: {
-          type: 'string',
-          description: '要发出去的话。口语、简短；一段一个意思，别把两件事塞进一段',
-        },
-        /**
-         * @ 人。**只给「要 @ 谁」，不给「怎么拼标签」**——
-         * 标签由宿主拼，模型碰不到那串 id 的语法。
-         *
-         * 为什么不让模型自己写 `<qqbot-at-user id="…"/>`：openid 是二十多位的
-         * 随机串，抄错一位官方不报错、只是 @ 不到人，线上根本看不出来。
-         * 而模型只要吐 `sender` 就行，错了宿主还能拦住并告诉它。
-         */
-        at: {
-          type: 'string',
-          description:
-            '要 @ 谁。填 "sender" = @ 刚说话的那个人（最常用）；'
-            + '也可以填消息头括号里的那串 openid。不填就不 @。'
-            + '只有群聊、只有这一轮第一段有效。',
-        },
+      text: {
+        type: 'string',
+        required: true,
+        description: '要发出去的话。口语、简短；一段一个意思，别把两件事塞进一段',
       },
-      required: ['text'],
+      /**
+       * @ 人。**只给「要 @ 谁」，不给「怎么拼标签」**——
+       * 标签由宿主拼，模型碰不到那串 id 的语法。
+       *
+       * 为什么不让模型自己写 `<qqbot-at-user id="…"/>`：openid 是二十多位的
+       * 随机串，抄错一位官方不报错、只是 @ 不到人，线上根本看不出来。
+       * 而模型只要吐 `sender` 就行，错了宿主还能拦住并告诉它。
+       */
+      at: {
+        type: 'string',
+        description:
+          '要 @ 谁。填 "sender" = @ 刚说话的那个人（最常用）；'
+          + '也可以填消息头括号里的那串 openid。不填就不 @。'
+          + '只有群聊、只有这一轮第一段有效。',
+      },
     },
     output: {
       schema: { type: 'object' },
@@ -221,12 +219,8 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
       + '**对方还在问你问题时不要用**；只有私聊能用。'
       + '收尾之后这一轮可以什么都不发。',
     parameters: {
-      type: 'object',
-      properties: {
-        point: { type: 'string', description: '这段聊到哪儿停的，一句话' },
-        resume: { type: 'string', description: '下次可以怎么接，一句话（可省）' },
-      },
-      required: ['point'],
+      point: { type: 'string', required: true, description: '这段聊到哪儿停的，一句话' },
+      resume: { type: 'string', description: '下次可以怎么接，一句话（可省）' },
     },
     output: {
       schema: { type: 'object' },
@@ -286,7 +280,7 @@ export async function registerQqTools({ agent, callerOf, sendOf, closeOf, cfgOf,
 
   for (const def of defs) {
     try {
-      const tool = defineTool ? defineTool(def) : def;
+      const tool = shapeTool(def, defineTool);
       const off = registry.register(tool);
       made.push({ off, name: def.name });
     } catch (e) {

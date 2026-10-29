@@ -55,7 +55,23 @@ test('工具：都有 parameters 和 execute', () => {
   const { defs } = make();
   for (const d of defs) {
     assert.equal(typeof d.execute, 'function', `${d.name} 缺 execute`);
-    assert.equal(d.parameters?.type, 'object', `${d.name} 缺 parameters`);
+    assert.ok(d.parameters && typeof d.parameters === 'object', `${d.name} 缺 parameters`);
+    /**
+     * 参数表必须是**扁平 map**，不能是标准 JSON Schema。
+     *
+     * DSH 的 `defineTool` 把 `parameters` 当「参数名 → schema」遍历，
+     * 撞到键 `type` 的值是字符串 `'object'` 就报
+     * `unsupported JSON schema: parameters.type must be a value schema object`。
+     * 别人机器上四个工具全挂在这，本机因为解析不到 defineTool 一直没暴露。
+     */
+    assert.equal(
+      d.parameters.type, undefined,
+      `${d.name} 的 parameters 是标准 JSON Schema——defineTool 要的是扁平表`,
+    );
+    for (const [k, v] of Object.entries(d.parameters)) {
+      assert.equal(typeof v, 'object', `${d.name}.${k} 不是 schema 对象`);
+      assert.ok(v.type, `${d.name}.${k} 缺 type`);
+    }
     assert.ok(d.description, `${d.name} 缺 description`);
   }
 });
