@@ -2006,12 +2006,26 @@ select.roost-input{color-scheme:dark}
                  */
                 delEdge
                   ? h('div', {
-                      className: 'roost-item',
-                      style: { borderLeft: '2px solid var(--roost-warn, #d08770)', paddingLeft: 10, marginTop: 8 },
+                      /**
+                       * **不能复用 `.roost-item`**：那是横排 flex
+                       * （`.t` 占 flex:1、`.d` 固定宽度）。把标题、按钮行、
+                       * 说明三块塞进去，它们会挤在同一行里，标题被压成
+                       * 一个字一行——线上真长这样。
+                       * 这里要的是竖排，所以自己写 flex-direction。
+                       */
+                      style: {
+                        borderLeft: '2px solid var(--roost-warn, #d08770)',
+                        paddingLeft: 10,
+                        marginTop: 8,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 8,
+                      },
                     },
-                      h('span', { className: 't' },
+                      h('div', { style: { fontSize: 12.5 } },
                         `删掉「${delEdge.src} —${delEdge.rel}→ ${delEdge.dst}」？`,
-                        h('span', { className: 'd' }, delEdge.chatId ? '（只在这个会话）' : '（所有会话）')),
+                        h('span', { style: { fontSize: 11, opacity: 0.7 } },
+                          delEdge.chatId ? '（只在这个会话）' : '（所有会话）')),
                       h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 } },
                         h('button', {
                           type: 'button', className: 'roost-primary', disabled: busy,
