@@ -171,7 +171,15 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
       }
 
       try {
-        const r = await sendOf(t, { at: String(at ?? '').trim() });
+        /**
+         * 每次 `qq_send` 调用生成一个幂等键（阶段 5）。
+         *
+         * **每次新生成，不复用**——模型重试是一次新调用，它可能就是想再说一遍。
+         * 这个 id 的用途是让账本记得住「这一段发没发出去」，
+         * 而不是拦模型重试。
+         */
+        const requestId = `qs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const r = await sendOf(t, { at: String(at ?? '').trim(), requestId });
         if (!r?.ok) return { ok: false, message: r?.message || '没发出去' };
         /**
          * 宿主可能**没 @ 成**（私聊 / 非第一段 / markdown 关 / id 不像）。

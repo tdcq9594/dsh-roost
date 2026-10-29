@@ -132,14 +132,21 @@ const OPENID = 'A1B2C3D4E5F60718293A4B5C6D7E8F90';
 test('qq_send：at 原样交给宿主（工具自己不管拼标签）', async () => {
   const { send, box } = make({ kind: 'group' });
   await send.execute({ text: '在的', at: 'sender' });
-  assert.deepEqual(box.opts[0], { at: 'sender' });
+  assert.equal(box.opts[0].at, 'sender');
+  /**
+   * 每次 `qq_send` 调用都带一个幂等键（阶段 5）。
+   * **每次新生成**——模型重试是新调用，它可能就是想再说一遍；
+   * 这个 id 的用途是让账本记得住「这一段发没发出去」。
+   */
+  assert.match(box.opts[0].requestId, /^qs-[a-z0-9]+-[a-z0-9]+$/);
   assert.deepEqual(box.sent, ['在的'], '工具不该自己往正文里塞标签');
 });
 
 test('qq_send：不传 at 时也带一个空串（宿主不用判 undefined）', async () => {
   const { send, box } = make();
   await send.execute({ text: '嗯' });
-  assert.deepEqual(box.opts[0], { at: '' });
+  assert.equal(box.opts[0].at, '');
+  assert.ok(box.opts[0].requestId, '不传 at 也要带幂等键');
 });
 
 /**

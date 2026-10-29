@@ -1211,7 +1211,9 @@ export function apply(ctx) {
           });
           if (at.note) log.info(`@ 没挂上：${at.note}`);
 
-          await postReply(c.payload, at.prefix ? at.prefix + text : text, false);
+          await postReply(c.payload, at.prefix ? at.prefix + text : text, false, {
+            requestId: opts.requestId,
+          });
           /**
            * 记下这一轮发了什么：turn 结束时要拿它写日记，并且决定正文不再重发。
            *

@@ -40,7 +40,7 @@ const CONNECT_ERR = {
  * @param {string} text 回复正文
  * @param {boolean} [done] false 表示「还有后续」
  */
-export async function postReply(payload, text, done = true) {
+export async function postReply(payload, text, done = true, extra = {}) {
   const url = payload?.reply?.url;
   const token = payload?.reply?.token;
   if (!url) throw new Error('payload 里没有回话地址');
@@ -69,7 +69,17 @@ export async function postReply(payload, text, done = true) {
     res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: payload.id, token, text, done }),
+      body: JSON.stringify({
+        id: payload.id,
+        token,
+        text,
+        done,
+        /**
+         * 投递账本的幂等键（阶段 5）。框架拿它做「同一条不重复发」。
+         * 空串不传——没有 id 时行为完全不变。
+         */
+        ...(extra?.requestId ? { requestId: String(extra.requestId) } : {}),
+      }),
       signal: AbortSignal.timeout(15000),
     });
   } catch (e) {
