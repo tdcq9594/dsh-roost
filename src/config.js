@@ -209,10 +209,16 @@ export const DEFAULTS = {
    */
   compact: {
     enabled: true,
-    /** 群聊到多少占用就压。60% 是折中：业界 70~90% 是编码 agent 的数字 */
-    atPercentGroup: 60,
-    /** 私聊长任务早一点压，避免生成质量下滑 */
-    atPercentC2C: 40,
+    /**
+     * 群聊到多少占用就压。
+     *
+     * 60% 是早期折中值，后来证明偏低：每换一次会话 prompt 缓存整段失效，
+     * 对照 `qq-dsh-bridge` 实测（阈值 15% → 95%，单步 45–55 秒 → 3–4 秒），
+     * 压得越勤越慢。抬到 85%，留 15% 余量容纳一次长回复的突增。
+     */
+    atPercentGroup: 85,
+    /** 私聊单轮更小，75% 已经够早；别学编码 agent 撑到 90% */
+    atPercentC2C: 75,
     /** 新会话开场带几条最近原话（用户多留、她自己少留） */
     keepRecentUser: 8,
     keepRecentBot: 3,
@@ -305,6 +311,27 @@ function merge(base, patch) {
   return out;
 }
 
+/**
+ * 改过默认值的字段：值还等于**旧默认**就升级。
+ *
+ * 为什么需要这一步：`saveConfig` 写的是整份合并后的配置，所以任何在面板上
+ * 点过一下的部署，磁盘上都躺着当时那份默认值——那是我们写进去的，不是用户选的。
+ * 只改 `DEFAULTS` 对它们完全无效（实测：改完 compact.js 的 85/75，老部署照旧 60/40）。
+ *
+ * 只在"值还等于旧默认"时才动：用户真调过的一律不碰。代价是"用户恰好也选了 60"
+ * 会被顺带升级——压缩阈值改回来只需在面板上点两下，比"改了默认值却没人拿到"轻。
+ */
+const UPGRADED = [{ path: ['compact', 'atPercentGroup'], from: 60, to: 85 },
+  { path: ['compact', 'atPercentC2C'], from: 40, to: 75 }];
+
+function upgradeOldDefaults(cfg) {
+  for (const u of UPGRADED) {
+    const [a, b] = u.path;
+    if (cfg?.[a]?.[b] === u.from) cfg[a][b] = u.to;
+  }
+  return cfg;
+}
+
 export function loadConfig() {
   let saved = {};
   try {
@@ -312,7 +339,7 @@ export function loadConfig() {
   } catch {
     saved = {};
   }
-  return merge(structuredClone(DEFAULTS), saved);
+  return upgradeOldDefaults(merge(structuredClone(DEFAULTS), saved));
 }
 
 export function saveConfig(next) {

@@ -1885,7 +1885,17 @@ export function apply(ctx) {
       compact.noteTurn(chat.chatId);
       try {
         const cp = await compact.maybe(chat.chatId, chat);
-        if (cp.compacted) log.info(`上下文压缩完成（${cp.trigger}）`);
+        if (cp.compacted) {
+          /**
+           * 压完把「压之前那一下」的命中率写进日志。
+           *
+           * 这是调阈值的唯一依据：压完就换新会话、`tokenUsage` 从零开始，
+           * 这个数没有第二次机会。日志里带上它，翻日志就能看出
+           * 阈值是不是压得太勤（命中率一直很低 = 缓存反复失效）。
+           */
+          const hit = cp.cacheHit == null ? '' : `，压前命中 ${cp.cacheHit.toFixed(1)}%`;
+          log.info(`上下文压缩完成（${cp.trigger}${hit}）`);
+        }
       } catch (e) {
         log.warn(`上下文压缩失败（不影响对话）：${e?.message ?? e}`);
       }

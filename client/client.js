@@ -2302,9 +2302,9 @@ select.roost-input{color-scheme:dark}
                   `已用 ${(p.projected || p.tokens || 0).toLocaleString()} / ${(p.window || 0).toLocaleString()} tokens`),
               ),
           h('div', { className: 'roost-note' },
-            `群聊到 ${th.atPercentGroup ?? 60}%、私聊到 ${th.atPercentC2C ?? 40}% 就换新会话。` +
-            '阈值刻意比编码 agent 的 70~90% 低一档：聊天单轮小、压掉的内容日记里查得回来；' +
-            '但也不能太低——每换一次会话，prompt 缓存就整段失效。'),
+            `群聊到 ${th.atPercentGroup ?? 85}%、私聊到 ${th.atPercentC2C ?? 75}% 就换新会话。` +
+            '原来定的 60/40 压得太勤：每换一次会话，prompt 缓存就整段失效，' +
+            '省下的 token 赔不回变慢的那几步。真正的数字看下一节的「缓存命中」。'),
         ),
 
         h(Sec, { n: '02', title: '压缩' },
@@ -2316,6 +2316,26 @@ select.roost-input{color-scheme:dark}
                 ),
               )
             : h('div', { className: 'roost-empty' }, '还没压过'),
+          /**
+           * 缓存命中率：调阈值的唯一依据。
+           *
+           * 上面那个数是"压的那一刻旧会话累计多少"——压完就换新会话、
+           * 从零开始，所以它没有第二次机会，只能在压的瞬间记下来。
+           * 下面那个是当前会话的实时值，两个放在一起看才知道阈值该往哪调。
+           */
+          h('div', { style: { marginTop: 10 } },
+            h(Row, { k: '当前命中' },
+              p?.usage?.cacheHit == null
+                ? '还没有用量数据'
+                : `${p.usage.cacheHit.toFixed(1)}%（读 ${(p.usage.cacheRead || 0).toLocaleString()} / 计费 ${(p.usage.billed || 0).toLocaleString()}）`),
+            (ctxInfo?.history || []).slice(-3).reverse().map((h2, i) =>
+              h(Row, { k: i === 0 ? '压之前' : '' },
+                `${ago(h2.at)} · 占用 ${h2.percent == null ? '—' : h2.percent.toFixed(0) + '%'}`
+                + ` · 命中 ${h2.cacheHit == null ? '—' : h2.cacheHit.toFixed(1) + '%'}`),
+            ),
+          ),
+          h('div', { className: 'roost-note' },
+            '命中率低 = 缓存反复失效，多半是压得太勤或者注入的东西每轮都在变。'),
           h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
             h('button', {
               type: 'button', className: 'roost-primary', disabled: busy,

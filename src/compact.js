@@ -47,10 +47,15 @@ export const DEFAULTS = {
    * 也不能沿用早期的 25%：用到四分之一就换会话，等于反复重铺上下文，
    * **每次换会话都会让 prompt cache 整段失效**（Claude Code 把"压缩后
    * 前缀仍可复用缓存"当招牌特性）。省下的 token 可能不够赔缓存。
-   * 60% 留出的余量够容纳一次长回复的突增。
+   *
+   * 60/40 后来也证明偏低：对照 `qq-dsh-bridge` 实测（阈值 15% → 95%，
+   * 单步 45–55 秒 → 3–4 秒），压得越勤、命中率越低、每一步都变慢。
+   * 现在抬到 85/75，留 15%/25% 余量容纳一次长回复的突增。
+   * 真正的数字得看 `cacheHit`（`tokenUsage` 投影里现成的），
+   * 面板「上下文 → 压缩」能直接看到压之前那一下的命中率。
    */
-  atPercentGroup: 60,
-  atPercentC2C: 40,
+  atPercentGroup: 85,
+  atPercentC2C: 75,
   /** 兼容旧配置：写了它就用它（两个场景同值） */
   atPercent: 0,
   /** 新会话开场里带几条最近原话（旧字段，被 keepRecent 覆盖后仅作兜底） */
@@ -73,19 +78,15 @@ export const DEFAULTS = {
 const DAY = 86_400_000;
 
 /**
- * 从 `session/projections` 的返回值里找 `contextPressure`。
+ * 从 `session/projections` 的返回值里按字段名找一个投影。
  *
  * 为什么用"递归找"而不是取值路径：那个对象是 DSH 内部的投影集合
  * （`values.inbox` / `values.workingDirectory` / …），`contextPressure` 挂在
  * 哪一层取决于他们怎么组织投影，换个版本就可能搬位置。
  * 按字段名找，比写死路径耐受得多。
- *
- * @returns {{tokens:number|null, projected:number|null, window:number|null, percent:number|null}}
  */
-export function readPressure(value) {
-  const empty = { tokens: null, projected: null, window: null, percent: null };
-  if (!value || typeof value !== 'object') return empty;
-
+function findProjection(value, name) {
+  if (!value || typeof value !== 'object') return null;
   const seen = new Set();
   let found = null;
   const walk = (node, depth) => {
@@ -93,7 +94,7 @@ export function readPressure(value) {
     if (seen.has(node)) return;
     seen.add(node);
     for (const [k, v] of Object.entries(node)) {
-      if (k === 'contextPressure' && v && typeof v === 'object') {
+      if (k === name && v && typeof v === 'object') {
         found = v;
         return;
       }
@@ -101,6 +102,17 @@ export function readPressure(value) {
     }
   };
   walk(value, 0);
+  return found;
+}
+
+/**
+ * 从投影里读 `contextPressure`。
+ *
+ * @returns {{tokens:number|null, projected:number|null, window:number|null, percent:number|null}}
+ */
+export function readPressure(value) {
+  const empty = { tokens: null, projected: null, window: null, percent: null };
+  const found = findProjection(value, 'contextPressure');
   if (!found) return empty;
 
   const num = (x) => (Number.isFinite(x) && Number(x) > 0 ? Number(x) : null);
@@ -117,15 +129,76 @@ export function readPressure(value) {
 }
 
 /**
+ * 从投影里读 `tokenUsage` —— **prompt cache 的命中情况**。
+ *
+ * 这是"压缩阈值该定多少"唯一能拿来判断的实数。没有它，调阈值等于猜：
+ * 压早了浪费缓存，压晚了溢出，两种都不报错。
+ *
+ * 字段来自 DSH 的 `tokenUsage` 投影（**整个会话累计**，不是单次请求）：
+ *   uncachedInputTokens  没命中缓存、按全价计的输入
+ *   cacheReadTokens      命中缓存读到的（约 1/10 价）
+ *   cacheWriteTokens     写入缓存的（比全价还贵，1.25 倍）
+ *   outputTokens         输出
+ *
+ * 命中率的分母是**三个互不重叠的计费桶之和**（和 DSH 自己的口径一致）：
+ * 只除以 uncached 会算出 >100%，只除以全部输入会漏掉写入成本。
+ *
+ * @returns {{uncached:number|null, cacheRead:number|null, cacheWrite:number|null,
+ *            output:number|null, billed:number|null, cacheHit:number|null}}
+ */
+export function readUsage(value) {
+  const empty = {
+    uncached: null,
+    cacheRead: null,
+    cacheWrite: null,
+    output: null,
+    billed: null,
+    cacheHit: null,
+  };
+  const found = findProjection(value, 'tokenUsage');
+  if (!found) return empty;
+
+  /** 这里 0 是合法值（还没发生过任何请求），不能像 pressure 那样把 0 当"没有" */
+  const num = (x) => (Number.isFinite(x) && Number(x) >= 0 ? Number(x) : null);
+  const uncached = num(found.uncachedInputTokens);
+  const cacheRead = num(found.cacheReadTokens);
+  const cacheWrite = num(found.cacheWriteTokens);
+  const output = num(found.outputTokens);
+  const parts = [uncached, cacheRead, cacheWrite];
+  const billed = parts.every((x) => x != null) ? parts.reduce((a, b) => a + b, 0) : null;
+  return {
+    uncached,
+    cacheRead,
+    cacheWrite,
+    output,
+    billed,
+    cacheHit: billed ? (cacheRead / billed) * 100 : null,
+  };
+}
+
+/**
  * 这个场景用哪个阈值。
  *
- * 抽成函数是为了让"哪个群聊按 60%、哪个私聊按 40%"这件事可测——
+ * 抽成函数是为了让"哪个群聊按多少、哪个私聊按多少"这件事可测——
  * 阈值写错的表现是"该压的时候没压"或"刚聊两句就换会话"，两种都不报错。
+ *
+ * 顺手挡一类配置写法事故：有人会写 `0.75` 想表达 75%。
+ * 不认分数的话，阈值就成了 0.75% → **每轮都压**，而日志上只显示
+ * "占用 12% ≥ 0.75%"，看起来还挺合理。所以小于 1 的一律按分数理解。
+ * 边界取严格小于：`1` 有歧义（1% 还是 100%？），按 1% 算再抬到 10%——
+ * 宁可多压一次也不要"永远不压"，那是会真的撑爆窗口的那个方向。
+ * 再夹到 [10, 95]：低于 10 等于不停地换会话，高于 95 就来不及了。
  */
 export function thresholdFor(cfg = {}, scene = 'c2c') {
   const c = { ...DEFAULTS, ...(cfg || {}) };
-  if (Number(c.atPercent) > 0) return Number(c.atPercent); // 旧配置优先
-  return scene === 'group' ? Number(c.atPercentGroup) : Number(c.atPercentC2C);
+  const norm = (v, fallback) => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    const pct = n < 1 ? n * 100 : n;
+    return Math.min(95, Math.max(10, pct));
+  };
+  if (Number(c.atPercent) > 0) return norm(c.atPercent, DEFAULTS.atPercentC2C); // 旧配置优先
+  return norm(scene === 'group' ? c.atPercentGroup : c.atPercentC2C, DEFAULTS.atPercentC2C);
 }
 
 /**
@@ -226,6 +299,15 @@ export function createCompact({
   /** 每个会话上次压缩之后的轮数（重启归零，可接受：重启后本来就要重新观察） */
   const turns = new Map();
   let last = null;
+  /**
+   * 最近几次压缩的现场：压的那一刻占用多少、命中率多少。
+   *
+   * 只留"压之前"的数——`tokenUsage` 是**按会话累计**的，压完就是新会话、
+   * 从零开始，所以"压之后"要等新会话聊一阵子才有意义。面板同时显示
+   * 旧会话压前的命中率和当前会话的实时命中率，两个数放在一起看才知道
+   * 阈值该往上还是往下调。
+   */
+  const history = [];
 
   const cfg = () => ({ ...DEFAULTS, ...(cfgOf()?.compact ?? {}) });
 
@@ -233,10 +315,14 @@ export function createCompact({
     turns.set(chatId, Number(turns.get(chatId) || 0) + 1);
   }
 
-  /** 读这个会话的上下文占用。取不到就是 null，不抛错 */
+  /** 读这个会话的上下文占用和缓存命中。取不到就是 null，不抛错 */
   async function pressure(chatId) {
     const sid = sessions.get(chatId);
-    if (!sid) return { tokens: null, projected: null, window: null, percent: null };
+    if (!sid) {
+      return {
+        tokens: null, projected: null, window: null, percent: null, usage: readUsage(null),
+      };
+    }
     try {
       const c = controllerOf();
       /**
@@ -249,13 +335,16 @@ export function createCompact({
       const t = setTimeout(() => ac.abort(), 5000);
       try {
         const v = await c.projections({ sessionId: sid }, ac.signal);
-        return readPressure(v);
+        // 一次投影调用同时读压力和用量，不为了两个数跑两趟
+        return { ...readPressure(v), usage: readUsage(v) };
       } finally {
         clearTimeout(t);
       }
     } catch (e) {
       log(`读上下文占用失败（不影响对话）：${e?.message ?? e}`);
-      return { tokens: null, projected: null, window: null, percent: null };
+      return {
+        tokens: null, projected: null, window: null, percent: null, usage: readUsage(null),
+      };
     }
   }
 
@@ -266,7 +355,7 @@ export function createCompact({
    * 反过来的话，中间失败会出现"开场给了但映射还指旧会话"，
    * 下一句话就进到旧窗口里，等于白压。
    */
-  async function compact(chatId, chat = {}) {
+  async function compact(chatId, chat = {}, snap = null) {
     const sid = sessions.get(chatId);
     if (!sid) return { ok: false, why: '这个会话还没有 DSH 会话' };
 
@@ -313,7 +402,26 @@ export function createCompact({
       onOpening(chatId, opening);
 
       last = { at: now(), chatId, from: sid, to: newSid, openingLen: opening.length };
-      log(`压缩 ${chatId.slice(0, 8)}：${sid.slice(-8)} → ${newSid.slice(-8)}，开场 ${opening.length} 字（旧会话保留）`);
+      /**
+       * 记现场：**压那一刻**旧会话的占用和缓存命中率。
+       *
+       * 这是调阈值唯一的数据来源。压完就换新会话，`tokenUsage` 从零开始，
+       * 所以"压之后"永远拿不到——只能拿它跟当前会话的实时命中率对比着看。
+       */
+      history.push({
+        at: last.at,
+        chatId,
+        percent: snap?.percent ?? null,
+        cacheHit: snap?.usage?.cacheHit ?? null,
+        tokens: snap?.usage?.billed ?? null,
+      });
+      if (history.length > 10) history.shift();
+      const hit = snap?.usage?.cacheHit;
+      log(
+        `压缩 ${chatId.slice(0, 8)}：${sid.slice(-8)} → ${newSid.slice(-8)}，` +
+          `开场 ${opening.length} 字（旧会话保留）` +
+          (hit == null ? '' : `，压前缓存命中 ${hit.toFixed(1)}%`),
+      );
       return { ok: true, from: sid, sessionId: newSid, opening };
     } catch (e) {
       log(`压缩失败：${e?.message ?? e}`);
@@ -333,9 +441,20 @@ export function createCompact({
     const scene = chat.kind === 'group' ? 'group' : 'c2c';
     const p = await pressure(chatId);
     const d = shouldCompact({ percent: p.percent, turnsSince: turns.get(chatId) || 0, cfg: c, scene });
-    if (!d.compact) return { compacted: false, why: d.why, percent: p.percent, threshold: d.threshold };
-    const r = await compact(chatId, chat);
-    return { ...r, compacted: Boolean(r.ok), percent: p.percent, trigger: d.why, threshold: d.threshold };
+    if (!d.compact) {
+      return {
+        compacted: false, why: d.why, percent: p.percent, threshold: d.threshold, cacheHit: p.usage.cacheHit,
+      };
+    }
+    const r = await compact(chatId, chat, p);
+    return {
+      ...r,
+      compacted: Boolean(r.ok),
+      percent: p.percent,
+      trigger: d.why,
+      threshold: d.threshold,
+      cacheHit: p.usage.cacheHit,
+    };
   }
 
   return {
@@ -343,6 +462,6 @@ export function createCompact({
     pressure,
     maybe,
     compact,
-    status: () => ({ last, turns: Object.fromEntries(turns), cfg: cfg() }),
+    status: () => ({ last, history: [...history], turns: Object.fromEntries(turns), cfg: cfg() }),
   };
 }
