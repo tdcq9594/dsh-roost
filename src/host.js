@@ -2524,6 +2524,86 @@ export function apply(ctx) {
               });
             }
 
+            /**
+             * 删掉一条关系，并且**以后别再记**。
+             *
+             * 为什么不复用 `memory.remove`：那个是按关键词删 facts，
+             * 而关系在图谱里是「主语—关系→宾语」的边，删完还会被凌晨巩固
+             * 从日记里重新抽出来。所以这里走 `graph.suppressEdge`：
+             * 一个事务里删边 + 立墓碑，巩固写之前会问 `isSuppressed`。
+             *
+             * `chatId` 传空串 = 所有会话都别再写；不传就用当前会话。
+             * 约定额外清 facts（它同时存在两个地方，只删一边等于没删）。
+             */
+            case 'graph.suppress': {
+              const src = String(arg?.src ?? '').trim();
+              const rel = String(arg?.rel ?? '').trim();
+              const dst = String(arg?.dst ?? '').trim();
+              if (!src || !rel || !dst) {
+                return send(res, 400, { ok: false, message: '缺 src / rel / dst（要删哪条关系）' });
+              }
+              const scope = arg?.chatId === undefined ? chatId : String(arg.chatId ?? '');
+              const r = graph.suppressEdge({ src, rel, dst, chatId: scope, why: String(arg?.why ?? '') });
+              if (!r.ok) return send(res, 500, { ok: false, message: r.reason || '没删掉' });
+
+              let facts = 0;
+              if (rel === '约定') {
+                try {
+                  facts = memory.remove(chatId, `约定：${dst}`);
+                } catch (e) {
+                  log.warn(`删约定的 facts 失败：${e.message}`);
+                }
+              }
+              return send(res, 200, {
+                ok: true,
+                removed: r.removed,
+                facts,
+                message: r.removed || facts
+                  ? `删了 ${r.removed} 条关系${facts ? `、${facts} 条事实` : ''}，以后不会再记`
+                  : '没有匹配的关系，已记下「别再记这条」',
+              });
+            }
+
+            /** 撤销屏蔽。撤销之后巩固会重新抽回来——这是对的，不是 bug */
+            case 'graph.unsuppress': {
+              const r = graph.unsuppressEdge({
+                id: arg?.id,
+                src: arg?.src,
+                rel: arg?.rel,
+                dst: arg?.dst,
+                chatId: arg?.chatId,
+              });
+              if (!r.ok) return send(res, 500, { ok: false, message: r.reason || '没撤掉' });
+              return send(res, 200, {
+                ok: true,
+                removed: r.removed,
+                message: r.removed ? '撤销了，以后会重新记' : '没找到这条屏蔽记录',
+              });
+            }
+
+            /**
+             * 只标「现在不成立了」，不立墓碑。
+             *
+             * 跟 `graph.suppress` 的区别是语义：这个是"以前对，现在不对"
+             * （搬家了、换工作了），历史还该看得见；那个是"这条根本不该有"。
+             * 面板上两个按钮并列，就是因为选错要返工。
+             */
+            case 'graph.close': {
+              const src = String(arg?.src ?? '').trim();
+              const rel = String(arg?.rel ?? '').trim();
+              const dst = String(arg?.dst ?? '').trim();
+              if (!src || !rel || !dst) {
+                return send(res, 400, { ok: false, message: '缺 src / rel / dst（要关哪条关系）' });
+              }
+              const scope = arg?.chatId === undefined ? chatId : String(arg.chatId ?? '');
+              const n = graph.closeEdge({ src, rel, dst, chatId: scope });
+              return send(res, 200, {
+                ok: true,
+                closed: n,
+                message: n ? '标成「现在不成立了」' : '没找到这条活关系',
+              });
+            }
+
             case 'memory.clear': {
               memory.clearChat(chatId);
               let j = 0;
@@ -2894,6 +2974,8 @@ export function apply(ctx) {
             entities: graph.entities({ chatId, limit: 50 }),
             edges: graph.nowEdges({ chatId, limit: 50 }),
             ended: graph.endedEdges({ chatId, limit: 20 }),
+            /** 删过的关系（墓碑）。面板要给一个「能撤销」的入口 */
+            suppressed: graph.suppressed({ chatId, limit: 50 }),
           });
         } catch (e) {
           send(res, 500, { ok: false, message: e.message });

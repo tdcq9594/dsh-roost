@@ -1325,3 +1325,117 @@ test('巩固：办完的约定能关掉（建边和关边必须同一个 chatId�
     '关掉之后不该还在「没办完」里',
   );
 });
+
+/* ---------------- 删关系：墓碑 ---------------- */
+
+/**
+ * 删一条关系必须**留个记号**，否则第二天又被巩固抽回来。
+ *
+ * 这是用户报的那个问题的核心：「记忆里面她知道的关系怎么删」——
+ * 光 DELETE 是删不掉的，日记原文还在，凌晨巩固一跑就回来了。
+ */
+test('图谱：删掉的关系不会被巩固写回来', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  g.addEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' });
+  assert.equal(g.nowEdges({ chatId: 'g1' }).length, 1);
+
+  const r = g.suppressEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1', why: '记错了' });
+  assert.equal(r.ok, true);
+  assert.equal(r.removed, 1, '边要真的删掉');
+  assert.equal(g.nowEdges({ chatId: 'g1' }).length, 0);
+  assert.equal(g.isSuppressed({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' }), true);
+
+  // 巩固再来一次：这条不许写回来
+  g.addEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' });
+  assert.equal(g.isSuppressed({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' }), true, '写之前该被拦住');
+});
+
+test('图谱：删掉的是同名全部边，活边和已结束的一起删', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const t = Date.now();
+  g.addEdge({ src: '主人', rel: '住在', dst: '杭州', at: t - 1000 });
+  g.closeEdge({ src: '主人', rel: '住在', dst: '杭州', at: t });
+  g.addEdge({ src: '主人', rel: '住在', dst: '杭州', at: t });
+  assert.equal(g.nowEdges({}).length, 1);
+  assert.equal(g.endedEdges({}).length, 1);
+
+  const r = g.suppressEdge({ src: '主人', rel: '住在', dst: '杭州' });
+  assert.equal(r.removed, 2, '「以前成立」那栏里还留着一条一模一样的，等于没删掉');
+  assert.equal(g.nowEdges({}).length + g.endedEdges({}).length, 0);
+});
+
+test('图谱：只删这个会话，别的会话照旧', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  g.addEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' });
+  g.addEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g2' });
+
+  g.suppressEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' });
+  assert.equal(g.isSuppressed({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' }), true);
+  assert.equal(g.isSuppressed({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g2' }), false, '别的群不该受影响');
+  assert.equal(g.nowEdges({ chatId: 'g2' }).length, 1);
+});
+
+test('图谱：全局屏蔽对所有会话都生效', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  g.suppressEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: '' });
+  for (const c of ['g1', 'g2', '']) {
+    assert.equal(g.isSuppressed({ src: '主人', rel: '住在', dst: '杭州', chatId: c }), true, `${c || '(空)'} 该被拦`);
+  }
+});
+
+test('图谱：删两次不报错，也不会多出一条墓碑', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  g.addEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' });
+  g.suppressEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' });
+  const r = g.suppressEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' });
+  assert.equal(r.ok, true);
+  assert.equal(r.removed, 0, '第二次没有边可删');
+  assert.equal(g.suppressed({ chatId: 'g1' }).length, 1, '墓碑只有一条');
+});
+
+test('图谱：撤销之后能重新记', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  g.addEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' });
+  g.suppressEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' });
+  const list = g.suppressed({ chatId: 'g1' });
+  assert.equal(list.length, 1);
+
+  const r = g.unsuppressEdge({ id: list[0].id });
+  assert.equal(r.removed, 1);
+  assert.equal(g.isSuppressed({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' }), false);
+});
+
+test('图谱：删关系要 src/rel/dst 齐全，缺一个就明说', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const r = g.suppressEdge({ src: '主人', rel: '住在', dst: '' });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /src \/ rel \/ dst/);
+});
+
+/**
+ * 巩固必须真的去问墓碑。
+ *
+ * 只加 API 不问，等于墓碑是摆设——这条用例就是防止 `apply()` 里那句
+ * `isSuppressed` 被谁顺手删掉。
+ */
+test('巩固：被屏蔽的三元组不写进图谱', async () => {
+  const now = Date.now();
+  const day = Y(now);
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const mem = fakeMemory();
+
+  g.suppressEdge({ src: '张三', rel: '住在', dst: '杭州', chatId: 'g1', why: '记错了' });
+
+  j.add({ id: 'e1', at: base, chatId: 'g1', sender: '张三', text: '我住在杭州' });
+  const gen = async () => JSON.stringify({
+    summary: '张三说住在杭州。',
+    triples: [{ s: '张三', rel: '住在', o: '杭州', scope: 'chat' }],
+  });
+  const r = await createConsolidate({ journal: j, graph: g, memory: mem, generate: gen, now: () => now }).run({ day });
+
+  assert.equal(r.ok, true);
+  assert.equal(r.suppressed, 1, '要记一笔「被墓碑挡了」');
+  assert.equal(g.nowEdges({ chatId: 'g1' }).length, 0, '不许写回来');
+});

@@ -211,6 +211,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       agreements: 0,
       closed: 0,
       digests: 0,
+      /** 被墓碑挡下来的条数（用户删过、巩固又抽出来的） */
+      suppressed: 0,
       /** 第五层：这条自述写没写（0/1），没写的理由放 selfSkip */
       self: 0,
       selfSkip: '',
@@ -266,7 +268,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         }
 
         const res = apply({ day: target, chatId, list, plan, dry });
-        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'digests']) {
+        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'digests', 'suppressed']) {
           stats[k] += res[k] || 0;
         }
 
@@ -385,7 +387,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
    * critical 降级由 journal.setLevel 那道护栏挡掉。**宁可少改。**
    */
   function apply({ day, chatId, list, plan, dry }) {
-    const out = { ranked: 0, compressed: 0, triples: 0, agreements: 0, closed: 0, digests: 0 };
+    const out = { ranked: 0, compressed: 0, triples: 0, agreements: 0, closed: 0, digests: 0, suppressed: 0 };
     const byId = new Map(list.map((r) => [r.id, r]));
     const at = list.length ? list[list.length - 1].at : now();
 
@@ -468,6 +470,20 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
           if (graph.closeEdge({ src: s, rel, dst: o, at, chatId: scope })) out.closed += 1;
           continue;
         }
+        /**
+         * 用户删过的关系**不许再写回来**。
+         *
+         * 这是墓碑真正生效的地方：`graph.suppressEdge` 只是删了行并记了一笔，
+         * 如果这里不问一句，下一次巩固会把同一件事从日记里重新抽出来——
+         * 用户会看到"删了又长回来"，那比删不掉更让人火大。
+         *
+         * 查的是 `scope`：删的时候选了"只删这个会话"，那别的会话照样能写；
+         * 选的是全局，`chat_id=''` 的墓碑对所有会话都命中。
+         */
+        if (graph.isSuppressed?.({ src: s, rel, dst: o, chatId: scope })) {
+          out.suppressed += 1;
+          continue;
+        }
         if (op === 'update' && graph.hasActive?.(s, rel, { chatId: scope })) {
           graph.closeEdge({ src: s, rel, at, chatId: scope });
         }
@@ -484,6 +500,14 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       if (!text) continue;
       if (dry) {
         out.agreements += 1;
+        continue;
+      }
+      /**
+       * 约定也有墓碑。删掉的那条如果又从日记里被抽出来，
+       * 会同时污染 facts 和图谱两个地方，所以两边都得先问一句。
+       */
+      if (graph?.isSuppressed?.({ src: '主人', rel: '约定', dst: text.slice(0, 40), chatId })) {
+        out.suppressed += 1;
         continue;
       }
       /**

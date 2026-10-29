@@ -1684,6 +1684,14 @@ select.roost-input{color-scheme:dark}
       const [hits, setHits] = useState(null)
       const [fact, setFact] = useState('')
       const [scope, setScope] = useState('global')
+      /**
+       * 正在确认要删的那条关系。
+       *
+       * 不用 `window.confirm`：它给不了「删掉 / 只是现在不成立」这种二选一，
+       * 而这两个语义差别很大——一个是"以后别再记"，一个只是标个结束时间。
+       * 选错了前者要撤销，后者要重新聊一遍。
+       */
+      const [delEdge, setDelEdge] = useState(null)
       const jr = mem?.journal
       const gp = mem?.graph
       const canChat = Boolean(mem?.chatId)
@@ -1976,11 +1984,91 @@ select.roost-input{color-scheme:dark}
                       gp.edges.map((e) =>
                         h('div', { key: e.id, className: 'roost-item' },
                           h('span', { className: 't' }, `${e.src} —${e.rel}→ ${e.dst}`),
-                          h('span', { className: 'd' }, dayOf(e.from)),
+                          h('span', { className: 'd', style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                            dayOf(e.from),
+                            h('button', {
+                              type: 'button',
+                              className: 'roost-btn',
+                              title: '删掉这条关系',
+                              onClick: () => setDelEdge(e),
+                            }, '删'),
+                          ),
                         ),
                       ),
                     )
                   : h('div', { className: 'roost-empty' }, '还没有关系。聊得多了巩固时会自己抽出来。'),
+
+                /**
+                 * 删除确认。两个选项对应两种真实诉求，必须分开：
+                 *   · 记错了 → 删掉 + 立墓碑，以后巩固也不会再写回来
+                 *   · 过时了 → 只标结束时间，历史还看得见
+                 * 直接 DELETE 是不行的：日记原文还在，第二天又被抽回来。
+                 */
+                delEdge
+                  ? h('div', {
+                      className: 'roost-item',
+                      style: { borderLeft: '2px solid var(--roost-warn, #d08770)', paddingLeft: 10, marginTop: 8 },
+                    },
+                      h('span', { className: 't' }, `删掉「${delEdge.src} —${delEdge.rel}→ ${delEdge.dst}」？`),
+                      h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 } },
+                        h('button', {
+                          type: 'button', className: 'roost-primary', disabled: busy,
+                          onClick: async () => {
+                            const r = await quick('graph.suppress', {
+                              src: delEdge.src, rel: delEdge.rel, dst: delEdge.dst,
+                              why: '面板手动删除',
+                            })
+                            toast(r.ok === false ? (r.message || '没删掉') : (r.message || '删了'))
+                            setDelEdge(null)
+                            reload()
+                          },
+                        }, '删掉，以后也别再记'),
+                        h('button', {
+                          type: 'button', className: 'roost-btn', disabled: busy,
+                          onClick: async () => {
+                            const r = await quick('graph.close', {
+                              src: delEdge.src, rel: delEdge.rel, dst: delEdge.dst,
+                            })
+                            toast(r.ok === false ? (r.message || '没标上') : (r.message || '标成「现在不成立了」'))
+                            setDelEdge(null)
+                            reload()
+                          },
+                        }, '只是现在不成立了'),
+                        h('button', {
+                          type: 'button', className: 'roost-btn', disabled: busy,
+                          onClick: () => setDelEdge(null),
+                        }, '算了'),
+                      ),
+                      h('div', { className: 'roost-note' },
+                        '「删掉」会同时记住“别再记这条”——不这样的话，凌晨巩固会从日记里把它重新抽出来。'),
+                    )
+                  : null,
+
+                (gp?.suppressed || []).length
+                  ? h('details', { style: { marginTop: 10 } },
+                      h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer' } },
+                        `删过的，不会再记（${gp.suppressed.length}）`),
+                      h('div', { className: 'roost-list', style: { marginTop: 6 } },
+                        gp.suppressed.slice(0, 12).map((s) =>
+                          h('div', { key: s.id, className: 'roost-item' },
+                            h('span', { className: 't' }, `${s.src} —${s.rel}→ ${s.dst}`),
+                            h('span', { className: 'd', style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                              s.chatId ? '只在这个会话' : '所有会话',
+                              h('button', {
+                                type: 'button', className: 'roost-btn', disabled: busy,
+                                title: '撤销之后，下次巩固会重新记这条',
+                                onClick: async () => {
+                                  const r = await quick('graph.unsuppress', { id: s.id })
+                                  toast(r.message || (r.ok === false ? '没撤掉' : '撤销了'))
+                                  reload()
+                                },
+                              }, '撤销'),
+                            ),
+                          ),
+                        ),
+                      ),
+                    )
+                  : null,
                 (gp?.ended || []).length
                   ? h('details', { style: { marginTop: 10 } },
                       h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer' } },

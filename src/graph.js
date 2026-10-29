@@ -108,6 +108,31 @@ export function createGraph({ file, log = () => {} } = {}) {
         );
         CREATE INDEX IF NOT EXISTS edge_src ON edge(src_id, rel);
         CREATE INDEX IF NOT EXISTS edge_chat ON edge(chat_id, valid_to);
+
+        /**
+         * 墓碑：用户明确说过「这条关系不该存在」。
+         *
+         * 为什么需要单独一张表：光删 edge 没用——日记原文还在，
+         * 凌晨巩固会把同一件事重新抽出来。删了又长回来，比删不掉更让人火大。
+         *
+         * 用 normKey(名字) 而不是 entity.id：实体删掉重建之后 id 会变，
+         * 名字才是稳定标识。
+         *
+         * chat_id='' 表示**所有会话**都别再写（全局屏蔽）；
+         * 带具体 id 就只拦那一个会话——同一个关系在 A 群是真的、B 群是错的，
+         * 这种情况必须能分开。
+         */
+        CREATE TABLE IF NOT EXISTS suppress (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          src_key TEXT NOT NULL,
+          rel TEXT NOT NULL,
+          dst_key TEXT NOT NULL,
+          chat_id TEXT NOT NULL DEFAULT '',
+          at INTEGER NOT NULL,
+          why TEXT NOT NULL DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS suppress_uniq
+          ON suppress(src_key, rel, dst_key, chat_id);
       `);
       /**
        * "同一关系同一时刻只有一条活边"用**部分唯一索引**表达。
@@ -220,13 +245,153 @@ export function createGraph({ file, log = () => {} } = {}) {
     return Number(r.changes || 0);
   }
 
+  /**
+   * 删掉一条关系，并记住「别再写回来」。
+   *
+   * 光 DELETE 是不够的：日记原文还在，凌晨巩固会把同一件事重新抽出来。
+   * 所以这里是一个事务里的两步——删干净 + 立墓碑。
+   *
+   * 删的是**同名全部边**（活边 + 已经结束的），不只是活边：
+   * 用户说"这条关系不对"时，面板「以前成立、现在不成立」那栏里还留着一条
+   * 一模一样的，等于没删掉。
+   *
+   * 实体不级联删：可能还有别的边引用它，孤儿本身无害。
+   *
+   * @param {object} o
+   * @param {string} o.src 主语
+   * @param {string} o.rel 关系名
+   * @param {string} o.dst 宾语
+   * @param {string} [o.chatId] 只在这个会话里屏蔽；空串 = 所有会话
+   * @param {string} [o.why] 为什么删（面板上显示，省得以后想不起）
+   * @returns {{ok:boolean, removed:number, reason?:string}}
+   */
+  function suppressEdge({ src, rel, dst, chatId = '', why = '', at = Date.now() } = {}) {
+    const d = open();
+    if (!d) return { ok: false, removed: 0, reason: '图谱没启用' };
+    const s = String(src ?? '').trim();
+    const r = String(rel ?? '').trim();
+    const o = String(dst ?? '').trim();
+    if (!s || !r || !o) return { ok: false, removed: 0, reason: 'src / rel / dst 都得有' };
+
+    const t = Number(at) || Date.now();
+    const sk = normKey(s);
+    const ok = normKey(o);
+    const cid = String(chatId ?? '');
+
+    let removed = 0;
+    try {
+      d.exec('BEGIN');
+      /**
+       * 删边用**名字**定位，不经过 `ensureEntity`。
+       *
+       * `ensureEntity` 会顺手把不存在的实体插进去——为了删一条边而造出
+       * 两条实体，纯属垃圾。这里直接 join 名字。
+       */
+      removed = Number(
+        d
+          .prepare(
+            `DELETE FROM edge WHERE rel=? AND src_id IN (SELECT id FROM entity WHERE key=?)
+             AND dst_id IN (SELECT id FROM entity WHERE key=?) AND (?='' OR chat_id=?)`,
+          )
+          .run(r, sk, ok, cid, cid).changes || 0,
+      );
+      d.prepare(
+        `INSERT INTO suppress(src_key, rel, dst_key, chat_id, at, why) VALUES (?,?,?,?,?,?)
+         ON CONFLICT(src_key, rel, dst_key, chat_id)
+         DO UPDATE SET at=excluded.at, why=excluded.why`,
+      ).run(sk, r, ok, cid, t, String(why ?? '').slice(0, 120));
+      d.exec('COMMIT');
+    } catch (e) {
+      try {
+        d.exec('ROLLBACK');
+      } catch {}
+      return { ok: false, removed: 0, reason: e?.message || String(e) };
+    }
+    return { ok: true, removed };
+  }
+
+  /** 撤销屏蔽。撤销之后巩固会重新把它抽回来——这是对的，不是 bug */
+  function unsuppressEdge({ id, src, rel, dst, chatId } = {}) {
+    const d = open();
+    if (!d) return { ok: false, removed: 0, reason: '图谱没启用' };
+    try {
+      if (id) {
+        return { ok: true, removed: Number(d.prepare('DELETE FROM suppress WHERE id=?').run(Number(id)).changes || 0) };
+      }
+      const sk = normKey(src);
+      const r = String(rel ?? '').trim();
+      const ok = normKey(dst);
+      if (!sk || !r || !ok) return { ok: false, removed: 0, reason: 'id 或者 src/rel/dst 得有' };
+      const cid = String(chatId ?? '');
+      return {
+        ok: true,
+        removed: Number(
+          d.prepare('DELETE FROM suppress WHERE src_key=? AND rel=? AND dst_key=? AND chat_id=?')
+            .run(sk, r, ok, cid).changes || 0,
+        ),
+      };
+    } catch (e) {
+      return { ok: false, removed: 0, reason: e?.message || String(e) };
+    }
+  }
+
+  /**
+   * 这条关系是不是被屏蔽过。
+   *
+   * 两条命中路径：**本会话**的墓碑，或者 `chat_id=''` 的全局墓碑。
+   * 反过来不成立——只屏蔽了 A 群，B 群照样能写。
+   *
+   * @returns {boolean}
+   */
+  function isSuppressed({ src, rel, dst, chatId = '' } = {}) {
+    const d = open();
+    if (!d) return false;
+    const sk = normKey(src);
+    const r = String(rel ?? '').trim();
+    const ok = normKey(dst);
+    if (!sk || !r || !ok) return false;
+    try {
+      const hit = d
+        .prepare(
+          `SELECT 1 FROM suppress WHERE src_key=? AND rel=? AND dst_key=?
+           AND (chat_id='' OR chat_id=?) LIMIT 1`,
+        )
+        .get(sk, r, ok, String(chatId ?? ''));
+      return Boolean(hit);
+    } catch {
+      return false;
+    }
+  }
+
+  /** 面板用：列出屏蔽清单（新删的在前） */
+  function suppressed({ chatId = '', limit = 50 } = {}) {
+    const d = open();
+    if (!d) return [];
+    try {
+      const sql = chatId
+        ? 'SELECT * FROM suppress WHERE chat_id=? OR chat_id=\'\' ORDER BY at DESC LIMIT ?'
+        : 'SELECT * FROM suppress ORDER BY at DESC LIMIT ?';
+      const rows = chatId ? d.prepare(sql).all(chatId, limit) : d.prepare(sql).all(limit);
+      return rows.map((r) => ({
+        id: r.id,
+        src: r.src_key,
+        rel: r.rel,
+        dst: r.dst_key,
+        chatId: r.chat_id,
+        at: r.at,
+        why: r.why,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   const SELECT_EDGE = `
     SELECT e.*, s.name AS src_name, t.name AS dst_name
     FROM edge e
     JOIN entity s ON s.id = e.src_id
     JOIN entity t ON t.id = e.dst_id
   `;
-
   /** 现在的状态：只要活边。`chatId` 给定时包含跨群（chat_id=''）的边 */
   function nowEdges({ chatId = '', limit = 50 } = {}) {
     const d = open();
@@ -394,6 +559,14 @@ export function createGraph({ file, log = () => {} } = {}) {
     addEpisode,
     addEdge,
     closeEdge,
+    /** 删一条关系 + 立墓碑（删了不会再被巩固写回来） */
+    suppressEdge,
+    /** 撤销屏蔽 */
+    unsuppressEdge,
+    /** 这条关系是不是被屏蔽过（巩固写之前要问一句） */
+    isSuppressed,
+    /** 屏蔽清单（面板用） */
+    suppressed,
     ensureEntity,
     nowEdges,
     edgesAsOf,
