@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,7 +19,7 @@ import {
 } from '../src/tokenize.js';
 import { createJournal, classify, dayOf, scoreOf, cosine, DEFAULT_KEEP_DAYS } from '../src/journal.js';
 import { createGraph } from '../src/graph.js';
-import { createMemory } from '../src/memory.js';
+import { createMemory, scoreOfFact, W_EXPLICIT } from '../src/memory.js';
 import {
   createConsolidate,
   parseJsonLoose,
@@ -852,6 +852,9 @@ function freshFacts() {
   return createMemory();
 }
 
+/** 直接看盘上的文件 —— 有些事（孤儿元数据）只有看文件才验得出来 */
+const readRaw = () => JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'memory.json'), 'utf8'));
+
 test('facts：默认记到跨群层（用户说"记住"多半是关于他自己）', () => {
   const m = freshFacts();
   m.add('g1', '主人住在杭州');
@@ -989,6 +992,17 @@ test('facts：授权记录能写能查（群主动的硬前置）', () => {
   assert.equal(m.authz('g1').type, 'group', '面板要能看见是什么类型的授权');
 });
 
+test('facts：授权记录重启后还在（不然群主动永远"没授权"）', () => {
+  // load() 以前只重建 global/chats/personas 三个字段，authz 不在里面：
+  // 重启后读不到授权，而下一次 save() 会把盘上整段 authz 抹掉 ——
+  // 表现是「重启一次群主动就永久失效」，且面板上看不出任何异常
+  const m = freshFacts();
+  m.setAuthz('g1', 'group_push');
+  assert.equal(createMemory().hasAuthz('g1', 'group_push'), true, '重启后授权不能丢');
+  createMemory().add('g1', '随便记一条'); // 任意一次保存
+  assert.equal(createMemory().hasAuthz('g1', 'group_push'), true, '保存不该把 authz 抹掉');
+});
+
 test('facts：从旧版导入是幂等的（重复导入不翻倍）', () => {
   const m = freshFacts();
   const payload = { global: ['跨群的 A', '跨群的 B'], chats: { g1: ['本群的 C'] } };
@@ -997,4 +1011,115 @@ test('facts：从旧版导入是幂等的（重复导入不翻倍）', () => {
   assert.equal(m.list('g1').global.length, 2);
   assert.equal(m.list('g1').chat.length, 1);
 });
+
+/* ---------------- 权重与淘汰（M3） ----------------
+ *
+ * 以前是纯 FIFO：第 41 条进来，第 1 条无条件走。
+ * 于是「主人对花生过敏」会因为今天记了 40 条杂事而消失。
+ */
+
+test('facts：分数 = 权重 × 时间衰减（30 天减半）', () => {
+  const t0 = Date.parse('2026-01-01T00:00:00');
+  assert.equal(scoreOfFact(null, t0), 1, '没元数据就按 1 算');
+  assert.equal(scoreOfFact({ w: 2, at: t0 }, t0), 2);
+  assert.equal(scoreOfFact({ w: 2, at: t0 }, t0 + 30 * DAY), 1, '30 天减半');
+  assert.equal(scoreOfFact({ w: 2, at: t0 }, t0 + 60 * DAY), 0.5);
+  assert.ok(scoreOfFact({ w: 2 }, t0) > scoreOfFact({ w: 1 }, t0), '权重高的分高');
+});
+
+test('facts：同一条被反复提到会加权重，但不加条目', () => {
+  const m = freshFacts();
+  m.add('g1', '主人对花生过敏');
+  m.add('g1', '主人对花生过敏');
+  m.add('g1', '主人对花生过敏');
+  const full = m.listFull('g1').global;
+  assert.equal(full.length, 1, '还是只有一条');
+  assert.equal(full[0].w, 2, '1 + 0.5 + 0.5');
+});
+
+test('facts：权重有上限，反复提到不会无限涨', () => {
+  const m = freshFacts();
+  for (let i = 0; i < 30; i++) m.add('g1', '同一句话');
+  assert.equal(m.listFull('g1').global[0].w, 5, '封顶 5');
+});
+
+test('facts：明确「记住」的比巩固抽出来的权重高', () => {
+  const m = freshFacts();
+  m.add('g1', '明确记的', 'global', { w: W_EXPLICIT });
+  m.add('g1', '巩固抽的');
+  const full = m.listFull('g1').global;
+  assert.equal(full.find((x) => x.text === '明确记的').w, 2);
+  assert.equal(full.find((x) => x.text === '巩固抽的').w, 1);
+});
+
+test('facts：老的高权重事实不会被新杂事挤掉（FIFO 会）', () => {
+  // 这条是 M3 的核心断言。以前是 FIFO：第 41 条进来，最早那条无条件走，
+  // 所以「对花生过敏」会因为今天记了 40 条杂事而消失。
+  let t = Date.parse('2026-01-01T00:00:00');
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-facts-'));
+  const m = createMemory({ now: () => t });
+
+  m.add('g1', '主人对花生过敏', 'global', { w: W_EXPLICIT }); // 第 1 条，权重 2
+  for (let i = 2; i <= 40; i++) m.add('g1', `杂事${i}`);
+  assert.equal(m.list('g1').global.length, 40);
+
+  // 30 天后：权重 2 的那条衰减到 1.0，其余衰减到 0.5
+  t += 30 * DAY;
+  m.add('g1', '新杂事');
+
+  const g = m.list('g1').global;
+  assert.equal(g.length, 40);
+  assert.ok(g.includes('主人对花生过敏'), '高权重的那条要留住');
+  assert.ok(g.includes('新杂事'), '刚记的当然也留');
+  assert.ok(!g.includes('杂事2'), '被挤掉的是最旧的低权重杂事');
+  assert.equal(Object.keys(readRaw().meta.global).length, 40, '被淘汰的不能留孤儿元数据');
+});
+
+test('facts：被用上会加权重，不认识的文本不算', () => {
+  const m = freshFacts();
+  m.add('g1', '一条');
+  assert.equal(m.touch('g1', ['一条', '不存在']), 1);
+  assert.equal(m.listFull('g1').global[0].w, 1.5);
+  assert.equal(m.touch('', ['一条'], 'chat'), 0, '本群层里没有这条');
+});
+
+test('facts：删掉正文，元数据也要跟着删（不然文件只会越来越长）', () => {
+  // 这条必须看盘上的文件才验得出来：listFull 只遍历正文，
+  // 孤儿元数据在内存里完全看不见 —— 但它会一直堆在 memory.json 里
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  m.add('g1', '主人住在杭州'); // w = 1.5
+  assert.equal(m.listFull('g1').global[0].w, 1.5);
+
+  m.remove('g1', '杭州');
+  assert.deepEqual(Object.keys(readRaw().meta.global), [], '删正文时元数据不能留孤儿');
+
+  m.add('g1', '主人住在杭州');
+  assert.equal(m.listFull('g1').global[0].w, 1, '再记是全新的一条，不继承旧权重');
+});
+
+test('facts：能记下出处（回查原文靠它）', () => {
+  const m = freshFacts();
+  m.add('g1', '主人对花生过敏', 'global', { src: { journalId: 'j1', eventIds: ['ev-1'], at: 123 } });
+  const x = m.listFull('g1').global[0];
+  assert.equal(x.src.journalId, 'j1');
+  assert.deepEqual(x.src.eventIds, ['ev-1']);
+});
+
+test('facts：老文件没有 meta 也能读，默认 w=1、无出处', () => {
+  // 升级路径：阶段 3 之前的库只有 global/chats，不该因为缺 meta 就读不出来
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-facts-'));
+  writeFileSync(
+    join(process.env.DSH_ROOST_DATA, 'memory.json'),
+    JSON.stringify({ global: ['老事实'], chats: { g1: ['老本群'] } }),
+    'utf8',
+  );
+  const m = createMemory();
+  assert.deepEqual(m.list('g1').global, ['老事实']);
+  const full = m.listFull('g1');
+  assert.equal(full.global[0].w, 1);
+  assert.equal(full.global[0].src, null);
+  assert.equal(full.chat[0].text, '老本群');
+});
+
 

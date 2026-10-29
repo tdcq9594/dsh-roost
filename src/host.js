@@ -22,7 +22,7 @@ import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf, speakerTag } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools } from './permissions.js';
 import { createSetup } from './setup.js';
-import { createMemory } from './memory.js';
+import { createMemory, W_EXPLICIT } from './memory.js';
 import { createJournal } from './journal.js';
 import { createGraph } from './graph.js';
 import { createSelf } from './self.js';
@@ -871,7 +871,13 @@ export function apply(ctx) {
     out = out.replace(/<<remember-here:\s*([\s\S]*?)>>/gi, (_, v) => {
       const f = String(v || '').trim();
       if (f) {
-        memory.add(chatId, f, 'chat');
+        /**
+         * 明确要求记的给更高权重（`W_EXPLICIT`）。
+         *
+         * 淘汰是按「权重 × 时间衰减」算的，全给 1 就等于退回 FIFO：
+         * 「记住我花生过敏」会因为今天记了 40 条杂事被挤掉。
+         */
+        memory.add(chatId, f, 'chat', { w: W_EXPLICIT });
         touched = '记住了（只这个群）';
       }
       return '';
@@ -880,7 +886,7 @@ export function apply(ctx) {
     out = out.replace(/<<remember:\s*([\s\S]*?)>>/gi, (_, v) => {
       const f = String(v || '').trim();
       if (f) {
-        memory.add(chatId, f, 'global');
+        memory.add(chatId, f, 'global', { w: W_EXPLICIT });
         touched = '记住了';
       }
       return '';
@@ -2579,7 +2585,13 @@ export function apply(ctx) {
         const body = await readBody(req);
         const fact = String(body.fact ?? '').trim();
         if (!fact) return send(res, 400, { ok: false, message: '缺 fact' });
-        memory.add(String(body.chatId ?? lastScene?.chatId ?? ''), fact, body.scope === 'chat' ? 'chat' : 'global');
+        // 面板上手动记的，等于人明确要求记住 → 高权重，别被后来的杂事挤掉
+        memory.add(
+          String(body.chatId ?? lastScene?.chatId ?? ''),
+          fact,
+          body.scope === 'chat' ? 'chat' : 'global',
+          { w: W_EXPLICIT },
+        );
         send(res, 200, { ok: true });
       }),
 
