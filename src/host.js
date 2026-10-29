@@ -1240,8 +1240,17 @@ export function apply(ctx) {
      * 是另一套）。哪一边加了新标记、另一边没跟上，标记就会原样进群——
      * `mood` 已经这么漏过一次（写进 `qq_send` 参数里，工具通道直接 `postReply`）。
      * 只匹配「字母开头 + 可选冒号值」的形状，不会误伤正文里的尖括号。
+     *
+     * **负向前瞻 `(?!image|voice|button|say|silence)\b` 是本次修复的关键**：
+     * 这几个是**下游 ai-chat** 的 `parseActions` 负责执行的标记（发图 / 发语音 /
+     * 按钮 / 语音条 / 静默），宿主这边不认识、也不该碰，必须原样保留让它们
+     * 随文本传到 ai-chat 去执行。
+     *
+     * 真实事故：模型把 `<<image: 路径>>` 写进 `qq_send` 的 text 参数，
+     * 这里没保护 → 被兜底当成「未知标记」静默删掉 → ai-chat 拿到的
+     * 是纯文本、解析不出 image 动作 → 图根本没发出去，模型却以为「发你了」。
      */
-    out = out.replace(/<<[a-z][a-z-]{0,20}(?::[^<>]{0,2000})?>>/gi, '');
+    out = out.replace(/<<(?!image|voice|button|say|silence)\b[a-z][a-z-]{0,20}(?::[^<>]{0,2000})?>>/gi, '');
 
     return { text: out.trim(), touched };
   }

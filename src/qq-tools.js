@@ -144,8 +144,9 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
       at: {
         type: 'string',
         description:
-          '要 @ 谁。填 "sender" = @ 刚说话的那个人（最常用）；'
-          + '也可以填消息头括号里的那串 openid。不填就不 @。'
+          '要 @ 谁。**群聊里默认不填**（不 @）——正常接话、闲聊、连续对话都不 @。'
+          + '只有需要明确点名某个人时才填："sender" = @ 刚说话的那个人，'
+          + '或填消息头括号里那串 openid。'
           + '只有群聊、只有这一轮第一段有效。',
       },
     },
