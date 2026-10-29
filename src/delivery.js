@@ -221,14 +221,30 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
 
     // 先查最老的：最老的等得最久，也最可能已经有结果
     const batch = waiting.slice().sort((a, b) => a.at - b.at).slice(0, Math.max(1, Number(limit) || 10));
+
+    /**
+     * **并发查，不串行。**
+     *
+     * 串行的代价是线性的：一条 5 秒超时，10 条就是 50 秒——面板上点
+     * 「回查一次」会转圈到人以为卡死，定时器那一轮也会拖住后面的活。
+     * 这些请求打到的是本机 ai-chat 的只读路由，并发几条没有任何压力。
+     *
+     * 查询本身是纯读，结果统一收集后再改内存，所以并发不会写出半截状态。
+     */
+    const answers = await Promise.all(
+      batch.map(async (x) => {
+        try {
+          return await ch.delivery(x.requestId);
+        } catch (e) {
+          return { ok: false, message: e?.message ?? String(e) };
+        }
+      }),
+    );
+
     const settled = [];
-    for (const x of batch) {
-      let r = null;
-      try {
-        r = await ch.delivery(x.requestId);
-      } catch (e) {
-        r = { ok: false, message: e?.message ?? String(e) };
-      }
+    for (let i = 0; i < batch.length; i++) {
+      const x = batch[i];
+      const r = answers[i];
       const nx = nextState(r, x.state);
       x.checkedAt = now();
       if (nx.state !== x.state) {
@@ -270,10 +286,5 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
       return { total: items.length, by, pending: items.filter((x) => !SETTLED.has(x.state)).length };
     },
     prune,
-    /** 测试用：把内存里的东西丢掉重读 */
-    reload: () => {
-      cache = null;
-      return load();
-    },
   };
 }

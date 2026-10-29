@@ -91,14 +91,15 @@ window.__ModuleLoader__.load({
     /**
      * 投递状态的中文名。
      *
-     * 后端的状态值（`sent` / `failed` / `unknown` / `gone` / `waiting`）直接
-     * 摆给用户看没人看得懂，而且「失败」和「不确定」的区别恰恰是这一页
-     * 最要讲清楚的事——前者可以再发，后者重发会让对方收到两条。
+     * 只有 `waiting`（还在等）和四个终态会落进 `delivery.json`——
+     * `src/delivery.js` 的 `nextState` 把 `pending` / `audited` 都归成
+     * `waiting`。所以这里不列那两个，免得读的人以为中间态会被存下来。
+     *
+     * 「没发出去」和「不确定」的区别是这一页最要讲清楚的事：
+     * 前者可以再发一次，后者重发会让对方收到两条。
      */
     const DELIV_STATE = {
       waiting: '等结果',
-      pending: '等结果',
-      audited: '审核中',
       sent: '送到了',
       failed: '没发出去',
       unknown: '不确定',
@@ -2336,7 +2337,9 @@ select.roost-input{color-scheme:dark}
               type: 'button', className: 'roost-primary', disabled: busy,
               onClick: async () => {
                 const r = await post('/awake', {})
-                toast(r.spoke ? '她说了：' + (r.text || '') : (r.why || '这次没说'))
+                toast(r.spoke
+                  ? (r.pending ? '说了，但在等审核：' : '她说了：') + (r.text || '')
+                  : (r.why || '这次没说'))
                 reload()
               },
             }, busy ? '问着…' : '问一次私聊'),
@@ -2345,7 +2348,10 @@ select.roost-input{color-scheme:dark}
               onClick: async () => {
                 const r = await post('/awake', { target: 'group' })
                 const said = (r.results || []).filter((x) => x.ok)
-                toast(said.length ? `在 ${said.length} 个群说了` : '群里一个都没说')
+                const wait = said.filter((x) => x.pending).length
+                toast(said.length
+                  ? `在 ${said.length} 个群说了${wait ? `，其中 ${wait} 条在等审核` : ''}`
+                  : '群里一个都没说')
                 reload()
               },
             }, '跑一遍群白名单'),

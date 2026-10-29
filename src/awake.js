@@ -579,7 +579,15 @@ export function createAwake({
       results.push({
         ...cand,
         ok: Boolean(r?.ok),
-        why: r?.ok ? '说了' : r?.message,
+        /**
+         * 进了审核：`ok` 为真，但**还不能算「说到了」**。
+         *
+         * 官方 304023 之后审核结果推到框架侧，这边只能等投递跟踪
+         * 回来问（`src/delivery.js`）。面板上「说了」和「说了但在等审核」
+         * 必须长得不一样，否则人会把一条可能被驳的消息当成已经送达。
+         */
+        pending: Boolean(r?.pending),
+        why: r?.ok ? (r?.pending ? '说了（等审核）' : '说了') : r?.message,
         kind: v.kind,
         text: r?.ok ? v.text : '',
       });

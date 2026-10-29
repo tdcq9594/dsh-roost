@@ -2974,7 +2974,12 @@ export function apply(ctx) {
           });
         }
         try {
-          const r = await deliveryTrack.resolve({ limit: 20 });
+          /**
+           * `limit` 不要调大：这些请求是**并发**打给 ai-chat 的，
+           * 一轮几十条就是几十个同时在飞的只读请求。10 条足够——
+           * 面板只是让人确认「刚才那条到底过没过」，不是批量对账。
+           */
+          const r = await deliveryTrack.resolve({ limit: 10 });
           return send(res, 200, { ok: true, ...r, ...deliveryTrack.stats() });
         } catch (e) {
           return send(res, 500, { ok: false, message: e.message });
@@ -3004,7 +3009,14 @@ export function apply(ctx) {
           const v = await awake.compose({ kind: 'c2c' });
           if (!v.speak) return send(res, 200, { ok: true, spoke: false, why: v.why, kind: v.kind });
           const sent = await sendOut({ scene: 'c2c', target: cfg.speakUp?.chatId || '', text: v.text });
-          return send(res, 200, { ok: Boolean(sent?.ok), spoke: Boolean(sent?.ok), text: v.text, message: sent?.message });
+          return send(res, 200, {
+            ok: Boolean(sent?.ok),
+            spoke: Boolean(sent?.ok),
+            /** 进了审核（304023）：发出去了但结果未定，面板要分开说 */
+            pending: Boolean(sent?.pending),
+            text: v.text,
+            message: sent?.message,
+          });
         } catch (e) {
           return send(res, 500, { ok: false, message: e.message });
         }
