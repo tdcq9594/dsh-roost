@@ -146,17 +146,30 @@ export function createQqChannel({ baseUrl, keyQuery = () => '', log = () => {}, 
      * 这是通道的硬前置（没授权官方直接拒），不是业务策略。
      * 上层只管"我想说"，能不能说是这一层的事。
      *
+     * `silenceMs`：她在这条消息里要求安静一阵子（`<<silence:2h>>`）。
+     * 主动搭话的文本会先被 speakup 摘掉所有标记，所以时长只能单独传，
+     * 由 ai-chat 转成框架的会话静默。
+     *
      * @returns {Promise<{ok:boolean, message?:string, scene?:string}>}
      */
-    async send({ scene = 'c2c', target, text, hasGroupAuthz = true } = {}) {
+    async send({ scene = 'c2c', target, text, hasGroupAuthz = true, silenceMs = 0 } = {}) {
       const t = String(text ?? '').trim();
       if (!target) return { ok: false, message: '缺 target' };
-      if (!t) return { ok: false, message: '没有内容可发' };
+      /**
+       * 只有静默、没有正文是合法的——`<<silence:2h>>` 单独出现就是
+       * 「我要安静，没什么要说的」。这时候不该拦，也不该发空消息。
+       */
+      if (!t && !(Number(silenceMs) > 0)) return { ok: false, message: '没有内容可发' };
       if (scene === 'group' && !hasGroupAuthz) {
         return { ok: false, message: '这个群没有 group_push 授权，主动消息发不出去' };
       }
       try {
-        const r = await post({ scene: scene === 'group' ? 'group' : 'c2c', target, text: t });
+        const r = await post({
+          scene: scene === 'group' ? 'group' : 'c2c',
+          target,
+          text: t,
+          ...(Number(silenceMs) > 0 ? { silenceMs: Number(silenceMs) } : {}),
+        });
         if (!r?.ok) log(`通道发送失败：${r?.message ?? '未知原因'}`);
         return r;
       } catch (e) {

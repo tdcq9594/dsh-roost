@@ -193,6 +193,25 @@ test('觉醒：真说话时把残留标记摘干净（不能漏到群里）', ()
   assert.ok(v.text.includes('想起你了'));
 });
 
+test('觉醒：说完一句顺带要求安静', () => {
+  const v = parseVerdict('群里太吵了 <<silence:1h>>');
+  assert.equal(v.speak, true);
+  assert.equal(v.text, '群里太吵了', '标记不能漏进群里');
+  assert.equal(v.silenceMs, 3_600_000, '时长要先提取再摘标记');
+});
+
+test('觉醒：只有静默没有正文时按「不说」处理', () => {
+  // 群主动本来就是「要不要插话」，不插话就不说话，单独静默没有意义
+  const v = parseVerdict('<<silence:2h>>');
+  assert.equal(v.speak, false);
+});
+
+test('觉醒：没有静默标记时 silenceMs 为 0', () => {
+  const v = parseVerdict('随便说一句');
+  assert.equal(v.speak, true);
+  assert.equal(v.silenceMs, 0);
+});
+
 test('觉醒：提示词里必须给出「不说话的出口」', () => {
   const p = buildWakePrompt({ opp: { kind: 'miss', reason: '很久没聊' }, ctx: {} });
   assert.match(p, /<<skip>>/);

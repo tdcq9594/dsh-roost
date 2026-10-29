@@ -23,7 +23,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { NEUTRAL } from './mood.js';
 // 跨天排期和私聊共用一份实现，两边的「额度用完推到明天」不能算出两个时间
-import { scheduleNextDay } from './speakup.js';
+import { scheduleNextDay, silenceMsOf } from './speakup.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -256,14 +256,20 @@ export function parseVerdict(raw) {
   const s = String(raw ?? '').trim();
   if (!s) return { speak: false, text: '', why: '空回答' };
   if (/<<\s*skip\s*>>/i.test(s)) return { speak: false, text: '', why: '她自己决定不说' };
-  // 去掉可能残留的标记，避免漏到群里
+  /**
+   * 静默要**先提取再摘掉**——下一行的 replace 会把所有 `<<...>>` 一起抹平。
+   *
+   * 群主动只支持「说完这句顺带要求安静」；只有静默、没有正文时按「不说」处理
+   * （群主动本来就是「要不要插话」，不插话就不说话，单独静默没有意义）。
+   */
+  const silenceMs = silenceMsOf(s);
   const text = s
     .replace(/<<[^>]*>>/g, '')
     .replace(/^["「『]|["」』]$/g, '')
     .trim();
   if (!text) return { speak: false, text: '', why: '去掉标记后没内容' };
-  if (text.length > 500) return { speak: true, text: text.slice(0, 500), why: '' };
-  return { speak: true, text, why: '' };
+  if (text.length > 500) return { speak: true, text: text.slice(0, 500), silenceMs, why: '' };
+  return { speak: true, text, silenceMs, why: '' };
 }
 
 /**
@@ -464,6 +470,8 @@ export function createAwake({
         target: cand.chatId,
         text: v.text,
         hasGroupAuthz: true,
+        // 「说完这句，让我静静」——群主动也认这个标记
+        silenceMs: v.silenceMs || 0,
       });
       if (r?.ok) {
         const today = dayKey(now());

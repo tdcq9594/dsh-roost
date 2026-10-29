@@ -64,6 +64,18 @@ export function shouldFire(state, cfg, now) {
     return { fire: false, why: `免打扰（${cfg.awakeFrom}–${cfg.awakeTo} 点）` };
   }
 
+  /**
+   * 她自己要求安静（`<<silence:2h>>`）。
+   *
+   * 框架那边的会话闸也记了一份（拦收到的消息），这里必须**再记一份**：
+   * 主动搭话走的是 outbound，不经过 pipeline，闸拦不到它。
+   * 两边都记，才是「安静就是真的安静」。
+   */
+  if (state.silenceUntil && now < state.silenceUntil) {
+    const mins = Math.ceil((state.silenceUntil - now) / MINUTE);
+    return { fire: false, why: `她自己要求安静（还剩 ${mins} 分钟）` };
+  }
+
   // 跨天了就把计数归零
   const day = new Date(now).toDateString();
   const count = state.day === day ? state.todayCount || 0 : 0;
@@ -81,6 +93,26 @@ export function shouldFire(state, cfg, now) {
   }
 
   return { fire: true, why: '到点了' };
+}
+
+/**
+ * 从模型输出里取 `<<silence:2h>>` 的毫秒数。没有返回 0。
+ *
+ * 为什么在 dsh-roost 这边也要解析一遍：主动搭话的文本由她生成，走的是
+ * `speakup → channel → /r/send`，中间没有 ai-chat 的 `parseActions` 参与；
+ * 而 `fire()` 里那句 `raw.replace(/<<[^>]*>>/g, '')` 会把标记**全部**抹平，
+ * 抹掉之后时长就找不回来了。所以必须**先提取，再摘掉**。
+ *
+ * 单位默认分钟（`<<silence:30>>` 比 `<<silence:30m>>` 更可能是人想写的），
+ * 上限 30 天——`<<silence:9999h>>` 那种等于永久静默，恢复只能靠面板。
+ */
+export function silenceMsOf(text) {
+  const m = String(text ?? '').match(/<<silence:\s*(\d+(?:\.\d+)?)\s*(s|m|h|d)?\s*>>/i);
+  if (!m) return 0;
+  const mul = { s: 1000, m: MINUTE, h: 60 * MINUTE, d: 24 * 60 * MINUTE }[
+    (m[2] || 'm').toLowerCase()
+  ];
+  return Math.min(Math.round(Number(m[1]) * mul), 30 * 24 * 60 * MINUTE);
 }
 
 /** 下一次什么时候（在 [min, max] 之间随机） */
@@ -107,7 +139,7 @@ export function scheduleNextDay(cfg, now = Date.now()) {
 export function createSpeakUp({ dataDir, cfgOf, generate, send, log = () => {} }) {
   const file = () => join(dataDir, 'speakup.json');
 
-  let state = { nextAt: 0, todayCount: 0, day: '', lastOwnerAt: 0, lastBotAt: 0, lastText: '' };
+  let state = { nextAt: 0, todayCount: 0, day: '', lastOwnerAt: 0, lastBotAt: 0, lastText: '', silenceUntil: 0 };
   try {
     state = { ...state, ...JSON.parse(readFileSync(file(), 'utf8')) };
   } catch {}
@@ -154,14 +186,32 @@ export function createSpeakUp({ dataDir, cfgOf, generate, send, log = () => {} }
         return { ok: false, skipped: true, why: raw ? '她自己决定不说' : 'AI 没说话' };
       }
 
+      /**
+       * 静默标记要**先提取再摘掉**——下一行的 replace 会把所有 `<<...>>`
+       * 一起抹平，抹掉之后再想拿时长就没处找了。
+       */
+      const silenceMs = silenceMsOf(raw);
       const text = raw.replace(/<<[^>]*>>/g, '').trim();
-      if (!text) {
+      if (!text && silenceMs <= 0) {
         state.nextAt = scheduleNext(cfg);
         save();
         return { ok: false, skipped: true, why: '去掉标记后没内容' };
       }
 
-      const r = await send({ scene: 'c2c', target: cfg.chatId, text });
+      const r = await send({ scene: 'c2c', target: cfg.chatId, text, silenceMs });
+
+      /**
+       * 只要求安静、没有要说的话：这不是「说了一次」，不能占今日额度，
+       * 但要把 `silenceUntil` 记下来——否则下一分钟又问她一遍，
+       * 她每分钟都说一次「让我静静」，比不静默还吵。
+       */
+      if (r?.ok && !text && silenceMs > 0) {
+        state.silenceUntil = Date.now() + silenceMs;
+        state.nextAt = state.silenceUntil + scheduleNext(cfg, 0);
+        save();
+        log(`她自己要求安静 ${Math.round(silenceMs / MINUTE)} 分钟（没说话）`);
+        return { ok: true, silent: true, silenceMs };
+      }
       if (!r?.ok) {
         /**
          * 发失败也要排下一次。否则失败会变成每分钟重试，直到把配额打满。
@@ -192,6 +242,15 @@ export function createSpeakUp({ dataDir, cfgOf, generate, send, log = () => {} }
       state.todayCount = (state.day === new Date().toDateString() ? state.todayCount : 0) + 1;
       state.day = new Date().toDateString();
       state.nextAt = scheduleNext(cfg);
+      /**
+       * 「说完这句，让我静静」——两个动作可以同时发生。
+       * 排期取两者较大的那个，省得静默期内每分钟空问一遍。
+       */
+      if (silenceMs > 0) {
+        state.silenceUntil = Date.now() + silenceMs;
+        state.nextAt = Math.max(state.nextAt, state.silenceUntil);
+        log(`顺带要求安静 ${Math.round(silenceMs / MINUTE)} 分钟`);
+      }
       save();
 
       log(`主动找主人说话了（${reason}）：${text.slice(0, 40)}`);

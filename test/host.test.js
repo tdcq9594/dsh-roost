@@ -24,6 +24,7 @@ import {
   inAwakeWindow,
   scheduleNext,
   scheduleNextDay,
+  silenceMsOf,
   createSpeakUp,
   DEFAULTS as SPEAK_DEFAULTS,
 } from '../src/speakup.js';
@@ -754,6 +755,65 @@ test('排期: 跨天排到清醒时段开始，且带 0–30 分钟随机', () =
     assert.equal(d.getHours(), 8, '必须是清醒时段开始');
     assert.ok(d.getMinutes() < 30, `随机量不该超过 30 分钟，实际 ${d.getMinutes()} 分`);
   }
+});
+
+/**
+ * `<<silence:2h>>`：她自己决定安静一阵子。
+ *
+ * 这里有个容易漏的地方——`fire()` 里那句 `raw.replace(/<<[^>]*>>/g, '')`
+ * 会把**所有**标记一起抹平，所以时长必须**先提取再摘**。下面第一条就是守它的。
+ */
+test('搭话: 静默标记能解析出时长', () => {
+  assert.equal(silenceMsOf('<<silence:2h>>'), 7_200_000);
+  assert.equal(silenceMsOf('让我静静 <<silence:30>>'), 1_800_000); // 默认分钟
+  assert.equal(silenceMsOf('<<silence:90s>>'), 90_000);
+  assert.equal(silenceMsOf('没有标记'), 0);
+  // 上限：不能变成永久静默
+  assert.equal(silenceMsOf('<<silence:9999h>>'), 30 * 24 * 60 * 60_000);
+});
+
+test('搭话: 静默期间不再问要不要说话', () => {
+  const now = new Date(2026, 9, 26, 14, 0, 0).getTime();
+  const cfg = { ...SPEAK_DEFAULTS, enabled: true, chatId: 'u1' };
+  const st = { nextAt: now - 1, lastOwnerAt: now - 5 * HOUR, silenceUntil: now + 2 * HOUR };
+  const r = shouldFire(st, cfg, now);
+  assert.equal(r.fire, false);
+  assert.match(r.why, /安静/);
+});
+
+test('搭话: 静默到期自动恢复', () => {
+  const now = new Date(2026, 9, 26, 14, 0, 0).getTime();
+  const cfg = { ...SPEAK_DEFAULTS, enabled: true, chatId: 'u1' };
+  const st = { nextAt: now - 1, lastOwnerAt: now - 5 * HOUR, silenceUntil: now - 1 };
+  assert.equal(shouldFire(st, cfg, now).fire, true);
+});
+
+test('搭话: 只要求安静时不占今日额度', async () => {
+  const sp = createSpeakUp({
+    dataDir: tmp(),
+    cfgOf: () => ({ speakUp: { enabled: true, chatId: 'u1' } }),
+    generate: async () => '<<silence:2h>>',
+    send: async () => ({ ok: true, silentOnly: true }),
+  });
+  const r = await sp.fire();
+  assert.equal(r.ok, true);
+  assert.equal(r.silent, true);
+  assert.equal(sp.state().todayCount, 0, '她一个字都没说，不该占今天的开口额度');
+  assert.ok(sp.state().silenceUntil > Date.now(), '静默要记下来，否则每分钟又问一遍');
+  assert.ok(sp.state().nextAt >= sp.state().silenceUntil, '下一次问要排在静默之后');
+});
+
+test('搭话: 说完一句顺带要求安静', async () => {
+  const sp = createSpeakUp({
+    dataDir: tmp(),
+    cfgOf: () => ({ speakUp: { enabled: true, chatId: 'u1' } }),
+    generate: async () => '今天有点累 <<silence:3h>>',
+    send: async () => ({ ok: true }),
+  });
+  const r = await sp.fire();
+  assert.equal(r.ok, true);
+  assert.equal(r.text, '今天有点累', '标记不能漏进消息');
+  assert.ok(sp.state().silenceUntil > Date.now());
 });
 
 /* ---------------- 端口租约 ---------------- */
