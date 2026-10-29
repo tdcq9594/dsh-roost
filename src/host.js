@@ -2549,7 +2549,13 @@ export function apply(ctx) {
               let facts = 0;
               if (rel === '约定') {
                 try {
-                  facts = memory.remove(chatId, `约定：${dst}`);
+                  /**
+                   * 用**这条关系自己的作用域**清 facts，不是当前会话。
+                   * 全局约定的 fact 在 `global` 层，拿一个群 id 去删，
+                   * `memory.remove` 虽然也会搜全局，但反过来（群里的约定、
+                   * 面板停在私聊）就删不到了。
+                   */
+                  facts = memory.remove(scope, `约定：${dst}`);
                 } catch (e) {
                   log.warn(`删约定的 facts 失败：${e.message}`);
                 }

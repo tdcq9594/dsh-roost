@@ -2009,13 +2009,24 @@ select.roost-input{color-scheme:dark}
                       className: 'roost-item',
                       style: { borderLeft: '2px solid var(--roost-warn, #d08770)', paddingLeft: 10, marginTop: 8 },
                     },
-                      h('span', { className: 't' }, `删掉「${delEdge.src} —${delEdge.rel}→ ${delEdge.dst}」？`),
+                      h('span', { className: 't' },
+                        `删掉「${delEdge.src} —${delEdge.rel}→ ${delEdge.dst}」？`,
+                        h('span', { className: 'd' }, delEdge.chatId ? '（只在这个会话）' : '（所有会话）')),
                       h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 } },
                         h('button', {
                           type: 'button', className: 'roost-primary', disabled: busy,
                           onClick: async () => {
+                            /**
+                             * `chatId` 传**这条边自己的作用域**，不是当前会话。
+                             *
+                             * 关系有两种归属：挂在某个会话上，或者全局（chat_id=''）。
+                             * 用当前会话去删一条全局关系，`suppressEdge` 里那句
+                             * `(?='' OR chat_id=?)` 一条都匹配不上——边还在，
+                             * 面板上看起来像"点了没反应"。
+                             */
                             const r = await quick('graph.suppress', {
                               src: delEdge.src, rel: delEdge.rel, dst: delEdge.dst,
+                              chatId: delEdge.chatId,
                               why: '面板手动删除',
                             })
                             toast(r.ok === false ? (r.message || '没删掉') : (r.message || '删了'))
@@ -2028,6 +2039,7 @@ select.roost-input{color-scheme:dark}
                           onClick: async () => {
                             const r = await quick('graph.close', {
                               src: delEdge.src, rel: delEdge.rel, dst: delEdge.dst,
+                              chatId: delEdge.chatId,
                             })
                             toast(r.ok === false ? (r.message || '没标上') : (r.message || '标成「现在不成立了」'))
                             setDelEdge(null)

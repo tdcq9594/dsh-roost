@@ -1439,3 +1439,25 @@ test('巩固：被屏蔽的三元组不写进图谱', async () => {
   assert.equal(r.suppressed, 1, '要记一笔「被墓碑挡了」');
   assert.equal(g.nowEdges({ chatId: 'g1' }).length, 0, '不许写回来');
 });
+
+/**
+ * 删全局关系时，作用域必须用**这条边自己的** chat_id。
+ *
+ * 面板上点「删」时如果顺手传当前会话的 id，`suppressEdge` 里那句
+ * `(?='' OR chat_id=?)` 一条都匹配不上——边还在，看起来像"点了没反应"。
+ * 所以 `edgeView` 必须带 chatId，面板也必须把它传回来。
+ */
+test('图谱：拿会话 id 删全局边删不到（面板要传这条边自己的作用域）', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  g.addEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: '' });
+  const e = g.nowEdges({ chatId: 'g1' })[0];
+  assert.equal(e.chatId, '', '全局边的 chatId 是空串，面板据此判断作用域');
+
+  const wrong = g.suppressEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: 'g1' });
+  assert.equal(wrong.removed, 0, '拿会话 id 删不到全局边');
+  assert.equal(g.nowEdges({ chatId: 'g1' }).length, 1, '边还在');
+
+  const right = g.suppressEdge({ src: '主人', rel: '住在', dst: '杭州', chatId: e.chatId });
+  assert.equal(right.removed, 1);
+  assert.equal(g.nowEdges({ chatId: 'g1' }).length, 0);
+});
