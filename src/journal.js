@@ -38,6 +38,16 @@ import {
 
 export const LEVELS = ['critical', 'important', 'normal'];
 
+/**
+ * 抹除后留在行上的占位符。
+ *
+ * 抽成常量而不是各处写字面量：这两个值同时是**「这一行不再承载信息」的判据**
+ * （`digests()` 靠它跳过被抹掉的摘要）。写死字符串的话，改一处忘一处，
+ * 表现是「忘了但摘要里还看得见」——正是它们要防的那种漏。
+ */
+export const ERASED = '（已按用户要求遗忘）';
+export const CLEARED = '（已清空）';
+
 /** 注入排序用的等级权重（1.7：重要性 × 衰减 + 访问频率） */
 const LEVEL_W = { critical: 3, important: 2, normal: 1 };
 
@@ -717,9 +727,19 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         .slice(0, limit);
     },
 
-    /** 每日摘要（巩固产出的那种一行一条） */
+    /**
+     * 每日摘要（巩固产出的那种一行一条）。
+     *
+     * 被 `forget` / `clearChat` 抹掉的不返回：行还在库里（时间线连续），
+     * 但它已经没有内容了，进【这几天】只会多一行占位符噪音。
+     * 多取一截再切，免得抹掉几条之后摘要凭空少一半。
+     */
     digests(chatId, limit = 5) {
-      return get().recent(chatId, limit, 'digest');
+      const want = Math.max(1, Number(limit) || 5);
+      return get()
+        .recent(chatId, want + 10, 'digest')
+        .filter((r) => r.text !== ERASED && r.text !== CLEARED)
+        .slice(0, want);
     },
 
     /** 搜到就记一次访问——access_count 是排序的一部分 */
@@ -843,6 +863,11 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      * 这是铁律的唯一例外，理由：用户说"别记这个"是**指令**，
      * 不是自然衰减。他要的是"这件事不要存在"，不是"压成一句还留着"。
      * 抹法是置空正文 + 删索引，行还在（保住时间线的连续性），但内容没了。
+     *
+     * **摘要（`kind='digest'`）也在范围内。**
+     * 以前这里只放行 `kind='chat'`，结果原文抹了、当天的摘要还在——
+     * 用户问「你还记得小美吗」，【这几天】那一段照样把名字带出来。
+     * 那不是「忘了」，那是「原文忘了、结论还记得」，比不删更让人不安。
      * @returns {number} 抹掉几条
      */
     forget({ chatId = '', word = '' } = {}) {
@@ -853,10 +878,10 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       const pool = s.listChat(chatId, 2000);
       let n = 0;
       for (const r of pool) {
-        if (r.kind !== 'chat') continue;
+        if (r.kind !== 'chat' && r.kind !== 'digest') continue;
         const hit = r.text.includes(w) || (terms.length && passesCoverage(terms, indexTerms(r.text)));
         if (!hit) continue;
-        s.update(r.id, { text: '（已按用户要求遗忘）', digest: null, level: 'normal' });
+        s.update(r.id, { text: ERASED, digest: null, level: 'normal' });
         n += 1;
       }
       return n;
@@ -867,7 +892,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       const s = get();
       let n = 0;
       for (const r of s.listChat(chatId, 5000)) {
-        s.update(r.id, { text: '（已清空）', digest: null, level: 'normal' });
+        s.update(r.id, { text: CLEARED, digest: null, level: 'normal' });
         n += 1;
       }
       return n;

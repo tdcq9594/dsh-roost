@@ -211,6 +211,29 @@ test('日记：显式"别记这个"是真忘（正文抹掉、检索不回来）
   })();
 });
 
+test('日记：摘要里提到的人也要忘（原文和 digest 一起抹）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const t = Date.now();
+  j.add({ id: 'a', at: t, chatId: 'g1', text: '我前女友叫小美' });
+  j.add({
+    id: 'day:2026-10-28:g1',
+    at: t,
+    chatId: 'g1',
+    kind: 'digest',
+    level: 'important',
+    text: '他说前女友小美要结婚了。',
+  });
+
+  /**
+   * 以前 `forget` 只放行 kind='chat'，于是原文抹了、当天的摘要还在。
+   * 「原文忘了、结论还记得」比不删更让人不安，所以这两条必须一起走。
+   */
+  const n = j.forget({ chatId: 'g1', word: '小美' });
+  assert.equal(n, 2, '原文和摘要都要抹');
+  assert.match(j.get('day:2026-10-28:g1').text, /已按用户要求遗忘/);
+  assert.equal(j.digests('g1', 5).length, 0, '抹掉的摘要不该再进【这几天】');
+});
+
 test('日记：TopK 按"重要性×衰减+访问"排，critical 排前面', () => {
   const j = createJournal({ file: join(tmp(), 'j.sqlite') });
   const t = Date.now();
