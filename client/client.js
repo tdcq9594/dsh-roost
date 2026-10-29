@@ -2007,7 +2007,7 @@ select.roost-input{color-scheme:dark}
         h(Sec, { n: '06', title: '清空' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '「清空」抹掉事实和日记正文，行还留着（时间线不断）；'
-            + '「彻底删除」连行一起删，磁盘上的旧页在凌晨压库时清掉。两者都不可恢复。'),
+            + '「彻底删除」连行一起删，磁盘上的旧页十分钟内自动压掉。两者都不可恢复。'),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h(ConfirmLink, {
               label: '清空本会话记忆', confirmLabel: '确认清空本会话',

@@ -187,7 +187,7 @@ function createSqliteStore(file, log) {
    *
    * VACUUM 会把整个库重写一遍，几万条时要锁几秒——**不能放在用户点按钮的
    * 那条路上**（`DatabaseSync` 是同步 API，阻塞事件循环 = QQ 消息全卡住）。
-   * 所以这里只记一个标记，真正的压缩交给巩固的定时器在凌晨做。
+   * 所以这里只记一个标记，真正的压缩交给巩固的定时器（每十分钟一轮）做。
    */
   let needVacuum = false;
 
@@ -467,7 +467,7 @@ function createSqliteStore(file, log) {
     /**
      * 压库。**只在删过行之后才真做**，平时是一次判断就返回。
      *
-     * 调用点放在巩固的定时器里（凌晨），不在消息链路上。
+     * 调用点放在巩固的定时器里（每十分钟一轮），不在消息链路上。
      * @returns {boolean} 这次有没有真的 VACUUM
      */
     vacuum() {
