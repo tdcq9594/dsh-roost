@@ -2364,7 +2364,9 @@ select.roost-input{color-scheme:dark}
             + '所以过十分钟自己回来问一次。'
             + '「不确定」和「失败」要分清楚：失败的可以再发一次，不确定的重发会让你收到两条。'),
           deliv === null
-            ? h('div', { className: 'roost-empty' }, '读不到（Roost 没在跑？）')
+            ? h('div', { className: 'roost-empty' },
+                '读不到这一节。两种可能：DSH 还没重启（新路由没加载），'
+                + '或者 Roost 没在跑（面板读的是它那边写的数据）。')
             : (() => {
                 const items = deliv.items || []
                 if (!items.length) return h('div', { className: 'roost-empty' }, '没有要跟踪的消息。一切正常。')
