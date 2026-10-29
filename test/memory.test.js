@@ -314,6 +314,39 @@ test('日记：压过的降权（还记着，但不再抢注入预算）', () =>
   assert.ok(after < before);
 });
 
+test('日记：访问加分随时间淡出（不会一次搜到就永久加分）', () => {
+  const now = Date.now();
+  const base = { at: now - 100 * DAY, level: 'important', accessed: 20, digest: null };
+  const justNow = scoreOf({ ...base, lastAccess: now - DAY }, now);
+  const longAgo = scoreOf({ ...base, lastAccess: now - 200 * DAY }, now);
+  assert.ok(justNow > longAgo, `最近搜过的该更高：${justNow} vs ${longAgo}`);
+});
+
+test('日记：刚搜过的确实加分（别把 access 项一起删了）', () => {
+  const now = Date.now();
+  const base = { at: now - 100 * DAY, level: 'important', digest: null };
+  const hit = scoreOf({ ...base, accessed: 5, lastAccess: now - DAY }, now);
+  const never = scoreOf({ ...base, accessed: 0, lastAccess: 0 }, now);
+  assert.ok(hit > never);
+});
+
+test('日记：一年前搜过 20 次的老事，不该压过今天的新事', () => {
+  const now = Date.now();
+  const oldButHot = scoreOf(
+    { at: now - 400 * DAY, level: 'important', accessed: 20, lastAccess: now - 365 * DAY },
+    now,
+  );
+  const fresh = scoreOf({ at: now, level: 'important', accessed: 0, lastAccess: 0 }, now);
+  assert.ok(oldButHot < fresh, `古代条目靠历史访问反超 = 永久霸榜：${oldButHot} vs ${fresh}`);
+});
+
+test('日记：注入不算"被想起"（否则注入得越勤越霸榜）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  j.add({ id: 'c', at: Date.now(), chatId: 'g1', text: '记住我生日是三月五号' });
+  for (let i = 0; i < 20; i += 1) j.top('g1', { limit: 6 });
+  assert.equal(j.get('c').accessed, 0, 'top() 只是把东西摆到眼前，不是她想起来了');
+});
+
 test('日记：日期按本地时区归组', () => {
   assert.equal(dayOf(new Date(2026, 0, 2, 3, 0, 0).getTime()), '2026-01-02');
 });

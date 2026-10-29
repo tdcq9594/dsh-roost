@@ -2003,8 +2003,46 @@ select.roost-input{color-scheme:dark}
               ),
         ),
 
+        /**
+         * 第五层：她自己写的。
+         *
+         * 前几节都是「关于用户」的；这一节回答「她最近怎么样、错在哪」。
+         * 不显示出来的话，用户没法判断她到底是变好了还是在重复同一个错，
+         * 也没法在写歪的时候把它清掉。
+         */
+        h(Sec, {
+          n: '06',
+          title: '她自己',
+          right: mem?.self?.stats?.notes
+            ? h(Pill, null, `${mem.self.stats.notes} 条`)
+            : null,
+        },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '每天巩固时她自己写一条（跨群汇总，不属于任何一个群）。'
+            + '只在新会话开头和每 15 轮的深度重注时读一点——每轮都灌会变成表演。'),
+          mem?.self?.error
+            ? h('div', { className: 'roost-note' }, `读不出来：${mem.self.error}`)
+            : (mem?.self?.notes?.length || mem?.self?.chapters?.length)
+              ? h('div', null,
+                ...(mem.self.notes || []).map((n) =>
+                  h('div', { key: 'n' + n.day, style: { padding: '6px 0', borderTop: '1px solid var(--line-soft)' } },
+                    h('div', { className: 'roost-note', style: { marginBottom: 2 } }, n.day),
+                    h('div', null, n.text),
+                  ),
+                ),
+                ...(mem.self.chapters || []).map((c) =>
+                  h('div', { key: 'c' + c.from, style: { padding: '6px 0', borderTop: '1px solid var(--line-soft)' } },
+                    h('div', { className: 'roost-note', style: { marginBottom: 2 } },
+                      `${c.from} → ${c.to}（压成一段）`),
+                    h('div', { className: 'roost-muted' }, c.text),
+                  ),
+                ),
+              )
+              : h('div', { className: 'roost-note' }, '还没写过。她自己说得够多、或者被纠正过的日子才会写一条。'),
+        ),
+
         /* 危险区放最后 */
-        h(Sec, { n: '06', title: '清空' },
+        h(Sec, { n: '07', title: '清空' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '「清空」抹掉事实和日记正文，行还留着（时间线不断）；'
             + '「彻底删除」连行一起删，磁盘上的旧页十分钟内自动压掉。两者都不可恢复。'),
@@ -2037,6 +2075,18 @@ select.roost-input{color-scheme:dark}
               onConfirm: async () => {
                 const r = await quick('memory.clearGlobal')
                 toast(r.message || '清了')
+                reload()
+              },
+            }),
+            /**
+             * 自述不跟上面三个走：它是跨群汇总的一份，
+             * 按会话清既清不干净又会误伤别的群，所以单独一个按钮。
+             */
+            h(ConfirmLink, {
+              label: '重置自我叙述', confirmLabel: '确认重置（她的自述全部清掉）',
+              onConfirm: async () => {
+                const r = await quick('self.clear')
+                toast(r.message || '重置了')
                 reload()
               },
             }),

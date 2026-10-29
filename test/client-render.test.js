@@ -323,6 +323,27 @@ test('前端渲染：她页没有打开人格时不出现「编辑人格」占�
  * 原来两者同处「清空与迁移」一节，容易误点。现在必须分开，
  * 且清空在最后。
  */
+/**
+ * 第五层（她自己写的）必须看得见。
+ *
+ * 它是唯一一层「关于她」而不是「关于用户」的记忆。不显示出来的话，
+ * 用户没法判断她是变好了还是在重复同一个错，也没法在写歪的时候清掉。
+ * 位置也有讲究：它是**跨群汇总**的一份，不属于任何单个会话，
+ * 所以「重置自我叙述」不能并进会话级清空那一排里冒充同一种操作。
+ */
+test('前端渲染：记忆页有「她自己」一节，且在清空之前', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'memory'
+  rt.reset()
+  const tree = expand(mod.RoostPage(), rt)
+  const titles = sectionsOf(tree).map((s) => s.title)
+  const iSelf = titles.indexOf('她自己')
+  const iClr = titles.indexOf('清空')
+  assert.ok(iSelf >= 0, '没有「她自己」节——第五层在面板上不可见')
+  assert.ok(iSelf < iClr, '自述是日常内容，不该排在危险区之后')
+});
+
 test('前端渲染：记忆页把导入和清空分成两节，清空在最后', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)

@@ -118,12 +118,30 @@ export function startOfDay(day) {
  * 重要性 × 时间衰减 + 访问频率，压过的再打六折：
  *   · 半衰期取 30 天——一个月前的重要事还留三成，不会突然消失
  *   · access 用 log1p 压一下，免得一条被反复搜到的旧事永远霸榜
+ *
+ * **访问加分自己也衰减（45 天半衰期）**。不衰减的话它是永久加冕：
+ * access 封顶 1.5，而重要性衰减到地板只降到 0.35×2=0.70，
+ * 于是「一年前被搜到 20 次」的旧事 = 0.70+1.5 = 2.20，
+ * 永远压过任何新鲜的重要记忆（2.00）——注入列表就此冻结，再也换不出一批新的。
+ * 45 天比记忆本身的 30 天慢：被想起来过的事，确实该更黏一点。
+ *
+ * 注意 `accessed` **只由检索写入**。自动注入（top）不算"被想起"——
+ * 那是系统自己挑的，让它计数等于注入得越勤越霸榜，上面那条会原样复发。
  */
 export function scoreOf(row, now = Date.now()) {
   const w = LEVEL_W[row.level] ?? 1;
-  const ageDays = Math.max(0, (now - Number(row.at || 0)) / DAY);
+  const at = Number(row.at || 0);
+  const ageDays = Math.max(0, (now - at) / DAY);
   const decay = Math.exp(-ageDays / 30);
-  const access = Math.min(1.5, Math.log1p(Number(row.accessed || 0)) / 2);
+
+  const accessed = Number(row.accessed || 0);
+  let access = 0;
+  if (accessed > 0) {
+    const last = Math.max(Number(row.lastAccess || 0), at);
+    const sinceDays = Math.max(0, (now - last) / DAY);
+    access = Math.min(1.5, Math.log1p(accessed) / 2) * Math.exp(-sinceDays / 45);
+  }
+
   let s = w * (0.35 + 0.65 * decay) + access;
   if (row.digest) s *= 0.6;
   return s;

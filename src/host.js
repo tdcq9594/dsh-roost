@@ -43,6 +43,7 @@ import { createQqChannel, createChannelRegistry } from './channel.js';
 import { createQrRegistration, createManualRegistration, createRegistrationRegistry } from './registration.js';
 import { createLease, candidates } from './lease.js';
 import { createSyncRetry } from './sync-retry.js';
+import { fitBudget } from './budget.js';
 
 export const name = 'roost';
 
@@ -301,6 +302,18 @@ export function apply(ctx) {
    * 比"每轮都给全量"便宜一个数量级，却能在上下文被压掉之后把细节铺回来。
    */
   const MEMORY_DEEP_MAX = 1200;
+  /**
+   * 易变段的预算。
+   *
+   * 它拼在**用户消息**里，每轮都发。三块各自都有上限（最近 3 条、命中
+   * `memory.hits` 条、一行索引），看着不会失控——但 `memory.hits` 是配置项，
+   * 有人写 20 就是每轮多一千多字，而这条路上原来一道闸都没有。
+   *
+   * 480 是按默认配置算的：刚才说到 ~88 + 命中 3 条 ~231 + 索引 ~44 ≈ 365，
+   * 留一百来字余量（名字长、摘要满）。`hits` 调到 5 就顶到 519、开始截索引——
+   * 正是该拦的地方。
+   */
+  const MEMORY_DYN_MAX = 480;
 
   const memory = createMemory();
   const mood = createMood();
@@ -664,28 +677,10 @@ export function apply(ctx) {
 
   /**
    * 按优先级把若干块塞进预算：**前面的先留，后面的先砍**。
-   *
-   * 为什么不是"整段截断"：动态块每轮都注入，写多了直接吃 token。
-   * 一刀切会把最要紧的那块也切掉一半；按优先级砍，至少保住重要的。
+   * 实现在 `budget.js`（纯函数，能测）。
    */
-  function fitBudget(sections, max) {
-    const out = [];
-    let used = 0;
-    for (const s of sections) {
-      const text = String(s || '');
-      if (!text) continue;
-      const room = max - used;
-      if (room <= 0) break;
-      if (text.length <= room) {
-        out.push(text);
-        used += text.length;
-      } else {
-        out.push(text.slice(0, Math.max(0, room - 1)) + '…');
-        break;
-      }
-    }
-    return out.join('\n\n');
-  }
+
+
 
   /**
    * 日记总条数的缓存。
@@ -850,7 +845,9 @@ export function apply(ctx) {
       idxSec = `（还有一本日记，记着 ${st2.total} 条，最早到 ${dayStr(st2.firstAt || Date.now())}；翻细节时按需要回忆）`;
     }
 
-    return [recentSec, hitSec, idxSec].filter(Boolean).join('\n');
+    // 优先级：指代 > 命中 > 索引。前两块缺了会直接影响这一轮说得对不对，
+    // 索引只是"知道还有东西"，砍它最不疼
+    return fitBudget([recentSec, hitSec, idxSec], MEMORY_DYN_MAX, '\n');
   }
 
   /** 两段拼起来（调试接口和面板用；真正注入是分开走的，别在这里合并回去） */
@@ -2312,6 +2309,20 @@ export function apply(ctx) {
               memory.clearGlobal();
               return send(res, 200, { ok: true, message: '通用记忆清空了' });
 
+            /**
+             * 重置自我叙述（第五层）。
+             *
+             * 单独一个动作、不挂在会话级清空上：自述是**跨群汇总**写的一条，
+             * 按 chatId 清既清不干净（它不属于任何一个群）又会误伤别的群。
+             */
+            case 'self.clear':
+              self.clear();
+              log.info('自我叙述已重置');
+              return send(res, 200, {
+                ok: true,
+                message: '自我叙述重置了，她下次开新会话时不再带着这些',
+              });
+
             case 'context.clear':
               /**
                * 解绑 = 下一条消息开新会话，旧会话还留着可以回溯。
@@ -2477,6 +2488,20 @@ export function apply(ctx) {
           gp = { error: e.message };
         }
 
+        let sf = null;
+        try {
+          const a = self.all();
+          sf = {
+            stats: self.stats(),
+            /** 最近几条按天写的自述（新的在后） */
+            notes: a.notes.slice(-8).map((n) => ({ day: n.day, at: n.at, text: clip(n.text, 200) })),
+            /** 压成阶段自述的旧条目 */
+            chapters: a.chapters.slice(-3).map((c) => ({ from: c.from, to: c.to, text: clip(c.text, 200) })),
+          };
+        } catch (e) {
+          sf = { error: e.message };
+        }
+
         send(res, 200, {
           ok: true,
           chatId,
@@ -2488,6 +2513,8 @@ export function apply(ctx) {
           facts: { global: facts.global, chat: facts.chat },
           journal: jr,
           graph: gp,
+          /** 第五层：她自己写下的（跨群汇总，不属于任何单个会话） */
+          self: sf,
           authz: memory.authz(chatId),
           personaOverride: memory.getPersonaOverride(chatId),
         });
