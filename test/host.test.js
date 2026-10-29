@@ -19,7 +19,14 @@ import { createSetup } from '../src/setup.js';
 import { createPersonas } from '../src/personas.js';
 import { createStickers, tagsOf } from '../src/stickers.js';
 import { createLease, candidates } from '../src/lease.js';
-import { shouldFire, inAwakeWindow, scheduleNext, DEFAULTS as SPEAK_DEFAULTS } from '../src/speakup.js';
+import {
+  shouldFire,
+  inAwakeWindow,
+  scheduleNext,
+  scheduleNextDay,
+  createSpeakUp,
+  DEFAULTS as SPEAK_DEFAULTS,
+} from '../src/speakup.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dsh-roost-'));
 
@@ -684,6 +691,69 @@ test('搭话: 间隔是随机的，落在区间内', () => {
     seen.add(Math.round(d));
   }
   assert.ok(seen.size > 1, '应该是随机的，不能每次都一样');
+});
+
+/**
+ * 失败后的排期要按**原因**分开。
+ *
+ * 这是 2026-10-29 的修正：框架以前把「日额度用完」和「一分钟发太密」
+ * 都报成 `quota`，调用方只能按最坏情况处理——一次分钟限流就让主动搭话
+ * 停一整天。现在两者分开了，这里守住「分开了就要各用各的排期」。
+ */
+test('搭话: 额度用完推到明天，不是等几分钟再撞一次', async () => {
+  const sp = createSpeakUp({
+    dataDir: tmp(),
+    cfgOf: () => ({ speakUp: { enabled: true, chatId: 'u1', awakeFrom: 8 } }),
+    generate: async () => '在吗',
+    send: async () => ({ ok: false, code: 'quota', message: '今天的主动额度用完了' }),
+  });
+  const before = Date.now();
+  const r = await sp.fire();
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'quota');
+
+  const next = sp.state().nextAt;
+  const target = new Date(before);
+  target.setDate(target.getDate() + 1);
+  target.setHours(8, 0, 0, 0);
+  assert.ok(next >= target.getTime(), `应排到明天 8 点之后，实际 ${new Date(next)}`);
+  assert.ok(next <= target.getTime() + 30 * 60_000, `不该超过明天 8:30，实际 ${new Date(next)}`);
+});
+
+test('搭话: 分钟限流只等一分钟', async () => {
+  const sp = createSpeakUp({
+    dataDir: tmp(),
+    cfgOf: () => ({ speakUp: { enabled: true, chatId: 'u1' } }),
+    generate: async () => '在吗',
+    send: async () => ({ ok: false, code: 'rate', message: '发得太密' }),
+  });
+  const before = Date.now();
+  await sp.fire();
+  const delta = sp.state().nextAt - before;
+  assert.ok(delta >= 60_000 && delta < 61_000, `应等约一分钟，实际 ${delta}ms`);
+});
+
+test('搭话: 其它失败按随机间隔，不能误判成今天说满了', async () => {
+  const sp = createSpeakUp({
+    dataDir: tmp(),
+    cfgOf: () => ({ speakUp: { enabled: true, chatId: 'u1', minIntervalMinutes: 180, maxIntervalMinutes: 480 } }),
+    generate: async () => '在吗',
+    send: async () => ({ ok: false, code: 'offline', message: '没连上 QQ' }),
+  });
+  const before = Date.now();
+  await sp.fire();
+  const mins = (sp.state().nextAt - before) / 60_000;
+  assert.ok(mins >= 180 && mins <= 480, `应落在随机间隔内，实际 ${mins} 分钟`);
+});
+
+test('排期: 跨天排到清醒时段开始，且带 0–30 分钟随机', () => {
+  const now = new Date(2026, 9, 26, 14, 0, 0).getTime();
+  for (let i = 0; i < 20; i++) {
+    const d = new Date(scheduleNextDay({ awakeFrom: 8 }, now));
+    assert.equal(d.getDate(), 27, '必须是明天');
+    assert.equal(d.getHours(), 8, '必须是清醒时段开始');
+    assert.ok(d.getMinutes() < 30, `随机量不该超过 30 分钟，实际 ${d.getMinutes()} 分`);
+  }
 });
 
 /* ---------------- 端口租约 ---------------- */

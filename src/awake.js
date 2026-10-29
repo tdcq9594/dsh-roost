@@ -22,6 +22,8 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { NEUTRAL } from './mood.js';
+// 跨天排期和私聊共用一份实现，两边的「额度用完推到明天」不能算出两个时间
+import { scheduleNextDay } from './speakup.js';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -303,6 +305,17 @@ export function groupCandidates({ groups = [], authzOf, stateOf, cfg = {}, now =
       out.push({ ...rec, ok: false, why: `今天已经说了 ${count} 次` });
       continue;
     }
+    /**
+     * 被框架挡回来过（主动额度用完），等到点再试。
+     *
+     * 为什么不用「把 count 填满」来变相封禁：那是往状态里写假数据，
+     * 面板上会显示「今天已经说了 3 次」而实际一次没说，比不封更让人困惑。
+     */
+    if (st.blockedUntil && now < st.blockedUntil) {
+      const mins = Math.ceil((st.blockedUntil - now) / MINUTE);
+      out.push({ ...rec, ok: false, why: `主动额度用完，${mins} 分钟后再看` });
+      continue;
+    }
     const quietMin = st.lastUserAt ? (now - st.lastUserAt) / MINUTE : 9999;
     if (quietMin < c.groupQuietMinutes) {
       out.push({ ...rec, ok: false, why: `群里刚有人说话（${Math.round(quietMin)} 分钟前）` });
@@ -460,9 +473,26 @@ export function createAwake({
           day: today,
           count: g.day === today ? Number(g.count || 0) + 1 : 1,
           lastBotAt: now(),
+          // 这次发成功了，之前的封禁自然作废
+          blockedUntil: 0,
         };
         save();
         log(`在群 ${cand.name} 主动说了话（${v.kind}）：${v.text.slice(0, 40)}`);
+      } else if (r?.code === 'quota') {
+        /**
+         * 这个群的主动额度今天用完了，等跨天。
+         *
+         * 不处理的话检查循环每 5 分钟空撞一次，一直到跨天（288 次无效请求
+         * 加 288 行 warn）。`rate`（一分钟限流）不封——5 分钟一轮本来就不会撞上，
+         * 真撞上了下一轮自然就好了。
+         */
+        const g = state.groups[cand.chatId] || {};
+        state.groups[cand.chatId] = {
+          ...g,
+          blockedUntil: scheduleNextDay({ awakeFrom: c.awakeFrom }, now()),
+        };
+        save();
+        log(`群 ${cand.name} 主动额度用完，今天不再试`);
       }
       results.push({
         ...cand,

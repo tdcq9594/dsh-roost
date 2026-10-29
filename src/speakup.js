@@ -90,6 +90,20 @@ export function scheduleNext(cfg, now = Date.now()) {
   return now + (min + Math.random() * (max - min)) * MINUTE;
 }
 
+/**
+ * 下一次什么时候 —— 跨天版。
+ *
+ * 给「今天的主动额度用完了」用。官方额度是**按天**算的，等一分钟没用，
+ * 只能等跨天重置。推到下一个清醒时段开始（`awakeFrom` 点），
+ * 再加 0–30 分钟随机：不加随机的话每天都会在同一个整点撞上去，一眼就是机器。
+ */
+export function scheduleNextDay(cfg, now = Date.now()) {
+  const d = new Date(now);
+  d.setDate(d.getDate() + 1);
+  d.setHours(cfg.awakeFrom ?? DEFAULTS.awakeFrom, 0, 0, 0);
+  return d.getTime() + Math.random() * 30 * MINUTE;
+}
+
 export function createSpeakUp({ dataDir, cfgOf, generate, send, log = () => {} }) {
   const file = () => join(dataDir, 'speakup.json');
 
@@ -150,12 +164,27 @@ export function createSpeakUp({ dataDir, cfgOf, generate, send, log = () => {} }
       const r = await send({ scene: 'c2c', target: cfg.chatId, text });
       if (!r?.ok) {
         /**
-         * 发失败也要排下一次。
-         * 否则失败会变成每分钟重试，直到把配额打满。
+         * 发失败也要排下一次。否则失败会变成每分钟重试，直到把配额打满。
+         *
+         * 但「多久之后」要看失败原因——一律用随机间隔会让两种相反的情况
+         * 都处理错：
+         *   `quota` 今天这个会话的主动额度用完了，等一分钟也没用，
+         *           按随机间隔（3–8 小时）重试就是一天空撞好几次，直接推到明天；
+         *   `rate`  这一分钟发得太密，等一分钟就好，
+         *           按随机间隔处理等于白白少说一次话。
+         * 其余（离线/超窗/接口报错）按正常随机间隔，下次再说。
+         *
+         * 注意 quota 不是「她说得太多」——是**这个会话**今天的总额度被用掉了，
+         * 面板手动发、别的插件 `ctx.push` 都记同一本账，所以跟 maxPerDay 无关。
          */
-        state.nextAt = scheduleNext(cfg);
+        const now = Date.now();
+        state.nextAt =
+          r?.code === 'quota' ? scheduleNextDay(cfg, now)
+          : r?.code === 'rate' ? now + MINUTE
+          : scheduleNext(cfg, now);
         save();
-        return { ok: false, message: r?.message || '发失败' };
+        log(`主动搭话没发出去（${r?.code || 'unknown'}）：${r?.message || '未知原因'}`);
+        return { ok: false, code: r?.code, message: r?.message || '发失败' };
       }
 
       state.lastBotAt = Date.now();

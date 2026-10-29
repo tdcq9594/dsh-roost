@@ -282,6 +282,35 @@ test('群主动：群里刚有人说话不发（没冷场就别插嘴）', () =>
   assert.match(r[0].why, /刚有人说话/);
 });
 
+/**
+ * 被框架挡回来过（日额度用完）就等到点再试。
+ *
+ * 为什么需要这条：群主动每 5 分钟扫一次，不封的话会一直空撞到跨天
+ * （288 次无效请求 + 288 行日志）。而「今天已经说了 N 次」是另一道门，
+ * 不能拿它顶替——那是应用层自己的计数，跟官方额度是两本账。
+ */
+test('群主动：主动额度用完的群，到点之前不再试', () => {
+  const blocked = groupCandidates({
+    groups: [{ chatId: 'g1' }],
+    authzOf: () => true,
+    stateOf: () => ({ lastUserAt: noon() - 3 * HOUR, blockedUntil: noon() + 3 * HOUR }),
+    cfg: GROUP_CFG,
+    now: noon(),
+  });
+  assert.equal(blocked[0].ok, false);
+  assert.match(blocked[0].why, /额度用完/);
+
+  // 到点之后照常放行
+  const free = groupCandidates({
+    groups: [{ chatId: 'g1' }],
+    authzOf: () => true,
+    stateOf: () => ({ lastUserAt: noon() - 3 * HOUR, blockedUntil: noon() - 1 }),
+    cfg: GROUP_CFG,
+    now: noon(),
+  });
+  assert.equal(free[0].ok, true, free[0].why);
+});
+
 test('群主动：四道门都过了才轮到说', () => {
   const r = groupCandidates({
     groups: [{ chatId: 'g1', name: '摸鱼群' }],
