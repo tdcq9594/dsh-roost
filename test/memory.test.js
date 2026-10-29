@@ -19,6 +19,7 @@ import {
 } from '../src/tokenize.js';
 import { createJournal, classify, dayOf, scoreOf, cosine, DEFAULT_KEEP_DAYS } from '../src/journal.js';
 import { createGraph } from '../src/graph.js';
+import { createMemory } from '../src/memory.js';
 import {
   createConsolidate,
   parseJsonLoose,
@@ -838,3 +839,162 @@ test('日记: 老库没有新列也能开（ALTER TABLE 迁移）', () => {
   j.add({ id: 'new-1', at: Date.now(), chatId: 'g1', text: '新数据', eventIds: ['ev-9'] });
   assert.deepEqual(j.get('new-1').eventIds, ['ev-9']);
 });
+
+/* ---------------- facts（memory.js） ----------------
+ *
+ * 这块以前一条测试都没有，而它是**每轮都注入**、模型能写、面板能删的一层。
+ * 它的错法全是静默的：记了没生效、删了没删掉、本群的事串到别的群。
+ */
+
+/** 每个用例一个干净的 data 目录（dataDir() 每次读 env，所以换 env 就够） */
+function freshFacts() {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-facts-'));
+  return createMemory();
+}
+
+test('facts：默认记到跨群层（用户说"记住"多半是关于他自己）', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  assert.deepEqual(m.list('g1').global, ['主人住在杭州']);
+  assert.deepEqual(m.list('g1').chat, [], '不该顺手写进本群层');
+});
+
+test('facts：本群层不串场（别的群看不到）', () => {
+  const m = freshFacts();
+  m.add('g1', '这个群管阿离叫小离', 'chat');
+  assert.deepEqual(m.list('g1').chat, ['这个群管阿离叫小离']);
+  assert.deepEqual(m.list('g2').chat, [], '换个群就该看不见');
+  assert.deepEqual(m.list('g2').global, [], '也不该跑到跨群层');
+});
+
+test('facts：本群层没 chatId 就记不上（别写进 undefined 这个群）', () => {
+  const m = freshFacts();
+  assert.equal(m.add('', '孤儿事实', 'chat'), false);
+  assert.deepEqual(m.list('').chat, []);
+});
+
+test('facts：同一条重复记只留一条', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  m.add('g1', '主人住在杭州');
+  assert.equal(m.list('g1').global.length, 1);
+});
+
+test('facts：空白不记，超长截到 200 字', () => {
+  const m = freshFacts();
+  m.add('g1', '   ');
+  assert.equal(m.list('g1').global.length, 0);
+  m.add('g1', '啊'.repeat(500));
+  assert.equal(m.list('g1').global[0].length, 200);
+});
+
+test('facts：一层最多 40 条，超了淘汰最旧的', () => {
+  const m = freshFacts();
+  for (let i = 1; i <= 45; i++) m.add('g1', `事实${i}`);
+  const g = m.list('g1').global;
+  assert.equal(g.length, 40);
+  assert.equal(g[0], '事实6', '最旧的 5 条被挤掉');
+  assert.equal(g[39], '事实45');
+});
+
+test('facts：list 给的是副本，外面改它不该改到库', () => {
+  // 注入路径会把 list 的结果拼进提示词，中间任何一处 push 都不该污染库
+  const m = freshFacts();
+  m.add('g1', '一条');
+  const r = m.list('g1');
+  r.global.push('偷偷加的');
+  r.chat.push('也加一条');
+  assert.deepEqual(m.list('g1').global, ['一条']);
+  assert.deepEqual(m.list('g1').chat, []);
+});
+
+test('facts：按关键词删，两层都搜，不相干的不动', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  m.add('g1', '主人喜欢猫');
+  m.add('g1', '这个群在杭州聚会', 'chat');
+  assert.equal(m.remove('g1', '杭州'), 2);
+  assert.deepEqual(m.list('g1').global, ['主人喜欢猫']);
+  assert.deepEqual(m.list('g1').chat, []);
+});
+
+test('facts：空关键词不误伤（不然一次误调用就清空全部）', () => {
+  const m = freshFacts();
+  m.add('g1', '一条');
+  assert.equal(m.remove('g1', ''), 0);
+  assert.equal(m.remove('g1', null), 0);
+  assert.equal(m.list('g1').global.length, 1);
+});
+
+test('facts：清本群不动跨群，清跨群不动本群', () => {
+  const m = freshFacts();
+  m.add('g1', '跨群的');
+  m.add('g1', '本群的', 'chat');
+  m.add('g2', '另一个群的', 'chat');
+
+  m.clearChat('g1');
+  assert.deepEqual(m.list('g1').chat, []);
+  assert.deepEqual(m.list('g1').global, ['跨群的'], '清本群不该动跨群层');
+  assert.deepEqual(m.list('g2').chat, ['另一个群的'], '更不该动别的群');
+
+  m.clearGlobal();
+  assert.deepEqual(m.list('g1').global, []);
+  assert.deepEqual(m.list('g2').chat, ['另一个群的']);
+});
+
+test('facts：存盘后重开还在（不是只活在内存里）', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  m.add('g1', '本群的梗', 'chat');
+  const again = createMemory(); // 同一个 DSH_ROOST_DATA，模拟重启
+  assert.deepEqual(again.list('g1').global, ['主人住在杭州']);
+  assert.deepEqual(again.list('g1').chat, ['本群的梗']);
+});
+
+test('facts：文件坏了不该把插件带崩（读不出就当空的）', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-facts-'));
+  writeFileSync(join(process.env.DSH_ROOST_DATA, 'memory.json'), '{ 这不是 JSON', 'utf8');
+  const m = createMemory();
+  assert.deepEqual(m.list('g1').global, []);
+  m.add('g1', '还能写');
+  assert.deepEqual(createMemory().list('g1').global, ['还能写'], '坏文件要被覆盖成好的');
+});
+
+test('facts：按群的人设覆盖，设/读/清三件套', () => {
+  const m = freshFacts();
+  assert.equal(m.getPersonaOverride('g1'), '', '没设过就是空串（回落到 personas/*.md）');
+  m.setPersonaOverride('g1', '这个群里她话少一点');
+  assert.equal(m.getPersonaOverride('g1'), '这个群里她话少一点');
+  assert.equal(m.getPersonaOverride('g2'), '', '别的群不受影响');
+  m.setPersonaOverride('g1', '   ');
+  assert.equal(m.getPersonaOverride('g1'), '', '传空就是清掉');
+});
+
+test('facts：人设覆盖截到 500 字', () => {
+  const m = freshFacts();
+  m.setPersonaOverride('g1', '啊'.repeat(900));
+  assert.equal(m.getPersonaOverride('g1').length, 500);
+});
+
+test('facts：授权记录能写能查（群主动的硬前置）', () => {
+  const m = freshFacts();
+  assert.equal(m.hasAuthz('g1', 'group_push'), false, '没给过就是没有');
+  assert.equal(m.authz('g1'), null);
+
+  m.setAuthz('g1', 'group_push', { type: 'group' });
+  assert.equal(m.hasAuthz('g1'), true, '不带 scope 时只问"有没有授权"');
+  assert.equal(m.hasAuthz('g1', 'group_push'), true);
+  assert.equal(m.hasAuthz('g1', 'c2c_push'), false, 'scope 不对就是没有');
+  assert.equal(m.authz('g1').scope, 'group_push');
+  assert.equal(m.authz('g1').type, 'group', '面板要能看见是什么类型的授权');
+});
+
+test('facts：从旧版导入是幂等的（重复导入不翻倍）', () => {
+  const m = freshFacts();
+  const payload = { global: ['跨群的 A', '跨群的 B'], chats: { g1: ['本群的 C'] } };
+  assert.equal(m.import(payload), 3);
+  assert.equal(m.import(payload), 0, '第二次一条都不该新增');
+  assert.equal(m.list('g1').global.length, 2);
+  assert.equal(m.list('g1').chat.length, 1);
+});
+
