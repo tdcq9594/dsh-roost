@@ -747,6 +747,105 @@ test('搭话: 其它失败按随机间隔，不能误判成今天说满了', asy
   assert.ok(mins >= 180 && mins <= 480, `应落在随机间隔内，实际 ${mins} 分钟`);
 });
 
+/**
+ * 「追问只追一次」。
+ *
+ * 这条从第 5 期就写在 `speakup.js` 的文件头里，但**只写了注释**：
+ * `shouldFire()` 只看 `lastOwnerAt`，`lastBotAt` 记了没人读。
+ * 后果是主人一直不回，她每 3–8 小时追一次，一路追满 `maxPerDay: 3`。
+ */
+test('搭话: 说了没回可以追一次，追完就闭嘴', () => {
+  const now = new Date(2026, 9, 26, 14, 0, 0).getTime();
+  const cfg = { ...SPEAK_DEFAULTS, enabled: true, chatId: 'u1', followUps: 1 };
+  const base = {
+    nextAt: now - 1, lastOwnerAt: now - 5 * HOUR,
+    day: new Date(now).toDateString(), todayCount: 1,
+  };
+
+  const once = { ...base, unanswered: 1 };
+  assert.equal(shouldFire(once, cfg, now).fire, true, '说了第 1 条没回，还允许追一次');
+
+  const twice = { ...base, unanswered: 2 };
+  assert.equal(shouldFire(twice, cfg, now).fire, false, '追过一次还没回，就不要再开口');
+  assert.match(shouldFire(twice, cfg, now).why, /还没回/);
+});
+
+test('搭话: followUps=0 时说一次没回就不再开口', () => {
+  const now = new Date(2026, 9, 26, 14, 0, 0).getTime();
+  const cfg = { ...SPEAK_DEFAULTS, enabled: true, chatId: 'u1', followUps: 0 };
+  const st = {
+    nextAt: now - 1, lastOwnerAt: now - 5 * HOUR,
+    day: new Date(now).toDateString(), todayCount: 1, unanswered: 1,
+  };
+  assert.equal(shouldFire(st, cfg, now).fire, false);
+});
+
+test('搭话: 主人回话之后，追问额度清零', async () => {
+  const sp = createSpeakUp({
+    dataDir: tmp(),
+    cfgOf: () => ({ speakUp: { enabled: true, chatId: 'u1' } }),
+    generate: async () => '在吗',
+    send: async () => ({ ok: true }),
+  });
+  await sp.fire();
+  await sp.fire();
+  assert.equal(sp.state().unanswered, 2, '连着两条都没被回');
+
+  sp.noteOwner('u1');
+  assert.equal(sp.state().unanswered, 0, '主人回来了，账要清零');
+});
+
+/**
+ * 老状态文件里没有 `unanswered` 字段。
+ *
+ * 只写 `+1` 的话，升级后的第一次追问会被当成「第 1 条」，
+ * 于是又能追满一整轮——等于这次修复对存量数据不生效。
+ */
+test('搭话: 老状态没有 unanswered 时，从 lastBotAt 补回来', async () => {
+  const dir = tmp();
+  writeFileSync(
+    join(dir, 'speakup.json'),
+    JSON.stringify({ nextAt: 0, todayCount: 0, day: '', lastOwnerAt: 0, lastBotAt: 1_000 }),
+    'utf8',
+  );
+  const sp = createSpeakUp({
+    dataDir: dir,
+    cfgOf: () => ({ speakUp: { enabled: true, chatId: 'u1' } }),
+    generate: async () => '在吗',
+    send: async () => ({ ok: true }),
+  });
+  await sp.fire();
+  assert.equal(sp.state().unanswered, 2, '上一条确实没被回，这次算第 2 条');
+});
+
+/**
+ * 没配主人 openid 时手动触发，必须**在第一行就停**。
+ *
+ * 面板的「立刻走一次」直接调 `fire()`，绕过 `tick()` 的所有前置检查。
+ * 以前这里没检查，于是：拿字面量 `'speakup'` 建了个假会话 → 跑了一轮模型
+ * （真花钱）→ 读到所有会话的上下文（串场）→ 最后才报「缺 target」。
+ */
+test('搭话: 没配 chatId 时手动触发什么都不做', async () => {
+  let spent = 0;
+  const sp = createSpeakUp({
+    dataDir: tmp(),
+    cfgOf: () => ({ speakUp: { enabled: true, chatId: '' } }),
+    generate: async () => {
+      spent += 1;
+      return '在吗';
+    },
+    send: async () => {
+      spent += 1;
+      return { ok: true };
+    },
+  });
+  const r = await sp.fire('手动');
+  assert.equal(r.ok, false);
+  assert.match(r.why, /chatId|openid/);
+  assert.equal(spent, 0, '一个字都不该花：不建会话、不调模型、不发消息');
+  assert.equal(sp.state().lastBotAt, 0, '不该留下「说过话」的痕迹');
+});
+
 test('排期: 跨天排到清醒时段开始，且带 0–30 分钟随机', () => {
   const now = new Date(2026, 9, 26, 14, 0, 0).getTime();
   for (let i = 0; i < 20; i++) {

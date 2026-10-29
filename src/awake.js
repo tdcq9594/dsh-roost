@@ -223,7 +223,7 @@ export function pickOpportunity(list, rand = Math.random) {
  * 关键是最后那句 `<<skip>>`：**必须明确给出不说话的出口**，
  * 否则模型会为了完成任务硬凑一句（这是铁律三的落点）。
  */
-export function buildWakePrompt({ opp, ctx = {}, group = null } = {}) {
+export function buildWakePrompt({ opp, ctx = {}, group = null, extra = '' } = {}) {
   const where = group ? `你在 QQ 群「${group.name || group.idShort || ''}」里` : '你在和主人私聊';
   const lines = [
     `${where}。现在 ${ctx.hour ?? ''} 点，${opp?.reason || '没什么特别的事'}。`,
@@ -253,6 +253,14 @@ export function buildWakePrompt({ opp, ctx = {}, group = null } = {}) {
       : '',
     ctx.recent?.length ? `【最近说过的话】\n${ctx.recent.map((r) => `· ${r}`).join('\n')}` : '',
     ctx.agreements?.length ? `【答应过还没做的】\n${ctx.agreements.map((a) => `· ${a}`).join('\n')}` : '',
+    /**
+     * 主人自己写的指令（`speakUp.prompt`）。
+     *
+     * 放在 `<<skip>>` 那一段**之前**：那段是铁律三的落点（必须给她不说话的
+     * 出口），不能被任何自定义指令顶掉。自定义指令写在前面，读起来是
+     * 「她自己的偏好」，最后那句仍然是「你可以不说」。
+     */
+    extra ? `【主人给你的额外要求】\n${extra}` : '',
     '',
     '现在给你一个开口的机会。**你可以不说。**',
     '想说就直接写要发出去的那句话：口语、简短（通常一两句），不要解释你为什么突然说话，',
@@ -396,8 +404,15 @@ export function createAwake({
   now = () => Date.now(),
 } = {}) {
   const file = () => join(dataDir, 'awake.json');
-  /** 群维度的状态：每个群今天说了几次、最后一条用户消息什么时候 */
-  let state = { groups: {}, casualDay: '', casualCount: 0, lastWakeAt: 0, lastKind: '', lastWhy: '' };
+  /**
+   * `groups` 只放**群**，`c2c` 单独一格。
+   *
+   * 以前私聊也往 `groups` 里写（`noteUser` 不看 kind），于是 `awake.json`
+   * 的 groups 里混进了主人的 c2c openid。后果不只是脏数据：`groupCandidates`
+   * 的候选来自配置白名单，脏条目不会真被当成群，但面板「她为什么不说」那栏
+   * 一旦有人按 state 去看，就会多出一个不存在的群。
+   */
+  let state = { groups: {}, c2c: { lastUserAt: 0 }, casualDay: '', casualCount: 0, lastWakeAt: 0, lastKind: '', lastWhy: '' };
   try {
     state = { ...state, ...JSON.parse(readFileSync(file(), 'utf8')) };
   } catch {}
@@ -426,9 +441,32 @@ export function createAwake({
     };
   };
 
-  /** 群里有人说话时调一下，用来算冷场 */
-  function noteUser(chatId) {
+  /**
+   * 有人说话时调一下。
+   *
+   * @param {string} chatId
+   * @param {'c2c'|'group'} [kind] 不传按群处理（老调用点兼容）
+   *
+   * 私聊和群记的是**两件不同的事**：私聊记「多久没聊」（喂给 miss 机会），
+   * 群记「冷场多久了 + 退避」（喂给插话的四道门）。以前不分，
+   * 私聊的 openid 被写进群状态表，而私聊决策读的却是 speakUp 的
+   * `lastOwnerAt`——那条路径在 `speakUp.chatId` 空着时永远不更新，
+   * 于是私聊的「沉默多久」永远是 99 小时，miss 机会每轮都成立。
+   */
+  function noteUser(chatId, kind = 'group') {
     if (!chatId) return;
+    if (kind === 'c2c') {
+      state.c2c = { ...(state.c2c || {}), lastUserAt: now() };
+      /**
+       * 顺手把历史上误写进 groups 的那条清掉。
+       *
+       * 不写迁移脚本：这条数据本身无害（候选群来自白名单），
+       * 主人下次说话就自然消失，比在启动时批量改文件安全。
+       */
+      if (state.groups[chatId]) delete state.groups[chatId];
+      save();
+      return;
+    }
     const g = state.groups[chatId] || {};
     /**
      * 顺带把退避清掉：有人说话了 = 场面变了，值得重新问她一次。
@@ -437,6 +475,9 @@ export function createAwake({
     state.groups[chatId] = { ...g, lastUserAt: now(), skipStreak: 0, nextAskAt: 0 };
     save();
   }
+
+  /** 私聊最后一次收到消息的时间（`contextOf` 算 miss 用） */
+  const c2cLastUserAt = () => Number(state.c2c?.lastUserAt || 0);
 
   function groupState(chatId) {
     return state.groups[chatId] || {};
@@ -450,17 +491,31 @@ export function createAwake({
    * 三件事分开，任何一件换实现都不用动另外两件。
    *
    * @param {'c2c'|'group'} kind
-   * @param {string} [chatId] 群聊时必填
+   * @param {string} [chatId] 群聊时必填；私聊传主人的 openid，不传就按配置兜底
+   * @param {string} [extraPrompt] 主人自己写的额外指令（`speakUp.prompt`）
    * @returns {Promise<{speak:boolean, text:string, kind:string, why:string}>}
    */
-  async function compose({ kind = 'c2c', chatId = '' } = {}) {
+  async function compose({ kind = 'c2c', chatId = '', extraPrompt = '' } = {}) {
     const c = cfg();
     const ctx = contextOf?.({ kind, chatId }) || {};
     const opps = opportunities({
       now: now(),
       mood: ctx.mood,
       agreements: ctx.agreements,
-      state: ctx.state || {},
+      /**
+       * 随性额度**必须从这里补进来**。
+       *
+       * `ctx.state` 是宿主给的（`lastOwnerAt` / `closedAt`），它不知道
+       * 「今天随性说过几次」——那是 `awake.json` 自己记的账。
+       * 以前两边没接上：`opportunities()` 从 `ctx.state.casualCount` 读，
+       * 写入点却是 `state.casualCount`，读的和写的不是一个对象，
+       * 所以即使有人写了，读到的也永远是 0。
+       */
+      state: {
+        ...(ctx.state || {}),
+        casualDay: state.casualDay,
+        casualCount: state.casualCount,
+      },
       // 群里不给"随性"机会：群聊随性插话最容易招人烦
       cfg: kind === 'group' ? { ...c, casualPerDay: 0 } : c,
       // 群里也没有"想你"：她不在群里等谁，等谁的是私聊
@@ -475,11 +530,12 @@ export function createAwake({
       opp,
       ctx,
       group: kind === 'group' ? { name: ctx.name, idShort: String(chatId).slice(0, 8) } : null,
+      extra: extraPrompt,
     });
 
     let raw = '';
     try {
-      raw = await generate(prompt);
+      raw = await generate(prompt, { kind, chatId });
     } catch (e) {
       return { speak: false, text: '', kind: opp.kind, why: `调模型失败：${e.message}`, error: true, asked: true };
     }
@@ -487,10 +543,37 @@ export function createAwake({
     const v = parseVerdict(raw);
     state.lastKind = opp.kind;
     state.lastWhy = opp.reason;
+    /**
+     * 「上次醒来是什么时候」。
+     *
+     * 这个字段从第 5 期就声明在状态里，但**全仓零写入点**——永远是 0。
+     * 「醒来」= 真的问过模型（说没说都算），所以写在这里，
+     * 不写在发送成功之后：问了但决定不说是醒过的，问了但没发出去也是醒过的。
+     */
+    state.lastWakeAt = now();
     if (!v.speak) {
       log(`觉醒了但没说（${opp.kind}）：${v.why}`);
+      save();
       return { speak: false, text: '', kind: opp.kind, why: v.why, asked: true };
     }
+    /**
+     * 「随性每天最多一次」的计数。
+     *
+     * `opportunities()` 一直在读 `casualDay` / `casualCount`，但**全仓没有
+     * 一处写**——`casualUsed` 永远 0，这条限制从上线起就没生效过。
+     * 实测 `awake.json` 是 `casualCount: 0` 而 `lastKind: "casual"`，
+     * 正好把「挑到过 casual 但没记账」这件事摆出来了。
+     *
+     * 记账放在**决定说**这一刻，不放在发送成功之后：发送失败时 `speakup`
+     * 会把下一次推到 3–8 小时后，这一次机会本来也已经花掉了。
+     * 宁可少说一句，也不能在同一个额度里反复开口。
+     */
+    if (opp.kind === 'casual') {
+      const today = dayKey(now());
+      state.casualCount = state.casualDay === today ? Number(state.casualCount || 0) + 1 : 1;
+      state.casualDay = today;
+    }
+    save();
     return { speak: true, text: v.text, kind: opp.kind, why: opp.reason, asked: true };
   }
 
@@ -599,6 +682,8 @@ export function createAwake({
     noteUser,
     compose,
     wakeGroups,
+    /** 私聊最后一次收到消息的时间戳（0 = 没记录）。`contextOf` 算「想你」用它 */
+    c2cLastUserAt,
     /** 某个群的觉醒状态（面板/日志看"为什么不说话"用） */
     groupState: (chatId) => state.groups[chatId] || {},
     /** 面板用 */

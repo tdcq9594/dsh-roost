@@ -32,6 +32,15 @@ export const DEFAULTS = {
   maxIntervalMinutes: 480,
   /** 每天最多主动几次 */
   maxPerDay: 3,
+  /**
+   * 上次主动说了、主人没回，最多再追几次。
+   *
+   * `1` = 说了没回可以再追一次，追完还没回就闭嘴（注释里第 5 条
+   * 「追问只追一次」）。`0` = 说一次没回就不再开口。
+   * **不设上限的话**，不回她就每 3–8 小时追一次，一路追满 `maxPerDay`，
+   * 那是最典型的「像催债」。
+   */
+  followUps: 1,
   /** 给 AI 的指令 */
   prompt:
     '主人有一阵子没找你了。主动发一条私聊消息给他，简短、自然，像朋友随口搭话。'
@@ -88,6 +97,26 @@ export function shouldFire(state, cfg, now) {
     return { fire: false, why: '主人刚说过话' };
   }
 
+  /**
+   * **追问只追一次**（文件头第 5 条）。
+   *
+   * 以前这里只看 `lastOwnerAt`，于是主人一直不回就每 3–8 小时追一次，
+   * 一路追满 `maxPerDay: 3`——三句话全都石沉大海，最像催债。
+   * `lastBotAt` 早在 `fire()` 里就记了，但**全仓没有一处读它**，
+   * 等于这条设计写在注释里、从没实现过。
+   *
+   * `unanswered` 是「连续几条主动消息没被回」，`noteOwner` 归零。
+   * 老状态文件里没有这个字段时按 0 算，下一次 `fire()` 会从时间戳补回来
+   * （见 `fire()` 里那段推导），所以升级不会卡在「永远 0」。
+   */
+  const followUps = Math.max(0, Number(cfg.followUps ?? DEFAULTS.followUps) || 0);
+  if (Number(state.unanswered || 0) > followUps) {
+    return {
+      fire: false,
+      why: `上次主动说了主人还没回（连着 ${state.unanswered} 条），不再追`,
+    };
+  }
+
   if (!state.nextAt || now < state.nextAt) {
     return { fire: false, why: '还没到时间' };
   }
@@ -136,10 +165,38 @@ export function scheduleNextDay(cfg, now = Date.now()) {
   return d.getTime() + Math.random() * 30 * MINUTE;
 }
 
-export function createSpeakUp({ dataDir, cfgOf, generate, send, log = () => {} }) {
+export function createSpeakUp({ dataDir, cfgOf, ownerOf, generate, send, log = () => {} }) {
   const file = () => join(dataDir, 'speakup.json');
 
-  let state = { nextAt: 0, todayCount: 0, day: '', lastOwnerAt: 0, lastBotAt: 0, lastText: '', silenceUntil: 0 };
+  /**
+   * 当前配置，**已把「发给谁」补好**。
+   *
+   * `speakUp.chatId` 只是其中一种来源：Roost 那边本来就有一份更权威的
+   * 主人 openid（`config/bots/<bot>.json` 的 `owners`）。以前这里只读
+   * 自己那份，于是「Roost 认得主人、DSH 说没配」——用户没有任何理由
+   * 知道要填两遍。
+   *
+   * 三级兜底，越靠前越优先：
+   *   1. `speakUp.chatId`（面板显式填的，认人）
+   *   2. `ownerOf()`（宿主给的：Roost 配置 / 从真实消息里学到的）
+   *   3. 空 → 上层判定「没配」，什么都不做
+   *
+   * 抽成一个函数是因为原来三处（noteOwner / fire / tick）各拼了一遍，
+   * 任何一处漏改就会出现「排期认了主人、发送却说不认识」。
+   */
+  function cfgNow() {
+    const c = { ...DEFAULTS, ...(cfgOf().speakUp ?? {}) };
+    if (!String(c.chatId || '').trim()) {
+      const auto = String(ownerOf?.() || '').trim();
+      if (auto) c.chatId = auto;
+    }
+    return c;
+  }
+
+  let state = {
+    nextAt: 0, todayCount: 0, day: '', lastOwnerAt: 0, lastBotAt: 0,
+    lastText: '', silenceUntil: 0, unanswered: 0,
+  };
   try {
     state = { ...state, ...JSON.parse(readFileSync(file(), 'utf8')) };
   } catch {}
@@ -155,16 +212,36 @@ export function createSpeakUp({ dataDir, cfgOf, generate, send, log = () => {} }
 
   /** 收到主人的消息时调一下，用来算冷场 */
   function noteOwner(chatId) {
-    const cfg = { ...DEFAULTS, ...(cfgOf().speakUp ?? {}) };
+    const cfg = cfgNow();
     if (!cfg.chatId || chatId !== cfg.chatId) return;
     state.lastOwnerAt = Date.now();
+    // 主人回来了，「连着几条没被回」的账清零——追问额度重新攒
+    state.unanswered = 0;
     // 主人回来了，重新排期
     state.nextAt = scheduleNext(cfg);
     save();
   }
 
   async function fire(reason = '定时') {
-    const cfg = { ...DEFAULTS, ...(cfgOf().speakUp ?? {}) };
+    const cfg = cfgNow();
+
+    /**
+     * 没配主人 openid 就**什么都不做**：不建会话、不跑模型、不排期。
+     *
+     * `tick()` 和 `shouldFire()` 都检查过这一条，但面板上的「立刻走一次」
+     * 是**直接调 `fire()`** 的，绕过前面所有门。以前这里没有检查，于是：
+     *   1. 宿主那边拿字面量 `'speakup'` 当 chatId 建了一个假会话
+     *      （会话列表里凭空多出一个叫「主动搭话」的会话）
+     *   2. 跑了一轮模型（真的花钱）
+     *   3. `compose` 拿到空 chatId，`journal.recent('')` 返回**所有会话**的
+     *      最近几条，可能引用群里的对话（串场）
+     *   4. 最后才在发送那一步报「缺 target」
+     * 顺序整个是反的：该在第一行拦住的事，拖到最后一行才报。
+     */
+    if (!cfg.chatId) {
+      return { ok: false, why: '不知道该发给谁：Roost 没配主人（owners），DSH 也没填 chatId' };
+    }
+
     try {
       const raw = String((await generate(cfg.prompt)) ?? '').trim();
 
@@ -237,6 +314,27 @@ export function createSpeakUp({ dataDir, cfgOf, generate, send, log = () => {} }
         return { ok: false, code: r?.code, message: r?.message || '发失败' };
       }
 
+      /**
+       * 「连着几条没被回」的账。
+       *
+       * 三种情况要分开，只写 `+1` 会把第三种算错：
+       *   1. 上一条被回了（或从没说过）→ 重新从 1 开始
+       *   2. 有账（`unanswered > 0`）→ 往上加
+       *   3. **老状态文件没有这个字段**（默认 0），但从 `lastBotAt > lastOwnerAt`
+       *      看得出上一条确实欠着 → 这次是第 2 条
+       * 少了第 3 条，升级后的第一次追问会被当成「第 1 条」，
+       * 于是又能追满一整轮——等于这次修复对存量数据不生效。
+       *
+       * 必须在写新的 `lastBotAt` **之前**取旧值，否则比较永远成立。
+       */
+      const prevBotAt = Number(state.lastBotAt || 0);
+      if (prevBotAt <= Number(state.lastOwnerAt || 0)) {
+        state.unanswered = 1;
+      } else if (Number(state.unanswered || 0) > 0) {
+        state.unanswered = Number(state.unanswered) + 1;
+      } else {
+        state.unanswered = 2;
+      }
       state.lastBotAt = Date.now();
       state.lastText = text.slice(0, 100);
       state.todayCount = (state.day === new Date().toDateString() ? state.todayCount : 0) + 1;
@@ -266,8 +364,10 @@ export function createSpeakUp({ dataDir, cfgOf, generate, send, log = () => {} }
 
   /** 每分钟跑一次 */
   async function tick(now = Date.now()) {
-    const cfg = { ...DEFAULTS, ...(cfgOf().speakUp ?? {}) };
-    if (!cfg.enabled || !cfg.chatId) return { ok: false, why: '没开' };
+    const cfg = cfgNow();
+    // 「没开」和「没配 chatId」是两件事，报同一个 why 会让人查错方向
+    if (!cfg.enabled) return { ok: false, why: '没开' };
+    if (!cfg.chatId) return { ok: false, why: '不知道该发给谁：Roost 没配主人（owners），DSH 也没填 chatId' };
 
     // 第一次只排期，不触发——不能让 DSH 一启动就发一句「在吗」
     if (!state.nextAt) {

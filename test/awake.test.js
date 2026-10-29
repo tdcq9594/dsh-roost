@@ -646,3 +646,186 @@ test('群主动：有约定时以「约定」为由开口，不是「想你」',
   assert.equal(v.speak, true);
   assert.equal(v.kind, 'agreement', '群里唯一的开口理由应该是「答应过的事」');
 });
+
+/* ---------------- 随性额度 / 醒来时间 / 私聊状态 ---------------- */
+
+/**
+ * 「随性每天最多一次」。
+ *
+ * `opportunities()` 一直在读 `casualDay` / `casualCount`，但**全仓没有一处写**，
+ * 于是 `casualUsed` 永远是 0，这条限制从上线起就没生效过。
+ * 现场证据：`awake.json` 是 `casualCount: 0` 而 `lastKind: "casual"`。
+ */
+test('觉醒：随性说过一次，当天就不再「随便说句话」', async () => {
+  const a = createAwake({
+    dataDir: tmp(),
+    cfgOf: () => ({ awake: CFG }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    // 刚聊过（不到 missAfterHours）、没约定 → 只剩「随性」一个机会
+    contextOf: () => ({
+      chatId: 'u1',
+      mood: { sociability: 1, energy: 1 },
+      agreements: [],
+      state: { lastOwnerAt: noon() - 60_000 },
+    }),
+    generate: async () => '今天天气不错',
+    log: () => {},
+    rand: () => 0,
+    now: () => noon(),
+  });
+
+  const v1 = await a.compose({ kind: 'c2c' });
+  assert.equal(v1.speak, true);
+  assert.equal(v1.kind, 'casual');
+  assert.equal(a.status().casualCount, 1, '说出口就要记账');
+
+  const v2 = await a.compose({ kind: 'c2c' });
+  assert.equal(v2.speak, false, '同一天第二次随性不该再出现');
+  assert.equal(v2.asked, false, '连模型都不用问');
+});
+
+test('觉醒：随性额度跨天重置', async () => {
+  const dir = tmp();
+  let day = 0;
+  const a = createAwake({
+    dataDir: dir,
+    cfgOf: () => ({ awake: CFG }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    contextOf: () => ({
+      chatId: 'u1',
+      mood: { sociability: 1, energy: 1 },
+      agreements: [],
+      state: { lastOwnerAt: noon(day) - 60_000 },
+    }),
+    generate: async () => '今天天气不错',
+    log: () => {},
+    rand: () => 0,
+    now: () => noon(day),
+  });
+
+  assert.equal((await a.compose({ kind: 'c2c' })).speak, true);
+  assert.equal((await a.compose({ kind: 'c2c' })).speak, false);
+
+  day = 1; // 第二天
+  const v = await a.compose({ kind: 'c2c' });
+  assert.equal(v.speak, true, '跨天之后随性额度要回来');
+  assert.equal(a.status().casualCount, 1);
+});
+
+/**
+ * `lastWakeAt` 从第 5 期就声明在状态里，但**全仓零写入点**，永远是 0。
+ * 「醒来」= 真的问过模型，说没说都算。
+ */
+test('觉醒：问过模型就记「醒来时间」，不是等发出去才记', async () => {
+  const a = createAwake({
+    dataDir: tmp(),
+    cfgOf: () => ({ awake: CFG }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    contextOf: () => ({ chatId: 'u1', mood: { sociability: 1 }, agreements: ['看电影'], state: {} }),
+    generate: async () => '<<skip>>',
+    log: () => {},
+    now: () => noon(),
+  });
+  assert.equal(a.status().lastWakeAt, 0);
+  await a.compose({ kind: 'c2c' });
+  assert.equal(a.status().lastWakeAt, noon(), '她决定不说也是醒过的');
+});
+
+/**
+ * 私聊和群记的是两件事。
+ *
+ * 以前 `noteUser` 不看 kind，私聊的 openid 被写进 `state.groups`；
+ * 而私聊决策读的是 `speakUp.lastOwnerAt`，那条路径在 chatId 没配时
+ * 永远不更新——于是私聊「沉默多久」永远是 99 小时，miss 每轮都成立。
+ */
+test('觉醒：私聊的消息不写进群状态表', () => {
+  const a = createAwake({
+    dataDir: tmp(),
+    cfgOf: () => ({ awake: CFG }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    contextOf: () => ({}),
+    generate: async () => '',
+    log: () => {},
+    now: () => noon(),
+  });
+  a.noteUser('u1', 'c2c');
+  assert.deepEqual(a.groupState('u1'), {}, '私聊 openid 不该出现在群状态里');
+  assert.equal(a.c2cLastUserAt(), noon(), '但要记进私聊那一格');
+});
+
+test('觉醒：群里有人说话记在群状态表，退避清零', () => {
+  const a = createAwake({
+    dataDir: tmp(),
+    cfgOf: () => ({ awake: CFG }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    contextOf: () => ({}),
+    generate: async () => '',
+    log: () => {},
+    now: () => noon(),
+  });
+  a.noteUser('g1', 'group');
+  assert.equal(a.groupState('g1').lastUserAt, noon());
+  assert.equal(a.c2cLastUserAt(), 0, '群消息不该冒充私聊');
+});
+
+test('觉醒：历史上误写进群状态表的私聊条目会被清掉', () => {
+  const a = createAwake({
+    dataDir: tmp(),
+    cfgOf: () => ({ awake: CFG }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    contextOf: () => ({}),
+    generate: async () => '',
+    log: () => {},
+    now: () => noon(),
+  });
+  a.noteUser('u1', 'group'); // 模拟旧版本把私聊当群写进去
+  assert.ok(a.groupState('u1').lastUserAt);
+  a.noteUser('u1', 'c2c'); // 主人下次说话时顺手清掉
+  assert.deepEqual(a.groupState('u1'), {});
+});
+
+/* ---------------- 主人自己写的额外指令 ---------------- */
+
+/**
+ * `speakUp.prompt` 以前**没人读**：awake 一开，`generate` 就把它丢掉。
+ * 现在只在「跟默认值不同」时当追加要求传进来。
+ */
+test('觉醒：主人写的额外要求会进提示词，但「可以不说」必须留在最后', () => {
+  const p = buildWakePrompt({ opp: { reason: '很久没联系了' }, ctx: {}, extra: '多用东北话，别太文雅' });
+  assert.match(p, /多用东北话/);
+  assert.ok(
+    p.trimEnd().endsWith('**只输出 `<<skip>>`**，什么都别加。'),
+    '不说话的出口不能被自定义指令顶掉，否则等于退回定时器',
+  );
+});
+
+test('觉醒：没传额外要求时不出现空段落', () => {
+  const p = buildWakePrompt({ opp: { reason: '很久没联系了' }, ctx: {} });
+  assert.ok(!p.includes('【主人给你的额外要求】'));
+  assert.ok(!/\n\n\n/.test(p), '不该留下连续空行');
+});
+
+test('觉醒：compose 把额外要求原样交给提示词', async () => {
+  let seen = '';
+  const a = createAwake({
+    dataDir: tmp(),
+    cfgOf: () => ({ awake: CFG }),
+    channelOf: () => createFakeChannel(),
+    authzOf: () => true,
+    contextOf: () => ({ chatId: 'u1', mood: { sociability: 1 }, agreements: ['看电影'], state: {} }),
+    generate: async (prompt) => {
+      seen = prompt;
+      return '<<skip>>';
+    },
+    log: () => {},
+    now: () => noon(),
+  });
+  await a.compose({ kind: 'c2c', extraPrompt: '别提工作的事' });
+  assert.match(seen, /别提工作的事/);
+});

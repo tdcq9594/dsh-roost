@@ -2186,6 +2186,26 @@ select.roost-input{color-scheme:dark}
       const [authScope, setAuthScope] = useState('group_push')
       const state = sp?.state || {}
       const spCfg = sp?.cfg || {}
+      /**
+       * 能不能手动走一次。
+       *
+       * `ready === false` 只会在**没配主人 openid** 时出现（宿主 `/speakup`
+       * 的判定）。老宿主不返回这个字段，`undefined` 按「可以」处理，
+       * 不会因为版本不齐就把按钮全锁了。
+       */
+      const spReady = sp?.ready !== false
+      const spWhy = sp?.why || '不知道发给谁'
+      /**
+       * 收件人从哪来的。
+       *
+       * 必须标出来——否则人会以为是自己填过 `speakUp.chatId`，
+       * 换掉 Roost 的 owners 之后发现「怎么没跟着变」，找不到原因。
+       */
+      const OWNER_FROM = {
+        config: '面板里填的',
+        roost: '取自 Roost 的 owners',
+        learned: '从主人私聊里认到的',
+      }
 
       /**
        * 待确认的主动消息（桥 3）。
@@ -2245,16 +2265,32 @@ select.roost-input{color-scheme:dark}
 
         /* 私聊排期：speakup.js 管"什么时候轮到她"，awake 只管"要不要说" */
         h(Sec, { n: '02', title: '私聊排期', right: h('button', { type: 'button', className: 'roost-btn', onClick: reloadSp }, '刷新') },
+          h(Row, { k: '发给' },
+            sp?.owner
+              ? `${String(sp.owner).slice(0, 8)}…（${OWNER_FROM[sp.ownerFrom] || '未知来源'}）`
+              : '还不知道发给谁'),
           h(Row, { k: '下次' }, state.nextAt ? ago(state.nextAt).replace('前', '后') : '还没排'),
           h(Row, { k: '今天' }, `${state.day && state.day === new Date().toDateString() ? state.todayCount : 0} / ${spCfg.maxPerDay ?? 3} 次`),
           h(Row, { k: '上次' },
             state.lastBotAt
               ? `${ago(state.lastBotAt)}${state.lastText ? '：' + state.lastText : ''}`
               : '还没主动说过'),
+          /**
+           * 「连着几条没被回」——这是「她怎么不追了」的直接答案。
+           *
+           * 不显示的话，主人不回她、她停下来，看起来就跟坏了一样。
+           */
+          h(Row, { k: '追问' },
+            Number(state.unanswered || 0) > 0
+              ? `连着 ${state.unanswered} 条没被回（上限 ${spCfg.followUps ?? 1} 次追问）`
+              : '没有欠着的'),
           h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
             h('button', {
-              type: 'button', className: 'roost-btn', disabled: busy,
+              type: 'button', className: 'roost-btn',
+              disabled: busy || !spReady,
+              title: spReady ? '' : spWhy,
               onClick: async () => {
+                if (!spReady) return toast(spWhy)
                 const r = await post('/speakup/fire', {})
                 toast(r.ok ? '说了：' + (r.text || '') : (r.why || r.message || '这次没说'))
                 reloadSp()
@@ -2263,7 +2299,11 @@ select.roost-input{color-scheme:dark}
             }, '立刻走一次私聊流程'),
           ),
           h('div', { className: 'roost-note' },
-            '间隔随机、免打扰、每日上限都在这里管；「要不要说」交给上面的机会判断。'),
+            spReady
+              ? (sp?.ownerFrom === 'config'
+                ? '间隔随机、免打扰、每日上限都在这里管；「要不要说」交给上面的机会判断。'
+                : '收件人是从 Roost 那边自动取的，不用在这填。想换人就去 Roost 面板改主人，或者在这里填 chatId 覆盖它。')
+              : `暂时不能手动触发：${spWhy}。在 Roost 面板上把主人配好，这个按钮就会亮。`),
         ),
 
         h(Sec, { n: '03', title: '群聊主动（默认全关）' },
@@ -2285,7 +2325,7 @@ select.roost-input{color-scheme:dark}
 
           h('div', { style: { marginTop: 12 } },
             h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 4 } },
-              '授权：官方硬前置，没这条记录群主动发不出去'),
+              '授权：只有群主动需要（官方硬前置，没这条记录群主动发不出去）。私聊主动不需要授权——发给主人本来就是她能做的事。'),
             mem?.authz
               ? h('div', { className: 'roost-item' },
                   h('span', { className: 't' }, `当前会话已授权：${mem.authz.scope}`),
@@ -2294,7 +2334,7 @@ select.roost-input{color-scheme:dark}
               : h('div', { className: 'roost-empty' }, '当前会话还没有授权记录'),
             h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
               h('input', {
-                className: 'roost-input', placeholder: '群/用户 chatId（可从「会话」页复制）',
+                className: 'roost-input', placeholder: '群 chatId（可从「会话」页复制）',
                 value: authChat, onChange: (e) => setAuthChat(e.target.value), style: { flex: 1, minWidth: 200 },
               }),
               h('select', {
@@ -2302,7 +2342,6 @@ select.roost-input{color-scheme:dark}
                 style: { width: 130, flex: '0 0 130px' },
               },
                 h('option', { value: 'group_push' }, '群主动'),
-                h('option', { value: 'c2c_push' }, '私聊主动'),
               ),
               h('button', {
                 type: 'button', className: 'roost-primary',
@@ -2535,8 +2574,8 @@ select.roost-input{color-scheme:dark}
     const JSON_SECTIONS = [
       ['memory', '记忆', '日记寿命、注入条数、多少轮全量重注、记忆工具开关'],
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
-      ['awake', '主动说话', '清醒时段、机会分门槛、群白名单'],
-      ['speakUp', '私聊排期', '间隔/免打扰/每日上限（开不开由这里的总开关管）'],
+      ['awake', '主动说话', '清醒时段、机会分门槛、群白名单（开着时 speakUp.prompt 会当额外要求一起给）'],
+      ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],
       ['persona', '人格', '当前用哪个人格、按群指定；换人格去「人格与情绪」页点「用这个」'
         + '（name / text 是 0.10.0 之前的旧字段，只在人格文件读不出正文时才兜底）'],
       ['stickers', '表情包', '图放哪、要不要注入'],

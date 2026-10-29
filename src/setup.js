@@ -214,6 +214,47 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
   function keyOf() {
     return String(roostGlobal().webui?.accessKey || '');
   }
+
+  /**
+   * Roost 那边认定的**主人 openid**（主动搭话要发给谁）。
+   *
+   * 为什么要读它：`speakUp.chatId` 是 dsh-roost 自己的一份配置，而
+   * Roost 早就有一份更权威的——`<roost>/config/bots/<bot>.json` 的
+   * `owners`。两边各填一次，必然出现「Roost 认得主人、DSH 这边说没配」
+   * 的场面，而用户根本没有理由知道要填两遍。
+   *
+   * 位置是 `config/bots/*.json`，不是 `config/bot.json`：全局那份没有
+   * `owners`，主人是**按 bot** 配的（一个 bot 一个 appId，主人也可能不同）。
+   * 多个 bot 时优先 `main`，跟 `pluginConfig` 的取法保持一致。
+   *
+   * 缓存 5 秒：面板会轮询 `/speakup`，每次轮询都去 readdir + 读文件没必要；
+   * 但也不能永久缓存——用户在 Roost 面板上加了主人，这边应该很快跟上。
+   */
+  let ownerCache = { at: 0, id: '' };
+  function roostOwner() {
+    const now = Date.now();
+    if (ownerCache.at && now - ownerCache.at < 5_000) return ownerCache.id;
+
+    let id = '';
+    try {
+      const base = join(dirOf(), 'config', 'bots');
+      const files = readdirSync(base)
+        .filter((f) => f.endsWith('.json'))
+        .sort((a, b) => (a === 'main.json' ? -1 : b === 'main.json' ? 1 : a.localeCompare(b)));
+      for (const f of files) {
+        const c = JSON.parse(readFileSync(join(base, f), 'utf8'));
+        const first = String(c?.owners?.[0] || '').trim();
+        if (first) {
+          id = first;
+          break;
+        }
+      }
+    } catch {
+      /* 没装、没权限、格式不对 → 当作没有，让上层退回别的来源 */
+    }
+    ownerCache = { at: now, id };
+    return id;
+  }
   function baseUrl() {
     return `http://127.0.0.1:${portOf()}`;
   }
@@ -818,6 +859,8 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     webuiUrl,
     /** 面板根地址（不带 key），拼别的接口用 */
     baseUrl,
+    /** Roost 配置里的主人 openid（主动搭话的收件人）。空 = 那边也没配 */
+    roostOwner,
     /** 面板密钥的 query 片段，没有就是空串 */
     keyQuery: () => (keyOf() ? `?key=${encodeURIComponent(keyOf())}` : ''),
     get busy() {

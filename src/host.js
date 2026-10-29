@@ -36,7 +36,7 @@ import { createUpdater } from './update.js';
 import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
-import { createSpeakUp } from './speakup.js';
+import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
 import { createQqChannel, createChannelRegistry } from './channel.js';
@@ -52,6 +52,16 @@ export const name = 'roost';
 export const inject = ['agents', 'sessions', 'systemPrompt', 'webServer'];
 
 const API = '/roost/api';
+
+/**
+ * 认识的授权类型，**只有一个**。
+ *
+ * `group_push`：官方硬前置，没有它群主动消息发不出去（`channel.js` 里判）。
+ * 私聊主动**不需要授权**——发给主人是她本来就能做的事，多一道门只是
+ * 让人以为坏了。以前面板上有个 `c2c_push` 选项，写进去之后全仓无人读，
+ * 唯一效果就是面板显示「已授权：c2c_push」误导人。
+ */
+const AUTHZ_SCOPES = new Set(['group_push']);
 
 /**
  * 老会话没有 `kind` 字段，但有 preset。
@@ -198,6 +208,52 @@ export function apply(ctx) {
   const stickers = createStickers({ dataDir: dataDir(), log: (m) => log.warn(m) });
 
   /**
+   * 主人自己写的额外指令（`speakUp.prompt`），**改过才用**。
+   *
+   * 默认那句是「主动发一条私聊消息给他」——无条件塞进 awake 的提示词里
+   * 会把「你可以不说」顶掉，等于退回定时器。所以只在跟默认值不同时传：
+   * 没改过 = 不干扰决策型行为，改过 = 真的生效。
+   * 以前这个配置项压根没人读，面板上改了也没反应。
+   */
+  const speakUpExtra = () => {
+    const custom = String(cfg.speakUp?.prompt ?? '').trim();
+    return custom && custom !== SPEAKUP_DEFAULTS.prompt ? custom : '';
+  };
+
+  /**
+   * 从真实消息里学到的主人 openid。
+   *
+   * 只当最后一道兜底：Roost 配置里没写 `owners`、但消息的
+   * `sender.bucket` 已经是 `owner` 时（插件自己认的），这条就是唯一线索。
+   * 不落盘——重启后 Roost 配置那份还在，学到的丢了也无所谓。
+   */
+  let learnedOwner = '';
+
+  /**
+   * 主动搭话发给谁。三级兜底，越靠前越优先：
+   *   1. `speakUp.chatId`——面板上显式填的，认人
+   *   2. Roost 的 `config/bots/<bot>.json` 里的 `owners[0]`
+   *   3. 从真实消息里学到的主人（`sender.bucket === 'owner'` 的私聊）
+   *
+   * 为什么要有第 2 级：Roost 本来就存着主人 openid，再让用户在 DSH 面板
+   * 手填一遍是重复劳动，而且必然有人漏填——表现就是点「立刻走一次」
+   * 报「没配主人 openid」，可 Roost 明明认得主人。
+   */
+  const ownerId = () => {
+    const explicit = String(cfg.speakUp?.chatId || '').trim();
+    if (explicit) return explicit;
+    const fromRoost = String(setup?.roostOwner?.() || '').trim();
+    return fromRoost || learnedOwner;
+  };
+
+  /** 这个 id 是从哪来的（面板要说清楚，不然人以为是自己填的） */
+  const ownerFrom = () => {
+    if (String(cfg.speakUp?.chatId || '').trim()) return 'config';
+    if (String(setup?.roostOwner?.() || '').trim()) return 'roost';
+    return learnedOwner ? 'learned' : '';
+  };
+
+  /**
    * 主动搭话：算好「该说话了」→ 跑一轮 DSH 生成一句 → 让 ai-chat 发出去。
    *
    * 为什么发消息要绕一圈找 ai-chat：主动消息只能由持有 QQ 连接的一方发，
@@ -206,6 +262,13 @@ export function apply(ctx) {
   const speakUp = createSpeakUp({
     dataDir: dataDir(),
     cfgOf: () => cfg,
+    /**
+     * 「发给谁」交给这里统一解析（显式配置 → Roost 的 owners → 学到的）。
+     *
+     * 传函数而不是值：`setup` 还没构造出来，而且 Roost 的配置随时会被
+     * 用户在另一个面板上改，读死值就会一直用旧的。
+     */
+    ownerOf: ownerId,
     log: (m) => log.info(m),
     /**
      * 第 5 期起，这里不再是"照着固定 prompt 说一句"，而是**先问她要不要说**。
@@ -215,13 +278,21 @@ export function apply(ctx) {
      */
     generate: async (prompt) => {
       const a = { ...(cfg.awake ?? {}) };
+      const owner = ownerId();
       if (a.enabled === false) {
-        const chat = { kind: 'c2c', chatId: cfg.speakUp?.chatId || 'speakup', name: '主动搭话', preset: 'roost-private' };
+        /**
+         * 老路径（awake 关掉时的定时器行为）也必须先有 openid。
+         *
+         * 以前是 `cfg.speakUp?.chatId || 'speakup'`——空着就拿字面量建会话。
+         * 用户实测撞到的「为什么没发给主人而是单独开一个会话」就是这一行。
+         */
+        if (!owner) throw new Error('不知道该发给谁：Roost 没配主人（owners），DSH 也没填 chatId，不建会话');
+        const chat = { kind: 'c2c', chatId: owner, name: '主动搭话', preset: 'roost-private' };
         const { agent } = await agentFor(chat);
         mount(agent, chat);
         return turns.run(agent, prompt, { source: { kind: 'roost-speakup' } });
       }
-      const v = await awake.compose({ kind: 'c2c' });
+      const v = await awake.compose({ kind: 'c2c', chatId: owner, extraPrompt: speakUpExtra() });
       return v.speak ? v.text : '<<skip>>';
     },
     /** 发送统一走通道层，不再各处自己 fetch。`sendOut` 会顺手登记审核中的消息 */
@@ -642,12 +713,33 @@ export function apply(ctx) {
         /** 这个人格习惯怎么开口：主动搭话时用来锚语气，不必逐字照抄 */
         opener: personas.resolve(cid, cfg.persona).firstMes || '',
         agreements: readAgreements({ memory, graph, chatId: cid }),
-        recent: journal
-          .recent(cid, 4)
-          .reverse()
-          .map((r) => `${r.role === 'bot' ? '你' : r.sender || '对方'}：${String(r.digest || r.text).slice(0, 60)}`),
+        /**
+         * 没有会话 id 时**返回空**，不要去查全库。
+         *
+         * `journal.recent('')` 不是"查不到"，而是**返回所有会话**的最近几条——
+         * 私聊主动搭话会引用到群里的对话（串场），而且看起来还挺像回事，
+         * 排查时极难发现。chatId 空说明本来就不该走到这一步。
+         */
+        recent: cid
+          ? journal
+            .recent(cid, 4)
+            .reverse()
+            .map((r) => `${r.role === 'bot' ? '你' : r.sender || '对方'}：${String(r.digest || r.text).slice(0, 60)}`)
+          : [],
         state: {
-          lastOwnerAt: speakUp.state?.().lastOwnerAt || 0,
+          /**
+           * 私聊「多久没聊」取两个来源里**更近**的那个。
+           *
+           * `speakUp` 那份只在 `speakUp.chatId` 配了、且发消息的 chatId
+           * 跟它完全一致时才更新；配成空就永远不更新，`lastOwnerAt` 停在 0，
+           * 而 0 在 `opportunities` 里被当成「沉默 99 小时」——
+           * 于是 miss 机会每一轮都成立，面板上永远显示「很久没联系了」。
+           * `awake` 自己那份是收到消息就记，不依赖配置对不对。
+           */
+          lastOwnerAt: Math.max(
+            Number(speakUp.state?.().lastOwnerAt || 0),
+            Number(awake.c2cLastUserAt?.() || 0),
+          ),
           /**
            * 刚收过尾的时间戳（0 = 没有记录）。给「随性搭话」踩刹车用：
            * 说完晚安 90 分钟内不该又冒出来。**不影响「约定」**——
@@ -659,9 +751,17 @@ export function apply(ctx) {
         closing: closed ? { point: closed.point, resume: closed.resume } : null,
       };
     },
-    /** 觉醒要用"她的嘴"问，所以借 speakup 那个内部会话，不新开一个 */
+    /**
+     * 觉醒要用"她的嘴"问，所以借 speakup 那个内部会话，不新开一个。
+     *
+     * 借不到就**抛错**，不拿 `'speakup'` 兜底——兜底的后果是建出一个
+     * 不属于任何人的会话（用户实测撞到过），而且它还能正常跑完一轮模型，
+     * 表面上看不出任何异常。
+     */
     generate: async (prompt) => {
-      const chat = { kind: 'c2c', chatId: cfg.speakUp?.chatId || 'speakup', name: '主动搭话', preset: 'roost-private' };
+      const owner = ownerId();
+      if (!owner) throw new Error('不知道该发给谁：Roost 没配主人（owners），DSH 也没填 chatId，不建会话');
+      const chat = { kind: 'c2c', chatId: owner, name: '主动搭话', preset: 'roost-private' };
       const { agent } = await agentFor(chat);
       mount(agent, chat);
       return turns.run(agent, prompt, { source: { kind: 'roost-awake' } });
@@ -1669,6 +1769,14 @@ export function apply(ctx) {
 
       // 主人自己说话了 → 主动搭话重新排期
       if (chat.kind === 'c2c') speakUp.noteOwner(chat.chatId);
+      /**
+       * 顺手记住「主人的私聊是哪个」。
+       *
+       * 只当兜底：Roost 的 `owners` 没配时，这是唯一能知道该发给谁的线索。
+       * 判据是**消息自己的 bucket**（插件给的），不猜——群里的 owner
+       * 不算，必须是一对一私聊，否则可能把主动消息发到群里。
+       */
+      if (chat.kind === 'c2c' && bucket === 'owner') learnedOwner = chat.chatId;
 
       // 告诉 AI 谁在说话（软提醒，每轮现读）
       speaker.set(sid, { payload, bucket, system: payload.system || '' });
@@ -1718,9 +1826,10 @@ export function apply(ctx) {
        * 有人说话 → 觉醒那边记一笔。
        *
        * 私聊用来算"多久没聊"，群里用来算"冷场多久了"（C7 的插话前提）。
-       * 放在这里而不是通道层：通道层不知道谁是"用户"。
+       * **必须带上 kind**：以前不分，私聊的 openid 被写进群状态表，
+       * 而私聊决策读的是另一份（`speakUp.lastOwnerAt`），两边对不上。
        */
-      awake.noteUser(chat.chatId);
+      awake.noteUser(chat.chatId, chat.kind);
 
       let text = renderInbound(payload);
 
@@ -2440,14 +2549,25 @@ export function apply(ctx) {
       }),
 
       /**
-       * 记录授权（c2c_push / group_push）。
+       * 记录授权（目前只有 `group_push`）。
        * **不鉴权**——授权是用户处置自己的权利；但必须记，群主动靠它。
+       *
+       * `scope` 要**校验**，不能来什么存什么：以前面板有个「私聊主动」
+       * 选项写的就是 `c2c_push`，而全仓没有任何地方读它——私聊主动
+       * 本来就不需要授权（发给主人是默认行为）。存进去的唯一效果是
+       * 面板上多一行「当前会话已授权：c2c_push」，让人以为私聊被卡住了。
        */
       route('/authz', async (req, res) => {
         const body = await readBody(req);
         const chatId = String(body?.chatId || '').trim();
         const scope = String(body?.scope || '').trim();
         if (!chatId || !scope) return send(res, 400, { ok: false, message: '缺 chatId 或 scope' });
+        if (!AUTHZ_SCOPES.has(scope)) {
+          return send(res, 400, {
+            ok: false,
+            message: `不认识的授权类型：${scope}（只有 ${[...AUTHZ_SCOPES].join('、')}；私聊主动不需要授权）`,
+          });
+        }
         memory.setAuthz(chatId, scope, { type: body?.type, optScene: body?.optScene });
         log.info(`授权记录 ${scope} @ ${chatId}`);
         send(res, 200, { ok: true });
@@ -3006,9 +3126,22 @@ export function apply(ctx) {
             const r = await awake.wakeGroups();
             return send(res, 200, { ok: true, results: r });
           }
-          const v = await awake.compose({ kind: 'c2c' });
+          /**
+           * 没配主人 openid 就**在这一行拦住**，不要先跑模型。
+           *
+           * 以前这里是先 `compose()`（真的调一轮模型、花钱）、再拿空 target
+           * 去发送、最后报「缺 target」——顺序整个是反的。
+           */
+          const owner = ownerId();
+          if (!owner) {
+            return send(res, 400, {
+              ok: false,
+              message: '不知道该发给谁：Roost 的 config/bots/<bot>.json 里没有 owners，先在那边配一个主人',
+            });
+          }
+          const v = await awake.compose({ kind: 'c2c', chatId: owner, extraPrompt: speakUpExtra() });
           if (!v.speak) return send(res, 200, { ok: true, spoke: false, why: v.why, kind: v.kind });
-          const sent = await sendOut({ scene: 'c2c', target: cfg.speakUp?.chatId || '', text: v.text });
+          const sent = await sendOut({ scene: 'c2c', target: owner, text: v.text });
           return send(res, 200, {
             ok: Boolean(sent?.ok),
             spoke: Boolean(sent?.ok),
@@ -3070,10 +3203,29 @@ export function apply(ctx) {
 
       route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
 
+      /**
+       * `ready` 是给面板判「立刻走一次」能不能点。
+       *
+       * 以前面板不看这个：chatId 空着按钮照样能点，点了之后建一个假会话、
+       * 跑一轮模型，最后才报「缺 target」。现在按钮直接禁用，原因写在 `why`。
+       */
       route('/speakup', (req, res) =>
-        send(res, 200, { ok: true, state: speakUp.state(), cfg: cfg.speakUp }),
+        send(res, 200, {
+          ok: true,
+          state: speakUp.state(),
+          cfg: cfg.speakUp,
+          /** 实际会发给谁 + 这个 id 哪来的（config / roost / learned） */
+          owner: ownerId(),
+          ownerFrom: ownerFrom(),
+          ready: Boolean(ownerId()),
+          why: ownerId() ? '' : 'Roost 那边也没配主人（config/bots/<bot>.json 的 owners）',
+        }),
       ),
 
+      /**
+       * 手动走一次。`fire()` 自己会先检查 chatId（这是唯一绕过 `tick()` 的入口），
+       * 没配就返回 `ok:false`，**不建会话、不跑模型**。
+       */
       route('/speakup/fire', async (req, res) => send(res, 200, await speakUp.fire('手动'))),
 
       route('/stickers', (req, res) =>
