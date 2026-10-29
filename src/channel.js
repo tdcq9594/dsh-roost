@@ -150,9 +150,15 @@ export function createQqChannel({ baseUrl, keyQuery = () => '', log = () => {}, 
      * 主动搭话的文本会先被 speakup 摘掉所有标记，所以时长只能单独传，
      * 由 ai-chat 转成框架的会话静默。
      *
-     * @returns {Promise<{ok:boolean, message?:string, scene?:string}>}
+     * **每次新生成一个幂等键，不复用。** 这里以前根本不传 `requestId`，
+     * 于是主动消息完全不进框架的投递账本——`/r/delivery` 永远查不到，
+     * 审核（304023）之后就再也没人知道那条到底过没过。
+     * 生成的 id 随返回值交出去，调用方拿它去问终态。
+     *
+     * @returns {Promise<{ok:boolean, message?:string, scene?:string,
+     *   id?:string, pending?:boolean, requestId?:string}>}
      */
-    async send({ scene = 'c2c', target, text, hasGroupAuthz = true, silenceMs = 0 } = {}) {
+    async send({ scene = 'c2c', target, text, hasGroupAuthz = true, silenceMs = 0, requestId = '' } = {}) {
       const t = String(text ?? '').trim();
       if (!target) return { ok: false, message: '缺 target' };
       /**
@@ -163,18 +169,63 @@ export function createQqChannel({ baseUrl, keyQuery = () => '', log = () => {}, 
       if (scene === 'group' && !hasGroupAuthz) {
         return { ok: false, message: '这个群没有 group_push 授权，主动消息发不出去' };
       }
+      /**
+       * 幂等键。前缀 `sp-`（speakup）和 `qs-`（`qq_send`）分开，
+       * 日志里一眼能看出这条是谁发的。
+       *
+       * 允许调用方传进来：重试同一条时应当复用同一个 id，
+       * 否则账本会记成两条，重发还会真的发两遍。
+       */
+      const rid = String(requestId || '').trim()
+        || `sp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       try {
         const r = await post({
           scene: scene === 'group' ? 'group' : 'c2c',
           target,
           text: t,
+          requestId: rid,
           ...(Number(silenceMs) > 0 ? { silenceMs: Number(silenceMs) } : {}),
         });
         if (!r?.ok) log(`通道发送失败：${r?.message ?? '未知原因'}`);
-        return r;
+        /**
+         * `requestId` 一律带回去（失败也带）：失败之后要查「到底是没发出去
+         * 还是不确定」，靠的就是这个 id。`pending` 是官方 304023 进了审核，
+         * 既不是成功也不是失败。
+         */
+        return { ...r, requestId: rid };
       } catch (e) {
         // 网络类错误单独包一层：上层据此区分"对方拒绝"和"根本没连上"
-        return { ok: false, message: `发不出去：${e?.message ?? e}`, network: true };
+        return { ok: false, message: `发不出去：${e?.message ?? e}`, network: true, requestId: rid };
+      }
+    },
+
+    /**
+     * 问一条消息的投递终态（桥 3）。
+     *
+     * 为什么要有这一步：主动消息进审核时 `send` 只回 `pending: true`——
+     * 「待审核」既不是送到也不是没送到。审核结果的事件推到的是**框架侧**
+     * （`MESSAGE_AUDIT_PASS` / `REJECT`），dsh-roost 收不到推送，
+     * 只能过一阵子主动来问一次。
+     *
+     * 查不到（插件没开账本、框架太老、id 已过保留期）一律回
+     * `{ ok: false, gone: true }`，调用方据此**放弃跟踪**而不是永远重试。
+     *
+     * @param {string} requestId
+     * @returns {Promise<{ok:boolean, state?:string, parts?:number, code?:string,
+     *   msgId?:string, gone?:boolean, message?:string}>}
+     */
+    async delivery(requestId) {
+      const rid = String(requestId ?? '').trim();
+      if (!rid) return { ok: false, gone: true, message: '缺 requestId' };
+      try {
+        const url = `${String(baseUrl() || '').replace(/\/+$/, '')}/api/plugins/ai-chat/r/delivery`
+          + `?requestId=${encodeURIComponent(rid)}${keyQuery() ? '&' + keyQuery().replace(/^\?/, '') : ''}`;
+        const r = await fetchImpl(url, { signal: AbortSignal.timeout(5000) });
+        const body = await r.json().catch(() => null);
+        if (!body) return { ok: false, message: `ai-chat 没回 JSON（HTTP ${r.status}）` };
+        return body;
+      } catch (e) {
+        return { ok: false, message: `查不了：${e?.message ?? e}`, network: true };
       }
     },
 
@@ -199,19 +250,30 @@ export function createQqChannel({ baseUrl, keyQuery = () => '', log = () => {}, 
  * 全靠"有没有真的发出去"来判断，真发就会往群里扔消息。
  * 这个实现让整条链路在测试里跑通而一个字节都不出机器。
  */
-export function createFakeChannel({ failWith = '' } = {}) {
+export function createFakeChannel({ failWith = '', pending = false, states = {} } = {}) {
   const sent = [];
+  /** 假账本：`delivery()` 从这里查，测「等确认 → 有结果」整条链路 */
+  const ledger = new Map(Object.entries(states));
   return {
     name: 'fake',
     capabilities: { ...QQ_CAPABILITIES },
     sent,
+    ledger,
     async send(payload) {
+      const requestId = String(payload?.requestId || `fake-${sent.length + 1}`);
       if (failWith) {
         sent.push({ ...payload, ok: false, message: failWith });
-        return { ok: false, message: failWith };
+        return { ok: false, message: failWith, requestId };
       }
-      sent.push({ ...payload, ok: true });
-      return { ok: true, scene: payload?.scene, target: payload?.target };
+      sent.push({ ...payload, ok: true, pending });
+      return { ok: true, scene: payload?.scene, target: payload?.target, pending, requestId };
+    },
+    async delivery(requestId) {
+      const id = String(requestId ?? '').trim();
+      if (!id) return { ok: false, gone: true, message: '缺 requestId' };
+      const st = ledger.get(id);
+      if (!st) return { ok: false, gone: true, message: '没有这条投递记录' };
+      return typeof st === 'string' ? { ok: true, state: st, parts: 1 } : { ok: true, ...st };
     },
     async ping() {
       return { ok: true, status: 200 };

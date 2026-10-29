@@ -40,6 +40,7 @@ import { createSpeakUp } from './speakup.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
 import { createQqChannel, createChannelRegistry } from './channel.js';
+import { createDeliveryTrack } from './delivery.js';
 import { createQrRegistration, createManualRegistration, createRegistrationRegistry } from './registration.js';
 import { createLease, candidates } from './lease.js';
 import { createSyncRetry } from './sync-retry.js';
@@ -223,8 +224,8 @@ export function apply(ctx) {
       const v = await awake.compose({ kind: 'c2c' });
       return v.speak ? v.text : '<<skip>>';
     },
-    /** 发送统一走通道层，不再各处自己 fetch */
-    send: async (payload) => channels.active().send(payload),
+    /** 发送统一走通道层，不再各处自己 fetch。`sendOut` 会顺手登记审核中的消息 */
+    send: async (payload) => sendOut(payload),
   });
 
   /** 一键流程：装 Roost、配插件、起停、打开面板 */
@@ -572,6 +573,41 @@ export function apply(ctx) {
   const pendingOpening = new Map();
 
   /**
+   * 投递终态跟踪（桥 3）。
+   *
+   * 主动消息进审核时 `send` 只回 `pending: true`——「待审核」既不是送到
+   * 也不是没送到，而审核结果推给的是**框架侧**（持有 QQ 连接那个进程）。
+   * 不跟踪的后果是审核被驳之后，日记和自我叙述还按「说过了」往下走，
+   * 她就会坚称自己说过一句没人看见的话。
+   */
+  const deliveryTrack = createDeliveryTrack({
+    file: join(dataDir(), 'delivery.json'),
+    channelOf: () => channels.active(),
+    log: (m) => log.info(m),
+  });
+
+  /**
+   * 所有主动发送的唯一出口。
+   *
+   * 为什么不在每个调用点各写一遍「发了 / 在审核」的判断：那样迟早漏一处，
+   * 而漏的那一处正好就是「她以为说过了」的来源。这里统一：
+   * 通道回 `pending` 就登记进投递跟踪，其余原样返回。
+   */
+  const sendOut = async (payload) => {
+    const r = await channels.active().send(payload);
+    if (r?.ok && r.pending && r.requestId) {
+      deliveryTrack.note({
+        requestId: r.requestId,
+        scene: payload?.scene,
+        target: payload?.target,
+        text: payload?.text,
+      });
+      log.info(`主动消息进审核，登记等确认（${r.requestId}）`);
+    }
+    return r;
+  };
+
+  /**
    * 觉醒（第 5 期）：只决定"要不要说、说什么"，排期仍归 speakup。
    *
    * `contextOf` 是唯一的上下文入口——决策层不自己去翻文件，
@@ -580,7 +616,11 @@ export function apply(ctx) {
   const awake = createAwake({
     dataDir: dataDir(),
     cfgOf: () => cfg,
-    channelOf: () => channels.active(),
+    /** 用 `sendOut` 而不是裸通道：审核中的消息要能记账 */
+    channelOf: () => {
+      const ch = channels.active();
+      return ch ? { ...ch, send: sendOut } : null;
+    },
     log: (m) => log.info(m),
     authzOf: (chatId) => memory.hasAuthz(chatId, 'group_push'),
     contextOf: ({ kind, chatId = '' } = {}) => {
@@ -658,6 +698,31 @@ export function apply(ctx) {
     awake.wakeGroups().catch((e) => log.warn(`群主动失败：${e?.message ?? e}`));
   }, 5 * 60_000);
   groupTimer.unref?.();
+
+  /**
+   * 投递终态的回查循环（桥 3）。
+   *
+   * 十分钟一次，比群主动稀——审核结果本来就不急在这一分钟，
+   * 而这条链路会真的打 HTTP 到 ai-chat，太密就是白花请求。
+   *
+   * **失败不重试、不结案**：`resolve` 内部把「问不到」保持成等待状态，
+   * 只有拿到明确终态才记账（见 `src/delivery.js` 的 `nextState`）。
+   */
+  const deliveryTick = () => {
+    deliveryTrack
+      .resolve({ limit: 10 })
+      .then((r) => {
+        if (r.checked && !r.skipped) {
+          log.info(`投递回查：查了 ${r.checked} 条，结案 ${r.settled.length} 条，还有 ${r.still} 条在等`);
+        }
+      })
+      .catch((e) => log.warn(`投递回查失败：${e?.message ?? e}`));
+  };
+  /** 启动后先等一分钟（刚起来时 ai-chat 可能还没就绪），之后每十分钟一次 */
+  const deliveryBoot = setTimeout(deliveryTick, 60_000);
+  deliveryBoot.unref?.();
+  const deliveryTimer = setInterval(deliveryTick, 10 * 60_000);
+  deliveryTimer.unref?.();
 
   /**
    * 群白名单的逐项判定（面板要看"这个群为什么不能主动"）。
@@ -2451,6 +2516,31 @@ export function apply(ctx) {
           factsDetail = { error: e.message };
         }
 
+        /**
+         * 「出处能不能回查到原文」的自检。
+         *
+         * 事实的 `src.eventIds` 和日记行的 `event_ids` 都来自 ai-chat 下发的
+         * `payload.eventIds`——**这个字段到底有没有值，光看代码验不出来**，
+         * 只能看真机数据。以前这项只能靠翻库确认，现在把它变成一个数字摆
+         * 在面板上：最近 20 条日记里几条带着事件 id。
+         *
+         * 全是 0 不等于坏了——ai-chat 没开事件账本时本来就没有 id，
+         * 出处只能记到时间，回查原文这条能力就断在这里。
+         */
+        let evidence = null;
+        try {
+          const rows = journal.recent(chatId, 20);
+          const withIds = rows.filter((r) => Array.isArray(r.eventIds) && r.eventIds.length);
+          evidence = {
+            rows: rows.length,
+            withIds: withIds.length,
+            /** 最近一条带 id 的日记，点开能核对格式对不对 */
+            sample: withIds[0] ? { id: withIds[0].id, eventIds: withIds[0].eventIds } : null,
+          };
+        } catch (e) {
+          evidence = { error: e.message };
+        }
+
         /** 会话清单：chatId + 能看懂的标题（群名 / 私聊昵称） */
         const chats = sessions
           .list()
@@ -2556,6 +2646,8 @@ export function apply(ctx) {
           facts: { global: facts.global, chat: facts.chat },
           /** 带权重/出处的那一份（面板显示「这条多重、从哪来」） */
           factsDetail,
+          /** 出处自检：最近 20 条日记里几条带着事件 id（0 条 = 回查原文这条链断了） */
+          evidence,
           journal: jr,
           graph: gp,
           /** 第五层：她自己写下的（跨群汇总，不属于任何单个会话） */
@@ -2865,6 +2957,31 @@ export function apply(ctx) {
       ),
 
       /**
+       * 投递终态：`GET` 看，`POST` 立刻回查一次。
+       *
+       * 为什么面板要能看这个：主动消息进审核后，`send` 回的是
+       * `pending: true`——「待审核」。审核被驳之后如果没人知道，
+       * 她就会坚称自己说过一句没人看见的话。这条接口把「哪些还没定论」
+       * 摆到明面上，不用去翻 ai-chat 的库。
+       */
+      route('/delivery', async (req, res) => {
+        if (req.method === 'GET') {
+          return send(res, 200, {
+            ok: true,
+            ...deliveryTrack.stats(),
+            /** 最近 20 条，新的在前。`state` 为 `waiting` 的还在等 */
+            items: deliveryTrack.list().slice(0, 20),
+          });
+        }
+        try {
+          const r = await deliveryTrack.resolve({ limit: 20 });
+          return send(res, 200, { ok: true, ...r, ...deliveryTrack.stats() });
+        } catch (e) {
+          return send(res, 500, { ok: false, message: e.message });
+        }
+      }),
+
+      /**
        * 觉醒状态：为什么说 / 为什么没说。
        *
        * "她怎么不主动"和"她怎么老说话"这两类问题，光看日志判断不了——
@@ -2874,7 +2991,9 @@ export function apply(ctx) {
         if (req.method === 'GET') {
           const st = awake.status();
           const groups = groupCandidatesView();
-          return send(res, 200, { ok: true, ...st, groups });
+          /** 待确认的主动消息（审核中）——「她说过吗」这类问题的另一半答案 */
+          const deliv = deliveryTrack.stats();
+          return send(res, 200, { ok: true, ...st, groups, delivery: deliv });
         }
         const body = await readBody(req);
         try {
@@ -2884,7 +3003,7 @@ export function apply(ctx) {
           }
           const v = await awake.compose({ kind: 'c2c' });
           if (!v.speak) return send(res, 200, { ok: true, spoke: false, why: v.why, kind: v.kind });
-          const sent = await channels.active().send({ scene: 'c2c', target: cfg.speakUp?.chatId || '', text: v.text });
+          const sent = await sendOut({ scene: 'c2c', target: cfg.speakUp?.chatId || '', text: v.text });
           return send(res, 200, { ok: Boolean(sent?.ok), spoke: Boolean(sent?.ok), text: v.text, message: sent?.message });
         } catch (e) {
           return send(res, 500, { ok: false, message: e.message });

@@ -88,6 +88,23 @@ window.__ModuleLoader__.load({
       return Math.round(s / 86400) + ' 天前'
     }
 
+    /**
+     * 投递状态的中文名。
+     *
+     * 后端的状态值（`sent` / `failed` / `unknown` / `gone` / `waiting`）直接
+     * 摆给用户看没人看得懂，而且「失败」和「不确定」的区别恰恰是这一页
+     * 最要讲清楚的事——前者可以再发，后者重发会让对方收到两条。
+     */
+    const DELIV_STATE = {
+      waiting: '等结果',
+      pending: '等结果',
+      audited: '审核中',
+      sent: '送到了',
+      failed: '没发出去',
+      unknown: '不确定',
+      gone: '查不到了',
+    }
+
     /** 时间戳 → 本地日期（日记和图谱都按天看，别显示 ISO 串） */
     const dayOf = (t) => {
       if (!t) return '—'
@@ -1769,6 +1786,19 @@ select.roost-input{color-scheme:dark}
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '跨群的事实她带去任何会话；本会话特有的只在这个会话提。串场就是从这条线漏出去的，所以要分开看。'
             + '后面那个 ×N 是权重：越常被提到越高，40 天没提会掉到 1；满 40 条时按「权重 × 时间」淘汰。'),
+          /**
+           * 出处自检。一个数字，但它是唯一能验「回查原文这条链通没通」的东西——
+           * `eventIds` 是 ai-chat 下发的，代码里看着对不代表真机上真有值。
+           */
+          (() => {
+            const ev = mem?.evidence
+            if (!ev || ev.error || !ev.rows) return null
+            return h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 8 } },
+              ev.withIds
+                ? `出处：最近 ${ev.rows} 条日记里 ${ev.withIds} 条带着事件 id，能回查到原文。`
+                : `出处：最近 ${ev.rows} 条日记里一条事件 id 都没有 —— 出处只能记到时间，回查原文这条链是断的（ai-chat 那边没开事件账本，或者没把 eventIds 传过来）。`,
+            )
+          })(),
           h('div', { style: { marginBottom: 10 } },
             h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 4 } }, '通用（跨群）'),
             (mem?.global || []).length
@@ -2156,6 +2186,24 @@ select.roost-input{color-scheme:dark}
       const state = sp?.state || {}
       const spCfg = sp?.cfg || {}
 
+      /**
+       * 待确认的主动消息（桥 3）。
+       *
+       * 挂载时只读（`GET /delivery` 是读文件，不花钱）；点「回查一次」才
+       * 真的去问 ai-chat（`POST`）。反过来做的话每次切到这个页签都会
+       * 打一轮 HTTP，而结果本来就不急在这一分钟。
+       */
+      const [deliv, setDeliv] = useState(null)
+      const loadDeliv = useCallback(async (hit = false) => {
+        const r = hit ? await post('/delivery', {}) : await get('/delivery')
+        setDeliv(r?.ok === false ? null : r)
+        if (hit && r?.ok !== false) {
+          toast(`查了 ${r.checked ?? 0} 条，结案 ${(r.settled || []).length} 条，还有 ${r.pending ?? 0} 条在等`)
+        }
+        return r
+      }, [toast])
+      useEffect(() => { loadDeliv(false) }, [loadDeliv])
+
       return h('div', null,
         h(Sec, { n: '01', title: '这一轮算出来的机会', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '重算') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
@@ -2302,6 +2350,38 @@ select.roost-input{color-scheme:dark}
               },
             }, '跑一遍群白名单'),
           ),
+        ),
+        h(Sec, { n: '05', title: '待确认的主动消息', right: h('button', { type: 'button', className: 'roost-btn', onClick: () => loadDeliv(true) }, '回查一次') },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '主动消息要过内容审核。进审核时接口只回「待审核」——既不是送到也不是没送到，'
+            + '而审核结果推给的是 Roost 那边（持有 QQ 连接那个进程），这边收不到。'
+            + '所以过十分钟自己回来问一次。'
+            + '「不确定」和「失败」要分清楚：失败的可以再发一次，不确定的重发会让你收到两条。'),
+          deliv === null
+            ? h('div', { className: 'roost-empty' }, '读不到（Roost 没在跑？）')
+            : (() => {
+                const items = deliv.items || []
+                if (!items.length) return h('div', { className: 'roost-empty' }, '没有要跟踪的消息。一切正常。')
+                return h('div', { className: 'roost-list' },
+                  items.slice(0, 12).map((x) =>
+                    h('div', { key: x.requestId, className: 'roost-item' },
+                      h('span', { className: 't' },
+                        h(Pill, {
+                          tone: x.state === 'sent' ? 'ok' : x.state === 'failed' || x.state === 'unknown' ? 'bad' : null,
+                        }, DELIV_STATE[x.state] || x.state),
+                        ' ',
+                        (x.scene === 'group' ? '群 ' : '私聊 ') + (x.text || '（无正文）'),
+                      ),
+                      h('span', { className: 'd' }, ago(x.at)),
+                    ),
+                  ),
+                )
+              })(),
+          h('div', { className: 'roost-note', style: { marginTop: 6 } },
+            deliv
+              ? `共 ${deliv.total ?? 0} 条，其中 ${deliv.pending ?? 0} 条还没定论。`
+                + '「不确定」不会自动重发——重发可能让对方收到两条，得你自己去 QQ 里看一眼。'
+              : ''),
         ),
       )
     }
