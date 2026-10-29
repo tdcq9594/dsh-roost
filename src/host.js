@@ -2509,6 +2509,12 @@ export function apply(ctx) {
             case 'memory.remove': {
               const word = String(arg ?? '').trim();
               if (!word) return send(res, 400, { ok: false, message: '要删哪条？给个关键词' });
+              /**
+               * `chatId` 由 `body.chatId || lastScene.chatId || ''` 得来，
+               * 可能真的是空串。而日记侧的 `clearChat` / `forget` 在
+               * chatId 为空时是**不过滤**语义 = 全库，所以先挡一道。
+               */
+              if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话再删' });
               const n = memory.remove(chatId, word);
               /**
                * 日记同删。
@@ -2523,12 +2529,27 @@ export function apply(ctx) {
               } catch (e) {
                 log.warn(`日记遗忘失败：${e.message}`);
               }
-              const total = n + j;
+              /**
+               * 自述（第五层）也要扫。
+               *
+               * 同一个词在 QQ 里走 `<<forget:>>` 时清的是三层
+               * （facts + 日记 + 自述），面板这条只清两层——
+               * 于是「她写过：今天把小美的事记混了」会留在自述里，
+               * 换个说法继续存在。
+               */
+              let s = 0;
+              try {
+                s = self.forget(word);
+              } catch (e) {
+                log.warn(`自述遗忘失败：${e.message}`);
+              }
+              const total = n + j + s;
               return send(res, 200, {
                 ok: true,
                 removed: total,
                 facts: n,
                 journal: j,
+                self: s,
                 message: total ? `忘了 ${total} 条` : '没找到匹配的记忆',
               });
             }
@@ -2620,6 +2641,7 @@ export function apply(ctx) {
             }
 
             case 'memory.clear': {
+              if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话' });
               memory.clearChat(chatId);
               let j = 0;
               try {
@@ -2643,6 +2665,7 @@ export function apply(ctx) {
              * `DatabaseSync` 是同步 API，VACUUM 锁几秒会把消息全卡住。
              */
             case 'memory.purge': {
+              if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话' });
               memory.clearChat(chatId);
               let j = 0;
               try {
@@ -2650,11 +2673,32 @@ export function apply(ctx) {
               } catch (e) {
                 log.warn(`彻底删日记失败：${e.message}`);
               }
-              log.info(`彻底删除 ${chatId.slice(0, 8)} 的日记 ${j} 条（磁盘旧页待压库）`);
+              /**
+               * 图谱也要清。
+               *
+               * `episode.text` 里躺着当天日记正文的拼接（最多 1200 字），
+               * 边是抽出来的关系——只删 journal 表的话，原文在
+               * `graph.sqlite` 里完整留了一份，「这些记录不许存在」是假的。
+               * 墓碑不删（那是"别再记"的指令，删了巩固会重新抽回来）。
+               */
+              let g = { episodes: 0, edges: 0, entities: 0 };
+              try {
+                g = graph.purgeChat?.(chatId) || g;
+              } catch (e) {
+                log.warn(`清图谱失败：${e.message}`);
+              }
+              log.info(
+                `彻底删除 ${chatId.slice(0, 8)}：日记 ${j} 条、原文片段 ${g.episodes} 段、`
+                + `关系 ${g.edges} 条、实体 ${g.entities} 个（磁盘旧页待压库）`,
+              );
               return send(res, 200, {
                 ok: true,
                 journal: j,
-                message: `彻底删了 ${j} 条日记，磁盘上的残留十分钟内自动压掉`,
+                graph: g,
+                message: `彻底删了 ${j} 条日记`
+                  + (g.episodes || g.edges || g.entities
+                    ? `、${g.episodes} 段原文片段、${g.edges} 条关系；磁盘上的残留十分钟内自动压掉`
+                    : '；磁盘上的残留十分钟内自动压掉'),
               });
             }
 
@@ -2970,10 +3014,91 @@ export function apply(ctx) {
         }
 
         const body = await readBody(req);
+
+        /**
+         * **单条删除走 id，不走关键词。**
+         *
+         * 面板上点的是「这一条」，拿正文前 12 个字当关键词去批量匹配是猜的：
+         * 命中判据是 `passesCoverage`（覆盖率门槛只有 0.34），实测
+         * 「生日是三月**五**号」会把「生日是三月**六**号」一起抹掉。
+         * 关键词留给「用户说忘掉某件事」这种批量入口。
+         */
+        const id = String(body?.id ?? '').trim();
+        if (id) {
+          const row = journal.get(id);
+          if (!row) return send(res, 404, { ok: false, message: '这条已经不在日记里了' });
+          /**
+           * 删的虽然是"这一行日记"，但**结论层也得跟着清**。
+           *
+           * 只删日记的话，她提炼出的 facts 还在，下一轮注入照样把这件事说出来——
+           * 用户看到的是"删了又想起来"，比没删更让人不安。
+           * 判据用正文前 12 字做子串匹配：facts 是短句，`includes` 很准，
+           * 不像日记那条按覆盖率 0.34 放水的路，不会连坐别的记录。
+           */
+          const hint = String(row.text || '').slice(0, 12);
+          const scope = String(row.chatId || chatId || '');
+          /** 先删日记那一行：它才是用户点的东西，后面两步失败不该让它留着 */
+          const ok = journal.remove(id);
+          let facts = 0;
+          let selfN = 0;
+          if (hint) {
+            try {
+              facts = memory.remove(scope, hint);
+            } catch (e) {
+              log.warn(`单条遗忘：清 facts 失败：${e.message}`);
+            }
+            try {
+              selfN = self.forget(hint);
+            } catch (e) {
+              log.warn(`单条遗忘：清自述失败：${e.message}`);
+            }
+          }
+          return send(res, 200, {
+            ok: true,
+            removed: ok ? 1 : 0,
+            facts,
+            self: selfN,
+            message: ok
+              ? `忘掉了这一条${facts ? `，连带 ${facts} 条事实` : ''}${selfN ? `、${selfN} 句自述` : ''}`
+              : '没删掉',
+          });
+        }
+
         const word = String(body?.word ?? '').trim();
-        if (!word) return send(res, 400, { ok: false, message: '要忘哪件事？给个关键词' });
-        const n = journal.forget({ chatId: String(body?.chatId || chatId), word });
-        return send(res, 200, { ok: true, removed: n, message: n ? `忘掉了 ${n} 条` : '日记里没有匹配的' });
+        if (!word) return send(res, 400, { ok: false, message: '要忘哪件事？给个关键词（要给 id 才能删单条）' });
+        /**
+         * 以前这里 `body.chatId || chatId` 都可能落成空串，而空 chatId
+         * 在日记侧是「不过滤」——一句「忘掉小美」会把所有群里的都抹了。
+         */
+        const scope = String(body?.chatId || chatId || '').trim();
+        if (!scope) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId（空值会作用到全部会话）' });
+        /**
+         * 按关键词忘 = 三层一起清，和 QQ 里的 `<<forget:>>` 完全一致。
+         *
+         * 只抹日记的话，facts 和自述里那句话还在，用户换个问法又能问出来。
+         */
+        const n = journal.forget({ chatId: scope, word });
+        let facts = 0;
+        let selfN = 0;
+        try {
+          facts = memory.remove(scope, word);
+        } catch (e) {
+          log.warn(`关键词遗忘：清 facts 失败：${e.message}`);
+        }
+        try {
+          selfN = self.forget(word);
+        } catch (e) {
+          log.warn(`关键词遗忘：清自述失败：${e.message}`);
+        }
+        const total = n + facts + selfN;
+        return send(res, 200, {
+          ok: true,
+          removed: total,
+          journal: n,
+          facts,
+          self: selfN,
+          message: total ? `忘掉了 ${total} 条` : '日记里没有匹配的',
+        });
       }),
 
       /** 图谱：实体 / 现在的关系 / 已经结束的关系（双时态的两面都给人看） */

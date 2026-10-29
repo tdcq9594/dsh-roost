@@ -1212,9 +1212,18 @@ select.roost-input{color-scheme:dark}
        * 看上去像少了一节。现在按实际渲染顺序编号，缺哪节后面自动跟上。
        */
       let _seq = 0
-      const sec = (title, extra, children) => {
+      /**
+       * 分节壳子（编号自增）。
+       *
+       * **必须收 `...children`。** 这一页的好几块内容是并列传进来的
+       * （人格列表、仓库面板、预览、覆盖提示、两段说明、新建输入框），
+       * 签名只收一个 `children` 时，多出来的参数会被 JS **静默丢掉**——
+       * 按钮的 onClick 照常执行、文案也变成「收起仓库」，可对应的面板
+       * 永远不渲染，用户看到的就是「按了没有用」。
+       */
+      const sec = (title, extra, ...children) => {
         _seq += 1
-        return h(Sec, Object.assign({ n: String(_seq).padStart(2, '0'), title }, extra || {}), children)
+        return h(Sec, Object.assign({ n: String(_seq).padStart(2, '0'), title }, extra || {}), ...children)
       }
 
       /** 这一页说的是「当前这个会话里她是谁」，不是「全局默认是谁」 */
@@ -1258,53 +1267,66 @@ select.roost-input{color-scheme:dark}
             }, showNew ? '收起新建' : '新建'),
           ),
         },
-          h('div', { className: 'roost-list' },
-            (personas?.personas || []).map((p) => {
-              const isCur = p.id === curId
-              const isDefault = p.id === 'default'
-              return h('div', { key: p.id, className: 'roost-item roost-persona' },
+          /**
+           * 新建入口放在「人格」这一节里，而不是单开一节。
+           *
+           * 之前它单独占一节「编辑人格」，可那一节平时是空的（占位），
+           * 真正的编辑动作又发生在点开某一行之后——入口和动作被拆到两处。
+           * 现在：标题右边「新建」开输入框；点某行的「编辑」就地展开正文。
+           *
+           * **位置紧贴按钮**：这几块原来排在整节末尾（人格列表 + 若干说明之后），
+           * 点完按钮要往下翻半天才看到输入框，读起来就是「按了没反应」。
+           * 现在按「按钮 → 新建 / 仓库 / 预览 → 人格列表」排，点开就在眼前。
+           */
+          showNew
+            ? h('div', { style: { display: 'flex', gap: 8, marginTop: 4 } },
+                h('input', {
+                  className: 'roost-input', placeholder: '新建一个：英文 id（如 lazycat）', value: newId,
+                  onChange: (e) => setNewId(e.target.value), style: { flex: 1 },
+                }),
+                h('button', {
+                  type: 'button', className: 'roost-primary',
+                  onClick: async () => {
+                    const id = newId.trim()
+                    if (!id) return toast('先给个 id')
+                    const seedText = `---\nname: ${id}\ntags: \n---\n\n（在这里写这个人格怎么说话）\n`
+                    const r = await post('/personas/save', { id, raw: seedText })
+                    if (r.ok === false) return toast(r.message || '没建成')
+                    setNewId('')
+                    setShowNew(false)
+                    toast('建好了，接着改正文')
+                    await reload()
+                    openPersona(id)
+                  },
+                }, '建'),
                 /**
-                 * 两行：名字一行、字数与标签一行。
+                 * 粘贴导入：把别人分享的人格 markdown 直接存成一个新人格。
                  *
-                 * 之前全挤在一行，右侧还要放三个按钮——窗口一窄，名字就被压没了。
-                 * 「当前」也不再做成禁用按钮（禁用态看着像坏了），改用标签。
+                 * 配合上面的「复制这份」，两个人之间就能传人格了——
+                 * 不需要远端仓库，也不需要格式转换（本来就是 markdown）。
                  */
-                h('div', { className: 't' },
-                  h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                    h('span', { style: { fontWeight: isCur ? 650 : 500 } }, p.name || p.id),
-                    isCur ? h(Pill, { tone: 'ok' }, '正在用') : null,
-                  ),
-                  h('div', { className: 'roost-note', style: { marginTop: 1 } },
-                    `${p.chars ?? 0} 字` + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')),
-                ),
-                h('div', { className: 'roost-acts' },
-                  isCur
-                    ? null
-                    : h('button', {
-                        type: 'button', className: 'roost-btn',
-                        onClick: async () => {
-                          const r = await save({ persona: { current: p.id } })
-                          toast(r.ok === false ? (r.message || '没换成') : '换好了')
-                          reload()
-                        },
-                      }, '用这个'),
-                  h('button', { type: 'button', className: 'roost-btn', onClick: () => openPersona(p.id) }, '编辑'),
-                  isDefault
-                    ? null
-                    : h(ConfirmLink, {
-                        label: '删除', confirmLabel: '确认删除',
-                        onConfirm: async () => {
-                          const r = await post('/personas/remove', { id: p.id })
-                          toast(r.ok === false ? (r.message || '没删掉') : '删了')
-                          if (editId === p.id) { setEditId(''); setRaw('') }
-                          reload()
-                        },
-                      }),
-                ),
-              )
-            }),
-            !(personas?.personas || []).length ? h('div', { className: 'roost-empty' }, '读不到人格列表') : null,
-          ),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  onClick: async () => {
+                    const id = newId.trim()
+                    if (!id) return toast('先给个 id，再点粘贴导入')
+                    let text = ''
+                    try {
+                      text = await navigator.clipboard.readText()
+                    } catch {
+                      return toast('读不到剪贴板，请允许读取或手动粘贴到编辑框')
+                    }
+                    if (!text.trim()) return toast('剪贴板是空的')
+                    const r = await post('/personas/save', { id, raw: text })
+                    if (r.ok === false) return toast(r.message || '没导入成功')
+                    setNewId('')
+                    setShowNew(false)
+                    toast('导入好了')
+                    await reload()
+                    openPersona(id)
+                  },
+                  }, '粘贴导入'),
+              )            : null,
 
           /**
            * 仓库面板：仓库里有哪些人格、本地各自什么状态。
@@ -1313,9 +1335,12 @@ select.roost-input{color-scheme:dark}
            * 点一次装全部该装的。多一个入口就多一套状态，而这里的需求
            * 本来就是"顺手点一下"，不是逐条挑着装。
            * 面板存在的意义是**看清楚**：谁没装、谁有更新、谁是你改过的。
+           *
+           * 和「新建」一样紧贴标题栏渲染：它在人格列表**上面**，
+           * 点一下「仓库」就能看到清单，不用先翻过本地人格列表。
            */
           repoOpen
-            ? h('div', { style: { marginTop: 12 } },
+            ? h('div', { style: { marginTop: 4 } },
                 h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
                   h('div', { style: { fontSize: 12, fontWeight: 650 } },
                     `仓库 ${repo?.repo || 'tdcq9594/dsh-roost'} · personas/`),
@@ -1405,6 +1430,54 @@ select.roost-input{color-scheme:dark}
               )
             : null,
 
+          h('div', { className: 'roost-list' },
+            (personas?.personas || []).map((p) => {
+              const isCur = p.id === curId
+              const isDefault = p.id === 'default'
+              return h('div', { key: p.id, className: 'roost-item roost-persona' },
+                /**
+                 * 两行：名字一行、字数与标签一行。
+                 *
+                 * 之前全挤在一行，右侧还要放三个按钮——窗口一窄，名字就被压没了。
+                 * 「当前」也不再做成禁用按钮（禁用态看着像坏了），改用标签。
+                 */
+                h('div', { className: 't' },
+                  h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+                    h('span', { style: { fontWeight: isCur ? 650 : 500 } }, p.name || p.id),
+                    isCur ? h(Pill, { tone: 'ok' }, '正在用') : null,
+                  ),
+                  h('div', { className: 'roost-note', style: { marginTop: 1 } },
+                    `${p.chars ?? 0} 字` + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')),
+                ),
+                h('div', { className: 'roost-acts' },
+                  isCur
+                    ? null
+                    : h('button', {
+                        type: 'button', className: 'roost-btn',
+                        onClick: async () => {
+                          const r = await save({ persona: { current: p.id } })
+                          toast(r.ok === false ? (r.message || '没换成') : '换好了')
+                          reload()
+                        },
+                      }, '用这个'),
+                  h('button', { type: 'button', className: 'roost-btn', onClick: () => openPersona(p.id) }, '编辑'),
+                  isDefault
+                    ? null
+                    : h(ConfirmLink, {
+                        label: '删除', confirmLabel: '确认删除',
+                        onConfirm: async () => {
+                          const r = await post('/personas/remove', { id: p.id })
+                          toast(r.ok === false ? (r.message || '没删掉') : '删了')
+                          if (editId === p.id) { setEditId(''); setRaw('') }
+                          reload()
+                        },
+                      }),
+                ),
+              )
+            }),
+            !(personas?.personas || []).length ? h('div', { className: 'roost-empty' }, '读不到人格列表') : null,
+          ),
+
           /** 更新完的高危提醒（不拦，只亮出来让人自己判断） */
           riskNote && riskNote.length
             ? h('div', { style: { marginTop: 10, border: '1px solid #c0392b', borderRadius: 8, padding: 10 } },
@@ -1460,62 +1533,7 @@ select.roost-input{color-scheme:dark}
             + '「## 世界书」一行一条，写 `触发词1, 触发词2 | 内容`，只有聊到这些词才注入（省 token）；'
             + '「## 说话示例」写 2~3 轮对话，比任何形容词都准。'),
 
-          /**
-           * 新建入口放在「人格」这一节里，而不是单开一节。
-           *
-           * 之前它单独占一节「编辑人格」，可那一节平时是空的（占位），
-           * 真正的编辑动作又发生在点开某一行之后——入口和动作被拆到两处。
-           * 现在：标题右边「新建」开输入框；点某行的「编辑」就地展开正文。
-           */
-          showNew
-            ? h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
-                h('input', {
-                  className: 'roost-input', placeholder: '新建一个：英文 id（如 lazycat）', value: newId,
-                  onChange: (e) => setNewId(e.target.value), style: { flex: 1 },
-                }),
-                h('button', {
-                  type: 'button', className: 'roost-primary',
-                  onClick: async () => {
-                    const id = newId.trim()
-                    if (!id) return toast('先给个 id')
-                    const seedText = `---\nname: ${id}\ntags: \n---\n\n（在这里写这个人格怎么说话）\n`
-                    const r = await post('/personas/save', { id, raw: seedText })
-                    if (r.ok === false) return toast(r.message || '没建成')
-                    setNewId('')
-                    setShowNew(false)
-                    toast('建好了，接着改正文')
-                    await reload()
-                    openPersona(id)
-                  },
-                }, '建'),
-                /**
-                 * 粘贴导入：把别人分享的人格 markdown 直接存成一个新人格。
-                 *
-                 * 配合上面的「复制这份」，两个人之间就能传人格了——
-                 * 不需要远端仓库，也不需要格式转换（本来就是 markdown）。
-                 */
-                h('button', {
-                  type: 'button', className: 'roost-btn',
-                  onClick: async () => {
-                    const id = newId.trim()
-                    if (!id) return toast('先给个 id，再点粘贴导入')
-                    let text = ''
-                    try {
-                      text = await navigator.clipboard.readText()
-                    } catch {
-                      return toast('读不到剪贴板，请允许读取或手动粘贴到编辑框')
-                    }
-                    if (!text.trim()) return toast('剪贴板是空的')
-                    const r = await post('/personas/save', { id, raw: text })
-                    if (r.ok === false) return toast(r.message || '没导入成功')
-                    setNewId('')
-                    setShowNew(false)
-                    toast('导入好了')
-                    await reload()
-                    openPersona(id)
-                  },
-                  }, '粘贴导入'),
-              )            : null,
+
         ),
 
         /**
@@ -1981,10 +1999,18 @@ select.roost-input{color-scheme:dark}
                         r.why ? h('span', { className: 'd' }, ' · ' + r.why) : null,
                       ),
                       h(ConfirmLink, {
-                        label: '忘', confirmLabel: '确认忘掉',
+                        label: '忘', confirmLabel: '确认忘掉这一条',
                         onConfirm: async () => {
-                          const w = r.text.slice(0, 12)
-                          const res = await post('/journal', { word: w })
+                          /**
+                           * **按 id 删，不拿正文当关键词。**
+                           *
+                           * 以前这里是 `r.text.slice(0, 12)` 再交给服务端做关键词匹配，
+                           * 而匹配走的是检索的覆盖率阈值（34% 就算命中）——
+                           * 点「生日是三月五号」那条，会把「生日是三月六号」一起抹掉。
+                           * 顺手把 chatId 也带上：不带的话服务端会退回「最近说话的会话」，
+                           * 在别的会话里翻日记时会删到另一个群。
+                           */
+                          const res = await post('/journal', { id: r.id, chatId: mem?.chatId || '' })
                           toast(res.message || '忘掉了')
                           doSearch()
                           reload()

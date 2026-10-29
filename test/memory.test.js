@@ -17,7 +17,7 @@ import {
   matchExpr,
   normalize,
 } from '../src/tokenize.js';
-import { createJournal, classify, dayOf, scoreOf, cosine, DEFAULT_KEEP_DAYS } from '../src/journal.js';
+import { createJournal, classify, dayOf, scoreOf, cosine, DEFAULT_KEEP_DAYS, ERASED } from '../src/journal.js';
 import { createGraph } from '../src/graph.js';
 import { createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc } from '../src/memory.js';
 import {
@@ -295,6 +295,157 @@ test('日记：清空留行、彻底删不留行（两档语义）', () => {
   /** 删过之后压一次库，标记随即清掉 */
   j.vacuum();
   assert.equal(j.vacuum(), false, '压过一次标记要清掉，不能每次巩固都锁库');
+});
+
+test('日记：按 id 删只掉点的那一条（不再拿正文当关键词）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const t = new Date(2026, 9, 22, 10, 0, 0).getTime();
+  j.add({ id: 'a', at: t, chatId: 'g1', text: '小美的生日是三月五号' });
+  j.add({ id: 'b', at: t + 1000, chatId: 'g1', text: '小美的生日是三月六号（记错了）' });
+
+  /**
+   * 以前面板点「忘」是拿 `text.slice(0, 12)` 当关键词交给 `forget`，
+   * 而命中判据 `passesCoverage` 的覆盖率门槛只有 0.34——
+   * 这两条只差一个字，会被一起抹掉。用户点的是**这一条**。
+   */
+  assert.equal(j.remove('a'), true);
+  assert.equal(j.get('a'), null, '点的那条要真没了');
+  assert.equal(j.get('b').text, '小美的生日是三月六号（记错了）', '措辞相近的别的条不许被带走');
+  assert.equal(j.remove('nope'), false, 'id 不存在就是没删掉，不能返回 true');
+  return (async () => {
+    assert.equal((await j.search('生日', { chatId: 'g1' })).length, 1, 'FTS 索引也要跟着删');
+  })();
+});
+
+test('日记：chatId 为空一律拒绝（空串在库里等于"不过滤"）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const t = Date.now();
+  j.add({ id: 'a', at: t, chatId: 'g1', text: '群一的事' });
+  j.add({ id: 'b', at: t + 1, chatId: 'g2', text: '群二的事' });
+
+  /**
+   * `clearChat('')` / `forget({chatId:''})` 在查询层是「不过滤」，
+   * 而调用方的 chatId 来自 `body.chatId || lastScene.chatId || ''`，
+   * 面板刚打开、还没收过消息时正好是空串——
+   * 于是「清空这个群」变成清空所有群，接口还回一句「这个群的记忆清了」。
+   */
+  assert.throws(() => j.clearChat(''), /缺 chatId/);
+  assert.throws(() => j.forget({ chatId: '', word: '事' }), /缺 chatId/);
+  assert.throws(() => j.purgeChat('  '), /缺 chatId/);
+  assert.equal(j.stats().total, 2, '一条都不许被抹');
+  assert.equal(j.get('a').text, '群一的事');
+  assert.equal(j.get('b').text, '群二的事');
+});
+
+test('日记：拒绝空 chatId 之后，正常会话的批量抹除照旧', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const t = Date.now();
+  j.add({ id: 'a', at: t, chatId: 'g1', text: '我前女友叫小美' });
+  j.add({ id: 'b', at: t + 1, chatId: 'g2', text: '别的群也提到小美' });
+  assert.equal(j.forget({ chatId: 'g1', word: '小美' }), 1);
+  assert.match(j.get('a').text, /已按用户要求遗忘/);
+  assert.equal(j.get('b').text, '别的群也提到小美', '别的群不受影响');
+});
+
+test('日记：抹掉的条目连原文快照和向量一起清（否则等于没忘）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const t = Date.now();
+  j.add({
+    id: 'a', at: t, chatId: 'g1', text: '我前女友叫小美',
+    evidence: [{ eventId: 'ev-1', at: t, sender: 'x', excerpt: '我前女友叫小美' }],
+  });
+  j.setVec('a', [1, 0, 0]);
+  assert.ok(j.get('a').vec, '前提：写进去了');
+
+  j.forget({ chatId: 'g1', word: '小美' });
+  const r = j.get('a');
+
+  /**
+   * 只抹 `text` 是不够的：`evidence` 里存着原文快照、`vec` 是原文算出来的
+   * 向量，语义检索照样能命中——用户问一句不相干的话，她都能"想起"这条。
+   */
+  assert.equal(r.text, ERASED);
+  assert.equal(r.vec, null, '向量必须清，否则语义检索还能把它捞出来');
+  assert.deepEqual(r.evidence, [], '原文快照必须清，否则原文还在库里');
+
+  /** 清空后的占位符不该被巩固重新算一遍向量 */
+  assert.equal(j.noVec(20).some((x) => x.id === 'a'), false, '占位符别补算向量');
+});
+
+test('日记：占位符不进"到期压缩"，也不进索引', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  j.setKeepDays({ normal: 1 });
+  const t = Date.now() - 3 * DAY;
+  j.add({ id: 'a', at: t, chatId: 'g1', text: '随便聊聊今天那件事' });
+
+  j.forget({ chatId: 'g1', word: '随便聊聊' });
+  /**
+   * 抹过之后 `level` 降成 normal、`keepUntil` 还是原来那个（已过期），
+   * 不过滤的话会被挑去"压缩"——给一句「（已按用户要求遗忘）」生成摘要。
+   */
+  assert.equal(j.dueToCompress(Date.now()).length, 0, '占位符不压');
+
+  return (async () => {
+    /** 索引只删不回填：否则搜「遗忘」能搜出一堆占位符 */
+    assert.equal((await j.search('遗忘', { chatId: 'g1' })).length, 0);
+  })();
+});
+
+test('日记：图谱里指向已删日记的死 id，不能让这一轮检索整段失效', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  j.add({ id: 'a', at: Date.now(), chatId: 'g1', text: '张三换了工作，去了新公司' });
+
+  /**
+   * 「彻底删除」删了 journal 行，但 graph 的 `episode.journal_id` 可能还指着它。
+   * 以前实体路先加分后查行，`byId` 里没有这个 id，拼结果时读 `r.text`
+   * 直接抛 TypeError，被 host 的 catch 吞掉 —— 这一轮日记检索整段变空，
+   * 用户只看到"她突然想不起以前的事"。
+   */
+  return (async () => {
+    const hits = await j.search('工作', { chatId: 'g1', entityJournalIds: ['已被彻底删除的id'] });
+    assert.ok(hits.length >= 1, '关键词那一路要照常出结果');
+  })();
+});
+
+test('日记：待压库的标记跨重启有效（十分钟内重启也要压）', () => {
+  const file = join(tmp(), 'j.sqlite');
+  const j = createJournal({ file });
+  j.add({ id: 'a', at: Date.now(), chatId: 'g1', text: '一句话' });
+  j.purgeChat('g1');
+  /**
+   * 标记原来只是闭包变量。DSH 更新/手动重载比"十分钟后"更常见，
+   * 一重启就丢，VACUUM 永不执行，库里那些页一直留着原文。
+   */
+  j.close();
+
+  const j2 = createJournal({ file });
+  assert.equal(j2.vacuum(), true, '重启后仍要压一次库');
+  assert.equal(j2.vacuum(), false, '压完标记要清掉，不能每轮都锁库');
+  j2.close();
+});
+
+test('图谱：按会话彻底清理会清掉原文片段、边和实体，但保留墓碑', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const t = Date.now();
+  const ep = g.addEpisode({ at: t, chatId: 'g1', text: '小美说她住在杭州', journalId: 'j1' });
+  g.addEdge({ src: '小美', rel: '住在', dst: '杭州', chatId: 'g1', episodeId: ep, at: t });
+  g.addEdge({ src: '主人', rel: '住在', dst: '上海', chatId: '', at: t });
+  g.suppressEdge({ src: '小美', rel: '住在', dst: '北京', chatId: 'g1', why: '用户删过', at: t });
+
+  const r = g.purgeChat('g1');
+  assert.equal(r.episodes, 1, '原文片段要清');
+  assert.equal(r.edges, 1, '这个群的关系要清');
+  assert.equal(g.episodes({ chatId: 'g1' }).length, 0, '原文片段要清干净');
+  /** `nowEdges(chatId)` 本来就会带上跨群那层，所以这里只剩那条全局边 */
+  const left = g.nowEdges({ chatId: 'g1' });
+  assert.equal(left.length, 1, '这个群自己的关系要清掉');
+  assert.equal(left[0].dst, '上海', '跨群的别动');
+  /**
+   * 墓碑必须留着：它是"这条关系别再记"的指令，
+   * 删了之后巩固会把用户明确删掉的关系重新抽回来。
+   */
+  assert.equal(g.suppressed({ chatId: 'g1' }).length, 1, '墓碑不许删');
+  g.close();
 });
 
 test('日记：TopK 按"重要性×衰减+访问"排，critical 排前面', () => {

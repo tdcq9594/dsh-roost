@@ -118,6 +118,25 @@ for (const tab of TABS) {
   })
 }
 
+test('前端渲染：人格页的分节要把并列的多块内容都渲染出来', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'her'
+  rt.reset()
+  const txt = textOf(expand(mod.RoostPage(), rt))
+
+  /**
+   * 这几块以前全丢了：`sec()` 只声明了一个 `children` 形参，
+   * 而调用处是并列传进去的（人格列表 + 仓库面板 + 预览 + 覆盖提示
+   * + 两段说明 + 新建输入框），多出来的参数被 JS 静默忽略。
+   *
+   * 表现就是「仓库」「新建」**按了没反应**：onClick 执行了、state 变了、
+   * 按钮文案也变成「收起仓库」，但面板永远不渲染——看起来像按钮坏了。
+   */
+  assert.ok(txt.includes('正文可以分四段'), '四段说明没渲染出来（分节的并列子节点被丢了）')
+  assert.ok(txt.includes('人格正文在 personas/*.md'), '人格正文说明没渲染出来')
+})
+
 test('前端渲染：默认页签是概览，不是上次的残留', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)

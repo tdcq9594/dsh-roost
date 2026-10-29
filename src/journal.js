@@ -25,7 +25,7 @@
  *   功能一样、检索退化为线性扫描——日记这条线不能因为环境差异就断掉。
  */
 
-import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   indexText,
@@ -155,6 +155,22 @@ function ensureDir(file) {
   } catch {}
 }
 
+/**
+ * FTS 批量删除。
+ *
+ * 为什么不是逐条 `DELETE FROM journal_fts WHERE jid=?`：FTS5 每删一行都要
+ * 定位并重写索引段，实测 5000 条要 **1268ms**（而 UPDATE 5000 行只要 12ms）。
+ * 拼成一条 `IN (...)` 是 **9ms**——差两个数量级，用户点「清空」时体感完全不同。
+ *
+ * 分 500 一批：SQLite 的变量上限默认 32766，切小一点更稳，也不影响速度。
+ */
+function deleteFtsMany(d, ids) {
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    d.prepare(`DELETE FROM journal_fts WHERE jid IN (${chunk.map(() => '?').join(',')})`).run(...chunk);
+  }
+}
+
 /** 一行的标准形状。上层只认这个，两种后端都产出它 */
 function normRow(r) {
   return {
@@ -206,8 +222,25 @@ function createSqliteStore(file, log) {
    * VACUUM 会把整个库重写一遍，几万条时要锁几秒——**不能放在用户点按钮的
    * 那条路上**（`DatabaseSync` 是同步 API，阻塞事件循环 = QQ 消息全卡住）。
    * 所以这里只记一个标记，真正的压缩交给巩固的定时器（每十分钟一轮）做。
+   *
+   * **标记必须落盘**：它原来只是闭包变量，进程一重启就没了。而重启
+   * （DSH 更新、手动重载）比重启前那十分钟更常见——用户点了「彻底删除」，
+   * 十分钟内重启一次，VACUUM 就永远不会跑，库里那些页一直留着原文，
+   * 面板上却已经说"十分钟内自动压掉"。
+   * 用同目录一个空文件当标记：写一次、压完删掉，跨进程有效。
    */
-  let needVacuum = false;
+  const vacuumMark = `${file}.vacuum`;
+  let needVacuum = existsSync(vacuumMark);
+
+  /** 记下"删过行、待压库"：内存 + 落盘各一份，后者跨重启 */
+  function markVacuum() {
+    if (needVacuum) return;
+    needVacuum = true;
+    try {
+      ensureDir(vacuumMark);
+      writeFileSync(vacuumMark, String(Date.now()), 'utf8');
+    } catch {}
+  }
 
   function open() {
     if (db || broken) return db;
@@ -345,6 +378,102 @@ function createSqliteStore(file, log) {
       return true;
     },
 
+    /**
+     * 批量抹正文（`forget` 的落点）：置占位符 + 清摘要 + 清原文快照/向量 + 降级，一个事务。
+     *
+     * 为什么不让上层循环调 `update()`：那样每行 3 条语句、各自一个隐式事务，
+     * 实测 5000 条要 4.9 秒。`DatabaseSync` 是同步 API，这几秒里事件循环停着，
+     * QQ 消息、心跳、面板请求全卡住——用户点一下「清空」就像插件死了。
+     * 同一个循环包进事务后是毫秒级（实测 5000 条 50ms 左右）。
+     *
+     * **`evidence` 和 `vec` 必须一起清**：正文抹成占位符，可
+     *   · `evidence` 里存着原文快照（`[{excerpt}]`），
+     *   · `vec` 是原文算出来的向量，语义检索照样能命中这一行。
+     * 留着任何一个，都是"忘了个正文、原文还在库里"。
+     *
+     * @param {string[]} ids 要抹的行
+     * @returns {number} 实际抹掉几条
+     */
+    erase(ids) {
+      const d = open();
+      if (!d || !Array.isArray(ids) || !ids.length) return 0;
+      const upd = d.prepare(
+        'UPDATE journal SET text=?, digest=NULL, level=?, evidence=NULL, vec=NULL WHERE id=?',
+      );
+      let n = 0;
+      d.exec('BEGIN');
+      try {
+        /**
+         * 索引只删不回填。
+         *
+         * 以前这里会把占位符再写进 FTS，于是「遗忘」「清空」这两个词
+         * 能搜出一堆占位符——既没意义，又让人以为"忘了的记录还在"。
+         * 抹掉的行就该搜不到，`byDay` / `digests` 本来就按正文跳过它们。
+         */
+        deleteFtsMany(d, ids);
+        for (const id of ids) n += Number(upd.run(ERASED, 'normal', id).changes || 0);
+        d.exec('COMMIT');
+      } catch (e) {
+        try {
+          d.exec('ROLLBACK');
+        } catch {}
+        throw e;
+      }
+      return n;
+    },
+
+    /** 抹掉某个会话的全部正文（`clearChat` 的落点）：行留着，时间线不断 */
+    clearChat(chatId) {
+      const d = open();
+      if (!d) return 0;
+      const ids = d.prepare('SELECT id FROM journal WHERE chat_id=?').all(chatId).map((r) => String(r.id));
+      if (!ids.length) return 0;
+      /** 同 `erase`：正文、摘要、原文快照、向量一起清，索引只删不回填 */
+      const upd = d.prepare(
+        'UPDATE journal SET text=?, digest=NULL, level=?, evidence=NULL, vec=NULL WHERE id=?',
+      );
+      d.exec('BEGIN');
+      try {
+        deleteFtsMany(d, ids);
+        for (const id of ids) upd.run(CLEARED, 'normal', id);
+        d.exec('COMMIT');
+      } catch (e) {
+        try {
+          d.exec('ROLLBACK');
+        } catch {}
+        throw e;
+      }
+      return ids.length;
+    },
+
+    /**
+     * **精确删一条**：行和 FTS 一起删。
+     *
+     * 面板点某一条的「忘」走这里，不再拿正文前几个字当关键词去猜。
+     * 关键词是"批量入口"（用户说「忘掉小美」），单条删除必须有确定的 id——
+     * 靠覆盖率匹配删单条，实测会把「生日是三月**五**号」和
+     * 「生日是三月**六**号」一起抹掉（`MIN_COVERAGE` 只有 0.34）。
+     */
+    remove(id) {
+      const d = open();
+      if (!d) return false;
+      let changed = 0;
+      d.exec('BEGIN');
+      try {
+        d.prepare('DELETE FROM journal_fts WHERE jid=?').run(id);
+        changed = Number(d.prepare('DELETE FROM journal WHERE id=?').run(id).changes || 0);
+        d.exec('COMMIT');
+      } catch (e) {
+        try {
+          d.exec('ROLLBACK');
+        } catch {}
+        throw e;
+      }
+      /** 行没了但页还在：让巩固时的 `vacuum()` 顺手压掉（和 purgeChat 同一档） */
+      if (changed) markVacuum();
+      return Boolean(changed);
+    },
+
     recent(chatId, n, kind = 'chat') {
       const d = open();
       if (!d) return [];
@@ -437,10 +566,20 @@ function createSqliteStore(file, log) {
     },
 
     /** 还没有向量的条目（巩固时批量补算，白天不花这个钱） */
+    /**
+     * 还没有向量的条目（巩固时批量补算，白天不花这个钱）。
+     *
+     * **占位符不补算**：抹掉的行 `vec` 被清空了，但它的正文已经是
+     * 「（已按用户要求遗忘）」。不排除的话，巩固会给这个占位符重新算一遍
+     * 向量，等于把抹掉的那行重新塞回语义检索里。
+     */
     noVec(limit = 64) {
       const d = open();
       if (!d) return [];
-      return d.prepare('SELECT * FROM journal WHERE vec IS NULL ORDER BY at DESC LIMIT ?').all(limit).map(normRow);
+      return d
+        .prepare('SELECT * FROM journal WHERE vec IS NULL AND text<>? AND text<>? ORDER BY at DESC LIMIT ?')
+        .all(ERASED, CLEARED, limit)
+        .map(normRow);
     },
 
     stats() {
@@ -473,13 +612,26 @@ function createSqliteStore(file, log) {
     purgeChat(chatId) {
       const d = open();
       if (!d) return 0;
-      const ids = d.prepare('SELECT id FROM journal WHERE chat_id=?').all(chatId).map((r) => String(r.id));
-      if (!ids.length) return 0;
-      const delFts = d.prepare('DELETE FROM journal_fts WHERE jid=?');
-      for (const id of ids) delFts.run(id);
-      const r = d.prepare('DELETE FROM journal WHERE chat_id=?').run(chatId);
-      needVacuum = true;
-      return Number(r.changes || 0);
+      let n = 0;
+      d.exec('BEGIN');
+      try {
+        /**
+         * 索引用**一条语句按子查询删**，不逐条：逐条 5000 次要 1.3 秒，
+         * 一条语句 9ms（见 `deleteFtsMany` 的注释）。先删索引再删行，
+         * 同一事务里子查询照样看得到这些行。
+         */
+        d.prepare('DELETE FROM journal_fts WHERE jid IN (SELECT id FROM journal WHERE chat_id=?)').run(chatId);
+        n = Number(d.prepare('DELETE FROM journal WHERE chat_id=?').run(chatId).changes || 0);
+        d.exec('COMMIT');
+      } catch (e) {
+        try {
+          d.exec('ROLLBACK');
+        } catch {}
+        throw e;
+      }
+      /** 真删掉了才值得压库；一条没删就别让巩固白锁一次 */
+      if (n) markVacuum();
+      return n;
     },
 
     /**
@@ -495,8 +647,13 @@ function createSqliteStore(file, log) {
       needVacuum = false;
       try {
         d.exec('VACUUM');
+        /** 压成功才删标记：失败时留着，下一轮（或重启后）接着试 */
+        try {
+          unlinkSync(vacuumMark);
+        } catch {}
         return true;
       } catch (e) {
+        needVacuum = true;
         log(`压库失败（不影响使用，磁盘上多留一点旧页）：${e.message}`);
         return false;
       }
@@ -602,6 +759,63 @@ function createJsonlStore(file, log) {
       return true;
     },
 
+    /**
+     * 批量抹正文（同 SQLite 后端）。
+     *
+     * 这里**必须**一次改完再重写一次文件：`update()` 每条都整文件重写，
+     * 上层循环调它的话是 O(N²)——实测 1000 条要 5.8 秒。
+     */
+    erase(ids) {
+      load();
+      const want = new Set((ids || []).map(String));
+      let n = 0;
+      for (const r of rows) {
+        if (!want.has(r.id)) continue;
+        r.text = ERASED;
+        r.digest = null;
+        r.level = 'normal';
+        /** 同 SQLite 后端：原文快照和向量一起清，否则"正文忘了、原文还在" */
+        r.evidence = null;
+        r.vec = null;
+        n += 1;
+      }
+      if (n) {
+        reindex();
+        rewrite();
+      }
+      return n;
+    },
+
+    clearChat(chatId) {
+      load();
+      let n = 0;
+      for (const r of rows) {
+        if (r.chatId !== chatId) continue;
+        r.text = CLEARED;
+        r.digest = null;
+        r.level = 'normal';
+        r.evidence = null;
+        r.vec = null;
+        n += 1;
+      }
+      if (n) {
+        reindex();
+        rewrite();
+      }
+      return n;
+    },
+
+    /** 精确删一条：行和索引一起（同 SQLite 后端） */
+    remove(id) {
+      load();
+      const before = rows.length;
+      rows = rows.filter((r) => r.id !== id);
+      if (rows.length === before) return false;
+      reindex();
+      rewrite();
+      return true;
+    },
+
     recent(chatId, n, kind = 'chat') {
       return load()
         .filter((r) => r.kind === kind && (!chatId || r.chatId === chatId))
@@ -650,8 +864,9 @@ function createJsonlStore(file, log) {
     },
 
     noVec(limit = 64) {
+      // 同 SQLite 后端：占位符不补算向量
       return load()
-        .filter((r) => !r.vec)
+        .filter((r) => !r.vec && r.text !== ERASED && r.text !== CLEARED)
         .sort((a, b) => b.at - a.at)
         .slice(0, limit);
     },
@@ -726,6 +941,23 @@ export function cosine(a, b) {
 }
 
 /* ---------------- 对外接口 ---------------- */
+
+/**
+ * 删除类操作的作用域必须是一个**具体会话**。
+ *
+ * 为什么要在这一层硬拦：`listChat('')` / `SELECT ... WHERE chat_id=?`（传空串）
+ * 在日志库里是"不过滤"的意思，于是 chatId 一缺省，「清空这个群」
+ * 就变成清空**所有群**——而调用方的 chatId 来自 `body.chatId || lastScene.chatId || ''`，
+ * 面板刚打开、还没收过消息时正好是空串。
+ *
+ * 宁可抛错让调用方补参数，也不能默默把作用域放大：删除不可逆，
+ * 「删多了」比「没删成」难解释得多。
+ */
+function requireChat(chatId, what = '日记操作') {
+  const s = String(chatId ?? '').trim();
+  if (!s) throw new Error(`${what}必须指定会话（缺 chatId；空值会作用到全部会话）`);
+  return s;
+}
 
 /**
  * @param {object} o
@@ -887,11 +1119,21 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
 
       /* 第三路：实体。不用算向量，纯靠图谱把候选日记拉进来 */
       entIds.forEach((id, i) => {
+        /**
+         * **先确认这一行还在，再给它加分。**
+         *
+         * 以前是先 `bump` 后查：图谱里 `episode.journal_id` 指向的日记
+         * 被「彻底删除」之后，这个 id 就成了死 id——`byId` 里没有它，
+         * 下面拼结果时读 `r.text` 直接抛 TypeError，被 `host` 那边的
+         * catch 吞成一条 warn，于是**这一轮日记检索整段失效**。
+         * 用户看到的是"她突然想不起以前的事"，日志里只有一行不好归因的警告。
+         *
+         * 死 id 是正常现象（删过日记就会留），所以这里直接跳过，不报错。
+         */
+        const row = byId.get(id) || s.get(id);
+        if (!row) return;
+        byId.set(id, row);
         bump(id, i, 0.5);
-        if (!byId.has(id)) {
-          const row = s.get(id);
-          if (row) byId.set(id, row);
-        }
       });
       let vecHits = [];
       if (embed?.enabled?.()) {
@@ -923,6 +1165,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       const out = [...ranks.entries()]
         .map(([id, score]) => {
           const r = byId.get(id);
+          /** 兜底：万一路径里还有别处塞进来的死 id，也不能让整段检索炸掉 */
+          if (!r) return null;
           return {
             ...r,
             score,
@@ -932,6 +1176,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
             coverage: coverage(terms, indexTerms(r.text)),
           };
         })
+        .filter(Boolean)
         .sort((a, b) => b.score - a.score)
         .slice(0, limit);
 
@@ -943,6 +1188,14 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     dueToCompress(at = now()) {
       return get()
         .listChat('', 5000)
+        /**
+         * 占位符不压。
+         *
+         * 抹过的行 `level` 被降成 normal、`keepUntil` 还是原来那个，
+         * 一旦过期就会被挑出来"压缩"——给一句「（已按用户要求遗忘）」
+         * 生成摘要，纯浪费，还会在库里留下一条没意义的 digest。
+         */
+        .filter((r) => r.text !== ERASED && r.text !== CLEARED)
         .filter((r) => r.kind === 'chat' && r.level !== 'critical' && !r.digest)
         .filter((r) => r.keepUntil > 0 && r.keepUntil <= at)
         .sort((a, b) => a.at - b.at);
@@ -984,6 +1237,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     forget({ chatId = '', word = '' } = {}) {
       const w = String(word ?? '').trim();
       if (!w) return 0;
+      const scope = requireChat(chatId, '忘掉关键词');
       const terms = queryTerms(w);
       const s = get();
       /**
@@ -997,17 +1251,18 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
        * `passesCoverage` 分词覆盖），后者要原文才能判断。
        * 代价是一次性把整个会话读进内存（十万条约几十 MB），
        * 但这是**用户主动要求删除**时才走的路，不在热路径上。
+       *
+       * `scope` 必须是具体会话：传空串在 `listChat` 里等于「不过滤」，
+       * 那句「忘掉小美」就会把**所有群**里带「小美」的日记一起抹了。
        */
-      const pool = s.listChat(chatId, 0);
-      let n = 0;
-      for (const r of pool) {
+      const ids = [];
+      for (const r of s.listChat(scope, 0)) {
         if (r.kind !== 'chat' && r.kind !== 'digest') continue;
         const hit = r.text.includes(w) || (terms.length && passesCoverage(terms, indexTerms(r.text)));
-        if (!hit) continue;
-        s.update(r.id, { text: ERASED, digest: null, level: 'normal' });
-        n += 1;
+        if (hit) ids.push(r.id);
       }
-      return n;
+      /** 一次事务抹完；逐条 `update` 是 O(N²)（JSONL 每条重写整个文件） */
+      return s.erase(ids);
     },
 
     /**
@@ -1018,14 +1273,19 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      * 实际更早的记录还在，而且他自己不会发现。
      */
     clearChat(chatId) {
-      const s = get();
-      let n = 0;
-      for (const r of s.listChat(chatId, 0)) {
-        s.update(r.id, { text: CLEARED, digest: null, level: 'normal' });
-        n += 1;
-      }
-      return n;
+      return get().clearChat(requireChat(chatId, '清空日记'));
     },
+
+    /**
+     * **精确删一条**（面板点某一条的「忘」）。
+     *
+     * 为什么要有这个：关键词抹除是"批量入口"，它的命中判据是
+     * `passesCoverage`（覆盖率只要 0.34），拿来删单条会误伤——
+     * 实测「生日是三月五号」会把「生日是三月六号」一起抹掉。
+     * 用户点的是**这一条**，就该只删这一条。
+     * @returns {boolean} 有没有删掉（id 不存在时 false）
+     */
+    remove: (id) => get().remove(String(id ?? '')),
 
     /**
      * **彻底删掉**某个会话的日记：行和索引都不留。
@@ -1035,7 +1295,9 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      *   · purgeChat —— 行都没了（用户要的是「这些记录不许存在」）
      * 磁盘上的旧页由 `vacuum()` 在巩固时压掉，这里不等。
      */
-    purgeChat: (chatId) => get().purgeChat(chatId),
+    purgeChat(chatId) {
+      return get().purgeChat(requireChat(chatId, '彻底删日记'));
+    },
 
     /** 压库。没删过行时是一次判断就返回，可以放心在定时器里调 */
     vacuum: () => get().vacuum(),

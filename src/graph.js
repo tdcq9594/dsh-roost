@@ -545,6 +545,40 @@ export function createGraph({ file, log = () => {} } = {}) {
     return true;
   }
 
+  /**
+   * 删掉某个会话在图谱里的**全部痕迹**：原始片段、边、实体。
+   *
+   * 为什么必须有：「彻底删除日记」以前只删 journal 表，而 `episode.text`
+   * 里存着当天日记正文的拼接（最多 1200 字，见 consolidate 写 episode 的地方），
+   * 边是抽出来的关系——原文在另一个文件里完整留了一份，
+   * 用户要的「这些记录不许存在」就成了一句空话。
+   *
+   * 墓碑（`suppress`）**故意不删**：那是"这条关系别再记"的指令，
+   * 删了之后巩固会把用户明确删掉的关系重新抽回来。
+   *
+   * @returns {{episodes:number, edges:number, entities:number}}
+   */
+  function purgeChat(chatId) {
+    const d = open();
+    const zero = { episodes: 0, edges: 0, entities: 0 };
+    if (!d) return zero;
+    d.exec('BEGIN');
+    try {
+      /** 顺序：先边（引用实体）、再实体、最后片段 */
+      const edges = Number(d.prepare('DELETE FROM edge WHERE chat_id=?').run(chatId).changes || 0);
+      const entities = Number(d.prepare('DELETE FROM entity WHERE chat_id=?').run(chatId).changes || 0);
+      const episodes = Number(d.prepare('DELETE FROM episode WHERE chat_id=?').run(chatId).changes || 0);
+      d.exec('COMMIT');
+      return { episodes, edges, entities };
+    } catch (e) {
+      try {
+        d.exec('ROLLBACK');
+      } catch {}
+      log(`清图谱失败（图谱里的原文可能还在）：${e.message}`);
+      return zero;
+    }
+  }
+
   function episodes({ chatId = '', limit = 20 } = {}) {
     const d = open();
     if (!d) return [];
@@ -574,6 +608,8 @@ export function createGraph({ file, log = () => {} } = {}) {
     entities,
     episodes,
     linkedJournalIds,
+    /** 彻底删某个会话在图谱里的痕迹（日记被彻底删除时跟着走） */
+    purgeChat,
     hasActive,
     text,
     stats,
