@@ -679,3 +679,77 @@ test('改主意：没有活边时 op=update 退化成 add（不能因为多写�
   await c.run({ day });
   assert.equal(g.nowEdges({ chatId: '' }).filter((e) => e.rel === '养了').length, 1, '退化为 add，事实要留下');
 });
+
+/**
+ * 场景片段（阶段 4）：记忆要记得「自己是从哪几条消息来的」。
+ *
+ * 两个字段各管一件事：
+ *   `eventIds` 用来**回查原文**（事件账本在框架侧，只能靠 id 去问）
+ *   `evidence` 是**原文快照**（events 7 天后滚动删了，它还留着）
+ */
+test('日记: 记下这条记忆来自哪几条消息', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  j.add({
+    id: 'm-src',
+    at: Date.now(),
+    chatId: 'g1',
+    text: '他说明天去杭州',
+    eventIds: ['ev-1', 'ev-2'],
+    evidence: [{ eventId: 'ev-2', at: Date.now(), sender: '小明', excerpt: '明天去杭州' }],
+  });
+  const row = j.get('m-src');
+  assert.deepEqual(row.eventIds, ['ev-1', 'ev-2']);
+  assert.equal(row.evidence.length, 1);
+  assert.equal(row.evidence[0].sender, '小明');
+});
+
+test('日记: 没有出处时是空数组，不是 undefined', () => {
+  // 上层会直接 `row.eventIds?.[0]`，返回 undefined 和返回 [] 都能用；
+  // 但 `[]` 让「没开账本」和「字段丢了」表现一致，省得到处判空
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  j.add({ id: 'm-plain', at: Date.now(), chatId: 'g1', text: '随口一句' });
+  const row = j.get('m-plain');
+  assert.deepEqual(row.eventIds, []);
+  assert.deepEqual(row.evidence, []);
+});
+
+test('日记: 出处数组有上限，别把一条记忆撑爆', () => {
+  // 合并窗口理论上能攒很多条；一条记忆带 500 个 eventId 没有意义，
+  // 而且会让 SQLite 那列变得又长又没用
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  j.add({
+    id: 'm-many',
+    at: Date.now(),
+    chatId: 'g1',
+    text: '一长串',
+    eventIds: Array.from({ length: 200 }, (_, i) => `ev-${i}`),
+  });
+  assert.equal(j.get('m-many').eventIds.length, 50);
+});
+
+test('日记: 老库没有新列也能开（ALTER TABLE 迁移）', () => {
+  // 模拟阶段 4 之前的库：建表时不带 event_ids/evidence，然后让 createJournal 打开它。
+  // 不迁移的话 insert 会报「no such column」，而新装的人是好的——
+  // 这种只影响升级用户的错最难查
+  const file = join(tmp(), 'old.sqlite');
+  const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+  const d = new DatabaseSync(file);
+  d.exec(`CREATE TABLE journal (
+    id TEXT PRIMARY KEY, at INTEGER NOT NULL, day TEXT NOT NULL,
+    chat_id TEXT NOT NULL DEFAULT '', sender TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'user', text TEXT NOT NULL,
+    level TEXT NOT NULL DEFAULT 'normal', kind TEXT NOT NULL DEFAULT 'chat',
+    digest TEXT, keep_until INTEGER NOT NULL DEFAULT 0,
+    accessed INTEGER NOT NULL DEFAULT 0, last_access INTEGER NOT NULL DEFAULT 0, vec BLOB
+  )`);
+  d.exec(`INSERT INTO journal(id,at,day,chat_id,text) VALUES ('old-1', ${Date.now()}, 'd', 'g1', '老数据')`);
+  d.close();
+
+  const j = createJournal({ file });
+  const old = j.get('old-1');
+  assert.equal(old.text, '老数据', '老数据要读得出来');
+  assert.deepEqual(old.eventIds, [], '新列对老行是空');
+  // 迁移之后能写新数据
+  j.add({ id: 'new-1', at: Date.now(), chatId: 'g1', text: '新数据', eventIds: ['ev-9'] });
+  assert.deepEqual(j.get('new-1').eventIds, ['ev-9']);
+});

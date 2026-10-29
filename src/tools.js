@@ -56,7 +56,7 @@ const WRITABLE_LEVELS = ['normal', 'important'];
  * @param {() => {bucket:string, chatId:string}} o.callerOf  当前这一轮是谁在说
  * @param {() => object} o.cfgOf
  */
-export function buildToolDefs({ journal, graphOf, callerOf, cfgOf }) {
+export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = null }) {
   /** 当前调用者的档位与所属会话 */
   const caller = () => {
     const s = callerOf?.() || {};
@@ -107,19 +107,50 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf }) {
       const cross = scope === 'global' && canCrossGroup();
       try {
         const rows = await journal.search(q, { chatId, limit: 5, crossCritical: cross });
+        /**
+         * 场景片段（阶段 4）：命中之后把**原文和前后文**也带出来。
+         *
+         * 为什么值得多跑几次 HTTP：检索给的是摘要，而模型要判断「这条到底是不是
+         * 他在说的那件事」，必须看到原话和上下文。只给摘要它只能猜，
+         * 猜错就说成另一件事——**比「不记得」更糟**。
+         *
+         * 只给前 2 条补邻文：5 条 × 5 段邻文 = 25 段，会把这个工具的返回撑得
+         * 比它要回答的问题还大。
+         */
+        const results = await Promise.all(
+          rows.map(async (r, i) => {
+            const base = {
+              when: new Date(r.at).toISOString().slice(0, 10),
+              level: r.level,
+              text: String(r.digest || r.text).slice(0, 200),
+              /**
+               * 群友看不到是谁说的——`sender` 会把别的群的人名漏出去。
+               * 主人/管理员才给，方便判断可信度。
+               */
+              ...(bucket === 'owner' || bucket === 'admin' ? { who: r.role === 'bot' ? '我' : r.sender } : {}),
+            };
+            const eid = r.eventIds?.[0];
+            if (i >= 2 || !eid || !contextOf) return base;
+            const ctx = await contextOf(eid, { before: 2, after: 2 }).catch(() => null);
+            if (!ctx?.items?.length) return base;
+            return {
+              ...base,
+              /**
+               * `role` 是 `hit` 还是 `neighbor` —— **相邻不等于同一话题**，
+               * 提示词里要写清楚，不能因为挨着就当因果。
+               */
+              around: ctx.items.map((x) => ({
+                role: x.role,
+                when: new Date(x.at).toISOString().slice(0, 10),
+                text: String(x.content || '').slice(0, 200),
+              })),
+            };
+          }),
+        );
         return {
           ok: true,
           count: rows.length,
-          results: rows.map((r) => ({
-            when: new Date(r.at).toISOString().slice(0, 10),
-            level: r.level,
-            text: String(r.digest || r.text).slice(0, 200),
-            /**
-             * 群友看不到是谁说的——`sender` 会把别的群的人名漏出去。
-             * 主人/管理员才给，方便判断可信度。
-             */
-            ...(bucket === 'owner' || bucket === 'admin' ? { who: r.role === 'bot' ? '我' : r.sender } : {}),
-          })),
+          results,
           hint: rows.length ? '' : '没查到。可以换个说法，或者直接说不记得。',
         };
       } catch (e) {
@@ -189,8 +220,8 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf }) {
  * @returns {Promise<{ok:boolean, names:string[], reason?:string, off?:Function}>}
  *   失败**不抛错**——工具是增强，装不上不能让整轮对话挂掉；但必须把原因带出去。
  */
-export async function registerMemoryTools({ agent, journal, graphOf, callerOf, cfgOf, log = () => {} }) {
-  const defs = buildToolDefs({ journal, graphOf, callerOf, cfgOf });
+export async function registerMemoryTools({ agent, journal, graphOf, callerOf, cfgOf, contextOf = null, log = () => {} }) {
+  const defs = buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf });
   const registry = agent?.ctx?.tools;
   if (!registry?.register) {
     /**

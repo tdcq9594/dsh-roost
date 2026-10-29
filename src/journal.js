@@ -144,7 +144,23 @@ function normRow(r) {
     accessed: Number(r.accessed ?? 0),
     lastAccess: Number(r.last_access ?? r.lastAccess ?? 0),
     vec: r.vec ?? null,
+    /** 这条记忆从哪几条消息来（阶段 4）。解析失败当空数组，不让坏数据拖垮整行 */
+    eventIds: parseList(r.event_ids ?? r.eventIds),
+    /** 原文快照 `[{eventId, at, sender, excerpt}]`，events 删了它也还在 */
+    evidence: parseList(r.evidence),
   };
+}
+
+/** JSON 列解析：坏数据返回空数组，不抛 */
+function parseList(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v !== 'string' || !v) return [];
+  try {
+    const out = JSON.parse(v);
+    return Array.isArray(out) ? out : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -184,11 +200,24 @@ function createSqliteStore(file, log) {
           keep_until INTEGER NOT NULL DEFAULT 0,
           accessed INTEGER NOT NULL DEFAULT 0,
           last_access INTEGER NOT NULL DEFAULT 0,
-          vec BLOB
+          vec BLOB,
+          -- 场景片段（阶段 4）：这条记忆是从哪几条消息来的，以及原文快照
+          event_ids TEXT,
+          evidence TEXT
         );
         CREATE INDEX IF NOT EXISTS journal_day ON journal(day);
         CREATE INDEX IF NOT EXISTS journal_chat ON journal(chat_id, at);
       `);
+      /**
+       * 老库补列。
+       *
+       * `CREATE TABLE IF NOT EXISTS` 对已存在的表什么都不做，所以加列必须
+       * 单独走 `ALTER TABLE`。不补的话，老用户的库上 insert 会直接报
+       * 「no such column」，而新装的人是好的——这种只影响升级用户的错最难查。
+       */
+      const cols = new Set(db.prepare('PRAGMA table_info(journal)').all().map((c) => c.name));
+      if (!cols.has('event_ids')) db.exec('ALTER TABLE journal ADD COLUMN event_ids TEXT');
+      if (!cols.has('evidence')) db.exec('ALTER TABLE journal ADD COLUMN evidence TEXT');
       /**
        * FTS5 单独一张表而不是 external content：
        * external content 要靠触发器同步，改一行忘了同步就静默不一致。
@@ -213,8 +242,8 @@ function createSqliteStore(file, log) {
       if (!d) return null;
       const r = d
         .prepare(
-          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO NOTHING`,
         )
         .run(
@@ -230,6 +259,8 @@ function createSqliteStore(file, log) {
           row.digest ?? null,
           row.keepUntil ?? 0,
           row.vec ?? null,
+          row.eventIds?.length ? JSON.stringify(row.eventIds) : null,
+          row.evidence?.length ? JSON.stringify(row.evidence) : null,
         );
       if (!r.changes) return false; // 幂等：同一条消息写了两次
       d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(row.id, indexText(row.text));
@@ -634,7 +665,20 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      * 消息来两次，按 id 去重才不会写出两条（对照表 12.4）。
      * @returns {{added:boolean, level:string}}
      */
-    add({ id, at, chatId = '', sender = '', role = 'user', text = '', level = '', kind = 'chat' }) {
+    add({
+      id,
+      at,
+      chatId = '',
+      sender = '',
+      role = 'user',
+      text = '',
+      level = '',
+      kind = 'chat',
+      /** 这条记忆从哪几条消息来（阶段 4）。写的时候一起落，不事后补 */
+      eventIds = [],
+      /** 原文快照 `[{eventId, at, sender, excerpt}]`。events 7 天后删了，它还留着 */
+      evidence = [],
+    }) {
       const t = String(text ?? '').trim();
       if (!t) return { added: false, level: 'normal' };
       const ts = Number(at) || now();
@@ -652,6 +696,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         digest: null,
         keepUntil: kind === 'digest' ? 0 : keepUntilOf(lv, ts),
         vec: null,
+        eventIds: (eventIds || []).map(String).filter(Boolean).slice(0, 50),
+        evidence: (evidence || []).slice(0, 50),
       };
       const added = get().insert(row);
       return { added: Boolean(added), level: lv };

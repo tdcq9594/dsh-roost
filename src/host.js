@@ -363,6 +363,15 @@ export function apply(ctx) {
     if (cfg.memory?.enabled === false) return;
     try {
       const base = String(payload?.id ?? '').trim();
+      /**
+       * 这一轮对应事件账本里的哪几条（场景片段，阶段 4）。
+       *
+       * 合并窗口攒过几句时是多条——一批消息合成一轮对话，出处也该是这一批。
+       * 没开事件账本时这个数组是空的，日记照写，只是以后查不回原文。
+       */
+      const eventIds = (Array.isArray(payload?.eventIds) ? payload.eventIds : [])
+        .map(String)
+        .filter(Boolean);
       journal.add({
         // 没有 msg_id 时给空串，journal 内部会生成随机 id（宁可重复也不丢）
         id: base ? `${base}${role === 'bot' ? ':bot' : ''}` : '',
@@ -371,6 +380,20 @@ export function apply(ctx) {
         sender: role === 'bot' ? '' : String(payload?.sender?.name ?? '').trim(),
         role,
         text,
+        eventIds,
+        /**
+         * 原文快照。**存的是整段，不是逐条**——合并批的正文已经被拼成一段，
+         * 拆不回原来那几条。快照的用途是「events 7 天后删了还能看到当时说了什么」，
+         * 整段正好满足；要逐条回看原文，用 `eventIds` 调 `/r/context`。
+         */
+        evidence: eventIds.length
+          ? [{
+              eventId: eventIds[eventIds.length - 1],
+              at: Date.now(),
+              sender: role === 'bot' ? 'bot' : String(payload?.sender?.name ?? '').trim(),
+              excerpt: String(text ?? '').slice(0, 200),
+            }]
+          : [],
       });
     } catch (e) {
       log.warn(`日记没写进去（不影响这轮）：${e.message}`);
@@ -433,6 +456,30 @@ export function apply(ctx) {
       log.warn(`巩固出错：${e?.message ?? e}`);
     }
   };
+
+  /**
+   * 取邻文（阶段 4 的桥 2）：把 `eventId` 换成原文和前后文。
+   *
+   * 事件账本在框架侧（A 侧），这边只有 id，只能回去问。
+   * **失败一律返回 null**——拿不到原文是「少一点上下文」，不该让检索整个失败。
+   * 超过保留期（默认 7 天）时框架那边会返回 `gone: true`，这里同样当 null。
+   */
+  async function contextOf(eventId, { before = 2, after = 2 } = {}) {
+    const id = String(eventId ?? '').trim();
+    if (!id) return null;
+    try {
+      const base = String(setup.baseUrl() || '').replace(/\/+$/, '');
+      if (!base) return null;
+      const url =
+        `${base}/api/plugins/ai-chat/r/context?aroundId=${encodeURIComponent(id)}`
+        + `&before=${Number(before) || 0}&after=${Number(after) || 0}${setup.keyQuery()}`;
+      const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      const body = await r.json().catch(() => null);
+      return body?.ok ? body : null;
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * 启动 60 秒后先补跑一次（多半是昨天关机错过了四点），
@@ -1063,6 +1110,11 @@ export function apply(ctx) {
           return { bucket: cur?.bucket, chatId: cur?.payload?.chat?.chatId || chat.chatId || '' };
         },
         cfgOf: () => cfg,
+        /**
+         * 场景片段（阶段 4）：检索命中后拿原文和前后文。
+         * 传 null 就是「没有这条桥」，检索照常返回摘要，只是不带邻文。
+         */
+        contextOf,
         log: (m) => log.warn(m),
       })
         .then((r) => {
