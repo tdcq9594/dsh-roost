@@ -50,6 +50,56 @@ export const MODES = ['all', 'chat'];
 export const GUEST_KEEP_TOOLS = ['memory_search', 'qq_send', 'qq_close'];
 
 /**
+ * 主动搭话那一轮要收走的工具。
+ *
+ * `qq_send` / `qq_close` 的语义是「回复**当前这条**消息」——目标来自
+ * `speaker`，而 `speaker` 在每轮 `finally` 里就删掉了。主动搭话是宿主
+ * 自己发起的，没有"当前消息"，挂着这两个工具的结果是：模型调了必然失败，
+ * 然后按提示 `<<skip>>`，一轮模型调用白花。
+ *
+ * 记忆工具**故意不在这里**：她翻日记、记事，主动开口时同样用得上。
+ */
+export const AWAKE_DENY_TOOLS = ['qq_send', 'qq_close'];
+
+/**
+ * 算出「这些名字里，当前实际挂着的有哪些」。
+ *
+ * 为什么不能直接把名字丢给 `restrict`：它会**校验名字**，只要有一个不存在
+ * 就抛 `names unknown global tools …`，整批拒绝。工具是每轮按条件挂的
+ * （`qqTools.enabled` 可以关），所以必须先问 DSH 现在有哪些。
+ *
+ * 做成纯函数是为了能测：给它一个假的 tools，看它算出来什么。
+ *
+ * @param {object} tools agent 的 tools 服务（只要 `schemas()`）
+ * @param {string[]} names 想收走的名字
+ * @returns {{ok:true, deny:string[]} | {ok:false, reason:string}}
+ */
+export function planDenyTools(tools, names = AWAKE_DENY_TOOLS) {
+  if (!tools || typeof tools.schemas !== 'function') {
+    return { ok: false, reason: '这个 agent 的 tools 服务没有 schemas()（版本差异）' };
+  }
+
+  let list;
+  try {
+    list = tools.schemas();
+  } catch (e) {
+    return { ok: false, reason: `读不到工具清单：${e?.message || e}` };
+  }
+
+  const have = new Set(
+    (Array.isArray(list) ? list : [])
+      .map((s) => String(s?.name ?? s?.tool?.name ?? ''))
+      .filter(Boolean),
+  );
+  if (!have.size) return { ok: false, reason: 'DSH 报不出工具清单（schemas() 是空的）' };
+
+  const deny = (Array.isArray(names) ? names : []).filter((n) => have.has(n));
+  if (!deny.length) return { ok: false, reason: '这些工具这一轮本来就没挂' };
+
+  return { ok: true, deny };
+}
+
+/**
  * 算出这一轮该收走哪些工具。
  *
  * 为什么是「问 DSH 要清单」而不是「我们自己列」：`tools.restrict()` 会

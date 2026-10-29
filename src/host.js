@@ -20,7 +20,7 @@ import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
 import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf, speakerTag } from './inbound.js';
-import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools } from './permissions.js';
+import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools } from './permissions.js';
 import { createSetup } from './setup.js';
 import { createMemory, W_EXPLICIT } from './memory.js';
 import { createJournal } from './journal.js';
@@ -166,6 +166,38 @@ export function apply(ctx) {
       return { ok: false, reason: `${e?.message || e}（清单：${plan.deny.join('、')}）` };
     }
   }
+
+  /**
+   * 主动搭话那一轮，把 `qq_send` / `qq_close` 收走。
+   *
+   * 这两个工具的语义是「回复**当前这条**消息」——目标来自 `speaker`，
+   * 而 `speaker` 在每轮 `finally` 里就 `delete` 掉了。主动搭话是宿主
+   * 自己发起的，根本没有"当前消息"，于是：
+   *   · 模型一调就失败（「这一轮没有可回话的消息」），只能退成 `<<skip>>`，
+   *     一轮模型调用白花——线上真的撞到过
+   *   · 万一 payload 没被清（并发/异常路径），它会**真的发出去**，
+   *     然后 `speakup.fire` 再发一遍 → 双发；而且走的是 `qs-` 幂等键，
+   *     `lastBotAt` 不记、`unanswered` 不加，面板显示"还没主动说过"
+   *
+   * 所以这一轮**直接不让它们出现在工具列表里**，比让它失败再解释可靠。
+   * 记忆工具不动：她翻日记、记事，在主动搭话里同样有用。
+   *
+   * 名字必须先从 `schemas()` 里取：`restrict` 会校验名字，
+   * 给一个不存在的名字会整批拒绝（跟 `planGuestTools` 同一个坑）。
+   */
+  function restrictQqTools(agent) {
+    const t = agent?.ctx?.tools;
+    if (!t || typeof t.restrict !== 'function') {
+      return { ok: false, reason: '这个 agent 的 tools 服务没有 restrict（版本差异）' };
+    }
+    const plan = planDenyTools(t);
+    if (!plan.ok) return plan;
+    try {
+      return { ok: true, off: t.restrict({ deny: plan.deny }), names: plan.deny };
+    } catch (e) {
+      return { ok: false, reason: `${e?.message || e}（清单：${plan.deny.join('、')}）` };
+    }
+  }
   let cfg = loadConfig();
 
   const sessions = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
@@ -290,7 +322,16 @@ export function apply(ctx) {
         const chat = { kind: 'c2c', chatId: owner, name: '主动搭话', preset: 'roost-private' };
         const { agent } = await agentFor(chat);
         mount(agent, chat);
-        return turns.run(agent, prompt, { source: { kind: 'roost-speakup' } });
+        /** 这一轮没有"正在回的那条消息"，`qq_send` 挂着只会诱导模型调它然后失败 */
+        const cut = restrictQqTools(agent);
+        if (!cut.ok) log.warn(`主动搭话没收走 qq 工具：${cut.reason}`);
+        try {
+          return await turns.run(agent, prompt, { source: { kind: 'roost-speakup' } });
+        } finally {
+          try {
+            cut.off?.();
+          } catch {}
+        }
       }
       const v = await awake.compose({ kind: 'c2c', chatId: owner, extraPrompt: speakUpExtra() });
       return v.speak ? v.text : '<<skip>>';
@@ -764,7 +805,16 @@ export function apply(ctx) {
       const chat = { kind: 'c2c', chatId: owner, name: '主动搭话', preset: 'roost-private' };
       const { agent } = await agentFor(chat);
       mount(agent, chat);
-      return turns.run(agent, prompt, { source: { kind: 'roost-awake' } });
+      /** 同 speakup 那条路：主动开口没有"正在回的消息"，别让她看见 `qq_send` */
+      const cut = restrictQqTools(agent);
+      if (!cut.ok) log.warn(`主动搭话没收走 qq 工具：${cut.reason}`);
+      try {
+        return await turns.run(agent, prompt, { source: { kind: 'roost-awake' } });
+      } finally {
+        try {
+          cut.off?.();
+        } catch {}
+      }
     },
   });
 
@@ -1401,7 +1451,12 @@ export function apply(ctx) {
         },
         sendOf: async (raw, opts = {}) => {
           const c = cur();
-          if (!c.payload) return { ok: false, message: '这一轮没有可回话的消息' };
+          if (!c.payload) {
+            return {
+              ok: false,
+              message: '这一轮是主动开口，没有"正在回的那条消息"——直接把要说的话写成正文。',
+            };
+          }
 
           /**
            * **工具参数里的标记也要摘掉。**

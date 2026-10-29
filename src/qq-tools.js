@@ -160,7 +160,23 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
       const t = String(text ?? '').trim();
       if (!t) return { ok: false, message: '要说什么？' };
       const c = caller();
-      if (!c.hasPayload) return { ok: false, message: '这一轮没有可回话的消息（不该发生，记一下）' };
+      /**
+       * 没有"正在回的那条消息"时**引导她改用正文**，别让她以为这轮不能说话。
+       *
+       * 这句文案原本是「不该发生，记一下」——对模型毫无帮助：它看到"失败"，
+       * 按提示里的 `<<skip>>` 就放弃了，一轮模型调用白花。线上真实发生过
+       * （主动搭话那一轮调了 `qq_send`）。
+       *
+       * 正常情况下宿主已经在这一轮把 `qq_send` 收走了（`restrictQqTools`），
+       * 走到这里说明收工具失败了（版本差异）——那至少别让她白白放弃。
+       */
+      if (!c.hasPayload) {
+        return {
+          ok: false,
+          message: '这一轮是主动开口，没有"正在回的那条消息"。'
+            + '直接把要说的话写成正文就行，不要用这个工具。',
+        };
+      }
 
       const st = stateOf?.() || { parts: 0 };
       if (st.parts >= maxParts()) {

@@ -477,7 +477,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       out.triples += triples.length;
     }
 
-    /* 4. 约定 → 长期事实（跨群，并且图里留一条活边，办完关掉） */
+    /* 4. 约定 → 长期事实（**按会话**，并且图里留一条活边，办完关掉） */
     const agreements = Array.isArray(plan?.agreements) ? plan.agreements : [];
     for (const a of agreements) {
       const text = String(a ?? '').trim();
@@ -486,8 +486,23 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         out.agreements += 1;
         continue;
       }
-      memory.add(chatId, `约定：${text.slice(0, 160)}`, 'global');
-      graph?.addEdge?.({ src: '主人', rel: '约定', dst: text.slice(0, 40), at, chatId: '' });
+      /**
+       * 约定**不能跨群**，这条以前是错的。
+       *
+       * 原来写死 `scope='global'` + `chatId: ''`，于是群里的约定
+       * （「替某人喊话给某个群」「群主要求用 Markdown 回复」）会出现在
+       * **每一个**会话里——包括私聊主动搭话的提示词。实际后果是模型
+       * 在私聊里对着「替 X 喊话 Y」这种只有群里才有意义的事做决策，
+       * 自己都觉得别扭，最后往往选择不说。
+       *
+       * 全局可见是有意为之的只有**身份事实**（他是谁、住在哪）；
+       * 「答应过要办的事」天然属于说这句话的那个会话。
+       *
+       * `chatId` 为空时（老日记没有归属）退回全局：宁可放错位置，
+       * 也不要因为拿不到 id 就把一条约定静默丢掉。
+       */
+      memory.add(chatId, `约定：${text.slice(0, 160)}`, chatId ? 'chat' : 'global');
+      graph?.addEdge?.({ src: '主人', rel: '约定', dst: text.slice(0, 40), at, chatId });
       out.agreements += 1;
     }
 
@@ -502,7 +517,14 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         out.closed += 1;
         continue;
       }
-      out.closed += graph?.closeEdge?.({ src: s, rel, dst: o, at, chatId: '' }) || 0;
+      /**
+       * `chatId` 必须跟**建边时**一致，否则关不掉。
+       *
+       * 实体是**按会话**存的（`entity WHERE key=? AND chat_id=?`），
+       * `closeEdge` 靠 `src_id` 定位：用 `''` 去找「主人」会拿到另一个
+       * 实体行，`src_id` 对不上 → 一条都关不掉，约定永远留在"没办完"里。
+       */
+      out.closed += graph?.closeEdge?.({ src: s, rel, dst: o, at, chatId }) || 0;
     }
 
     return out;

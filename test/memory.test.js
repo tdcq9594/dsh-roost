@@ -567,7 +567,21 @@ test('巩固：模型的建议落到库里（摘要/压缩/三元组/约定）',
   assert.equal(j.get('a2').digest, '李四应了一声');
   assert.equal(j.get('day:' + day + ':g1').text, '张三说住在杭州。');
   assert.equal(g.nowEdges({}).filter((e) => e.rel === '住在').length, 1);
-  assert.ok(mem.global.some((f) => f.includes('周末一起看电影')));
+  /**
+   * 约定归**这个会话**，不进全局。
+   *
+   * 以前写死 `scope='global'`，于是群里的约定会出现在每一个会话里——
+   * 包括私聊主动搭话的提示词。线上表现是她在私聊里对着「替某人喊话给
+   * 某个群」这种只有群里才有意义的事做决策，最后往往选择不说。
+   */
+  assert.ok(
+    (mem.chats.g1 || []).some((f) => f.includes('周末一起看电影')),
+    '约定要落在本会话',
+  );
+  assert.ok(
+    !mem.global.some((f) => f.includes('周末一起看电影')),
+    '约定不该进全局——进了就会串到别的群和私聊',
+  );
 });
 
 test('巩固：模型给的等级不许把 critical 降下去', async () => {
@@ -1236,3 +1250,78 @@ test('出处：手动记的会被标成 manual', () => {
 });
 
 
+
+/**
+ * 群里的约定不能漏进私聊。
+ *
+ * 以前 `apply()` 写死 `scope='global'` + `chatId: ''`，于是「替某人喊话给
+ * 某个群」「群主要求用 Markdown 回复」这类只有群里才有意义的事，会出现在
+ * **每一个**会话的提示词里——包括私聊主动搭话。线上表现是她在私聊里对着
+ * 这些事做决策，自己都觉得别扭（"喊话对象是群，但对方是主人，我在这里说也没用"），
+ * 最后往往选择不说。
+ */
+test('巩固：群里说的约定不会漏进私聊', async () => {
+  const now = Date.now();
+  const day = Y(now);
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const mem = fakeMemory();
+
+  j.add({ id: 'b1', at: base, chatId: 'group1', sender: '张三', text: '帮我跟主人说一声' });
+  const gen = async () => JSON.stringify({ summary: '张三让带话。', agreements: ['替张三给主人带句话'], closed: [] });
+  const c = createConsolidate({ journal: j, graph: g, memory: mem, generate: gen, now: () => now });
+  await c.run({ day });
+
+  assert.equal(
+    g.nowEdges({ chatId: 'group1' }).filter((e) => e.rel === '约定').length, 1,
+    '这个群自己要看得见',
+  );
+  assert.equal(
+    g.nowEdges({ chatId: 'private1' }).filter((e) => e.rel === '约定').length, 0,
+    '别的会话不该看见——看见了就是串场',
+  );
+  assert.ok((mem.chats.group1 || []).some((f) => f.includes('替张三给主人带句话')));
+  assert.ok(!mem.global.some((f) => f.includes('替张三给主人带句话')), 'facts 也不能进全局');
+});
+
+/**
+ * 办完的约定要真的关得掉。
+ *
+ * 这里有个容易踩的坑：实体是**按会话**存的（`entity WHERE key=? AND chat_id=?`），
+ * `closeEdge` 靠 `src_id` 定位。建边用 `chatId`、关边用 `''`，就会拿到另一行
+ * 「主人」实体，`src_id` 对不上 → 一条都关不掉，约定永远留在"没办完"里，
+ * 而且**不报错**，只是数字一直是 0。
+ */
+test('巩固：办完的约定能关掉（建边和关边必须同一个 chatId）', async () => {
+  const now = Date.now();
+  const day = Y(now);
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const mem = fakeMemory();
+
+  j.add({ id: 'd1', at: base, chatId: 'group1', text: '说好周末看电影' });
+  const first = async () => JSON.stringify({ summary: '约了看电影。', agreements: ['周末一起看电影'], closed: [] });
+  await createConsolidate({ journal: j, graph: g, memory: mem, generate: first, now: () => now }).run({ day });
+  assert.equal(g.nowEdges({ chatId: 'group1' }).filter((e) => e.rel === '约定').length, 1);
+
+  // 第二天：同一件事办完了
+  const now2 = now + 86_400_000;
+  const day2 = Y(now2);
+  const base2 = Date.parse(`${day2}T10:00:00`);
+  j.add({ id: 'd2', at: base2, chatId: 'group1', text: '电影看完了' });
+  const second = async () => JSON.stringify({
+    summary: '看完了。',
+    closed: [{ s: '主人', rel: '约定', o: '周末一起看电影' }],
+  });
+  const r = await createConsolidate({
+    journal: j, graph: g, memory: mem, generate: second, now: () => now2,
+  }).run({ day: day2 });
+
+  assert.equal(r.closed, 1, '要真的关掉一条');
+  assert.equal(
+    g.nowEdges({ chatId: 'group1' }).filter((e) => e.rel === '约定').length, 0,
+    '关掉之后不该还在「没办完」里',
+  );
+});

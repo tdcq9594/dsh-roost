@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { planGuestTools, GUEST_KEEP_TOOLS } from '../src/permissions.js';
+import { planGuestTools, planDenyTools, GUEST_KEEP_TOOLS, AWAKE_DENY_TOOLS } from '../src/permissions.js';
 
 /** 这版 DSH 真实报出来的全局工具（2026-10-28 面板日志里抄的） */
 const REAL_TOOLS = [
@@ -106,4 +106,43 @@ test('兼容 { tool: { name } } 这种包装', () => {
 test('可以自己传白名单（给以后别的档位用）', () => {
   const plan = planGuestTools(fakeTools(['edit', 'read', 'pwd']), ['read']);
   assert.deepEqual(plan.deny, ['edit', 'pwd']);
+});
+
+/* ---------------- 主动搭话：收走「回复当前消息」那两个 ---------------- */
+
+/**
+ * 主动搭话那一轮没有"正在回的那条消息"，`qq_send` 挂着只会诱导模型调它，
+ * 调了必然失败，然后按提示 `<<skip>>`——一轮模型调用白花（线上撞到过）。
+ */
+test('主动搭话：只收 qq_send / qq_close，记忆工具留着', () => {
+  const all = [...REAL_TOOLS, 'qq_send', 'qq_close', 'memory_search', 'memory_note'];
+  const plan = planDenyTools(fakeTools(all));
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.deny.sort(), ['qq_close', 'qq_send']);
+  assert.ok(!plan.deny.includes('memory_search'), '她翻日记在主动开口时同样有用');
+  assert.ok(!plan.deny.includes('memory_note'), '记事也一样');
+});
+
+test('主动搭话：这一轮没挂 qq 工具就明说没得收，不硬来', () => {
+  const plan = planDenyTools(fakeTools(['memory_search', 'read']));
+  assert.equal(plan.ok, false);
+  assert.match(plan.reason, /本来就没挂/);
+});
+
+test('主动搭话：读不到清单要明说，不能装作收住了', () => {
+  assert.equal(planDenyTools({}).ok, false);
+  assert.match(planDenyTools({}).reason, /schemas/);
+  assert.match(planDenyTools({ schemas() { throw new Error('没就绪'); } }).reason, /读不到/);
+  assert.match(planDenyTools({ schemas: () => [] }).reason, /报不出/);
+});
+
+test('主动搭话：名字取自 schemas()，两种形状都认', () => {
+  const plan = planDenyTools({ schemas: () => [{ tool: { name: 'qq_send' } }, { name: 'qq_close' }, {}] });
+  assert.deepEqual(plan.deny.sort(), ['qq_close', 'qq_send']);
+});
+
+test('主动搭话：名单是可传的，默认就是那两个', () => {
+  assert.deepEqual(AWAKE_DENY_TOOLS, ['qq_send', 'qq_close']);
+  const plan = planDenyTools(fakeTools(['qq_send', 'qq_close']), ['qq_close']);
+  assert.deepEqual(plan.deny, ['qq_close']);
 });
