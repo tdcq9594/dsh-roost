@@ -19,6 +19,7 @@
  */
 
 import { dayOf } from './journal.js';
+import { RE_CORRECTION, MIN_BOT_LINES } from './self.js';
 
 /** 单次巩固最多改多少条等级。防模型一口气把整天的日记全升成 critical */
 const MAX_RANK_CHANGES = 30;
@@ -131,13 +132,50 @@ export function buildPrompt({ day, chatName, items }) {
 }
 
 /**
+ * 拼自述的提示词（第五层）。
+ *
+ * 和巩固其他几件事分开拼、单独调一次：素材不同——这里要的是**她自己说过的话**
+ * 和**被纠正的时刻**，而巩固给的是混在一起的一整天。混在同一个 prompt 里，
+ * 模型会把它写成第二份日记摘要。
+ *
+ * @param {object} o
+ * @param {string} o.day
+ * @param {Array<{text:string, at:number}>} o.said  当天她自己说过的话
+ * @param {Array<{text:string, at:number}>} o.corrected 被纠正时对方说的话
+ */
+export function buildSelfPrompt({ day, said = [], corrected = [] } = {}) {
+  const lines = [
+    `下面是 ${day} 你自己说过的话（只有你说的），以及今天被对方纠正的时刻。`,
+    '',
+    '请用两三句话写下**关于你自己**的：',
+    '· 今天你觉得自己哪里做得不够好',
+    '· 你打算怎么改',
+    '· 或者你对自己的新发现',
+    '',
+    '要求：',
+    '· 只写你自己。不要写对方的事、不要复述聊了什么——那是日记的活。',
+    '· 不要写「作为 AI」「作为一个语言模型」。',
+    '· 不超过 100 字，口语，像随手记的一笔。',
+    '· 今天确实没什么可写的，就只输出 `<<skip>>`，什么都别加。',
+    '',
+    '—— 你说过的话 ——',
+    ...said.map((x) => `· ${x.text}`),
+  ];
+  if (corrected.length) {
+    lines.push('', '—— 被纠正的时刻 ——', ...corrected.map((x) => `· ${x.text}`));
+  }
+  return lines.join('\n');
+}
+
+/**
  * @param {object} o
  * @param {object} o.journal  createJournal() 的返回
  * @param {object} o.graph    createGraph() 的返回
  * @param {object} o.memory   createMemory() 的返回（约定要沉进 facts）
+ * @param {object} [o.self]   createSelf() 的返回（第五层：自我叙述）
  * @param {(p:string)=>Promise<string>} [o.generate] 没给就只做机械压缩
  */
-export function createConsolidate({ journal, graph, memory, generate = null, log = () => {}, now = () => Date.now() } = {}) {
+export function createConsolidate({ journal, graph, memory, self = null, generate = null, log = () => {}, now = () => Date.now() } = {}) {
   /** 上一次的结果，面板和 /consolidate 接口读它 */
   let last = null;
   let running = false;
@@ -173,6 +211,9 @@ export function createConsolidate({ journal, graph, memory, generate = null, log
       agreements: 0,
       closed: 0,
       digests: 0,
+      /** 第五层：这条自述写没写（0/1），没写的理由放 selfSkip */
+      self: 0,
+      selfSkip: '',
       mode: generate ? 'model' : 'mechanical',
       errors: [],
     };
@@ -251,6 +292,25 @@ export function createConsolidate({ journal, graph, memory, generate = null, log
         }
       }
 
+      /**
+       * 第五层：自述。
+       *
+       * 放在所有会话处理完之后，用**跨群的汇总**写一条——
+       * 自述是关于「她这个人」的，一个群一份会分裂成好几个她。
+       * 素材和巩固其他几件事不同（只有她自己说的话 + 被纠正的时刻），
+       * 所以单独拼 prompt、单独调一次，不和 summary/ranks 混在一起。
+       */
+      if (self && generate && !dry) {
+        try {
+          const r = await writeSelf({ day: target, rows });
+          if (r.written) stats.self = 1;
+          else stats.selfSkip = r.why || '';
+        } catch (e) {
+          stats.errors.push(`写自述失败：${e.message}`);
+          log(`写自述失败：${e.message}`);
+        }
+      }
+
       /** 顺手补向量的位置：这里只报数，实际补算由宿主在填充向量后调 setVec */
       stats.needVec = journal.noVec(20).length;
     } catch (e) {
@@ -263,6 +323,59 @@ export function createConsolidate({ journal, graph, memory, generate = null, log
 
     last = stats;
     return stats;
+  }
+
+  /**
+   * 写一条自述。
+   *
+   * 触发条件是 **C 方案：按量 or 被纠正**：
+   *   · 按量：当天她自己说了 `MIN_BOT_LINES` 条以上 —— 冷清的一天硬写一条
+   *     「今天没说什么」，只是往库里灌水
+   *   · 被纠正：**哪怕只说了三句**也要写。被纠正那一刻是最值钱的素材，
+   *     纯按量的话「说错一句就被怼」的日子永远轮不到她复盘——
+   *     而这恰恰是她最该记住的那天
+   *
+   * 最后一道门是模型自己的：`<<skip>>` 是**正常结局**，不是失败。
+   *
+   * 素材只取 `role='bot'` 的行和被纠正的时刻：自述不是复盘，
+   * 把对方说的话也塞进去，写出来必然是第二份日记摘要。
+   */
+  async function writeSelf({ day, rows }) {
+    const said = rows
+      .filter((r) => r.role === 'bot' && r.kind === 'chat')
+      .map((r) => ({ text: String(r.text || '').slice(0, 60), at: r.at }));
+    const corrected = rows
+      .filter((r) => r.role !== 'bot' && RE_CORRECTION.test(String(r.text || '')))
+      .map((r) => ({ text: String(r.text || '').slice(0, 80), at: r.at }));
+
+    // 一句没说就没有「关于她自己」的素材，被纠正也无从谈起
+    if (!said.length) return { written: false, why: '她这天没说话' };
+    if (said.length < MIN_BOT_LINES && !corrected.length) {
+      return { written: false, why: `只说了 ${said.length} 条、也没被纠正，不值得写` };
+    }
+
+    /**
+     * 截断是刻意的：她说的话取最近 20 条、被纠正最多 6 条。
+     * 给多了模型会写成「今天聊了 A、B、C」的流水账——那是 digest 的活。
+     */
+    const raw = await generate(
+      buildSelfPrompt({ day, said: said.slice(-20), corrected: corrected.slice(-6) }),
+    );
+    const text = String(raw ?? '').trim();
+    if (!text || /<<\s*skip\s*>>/i.test(text)) {
+      return { written: false, why: '她自己觉得没什么可写的' };
+    }
+
+    // 标记和包裹的引号摘干净：自述是要注入提示词的，带 `<<x>>` 会漏给模型
+    const clean = text
+      .replace(/<<[^>]*>>/g, '')
+      .replace(/^["「『]|["」』]$/g, '')
+      .trim();
+    if (!clean) return { written: false, why: '去掉标记后没内容' };
+
+    self.add({ text: clean.slice(0, 200), day, at: rows[rows.length - 1].at });
+    log(`写了自述（${day}）：${clean.slice(0, 40)}`);
+    return { written: true };
   }
 
   /**

@@ -25,6 +25,7 @@ import { createSetup } from './setup.js';
 import { createMemory } from './memory.js';
 import { createJournal } from './journal.js';
 import { createGraph } from './graph.js';
+import { createSelf } from './self.js';
 import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
 import { createMood, parseMoodMark } from './mood.js';
@@ -338,6 +339,15 @@ export function apply(ctx) {
   });
 
   /**
+   * 第五层：自我叙述。
+   *
+   * 写由巩固按天做（她自己说得够多才写），读只在**会话边界**——
+   * 新会话第一轮、压缩后的开场、深度重注。每轮都灌会让她
+   * 为了跟自述一致而表演，而不是自然地活着。
+   */
+  const self = createSelf({ log: (m) => log.warn(m) });
+
+  /**
    * 每轮记忆注入用的临时状态：deep（这次要不要全量）+ hits（这一句检索到什么）。
    *
    * 为什么放这儿而不是现算：`systemPrompt.context` 的 text() 是**同步**的，
@@ -410,6 +420,7 @@ export function apply(ctx) {
     journal,
     graph,
     memory,
+    self,
     log: (m) => log.info(m),
     generate: async (prompt) => {
       const chat = {
@@ -433,8 +444,9 @@ export function apply(ctx) {
    * 巩固是无人值守的后台活，塞进去会在用户的任务列表里凭空多出一条
    * 他从来没建过的提醒。所以这里用进程内定时器 + 自查"该跑没跑"。
    *
-   * 十分钟一次、只在过了巩固点钟且昨天的摘要还不存在时才动，
-   * 所以平时它只是个空转的判断（一次查库，几十微秒）。
+   * 十分钟一次。巩固本身只在过了巩固点钟且昨天的摘要还不存在时才动；
+   * 这里还兼管「彻底删过日记」之后的压库。两件事平时都只是空转的判断
+   * （一次布尔判断，不查库），所以这个循环本身很便宜。
    */
   const consolidateTick = async () => {
     if (cfg.memory?.enabled === false) return;
@@ -458,7 +470,8 @@ export function apply(ctx) {
       if (r.ok) {
         log.info(
           `巩固 ${day} 完成：${r.chats} 个会话、评级 ${r.ranked}、压缩 ${r.compressed}、` +
-            `三元组 ${r.triples}、约定 ${r.agreements}、摘要 ${r.digests}（${r.mode}）`,
+            `三元组 ${r.triples}、约定 ${r.agreements}、摘要 ${r.digests}（${r.mode}）` +
+            (r.self ? '、写了自述' : r.selfSkip ? `、自述没写（${r.selfSkip}）` : ''),
         );
       } else {
         log.warn(`巩固 ${day} 没跑成：${r.reason}`);
@@ -753,8 +766,20 @@ export function apply(ctx) {
     let digestSec = '';
     let topSec = '';
     let graphSec = '';
+    let selfSec = '';
     if (deep) {
       try {
+        /**
+         * 第五层：深度重注时带**一条**自述。
+         *
+         * 只给一条、只在 deep 时给：会话边界已经读过 3 条，
+         * 这里的作用是「聊久了偶尔想起自己是谁」，不是每轮提醒。
+         */
+        try {
+          selfSec = self.text(1);
+        } catch (e) {
+          log.debug(`取自述失败：${e.message}`);
+        }
         const ds = journal.digests(chatId, 5);
         if (ds.length) {
           digestSec = `【这几天】\n${ds
@@ -773,8 +798,13 @@ export function apply(ctx) {
       }
     }
 
+    /**
+     * 自述排在 facts 之后、摘要之前：
+     * 「我是谁」比「这几天聊了什么」更根本，但预算不够时先砍它——
+     * facts 是硬事实，自述是软状态。
+     */
     const sections = deep
-      ? [rules, factsGlobal, factsChat, digestSec, topSec, graphSec]
+      ? [rules, factsGlobal, factsChat, selfSec, digestSec, topSec, graphSec]
       : [rules, factsGlobal, factsChat];
 
     const body = fitBudget(sections, deep ? MEMORY_DEEP_MAX : MEMORY_MAX);
@@ -908,11 +938,14 @@ export function apply(ctx) {
     out = out.replace(/<<forget:\s*([\s\S]*?)>>/gi, (_, v) => {
       const word = String(v || '').trim();
       /**
-       * 两边都要忘。
+       * **三边都要忘。**
        *
        * 只删 facts 不删日记，会出现"她嘴上说不记得了，一检索又想起来"——
        * 用户说"别记这个"要的是真的不存在，所以日记里那几条正文也抹掉
        * （`journal.forget` 是抹正文不删行，时间线还连着）。
+       *
+       * 第五层的自述也要扫：她可能写过「今天聊到 X，我记错了」，
+       * 用户要求忘掉 X 之后那句自述还留着，等于换个说法继续记着。
        */
       const n = memory.remove(chatId, word);
       let j = 0;
@@ -921,7 +954,13 @@ export function apply(ctx) {
       } catch (e) {
         log.warn(`日记遗忘失败：${e.message}`);
       }
-      if (n || j) touched = `忘掉了 ${n + j} 条`;
+      let s = 0;
+      try {
+        s = self.forget(word);
+      } catch (e) {
+        log.warn(`自述遗忘失败：${e.message}`);
+      }
+      if (n || j || s) touched = `忘掉了 ${n + j + s} 条`;
       return '';
     });
 
@@ -1622,11 +1661,36 @@ export function apply(ctx) {
        * 而且她会先回一句"好的我了解了"——最像机器人的那种开场。
        * 拼进来等于"用户说完，顺带把上文递过去"，历史里也只占一条。
        */
+      /**
+       * 第五层：自我叙述。
+       *
+       * **只在会话边界读一次**，两个边界都要覆盖：
+       *   · 进程启动后的第一轮（`rounds` 里还没有这个会话）
+       *   · 压缩开了新会话的第一轮（`pendingOpening` 有值）
+       *
+       * 为什么不每轮给：每轮灌等于每轮提醒她「你应该是这样」，
+       * 模型会照着演，而不是自然地活着。自述的价值在「偶尔想起自己是谁」。
+       *
+       * 放在开场白**之前**：先想起自己是谁，再看这段聊到哪了。
+       */
+      const prevRound = rounds.get(chat.chatId);
+      const firstRound = !prevRound || !prevRound.n;
       const opening = pendingOpening.get(chat.chatId);
       if (opening) {
         pendingOpening.delete(chat.chatId);
         text = `${opening}\n\n${text}`;
         log.info(`压缩后的第一条消息带上了开场白（${opening.length} 字）`);
+      }
+      if (firstRound || opening) {
+        try {
+          const st = self.text(3);
+          if (st) {
+            text = `${st}\n\n${text}`;
+            log.info(`会话边界带上自述（${st.length} 字）`);
+          }
+        } catch (e) {
+          log.warn(`读自述失败（不影响这轮）：${e.message}`);
+        }
       }
 
       /**
@@ -2234,7 +2298,7 @@ export function apply(ctx) {
               return send(res, 200, {
                 ok: true,
                 journal: j,
-                message: `彻底删了 ${j} 条日记，磁盘上的残留会在凌晨压库时清掉`,
+                message: `彻底删了 ${j} 条日记，磁盘上的残留十分钟内自动压掉`,
               });
             }
 
