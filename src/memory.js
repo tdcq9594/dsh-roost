@@ -60,6 +60,49 @@ export function scoreOfFact(meta, now = Date.now()) {
   return w * 0.5 ** (days / HALF_LIFE_DAYS);
 }
 
+/**
+ * 事实的出处，**统一在这里收口**。
+ *
+ * 为什么要一个收口函数：`src` 是从消息 payload 来的（`payload.id` / `payload.eventIds`），
+ * 一路写进 `memory.json` 长期存着。不收口的话，一个畸形 payload 就能把
+ * 几千个 event id 灌进每条事实里，文件悄悄涨到几十 MB，而没有任何一处会报错。
+ *
+ * 形状（都可有可无，全空就当没有出处）：
+ *   journalId  这一轮对应的日记行 id（= 消息 id），拿它调 `/r/context?aroundId=` 能翻回原文
+ *   eventIds   事件账本里的那几条（合并批是多条）
+ *   at         记下这条的时间
+ *   manual     面板上手动记的（人手写的，没有消息来源）
+ *   by         谁记的（现在只有 'owner'）
+ *
+ * @returns {object|null} 清理过的出处；没有任何有效字段时返回 null（不存 `{}`）
+ */
+export function normalizeSrc(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+
+  const s = (v, max) => {
+    const t = String(v ?? '').trim().slice(0, max);
+    return t || '';
+  };
+
+  const journalId = s(raw.journalId, 120);
+  if (journalId) out.journalId = journalId;
+
+  if (Array.isArray(raw.eventIds)) {
+    const ids = [...new Set(raw.eventIds.map((x) => s(x, 120)).filter(Boolean))].slice(0, 50);
+    if (ids.length) out.eventIds = ids;
+  }
+
+  const at = Number(raw.at);
+  if (Number.isFinite(at) && at > 0) out.at = at;
+
+  if (raw.manual === true) out.manual = true;
+  const by = s(raw.by, 20);
+  if (by) out.by = by;
+
+  return Object.keys(out).length ? out : null;
+}
+
 export function createMemory({ now = () => Date.now() } = {}) {
   const file = () => join(dataDir(), 'memory.json');
   let cache = null;
@@ -131,6 +174,8 @@ export function createMemory({ now = () => Date.now() } = {}) {
     if (!f) return list;
     const t = Number(opts.at) > 0 ? Number(opts.at) : now();
     const old = metaMap[f];
+    // 收口在这里：所有写入路径（模型标记、面板手记、以后新增的）都过一遍
+    const src = normalizeSrc(opts.src);
 
     if (list.includes(f)) {
       /**
@@ -143,13 +188,13 @@ export function createMemory({ now = () => Date.now() } = {}) {
         ...old,
         w: Math.min(W_MAX, (Number(old?.w) > 0 ? Number(old.w) : 1) + W_BUMP),
         at: t,
-        src: opts.src || old?.src || null,
+        src: src || old?.src || null,
       };
       return list;
     }
 
     list.push(f);
-    metaMap[f] = { w: Number(opts.w) > 0 ? Number(opts.w) : 1, at: t, src: opts.src || null };
+    metaMap[f] = { w: Number(opts.w) > 0 ? Number(opts.w) : 1, at: t, src };
     if (list.length <= FACTS_MAX) return list;
 
     /**

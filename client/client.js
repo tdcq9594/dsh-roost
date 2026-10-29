@@ -1693,6 +1693,31 @@ select.roost-input{color-scheme:dark}
       const sceneName = nameOf(scene) || (canChat ? String(mem.chatId).slice(0, 10) : '')
       const sceneKind = scene?.kind === 'c2c' ? '私聊' : scene?.kind === 'group' ? '群' : scene?.kind || '会话'
 
+      /**
+       * 一条事实的「多重、从哪来」。
+       *
+       * 权重系统做完了但看不见等于没做：用户看到一条事实被挤掉，
+       * 会以为是 bug，而不是「它 40 天没被提到、权重掉到最低」。
+       * 出处同理——「她为什么记着这个」是这类系统最常被问的问题，
+       * 而答案就在 `factsDetail` 里（面板手记的还标着「你手动记的」）。
+       *
+       * 老库没有 `src` 是常态（这个字段是后加的），所以缺省文案是
+       * 「来源不明」而不是留空——留空会让人以为渲染坏了。
+       */
+      const factMeta = (scope, text) => {
+        const list = mem?.factsDetail?.[scope]
+        if (!Array.isArray(list)) return ''
+        const d = list.find((x) => x.text === text)
+        if (!d) return ''
+        const parts = []
+        if (Number(d.w) > 1) parts.push(`×${Number(d.w)}`)
+        const s = d.src
+        if (s?.manual) parts.push('你手动记的')
+        else if (s?.at) parts.push(`来自 ${ago(s.at)}的对话`)
+        else parts.push('来源不明')
+        return parts.join(' · ')
+      }
+
       const doSearch = async () => {
         const term = q.trim()
         if (!term) return
@@ -1742,8 +1767,8 @@ select.roost-input{color-scheme:dark}
         /* ── 第一层：事实 ── */
         h(Sec, { n: '01', title: '事实', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-            '跨群的事实她带去任何会话；本会话特有的只在这个会话提。串场就是从这条线漏出去的，所以要分开看。'),
-
+            '跨群的事实她带去任何会话；本会话特有的只在这个会话提。串场就是从这条线漏出去的，所以要分开看。'
+            + '后面那个 ×N 是权重：越常被提到越高，40 天没提会掉到 1；满 40 条时按「权重 × 时间」淘汰。'),
           h('div', { style: { marginBottom: 10 } },
             h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 4 } }, '通用（跨群）'),
             (mem?.global || []).length
@@ -1751,6 +1776,8 @@ select.roost-input{color-scheme:dark}
                   mem.global.map((f, i) =>
                     h('div', { key: i, className: 'roost-item' },
                       h('span', { className: 't' }, f),
+                      h('span', { className: 'roost-muted', style: { fontSize: 11, flexShrink: 0 } },
+                        factMeta('global', f)),
                       h(ConfirmLink, {
                         label: '删', confirmLabel: '确认删除',
                         onConfirm: async () => {
@@ -1780,6 +1807,8 @@ select.roost-input{color-scheme:dark}
                   mem.chat.map((f, i) =>
                     h('div', { key: i, className: 'roost-item' },
                       h('span', { className: 't' }, f),
+                      h('span', { className: 'roost-muted', style: { fontSize: 11, flexShrink: 0 } },
+                        factMeta('chat', f)),
                       h(ConfirmLink, {
                         label: '删', confirmLabel: '确认删除',
                         onConfirm: async () => {

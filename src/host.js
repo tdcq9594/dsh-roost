@@ -856,12 +856,30 @@ export function apply(ctx) {
   }
 
   /**
+   * 这条事实是从哪来的。
+   *
+   * 用途只有一个：事后能回答「她为什么记着这个」。面板上一条事实旁边
+   * 写着「来自 3 天前的对话」——只存句子不存出处，这句记忆就是断线的，
+   * 日后想核实「她是不是记错了」都无从查起。
+   *
+   * `journalId` 取消息 id——日记行的 id 就是它（见 `journalAdd`），
+   * 所以拿着它调 `/r/context?aroundId=` 能定位回那一轮。面板目前只显示
+   * 时间，没做跳转；先把这个字段落下来，等真要看原文时不必再补数据。
+   */
+  function srcOf(payload) {
+    const journalId = String(payload?.id ?? '').trim();
+    const eventIds = Array.isArray(payload?.eventIds) ? payload.eventIds : [];
+    if (!journalId && !eventIds.length) return null;
+    return { journalId, eventIds, at: Date.now() };
+  }
+
+  /**
    * 把回复里的记忆标记摘出来执行，返回干净文本。
    *
    * 标记是模型写在回复里的，所以只能等回复到手再处理。
    * 摘干净再发出去——群里不该看到 `<<remember: ...>>`。
    */
-  function applyMemoryMarkers(text, chatId, said = '', kind = 'group') {
+  function applyMemoryMarkers(text, chatId, said = '', kind = 'group', src = null) {
     let out = String(text ?? '');
     let touched = '';
 
@@ -874,7 +892,7 @@ export function apply(ctx) {
          * 淘汰是按「权重 × 时间衰减」算的，全给 1 就等于退回 FIFO：
          * 「记住我花生过敏」会因为今天记了 40 条杂事被挤掉。
          */
-        memory.add(chatId, f, 'chat', { w: W_EXPLICIT });
+        memory.add(chatId, f, 'chat', { w: W_EXPLICIT, src });
         touched = '记住了（只这个群）';
       }
       return '';
@@ -883,7 +901,7 @@ export function apply(ctx) {
     out = out.replace(/<<remember:\s*([\s\S]*?)>>/gi, (_, v) => {
       const f = String(v || '').trim();
       if (f) {
-        memory.add(chatId, f, 'global', { w: W_EXPLICIT });
+        memory.add(chatId, f, 'global', { w: W_EXPLICIT, src });
         touched = '记住了';
       }
       return '';
@@ -1231,7 +1249,7 @@ export function apply(ctx) {
            * 复用同一个函数而不是另写一份清理：标记的语义不该因为
            * 它出现在正文还是工具参数里而不同。
            */
-          const { text, touched } = applyMemoryMarkers(raw, c.chatId, c.said, c.kind);
+          const { text, touched } = applyMemoryMarkers(raw, c.chatId, c.said, c.kind, srcOf(c.payload));
           if (touched) log.info(`工具发言里的标记已执行：${touched}`);
           if (!text) {
             /**
@@ -1821,6 +1839,7 @@ export function apply(ctx) {
         chat.chatId,
         String(payload?.text ?? ''),
         chat.kind,
+        srcOf(payload),
       );
       if (touched) log.info(`记忆：${touched}`);
 
@@ -2418,6 +2437,20 @@ export function apply(ctx) {
         const chatId = asked || lastScene?.chatId || '';
         const facts = memory.list(chatId);
 
+        /**
+         * 带权重和出处的版本，给面板的「事实」那一节用。
+         *
+         * 权重系统做完了但看不见，等于没有：用户看到一条事实被挤掉，
+         * 会以为是 bug，而不是「它 40 天没被提到、权重掉到最低」。
+         * 出处同理——「她为什么记着这个」是这类系统最常被问的问题。
+         */
+        let factsDetail = null;
+        try {
+          factsDetail = memory.listFull(chatId);
+        } catch (e) {
+          factsDetail = { error: e.message };
+        }
+
         /** 会话清单：chatId + 能看懂的标题（群名 / 私聊昵称） */
         const chats = sessions
           .list()
@@ -2521,6 +2554,8 @@ export function apply(ctx) {
           ...facts,
           // 显式再给一份带名字的，前端读 facts.global 比读 global 清楚
           facts: { global: facts.global, chat: facts.chat },
+          /** 带权重/出处的那一份（面板显示「这条多重、从哪来」） */
+          factsDetail,
           journal: jr,
           graph: gp,
           /** 第五层：她自己写下的（跨群汇总，不属于任何单个会话） */
@@ -2627,7 +2662,9 @@ export function apply(ctx) {
           String(body.chatId ?? lastScene?.chatId ?? ''),
           fact,
           body.scope === 'chat' ? 'chat' : 'global',
-          { w: W_EXPLICIT },
+          // 手记没有消息来源，但要能和「她自己在聊天里记的」区分开——
+          // 以后想清理「模型自作主张记的」时，这就是唯一的分界线
+          { w: W_EXPLICIT, src: { manual: true, by: 'owner', at: Date.now() } },
         );
         send(res, 200, { ok: true });
       }),

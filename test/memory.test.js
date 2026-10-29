@@ -19,7 +19,7 @@ import {
 } from '../src/tokenize.js';
 import { createJournal, classify, dayOf, scoreOf, cosine, DEFAULT_KEEP_DAYS } from '../src/journal.js';
 import { createGraph } from '../src/graph.js';
-import { createMemory, scoreOfFact, W_EXPLICIT } from '../src/memory.js';
+import { createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc } from '../src/memory.js';
 import {
   createConsolidate,
   parseJsonLoose,
@@ -1153,6 +1153,86 @@ test('facts：老文件没有 meta 也能读，默认 w=1、无出处', () => {
   assert.equal(full.global[0].w, 1);
   assert.equal(full.global[0].src, null);
   assert.equal(full.chat[0].text, '老本群');
+});
+
+/* ---------------- 出处收口（normalizeSrc） ---------------- */
+
+test('出处：垃圾输入返回 null，不往文件里塞空壳', () => {
+  // 这条盯的是「别存一个什么都为空的 {}」：那会让面板显示
+  // 「来源不明」，而其实连来源都没传过 —— 两者含义不同，不能混。
+  assert.equal(normalizeSrc(null), null);
+  assert.equal(normalizeSrc(undefined), null);
+  assert.equal(normalizeSrc('j1'), null, '字符串不是出处');
+  assert.equal(normalizeSrc({}), null);
+  assert.equal(normalizeSrc({ journalId: '   ', eventIds: [] }), null, '全空白等于没传');
+  assert.equal(normalizeSrc({ eventIds: ['', '  '] }), null);
+});
+
+test('出处：只留白名单字段，多余的原样丢掉', () => {
+  const s = normalizeSrc({
+    journalId: 'j1',
+    eventIds: ['ev-1'],
+    at: 123,
+    by: 'owner',
+    manual: true,
+    // 下面这些是模型/上游可能顺手塞进来的，不该跟着落盘
+    token: 'secret',
+    raw: { huge: 'x'.repeat(1000) },
+  });
+  assert.deepEqual(s, { journalId: 'j1', eventIds: ['ev-1'], at: 123, by: 'owner', manual: true });
+  assert.equal('token' in s, false);
+  assert.equal('raw' in s, false);
+});
+
+test('出处：超长和超量都夹住，不让一条出处把文件撑爆', () => {
+  const s = normalizeSrc({
+    journalId: 'j'.repeat(500),
+    eventIds: Array.from({ length: 80 }, (_, i) => `ev-${i}`),
+    at: 1,
+    by: 'b'.repeat(100),
+  });
+  assert.equal(s.journalId.length, 120);
+  assert.equal(s.eventIds.length, 50, 'eventIds 最多 50 个');
+  assert.equal(s.by.length, 20);
+});
+
+test('出处：eventIds 去重，重复的 id 只算一个', () => {
+  const s = normalizeSrc({ eventIds: ['ev-1', 'ev-1', 'ev-2'] });
+  assert.deepEqual(s.eventIds, ['ev-1', 'ev-2']);
+});
+
+test('出处：manual 只认严格的 true，字符串 "true" 不算', () => {
+  // 面板靠这个字段显示「你手动记的」。如果宽松匹配，
+  // 上游传个 "true" 字符串就会把模型自己记的事实标成人手动记的。
+  assert.equal(normalizeSrc({ manual: 'true' }), null);
+  assert.equal(normalizeSrc({ manual: 1 }), null);
+  assert.equal(normalizeSrc({ manual: true }).manual, true);
+});
+
+test('出处：时间戳非数字就丢掉，不存 NaN', () => {
+  // NaN 落盘会变成 null，读回来是 0，面板会显示「1970 年前」——
+  // 宁可不显示，也别显示一个假时间
+  assert.equal(normalizeSrc({ at: 'abc', journalId: 'j1' }).at, undefined);
+  assert.equal(normalizeSrc({ at: 0, journalId: 'j1' }).at, undefined, '0 当没传');
+  assert.equal(normalizeSrc({ at: -5, journalId: 'j1' }).at, undefined);
+  assert.equal(normalizeSrc({ at: 1700000000000 }).at, 1700000000000);
+});
+
+test('出处：add 时传垃圾 src 不会写坏库，且不覆盖已有的好出处', () => {
+  // 真实场景：模型这一轮没带 eventIds（srcOf 返回 null），
+  // 但这条事实上一轮已经记过并带了出处 —— 不该被这次的空值抹掉
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州', 'global', { src: { journalId: 'j1', at: 123 } });
+  m.add('g1', '主人住在杭州', 'global', { src: { token: 'x' } });
+  assert.equal(m.listFull('g1').global[0].src.journalId, 'j1', '老出处要留着');
+});
+
+test('出处：手动记的会被标成 manual', () => {
+  const m = freshFacts();
+  m.add('g1', '主人不喜欢被叫全名', 'global', { src: { manual: true, by: 'owner' } });
+  const x = m.listFull('g1').global[0];
+  assert.equal(x.src.manual, true);
+  assert.equal(x.src.by, 'owner');
 });
 
 
