@@ -1752,6 +1752,75 @@ select.roost-input{color-scheme:dark}
         setHits(r.results || [])
       }
 
+      /**
+       * 删一条关系的确认块，渲染在**被点的那一行正下方**。
+       *
+       * 两个选项对应两种真实诉求，必须分开：
+       *   · 记错了 → 删掉 + 立墓碑，以后巩固也不会再写回来
+       *   · 过时了 → 只标结束时间，历史还看得见
+       * 直接 DELETE 是不行的：日记原文还在，第二天又被抽回来。
+       *
+       * **不能复用 `.roost-item`**：那是横排 flex（`.t` 占 flex:1、
+       * `.d` 固定宽度）。把标题、按钮行、说明三块塞进去会挤在同一行，
+       * 标题被压成一个字一行——线上真长这样。所以这里自己写竖排。
+       */
+      const edgeConfirm = (e) =>
+        h('div', {
+          style: {
+            borderLeft: '2px solid var(--roost-warn, #d08770)',
+            paddingLeft: 10,
+            margin: '2px 0 8px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+          },
+        },
+          h('div', { style: { fontSize: 12.5 } },
+            `删掉「${e.src} —${e.rel}→ ${e.dst}」？`,
+            h('span', { style: { fontSize: 11, opacity: 0.7 } },
+              e.chatId ? '（只在这个会话）' : '（所有会话）')),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            h('button', {
+              type: 'button', className: 'roost-primary', disabled: busy,
+              onClick: async () => {
+                /**
+                 * `chatId` 传**这条边自己的作用域**，不是当前会话。
+                 *
+                 * 关系有两种归属：挂在某个会话上，或者全局（chat_id=''）。
+                 * 用当前会话去删一条全局关系，`suppressEdge` 里那句
+                 * `(?='' OR chat_id=?)` 一条都匹配不上——边还在，
+                 * 面板上看起来像"点了没反应"。
+                 */
+                const r = await quick('graph.suppress', {
+                  src: e.src, rel: e.rel, dst: e.dst,
+                  chatId: e.chatId,
+                  why: '面板手动删除',
+                })
+                toast(r.ok === false ? (r.message || '没删掉') : (r.message || '删了'))
+                setDelEdge(null)
+                reload()
+              },
+            }, '删掉，以后也别再记'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy,
+              onClick: async () => {
+                const r = await quick('graph.close', {
+                  src: e.src, rel: e.rel, dst: e.dst, chatId: e.chatId,
+                })
+                toast(r.ok === false ? (r.message || '没标上') : (r.message || '标成「现在不成立了」'))
+                setDelEdge(null)
+                reload()
+              },
+            }, '只是现在不成立了'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy,
+              onClick: () => setDelEdge(null),
+            }, '算了'),
+          ),
+          h('div', { className: 'roost-note' },
+            '「删掉」会同时记住“别再记这条”——不这样的话，凌晨巩固会从日记里把它重新抽出来。'),
+        )
+
       return h('div', null,
         /**
          * 先回答「本群是哪个群」。
@@ -1981,7 +2050,16 @@ select.roost-input{color-scheme:dark}
                   : null,
                 (gp?.edges || []).length
                   ? h('div', { className: 'roost-list' },
-                      gp.edges.map((e) =>
+                      gp.edges.map((e) => [
+                        /**
+                         * 每条关系返回**两个元素**（行 + 可选的确认块），
+                         * 而不是包一层 div。
+                         *
+                         * 包一层会破坏 `.roost-list > .roost-item` 的相邻关系：
+                         * 每个 item 都成了自己容器里的 `:first-child`，
+                         * `border-top: none` 全部命中，行与行之间的分隔线消失。
+                         * React 会摊平嵌套数组，所以直接返回数组最省事。
+                         */
                         h('div', { key: e.id, className: 'roost-item' },
                           h('span', { className: 't' }, `${e.src} —${e.rel}→ ${e.dst}`),
                           h('span', { className: 'd', style: { display: 'flex', alignItems: 'center', gap: 8 } },
@@ -1990,85 +2068,16 @@ select.roost-input{color-scheme:dark}
                               type: 'button',
                               className: 'roost-btn',
                               title: '删掉这条关系',
-                              onClick: () => setDelEdge(e),
+                              onClick: () => setDelEdge(delEdge?.id === e.id ? null : e),
                             }, '删'),
                           ),
                         ),
-                      ),
+                        delEdge?.id === e.id
+                          ? h('div', { key: `${e.id}-confirm` }, edgeConfirm(e))
+                          : null,
+                      ]),
                     )
                   : h('div', { className: 'roost-empty' }, '还没有关系。聊得多了巩固时会自己抽出来。'),
-
-                /**
-                 * 删除确认。两个选项对应两种真实诉求，必须分开：
-                 *   · 记错了 → 删掉 + 立墓碑，以后巩固也不会再写回来
-                 *   · 过时了 → 只标结束时间，历史还看得见
-                 * 直接 DELETE 是不行的：日记原文还在，第二天又被抽回来。
-                 */
-                delEdge
-                  ? h('div', {
-                      /**
-                       * **不能复用 `.roost-item`**：那是横排 flex
-                       * （`.t` 占 flex:1、`.d` 固定宽度）。把标题、按钮行、
-                       * 说明三块塞进去，它们会挤在同一行里，标题被压成
-                       * 一个字一行——线上真长这样。
-                       * 这里要的是竖排，所以自己写 flex-direction。
-                       */
-                      style: {
-                        borderLeft: '2px solid var(--roost-warn, #d08770)',
-                        paddingLeft: 10,
-                        marginTop: 8,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 8,
-                      },
-                    },
-                      h('div', { style: { fontSize: 12.5 } },
-                        `删掉「${delEdge.src} —${delEdge.rel}→ ${delEdge.dst}」？`,
-                        h('span', { style: { fontSize: 11, opacity: 0.7 } },
-                          delEdge.chatId ? '（只在这个会话）' : '（所有会话）')),
-                      h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 } },
-                        h('button', {
-                          type: 'button', className: 'roost-primary', disabled: busy,
-                          onClick: async () => {
-                            /**
-                             * `chatId` 传**这条边自己的作用域**，不是当前会话。
-                             *
-                             * 关系有两种归属：挂在某个会话上，或者全局（chat_id=''）。
-                             * 用当前会话去删一条全局关系，`suppressEdge` 里那句
-                             * `(?='' OR chat_id=?)` 一条都匹配不上——边还在，
-                             * 面板上看起来像"点了没反应"。
-                             */
-                            const r = await quick('graph.suppress', {
-                              src: delEdge.src, rel: delEdge.rel, dst: delEdge.dst,
-                              chatId: delEdge.chatId,
-                              why: '面板手动删除',
-                            })
-                            toast(r.ok === false ? (r.message || '没删掉') : (r.message || '删了'))
-                            setDelEdge(null)
-                            reload()
-                          },
-                        }, '删掉，以后也别再记'),
-                        h('button', {
-                          type: 'button', className: 'roost-btn', disabled: busy,
-                          onClick: async () => {
-                            const r = await quick('graph.close', {
-                              src: delEdge.src, rel: delEdge.rel, dst: delEdge.dst,
-                              chatId: delEdge.chatId,
-                            })
-                            toast(r.ok === false ? (r.message || '没标上') : (r.message || '标成「现在不成立了」'))
-                            setDelEdge(null)
-                            reload()
-                          },
-                        }, '只是现在不成立了'),
-                        h('button', {
-                          type: 'button', className: 'roost-btn', disabled: busy,
-                          onClick: () => setDelEdge(null),
-                        }, '算了'),
-                      ),
-                      h('div', { className: 'roost-note' },
-                        '「删掉」会同时记住“别再记这条”——不这样的话，凌晨巩固会从日记里把它重新抽出来。'),
-                    )
-                  : null,
 
                 (gp?.suppressed || []).length
                   ? h('details', { style: { marginTop: 10 } },
