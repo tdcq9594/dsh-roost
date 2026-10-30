@@ -1890,6 +1890,30 @@ select.roost-input{color-scheme:dark}
           h('i', null, canChat
             ? '下面「本会话特有」说的就是这个会话。切到别的会话，日记和关系跟着一起换。'
             : '还没有任何群或私聊说过话，所以没有「本会话」可看——先聊一句，或者只看跨群事实。'),
+
+          /**
+           * 这个会话「不记也不读」的开关（纯净模式）。
+           *
+           * 和「清空本会话记忆」分开放：这个只是停读停写，**已有记忆原样保留**，
+           * 关回来就能用；清空是不可逆的。混在一起点错，代价差太远。
+           */
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 } },
+            h('button', {
+              type: 'button',
+              className: 'roost-btn',
+              disabled: !canChat || Boolean(busy),
+              title: '只影响这个会话：不再读也不再写记忆，已有记忆保留',
+              onClick: async () => {
+                const r = await quick(mem?.muted ? 'memory.unmute' : 'memory.mute')
+                toast(r.message || (r.ok === false ? '没改成' : '改了'))
+                reload()
+              },
+            }, mem?.muted ? '恢复记忆' : '本会话不记'),
+            mem?.muted
+              ? h('span', { className: 'roost-muted', style: { fontSize: 12 } },
+                  '现在不读也不记；已有的记忆还在，恢复后就能用')
+              : null,
+          ),
         ),
 
         /* ── 第一层：事实 ── */

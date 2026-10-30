@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1071,6 +1071,86 @@ test('激活: 清理函数要把每条路由都注销掉', async () => {
   }
 
   assert.equal(unsubscribed, registered, `注销数要等于注册数（${unsubscribed}/${registered}）`);
+});
+
+test('面板 quick：memory.mute 真的把会话写进 offChats', async () => {
+  /**
+   * 这条锁的是**只在运行时才炸**的那类错：quick 的处理器里调了 `setCfg(...)`，
+   * 而 `setCfg` 只是传给 `createSetup()` 的一个属性，**不在 apply 的闭包里**。
+   * `node --check` 查不出来，`dry-run.mjs` 也查不出来（它只跑 apply，不跑处理器），
+   * 只有真的点一下按钮才炸 —— 而且被外层 try/catch 吞成一句 toast
+   * 「setCfg is not defined」，用户看到的是"操作失败"，不是代码错。
+   *
+   * 所以这里把 /quick 的 handler 真的调一遍，连"写没写进盘上的配置"一起验。
+   */
+  const host = await import('../src/host.js');
+  const dir = tmp();
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = join(dir, 'data');
+
+  const routes = new Map();
+  const cleanups = [];
+  const noop = () => () => {};
+  const ctx = {
+    agents: { get: () => null, list: () => [], create: async () => ({ id: 'a', ctx: {} }) },
+    sessions: { get: () => null, list: () => [], create: () => ({ id: 's' }) },
+    systemPrompt: { context: noop },
+    webServer: {
+      register: (r) => {
+        routes.set(r.path, r.handler);
+        return noop;
+      },
+    },
+    config: {},
+    logger: { info: noop, warn: noop, error: noop, debug: noop },
+    effect: (cb) => {
+      const off = cb();
+      if (typeof off === 'function') cleanups.push(off);
+      return noop;
+    },
+    on: () => noop,
+    dataDir: join(dir, 'data'),
+    dir,
+  };
+
+  /** 按面板的方式调一次 /quick：JSON body + 回环 Host */
+  const call = async (body) => {
+    const res = { statusCode: 0, setHeader() {}, end(s) { this.body = JSON.parse(s); } };
+    const req = {
+      headers: { host: '127.0.0.1:8931' },
+      async *[Symbol.asyncIterator]() {
+        yield JSON.stringify(body);
+      },
+    };
+    await routes.get('/roost/api/quick')(req, res);
+    return res;
+  };
+
+  const offChatsOnDisk = () =>
+    JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'config.json'), 'utf8')).memory.offChats;
+
+  try {
+    host.apply(ctx);
+    assert.ok(routes.has('/roost/api/quick'), '没注册 /quick');
+
+    const on = await call({ op: 'memory.mute', chatId: 'g1', actor: { bucket: 'owner' } });
+    assert.equal(on.statusCode, 200, `状态 ${on.statusCode}：${JSON.stringify(on.body)}`);
+    assert.equal(on.body.ok, true);
+    assert.equal(on.body.muted, true);
+    assert.deepEqual(offChatsOnDisk(), ['g1'], '没写进盘上的配置');
+
+    const back = await call({ op: 'memory.unmute', chatId: 'g1', actor: { bucket: 'owner' } });
+    assert.equal(back.body.muted, false);
+    assert.deepEqual(offChatsOnDisk(), [], '取消后要清干净');
+  } finally {
+    for (const c of cleanups) {
+      try {
+        c();
+      } catch {}
+    }
+    if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;
+    else process.env.DSH_ROOST_DATA = oldEnv;
+  }
 });
 
 /* ---------------- 配置 ---------------- */

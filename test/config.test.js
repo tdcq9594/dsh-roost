@@ -78,3 +78,35 @@ test('配置：DEFAULTS 与 dataDir 都对得上（别把默认值写回旧数�
   assert.equal(DEFAULTS.compact.atPercentC2C, 75);
   assert.ok(dataDir());
 });
+
+/**
+ * 按会话关记忆（`memory.offChats`）。
+ *
+ * 这一项特别容易在「保存」这一步出事：面板开关只发 `{memory:{offChats}}`，
+ * 如果 `saveConfig` 不是深合并，`keepDays` / `deepEvery` / `tools` 会被整段冲掉，
+ * 而症状是「关了一次记忆，压缩阈值和注入条数全变了」，没有任何报错。
+ */
+test('配置：offChats 默认是空数组（等于所有会话照常记忆）', () => {
+  freshDir();
+  assert.deepEqual(DEFAULTS.memory.offChats, []);
+  assert.deepEqual(loadConfig().memory.offChats, []);
+});
+
+test('配置：写 offChats 不会把 memory 其他项冲掉', () => {
+  const d = freshDir();
+  const merged = saveConfig({ memory: { offChats: ['g1'] } });
+  assert.deepEqual(merged.memory.offChats, ['g1']);
+  assert.equal(merged.memory.deepEvery, DEFAULTS.memory.deepEvery, 'deepEvery 被冲掉了');
+  assert.equal(merged.memory.tools, DEFAULTS.memory.tools, 'tools 被冲掉了');
+  assert.deepEqual(merged.memory.keepDays, DEFAULTS.memory.keepDays, 'keepDays 被冲掉了');
+
+  const onDisk = JSON.parse(readFileSync(join(d, 'config.json'), 'utf8'));
+  assert.deepEqual(onDisk.memory.offChats, ['g1'], '盘上没写进去');
+});
+
+test('配置：offChats 是数组，整体替换而不是合并', () => {
+  freshDir();
+  saveConfig({ memory: { offChats: ['g1', 'g2'] } });
+  const next = saveConfig({ memory: { offChats: ['g3'] } });
+  assert.deepEqual(next.memory.offChats, ['g3'], '数组必须整体替换，否则取消勾选永远去不掉');
+});

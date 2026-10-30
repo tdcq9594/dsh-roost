@@ -496,8 +496,24 @@ export function apply(ctx) {
    *
    * 日记是"第二天还是同一个人"的基础，但它坏了不该让人连话都说不了。
    */
+  /**
+   * 这个会话是不是「不记也不读」。
+   *
+   * 全局开关和按会话开关是**或**的关系：任何一个关着，这个会话就不碰记忆。
+   * 收在一个函数里，是因为要判的地方有五处（写日记 / 静态注入 / 动态注入 /
+   * 检索 / 记忆工具），分散着写必然漏一处 —— 漏在写日记上是"关着还照记"，
+   * 漏在注入上是"关了还照说"，两种都很难在面板上看出来。
+   */
+  const memoryOff = (chatId) => {
+    if (cfg.memory?.enabled === false) return true;
+    const off = cfg.memory?.offChats;
+    if (!Array.isArray(off) || !off.length) return false;
+    const id = String(chatId || '');
+    return Boolean(id) && off.includes(id);
+  };
+
   function journalAdd(payload, chat, text, role) {
-    if (cfg.memory?.enabled === false) return;
+    if (memoryOff(chat?.chatId)) return;
     try {
       const base = String(payload?.id ?? '').trim();
       /**
@@ -975,8 +991,8 @@ export function apply(ctx) {
    * 等于每轮主动作废一次缓存。
    */
   function memoryStatic(override = null) {
-    if (cfg.memory?.enabled === false) return '';
     const chatId = lastScene?.chatId || '';
+    if (memoryOff(chatId)) return '';
     /**
      * **按分数取，不按位置取。**
      *
@@ -1065,8 +1081,8 @@ export function apply(ctx) {
    * 「刚才说到」必须留着：上下文一压缩，`那个`/`上面第二个` 就没了指代对象。
    */
   function memoryDynamic() {
-    if (cfg.memory?.enabled === false) return '';
     const chatId = lastScene?.chatId || '';
+    if (memoryOff(chatId)) return '';
     const st = memState.get(chatId) || {};
 
     let recentSec = '';
@@ -1427,7 +1443,7 @@ export function apply(ctx) {
      * 权限不在这里判：注册是一次性的，而"这一句是谁说的"每轮变，
      * 所以档位检查放在工具 execute 里（见 tools.js）。
      */
-    if (cfg.memory?.enabled !== false && cfg.memory?.tools !== false) {
+    if (!memoryOff(chat?.chatId) && cfg.memory?.tools !== false) {
       const sidFor = () => agent?.session?.id;
       registerMemoryTools({
         agent,
@@ -2011,7 +2027,7 @@ export function apply(ctx) {
       rounds.set(chat.chatId, mr);
 
       let hits = [];
-      if (cfg.memory?.enabled !== false) {
+      if (!memoryOff(chat.chatId)) {
         try {
           /**
            * 第三路（M3）：查询里提到的实体，把相关日记拉进来。
@@ -2560,7 +2576,36 @@ export function apply(ctx) {
               return send(res, 200, { ok: true, message: arg ? '这个群的人设换了' : '回到默认人格' });
 
             case 'memory.list':
-              return send(res, 200, { ok: true, chatId, ...memory.list(chatId) });
+              return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId) });
+
+            /**
+             * 这个会话「不记也不读」的开关（纯净模式）。
+             *
+             * 和「清空本会话记忆」是两件事，必须分开：关掉只是不再读、不再写，
+             * **已有记忆原样留着**，关回来还在；清空是不可逆的。混在一起点错的
+             * 代价差太远，所以这里是独立两个 op。
+             */
+            case 'memory.mute':
+            case 'memory.unmute': {
+              if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话' });
+              const want = op === 'memory.mute';
+              const cur = Array.isArray(cfg.memory?.offChats) ? cfg.memory.offChats : [];
+              const next = want ? [...new Set([...cur, chatId])] : cur.filter((x) => x !== chatId);
+              /**
+               * **直接写 `cfg =`，不要调 `setCfg`。**
+               *
+               * `setCfg` 只是传给 `createSetup()` 的一个属性（见上面
+               * `createSetup({ setCfg: … })`），不在本闭包里，这里调它是
+               * `ReferenceError: setCfg is not defined` —— 而且会被外层
+               * try/catch 吞成一句 toast，看着像"操作失败"而不是代码错。
+               */
+              cfg = saveConfig({ memory: { offChats: next } });
+              return send(res, 200, {
+                ok: true,
+                muted: want,
+                message: want ? '这个会话不记也不读了（已有记忆还在）' : '这个会话恢复记忆',
+              });
+            }
 
             /**
              * 删一条（按关键词，两层都搜）。
@@ -3022,6 +3067,13 @@ export function apply(ctx) {
           facts: { global: facts.global, chat: facts.chat },
           /** 带权重/出处的那一份（面板显示「这条多重、从哪来」） */
           factsDetail,
+          /**
+           * 这个会话是不是「不记也不读」。
+           *
+           * 面板必须知道状态才能把开关画对 —— 只画个按钮、不给当前值，
+           * 用户点两下也不知道自己现在是开还是关。
+           */
+          muted: memoryOff(chatId),
           /** 出处自检：最近 20 条日记里几条带着事件 id（0 条 = 回查原文这条链断了） */
           evidence,
           journal: jr,
