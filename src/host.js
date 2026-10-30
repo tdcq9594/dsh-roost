@@ -3378,12 +3378,60 @@ export function apply(ctx) {
       route('/config', async (req, res) => {
         if (req.method === 'GET') return send(res, 200, { ok: true, config: publicConfig(cfg) });
         const body = await readBody(req);
-        // 面板拿到的是打码后的密钥，原样提交回来时别把真密钥冲掉
-        if (body?.server?.token === '******') delete body.server.token;
+
+        /**
+         * 根必须是对象。
+         *
+         * `JSON.parse('null' | '[]' | '"abc"' | '123')` 都能过 parse，但 `merge`
+         * 见到非对象会直接返回原配置 —— 表现是「提示存好了，磁盘一个字没改」。
+         */
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          return send(res, 400, {
+            ok: false,
+            message: '配置必须是一个 JSON 对象（形如 { "server": { … } }），不能是 null / 数组 / 字符串 / 数字',
+          });
+        }
+
+        /**
+         * 面板拿到的是打码后的密钥，原样提交回来时别把真密钥冲掉。
+         *
+         * **不能只是 `delete`**：`saveConfig` 的基线是 DEFAULTS（token 默认空串），
+         * 删掉这个键等于主动提交「没有 token」——真密钥会被默认空值顶掉。
+         * 必须显式回填当前内存里的真值。
+         */
+        if (body?.server?.token === '******') body.server.token = cfg.server.token;
+
+        /**
+         * 端口必须是 1–65535 的整数。
+         *
+         * 以前不校验：填 `"abc"` 也能保存成功，然后 `listen('abc')` 抛 EACCES，
+         * 而顺延逻辑只认 EADDRINUSE —— 于是服务直接起不来，面板只看到一句
+         * `permission denied abc`，既看不出是自己填错了，也不知道该改哪。
+         */
+        if (body?.server && 'port' in body.server) {
+          const n = Number(body.server.port);
+          if (!Number.isInteger(n) || n < 1 || n > 65535) {
+            return send(res, 400, {
+              ok: false,
+              message: `端口必须是 1–65535 的整数，收到的是 ${JSON.stringify(body.server.port)}`,
+            });
+          }
+          body.server.port = n;
+        }
+
         const beforePort = cfg.server.port;
+        const beforeToken = cfg.server.token;
         cfg = saveConfig(body);
-        // 端口/密钥变了要重起服务；人格和开关下一轮自然生效
-        startServer();
+
+        /**
+         * 只有**端口或密钥**变了才重启监听。
+         *
+         * 以前是无条件 `startServer()`：改一个记忆条数也会关掉再重建收消息服务。
+         * 那几百毫秒里 ai-chat 推过来就是 connection refused；端口还会重新 bind
+         * 一次，万一那一刻被瞬时占用就漂到别的端口去了（棘轮的老诱因之一）。
+         */
+        const restarted = cfg.server.port !== beforePort || cfg.server.token !== beforeToken;
+        if (restarted) startServer();
 
         /**
          * 端口变了必须回头改 ai-chat 的 DSH 地址。
@@ -3399,7 +3447,11 @@ export function apply(ctx) {
             : '；但 ai-chat 没同步（' + (r?.message || '未知') + '）';
         }
 
-        return send(res, 200, { ok: true, config: publicConfig(cfg), message: '已保存，服务已重载' + syncNote });
+        return send(res, 200, {
+          ok: true,
+          config: publicConfig(cfg),
+          message: (restarted ? '已保存，服务已重载' : '已保存') + syncNote,
+        });
       }),
       /**
        * 一键流程的接口。

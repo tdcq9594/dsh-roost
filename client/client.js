@@ -537,8 +537,15 @@ select.roost-input{color-scheme:dark}
             : '还没拿到实际端口，点右上「刷新」再看。',
         }
       }
+      /**
+       * 只陈述事实（配置值 ≠ 实际值），**不断言原因**。
+       *
+       * 这里曾经直接写「被占了」，但面板没有能力知道原因：可能是 want 真被占，
+       * 也可能是 want 非法（<1024 / >65535）被候选列表过滤掉。把「没试过」
+       * 说成「试过失败了」，会让人去查一个根本不存在的占用进程。
+       */
       const cell = st.wantPort && st.wantPort !== actual
-        ? `${actual}（配置 ${st.wantPort}，被占了）`
+        ? `${actual}（配置 ${st.wantPort}，已顺延）`
         : String(actual)
       if (!gotUrl) {
         return { kind: 'unset', cell, wantUrl: want, text: 'ai-chat 还没配好，消息推不过来 —— 去「接入」第 5 步。' }
@@ -2797,15 +2804,18 @@ select.roost-input{color-scheme:dark}
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
       ['awake', '主动说话', '清醒时段、机会分门槛、群白名单（开着时 speakUp.prompt 会当额外要求一起给）'],
       ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],
+      ['closing', '收尾', '对话冷掉前自己补一句：多久算冷（coolMinutes）、盯几个会话（maxChats）、记录留几天（ttlDays）'],
       ['persona', '人格', '当前用哪个人格、按群指定；换人格去「人格与情绪」页点「用这个」'
         + '（name / text 是 0.10.0 之前的旧字段，只在人格文件读不出正文时才兜底）'],
       ['stickers', '表情包', '图放哪、要不要注入'],
       ['permissions', '权限', '主人/管理员/成员各能用什么工具'],
+      ['qqTools', 'QQ 工具', '给 AI 的工具总开关、单次最多分几段发（maxParts）'],
       ['channel', '通道', '当前用哪个通道'],
       ['chat', '会话', '一轮最多等多久；上游 502/429 时的补重试（attempts 是「补几次」，budgetSec 是整轮总预算）'],
       ['workspace', '工作区', '机器人会话挂哪个工作区：dir 留空单开、__default__ 用默认'],
       ['server', '服务', '端口与密钥'],
       ['setup', '接入', '装在哪、用哪种接入方式'],
+      ['update', '更新源', 'npm 源（registry）；留空用默认源'],
     ]
 
     /**
@@ -2950,6 +2960,30 @@ select.roost-input{color-scheme:dark}
     function ConfigTab({ config, save, toast }) {
       const [draft, setDraft] = useState(() => JSON.stringify(config, null, 2))
       const [err, setErr] = useState('')
+      const taRef = useRef(null)
+
+      /**
+       * 点段名跳到那一段。
+       *
+       * 以前提示「在下面的配置全文里搜 «x»」——但浏览器的页内查找**不搜 textarea
+       * 的内容**（它只搜 DOM 文本节点，textarea 的 value 不算），用户按提示去搜
+       * 根本搜不到。改成直接定位并选中。
+       */
+      const jumpTo = (k) => {
+        const ta = taRef.current
+        if (!ta) return
+        const needle = '"' + k + '"'
+        const i = draft.indexOf(needle)
+        if (i < 0) {
+          toast('当前配置里没有 «' + k + '» 这一段（可能被你删了）')
+          return
+        }
+        ta.focus()
+        ta.setSelectionRange(i, i + needle.length)
+        // 11.5px × 1.6 ≈ 18.4px 行高；滚到中间偏上，前后都能看见
+        const line = draft.slice(0, i).split('\n').length - 1
+        ta.scrollTop = Math.max(0, line * 18.4 - ta.clientHeight / 2)
+      }
 
       /**
        * 直接编辑 JSON，而不是给每个字段做表单。
@@ -2967,9 +3001,36 @@ select.roost-input{color-scheme:dark}
           setErr('JSON 不合法：' + e.message)
           return
         }
+        /**
+         * 根必须是对象。`null` / `[]` / `"abc"` / `123` 都能过 JSON.parse，
+         * 后端会 400，这里先拦一道，省一次往返。
+         */
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          setErr('配置必须是一个 JSON 对象（形如 { "server": { … } }）')
+          return
+        }
         setErr('')
         const r = await save(parsed)
-        toast(r.ok === false ? (r.message || '没存上') : '存好了（下一轮生效）')
+        if (r.ok === false) {
+          toast(r.message || '没存上')
+          return
+        }
+        /**
+         * 回填服务端返回的配置。
+         *
+         * 服务端会做归一化（补默认值、删掉展示字段、把旧默认值升级），不回填的话
+         * 用户看到的是自己提交的版本，跟磁盘上真正存的不一致——下次改别的字段时
+         * 会基于一份并不存在的配置继续改。
+         */
+        if (r.config) setDraft(JSON.stringify(r.config, null, 2))
+        /**
+         * 用服务端的 message，不再写死。
+         *
+         * 以前成功分支固定 `'存好了（下一轮生效）'`，把服务端返回的
+         * 「已保存，服务已重载；但 ai-chat 没同步（原因）」整句丢掉了——
+         * 端口换了而 ai-chat 没跟上时，那正是唯一能看见的警告。
+         */
+        toast(r.message || '存好了')
       }
 
       return h('div', null,
@@ -2981,6 +3042,7 @@ select.roost-input{color-scheme:dark}
         ) },
           err ? h('div', { style: { color: 'var(--bad)', fontSize: 12, marginBottom: 6 } }, err) : null,
           h('textarea', {
+            ref: taRef,
             className: 'roost-input',
             style: { minHeight: 420, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 11.5, lineHeight: 1.6, resize: 'vertical' },
             value: draft,
@@ -2996,7 +3058,7 @@ select.roost-input{color-scheme:dark}
             JSON_SECTIONS.map(([k, label, desc]) =>
               h('div', { key: k, className: 'roost-item' },
                 h('span', { className: 't' },
-                  h('span', { className: 'roost-code', style: { cursor: 'pointer' }, onClick: () => toast('在下面的配置全文里搜 «' + k + '»') }, k),
+                  h('span', { className: 'roost-code', style: { cursor: 'pointer' }, onClick: () => jumpTo(k), title: '点一下跳到这一段' }, k),
                   ' ',
                   h('span', null, label),
                   h('span', { className: 'd' }, ' · ' + desc),

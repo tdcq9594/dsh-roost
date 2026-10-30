@@ -356,17 +356,69 @@ export function loadConfig() {
   return upgradeOldDefaults(merge(structuredClone(DEFAULTS), saved));
 }
 
+/**
+ * 按 DEFAULTS 的形状裁剪：DEFAULTS 里没有的键一律丢掉。
+ *
+ * 为什么需要：`merge` 只对**对象值**递归合并，key 本身照样写进去——所以
+ * `merge(DEFAULTS, { tokenSet: true })` 反而会把 `tokenSet` 加上。展示字段
+ * 和用户手写的错键都得靠这一步挡掉。
+ *
+ * 两条特殊规则：
+ *   · **空对象当开放字典**（`persona.byChat` 的键是群 openid，形状不可知）→ 整份保留
+ *   · **数组整体保留**（元素类型不可知，只校验它确实是数组）
+ */
+function pruneTo(shape, value) {
+  if (Array.isArray(shape)) return Array.isArray(value) ? value : structuredClone(shape);
+  if (shape && typeof shape === 'object') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return structuredClone(shape);
+    const keys = Object.keys(shape);
+    if (keys.length === 0) return value;
+    const out = {};
+    for (const k of keys) out[k] = pruneTo(shape[k], value[k]);
+    return out;
+  }
+  return value === undefined ? shape : value;
+}
+
 export function saveConfig(next) {
-  const cfg = merge(loadConfig(), next);
+  /**
+   * 基线用 **DEFAULTS**，不用 `loadConfig()`。
+   *
+   * 面板的「配置全文」允许直接编辑 JSON，用户删掉一个字段就是想让它没了。
+   * 但以前基线是磁盘上的旧配置，而 `merge` 只遍历用户提交的 key —— 删掉的字段
+   * 会从旧配置里原样补回来，**删除操作静默失效**（实测：删 `memory.injectCount`
+   * 和整个 `workspace` 段，保存后都还在）。
+   *
+   * 换成 DEFAULTS 做基线后：删掉 = 回落到默认值，既尊重删除动作，又保证结构完整
+   * （不会出现 `cfg.xxx` 是 undefined）。
+   *
+   * 再用 `pruneTo` 裁一遍，把 DEFAULTS 之外的键（展示字段 `tokenSet`、手写错键）
+   * 挡在磁盘外面。
+   *
+   * 前提是 DEFAULTS 覆盖所有合法字段。已核对真实配置：除了 `tokenSet`，
+   * 没有任何 DEFAULTS 之外的路径。
+   */
+  const merged = merge(structuredClone(DEFAULTS), next);
+  const cfg = pruneTo(DEFAULTS, merged);
   writeFileSync(FILE(), JSON.stringify(cfg, null, 2), 'utf8');
   return cfg;
 }
 
 /** 给面板看：密钥打码 */
 export function publicConfig(cfg) {
+  /**
+   * 先按 DEFAULTS 裁一遍。
+   *
+   * `cfg` 来自 `loadConfig()`，而它会把磁盘上的键**全部**带出来——包括历史遗留的
+   * 展示字段 `tokenSet`。不裁的话它会出现在「配置全文」里，用户再点一次保存
+   * 就又写回磁盘了（这也是它当初能一直赖着不走的原因）。
+   *
+   * 另外这里**不额外加字段**：`token` 为 `''` 就是没设、为 `******` 就是设了，
+   * 光看这个就够判断，不需要 `tokenSet`。
+   */
+  const clean = pruneTo(DEFAULTS, cfg);
   return {
-    ...cfg,
-    server: { ...cfg.server, token: cfg.server.token ? '******' : '' },
-    tokenSet: Boolean(cfg.server.token),
+    ...clean,
+    server: { ...clean.server, token: clean.server.token ? '******' : '' },
   };
 }

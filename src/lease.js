@@ -21,8 +21,18 @@ import { dirname } from 'node:path';
 export const SCAN = 20;
 
 /**
- * 从「意愿」推出候选列表：先 want，再 want+1 … want+SCAN。
+ * 从「意愿」推出候选列表：先 want，再上次的 actual，再 want+1 … want+SCAN。
  * 去重，因为上次的 actual 可能就在这个区间里。
+ *
+ * **want 必须排第一。**
+ *
+ * 曾经把 `lastActual` 放最前，理由是「重启后尽量落回同一端口，用户可能在书签里记着」。
+ * 结果是**单向棘轮**：只要因为任何原因（旧实例没退干净、手工改过配置……）漂到过
+ * want+1，之后每次启动都直接绑它并成功，**再也不回头试 want**——于是 want 一次都没被
+ * 尝试过，却永久显示成「被占了」，而且只会一路往后爬（want+2、want+3…）。
+ *
+ * 想「落回同一端口」，靠的是 want 排第一，不是 lastActual 排第一：
+ * want 空着就回 want；want 真被占才退到 lastActual，书签照样有效。
  */
 export function candidates(want, lastActual, scan = SCAN) {
   const out = [];
@@ -30,8 +40,8 @@ export function candidates(want, lastActual, scan = SCAN) {
     const n = Number(p);
     if (Number.isInteger(n) && n > 0 && n < 65536 && !out.includes(n)) out.push(n);
   };
-  push(lastActual);
   push(want);
+  push(lastActual);
   for (let i = 1; i <= scan; i++) push(Number(want) + i);
   return out;
 }

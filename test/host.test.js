@@ -13,7 +13,7 @@ import { renderInbound, chatOf } from '../src/inbound.js';
 import { createSessions } from '../src/sessions.js';
 import { createInboundServer, postReply } from '../src/server.js';
 import { createTurnRunner, textOf } from '../src/turn.js';
-import { DEFAULTS, publicConfig } from '../src/config.js';
+import { DEFAULTS, publicConfig, saveConfig } from '../src/config.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor } from '../src/permissions.js';
 import { createSetup } from '../src/setup.js';
 import { createPersonas } from '../src/personas.js';
@@ -917,12 +917,28 @@ test('搭话: 说完一句顺带要求安静', async () => {
 
 /* ---------------- 端口租约 ---------------- */
 
-test('租约: 候选端口从 want 往后排，上次的 actual 优先', () => {
+test('租约: 候选端口从 want 开始，上次的 actual 紧随其后', () => {
   const list = candidates(17321, 17323, 3);
-  assert.equal(list[0], 17323, '上次实际用的排最前');
-  assert.equal(list[1], 17321);
-  assert.deepEqual(list.slice(2), [17322, 17323, 17324].filter((p) => p !== 17323));
+  assert.equal(list[0], 17321, '配置的端口永远第一个试');
+  assert.equal(list[1], 17323, 'want 被占时优先回上次那个（书签还能用）');
+  assert.deepEqual(list.slice(2), [17322, 17324]);
   assert.equal(new Set(list).size, list.length, '不能有重复');
+});
+
+/**
+ * 防棘轮：漂过一次不等于永久搬走。
+ *
+ * 曾经的实现把 lastActual 排最前，导致「只要漂到过 want+1，之后每次启动都直接绑它、
+ * 再也不回头试 want」——want 从头到尾没被尝试过，面板却永久写着「配置 17321，被占了」。
+ */
+test('租约: 上次漂到 want+1 也不能把它顶到 want 前面', () => {
+  const list = candidates(17321, 17322);
+  assert.equal(list[0], 17321, '漂过一次不等于永久搬走');
+  assert.equal(list[1], 17322);
+  // 反复「启动」多次，第一位永远是配置值，不会一路往后爬
+  let last = 17322;
+  for (let i = 0; i < 5; i++) last = candidates(17321, last)[0];
+  assert.equal(last, 17321, '连续多次启动也必须先试配置端口');
 });
 
 test('租约: 没有上次记录就从 want 开始', () => {
@@ -1157,11 +1173,90 @@ test('面板 quick：memory.mute 真的把会话写进 offChats', async () => {
 
 test('配置：密钥打码，但能看出有没有设', () => {
   const a = publicConfig({ ...SPEAK_DEFAULTS, server: { port: 1, token: 'secret' } });
-  assert.equal(a.server.token, '******');
-  assert.equal(a.tokenSet, true);
+  assert.equal(a.server.token, '******', '设了 → 打码');
 
   const b = publicConfig({ ...SPEAK_DEFAULTS, server: { port: 1, token: '' } });
-  assert.equal(b.tokenSet, false);
+  assert.equal(b.server.token, '', '没设 → 空串，光看这个就够判断了');
+
+  /**
+   * 不许往配置里塞展示字段。
+   *
+   * 曾经加过 `tokenSet`：面板把整份 JSON 原样提交回来时，它就被写进了用户的
+   * config.json，而且靠面板删不掉（`merge` 会从旧值补回来）。
+   */
+  assert.equal('tokenSet' in a, false, 'publicConfig 不能额外加字段');
+  assert.equal('tokenSet' in b, false);
+
+  /**
+   * 磁盘上已经有的脏字段也不许露到面板。
+   *
+   * `cfg` 来自 `loadConfig()`，会把磁盘上的键全部带出来——不裁的话 `tokenSet`
+   * 会出现在「配置全文」里，用户再点一次保存就又写回去了。
+   */
+  const dirty = publicConfig({ ...DEFAULTS, tokenSet: true, 乱写的: 1 });
+  assert.equal('tokenSet' in dirty, false, '磁盘上的 tokenSet 不许露到面板');
+  assert.equal('乱写的' in dirty, false, '磁盘上的未知键也不许露出来');
+});
+
+/**
+ * 「配置全文」承诺的是「直接编辑 JSON」，那删掉一个字段就该真的没了。
+ *
+ * 以前的基线是磁盘上的旧配置，`merge` 只遍历用户提交的 key —— 删掉的字段
+ * 会从旧配置原样补回来，删除静默失效。
+ */
+test('配置：删掉的字段回落到默认值，不从旧配置里补回来', () => {
+  const dir = tmp();
+  const old = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = dir;
+  try {
+    saveConfig({ memory: { deepEvery: 99 }, server: { port: 17322 } });
+    // 用户在面板上删掉 deepEvery 和整个 server 段
+    const after = saveConfig({ memory: { enabled: true } });
+    assert.equal(after.memory.deepEvery, DEFAULTS.memory.deepEvery, '删掉 → 回默认');
+    assert.notEqual(after.memory.deepEvery, 99, '不能留着上次存的值');
+    assert.equal(after.server.port, DEFAULTS.server.port, '删掉整段 → 整段回默认');
+
+    // 落盘内容也要是回落后的，不能只在返回值里对
+    const onDisk = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'));
+    assert.equal(onDisk.memory.deepEvery, DEFAULTS.memory.deepEvery);
+    assert.equal(onDisk.server.port, DEFAULTS.server.port);
+  } finally {
+    if (old === undefined) delete process.env.DSH_ROOST_DATA;
+    else process.env.DSH_ROOST_DATA = old;
+  }
+});
+
+test('配置：DEFAULTS 之外的字段不落盘', () => {
+  const dir = tmp();
+  const old = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = dir;
+  try {
+    const after = saveConfig({ server: { port: 17321 }, tokenSet: true, 乱写的: 1 });
+    assert.equal('tokenSet' in after, false, '展示字段不许进配置文件');
+    assert.equal('乱写的' in after, false, 'DEFAULTS 之外的键一律丢掉');
+  } finally {
+    if (old === undefined) delete process.env.DSH_ROOST_DATA;
+    else process.env.DSH_ROOST_DATA = old;
+  }
+});
+
+/**
+ * 裁剪不能误伤动态字典。
+ *
+ * `persona.byChat` 在 DEFAULTS 里是 `{}`，键是群 openid、形状不可知——
+ * 按形状裁剪会把用户的按群配置全部清空。空对象必须整份保留。
+ */
+test('配置：按群指定人格（persona.byChat）不会被裁剪掉', () => {
+  const dir = tmp();
+  const old = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = dir;
+  try {
+    const after = saveConfig({ persona: { byChat: { 群A: '毒舌群友', 群B: '小栖' } } });
+    assert.deepEqual(after.persona.byChat, { 群A: '毒舌群友', 群B: '小栖' }, '动态字典要原样保留');
+  } finally {
+    if (old === undefined) delete process.env.DSH_ROOST_DATA;
+    else process.env.DSH_ROOST_DATA = old;
+  }
 });
 
 test('配置：默认端口跟 ai-chat 的默认地址对上', () => {

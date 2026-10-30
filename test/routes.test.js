@@ -259,6 +259,84 @@ test('对齐：设置页列出的配置段后端都有', async () => {
   assert.deepEqual(missing, [], `设置页列了后端没有的配置段：${missing.join('、')}`);
 });
 
+/**
+ * 反向也要查。
+ *
+ * 上一版只查「前端列的 ⊂ 后端有」，于是后端新加了 `closing` / `qqTools` / `update`
+ * 三段，设置页一直没列，测试全绿——用户根本不知道有这几个配置项。
+ */
+test('对齐：后端有的配置段，设置页也要列出来', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { DEFAULTS } = await import('../src/config.js');
+  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+
+  const block = client.slice(client.indexOf('const JSON_SECTIONS'), client.indexOf('function ConfigTab'));
+  const keys = [...block.matchAll(/\['([a-zA-Z]+)',/g)].map((m) => m[1]);
+
+  const missing = Object.keys(DEFAULTS).filter((k) => !keys.includes(k));
+  assert.deepEqual(missing, [], `后端有、设置页没列出的配置段：${missing.join('、')}`);
+});
+
+/* ---------------- /config 保存的校验 ---------------- */
+
+/**
+ * 「提示存好了，磁盘一个字没改」是最坑的一类失败。
+ * `JSON.parse('[]' | '"abc"' | '123')` 都能过 parse，但都不是配置对象。
+ */
+test('配置：根不是对象时 400，不能静默成功', async () => {
+  const { call, off } = await bootHost();
+  try {
+    for (const bad of [[], 'abc', 123]) {
+      const r = await call('/config', { method: 'PUT', body: bad });
+      assert.equal(r.status, 400, `${JSON.stringify(bad)} 必须被拒`);
+      assert.equal(r.json.ok, false);
+      assert.match(r.json.message, /JSON 对象/, '要说清该传什么形状');
+    }
+  } finally {
+    off?.();
+  }
+});
+
+/**
+ * 端口不校验的后果：`listen('abc')` 抛 EACCES，而顺延逻辑只认 EADDRINUSE，
+ * 于是服务直接起不来，面板只有一句 `permission denied abc`。
+ */
+test('配置：端口非法时 400，并说清范围', async () => {
+  const { call, off } = await bootHost();
+  try {
+    for (const bad of ['abc', 0, 99999, 1.5, null]) {
+      const r = await call('/config', { method: 'PUT', body: { server: { port: bad } } });
+      assert.equal(r.status, 400, `port=${JSON.stringify(bad)} 必须被拒`);
+      assert.match(r.json.message, /1–65535/, '要给出合法范围');
+    }
+  } finally {
+    off?.();
+  }
+});
+
+/**
+ * 打码的密钥原样提交回来，真值必须保住。
+ *
+ * `saveConfig` 的基线是 DEFAULTS（token 默认空串），所以「把 `******` 删掉」
+ * 等于主动提交「没有 token」——真密钥会被空串顶掉。这里钉死这个行为：
+ * 占位符要回填真值，而用户真的填 `''` 才表示清空。
+ */
+test('配置：打码的密钥原样提交回来，真密钥不能被冲成空', async () => {
+  const { call, off } = await bootHost({ server: { port: 17321, token: 'REAL_SECRET' } });
+  try {
+    const got = await call('/config');
+    assert.equal(got.json.config.server.token, '******', '面板只该看到打码值');
+
+    // 用户什么都不改，直接点保存
+    const r = await call('/config', { method: 'PUT', body: got.json.config });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.config.server.token, '******', '真密钥不能被冲成空');
+    assert.equal(r.json.message, '已保存', '端口和密钥都没变，不该重启服务');
+  } finally {
+    off?.();
+  }
+});
+
 /* ---------------- 字段级对齐（比路由级更细一层） ---------------- */
 
 /**
