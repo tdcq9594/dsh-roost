@@ -1762,6 +1762,21 @@ select.roost-input{color-scheme:dark}
         return parts.join(' · ')
       }
 
+      /**
+       * 被取代的说法（`meta.until` 有值）。
+       *
+       * 它们**不注入**，但还占着那 40 个名额 —— 面板上不露出来的话就变成
+       * 「看不见也删不掉」，只能等它自然被淘汰。和关系那边的「结束的」
+       * 一个道理：历史留着、默认折叠、随时可删。
+       */
+      const historyRows = (() => {
+        const pick = (scope, label) =>
+          (Array.isArray(mem?.factsDetail?.[scope]) ? mem.factsDetail[scope] : [])
+            .filter((x) => Number(x.until) > 0)
+            .map((x) => ({ ...x, scope, label }))
+        return [...pick('global', '跨群'), ...pick('chat', '本会话')]
+      })()
+
       const doSearch = async () => {
         const term = q.trim()
         if (!term) return
@@ -1948,6 +1963,39 @@ select.roost-input{color-scheme:dark}
                 )
               : h('div', { className: 'roost-empty' }, canChat ? '这个群还没特有记忆' : '—'),
           ),
+
+          /**
+           * 历史：被后来的说法取代的条目。
+           *
+           * 默认折叠 —— 它们是噪声，不该跟「她现在记得的事」抢位置；
+           * 但必须能查到、能删掉，否则就成了占着名额的隐形条目。
+           */
+          historyRows.length
+            ? h('details', { style: { marginBottom: 10 } },
+                h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer' } },
+                  `历史 · ${historyRows.length} 条被后来的说法取代（不注入）`),
+                h('div', { className: 'roost-list', style: { marginTop: 6 } },
+                  historyRows.slice(0, 20).map((x, i) =>
+                    h('div', { key: i, className: 'roost-item' },
+                      h('span', {
+                        className: 't',
+                        style: { opacity: 0.6, textDecoration: 'line-through' },
+                      }, x.text),
+                      h('span', { className: 'roost-muted', style: { fontSize: 11, flexShrink: 0 } },
+                        `${x.label} · ${ago(x.until)}起不再用`),
+                      h(ConfirmLink, {
+                        label: '删', confirmLabel: '确认删除',
+                        onConfirm: async () => {
+                          const r = await quick('memory.remove', x.text)
+                          toast(r.message || '删了')
+                          reload()
+                        },
+                      }),
+                    ),
+                  ),
+                ),
+              )
+            : null,
 
           h('div', { style: { display: 'flex', gap: 8, marginTop: 4 } },
             h('input', {

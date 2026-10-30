@@ -1273,12 +1273,80 @@ test('facts：老的高权重事实不会被新杂事挤掉（FIFO 会）', () =
   assert.equal(Object.keys(readRaw().meta.global).length, 40, '被淘汰的不能留孤儿元数据');
 });
 
-test('facts：被用上会加权重，不认识的文本不算', () => {
+test('facts：注入按分数排序，不按插入顺序', () => {
+  // 锁的是「淘汰按分数、注入按位置」那个错位：数组是插入序，
+  // slice(-N) 取的是"最近记的"，跟权重无关 —— 于是权重高的老事实
+  // 永久沉在数组前段，平时那 6 个名额永远轮不到它。
+  let t = Date.parse('2026-01-01T00:00:00');
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-rank-'));
+  const m = createMemory({ now: () => t });
+
+  m.add('g1', '主人对花生过敏', 'global', { w: W_EXPLICIT }); // 最早记，但权重 2
+  for (let i = 2; i <= 8; i++) m.add('g1', `杂事${i}`); // 之后记的一堆轻事实
+
+  const ranked = m.listRanked('g1').global;
+  assert.equal(ranked.length, 8);
+  assert.equal(ranked[0], '主人对花生过敏', '权重高的排第一，哪怕它最早记');
+  assert.deepEqual(
+    ranked.slice(1),
+    ['杂事8', '杂事7', '杂事6', '杂事5', '杂事4', '杂事3', '杂事2'],
+    '同分时新的优先（和淘汰那侧的排序键一致）'
+  );
+
+  // 注入平时只取前 6 条 —— 老事实必须在这 6 条里，否则"记得牢"是空话
+  assert.ok(ranked.slice(0, 6).includes('主人对花生过敏'));
+
+  // 插入序本身不动：list() 还给面板和旧路径用
+  assert.equal(m.list('g1').global[0], '主人对花生过敏');
+  assert.equal(m.list('g1').global[7], '杂事8', 'list() 仍然是插入序');
+});
+
+test('facts：同一句改个尾巴，旧的打 until 变历史（不删、不注入）', () => {
   const m = freshFacts();
-  m.add('g1', '一条');
-  assert.equal(m.touch('g1', ['一条', '不存在']), 1);
-  assert.equal(m.listFull('g1').global[0].w, 1.5);
-  assert.equal(m.touch('', ['一条'], 'chat'), 0, '本群层里没有这条');
+  m.add('g1', '主人住在杭州');
+  m.add('g1', '主人住在杭州市'); // 二元组 Jaccard 0.83，算同一件事
+
+  assert.deepEqual(m.list('g1').global, ['主人住在杭州市'], '旧说法不能再活在注入里');
+  const full = m.listFull('g1').global;
+  assert.equal(full.length, 2, '历史不删，只打时间戳');
+  assert.ok(full.find((x) => x.text === '主人住在杭州').until > 0, '旧的要有 until');
+  assert.equal(full.find((x) => x.text === '主人住在杭州市').until, null);
+  assert.ok(!m.listRanked('g1').global.includes('主人住在杭州'), '排序里也不能出现历史');
+});
+
+test('facts：不同的事不会被当成改口（宁漏不误）', () => {
+  const m = freshFacts();
+  m.add('g1', '主人养了猫');
+  m.add('g1', '主人养了狗');
+  m.add('g1', '主人在杭州工作');
+  m.add('g1', '主人住在杭州');
+
+  assert.equal(m.list('g1').global.length, 4, '四条是不同的事，一条都不许被取代');
+  assert.ok(
+    m.listFull('g1').global.every((x) => x.until === null),
+    '一个 until 都不该有'
+  );
+});
+
+test('facts：重提一条历史说法 = 重新确认，until 清掉', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  m.add('g1', '主人住在杭州市');
+  assert.deepEqual(m.list('g1').global, ['主人住在杭州市']);
+
+  m.add('g1', '主人住在杭州'); // 又说回来了
+  const full = m.listFull('g1').global;
+  assert.equal(full.find((x) => x.text === '主人住在杭州').until, null, '这条要复活');
+  assert.ok(full.find((x) => x.text === '主人住在杭州市').until > 0, '反过来那条变历史');
+  assert.deepEqual(m.list('g1').global, ['主人住在杭州']);
+});
+
+test('facts：没有 touch 了（注入不强化权重）', () => {
+  // 删掉的 `touch()` 是"注入进提示词就 +0.5"。留着它，配上按分数注入，
+  // 就是注入即加冕：越常被注入的越容易被注入，列表冻结。
+  // 这里锁死"这个口子不许再开"。
+  const m = freshFacts();
+  assert.equal(typeof m.touch, 'undefined', 'touch 不能再回来');
 });
 
 test('facts：删掉正文，元数据也要跟着删（不然文件只会越来越长）', () => {

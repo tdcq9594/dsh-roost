@@ -977,19 +977,33 @@ export function apply(ctx) {
   function memoryStatic(override = null) {
     if (cfg.memory?.enabled === false) return '';
     const chatId = lastScene?.chatId || '';
-    const m = memory.list(chatId);
+    /**
+     * **按分数取，不按位置取。**
+     *
+     * `listRanked` 给的是「重要度 × 时间衰减」从高到低、同分新的优先，
+     * 排序键和淘汰那侧（`memory.js` 的 `addInto`）一致。
+     * 以前这里是 `list()` 配 `slice(-6)`：数组是插入序，取尾部等于取
+     * "最近记的"，跟权重毫无关系 —— 一条被反复强调、权重 5 的事，
+     * 只要最近没人再提，就永久沉在数组前段，平时那 6 个名额永远轮不到它。
+     */
+    const m = memory.listRanked(chatId);
     const st = memState.get(chatId) || {};
     const deep = typeof override === 'boolean' ? override : Boolean(st.deep);
 
     const rules = '记着的事可以拿来用，但**只在这个群发生过的事别拿到别处说**；判断不了就当作不知道。';
     const lines = (arr) => arr.map((f) => `· ${f}`).join('\n');
 
-    // 平时只给最近的几条（数组是追加序，所以取尾部）；深度时才全量
+    /**
+     * 平时只给分数最高的几条；深度时才全量。
+     *
+     * 深度也按同一顺序给：万一 `fitBudget` 要砍，砍掉的是分数低的尾巴，
+     * 而不是最新的那几条 —— 后者恰恰是 deep 最想铺回来的东西。
+     */
     const factsGlobal = m.global.length
-      ? `【你记得的事（通用）】\n${lines(deep ? m.global : m.global.slice(-6))}`
+      ? `【你记得的事（通用）】\n${lines(deep ? m.global : m.global.slice(0, 6))}`
       : '';
     const factsChat = m.chat.length
-      ? `【这个群特有的事】\n${lines(deep ? m.chat : m.chat.slice(-3))}`
+      ? `【这个群特有的事】\n${lines(deep ? m.chat : m.chat.slice(0, 3))}`
       : '';
 
     let digestSec = '';

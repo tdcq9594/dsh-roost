@@ -15,10 +15,15 @@
  *   {
  *     "global": ["主人住在杭州"],                 ← 事实正文，**永远是字符串数组**
  *     "chats":  { "g1": ["这个群管阿离叫小离"] },
- *     "meta":   { "global": { "主人住在杭州": { "w": 2, "at": 1750000000000, "src": {...} } },
+ *     "meta":   { "global": { "主人住在杭州": { "w": 2, "at": 1750000000000, "src": {...},
+ *                                              "until": 1750000000000 } },
  *                 "chats":  { "g1": { "…": {…} } } },
  *     "personas": {...}, "authz": {...}
  *   }
+ *
+ * `until` 有值 = 这条说法**被后来的说法取代了**（「搬到上海」之后的「住在杭州」）。
+ * 不删，只打时间戳，和 `graph.js` 的双时态一个路子：注入只取活的，
+ * 面板还看得见历史。没有 `until` 的老数据一律当活的。
  *
  * 为什么权重和出处**另开 meta，不把 facts 变成对象数组**：
  *   老版本的 `load()` 只认字符串（`filter(x => typeof x === 'string')`），
@@ -52,12 +57,58 @@ const DAY_MS = 86_400_000;
  * 没有元数据（老数据）时按 `w=1`、不衰减算 —— 于是全部同分，淘汰退化成
  * 「最旧的先走」，**跟加权重之前的行为完全一致**。
  * 这是刻意的：升级不该悄悄改变已有库的淘汰顺序。
+ *
+ * 被取代的说法（有 `until`）打个折：它们**不参与注入**，却仍占那 40 个
+ * 名额。不打折的话，一条 w=2 的旧说法会长期压着新事实，把活的名额挤掉。
  */
 export function scoreOfFact(meta, now = Date.now()) {
   const w = Number(meta?.w) > 0 ? Number(meta.w) : 1;
   const at = Number(meta?.at) || 0;
   const days = at ? Math.max(0, (now - at) / DAY_MS) : 0;
-  return w * 0.5 ** (days / HALF_LIFE_DAYS);
+  const base = w * 0.5 ** (days / HALF_LIFE_DAYS);
+  return meta?.until ? base * HISTORY_WEIGHT : base;
+}
+
+/**
+ * 取代判定的相似度阈值（字符二元组 Jaccard）。
+ *
+ * 0.75 是**保守**值，只在"同一句话改了个尾巴"时触发：
+ *   「主人住在杭州」vs「主人住在杭州市」         → 0.83 ✓ 取代
+ *   「主人对花生过敏」vs「主人对花生过敏，严重」  → 0.75 ✓ 取代
+ *   「主人养了猫」vs「主人养了狗」               → 0.43 ✗ 两条都留
+ *   「主人在杭州工作」vs「主人住在杭州」          → 0.50 ✗ 两件事
+ *
+ * 宁可漏判（两条都留着，模型自己挑），不要误判（把不同的事当成改口抹掉）。
+ */
+const SUPERSEDE_SIM = 0.75;
+/** 太短的文本不做取代判定：两三个字的二元组太少，比例没有意义 */
+const SUPERSEDE_MIN_LEN = 4;
+/** 已取代（历史）的分数折扣，见 `scoreOfFact` */
+const HISTORY_WEIGHT = 0.5;
+
+/**
+ * 字符二元组。
+ *
+ * 中文没有空格，按字切比按词切稳 —— 不需要分词表，也不受"未登录词"影响。
+ * 代价是它只看字面：语义改口（「搬到上海」vs「住在杭州」）它抓不到，
+ * 那类要靠模型判定，别指望调阈值调出来。
+ */
+export function bigramsOf(text) {
+  const s = String(text ?? '').replace(/\s+/g, '');
+  const out = new Set();
+  for (let i = 0; i + 1 < s.length; i += 1) out.add(s.slice(i, i + 2));
+  if (!out.size && s) out.add(s);
+  return out;
+}
+
+/** 两句话有多像（0~1）。Jaccard：不看顺序、不看长度 */
+export function similarityOf(a, b) {
+  const A = bigramsOf(a);
+  const B = bigramsOf(b);
+  if (!A.size || !B.size) return 0;
+  let hit = 0;
+  for (const g of A) if (B.has(g)) hit += 1;
+  return hit / (A.size + B.size - hit);
 }
 
 /**
@@ -177,24 +228,57 @@ export function createMemory({ now = () => Date.now() } = {}) {
     // 收口在这里：所有写入路径（模型标记、面板手记、以后新增的）都过一遍
     const src = normalizeSrc(opts.src);
 
+    /**
+     * 同槽位取代：这次记的和某条旧说法几乎是同一句，就给旧的打 `until`。
+     *
+     * 为什么要有：没有它，「主人住在杭州」和「主人住在杭州市」会同时留在
+     * 库里、同时注入，白占两个名额，模型还得自己挑一条。
+     *
+     * 判定**故意用字面相似度**、不调模型：
+     *   · 它只抓"同一句改了个尾巴"这一类，抓不到「搬到上海」那种语义改口
+     *     —— 那是另一件事，要模型判定，不是调阈值能解决的；
+     *   · 好处是零成本、可测、当场生效，而且宁漏不误（阈值 0.75）。
+     *
+     * 旧条目**不删**，只打时间戳（和 `graph.js` 的双时态一个路子）：
+     * 面板还看得见历史，注入只取活的。
+     */
+    const supersede = () => {
+      if (f.length < SUPERSEDE_MIN_LEN) return;
+      for (const other of list) {
+        if (other === f) continue;
+        const om = metaMap[other];
+        if (om?.until) continue; // 已经是历史了，不重复打
+        if (other.length < SUPERSEDE_MIN_LEN) continue;
+        if (similarityOf(other, f) < SUPERSEDE_SIM) continue;
+        metaMap[other] = { ...om, until: t };
+      }
+    };
+
     if (list.includes(f)) {
       /**
        * 又提了一次同一件事 —— 加权重，不加条目。
        *
        * 反复被提到的才是他真正在意的事。这比单纯按时间排队更接近人怎么记东西：
        * 「我生日是三月五号」被说过五次，不该因为今天新记了五条杂事就被挤掉。
+       *
+       * 如果这条**自己**已经是历史（被后来的说法取代过），这次重提就是
+       * 重新确认 —— 把 `until` 清掉，让它回到活的那一批。
        */
-      metaMap[f] = {
+      const next = {
         ...old,
         w: Math.min(W_MAX, (Number(old?.w) > 0 ? Number(old.w) : 1) + W_BUMP),
         at: t,
         src: src || old?.src || null,
       };
+      if (next.until) next.until = null;
+      metaMap[f] = next;
+      supersede();
       return list;
     }
 
     list.push(f);
     metaMap[f] = { w: Number(opts.w) > 0 ? Number(opts.w) : 1, at: t, src };
+    supersede();
     if (list.length <= FACTS_MAX) return list;
 
     /**
@@ -212,20 +296,63 @@ export function createMemory({ now = () => Date.now() } = {}) {
   }
 
   return {
-    /** 读两层（正文）。签名不变——注入路径和面板都按字符串用 */
+    /**
+     * 读两层（正文）。签名不变——注入路径和面板都按字符串用。
+     *
+     * **只返回活的**：被取代的说法（`meta.until` 有值）不进这里。
+     * 默认安全优先 —— 谁拿 `list()` 去拼提示词都不会把历史说法带进去。
+     * 要看历史的用 `listFull()`。
+     */
     list(chatId) {
       const m = load();
+      const alive = (arr, mm) =>
+        (Array.isArray(arr) ? arr : []).filter((text) => !mm?.[text]?.until);
       return {
-        global: [...m.global],
-        chat: Array.isArray(m.chats?.[chatId]) ? [...m.chats[chatId]] : [],
+        global: alive(m.global, m.meta.global),
+        chat: alive(m.chats?.[chatId], m.meta.chats?.[chatId]),
       };
     },
 
     /**
-     * 带权重和出处的版本（面板、调试用）。
+     * 按「重要度 × 时间衰减」排序的正文，**注入用这个**。
+     *
+     * 为什么不能再用 `list().slice(-N)`：数组是插入序，取尾部等于取
+     * "最近记的"，跟权重毫无关系。一条被反复强调（w=5）的事只要最近
+     * 没人再提，就永久沉在数组前段——平时那 6 个名额永远轮不到它，
+     * 只有每 15 轮的 deep 才可能露一次。权重于是只服务于淘汰，
+     * "记得牢"的那半根本没接上。
+     *
+     * 排序键和 `addInto` 的淘汰排序**必须一致**（`b.s - a.s || b.i - a.i`）：
+     * 否则"留得下"和"看得见"是两套口径，会出现"它还在库里，但你永远
+     * 看不到它"这种最难查的状态。
+     *
+     * 深度重注（deep）也用这个顺序，但**不截断**：全量照给，只是让
+     * `fitBudget` 万一要砍时，砍掉的是分数低的尾巴而不是最新的几条。
+     *
+     * 历史（`until`）不参与排序：它不注入，排进来只会白占名额。
+     */
+    listRanked(chatId) {
+      const m = load();
+      const t = now();
+      const rank = (list, mm) =>
+        (Array.isArray(list) ? list : [])
+          .filter((text) => !mm?.[text]?.until)
+          .map((text, i) => ({ text, i, s: scoreOfFact(mm?.[text], t) }))
+          .sort((a, b) => b.s - a.s || b.i - a.i)
+          .map((x) => x.text);
+      return {
+        global: rank(m.global, m.meta.global),
+        chat: rank(m.chats?.[chatId], m.meta.chats?.[chatId]),
+      };
+    },
+
+    /**
+     * 带权重、出处和**历史**的版本（面板、调试用）。
      *
      * 单独开一个方法而不是让 `list()` 返回对象：`list()` 有四处调用点，
      * 全都要跟着改的话，漏一处就是「注入里出现 `[object Object]`」。
+     *
+     * `until` 有值 = 这条被后来的说法取代了，仍然留着但不注入。
      */
     listFull(chatId) {
       const m = load();
@@ -237,6 +364,7 @@ export function createMemory({ now = () => Date.now() } = {}) {
             w: Number(x.w) > 0 ? Number(x.w) : 1,
             at: Number(x.at) || 0,
             src: x.src || null,
+            until: Number(x.until) > 0 ? Number(x.until) : null,
           };
         });
       return {
@@ -266,32 +394,20 @@ export function createMemory({ now = () => Date.now() } = {}) {
     },
 
     /**
-     * 这条事实被用上了（注入进提示词、这一轮也确实回了话）——加一点权重。
+     * 这里原本有个 `touch()`：注入进提示词、这一轮又确实回了话，就给
+     * 这条事实 +0.5 权重。**故意删掉的，别加回来。**
      *
-     * 不记的话，权重只反映"被说过几次"，不反映"被用到过几次"：
-     * 一条一直有用的事实会被一直没用的新事实挤掉。
+     * 两个理由：
+     *   1. 它从写下来那天起就**没有任何生产调用点**（只有测试调过），
+     *      注释却写得像在生效 —— 比没有这个方法更误导。
+     *   2. 语义现在是错的。`listRanked` 让"被注入"直接影响"下次还注不注"，
+     *      再叠一层"被注入就加分"，就是注入即加冕：越常被注入的越容易被
+     *      注入，列表冻结，再也换不出一批新的。
      *
-     * @returns {number} 加到了几条
+     * 同一个坑在日记那边踩过并锁死了：`journal.js` 的 `accessed`
+     * **只由检索写入，自动注入不算**，`test/memory.test.js` 有断言。
+     * facts 走同一条结论 —— **自己读到、自己整理，不强化**。
      */
-    touch(chatId, texts, scope = 'global') {
-      const m = load();
-      const mm = scope === 'chat' ? m.meta.chats?.[chatId] : m.meta.global;
-      if (!mm) return 0;
-      const t = now();
-      let n = 0;
-      for (const text of Array.isArray(texts) ? texts : [texts]) {
-        const k = String(text ?? '');
-        if (!mm[k]) continue;
-        mm[k] = {
-          ...mm[k],
-          w: Math.min(W_MAX, (Number(mm[k].w) > 0 ? Number(mm[k].w) : 1) + W_BUMP),
-          at: t,
-        };
-        n += 1;
-      }
-      if (n) save();
-      return n;
-    },
 
     /** 按关键词删，两层都搜；返回删掉几条 */
     remove(chatId, word) {
