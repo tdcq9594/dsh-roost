@@ -136,7 +136,7 @@ export function shouldFire(state, cfg, now) {
  * 上限 30 天——`<<silence:9999h>>` 那种等于永久静默，恢复只能靠面板。
  */
 export function silenceMsOf(text) {
-  const m = String(text ?? '').match(/<<silence:\s*(\d+(?:\.\d+)?)\s*(s|m|h|d)?\s*>>/i);
+  const m = String(text ?? '').match(/<<silence[:：]\s*(\d+(?:\.\d+)?)\s*(s|m|h|d)?\s*>>/i);
   if (!m) return 0;
   const mul = { s: 1000, m: MINUTE, h: 60 * MINUTE, d: 24 * 60 * MINUTE }[
     (m[2] || 'm').toLowerCase()

@@ -864,6 +864,8 @@ test('排期: 跨天排到清醒时段开始，且带 0–30 分钟随机', () =
  */
 test('搭话: 静默标记能解析出时长', () => {
   assert.equal(silenceMsOf('<<silence:2h>>'), 7_200_000);
+  // 全角冒号：中文输入法下很常见，不认的话标记被兜底抹掉、静默却不会生效
+  assert.equal(silenceMsOf('<<silence：2h>>'), 7_200_000);
   assert.equal(silenceMsOf('让我静静 <<silence:30>>'), 1_800_000); // 默认分钟
   assert.equal(silenceMsOf('<<silence:90s>>'), 90_000);
   assert.equal(silenceMsOf('没有标记'), 0);
