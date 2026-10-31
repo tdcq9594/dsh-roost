@@ -1875,6 +1875,15 @@ export function apply(ctx) {
     const bucket = bucketOf(payload);
     let sid = '';
     let restore = null;
+    /**
+     * 链路 id 必须在 `try` **外面**声明。
+     *
+     * 它是在 try 内部赋值的，但 catch 里要把它记进 lastTurn——
+     * 如果异常发生在赋值之前（`agentFor` 失败之类），catch 里访问
+     * 一个还没初始化的 `const` 会抛 TDZ 错误，把真正的错误盖掉，
+     * 面板上就只剩一句「Cannot access 'trace' before initialization」。
+     */
+    let trace = '';
 
     try {
       const { agent, sessionId } = await agentFor(chat);
@@ -1949,7 +1958,7 @@ export function apply(ctx) {
        * 链路 id：框架进站时生成，ai-chat 透传过来。
        * 老版本插件没有这个字段就留空——日志里少一段前缀，不影响功能。
        */
-      const trace = String(payload?.trace || '');
+      trace = String(payload?.trace || '');
 
       let text = renderInbound(payload);
 
