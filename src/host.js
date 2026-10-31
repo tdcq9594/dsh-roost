@@ -1958,7 +1958,14 @@ export function apply(ctx) {
        * 链路 id：框架进站时生成，ai-chat 透传过来。
        * 老版本插件没有这个字段就留空——日志里少一段前缀，不影响功能。
        */
-      trace = String(payload?.trace || '');
+      /**
+       * 只留字母数字和 `-` `_`，并截到 32 位。
+       *
+       * 这是外部传进来的字段，直接拼进日志的话，一个带 `\n` 的 trace
+       * 就能伪造出一行假日志；带 ANSI 转义还能把终端刷花。
+       * 链路 id 本来就只有我们自己生成的格式，收紧没有代价。
+       */
+      trace = String(payload?.trace || '').replace(/[^0-9A-Za-z_-]/g, '').slice(0, 32);
 
       let text = renderInbound(payload);
 
