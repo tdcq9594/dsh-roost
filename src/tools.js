@@ -297,7 +297,8 @@ export async function registerMemoryTools({ agent, journal, graphOf, callerOf, c
   try {
     const list = typeof registry.schemas === 'function' ? registry.schemas() : [];
     for (const item of Array.isArray(list) ? list : []) {
-      const n = typeof item === 'string' ? item : item?.name;
+      // 三种形状都认：字符串、`{name}`、OpenAI 风格的 `{function:{name}}`
+      const n = typeof item === 'string' ? item : (item?.name ?? item?.function?.name);
       if (n) taken.add(String(n));
     }
   } catch {
