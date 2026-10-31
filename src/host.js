@@ -38,6 +38,7 @@ import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
 import { createFence, PEER } from './fence.js';
+import { markerRe, stripUnknown, stripUnclosed } from './markers.js';
 import { audit, peerSummary } from './audit.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
@@ -1148,7 +1149,7 @@ export function apply(ctx) {
     let out = String(text ?? '');
     let touched = '';
 
-    out = out.replace(/<<remember-here:\s*([\s\S]*?)>>/gi, (_, v) => {
+    out = out.replace(markerRe('remember-here'), (_, v) => {
       const f = String(v || '').trim();
       if (f) {
         /**
@@ -1163,7 +1164,7 @@ export function apply(ctx) {
       return '';
     });
 
-    out = out.replace(/<<remember:\s*([\s\S]*?)>>/gi, (_, v) => {
+    out = out.replace(markerRe('remember'), (_, v) => {
       const f = String(v || '').trim();
       if (f) {
         memory.add(chatId, f, 'global', { w: W_EXPLICIT, src });
@@ -1172,7 +1173,7 @@ export function apply(ctx) {
       return '';
     });
 
-    out = out.replace(/<<persona:\s*([\s\S]*?)>>/gi, (_, v) => {
+    out = out.replace(markerRe('persona'), (_, v) => {
       const t = String(v || '').trim();
       if (t) {
         memory.setPersonaOverride(chatId, t);
@@ -1201,7 +1202,7 @@ export function apply(ctx) {
       return '';
     });
 
-    out = out.replace(/<<mood:\s*([\s\S]*?)>>/gi, (_, v) => {
+    out = out.replace(markerRe('mood'), (_, v) => {
       /**
        * 解析交给 `parseMoodMark`，别在这里自己按逗号切。
        *
@@ -1221,7 +1222,7 @@ export function apply(ctx) {
       return '';
     });
 
-    out = out.replace(/<<forget:\s*([\s\S]*?)>>/gi, (_, v) => {
+    out = out.replace(markerRe('forget'), (_, v) => {
       const word = String(v || '').trim();
       /**
        * **三边都要忘。**
@@ -1265,7 +1266,7 @@ export function apply(ctx) {
      * 注意**不要求**收尾必须带正文：`qq_close_conversation` 本来就是
      * "不说话地退场"，说完晚安、下一轮只留一个 close 标记是正确的用法。
      */
-    out = out.replace(/<<close:\s*([\s\S]*?)>>/gi, (_, v) => {
+    out = out.replace(markerRe('close'), (_, v) => {
       const { point, resume } = parseClose(v);
       const gate = acceptClose({ point, kind, said });
       if (!gate.ok) {
@@ -1300,7 +1301,15 @@ export function apply(ctx) {
      * 这里没保护 → 被兜底当成「未知标记」静默删掉 → ai-chat 拿到的
      * 是纯文本、解析不出 image 动作 → 图根本没发出去，模型却以为「发你了」。
      */
-    out = out.replace(/<<(?!image|voice|button|say|silence)\b[a-z][a-z-]{0,20}(?::[^<>]{0,2000})?>>/gi, '');
+    out = stripUnknown(out);
+
+    /**
+     * 最后再清一遍**未闭合**的标记。
+     *
+     * 顺序必须在所有正常替换之后：截断的标记没有闭合位置，
+     * 提前清会把它后面的正常文本一起吃掉。
+     */
+    out = stripUnclosed(out);
 
     return { text: out.trim(), touched };
   }
