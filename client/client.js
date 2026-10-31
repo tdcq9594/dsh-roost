@@ -2670,7 +2670,9 @@ select.roost-input{color-scheme:dark}
 
     /* ---------------- 上下文（压缩 + 注入） ---------------- */
 
-    function ContextTab({ ctxInfo, mind, toast, reload, busy }) {
+    function ContextTab({ ctxInfo, mind, usageInfo, toast, reload, busy }) {
+      /** 计费 token = 三个互不重叠的桶之和（和 compact 的命中率同一口径） */
+      const billedOf = (b) => Number((b?.uncached || 0) + (b?.cacheRead || 0) + (b?.cacheWrite || 0))
       const p = ctxInfo?.pressure || {}
       const th = ctxInfo?.cfg || {}
       const b = mind?.budgets?.memory || {}
@@ -2768,6 +2770,37 @@ select.roost-input{color-scheme:dark}
                   '挂上了她才能主动翻日记（memory_search）、主动记东西（memory_note）。没挂上只是少了这两手，自动注入照常。'),
               )
             : h('div', { className: 'roost-empty' }, '还没聊过'),
+        ),
+
+        /**
+         * 用量：回答用户真正会问的两个问题——这个群这个月花了多少、哪个群最费。
+         * 上面那些是「调阈值用的实时数」，这里是「账单口径的累计数」，两回事。
+         */
+        h(Sec, { n: '05', title: '用量' },
+          !usageInfo
+            ? h('div', { className: 'roost-empty' }, '还没有用量数据（要先聊过，且服务商回报过 usage）')
+            : h('div', null,
+                h(Row, { k: '近 7 天' },
+                  /**
+                   * **只统计 token，不折算金额。**
+                   * 订阅制、免费额度、自建模型都不按 token 收钱，
+                   * 硬乘一个单价出来的美元数不是账单，只会误导。
+                   */
+                  `计费 ${Number(billedOf(usageInfo.total)).toLocaleString()}`
+                  + ` · 输出 ${Number(usageInfo.total.output || 0).toLocaleString()}`
+                  + ` · 命中 ${usageInfo.total.cacheHit == null ? '—' : usageInfo.total.cacheHit + '%'}`),
+                h(Row, { k: '轮数' }, String(usageInfo.total.turns || 0)),
+                Object.entries(usageInfo.chats || {})
+                  .sort((a, b) => billedOf(b[1]) - billedOf(a[1]))
+                  .slice(0, 3)
+                  .map(([cid, v], i) =>
+                    h(Row, { k: i === 0 ? '最多' : '' },
+                      `${String(cid).slice(0, 8)} · ${v.turns} 轮 · 计费 ${Number(billedOf(v)).toLocaleString()}`),
+                  ),
+              ),
+          h('div', { className: 'roost-note' },
+            '这里只统计 token，不折算金额——订阅制或免费额度下算出来的美元数不是账单。'
+            + '按「天 × 会话」记在 data/usage.json，只存数字不存内容。'),
         ),
       )
     }
@@ -3172,6 +3205,7 @@ select.roost-input{color-scheme:dark}
       const [aw, setAw] = useState(null)
       const [sp, setSp] = useState(null)
       const [ctxInfo, setCtxInfo] = useState(null)
+      const [usageInfo, setUsageInfo] = useState(null)
       const [mind, setMind] = useState(null)
       const [chats, setChats] = useState(null)
       const [ch, setCh] = useState(null)
@@ -3262,9 +3296,10 @@ select.roost-input{color-scheme:dark}
       }, [])
 
       const loadCtx = useCallback(async () => {
-        const [c, m] = await Promise.all([get('/compact'), get('/mind')])
+        const [c, m, u] = await Promise.all([get('/compact'), get('/mind'), get('/usage?days=7')])
         setCtxInfo(c.ok === false ? null : c)
         setMind(m.ok === false ? null : m)
+        setUsageInfo(u.ok === false ? null : u)
       }, [])
 
       const loadChats = useCallback(async () => {
@@ -3371,7 +3406,7 @@ select.roost-input{color-scheme:dark}
             : null,
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat }) : null,
           tab === 'awake' ? h(AwakeTab, { aw, mem, sp, chats, toast, reload: loadAwake, reloadSp: loadAwake, busy }) : null,
-          tab === 'context' ? h(ContextTab, { ctxInfo, mind, toast, reload: loadCtx, busy }) : null,
+          tab === 'context' ? h(ContextTab, { ctxInfo, mind, usageInfo, toast, reload: loadCtx, busy }) : null,
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
           tab === 'config' ? (config ? h(ConfigTab, { config, save: saveCfg, toast }) : h('div', { className: 'roost-empty' }, '读取配置…')) : null,
           tab === 'logs' ? h(LogsTab, null) : null,

@@ -437,13 +437,29 @@ export function createCompact({
    */
   async function maybe(chatId, chat = {}) {
     const c = cfg();
-    if (!c.enabled) return { compacted: false, why: '没开' };
+    /**
+     * 压缩关了**也要量一次用量**。
+     *
+     * 以前这里直接 return，于是「关掉压缩」等于「用量统计静默失效」——
+     * 面板上永远是空的，而且没有任何报错。关的是压缩，不是记账。
+     *
+     * 代价是每轮多一次投影调用；只有主动关压缩的人才会走到这条分支。
+     */
+    if (!c.enabled) {
+      const p = await pressure(chatId);
+      return {
+        compacted: false, why: '没开',
+        percent: p.percent, cacheHit: p.usage.cacheHit, usage: p.usage,
+      };
+    }
     const scene = chat.kind === 'group' ? 'group' : 'c2c';
     const p = await pressure(chatId);
     const d = shouldCompact({ percent: p.percent, turnsSince: turns.get(chatId) || 0, cfg: c, scene });
     if (!d.compact) {
       return {
         compacted: false, why: d.why, percent: p.percent, threshold: d.threshold, cacheHit: p.usage.cacheHit,
+        // 整份 usage 带出去：用量记账要在同一处拿数，别为它再跑一次投影
+        usage: p.usage,
       };
     }
     const r = await compact(chatId, chat, p);
@@ -454,6 +470,7 @@ export function createCompact({
       trigger: d.why,
       threshold: d.threshold,
       cacheHit: p.usage.cacheHit,
+      usage: p.usage,
     };
   }
 

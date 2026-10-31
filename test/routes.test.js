@@ -208,6 +208,17 @@ test('注入分段：freezeSystem=false 能退回旧行为（全部进 system）
   off?.();
 });
 
+test('用量：/usage 返回汇总结构，空库也不报错', async () => {
+  const { call, off } = await bootHost({});
+  const r = await call('/usage?days=7');
+  assert.equal(r.json.ok, true);
+  assert.ok(Array.isArray(r.json.days), 'days 必须是数组');
+  assert.ok(r.json.total && typeof r.json.total.turns === 'number', 'total.turns 要是个数');
+  assert.equal(r.json.total.cost, undefined, '不做金额折算');
+  assert.ok(r.json.chats && typeof r.json.chats === 'object');
+  off?.();
+});
+
 /* ---------------- 前后端对齐（结构性检查） ---------------- */
 
 /**

@@ -42,6 +42,7 @@ import { markerRe, stripUnknown, stripUnclosed, parseReplace } from './markers.j
 import { audit, peerSummary } from './audit.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
+import { createUsage } from './usage.js';
 import { createQqChannel, createChannelRegistry } from './channel.js';
 import { createDeliveryTrack } from './delivery.js';
 import { createQrRegistration, createManualRegistration, createRegistrationRegistry } from './registration.js';
@@ -861,6 +862,12 @@ export function apply(ctx) {
    * 开场不单独跑一轮模型，而是交给宿主在下一条消息前拼进去：
    * 少一次调用，也不会出现"她先回一句'好的我了解了'"这种尴尬开场。
    */
+  /**
+   * 用量记账：按「天 × 会话」累计 token，面板上回答「这个群这个月花了多少」。
+   * 只记数字，不记内容。
+   */
+  const usage = createUsage({ file: join(dataDir(), 'usage.json'), log });
+
   const compact = createCompact({
     controllerOf: () => controller(),
     workspaceIdOf: () => workspaceId(),
@@ -2247,6 +2254,12 @@ export function apply(ctx) {
       compact.noteTurn(chat.chatId);
       try {
         const cp = await compact.maybe(chat.chatId, chat);
+        // 顺带记账：cp.usage 是整份读数，usage.record 自己算增量
+        try {
+          usage.record({ chatId: chat.chatId, usage: cp.usage });
+        } catch (e) {
+          log.debug(`用量记账失败（不影响对话）：${e?.message ?? e}`);
+        }
         if (cp.compacted) {
           /**
            * 压完把「压之前那一下」的命中率写进日志。
@@ -2575,6 +2588,18 @@ export function apply(ctx) {
     };
 
     const offs = [
+      /**
+       * 用量汇总：按天 + 按会话。
+       *
+       * 只读 `data/usage.json`，不碰 DSH 的投影——面板轮询也不会有额外开销。
+       * `days` 默认 7，最多 90（再往前也没意义，`usage.json` 只留 400 天）。
+       */
+      route('/usage', (req, res) => {
+        const u = new URL(req.url ?? '/', 'http://x');
+        const days = Math.min(Math.max(Number(u.searchParams.get('days')) || 7, 1), 90);
+        return send(res, 200, { ok: true, ...usage.summary({ days }) });
+      }),
+
       route('/status', (req, res) =>
         send(res, 200, {
           ok: true,
