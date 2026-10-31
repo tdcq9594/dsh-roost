@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createFence, localRejection, headerOf } from '../src/fence.js';
+import { createFence, localRejection, headerOf, PEER } from '../src/fence.js';
 
 /** 造一个像样的请求：回环 Host + 同源标记 */
 const req = (headers = {}) => ({
@@ -99,4 +99,22 @@ test('栅栏：headerOf 兼容数组头', () => {
   assert.equal(headerOf({ headers: { host: ['a', 'b'] } }, 'host'), 'a');
   assert.equal(headerOf({ headers: {} }, 'host'), '');
   assert.equal(headerOf({}, 'host'), '');
+});
+
+test('栅栏：把 Peer 挂到 req 上，handler 才有服务端身份可用', () => {
+  const peer = { id: 'op-123', principal: { kind: 'owner' } };
+  const fence = createFence({ connection: () => ({ admit: () => ({ peer }) }) });
+  const r = req();
+  assert.equal(fence(r), null);
+  assert.equal(r[PEER], peer, '授权要用宿主交回的 Peer，不能用请求体里的 actor');
+});
+
+test('栅栏：isDegraded 反映「有没有会话鉴权」', () => {
+  const degraded = createFence({});
+  degraded(req());
+  assert.equal(degraded.isDegraded(), true, '没有 connection 服务 = 只剩本地判定');
+
+  const ok = createFence({ connection: () => ({ admit: () => ({ peer: { id: 'x' } }) }) });
+  ok(req());
+  assert.equal(ok.isDegraded(), false);
 });

@@ -27,6 +27,14 @@
 /** 回环 Host：localhost / [::1] / 127.0.0.0-8 */
 const LOOPBACK = /^(?:localhost|\[::1\]|127(?:\.\d{1,3}){3})$/i;
 
+/**
+ * 宿主交回的 Peer，挂在 req 上给 handler 用。
+ *
+ * 为什么用 Symbol：这是插件自己的元数据，不该出现在任何序列化结果里，
+ * 也不该和 req 上已有的字段撞名。
+ */
+export const PEER = Symbol.for('roost.peer');
+
 /** 取一个请求头（Node 的 http 头可能是数组） */
 export function headerOf(req, name) {
   const v = req?.headers?.[name];
@@ -95,7 +103,7 @@ export function createFence({ connection, log = () => {} } = {}) {
     }
   };
 
-  return function fence(req) {
+  const fence = function (req) {
     const conn = readConn();
 
     try {
@@ -119,6 +127,18 @@ export function createFence({ connection, log = () => {} } = {}) {
           const kind = admission?.peer?.principal?.kind;
           if (kind !== undefined && kind !== 'owner') {
             return { status: 403, why: '调用方不是本机所有者' };
+          }
+
+          /**
+           * 把 Peer 留给 handler。**授权判断用它，不要用请求体里的 `actor`**
+           * ——那个字段是调用方自己填的，写 `{bucket:'owner'}` 就能自称主人。
+           */
+          if (admission?.peer) {
+            try {
+              req[PEER] = admission.peer;
+            } catch {
+              // 冻结对象等极端情况：拿不到 Peer 不影响放行，只是审计少一条身份
+            }
           }
           return null;
         }
@@ -149,4 +169,12 @@ export function createFence({ connection, log = () => {} } = {}) {
     }
     return localRejection(req);
   };
+
+  /**
+   * 当前是否处于降级状态：宿主没有 `connection` 服务，只剩「回环 Host + 同源」
+   * 这道本地判定，**没有浏览器会话鉴权**。面板要据此提示用户。
+   */
+  fence.isDegraded = () => degraded;
+
+  return fence;
 }

@@ -37,7 +37,8 @@ import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
-import { createFence } from './fence.js';
+import { createFence, PEER } from './fence.js';
+import { audit, peerSummary } from './audit.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
 import { createQqChannel, createChannelRegistry } from './channel.js';
@@ -2528,6 +2529,12 @@ export function apply(ctx) {
            */
           listening: Boolean(server?.server?.listening),
           serverError: server?.lastError || '',
+          /**
+           * 宿主没有 `connection` 服务时的降级状态：面板 API 只剩
+           * 「回环 Host + 同源」这道本地判定，**没有浏览器会话鉴权**。
+           * 面板要据此显式提示，不能静默降级。
+           */
+          fenceDegraded: Boolean(fence.isDegraded?.()),
           wantPort: cfg.server.port,
           // actualPort 是个函数，忘了加括号会得到「函数本身」（JSON 里直接消失）
           actualPort: server?.actualPort?.() ?? 0,
@@ -2550,24 +2557,38 @@ export function apply(ctx) {
       /**
        * 快捷操作：面板/按钮点完由 ai-chat 转发到这里执行。
        *
-       * **两道鉴权，这是第二道。** ai-chat 那边已经按 sender 拦过一次，
-       * 但这里必须再校验 `actor.bucket`——不能只信转发方，
-       * 以后要是有别的调用方接进来，鉴权不能只有一道。
+       * **鉴权只有一道，在 `route()` 外面那层 `fence()` 里**：它问宿主的
+       * `connection.admit()` 要 Peer，`peer.principal.kind !== 'owner'` 直接 403。
+       * 所以这里不再校验任何身份字段——以前校验的是 `body.actor`，那是调用方
+       * 自己填的，写 `{bucket:'owner'}` 就能自称主人，看着像第二道锁，其实是
+       * 一道没上锁的门。
        *
-       * 只有 owner(主人) / admin(管理) 能改设置。
+       * 这里只做两件事：记审计、执行操作。
        * 消息反馈（点赞点踩）和授权不走这里，那些是"表达态度"，谁都能做。
        */
       route('/quick', async (req, res) => {
         const body = await readBody(req);
-        const actor = body?.actor ?? {};
-        const bucket = String(actor.bucket || 'unknown');
-        if (bucket !== 'owner' && bucket !== 'admin') {
-          return send(res, 403, { ok: false, message: '只有主人或管理员能改设置' });
-        }
+
+        /**
+         * 鉴权已经在 `fence()` 里做完了：`peer.principal.kind !== 'owner'` 直接 403。
+         *
+         * **不要再读 `body.actor`。** 那是调用方自己填的字段，写
+         * `{"actor":{"bucket":"owner"}}` 就能自称主人；以前的实现信的正是它，
+         * 注释却写着「不能只信转发方」——两句话互相矛盾，而且看不出错，
+         * 因为 fence 在上面已经挡过一道，它从来没被真正考验过。
+         */
+        const who = peerSummary(req[PEER]);
 
         const chatId = String(body?.chatId || lastScene?.chatId || '');
         const op = String(body?.op || '');
         const arg = body?.arg;
+
+        /**
+         * 审计：谁、什么时候、对哪个会话、点了什么。
+         * 只记意图不记结果——失败时用户能看到 toast，这里要的是可追溯。
+         * `memory.list` 是纯读，跳过，否则翻一次记忆就多一行噪音。
+         */
+        if (op && op !== 'memory.list') audit({ op, chatId, peer: who.kind, peerId: who.id });
 
         try {
           switch (op) {

@@ -457,6 +457,13 @@ select.roost-input{color-scheme:dark}
             + (st.serverError ? `原因：${st.serverError}。` : '')
             + ' 常见是端口被占或上一轮没退干净——重启 DSH 让端口释放。'))
       }
+      if (st.fenceDegraded) {
+        return h('div', { className: 'roost-banner bad' },
+          h('b', null, '面板接口没有会话鉴权。'),
+          h('i', null,
+            '当前宿主没有 connection 服务，面板只剩「本机 + 同源」校验——'
+            + '本机上的任何程序都能调这些接口。功能不受影响，但别在共用机器上长期这样跑。'))
+      }
       if (!st.chats) {
         return h('div', { className: 'roost-banner' },
           h('b', null, '还没有会话接进来。'),
@@ -3299,7 +3306,12 @@ select.roost-input{color-scheme:dark}
       }, [toast, loadStatus])
 
       const quick = useCallback(async (op, arg) => {
-        const r = await post('/quick', { op, arg, chatId: mem?.chatId || '', actor: { bucket: 'owner' } })
+        /**
+         * 不再传 `actor`：身份由宿主（fence → connection.admit）判定，
+         * 前端填什么都不会被采信。以前这里写死 `{bucket:'owner'}`，
+         * 等于「谁打开面板谁是主人」——看着像鉴权，实际是自报家门。
+         */
+        const r = await post('/quick', { op, arg, chatId: mem?.chatId || '' })
         return r
       }, [mem])
 
