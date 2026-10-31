@@ -43,6 +43,7 @@ import { audit, peerSummary } from './audit.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
 import { createUsage } from './usage.js';
+import { segmentsOf } from './timing.js';
 import { createQqChannel, createChannelRegistry } from './channel.js';
 import { createDeliveryTrack } from './delivery.js';
 import { createQrRegistration, createManualRegistration, createRegistrationRegistry } from './registration.js';
@@ -2275,9 +2276,21 @@ export function apply(ctx) {
         log.warn(`上下文压缩失败（不影响对话）：${e?.message ?? e}`);
       }
 
+      /**
+       * 四段耗时。宿主能算前三段，第四段（回发）在 ai-chat 那边。
+       *
+       *   queue  内核收到事件 → 插件拿到（内核分发排队）
+       *   prep   插件准备 → 宿主开始处理（组 payload、网络）
+       *   gen    宿主这一轮（模型生成 + 落盘）
+       *
+       * 缺时间点就给 null，不拿 0 冒充——0 会被读成"这一段的耗时是 0ms"。
+       */
+      const seg = segmentsOf(payload, started);
+
       lastTurn = {
         at: Date.now(),
         trace,
+        seg,
         chatId: chat.chatId,
         bucket,
         mode,
@@ -2285,8 +2298,10 @@ export function apply(ctx) {
         ok: true,
         len: reply.length,
       };
+      const segTxt = [seg.queue, seg.prep, seg.gen].map((x) => (x == null ? '—' : `${x}ms`)).join('/');
       log.info(
-        `${trace ? `[trace:${trace}] ` : ''}${chat.chatId.slice(0, 8)} 会话 ${sessionId.slice(-8)} [${bucket}/${mode}] 回了 ${reply.length} 字 · ${Date.now() - started}ms`,
+        `${trace ? `[trace:${trace}] ` : ''}${chat.chatId.slice(0, 8)} 会话 ${sessionId.slice(-8)} [${bucket}/${mode}] 回了 ${reply.length} 字 · ${Date.now() - started}ms`
+        + ` · 段(排队/准备/生成) ${segTxt}`,
       );
     } catch (e) {
       lastTurn = {

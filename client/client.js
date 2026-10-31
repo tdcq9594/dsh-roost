@@ -639,7 +639,13 @@ select.roost-input{color-scheme:dark}
             h(Stat, { n: st?.waiting ?? 0, label: '正在等回复' }),
             h(Stat, {
               n: lt ? `${lt.ms}ms` : '—',
-              label: lt ? `${lt.ok ? `最近一轮回了 ${lt.len} 字` : '最近一轮失败'}${lt.trace ? ` · trace ${lt.trace}` : ''}` : '还没跑过',
+              label: lt
+                ? `${lt.ok ? `最近一轮回了 ${lt.len} 字` : '最近一轮失败'}`
+                  + (lt.trace ? ` · trace ${lt.trace}` : '')
+                  + (lt.seg
+                    ? ` · 排队 ${lt.seg.queue ?? '—'}ms / 准备 ${lt.seg.prep ?? '—'}ms / 生成 ${lt.seg.gen ?? '—'}ms`
+                    : '')
+                : '还没跑过',
               tone: lt ? (lt.ok ? 'ok' : 'bad') : null,
             }),
             h(Stat, {
