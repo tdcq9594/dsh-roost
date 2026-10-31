@@ -53,8 +53,16 @@ test('未闭合：截断的标记吞到行尾，不留给用户', () => {
   assert.equal(stripUnclosed('前面的话 <<remember: 后面没了'), '前面的话 ');
 });
 
-test('未闭合：不碰下游负责的标记和正文里的尖括号', () => {
-  assert.equal(stripUnclosed('<<image: a.png'), '<<image: a.png', 'image 归 ai-chat 处理');
+test('未闭合：下游标记要清，闭合的下游标记不能碰', () => {
+  // 闭合的必须原样留给 ai-chat，摘了图就发不出去
+  assert.equal(stripUnclosed('<<image: a.png>>'), '<<image: a.png>>');
+  // 未闭合的没有闭合位置，ai-chat 也匹配不到，留着就是漏
+  assert.equal(stripUnclosed('<<image: a.png'), '');
+  assert.equal(stripUnclosed('<<image：a.png'), '');
+  assert.equal(stripUnclosed('<<say: 你好'), '');
+});
+
+test('未闭合：正文里的尖括号不能误伤', () => {
   assert.equal(stripUnclosed('1 < 2 且 3 > 2'), '1 < 2 且 3 > 2');
 });
 

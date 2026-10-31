@@ -26,6 +26,15 @@
 export const VALUE_MARKERS = ['remember-here', 'remember', 'persona', 'mood', 'forget', 'close'];
 
 /**
+ * 下游（ai-chat）负责执行的标记。
+ *
+ * 宿主**不能摘掉闭合的**——摘了 ai-chat 就发不出图了（真实事故见 `stripUnknown`）。
+ * 但**未闭合的必须摘**：它没有闭合位置，ai-chat 的正则也匹配不到，
+ * 留着就是原样进群。反正缺 `>>` 的标记本来就执行不了。
+ */
+export const DOWNSTREAM_MARKERS = ['image', 'voice', 'button', 'say', 'silence'];
+
+/**
  * 一个标记的匹配式。**半角冒号和全角冒号都认**。
  *
  * 用函数生成而不是常量数组：每个标记各用一次，带 `g` 的正则不能复用
@@ -49,8 +58,8 @@ export function markerRe(name) {
  * @param {string} text
  */
 export function stripUnclosed(text) {
-  const names = VALUE_MARKERS.map((n) => n.replace(/-/g, '\\-')).join('|');
-  return String(text ?? '').replace(new RegExp(`<<(?:${names})[:：][^\\n]*`, 'gi'), '');
+  const names = [...VALUE_MARKERS, ...DOWNSTREAM_MARKERS].map((n) => n.replace(/-/g, '\\-')).join('|');
+  return String(text ?? '').replace(new RegExp(`<<(?:${names})[:：](?![^\\n]*>>)[^\\n]*`, 'gi'), '');
 }
 
 /**
