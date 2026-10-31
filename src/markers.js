@@ -23,7 +23,7 @@
  */
 
 /** 带值的标记名。`clear` 没有值，不在此列。 */
-export const VALUE_MARKERS = ['remember-here', 'remember', 'persona', 'mood', 'forget', 'close'];
+export const VALUE_MARKERS = ['remember-here', 'remember', 'replace', 'persona', 'mood', 'forget', 'close'];
 
 /**
  * 下游（ai-chat）负责执行的标记。

@@ -1777,3 +1777,55 @@ test('日记：老库打开时会补上 journal_due 索引', () => {
   d2.close();
   assert.equal(n, 1, '老库升级后必须有这个索引，否则按 keep_until 直查会退化成全表扫');
 });
+
+/* ---------------- supersede：语义改口的显式入口 ---------------- */
+
+test('supersede：命中一条就给它打 until，注入里不再出现', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  const r = m.supersede('g1', '杭州');
+  assert.equal(r.ok, true);
+  assert.equal(r.text, '主人住在杭州');
+  assert.deepEqual(m.list('g1').global, [], '活的那批里不该再有它');
+  const full = m.listFull('g1').global;
+  assert.equal(full.length, 1, '历史还在，只是不在活的那批');
+  assert.ok(full[0].until > 0, 'until 要真的写进去');
+});
+
+test('supersede：找不到就不猜，返回空候选', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  const r = m.supersede('g1', '成都');
+  assert.equal(r.ok, false);
+  assert.match(r.why, /没找到/);
+  assert.deepEqual(r.candidates, []);
+  assert.deepEqual(m.list('g1').global, ['主人住在杭州'], '失败不能动任何一条');
+});
+
+test('supersede：命中多条也不猜，把候选带回来', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  m.add('g1', '主人公司在杭州西溪');
+  const r = m.supersede('g1', '杭州');
+  assert.equal(r.ok, false);
+  assert.equal(r.candidates.length, 2);
+  assert.deepEqual(m.list('g1').global.length, 2, '多条命中时一条都不能关');
+});
+
+test('supersede：已经是历史的条目不再参与，避免连环替换', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  m.supersede('g1', '杭州');
+  // 第二次拿同一个词找：活的那批里已经没有了
+  const again = m.supersede('g1', '杭州');
+  assert.equal(again.ok, false);
+});
+
+test('supersede：本群层的事实也能定位', () => {
+  const m = freshFacts();
+  m.add('g1', '这个群只聊斗罗', 'chat');
+  const r = m.supersede('g1', '斗罗');
+  assert.equal(r.ok, true);
+  assert.equal(r.scope, 'chat');
+  assert.deepEqual(m.list('g1').chat, []);
+});

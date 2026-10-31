@@ -409,6 +409,62 @@ export function createMemory({ now = () => Date.now() } = {}) {
      * facts 走同一条结论 —— **自己读到、自己整理，不强化**。
      */
 
+    /**
+     * 把「旧说法」标记为已被取代（打 `until`），**不删除**。
+     *
+     * 和 `remove` 的区别：remove 是「这件事不许存在」（连日记一起抹），
+     * supersede 是「这件事过时了」——面板还看得见历史，注入只取活的。
+     *
+     * 为什么需要它：`addInto` 里的同槽位取代只认**字面相似**（0.75），
+     * 抓不到「住在杭州」→「搬到上海」这种语义改口。那条路径上模型给不了
+     * 帮助（它不知道哪条旧的），所以给一个**显式**入口：
+     * 模型说「改成 X，旧的用 Y 找」，这里按 Y 去定位。
+     *
+     * 定位规则：
+     *   · 只搜**活着的**（已经有 `until` 的不再参与，避免连环替换）
+     *   · 命中 0 条 → 不猜，返回失败让调用方决定（通常是"只记新的"）
+     *   · 命中多条 → 也不猜，把候选带回去；猜错等于关掉一条无关的记忆
+     *
+     * @param {string} chatId
+     * @param {string} needle 旧说法里的片段
+     * @param {{at?:number}} [opts]
+     * @returns {{ok:boolean, text?:string, scope?:string, why?:string, candidates?:string[]}}
+     */
+    supersede(chatId, needle, opts = {}) {
+      const w = String(needle ?? '').trim();
+      if (!w) return { ok: false, why: '要替换的旧说法不能为空' };
+      const m = load();
+      const at = Number(opts.at) > 0 ? Number(opts.at) : now();
+
+      const pools = [{ scope: 'global', list: m.global, mm: m.meta.global }];
+      if (chatId && m.chats?.[chatId]) {
+        m.meta.chats[chatId] = m.meta.chats[chatId] || {};
+        pools.push({ scope: 'chat', list: m.chats[chatId], mm: m.meta.chats[chatId] });
+      }
+
+      const hits = [];
+      for (const p of pools) {
+        for (const text of Array.isArray(p.list) ? p.list : []) {
+          if (p.mm?.[text]?.until) continue;
+          if (String(text).includes(w)) hits.push({ scope: p.scope, text, mm: p.mm });
+        }
+      }
+
+      if (!hits.length) return { ok: false, why: `没找到包含「${w}」的活事实`, candidates: [] };
+      if (hits.length > 1) {
+        return {
+          ok: false,
+          why: `「${w}」匹配到 ${hits.length} 条，说具体一点`,
+          candidates: hits.map((h) => h.text),
+        };
+      }
+
+      const h = hits[0];
+      h.mm[h.text] = { ...(h.mm[h.text] ?? {}), until: at };
+      save();
+      return { ok: true, text: h.text, scope: h.scope };
+    },
+
     /** 按关键词删，两层都搜；返回删掉几条 */
     remove(chatId, word) {
       const w = String(word ?? '').trim();

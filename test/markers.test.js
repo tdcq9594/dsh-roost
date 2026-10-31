@@ -85,3 +85,8 @@ test('整条链路：正常正文一个字都不能少', () => {
   const say = '她今天说 << 这个符号 >> 用来表示强调，不是标记。';
   assert.equal(pipeline(say), say);
 });
+
+test('整条链路：replace 是值标记，宿主负责摘（执行在 applyMemoryMarkers 里）', () => {
+  assert.equal(pipeline('<<replace: 住在杭州 | 搬到上海>>'), '');
+  assert.equal(pipeline('记下了 <<replace：住在杭州｜搬到上海>>'), '记下了');
+});

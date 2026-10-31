@@ -1173,6 +1173,36 @@ export function apply(ctx) {
       return '';
     });
 
+    /**
+     * `<<replace: 旧说法 | 新说法>>`：语义改口。
+     *
+     * 为什么需要它：同槽位取代（`addInto` 里那个 0.75 相似度）只抓
+     * 「同一句改了个尾巴」，抓不到「住在杭州」→「搬到上海」。
+     * 这条路上模型能帮上忙——它知道自己在纠正哪句。
+     *
+     * 定位失败**不猜**：命中 0 条就只记新的（旧的可能本来就没记过）；
+     * 命中多条也记新的，但日志里留一条，方便事后查"为什么没替换掉"。
+     */
+    out = out.replace(markerRe('replace'), (_, v) => {
+      const raw = String(v || '').trim();
+      const sep = raw.search(/[|｜]/);
+      if (sep < 0) {
+        touched = 'replace 要写成「旧说法 | 新说法」';
+        return '';
+      }
+      const oldNeedle = raw.slice(0, sep).trim();
+      const next = raw.slice(sep + 1).trim();
+      if (!oldNeedle || !next) {
+        touched = 'replace 要写成「旧说法 | 新说法」';
+        return '';
+      }
+      const r = memory.supersede(chatId, oldNeedle);
+      if (!r.ok) log.debug(`replace 没定位到「${oldNeedle}」：${r.why}`);
+      memory.add(chatId, next, 'global', { w: W_EXPLICIT, src });
+      touched = r.ok ? '旧说法换成了新的' : `没找到「${oldNeedle}」，只记了新的`;
+      return '';
+    });
+
     out = out.replace(markerRe('persona'), (_, v) => {
       const t = String(v || '').trim();
       if (t) {
