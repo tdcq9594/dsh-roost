@@ -63,6 +63,25 @@ export function stripUnclosed(text) {
 }
 
 /**
+ * 解析 `<<replace: 旧说法 | 新说法>>` 的值。
+ *
+ * 分隔符半角 `|` 和全角 `｜` 都认（中文输入法下后者很常见）。
+ * 用 `slice` 而不是 `split`：新说法里可能还有竖线，split 会把它们切碎。
+ *
+ * @param {string} value
+ * @returns {{old:string, next:string}|null} 格式不对返回 null（调用方负责提示）
+ */
+export function parseReplace(value) {
+  const raw = String(value ?? '').trim();
+  const sep = raw.search(/[|｜]/);
+  if (sep < 0) return null;
+  const oldNeedle = raw.slice(0, sep).trim();
+  const next = raw.slice(sep + 1).trim();
+  if (!oldNeedle || !next) return null;
+  return { old: oldNeedle, next };
+}
+
+/**
  * 兜底：剩下的 `<<名字>>` / `<<名字: 值>>` 一律摘掉。
  *
  * 标记协议是**两个仓库各自实现**的（这里是这套，ai-chat 的 `parseActions`

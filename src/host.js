@@ -38,7 +38,7 @@ import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
 import { createFence, PEER } from './fence.js';
-import { markerRe, stripUnknown, stripUnclosed } from './markers.js';
+import { markerRe, stripUnknown, stripUnclosed, parseReplace } from './markers.js';
 import { audit, peerSummary } from './audit.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { createCompact } from './compact.js';
@@ -1184,18 +1184,12 @@ export function apply(ctx) {
      * 命中多条也记新的，但日志里留一条，方便事后查"为什么没替换掉"。
      */
     out = out.replace(markerRe('replace'), (_, v) => {
-      const raw = String(v || '').trim();
-      const sep = raw.search(/[|｜]/);
-      if (sep < 0) {
+      const parsed = parseReplace(v);
+      if (!parsed) {
         touched = 'replace 要写成「旧说法 | 新说法」';
         return '';
       }
-      const oldNeedle = raw.slice(0, sep).trim();
-      const next = raw.slice(sep + 1).trim();
-      if (!oldNeedle || !next) {
-        touched = 'replace 要写成「旧说法 | 新说法」';
-        return '';
-      }
+      const { old: oldNeedle, next } = parsed;
       const r = memory.supersede(chatId, oldNeedle);
       if (!r.ok) log.debug(`replace 没定位到「${oldNeedle}」：${r.why}`);
       memory.add(chatId, next, 'global', { w: W_EXPLICIT, src });

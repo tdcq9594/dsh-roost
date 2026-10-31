@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { markerRe, stripUnclosed, stripUnknown, VALUE_MARKERS } from '../src/markers.js';
+import { markerRe, stripUnclosed, stripUnknown, parseReplace, VALUE_MARKERS } from '../src/markers.js';
 
 /** 复刻 host.js 里的执行顺序：先摘已知标记，再兜底，最后清未闭合 */
 function pipeline(text) {
@@ -89,4 +89,21 @@ test('整条链路：正常正文一个字都不能少', () => {
 test('整条链路：replace 是值标记，宿主负责摘（执行在 applyMemoryMarkers 里）', () => {
   assert.equal(pipeline('<<replace: 住在杭州 | 搬到上海>>'), '');
   assert.equal(pipeline('记下了 <<replace：住在杭州｜搬到上海>>'), '记下了');
+});
+
+test('parseReplace：半角/全角竖线都认', () => {
+  assert.deepEqual(parseReplace('住在杭州 | 搬到上海'), { old: '住在杭州', next: '搬到上海' });
+  assert.deepEqual(parseReplace('住在杭州｜搬到上海'), { old: '住在杭州', next: '搬到上海' });
+});
+
+test('parseReplace：新说法里还有竖线时不能被切碎', () => {
+  assert.deepEqual(parseReplace('旧 | 新说法里有 | 竖线'), { old: '旧', next: '新说法里有 | 竖线' });
+});
+
+test('parseReplace：格式不对一律返回 null，不猜', () => {
+  assert.equal(parseReplace('没有分隔符'), null);
+  assert.equal(parseReplace('| 只有新的'), null);
+  assert.equal(parseReplace('只有旧的 |'), null);
+  assert.equal(parseReplace(''), null);
+  assert.equal(parseReplace(null), null);
 });
