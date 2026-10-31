@@ -1945,6 +1945,12 @@ export function apply(ctx) {
        */
       awake.noteUser(chat.chatId, chat.kind);
 
+      /**
+       * 链路 id：框架进站时生成，ai-chat 透传过来。
+       * 老版本插件没有这个字段就留空——日志里少一段前缀，不影响功能。
+       */
+      const trace = String(payload?.trace || '');
+
       let text = renderInbound(payload);
 
       /**
@@ -2209,6 +2215,7 @@ export function apply(ctx) {
 
       lastTurn = {
         at: Date.now(),
+        trace,
         chatId: chat.chatId,
         bucket,
         mode,
@@ -2217,11 +2224,12 @@ export function apply(ctx) {
         len: reply.length,
       };
       log.info(
-        `${chat.chatId.slice(0, 8)} 会话 ${sessionId.slice(-8)} [${bucket}/${mode}] 回了 ${reply.length} 字 · ${Date.now() - started}ms`,
+        `${trace ? `[trace:${trace}] ` : ''}${chat.chatId.slice(0, 8)} 会话 ${sessionId.slice(-8)} [${bucket}/${mode}] 回了 ${reply.length} 字 · ${Date.now() - started}ms`,
       );
     } catch (e) {
       lastTurn = {
         at: Date.now(),
+        trace,
         chatId: chat.chatId,
         bucket,
         ms: Date.now() - started,
