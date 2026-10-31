@@ -283,6 +283,37 @@ export async function registerMemoryTools({ agent, journal, graphOf, callerOf, c
     return { ok: false, names: [], reason: '这个 agent 的 tools 服务没有 register（版本差异）' };
   }
 
+  /**
+   * 先看一眼现有工具名。
+   *
+   * `memory_search` 这种名字是全局的，别的插件（mem0、OpenViking 之类）也可能
+   * 抢注。等 `register` 抛错的报错往往只有一句「already registered」，
+   * 用户看不出是谁占的、该怎么办。这里提前查一遍，把名字点出来。
+   *
+   * 拿不到清单（老宿主没有 `schemas()`）就退回「注册时再报错」那条路，
+   * 不能因为查不了就拒绝挂工具。
+   */
+  const taken = new Set();
+  try {
+    const list = typeof registry.schemas === 'function' ? registry.schemas() : [];
+    for (const item of Array.isArray(list) ? list : []) {
+      const n = typeof item === 'string' ? item : item?.name;
+      if (n) taken.add(String(n));
+    }
+  } catch {
+    // 查不到就算了，后面 register 仍会兜底
+  }
+  const clash = defs.filter((d) => taken.has(d.name));
+  if (clash.length) {
+    return {
+      ok: false,
+      names: [],
+      reason:
+        `工具名被占用：${clash.map((d) => d.name).join('、')}。` +
+        '多半是别的插件先注册了同名工具——停用它，或改名后再试。',
+    };
+  }
+
   const defineTool = await loadDefineTool();
   const made = [];
 

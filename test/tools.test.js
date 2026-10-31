@@ -260,3 +260,30 @@ test('参数表：四个工具的 parameters 都是扁平表', () => {
     }
   }
 });
+
+test('注册：工具名被别的插件占了，要指名道姓地说清，而不是含糊报错', async () => {
+  let registerCalled = false;
+  const agent = {
+    ctx: {
+      tools: {
+        schemas: () => [{ name: 'memory_search' }, { name: 'other_tool' }],
+        register() {
+          registerCalled = true;
+          throw new Error('already registered');
+        },
+      },
+    },
+  };
+  const r = await registerMemoryTools({
+    agent,
+    journal: { add: () => ({ added: true }), search: async () => [] },
+    graphOf: () => ({}),
+    callerOf: () => ({ bucket: 'owner' }),
+    cfgOf: () => ({}),
+    log: () => {},
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /被占用/);
+  assert.match(r.reason, /memory_search/);
+  assert.equal(registerCalled, false, '预检命中就不该再去注册，避免半套工具');
+});
