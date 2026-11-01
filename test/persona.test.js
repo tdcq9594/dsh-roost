@@ -195,7 +195,7 @@ test('解析：没有头就整段当正文，名字退回 id', () => {
 
 /* ---------------- 人格级工具限制（P1） ---------------- */
 
-test('解析：tools 三元语义——省略/null 不限制、[] 全禁、[a,b] 只给这些', () => {
+test('解析：tools 三元语义——省略/null 不限制、[] 或空值全禁、[a,b] 只给这些', () => {
   const none = parsePersona('x', '---\nname: 甲\n---\n正文');
   assert.equal(none.tools, null, '没写就是 null（不限制，保持旧行为）');
 
@@ -203,13 +203,34 @@ test('解析：tools 三元语义——省略/null 不限制、[] 全禁、[a,b]
   assert.equal(nul.tools, null);
 
   const empty = parsePersona('x', '---\nname: 甲\ntools: []\n---\n正文');
-  assert.deepEqual(empty.tools, [], '仓库装来的人格默认这个');
+  assert.deepEqual(empty.tools, []);
+
+  const blank = parsePersona('x', '---\nname: 甲\ntools:\n---\n正文');
+  assert.deepEqual(blank.tools, [], '写了 key 没写值按全禁（fail-closed），要全开请写 null');
 
   const two = parsePersona('x', '---\nname: 甲\ntools: qq_send, memory_search\n---\n正文');
   assert.deepEqual(two.tools, ['qq_send', 'memory_search']);
 
   const bracket = parsePersona('x', '---\nname: 甲\ntools: [qq_send]\n---\n正文');
   assert.deepEqual(bracket.tools, ['qq_send'], '中括号写法也认');
+});
+
+test('解析：tools 容忍引号和行尾注释（写得很自然，不该静默错位）', () => {
+  const quoted = parsePersona('x', '---\nname: 甲\ntools: "qq_send"\n---\n正文');
+  assert.deepEqual(quoted.tools, ['qq_send'], '引号要剥掉，否则永远匹配不上');
+
+  const comment = parsePersona('x', '---\nname: 甲\ntools: [qq_send] # 只给聊天\n---\n正文');
+  assert.deepEqual(comment.tools, ['qq_send'], '# 后面的注释要截掉');
+
+  const emptyComment = parsePersona('x', '---\nname: 甲\ntools: [] # 全禁\n---\n正文');
+  assert.deepEqual(emptyComment.tools, []);
+});
+
+test('解析：头部前面多空行、分隔符带尾随空格也认（否则 tools 会被当成正文）', () => {
+  const r = parsePersona('x', '\n\n--- \nname: 甲\ntools: []\n--- \n正文');
+  assert.deepEqual(r.tools, [], '头没认出来的话这里会是 null，限制静默失效');
+  assert.equal(r.name, '甲');
+  assert.equal(r.body, '正文');
 });
 
 /* ---------------- 人格搬成文件（0.10.7） ---------------- */
@@ -273,3 +294,9 @@ test('seed：自带目录读不到时只记日志，不抛错（打包漏了 per
   }
 });
 
+
+test('解析：空头 `---\\n---` 也认（认不出就会让 tools 静默变 null）', () => {
+  const r = parsePersona('x', '---\n---\n正文');
+  assert.equal(r.name, 'x');
+  assert.equal(r.body, '正文');
+});

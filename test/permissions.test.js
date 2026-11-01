@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, AWAKE_DENY_TOOLS } from '../src/permissions.js';
+import { planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, AWAKE_DENY_TOOLS, OUTPUT_TOOLS } from '../src/permissions.js';
 
 /** 这版 DSH 真实报出来的全局工具（2026-10-28 面板日志里抄的） */
 const REAL_TOOLS = [
@@ -190,4 +190,29 @@ test('人格工具：清单为空时明说没算成，不假装收住了', () =>
   const plan = planPersonaTools(fakeTools([]), []);
   assert.equal(plan.ok, false);
   assert.match(plan.reason, /报不出工具清单/);
+});
+
+test('人格工具：输出通道永远保留（tools: [] 是「别碰机器」，不是「别说话」）', () => {
+  const all = [...REAL_TOOLS, ...OUTPUT_TOOLS];
+  const plan = planPersonaTools(fakeTools(all), []);
+  assert.equal(plan.ok, true);
+  assert.ok(!plan.deny.includes('qq_send'), 'qq_send 不能被收走，否则 907 的提示词会变成谎话');
+  assert.ok(!plan.deny.includes('qq_close'));
+  assert.ok(plan.deny.includes('edit'));
+});
+
+test('人格工具：全都允许时返回 nothing（调用方别当告警打）', () => {
+  const all = ['memory_search'];
+  const plan = planPersonaTools(fakeTools(all), ['memory_search']);
+  assert.equal(plan.ok, false);
+  assert.equal(plan.nothing, true);
+});
+
+test('人格工具：keep=[] 这种极端值也不能把输出通道切掉', () => {
+  const all = [...REAL_TOOLS, ...OUTPUT_TOOLS];
+  const plan = planPersonaTools(fakeTools(all), ['edit'], []);
+  assert.equal(plan.ok, true);
+  assert.ok(!plan.deny.includes('qq_send'), '输出通道永远不收');
+  assert.ok(!plan.deny.includes('qq_close'));
+  assert.ok(plan.deny.includes('edit'), '人格放开但档位不许的，照样收');
 });

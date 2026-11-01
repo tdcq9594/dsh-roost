@@ -166,8 +166,9 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
        * 按提示里的 `<<skip>>` 就放弃了，一轮模型调用白花。线上真实发生过
        * （主动搭话那一轮调了 `qq_send`）。
        *
-       * 正常情况下宿主已经在这一轮把 `qq_send` 收走了（`restrictQqTools`），
-       * 走到这里说明收工具失败了（版本差异）——那至少别让她白白放弃。
+       * 正常情况下宿主已经在这一轮把 `qq_send` 收走了（`restrictTurnTools` 的
+       * `denyExtra: AWAKE_DENY_TOOLS`），走到这里说明收工具失败了（版本差异）——
+       * 那至少别让她白白放弃。
        */
       if (!c.hasPayload) {
         return {

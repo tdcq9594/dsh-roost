@@ -50,7 +50,14 @@ export function parsePersona(id, raw) {
   let text = String(raw ?? '').replace(/^\uFEFF/, '');
   const meta = { id, name: id, tags: [], tools: null };
 
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  /**
+   * 头部的匹配放宽一点：允许前导空行、分隔符行尾的空格、**空头**（`---\n---`）。
+   *
+   * 以前是 `^---\n`，手写时开头多一个空行、或者写成 `--- `（尾随空格），
+   * 整段头就认不出来——结果是 `tools: []` 被当成正文、限制静默失效。
+   * 空头那一条同理：认不出来时 `tools` 会变成 null（全开），方向正好反了。
+   */
+  const m = text.match(/^\s*---[ \t]*\r?\n([\s\S]*?)(?:\r?\n)?---[ \t]*(?:\r?\n|$)/);
   if (m) {
     for (const line of m[1].split(/\r?\n/)) {
       const kv = line.match(/^(\w+):\s*(.*)$/);
@@ -66,20 +73,25 @@ export function parsePersona(id, raw) {
       /**
        * `tools`：这个格能碰哪些工具。三元语义（抄 AstrBot persona_plus）：
        *   · 省略 / `null` → 不限制（自己写的人格，保持旧行为）
-       *   · `[]`        → 一个都不给（**仓库装来的人格默认这个**）
-       *   · `[a, b]`    → 只给这两个
+       *   · `[]` / 空值    → 一个都不给（**市场安装时会补写这个**；内置人格由作者显式声明）
+       *   · `[a, b]`       → 只给这两个
        *
-       * 为什么放在人格文件里而不是配置里：限制属于「这个人格该有多危险」，
-       * 跟正文一起走才能被作者写、被 review、被 diff。
+       * 「空值按全禁」是 fail-closed：写了一半的 `tools:`（本想禁掉）不该
+       * 变成「全开」。真要全开就写 `null`，那个是显式的。
+       *
+       * 另外顺手去掉引号和行尾 `#` 注释——`tools: "qq_send"` 和
+       * `tools: [a] # 只给聊天` 都是很自然的写法，不处理就会变成
+       * 一个永远匹配不上的名字，限制静默错位。
        */
       if (kv[1] === 'tools') {
-        const v = kv[2].trim();
-        if (!v || /^null$/i.test(v)) meta.tools = null;
+        const v = kv[2].split('#')[0].trim();
+        if (/^null$/i.test(v)) meta.tools = null;
+        else if (!v) meta.tools = [];
         else {
           meta.tools = v
             .replace(/^\[|\]$/g, '')
             .split(/[,，]/)
-            .map((s) => s.trim())
+            .map((s) => s.trim().replace(/^["']|["']$/g, ''))
             .filter(Boolean);
         }
       }

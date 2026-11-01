@@ -31,7 +31,7 @@ export const MODES = ['all', 'chat'];
  * 于是「群友只能用聊天」这条硬限制从来没生效过——只是没人看得见，
  * 因为面板日志那层把错误信息丢了。
  *
- * 现在收工具的逻辑在 `host.js` 的 `restrictGuestTools()`：名字全部来自
+ * 现在收工具的逻辑在 `host.js` 的 `restrictTurnTools()`：名字全部来自
  * DSH 自己的 `tools.schemas()`，白名单之外的都收走（fail-closed）。
  * 别再往这里加硬编码的工具名。
  */
@@ -135,11 +135,23 @@ export function planGuestTools(tools, keep = GUEST_KEEP_TOOLS) {
   const keepSet = new Set(keep);
   const deny = names.filter((n) => !keepSet.has(n));
   if (!deny.length) {
-    return { ok: false, reason: `没有可收走的工具（清单 ${names.length} 个，全在白名单里）` };
+    return { ok: false, nothing: true, reason: `没有可收走的工具（清单 ${names.length} 个，全在白名单里）` };
   }
 
   return { ok: true, deny };
 }
+
+/**
+ * **输出通道**：这两个不算「能力」，是「怎么说话」。
+ *
+ * 人格写 `tools: []` 的意思是「别让它碰这台机器」，不是「别让它开口」。
+ * 如果把 `qq_send` 一起收走，模型会按 order 907 的说明去调一个不存在的工具，
+ * 然后退成正文发送——表面上还能说话，但分段发言、表情、@ 全没了，
+ * 而且 907 那段提示词会变成谎话。
+ *
+ * 所以人格级收窄**永远保留**这两个（群友档本来也保留）。
+ */
+export const OUTPUT_TOOLS = ['qq_send', 'qq_close'];
 
 /**
  * 人格级工具限制：这个人格这一轮允许碰哪些工具。
@@ -182,9 +194,18 @@ export function planPersonaTools(tools, personaTools, keep = null) {
     const k = new Set(keep);
     allowed = new Set([...allowed].filter((n) => k.has(n)));
   }
+  /**
+   * 输出通道**在交集之后**并回来。
+   *
+   * 放在交集之前的话，`keep=[]` 这种极端值会把 `qq_send` 也切掉——
+   * 那就又回到「人格写了 tools 就不许说话」。输出不是能力，是「怎么说话」，
+   * 任何一档、任何人格都不该把它收走。
+   */
+  for (const n of OUTPUT_TOOLS) allowed.add(n);
 
   const deny = names.filter((n) => !allowed.has(n));
-  if (!deny.length) return { ok: false, reason: '没有可收走的工具（人格允许的已经覆盖了全部）' };
+  // nothing: 没有需要收走的（不是失败）。调用方别把它当告警打出去
+  if (!deny.length) return { ok: false, nothing: true, reason: '没有可收走的工具（人格允许的已经覆盖了全部）' };
 
   return { ok: true, deny };
 }
