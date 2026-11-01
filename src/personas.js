@@ -360,6 +360,8 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
           name: m.label || m.name || m.id,
           tags: [...m.tags],
           chars: m.chars,
+          /** 文件 mtime：治理页用它判断「刚装的别急着建议删」 */
+          mtimeMs: m.mtimeMs || 0,
         }))
         .sort((a, b) => (a.id === 'default' ? -1 : b.id === 'default' ? 1 : a.id.localeCompare(b.id)));
     },
@@ -424,6 +426,124 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
       catalog.invalidate();
       parsedCache.delete(clean);
       return { id: clean };
+    },
+
+    /**
+     * 批量删除：**一个批次一个目录 + manifest**。
+     *
+     * 不能循环调 `remove()`：那样每次 `backup()` 都自己算时间戳，17 份散成 17 个目录，
+     * `pruneBackups()` 只留最近 5 个目录，会把自己这一批的一部分先删掉。
+     * manifest 是撤销的唯一依据，没有它就只能人工去备份目录里翻。
+     */
+    removeMany(ids, refs = {}) {
+      const list = [...new Set((ids || []).map(safeId))].filter((x) => x !== 'default');
+      if (!list.length) return { ok: true, batch: null, removed: [], skipped: [] };
+
+      /**
+       * **先 prune 再建目录**：`pruneBackups()` 只留 5 个目录，先建后 prune 的话，
+       * 只要 .backup 里已有 5 个更晚的目录（时钟回拨、从别的机器拷来），
+       * 刚建的这一批会立刻被自己删掉——文件已 unlink，撤销就永久没了。
+       */
+      pruneBackups();
+
+      const base = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+      /** 同一秒内两次批量删除不能共用一个目录：manifest 会被覆盖，前一批的备份也会被一起删 */
+      let ts = base;
+      let n = 1;
+      while (existsSync(join(dir(), '.backup', ts))) ts = `${base}-${++n}`;
+      const bdir = join(dir(), '.backup', ts);
+      mkdirSync(bdir, { recursive: true });
+
+      const removed = [];
+      const skipped = [];
+      const items = [];
+      for (const id of list) {
+        const item = catalog.get(id);
+        const file = item ? item.file : `${id}.md`;
+        const f = join(dir(), file);
+        try {
+          if (!existsSync(f)) {
+            /** 不存在的 id 不能算「已删」：撤销时恢复不了，还会留一个无主墓碑 */
+            skipped.push({ id, why: '文件不存在' });
+            continue;
+          }
+          writeFileSync(join(bdir, `${safeId(id)}.md`), readFileSync(f, 'utf8'), 'utf8');
+          unlinkSync(f);
+          items.push({ id, file, deletedAt: Date.now() });
+          removed.push(id);
+        } catch (e) {
+          skipped.push({ id, why: e.message });
+        }
+      }
+
+      if (!items.length) {
+        try { rmSync(bdir, { recursive: true, force: true }); } catch {}
+        return { ok: true, batch: null, removed, skipped };
+      }
+
+      /** 记下被删人格占用的会话引用，撤销时一起写回（否则「恢复」只恢复文件） */
+      const keptRefs = {};
+      for (const [chatId, pid] of Object.entries(refs || {})) {
+        if (removed.includes(pid)) keptRefs[chatId] = pid;
+      }
+      writeFileSync(join(bdir, 'manifest.json'), JSON.stringify({ ts, items, byChat: keptRefs }, null, 2), 'utf8');
+      try {
+        const p = prefs.read();
+        prefs.patch({ deleted: [...new Set([...p.deleted, ...removed])] });
+      } catch {}
+      catalog.invalidate();
+      for (const id of removed) parsedCache.delete(id);
+      // 不再 prune：开头已经 prune 过，建完再 prune 有把自己删掉的风险
+      return { ok: true, batch: ts, removed, skipped };
+    },
+
+    /** 撤销一个批次：按 manifest 回拷、清墓碑、删掉批次目录 */
+    undoBatch(ts) {
+      const name = String(ts || '').trim();
+      if (!/^[0-9-]+$/.test(name)) throw new Error('批次号不合法');
+      const bdir = join(dir(), '.backup', name);
+      const mf = join(bdir, 'manifest.json');
+      if (!existsSync(mf)) throw new Error('这一批没有 manifest，没法自动撤销');
+
+      const man = JSON.parse(readFileSync(mf, 'utf8'));
+      const restored = [];
+      for (const it of man.items || []) {
+        const src = join(bdir, `${safeId(it.id)}.md`);
+        if (!existsSync(src)) continue;
+        /** 撤销会覆盖同名文件（用户可能在这期间又建了一个）——先备份再写 */
+        if (existsSync(join(dir(), it.file))) backup(it.id, it.file);
+        writeFileSync(join(dir(), it.file), readFileSync(src, 'utf8'), 'utf8');
+        restored.push(it.id);
+      }
+      try {
+        const p = prefs.read();
+        prefs.patch({ deleted: p.deleted.filter((x) => !restored.includes(x)) });
+      } catch {}
+      catalog.invalidate();
+      for (const id of restored) parsedCache.delete(id);
+      try { rmSync(bdir, { recursive: true, force: true }); } catch {}
+      return { ok: true, batch: name, restored, byChat: man.byChat || {} };
+    },
+
+    /** 最近几个「可撤销」的批次（有 manifest 的），给面板显示撤销按钮 */
+    batches() {
+      const root = join(dir(), '.backup');
+      try {
+        return readdirSync(root)
+          .sort()
+          .reverse()
+          .map((ts) => {
+            try {
+              const man = JSON.parse(readFileSync(join(root, ts, 'manifest.json'), 'utf8'));
+              return { ts, count: (man.items || []).length, at: (man.items || [])[0]?.deletedAt || 0 };
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean);
+      } catch {
+        return [];
+      }
     },
 
     /**

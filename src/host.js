@@ -31,7 +31,7 @@ import { createEmbedder } from './embed.js';
 import { createMood } from './mood.js';
 import { createClosing } from './closing.js';
 import { createPersonas, legacyPersonaText, personaName } from './personas.js';
-import { createPersonaRepo } from './persona-repo.js';
+import { createPersonaRepo, scanPersona } from './persona-repo.js';
 import { createUpdater } from './update.js';
 import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
@@ -254,6 +254,18 @@ export function apply(ctx) {
     } catch (e) {
       log.debug('使用次数落盘失败：', e.message);
     }
+  }
+
+  /** 删掉人格后，把 byChat 里指向它的项清掉——不清就持续制造失效引用 */
+  function clearByChatRefs(ids) {
+    const gone = new Set(ids || []);
+    if (!gone.size) return;
+    const next = structuredClone(loadConfig());
+    let changed = false;
+    for (const [chatId, pid] of Object.entries(next.persona.byChat || {})) {
+      if (gone.has(pid)) { delete next.persona.byChat[chatId]; changed = true; }
+    }
+    if (changed) cfg = saveConfig(next);
   }
 
   function personaToolsFor(chat, { count = true } = {}) {
@@ -3883,7 +3895,137 @@ export function apply(ctx) {
 
       route('/personas/remove', async (req, res) => {
         const b = await readBody(req);
-        return send(res, 200, { ok: true, ...personas.remove(b.id) });
+        const r = personas.remove(b.id);
+        /** 级联清 byChat：不清的话这个群会一直指向一个不存在的人格（静默回退） */
+        clearByChatRefs([r.id]);
+        return send(res, 200, { ok: true, ...r, byChat: cfg.persona.byChat });
+      }),
+
+      /**
+       * 治理快照：谁在用、引用有没有失效、体检结果。
+       *
+       * `?scan=1` 才真扫（读全部正文 + 算重复）——首屏不该为了四张卡片读几百个文件。
+       * 不扫时 `health: null`，面板显示「未扫描」，而不是四张 0（0 会被读成「没问题」）。
+       */
+      route('/personas/gov', (req, res) => {
+        const u = new URL(req.url || '/', 'http://x');
+        const scan = u.searchParams.get('scan') === '1';
+        const list = personas.list();
+        const byId = new Map(list.map((p) => [p.id, p]));
+        const labelOf = (id) => byId.get(id)?.label || byId.get(id)?.name || id;
+        const byChat = cfg.persona?.byChat || {};
+        const current = cfg.persona?.current || 'default';
+
+        const refs = Object.entries(byChat).map(([chatId, id]) => ({
+          chatId, id, ok: byId.has(id), label: labelOf(id),
+        }));
+
+        let health = null;
+        if (scan) {
+          const prefsNow = personas?.prefs?.read?.() ?? {};
+          const usage = prefsNow.usage ?? {};
+          const now = Date.now();
+          const NINETY = 90 * 24 * 3600 * 1000;
+          const risky = [];
+          const dup = [];
+          const stale = [];
+          const big = [];
+          const byRaw = new Map();
+
+          for (const p of list) {
+            const raw = personas.read(p.id)?.raw || '';
+            const hits = scanPersona(raw);
+            if (hits.length) risky.push({ id: p.id, label: labelOf(p.id), count: hits.length });
+            if (raw) {
+              const arr = byRaw.get(raw) || [];
+              arr.push(p.id);
+              byRaw.set(raw, arr);
+            }
+            if ((p.chars ?? 0) > 2000) big.push({ id: p.id, label: labelOf(p.id), chars: p.chars });
+
+            const u2 = usage[p.id];
+            const used = typeof u2 === 'number' ? u2 : Number(u2?.useCount) || 0;
+            const last = typeof u2 === 'number' ? 0 : Number(u2?.lastUsedAt) || 0;
+            /** 刚装/刚改过的不进「长期未用」：首次扫描别把 8 份内置全列成待删 */
+            const fresh = p.mtimeMs && now - p.mtimeMs < 7 * 24 * 3600 * 1000;
+            if (!fresh && (used === 0 || (last && now - last > NINETY))) {
+              stale.push({ id: p.id, label: labelOf(p.id), useCount: used, lastUsedAt: last });
+            }
+          }
+          for (const ids of byRaw.values()) {
+            if (ids.length > 1) dup.push({ ids, labels: ids.map(labelOf) });
+          }
+
+          /**
+           * 清理建议：长期未用 + 重复。
+           * **排除**默认、正在用、被任何会话指定、置顶——照着建议点不能把全局默认删掉。
+           */
+          const pinned = new Set(prefsNow.pinned || []);
+          const inUse = new Set([current, ...Object.values(byChat)]);
+          const keep = (id) => id !== 'default' && !pinned.has(id) && !inUse.has(id);
+          const sugg = new Map();
+          for (const x of stale) if (keep(x.id)) sugg.set(x.id, '长期未用');
+          for (const g of dup) {
+            const victims = g.ids.filter(keep);
+            for (const id of victims.slice(1)) if (!sugg.has(id)) sugg.set(id, '内容重复');
+          }
+
+          health = {
+            scannedAt: Date.now(),
+            risky, dup, stale, big,
+            suggestions: [...sugg].map(([id, why]) => ({ id, label: labelOf(id), why })),
+          };
+        }
+
+        return send(res, 200, {
+          ok: true,
+          current,
+          currentLabel: labelOf(current),
+          /** 全局当前指向一个不存在的人格时，面板要能标红（否则显示的是 id） */
+          currentOk: byId.has(current),
+          refs,
+          invalid: refs.filter((r) => !r.ok),
+          health,
+          /** 可撤销的批次（最近 5 个目录，带 manifest 的才算） */
+          batches: personas.batches(),
+        });
+      }),
+
+      /** 批量删除：一个批次一个目录 + manifest，撤销靠它 */
+      route('/personas/batch/remove', async (req, res) => {
+        const b = await readBody(req);
+        const ids = Array.isArray(b.ids) ? b.ids.map((x) => String(x)) : [];
+        if (!ids.length) return send(res, 400, { ok: false, message: '缺 ids' });
+        try {
+          const r = personas.removeMany(ids, cfg.persona?.byChat || {});
+          if (r.removed?.length) clearByChatRefs(r.removed);
+          if (r.removed?.length) addLog('info', 'persona', `批量删除 ${r.removed.length} 份（批次 ${r.batch}）`);
+          return send(res, 200, { ok: true, ...r, byChat: cfg.persona.byChat });
+        } catch (e) {
+          return send(res, 500, { ok: false, message: e.message });
+        }
+      }),
+
+      /** 撤销一个批次：整批回拷、清墓碑 */
+      route('/personas/batch/undo', async (req, res) => {
+        const b = await readBody(req);
+        try {
+          const r = personas.undoBatch(b.batch);
+          /** 撤销时把当时清掉的会话引用一起写回 */
+          if (r.byChat && Object.keys(r.byChat).length) {
+            const next = structuredClone(loadConfig());
+            next.persona.byChat = next.persona.byChat || {};
+            /** 只补「空着」的会话：删除之后用户可能又给这个群指定了别人，别盖掉 */
+            for (const [chatId, pid] of Object.entries(r.byChat)) {
+              if (!next.persona.byChat[chatId]) next.persona.byChat[chatId] = pid;
+            }
+            cfg = saveConfig(next);
+          }
+          addLog('info', 'persona', `撤销批次 ${r.batch}：恢复 ${r.restored.length} 份`);
+          return send(res, 200, r);
+        } catch (e) {
+          return send(res, 400, { ok: false, message: e.message });
+        }
       }),
 
       /**

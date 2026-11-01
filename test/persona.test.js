@@ -336,3 +336,74 @@ test('列表：带 label，name 同值（旧客户端不会立刻坏）', () => 
     done();
   }
 });
+
+test('批量删除：一个批次一个目录 + manifest，撤销能全部恢复', () => {
+  const { p, dir, done } = fresh();
+  try {
+    p.save('a', '---\nlabel: 甲\n---\nA');
+    p.save('b', '---\nlabel: 乙\n---\nB');
+
+    const r = p.removeMany(['a', 'b']);
+    assert.equal(r.removed.length, 2);
+    assert.ok(r.batch, '要有批次号');
+    assert.ok(!existsSync(join(dir, 'personas', 'a.md')));
+
+    const man = JSON.parse(readFileSync(join(dir, 'personas', '.backup', r.batch, 'manifest.json'), 'utf8'));
+    assert.equal(man.items.length, 2, 'manifest 要记全');
+
+    const u = p.undoBatch(r.batch);
+    assert.deepEqual(u.restored.sort(), ['a', 'b']);
+    assert.ok(existsSync(join(dir, 'personas', 'a.md')), '撤销要真的回拷');
+    const prefs = JSON.parse(readFileSync(join(dir, 'personas', '.prefs.json'), 'utf8'));
+    assert.ok(!prefs.deleted.includes('a'), '撤销要清墓碑');
+  } finally {
+    done();
+  }
+});
+
+test('批量删除：默认人格不会被删', () => {
+  const { p, done } = fresh();
+  try {
+    const r = p.removeMany(['default']);
+    assert.deepEqual(r.removed, []);
+  } finally {
+    done();
+  }
+});
+
+test('批量删除：同一秒内两批不共用目录，撤销各自独立', () => {
+  const { p, dir, done } = fresh();
+  try {
+    p.save('a', '---\nlabel: A\n---\nA');
+    p.save('b', '---\nlabel: B\n---\nB');
+
+    const r1 = p.removeMany(['a']);
+    const r2 = p.removeMany(['b']);
+    assert.notEqual(r1.batch, r2.batch, '同一秒也要分开，否则 manifest 互相覆盖');
+
+    const u2 = p.undoBatch(r2.batch);
+    assert.deepEqual(u2.restored, ['b']);
+    assert.ok(!existsSync(join(dir, 'personas', 'a.md')), '撤销第二批不能顺手恢复第一批');
+
+    const u1 = p.undoBatch(r1.batch);
+    assert.deepEqual(u1.restored, ['a']);
+  } finally {
+    done();
+  }
+});
+
+test('批量删除：17 个一批，撤销全部恢复', () => {
+  const { p, dir, done } = fresh();
+  try {
+    const ids = Array.from({ length: 17 }, (_, i) => `p${i}`);
+    for (const id of ids) p.save(id, `---\nlabel: ${id}\n---\n${id}`);
+
+    const r = p.removeMany(ids);
+    assert.equal(r.removed.length, 17);
+    const u = p.undoBatch(r.batch);
+    assert.equal(u.restored.length, 17);
+    for (const id of ids) assert.ok(existsSync(join(dir, 'personas', `${id}.md`)));
+  } finally {
+    done();
+  }
+});

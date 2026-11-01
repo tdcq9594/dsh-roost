@@ -541,3 +541,40 @@ test('选人格：本群指定不动全局，A 群的指定不丢，取消能真
     h.off?.();
   }
 });
+
+test('治理：失效引用能查出来；批量删会级联清 byChat', async () => {
+  const h = await bootHost({ persona: { current: 'default', byChat: { 群A: 'snarky', 群B: '不存在' } } });
+  try {
+    const g = await h.call('/personas/gov');
+    assert.equal(g.json.invalid.length, 1, '只有 群B 是失效引用');
+    assert.equal(g.json.health, null, '不扫时 health 必须是 null（面板显示未扫描）');
+
+    const g2 = await h.call('/personas/gov?scan=1');
+    assert.ok(g2.json.health, '扫描后要有结果');
+    assert.ok(Array.isArray(g2.json.health.suggestions));
+
+    const del = await h.call('/personas/batch/remove', { method: 'POST', body: { ids: ['snarky'] } });
+    assert.equal(del.status, 200);
+    assert.ok(del.json.batch, '要返回批次号');
+    assert.equal(del.json.byChat.群A, undefined, '删掉被指定的要级联清 byChat');
+
+    const undo = await h.call('/personas/batch/undo', { method: 'POST', body: { batch: del.json.batch } });
+    assert.equal(undo.status, 200);
+    assert.deepEqual(undo.json.restored, ['snarky']);
+
+    const back = await h.call('/personas/gov');
+    assert.equal(back.json.refs.find((r) => r.chatId === '群A')?.id, 'snarky', '撤销要把会话引用一起恢复');
+  } finally {
+    h.off?.();
+  }
+});
+
+test('单删也会级联清 byChat', async () => {
+  const h = await bootHost({ persona: { current: 'default', byChat: { 群A: 'snarky' } } });
+  try {
+    const r = await h.call('/personas/remove', { method: 'POST', body: { id: 'snarky' } });
+    assert.equal(r.json.byChat.群A, undefined, '单删不级联的话这个群会一直指向不存在的人格');
+  } finally {
+    h.off?.();
+  }
+});

@@ -3260,6 +3260,121 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /* ---------------- 治理 ---------------- */
+
+    /**
+     * 治理：谁在用、引用有没有失效、体检 + 批量清理。
+     *
+     * 首屏**不扫描**（`health: null`），显示「未扫描」而不是四张 0——
+     * 0 会被读成「没问题」，那比不显示更糟。
+     */
+    function GovPanel({ toast, reload, loadMarket }) {
+      const [gov, setGov] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [picked, setPicked] = useState([])
+
+      const load = useCallback(async (scan) => {
+        const r = await get('/personas/gov' + (scan ? '?scan=1' : ''))
+        if (r.ok === false) return toast(r.message || '读不到治理信息')
+        setGov(r)
+        setPicked([])
+      }, [toast])
+
+      useEffect(() => { load(false) }, [load])
+
+      const run = async (fn) => {
+        setBusy(true)
+        try {
+          await fn()
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const toggle = (id) => setPicked((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]))
+
+      if (!gov) return h('div', { className: 'roost-empty' }, '读着…')
+
+      const health = gov.health
+      const batches = gov.batches || []
+
+      return h('div', { style: { marginTop: 8 } },
+        h(Sec, { n: '02', title: '正在用' },
+          h('div', { className: 'roost-note', style: { marginTop: 4, color: gov.currentOk === false ? '#c0392b' : undefined } },
+            `全局：${gov.currentLabel || gov.current}` + (gov.currentOk === false ? '（不存在，已回退 default）' : '')),
+          (gov.refs || []).length
+            ? h('div', { className: 'roost-list', style: { marginTop: 6 } },
+                gov.refs.map((r) => h('div', { key: r.chatId, className: 'roost-item' },
+                  h('span', { className: 't', style: { color: r.ok ? undefined : '#c0392b' } },
+                    `${String(r.chatId).slice(0, 10)}… → ${r.ok ? r.label : `${r.id}（不存在，已回退 default）`}`),
+                )))
+            : h('div', { className: 'roost-note', style: { marginTop: 4 } }, '没有按会话指定的人格'),
+        ),
+
+        h(Sec, { n: '03', title: '体检', right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: busy,
+          onClick: () => run(async () => {
+            await load(true)
+            toast('扫完了')
+          }),
+        }, health ? '重新扫描' : '开始扫描') },
+          !health
+            ? h('div', { className: 'roost-empty' }, '未扫描——点右上角「开始扫描」')
+            : h('div', null,
+                h('div', { className: 'roost-note', style: { marginTop: 4 } },
+                  `高危 ${health.risky.length} · 重复 ${health.dup.length} 组 · 长期未用 ${health.stale.length} · 超预算 ${health.big.length}`),
+                (gov.invalid || []).length
+                  ? h('div', { className: 'roost-note', style: { color: '#c0392b', marginTop: 4 } },
+                      `引用失效 ${gov.invalid.length} 个会话（已静默回退 default）`)
+                  : null,
+
+                h('div', { style: { marginTop: 10, fontSize: 12, fontWeight: 650 } }, '清理建议'),
+                (health.suggestions || []).length
+                  ? h('div', { className: 'roost-list' },
+                      health.suggestions.map((s) => h('div', { key: s.id, className: 'roost-item' },
+                        h('label', { className: 't', style: { display: 'flex', gap: 8, alignItems: 'center' } },
+                          h('input', {
+                            type: 'checkbox',
+                            checked: picked.includes(s.id),
+                            onChange: () => toggle(s.id),
+                          }),
+                          h('span', null, `${s.label} · ${s.why}`),
+                        ),
+                      )))
+                  : h('div', { className: 'roost-note', style: { marginTop: 4 } }, '没有可清理的（默认、正在用、被指定的都已排除）'),
+
+                h('div', { style: { display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' } },
+                  h('button', {
+                    type: 'button', className: 'roost-btn danger', disabled: busy || !picked.length,
+                    onClick: () => run(async () => {
+                      const r = await post('/personas/batch/remove', { ids: picked })
+                      if (r.ok === false) return toast(r.message || '没删成')
+                      toast(`删了 ${r.removed.length} 份` + (r.batch ? '，可以撤销' : ''))
+                      await load(true)
+                      reload?.()
+                      loadMarket?.(true)
+                    }),
+                  }, `删除选中（${picked.length}）`),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: busy || !batches.length,
+                    /** 撤销窗口 = 最近 5 个批次（pruneBackups 按目录数留 5） */
+                    title: '只保留最近 5 次备份',
+                    onClick: () => run(async () => {
+                      const r = await post('/personas/batch/undo', { batch: batches[0].ts })
+                      if (r.ok === false) return toast(r.message || '没撤销成')
+                      toast(`恢复了 ${r.restored.length} 份`)
+                      await load(true)
+                      reload?.()
+                      loadMarket?.(true)
+                    }),
+                  }, batches.length ? `撤销上一批（${batches[0].count} 份）` : '没有可撤销的批次'),
+                ),
+              ),
+        ),
+      )
+    }
+
     /* ---------------- 市场 ---------------- */
 
     /**
@@ -3275,6 +3390,8 @@ select.roost-input{color-scheme:dark}
       const [tag, setTag] = useState('')
       const [limit, setLimit] = useState(50)
       const [preview, setPreview] = useState(null)
+      /** 治理是市场页里的一块，不另开页签（11 个页签窄屏会换行） */
+      const [govOpen, setGovOpen] = useState(false)
 
       const all = market?.personas || []
       /** 标签栏用**全量**算：用过滤后的算，选中一个标签后其它标签会消失，没法切换 */
@@ -3308,12 +3425,18 @@ select.roost-input{color-scheme:dark}
         h(Sec, {
           n: '01',
           title: '市场',
-          right: h('span', { className: 'roost-note', style: { margin: 0 } },
-            !market ? '读着…'
-              : gated ? '先升级再看'
-                : `${all.length} 个`
-                  + (market.pending ? ` · ${market.pending} 个可更新` : '')
-                  + (market.deleted ? ` · ${market.deleted} 个你删过` : '')),
+          right: h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+            h('span', { className: 'roost-note', style: { margin: 0 } },
+              !market ? '读着…'
+                : gated ? '先升级再看'
+                  : `${all.length} 个`
+                    + (market.pending ? ` · ${market.pending} 个可更新` : '')
+                    + (market.deleted ? ` · ${market.deleted} 个你删过` : '')),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => setGovOpen((v) => !v),
+            }, govOpen ? '收起治理' : '治理'),
+          ),
         },
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 8 } },
             h('input', {
@@ -3447,6 +3570,7 @@ select.roost-input{color-scheme:dark}
             '装的时候会给市场人格补上「不许用工具」的默认值（作者自己声明过就按作者的）；'
             + '你改过的那份不会被覆盖，撞名会另存一个名字。'),
         ),
+        govOpen ? h(GovPanel, { toast, reload, loadMarket }) : null,
       )
     }
 
