@@ -48,7 +48,7 @@ export function legacyPersonaText(persona, cfgText) {
 /** 解析 `---` 头 + 正文 */
 export function parsePersona(id, raw) {
   let text = String(raw ?? '').replace(/^\uFEFF/, '');
-  const meta = { id, name: id, tags: [] };
+  const meta = { id, name: id, tags: [], tools: null };
 
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   if (m) {
@@ -62,6 +62,26 @@ export function parsePersona(id, raw) {
           .split(/[,，]/)
           .map((s) => s.trim())
           .filter(Boolean);
+      }
+      /**
+       * `tools`：这个格能碰哪些工具。三元语义（抄 AstrBot persona_plus）：
+       *   · 省略 / `null` → 不限制（自己写的人格，保持旧行为）
+       *   · `[]`        → 一个都不给（**仓库装来的人格默认这个**）
+       *   · `[a, b]`    → 只给这两个
+       *
+       * 为什么放在人格文件里而不是配置里：限制属于「这个人格该有多危险」，
+       * 跟正文一起走才能被作者写、被 review、被 diff。
+       */
+      if (kv[1] === 'tools') {
+        const v = kv[2].trim();
+        if (!v || /^null$/i.test(v)) meta.tools = null;
+        else {
+          meta.tools = v
+            .replace(/^\[|\]$/g, '')
+            .split(/[,，]/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+        }
       }
     }
     text = text.slice(m[0].length);

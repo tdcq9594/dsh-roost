@@ -136,9 +136,14 @@ test('保存：覆盖旧人格也会先备份（注释说共用一条规则，�
     p.list();
     p.save('fatfish', '---\nname: 大肥鱼\n---\n第一版。');
     p.save('fatfish', '---\nname: 大肥鱼\n---\n第二版。');
-    const dirs = readdirSync(join(dir, 'personas', '.backup'));
-    assert.equal(dirs.length, 1);
-    assert.match(readFileSync(join(dir, 'personas', '.backup', dirs[0], 'fatfish.md'), 'utf8'), /第一版/);
+    /**
+     * 备份目录名只精确到秒，两次保存跨过整秒就会分成两个目录——
+     * 所以不能断言「只有一个目录」，只能断言「第一版确实被备份下来了」。
+     */
+    const base = join(dir, 'personas', '.backup');
+    const texts = readdirSync(base)
+      .flatMap((d) => readdirSync(join(base, d)).map((f) => readFileSync(join(base, d, f), 'utf8')));
+    assert.ok(texts.some((t) => /第一版/.test(t)), `第二版写入前应把第一版备份下来：${texts.length} 份备份`);
   } finally {
     done();
   }
@@ -186,6 +191,25 @@ test('解析：没有头就整段当正文，名字退回 id', () => {
   const r = parsePersona('bare', '就是一段话');
   assert.equal(r.name, 'bare');
   assert.equal(r.body, '就是一段话');
+});
+
+/* ---------------- 人格级工具限制（P1） ---------------- */
+
+test('解析：tools 三元语义——省略/null 不限制、[] 全禁、[a,b] 只给这些', () => {
+  const none = parsePersona('x', '---\nname: 甲\n---\n正文');
+  assert.equal(none.tools, null, '没写就是 null（不限制，保持旧行为）');
+
+  const nul = parsePersona('x', '---\nname: 甲\ntools: null\n---\n正文');
+  assert.equal(nul.tools, null);
+
+  const empty = parsePersona('x', '---\nname: 甲\ntools: []\n---\n正文');
+  assert.deepEqual(empty.tools, [], '仓库装来的人格默认这个');
+
+  const two = parsePersona('x', '---\nname: 甲\ntools: qq_send, memory_search\n---\n正文');
+  assert.deepEqual(two.tools, ['qq_send', 'memory_search']);
+
+  const bracket = parsePersona('x', '---\nname: 甲\ntools: [qq_send]\n---\n正文');
+  assert.deepEqual(bracket.tools, ['qq_send'], '中括号写法也认');
 });
 
 /* ---------------- 人格搬成文件（0.10.7） ---------------- */

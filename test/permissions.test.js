@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { planGuestTools, planDenyTools, GUEST_KEEP_TOOLS, AWAKE_DENY_TOOLS } from '../src/permissions.js';
+import { planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, AWAKE_DENY_TOOLS } from '../src/permissions.js';
 
 /** 这版 DSH 真实报出来的全局工具（2026-10-28 面板日志里抄的） */
 const REAL_TOOLS = [
@@ -145,4 +145,49 @@ test('主动搭话：名单是可传的，默认就是那两个', () => {
   assert.deepEqual(AWAKE_DENY_TOOLS, ['qq_send', 'qq_close']);
   const plan = planDenyTools(fakeTools(['qq_send', 'qq_close']), ['qq_close']);
   assert.deepEqual(plan.deny, ['qq_close']);
+});
+
+/* ---------------- 人格级工具限制（P1） ---------------- */
+
+/**
+ * 人格文件里的 `tools` 是**第三个**限制来源（另外两个是档位、主动搭话）。
+ * 语义：null = 不限制 / [] = 一个都不给 / [a,b] = 只给这些。
+ *
+ * 最容易做错的是「和档位取交集」：人格写了 `[edit]`，群友说话时也不能给 edit。
+ */
+test('人格工具：[] 表示一个都不给（仓库装来的人格默认这个）', () => {
+  const plan = planPersonaTools(fakeTools(REAL_TOOLS), []);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.deny.length, REAL_TOOLS.length, '全都要收走');
+});
+
+test('人格工具：[a,b] 只留这两个，其余收走', () => {
+  const all = [...REAL_TOOLS, 'memory_search', 'qq_send'];
+  const plan = planPersonaTools(fakeTools(all), ['memory_search', 'qq_send']);
+  assert.equal(plan.ok, true);
+  assert.ok(!plan.deny.includes('memory_search'));
+  assert.ok(!plan.deny.includes('qq_send'));
+  assert.ok(plan.deny.includes('edit'));
+  assert.equal(plan.deny.length, all.length - 2);
+});
+
+test('人格工具：和档位取交集——人格放开的，群友也拿不到', () => {
+  const all = [...REAL_TOOLS, ...GUEST_KEEP_TOOLS];
+  // 人格说可以用 edit，但群友档只允许 GUEST_KEEP_TOOLS
+  const plan = planPersonaTools(fakeTools(all), ['edit', 'memory_search'], GUEST_KEEP_TOOLS);
+  assert.equal(plan.ok, true);
+  assert.ok(plan.deny.includes('edit'), '群友不该因为人格写了就拿到 edit');
+  assert.ok(!plan.deny.includes('memory_search'), '两边都允许的才留下');
+});
+
+test('人格工具：null / 非数组表示「不限制」，不产生 deny', () => {
+  const plan = planPersonaTools(fakeTools(REAL_TOOLS), null);
+  assert.equal(plan.ok, false);
+  assert.match(plan.reason, /没有声明/);
+});
+
+test('人格工具：清单为空时明说没算成，不假装收住了', () => {
+  const plan = planPersonaTools(fakeTools([]), []);
+  assert.equal(plan.ok, false);
+  assert.match(plan.reason, /报不出工具清单/);
 });

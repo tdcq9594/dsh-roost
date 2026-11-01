@@ -142,6 +142,54 @@ export function planGuestTools(tools, keep = GUEST_KEEP_TOOLS) {
 }
 
 /**
+ * 人格级工具限制：这个人格这一轮允许碰哪些工具。
+ *
+ * 语义（抄 AstrBot `persona_plus`，三元）：
+ *   · `null` / 省略 → 不限制（自己写的人格，保持旧行为）
+ *   · `[]`          → 一个都不给（**仓库装来的人格默认这个**）
+ *   · `[a, b]`      → 只给这两个
+ *
+ * 和档位的关系是**取交集**：主人的消息 + 人格 `[]` → 仍然没工具；
+ * 群友的消息 + 人格 `[edit]` → 仍然只有 `GUEST_KEEP_TOOLS` 里那几个。
+ * 「宁可少给，不可多给」这条兜底原则对人格同样成立。
+ *
+ * @param {object} tools agent 的 tools 服务（只要 `schemas()`）
+ * @param {string[]} personaTools 人格声明的允许名单（空数组 = 全禁）
+ * @param {string[]|null} [keep] 档位还允许保留的白名单；null = 档位不额外限制
+ * @returns {{ok:true, deny:string[]} | {ok:false, reason:string}}
+ */
+export function planPersonaTools(tools, personaTools, keep = null) {
+  if (!Array.isArray(personaTools)) return { ok: false, reason: '人格没有声明工具限制' };
+
+  if (!tools || typeof tools.schemas !== 'function') {
+    return { ok: false, reason: '这个 agent 的 tools 服务没有 schemas()（版本差异）' };
+  }
+
+  let list;
+  try {
+    list = tools.schemas();
+  } catch (e) {
+    return { ok: false, reason: `读不到工具清单：${e?.message || e}` };
+  }
+
+  const names = (Array.isArray(list) ? list : [])
+    .map((s) => String(s?.name ?? s?.tool?.name ?? ''))
+    .filter(Boolean);
+  if (!names.length) return { ok: false, reason: 'DSH 报不出工具清单（schemas() 是空的）' };
+
+  let allowed = new Set(personaTools);
+  if (Array.isArray(keep)) {
+    const k = new Set(keep);
+    allowed = new Set([...allowed].filter((n) => k.has(n)));
+  }
+
+  const deny = names.filter((n) => !allowed.has(n));
+  if (!deny.length) return { ok: false, reason: '没有可收走的工具（人格允许的已经覆盖了全部）' };
+
+  return { ok: true, deny };
+}
+
+/**
  * 这条消息的说话人属于哪一档。
  *
  * 优先用 ai-chat 给的 `bucket`（它已经按框架的等级算好了）；

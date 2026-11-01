@@ -195,6 +195,8 @@ export function createCatalog({ dir, parse, log = () => {} }) {
         file: name,
         name: meta.name || id,
         tags: Array.isArray(meta.tags) ? meta.tags : [],
+        // 人格级工具限制：null = 不限制，[] = 一个都不给，[a,b] = 只给这些
+        tools: Array.isArray(meta.tools) ? meta.tools : null,
         // 字数用**整份原文**长度（CRLF 归一后），跟 personas/index.json 的口径一致。
         // 用 body.length 会明显偏小（不含示例和世界书）；不归一的话，Windows 用户
         // 用记事本存一次，sha 判「没改」、字数却凭空多出「行数」个字符。
