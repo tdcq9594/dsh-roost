@@ -445,7 +445,7 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
       const byChat = personaCfg.byChat ?? {};
       const want = byChat[chatId] || personaCfg.current || 'default';
       const got = parsedOf(items, want) || parsedOf(items, 'default');
-      return got || { id: 'default', name: '小栖', body: '', tags: [] };
+      return got || { id: 'default', label: '大肥鱼', name: '大肥鱼', body: '', tags: [] };
     },
   };
 }

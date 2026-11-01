@@ -377,9 +377,9 @@ export function createPersonaRepo({
    * 补 `tools: []`，但**只在明确要求时**补。
    *
    * 三种调用方，三种语义：
-   *   · `install()`——市场单条安装，`force = !bmap.has(file)`：内置人格不补
-   *     （它们由作者显式声明 `null`，补成 `[]` 会把小栖的工具全收走）；
-   *   · `sync()` / `restore()`——`force = 本地这份本来就声明了 tools`：
+   *   · `install()`——市场单条安装，`force = !isBuiltin(本地文件名)`：内置人格不补
+   *     （包自带的那几份靠索引/文件识别，补成 `[]` 会把小栖的工具全收走）；
+   *   · `sync()` / `restore()`——`force = 非内置 或 本地本来就声明了 tools`：
    *     **保留**，别把装的时候补的 `[]` 洗回 `null`（全开）；
    *   · 本地没有 tools 的（内置/老文件）——一个字节都不动。
    *
@@ -532,7 +532,13 @@ export function createPersonaRepo({
        */
       else if (rec && local === rec.localSha) state = rec.sha256 === p.sha256 ? 'same' : 'update';
       else if (rec?.sha256 === local || bundled === local) state = 'update';
-      else state = 'modified';
+      /**
+       * 内置人格、**没有 `.synced`**（老用户从没用过一键更新）：本地那份就是
+       * 包自带的旧版，不是用户改的。判成 `modified` 会让它永远收不到更新，
+       * 面板还会长期挂着「你改过」。
+       * 有 `.synced` 却对不上的，仍然算 `modified`——那是真的改过。
+       */
+      else state = bundled && !rec ? 'update' : 'modified';
 
       return {
         id: p.id,
@@ -742,6 +748,13 @@ export function createPersonaRepo({
          * 本地 sha 不等于包内 sha，但那不是用户手改的——按 `rec` 判它是我们写的。
          */
         let allowed = false;
+        /**
+         * 内置人格只认两种「没改过」：和包内 sha 一致，或 `.synced` 记录对得上。
+         *
+         * **没有 `.synced` 的旧版不迁移**：分不清「老包自带的」和「用户改过的」，
+         * 迁移只改一行也会动用户的文件。这类文件的状态会被判成 `update`，
+         * 用户点一次「一键更新」就换成新的 label 版本（会先备份），不需要迁移插手。
+         */
         if (builtin) allowed = localSha === bundledSha(file) || localSha === rec?.localSha || localSha === rec?.sha256;
         else if (rec) allowed = localSha === rec.localSha || localSha === rec.sha256;
         else allowed = true; // 自己写的，没有 sha 语义
@@ -766,10 +779,17 @@ export function createPersonaRepo({
           writeAtomic(p, out);
 
           if (builtin || rec) {
+            /**
+             * 没有 `rec` 时（老用户的内置人格），把**写下去的这一版**当基准：
+             * 内容和新包一致 → `same`；不一致（比如 fatfish 正文这次改过）
+             * → `update`，用户点一下就能拿到新正文。
+             * 不能拿包内 sha 当基准——那会把旧正文谎报成「已是最新」。
+             */
+            const newSha = hashText(out);
             synced[repoId] = {
               ...(rec || {}),
-              sha256: rec?.sha256 ?? bundledSha(file) ?? localSha,
-              localSha: hashText(out),
+              sha256: rec?.sha256 ?? newSha,
+              localSha: newSha,
               syncedAt: Date.now(),
             };
           }
@@ -835,10 +855,15 @@ export function createPersonaRepo({
            *   · 内置人格本地是 npm 带的旧版 → 和包内那份 sha 一致，正常覆盖；
            *   · 用户改过的内置人格 → 拒绝；
            *   · 其余才算撞名（用户自己写的同名人格）→ 换名，绝不覆盖。
+           *
+           * **必须同时要求 `p.id === 文件名主干`**：市场条目的 `file` 可以随便写，
+           * 一条 `id: evil, file: default.md` 会命中「和包内 sha 一致」，
+           * 把内置人格覆盖掉，而且因为文件名叫 default.md 还被当成内置、不补 tools。
            */
-          if (localSha === bundledSha(file)) {
+          const samePersona = p.id === String(file).replace(/\.md$/i, '');
+          if (samePersona && localSha === bundledSha(file)) {
             // ours：继续往下装（会先备份）
-          } else if (isBuiltin(file)) {
+          } else if (samePersona && isBuiltin(file)) {
             return { ok: false, why: '你改过这份，先自己处理（或点「恢复官方」）' };
           } else {
             const stem = localName.replace(/\.md$/i, '');
@@ -860,7 +885,12 @@ export function createPersonaRepo({
       const got = hashText(text);
       if (got !== p.sha256) throw new Error(`内容校验失败（索引说 ${String(p.sha256).slice(0, 8)}…，实际 ${got.slice(0, 8)}…）`);
 
-      const { text: out, injected } = withToolsDefault(text, !isBuiltin(file));
+      /**
+       * 补不补 `tools: []` 看**本地文件名**，不看仓库里的 `file`。
+       * 撞名安装后本地叫 `slug__default.md`，它已经不是内置那份了，
+       * 必须补；只看 `file` 的话会漏掉，等于绕过安全默认。
+       */
+      const { text: out, injected } = withToolsDefault(text, !isBuiltin(localName));
       backup(id, localName);
       writeAtomic(join(dir(), localName), out);
       synced[id] = { sha256: got, localSha: hashText(out), syncedAt: Date.now() };
@@ -917,8 +947,10 @@ export function createPersonaRepo({
        */
       try {
         const p2 = personas?.prefs?.read?.();
-        if (p2?.deleted?.includes(id)) {
-          personas.prefs.patch({ deleted: p2.deleted.filter((x) => x !== id) });
+        /** 墓碑可能记在仓库 id、本地 id（撞名安装）两个地方，一起清 */
+        const gone = [...new Set([id, String(localName).replace(/\.md$/i, ''), inst[id]].filter(Boolean))];
+        if (gone.some((x) => p2?.deleted?.includes(x))) {
+          personas.prefs.patch({ deleted: p2.deleted.filter((x) => !gone.includes(x)) });
         }
       } catch {}
 

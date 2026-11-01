@@ -814,23 +814,36 @@ test('迁移：自己写的人格把 name 改成 label，原文与备份都对',
   }
 });
 
-test('迁移：内置人格改完后仍是「已是最新」（靠 localSha 吸收 sha 变化）', async () => {
-  const h = harness({ files: { a: P1 }, bundled: { 'a.md': P1 } });
+test('迁移：内置旧版没有 .synced 时不碰文件，状态是「可更新」而不是「你改过」', async () => {
+  const oldText = '---\nname: 甲\n---\n我是甲。';
+  const newText = '---\nlabel: 甲\n---\n我是甲。';
+  const h = harness({ files: { a: newText }, bundled: { 'a.md': newText } });
   try {
     writeFileSync(
       join(h.dataDir, 'bundled', 'index.json'),
-      JSON.stringify({ schema: 1, personas: [{ id: 'a', file: 'a.md', sha256: sha256(P1) }] }),
+      JSON.stringify({ schema: 1, personas: [{ id: 'a', file: 'a.md', sha256: sha256(newText) }] }),
       'utf8',
     );
     mkdirSync(h.pdir, { recursive: true });
-    writeFileSync(join(h.pdir, 'a.md'), P1, 'utf8');
+    writeFileSync(join(h.pdir, 'a.md'), oldText, 'utf8');
 
+    // 分不清「老包自带」和「用户改过」，迁移不碰；状态给「可更新」
     const rep = h.repo.migrateNameField();
-    assert.deepEqual(rep.renamed.map((x) => x.id), ['a']);
-    assert.match(readFileSync(join(h.pdir, 'a.md'), 'utf8'), /label: 甲/);
+    assert.deepEqual(rep.renamed, [], '没有 .synced 的旧版不迁移');
+    assert.equal(readFileSync(join(h.pdir, 'a.md'), 'utf8'), oldText);
 
-    const l = await h.repo.list({ force: true });
-    assert.equal(l.personas[0].state, 'same', `改完不该变成「你改过」，实际 ${l.personas[0].state}`);
+    const before = await h.repo.list({ force: true });
+    assert.equal(before.personas[0].state, 'update', `应该可更新，实际 ${before.personas[0].state}`);
+
+    // 用户点一键更新 → 换成新版（label），之后 same
+    const s = await h.repo.sync();
+    assert.deepEqual(s.updated.map((x) => x.id), ['a']);
+    const text = readFileSync(join(h.pdir, 'a.md'), 'utf8');
+    assert.match(text, /label: 甲/);
+    assert.doesNotMatch(text, /^name:/m);
+
+    const after = await h.repo.list({ force: true });
+    assert.equal(after.personas[0].state, 'same');
   } finally {
     h.done();
   }
@@ -874,6 +887,35 @@ test('迁移：撞名装的人格改完后仍是 same（synced 按仓库 id 记�
 
     const after = await h.repo.list({ force: true });
     assert.equal(after.personas[0].state, 'same', '迁移后不能变成「你改过」');
+  } finally {
+    h.done();
+  }
+});
+
+test('安装：市场条目 file 撞内置文件名，换名且补 tools，不覆盖内置', async () => {
+  /** 市场那份和内置内容**不一样**，否则会被判成「已经装过」 */
+  const evil = '---\nlabel: 坏家伙\n---\n我是另一份。';
+  const customIndex = JSON.stringify({
+    schema: 1,
+    repo: 't/p',
+    branch: 'main',
+    minVersion: '0.0.1',
+    personas: [{ id: 'evil', name: 'evil', tags: [], file: 'default.md', chars: evil.length, sha256: sha256(evil) }],
+  });
+  const h = harness({ files: { default: evil }, bundled: { 'default.md': P1 }, index: customIndex });
+  try {
+    mkdirSync(h.pdir, { recursive: true });
+    writeFileSync(join(h.pdir, 'default.md'), P1, 'utf8'); // 内置那份
+
+    const r = await h.repo.install('evil');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.notEqual(r.localId, 'default', '不能覆盖内置的 default.md');
+    assert.equal(readFileSync(join(h.pdir, 'default.md'), 'utf8'), P1, '内置文件一个字节不动');
+
+    const installed = readFileSync(join(h.pdir, `${r.localId}.md`), 'utf8');
+    assert.match(installed, /我是另一份/, '市场内容要装进来');
+    assert.match(installed, /tools: \[\]/, '撞名装进来的市场人格也必须补 tools');
+    assert.equal(r.injected, true);
   } finally {
     h.done();
   }

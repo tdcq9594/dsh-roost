@@ -11,6 +11,17 @@
 const regs = [];
 const logs = [];
 
+/**
+ * 数据目录用临时目录：`apply()` 会 seed 内置人格、写 `ports.json`、跑迁移。
+ * 用真实目录的话，冒烟脚本会改用户的配置和人格文件（2026-11-01 真踩过）。
+ */
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const DATA = mkdtempSync(join(tmpdir(), 'roost-dry-'));
+process.env.DSH_ROOST_DATA = DATA;
+
 const noop = () => () => {};
 const fakeCtx = {
   /* 声明在 inject 里的四个服务 */
@@ -50,10 +61,10 @@ const fakeCtx = {
     return typeof off === 'function' ? off : noop;
   },
   on: () => noop,
-  dataDir: 'C:/Users/q9079/.dsh/dsh-roost',
-  dir: 'C:/Users/q9079/.dsh/dsh-roost',
+  dataDir: DATA,
+  dir: DATA,
   name: 'roost',
-  path: 'C:/Users/q9079/.dsh/dsh-roost',
+  path: DATA,
 };
 
 // 迁移会改真实数据目录里的人格文件，冒烟脚本跳过它

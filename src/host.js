@@ -1557,7 +1557,7 @@ export function apply(ctx) {
             );
 
             return [
-              `你现在叫「${globalName(persona)}」。`,
+              `别人叫你「${globalName(persona)}」。`,
               PERSONA_BASE,
               override ? `（本群临时人设）\n${override}` : persona.body,
               /**
@@ -1606,11 +1606,16 @@ export function apply(ctx) {
              * 失败后按提示 `<<skip>>` —— 一轮模型调用白花。所以按**当前实际**
              * 工具清单判断；读不到清单就按旧行为，别把正常轮次的分段发言也关掉。
              */
+            let list = null;
             try {
-              const list = agent?.ctx?.tools?.schemas?.() ?? [];
-              const has = list.some((s) => String(s?.name ?? s?.tool?.name ?? '') === 'qq_send');
-              if (!has) return '';
+              list = agent?.ctx?.tools?.schemas?.();
             } catch {}
+            /**
+             * **只有确实拿到清单、且清单里没有 `qq_send` 时**才闭嘴。
+             * 读不到清单（老版本没有 schemas / 调用抛错）要按旧行为把这段留下，
+             * 否则分段发言、表情、@ 会整块消失——比「多一段提示词」严重得多。
+             */
+            if (Array.isArray(list) && !list.some((s) => String(s?.name ?? s?.tool?.name ?? '') === 'qq_send')) return '';
             return [
               '【发言方式】',
               '你手上有两个工具：`qq_send`（发一段话）和 `qq_close`（给这段对话收尾）。',
@@ -1642,14 +1647,21 @@ export function apply(ctx) {
           order: 908,
           text: () => {
             const p = cfg.persona;
-            const persona = personas.resolve(chat.chatId, p);
             return [
-              `别忘了你是谁：${globalName(persona)}。`,
-              '上面那些历史是发生过的事，不是你说话的方式——别聊着聊着变成通用助手。',
+              /**
+               * 这里**不点名字、也不说「刚才」**。
+               *
+               * 不点名字：名字换成全局身份后，「你是谁」会把注意力从「怎么说话」
+               * 拉到「我是谁」，长聊里更容易冒出自我介绍。
+               * 不说「刚才」：主动搭话第一轮没有上文，「刚才那个」指代悬空。
+               * 所以直接指向「上面那段人设」，自包含。
+               */
+              '就按上面那段人设的说话方式，别聊着聊着变成通用助手。',
+              '上面那些历史是发生过的事，不是你说话的方式。',
               p.near || '',
             ]
               .filter(Boolean)
-              .join('');
+              .join('\n');
           },
         }),
       );
