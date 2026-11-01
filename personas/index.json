@@ -8,13 +8,13 @@
       "n": 0,
       "file": "packs/p0.jsonl",
       "count": 2,
-      "bytes": 1067
+      "bytes": 1061
     },
     {
       "n": 1,
       "file": "packs/p1.jsonl",
       "count": 2,
-      "bytes": 937
+      "bytes": 748
     },
     {
       "n": 4,
@@ -45,8 +45,8 @@
         "温和"
       ],
       "file": "default.md",
-      "chars": 169,
-      "sha256": "f422010e73a333293c61fbd724830d19af6ea140b46201ffd01b6d18674745ef",
+      "chars": 103,
+      "sha256": "82ac42a4960f689e005fdc5e2316074d3ec05a68a77f73c76e891a2797e0338a",
       "pack": 1
     },
     {
@@ -59,8 +59,8 @@
         "鲸鱼娘"
       ],
       "file": "fatfish.md",
-      "chars": 294,
-      "sha256": "5d1eba116d0ce524fef6b3a2206a3e5a9cda5aa69b1f0a07e118ddf872e5adff",
+      "chars": 290,
+      "sha256": "ababd9290982a3902755967c32c27cd40d5b8a1cad4ef34cdc006750a0f1dc8a",
       "pack": 0
     },
     {
