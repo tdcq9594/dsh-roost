@@ -69,7 +69,10 @@ export function parseSwitchCommand(text, prefix, names = []) {
   const p = String(prefix || '').trim();
   const t = String(text || '').trim();
   if (!p || !t.startsWith(p)) return null;
-  const arg = t.slice(p.length).trim();
+  /** 前缀后必须是空白或行尾：`/personal info` 不能被当成 `/persona l info` */
+  const rest = t.slice(p.length);
+  if (rest && !/^\s/.test(rest)) return null;
+  const arg = rest.trim();
   if (!arg || /^(list|ls|列表)$/i.test(arg)) return { kind: 'list', arg: '' };
   if (/^(off|reset|clear|关|默认|取消)$/i.test(arg)) return { kind: 'clear', arg: '' };
   const match = (names || []).find((n) => n.id === arg || n.label === arg) || null;
@@ -300,17 +303,33 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
    * 以前只有「一键更新覆盖」会备份，删掉一个自己写的人格就真的没了。
    * 两条路径必须用同一份规则，否则备份目录会长成两种样子。
    */
+  /**
+   * 新建一个**唯一**的备份目录。
+   *
+   * 以前直接用秒级时间戳：同一秒两次备份会写进同一个目录，后一份覆盖前一份
+   * （实测「撤销时覆盖同名文件」把原始备份冲掉，原文永久丢失）。
+   * 而且必须先 prune 再建：先建后 prune 时，只要已有 5 个更晚的目录，
+   * 刚建的这份会被自己删掉。
+   */
+  function newBackupDir() {
+    pruneBackups();
+    const base = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    let name = base;
+    let n = 1;
+    while (existsSync(join(dir(), '.backup', name))) name = `${base}-${++n}`;
+    const bdir = join(dir(), '.backup', name);
+    mkdirSync(bdir, { recursive: true });
+    return bdir;
+  }
+
   function backup(id, file) {
     const name = file || `${safeId(id)}.md`;
     const src = join(dir(), name);
     if (!existsSync(src)) return '';
     try {
-      const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
-      const bdir = join(dir(), '.backup', ts);
-      mkdirSync(bdir, { recursive: true });
+      const bdir = newBackupDir();
       const target = join(bdir, `${safeId(id)}.md`);
       writeFileSync(target, readFileSync(src, 'utf8'), 'utf8');
-      pruneBackups();
       return target;
     } catch (e) {
       log(`备份人格失败：${e.message}`);
@@ -398,6 +417,13 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
     save(id, raw) {
       ensureSeeded();
       const clean = safeId(id);
+      /**
+       * id 必须原样合法。以前 `safeId('中文名')` 会变成空串再兜底成 'default'，
+       * 于是「新建中文 id」会静默覆盖默认人格。
+       */
+      if (!String(id || '').trim() || clean !== String(id)) {
+        throw new Error('id 只能用字母、数字、下划线、短横');
+      }
       // seed 只跑一次之后，`personas/` 被外部删掉就没人重建了——这里自己兜底
       mkdirSync(dir(), { recursive: true });
       const f = join(dir(), `${clean}.md`);
@@ -420,6 +446,8 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
       const item = catalog.get(clean);
       const file = item ? item.file : `${clean}.md`;
       const f = join(dir(), file);
+      /** 不存在的 id 不能算「已删」：会留一个无主墓碑，上游以后出现同名 id 永远 deleted */
+      if (!existsSync(f) && !item) return { id: clean, skipped: true };
       if (existsSync(f)) {
         /**
          * 备份失败就**不删**。
@@ -533,15 +561,8 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
        * 只要 .backup 里已有 5 个更晚的目录（时钟回拨、从别的机器拷来），
        * 刚建的这一批会立刻被自己删掉——文件已 unlink，撤销就永久没了。
        */
-      pruneBackups();
-
-      const base = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
-      /** 同一秒内两次批量删除不能共用一个目录：manifest 会被覆盖，前一批的备份也会被一起删 */
-      let ts = base;
-      let n = 1;
-      while (existsSync(join(dir(), '.backup', ts))) ts = `${base}-${++n}`;
-      const bdir = join(dir(), '.backup', ts);
-      mkdirSync(bdir, { recursive: true });
+      const bdir = newBackupDir();
+      const ts = bdir.split(/[\\/]/).pop();
 
       const removed = [];
       const skipped = [];
@@ -595,13 +616,32 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
       if (!existsSync(mf)) throw new Error('这一批没有 manifest，没法自动撤销');
 
       const man = JSON.parse(readFileSync(mf, 'utf8'));
-      const restored = [];
+      /**
+       * **先把整批读进内存**再写回：写回过程中如果调 `backup()`，它会 prune，
+       * 可能把正在读的这个批次目录删掉（实测原文永久丢失）。
+       */
+      const items = [];
       for (const it of man.items || []) {
+        const file = String(it.file || '');
+        // manifest 也可能被手改：只允许单纯文件名，挡住 `../../config.json`
+        if (!file || /[\\/]/.test(file) || file.includes('..')) continue;
         const src = join(bdir, `${safeId(it.id)}.md`);
         if (!existsSync(src)) continue;
-        /** 撤销会覆盖同名文件（用户可能在这期间又建了一个）——先备份再写 */
-        if (existsSync(join(dir(), it.file))) backup(it.id, it.file);
-        writeFileSync(join(dir(), it.file), readFileSync(src, 'utf8'), 'utf8');
+        items.push({ id: it.id, file, text: readFileSync(src, 'utf8') });
+      }
+
+      const restored = [];
+      const conflicts = [];
+      for (const it of items) {
+        const target = join(dir(), it.file);
+        if (existsSync(target)) {
+          /** 覆盖前留一份到独立目录（不调 backup()，避免 prune 波及本批次） */
+          const cdir = join(dir(), '.backup', `${name}-undo`);
+          mkdirSync(cdir, { recursive: true });
+          writeFileSync(join(cdir, `${safeId(it.id)}.md`), readFileSync(target, 'utf8'), 'utf8');
+          conflicts.push(it.id);
+        }
+        writeFileSync(target, it.text, 'utf8');
         restored.push(it.id);
       }
       try {
@@ -611,7 +651,7 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
       catalog.invalidate();
       for (const id of restored) parsedCache.delete(id);
       try { rmSync(bdir, { recursive: true, force: true }); } catch {}
-      return { ok: true, batch: name, restored, byChat: man.byChat || {} };
+      return { ok: true, batch: name, restored, conflicts, byChat: man.byChat || {} };
     },
 
     /** 最近几个「可撤销」的批次（有 manifest 的），给面板显示撤销按钮 */
@@ -648,6 +688,11 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
      * 免得每轮对话把几 KB 原文也缓存进内存）。宿主只用 body / demos /
      * firstMes / lore / name，不需要原文。
      */
+    /** 让仓库侧能主动触发 seed（status 直接用 catalog.scan 时不经过 list） */
+    seedNow() {
+      ensureSeeded();
+    },
+
     resolve(chatId, personaCfg = {}) {
       ensureSeeded();
       const items = catalog.scan().items;

@@ -204,6 +204,8 @@ export function createCatalog({ dir, parse, log = () => {} }) {
         // 用记事本存一次，sha 判「没改」、字数却凭空多出「行数」个字符。
         chars: raw.replace(/\r\n/g, '\n').length,
         sha256: hashText(raw),
+        /** 文件 mtime：治理页判断「刚装的别急着建议删」，必须在 rec 上，不能在 files 上 */
+        mtimeMs: st.mtimeMs,
       };
       items[id] = rec;
       files[name] = { id, mtimeMs: st.mtimeMs, size: st.size, sha256: rec.sha256 };

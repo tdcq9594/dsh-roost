@@ -555,7 +555,8 @@ export function apply(ctx) {
   /** 关键词切人格：chatId → personaId。**只在内存里**，重启失效（设计如此） */
   const keywordPick = new Map();
   /** 这一轮要注入的「刚切了人格」提示；轮末清掉 */
-  let keywordNote = '';
+  /** 关键词切人格的当轮提示：chatId → 提示。**不能是单变量**，两个群并发会串台 */
+  const keywordNote = new Map();
 
   /** 合并「关键词临时人格」后的 persona 配置，给 resolve 用 */
   function personaCfgFor(chat) {
@@ -1746,7 +1747,7 @@ export function apply(ctx) {
         agent.ctx.systemPrompt.context({
           name: 'roost-switch-note',
           order: 909,
-          text: () => keywordNote || '',
+          text: () => keywordNote.get(chat.chatId) || '',
         }),
       );
     } catch (e) {
@@ -2063,20 +2064,22 @@ export function apply(ctx) {
        * 反而容易和 qq_send 的幂等键打架。
        */
       if (bucket === 'owner' && cfg.persona?.command?.enabled) {
-        const names = personas.list().map((p) => ({ id: p.id, label: p.label || p.name || p.id }));
+        /** label 来自人格文件（市场人格可能是陌生人写的）：压平换行再拼进提示词 */
+        const clean = (s) => String(s || '').replace(/[\r\n]+/g, ' ').slice(0, 40);
+        const names = personas.list().map((p) => ({ id: p.id, label: clean(p.label || p.name || p.id) }));
         const cmd = parseSwitchCommand(text, cfg.persona.command.prefix, names);
         if (cmd) {
           const avail = names.map((n) => n.label).join('、');
           if (cmd.kind === 'list') {
-            keywordNote = `主人想看人格列表。可用：${avail}。简短列出来，别展开。`;
+            keywordNote.set(chat.chatId, `主人想看人格列表。可用：${avail}。简短列出来，别展开。`);
           } else if (cmd.kind === 'clear') {
             keywordPick.delete(chat.chatId);
-            keywordNote = '主人刚取消了这个会话的临时人格，回到全局设定。回一句确认即可。';
+            keywordNote.set(chat.chatId, '主人刚取消了这个会话的临时人格，回到全局设定。回一句确认即可。');
           } else if (cmd.match) {
             keywordPick.set(chat.chatId, cmd.match.id);
-            keywordNote = `主人刚把这个会话的人格切成「${cmd.match.label}」。回一句确认即可，不要解释规则。`;
+            keywordNote.set(chat.chatId, `主人刚把这个会话的人格切成「${cmd.match.label}」。回一句确认即可，不要解释规则。`);
           } else {
-            keywordNote = `主人想切人格但「${cmd.arg}」不存在。可用：${avail}。简短说明并列出。`;
+            keywordNote.set(chat.chatId, `主人想切人格但「${clean(cmd.arg)}」不存在。可用：${avail}。简短说明并列出。`);
           }
         }
       }
@@ -2425,7 +2428,7 @@ export function apply(ctx) {
       } catch {}
       if (sid) speaker.delete(sid);
       /** 切人格提示只活一轮：下一句普通聊天不能再带着它 */
-      keywordNote = '';
+      keywordNote.delete(chat.chatId);
     }
   }
 
@@ -3551,7 +3554,11 @@ export function apply(ctx) {
       }),
 
       route('/config', async (req, res) => {
-        if (req.method === 'GET') return send(res, 200, { ok: true, config: publicConfig(cfg), revision: configRevision() });
+        if (req.method === 'GET') {
+          /** config 与 revision 必须同源：内存 cfg 可能落后于磁盘，混用会让 409 在最该生效时失效 */
+          cfg = loadConfig();
+          return send(res, 200, { ok: true, config: publicConfig(cfg), revision: configRevision() });
+        }
         const body = await readBody(req);
         /**
          * `?mode=patch`：局部保存（切人格、改名字）。
@@ -3648,6 +3655,8 @@ export function apply(ctx) {
           ok: true,
           config: publicConfig(cfg),
           message: (restarted ? '已保存，服务已重载' : '已保存') + syncNote,
+          /** 成功也要回新版本号，否则客户端下次拿空串、冲突检测只生效一次 */
+          revision: configRevision(),
         });
       }),
       /**
@@ -3929,7 +3938,11 @@ export function apply(ctx) {
          * config.json 的话，用旧快照整份写会把他的修改回滚掉。
          */
         const next = structuredClone(loadConfig());
-        if (chatId) next.persona.byChat = { ...(next.persona.byChat || {}), [chatId]: id };
+        if (chatId) {
+          /** 面板显式指定优先于聊天指令：清掉内存里的临时选择 */
+          keywordPick.delete(chatId);
+          next.persona.byChat = { ...(next.persona.byChat || {}), [chatId]: id };
+        }
         else next.persona.current = id;
         cfg = saveConfig(next);
 
@@ -3949,6 +3962,7 @@ export function apply(ctx) {
         }
 
         const next = structuredClone(loadConfig());
+        keywordPick.delete(chatId);
         const map = { ...(next.persona.byChat || {}) };
         delete map[chatId];
         next.persona.byChat = map;
@@ -3959,7 +3973,11 @@ export function apply(ctx) {
       route('/personas/save', async (req, res) => {
         const b = await readBody(req);
         if (!b.id) return send(res, 400, { ok: false, message: '缺 id' });
-        personas.save(b.id, b.raw ?? '');
+        try {
+          personas.save(b.id, b.raw ?? '');
+        } catch (e) {
+          return send(res, 400, { ok: false, message: e.message });
+        }
         return send(res, 200, { ok: true, message: '已保存', id: b.id });
       }),
 
@@ -4036,8 +4054,14 @@ export function apply(ctx) {
           const sugg = new Map();
           for (const x of stale) if (keep(x.id)) sugg.set(x.id, '长期未用');
           for (const g of dup) {
-            const victims = g.ids.filter(keep);
-            for (const id of victims.slice(1)) if (!sugg.has(id)) sugg.set(id, '内容重复');
+            /**
+             * 重复组里要留一份：如果组里有被排除的（正在用/置顶），其余都可清理；
+             * 一个都没排除时，留第一份、建议删其余。
+             */
+            const kept = g.ids.filter((id) => !keep(id));
+            const cand = g.ids.filter(keep);
+            const drop = kept.length ? cand : cand.slice(1);
+            for (const id of drop) if (!sugg.has(id)) sugg.set(id, '内容重复');
           }
 
           health = {

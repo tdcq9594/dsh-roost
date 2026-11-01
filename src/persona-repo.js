@@ -454,6 +454,16 @@ export function createPersonaRepo({
     return Boolean(root && existsSync(join(root, file)));
   }
 
+  function bundledText(file) {
+    const root = personas?.builtinDir?.();
+    if (!root) return '';
+    try {
+      return readFileSync(join(root, file), 'utf8');
+    } catch {
+      return '';
+    }
+  }
+
   /** 本地这份有没有声明 tools（sync/restore 靠它决定要不要保留） */
   function localDeclaresTools(id, file, inst) {
     const p = join(dir(), localNameFor(id, file, inst));
@@ -467,7 +477,9 @@ export function createPersonaRepo({
 
   /** 仓库 id 在本地对应哪个文件名（撞名安装时和仓库里的 `file` 不一样） */
   function localNameFor(id, file, inst) {
-    return `${inst?.[id] || String(file).replace(/\.md$/i, '')}.md`;
+    // 映射值也要清洗：.prefs.json 写 ../../x 能把文件写到 dataDir 外
+    const mapped = String(inst?.[id] || '').replace(/[^A-Za-z0-9_-]/g, '');
+    return `${mapped || String(file).replace(/\.md$/i, '')}.md`;
   }
 
   /**
@@ -492,6 +504,8 @@ export function createPersonaRepo({
    * 离线就能判，也不依赖上次同步的时间点。
    */
   function status(index) {
+    /** 全新安装时 catalog 还是空的：先 seed，否则 8 份内置全显示「未安装」 */
+    personas?.seedNow?.();
     const synced = readSynced();
     const bmap = bundledShas();
     /**
@@ -569,7 +583,21 @@ export function createPersonaRepo({
        * 面板还会长期挂着「你改过」。
        * 有 `.synced` 却对不上的，仍然算 `modified`——那是真的改过。
        */
-      else state = bundled && !rec ? 'update' : 'modified';
+      else if (bundled && !rec) {
+        /**
+         * 内置、没有 `.synced`：只有「正文和包内一致、仅头部不同」才算旧版可更新。
+         * 正文不同 = 用户改过（面板编辑/打标签都会改文件），必须判 `modified`——
+         * 以前这里一律给 `update`，一键更新会把用户的编辑静默覆盖。
+         */
+        let localText = '';
+        try {
+          localText = readFileSync(join(dir(), item ? item.file : `${localId}.md`), 'utf8');
+        } catch {}
+        const bt = bundledText(file);
+        const bodyOf = (t) => String(t).replace(/^\s*---[\s\S]*?\n---[ \t]*(?:\r?\n|$)/, '');
+        state = localText && bt && bodyOf(localText) === bodyOf(bt) ? 'update' : 'modified';
+      }
+      else state = 'modified';
 
       return {
         id: p.id,
@@ -712,6 +740,14 @@ export function createPersonaRepo({
 
         const p = byId.get(r.id);
         try {
+          /**
+           * 索引里的 file 可以随便写，而 sync 直接拿它当本地文件名——
+           * 一条 id=evil、file=fatfish.md 就能把内置人格覆盖掉，还绕过 tools 补写。
+           * install 有撞名守卫，sync 也必须有。
+           */
+          if (String(p.id) !== String(p.file).replace(/\.md$/i, '')) {
+            throw new Error('索引条目的 file 与 id 不一致，拒绝写入（防止撞名覆盖）');
+          }
           const fetchOne = () => getText(`${index.base}/${safeFile(p.file)}`);
           let text = packTexts.get(r.id);
           let fromPack = Boolean(text);
@@ -882,13 +918,15 @@ export function createPersonaRepo({
       const inst = personas?.prefs?.read?.().installedAs ?? {};
       let changed = false;
       for (const id of ids || []) {
-        const rec = synced[id];
+        /** 传进来的可能是本地 id（撞名安装后是 slug__x），.synced 按仓库 id 存 */
+        const repoId = Object.keys(inst).find((k) => inst[k] === id) ?? id;
+        const rec = synced[repoId];
         if (!rec) continue;
-        const p = join(dir(), localNameFor(id, `${id}.md`, inst));
+        const p = join(dir(), localNameFor(repoId, `${repoId}.md`, inst));
         if (!existsSync(p)) continue;
         const sha = hashText(readFileSync(p, 'utf8'));
         if (rec.localSha !== sha) {
-          synced[id] = { ...rec, localSha: sha };
+          synced[repoId] = { ...rec, localSha: sha };
           changed = true;
         }
       }
@@ -1013,6 +1051,7 @@ export function createPersonaRepo({
       const inst = personas?.prefs?.read?.().installedAs ?? {};
       const localName = localNameFor(id, file, inst);
       const text = await getText(`${index.base}/${file}`);
+      if (text.length > MAX_CHARS) throw new Error(`正文 ${text.length} 字，超过 ${MAX_CHARS} 字上限`);
       const got = hashText(text);
       if (got !== p.sha256) throw new Error(`内容校验失败（索引说 ${String(p.sha256).slice(0, 8)}…，实际 ${got.slice(0, 8)}…）`);
 

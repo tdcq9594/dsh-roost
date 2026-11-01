@@ -55,9 +55,10 @@ window.__ModuleLoader__.load({
           };
         }
         try {
-          return JSON.parse(text);
+          /** 带上 HTTP 状态码：调用方要区分 409/403 这些，光有 ok 字段不够 */
+          return { ...JSON.parse(text), status: r.status };
         } catch {
-          return { ok: false, message: `插件回的不是 JSON（HTTP ${r.status}，${p}）：${text.slice(0, 80)}` };
+          return { ok: false, status: r.status, message: `插件回的不是 JSON（HTTP ${r.status}，${p}）：${text.slice(0, 80)}` };
         }
       } catch (e) {
         return { ok: false, message: '连不上插件：' + e.message };
@@ -1330,7 +1331,7 @@ select.roost-input{color-scheme:dark}
             },
           },
             /** 当前人格被删/进墓碑时，受控 select 会显示空白——补一个占位选项说清楚 */
-            (personas?.personas || []).some((p) => p.id === globalId)
+            (personas?.personas || []).some((p) => p.id === globalId) || !personas
               ? null
               : h('option', { value: globalId }, `（已删除：${globalId}）`),
             (personas?.personas || []).map((p) =>
@@ -1564,7 +1565,7 @@ select.roost-input{color-scheme:dark}
                   h('div', { className: 'roost-note', style: { marginTop: 1 } },
                     `${p.chars ?? 0} 字`
                     + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')
-                    + (usage[p.id] ? ` · 用过 ${usage[p.id].useCount ?? usage[p.id]} 次` : '')),
+                    + ((usage[p.id]?.useCount ?? usage[p.id] ?? 0) > 0 ? ` · 用过 ${usage[p.id].useCount ?? usage[p.id]} 次` : '')),
                 ),
                 h('div', { className: 'roost-acts' },
                   /** 只给「当前这个群」指定，不动全局 */
@@ -3268,7 +3269,7 @@ select.roost-input{color-scheme:dark}
      * 首屏**不扫描**（`health: null`），显示「未扫描」而不是四张 0——
      * 0 会被读成「没问题」，那比不显示更糟。
      */
-    function GovPanel({ toast, reload, loadMarket }) {
+    function GovPanel({ toast, reload, loadMarket, tick }) {
       const [gov, setGov] = useState(null)
       const [busy, setBusy] = useState(false)
       const [picked, setPicked] = useState([])
@@ -3281,7 +3282,7 @@ select.roost-input{color-scheme:dark}
         setPicked([])
       }, [toast])
 
-      useEffect(() => { load(false) }, [load])
+      useEffect(() => { load(false) }, [load, tick])
 
       const run = async (fn) => {
         setBusy(true)
@@ -3412,6 +3413,13 @@ select.roost-input{color-scheme:dark}
       const [preview, setPreview] = useState(null)
       /** 治理是市场页里的一块，不另开页签（11 个页签窄屏会换行） */
       const [govOpen, setGovOpen] = useState(false)
+      /** 装/恢复之后让治理面板重挂，否则「正在用/建议」还是旧快照 */
+      const [govTick, setGovTick] = useState(0)
+      const refreshAll = async () => {
+        await loadMarket(true)
+        setGovTick((n) => n + 1)
+        reload?.()
+      }
 
       const all = market?.personas || []
       /** 标签栏用**全量**算：用过滤后的算，选中一个标签后其它标签会消失，没法切换 */
@@ -3522,8 +3530,7 @@ select.roost-input{color-scheme:dark}
                         const saved = r.localId && r.localId !== stem ? `（存为 ${r.localId}）` : ''
                         toast(r.already ? '已经装过了' : `已装上${saved}${r.injected ? '，默认不许用工具' : ''}`)
                         setPreview(null)
-                        await loadMarket(true)
-                        reload?.()
+                        await refreshAll()
                       },
                     }, p.state === 'update' ? '更新' : '装上')
                   : null,
@@ -3542,8 +3549,7 @@ select.roost-input{color-scheme:dark}
                           ? '已恢复'
                           : r.backup ? '已恢复官方版本（旧内容已备份）' : '已恢复官方版本')
                         setPreview(null)
-                        await loadMarket(true)
-                        reload?.()
+                        await refreshAll()
                       },
                     })
                   : null,
@@ -3590,7 +3596,7 @@ select.roost-input{color-scheme:dark}
             '装的时候会给市场人格补上「不许用工具」的默认值（作者自己声明过就按作者的）；'
             + '你改过的那份不会被覆盖，撞名会另存一个名字。'),
         ),
-        govOpen ? h(GovPanel, { toast, reload, loadMarket }) : null,
+        govOpen ? h(GovPanel, { toast, reload, loadMarket, tick: govTick }) : null,
       )
     }
 
@@ -3811,7 +3817,7 @@ select.roost-input{color-scheme:dark}
         if (tab === 'context') loadCtx()
         if (tab === 'chats') loadChats()
         if (tab === 'config' && !config) loadConfig()
-      }, [tab, config, mem, chats, loadMemory, loadHer, loadMarket, loadAwake, loadCtx, loadChats, loadConfig])
+      }, [tab, mem, chats, loadMemory, loadHer, loadMarket, loadAwake, loadCtx, loadChats, loadConfig])
 
       /** 通用动作 runner：按钮点下去 → 跑接口 → 提示 → 刷新 */
       const run = useCallback(async (path, label, body) => {
@@ -3845,7 +3851,10 @@ select.roost-input{color-scheme:dark}
        */
       const saveCfg = useCallback(async (patch) => {
         const r = await post('/config?mode=patch', patch)
-        if (r.ok !== false) setConfig(r.config || null)
+        if (r.ok !== false) {
+          setConfig(r.config || null)
+          if (r.revision) setConfigRev(String(r.revision))
+        }
         return r
       }, [])
 
@@ -3919,7 +3928,7 @@ select.roost-input{color-scheme:dark}
           tab === 'awake' ? h(AwakeTab, { aw, mem, sp, chats, toast, reload: loadAwake, reloadSp: loadAwake, busy }) : null,
           tab === 'context' ? h(ContextTab, { ctxInfo, mind, usageInfo, toast, reload: loadCtx, busy }) : null,
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
-          tab === 'config' ? (config ? h(ConfigTab, { config, save: saveAll, toast }) : h('div', { className: 'roost-empty' }, '读取配置…')) : null,
+          tab === 'config' ? (config ? h(ConfigTab, { key: configRev, config, save: saveAll, toast }) : h('div', { className: 'roost-empty' }, '读取配置…')) : null,
           tab === 'logs' ? h(LogsTab, null) : null,
         ),
 

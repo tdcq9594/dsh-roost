@@ -552,7 +552,8 @@ test('人格: 指定的文件被删了要静默回退，不能让机器人失声
 test('人格: id 做安全过滤，挡路径穿越', () => {
   const dir = tmp();
   const p = createPersonas({ dataDir: dir });
-  p.save('../../evil', 'x');
+  // 现在直接拒绝（比以前静默改名更清楚）
+  assert.throws(() => p.save('../../evil', 'x'), /id 只能用/);
   // 不能写到数据目录外面去
   assert.ok(!existsSync(join(dir, '..', '..', 'evil.md')));
   assert.ok(p.list().every((x) => !x.id.includes('/')));

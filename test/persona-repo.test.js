@@ -996,3 +996,26 @@ test('一键更新：分片内容过期时回退逐条，不把整批记失败',
     h.done();
   }
 });
+
+test('内置人格被改过正文：判 modified，一键更新不覆盖', async () => {
+  const h = harness({ files: { a: P1 }, bundled: { 'a.md': P1 } });
+  try {
+    writeFileSync(
+      join(h.dataDir, 'bundled', 'index.json'),
+      JSON.stringify({ schema: 1, personas: [{ id: 'a', file: 'a.md', sha256: sha256(P1) }] }),
+      'utf8',
+    );
+    mkdirSync(h.pdir, { recursive: true });
+    const mine = `${P1}\n我自己加的一段。`;
+    writeFileSync(join(h.pdir, 'a.md'), mine, 'utf8');
+
+    const l = await h.repo.list({ force: true });
+    assert.equal(l.personas[0].state, 'modified', '正文变了就是用户改过，不能判 update');
+
+    const s = await h.repo.sync();
+    assert.equal(s.updated.length, 0, '一键更新必须跳过');
+    assert.equal(readFileSync(join(h.pdir, 'a.md'), 'utf8'), mine, '用户编辑不能被覆盖');
+  } finally {
+    h.done();
+  }
+});

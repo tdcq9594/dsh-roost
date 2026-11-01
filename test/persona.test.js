@@ -459,3 +459,40 @@ test('切人格指令：整段取名字（带空格也认），list/off 是子�
   assert.equal(parseSwitchCommand('/persona 不存在', '/persona', names).match, null);
   assert.equal(parseSwitchCommand('今天吃什么', '/persona', names), null, '普通聊天不是指令');
 });
+
+test('撤销：同名文件已存在时留冲突副本，原备份不被覆盖', () => {
+  const { p, dir, done } = fresh();
+  try {
+    p.save('a', '---\nlabel: 原\n---\n原内容');
+    const r = p.removeMany(['a']);
+    p.save('a', '---\nlabel: 新\n---\n新内容'); // 删完又建了同名
+
+    const u = p.undoBatch(r.batch);
+    assert.deepEqual(u.restored, ['a']);
+    assert.deepEqual(u.conflicts, ['a'], '要报告被覆盖的那份');
+    assert.match(readFileSync(join(dir, 'personas', 'a.md'), 'utf8'), /原内容/, '恢复的是原内容');
+    assert.ok(existsSync(join(dir, 'personas', '.backup', `${r.batch}-undo`, 'a.md')), '冲突副本要留着');
+  } finally {
+    done();
+  }
+});
+
+test('删除不存在的 id 不写墓碑', () => {
+  const { p, dir, done } = fresh();
+  try {
+    const r = p.remove('ghost');
+    assert.equal(r.skipped, true);
+    const prefsFile = join(dir, 'personas', '.prefs.json');
+    if (existsSync(prefsFile)) {
+      const prefs = JSON.parse(readFileSync(prefsFile, 'utf8'));
+      assert.ok(!(prefs.deleted || []).includes('ghost'), '不能留无主墓碑');
+    }
+  } finally {
+    done();
+  }
+});
+
+test('指令：前缀后必须是空白（/personal 不是 /persona）', () => {
+  assert.equal(parseSwitchCommand('/personal info', '/persona', []), null);
+  assert.equal(parseSwitchCommand('/personaX', '/persona', []), null);
+});

@@ -618,3 +618,30 @@ test('治理体检：重复内容进建议，正在用的排除', async () => {
     h.off?.();
   }
 });
+
+test('配置：GET 读磁盘；旧版本号 409；成功后回新版本号', async () => {
+  const h = await bootHost({ persona: { current: 'default' } });
+  try {
+    const g1 = await h.call('/config');
+    const rev1 = g1.json.revision;
+
+    // 模拟「别处改了配置」
+    const p = join(h.dir, 'config.json');
+    const c = JSON.parse(readFileSync(p, 'utf8'));
+    c.persona.current = 'snarky';
+    writeFileSync(p, JSON.stringify(c), 'utf8');
+
+    const g2 = await h.call('/config');
+    assert.equal(g2.json.config.persona.current, 'snarky', 'GET 必须读磁盘，不能回内存旧快照');
+    assert.notEqual(g2.json.revision, rev1, '内容变了版本号就要变');
+
+    const stale = await h.call('/config', { method: 'POST', body: { persona: { current: 'teacher' }, __revision: rev1 } });
+    assert.equal(stale.status, 409);
+
+    const ok = await h.call('/config', { method: 'POST', body: { persona: { current: 'teacher' }, __revision: g2.json.revision } });
+    assert.equal(ok.status, 200);
+    assert.ok(ok.json.revision && ok.json.revision !== g2.json.revision, '成功要回新版本号');
+  } finally {
+    h.off?.();
+  }
+});
