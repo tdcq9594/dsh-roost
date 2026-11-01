@@ -3159,6 +3159,181 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /* ---------------- 市场 ---------------- */
+
+    /**
+     * 市场：从仓库里挑人格。
+     *
+     * 这一版只做「看」：列表、搜索、标签、预览、恢复已删除。
+     * 装 / 更新仍走「人格与情绪」页的一键更新——等 `install` 接口做好
+     * （要补 `tools: []` 和 `localSha`）再接过来。现在拿 `restore` 当安装用的话，
+     * 装进来的人格没有工具限制，等于把安全默认绕过去了。
+     *
+     * 列表上限 50 行 + 「再看 N 个」：几百份人格全量铺开，面板会卡。
+     */
+    function MarketTab({ market, marketErr, toast, loadMarket, reload }) {
+      const [q, setQ] = useState('')
+      const [tag, setTag] = useState('')
+      const [limit, setLimit] = useState(50)
+      const [preview, setPreview] = useState(null)
+
+      const all = market?.personas || []
+      /** 标签栏用**全量**算：用过滤后的算，选中一个标签后其它标签会消失，没法切换 */
+      const tags = [...new Set(all.flatMap((p) => p.tags || []))]
+        .sort((a, b) => a.localeCompare(b))
+        .slice(0, 14)
+      /** 选中的标签必须还在：刷新后它可能掉出前 14，那时页面会「筛着却取消不掉」 */
+      if (tag && !tags.includes(tag)) tags.unshift(tag)
+
+      const kw = q.trim().toLowerCase()
+      const rows = all.filter((p) => {
+        if (tag && !(p.tags || []).includes(tag)) return false
+        if (!kw) return true
+        return [p.name || '', p.id, ...(p.tags || [])].join(' ').toLowerCase().includes(kw)
+      })
+
+      const label = (s) =>
+        s === 'deleted' ? '已删除'
+          : s === 'missing' ? '未安装'
+            : s === 'update' ? '有更新'
+              : s === 'modified' ? '你改过'
+                : s === 'same' ? '已是最新'
+                  : '未知'
+
+      /** 门槛不过时列表是空的，但那是「看不到」不是「没有」，别显示空态文案 */
+      const gated = Boolean(market && market.gate && market.gate.ok === false)
+
+      const shown = rows.slice(0, limit)
+
+      return h('div', null,
+        h(Sec, {
+          n: '01',
+          title: '市场',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } },
+            !market ? '读着…'
+              : gated ? '先升级再看'
+                : `${all.length} 个`
+                  + (market.pending ? ` · ${market.pending} 个可更新` : '')
+                  + (market.deleted ? ` · ${market.deleted} 个你删过` : '')),
+        },
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 8 } },
+            h('input', {
+              className: 'roost-input', value: q, placeholder: '搜名字、id 或标签',
+              'aria-label': '搜索人格',
+              onChange: (e) => { setQ(e.target.value); setLimit(50) },
+              style: { maxWidth: 260 },
+            }),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => { setPreview(null); loadMarket(true) },
+            }, '刷新'),
+            market?.stale ? h(Pill, { tone: 'warn' }, '用的是缓存清单') : null,
+          ),
+          marketErr
+            ? h('div', { className: 'roost-note', style: { color: '#c0392b', marginTop: 6 } }, '连不上仓库：' + marketErr)
+            : null,
+          gated
+            ? h('div', { className: 'roost-note', style: { marginTop: 6 } }, market.gate.why + '，先升级 dsh-roost 再看。')
+            : null,
+
+          tags.length
+            ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 } },
+                tags.map((t) => h('button', {
+                  key: t, type: 'button', className: 'roost-chip',
+                  'data-on': tag === t ? '1' : '0',
+                  'aria-pressed': tag === t ? 'true' : 'false',
+                  onClick: () => { setTag(tag === t ? '' : t); setLimit(50) },
+                }, t)),
+              )
+            : null,
+
+          h('div', { className: 'roost-list', style: { marginTop: 10 } },
+            shown.map((p) => h('div', { key: p.id, className: 'roost-item' },
+              h('div', { className: 't' },
+                h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+                  h('span', { style: { fontWeight: 500 } }, p.name || p.id),
+                  h(Pill, { tone: p.state === 'same' ? 'ok' : (p.state === 'modified' || p.state === 'deleted' || p.state === 'update') ? 'warn' : null }, label(p.state)),
+                ),
+                h('div', { className: 'roost-note', style: { marginTop: 1 } },
+                  `${p.chars || 0} 字`
+                  + (p.localChars ? ` · 本地 ${p.localChars} 字` : '')
+                  + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')),
+              ),
+              h('div', { className: 'roost-acts' },
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  onClick: async () => {
+                    const r = await get('/personas/repo/preview?id=' + encodeURIComponent(p.id))
+                    if (r.ok === false) return toast(r.message || '预览不了')
+                    setPreview(r)
+                  },
+                }, '预览'),
+                /** 只对「改过的」和「删过的」给恢复；装新的等 install 接口 */
+                p.state === 'modified' || p.state === 'deleted'
+                  ? h(ConfirmLink, {
+                      label: p.state === 'deleted' ? '恢复' : '恢复官方',
+                      confirmLabel: p.state === 'deleted' ? '确认恢复？' : '确认覆盖？',
+                      /** 「恢复已删除」不是破坏性动作，别用红底；「恢复官方」会覆盖，才要红 */
+                      danger: p.state !== 'deleted',
+                      onConfirm: async () => {
+                        const r = await post('/personas/restore', { id: p.id })
+                        // gate 不过时服务端返回 {ok:false, skipped:true, why}，没有 message
+                        if (r.ok === false) return toast(r.why || r.message || '没恢复成')
+                        toast(p.state === 'deleted'
+                          ? '已恢复'
+                          : r.backup ? '已恢复官方版本（旧内容已备份）' : '已恢复官方版本')
+                        setPreview(null)
+                        await loadMarket(true)
+                        reload?.()
+                      },
+                    })
+                  : null,
+              ),
+            )),
+            !rows.length && !gated
+              ? h('div', { className: 'roost-empty' },
+                  !market ? '读着…' : all.length ? '没有匹配的人格' : '仓库里没读到人格')
+              : null,
+          ),
+
+          rows.length > shown.length
+            ? h('div', { style: { marginTop: 8 } },
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  onClick: () => setLimit(limit + 50),
+                }, `再看 ${Math.min(50, rows.length - shown.length)} 个`),
+              )
+            : null,
+
+          preview
+            ? h('div', { style: { marginTop: 12, border: '1px solid currentColor', borderRadius: 8, padding: 10 } },
+                h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+                  h('div', { style: { fontSize: 12, fontWeight: 650 } }, `预览：${preview.name || preview.id}`),
+                  h('span', { className: 'roost-note', style: { margin: 0 } }, `${preview.chars || 0} 字`),
+                  h('button', { type: 'button', className: 'roost-btn', onClick: () => setPreview(null) }, '关闭'),
+                ),
+                (preview.risky || []).length
+                  ? h('div', { className: 'roost-note', style: { color: '#c0392b', marginTop: 6 } },
+                      `⚠ 提到工具或敏感路径 ${preview.risky.length} 处（只是提醒，不拦）：`,
+                      h('div', null, preview.risky.slice(0, 5).map((r, i) =>
+                        h('div', { key: i }, `第 ${r.line} 行 · ${r.why}：${r.text}`))))
+                  : null,
+                h('pre', {
+                  style: {
+                    marginTop: 8, maxHeight: 260, overflow: 'auto', fontSize: 12, lineHeight: 1.7,
+                    whiteSpace: 'pre-wrap', fontFamily: 'ui-monospace,Menlo,Consolas,monospace',
+                  },
+                }, preview.text || ''),
+              )
+            : null,
+
+          h('div', { className: 'roost-note', style: { marginTop: 10 } },
+            '这一版只做「看」：装和更新还在「人格与情绪」页（一键更新）。'
+            + '逐条安装要等 install 接口——它得同时补上工具限制，否则装进来的人格等于没有安全默认。'),
+        ),
+      )
+    }
+
     /* ---------------- 页面 ---------------- */
 
     /**
@@ -3174,6 +3349,11 @@ select.roost-input{color-scheme:dark}
       ['overview', '概览'],
       ['setup', '接入'],
       ['her', '人格与情绪'],
+      /**
+       * 「市场」放在人格后面：先看自己有什么，再去仓库里挑。
+       * 只写两个字——10 个页签窄屏要换行，长名字会把整行撑开。
+       */
+      ['market', '市场'],
       ['memory', '记忆'],
       ['awake', '主动搭话'],
       ['context', '上下文'],
@@ -3216,6 +3396,9 @@ select.roost-input{color-scheme:dark}
        * 所以「切到这一页」更容易看到没画完的白块。
        */
       const [her, setHer] = useState(null)
+      /** 市场：仓库清单 + 每个条目在本地的状态（`/personas/repo` 原样存） */
+      const [market, setMarket] = useState(null)
+      const [marketErr, setMarketErr] = useState('')
       const [aw, setAw] = useState(null)
       const [sp, setSp] = useState(null)
       const [ctxInfo, setCtxInfo] = useState(null)
@@ -3321,6 +3504,27 @@ select.roost-input{color-scheme:dark}
         setChats(r.ok === false ? null : r.chats || [])
       }, [])
 
+      /**
+       * 市场清单。
+       *
+       * `force` 只给「刷新」按钮用：`/personas/repo` 服务端有 5 分钟缓存，
+       * 用户刚在 GitHub 推了一份、回来点刷新却还是旧清单，会以为没推上去。
+       */
+      const loadMarket = useCallback(async (force = false) => {
+        setMarketErr('')
+        const r = await get('/personas/repo' + (force ? '?force=1' : ''))
+        if (r.ok === false) {
+          /**
+           * 失败时**保留旧清单**：清成 null 会让列表整块消失，而且 `market`
+           * 一变又会触发一次 effect，等于自动重试一次（这次不带 force，可能
+           * 命中缓存「自己好了」），错误条一闪而过，用户只看到列表闪了一下。
+           */
+          setMarketErr(r.message || '拉不到清单')
+          return
+        }
+        setMarket(r)
+      }, [])
+
       /** 首屏 + 切页时按需拉，不一次性全打一遍 */
       useEffect(() => {
         loadStatus()
@@ -3330,6 +3534,7 @@ select.roost-input{color-scheme:dark}
       useEffect(() => {
         if (tab === 'memory') loadMemory()
         if (tab === 'her') loadHer()
+        if (tab === 'market') loadMarket()
         if (tab === 'awake') {
           // 授权状态在 /memory 里、chatId 列表在 /chats 里，这一页两样都要用
           loadAwake()
@@ -3339,7 +3544,7 @@ select.roost-input{color-scheme:dark}
         if (tab === 'context') loadCtx()
         if (tab === 'chats') loadChats()
         if (tab === 'config' && !config) loadConfig()
-      }, [tab, config, mem, chats, loadMemory, loadHer, loadAwake, loadCtx, loadChats, loadConfig])
+      }, [tab, config, mem, chats, loadMemory, loadHer, loadMarket, loadAwake, loadCtx, loadChats, loadConfig])
 
       /** 通用动作 runner：按钮点下去 → 跑接口 → 提示 → 刷新 */
       const run = useCallback(async (path, label, body) => {
@@ -3418,6 +3623,9 @@ select.roost-input{color-scheme:dark}
                 mem, setupSt, toast, save: saveCfg, reload: loadHer, quick,
               })
             : null,
+          tab === 'market'
+            ? h(MarketTab, { market, marketErr, toast, loadMarket, reload: loadHer })
+            : null,
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat }) : null,
           tab === 'awake' ? h(AwakeTab, { aw, mem, sp, chats, toast, reload: loadAwake, reloadSp: loadAwake, busy }) : null,
           tab === 'context' ? h(ContextTab, { ctxInfo, mind, usageInfo, toast, reload: loadCtx, busy }) : null,
@@ -3471,6 +3679,8 @@ select.roost-input{color-scheme:dark}
     exports.inject = inject
     exports.RoostPage = RoostPage
     exports.RoostIcon = RoostIcon
+    // 给渲染测试用：市场页的过滤/状态文案要能单独跑一遍
+    exports.MarketTab = MarketTab
     /**
      * 导出给测试盯住。这个函数出过一次「拿配置端口冒充实际端口」的事故——
      * 语法合法、渲染不炸、测试全绿，但面板在撒谎。纯函数才能被断言。

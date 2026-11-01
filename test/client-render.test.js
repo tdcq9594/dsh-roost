@@ -6,7 +6,7 @@
 // `mem.global.map` 这种少写一个 `?.` 也是语法合法、运行必炸。
 //
 // 做法：造一个极简 React（createElement 出普通对象，hooks 按调用顺序存），
-// 用 localStorage 控制初始页签，把九个页面各渲染一次。
+// 用 localStorage 控制初始页签，把十个页面各渲染一次。
 // 断言只有两条：不抛异常、出得来树。
 
 import { test } from 'node:test';
@@ -62,7 +62,7 @@ function loadClient(react) {
 /**
  * 把函数组件真的执行掉。
  *
- * 只调 `RoostPage()` 是不够的——它返回的树里，九个页面都是
+ * 只调 `RoostPage()` 是不够的——它返回的树里，十个页面都是
  * `{type: OverviewTab, ...}` 这样的元素对象，**子组件根本没被调用**，
  * 于是「渲染不炸」是假的（我第一版就写成了这样，9 个页面全"通过"）。
  * 这里遇到函数类型就执行它，每个组件各自 reset 一次 hook 游标。
@@ -93,7 +93,7 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-const TABS = ['overview', 'setup', 'her', 'memory', 'awake', 'context', 'chats', 'config', 'logs']
+const TABS = ['overview', 'setup', 'her', 'market', 'memory', 'awake', 'context', 'chats', 'config', 'logs']
 
 for (const tab of TABS) {
   test(`前端渲染：${tab} 页在空数据下不炸`, () => {
@@ -110,9 +110,9 @@ for (const tab of TABS) {
     }, `${tab} 页渲染抛异常`)
 
     assert.equal(tree?.props?.className, 'roost-root', '根节点不对')
-    // 页签条必须在每一页都在，且九个都在
+    // 页签条必须在每一页都在，且十个都在
     const txt = textOf(tree)
-    for (const label of ['概览', '接入', '人格与情绪', '记忆', '主动搭话', '上下文', '会话', '设置', '日志']) {
+    for (const label of ['概览', '接入', '人格与情绪', '市场', '记忆', '主动搭话', '上下文', '会话', '设置', '日志']) {
       assert.ok(txt.includes(label), `页签缺「${label}」`)
     }
   })
@@ -547,4 +547,46 @@ test('端口：ai-chat 没配时不报红，指去接入第 5 步', () => {
   assert.equal(pv.kind, 'unset')
   assert.match(pv.text, /第 5 步/)
   assert.equal(pv.action, undefined)
+})
+
+test('前端渲染：市场页能列出人格、标签和状态', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  rt.reset()
+
+  const tree = expand(mod.MarketTab({
+    market: {
+      personas: [
+        { id: 'a', name: '甲', tags: ['短句'], chars: 100, localChars: 0, state: 'missing' },
+        { id: 'b', name: '乙', tags: ['吐槽'], chars: 200, localChars: 210, state: 'deleted' },
+      ],
+      pending: 1,
+      deleted: 1,
+    },
+    marketErr: '',
+    toast: () => {},
+    loadMarket: () => {},
+    reload: () => {},
+  }), rt)
+
+  const txt = textOf(tree)
+  assert.ok(txt.includes('甲') && txt.includes('乙'), '两个人格都要列出来')
+  assert.ok(txt.includes('未安装'), '缺 missing 的状态文案')
+  assert.ok(txt.includes('已删除'), '缺 deleted 的状态文案')
+  assert.ok(txt.includes('短句') && txt.includes('吐槽'), '标签要显示')
+  assert.ok(txt.includes('2 个 · 1 个可更新 · 1 个你删过'), '头部要给出总数与分类，且不能被「12 个」误匹配')
+  assert.ok(txt.includes('这一版只做「看」'), '要说清还没法逐条安装')
+})
+
+test('前端渲染：市场页还没拿到清单时说「读着…」，不能说成「没读到」', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  rt.reset()
+
+  const txt = textOf(expand(mod.MarketTab({
+    market: null, marketErr: '', toast: () => {}, loadMarket: () => {}, reload: () => {},
+  }), rt))
+
+  assert.ok(txt.includes('读着…'), '首屏加载中要显示「读着…」')
+  assert.ok(!txt.includes('仓库里没读到人格'), '还没拉完就说「没读到」是假话')
 })
