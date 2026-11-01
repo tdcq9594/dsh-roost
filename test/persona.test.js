@@ -10,7 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, unlinkSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, unlinkSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -94,25 +94,76 @@ test('旧字段：default 人格也不拼（default.md 的正文就是它抄过�
   }
 });
 
-test('旧字段：default.md 被删了会被 seed 补回来，所以旧 text 实际上永远不会生效', () => {
+test('旧字段：内置人格删掉后不再自动复活（seed 只跑一次），旧 text 兜底这才真正生效', () => {
   const { dir, p, done } = fresh();
   try {
-    p.list();
+    p.list(); // 触发 seed
     const f = join(dir, 'personas', 'default.md');
     assert.ok(existsSync(f));
     unlinkSync(f);
     /**
-     * `resolve()` 里的 `seed()` 会把缺的人格文件重新写出来。
-     * 也就是说 `persona.body` 在实际运行中不会为空——旧 text 那条兜底
-     * 是纯安全网（目录只读、写盘失败时才轮到它），不是常规路径。
-     * 这条断言就是把这个事实钉住，免得以后有人以为删了文件就会退回旧配置。
+     * 0.11 起 `seed()` 一个进程只跑一次，`list/read/resolve` 不会再补文件。
+     *
+     * 这是**故意改的行为**：以前删完下一次 `list()` 就把它拷回来，
+     * 等于「内置人格其实删不掉」。现在文件真的没了，正文读不出来，
+     * `legacyPersonaText` 这条兜底才第一次真正生效。
      */
     const persona = p.resolve('', { current: 'not-exist', byChat: {} });
-    assert.ok(existsSync(f), 'seed 应该把 default.md 补回来');
-    assert.ok(persona.body.length > 0);
-    assert.equal(legacyPersonaText(persona, LEGACY), '', '有正文就不挂旧 text');
+    assert.equal(existsSync(f), false, 'seed 只跑一次，不该再把文件补回来');
+    assert.equal(persona.body, '', '正文读不出来，body 为空');
+    assert.equal(legacyPersonaText(persona, LEGACY), LEGACY, '这时才轮到旧 text 兜底');
   } finally {
     done();
+  }
+});
+
+test('删除：备份失败就不许删（捞不回来等于把承诺作废）', () => {
+  const { dir, p, done } = fresh();
+  try {
+    p.list(); // seed
+    // 把 .backup 占成一个普通文件，备份时 mkdir 会失败
+    writeFileSync(join(dir, 'personas', '.backup'), 'x', 'utf8');
+    assert.throws(() => p.remove('fatfish'), /备份失败/);
+    assert.ok(existsSync(join(dir, 'personas', 'fatfish.md')), '备份没成，文件必须还在');
+  } finally {
+    done();
+  }
+});
+
+test('保存：覆盖旧人格也会先备份（注释说共用一条规则，就得真共用）', () => {
+  const { dir, p, done } = fresh();
+  try {
+    p.list();
+    p.save('fatfish', '---\nname: 大肥鱼\n---\n第一版。');
+    p.save('fatfish', '---\nname: 大肥鱼\n---\n第二版。');
+    const dirs = readdirSync(join(dir, 'personas', '.backup'));
+    assert.equal(dirs.length, 1);
+    assert.match(readFileSync(join(dir, 'personas', '.backup', dirs[0], 'fatfish.md'), 'utf8'), /第一版/);
+  } finally {
+    done();
+  }
+});
+
+test('删除：内置人格删掉后，换个进程也不再复活（墓碑）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-persona-'));
+  try {
+    const p1 = createPersonas({ dataDir: dir });
+    p1.list(); // seed
+    p1.remove('fatfish');
+    assert.equal(existsSync(join(dir, 'personas', 'fatfish.md')), false);
+
+    // 模拟重启：新实例会重新 seed 一遍，但墓碑要挡住它
+    const p2 = createPersonas({ dataDir: dir });
+    const ids = p2.list().map((x) => x.id);
+    assert.ok(!ids.includes('fatfish'), `墓碑没生效，fatfish 又回来了：${ids}`);
+    assert.ok(ids.includes('default'), '其它内置人格照常在');
+
+    // 用户又手动写了同名人格 → 墓碑摘掉，正常保存
+    p2.save('fatfish', '---\nname: 我又想要了\n---\n正文。');
+    const p3 = createPersonas({ dataDir: dir });
+    assert.ok(p3.list().some((x) => x.id === 'fatfish'), 'save 之后墓碑要清掉');
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {}
   }
 });
 

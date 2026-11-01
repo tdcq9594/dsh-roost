@@ -23,8 +23,10 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { parsePersona } from '../src/personas.js';
+// 哈希规则只能有一个定义处（见 catalog.js）：这里算出来的 sha256 要和
+// persona-repo 校验时用的完全一致，否则 Windows 检出会被判成「改过」。
+import { hashText } from '../src/catalog.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const DIR = path.join(ROOT, 'personas');
@@ -42,17 +44,6 @@ const MIN_VERSION = '0.10.7';
 
 const checkOnly = process.argv.includes('--check');
 
-const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
-
-/**
- * 算哈希前把 CRLF 归一成 LF。
- *
- * 和 `src/persona-repo.js` 里的 `hashText` 必须是同一套规则——两边不一致，
- * 用户下载完校验就会永远失败。原因：同一个文件在 Windows 检出是 CRLF、
- * 在 GitHub 上是 LF，字节不同但内容一样。
- */
-const hashText = (text) => sha256(Buffer.from(String(text ?? '').replace(/\r\n/g, '\n'), 'utf8'));
-
 async function build() {
   const names = (await fs.readdir(DIR)).filter((n) => n.endsWith('.md')).sort();
 
@@ -68,7 +59,8 @@ async function build() {
       file,
       // 面板上显示「439 字」。用整份原文的长度，不是 body 的长度——
       // body 不含示例和世界书，报出来的数会明显偏小。
-      chars: raw.length,
+      // 和 catalog 一样先归一 CRLF：否则 Windows 检出会让同一个文件多出「行数」个字。
+      chars: raw.replace(/\r\n/g, '\n').length,
       // 按字节算哈希，不按字符：CRLF / 尾随空格 / BOM 都算内容差异，
       // 差一个字节就该重下，而不是「反正显示一样」。
       sha256: hashText(raw),

@@ -123,6 +123,26 @@ test('仓库：内容和索引一致时标 same，不再重复下载', async () 
   }
 });
 
+/**
+ * 性能回归：`status()` 每条都调 `catalog.get()` 的话，get 内部会重新扫目录，
+ * 整体就是 O(N²)——300 份实测 2.8 秒，比它替换掉的「每条读两次文件」还慢。
+ * 这条断言把「一次 list 只扫一遍目录」钉住。
+ */
+test('性能：一次 list 只扫一遍人格目录（不是每条扫一遍）', async () => {
+  const h = harness({ files: { a: P1, b: P2 } });
+  try {
+    const cat = h.personas.catalog;
+    const orig = cat.scan.bind(cat);
+    let scans = 0;
+    cat.scan = (...args) => { scans += 1; return orig(...args); };
+
+    await h.repo.list({ force: true });
+    assert.equal(scans, 1, `status() 应该只扫一次目录，实际扫了 ${scans} 次`);
+  } finally {
+    h.done();
+  }
+});
+
 /* ---------------- 一键更新 ---------------- */
 
 test('一键更新：装上新人格，并把 sha 记进 .synced.json', async () => {
@@ -359,6 +379,113 @@ test('恢复：仓库里没这个人格就报错，不静默成功', async () =>
   const h = harness({ files: { a: P1 } });
   try {
     await assert.rejects(() => h.repo.restore('不存在'), /没有/);
+  } finally {
+    h.done();
+  }
+});
+
+/* ---------------- 删除与误删恢复 ---------------- */
+
+/**
+ * 删掉内置人格之后的三件事必须同时成立，否则「可删」这个特性是假的：
+ *   1. 状态标成 `deleted`，不是 `missing`（两者对一键更新的意义完全不同）；
+ *   2. 一键更新**不**装回来（不然删了又回来，等于删不掉）；
+ *   3. `restore()` 能恢复，并顺手把墓碑清掉（误删的出口）。
+ */
+test('删除：标 deleted、一键更新不装回、restore 能恢复并清墓碑', async () => {
+  const h = harness({ files: { a: P1 }, bundled: { 'a.md': P1 } });
+  try {
+    await h.repo.sync(); // 先正常装上
+    assert.equal(readFileSync(join(h.pdir, 'a.md'), 'utf8'), P1);
+
+    h.personas.remove('a'); // 用户删掉（写墓碑）
+    assert.equal(existsSync(join(h.pdir, 'a.md')), false);
+
+    const l = await h.repo.list({ force: true });
+    assert.equal(l.personas[0].state, 'deleted', `应该是 deleted，实际 ${l.personas[0].state}`);
+    assert.equal(l.pending, 0, 'deleted 不该算进「有更新」角标');
+    assert.equal(l.deleted, 1);
+
+    const s = await h.repo.sync();
+    assert.deepEqual(s.updated, [], '一键更新不能把删掉的装回来');
+    assert.deepEqual(s.deleted.map((x) => x.id), ['a'], '要在报告里说明「你删过」');
+    assert.equal(existsSync(join(h.pdir, 'a.md')), false);
+
+    const r = await h.repo.restore('a');
+    assert.equal(r.ok, true);
+    assert.equal(readFileSync(join(h.pdir, 'a.md'), 'utf8'), P1, '恢复要拿回原文');
+
+    const prefs = JSON.parse(readFileSync(join(h.pdir, '.prefs.json'), 'utf8'));
+    assert.deepEqual(prefs.deleted, [], '恢复之后墓碑要清掉');
+    const l2 = await h.repo.list({ force: true });
+    assert.equal(l2.personas[0].state, 'same');
+  } finally {
+    h.done();
+  }
+});
+
+test('删除：先备份到 .backup/<时间戳>/（自己写的人格删错也能捞回来）', async () => {
+  const h = harness({ files: { a: P1 }, bundled: { 'a.md': P1 } });
+  try {
+    await h.repo.sync();
+    h.personas.remove('a');
+    const { readdirSync } = await import('node:fs');
+    const dirs = readdirSync(join(h.pdir, '.backup'));
+    assert.equal(dirs.length, 1, '删除应该留一份备份');
+    assert.equal(readFileSync(join(h.pdir, '.backup', dirs[0], 'a.md'), 'utf8'), P1);
+  } finally {
+    h.done();
+  }
+});
+
+test('删除：从仓库装进来（本地包里没有）的人格，删了也不该被一键更新装回', async () => {
+  // 注意这里**没有 bundled**：模拟「本地包版本旧、人格是从仓库装的」
+  const h = harness({ files: { a: P1 } });
+  try {
+    await h.repo.sync();
+    h.personas.remove('a');
+
+    const l = await h.repo.list({ force: true });
+    assert.equal(l.personas[0].state, 'deleted', `应该写墓碑，实际 ${l.personas[0].state}`);
+
+    const s = await h.repo.sync();
+    assert.deepEqual(s.updated, [], '删掉的不能被一键更新装回来');
+    assert.equal(existsSync(join(h.pdir, 'a.md')), false);
+  } finally {
+    h.done();
+  }
+});
+
+test('状态：包内索引漏了这一条时回退算 hash（别判成「你改过」）', async () => {
+  const next = '---\nname: 甲\n---\n第二版。';
+  const h = harness({ index: indexOf([['a', next]]), files: {}, bundled: { 'a.md': P1 } });
+  try {
+    // 包内索引只列了别人，漏了 a（开发态：新加 .md 忘了重跑索引）
+    writeFileSync(
+      join(h.dataDir, 'bundled', 'index.json'),
+      JSON.stringify({ schema: 1, personas: [{ id: 'z', file: 'z.md', sha256: sha256('z') }] }),
+      'utf8',
+    );
+    h.personas.seed();
+    const r = await h.repo.list({ force: true });
+    assert.equal(r.personas[0].state, 'update', `应该判「可更新」，实际 ${r.personas[0].state}`);
+  } finally {
+    h.done();
+  }
+});
+
+test('状态：索引里的 id 与 file 不一致时按文件名找本地那份（否则永远 missing）', async () => {
+  const idx = JSON.stringify({
+    schema: 1,
+    minVersion: '0.0.1',
+    personas: [{ id: 'a', name: '甲', file: 'a-v2.md', chars: P1.length, sha256: sha256(P1) }],
+  });
+  const h = harness({ index: idx });
+  try {
+    mkdirSync(h.pdir, { recursive: true });
+    writeFileSync(join(h.pdir, 'a-v2.md'), P1, 'utf8');
+    const r = await h.repo.list({ force: true });
+    assert.equal(r.personas[0].state, 'same', `不该判成 missing：${JSON.stringify(r.personas[0])}`);
   } finally {
     h.done();
   }

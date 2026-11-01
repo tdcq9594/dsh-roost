@@ -1210,6 +1210,7 @@ select.roost-input{color-scheme:dark}
             const parts = []
             if (r.updated?.length) parts.push(`更新 ${r.updated.length} 个（${r.updated.map((x) => x.name).join('、')}）`)
             if (r.untouched?.length) parts.push(`跳过 ${r.untouched.length} 个（你改过）`)
+            if (r.deleted?.length) parts.push(`${r.deleted.length} 个你删过，没动（要的话在下面点「恢复」）`)
             if (r.failed?.length) parts.push(`失败 ${r.failed.length} 个（${r.failed[0].why}）`)
             toast(parts.join('；') || '已经是最新的')
             const risky = (r.updated || []).filter((x) => (x.risky || []).length)
@@ -1377,15 +1378,16 @@ select.roost-input{color-scheme:dark}
 
                 h('div', { className: 'roost-list', style: { marginTop: 8 } },
                   (repo?.personas || []).map((p) => {
-                    const label = p.state === 'missing' ? '未安装'
-                      : p.state === 'update' ? '有更新'
-                        : p.state === 'modified' ? '你改过'
-                          : '已是最新'
+                    const label = p.state === 'deleted' ? '已删除'
+                      : p.state === 'missing' ? '未安装'
+                        : p.state === 'update' ? '有更新'
+                          : p.state === 'modified' ? '你改过'
+                            : '已是最新'
                     return h('div', { key: p.id, className: 'roost-item' },
                       h('div', { className: 't' },
                         h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
                           h('span', { style: { fontWeight: 500 } }, p.name || p.id),
-                          h(Pill, { tone: p.state === 'modified' ? 'warn' : p.state === 'same' ? 'ok' : 'info' }, label),
+                          h(Pill, { tone: p.state === 'modified' || p.state === 'deleted' ? 'warn' : p.state === 'same' ? 'ok' : 'info' }, label),
                         ),
                         h('div', { className: 'roost-note', style: { marginTop: 1 } },
                           `仓库 ${p.chars} 字` + (p.localChars ? ` · 本地 ${p.localChars} 字` : '')
@@ -1401,16 +1403,21 @@ select.roost-input{color-scheme:dark}
                           },
                         }, '预览'),
                         /**
-                         * 「恢复官方版本」只对**改过的**出现。
-                         * 一键更新刻意不碰你改过的文件，这里就是反悔的出口；
-                         * 服务端覆盖前会自动备份到 personas/.backup/。
+                         * 「恢复」对两种状态出现：
+                         *   · `modified`——一键更新刻意不碰你改过的文件，这是反悔的出口；
+                         *   · `deleted`——你删过的内置人格，一键更新也不会自动装回来，
+                         *     误删之后从这里捞回来（服务端会顺手清掉墓碑）。
+                         * 覆盖前都会自动备份到 personas/.backup/。
                          */
-                        p.state === 'modified'
+                        p.state === 'modified' || p.state === 'deleted'
                           ? h(ConfirmLink, {
-                              label: '恢复官方', confirmLabel: '确认覆盖？',
+                              label: p.state === 'deleted' ? '恢复' : '恢复官方',
+                              confirmLabel: p.state === 'deleted' ? '确认恢复？' : '确认覆盖？',
                               onConfirm: async () => {
                                 const r = await post('/personas/restore', { id: p.id })
-                                toast(r.ok === false ? (r.message || '没恢复成') : '已恢复官方版本（旧内容已备份）')
+                                toast(r.ok === false
+                                  ? (r.message || '没恢复成')
+                                  : p.state === 'deleted' ? '已恢复' : '已恢复官方版本（旧内容已备份）')
                                 await reload()
                                 await loadRepo(true)
                               },
@@ -1423,7 +1430,8 @@ select.roost-input{color-scheme:dark}
                 ),
                 h('div', { className: 'roost-note' },
                   '只装「没被改过」的：一键更新会跳过你手改过的那几份，'
-                  + '自建的人格（不在仓库清单里的）完全不碰。'),
+                  + '自建的人格（不在仓库清单里的）完全不碰。'
+                  + '删掉的内置人格也不会被装回来（标「已删除」），点「恢复」才回来。'),
               )
             : null,
 

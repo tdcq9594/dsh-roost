@@ -25,11 +25,13 @@
  */
 
 import {
-  readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, readdirSync, rmSync,
+  readFileSync, writeFileSync, existsSync, mkdirSync, renameSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 import { compareVersion } from './version.js';
+// 哈希规则只能有一个定义处：这里、catalog、构建脚本必须算出一模一样的 sha256，
+// 否则 Windows 检出（CRLF）会被判成「改过」，一键更新永远跳过用户文件。
+import { hashText } from './catalog.js';
 
 // 兼容旧引用：本模块曾经自己实现过一份，测试和其它模块直接从这儿 import
 export { compareVersion };
@@ -80,18 +82,6 @@ const MAX_CHARS = 8000;
 
 /** 单次响应体上限，防远端塞一个几百 MB 的 index.json */
 const MAX_BYTES = 512 * 1024;
-
-const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
-
-/**
- * 算内容哈希前先把 CRLF 归一成 LF。
- *
- * 为什么必须归一：同一个文件在 Windows 检出（CRLF）和 GitHub 上（LF）
- * 字节不同，但**内容一样**。不归一的话，Windows 用户一 clone 下来，
- * 每份人格的哈希都对不上索引——「一键更新」会永远显示「有更新」，
- * 点了又装回一模一样的字节，来回打转。
- */
-const hashText = (text) => sha256(Buffer.from(String(text ?? '').replace(/\r\n/g, '\n'), 'utf8'));
 
 /**
  * 只认安全文件名。远端给的 `file` 必须先过这一关，否则能路径穿越。
@@ -342,6 +332,36 @@ export function createPersonaRepo({
   }
 
   /**
+   * 包内 `personas/index.json` 的 `file → sha256` 映射。
+   *
+   * 为什么用它：判断「本地这份有没有被改过」需要「官方那份长什么样」。
+   * 以前是逐个文件读出来算 hash——300 份就是 300 次读 + 300 次 sha256。
+   * 而 `personas/index.json` 本来就随 npm 包发布（`package.json` 的 `files`
+   * 含 `personas`），里面已经有每份的 sha256，读一次建个 map 就够。
+   *
+   * 读不到（测试里的假 builtinDir、打包漏了）返回 null，调用方回退到算 hash。
+   */
+  let bundledMap;
+  let bundledTried = false;
+  function bundledShas() {
+    if (bundledTried) return bundledMap;
+    bundledTried = true;
+    try {
+      const root = personas?.builtinDir?.();
+      if (!root) return (bundledMap = null);
+      const j = JSON.parse(readFileSync(join(root, 'index.json'), 'utf8'));
+      const m = new Map();
+      for (const p of j?.personas ?? []) {
+        if (p?.file && p?.sha256) m.set(p.file, p.sha256);
+      }
+      bundledMap = m.size ? m : null;
+    } catch {
+      bundledMap = null;
+    }
+    return bundledMap;
+  }
+
+  /**
    * 逐个算出「本地 vs 仓库」的状态。
    *
    * 状态只有五种，判定顺序不能换：
@@ -364,16 +384,58 @@ export function createPersonaRepo({
    */
   function status(index) {
     const synced = readSynced();
+    const bmap = bundledShas();
+    /**
+     * 墓碑：用户主动删掉的人格。
+     *
+     * 它们和一键更新里「没装过」的 `missing` 不是一回事：
+     * `missing` 该装，`deleted` 不该自动装回来（否则「删掉」这个动作永远不成立）。
+     * 想恢复得点「恢复」，那条路会顺手把墓碑清掉。
+     */
+    const tombstones = new Set(personas?.prefs?.read?.().deleted ?? []);
+    /**
+     * **一次扫描拿快照，之后全是查表。**
+     *
+     * 注意别写成 `personas.catalog.get(p.id)`：那个方法内部每次都会重新
+     * scan 整个目录（N 次 stat），放进 map 里就是 O(N²)——300 份实测 2.8 秒，
+     * 比它替换掉的「每条读两次文件」还慢一个数量级。
+     */
+    const items = personas?.catalog?.scan ? personas.catalog.scan().items : null;
     return index.personas.map((p) => {
       const file = safeFile(p.file);
-      const f = join(dir(), file);
-      const local = existsSync(f) ? hashText(readFileSync(f, 'utf8')) : null;
+      /**
+       * 本地条目按**文件名**查，不按 `p.id`。
+       *
+       * catalog 的 key 是文件名去掉 `.md`（`catalog.js` 里 `id = name.slice(0,-3)`），
+       * 而索引里的 `id` 和 `file` 是两回事——`validateIndex` 没强制
+       * `file === id + '.md'`。按 id 查的话，上游哪天把 file 改成 `a-v2.md`，
+       * 这份人格就会永远显示「未安装」，每次同步都重装一遍。
+       */
+      const localId = file.slice(0, -3);
+      const item = items ? (items[localId] ?? null) : null;
+      /**
+       * 本地这份的 sha / 字数从 catalog 拿，**不再逐个文件读**。
+       *
+       * `items === null` 说明调用方塞了一个没有 catalog 的假 personas
+       * （只可能出现在测试里），退回读文件，行为与旧版一致。
+       */
+      const local = items
+        ? (item ? item.sha256 : null)
+        : (existsSync(join(dir(), file)) ? hashText(readFileSync(join(dir(), file), 'utf8')) : null);
       const rec = synced[p.id];
+      /**
+       * 包内索引里查不到这一条时，**回退去算那份文件的 hash**。
+       *
+       * 开发态常见：新加了 `.md` 但忘了跑 `build-persona-index.mjs`，
+       * 索引里就没有它。此时如果直接当「没有基准」，本地这份会被判成
+       * `modified`，一键更新从此永远跳过它——比多读一次文件贵得多。
+       */
+      const bundled = bmap?.get(file) ?? bundledSha(file);
 
       let state;
-      if (local === null) state = 'missing';
+      if (local === null) state = tombstones.has(p.id) ? 'deleted' : 'missing';
       else if (local === p.sha256) state = 'same';
-      else if (rec?.sha256 === local || bundledSha(file) === local) state = 'update';
+      else if (rec?.sha256 === local || bundled === local) state = 'update';
       else state = 'modified';
 
       return {
@@ -384,7 +446,9 @@ export function createPersonaRepo({
         chars: p.chars ?? p.bytes ?? 0,
         state,
         // 面板要显示「我的版本 / 仓库版本」的差别，只给字数不够直观
-        localChars: local === null ? 0 : readFileSync(f, 'utf8').length,
+        localChars: items
+          ? (item ? item.chars : 0)
+          : (local === null ? 0 : readFileSync(join(dir(), file), 'utf8').length),
       };
     });
   }
@@ -392,33 +456,14 @@ export function createPersonaRepo({
   /* ---------------- 备份 ---------------- */
 
   /**
-   * 覆盖前备份到 `<数据目录>/personas/.backup/<时间戳>/`。
+   * 备份实现挪到了 `personas.js`。
    *
-   * 方案文档里写的是备份成 `id.我的-YYYYMMDD.md`，落地时改成子目录了：
-   * 那样备份文件会躺在人格目录里，被 `list()` 当成一个人格列出来
-   * （名字变成「大肥鱼.我的-20261028」）。子目录里不会被扫到。
+   * 理由：**删除也要备份**（自己写的人格不在仓库里，删错就真没了），
+   * 而删除发生在 personas 那边。两条路径必须共用同一份规则，
+   * 否则 `.backup/` 会长成两种样子（目录名、保留数量、文件命名都会飘）。
    */
   function backup(id, file) {
-    const f = join(dir(), file);
-    if (!existsSync(f)) return '';
-    const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
-    const bdir = join(dir(), '.backup', ts);
-    mkdirSync(bdir, { recursive: true });
-    const target = join(bdir, `${id}.md`);
-    writeAtomic(target, readFileSync(f, 'utf8'));
-    pruneBackups();
-    return target;
-  }
-
-  /** 只留最近 5 次。人格是几 KB，但没人希望备份目录无限长 */
-  function pruneBackups() {
-    try {
-      const root = join(dir(), '.backup');
-      const dirs = readdirSync(root).sort();
-      for (const d of dirs.slice(0, Math.max(0, dirs.length - 5))) {
-        rmSync(join(root, d), { recursive: true, force: true });
-      }
-    } catch {}
+    return personas?.backup ? personas.backup(id, file) : '';
   }
 
   /* ---------------- 对外 ---------------- */
@@ -450,7 +495,15 @@ export function createPersonaRepo({
         minVersion: index.minVersion ?? '',
         gate: g,
         personas: rows,
-        pending: rows.filter((x) => x.state !== 'same').length,
+        /**
+         * 「有几个该更新」的角标。
+         *
+         * **不含 `deleted`**：用户主动删掉的不该一直顶着角标催他，
+         * 否则那个数字永远清不掉，等于变相骚扰。
+         */
+        pending: rows.filter((x) => x.state !== 'same' && x.state !== 'deleted').length,
+        /** 用户删过的（可恢复）。面板用它显示「有 N 个你删过的人格」 */
+        deleted: rows.filter((x) => x.state === 'deleted').length,
       };
     },
 
@@ -479,15 +532,23 @@ export function createPersonaRepo({
       const updated = [];
       const failed = [];
       const untouched = [];
+      /** 用户主动删过的：不自动装回来，只报告，让他自己决定 */
+      const skippedDeleted = [];
+      // 一次建表，循环里别再 `index.personas.find`（那是 O(N²)，纯属白烧）
+      const byId = new Map(index.personas.map((p) => [p.id, p]));
 
       for (const r of rows) {
+        if (r.state === 'deleted') {
+          skippedDeleted.push({ id: r.id, name: r.name });
+          continue;
+        }
         if (r.state === 'same') {
           /**
            * 顺手补记 `.synced`：内容和仓库一模一样，那就没必要记成"改过"。
            * 老用户第一次点一键更新时全靠这一步，否则下一轮仓库一更新，
            * 这些文件就会被判成 `modified` 而永远更新不了。
            */
-          if (!synced[r.id]) synced[r.id] = { sha256: index.personas.find((p) => p.id === r.id)?.sha256 ?? '', syncedAt: Date.now() };
+          if (!synced[r.id]) synced[r.id] = { sha256: byId.get(r.id)?.sha256 ?? '', syncedAt: Date.now() };
           continue;
         }
         if (r.state === 'modified') {
@@ -495,7 +556,7 @@ export function createPersonaRepo({
           continue;
         }
 
-        const p = index.personas.find((x) => x.id === r.id);
+        const p = byId.get(r.id);
         try {
           const text = await getText(`${index.base}/${safeFile(p.file)}`);
           if (text.length > MAX_CHARS) throw new Error(`正文 ${text.length} 字，超过 ${MAX_CHARS} 字上限`);
@@ -513,13 +574,16 @@ export function createPersonaRepo({
       }
 
       saveSynced(synced);
-      log(`人格更新：成功 ${updated.length}、跳过 ${untouched.length}、失败 ${failed.length}`);
+      log(`人格更新：成功 ${updated.length}、跳过 ${untouched.length}、失败 ${failed.length}`
+        + (skippedDeleted.length ? `、你删过 ${skippedDeleted.length}` : ''));
       return {
         ok: failed.length === 0,
         updated,
         untouched,
         failed,
-        pending: status(index).filter((x) => x.state !== 'same').length,
+        /** 你删过的：报告出来但不装，面板可以提示「要恢复吗」 */
+        deleted: skippedDeleted,
+        pending: status(index).filter((x) => x.state !== 'same' && x.state !== 'deleted').length,
       };
     },
 
@@ -546,6 +610,21 @@ export function createPersonaRepo({
       const synced = readSynced();
       synced[id] = { sha256: got, syncedAt: Date.now() };
       saveSynced(synced);
+
+      /**
+       * 恢复成功要把墓碑清掉。
+       *
+       * 不清的话：文件虽然回来了，但下次 `seed()` 仍会跳过它，
+       * 而且一旦文件再丢（比如用户又误删一次别的），行为会变得很难解释。
+       * 「恢复」的语义就是「当没删过」。
+       */
+      try {
+        const p2 = personas?.prefs?.read?.();
+        if (p2?.deleted?.includes(id)) {
+          personas.prefs.patch({ deleted: p2.deleted.filter((x) => x !== id) });
+        }
+      } catch {}
+
       return { ok: true, id, name: p.name, backup: saved, risky: scanPersona(text) };
     },
   };
