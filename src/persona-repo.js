@@ -536,7 +536,8 @@ export function createPersonaRepo({
 
       return {
         id: p.id,
-        name: p.name,
+        label: p.label || p.name,
+        name: p.label || p.name,
         tags: p.tags ?? [],
         file,
         chars: p.chars ?? p.bytes ?? 0,
@@ -609,7 +610,7 @@ export function createPersonaRepo({
       const p = index.personas.find((x) => x.id === id);
       if (!p) throw new Error(`仓库里没有「${id}」这个人格`);
       const text = await getText(`${index.base}/${safeFile(p.file)}`);
-      return { ok: true, id: p.id, name: p.name, text, chars: text.length, risky: scanPersona(text) };
+      return { ok: true, id: p.id, label: p.label || p.name, name: p.label || p.name, text, chars: text.length, risky: scanPersona(text) };
     },
 
     /**

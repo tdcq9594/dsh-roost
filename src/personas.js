@@ -353,7 +353,14 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
       return catalog
         .list()
         // tags 拷一份：调用方 push 一下就会污染内存里的 catalog
-        .map((m) => ({ id: m.id, name: m.name, tags: [...m.tags], chars: m.chars }))
+        .map((m) => ({
+          id: m.id,
+          // 0.11：label 是显示名；name 保留同值，给还没改的老客户端
+          label: m.label || m.name || m.id,
+          name: m.label || m.name || m.id,
+          tags: [...m.tags],
+          chars: m.chars,
+        }))
         .sort((a, b) => (a.id === 'default' ? -1 : b.id === 'default' ? 1 : a.id.localeCompare(b.id)));
     },
 

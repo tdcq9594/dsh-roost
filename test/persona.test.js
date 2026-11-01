@@ -324,3 +324,15 @@ test('名字回退链：配置 → label → id → 大肥鱼', () => {
   assert.equal(personaName('   ', { id: 'snarky' }), 'snarky', 'label 空就退回 id');
   assert.equal(personaName('', {}), '大肥鱼', '全空用默认名');
 });
+
+test('列表：带 label，name 同值（旧客户端不会立刻坏）', () => {
+  const { p, done } = fresh();
+  try {
+    p.save('lbl', '---\nlabel: 吐槽\n---\n正文。');
+    const row = p.list().find((x) => x.id === 'lbl');
+    assert.equal(row.label, '吐槽');
+    assert.equal(row.name, '吐槽', 'name 保留同值给旧客户端');
+  } finally {
+    done();
+  }
+});

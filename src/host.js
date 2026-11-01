@@ -3734,7 +3734,14 @@ export function apply(ctx) {
         send(res, 200, { ok: true, dir: stickers.dir(cfg.stickers), items: stickers.list(cfg.stickers) }),
       ),
 
-      route('/personas', (req, res) => send(res, 200, { ok: true, personas: personas.list(), current: cfg.persona?.current || 'default', byChat: cfg.persona?.byChat || {} })),
+      route('/personas', (req, res) => send(res, 200, {
+        ok: true,
+        personas: personas.list(),
+        current: cfg.persona?.current || 'default',
+        byChat: cfg.persona?.byChat || {},
+        /** 她的名字（全局）：面板顶部直接用，不用再拉一次 /config */
+        globalName: globalName(),
+      })),
 
       /**
        * 读一个人格的正文。
@@ -3749,7 +3756,7 @@ export function apply(ctx) {
         if (!id) return send(res, 400, { ok: false, message: '缺 id' });
         const p = personas.read(id);
         if (!p) return send(res, 404, { ok: false, message: `没有「${id}」这个人格` });
-        return send(res, 200, { ok: true, id, name: p.name, raw: p.raw });
+        return send(res, 200, { ok: true, id, label: p.label || p.name, name: p.label || p.name, raw: p.raw });
       }),
 
       route('/personas/save', async (req, res) => {

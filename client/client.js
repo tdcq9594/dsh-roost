@@ -1423,7 +1423,7 @@ select.roost-input{color-scheme:dark}
                     return h('div', { key: p.id, className: 'roost-item' },
                       h('div', { className: 't' },
                         h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                          h('span', { style: { fontWeight: 500 } }, p.name || p.id),
+                          h('span', { style: { fontWeight: 500 } }, p.label || p.name || p.id),
                           h(Pill, { tone: p.state === 'modified' || p.state === 'deleted' ? 'warn' : p.state === 'same' ? 'ok' : 'info' }, label),
                         ),
                         h('div', { className: 'roost-note', style: { marginTop: 1 } },
@@ -1476,7 +1476,7 @@ select.roost-input{color-scheme:dark}
           preview
             ? h('div', { style: { marginTop: 12, border: '1px solid currentColor', borderRadius: 8, padding: 10 } },
                 h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                  h('div', { style: { fontSize: 12, fontWeight: 650 } }, `预览：${preview.name || preview.id}`),
+                  h('div', { style: { fontSize: 12, fontWeight: 650 } }, `预览：${preview.label || preview.name || preview.id}`),
                   h('span', { className: 'roost-note', style: { margin: 0 } }, `${preview.chars || 0} 字`),
                   h('button', { type: 'button', className: 'roost-btn', onClick: () => setPreview(null) }, '关闭'),
                 ),
@@ -1508,7 +1508,7 @@ select.roost-input{color-scheme:dark}
                  */
                 h('div', { className: 't' },
                   h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                    h('span', { style: { fontWeight: isCur ? 650 : 500 } }, p.name || p.id),
+                    h('span', { style: { fontWeight: isCur ? 650 : 500 } }, p.label || p.name || p.id),
                     isCur ? h(Pill, { tone: 'ok' }, '正在用') : null,
                   ),
                   h('div', { className: 'roost-note', style: { marginTop: 1 } },
@@ -3226,7 +3226,7 @@ select.roost-input{color-scheme:dark}
       const rows = all.filter((p) => {
         if (tag && !(p.tags || []).includes(tag)) return false
         if (!kw) return true
-        return [p.name || '', p.id, ...(p.tags || [])].join(' ').toLowerCase().includes(kw)
+        return [p.label || p.name || '', p.id, ...(p.tags || [])].join(' ').toLowerCase().includes(kw)
       })
 
       const label = (s) =>
@@ -3288,7 +3288,7 @@ select.roost-input{color-scheme:dark}
             shown.map((p) => h('div', { key: p.id, className: 'roost-item' },
               h('div', { className: 't' },
                 h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                  h('span', { style: { fontWeight: 500 } }, p.name || p.id),
+                  h('span', { style: { fontWeight: 500 } }, p.label || p.name || p.id),
                   h(Pill, { tone: p.state === 'same' ? 'ok' : (p.state === 'modified' || p.state === 'deleted' || p.state === 'update') ? 'warn' : null }, label(p.state)),
                 ),
                 h('div', { className: 'roost-note', style: { marginTop: 1 } },
@@ -3362,7 +3362,7 @@ select.roost-input{color-scheme:dark}
           preview
             ? h('div', { style: { marginTop: 12, border: '1px solid currentColor', borderRadius: 8, padding: 10 } },
                 h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                  h('div', { style: { fontSize: 12, fontWeight: 650 } }, `预览：${preview.name || preview.id}`),
+                  h('div', { style: { fontSize: 12, fontWeight: 650 } }, `预览：${preview.label || preview.name || preview.id}`),
                   h('span', { className: 'roost-note', style: { margin: 0 } }, `${preview.chars || 0} 字`),
                   h('button', { type: 'button', className: 'roost-btn', onClick: () => setPreview(null) }, '关闭'),
                 ),
