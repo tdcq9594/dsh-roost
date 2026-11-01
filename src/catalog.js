@@ -193,7 +193,9 @@ export function createCatalog({ dir, parse, log = () => {} }) {
       const rec = {
         id,
         file: name,
-        name: meta.name || id,
+        // 0.11：label 是显示名；name 保留同值，给还没改的老消费方
+        label: meta.label || meta.name || id,
+        name: meta.label || meta.name || id,
         tags: Array.isArray(meta.tags) ? meta.tags : [],
         // 人格级工具限制：null = 不限制，[] = 一个都不给，[a,b] = 只给这些
         tools: Array.isArray(meta.tools) ? meta.tools : null,

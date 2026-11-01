@@ -25,7 +25,7 @@
  */
 
 import {
-  readFileSync, writeFileSync, existsSync, mkdirSync, renameSync,
+  readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, readdirSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { compareVersion } from './version.js';
@@ -687,6 +687,106 @@ export function createPersonaRepo({
         deleted: skippedDeleted,
         pending: status(index).filter((x) => x.state !== 'same' && x.state !== 'deleted').length,
       };
+    },
+
+    /**
+     * 把人格文件里废弃的 `name:` 改名为 `label:`（0.11 迁移）。
+     *
+     * 只动这一行，其它字节原样保留；改前备份。
+     * 按来源决定要不要改：
+     *   · 内置且没改过   → 改，并把「写下去的那一版」记进 `.synced.localSha`；
+     *   · 市场装的且没改过 → 改，更新 `rec.localSha`；
+     *   · 用户自己写的   → 改（没有 sha 语义）；
+     *   · **改过的一律不碰**——迁移永远不覆盖用户的编辑。
+     *
+     * 不清的话 `name` 会被当成 label 一直显示；清错了则会让人格集体变成
+     * 「你改过」、从此收不到更新。所以判据必须按来源分开。
+     */
+    migrateNameField() {
+      let files = [];
+      try {
+        files = readdirSync(dir()).filter((f) => f.endsWith('.md'));
+      } catch {
+        return { renamed: [], skipped: [] };
+      }
+
+      const synced = readSynced();
+      /** 撞名安装的：本地 id → 仓库 id。`.synced` 是按仓库 id 存的 */
+      const inst = personas?.prefs?.read?.().installedAs ?? {};
+      const renamed = [];
+      const skipped = [];
+
+      for (const file of files) {
+        const id = file.slice(0, -3);
+        const repoId = Object.keys(inst).find((k) => inst[k] === id) ?? id;
+        const p = join(dir(), file);
+        let text;
+        try {
+          text = readFileSync(p, 'utf8');
+        } catch {
+          continue;
+        }
+
+        const m = String(text).match(/^(\s*---[ \t]*\r?\n)([\s\S]*?)(\r?\n---[ \t]*(?:\r?\n|$))/);
+        if (!m) continue;
+        const header = m[2];
+        if (!/^[ \t]*name[ \t]*:/im.test(header)) continue;
+
+        const localSha = hashText(text);
+        const rec = synced[repoId];
+        const builtin = isBuiltin(file);
+
+        /**
+         * 内置人格也要认 `rec`：被「一键更新」升到比包内新的版本后，
+         * 本地 sha 不等于包内 sha，但那不是用户手改的——按 `rec` 判它是我们写的。
+         */
+        let allowed = false;
+        if (builtin) allowed = localSha === bundledSha(file) || localSha === rec?.localSha || localSha === rec?.sha256;
+        else if (rec) allowed = localSha === rec.localSha || localSha === rec.sha256;
+        else allowed = true; // 自己写的，没有 sha 语义
+
+        if (!allowed) {
+          skipped.push({ id, why: '你改过这份' });
+          continue;
+        }
+
+        try {
+          const eol = header.includes('\r\n') ? '\r\n' : '\n';
+          const hasLabel = /^[ \t]*label[ \t]*:/im.test(header);
+          const newHeader = hasLabel
+            ? header.split(/\r?\n/).filter((l) => !/^[ \t]*name[ \t]*:/i.test(l)).join(eol)
+            // g 标志：万一头部有两行 name，一次改完，别让下次启动再改一遍
+            : header.replace(/^([ \t]*)name([ \t]*):/gim, '$1label$2:');
+
+          const out = m[1] + newHeader + m[3] + String(text).slice(m[0].length);
+          if (out === text) continue;
+
+          backup(id, file);
+          writeAtomic(p, out);
+
+          if (builtin || rec) {
+            synced[repoId] = {
+              ...(rec || {}),
+              sha256: rec?.sha256 ?? bundledSha(file) ?? localSha,
+              localSha: hashText(out),
+              syncedAt: Date.now(),
+            };
+          }
+          renamed.push({ id });
+          // 每成功一份就落盘：中途失败不会留下「文件改了、记录没改」的半迁移状态
+          if (builtin || rec) saveSynced(synced);
+        } catch (e) {
+          skipped.push({ id, why: e.message });
+        }
+      }
+
+      if (renamed.length) {
+        try {
+          saveSynced(synced);
+        } catch {}
+        personas?.catalog?.invalidate?.();
+      }
+      return { renamed, skipped };
     },
 
     /**

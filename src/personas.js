@@ -45,10 +45,28 @@ export function legacyPersonaText(persona, cfgText) {
   return String(cfgText ?? '').trim();
 }
 
+/**
+ * 她的名字：**全局唯一**（0.11 起名字是账号身份，不是人格属性）。
+ *
+ * 回退链：配置 → 人格 label → 人格 id → 大肥鱼。
+ * 做成纯函数是为了能测：提示词里用的一定得是这个名字。
+ */
+export function personaName(cfgName, persona) {
+  const n = String(cfgName || '').trim();
+  if (n) return n;
+  return String(persona?.label || persona?.name || persona?.id || '').trim() || '大肥鱼';
+}
+
 /** 解析 `---` 头 + 正文 */
 export function parsePersona(id, raw) {
   let text = String(raw ?? '').replace(/^\uFEFF/, '');
-  const meta = { id, name: id, tags: [], tools: null };
+  /**
+   * `label` 是 0.11 的新字段（面板显示用）；`name` 废弃，仍认，当 label 的别名。
+   * 名字本身不再由人格决定——见 `config.persona.name`。
+   */
+  const meta = { id, name: id, label: id, tags: [], tools: null };
+  let labelField = '';
+  let nameField = '';
 
   /**
    * 头部的匹配放宽一点：允许前导空行、分隔符行尾的空格、**空头**（`---\n---`）。
@@ -68,7 +86,8 @@ export function parsePersona(id, raw) {
       const kv = line.match(/^\s*([A-Za-z_]\w*)\s*:\s*(.*)$/);
       if (!kv) continue;
       const key = kv[1].toLowerCase();
-      if (key === 'name') meta.name = kv[2].trim() || id;
+      if (key === 'label') labelField = kv[2].trim();
+      if (key === 'name') nameField = kv[2].trim();
       if (key === 'tags') {
         meta.tags = kv[2]
           .replace(/^\[|\]$/g, '')
@@ -104,6 +123,9 @@ export function parsePersona(id, raw) {
     }
     text = text.slice(m[0].length);
   }
+  /** label 优先，其次废弃的 name，最后退回 id；`name` 保留同值给旧消费方 */
+  meta.label = labelField || nameField || id;
+  meta.name = meta.label;
   /**
    * 把正文切成四段：性格 / 开场白 / 说话示例 / 世界书。
    *

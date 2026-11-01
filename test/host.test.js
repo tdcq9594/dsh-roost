@@ -1046,6 +1046,15 @@ test('激活: 清理函数要把每条路由都注销掉', async () => {
    * 清理函数得从 effect 里接。而且它会真的 bind 端口，必须 finally 关掉，
    * 否则测试进程不退出。
    */
+  /**
+   * 必须把数据目录指到临时目录：`apply()` 启动时会跑名字迁移，
+   * 而它**会改人格文件**。不隔离的话，跑一次测试就把用户真实的
+   * `~/.dsh/dsh-roost/personas/*.md` 改了（2026-11-01 真踩过）。
+   */
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  const testData = join(tmp(), 'data');
+  process.env.DSH_ROOST_DATA = testData;
+
   const host = await import('../src/host.js');
 
   let registered = 0;
@@ -1073,8 +1082,8 @@ test('激活: 清理函数要把每条路由都注销掉', async () => {
       return noop;
     },
     on: () => noop,
-    dataDir: join(tmp(), 'data'),
-    dir: tmp(),
+    dataDir: testData,
+    dir: testData,
   };
 
   try {
@@ -1086,6 +1095,8 @@ test('激活: 清理函数要把每条路由都注销掉', async () => {
         c();
       } catch {}
     }
+    if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;
+    else process.env.DSH_ROOST_DATA = oldEnv;
   }
 
   assert.equal(unsubscribed, registered, `注销数要等于注册数（${unsubscribed}/${registered}）`);

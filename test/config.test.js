@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadConfig, saveConfig, patchConfig, DEFAULTS, dataDir } from '../src/config.js';
+import { loadConfig, saveConfig, patchConfig, readRawConfig, DEFAULTS, dataDir } from '../src/config.js';
 
 /** 每个用例一个干净的 data 目录（dataDir() 每次读 env） */
 function freshDir() {
@@ -145,4 +145,17 @@ test('配置：patchConfig 也尊重「删掉 = 回默认」（它最终仍走 s
   const c = patchConfig({ server: { token: '' } });
   assert.equal(c.server.token, '');
   assert.equal(c.server.port, 4321, '其它键仍然不动');
+});
+
+test('默认名字是「大肥鱼」（0.11：名字是账号身份）', () => {
+  assert.equal(DEFAULTS.persona.name, '大肥鱼');
+});
+
+test('readRawConfig：没写过的键不会被默认值污染（迁移靠它判断）', () => {
+  const d = freshDir();
+  // 老配置：没有 persona.name
+  writeCfg(d, { persona: { current: 'snarky' } });
+  const raw = readRawConfig();
+  assert.equal(raw.persona.name, undefined, '原始配置里就是没有，不能合并出「大肥鱼」');
+  assert.equal(loadConfig().persona.name, '大肥鱼', '合并后的默认值是新装的默认');
 });

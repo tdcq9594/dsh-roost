@@ -15,7 +15,7 @@
 
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir } from './config.js';
+import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig } from './config.js';
 import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
 import { createInboundServer, postReply } from './server.js';
@@ -30,7 +30,7 @@ import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
 import { createMood } from './mood.js';
 import { createClosing } from './closing.js';
-import { createPersonas, legacyPersonaText } from './personas.js';
+import { createPersonas, legacyPersonaText, personaName } from './personas.js';
 import { createPersonaRepo } from './persona-repo.js';
 import { createUpdater } from './update.js';
 import { createStickers } from './stickers.js';
@@ -243,6 +243,68 @@ export function apply(ctx) {
     // 全打成 warn 的话面板上永远是两条红字，看着像功能坏了
     note: (m) => log.info(m),
   });
+
+  /**
+   * 她的名字：**全局唯一**（0.11 起名字是账号身份，不是人格属性）。
+   *
+   * 人格文件里的 `name` 已废弃，只在配置为空时兜底显示。
+   */
+  function globalName(persona) {
+    return personaName(cfg.persona?.name, persona);
+  }
+
+  /**
+   * 名字迁移（0.11）：把人格文件里的 `name` 读一次搬进全局配置，然后清字段。
+   *
+   * 三个要点：
+   *   1. 判「用户设过没有」必须看**原始 config.json**，不能看合并后的默认值
+   *      （老配置里没这个键，合并后却是「大肥鱼」，会把迁移骗过去）；
+   *   2. 先读名字再清字段——顺序反了就只能读到空值；
+   *   3. 清字段按来源分别处理（`persona-repo.migrateNameField`），
+   *      改过的一律不碰：迁移永远不覆盖用户的编辑。
+   */
+  function migratePersonaName() {
+    const raw = readRawConfig();
+    let name = '';
+    /**
+     * `raw === null` = 没有配置文件（新装）或配置坏了。
+     * 两种都**不写配置**：新装直接吃 DEFAULTS 的「大肥鱼」；
+     * 坏配置更不能拿默认值去覆盖，留给人手工救。
+     */
+    if (raw) {
+      name = typeof raw.persona?.name === 'string' ? raw.persona.name.trim() : '';
+      if (!name) {
+        const cur = personas.resolve('', cfg.persona);
+        const fromFile = String(cur.label || cur.name || '').trim();
+        if (fromFile && fromFile !== cur.id) {
+          try {
+            cfg = patchConfig({ persona: { name: fromFile } });
+            name = fromFile;
+          } catch (e) {
+            log.warn(`迁移名字失败（继续用默认值）：${e.message}`);
+          }
+        }
+      }
+    }
+
+    let rep = { renamed: [], skipped: [] };
+    try {
+      rep = personaRepo.migrateNameField();
+    } catch (e) {
+      log.warn(`清理人格里的 name 字段失败：${e.message}`);
+    }
+    if (name || rep.renamed.length) {
+      log.info(`名字迁移：全局名字「${name || globalName()}」；`
+        + `name→label ${rep.renamed.length} 份`
+        + (rep.skipped.length ? `，跳过 ${rep.skipped.length} 份（你改过的）` : ''));
+    }
+  }
+
+  /**
+   * 干跑（`scripts/dry-run.mjs`）用的是**真实数据目录**，迁移会改人格文件——
+   * 冒烟脚本不该动用户数据，所以给它一个跳过开关。
+   */
+  if (process.env.DSH_ROOST_SKIP_MIGRATE !== '1') migratePersonaName();
 
   /**
    * 本体自更新。
@@ -1495,7 +1557,7 @@ export function apply(ctx) {
             );
 
             return [
-              `你现在叫「${persona.name}」。`,
+              `你现在叫「${globalName(persona)}」。`,
               PERSONA_BASE,
               override ? `（本群临时人设）\n${override}` : persona.body,
               /**
@@ -1582,7 +1644,7 @@ export function apply(ctx) {
             const p = cfg.persona;
             const persona = personas.resolve(chat.chatId, p);
             return [
-              `别忘了你是谁：${persona.name}。`,
+              `别忘了你是谁：${globalName(persona)}。`,
               '上面那些历史是发生过的事，不是你说话的方式——别聊着聊着变成通用助手。',
               p.near || '',
             ]
@@ -3367,6 +3429,14 @@ export function apply(ctx) {
       route('/config', async (req, res) => {
         if (req.method === 'GET') return send(res, 200, { ok: true, config: publicConfig(cfg) });
         const body = await readBody(req);
+        /**
+         * `?mode=patch`：局部保存（切人格、改名字）。
+         *
+         * 默认仍然是「整份替换」——「配置全文」那个编辑器允许删字段，
+         * 删掉就该回落到默认值。但面板上那些只提交一小段的按钮**不能**走整份替换：
+         * `saveConfig` 的基线是 DEFAULTS，局部提交会把 token 清空、端口改回 17321。
+         */
+        const patchMode = new URL(req.url || '/', 'http://x').searchParams.get('mode') === 'patch';
 
         /**
          * 根必须是对象。
@@ -3410,7 +3480,7 @@ export function apply(ctx) {
 
         const beforePort = cfg.server.port;
         const beforeToken = cfg.server.token;
-        cfg = saveConfig(body);
+        cfg = patchMode ? patchConfig(body) : saveConfig(body);
 
         /**
          * 只有**端口或密钥**变了才重启监听。

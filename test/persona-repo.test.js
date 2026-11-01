@@ -794,3 +794,87 @@ test('安装：删掉之后再装回来，墓碑要清掉', async () => {
     h.done();
   }
 });
+
+/* ---------------- name → label 迁移 ---------------- */
+
+test('迁移：自己写的人格把 name 改成 label，原文与备份都对', () => {
+  const h = harness({});
+  try {
+    mkdirSync(h.pdir, { recursive: true });
+    writeFileSync(join(h.pdir, 'mine.md'), '---\nname: 我的猫\ntags: 猫\n---\n正文。', 'utf8');
+
+    const rep = h.repo.migrateNameField();
+    assert.deepEqual(rep.renamed.map((x) => x.id), ['mine']);
+
+    const out = readFileSync(join(h.pdir, 'mine.md'), 'utf8');
+    assert.equal(out, '---\nlabel: 我的猫\ntags: 猫\n---\n正文。', '只改这一行，其余字节不动');
+    assert.ok(existsSync(join(h.pdir, '.backup')), '改之前要备份');
+  } finally {
+    h.done();
+  }
+});
+
+test('迁移：内置人格改完后仍是「已是最新」（靠 localSha 吸收 sha 变化）', async () => {
+  const h = harness({ files: { a: P1 }, bundled: { 'a.md': P1 } });
+  try {
+    writeFileSync(
+      join(h.dataDir, 'bundled', 'index.json'),
+      JSON.stringify({ schema: 1, personas: [{ id: 'a', file: 'a.md', sha256: sha256(P1) }] }),
+      'utf8',
+    );
+    mkdirSync(h.pdir, { recursive: true });
+    writeFileSync(join(h.pdir, 'a.md'), P1, 'utf8');
+
+    const rep = h.repo.migrateNameField();
+    assert.deepEqual(rep.renamed.map((x) => x.id), ['a']);
+    assert.match(readFileSync(join(h.pdir, 'a.md'), 'utf8'), /label: 甲/);
+
+    const l = await h.repo.list({ force: true });
+    assert.equal(l.personas[0].state, 'same', `改完不该变成「你改过」，实际 ${l.personas[0].state}`);
+  } finally {
+    h.done();
+  }
+});
+
+test('迁移：改过的人格不碰（迁移永不覆盖用户编辑）', () => {
+  const h = harness({ bundled: { 'a.md': P1 } });
+  try {
+    writeFileSync(
+      join(h.dataDir, 'bundled', 'index.json'),
+      JSON.stringify({ schema: 1, personas: [{ id: 'a', file: 'a.md', sha256: sha256(P1) }] }),
+      'utf8',
+    );
+    mkdirSync(h.pdir, { recursive: true });
+    const mine = `${P1}\n我自己加的一段。`;
+    writeFileSync(join(h.pdir, 'a.md'), mine, 'utf8');
+
+    const rep = h.repo.migrateNameField();
+    assert.deepEqual(rep.renamed, []);
+    assert.equal(rep.skipped[0].id, 'a');
+    assert.equal(readFileSync(join(h.pdir, 'a.md'), 'utf8'), mine, '一个字节都不许动');
+  } finally {
+    h.done();
+  }
+});
+
+test('迁移：撞名装的人格改完后仍是 same（synced 按仓库 id 记）', async () => {
+  const h = harness({ files: { a: P1 } });
+  try {
+    mkdirSync(h.pdir, { recursive: true });
+    writeFileSync(join(h.pdir, 'a.md'), '---\nname: 我的\n---\n我自己的。', 'utf8');
+
+    const r = await h.repo.install('a');
+    assert.notEqual(r.localId, 'a', '撞名应该换名');
+
+    const before = await h.repo.list({ force: true });
+    assert.equal(before.personas[0].state, 'same');
+
+    const rep = h.repo.migrateNameField();
+    assert.ok(rep.renamed.some((x) => x.id === r.localId), '撞名那份也要改名');
+
+    const after = await h.repo.list({ force: true });
+    assert.equal(after.personas[0].state, 'same', '迁移后不能变成「你改过」');
+  } finally {
+    h.done();
+  }
+});

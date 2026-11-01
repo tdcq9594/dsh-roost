@@ -273,14 +273,15 @@ export const DEFAULTS = {
     /** 按会话指定：{ "群openid": "personaId" }，留空就用 current */
     byChat: {},
     /**
-     * 旧字段，**已经不再拼进提示词**。
+     * **她的名字，全局唯一。**
      *
-     * 0.10.0 起人格正文在 `personas/<id>.md` 里，`default.md` 的正文就是
-     * 从这两个字段抄过去的。以前提示词末尾无条件追加 `text`，于是换了人格
-     * 旧的那段还挂着，且因为排最后而权重最大——表现就是「换了还是原来那个」。
-     * 现在只在人格文件读不出正文时才兜底。
+     * 0.11 起名字是「账号身份」而不是「人格属性」：换人格只换说话方式，
+     * 名字不变（和 QQ-agent 的 botName 同款）。人格文件里的 `name` 已废弃，
+     * 只当面板标签用（`label`）。
+     *
+     * 默认给「大肥鱼」——新装用户直接用这个；老用户由迁移读一次原人格名。
      */
-    name: '',
+    name: '大肥鱼',
     text: '',
     rulesPrivate: '这是和主人的私聊，可以放开聊。',
     rulesSocial: '这是群聊，说话要短，别刷屏。',
@@ -344,6 +345,30 @@ function upgradeOldDefaults(cfg) {
     if (cfg?.[a]?.[b] === u.from) cfg[a][b] = u.to;
   }
   return cfg;
+}
+
+/**
+ * 磁盘上的**原始**配置，不合并默认值。
+ *
+ * 迁移必须用它判断「用户到底设过没有」：`loadConfig()` 会把 `DEFAULTS`
+ * 合并进来，于是老用户配置里明明没有 `persona.name`，读出来却是「大肥鱼」——
+ * 拿合并结果判断就会误以为用户选过，永远读不到他原来的「小栖」。
+ */
+export function readRawConfig() {
+  try {
+    const j = JSON.parse(readFileSync(FILE(), 'utf8'));
+    if (!j || typeof j !== 'object' || Array.isArray(j)) return null;
+    return j;
+  } catch {
+    /**
+     * 没有文件、或者 JSON 坏了，都返回 null。
+     *
+     * 两者对迁移的意义一样：**配置不可信，别拿默认值去覆盖它**。
+     * 区分开的话，坏配置会被当成「新装」，然后 `patchConfig` 一把写成默认值，
+     * 用户那份「坏但还能手工救」的配置就没了。
+     */
+    return null;
+  }
 }
 
 export function loadConfig() {

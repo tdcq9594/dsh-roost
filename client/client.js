@@ -1163,6 +1163,18 @@ select.roost-input{color-scheme:dark}
       const [newId, setNewId] = useState('')
       const [dirty, setDirty] = useState(false)
       const [showNew, setShowNew] = useState(false)
+      /**
+       * 全局名字（0.11：名字是账号身份，不再写在人格里）。
+       *
+       * 用本地草稿而不是直接受控于 config：输入过程中不能每个字符都写盘，
+       * 点「保存」才提交。
+       */
+      const [nameDraft, setNameDraft] = useState('')
+      /** 用户改过名字输入框没有：没有才跟着 config 刷新，别把他正在输的内容冲掉 */
+      const [nameDirty, setNameDirty] = useState(false)
+      useEffect(() => {
+        if (!nameDirty) setNameDraft(config?.persona?.name ?? '')
+      }, [config, nameDirty])
 
       /**
        * 人格仓库（「从仓库更新」）。
@@ -1264,6 +1276,31 @@ select.roost-input{color-scheme:dark}
       }
 
       return h('div', null,
+        /**
+         * 名字放在最上面：它决定「她是谁」，人格只决定「她怎么说话」。
+         * 0.11 起名字全局生效——换人格不会改名。
+         */
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 } },
+          h('span', { style: { fontSize: 12, fontWeight: 650 } }, '名字'),
+          h('input', {
+            className: 'roost-input', value: nameDraft, placeholder: '她的名字（全局）',
+            'aria-label': '她的名字', style: { maxWidth: 200 },
+            onChange: (e) => { setNameDraft(e.target.value); setNameDirty(true) },
+          }),
+          h('button', {
+            type: 'button', className: 'roost-btn',
+            onClick: async () => {
+              const name = nameDraft.trim()
+              if (!name) return toast('名字不能为空')
+              const r = await save({ persona: { name } })
+              if (r.ok === false) return toast(r.message || '没存上')
+              setNameDirty(false)
+              toast('名字已更新')
+            },
+          }, '保存'),
+          h('span', { className: 'roost-note', style: { margin: 0 } },
+            '全局生效；换人格不改名字，人格里的名字只是标签。'),
+        ),
         sec('人格', {
           /**
            * 标题右边两个按钮。
@@ -3550,7 +3587,11 @@ select.roost-input{color-scheme:dark}
 
       useEffect(() => {
         if (tab === 'memory') loadMemory()
-        if (tab === 'her') loadHer()
+        if (tab === 'her') {
+          loadHer()
+          // 名字输入框读的是 config；直接进这一页时 config 还没拉过
+          if (!config) loadConfig()
+        }
         if (tab === 'market') loadMarket()
         if (tab === 'awake') {
           // 授权状态在 /memory 里、chatId 列表在 /chats 里，这一页两样都要用
@@ -3586,8 +3627,22 @@ select.roost-input{color-scheme:dark}
         return r
       }, [mem])
 
+      /**
+       * 局部保存（切人格、改名字）。
+       *
+       * 走 `?mode=patch`：服务端以磁盘配置为基线合并。走整份替换的话，
+       * `saveConfig` 的基线是 DEFAULTS——只提交 `{persona:{name}}` 会把 token
+       * 清空、端口改回 17321（2026-11-01 实测）。
+       */
       const saveCfg = useCallback(async (patch) => {
-        const r = await post('/config', patch)
+        const r = await post('/config?mode=patch', patch)
+        if (r.ok !== false) setConfig(r.config || null)
+        return r
+      }, [])
+
+      /** 「配置全文」用：整份替换（删字段 = 回落默认值） */
+      const saveAll = useCallback(async (full) => {
+        const r = await post('/config', full)
         if (r.ok !== false) setConfig(r.config || null)
         return r
       }, [])
@@ -3647,7 +3702,7 @@ select.roost-input{color-scheme:dark}
           tab === 'awake' ? h(AwakeTab, { aw, mem, sp, chats, toast, reload: loadAwake, reloadSp: loadAwake, busy }) : null,
           tab === 'context' ? h(ContextTab, { ctxInfo, mind, usageInfo, toast, reload: loadCtx, busy }) : null,
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
-          tab === 'config' ? (config ? h(ConfigTab, { config, save: saveCfg, toast }) : h('div', { className: 'roost-empty' }, '读取配置…')) : null,
+          tab === 'config' ? (config ? h(ConfigTab, { config, save: saveAll, toast }) : h('div', { className: 'roost-empty' }, '读取配置…')) : null,
           tab === 'logs' ? h(LogsTab, null) : null,
         ),
 

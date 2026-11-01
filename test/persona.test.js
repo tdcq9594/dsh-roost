@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createPersonas, legacyPersonaText, parsePersona } from '../src/personas.js';
+import { createPersonas, legacyPersonaText, parsePersona, personaName } from '../src/personas.js';
 
 const LEGACY = '你住在 QQ 里，是个话不多但有意思的人。回答简短口语化，通常两三句话。';
 
@@ -304,4 +304,23 @@ test('解析：空头 `---\\n---` 也认（认不出就会让 tools 静默变 nu
 test('解析：键名容忍缩进和大小写（认不出会让 tools 静默变全开）', () => {
   assert.deepEqual(parsePersona('x', '---\n  tools: []\n---\n正文').tools, []);
   assert.deepEqual(parsePersona('x', '---\nTools: []\n---\n正文').tools, []);
+});
+
+test('解析：label 优先，name 作别名（0.11 名字不再由人格决定）', () => {
+  const both = parsePersona('x', '---\nlabel: 吐槽\nname: 旧名\n---\n正文');
+  assert.equal(both.label, '吐槽', 'label 优先');
+  assert.equal(both.name, '吐槽', 'name 跟随 label，兼容旧消费方');
+
+  const legacy = parsePersona('x', '---\nname: 旧名\n---\n正文');
+  assert.equal(legacy.label, '旧名', '只有 name 时当 label 用');
+
+  const none = parsePersona('x', '---\ntags: a\n---\n正文');
+  assert.equal(none.label, 'x', '都没有就退回 id');
+});
+
+test('名字回退链：配置 → label → id → 大肥鱼', () => {
+  assert.equal(personaName('小栖', { label: '吐槽' }), '小栖', '配置优先');
+  assert.equal(personaName('', { label: '吐槽' }), '吐槽', '配置空就用人格 label');
+  assert.equal(personaName('   ', { id: 'snarky' }), 'snarky', 'label 空就退回 id');
+  assert.equal(personaName('', {}), '大肥鱼', '全空用默认名');
 });

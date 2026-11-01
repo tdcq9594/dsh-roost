@@ -56,6 +56,8 @@ const fakeCtx = {
   path: 'C:/Users/q9079/.dsh/dsh-roost',
 };
 
+// 迁移会改真实数据目录里的人格文件，冒烟脚本跳过它
+process.env.DSH_ROOST_SKIP_MIGRATE = '1';
 const host = await import('../src/host.js');
 console.log('inject:', host.inject?.join(', ') || '(没声明)');
 
