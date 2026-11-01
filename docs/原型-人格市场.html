@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人格市场原型 · dsh-roost</title>
+<style>
+  :root{
+    --bg:#17181c; --panel:#1c1d22; --panel2:#202127;
+    --line:rgba(255,255,255,.09); --line2:rgba(255,255,255,.16);
+    --text:#e9eaee; --muted:#9a9ba3; --dim:#71727a;
+    --accent:#7aa2f7; --ok:#4ec9a5; --warn:#e0af68; --danger:#f07178;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;}
+  .app{max-width:1060px;margin:0 auto;padding:20px 24px 60px;container-type:inline-size}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:16px}
+  .brand{font-size:15px;font-weight:500}
+  .brand span{color:var(--dim);font-weight:400;margin-left:4px}
+  .proto{font-size:10.5px;color:var(--dim);border:1px solid var(--line);
+    border-radius:20px;padding:1px 7px}
+  nav{display:flex;gap:4px}
+  .tab{background:none;border:0;color:var(--muted);font-size:13px;padding:5px 11px;
+    border-radius:8px;cursor:pointer;font-family:inherit}
+  .tab:hover{background:rgba(255,255,255,.04);color:var(--text)}
+  .tab.active{background:rgba(255,255,255,.08);color:var(--text)}
+  .grow{flex:1}
+  .status{font-size:11px;color:var(--dim)}
+  .status b{color:var(--muted);font-weight:500}
+
+  .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+  input[type=text]{background:var(--panel);border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:6px 10px;font:inherit;font-size:12.5px;outline:none;min-width:0}
+  input[type=text]:focus{border-color:var(--line2)}
+  #q{flex:1;min-width:220px}
+  select{background:var(--panel);border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:6px 8px;font:inherit;font-size:12px;outline:none}
+  option{background:#1c1d22;color:#e9eaee}
+  input[type=checkbox]{accent-color:var(--accent);margin:0}
+  .btn{background:none;border:1px solid var(--line);color:var(--text);border-radius:7px;
+    padding:4px 10px;font:inherit;font-size:11.5px;cursor:pointer;white-space:nowrap}
+  .btn:hover{border-color:var(--line2);background:rgba(255,255,255,.03)}
+  .btn.primary{border-color:rgba(122,162,247,.5);color:var(--accent)}
+  .btn.primary:hover{background:rgba(122,162,247,.08)}
+  .btn.danger{border-color:rgba(240,113,120,.4);color:var(--danger)}
+  .btn:disabled{opacity:.4;cursor:default}
+
+  .cats{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
+  .cat{background:none;border:1px solid transparent;color:var(--muted);font:inherit;
+    font-size:12px;padding:3px 9px;border-radius:20px;cursor:pointer}
+  .cat:hover{color:var(--text)}
+  .cat.active{background:rgba(255,255,255,.08);color:var(--text);border-color:var(--line)}
+  .cat em{font-style:normal;color:var(--dim);margin-left:4px;font-size:11px}
+
+  .tags{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+  .chip{background:none;border:1px solid var(--line);color:var(--muted);font:inherit;
+    font-size:11px;padding:2px 8px;border-radius:20px;cursor:pointer}
+  .chip:hover{color:var(--text);border-color:var(--line2)}
+  .chip.on{border-color:rgba(122,162,247,.55);color:var(--accent);background:rgba(122,162,247,.07)}
+  .chip em{font-style:normal;color:var(--dim);margin-left:3px}
+
+  .count{font-size:11.5px;color:var(--dim);margin-bottom:6px}
+  .list{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
+  .scroll{max-height:520px;overflow:auto}
+  .row{display:grid;grid-template-columns:30px minmax(0,1fr) 84px auto;gap:10px;
+    align-items:center;padding:9px 12px;border-bottom:1px solid var(--line)}
+  .row:last-child{border-bottom:0}
+  .row:hover{background:rgba(255,255,255,.02)}
+  .avatar{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;
+    font-size:15px;background:rgba(255,255,255,.06);line-height:1}
+  .avatar.txt{font-size:12px;font-weight:500}
+  .line1{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .name{font-size:13px;font-weight:500}
+  .by{font-size:11px;color:var(--dim)}
+  .desc{font-size:11.5px;color:var(--muted);margin-top:1px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .meta{font-size:11px;color:var(--dim);text-align:right;line-height:1.5}
+  .acts{display:flex;gap:6px;justify-content:flex-end}
+  .pill{font-size:10.5px;padding:0 6px;border-radius:20px;border:1px solid var(--line);
+    color:var(--muted);line-height:16px}
+  .pill.ok{color:var(--ok);border-color:rgba(78,201,165,.35)}
+  .pill.warn{color:var(--warn);border-color:rgba(224,175,104,.35)}
+  .pill.cur{color:var(--accent);border-color:rgba(122,162,247,.45)}
+  .pager{display:flex;align-items:center;justify-content:space-between;
+    padding:8px 12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim)}
+  .empty{padding:28px;text-align:center;color:var(--dim);font-size:12px}
+
+  .drawer{position:fixed;top:0;right:0;width:392px;max-width:92vw;height:100%;
+    background:var(--panel);border-left:1px solid var(--line);padding:16px 18px;
+    overflow:auto;transform:translateX(100%);transition:transform .18s ease;z-index:30}
+  .drawer.open{transform:translateX(0)}
+  .drawer h3{margin:0;font-size:14px;font-weight:500}
+  .dhead{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+  .dmeta{font-size:11px;color:var(--dim);margin-bottom:10px}
+  .sect{font-size:11px;color:var(--dim);margin:14px 0 5px;letter-spacing:.02em}
+  .kv{display:flex;gap:10px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
+  .kv span{background:rgba(255,255,255,.04);border-radius:6px;padding:2px 7px}
+  pre{background:#15161a;border:1px solid var(--line);border-radius:8px;padding:10px;
+    font-size:11.5px;line-height:1.75;white-space:pre-wrap;margin:0;
+    font-family:ui-monospace,Menlo,Consolas,monospace;max-height:300px;overflow:auto}
+  .risk{border:1px solid rgba(240,113,120,.35);border-radius:8px;padding:8px 10px;
+    font-size:11.5px;color:var(--danger);margin-top:10px;line-height:1.6}
+  .dfoot{display:flex;gap:8px;margin-top:14px}
+
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;
+    align-items:flex-start;justify-content:center;padding-top:12vh;z-index:40}
+  .picker{width:470px;max-width:92vw;background:var(--panel);border:1px solid var(--line2);
+    border-radius:12px;overflow:hidden}
+  .phead{padding:10px 12px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
+  .phead input{flex:1;background:none;border:0;outline:none;color:var(--text);font:inherit;font-size:13px}
+  .plist{max-height:336px;overflow:auto;
+    -webkit-mask-image:linear-gradient(to bottom,#000 90%,transparent);
+    mask-image:linear-gradient(to bottom,#000 90%,transparent)}
+  .prow{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:10px;align-items:center;
+    padding:8px 12px;cursor:pointer;border-left:2px solid transparent}
+  .prow:hover,.prow.on{background:rgba(255,255,255,.05);border-left-color:var(--accent)}
+  .pfoot{padding:8px 12px;border-top:1px solid var(--line);display:flex;
+    align-items:center;gap:8px;font-size:11px;color:var(--dim)}
+  .seg{display:flex;gap:2px;background:rgba(255,255,255,.05);border-radius:7px;padding:2px}
+  .seg button{background:none;border:0;color:var(--muted);font:inherit;font-size:11px;
+    padding:3px 9px;border-radius:5px;cursor:pointer}
+  .seg button.on{background:rgba(255,255,255,.1);color:var(--text)}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .card .k{font-size:11px;color:var(--dim)}
+  .card .v{font-size:18px;font-weight:500;margin-top:2px}
+  .card .s{font-size:11px;color:var(--muted);margin-top:1px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{text-align:left;font-weight:400;color:var(--dim);font-size:11px;
+    padding:6px 8px;border-bottom:1px solid var(--line)}
+  td{padding:7px 8px;border-bottom:1px solid var(--line);color:var(--muted)}
+  tr:last-child td{border-bottom:0}
+  .bad{color:var(--danger)}
+  .h2{font-size:12.5px;font-weight:500;margin:18px 0 8px}
+  .note{font-size:11px;color:var(--dim);margin-top:8px;line-height:1.7}
+  .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(10px);
+    background:#2a2b32;border:1px solid var(--line2);border-radius:8px;padding:8px 14px;
+    font-size:12px;color:var(--text);opacity:0;pointer-events:none;transition:.18s;z-index:60}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  @media (max-width:820px){ .row{grid-template-columns:30px minmax(0,1fr) auto} .meta{display:none} }
+
+  @container (max-width:560px){
+    .app{padding:14px 14px 40px}
+    header{gap:8px;padding-bottom:10px;margin-bottom:12px}
+    .status,.proto{display:none}
+    .row{grid-template-columns:28px minmax(0,1fr) auto;gap:8px;padding:8px 10px}
+    .meta{display:none}
+    .acts .btn{padding:3px 7px;font-size:11px}
+    .cats,.tags{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+    .cats::-webkit-scrollbar,.tags::-webkit-scrollbar{display:none}
+    .chip,.cat{flex:0 0 auto;white-space:nowrap}
+    #q{min-width:0}
+    .toolbar{gap:6px}
+    .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .pager{font-size:11px}
+    .drawer{width:100%;max-width:100%}
+  }
+  body.narrow{background:#101114}
+  body.narrow .app{max-width:420px;border-right:1px solid var(--line2);min-height:100vh;margin:0}
+  body.narrow .drawer{left:0;right:auto;top:auto;bottom:0;width:420px;height:74vh;
+    border-left:0;border-top:1px solid var(--line2);border-radius:12px 12px 0 0;
+    transform:translateY(100%)}
+  body.narrow .drawer.open{transform:translateY(0)}
+  body.narrow .overlay{width:420px;padding-top:16vh}
+  body.narrow .picker{width:396px;max-width:396px}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">栖<span>· 人格</span></div>
+    <span class="proto">原型 · 假数据</span>
+    <nav>
+      <button class="tab active" data-act="tab" data-tab="market">市场</button>
+      <button class="tab" data-act="tab" data-tab="library">我的</button>
+      <button class="tab" data-act="tab" data-tab="gov">治理</button>
+    </nav>
+    <div class="grow"></div>
+    <button class="btn" data-act="narrow" title="切到 420px 窄栏，看侧边栏/分屏下的样子">窄栏</button>
+    <button class="btn primary" data-act="picker">换人格</button>
+    <div class="status">目录 <b id="stTotal">300</b> 份 · 打开面板 <b>0</b> 次文件读 · <b>12</b> ms</div>
+  </header>
+  <main id="view"></main>
+</div>
+<div class="drawer" id="drawer"></div>
+<div id="modal"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const TAG_POOL = ['日常','温和','短句','吐槽','二次元','工具','严谨','文艺','有趣','毒舌','治愈','高冷','热血','慢热','傲娇','社畜','夜猫','嘴硬'];
+const AUTHORS = ['tdcq9594','阿柚','moyu','青柠','夜航','小鱼干'];
+const EMOJI = ['🐟','🌙','⚡','🍵','📚','🌊','🔥','🍂','🎧','🧊','🌱','☕'];
+const PRE = ['月','雪','风','星','雾','海','山','林','云','灯','雨','秋'];
+const SUF = ['见','行','子','君','客','娘','喵','酱','老师','先生','小姐','同学'];
+const MID = ['之','小','家',''];
+
+const DESC = {
+  '日常':'回消息不紧不慢，什么都聊一点',
+  '温和':'不呛人，先接住情绪再讲道理',
+  '短句':'一句话能说完就绝不说两句',
+  '吐槽':'嘴上不饶人，回得比谁都快',
+  '二次元':'语气偏轻，偶尔冒一句番剧梗',
+  '工具':'给步骤不给情绪，先问清再动手',
+  '严谨':'不确定就说不确定，不编',
+  '文艺':'半文半白，喜欢把话说得慢一点',
+  '有趣':'爱接梗，正经话也能讲出笑点',
+  '毒舌':'夸人也像在损人，但心是软的',
+  '治愈':'擅长把小事说得很轻',
+  '高冷':'能一个字说完不说两个',
+  '热血':'情绪高，标点也跟着高',
+  '慢热':'头几句很客气，熟了才话多',
+  '傲娇':'嘴上说随便，其实很在意',
+  '社畜':'总在加班，回消息带工位味',
+  '夜猫':'凌晨两点最清醒',
+  '嘴硬':'错了也不认，但会偷偷改',
+};
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return ((t^t>>>14)>>>0)/4294967296}}
+const rnd = mulberry32(20261101);
+const pick = (a)=>a[Math.floor(rnd()*a.length)];
+const int = (n)=>Math.floor(rnd()*n);
+function hue(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))%360;return h}
+
+const REAL = [
+  ['default','小栖','🏠',['日常','温和'],'默认的那只，话不多但接得住梗','tdcq9594',216],
+  ['fatfish','大肥鱼','🐟',['短句','吐槽'],'短句、爱吐槽、不装真人','tdcq9594',439],
+  ['genki','元气少女','⚡',['二次元','热血'],'高能量、爱用感叹号','阿柚',512],
+  ['helper','靠谱助手','🧰',['工具','严谨'],'给步骤不给情绪，先问清再动手','tdcq9594',386],
+  ['scholar','古风书生','📜',['文艺','有趣'],'半文半白，爱引经据典','青柠',190],
+  ['snarky','冷淡','🧊',['毒舌','高冷'],'能一个字说完不说两个','moyu',264],
+  ['teacher','老师','📚',['严谨','治愈'],'耐心拆解，先问再答','夜航',330],
+  ['terse','夜猫子','🌙',['夜猫','慢热'],'凌晨两点最清醒','小鱼干',280],
+];
+
+const personas = [];
+REAL.forEach(([id,name,icon,tags,desc,author,chars],i)=>{
+  personas.push({id,name,icon,tags,desc,author,chars,version:'1.0.0',addedAt:1000-i,featured:true,alias:[]});
+});
+
+const used = new Set(personas.map(p=>p.name));
+let n = 0;
+while(personas.length < 300){
+  const pre = PRE[n % PRE.length], mid = MID[int(MID.length)], suf = SUF[int(SUF.length)];
+  let name = pre + mid + suf;
+  if(used.has(name)) name = pre + suf + (n % 97);
+  used.add(name);
+  const t1 = pick(TAG_POOL);
+  let t2 = pick(TAG_POOL); if(t2===t1) t2 = pick(TAG_POOL);
+  const tags = [t1,t2];
+  const desc = DESC[t1] || (tags.join('、') + '，说话有自己的一套');
+  personas.push({
+    id: 'p' + String(n).padStart(3,'0'),
+    name,
+    icon: rnd() < 0.42 ? pick(EMOJI) : '',
+    tags, desc,
+    author: pick(AUTHORS),
+    chars: 150 + int(760),
+    version: '1.' + int(5) + '.' + int(9),
+    addedAt: 900 - n,
+    featured: rnd() < 0.14,
+    alias: rnd() < 0.12 ? [tags[0] + '那位'] : [],
+  });
+  n++;
+}
+
+const instIdx = personas.map((p,i)=>i).filter(i=> i<8 || i % 5 === 0);
+instIdx.forEach((i,k)=>{
+  const p = personas[i];
+  p.state = k % 19 === 0 ? 'update' : k % 13 === 0 ? 'modified' : 'installed';
+  p.hoursAgo = p.state==='update' ? 30 + int(400) : int(3000);
+  p.useCount = int(3) === 0 ? 0 : 1 + int(40);
+  p.fav = rnd() < 0.18;
+  p.pinned = p.id === 'fatfish' || p.id === 'snarky';
+});
+personas.forEach(p=>{
+  if(p.state) return;
+  p.state = 'missing';
+  p.hoursAgo = null; p.useCount = 0; p.fav = false; p.pinned = false;
+});
+personas.forEach(p=>{ p.risky = p.tags.includes('工具') ? 1 : 0; });
+
+const cfg = {
+  current: 'default',
+  byChat: { '摸鱼部':'fatfish', '读书会':'scholar', '测试群':'lazycat' },
+  chat: '摸鱼部',
+};
+
+const state = {
+  tab:'market', q:'', cat:'all', tags:new Set(), sort:'repo', page:1, size:50,
+  preview:null, picker:false, pickerQ:'', pickerIdx:0, scope:'chat', sel:new Set(),
+  libCat:'all', libSort:'recent', confirmDel:false,
+};
+
+const byId = id => personas.find(p=>p.id===id);
+const installed = () => personas.filter(p=>p.state!=='missing');
+const chatCount = id => Object.values(cfg.byChat).filter(v=>v===id).length;
+
+function matchQ(p,q){
+  if(!q) return true;
+  const s = (p.name+' '+p.id+' '+p.tags.join(' ')+' '+p.desc+' '+p.author+' '+p.alias.join(' ')).toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every(w=>s.includes(w));
+}
+function matchTags(p){ return [...state.tags].every(t=>p.tags.includes(t)); }
+
+function sortRows(arr, sort){
+  const a = arr.slice();
+  const cmp = {
+    repo:(x,y)=> y.addedAt - x.addedAt,
+    chars:(x,y)=> y.chars - x.chars,
+    name:(x,y)=> x.name.localeCompare(y.name,'zh'),
+    recent:(x,y)=> (x.hoursAgo===null?1e9:x.hoursAgo) - (y.hoursAgo===null?1e9:y.hoursAgo),
+    used:(x,y)=> y.useCount - x.useCount,
+  }[sort] || (()=>0);
+  a.sort((x,y)=> cmp(x,y) || x.id.localeCompare(y.id));
+  return a;
+}
+
+function marketRows(){
+  let arr = personas.slice();
+  if(state.cat==='featured') arr = arr.filter(p=>p.featured);
+  if(state.cat==='update') arr = arr.filter(p=>p.state==='update');
+  if(state.cat==='installed') arr = arr.filter(p=>p.state!=='missing');
+  if(state.cat==='missing') arr = arr.filter(p=>p.state==='missing');
+  arr = arr.filter(p=>matchQ(p,state.q)).filter(matchTags);
+  return sortRows(arr, state.sort);
+}
+function libraryRows(){
+  let arr = installed();
+  if(state.libCat==='pinned') arr = arr.filter(p=>p.pinned);
+  if(state.libCat==='fav') arr = arr.filter(p=>p.fav);
+  if(state.libCat==='stale') arr = arr.filter(p=>p.useCount===0 || p.hoursAgo>2160);
+  arr = arr.filter(p=>matchQ(p,state.q)).filter(matchTags);
+  arr = sortRows(arr, state.libSort);
+  return arr.filter(p=>p.pinned).concat(arr.filter(p=>!p.pinned));
+}
+
+function avatar(p){
+  if(p.icon) return '<div class="avatar">'+p.icon+'</div>';
+  const h = hue(p.id);
+  return '<div class="avatar txt" style="background:hsl('+h+' 26% 24%);color:hsl('+h+' 62% 78%)">'
+    + p.name.slice(0,1) + '</div>';
+}
+function pill(p){
+  if(p.state==='installed') return '<span class="pill ok">已装</span>';
+  if(p.state==='update') return '<span class="pill warn">有更新</span>';
+  if(p.state==='modified') return '<span class="pill warn">你改过</span>';
+  return '<span class="pill">未装</span>';
+}
+function ago(h){
+  if(h===null) return '没用过';
+  if(h<1) return '刚刚';
+  if(h<24) return Math.round(h)+' 小时前';
+  return Math.round(h/24)+' 天前';
+}
+
+function rowMarket(p){
+  return '<div class="row" data-id="'+p.id+'">'+avatar(p)+
+    '<div><div class="line1"><span class="name">'+p.name+'</span>'+
+      '<span class="by">@'+p.author+'</span>'+pill(p)+
+      (p.featured?'<span class="pill">精选</span>':'')+'</div>'+
+      '<div class="desc">'+p.desc+'</div></div>'+
+    '<div class="meta">v'+p.version+'<br>'+p.chars+' 字</div>'+
+    '<div class="acts">'+
+      '<button class="btn" data-act="preview">预览</button>'+
+      (p.state==='missing'?'<button class="btn primary" data-act="install">装上</button>'
+       :p.state==='update'?'<button class="btn primary" data-act="install">更新</button>'
+       :p.state==='modified'?'<button class="btn" data-act="install">恢复官方</button>':'')+
+    '</div></div>';
+}
+function rowLib(p){
+  const cur = cfg.byChat[cfg.chat]===p.id ? 'cur' : (cfg.current===p.id?'cur':'');
+  const cnt = chatCount(p.id);
+  return '<div class="row" data-id="'+p.id+'">'+avatar(p)+
+    '<div><div class="line1"><span class="name">'+p.name+'</span>'+
+      (p.pinned?'<span class="pill">置顶</span>':'')+
+      (cur?'<span class="pill '+cur+'">'+(cfg.byChat[cfg.chat]===p.id?'本群在用':'全局默认')+'</span>':'')+
+      (p.fav?'<span class="pill">收藏</span>':'')+'</div>'+
+      '<div class="desc">'+p.desc+(cnt?' · '+cnt+' 个群在用':'')+'</div></div>'+
+    '<div class="meta">'+ago(p.hoursAgo)+'<br>'+(p.useCount?('用过 '+p.useCount+' 次'):'没用过')+'</div>'+
+    '<div class="acts">'+
+      (cfg.byChat[cfg.chat]===p.id?'':'<button class="btn primary" data-act="use">用这个</button>')+
+      '<button class="btn" data-act="preview">预览</button>'+
+    '</div></div>';
+}
+
+function tagbarHTML(){
+  const base = state.tab==='market' ? personas : installed();
+  const counts = {};
+  base.filter(p=>matchQ(p,state.q)).forEach(p=>p.tags.forEach(t=>counts[t]=(counts[t]||0)+1));
+  const top = Object.keys(counts).sort((a,b)=>counts[b]-counts[a]).slice(0,10);
+  return ['<button class="chip '+(state.tags.size?'':'on')+'" data-act="tag" data-tag="">全部</button>']
+    .concat(top.map(t=>'<button class="chip '+(state.tags.has(t)?'on':'')+'" data-act="tag" data-tag="'+t+'">'+t+'<em>'+counts[t]+'</em></button>'))
+    .join('');
+}
+
+function resultsHTML(rows){
+  const pages = Math.max(1, Math.ceil(rows.length/state.size));
+  if(state.page>pages) state.page = pages;
+  const start = (state.page-1)*state.size;
+  const page = rows.slice(start, start+state.size);
+  const body = page.length
+    ? page.map(state.tab==='market'?rowMarket:rowLib).join('')
+    : '<div class="empty">没有匹配的人格。试试去掉几个标签，或换个词。</div>';
+  return '<div class="count">'+rows.length+' 个结果'+
+      (state.tags.size?' · 标签 '+[...state.tags].join(' + '):'')+'</div>'+
+    '<div class="list"><div class="scroll">'+body+'</div>'+
+    '<div class="pager"><span>第 '+(start+1)+'–'+Math.min(start+state.size,rows.length)+' 条，共 '+rows.length+'</span>'+
+      '<span style="display:flex;gap:6px;align-items:center">'+
+      '<button class="btn" data-act="page" data-page="'+(state.page-1)+'" '+(state.page<=1?'disabled':'')+'>上一页</button>'+
+      '<span>'+state.page+' / '+pages+'</span>'+
+      '<button class="btn" data-act="page" data-page="'+(state.page+1)+'" '+(state.page>=pages?'disabled':'')+'>下一页</button>'+
+      '</span></div></div>';
+}
+
+function marketHTML(){
+  return '<div class="toolbar">'+
+      '<input type="text" id="q" placeholder="搜索 名称 / 标签 / 简介 / 作者 / 别名" value="'+state.q+'">'+
+      '<select id="sort">'+
+        ['repo:最近更新','chars:字数','name:名称'].map(o=>{
+          const [v,l] = o.split(':');
+          return '<option value="'+v+'" '+(state.sort===v?'selected':'')+'>排序：'+l+'</option>';
+        }).join('')+
+      '</select></div>'+
+    '<div class="cats">'+
+      [['all','全部'],['featured','精选'],['update','有更新'],['installed','已装'],['missing','未装']]
+        .map(([k,l])=>'<button class="cat '+(state.cat===k?'active':'')+'" data-act="cat" data-cat="'+k+'">'+l+
+          '<em>'+(k==='all'?personas.length:
+                 k==='featured'?personas.filter(p=>p.featured).length:
+                 k==='update'?personas.filter(p=>p.state==='update').length:
+                 k==='installed'?installed().length:
+                 personas.filter(p=>p.state==='missing').length)+'</em></button>').join('')+
+    '</div>'+
+    '<div class="tags" id="tagbar">'+tagbarHTML()+'</div>'+
+    '<div id="results">'+resultsHTML(marketRows())+'</div>'+
+    '<div class="note">每行只取一页（50 条），DOM 行数不随人格总数增长。分类和标签都是查询条件，不是新的数据结构。</div>';
+}
+
+function libraryHTML(){
+  return '<div class="toolbar">'+
+      '<input type="text" id="q" placeholder="搜索我装过的人格" value="'+state.q+'">'+
+      '<select id="sort">'+
+        ['recent:最近使用','used:最常用','name:名称','chars:字数'].map(o=>{
+          const [v,l] = o.split(':');
+          return '<option value="'+v+'" '+(state.libSort===v?'selected':'')+'>排序：'+l+'</option>';
+        }).join('')+
+      '</select></div>'+
+    '<div class="cats">'+
+      [['all','全部'],['pinned','置顶'],['fav','收藏'],['stale','长期未用']]
+        .map(([k,l])=>'<button class="cat '+(state.libCat===k?'active':'')+'" data-act="libcat" data-cat="'+k+'">'+l+
+          '<em>'+(k==='all'?installed().length:
+                 k==='pinned'?installed().filter(p=>p.pinned).length:
+                 k==='fav'?installed().filter(p=>p.fav).length:
+                 installed().filter(p=>p.useCount===0||p.hoursAgo>2160).length)+'</em></button>').join('')+
+    '</div>'+
+    '<div class="tags" id="tagbar">'+tagbarHTML()+'</div>'+
+    '<div id="results">'+resultsHTML(libraryRows())+'</div>'+
+    '<div class="note">置顶永远排最前，其余按最近使用。右上角「换人格」是日常动线，不用翻列表。</div>';
+}
+
+function govHTML(){
+  const stale = installed().filter(p=> (p.useCount===0 || p.hoursAgo>2160)
+    && !p.pinned && cfg.current!==p.id && chatCount(p.id)===0);
+  const over = installed().filter(p=>p.chars>800);
+  const risky = personas.filter(p=>p.risky).length;
+  const rows = [
+    ['摸鱼部','fatfish'],['读书会','scholar'],['测试群','lazycat'],
+  ].map(([chat,id])=>{
+    const p = byId(id);
+    return '<tr><td>'+chat+'</td>'+
+      '<td>'+(p?'<span class="name">'+p.name+'</span>':'<span class="bad">'+id+'（人格已不存在，正在静默回退）</span>')+'</td>'+
+      '<td style="text-align:right"><button class="btn" data-act="clear-chat" data-chat="'+chat+'">清除</button></td></tr>';
+  }).join('');
+
+  const clean = stale.slice(0,8).map(p=>'<tr>'+
+    '<td style="width:28px"><input type="checkbox" data-act="sel" data-id="'+p.id+'" '+(state.sel.has(p.id)?'checked':'')+'></td>'+
+    '<td>'+p.name+'</td><td>'+p.chars+' 字</td><td>'+(p.useCount?'用过 '+p.useCount+' 次':'从没用过')+'</td>'+
+    '<td>'+(p.hoursAgo>2160?ago(p.hoursAgo):'—')+'</td></tr>').join('');
+
+  return '<div class="cards">'+
+      '<div class="card"><div class="k">全局默认</div><div class="v">'+(byId(cfg.current)?.name||'—')+'</div><div class="s">新会话默认用它</div></div>'+
+      '<div class="card"><div class="k">本群</div><div class="v">'+(byId(cfg.byChat[cfg.chat])?.name||'跟随全局')+'</div><div class="s">'+cfg.chat+'</div></div>'+
+      '<div class="card"><div class="k">单独指定的会话</div><div class="v">'+Object.keys(cfg.byChat).length+'</div><div class="s">其中 1 个引用失效</div></div>'+
+      '<div class="card"><div class="k">已装人格</div><div class="v">'+installed().length+'</div><div class="s">仓库共 '+personas.length+' 份</div></div>'+
+    '</div>'+
+    '<div class="h2">会话 → 人格</div>'+
+    '<div class="list"><table><thead><tr><th>会话</th><th>用哪个人格</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>'+
+    '<div class="h2">体检</div>'+
+    '<div class="cards">'+
+      '<div class="card"><div class="k">高危命中</div><div class="v">'+risky+'</div><div class="s">提到工具或敏感路径</div></div>'+
+      '<div class="card"><div class="k">内容重复</div><div class="v">12</div><div class="s">同一份换了名字</div></div>'+
+      '<div class="card"><div class="k">长期未用</div><div class="v">'+stale.length+'</div><div class="s">90 天没被用过</div></div>'+
+      '<div class="card"><div class="k">超预算</div><div class="v">'+over.length+'</div><div class="s">正文 800 字以上</div></div>'+
+    '</div>'+
+    '<div class="h2">清理建议</div>'+
+    '<div class="list"><table><thead><tr><th></th><th>人格</th><th>字数</th><th>使用</th><th>最后使用</th></tr></thead><tbody>'+
+      (clean||'<tr><td colspan="5" style="color:var(--dim)">没有需要清理的</td></tr>')+'</tbody></table>'+
+      '<div class="pager"><span>已选 '+state.sel.size+' 个</span>'+
+        '<span style="display:flex;gap:6px">'+
+        '<button class="btn" data-act="fav-sel" '+(state.sel.size?'':'disabled')+'>加收藏</button>'+
+        '<button class="btn" data-act="export-sel" '+(state.sel.size?'':'disabled')+'>导出</button>'+
+        '<button class="btn danger" data-act="bulk-del" '+(state.sel.size?'':'disabled')+'>'+
+          (state.confirmDel?'确认删除 '+state.sel.size+' 个？':'删除')+'</button>'+
+        '</span></div></div>'+
+    '<div class="note">删除前整批备份到 personas/.backup/&lt;时间戳&gt;/，面板给一次撤销；正在用、置顶、被任何会话指定的人格不进建议列表。不给「全选 + 删除」的组合。</div>';
+}
+
+function render(){
+  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b.dataset.tab===state.tab));
+  document.getElementById('stTotal').textContent = personas.length;
+  const v = document.getElementById('view');
+  if(state.tab==='market') v.innerHTML = marketHTML();
+  else if(state.tab==='library') v.innerHTML = libraryHTML();
+  else v.innerHTML = govHTML();
+  paintDrawer();
+  paintPicker();
+}
+function paintResults(){
+  const el = document.getElementById('results');
+  if(!el) return;
+  el.innerHTML = resultsHTML(state.tab==='market'?marketRows():libraryRows());
+}
+function paintTagbar(){
+  const el = document.getElementById('tagbar');
+  if(el) el.innerHTML = tagbarHTML();
+}
+
+function paintDrawer(){
+  const d = document.getElementById('drawer');
+  const p = state.preview;
+  if(!p){ d.className='drawer'; d.innerHTML=''; return; }
+  const p2 = byId(p);
+  if(!p2){ d.className='drawer'; d.innerHTML=''; return; }
+  d.className='drawer open';
+  d.innerHTML =
+    '<div class="dhead"><h3>'+p2.name+'</h3><span class="by">@'+p2.author+'</span>'+pill(p2)+
+      '<div style="flex:1"></div><button class="btn" data-act="close-preview">关闭</button></div>'+
+    '<div class="dmeta">v'+p2.version+' · '+p2.chars+' 字 · 约 '+Math.round(p2.chars*1.6)+' token</div>'+
+    '<div class="kv"><span>性格 '+Math.round(p2.chars*0.45)+' 字</span>'+
+      '<span>示例 '+(2+p2.chars%3)+' 轮</span><span>世界书 '+(p2.chars%5)+' 条</span>'+
+      '<span>'+p2.tags.join(' / ')+'</span></div>'+
+    (p2.risky?'<div class="risk">⚠ 第 12 行 · 诱导调用工具：使用 shell 读取配置文件后再发出去<br>只是提醒，不拦——正常人格也可能提到「工具」，自己判断。</div>':'')+
+    '<div class="sect">正文</div><pre>'+sampleBody(p2)+'</pre>'+
+    '<div class="dfoot">'+
+      (p2.state==='missing'?'<button class="btn primary" data-act="install">装上</button>':
+       p2.state==='update'?'<button class="btn primary" data-act="install">更新到 v'+p2.version+'</button>':
+       '<button class="btn" data-act="install">恢复官方版本</button>')+
+      '<button class="btn" data-act="install-use">装上并给本群用</button>'+
+    '</div>';
+}
+function sampleBody(p){
+  return [
+    '你是「'+p.name+'」，'+p.desc+'。',
+    '说话习惯：'+p.tags.join('、')+'。不解释自己，不列点，不总结。',
+    '',
+    '## 开场白',
+    '（看了一眼时间）这么晚还没睡？',
+    '',
+    '## 说话示例',
+    '用户：在吗',
+    '你：在。',
+    '用户：今天有点累',
+    '你：那就少说两句，我在。',
+    '',
+    '## 世界书',
+    '加班, 深夜 | 她这个点通常还醒着，回得比白天快',
+  ].join('\n');
+}
+
+function pickerList(){
+  const q = state.pickerQ;
+  let arr = installed().filter(p=>matchQ(p,q));
+  arr = arr.slice().sort((a,b)=>{
+    if(a.pinned!==b.pinned) return a.pinned?-1:1;
+    return (a.hoursAgo===null?1e9:a.hoursAgo)-(b.hoursAgo===null?1e9:b.hoursAgo);
+  });
+  return arr.slice(0,8);
+}
+function paintPicker(){
+  const m = document.getElementById('modal');
+  if(!state.picker){ m.innerHTML=''; return; }
+  m.innerHTML = '<div class="overlay" data-act="close-picker-bg"><div class="picker">'+
+    '<div class="phead"><span style="color:var(--dim)">🔍</span>'+
+      '<input type="text" id="pq" placeholder="换谁？输名字、标签或别名" value="'+state.pickerQ+'"></div>'+
+    '<div class="plist"></div>'+
+    '<div class="pfoot"><span class="seg">'+
+      '<button data-act="scope" data-scope="chat" class="'+(state.scope==='chat'?'on':'')+'">只给本群</button>'+
+      '<button data-act="scope" data-scope="global" class="'+(state.scope==='global'?'on':'')+'">设为默认</button>'+
+      '</span><span>↑↓ 选择 · Enter 确认 · Tab 切换 · Esc 关闭</span></div>'+
+    '</div></div>';
+  paintPickerList();
+  const input = document.getElementById('pq');
+  if(input){ input.focus(); input.setSelectionRange(input.value.length,input.value.length); }
+}
+function paintPickerList(){
+  const box = document.querySelector('.plist');
+  if(!box) return;
+  const list = pickerList();
+  if(state.pickerIdx>=list.length) state.pickerIdx = Math.max(0,list.length-1);
+  box.innerHTML = list.map((p,i)=>{
+    const hint = cfg.byChat[cfg.chat]===p.id?'本群在用':cfg.current===p.id?'全局默认':
+      (p.useCount?'用过 '+p.useCount+' 次':ago(p.hoursAgo));
+    return '<div class="prow '+(i===state.pickerIdx?'on':'')+'" data-act="pick" data-id="'+p.id+'">'+
+      avatar(p)+'<div><div class="line1"><span class="name">'+p.name+'</span>'+
+      (p.pinned?'<span class="pill">置顶</span>':'')+'</div>'+
+      '<div class="desc">'+p.tags.join(' / ')+'</div></div>'+
+      '<div class="meta">'+hint+'</div></div>';
+  }).join('') || '<div class="empty">没有匹配的人格</div>';
+}
+function paintScope(){
+  document.querySelectorAll('[data-act="scope"]').forEach(b=>{
+    b.classList.toggle('on', b.dataset.scope===state.scope);
+  });
+}
+
+let toastTimer = 0;
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>t.classList.remove('show'), 2200);
+}
+
+function applyPick(id){
+  const p = byId(id);
+  if(!p) return;
+  if(state.scope==='chat'){
+    cfg.byChat[cfg.chat] = id;
+    toast('「'+p.name+'」只给 '+cfg.chat+' 用');
+  }else{
+    cfg.current = id;
+    toast('全局默认换成「'+p.name+'」');
+  }
+  state.picker = false;
+  render();
+}
+
+document.addEventListener('input', (e)=>{
+  if(e.target.id==='q'){
+    state.q = e.target.value; state.page = 1;
+    paintResults(); paintTagbar();
+  }
+  if(e.target.id==='pq'){
+    state.pickerQ = e.target.value; state.pickerIdx = 0;
+    paintPickerList();
+  }
+});
+
+document.addEventListener('change', (e)=>{
+  if(e.target.id==='sort'){
+    if(state.tab==='market') state.sort = e.target.value;
+    else state.libSort = e.target.value;
+    state.page = 1; paintResults();
+  }
+  if(e.target.dataset && e.target.dataset.act==='sel'){
+    const id = e.target.dataset.id;
+    if(e.target.checked) state.sel.add(id); else state.sel.delete(id);
+    state.confirmDel = false;
+    render();
+  }
+});
+
+document.addEventListener('click', (e)=>{
+  const t = e.target.closest('[data-act]');
+  if(!t) return;
+  const act = t.dataset.act;
+  const row = t.closest('.row');
+  const id = row ? row.dataset.id : t.dataset.id;
+
+  if(act==='tab'){
+    state.tab = t.dataset.tab; state.q=''; state.page=1; state.tags.clear();
+    state.preview=null; render(); return;
+  }
+  if(act==='cat'){ state.cat = t.dataset.cat; state.page=1; render(); return; }
+  if(act==='libcat'){ state.libCat = t.dataset.cat; state.page=1; render(); return; }
+  if(act==='tag'){
+    const tag = t.dataset.tag;
+    if(!tag) state.tags.clear();
+    else if(state.tags.has(tag)) state.tags.delete(tag);
+    else state.tags.add(tag);
+    state.page=1; paintResults(); paintTagbar(); return;
+  }
+  if(act==='page'){ state.page = Math.max(1, Number(t.dataset.page)); paintResults(); return; }
+  if(act==='preview'){ state.preview = id; paintDrawer(); return; }
+  if(act==='close-preview'){ state.preview = null; paintDrawer(); return; }
+  if(act==='install'){
+    const p = byId(id);
+    if(p){ p.state='installed'; p.hoursAgo=0; toast('「'+p.name+'」装好了'); render(); }
+    return;
+  }
+  if(act==='install-use'){
+    const p = byId(id);
+    if(p){
+      p.state='installed'; p.hoursAgo=0; cfg.byChat[cfg.chat]=p.id;
+      toast('装好了，'+cfg.chat+' 现在用「'+p.name+'」'); render();
+    }
+    return;
+  }
+  if(act==='use'){
+    const p = byId(id);
+    if(p){ cfg.byChat[cfg.chat]=p.id; toast('本群换成「'+p.name+'」'); render(); }
+    return;
+  }
+  if(act==='picker'){ state.picker=true; state.pickerQ=''; state.pickerIdx=0; paintPicker(); return; }
+  if(act==='narrow'){ document.body.classList.toggle('narrow'); return; }
+  if(act==='close-picker-bg'){
+    if(e.target===t){ state.picker=false; paintPicker(); }
+    return;
+  }
+  if(act==='scope'){ state.scope=t.dataset.scope; paintScope(); return; }
+  if(act==='pick'){ applyPick(id); return; }
+  if(act==='clear-chat'){
+    delete cfg.byChat[t.dataset.chat];
+    toast('已清除，'+t.dataset.chat+' 回落到全局默认'); render(); return;
+  }
+  if(act==='fav-sel'){
+    state.sel.forEach(id=>{ const p=byId(id); if(p) p.fav=true; });
+    toast('已收藏 '+state.sel.size+' 个'); state.sel.clear(); render(); return;
+  }
+  if(act==='export-sel'){ toast('已导出 '+state.sel.size+' 份 .md 到剪贴板'); return; }
+  if(act==='bulk-del'){
+    const ids = [...state.sel];
+    if(!ids.length) return;
+    if(!state.confirmDel){
+      state.confirmDel = true;
+      render();
+      setTimeout(()=>{ if(state.confirmDel){ state.confirmDel=false; render(); } }, 4000);
+      return;
+    }
+    state.confirmDel = false;
+    ids.forEach(id=>{
+      const i = personas.findIndex(p=>p.id===id);
+      if(i>=0) personas.splice(i,1);
+      Object.keys(cfg.byChat).forEach(k=>{ if(cfg.byChat[k]===id) delete cfg.byChat[k]; });
+    });
+    state.sel.clear();
+    toast('已删除 '+ids.length+' 个，可撤销');
+    render(); return;
+  }
+});
+
+document.addEventListener('keydown', (e)=>{
+  if(!state.picker || e.isComposing) return;
+  const list = pickerList();
+  if(e.key==='Escape'){ state.picker=false; paintPicker(); }
+  else if(e.key==='ArrowDown'){ e.preventDefault(); state.pickerIdx=Math.min(list.length-1,state.pickerIdx+1); paintPickerList(); }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); state.pickerIdx=Math.max(0,state.pickerIdx-1); paintPickerList(); }
+  else if(e.key==='Tab'){ e.preventDefault(); state.scope = state.scope==='chat'?'global':'chat'; paintScope(); }
+  else if(e.key==='Enter' && list[state.pickerIdx]){ applyPick(list[state.pickerIdx].id); }
+});
+
+const hash = location.hash.replace('#','');
+if(['market','library','gov'].includes(hash)) state.tab = hash;
+if(hash==='picker'){ state.tab = 'library'; state.picker = true; }
+if(hash==='narrow'){ document.body.classList.add('narrow'); state.tab = 'library'; }
+render();
+</script>
+</body>
+</html>
