@@ -1263,6 +1263,15 @@ select.roost-input{color-scheme:dark}
       const byChat = personas?.byChat || {}
       const byChatCount = Object.keys(byChat).length
       const curId = byChat[mem?.chatId] || personas?.current || config?.persona?.current || 'default'
+      /** 全局当前（可能被本群覆盖，选择器要显示全局值） */
+      const globalId = personas?.current || config?.persona?.current || 'default'
+      const chatId = mem?.chatId || ''
+      const chatPick = chatId ? byChat[chatId] : ''
+      const usage = personas?.usage || {}
+      const labelOf = (id) => {
+        const p = (personas?.personas || []).find((x) => x.id === id)
+        return p ? (p.label || p.name || p.id) : id
+      }
       const override = mem?.personaOverride || ''
       const tts = setupSt?.pluginConfig?.ttsVoice
 
@@ -1300,6 +1309,42 @@ select.roost-input{color-scheme:dark}
           }, '保存'),
           h('span', { className: 'roost-note', style: { margin: 0 } },
             '全局生效；换人格不改名字，人格里的名字只是标签。'),
+        ),
+        /**
+         * 当前人格：全局下拉 + 本群覆盖。
+         *
+         * 全局和本群分开显示，是因为「本群指定了谁」和「全局默认是谁」经常不是同一个人，
+         * 只显示一个值会让人以为改错了。本群按钮只在知道 chatId 时出现。
+         */
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 } },
+          h('span', { style: { fontSize: 12, fontWeight: 650 } }, '当前人格'),
+          h('select', {
+            className: 'roost-input', value: globalId, 'aria-label': '全局当前人格',
+            style: { maxWidth: 200 },
+            onChange: async (e) => {
+              const id = e.target.value
+              const r = await post('/personas/use', { id })
+              if (r.ok === false) return toast(r.message || '没换成')
+              toast('换好了')
+              await reload()
+            },
+          }, (personas?.personas || []).map((p) =>
+            h('option', { key: p.id, value: p.id }, p.label || p.name || p.id))),
+          chatId
+            ? h('span', { className: 'roost-note', style: { margin: 0 } },
+                chatPick ? `本群：${labelOf(chatPick)}` : '本群：跟随全局')
+            : null,
+          chatId && chatPick
+            ? h('button', {
+                type: 'button', className: 'roost-btn',
+                onClick: async () => {
+                  const r = await post('/personas/unuse', { chatId })
+                  if (r.ok === false) return toast(r.message || '没改回来')
+                  toast('本群已跟随全局')
+                  await reload()
+                },
+              }, '跟随全局')
+            : null,
         ),
         sec('人格', {
           /**
@@ -1512,9 +1557,23 @@ select.roost-input{color-scheme:dark}
                     isCur ? h(Pill, { tone: 'ok' }, '正在用') : null,
                   ),
                   h('div', { className: 'roost-note', style: { marginTop: 1 } },
-                    `${p.chars ?? 0} 字` + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')),
+                    `${p.chars ?? 0} 字`
+                    + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')
+                    + (usage[p.id] ? ` · 用过 ${usage[p.id]} 次` : '')),
                 ),
                 h('div', { className: 'roost-acts' },
+                  /** 只给「当前这个群」指定，不动全局 */
+                  chatId && chatPick !== p.id
+                    ? h('button', {
+                        type: 'button', className: 'roost-btn',
+                        onClick: async () => {
+                          const r = await post('/personas/use', { id: p.id, chatId })
+                          if (r.ok === false) return toast(r.message || '没指定成')
+                          toast('本群已指定')
+                          await reload()
+                        },
+                      }, '本群用')
+                    : null,
                   isCur
                     ? null
                     : h('button', {

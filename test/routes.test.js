@@ -509,3 +509,27 @@ test('路由：跨站标记 403，写接口同样拦住', async () => {
   assert.equal(bad.status, 403, 'POST /journal 是删日记的入口，跨站必须拒');
   off?.();
 });
+
+test('选人格：本群指定不动全局，A 群的指定不丢，取消能真的删掉', async () => {
+  const h = await bootHost({ persona: { current: 'default', byChat: { 群A: 'snarky' } } });
+  try {
+    const r1 = await h.call('/personas/use', { method: 'POST', body: { id: 'teacher', chatId: '群B' } });
+    assert.equal(r1.status, 200);
+    assert.equal(r1.json.byChat.群A, 'snarky', 'A 群的指定不能丢');
+    assert.equal(r1.json.byChat.群B, 'teacher');
+    assert.equal(r1.json.current, 'default', '本群指定不该动全局');
+
+    /**
+     * `merge` 对对象是深合并，用 patch 删不掉键——所以 use/unuse 走整份写。
+     * 这条就是锁这个行为的。
+     */
+    const r2 = await h.call('/personas/unuse', { method: 'POST', body: { chatId: '群B' } });
+    assert.equal(r2.json.byChat.群B, undefined, '取消要真的删掉');
+    assert.equal(r2.json.byChat.群A, 'snarky');
+
+    const bad = await h.call('/personas/use', { method: 'POST', body: { id: '不存在的' } });
+    assert.equal(bad.status, 404);
+  } finally {
+    h.off?.();
+  }
+});

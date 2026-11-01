@@ -214,8 +214,42 @@ export function apply(ctx) {
    * `null` = 没声明（自己写的人格，保持旧行为）；`[]` = 全禁；`[a,b]` = 只给这些。
    * 三条入口（有人说话 / 主动搭话 / 觉醒）共用它，免得哪条路又忘了带人格限制。
    */
+  /**
+   * 使用次数：内存累加 + 30 秒 debounce 落 `prefs.usage`。
+   *
+   * 每条消息都写一次盘太贵；进程退出时由 dispose 兜底 flush。
+   * 计数放在「每轮真正用了哪个人格」上，比「点了哪次切换」更接近用户理解。
+   */
+  const usageBuf = new Map();
+  let usageTimer = null;
+
+  function bumpUsage(id) {
+    if (!id) return;
+    usageBuf.set(id, (usageBuf.get(id) || 0) + 1);
+    if (usageTimer) return;
+    usageTimer = setTimeout(() => {
+      usageTimer = null;
+      flushUsage();
+    }, 30_000);
+    usageTimer.unref?.();
+  }
+
+  function flushUsage() {
+    if (!usageBuf.size) return;
+    try {
+      const cur = personas?.prefs?.read?.().usage ?? {};
+      const next = { ...cur };
+      for (const [id, n] of usageBuf) next[id] = (next[id] || 0) + n;
+      usageBuf.clear();
+      personas.prefs.patch({ usage: next });
+    } catch (e) {
+      log.debug('使用次数落盘失败：', e.message);
+    }
+  }
+
   function personaToolsFor(chat) {
     const p = personas.resolve(chat.chatId, cfg.persona);
+    bumpUsage(p.id);
     return Array.isArray(p.tools) ? p.tools : null;
   }
 
@@ -3753,6 +3787,8 @@ export function apply(ctx) {
         byChat: cfg.persona?.byChat || {},
         /** 她的名字（全局）：面板顶部直接用，不用再拉一次 /config */
         globalName: globalName(),
+        /** 用过几次：面板列表上显示，帮用户删掉从没用过的 */
+        usage: personas?.prefs?.read?.().usage ?? {},
       })),
 
       /**
@@ -3769,6 +3805,47 @@ export function apply(ctx) {
         const p = personas.read(id);
         if (!p) return send(res, 404, { ok: false, message: `没有「${id}」这个人格` });
         return send(res, 200, { ok: true, id, label: p.label || p.name, name: p.label || p.name, raw: p.raw });
+      }),
+
+      /**
+       * 选人格：不给 `chatId` 就改全局，给了就只给那个会话指定。
+       *
+       * 为什么用 `saveConfig(整份)` 而不是 `patchConfig`：`merge` 对对象是**深合并**，
+       * 用它删 byChat 的键删不掉（旧键会从磁盘补回来）。整份写下去才是准的。
+       * `cfg` 本身就是完整配置，不存在「冲掉别的段」的问题。
+       */
+      route('/personas/use', async (req, res) => {
+        const b = await readBody(req);
+        const id = String(b.id || '').trim();
+        const chatId = String(b.chatId || '').trim();
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        if (!personas.list().some((p) => p.id === id)) {
+          return send(res, 404, { ok: false, message: `没有「${id}」这个人格` });
+        }
+
+        const next = structuredClone(cfg);
+        if (chatId) next.persona.byChat = { ...(next.persona.byChat || {}), [chatId]: id };
+        else next.persona.current = id;
+        cfg = saveConfig(next);
+
+        addLog('info', 'persona', chatId
+          ? `群 ${chatId.slice(0, 8)}… 指定人格：${id}`
+          : `当前人格：${id}`);
+        return send(res, 200, { ok: true, current: cfg.persona.current, byChat: cfg.persona.byChat });
+      }),
+
+      /** 取消某个会话的指定，回到跟随全局 */
+      route('/personas/unuse', async (req, res) => {
+        const b = await readBody(req);
+        const chatId = String(b.chatId || '').trim();
+        if (!chatId) return send(res, 400, { ok: false, message: '缺 chatId' });
+
+        const next = structuredClone(cfg);
+        const map = { ...(next.persona.byChat || {}) };
+        delete map[chatId];
+        next.persona.byChat = map;
+        cfg = saveConfig(next);
+        return send(res, 200, { ok: true, byChat: cfg.persona.byChat });
       }),
 
       route('/personas/save', async (req, res) => {
@@ -3945,6 +4022,9 @@ export function apply(ctx) {
       clearInterval(groupTimer);
       clearTimeout(consolidateBoot);
       clearInterval(consolidateTimer);
+      /** 使用次数还在内存里：退出前补一次，别把最近 30 秒的计数丢掉 */
+      clearTimeout(usageTimer);
+      flushUsage();
       /**
        * 数据库连接也要关。
        *
