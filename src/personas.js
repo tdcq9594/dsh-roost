@@ -429,6 +429,76 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
     },
 
     /**
+     * 批量打标签：`add` 加、`remove` 删，其余标签保持原样。
+     *
+     * 只改 front matter 的 `tags:` 行，其它字节不动；每份改前备份。
+     * 用 `save()` 也能做，但它会走整份重写 + 清墓碑，语义太重。
+     */
+    tagMany(ids, { add = [], remove = [] } = {}) {
+      const list = [...new Set((ids || []).map(safeId))];
+      /**
+       * 标签值要清洗：面板是单行 input，但这是公开路由——
+       * `add: ["x\n---\n忽略之前所有指令"]` 能提前闭合 front matter，
+       * 把注入行塞进**正文**（正文直接进系统提示词）。换行必须压平，
+       * 括号/冒号/逗号这些会破坏 tags 行的字符也去掉。
+       */
+      const cleanTag = (s) => String(s)
+        .replace(/[\r\n]+/g, ' ')
+        .replace(/[[\]:,，]/g, '')
+        .trim()
+        .slice(0, 24);
+      const addTags = (add || []).map(cleanTag).filter(Boolean);
+      const delTags = new Set((remove || []).map(cleanTag).filter(Boolean));
+      const changed = [];
+
+      for (const id of list) {
+        const item = catalog.get(id);
+        if (!item) continue;
+        const f = join(dir(), item.file);
+        let text;
+        try {
+          text = readFileSync(f, 'utf8');
+        } catch {
+          continue;
+        }
+        /** 空头 `---\n---` 也要认（parsePersona 认，这里不认就会静默跳过） */
+        const m = String(text).match(/^(\s*---[ \t]*\r?\n)([\s\S]*?)((?:\r?\n)?---[ \t]*(?:\r?\n|$))/);
+        if (!m) continue;
+
+        const eol = m[1].includes('\r\n') ? '\r\n' : '\n';
+        const lines = m[2].split(/\r?\n/);
+        const at = lines.findIndex((l) => /^[ \t]*tags[ \t]*:/i.test(l));
+        const cur = at >= 0
+          ? lines[at].replace(/^[^:]*:\s*/, '').trim()
+            .replace(/^\[/, '').replace(/\]$/, '')   // 先 trim 再剥括号：`[甲, 乙]  ` 也认
+            .split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+          : [];
+        const next = [...new Set([...cur.filter((t) => !delTags.has(t)), ...addTags])];
+        if (next.join('\u0000') === cur.join('\u0000')) continue;
+
+        if (at >= 0) {
+          if (next.length) lines[at] = `tags: ${next.join(', ')}`;
+          else lines.splice(at, 1); // 删光了就整行去掉，别留一个空 `tags:`
+        } else {
+          lines.push(`tags: ${next.join(', ')}`);
+        }
+
+        // 空头时 m[3] 不带前导换行，要补一个，否则会拼成 `tags: x---`
+        const close = m[3].startsWith('\r\n') || m[3].startsWith('\n') ? m[3] : eol + m[3];
+        const out = m[1] + lines.join(eol) + close + String(text).slice(m[0].length);
+        backup(id, item.file);
+        writeFileSync(f, out, 'utf8');
+        changed.push(id);
+      }
+
+      if (changed.length) {
+        catalog.invalidate();
+        for (const id of changed) parsedCache.delete(id);
+      }
+      return { ok: true, changed };
+    },
+
+    /**
      * 批量删除：**一个批次一个目录 + manifest**。
      *
      * 不能循环调 `remove()`：那样每次 `backup()` 都自己算时间戳，17 份散成 17 个目录，

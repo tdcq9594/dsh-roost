@@ -48,7 +48,7 @@ function indexOf(entries) {
  * 刻意用真实的 raw.githubusercontent.com 域名 + 走真实的白名单校验：
  * 测试里把白名单放开，就等于永远测不到「有人往 index 里塞内网地址」这条。
  */
-function harness({ files = {}, index, bundled = {}, failAll = false, sources = [BASE], failUrls = [] } = {}) {
+function harness({ files = {}, index, bundled = {}, failAll = false, sources = [BASE], failUrls = [], packs = {} } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'roost-repo-'));
   const bdir = join(dataDir, 'bundled');
   mkdirSync(bdir, { recursive: true });
@@ -59,6 +59,7 @@ function harness({ files = {}, index, bundled = {}, failAll = false, sources = [
   for (const src of sources) {
     routes[`${src}/index.json`] = index ?? indexOf(Object.entries(files));
     for (const [id, t] of Object.entries(files)) routes[`${src}/${id}.md`] = t;
+    for (const [file, body] of Object.entries(packs)) routes[`${src}/${file}`] = body;
   }
 
   const calls = [];
@@ -916,6 +917,81 @@ test('安装：市场条目 file 撞内置文件名，换名且补 tools，不�
     assert.match(installed, /我是另一份/, '市场内容要装进来');
     assert.match(installed, /tools: \[\]/, '撞名装进来的市场人格也必须补 tools');
     assert.equal(r.injected, true);
+  } finally {
+    h.done();
+  }
+});
+
+test('一键更新：待装 ≥5 走 pack，一次请求装多份', async () => {
+  const texts = Object.fromEntries(
+    Array.from({ length: 5 }, (_, i) => [`x${i}`, `---\nlabel: X${i}\n---\n第 ${i} 份。`]),
+  );
+  const packBody = Object.entries(texts).map(([id, text]) => JSON.stringify({ id, text })).join('\n') + '\n';
+  const idx = JSON.stringify({
+    schema: 1,
+    repo: 't/p',
+    branch: 'main',
+    minVersion: '0.0.1',
+    packs: [{ n: 0, file: 'packs/p0.jsonl', count: 5, bytes: packBody.length }],
+    personas: Object.entries(texts).map(([id, text]) => ({
+      id, name: id, tags: [], file: `${id}.md`, chars: text.length, sha256: sha256(text), pack: 0,
+    })),
+  });
+  const h = harness({ files: texts, index: idx, packs: { 'packs/p0.jsonl': packBody } });
+  try {
+    const s = await h.repo.sync();
+    assert.equal(s.updated.length, 5, JSON.stringify(s));
+    assert.ok(h.calls.some((u) => u.includes('packs/p0.jsonl')), '应该走 pack');
+    assert.ok(!h.calls.some((u) => u.endsWith('/x0.md')), '不该逐条下载');
+    assert.match(readFileSync(join(h.pdir, 'x0.md'), 'utf8'), /第 0 份/);
+  } finally {
+    h.done();
+  }
+});
+
+test('索引产物：每份的 pack 等于 hash(id)%16，分片包含全部 id', async () => {
+  const { readFileSync: rf, readdirSync: rd } = await import('node:fs');
+  const { join: j } = await import('node:path');
+  const { createHash } = await import('node:crypto');
+  const root = j(import.meta.dirname, '..', 'personas');
+  const idx = JSON.parse(rf(j(root, 'index.json'), 'utf8'));
+  const packOf = (id) => parseInt(createHash('sha256').update(id, 'utf8').digest('hex').slice(0, 8), 16) % 16;
+
+  const seen = new Set();
+  for (const p of idx.personas) {
+    assert.equal(p.pack, packOf(p.id), `${p.id} 的分片算错了`);
+    seen.add(p.id);
+  }
+  const files = rd(j(root, 'packs')).filter((f) => f.endsWith('.jsonl'));
+  const inPacks = new Set();
+  for (const f of files) {
+    for (const line of rf(j(root, 'packs', f), 'utf8').split('\n')) {
+      if (line.trim()) inPacks.add(JSON.parse(line).id);
+    }
+  }
+  assert.deepEqual([...inPacks].sort(), [...seen].sort(), '分片要覆盖且只覆盖索引里的 id');
+});
+
+test('一键更新：分片内容过期时回退逐条，不把整批记失败', async () => {
+  const fresh = Object.fromEntries(
+    Array.from({ length: 5 }, (_, i) => [`y${i}`, `---\nlabel: Y${i}\n---\n新版 ${i}。`]),
+  );
+  const stale = { ...fresh, y0: '---\nlabel: Y0\n---\n旧版 0。' };
+  const packBody = Object.entries(stale).map(([id, text]) => JSON.stringify({ id, text })).join('\n') + '\n';
+  const idx = JSON.stringify({
+    schema: 1, repo: 't/p', branch: 'main', minVersion: '0.0.1',
+    packs: [{ n: 0, file: 'packs/p0.jsonl', count: 5, bytes: packBody.length }],
+    personas: Object.entries(fresh).map(([id, text]) => ({
+      id, name: id, tags: [], file: `${id}.md`, chars: text.length, sha256: sha256(text), pack: 0,
+    })),
+  });
+  const h = harness({ files: fresh, index: idx, packs: { 'packs/p0.jsonl': packBody } });
+  try {
+    const s = await h.repo.sync();
+    assert.equal(s.updated.length, 5, JSON.stringify(s));
+    assert.equal(s.failed.length, 0, '分片过期不该整批失败');
+    assert.ok(h.calls.some((u) => u.endsWith('/y0.md')), '过期的那份要回退逐条');
+    assert.match(readFileSync(join(h.pdir, 'y0.md'), 'utf8'), /新版 0/, '装进去的必须是新版');
   } finally {
     h.done();
   }

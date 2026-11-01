@@ -3991,6 +3991,25 @@ export function apply(ctx) {
         });
       }),
 
+      /** 批量打标签：只改 tags 行，每份改前备份 */
+      route('/personas/batch/tag', async (req, res) => {
+        const b = await readBody(req);
+        const ids = Array.isArray(b.ids) ? b.ids.map((x) => String(x)) : [];
+        const add = Array.isArray(b.add) ? b.add : [];
+        const remove = Array.isArray(b.remove) ? b.remove : [];
+        if (!ids.length) return send(res, 400, { ok: false, message: '缺 ids' });
+        if (!add.length && !remove.length) return send(res, 400, { ok: false, message: '缺 add / remove' });
+        try {
+          const r = personas.tagMany(ids, { add, remove });
+          /** 标签是元数据：刷新 localSha，别让这份人格从此被当成「你改过」 */
+          if (r.changed.length) personaRepo.refreshLocalSha(r.changed);
+          if (r.changed.length) addLog('info', 'persona', `批量改标签 ${r.changed.length} 份`);
+          return send(res, 200, r);
+        } catch (e) {
+          return send(res, 500, { ok: false, message: e.message });
+        }
+      }),
+
       /** 批量删除：一个批次一个目录 + manifest，撤销靠它 */
       route('/personas/batch/remove', async (req, res) => {
         const b = await readBody(req);

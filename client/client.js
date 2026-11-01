@@ -3272,6 +3272,7 @@ select.roost-input{color-scheme:dark}
       const [gov, setGov] = useState(null)
       const [busy, setBusy] = useState(false)
       const [picked, setPicked] = useState([])
+      const [tagDraft, setTagDraft] = useState('')
 
       const load = useCallback(async (scan) => {
         const r = await get('/personas/gov' + (scan ? '?scan=1' : ''))
@@ -3343,7 +3344,26 @@ select.roost-input{color-scheme:dark}
                       )))
                   : h('div', { className: 'roost-note', style: { marginTop: 4 } }, '没有可清理的（默认、正在用、被指定的都已排除）'),
 
-                h('div', { style: { display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' } },
+                h('div', { style: { display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' } },
+                  h('input', {
+                    className: 'roost-input', value: tagDraft, placeholder: '给选中的加标签（逗号分隔）',
+                    'aria-label': '批量加标签', style: { maxWidth: 220 },
+                    onChange: (e) => setTagDraft(e.target.value),
+                  }),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: busy || !picked.length || !tagDraft.trim(),
+                    onClick: () => run(async () => {
+                      const add = tagDraft.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
+                      const r = await post('/personas/batch/tag', { ids: picked, add })
+                      if (r.ok === false) return toast(r.message || '没改成')
+                      toast(`改了 ${r.changed.length} 份的标签`)
+                      setTagDraft('')
+                      await load(true)
+                      reload?.()
+                      loadMarket?.(true)
+                    }),
+                  }, '加标签'),
                   h('button', {
                     type: 'button', className: 'roost-btn danger', disabled: busy || !picked.length,
                     onClick: () => run(async () => {

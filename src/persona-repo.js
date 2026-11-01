@@ -80,8 +80,11 @@ const INDEX_TTL = 5 * 60_000;
 /** 单份人格正文上限。现在最长的大肥鱼 731 字节，8000 字符够写很多了 */
 const MAX_CHARS = 8000;
 
-/** 单次响应体上限，防远端塞一个几百 MB 的 index.json */
+/** 单份人格 / 未知响应的上限 */
 const MAX_BYTES = 512 * 1024;
+/** 索引和 pack 各有各的上限：**不要**把全局常量抬到 8 MB，那等于允许一个 8 MB 的 index.json 通过 */
+const INDEX_MAX_BYTES = 2 * 1024 * 1024;
+const PACK_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * 只认安全文件名。远端给的 `file` 必须先过这一关，否则能路径穿越。
@@ -190,7 +193,7 @@ export function createPersonaRepo({
     return u;
   }
 
-  async function getText(url) {
+  async function getText(url, { maxBytes = MAX_BYTES } = {}) {
     const u = assertSafeUrl(url).href;
     if (inflight.has(u)) return inflight.get(u);
     const job = (async () => {
@@ -200,11 +203,39 @@ export function createPersonaRepo({
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
-      if (text.length > MAX_BYTES) throw new Error(`响应过大（${text.length} 字节）`);
+      if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error(`响应过大（${Buffer.byteLength(text, 'utf8')} 字节，上限 ${maxBytes}）`);
       return text;
     })().finally(() => inflight.delete(u));
     inflight.set(u, job);
     return job;
+  }
+
+  /** pack 分片路径：只允许 `packs/<名字>.jsonl`，同样防路径穿越 */
+  function safePackFile(name) {
+    const s = String(name || '');
+    if (!/^packs\/[A-Za-z0-9_-]+\.jsonl$/.test(s)) throw new Error(`pack 文件名不合法：${s}`);
+    return s;
+  }
+
+  /**
+   * 拉一个 pack 分片，解析成 `id → 原文`。
+   *
+   * 逐行 JSONL；坏行跳过（不因为一行脏数据把整片废掉）。
+   * 里面的正文仍然要逐份验 sha256——pack 只是省请求数，不是信任来源。
+   */
+  async function fetchPack(index, n) {
+    const meta = (index.packs || []).find((p) => Number(p.n) === Number(n));
+    if (!meta) return null;
+    const txt = await getText(`${index.base}/${safePackFile(meta.file)}`, { maxBytes: PACK_MAX_BYTES });
+    const map = new Map();
+    for (const line of txt.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const o = JSON.parse(line);
+        if (o?.id && typeof o.text === 'string') map.set(String(o.id), o.text);
+      } catch {}
+    }
+    return map;
   }
 
   /* ---------------- .synced.json ---------------- */
@@ -281,7 +312,7 @@ export function createPersonaRepo({
       for (let attempt = 0; attempt < 2; attempt++) {
         const url = `${base}/index.json`;
         try {
-          const txt = await getText(url);
+          const txt = await getText(url, { maxBytes: INDEX_MAX_BYTES });
           const j = JSON.parse(txt);
           if (!Array.isArray(j?.personas)) throw new Error('index.json 结构不对（缺 personas 数组）');
           validateIndex(j);
@@ -642,6 +673,24 @@ export function createPersonaRepo({
       const inst = personas?.prefs?.read?.().installedAs ?? {};
       const bmap = bundledShas();
 
+      /**
+       * 装 5 个以上走 pack：每片一次请求，而不是每份一次。
+       * 1–4 个仍逐条——为 2 份人格拉一个分片不划算。
+       */
+      const todo = rows.filter((r) => r.state === 'missing' || r.state === 'update');
+      const packTexts = new Map();
+      if (todo.length >= 5 && Array.isArray(index.packs) && index.packs.length) {
+        const need = new Set(todo.map((r) => byId.get(r.id)?.pack).filter((n) => Number.isInteger(n)));
+        for (const n of need) {
+          try {
+            const m = await fetchPack(index, n);
+            if (m) for (const [id, t] of m) packTexts.set(id, t);
+          } catch (e) {
+            log(`pack p${n} 拉取失败，回退逐条：${e.message}`);
+          }
+        }
+      }
+
       for (const r of rows) {
         if (r.state === 'deleted') {
           skippedDeleted.push({ id: r.id, name: r.name });
@@ -663,7 +712,19 @@ export function createPersonaRepo({
 
         const p = byId.get(r.id);
         try {
-          const text = await getText(`${index.base}/${safeFile(p.file)}`);
+          const fetchOne = () => getText(`${index.base}/${safeFile(p.file)}`);
+          let text = packTexts.get(r.id);
+          let fromPack = Boolean(text);
+          if (!text) text = await fetchOne();
+          /**
+           * 分片可能是旧的（索引更新了、packs 忘了重跑，或 CDN 缓存）。
+           * 这种情况要**回退逐条**，不能把整批记成失败——逐条路径拿到的是对的。
+           */
+          if (fromPack && (text.length > MAX_CHARS || hashText(text) !== p.sha256)) {
+            log(`分片内容与索引不一致（${r.id}），回退逐条`);
+            text = await fetchOne();
+            fromPack = false;
+          }
           if (text.length > MAX_CHARS) throw new Error(`正文 ${text.length} 字，超过 ${MAX_CHARS} 字上限`);
           const got = hashText(text);
           if (got !== p.sha256) {
@@ -808,6 +869,31 @@ export function createPersonaRepo({
         personas?.catalog?.invalidate?.();
       }
       return { renamed, skipped };
+    },
+
+    /**
+     * 打完标签后刷新 `.synced.localSha`。
+     *
+     * 标签是元数据，用户不会预期「加了个标签就从此收不到更新」。
+     * 不刷新的话 `status()` 立刻判 `modified`，`sync()` 永远跳过这份。
+     */
+    refreshLocalSha(ids) {
+      const synced = readSynced();
+      const inst = personas?.prefs?.read?.().installedAs ?? {};
+      let changed = false;
+      for (const id of ids || []) {
+        const rec = synced[id];
+        if (!rec) continue;
+        const p = join(dir(), localNameFor(id, `${id}.md`, inst));
+        if (!existsSync(p)) continue;
+        const sha = hashText(readFileSync(p, 'utf8'));
+        if (rec.localSha !== sha) {
+          synced[id] = { ...rec, localSha: sha };
+          changed = true;
+        }
+      }
+      if (changed) saveSynced(synced);
+      return changed;
     },
 
     /**
