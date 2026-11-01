@@ -574,8 +574,9 @@ test('前端渲染：市场页能列出人格、标签和状态', () => {
   assert.ok(txt.includes('未安装'), '缺 missing 的状态文案')
   assert.ok(txt.includes('已删除'), '缺 deleted 的状态文案')
   assert.ok(txt.includes('短句') && txt.includes('吐槽'), '标签要显示')
+  assert.ok(txt.includes('装上'), '未安装的那行要有「装上」按钮');
   assert.ok(txt.includes('2 个 · 1 个可更新 · 1 个你删过'), '头部要给出总数与分类，且不能被「12 个」误匹配')
-  assert.ok(txt.includes('这一版只做「看」'), '要说清还没法逐条安装')
+  assert.ok(txt.includes('默认不许用工具') || txt.includes('不许用工具'), '要说清装的时候会补工具限制')
 })
 
 test('前端渲染：市场页还没拿到清单时说「读着…」，不能说成「没读到」', () => {

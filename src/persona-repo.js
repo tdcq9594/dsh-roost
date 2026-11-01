@@ -362,6 +362,84 @@ export function createPersonaRepo({
   }
 
   /**
+   * 头部里有没有显式写 `tools`（`Tools:`、缩进也认）。
+   *
+   * 不能用 `parsePersona().tools === null` 判断——「没写」和「写了 null」
+   * 解析出来都是 null，而这两者对安装器意味着完全不同的动作。
+   */
+  function toolsDeclared(text) {
+    const m = String(text).match(/^\s*---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+    if (!m) return false;
+    return /^\s*tools\s*:/im.test(m[1]);
+  }
+
+  /**
+   * 补 `tools: []`，但**只在明确要求时**补。
+   *
+   * 三种调用方，三种语义：
+   *   · `install()`——市场单条安装，`force = !bmap.has(file)`：内置人格不补
+   *     （它们由作者显式声明 `null`，补成 `[]` 会把小栖的工具全收走）；
+   *   · `sync()` / `restore()`——`force = 本地这份本来就声明了 tools`：
+   *     **保留**，别把装的时候补的 `[]` 洗回 `null`（全开）；
+   *   · 本地没有 tools 的（内置/老文件）——一个字节都不动。
+   *
+   * 补写会改变文件内容，所以 `.synced` 必须同时记 `localSha`。
+   */
+  function withToolsDefault(text, force) {
+    if (!force) return { text, injected: false };
+    if (toolsDeclared(text)) return { text, injected: false };
+
+    const m = String(text).match(/^(\s*---[ \t]*\r?\n)([\s\S]*?)(\r?\n---[ \t]*(?:\r?\n|$))/);
+    if (m) {
+      // 注意要接回匹配之后的原文：只拼 m[1..3] 会把正文整段丢掉
+      // 换行符跟着文件走，别给 CRLF 文件塞一行 LF（混合换行虽然能解析，但看着别扭）
+      const eol = m[1].includes('\r\n') ? '\r\n' : '\n';
+      return { text: m[1] + m[2] + eol + 'tools: []' + m[3] + String(text).slice(m[0].length), injected: true };
+    }
+
+    // 空头 / 头没闭合：插在开头那行之后，别把原文顶掉
+    const first = String(text).match(/^(\s*---[ \t]*\r?\n)/);
+    if (first) {
+      const eol = first[1].includes('\r\n') ? '\r\n' : '\n';
+      return { text: first[1] + 'tools: []' + eol + String(text).slice(first[1].length), injected: true };
+    }
+
+    return { text: '---\ntools: []\n---\n' + String(text), injected: true };
+  }
+
+  /**
+   * 这份是不是「包内自带的」。
+   *
+   * 两个判据，缺一不可：
+   *   · 包内 `index.json` 里有它；
+   *   · 或者包内目录里确实躺着这个文件（开发态新加了 `.md` 但忘了重跑索引）。
+   * 只看 index 的话，忘了跑索引时内置人格会被当成市场人格补 `tools: []`，
+   * 直接把小栖的工具全收走。
+   */
+  function isBuiltin(file) {
+    const bmap = bundledShas();
+    if (bmap?.has(file)) return true;
+    const root = personas?.builtinDir?.();
+    return Boolean(root && existsSync(join(root, file)));
+  }
+
+  /** 本地这份有没有声明 tools（sync/restore 靠它决定要不要保留） */
+  function localDeclaresTools(id, file, inst) {
+    const p = join(dir(), localNameFor(id, file, inst));
+    if (!existsSync(p)) return false;
+    try {
+      return toolsDeclared(readFileSync(p, 'utf8'));
+    } catch {
+      return false;
+    }
+  }
+
+  /** 仓库 id 在本地对应哪个文件名（撞名安装时和仓库里的 `file` 不一样） */
+  function localNameFor(id, file, inst) {
+    return `${inst?.[id] || String(file).replace(/\.md$/i, '')}.md`;
+  }
+
+  /**
    * 逐个算出「本地 vs 仓库」的状态。
    *
    * 状态只有五种，判定顺序不能换：
@@ -393,6 +471,8 @@ export function createPersonaRepo({
      * 想恢复得点「恢复」，那条路会顺手把墓碑清掉。
      */
     const tombstones = new Set(personas?.prefs?.read?.().deleted ?? []);
+    /** 撞名安装的映射：仓库 id → 本地 id */
+    const inst = personas?.prefs?.read?.().installedAs ?? {};
     /**
      * **一次扫描拿快照，之后全是查表。**
      *
@@ -410,8 +490,9 @@ export function createPersonaRepo({
        * 而索引里的 `id` 和 `file` 是两回事——`validateIndex` 没强制
        * `file === id + '.md'`。按 id 查的话，上游哪天把 file 改成 `a-v2.md`，
        * 这份人格就会永远显示「未安装」，每次同步都重装一遍。
+       * 撞名安装过的，还要再经 `installedAs` 映射到本地文件名。
        */
-      const localId = file.slice(0, -3);
+      const localId = inst[p.id] ?? file.slice(0, -3);
       const item = items ? (items[localId] ?? null) : null;
       /**
        * 本地这份的 sha / 字数从 catalog 拿，**不再逐个文件读**。
@@ -433,8 +514,23 @@ export function createPersonaRepo({
       const bundled = bmap?.get(file) ?? bundledSha(file);
 
       let state;
-      if (local === null) state = tombstones.has(p.id) ? 'deleted' : 'missing';
+      if (local === null) {
+        /**
+         * 墓碑可能记的是仓库 id，也可能是本地 id（撞名安装后删的是 `repo__a`）。
+         * 两个都查，否则撞名装过的人格删掉后会被判成 `missing`，一键更新立刻装回。
+         */
+        const gone = tombstones.has(p.id) || (inst[p.id] && tombstones.has(inst[p.id]));
+        state = gone ? 'deleted' : 'missing';
+      }
       else if (local === p.sha256) state = 'same';
+      /**
+       * 装的时候补过 `tools: []`，文件内容就和索引里的 sha 对不上了。
+       * `localSha` 记的是「我们写下去的那一版」——但**还要看它对应哪个仓库版本**：
+       * `rec.sha256` 是装的时候那份原文的 sha，只有它还等于当前 `p.sha256` 时，
+       * `localSha` 一致才算「已是最新」；仓库更新过就得落到 `update`。
+       * 少了后半个条件，补过 tools 的人格会永远显示最新、再也更新不了。
+       */
+      else if (rec && local === rec.localSha) state = rec.sha256 === p.sha256 ? 'same' : 'update';
       else if (rec?.sha256 === local || bundled === local) state = 'update';
       else state = 'modified';
 
@@ -536,6 +632,8 @@ export function createPersonaRepo({
       const skippedDeleted = [];
       // 一次建表，循环里别再 `index.personas.find`（那是 O(N²)，纯属白烧）
       const byId = new Map(index.personas.map((p) => [p.id, p]));
+      const inst = personas?.prefs?.read?.().installedAs ?? {};
+      const bmap = bundledShas();
 
       for (const r of rows) {
         if (r.state === 'deleted') {
@@ -564,10 +662,14 @@ export function createPersonaRepo({
           if (got !== p.sha256) {
             throw new Error(`内容校验失败（索引说 ${String(p.sha256).slice(0, 8)}…，实际 ${got.slice(0, 8)}…）`);
           }
-          if (r.state === 'update') backup(r.id, r.file);
-          writeAtomic(join(dir(), r.file), text);
-          synced[r.id] = { sha256: got, syncedAt: Date.now() };
-          updated.push({ id: r.id, name: r.name, risky: scanPersona(text) });
+          const localName = localNameFor(r.id, r.file, inst);
+          const { text: out, injected } = withToolsDefault(text, !isBuiltin(r.file) || localDeclaresTools(r.id, r.file, inst));
+          if (r.state === 'update') backup(r.id, localName);
+          writeAtomic(join(dir(), localName), out);
+          personas?.catalog?.invalidate?.();
+          // localSha 记「写下去的那一版」：补过 tools 之后它和索引 sha 不同
+          synced[r.id] = { sha256: got, localSha: hashText(out), syncedAt: Date.now() };
+          updated.push({ id: r.id, name: r.name, risky: scanPersona(out), injected });
         } catch (e) {
           failed.push({ id: r.id, name: r.name, why: e.message });
         }
@@ -588,6 +690,96 @@ export function createPersonaRepo({
     },
 
     /**
+     * 装单个（市场用）。
+     *
+     * 和 `sync()` 的三点区别：
+     *   · 只装一个；
+     *   · **不覆盖用户改过的**（有同步记录但内容对不上 → 直接拒绝）；
+     *   · 撞名时改名而不是覆盖（用户自己写了个同名人格）。
+     *
+     * 写盘前给市场人格补 `tools: []`，并把「写下去的那一版」记进 `localSha`。
+     */
+    async install(id) {
+      const index = await loadIndex({ force: true });
+      const g = this.gate(index);
+      if (!g.ok) return { ok: false, skipped: true, why: g.why };
+      const p = index.personas.find((x) => x.id === id);
+      if (!p) throw new Error(`仓库里没有「${id}」这个人格`);
+
+      const file = safeFile(p.file);
+      const synced = readSynced();
+      const prefsNow = personas?.prefs?.read?.() ?? {};
+      const inst = prefsNow.installedAs ?? {};
+      let localName = localNameFor(id, file, inst);
+      const readLocal = () => (existsSync(join(dir(), localName)) ? hashText(readFileSync(join(dir(), localName), 'utf8')) : null);
+      let localSha = readLocal();
+
+      if (localSha) {
+        const rec = synced[id];
+        /** 已经是当前仓库版本（或我们为当前版本写下去的那版）→ 不用再装 */
+        const upToDate = localSha === p.sha256
+          || (rec && localSha === rec.localSha && rec.sha256 === p.sha256);
+        if (upToDate) return { ok: true, already: true, id, name: p.name };
+        if (rec) {
+          /**
+           * 有同步记录：内容对得上「我们写过的某一版」= 只是仓库更新了，继续装；
+           * 对不上 = 用户改过，绝不覆盖。
+           */
+          if (localSha !== rec.sha256 && localSha !== rec.localSha) {
+            return { ok: false, why: '你改过这份，先自己处理（或点「恢复官方」）' };
+          }
+        } else {
+          /**
+           * 没有同步记录、内容又不同。先排除「这本来就是我们的那份」：
+           *   · 内置人格本地是 npm 带的旧版 → 和包内那份 sha 一致，正常覆盖；
+           *   · 用户改过的内置人格 → 拒绝；
+           *   · 其余才算撞名（用户自己写的同名人格）→ 换名，绝不覆盖。
+           */
+          if (localSha === bundledSha(file)) {
+            // ours：继续往下装（会先备份）
+          } else if (isBuiltin(file)) {
+            return { ok: false, why: '你改过这份，先自己处理（或点「恢复官方」）' };
+          } else {
+            const stem = localName.replace(/\.md$/i, '');
+            const slug = String(p.authorSlug || '').replace(/[^A-Za-z0-9_-]/g, '')
+              || hashText(String(p.author || p.id)).slice(0, 6);
+            let n = 1;
+            do {
+              localName = `${slug}__${stem}${n > 1 ? '-' + n : ''}.md`;
+              n += 1;
+            } while (existsSync(join(dir(), localName)) && n < 50);
+            if (n >= 50) throw new Error('同名人格太多了，换不出可用的文件名');
+            localSha = readLocal();
+          }
+        }
+      }
+
+      const text = await getText(`${index.base}/${file}`);
+      if (text.length > MAX_CHARS) throw new Error(`正文 ${text.length} 字，超过 ${MAX_CHARS} 字上限`);
+      const got = hashText(text);
+      if (got !== p.sha256) throw new Error(`内容校验失败（索引说 ${String(p.sha256).slice(0, 8)}…，实际 ${got.slice(0, 8)}…）`);
+
+      const { text: out, injected } = withToolsDefault(text, !isBuiltin(file));
+      backup(id, localName);
+      writeAtomic(join(dir(), localName), out);
+      synced[id] = { sha256: got, localSha: hashText(out), syncedAt: Date.now() };
+      saveSynced(synced);
+      personas?.catalog?.invalidate?.();
+
+      const localId = localName.replace(/\.md$/i, '');
+      if (localId !== String(file).replace(/\.md$/i, '')) {
+        personas.prefs.patch({ installedAs: { [id]: localId } });
+      }
+      /** 装回来 = 当没删过，墓碑一起清掉（仓库 id 和本地 id 都可能是墓碑） */
+      const gone = [...new Set([id, localId, inst[id]].filter(Boolean))];
+      if (gone.some((x) => prefsNow.deleted?.includes(x))) {
+        personas.prefs.patch({ deleted: prefsNow.deleted.filter((x) => !gone.includes(x)) });
+      }
+
+      return { ok: true, id, name: p.name, localId, injected, risky: scanPersona(out) };
+    },
+
+    /**
      * 强制恢复官方版本（单个）。
      *
      * 这是「你改过」之后想反悔时的出口——一键更新刻意不动改过的文件，
@@ -601,14 +793,18 @@ export function createPersonaRepo({
       if (!p) throw new Error(`仓库里没有「${id}」这个人格`);
 
       const file = safeFile(p.file);
+      const inst = personas?.prefs?.read?.().installedAs ?? {};
+      const localName = localNameFor(id, file, inst);
       const text = await getText(`${index.base}/${file}`);
       const got = hashText(text);
       if (got !== p.sha256) throw new Error(`内容校验失败（索引说 ${String(p.sha256).slice(0, 8)}…，实际 ${got.slice(0, 8)}…）`);
 
-      const saved = backup(id, file);
-      writeAtomic(join(dir(), file), text);
+      const { text: out, injected } = withToolsDefault(text, !isBuiltin(file) || localDeclaresTools(id, file, inst));
+      const saved = backup(id, localName);
+      writeAtomic(join(dir(), localName), out);
+      personas?.catalog?.invalidate?.();
       const synced = readSynced();
-      synced[id] = { sha256: got, syncedAt: Date.now() };
+      synced[id] = { sha256: got, localSha: hashText(out), syncedAt: Date.now() };
       saveSynced(synced);
 
       /**
@@ -625,7 +821,7 @@ export function createPersonaRepo({
         }
       } catch {}
 
-      return { ok: true, id, name: p.name, backup: saved, risky: scanPersona(text) };
+      return { ok: true, id, name: p.name, backup: saved, risky: scanPersona(out), injected };
     },
   };
 }

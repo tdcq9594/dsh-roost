@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
-import { createPersonas } from '../src/personas.js';
+import { createPersonas, parsePersona } from '../src/personas.js';
 import { createPersonaRepo, compareVersion, scanPersona } from '../src/persona-repo.js';
 
 const sha256 = (s) => createHash('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
@@ -151,7 +151,9 @@ test('一键更新：装上新人格，并把 sha 记进 .synced.json', async ()
     const r = await h.repo.sync();
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.deepEqual(r.updated.map((x) => x.id), ['a', 'b']);
-    assert.equal(readFileSync(join(h.pdir, 'a.md'), 'utf8'), P1);
+    const aText = readFileSync(join(h.pdir, 'a.md'), 'utf8');
+    assert.match(aText, /我是甲。/, '正文要装上');
+    assert.deepEqual(parsePersona('a', aText).tools, [], '市场人格要补 tools');
     const synced = JSON.parse(readFileSync(join(h.pdir, '.synced.json'), 'utf8'));
     assert.equal(synced.a.sha256, sha256(P1));
   } finally {
@@ -368,7 +370,9 @@ test('恢复：强制拿回官方版，覆盖前先备份', async () => {
     const r = await h.repo.restore('a');
     assert.equal(r.ok, true);
     assert.ok(r.backup && existsSync(r.backup), '要留下备份路径');
-    assert.equal(readFileSync(join(h.pdir, 'a.md'), 'utf8'), P1);
+    const restored = readFileSync(join(h.pdir, 'a.md'), 'utf8');
+    assert.match(restored, /我是甲。/, '正文要恢复');
+    assert.deepEqual(parsePersona('a', restored).tools, [], '市场人格恢复后仍要全禁');
     assert.equal(readFileSync(r.backup, 'utf8'), mine);
   } finally {
     h.done();
@@ -615,6 +619,177 @@ test('换源时重试次数：一个源最多试 2 次，别死磕', async () =>
     const gh = h.calls.filter((u) => u.startsWith(BASE));
     assert.equal(gh.length, 2, `GitHub 应该试 2 次，实际 ${gh.length} 次`);
     assert.ok(h.calls.some((u) => u.startsWith(BASE2)), '应该换到 Gitee');
+  } finally {
+    h.done();
+  }
+});
+
+/* ---------------- 单条安装（市场） ---------------- */
+
+test('安装：市场人格补 tools: []，装完状态是 same（靠 localSha）', async () => {
+  const h = harness({ files: { a: P1 } }); // 没有 bundled = 市场人格
+  try {
+    const r = await h.repo.install('a');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.injected, true, '市场人格要补 tools');
+
+    const text = readFileSync(join(h.pdir, 'a.md'), 'utf8');
+    assert.match(text, /tools: \[\]/);
+    assert.deepEqual(parsePersona('a', text).tools, [], '解析出来必须是全禁');
+    assert.match(text, /我是甲。/, '补 tools 不能把正文弄丢');
+
+    const l = await h.repo.list({ force: true });
+    assert.equal(l.personas[0].state, 'same', `装完应该 same，实际 ${l.personas[0].state}`);
+    assert.equal(l.pending, 0, '补过 tools 也不该一直挂着「有更新」');
+
+    const synced = JSON.parse(readFileSync(join(h.pdir, '.synced.json'), 'utf8'));
+    assert.ok(synced.a.localSha, '.synced 要记 localSha');
+    assert.notEqual(synced.a.localSha, synced.a.sha256, '补过 tools，两个 sha 本来就不一样');
+  } finally {
+    h.done();
+  }
+});
+
+test('安装：包内已有的内置人格不补 tools（补了会把小栖的工具全收走）', async () => {
+  const h = harness({ files: { a: P1 }, bundled: { 'a.md': P1 } });
+  try {
+    // 包内索引要存在，才知道这份是内置的
+    writeFileSync(
+      join(h.dataDir, 'bundled', 'index.json'),
+      JSON.stringify({ schema: 1, personas: [{ id: 'a', file: 'a.md', sha256: sha256(P1) }] }),
+      'utf8',
+    );
+    const r = await h.repo.install('a');
+    assert.equal(r.ok, true);
+    assert.equal(r.injected, false);
+    assert.equal(readFileSync(join(h.pdir, 'a.md'), 'utf8'), P1, '内置人格一个字节都不该改');
+  } finally {
+    h.done();
+  }
+});
+
+test('安装：同名但不是我们装的，换名装，绝不覆盖用户自己的人格', async () => {
+  const h = harness({ files: { a: P1 } });
+  try {
+    mkdirSync(h.pdir, { recursive: true });
+    const mine = '---\nname: 我自己写的\n---\n我的正文。';
+    writeFileSync(join(h.pdir, 'a.md'), mine, 'utf8');
+
+    const r = await h.repo.install('a');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.notEqual(r.localId, 'a', '撞名必须换名');
+    assert.equal(readFileSync(join(h.pdir, 'a.md'), 'utf8'), mine, '原文件不许动');
+    assert.ok(existsSync(join(h.pdir, `${r.localId}.md`)));
+
+    const prefs = JSON.parse(readFileSync(join(h.pdir, '.prefs.json'), 'utf8'));
+    assert.equal(prefs.installedAs.a, r.localId, '要记下撞名映射');
+
+    const l = await h.repo.list({ force: true });
+    assert.equal(l.personas[0].state, 'same', '状态要通过 installedAs 找到本地那份');
+  } finally {
+    h.done();
+  }
+});
+
+test('安装：你改过的那份不会被覆盖', async () => {
+  const h = harness({ files: { a: P1 } });
+  try {
+    await h.repo.install('a');
+    const mine = '---\nname: 甲\ntools: []\n---\n我改过。';
+    writeFileSync(join(h.pdir, 'a.md'), mine, 'utf8');
+
+    const r = await h.repo.install('a');
+    assert.equal(r.ok, false);
+    assert.match(r.why, /改过/);
+    assert.equal(readFileSync(join(h.pdir, 'a.md'), 'utf8'), mine);
+  } finally {
+    h.done();
+  }
+});
+
+test('一键更新：补过的 tools: [] 不会被洗掉，且仓库更新后能正常升上去', async () => {
+  const next = '---\nname: 甲\n---\n第二版。';
+  const h = harness({ files: { a: P1 } });
+  try {
+    await h.repo.install('a');
+
+    h.repo = createPersonaRepo({
+      dataDir: h.dataDir,
+      personas: h.personas,
+      sources: [BASE],
+      fetchImpl: async (url) => ({
+        ok: true,
+        status: 200,
+        text: async () => (url.endsWith('index.json') ? indexOf([['a', next]]) : next),
+      }),
+      log: () => {},
+    });
+
+    // 先确认仓库更新后状态是 update，而不是被 localSha 卡成 same
+    const before = await h.repo.list({ force: true });
+    assert.equal(before.personas[0].state, 'update', `仓库更新了应该是 update，实际 ${before.personas[0].state}`);
+
+    const s = await h.repo.sync();
+    assert.deepEqual(s.updated.map((x) => x.id), ['a']);
+    const text = readFileSync(join(h.pdir, 'a.md'), 'utf8');
+    assert.match(text, /第二版/, '内容要更新');
+    assert.match(text, /tools: \[\]/, 'tools 不能被洗掉');
+    assert.match(text, /第二版/, '正文要是新版');
+    assert.deepEqual(parsePersona('a', text).tools, []);
+  } finally {
+    h.done();
+  }
+});
+
+test('一键更新：装市场人格（非内置）也要补 tools，不能只有单条安装生效', async () => {
+  const h = harness({ files: { a: P1 } }); // 没有 bundled = 市场人格
+  try {
+    const s = await h.repo.sync();
+    assert.deepEqual(s.updated.map((x) => x.id), ['a']);
+    const text = readFileSync(join(h.pdir, 'a.md'), 'utf8');
+    assert.deepEqual(parsePersona('a', text).tools, [], '一键更新装进来的也必须全禁');
+    assert.match(text, /我是甲。/, '正文不能丢');
+  } finally {
+    h.done();
+  }
+});
+
+test('安装：内置人格本地是旧版时原地覆盖，不该复制成 repo__a', async () => {
+  const next = '---\nname: 甲\n---\n第二版。';
+  const h = harness({ index: indexOf([['a', next]]), files: { a: next }, bundled: { 'a.md': P1 } });
+  try {
+    writeFileSync(
+      join(h.dataDir, 'bundled', 'index.json'),
+      JSON.stringify({ schema: 1, personas: [{ id: 'a', file: 'a.md', sha256: sha256(P1) }] }),
+      'utf8',
+    );
+    mkdirSync(h.pdir, { recursive: true });
+    writeFileSync(join(h.pdir, 'a.md'), P1, 'utf8'); // npm 带的旧版
+
+    const r = await h.repo.install('a');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.localId, 'a', '内置旧版应该原地覆盖');
+    assert.ok(!existsSync(join(h.pdir, 'repo__a.md')), '不能复制成第二份');
+    assert.match(readFileSync(join(h.pdir, 'a.md'), 'utf8'), /第二版/);
+  } finally {
+    h.done();
+  }
+});
+
+test('安装：删掉之后再装回来，墓碑要清掉', async () => {
+  const h = harness({ files: { a: P1 } });
+  try {
+    await h.repo.install('a');
+    h.personas.remove('a');
+    const l1 = await h.repo.list({ force: true });
+    assert.equal(l1.personas[0].state, 'deleted');
+
+    const r = await h.repo.install('a');
+    assert.equal(r.ok, true);
+    const prefs = JSON.parse(readFileSync(join(h.pdir, '.prefs.json'), 'utf8'));
+    assert.deepEqual(prefs.deleted, [], '装回来之后墓碑要清掉');
+    const l2 = await h.repo.list({ force: true });
+    assert.equal(l2.personas[0].state, 'same');
   } finally {
     h.done();
   }

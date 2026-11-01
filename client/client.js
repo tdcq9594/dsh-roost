@@ -3268,7 +3268,24 @@ select.roost-input{color-scheme:dark}
                     setPreview(r)
                   },
                 }, '预览'),
-                /** 只对「改过的」和「删过的」给恢复；装新的等 install 接口 */
+                /** 装新的 / 升到新版本：单个装，不覆盖你改过的（服务端会拒绝） */
+                p.state === 'missing' || p.state === 'update'
+                  ? h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: async () => {
+                        const r = await post('/personas/install', { id: p.id })
+                        if (r.ok === false) return toast(r.why || r.message || '没装上')
+                        // 撞名时 localId 和仓库里的 file 不同名，不是和 id 比
+                        const stem = String(p.file || p.id).replace(/\.md$/i, '')
+                        const saved = r.localId && r.localId !== stem ? `（存为 ${r.localId}）` : ''
+                        toast(r.already ? '已经装过了' : `已装上${saved}${r.injected ? '，默认不许用工具' : ''}`)
+                        setPreview(null)
+                        await loadMarket(true)
+                        reload?.()
+                      },
+                    }, p.state === 'update' ? '更新' : '装上')
+                  : null,
+                /** 只对「改过的」和「删过的」给恢复；装新的走上面的 install */
                 p.state === 'modified' || p.state === 'deleted'
                   ? h(ConfirmLink, {
                       label: p.state === 'deleted' ? '恢复' : '恢复官方',
@@ -3328,8 +3345,8 @@ select.roost-input{color-scheme:dark}
             : null,
 
           h('div', { className: 'roost-note', style: { marginTop: 10 } },
-            '这一版只做「看」：装和更新还在「人格与情绪」页（一键更新）。'
-            + '逐条安装要等 install 接口——它得同时补上工具限制，否则装进来的人格等于没有安全默认。'),
+            '装的时候会给市场人格补上「不许用工具」的默认值（作者自己声明过就按作者的）；'
+            + '你改过的那份不会被覆盖，撞名会另存一个名字。'),
         ),
       )
     }

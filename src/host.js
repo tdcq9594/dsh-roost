@@ -3741,6 +3741,19 @@ export function apply(ctx) {
         }
       }),
 
+      /** 从仓库装单个（市场用）：补 `tools: []`、撞名换名、不覆盖你改过的 */
+      route('/personas/install', async (req, res) => {
+        const b = await readBody(req);
+        if (!b.id) return send(res, 400, { ok: false, message: '缺 id' });
+        try {
+          const r = await personaRepo.install(String(b.id));
+          if (r.ok && !r.already) addLog('info', 'persona', `已安装人格：${r.name || b.id}${r.localId && r.localId !== b.id ? `（存为 ${r.localId}）` : ''}`);
+          return send(res, r.ok ? 200 : 400, r);
+        } catch (e) {
+          return send(res, 502, { ok: false, message: e.message });
+        }
+      }),
+
       /** 单个强制恢复官方版本（覆盖前自动备份到 `personas/.backup/<时间戳>/`） */
       route('/personas/restore', async (req, res) => {
         const b = await readBody(req);
