@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadConfig, saveConfig, DEFAULTS, dataDir } from '../src/config.js';
+import { loadConfig, saveConfig, patchConfig, DEFAULTS, dataDir } from '../src/config.js';
 
 /** 每个用例一个干净的 data 目录（dataDir() 每次读 env） */
 function freshDir() {
@@ -109,4 +109,40 @@ test('配置：offChats 是数组，整体替换而不是合并', () => {
   saveConfig({ memory: { offChats: ['g1', 'g2'] } });
   const next = saveConfig({ memory: { offChats: ['g3'] } });
   assert.deepEqual(next.memory.offChats, ['g3'], '数组必须整体替换，否则取消勾选永远去不掉');
+});
+
+/* ---------------- 局部保存（patchConfig） ---------------- */
+
+/**
+ * 这条钉的是一个真实事故级缺陷。
+ *
+ * `saveConfig(next)` 的基线是 DEFAULTS，而 `merge` 只遍历 next 里的键——
+ * 提交局部 patch 时，**其它段全部回落到默认值**。实测：先存
+ * `{server:{token:'REAL',port:4321}}`，再存 `{memory:{offChats:['g1']}}`，
+ * 磁盘上 token 变成空串、port 变成 17321。也就是「静音一个会话」会把
+ * QQ 的 token 和端口一起重置。
+ *
+ * 所以凡是「改一个键」的快捷操作都必须走 `patchConfig`。
+ */
+test('配置：patchConfig 只改一个键，token / 端口不许被冲回默认值', () => {
+  const d = freshDir();
+  saveConfig({ server: { token: 'REAL_TOKEN', port: 4321 } });
+
+  const c = patchConfig({ memory: { offChats: ['g1'] } });
+  assert.equal(c.server.token, 'REAL_TOKEN', 'token 被冲掉了');
+  assert.equal(c.server.port, 4321, '端口被冲掉了');
+  assert.deepEqual(c.memory.offChats, ['g1']);
+
+  const onDisk = JSON.parse(readFileSync(join(d, 'config.json'), 'utf8'));
+  assert.equal(onDisk.server.token, 'REAL_TOKEN', '盘上的 token 被冲掉了');
+  assert.equal(onDisk.server.port, 4321, '盘上的端口被冲掉了');
+});
+
+test('配置：patchConfig 也尊重「删掉 = 回默认」（它最终仍走 saveConfig 的裁剪）', () => {
+  freshDir();
+  saveConfig({ server: { token: 'T', port: 4321 } });
+  // 显式把 token 写成空串 = 用户想清掉它，不该被旧值补回来
+  const c = patchConfig({ server: { token: '' } });
+  assert.equal(c.server.token, '');
+  assert.equal(c.server.port, 4321, '其它键仍然不动');
 });

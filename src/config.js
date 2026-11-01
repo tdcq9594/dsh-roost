@@ -404,6 +404,29 @@ export function saveConfig(next) {
   return cfg;
 }
 
+/**
+ * 改一个键，其它不动。
+ *
+ * 为什么必须有它
+ * --------------
+ * `saveConfig(next)` 的基线是 **DEFAULTS**，而 `merge` 只遍历 `next` 里的键
+ * （见上面两处注释）。也就是说：**提交一个局部 patch，其它段全部回落到默认值**。
+ *
+ * 实测（临时数据目录）：先存 `{server:{token:'REAL', port:4321}}`，
+ * 再存 `{memory:{offChats:['g1']}}` → 磁盘上 `token` 变成空串、`port` 变成 17321。
+ * 也就是说「静音一个会话」会把 QQ 的 token 和端口一起重置。
+ *
+ * 所以约定：
+ *   · **整份替换**（面板「配置全文」）用 `saveConfig` —— 删字段才会真的删掉；
+ *   · **改一个键**（快捷操作、`/personas/use`、关键词配置）用 `patchConfig`。
+ *
+ * 实现上以**当前磁盘配置**为基线合并，再交给 `saveConfig` 走一遍 DEFAULTS 裁剪，
+ * 这样既有「其它段不动」，又保住「结构完整、DEFAULTS 之外的键进不来」。
+ */
+export function patchConfig(patch) {
+  return saveConfig(merge(loadConfig(), patch));
+}
+
 /** 给面板看：密钥打码 */
 export function publicConfig(cfg) {
   /**

@@ -15,7 +15,7 @@
 
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { loadConfig, saveConfig, publicConfig, dataDir } from './config.js';
+import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir } from './config.js';
 import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
 import { createInboundServer, postReply } from './server.js';
@@ -350,7 +350,8 @@ export function apply(ctx) {
   const setup = createSetup({
     cfgOf: () => cfg,
     // 面板改配置时要同时更新这里的 cfg 引用，否则下次 detect 还是旧路径
-    setCfg: (patch) => (cfg = saveConfig(patch)),
+    // 用 patchConfig：局部改一个键（如 setup.roostDir），不能把其它段冲回默认值
+    setCfg: (patch) => (cfg = patchConfig(patch)),
     /**
      * 传**函数**，不是 `dataDir()` 的返回值。
      *
@@ -2490,7 +2491,7 @@ export function apply(ctx) {
                * `ReferenceError: setCfg is not defined` —— 而且会被外层
                * try/catch 吞成一句 toast，看着像"操作失败"而不是代码错。
                */
-              cfg = saveConfig({ memory: { offChats: next } });
+              cfg = patchConfig({ memory: { offChats: next } });
               return send(res, 200, {
                 ok: true,
                 muted: want,
