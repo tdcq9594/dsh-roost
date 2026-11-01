@@ -558,6 +558,23 @@ export function apply(ctx) {
   /** 关键词切人格的当轮提示：chatId → 提示。**不能是单变量**，两个群并发会串台 */
   const keywordNote = new Map();
 
+  /**
+   * 面板换人格后的一次性提示。
+   *
+   * DSH 在 system prompt 变化时可能**追加**一条新 system message，旧的还在历史里；
+   * 再加上几十轮旧语气的对话，模型很容易继续沿用。给下一轮一句「刚换了」压一下。
+   */
+  let switchNote = null;
+  function noteSwitch(label) {
+    if (!label) return;
+    switchNote = { text: `说话方式刚换成「${label}」，从这一轮起按新的来，别延续之前的语气。`, at: Date.now() };
+  }
+  function switchNoteText() {
+    if (!switchNote) return '';
+    if (Date.now() - switchNote.at > 5 * 60_000) { switchNote = null; return ''; }
+    return switchNote.text;
+  }
+
   /** 合并「关键词临时人格」后的 persona 配置，给 resolve 用 */
   function personaCfgFor(chat) {
     const picked = keywordPick.get(chat.chatId);
@@ -1748,7 +1765,7 @@ export function apply(ctx) {
         agent.ctx.systemPrompt.context({
           name: 'roost-switch-note',
           order: 909,
-          text: () => keywordNote.get(chat.chatId) || '',
+          text: () => keywordNote.get(chat.chatId) || switchNoteText(),
         }),
       );
     } catch (e) {
@@ -2432,6 +2449,8 @@ export function apply(ctx) {
       if (sid) speaker.delete(sid);
       /** 切人格提示只活一轮：下一句普通聊天不能再带着它 */
       keywordNote.delete(chat.chatId);
+      /** 换人格提示只活一轮 */
+      switchNote = null;
     }
   }
 
@@ -3628,7 +3647,12 @@ export function apply(ctx) {
 
         const beforePort = cfg.server.port;
         const beforeToken = cfg.server.token;
+        const beforeCurrent = cfg.persona.current;
         cfg = patchMode ? patchConfig(body) : saveConfig(body);
+        if (cfg.persona.current !== beforeCurrent) {
+          const hit = personas.list().find((p) => p.id === cfg.persona.current);
+          noteSwitch(hit?.label || hit?.name || cfg.persona.current);
+        }
 
         /**
          * 只有**端口或密钥**变了才重启监听。
@@ -3932,7 +3956,8 @@ export function apply(ctx) {
         if (chatId === '__proto__' || chatId === 'constructor' || chatId === 'prototype') {
           return send(res, 400, { ok: false, message: 'chatId 不合法' });
         }
-        if (!personas.list().some((p) => p.id === id)) {
+        const hit = personas.list().find((p) => p.id === id);
+        if (!hit) {
           return send(res, 404, { ok: false, message: `没有「${id}」这个人格` });
         }
 
@@ -3940,6 +3965,7 @@ export function apply(ctx) {
          * 基线取**磁盘上的配置**而不是内存里的 `cfg`：用户运行期手改过
          * config.json 的话，用旧快照整份写会把他的修改回滚掉。
          */
+        const prevCurrent = cfg.persona.current;
         const next = structuredClone(loadConfig());
         if (chatId) {
           /** 面板显式指定优先于聊天指令：清掉内存里的临时选择 */
@@ -3948,6 +3974,11 @@ export function apply(ctx) {
         }
         else next.persona.current = id;
         cfg = saveConfig(next);
+
+        /** 换人格后给下一轮一句提示：旧 system 和历史还在，模型容易沿用旧语气 */
+        const label = hit.label || hit.name || hit.id;
+        if (chatId) keywordNote.set(chatId, `说话方式刚换成「${label}」，从这一轮起按新的来，别延续之前的语气。`);
+        else if (cfg.persona.current !== prevCurrent) noteSwitch(label);
 
         addLog('info', 'persona', chatId
           ? `群 ${chatId.slice(0, 8)}… 指定人格：${id}`
