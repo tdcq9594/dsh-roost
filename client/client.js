@@ -3121,8 +3121,35 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /** 交流反馈群：固定群号，一键复制 */
+    function FeedbackCard({ toast }) {
+      const [copied, setCopied] = useState(false)
+      const group = '1130901545'
+
+      return h(Sec, { n: '02', title: '交流反馈群' },
+        h('div', { className: 'roost-note', style: { marginTop: 2 } },
+          '遇到问题、想加功能，或者只是想看看别人怎么用，都可以进群说。'),
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' } },
+          h('span', { className: 'roost-code', style: { fontSize: 14, padding: '4px 8px' } }, group),
+          h('button', {
+            type: 'button', className: 'roost-btn',
+            onClick: async () => {
+              try {
+                await navigator.clipboard.writeText(group)
+                setCopied(true)
+                toast('群号已复制')
+                setTimeout(() => setCopied(false), 1500)
+              } catch {
+                toast('复制失败，手动记一下：' + group)
+              }
+            },
+          }, copied ? '已复制' : '复制群号'),
+        ),
+      )
+    }
+
     /** 工作区：当前挂在哪个目录 + 改名 / 换目录 */
-    function WorkspaceCard({ save, toast }) {
+    function WorkspaceCard({ saveCfg, toast }) {
       const [ws, setWs] = useState(null)
       const [dir, setDir] = useState('')
       const [name, setName] = useState('')
@@ -3143,7 +3170,7 @@ select.roost-input{color-scheme:dark}
       }
 
       return h(Sec, {
-        n: '02',
+        n: '03',
         title: '工作区',
         right: h('span', { className: 'roost-note', style: { margin: 0 } }, ws?.current?.title || ''),
       },
@@ -3168,7 +3195,7 @@ select.roost-input{color-scheme:dark}
           h('button', {
             type: 'button', className: 'roost-primary', disabled: busy,
             onClick: () => run(async () => {
-              const r = await save({ workspace: { dir, name } })
+              const r = await saveCfg({ workspace: { dir, name } })
               if (r.ok === false) return toast(r.message || '没存上')
               toast('工作区设置已保存（下一条消息生效）')
               await load()
@@ -3189,7 +3216,7 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    function ConfigTab({ config, save, toast }) {
+    function ConfigTab({ config, save, saveCfg, toast }) {
       const [draft, setDraft] = useState(() => JSON.stringify(config, null, 2))
       const [err, setErr] = useState('')
       const taRef = useRef(null)
@@ -3268,9 +3295,11 @@ select.roost-input{color-scheme:dark}
       return h('div', null,
         h(UpdatesBlock, { toast }),
 
-        h(WorkspaceCard, { save, toast }),
+        h(FeedbackCard, { toast }),
 
-        h(Sec, { n: '03', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
+        h(WorkspaceCard, { saveCfg, toast }),
+
+        h(Sec, { n: '04', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
           h('button', { type: 'button', className: 'roost-btn', onClick: () => setDraft(JSON.stringify(config, null, 2)) }, '还原'),
           h('button', { type: 'button', className: 'roost-primary', onClick: doSave }, '保存'),
         ) },
@@ -3287,7 +3316,7 @@ select.roost-input{color-scheme:dark}
             '密钥显示成 ******。原样提交回来不会覆盖真密钥，只有填了新的才会改。'),
         ),
 
-        h(Sec, { n: '04', title: '各段是干什么的' },
+        h(Sec, { n: '05', title: '各段是干什么的' },
           h('div', { className: 'roost-list' },
             JSON_SECTIONS.map(([k, label, desc]) =>
               h('div', { key: k, className: 'roost-item' },
@@ -4007,7 +4036,7 @@ select.roost-input{color-scheme:dark}
           tab === 'awake' ? h(AwakeTab, { aw, mem, sp, chats, toast, reload: loadAwake, reloadSp: loadAwake, busy }) : null,
           tab === 'context' ? h(ContextTab, { ctxInfo, mind, usageInfo, toast, reload: loadCtx, busy }) : null,
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
-          tab === 'config' ? (config ? h(ConfigTab, { key: configRev, config, save: saveAll, toast }) : h('div', { className: 'roost-empty' }, '读取配置…')) : null,
+          tab === 'config' ? (config ? h(ConfigTab, { key: configRev, config, save: saveAll, saveCfg, toast }) : h('div', { className: 'roost-empty' }, '读取配置…')) : null,
           tab === 'logs' ? h(LogsTab, null) : null,
         ),
 

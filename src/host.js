@@ -567,12 +567,17 @@ export function apply(ctx) {
   let switchNote = null;
   function noteSwitch(label) {
     if (!label) return;
-    switchNote = { text: `说话方式刚换成「${label}」，从这一轮起按新的来，别延续之前的语气。`, at: Date.now() };
+    /** seen：每个会话只提示一次，避免 A 群换人格、B 群的轮次把它消费掉 */
+    switchNote = { text: `说话方式刚换成「${label}」，从这一轮起按新的来，别延续之前的语气。`, at: Date.now(), seen: new Set() };
   }
-  function switchNoteText() {
+  function switchNoteText(chatId) {
     if (!switchNote) return '';
     if (Date.now() - switchNote.at > 5 * 60_000) { switchNote = null; return ''; }
+    if (switchNote.seen.has(chatId)) return '';
     return switchNote.text;
+  }
+  function consumeSwitchNote(chatId) {
+    switchNote?.seen.add(chatId);
   }
 
   /** 合并「关键词临时人格」后的 persona 配置，给 resolve 用 */
@@ -1416,8 +1421,14 @@ export function apply(ctx) {
    * 群名不在官方事件里，ai-chat 以前又用发送者昵称兜底，结果群标题变成「我的昵称」；
    * 私聊没有昵称就退成 openid。两头都看不出是哪个会话。
    */
+  /** 主动搭话/自测的哨兵名不是真会话名，不能拿来当标题 */
+  const SENTINEL_NAMES = new Set(['主动搭话', '自测']);
+  const isPlaceholderTitle = (t) => /^QQ · (群|私聊) [0-9A-Za-z]{6}$/.test(t);
+  const isSentinelTitle = (t) => t === 'QQ · 主动搭话' || t === 'QQ · 自测';
+
   function sessionTitle(chat) {
-    const name = String(chat.name || '').trim();
+    const raw = String(chat.name || '').trim();
+    const name = SENTINEL_NAMES.has(raw) ? '' : raw;
     if (name) return `QQ · ${name}`;
     return `QQ · ${chat.kind === 'c2c' ? '私聊' : '群'} ${String(chat.chatId || '').slice(-6)}`;
   }
@@ -1431,6 +1442,7 @@ export function apply(ctx) {
    * 拿不到默认值或宿主不支持就静默跳过——不影响正常流程。
    */
   const modelApplied = new Set();
+  let modelWarned = false;
   async function applyDefaultModel(sessionId) {
     if (!sessionId || modelApplied.has(sessionId)) return;
     try {
@@ -1438,7 +1450,13 @@ export function apply(ctx) {
       const sel = dm?.currentSelection?.();
       if (!sel?.provider || !sel?.model) return;
       const remote = controller().remote?.session;
-      if (typeof remote?.selectModel !== 'function') return;
+      if (typeof remote?.selectModel !== 'function') {
+        if (!modelWarned) {
+          modelWarned = true;
+          log.warn('宿主没有暴露 session.selectModel，新会话可能拿不到默认模型');
+        }
+        return;
+      }
       await remote.selectModel({
         sessionId,
         provider: sel.provider,
@@ -1463,14 +1481,28 @@ export function apply(ctx) {
          */
         const want = sessionTitle(chat);
         const old = sessions.entry(chat.chatId)?.title || '';
-        const needRename = old !== want && (chat.name || !old || old.includes(chat.chatId) || old.startsWith('QQ · '));
+        /** 压缩续会话的「（续）」是标记，不该因为名字一致就被抹掉 */
+        const oldBase = old.replace(/（续）$/, '');
+        /**
+         * 只在「名字确实更好」时改，别把已有好名字降级成占位符：
+         *   · 有真名字 → 改；
+         *   · 旧标题是 openid / 占位符 / 哨兵 / 旧版裸昵称 → 改；
+         *   · 旧标题是「QQ · 真群名」而这次没拿到名字 → 不动。
+         */
+        const needRename = oldBase !== want && (
+          Boolean(chat.name)
+          || !old
+          || old.includes(chat.chatId)
+          || isPlaceholderTitle(old)
+          || isSentinelTitle(old)
+          || !old.startsWith('QQ · ')
+        );
         if (needRename) {
           try {
             await controller().rename({ sessionId: sid, title: want });
             sessions.set(chat.chatId, sid, { preset: chat.preset, title: want, kind: chat.kind });
           } catch {}
         }
-        await applyDefaultModel(sid);
         return { agent, sessionId: sid };
       } catch (e) {
         log.warn(`${chat.chatId}：旧会话 ${sid.slice(-8)} 拉不起来了（${e.message}），重建`);
@@ -1835,7 +1867,7 @@ export function apply(ctx) {
         agent.ctx.systemPrompt.context({
           name: 'roost-switch-note',
           order: 909,
-          text: () => keywordNote.get(chat.chatId) || switchNoteText(),
+          text: () => keywordNote.get(chat.chatId) || switchNoteText(chat.chatId),
         }),
       );
     } catch (e) {
@@ -2519,8 +2551,8 @@ export function apply(ctx) {
       if (sid) speaker.delete(sid);
       /** 切人格提示只活一轮：下一句普通聊天不能再带着它 */
       keywordNote.delete(chat.chatId);
-      /** 换人格提示只活一轮 */
-      switchNote = null;
+      /** 换人格提示每个会话只消费一次；5 分钟后整体过期 */
+      consumeSwitchNote(chat.chatId);
     }
   }
 
@@ -4063,12 +4095,17 @@ export function apply(ctx) {
        */
       route('/workspace', async (req, res) => {
         try {
-          const id = await workspaceId();
+          /**
+           * **只读**：不能调 workspaceId()——它会 mkdir + create + rename，
+           * 进一次设置页就建目录、改名字，填错路径还会在错的地方建。
+           */
           const reg = ctx.get('workspaceRegistry');
           const list = (await reg?.list?.()) ?? [];
           const norm = (w) => ({ id: w.workspaceId || w.id, title: w.title || '', path: w.path || '' });
           const all = list.map(norm);
-          return send(res, 200, { ok: true, current: all.find((w) => w.id === id) || null, list: all, configured: cfg.workspace || {} });
+          const want = String(cfg.workspace?.dir ?? '');
+          const wantPath = want === '__default__' ? '' : (want || join(dataDir(), 'workspace'));
+          return send(res, 200, { ok: true, current: (wantPath && all.find((w) => w.path === wantPath)) || null, list: all, configured: cfg.workspace || {} });
         } catch (e) {
           return send(res, 200, { ok: false, message: e.message, current: null, list: [], configured: cfg.workspace || {} });
         }
@@ -4078,11 +4115,13 @@ export function apply(ctx) {
         const b = await readBody(req);
         const title = String(b.title || '').trim();
         if (!title) return send(res, 400, { ok: false, message: '缺 title' });
-        const wc = ctx.get('workspaceController');
-        if (typeof wc?.rename !== 'function') return send(res, 501, { ok: false, message: '宿主不支持改工作区名' });
         try {
+          const wc = ctx.get('workspaceController');
+          if (typeof wc?.rename !== 'function') return send(res, 501, { ok: false, message: '宿主不支持改工作区名' });
           const id = await workspaceId();
           await wc.rename({ workspaceId: id, title });
+          /** 记下名字，否则下次 workspaceId() 会按目录名/旧配置改回去 */
+          cfg = patchConfig({ workspace: { name: title } });
           return send(res, 200, { ok: true, id, title });
         } catch (e) {
           return send(res, 500, { ok: false, message: e.message });
@@ -4104,6 +4143,8 @@ export function apply(ctx) {
         delete map[chatId];
         next.persona.byChat = map;
         cfg = saveConfig(next);
+        /** 回退到全局也要给一句提示，否则这一轮还按旧人格说话 */
+        keywordNote.set(chatId, '说话方式刚回到全局设定。回一句确认即可。');
         return send(res, 200, { ok: true, byChat: cfg.persona.byChat });
       }),
 

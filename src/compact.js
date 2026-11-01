@@ -393,11 +393,17 @@ export function createCompact({
       const newSid = String(r.sessionId);
       if (!newSid) return { ok: false, why: '新会话没拿到 sessionId' };
 
+      /** 和主标题同一套兜底：没有名字就用「群/私聊 + 尾号」，别把 openid 摆出来 */
+      const name = String(chat.name || '').trim();
+      const base = name
+        ? `QQ · ${name}`
+        : `QQ · ${chat.kind === 'c2c' ? '私聊' : '群'} ${String(chatId).slice(-6)}`;
+      const title = `${base}（续）`;
       try {
-        await ctrl.rename({ sessionId: newSid, title: `QQ · ${chat.name || chatId}（续）` });
+        await ctrl.rename({ sessionId: newSid, title });
       } catch {}
 
-      sessions.set(chatId, newSid, { preset: chat.preset, title: chat.name });
+      sessions.set(chatId, newSid, { preset: chat.preset, title });
       turns.set(chatId, 0);
       onOpening(chatId, opening);
 
