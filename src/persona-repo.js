@@ -595,7 +595,11 @@ export function createPersonaRepo({
         } catch {}
         const bt = bundledText(file);
         const bodyOf = (t) => String(t).replace(/^\s*---[\s\S]*?\n---[ \t]*(?:\r?\n|$)/, '');
-        state = localText && bt && bodyOf(localText) === bodyOf(bt) ? 'update' : 'modified';
+        const headerOf = (t) => (String(t).match(/^\s*---[ \t]*\r?\n([\s\S]*?)(?:\r?\n)?---/) || [null, ''])[1] || '';
+        /** 头部除了 name/label/tags/tools 还有别的字段 = 用户加过东西，不能当旧版覆盖 */
+        const extra = [...headerOf(localText).matchAll(/^\s*([A-Za-z_]\w*)\s*:/gm)]
+          .some((m) => !['name', 'label', 'tags', 'tools'].includes(m[1].toLowerCase()));
+        state = localText && bt && bodyOf(localText) === bodyOf(bt) && !extra ? 'update' : 'modified';
       }
       else state = 'modified';
 
@@ -1048,6 +1052,10 @@ export function createPersonaRepo({
       if (!p) throw new Error(`仓库里没有「${id}」这个人格`);
 
       const file = safeFile(p.file);
+      /** 和 sync 同一条守卫：file 主干必须等于 id，否则 restore 也能覆盖内置人格 */
+      if (String(p.id) !== String(file).replace(/\.md$/i, '')) {
+        throw new Error('索引条目的 file 与 id 不一致，拒绝写入（防止撞名覆盖）');
+      }
       const inst = personas?.prefs?.read?.().installedAs ?? {};
       const localName = localNameFor(id, file, inst);
       const text = await getText(`${index.base}/${file}`);

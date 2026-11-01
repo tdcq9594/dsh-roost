@@ -55,10 +55,13 @@ window.__ModuleLoader__.load({
           };
         }
         try {
-          /** 带上 HTTP 状态码：调用方要区分 409/403 这些，光有 ok 字段不够 */
-          return { ...JSON.parse(text), status: r.status };
+          /**
+           * 用 `httpStatus`，**不能**叫 `status`：
+           * `/setup/qr/poll` 的业务字段就叫 `status`（pending/done），覆盖掉会直接坏扫码。
+           */
+          return { ...JSON.parse(text), httpStatus: r.status };
         } catch {
-          return { ok: false, status: r.status, message: `插件回的不是 JSON（HTTP ${r.status}，${p}）：${text.slice(0, 80)}` };
+          return { ok: false, httpStatus: r.status, message: `插件回的不是 JSON（HTTP ${r.status}，${p}）：${text.slice(0, 80)}` };
         }
       } catch (e) {
         return { ok: false, message: '连不上插件：' + e.message };
@@ -3861,7 +3864,7 @@ select.roost-input{color-scheme:dark}
       /** 「配置全文」用：整份替换（删字段 = 回落默认值） */
       const saveAll = useCallback(async (full) => {
         const r = await post('/config', { ...full, __revision: configRev })
-        if (r.status === 409) {
+        if (r.httpStatus === 409) {
           setConfig(r.config || null)
           setConfigRev(String(r.revision || ''))
           return r
