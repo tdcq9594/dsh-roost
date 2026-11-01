@@ -1339,21 +1339,26 @@ select.roost-input{color-scheme:dark}
               : h('option', { value: globalId }, `（已删除：${globalId}）`),
             (personas?.personas || []).map((p) =>
               h('option', { key: p.id, value: p.id }, p.label || p.name || p.id))),
+          h('span', { style: { fontSize: 12, fontWeight: 650 } }, '本群'),
           chatId
-            ? h('span', { className: 'roost-note', style: { margin: 0 } },
-                chatPick ? `本群（最近说话）：${labelOf(chatPick)}` : '本群（最近说话）：跟随全局')
-            : null,
-          chatId && chatPick
-            ? h('button', {
-                type: 'button', className: 'roost-btn',
-                onClick: async () => {
-                  const r = await post('/personas/unuse', { chatId })
-                  if (r.ok === false) return toast(r.message || '没改回来')
-                  toast('本群已跟随全局')
+            ? h('select', {
+                className: 'roost-input', value: chatPick || '', 'aria-label': '本群使用的人格',
+                title: '只对最近说话的这个会话生效；换会话后这里跟着变',
+                style: { maxWidth: 180 },
+                onChange: async (e) => {
+                  const id = e.target.value
+                  const r = id
+                    ? await post('/personas/use', { id, chatId })
+                    : await post('/personas/unuse', { chatId })
+                  if (r.ok === false) return toast(r.message || '没改成')
+                  toast(id ? '本群已指定' : '本群已跟随全局')
                   await reload()
                 },
-              }, '跟随全局')
-            : null,
+              },
+                h('option', { value: '' }, '跟随全局'),
+                (personas?.personas || []).map((p) =>
+                  h('option', { key: p.id, value: p.id }, p.label || p.name || p.id)))
+            : h('span', { className: 'roost-note', style: { margin: 0 } }, '读取会话中…'),
         ),
         sec('人格', {
           /**
@@ -3807,8 +3812,9 @@ select.roost-input{color-scheme:dark}
         if (tab === 'memory') loadMemory()
         if (tab === 'her') {
           loadHer()
-          // 名字输入框读的是 config；直接进这一页时 config 还没拉过
+          // 名字输入框读 config；「本群」下拉要 mem.chatId——都主动拉一次
           if (!config) loadConfig()
+          if (!mem) loadMemory()
         }
         if (tab === 'market') loadMarket()
         if (tab === 'awake') {
