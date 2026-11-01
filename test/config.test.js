@@ -159,3 +159,8 @@ test('readRawConfig：没写过的键不会被默认值污染（迁移靠它判�
   assert.equal(raw.persona.name, undefined, '原始配置里就是没有，不能合并出「大肥鱼」');
   assert.equal(loadConfig().persona.name, '大肥鱼', '合并后的默认值是新装的默认');
 });
+
+test('聊天内切人格指令默认关闭（只对主人、不落盘）', () => {
+  assert.equal(DEFAULTS.persona.command.enabled, false);
+  assert.equal(DEFAULTS.persona.command.prefix, '/persona');
+});

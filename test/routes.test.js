@@ -578,3 +578,43 @@ test('单删也会级联清 byChat', async () => {
     h.off?.();
   }
 });
+
+test('配置：整份保存带旧版本号会 409，不覆盖别处的修改', async () => {
+  const h = await bootHost({ persona: { current: 'default' } });
+  try {
+    const g = await h.call('/config');
+    const rev = g.json.revision;
+    assert.ok(rev, 'GET /config 要返回版本号');
+
+    const r1 = await h.call('/config', { method: 'POST', body: { persona: { current: 'snarky' }, __revision: rev } });
+    assert.equal(r1.status, 200);
+
+    // 用同一个旧版本号再存：磁盘已经变了，必须拒绝
+    const r2 = await h.call('/config', { method: 'POST', body: { persona: { current: 'teacher' }, __revision: rev } });
+    assert.equal(r2.status, 409, '旧快照不能覆盖');
+
+    const disk = JSON.parse(readFileSync(join(h.dir, 'config.json'), 'utf8'));
+    assert.equal(disk.persona.current, 'snarky', '磁盘上保留第一次保存的结果');
+  } finally {
+    h.off?.();
+  }
+});
+
+test('治理体检：重复内容进建议，正在用的排除', async () => {
+  const h = await bootHost({ persona: { current: 'default' } });
+  try {
+    const raw = '---\nlabel: 重复\n---\n同样的正文。';
+    await h.call('/personas/save', { method: 'POST', body: { id: 'dup1', raw } });
+    await h.call('/personas/save', { method: 'POST', body: { id: 'dup2', raw } });
+    await h.call('/personas/use', { method: 'POST', body: { id: 'dup2', chatId: '群X' } });
+
+    const g = await h.call('/personas/gov?scan=1');
+    assert.ok(g.json.health.dup.length >= 1, '同内容要能判出重复');
+    const sugg = g.json.health.suggestions.map((s) => s.id);
+    assert.ok(!sugg.includes('dup2'), '被会话指定的不能进建议');
+    assert.ok(sugg.includes('dup1'), '重复组里没被用的那个应该进建议');
+    assert.ok(!sugg.includes('default'), '默认人格永远不进建议');
+  } finally {
+    h.off?.();
+  }
+});

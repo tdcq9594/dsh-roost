@@ -57,6 +57,25 @@ export function personaName(cfgName, persona) {
   return String(persona?.label || persona?.name || persona?.id || '').trim() || '大肥鱼';
 }
 
+/**
+ * 解析聊天内切人格指令（抄 AstrBot 的 `/persona`）。
+ *
+ * 名字**整段取**，不按空格切——AstrBot 就踩过「人格名带空格匹配失败」的坑
+ * （builtin_commands_extension Issue #2）。
+ *
+ * 返回 `{ kind: 'list' | 'clear' | 'switch', arg, match }`；不是指令时返回 null。
+ */
+export function parseSwitchCommand(text, prefix, names = []) {
+  const p = String(prefix || '').trim();
+  const t = String(text || '').trim();
+  if (!p || !t.startsWith(p)) return null;
+  const arg = t.slice(p.length).trim();
+  if (!arg || /^(list|ls|列表)$/i.test(arg)) return { kind: 'list', arg: '' };
+  if (/^(off|reset|clear|关|默认|取消)$/i.test(arg)) return { kind: 'clear', arg: '' };
+  const match = (names || []).find((n) => n.id === arg || n.label === arg) || null;
+  return { kind: 'switch', arg, match };
+}
+
 /** 解析 `---` 头 + 正文 */
 export function parsePersona(id, raw) {
   let text = String(raw ?? '').replace(/^\uFEFF/, '');

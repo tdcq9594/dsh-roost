@@ -15,7 +15,7 @@
 
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig } from './config.js';
+import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision } from './config.js';
 import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
 import { createInboundServer, postReply } from './server.js';
@@ -30,7 +30,7 @@ import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
 import { createMood } from './mood.js';
 import { createClosing } from './closing.js';
-import { createPersonas, legacyPersonaText, personaName } from './personas.js';
+import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand } from './personas.js';
 import { createPersonaRepo, scanPersona } from './persona-repo.js';
 import { createUpdater } from './update.js';
 import { createStickers } from './stickers.js';
@@ -269,7 +269,7 @@ export function apply(ctx) {
   }
 
   function personaToolsFor(chat, { count = true } = {}) {
-    const p = personas.resolve(chat.chatId, cfg.persona);
+    const p = personas.resolve(chat.chatId, personaCfgFor(chat));
     if (count) bumpUsage(p.id);
     return Array.isArray(p.tools) ? p.tools : null;
   }
@@ -551,6 +551,18 @@ export function apply(ctx) {
 
   /** 这一轮用户说的话（截断），世界书按它匹配触发词 */
   let lastMsgText = '';
+
+  /** 关键词切人格：chatId → personaId。**只在内存里**，重启失效（设计如此） */
+  const keywordPick = new Map();
+  /** 这一轮要注入的「刚切了人格」提示；轮末清掉 */
+  let keywordNote = '';
+
+  /** 合并「关键词临时人格」后的 persona 配置，给 resolve 用 */
+  function personaCfgFor(chat) {
+    const picked = keywordPick.get(chat.chatId);
+    if (!picked) return cfg.persona;
+    return { ...cfg.persona, byChat: { ...(cfg.persona?.byChat || {}), [chat.chatId]: picked } };
+  }
 
   /** 动态块的字数硬上限（token 预算的粗护栏，先粗后细） */
   const SCENE_MAX = 240;
@@ -1595,7 +1607,7 @@ export function apply(ctx) {
              * 人格正文在文件里（`personas/*.md`），配置只记「用哪个」。
              * 按群覆盖 > 全局当前 > default；指定的文件被删了会静默回退。
              */
-            const persona = personas.resolve(chat.chatId, p);
+            const persona = personas.resolve(chat.chatId, personaCfgFor(chat));
             // 按群覆盖优先（模型用 <<persona:>> 写的），没有才用文件里那个人格
             const override = memory.getPersonaOverride(chat.chatId);
             const extra = chat.kind === 'c2c' ? p.rulesPrivate : p.rulesSocial;
@@ -1723,6 +1735,22 @@ export function apply(ctx) {
       );
     } catch (e) {
       log.debug('挂近处指令失败：', e.message);
+    }
+
+    /**
+     * 切人格的当轮提示（order 909）：只在主人刚发了 `/persona ...` 的那一轮注入，
+     * 让模型知道「这是指令，不是普通聊天」，回一句确认就好。
+     */
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-switch-note',
+          order: 909,
+          text: () => keywordNote || '',
+        }),
+      );
+    } catch (e) {
+      log.debug('挂切人格提示失败：', e.message);
     }
 
     /**
@@ -2026,6 +2054,32 @@ export function apply(ctx) {
        * `Cannot access 'text' before initialization`，整个插件挂掉、DSH 起不来。
        */
       lastMsgText = String(text || '').slice(0, 2000);
+
+      /**
+       * 聊天内切人格（默认关、仅主人、只影响当前会话、不落盘）。
+       *
+       * 不单独发消息：让这一轮正常跑，模型用新人设回一句确认——
+       * 宿主没有「直接发一条」的通道，硬插一条要另起一套发送逻辑，
+       * 反而容易和 qq_send 的幂等键打架。
+       */
+      if (bucket === 'owner' && cfg.persona?.command?.enabled) {
+        const names = personas.list().map((p) => ({ id: p.id, label: p.label || p.name || p.id }));
+        const cmd = parseSwitchCommand(text, cfg.persona.command.prefix, names);
+        if (cmd) {
+          const avail = names.map((n) => n.label).join('、');
+          if (cmd.kind === 'list') {
+            keywordNote = `主人想看人格列表。可用：${avail}。简短列出来，别展开。`;
+          } else if (cmd.kind === 'clear') {
+            keywordPick.delete(chat.chatId);
+            keywordNote = '主人刚取消了这个会话的临时人格，回到全局设定。回一句确认即可。';
+          } else if (cmd.match) {
+            keywordPick.set(chat.chatId, cmd.match.id);
+            keywordNote = `主人刚把这个会话的人格切成「${cmd.match.label}」。回一句确认即可，不要解释规则。`;
+          } else {
+            keywordNote = `主人想切人格但「${cmd.arg}」不存在。可用：${avail}。简短说明并列出。`;
+          }
+        }
+      }
 
       /**
        * 刚压缩过的话，这一轮的正文前面要带上开场白。
@@ -2370,6 +2424,8 @@ export function apply(ctx) {
         restore?.();
       } catch {}
       if (sid) speaker.delete(sid);
+      /** 切人格提示只活一轮：下一句普通聊天不能再带着它 */
+      keywordNote = '';
     }
   }
 
@@ -3495,7 +3551,7 @@ export function apply(ctx) {
       }),
 
       route('/config', async (req, res) => {
-        if (req.method === 'GET') return send(res, 200, { ok: true, config: publicConfig(cfg) });
+        if (req.method === 'GET') return send(res, 200, { ok: true, config: publicConfig(cfg), revision: configRevision() });
         const body = await readBody(req);
         /**
          * `?mode=patch`：局部保存（切人格、改名字）。
@@ -3526,6 +3582,20 @@ export function apply(ctx) {
          * 删掉这个键等于主动提交「没有 token」——真密钥会被默认空值顶掉。
          * 必须显式回填当前内存里的真值。
          */
+        /**
+         * 冲突检测：面板拿的是旧快照就别整份覆盖。
+         * 整份保存是「以提交的为准」，别处刚改过（比如换人格写了 byChat）就会被抹掉。
+         */
+        if (typeof body.__revision === 'string' && body.__revision && body.__revision !== configRevision()) {
+          return send(res, 409, {
+            ok: false,
+            message: '配置在别处改过了，先刷新再保存',
+            config: publicConfig(cfg),
+            revision: configRevision(),
+          });
+        }
+        delete body.__revision;
+
         if (body?.server?.token === '******') body.server.token = cfg.server.token;
 
         /**

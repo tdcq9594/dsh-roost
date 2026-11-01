@@ -7,6 +7,7 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -282,6 +283,12 @@ export const DEFAULTS = {
      * 默认给「大肥鱼」——新装用户直接用这个；老用户由迁移读一次原人格名。
      */
     name: '大肥鱼',
+    /**
+     * 聊天内切人格指令（抄 AstrBot 的 /persona）：默认关、只对主人生效、
+     * **不落盘**（进程重启失效），只影响当前会话。
+     * 支持 `前缀`（列表）、`前缀 off`（回全局）、`前缀 <名字>`（切换，名字可带空格）。
+     */
+    command: { enabled: false, prefix: '/persona' },
     text: '',
     rulesPrivate: '这是和主人的私聊，可以放开聊。',
     rulesSocial: '这是群聊，说话要短，别刷屏。',
@@ -368,6 +375,19 @@ export function readRawConfig() {
      * 用户那份「坏但还能手工救」的配置就没了。
      */
     return null;
+  }
+}
+
+/**
+ * 配置文件的版本号（mtime）。整份保存前用它做冲突检测：
+ * 面板打开后别处又改过配置，直接覆盖会把别人的修改抹掉。
+ */
+export function configRevision() {
+  try {
+    // 用内容哈希而不是 mtime：同一毫秒内的两次写，mtime 分不出来
+    return createHash('sha256').update(readFileSync(FILE())).digest('hex').slice(0, 16);
+  } catch {
+    return '';
   }
 }
 

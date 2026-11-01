@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createPersonas, legacyPersonaText, parsePersona, personaName } from '../src/personas.js';
+import { createPersonas, legacyPersonaText, parsePersona, personaName, parseSwitchCommand } from '../src/personas.js';
 
 const LEGACY = '你住在 QQ 里，是个话不多但有意思的人。回答简短口语化，通常两三句话。';
 
@@ -441,4 +441,21 @@ test('批量打标签：方括号+尾随空格也认，换行注入被压平', (
   } finally {
     done();
   }
+});
+
+test('切人格指令：整段取名字（带空格也认），list/off 是子命令', () => {
+  const names = [
+    { id: 'snarky', label: '毒舌群友' },
+    { id: 'my cat', label: '我的 猫' },
+  ];
+  assert.equal(parseSwitchCommand('/persona', '/persona', names).kind, 'list');
+  assert.equal(parseSwitchCommand('/persona list', '/persona', names).kind, 'list');
+  assert.equal(parseSwitchCommand('/persona off', '/persona', names).kind, 'clear');
+
+  const hit = parseSwitchCommand('/persona 我的 猫', '/persona', names);
+  assert.equal(hit.kind, 'switch');
+  assert.equal(hit.match.id, 'my cat', '名字带空格要整段匹配（AstrBot 在这里踩过坑）');
+
+  assert.equal(parseSwitchCommand('/persona 不存在', '/persona', names).match, null);
+  assert.equal(parseSwitchCommand('今天吃什么', '/persona', names), null, '普通聊天不是指令');
 });

@@ -3645,6 +3645,8 @@ select.roost-input{color-scheme:dark}
       const [st, setSt] = useState(null)
       const [setupSt, setSetupSt] = useState(null)
       const [config, setConfig] = useState(null)
+      /** 配置版本（mtime）：整份保存时带回去，别处改过就 409 而不是覆盖 */
+      const [configRev, setConfigRev] = useState('')
       const [mem, setMem] = useState(null)
       /** 记忆页选中的会话；空串 = 跟随「最近说话的那个」 */
       const [memPick, setMemPick] = useState('')
@@ -3693,6 +3695,7 @@ select.roost-input{color-scheme:dark}
       const loadConfig = useCallback(async () => {
         const r = await get('/config')
         setConfig(r.ok === false ? null : r.config)
+        if (r.ok !== false) setConfigRev(String(r.revision || ''))
       }, [])
 
       /**
@@ -3848,10 +3851,18 @@ select.roost-input{color-scheme:dark}
 
       /** 「配置全文」用：整份替换（删字段 = 回落默认值） */
       const saveAll = useCallback(async (full) => {
-        const r = await post('/config', full)
-        if (r.ok !== false) setConfig(r.config || null)
+        const r = await post('/config', { ...full, __revision: configRev })
+        if (r.status === 409) {
+          setConfig(r.config || null)
+          setConfigRev(String(r.revision || ''))
+          return r
+        }
+        if (r.ok !== false) {
+          setConfig(r.config || null)
+          setConfigRev(String(r.revision || ''))
+        }
         return r
-      }, [])
+      }, [configRev])
 
       /**
        * 结构：**页头和页签固定，只有正文滚**。
