@@ -13,7 +13,7 @@
 // ⚠️ 权限按**每一条消息**判定：主人、管理员、普通成员拿到的工具不一样，
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision } from './config.js';
 import { createSessions } from './sessions.js';
@@ -574,10 +574,15 @@ export function apply(ctx) {
     if (!switchNote) return '';
     if (Date.now() - switchNote.at > 5 * 60_000) { switchNote = null; return ''; }
     if (switchNote.seen.has(chatId)) return '';
+    /** 记下这一轮真的注入过；轮末据此决定要不要标记 seen */
+    switchNote.lastHit = chatId;
     return switchNote.text;
   }
   function consumeSwitchNote(chatId) {
-    switchNote?.seen.add(chatId);
+    if (!switchNote) return;
+    /** 只有真的注入过才标记：被 keywordNote 抢先、或轮次在注入前失败，都不算 */
+    if (switchNote.lastHit === chatId) switchNote.seen.add(chatId);
+    switchNote.lastHit = null;
   }
 
   /** 合并「关键词临时人格」后的 persona 配置，给 resolve 用 */
@@ -1426,9 +1431,14 @@ export function apply(ctx) {
   const isPlaceholderTitle = (t) => /^QQ · (群|私聊) [0-9A-Za-z]{6}$/.test(t);
   const isSentinelTitle = (t) => t === 'QQ · 主动搭话' || t === 'QQ · 自测';
 
-  function sessionTitle(chat) {
+  /** 过滤掉哨兵名后的真实名字（空串表示没有） */
+  function realChatName(chat) {
     const raw = String(chat.name || '').trim();
-    const name = SENTINEL_NAMES.has(raw) ? '' : raw;
+    return SENTINEL_NAMES.has(raw) ? '' : raw;
+  }
+
+  function sessionTitle(chat) {
+    const name = realChatName(chat);
     if (name) return `QQ · ${name}`;
     return `QQ · ${chat.kind === 'c2c' ? '私聊' : '群'} ${String(chat.chatId || '').slice(-6)}`;
   }
@@ -1490,7 +1500,7 @@ export function apply(ctx) {
          *   · 旧标题是「QQ · 真群名」而这次没拿到名字 → 不动。
          */
         const needRename = oldBase !== want && (
-          Boolean(chat.name)
+          Boolean(realChatName(chat))
           || !old
           || old.includes(chat.chatId)
           || isPlaceholderTitle(old)
@@ -4104,8 +4114,12 @@ export function apply(ctx) {
           const norm = (w) => ({ id: w.workspaceId || w.id, title: w.title || '', path: w.path || '' });
           const all = list.map(norm);
           const want = String(cfg.workspace?.dir ?? '');
-          const wantPath = want === '__default__' ? '' : (want || join(dataDir(), 'workspace'));
-          return send(res, 200, { ok: true, current: (wantPath && all.find((w) => w.path === wantPath)) || null, list: all, configured: cfg.workspace || {} });
+          const wantPath = want === '__default__' ? '' : resolve(want || join(dataDir(), 'workspace'));
+          /** __default__ 时回落第一个（DSH 的默认工作区）；路径统一 resolve，尾斜杠也能匹配 */
+          const cur = want === '__default__'
+            ? (all.find((w) => w.title === 'default-workspace') || all[0] || null)
+            : (all.find((w) => resolve(w.path || '') === wantPath) || null);
+          return send(res, 200, { ok: true, current: cur, list: all, configured: cfg.workspace || {} });
         } catch (e) {
           return send(res, 200, { ok: false, message: e.message, current: null, list: [], configured: cfg.workspace || {} });
         }
@@ -4113,7 +4127,7 @@ export function apply(ctx) {
 
       route('/workspace/rename', async (req, res) => {
         const b = await readBody(req);
-        const title = String(b.title || '').trim();
+        const title = String(b.title || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 40);
         if (!title) return send(res, 400, { ok: false, message: '缺 title' });
         try {
           const wc = ctx.get('workspaceController');
