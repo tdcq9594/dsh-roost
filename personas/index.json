@@ -1,22 +1,24 @@
 {
-  "schema": 1,
+  "schema": 3,
   "repo": "tdcq9594/dsh-roost",
   "branch": "main",
   "minVersion": "0.10.7",
   "personas": [
     {
       "id": "default",
+      "label": "小栖",
       "name": "小栖",
       "tags": [
         "日常",
         "温和"
       ],
       "file": "default.md",
-      "chars": 168,
-      "sha256": "c8bd975780aa9b1606868540ecc30286dd19819d2051505cdd68e004fa1204ba"
+      "chars": 169,
+      "sha256": "f422010e73a333293c61fbd724830d19af6ea140b46201ffd01b6d18674745ef"
     },
     {
       "id": "fatfish",
+      "label": "大肥鱼",
       "name": "大肥鱼",
       "tags": [
         "短句",
@@ -24,74 +26,80 @@
         "鲸鱼娘"
       ],
       "file": "fatfish.md",
-      "chars": 297,
-      "sha256": "3ef5374d72387d5c24106567532190044363f7d7e027b6359a3cab7ace40026c"
+      "chars": 294,
+      "sha256": "5d1eba116d0ce524fef6b3a2206a3e5a9cda5aa69b1f0a07e118ddf872e5adff"
     },
     {
       "id": "genki",
+      "label": "元气少女",
       "name": "元气少女",
       "tags": [
         "活泼",
         "二次元"
       ],
       "file": "genki.md",
-      "chars": 157,
-      "sha256": "4f03d03b1ec3e6c2efce8657796d10bd707ba0ad87908e3054e90cc5c66dfe8e"
+      "chars": 158,
+      "sha256": "a2f15ab5e3f73cb3e13dc2a41edf8d212f2aff5b154d8ff1ff2c883abd4de11e"
     },
     {
       "id": "helper",
+      "label": "靠谱助手",
       "name": "靠谱助手",
       "tags": [
         "工具",
         "严谨"
       ],
       "file": "helper.md",
-      "chars": 186,
-      "sha256": "b9dbc828f599656eba05a9fe808a263fbd16999fb377bf752fbd154ca5811b97"
+      "chars": 187,
+      "sha256": "5b94ab5cf6e7f57203c2a3d36da761bc9f5d8c442516667e8571640a1ac267f9"
     },
     {
       "id": "scholar",
+      "label": "古风书生",
       "name": "古风书生",
       "tags": [
         "文艺",
         "有趣"
       ],
       "file": "scholar.md",
-      "chars": 190,
-      "sha256": "6c593a6b3c0217a25bcdf59d527961040ad1d3bc0564546b629d291b00202ad5"
+      "chars": 191,
+      "sha256": "52a5d220fd13911ed5e23d472316142b8007b7d4b74a3c67add049bcc870cbb4"
     },
     {
       "id": "snarky",
+      "label": "毒舌群友",
       "name": "毒舌群友",
       "tags": [
         "群聊",
         "活跃"
       ],
       "file": "snarky.md",
-      "chars": 174,
-      "sha256": "3de63db7dee85d0ab9630627d765d220875eff984e822d6cfe7ecdcd94dae030"
+      "chars": 175,
+      "sha256": "1875aa667c1a63527c8cf83c130d41a8fb21be482b4f57eb64bd99376e926699"
     },
     {
       "id": "teacher",
+      "label": "科普老师",
       "name": "科普老师",
       "tags": [
         "解释",
         "耐心"
       ],
       "file": "teacher.md",
-      "chars": 106,
-      "sha256": "67745304f33a865dc2792c3e0440bd19114d255adc368597a2df51119cc3ef71"
+      "chars": 107,
+      "sha256": "cb608e40963019052e4b444a5290622cadc7b8f7c371f799a9ddcba7052c5f01"
     },
     {
       "id": "terse",
+      "label": "惜字如金",
       "name": "惜字如金",
       "tags": [
         "极简",
         "效率"
       ],
       "file": "terse.md",
-      "chars": 138,
-      "sha256": "37420c5214dd071fcea2a1a25109595717fc48432e4f998966d481168b328466"
+      "chars": 139,
+      "sha256": "73620c480f433f2b96241bac88393b8b1332a6d87cc6c565fa25167643dcd175"
     }
   ]
 }

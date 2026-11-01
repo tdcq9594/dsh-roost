@@ -52,9 +52,14 @@ async function build() {
     const raw = await fs.readFile(path.join(DIR, file), 'utf8');
     const id = file.slice(0, -3);
     const p = parsePersona(id, raw);
+    if (/^\s*name\s*:/m.test(raw)) {
+      console.warn(`  ⚠ ${file} 还在用 name:，0.11 起请改成 label:（name 只作兼容别名）`);
+    }
     personas.push({
       id,
-      name: p.name,
+      // 0.11：label 是显示名；name 保留同值，给还没改的老客户端
+      label: p.label || p.name,
+      name: p.label || p.name,
       tags: p.tags,
       file,
       // 面板上显示「439 字」。用整份原文的长度，不是 body 的长度——
@@ -68,7 +73,7 @@ async function build() {
   }
 
   return {
-    schema: 1,
+    schema: 3,
     // 只是给面板显示「仓库 tdcq9594/dsh-roost · personas/」用的，
     // 真正拉取的地址由 sources 决定（可换源）。
     repo: 'tdcq9594/dsh-roost',
@@ -109,5 +114,5 @@ if (checkOnly) {
 } else {
   await fs.writeFile(TARGET, text, 'utf8');
   console.log(`已写入 personas/index.json（${next.personas.length} 份，minVersion ${MIN_VERSION}）`);
-  for (const p of next.personas) console.log(`  ${p.id.padEnd(10)} ${String(p.chars).padStart(5)}字  ${p.name}`);
+  for (const p of next.personas) console.log(`  ${p.id.padEnd(10)} ${String(p.chars).padStart(5)}字  ${p.label || p.name}`);
 }
