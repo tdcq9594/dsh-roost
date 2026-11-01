@@ -70,6 +70,8 @@ export const DEFAULTS = {
   workspace: {
     /** 工作区目录。留空 = <数据目录>/workspace；`__default__` = 用 DSH 默认工作区 */
     dir: '',
+    /** 工作区名字。留空 = 跟随目录名（DSH 默认）；填了就按这个名字建/改 */
+    name: '',
   },
   /**
    * 每一档权限能用什么：`all` = 全部工具，`chat` = 只能聊天。

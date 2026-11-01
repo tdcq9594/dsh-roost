@@ -3121,6 +3121,74 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /** 工作区：当前挂在哪个目录 + 改名 / 换目录 */
+    function WorkspaceCard({ save, toast }) {
+      const [ws, setWs] = useState(null)
+      const [dir, setDir] = useState('')
+      const [name, setName] = useState('')
+      const [busy, setBusy] = useState(false)
+
+      const load = async () => {
+        const r = await get('/workspace')
+        if (r.ok === false) return toast(r.message || '读不到工作区')
+        setWs(r)
+        setDir(r.configured?.dir || '')
+        setName(r.configured?.name || '')
+      }
+      useEffect(() => { load() }, [])
+
+      const run = async (fn) => {
+        setBusy(true)
+        try { await fn() } finally { setBusy(false) }
+      }
+
+      return h(Sec, {
+        n: '02',
+        title: '工作区',
+        right: h('span', { className: 'roost-note', style: { margin: 0 } }, ws?.current?.title || ''),
+      },
+        h('div', { className: 'roost-note', style: { marginTop: 2 } },
+          ws?.current
+            ? `当前：${ws.current.title || '(未命名)'} · ${ws.current.path}`
+            : '还没有工作区（下一条消息会创建）'),
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+          h('input', {
+            className: 'roost-input', value: dir,
+            placeholder: '目录（留空=数据目录/workspace；__default__=DSH 默认）',
+            style: { flex: '1 1 280px' },
+            onChange: (e) => setDir(e.target.value),
+          }),
+          h('input', {
+            className: 'roost-input', value: name, placeholder: '名字（留空=跟目录名）',
+            style: { flex: '0 1 180px' },
+            onChange: (e) => setName(e.target.value),
+          }),
+        ),
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+          h('button', {
+            type: 'button', className: 'roost-primary', disabled: busy,
+            onClick: () => run(async () => {
+              const r = await save({ workspace: { dir, name } })
+              if (r.ok === false) return toast(r.message || '没存上')
+              toast('工作区设置已保存（下一条消息生效）')
+              await load()
+            }),
+          }, '保存'),
+          h('button', {
+            type: 'button', className: 'roost-btn', disabled: busy || !ws?.current,
+            onClick: () => run(async () => {
+              const r = await post('/workspace/rename', { title: name.trim() || 'workspace' })
+              if (r.ok === false) return toast(r.message || '没改成')
+              toast('工作区已改名')
+              await load()
+            }),
+          }, '改名'),
+        ),
+        h('div', { className: 'roost-note', style: { marginTop: 6 } },
+          '换目录只影响之后新建的会话；已经在跑的会话仍挂在旧工作区。'),
+      )
+    }
+
     function ConfigTab({ config, save, toast }) {
       const [draft, setDraft] = useState(() => JSON.stringify(config, null, 2))
       const [err, setErr] = useState('')
@@ -3200,7 +3268,9 @@ select.roost-input{color-scheme:dark}
       return h('div', null,
         h(UpdatesBlock, { toast }),
 
-        h(Sec, { n: '02', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
+        h(WorkspaceCard, { save, toast }),
+
+        h(Sec, { n: '03', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
           h('button', { type: 'button', className: 'roost-btn', onClick: () => setDraft(JSON.stringify(config, null, 2)) }, '还原'),
           h('button', { type: 'button', className: 'roost-primary', onClick: doSave }, '保存'),
         ) },
@@ -3217,7 +3287,7 @@ select.roost-input{color-scheme:dark}
             '密钥显示成 ******。原样提交回来不会覆盖真密钥，只有填了新的才会改。'),
         ),
 
-        h(Sec, { n: '03', title: '各段是干什么的' },
+        h(Sec, { n: '04', title: '各段是干什么的' },
           h('div', { className: 'roost-list' },
             JSON_SECTIONS.map(([k, label, desc]) =>
               h('div', { key: k, className: 'roost-item' },

@@ -13,7 +13,7 @@
 // ⚠️ 权限按**每一条消息**判定：主人、管理员、普通成员拿到的工具不一样，
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision } from './config.js';
 import { createSessions } from './sessions.js';
@@ -1365,6 +1365,7 @@ export function apply(ctx) {
    */
   async function workspaceId() {
     const want = cfg.workspace?.dir ?? '';
+    const wantName = String(cfg.workspace?.name || '').trim();
 
     if (want !== '__default__') {
       const dir = want ? String(want) : join(dataDir(), 'workspace');
@@ -1374,7 +1375,18 @@ export function apply(ctx) {
           mkdirSync(dir, { recursive: true });
           const r = await wc.create({ path: dir });
           const id = r?.workspace?.workspaceId;
-          if (id) return id;
+          if (id) {
+            const title = String(r?.workspace?.title || '');
+            /**
+             * 工作区名字由 DSH 按目录名取。历史版本把它建成了「QQ」，和目录 workspace 对不上；
+             * 只在「默认目录 + 名字还是 QQ」时纠正一次，不碰用户自己改过的名字。
+             */
+            const target = wantName || (title === 'QQ' && basename(dir) === 'workspace' ? 'workspace' : '');
+            if (target && target !== title && typeof wc.rename === 'function') {
+              try { await wc.rename({ workspaceId: id, title: target }); } catch {}
+            }
+            return id;
+          }
         } catch (e) {
           log.warn(`单开工作区失败（${e.message}），退回默认工作区`);
         }
@@ -1398,12 +1410,68 @@ export function apply(ctx) {
   }
 
   /** 拿到这个 QQ 会话对应的活 agent（没有就建） */
+  /**
+   * 会话标题：名字拿不到时用「群/私聊 + id 尾号」，**不要把 openid 原样摆出来**。
+   *
+   * 群名不在官方事件里，ai-chat 以前又用发送者昵称兜底，结果群标题变成「我的昵称」；
+   * 私聊没有昵称就退成 openid。两头都看不出是哪个会话。
+   */
+  function sessionTitle(chat) {
+    const name = String(chat.name || '').trim();
+    if (name) return `QQ · ${name}`;
+    return `QQ · ${chat.kind === 'c2c' ? '私聊' : '群'} ${String(chat.chatId || '').slice(-6)}`;
+  }
+
+  /**
+   * 新会话套用 DSH 的默认模型。
+   *
+   * DSH 的 session.create 只收 workspace/preset，不收模型；新会话靠
+   * `agentDefaultModel` 兜底。但通过 API 建的会话有时拿不到这个默认值，
+   * 结果第一轮就报「没有 API key / 没有模型」。这里建完补一次 selectModel。
+   * 拿不到默认值或宿主不支持就静默跳过——不影响正常流程。
+   */
+  const modelApplied = new Set();
+  async function applyDefaultModel(sessionId) {
+    if (!sessionId || modelApplied.has(sessionId)) return;
+    try {
+      const dm = ctx.get?.('agentDefaultModel');
+      const sel = dm?.currentSelection?.();
+      if (!sel?.provider || !sel?.model) return;
+      const remote = controller().remote?.session;
+      if (typeof remote?.selectModel !== 'function') return;
+      await remote.selectModel({
+        sessionId,
+        provider: sel.provider,
+        model: sel.model,
+        ...(sel.reasoningEffort ? { reasoningEffort: sel.reasoningEffort } : {}),
+      });
+      modelApplied.add(sessionId);
+    } catch (e) {
+      log.debug('套用默认模型失败：', e.message);
+    }
+  }
+
   async function agentFor(chat) {
     const sid = sessions.get(chat.chatId);
 
     if (sid) {
       try {
-        return { agent: await resolveAgent(sid), sessionId: sid };
+        const agent = await resolveAgent(sid);
+        /**
+         * 名字后到也要能改标题：群名是异步拉的，第一句通常还没有；
+         * 等拿到群名后（或旧标题是 openid/裸昵称时）补一次 rename。
+         */
+        const want = sessionTitle(chat);
+        const old = sessions.entry(chat.chatId)?.title || '';
+        const needRename = old !== want && (chat.name || !old || old.includes(chat.chatId) || old.startsWith('QQ · '));
+        if (needRename) {
+          try {
+            await controller().rename({ sessionId: sid, title: want });
+            sessions.set(chat.chatId, sid, { preset: chat.preset, title: want, kind: chat.kind });
+          } catch {}
+        }
+        await applyDefaultModel(sid);
+        return { agent, sessionId: sid };
       } catch (e) {
         log.warn(`${chat.chatId}：旧会话 ${sid.slice(-8)} 拉不起来了（${e.message}），重建`);
         sessions.remove(chat.chatId);
@@ -1412,11 +1480,13 @@ export function apply(ctx) {
 
     const r = await controller().create({ workspaceId: await workspaceId(), agentPreset: chat.preset });
     const newSid = String(r.sessionId);
+    const title = sessionTitle(chat);
     try {
-      await controller().rename({ sessionId: newSid, title: `QQ · ${chat.name || chat.chatId}` });
+      await controller().rename({ sessionId: newSid, title });
     } catch {}
-    sessions.set(chat.chatId, newSid, { preset: chat.preset, title: chat.name, kind: chat.kind });
+    sessions.set(chat.chatId, newSid, { preset: chat.preset, title, kind: chat.kind });
     log.info(`为 ${chat.chatId} 新建 DSH 会话 ${newSid.slice(-8)}（${chat.preset}）`);
+    await applyDefaultModel(newSid);
     return { agent: await resolveAgent(newSid), sessionId: newSid };
   }
 
@@ -3984,6 +4054,39 @@ export function apply(ctx) {
           ? `群 ${chatId.slice(0, 8)}… 指定人格：${id}`
           : `当前人格：${id}`);
         return send(res, 200, { ok: true, current: cfg.persona.current, byChat: cfg.persona.byChat });
+      }),
+
+      /**
+       * 工作区：当前挂的是哪个、能不能改名。
+       *
+       * 设置页要能看见「会话挂在哪个目录」，否则换工作区只能去翻 config.json。
+       */
+      route('/workspace', async (req, res) => {
+        try {
+          const id = await workspaceId();
+          const reg = ctx.get('workspaceRegistry');
+          const list = (await reg?.list?.()) ?? [];
+          const norm = (w) => ({ id: w.workspaceId || w.id, title: w.title || '', path: w.path || '' });
+          const all = list.map(norm);
+          return send(res, 200, { ok: true, current: all.find((w) => w.id === id) || null, list: all, configured: cfg.workspace || {} });
+        } catch (e) {
+          return send(res, 200, { ok: false, message: e.message, current: null, list: [], configured: cfg.workspace || {} });
+        }
+      }),
+
+      route('/workspace/rename', async (req, res) => {
+        const b = await readBody(req);
+        const title = String(b.title || '').trim();
+        if (!title) return send(res, 400, { ok: false, message: '缺 title' });
+        const wc = ctx.get('workspaceController');
+        if (typeof wc?.rename !== 'function') return send(res, 501, { ok: false, message: '宿主不支持改工作区名' });
+        try {
+          const id = await workspaceId();
+          await wc.rename({ workspaceId: id, title });
+          return send(res, 200, { ok: true, id, title });
+        } catch (e) {
+          return send(res, 500, { ok: false, message: e.message });
+        }
       }),
 
       /** 取消某个会话的指定，回到跟随全局 */

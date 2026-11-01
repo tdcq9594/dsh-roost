@@ -36,6 +36,11 @@ export function createSessions({ dataDir, log = () => {} }) {
       return e?.sessionId ?? '';
     },
 
+    /** 整条记录（title/kind/preset），给「名字变了要改标题」用 */
+    entry(chatId) {
+      return map.chats[chatId] || null;
+    },
+
     /**
      * 记下来。
      *
