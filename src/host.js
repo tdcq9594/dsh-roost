@@ -239,17 +239,26 @@ export function apply(ctx) {
     try {
       const cur = personas?.prefs?.read?.().usage ?? {};
       const next = { ...cur };
-      for (const [id, n] of usageBuf) next[id] = (next[id] || 0) + n;
-      usageBuf.clear();
+      for (const [id, n] of usageBuf) {
+        /**
+         * `prefs.usage` 的约定是 `{ id: { useCount, lastUsedAt } }`（见 prefs.js）。
+         * 兼容早期写成的纯数字，否则 `(旧对象||0)+n` 会变成 "[object Object]1"。
+         */
+        const old = next[id];
+        const count = typeof old === 'number' ? old : Number(old?.useCount) || 0;
+        next[id] = { useCount: count + n, lastUsedAt: Date.now() };
+      }
       personas.prefs.patch({ usage: next });
+      // 写成功才清：失败时留着，下一轮 debounce 还能重试
+      usageBuf.clear();
     } catch (e) {
       log.debug('使用次数落盘失败：', e.message);
     }
   }
 
-  function personaToolsFor(chat) {
+  function personaToolsFor(chat, { count = true } = {}) {
     const p = personas.resolve(chat.chatId, cfg.persona);
-    bumpUsage(p.id);
+    if (count) bumpUsage(p.id);
     return Array.isArray(p.tools) ? p.tools : null;
   }
 
@@ -669,7 +678,8 @@ export function apply(ctx) {
        */
       const cut = restrictTurnTools(agent, {
         mode: 'all',
-        personaTools: personaToolsFor(chat),
+        /** 后台维护不算「用过」：不然每晚巩固会把次数刷上去 */
+        personaTools: personaToolsFor(chat, { count: false }),
         denyExtra: AWAKE_DENY_TOOLS,
       });
       if (!cut.ok && !cut.nothing) log.warn(`巩固收工具失败：${cut.reason}`);
@@ -3817,13 +3827,26 @@ export function apply(ctx) {
       route('/personas/use', async (req, res) => {
         const b = await readBody(req);
         const id = String(b.id || '').trim();
-        const chatId = String(b.chatId || '').trim();
+        const hasChat = Object.prototype.hasOwnProperty.call(b, 'chatId');
+        const chatId = String(b.chatId ?? '').trim();
         if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        /**
+         * 传了 `chatId` 却是空的 → 报错，**不能**悄悄当成「改全局」：
+         * 前端拼错一个空键，就会把全局人格换掉，用户完全看不出发生了什么。
+         */
+        if (hasChat && !chatId) return send(res, 400, { ok: false, message: 'chatId 不能为空；要改全局就别传这个字段' });
+        if (chatId === '__proto__' || chatId === 'constructor' || chatId === 'prototype') {
+          return send(res, 400, { ok: false, message: 'chatId 不合法' });
+        }
         if (!personas.list().some((p) => p.id === id)) {
           return send(res, 404, { ok: false, message: `没有「${id}」这个人格` });
         }
 
-        const next = structuredClone(cfg);
+        /**
+         * 基线取**磁盘上的配置**而不是内存里的 `cfg`：用户运行期手改过
+         * config.json 的话，用旧快照整份写会把他的修改回滚掉。
+         */
+        const next = structuredClone(loadConfig());
         if (chatId) next.persona.byChat = { ...(next.persona.byChat || {}), [chatId]: id };
         else next.persona.current = id;
         cfg = saveConfig(next);
@@ -3839,8 +3862,11 @@ export function apply(ctx) {
         const b = await readBody(req);
         const chatId = String(b.chatId || '').trim();
         if (!chatId) return send(res, 400, { ok: false, message: '缺 chatId' });
+        if (chatId === '__proto__' || chatId === 'constructor' || chatId === 'prototype') {
+          return send(res, 400, { ok: false, message: 'chatId 不合法' });
+        }
 
-        const next = structuredClone(cfg);
+        const next = structuredClone(loadConfig());
         const map = { ...(next.persona.byChat || {}) };
         delete map[chatId];
         next.persona.byChat = map;
@@ -3992,10 +4018,10 @@ export function apply(ctx) {
           const chat = { kind: 'c2c', chatId: 'selftest', name: '自测', preset: 'roost-private' };
           const { agent } = await agentFor(chat);
           mount(agent, chat);
-          /** 自测也没有"正在回的消息"，同样要收走 qq 工具、并叠上人格限制 */
+          /** 自测也没有"正在回的消息"，同样要收走 qq 工具、并叠上人格限制；也不计入使用次数 */
           const cut = restrictTurnTools(agent, {
             mode: 'all',
-            personaTools: personaToolsFor(chat),
+            personaTools: personaToolsFor(chat, { count: false }),
             denyExtra: AWAKE_DENY_TOOLS,
           });
           let reply;

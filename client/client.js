@@ -1328,11 +1328,16 @@ select.roost-input{color-scheme:dark}
               toast('换好了')
               await reload()
             },
-          }, (personas?.personas || []).map((p) =>
-            h('option', { key: p.id, value: p.id }, p.label || p.name || p.id))),
+          },
+            /** 当前人格被删/进墓碑时，受控 select 会显示空白——补一个占位选项说清楚 */
+            (personas?.personas || []).some((p) => p.id === globalId)
+              ? null
+              : h('option', { value: globalId }, `（已删除：${globalId}）`),
+            (personas?.personas || []).map((p) =>
+              h('option', { key: p.id, value: p.id }, p.label || p.name || p.id))),
           chatId
             ? h('span', { className: 'roost-note', style: { margin: 0 } },
-                chatPick ? `本群：${labelOf(chatPick)}` : '本群：跟随全局')
+                chatPick ? `本群（最近说话）：${labelOf(chatPick)}` : '本群（最近说话）：跟随全局')
             : null,
           chatId && chatPick
             ? h('button', {
@@ -1559,11 +1564,11 @@ select.roost-input{color-scheme:dark}
                   h('div', { className: 'roost-note', style: { marginTop: 1 } },
                     `${p.chars ?? 0} 字`
                     + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')
-                    + (usage[p.id] ? ` · 用过 ${usage[p.id]} 次` : '')),
+                    + (usage[p.id] ? ` · 用过 ${usage[p.id].useCount ?? usage[p.id]} 次` : '')),
                 ),
                 h('div', { className: 'roost-acts' },
                   /** 只给「当前这个群」指定，不动全局 */
-                  chatId && chatPick !== p.id
+                  chatId && p.id !== curId
                     ? h('button', {
                         type: 'button', className: 'roost-btn',
                         onClick: async () => {

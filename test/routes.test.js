@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -511,7 +511,7 @@ test('路由：跨站标记 403，写接口同样拦住', async () => {
 });
 
 test('选人格：本群指定不动全局，A 群的指定不丢，取消能真的删掉', async () => {
-  const h = await bootHost({ persona: { current: 'default', byChat: { 群A: 'snarky' } } });
+  const h = await bootHost({ server: { token: 'REAL_TOKEN', port: 17321 }, persona: { current: 'default', byChat: { 群A: 'snarky' } } });
   try {
     const r1 = await h.call('/personas/use', { method: 'POST', body: { id: 'teacher', chatId: '群B' } });
     assert.equal(r1.status, 200);
@@ -527,8 +527,16 @@ test('选人格：本群指定不动全局，A 群的指定不丢，取消能真
     assert.equal(r2.json.byChat.群B, undefined, '取消要真的删掉');
     assert.equal(r2.json.byChat.群A, 'snarky');
 
+    /** 整份写最大的风险：把 token 冲掉。直接看磁盘 */
+    const disk = JSON.parse(readFileSync(join(h.dir, 'config.json'), 'utf8'));
+    assert.equal(disk.server.token, 'REAL_TOKEN', '换人格不能把 token 冲掉');
+    assert.equal(disk.persona.byChat.群B, undefined);
+
     const bad = await h.call('/personas/use', { method: 'POST', body: { id: '不存在的' } });
     assert.equal(bad.status, 404);
+
+    const blank = await h.call('/personas/use', { method: 'POST', body: { id: 'teacher', chatId: '   ' } });
+    assert.equal(blank.status, 400, '传了空 chatId 不能悄悄当成改全局');
   } finally {
     h.off?.();
   }
