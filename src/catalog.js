@@ -44,7 +44,7 @@ export const hashText = (text) => sha256(Buffer.from(String(text ?? '').replace(
  * 老用户磁盘上的 catalog 会一直返回旧元数据，直到那个文件被碰一下。
  * bump 之后 `readDisk()` 直接判结构不符、整份重建。
  */
-const SCHEMA = 1;
+const SCHEMA = 2;
 
 /**
  * @param {object} opts

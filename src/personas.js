@@ -60,10 +60,16 @@ export function parsePersona(id, raw) {
   const m = text.match(/^\s*---[ \t]*\r?\n([\s\S]*?)(?:\r?\n)?---[ \t]*(?:\r?\n|$)/);
   if (m) {
     for (const line of m[1].split(/\r?\n/)) {
-      const kv = line.match(/^(\w+):\s*(.*)$/);
+      /**
+       * 键名容忍缩进和大小写：`  tools: []` 和 `Tools: []` 都是很自然的写法。
+       * 认不出来的后果不是「少一条元数据」，而是 `tools` 静默变 null（全开）——
+       * 方向正好反，所以这里宁可放宽。
+       */
+      const kv = line.match(/^\s*([A-Za-z_]\w*)\s*:\s*(.*)$/);
       if (!kv) continue;
-      if (kv[1] === 'name') meta.name = kv[2].trim() || id;
-      if (kv[1] === 'tags') {
+      const key = kv[1].toLowerCase();
+      if (key === 'name') meta.name = kv[2].trim() || id;
+      if (key === 'tags') {
         meta.tags = kv[2]
           .replace(/^\[|\]$/g, '')
           .split(/[,，]/)
@@ -83,7 +89,7 @@ export function parsePersona(id, raw) {
        * `tools: [a] # 只给聊天` 都是很自然的写法，不处理就会变成
        * 一个永远匹配不上的名字，限制静默错位。
        */
-      if (kv[1] === 'tools') {
+      if (key === 'tools') {
         const v = kv[2].split('#')[0].trim();
         if (/^null$/i.test(v)) meta.tools = null;
         else if (!v) meta.tools = [];

@@ -300,3 +300,8 @@ test('解析：空头 `---\\n---` 也认（认不出就会让 tools 静默变 nu
   assert.equal(r.name, 'x');
   assert.equal(r.body, '正文');
 });
+
+test('解析：键名容忍缩进和大小写（认不出会让 tools 静默变全开）', () => {
+  assert.deepEqual(parsePersona('x', '---\n  tools: []\n---\n正文').tools, []);
+  assert.deepEqual(parsePersona('x', '---\nTools: []\n---\n正文').tools, []);
+});
