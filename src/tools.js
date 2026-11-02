@@ -83,7 +83,23 @@ export function toJsonSchema(params) {
     properties[name] = rest;
     if (req) required.push(name);
   }
-  return { type: 'object', properties, ...(required.length ? { required } : {}) };
+  /**
+   * `additionalProperties: false` 是**硬要求**，不是修饰。
+   *
+   * 新版 DSH 对「裸 JSON Schema」有一套严格子集校验：凡是 `type: 'object'`
+   * 的节点，`additionalProperties` 必须显式写成布尔值，缺了直接抛
+   * `unsupported JSON schema: schema.additionalProperties must be explicitly true or false`，
+   * 工具**注册即被拒**，连面板都挂不上去。
+   *
+   * 这里用 `false`（参数表是封闭的，只有声明过的键）；`output.schema` 那边
+   * 用 `true`（返回值是自由 JSON，结构不固定）。
+   */
+  return {
+    type: 'object',
+    properties,
+    additionalProperties: false,
+    ...(required.length ? { required } : {}),
+  };
 }
 
 /**
@@ -145,7 +161,7 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
       },
     },
     output: {
-      schema: { type: 'object' },
+      schema: { type: 'object', additionalProperties: true },
       /**
        * render 必须返回**内容块数组**（`[{type:'text',text:...}]`），
        * 不能返回字符串——DSH 拿到结果会对 content 调 `.some()`，
@@ -228,7 +244,7 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
       },
     },
     output: {
-      schema: { type: 'object' },
+      schema: { type: 'object', additionalProperties: true },
       /** 同 memory_search：必须是内容块数组，字符串会让 DSH 的 content.some 炸掉 */
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },

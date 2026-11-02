@@ -55,7 +55,7 @@ export function buildStickerToolDefs({ pickOf }) {
       },
     },
     output: {
-      schema: { type: 'object' },
+      schema: { type: 'object', additionalProperties: true },
       /** 必须是内容块数组——字符串会让 DSH 的 content.some 炸掉 */
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },

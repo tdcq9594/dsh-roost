@@ -216,7 +216,29 @@ test('参数表：扁平 map 转成标准 JSON Schema', () => {
       scope: { type: 'string', enum: ['chat', 'global'], description: '范围' },
     },
     required: ['query'],
+    /**
+     * 新版 DSH 对裸 JSON Schema 有严格子集校验：`type: 'object'` 的节点
+     * `additionalProperties` 必须是显式布尔，缺了工具**注册即被拒**。
+     * 这个字段是规则的一部分，不是可选装饰，所以写进期望值。
+     */
+    additionalProperties: false,
   });
+});
+
+/**
+ * 只盯「有没有显式布尔」这一条。
+ *
+ * 上面那条 deepEqual 已经覆盖了，但它是「整体结构」断言——将来谁加一个字段
+ * 就得改它，改的时候顺手把 `additionalProperties` 删掉也不会有人注意。
+ * 单独一条把人钉住：删了直接红，报错信息就是面板上会看到的那句。
+ */
+test('参数表：object 节点必须显式声明 additionalProperties', () => {
+  const out = toJsonSchema({ a: { type: 'string' } });
+  assert.equal(
+    typeof out.additionalProperties,
+    'boolean',
+    '缺了会 unsupported JSON schema: schema.additionalProperties must be explicitly true or false，工具注册被拒',
+  );
 });
 
 test('参数表：没有必填项时不出现空的 required 数组', () => {
