@@ -68,7 +68,7 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ 本插件 ⇄ DSH �
 - 🗜️ **上下文压缩**：到阈值（群 85% / 私聊 75%）开新会话 + 摘要开场，旧会话保留可回查；压之前那一刻的**缓存命中率**记在面板和日志里，阈值该往上还是往下调用它判断
 - 📱 **侧栏面板**：九页仪表盘，状态、记忆、人格、排期、日志全在 DSH 里看
 - 🧬 **人格四段式**：人格文件分性格 / 开场白 / 说话示例 / 世界书四段。世界书一行一条 `触发词 | 内容`，**命中才注入**；开场白给主动搭话一个语气锚；近处指令贴在离历史最近的位置，聊到几十轮人设也不被冲淡
-- 🔄 **人格库一键更新**：内置人格放在仓库的 `personas/*.md`，改完推个 commit，面板点一下就拿到——**不用发版**。只覆盖没改过的，你改过和自建的一个不碰
+- 🔄 **人格库一键更新**：人格放在独立仓库 [dsh-roost-personas](https://github.com/tdcq9594/dsh-roost-personas)，改完推一个 commit，面板点一下就拿到——**不用发版**。只覆盖没改过的，你改过和自建的一个不碰
 - ⬆️ **本体自更新**：设置页顶部查最新版、一键装。走 DSH 自己的 `pluginManager`（失败会回滚 `package.json` + `pnpm-lock.yaml`），装完提示重启。开发机（符号链接装的）自动禁用
 - 🎭 **双人格 preset**：私聊（`roost-private`）/ 群聊（`roost-social`）各一套提示词
 - 🖼️ **表情包**：图丢进目录就能用，文件名或侧车 `.tags` 当标签；图多了建子目录分类，`sticker_pick` 按需取图——**加图不会冲掉提示词缓存**
@@ -325,7 +325,7 @@ src/
 client/
   client.js      侧栏面板（React，沿用 DSH 主题变量）
 cordis.patch.yml 两档 agent preset（私聊 / 群聊）
-personas/        内置人格（8 份）+ index.json（生成物，sha256 清单）
+personas/        内置人格镜像（8 份）+ index.json（生成物）。权威源在独立仓库 dsh-roost-personas
 scripts/         生成人格索引、dry-run、同步 GitHub
 docs/            设计文档、调研、和 Aurabot 的对比
 ```
