@@ -30,7 +30,7 @@ import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
 import { createMood } from './mood.js';
 import { createClosing } from './closing.js';
-import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand } from './personas.js';
+import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand, trimPersonaBody, trimDemos } from './personas.js';
 import { createPersonaRepo, scanPersona } from './persona-repo.js';
 import { createUpdater } from './update.js';
 import { createDepsCheck } from './deps.js';
@@ -552,9 +552,24 @@ export function apply(ctx) {
    * （这几条原本在 ai-chat 的 systemPrompt 里，那个配置项删掉之后
    *  就该落到这儿，否则换个人格就变成话痨/爱编。）
    */
-  const PERSONA_BASE =
-    '说话简短口语化，通常一两句话，最多三句；不确定就直说不确定，不要编；' +
-    '不用「作为 AI」「作为一个语言模型」这类说法。';
+  const PERSONA_BASE = [
+    '说话简短口语化，通常一两句话，最多三句；不确定就直说不确定，不要编；',
+    '不用「作为 AI」「作为一个语言模型」这类说法。',
+    '',
+    '【别像 AI】',
+    '- 你不是客服，也不是有求必应：闲聊式的索要（推荐、评价、聊闲天）可以不接、可以反问、可以给个没用的答案。',
+    '  但问到正事（怎么做、是什么、出了什么错）要好好答，别为了不像 AI 而糊弄。',
+    '- 少用推销词：「一绝」「真管用」「保证」「绝对」「强烈推荐」这类词少用；真人更多说「还行」「不知道」「懒得找」。',
+    '- 不总结、不升华、不加「希望对你有帮助」，不列「首先 / 其次 / 最后」。',
+    '- 被说「你 AI 味好重」时顺着玩梗就行，别立刻改口变回一本正经的客服。',
+    '',
+    '【像真人一样】',
+    '- 你刚说完一句、没人接，就别马上补第二条；停住是正常的。',
+    '- 别人说一句你回一句、每条都追问，那是机械应答。先判断：这事值不值得接、对方是不是在跟别人说话。',
+    '- 有时只发「草」「？」「行」也比硬接一句强。',
+    '- 不确定对方是不是在跟你说话时，当成不是。',
+    '- 别当群管家或主持人：不总结话题、不「大家别吵了」、不把话题硬拉回来。',
+  ].join('\n');
 
   let server = null;
   /** 最近一轮的耗时与结果，面板上显示用 */
@@ -1877,15 +1892,27 @@ export function apply(ctx) {
               l.keys.some((k) => k && lastMsgText.includes(k)),
             );
 
+            /**
+             * 注入预算：正文和示例各限一次。
+             *
+             * 裁剪只发生在注入时、不写回 `parsedCache`——同一份人格在别的轮次
+             * 还是全文，只是这一轮按预算注。默认 8000 字符，内置人格都在 300
+             * 内、不走裁剪分支；角色卡（QQ-Agent 那批）才会被裁。
+             */
+            const maxChars = Number(p.maxChars) > 0 ? Number(p.maxChars) : 0;
+            const bodyText = override ? `（本群临时人设）\n${override}` : trimPersonaBody(persona.body, maxChars);
+
             return [
               `别人叫你「${globalName(persona)}」；别人问起就说这个名字，不要自称别的名字。`,
               PERSONA_BASE,
-              override ? `（本群临时人设）\n${override}` : persona.body,
+              bodyText,
               /**
                * 示例对话：比形容词准得多。
                * 放在性格后面读，作为"她平时具体怎么说话"的锚。
+               * 示例单独限一个上限（正文预算管不到它），否则 body 8000 + demos 9000
+               * 等于没裁。
                */
-              persona.demos ? `【她平时这么说话】\n${persona.demos}` : '',
+              persona.demos ? `【她平时这么说话】\n${trimDemos(persona.demos)}` : '',
               hits.length ? `【跟这会儿有关的事】\n${hits.map((h) => `· ${h.text}`).join('\n')}` : '',
               extra,
               '可以用 markdown 和括号动作，但别写成整段旁白。',

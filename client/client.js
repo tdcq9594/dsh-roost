@@ -1394,12 +1394,14 @@ select.roost-input{color-scheme:dark}
         /**
          * 名字放在最上面：它决定「她是谁」，人格只决定「她怎么说话」。
          * 0.11 起名字全局生效——换人格不会改名。
+         * 0.12 起人格可写 `selfName` 声明「我就是这个名字」（角色卡），
+         * 写了会盖过这里填的全局名；所以这里的语义是「默认名字」。
          */
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 } },
           h('span', { style: { fontSize: 12, fontWeight: 650 } }, '名字'),
           h('input', {
-            className: 'roost-input', value: nameDraft, placeholder: '她的名字（全局）',
-            'aria-label': '她的名字', style: { maxWidth: 200 },
+            className: 'roost-input', value: nameDraft, placeholder: '默认名字（人格没声明 selfName 时用）',
+            'aria-label': '她的名字', style: { maxWidth: 240 },
             onChange: (e) => { setNameDraft(e.target.value); setNameDirty(true) },
           }),
           h('button', {
@@ -1684,6 +1686,10 @@ select.roost-input{color-scheme:dark}
                 h('div', { className: 't' },
                   h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
                     h('span', { style: { fontWeight: isCur ? 650 : 500 } }, p.label || p.name || p.id),
+                    // 人格自报的名字跟全局名不同时，标出来——否则用户会以为切了人格还是「大肥鱼」
+                    p.selfName && p.selfName !== p.label
+                      ? h('span', { className: 'roost-note', style: { fontWeight: 400 } }, `自称 ${p.selfName}`)
+                      : null,
                     isCur ? h(Pill, { tone: 'ok' }, '正在用') : null,
                   ),
                   h('div', { className: 'roost-note', style: { marginTop: 1 } },

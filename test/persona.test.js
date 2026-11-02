@@ -10,12 +10,12 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, unlinkSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, unlinkSync, writeFileSync, readFileSync, readdirSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createPersonas, legacyPersonaText, parsePersona, personaName, parseSwitchCommand } from '../src/personas.js';
+import { createPersonas, legacyPersonaText, parsePersona, personaName, parseSwitchCommand, trimPersonaBody, trimDemos } from '../src/personas.js';
 
 const LEGACY = '你住在 QQ 里，是个话不多但有意思的人。回答简短口语化，通常两三句话。';
 
@@ -325,6 +325,40 @@ test('名字回退链：配置 → label → id → 大肥鱼', () => {
   assert.equal(personaName('', {}), '大肥鱼', '全空用默认名');
 });
 
+test('名字：selfName 盖过全局名，没写 selfName 就还按老逻辑', () => {
+  // 角色卡：人格声明了自己的名字，全局「大肥鱼」不再压它
+  assert.equal(personaName('大肥鱼', { selfName: '若叶睦', label: '若叶睦' }), '若叶睦');
+  // 没写 selfName（空串）：行为和以前一模一样，全局名优先
+  assert.equal(personaName('大肥鱼', { label: '吐槽' }), '大肥鱼');
+  assert.equal(personaName('大肥鱼', { selfName: '' }), '大肥鱼');
+  // selfName 里塞了空白也当没写
+  assert.equal(personaName('大肥鱼', { selfName: '   ' }), '大肥鱼');
+});
+
+test('解析：front matter 读 selfName，且不受 name 字段干扰', () => {
+  const p = parsePersona('ruoyemu', '---\nlabel: 若叶睦\nselfName: 若叶睦\ntags: 角色\n---\n正文');
+  assert.equal(p.selfName, '若叶睦');
+  assert.equal(p.label, '若叶睦');
+  // 没写 selfName 时是空串，不是回退到 label
+  const q = parsePersona('x', '---\nlabel: X\n---\n正文');
+  assert.equal(q.selfName, '');
+});
+
+test('label 清洗：迁移文件名去掉 __persona-<hex> 尾巴', () => {
+  // QQ-Agent 导出的文件名是 `名字__persona-12位hex.md`，没有 front matter 时
+  // label 会退回 id，面板就显示成一长串
+  const a = parsePersona('Claude__persona-4aac7aa270', '你是 Claude。');
+  assert.equal(a.label, 'Claude');
+  const b = parsePersona('二阶堂真红__persona-25e8230bc7', '你是二阶堂真红。');
+  assert.equal(b.label, '二阶堂真红');
+  // 有 front matter 的 label 优先，不动
+  const c = parsePersona('x__persona-abc', '---\nlabel: 自定义\n---\n正文');
+  assert.equal(c.label, '自定义');
+  // 不带尾巴的不受影响
+  const d = parsePersona('fatfish', '正文');
+  assert.equal(d.label, 'fatfish');
+});
+
 test('列表：带 label，name 同值（旧客户端不会立刻坏）', () => {
   const { p, done } = fresh();
   try {
@@ -495,4 +529,178 @@ test('删除不存在的 id 不写墓碑', () => {
 test('指令：前缀后必须是空白（/personal 不是 /persona）', () => {
   assert.equal(parseSwitchCommand('/personal info', '/persona', []), null);
   assert.equal(parseSwitchCommand('/personaX', '/persona', []), null);
+});
+
+/* ---------------- 中文 id：从 QQ-Agent 迁移过来的必经之路 ---------------- */
+
+/**
+ * 以前 `safeId` 是 `replace(/[^a-zA-Z0-9_-]/g, '')`，中文被整段删掉：
+ * `若叶睦` → 空串 → 兜底 `'default'`。而 `catalog` 的 key 是**未过滤**的原名，
+ * 于是 `read()` 用 `'default'` 去查，命中内置默认人格——**面板点开「若叶睦」，
+ * 看到的是大肥鱼的正文**，`remove` 还报「默认人格不能删」。
+ *
+ * 这三条是同一件事的三个面：读、写、删。任何一条不对，中文人格在面板上就是坏的。
+ */
+test('中文 id：read 读到的是自己的正文，不是默认人格的', () => {
+  const { p, dir, done } = fresh();
+  try {
+    const mine = '你是若叶睦，话很少。\n';
+    mkdirSync(join(dir, 'personas'), { recursive: true });
+    writeFileSync(join(dir, 'personas', '若叶睦.md'), mine, 'utf8');
+    p.catalog.invalidate?.();
+    const got = p.read('若叶睦');
+    assert.ok(got, 'read 不能返回 null');
+    assert.equal(got.raw, mine, '读到别人的正文就是串台');
+    assert.notEqual(got.raw, p.read('default')?.raw, '不能和默认人格撞');
+  } finally {
+    done();
+  }
+});
+
+test('中文 id：save 能存，且存回同一个文件', () => {
+  const { p, dir, done } = fresh();
+  try {
+    mkdirSync(join(dir, 'personas'), { recursive: true });
+    writeFileSync(join(dir, 'personas', '若叶睦.md'), '旧内容\n', 'utf8');
+    p.catalog.invalidate?.();
+    p.save('若叶睦', '新内容\n');
+    assert.equal(readFileSync(join(dir, 'personas', '若叶睦.md'), 'utf8'), '新内容\n');
+    assert.ok(existsSync(join(dir, 'personas', 'default.md')), '不能把默认人格覆盖掉');
+    assert.notEqual(readFileSync(join(dir, 'personas', 'default.md'), 'utf8'), '新内容\n');
+  } finally {
+    done();
+  }
+});
+
+test('中文 id：remove 删得掉自己的文件，不会误报「默认人格不能删」', () => {
+  const { p, dir, done } = fresh();
+  try {
+    mkdirSync(join(dir, 'personas'), { recursive: true });
+    writeFileSync(join(dir, 'personas', '若叶睦.md'), '随便什么内容，够长就行。\n', 'utf8');
+    p.catalog.invalidate?.();
+    const r = p.remove('若叶睦');
+    assert.equal(r.id, '若叶睦');
+    assert.ok(!existsSync(join(dir, 'personas', '若叶睦.md')), '文件应该真的删掉');
+    // 关键：以前的 bug 是「若叶睦 → 空串 → default」，remove 会报「默认人格不能删」。
+    // 这里能正常返回 { id: '若叶睦' } 且文件没了，就说明没走那条错路。
+  } finally {
+    done();
+  }
+});
+
+/**
+ * 放宽到支持中文之后，**路径穿越必须还挡得住**。
+ *
+ * 这是放宽正则之后最该盯的一条：`safeId` 是文件名，一旦能被 `..` 或 `/` 影响，
+ * 面板上一个删除操作就能删到数据目录以外的东西。
+ */
+test('id 安全：路径分隔符和 .. 仍被挡', () => {
+  const { p, dir, done } = fresh();
+  try {
+    for (const bad of ['../evil', '..\\evil', 'a/b', 'a\\b', 'a..b', 'x\u0000y']) {
+      assert.throws(() => p.save(bad, '内容'), /不能有路径分隔符/, `应拒绝 ${JSON.stringify(bad)}`);
+    }
+    // 真的写进去了才算漏
+    assert.ok(!existsSync(join(dir, '..', 'evil.md')), '不能写到 personas/ 外面');
+  } finally {
+    done();
+  }
+});
+
+test('id 安全：Windows 保留名加下划线绕开', () => {
+  const { p, dir, done } = fresh();
+  try {
+    // CON 在 Windows 上是设备名，直接写会失败或写到奇怪的地方
+    assert.throws(() => p.save('CON', '内容'), /不能有路径分隔符/, 'CON 会被 safeId 改名，save 应拒绝');
+    assert.ok(!existsSync(join(dir, 'personas', 'CON')), '不能真的落一个 CON 文件');
+  } finally {
+    done();
+  }
+});
+
+/* ---------------- 注入预算裁剪 ---------------- */
+
+/**
+ * 角色卡人格动辄上万字符，全量注入会把上下文吃光。裁剪按「小节优先级」做，
+ * 而不是从尾部一刀切——那样会丢「你是谁」这种最该留的。
+ */
+
+/** 造一个带多种标题格式的人格正文，方便测「裁谁不裁谁」 */
+function sampleBody() {
+  return [
+    '一、你是谁',
+    '你是若叶睦，一个寡言的角色。'.repeat(20),
+    '',
+    '## 说话方式：去 AI 味',
+    '话少，一句说完。'.repeat(20),
+    '',
+    '第X部分 · 外貌与衣着',
+    '绿色头发，校服。'.repeat(20),
+    '',
+    '十、群文化自适应',
+    '学群里的梗。'.repeat(20),
+  ].join('\n');
+}
+
+test('裁剪：不超预算原样返回，超了才动', () => {
+  const short = '你是若叶睦，话很少。';
+  assert.equal(trimPersonaBody(short, 8000), short, '短正文一个字都不能动');
+  assert.equal(trimPersonaBody('', 8000), '', '空正文返回空');
+});
+
+test('裁剪：drop 节（外貌）整段丢，keep 节（你是谁/说话方式）保留', () => {
+  const out = trimPersonaBody(sampleBody(), 500);
+  assert.ok(out.includes('你是谁'), 'keep 节必须留');
+  assert.ok(out.includes('说话方式'), 'keep 节必须留');
+  assert.ok(!out.includes('外貌与衣着'), 'drop 节应该被丢');
+  assert.ok(!out.includes('绿色头发'), 'drop 节的内容也不能在');
+});
+
+test('裁剪：结果真的落进预算，且带「设定不全」说明', () => {
+  const out = trimPersonaBody(sampleBody(), 500);
+  assert.ok(out.length <= 560, `实际 ${out.length} 字，应该 ≤ 预算+说明`);
+  assert.ok(/完整设定 .* 字，本轮按预算注入/.test(out), '超预算必须标注，否则模型会以为设定齐全');
+});
+
+test('裁剪：budget 为 0 表示不裁剪', () => {
+  const body = sampleBody();
+  assert.equal(trimPersonaBody(body, 0), body, '0 就是关掉裁剪');
+});
+
+test('裁剪：demos 按示例组边界截断，不切开一组对话', () => {
+  const demos = '用户：你好\n你：嗯\n\n用户：再见\n你：拜\n\n用户：第三组\n你：好';
+  const out = trimDemos(demos, 16);
+  // 第一组「用户：你好\n你：嗯」= 11 字符，第二组「用户：再见\n你：拜」= 12 字符，
+  // 加起来 11+2+12=25 > 16，所以只留第一组
+  assert.equal(out, '用户：你好\n你：嗯', '只留完整的第一组，不把第二组切一半');
+});
+
+test('裁剪：demos 不超限原样返回', () => {
+  const demos = '用户：嗨\n你：嗨';
+  assert.equal(trimDemos(demos, 1500), demos);
+});
+
+/* ---------------- P2：编号小节识别 + 示例转换 ---------------- */
+
+test('解析：认「九、回复示例」这种编号标题（含括号说明）', () => {
+  const p = parsePersona('x', '一、你是谁\n你是若叶睦。\n\n九、回复示例（斜杠＝分成两条发）\n群友：你是若叶睦吗\n　　你：是。\n\n十、群文化自适应\n学梗。');
+  assert.ok(p.demos.includes('你是若叶睦吗'), '示例要能取出来');
+  assert.ok(!p.body.includes('回复示例'), '示例不能还留在正文里');
+});
+
+test('示例转换：群友→用户，斜杠拆成两条「你：」', () => {
+  const p = parsePersona('x', '九、回复示例\n群友：BMPT是不是轮椅啊\n　　你开一个试试 / 轮椅也是我自己坐上去的\n\n群友（持续辱骂）：垃圾载具\n　　你嘴比我炮还能拉');
+  const d = p.demos;
+  assert.ok(d.includes('用户：BMPT是不是轮椅啊'), '群友要换成用户');
+  assert.ok(d.includes('用户：垃圾载具'), '带括号说明的群友也要换成用户');
+  // 缩进行是「角色说的话」，前缀「你：」表示角色；句子里原有的「你」指对方，保留
+  assert.ok(d.includes('你：你开一个试试'), '斜杠第一句');
+  assert.ok(d.includes('你：轮椅也是我自己坐上去的'), '斜杠第二句');
+  assert.ok(!d.includes('群友'), '不能有群友残留');
+  assert.ok(!/：们/.test(d), '「你们」的「你」不能被误删');
+});
+
+test('示例转换：不带斜杠的普通「你：」行不动', () => {
+  const p = parsePersona('x', '九、回复示例\n用户：你好\n你：嗯');
+  assert.equal(p.demos, '用户：你好\n你：嗯');
 });
