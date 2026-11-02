@@ -3217,9 +3217,36 @@ select.roost-input{color-scheme:dark}
     }
 
     function ConfigTab({ config, save, saveCfg, toast }) {
-      const [draft, setDraft] = useState(() => JSON.stringify(config, null, 2))
+      const cfgJson = JSON.stringify(config, null, 2)
+      const [draft, setDraft] = useState(cfgJson)
       const [err, setErr] = useState('')
+      /** 用户动过草稿没有。动过就别被外部变化覆盖，否则输入白丢 */
+      const [dirty, setDirty] = useState(false)
+      /** 上次与服务端对齐时的 JSON。和当前 cfgJson 不同 = 草稿已过期。用 state：改了要能触发重渲染 */
+      const [baseline, setBaseline] = useState(cfgJson)
       const taRef = useRef(null)
+
+      /**
+       * 外部配置变了（比如上面刚保存了工作区）：没动过草稿就跟上，动过就保留。
+       * 只在 !dirty 时同步，所以不会和 dirty 打转。
+       */
+      useEffect(() => {
+        if (dirty) return
+        setDraft(cfgJson)
+        setBaseline(cfgJson)
+      }, [cfgJson, dirty])
+
+      /** 草稿是旧的、而且用户改过 → 直接保存会把别处的改动盖回去 */
+      const stale = dirty && baseline !== cfgJson
+
+      /** 重新载入：丢掉自己的草稿，跟服务端对齐 */
+      const reloadDraft = () => {
+        setDraft(cfgJson)
+        setBaseline(cfgJson)
+        setDirty(false)
+      }
+      /** 我知道别处改过，仍要用我的草稿：把基线挪过来，stale 就消了 */
+      const keepMine = () => setBaseline(cfgJson)
 
       /**
        * 点段名跳到那一段。
@@ -3271,6 +3298,13 @@ select.roost-input{color-scheme:dark}
         setErr('')
         const r = await save(parsed)
         if (r.ok === false) {
+          /** 409 时服务端把当前配置一起回了：强制对齐，否则用户会拿旧草稿反复撞 409 */
+          if (r.config) {
+            const next = JSON.stringify(r.config, null, 2)
+            setDraft(next)
+            setBaseline(next)
+            setDirty(false)
+          }
           toast(r.message || '没存上')
           return
         }
@@ -3281,7 +3315,12 @@ select.roost-input{color-scheme:dark}
          * 用户看到的是自己提交的版本，跟磁盘上真正存的不一致——下次改别的字段时
          * 会基于一份并不存在的配置继续改。
          */
-        if (r.config) setDraft(JSON.stringify(r.config, null, 2))
+        if (r.config) {
+          const next = JSON.stringify(r.config, null, 2)
+          setDraft(next)
+          setBaseline(next)
+          setDirty(false)
+        }
         /**
          * 用服务端的 message，不再写死。
          *
@@ -3300,17 +3339,27 @@ select.roost-input{color-scheme:dark}
         h(WorkspaceCard, { saveCfg, toast }),
 
         h(Sec, { n: '04', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
-          h('button', { type: 'button', className: 'roost-btn', onClick: () => setDraft(JSON.stringify(config, null, 2)) }, '还原'),
-          h('button', { type: 'button', className: 'roost-primary', onClick: doSave }, '保存'),
+          h('button', { type: 'button', className: 'roost-btn', onClick: reloadDraft }, '还原'),
+          h('button', {
+            type: 'button', className: 'roost-primary', onClick: doSave,
+            disabled: stale,
+            title: stale ? '配置在别处改过了，先选「重新载入」或「仍用我的草稿」' : '',
+          }, '保存'),
         ) },
           err ? h('div', { style: { color: 'var(--bad)', fontSize: 12, marginBottom: 6 } }, err) : null,
+          stale
+            ? h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)', marginBottom: 6, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                h('span', null, '配置在别处改过了，直接保存会把它盖回去。'),
+                h('button', { type: 'button', className: 'roost-btn', onClick: reloadDraft }, '重新载入'),
+                h('button', { type: 'button', className: 'roost-btn', onClick: keepMine }, '仍用我的草稿'))
+            : null,
           h('textarea', {
             ref: taRef,
             className: 'roost-input',
             style: { minHeight: 420, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 11.5, lineHeight: 1.6, resize: 'vertical' },
             value: draft,
             spellCheck: false,
-            onChange: (e) => setDraft(e.target.value),
+            onChange: (e) => { setDraft(e.target.value); setDirty(true) },
           }),
           h('div', { className: 'roost-note' },
             '密钥显示成 ******。原样提交回来不会覆盖真密钥，只有填了新的才会改。'),
@@ -4036,7 +4085,7 @@ select.roost-input{color-scheme:dark}
           tab === 'awake' ? h(AwakeTab, { aw, mem, sp, chats, toast, reload: loadAwake, reloadSp: loadAwake, busy }) : null,
           tab === 'context' ? h(ContextTab, { ctxInfo, mind, usageInfo, toast, reload: loadCtx, busy }) : null,
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
-          tab === 'config' ? (config ? h(ConfigTab, { key: configRev, config, save: saveAll, saveCfg, toast }) : h('div', { className: 'roost-empty' }, '读取配置…')) : null,
+          tab === 'config' ? (config ? h(ConfigTab, { config, save: saveAll, saveCfg, toast }) : h('div', { className: 'roost-empty' }, '读取配置…')) : null,
           tab === 'logs' ? h(LogsTab, null) : null,
         ),
 

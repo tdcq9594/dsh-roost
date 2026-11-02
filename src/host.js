@@ -51,6 +51,8 @@ import { createQrRegistration, createManualRegistration, createRegistrationRegis
 import { createLease, candidates } from './lease.js';
 import { createSyncRetry } from './sync-retry.js';
 import { fitBudget } from './budget.js';
+import { sessionTitle, nextTitle } from './chat-name.js';
+import { createSwitchNote } from './switch-note.js';
 
 export const name = 'roost';
 
@@ -563,27 +565,11 @@ export function apply(ctx) {
    *
    * DSH 在 system prompt 变化时可能**追加**一条新 system message，旧的还在历史里；
    * 再加上几十轮旧语气的对话，模型很容易继续沿用。给下一轮一句「刚换了」压一下。
+   *
+   * 实现在 ./switch-note.js：按会话各记各的（原来共用一个 lastHit，两个会话并发时
+   * 会互相抹掉记录，结果 5 分钟内每轮都重复提示）。
    */
-  let switchNote = null;
-  function noteSwitch(label) {
-    if (!label) return;
-    /** seen：每个会话只提示一次，避免 A 群换人格、B 群的轮次把它消费掉 */
-    switchNote = { text: `说话方式刚换成「${label}」，从这一轮起按新的来，别延续之前的语气。`, at: Date.now(), seen: new Set() };
-  }
-  function switchNoteText(chatId) {
-    if (!switchNote) return '';
-    if (Date.now() - switchNote.at > 5 * 60_000) { switchNote = null; return ''; }
-    if (switchNote.seen.has(chatId)) return '';
-    /** 记下这一轮真的注入过；轮末据此决定要不要标记 seen */
-    switchNote.lastHit = chatId;
-    return switchNote.text;
-  }
-  function consumeSwitchNote(chatId) {
-    if (!switchNote) return;
-    /** 只有真的注入过才标记：被 keywordNote 抢先、或轮次在注入前失败，都不算 */
-    if (switchNote.lastHit === chatId) switchNote.seen.add(chatId);
-    switchNote.lastHit = null;
-  }
+  const switchNote = createSwitchNote();
 
   /** 合并「关键词临时人格」后的 persona 配置，给 resolve 用 */
   function personaCfgFor(chat) {
@@ -1048,6 +1034,8 @@ export function apply(ctx) {
     onOpening: (chatId, text) => {
       if (text) pendingOpening.set(chatId, text);
     },
+    /** 延迟求值：applyDefaultModel 声明在后面，写成引用的话将来改成 const 会静默变 undefined */
+    applyModelOf: (sid) => applyDefaultModel(sid),
     log: (m) => log.info(m),
     cfgOf: () => cfg,
   });
@@ -1420,28 +1408,7 @@ export function apply(ctx) {
   }
 
   /** 拿到这个 QQ 会话对应的活 agent（没有就建） */
-  /**
-   * 会话标题：名字拿不到时用「群/私聊 + id 尾号」，**不要把 openid 原样摆出来**。
-   *
-   * 群名不在官方事件里，ai-chat 以前又用发送者昵称兜底，结果群标题变成「我的昵称」；
-   * 私聊没有昵称就退成 openid。两头都看不出是哪个会话。
-   */
-  /** 主动搭话/自测的哨兵名不是真会话名，不能拿来当标题 */
-  const SENTINEL_NAMES = new Set(['主动搭话', '自测']);
-  const isPlaceholderTitle = (t) => /^QQ · (群|私聊) [0-9A-Za-z]{6}$/.test(t);
-  const isSentinelTitle = (t) => t === 'QQ · 主动搭话' || t === 'QQ · 自测';
-
-  /** 过滤掉哨兵名后的真实名字（空串表示没有） */
-  function realChatName(chat) {
-    const raw = String(chat.name || '').trim();
-    return SENTINEL_NAMES.has(raw) ? '' : raw;
-  }
-
-  function sessionTitle(chat) {
-    const name = realChatName(chat);
-    if (name) return `QQ · ${name}`;
-    return `QQ · ${chat.kind === 'c2c' ? '私聊' : '群'} ${String(chat.chatId || '').slice(-6)}`;
-  }
+  /* 标题逻辑在 ./chat-name.js：抽出去才测得动（原来埋在闭包里，改坏不报错） */
 
   /**
    * 新会话套用 DSH 的默认模型。
@@ -1452,19 +1419,29 @@ export function apply(ctx) {
    * 拿不到默认值或宿主不支持就静默跳过——不影响正常流程。
    */
   const modelApplied = new Set();
-  let modelWarned = false;
+  /** 套过模型但失败过的会话：下次进来再试一次（成功就移出） */
+  const modelFailed = new Set();
+  /** 每种原因只告警一次（用 Set 而不是单个 bool：否则第一条会把后面真问题永久盖住） */
+  const modelWarned = new Set();
+  const warnOnce = (key, msg) => {
+    if (modelWarned.has(key)) return;
+    modelWarned.add(key);
+    log.warn(msg);
+  };
   async function applyDefaultModel(sessionId) {
     if (!sessionId || modelApplied.has(sessionId)) return;
     try {
       const dm = ctx.get?.('agentDefaultModel');
       const sel = dm?.currentSelection?.();
-      if (!sel?.provider || !sel?.model) return;
+      if (!sel?.provider || !sel?.model) {
+        modelFailed.add(sessionId);
+        warnOnce('no-default', 'DSH 没有默认模型（或宿主没暴露 agentDefaultModel），新会话可能拿不到模型');
+        return;
+      }
       const remote = controller().remote?.session;
       if (typeof remote?.selectModel !== 'function') {
-        if (!modelWarned) {
-          modelWarned = true;
-          log.warn('宿主没有暴露 session.selectModel，新会话可能拿不到默认模型');
-        }
+        modelFailed.add(sessionId);
+        warnOnce('no-select', '宿主没有暴露 session.selectModel，新会话可能拿不到默认模型');
         return;
       }
       await remote.selectModel({
@@ -1474,8 +1451,10 @@ export function apply(ctx) {
         ...(sel.reasoningEffort ? { reasoningEffort: sel.reasoningEffort } : {}),
       });
       modelApplied.add(sessionId);
+      modelFailed.delete(sessionId);
     } catch (e) {
-      log.debug('套用默认模型失败：', e.message);
+      modelFailed.add(sessionId);
+      warnOnce(`fail:${e.message}`, `套用默认模型失败：${e.message}`);
     }
   }
 
@@ -1488,31 +1467,23 @@ export function apply(ctx) {
         /**
          * 名字后到也要能改标题：群名是异步拉的，第一句通常还没有；
          * 等拿到群名后（或旧标题是 openid/裸昵称时）补一次 rename。
+         *
+         * 判定在 ./chat-name.js 的 nextTitle 里（纯函数，有真值表测试）。
          */
-        const want = sessionTitle(chat);
         const old = sessions.entry(chat.chatId)?.title || '';
-        /** 压缩续会话的「（续）」是标记，不该因为名字一致就被抹掉 */
-        const oldBase = old.replace(/（续）$/, '');
-        /**
-         * 只在「名字确实更好」时改，别把已有好名字降级成占位符：
-         *   · 有真名字 → 改；
-         *   · 旧标题是 openid / 占位符 / 哨兵 / 旧版裸昵称 → 改；
-         *   · 旧标题是「QQ · 真群名」而这次没拿到名字 → 不动。
-         */
-        const needRename = oldBase !== want && (
-          Boolean(realChatName(chat))
-          || !old
-          || old.includes(chat.chatId)
-          || isPlaceholderTitle(old)
-          || isSentinelTitle(old)
-          || !old.startsWith('QQ · ')
-        );
-        if (needRename) {
+        const { want, rename } = nextTitle(chat, old);
+        if (rename) {
           try {
             await controller().rename({ sessionId: sid, title: want });
             sessions.set(chat.chatId, sid, { preset: chat.preset, title: want, kind: chat.kind });
           } catch {}
         }
+        /**
+         * 只补「套过但失败」的会话。
+         * 不能对所有既有会话都补：`modelApplied` 在内存里，重启后为空，
+         * 那样会把用户在 DSH 里手选的模型覆盖掉。
+         */
+        if (modelFailed.has(sid)) await applyDefaultModel(sid);
         return { agent, sessionId: sid };
       } catch (e) {
         log.warn(`${chat.chatId}：旧会话 ${sid.slice(-8)} 拉不起来了（${e.message}），重建`);
@@ -1877,7 +1848,7 @@ export function apply(ctx) {
         agent.ctx.systemPrompt.context({
           name: 'roost-switch-note',
           order: 909,
-          text: () => keywordNote.get(chat.chatId) || switchNoteText(chat.chatId),
+          text: () => keywordNote.get(chat.chatId) || switchNote.text(chat.chatId),
         }),
       );
     } catch (e) {
@@ -2562,7 +2533,7 @@ export function apply(ctx) {
       /** 切人格提示只活一轮：下一句普通聊天不能再带着它 */
       keywordNote.delete(chat.chatId);
       /** 换人格提示每个会话只消费一次；5 分钟后整体过期 */
-      consumeSwitchNote(chat.chatId);
+      switchNote.consume(chat.chatId);
     }
   }
 
@@ -3763,7 +3734,7 @@ export function apply(ctx) {
         cfg = patchMode ? patchConfig(body) : saveConfig(body);
         if (cfg.persona.current !== beforeCurrent) {
           const hit = personas.list().find((p) => p.id === cfg.persona.current);
-          noteSwitch(hit?.label || hit?.name || cfg.persona.current);
+          switchNote.set(hit?.label || hit?.name || cfg.persona.current);
         }
 
         /**
@@ -4090,7 +4061,7 @@ export function apply(ctx) {
         /** 换人格后给下一轮一句提示：旧 system 和历史还在，模型容易沿用旧语气 */
         const label = hit.label || hit.name || hit.id;
         if (chatId) keywordNote.set(chatId, `说话方式刚换成「${label}」，从这一轮起按新的来，别延续之前的语气。`);
-        else if (cfg.persona.current !== prevCurrent) noteSwitch(label);
+        else if (cfg.persona.current !== prevCurrent) switchNote.set(label);
 
         addLog('info', 'persona', chatId
           ? `群 ${chatId.slice(0, 8)}… 指定人格：${id}`

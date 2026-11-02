@@ -213,10 +213,14 @@ test('开场：什么数据都没有也能给出可用的一段（不能是空�
 
 /* ---------------- 换会话 ---------------- */
 
-function fakeRig({ failCreate = false, percent = 80, usage = null } = {}) {
+function fakeRig({ failCreate = false, percent = 80, usage = null, applyModelOf } = {}) {
   const map = new Map([['g1', 'old-sid']]);
   const made = [];
   const openings = [];
+  /** 新会话套默认模型的调用记录 */
+  const modelCalls = [];
+  /** rename 过的标题（换会话时的标题靠它验） */
+  const renamed = [];
   const controller = {
     async create({ workspaceId, agentPreset }) {
       if (failCreate) throw new Error('建会话失败');
@@ -224,7 +228,8 @@ function fakeRig({ failCreate = false, percent = 80, usage = null } = {}) {
       made.push({ sid, workspaceId, agentPreset });
       return { sessionId: sid };
     },
-    async rename() {
+    async rename({ sessionId, title }) {
+      renamed.push({ sessionId, title });
       return {};
     },
     async projections() {
@@ -245,9 +250,14 @@ function fakeRig({ failCreate = false, percent = 80, usage = null } = {}) {
       return v;
     },
   };
+  /** compact 传给 sessions.set 的第三个参数（title / kind / preset） */
+  const meta = [];
   const sessions = {
     get: (c) => map.get(c) || '',
-    set: (c, s) => map.set(c, s),
+    set: (c, s, m) => {
+      map.set(c, s);
+      if (m) meta.push(m);
+    },
   };
   const journal = {
     digests: () => [{ at: Date.now(), text: '聊了搬家' }],
@@ -260,11 +270,15 @@ function fakeRig({ failCreate = false, percent = 80, usage = null } = {}) {
     journal,
     agreementsOf: () => ['周末看电影'],
     onOpening: (chatId, text) => openings.push({ chatId, text }),
+    applyModelOf: async (sid) => {
+      modelCalls.push(sid);
+      if (applyModelOf) await applyModelOf(sid);
+    },
     log: () => {},
     cfgOf: () => ({ compact: DEFAULTS }),
     now: () => Date.now(),
   });
-  return { compact, map, made, openings };
+  return { compact, map, made, openings, modelCalls, renamed, meta };
 }
 
 test('压缩：压一次 = 新建同 preset 会话 + 映射改指向 + 交出开场', async () => {
@@ -424,4 +438,46 @@ test('开场：配额可配（配置改了要真的生效）', async () => {
   await compact.compact('g1', {});
   const lines = (openings[0].match(/· /g) || []).length;
   assert.ok(lines <= 3, `按配置最多 3 条，实际 ${lines}`);
+});
+
+/* ---------------- 换会话：套默认模型 / 标题 ---------------- */
+
+test('压缩：换会话后套一次默认模型（否则压缩完第一轮报没模型）', async () => {
+  const { compact, modelCalls } = fakeRig();
+  const r = await compact.compact('g1', { preset: 'roost-social', name: '摸鱼群' });
+  assert.equal(r.ok, true);
+  assert.deepEqual(modelCalls, ['new-1'], '必须给新会话套模型，且只套一次');
+});
+
+test('压缩：套模型失败不能把压缩整件事搞砸', async () => {
+  const { compact, map, modelCalls } = fakeRig({
+    applyModelOf: async () => { throw new Error('宿主没暴露 selectModel'); },
+  });
+  const r = await compact.compact('g1', { preset: 'roost-social', name: '摸鱼群' });
+  assert.equal(r.ok, true, '套模型失败只是记日志');
+  assert.equal(modelCalls.length, 1);
+  assert.equal(map.get('g1'), 'new-1', '映射照样要指向新会话');
+});
+
+test('压缩：续会话标题带「（续）」，且手动压缩（chat 没有 chatId）也能拿到尾号', async () => {
+  const { compact, renamed } = fakeRig();
+  // 手动压缩路由传的就是这三个字段，没有 chatId
+  await compact.compact('g1', { kind: 'group', name: '', preset: 'roost-social' });
+  assert.equal(renamed[0].title, 'QQ · 群 g1（续）', '尾号必须来自 chatId 参数，不能是空的');
+});
+
+test('压缩：有名字时标题用名字，不吃哨兵名', async () => {
+  const { compact, renamed } = fakeRig();
+  await compact.compact('g1', { kind: 'c2c', name: '主动搭话', preset: 'roost-private' });
+  assert.ok(!renamed[0].title.includes('主动搭话'), '哨兵名不能进标题');
+  assert.ok(renamed[0].title.includes('私聊'), '按 kind 走私聊兜底');
+});
+
+
+test('压缩：换会话后 kind 要一起存（丢了面板分不出群/私聊）', async () => {
+  const { compact, meta } = fakeRig();
+  await compact.compact('g1', { kind: 'group', name: '摸鱼群', preset: 'roost-social' });
+  assert.equal(meta.length, 1);
+  assert.equal(meta[0].kind, 'group', 'sessions.set 必须带上 kind');
+  assert.equal(meta[0].title, 'QQ · 摸鱼群（续）');
 });

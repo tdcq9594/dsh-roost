@@ -34,6 +34,7 @@
  */
 
 import { dayOf } from './journal.js';
+import { sessionTitle, withContinued } from './chat-name.js';
 
 export const DEFAULTS = {
   enabled: true,
@@ -292,6 +293,8 @@ export function createCompact({
   journal,
   agreementsOf = () => [],
   onOpening = () => {},
+  /** 新会话建好后套默认模型（和主路径 agentFor 一致）；失败不能拦住压缩 */
+  applyModelOf = async () => {},
   log = () => {},
   cfgOf = () => ({}),
   now = () => Date.now(),
@@ -393,17 +396,29 @@ export function createCompact({
       const newSid = String(r.sessionId);
       if (!newSid) return { ok: false, why: '新会话没拿到 sessionId' };
 
-      /** 和主标题同一套兜底：没有名字就用「群/私聊 + 尾号」，别把 openid 摆出来 */
-      const name = String(chat.name || '').trim();
-      const base = name
-        ? `QQ · ${name}`
-        : `QQ · ${chat.kind === 'c2c' ? '私聊' : '群'} ${String(chatId).slice(-6)}`;
-      const title = `${base}（续）`;
+      /**
+       * 和主路径一致：新会话要套默认模型，否则压缩后的第一轮会报「没有模型」。
+       * 失败只记日志——压缩本身已经成功了，不能因为套模型失败把整件事回滚。
+       */
+      try {
+        await applyModelOf(newSid);
+      } catch (e) {
+        log(`压缩后套默认模型失败：${e.message}`);
+      }
+
+      /**
+       * 和主标题同一套兜底：没有名字就用「群/私聊 + 尾号」，别把 openid 摆出来。
+       *
+       * 必须显式传 chatId：手动压缩那条路的 `chat` 只有 { kind, name, preset }，
+       * 直接 sessionTitle(chat) 会得到「QQ · 群 」（尾号是空的）。
+       */
+      const title = withContinued(sessionTitle({ kind: chat.kind, chatId, name: chat.name }));
       try {
         await ctrl.rename({ sessionId: newSid, title });
       } catch {}
 
-      sessions.set(chatId, newSid, { preset: chat.preset, title });
+      /** kind 要一起存：丢了面板就分不出群/私聊 */
+      sessions.set(chatId, newSid, { preset: chat.preset, title, kind: chat.kind });
       turns.set(chatId, 0);
       onOpening(chatId, opening);
 
