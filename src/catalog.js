@@ -196,6 +196,8 @@ export function createCatalog({ dir, parse, log = () => {} }) {
         // 0.11：label 是显示名；name 保留同值，给还没改的老消费方
         label: meta.label || meta.name || id,
         name: meta.label || meta.name || id,
+        // 人格自己声明的名字（角色卡用），没写就是空串——不是回退到 label
+        selfName: String(meta.selfName || ''),
         tags: Array.isArray(meta.tags) ? meta.tags : [],
         // 人格级工具限制：null = 不限制，[] = 一个都不给，[a,b] = 只给这些
         tools: Array.isArray(meta.tools) ? meta.tools : null,

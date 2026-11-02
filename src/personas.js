@@ -31,7 +31,47 @@ import { join } from 'node:path';
 import { createCatalog } from './catalog.js';
 import { createPrefs } from './prefs.js';
 
-const safeId = (id) => String(id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || 'default';
+/**
+ * 人格 id 的安全过滤（id 就是磁盘上的文件名，不带 `.md`）。
+ *
+ * **允许中文**。以前是 `replace(/[^a-zA-Z0-9_-]/g, '')`——中文字符会被整段删掉，
+ * 于是 `若叶睦` 变成空串、兜底成 `'default'`。后果不是"名字难看"，是**串台**：
+ * `catalog` 的 key 是**未过滤**的原名（`catalog.js` 里 `name.slice(0, -3)`），
+ * 而 `read()` 用过滤后的名字去查，`catalog.get('default')` 命中的是内置默认人格。
+ * 面板点开「若叶睦」看到的是大肥鱼的正文，`remove` 还会报「默认人格不能删」。
+ * 从 QQ-Agent 那批人格（346 份几乎全中文名）迁移过来时必然踩到。
+ *
+ * 只去掉真正危险的东西：
+ *   · 路径分隔符 `\ /` 和 Windows 保留字符 `<>:"|?*`、控制字符 —— path traversal
+ *   · 连写的 `..` —— 同上
+ *   · 首尾的点和空格 —— Windows 上不允许文件名这样结尾
+ * 保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）加个下划线绕开，否则写盘会失败。
+ */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+/**
+ * 从 id 派生 label 时，去掉迁移文件名的机器尾巴。
+ *
+ * QQ-Agent 导出的人格文件名是 `名字__persona-<12 位 hex>.md`，没有 front matter
+ * 时 label 会直接退回这个文件名，面板就显示成一长串 `Claude__persona-4aac7aa270`。
+ * 这里把 `__persona-<hex>` 砍掉，`Claude__persona-4aac7aa270` → `Claude`。
+ *
+ * 只做文件名清洗，不猜正文——首行推断误判率太高（「一、你是谁」「设定」都会被
+ * 当成人名）。有 front matter 的 label 根本不走这里。
+ */
+function cleanIdLabel(id) {
+  return String(id ?? '').replace(/__persona-[0-9a-f]+$/i, '');
+}
+
+const safeId = (id) => {
+  const s = String(id || '')
+    .replace(/[\u0000-\u001f<>:"/\\|?*]/g, '')
+    .replace(/\.{2,}/g, '.')
+    .slice(0, 60)
+    .replace(/^[\s.]+|[\s.]+$/g, '');
+  if (!s) return 'default';
+  return WINDOWS_RESERVED.test(s) ? `${s}_` : s;
+};
 
 /**
  * 旧字段 `persona.text` 要不要拼进提示词。
@@ -49,12 +89,25 @@ export function legacyPersonaText(persona, cfgText) {
 }
 
 /**
- * 她的名字：**全局唯一**（0.11 起名字是账号身份，不是人格属性）。
+ * 她的名字。
  *
- * 回退链：配置 → 人格 label → 人格 id → 大肥鱼。
- * 做成纯函数是为了能测：提示词里用的一定得是这个名字。
+ * 四级优先级（高到低）：
+ *   1. `persona.selfName` —— 人格自己声明「我就是这个名字」（角色卡场景）
+ *   2. `config.persona.name` —— 全局名字（助手型人格，换风格不换身份）
+ *   3. 人格 label —— 全局名字为空时的兜底
+ *   4. `大肥鱼`
+ *
+ * `selfName` 是 0.12 起的新字段，专门给「角色卡」用：QQ-Agent 那批人格的
+ * 身份就是名字本身（若叶睦、高松灯…），而全局名字固定是「大肥鱼」——
+ * 如果还按老逻辑，会变成「一个自称大肥鱼、说话像若叶睦的东西」，自相矛盾。
+ * 所以人格可以在头里写 `selfName: 若叶睦`，写了就盖过全局名。
+ *
+ * 为什么不能用 `name:`：`name` 已废弃，`migrateNameField` 每次启动会把
+ * `name:` 改成 `label:` 或直接删掉，写了等于没写。
  */
 export function personaName(cfgName, persona) {
+  const self = String(persona?.selfName || '').trim();
+  if (self) return self;
   const n = String(cfgName || '').trim();
   if (n) return n;
   return String(persona?.label || persona?.name || persona?.id || '').trim() || '大肥鱼';
@@ -82,6 +135,44 @@ export function parseSwitchCommand(text, prefix, names = []) {
   return { kind: 'switch', arg, match };
 }
 
+/**
+ * 示例对话的说话人标签归一。
+ *
+ * QQ-Agent 的示例用「群友：」「来者：」「他：」「她：」「主人：」当对方，
+ * 用「你：」当自己。我们的提示词约定是「用户：」+「你：」，所以把对方
+ * 那一串标签统一换成「用户」，斜杠拆的两句各给一个「你：」。
+ *
+ * **只在示例节内部做**，不能全局替换——正文里「或者：」这种词会被误伤
+ * （346 份里「或者」出现 1200+ 次，全换就废了）。
+ */
+function normalizeDemos(demos) {
+  const s = String(demos ?? '');
+  if (!s) return s;
+  // 对方标签后可能带括号说明：`群友（持续辱骂）：` 也是对方在说
+  const other = /^(群友|用户|来者|他|她|主人|对方)\s*(?:[（(][^）)]*[）)])?\s*[：:]/;
+  return s
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+      // 对方的一句话（含「/」拆成两句发）
+      if (other.test(trimmed)) {
+        return trimmed.replace(other, '用户：');
+      }
+      // 含斜杠的，一律拆成两条「你：」——包括「你开一个试试 / 轮椅」这种
+      // 已经以「你」开头但其实是「第一句 / 第二句」的
+      if (/[／/]/.test(trimmed)) {
+        // 前面可能有全角空格缩进（QQ-Agent 用「　　你开一个试试 / 轮椅」）
+        return trimmed
+          .split(/\s*[／/]\s*/)
+          .map((part) => `你：${part.replace(/^[　\s]+/, '').replace(/^你：/, '')}`)
+          .join('\n');
+      }
+      return line;
+    })
+    .join('\n');
+}
+
 /** 解析 `---` 头 + 正文 */
 export function parsePersona(id, raw) {
   let text = String(raw ?? '').replace(/^\uFEFF/, '');
@@ -89,7 +180,7 @@ export function parsePersona(id, raw) {
    * `label` 是 0.11 的新字段（面板显示用）；`name` 废弃，仍认，当 label 的别名。
    * 名字本身不再由人格决定——见 `config.persona.name`。
    */
-  const meta = { id, name: id, label: id, tags: [], tools: null };
+  const meta = { id, name: id, label: id, tags: [], tools: null, selfName: '' };
   let labelField = '';
   let nameField = '';
 
@@ -113,6 +204,7 @@ export function parsePersona(id, raw) {
       const key = kv[1].toLowerCase();
       if (key === 'label') labelField = kv[2].trim();
       if (key === 'name') nameField = kv[2].trim();
+      if (key === 'selfname') meta.selfName = kv[2].trim();
       if (key === 'tags') {
         meta.tags = kv[2]
           .replace(/^\[|\]$/g, '')
@@ -149,7 +241,7 @@ export function parsePersona(id, raw) {
     text = text.slice(m[0].length);
   }
   /** label 优先，其次废弃的 name，最后退回 id；`name` 保留同值给旧消费方 */
-  meta.label = labelField || nameField || id;
+  meta.label = labelField || nameField || cleanIdLabel(id);
   meta.name = meta.label;
   /**
    * 把正文切成四段：性格 / 开场白 / 说话示例 / 世界书。
@@ -163,14 +255,24 @@ export function parsePersona(id, raw) {
    *   · `## 世界书` = character_book，**命中关键词才注入**，比全量注入省 token
    */
   let body = text.trim();
+  /**
+   * 从正文里取出一段命名的内容（`## 说话示例` / `九、回复示例` / `第X部分 · 回复示例`）。
+   *
+   * 三种标题格式都认。取到就把那段从 body 里摘掉，剩下的继续当性格正文。
+   * 没取到返回空串（那段本来就没有）。
+   */
   const take = (title) => {
     /**
      * 注意：**不能用 `m` 标志**。
      * 多行模式下 `$` 只匹配行尾，`[\s\S]*?` 会停在第一行结束——
      * 结果「说话示例」只切出一行，剩下的示例全被当成性格正文。
-     * 所以这里用 `(?:^|\n)##` 锚行首、`$` 靠非多行模式锚字符串末尾。
+     * 所以这里用 `(?:^|\n)` 锚行首、`$` 靠非多行模式锚字符串末尾。
+     *
+     * 三种标题写进一个正则：`## `、`一、`、`第X部分 ·`（X 是中文序号）。
      */
-    const re = new RegExp(`(?:^|\\n)##\\s*${title}\\s*\\r?\\n([\\s\\S]*?)(?=\\r?\\n##\\s|$)`);
+    const re = new RegExp(
+      `(?:^|\\n)(?:#{1,3}\\s*${title}|[一二三四五六七八九十]{1,3}、\\s*${title}|第[一二三四五六七八九十]{1,3}部分\\s*[·・:：\\-—]\\s*${title})\\s*(?:[（(][^\\n]*?[)）])?\\s*\\r?\\n([\\s\\S]*?)(?=\\r?\\n(?:#{1,3}\\s|[一二三四五六七八九十]{1,3}、\\s|第[一二三四五六七八九十]{1,3}部分\\s)|$)`,
+    );
     const hit = body.match(re);
     if (!hit) return '';
     body = (body.slice(0, hit.index) + body.slice(hit.index + hit[0].length)).trim();
@@ -178,10 +280,13 @@ export function parsePersona(id, raw) {
   };
 
   // 顺序有讲究：先取长的，避免「说话示例」被「说话」之类的前缀误吃
-  const demos = take('说话示例');
+  let demos = take('说话示例') || take('回复示例');
   const firstMes = take('开场白');
   const loreRaw = take('世界书');
   body = body.trim();
+
+  /** 示例里的说话人标签归一：QQ-Agent 用「群友：」/「来者：」/「他：」等 */
+  demos = normalizeDemos(demos);
 
   /**
    * 世界书一行一条：`触发词1, 触发词2 | 内容`
@@ -207,6 +312,106 @@ export function parsePersona(id, raw) {
     .filter(Boolean);
 
   return { ...meta, body, demos, firstMes, lore };
+}
+
+/* ---------------- 注入预算裁剪 ---------------- */
+
+/** keep：核心，永不丢。丢了角色就「不像」了 */
+const KEEP_SECTIONS = [
+  '你是谁', '她是谁', '性格底色', '说话方式', '群聊说话铁律',
+  '节奏与消息习惯', '禁忌', '总原则', '元规则', '边界', '执行契',
+  // 「AI 味黑名单」是骨架唯一在管「别写首先其次总之」的地方（PERSONA_BASE 只有一句），
+  // 裁掉它模型立刻回 AI 腔，所以必须 keep
+  'AI 味黑名单', 'AI 味', '黑名单',
+];
+/** mid：有用但可裁，超预算时从长的开始截尾 */
+const MID_SECTIONS = ['群文化自适应', '梗', '记忆', '回复示例'];
+/** drop：整段丢，对文字聊天几乎没用 */
+const DROP_SECTIONS = ['知道自己长啥样', '外貌与衣着', '情绪与小动作', '表情包'];
+
+/**
+ * 三种标题格式都认：`## 标题` / `一、标题` / `第X部分 · 标题`。
+ * QQ-Agent 那批主要用「一、」「第X部分 ·」，我们自己的用「## 」。
+ */
+const HEAD_RE =
+  /^\s*(?:#{1,3}\s+(.+)|([一二三四五六七八九十]{1,3})、\s*(.+)|第([一二三四五六七八九十]{1,3})部分\s*[·・:：\-—]\s*(.+))\s*$/;
+
+function classifySection(title) {
+  const t = String(title || '').trim();
+  if (DROP_SECTIONS.some((k) => t.includes(k))) return 'drop';
+  if (MID_SECTIONS.some((k) => t.includes(k))) return 'mid';
+  if (KEEP_SECTIONS.some((k) => t.includes(k))) return 'keep';
+  return 'mid'; // 认不出来的保守归 mid，超了才裁，别一开始就丢
+}
+
+/** 把正文按标题切成 [{title, text, kind}] */
+function splitSections(text) {
+  const out = [{ title: '', text: '', kind: 'mid' }];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = line.match(HEAD_RE);
+    if (m) {
+      const raw = (m[1] ?? m[3] ?? m[5] ?? '').trim();
+      const title = raw.replace(/[（(].*?[)）]/g, '').trim();
+      out.push({ title, text: line, kind: classifySection(title) });
+    } else {
+      out[out.length - 1].text += (out[out.length - 1].text ? '\n' : '') + line;
+    }
+  }
+  return out;
+}
+
+/**
+ * 按预算裁剪人格正文（注入前调用，不碰 parsePersona 的缓存）。
+ *
+ * 策略：drop 整段丢 → 还超就裁 mid（从长的开始）→ 还超就按段落从尾部砍。
+ * 超预算时末尾加一行说明，让模型知道「设定不全」，别因为「没写」就瞎编。
+ *
+ * @param {string} body 人格正文（性格段）
+ * @param {number} budget 字符上限；<=0 表示不裁剪
+ * @returns {string}
+ */
+export function trimPersonaBody(body, budget) {
+  const s = String(body ?? '');
+  if (budget <= 0 || s.length <= budget) return s;
+
+  const secs = splitSections(s);
+  const kept = secs.filter((x) => x.kind !== 'drop');
+  let joined = kept.map((x) => x.text).join('\n');
+
+  // 还超就逐个裁 mid，从长的开始
+  for (const sec of kept.filter((x) => x.kind === 'mid').sort((a, b) => b.text.length - a.text.length)) {
+    if (joined.length <= budget) break;
+    const cut = Math.min(joined.length - budget, sec.text.length);
+    sec.text = sec.text.slice(0, sec.text.length - cut);
+    joined = kept.map((x) => x.text).join('\n');
+  }
+
+  // 只剩 keep 还超 → 按段落从尾部砍（keep 之间没有标题，只能整段动）
+  if (joined.length > budget) {
+    const paras = joined.split(/\n{2,}/);
+    while (paras.length > 1 && paras.join('\n\n').length > budget) paras.pop();
+    joined = paras.join('\n\n');
+  }
+
+  return `${joined}\n（完整设定 ${s.length} 字，本轮按预算注入 ${joined.length} 字）`;
+}
+
+/** 示例对话的独立硬限：不设这个，body 8000 + demos 9000 等于没裁 */
+const DEMOS_MAX = 1500;
+
+/** 按「示例组」边界截断示例，不切开一组对话（一组 = 空行分隔的一段） */
+export function trimDemos(demos, budget = DEMOS_MAX) {
+  const s = String(demos ?? '');
+  if (budget <= 0 || s.length <= budget) return s;
+  const groups = s.split(/\n{2,}/);
+  let out = '';
+  for (const g of groups) {
+    if ((out ? out.length + 2 : 0) + g.length > budget) break;
+    out = out ? `${out}\n\n${g}` : g;
+  }
+  // 一个组本身就超预算：只能硬切（罕见，说明这一组对话特别长）
+  if (!out && groups.length) return groups[0].slice(0, budget);
+  return out;
 }
 
 /**
@@ -399,6 +604,8 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
           // 0.11：label 是显示名；name 保留同值，给还没改的老客户端
           label: m.label || m.name || m.id,
           name: m.label || m.name || m.id,
+          // 人格自报的名字（角色卡用），没写是空串；面板用它显示「自称：X」
+          selfName: m.selfName || '',
           tags: [...m.tags],
           chars: m.chars,
           /** 文件 mtime：治理页用它判断「刚装的别急着建议删」 */
@@ -421,11 +628,17 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
       ensureSeeded();
       const clean = safeId(id);
       /**
-       * id 必须原样合法。以前 `safeId('中文名')` 会变成空串再兜底成 'default'，
-       * 于是「新建中文 id」会静默覆盖默认人格。
+       * id 必须**原样合法**，不能靠 safeId 静默纠正。
+       *
+       * 以前 `safeId('中文名')` 会变成空串再兜底成 `'default'`，于是
+       * 「新建中文 id」会把默认人格覆盖掉。现在 safeId 支持中文了，但这条
+       * 检查仍然要留着：它挡的是「传进来 `a<b`、`a.`、`a ` 这种需要纠正的名字」——
+       * 静默纠正会让面板显示的名字和磁盘上的文件名对不上，下次就找不到了。
        */
       if (!String(id || '').trim() || clean !== String(id)) {
-        throw new Error('id 只能用字母、数字、下划线、短横');
+        throw new Error(
+          'id 里不能有路径分隔符、Windows 保留字符（<>:"/\\|?*），也不能以点或空格开头结尾',
+        );
       }
       // seed 只跑一次之后，`personas/` 被外部删掉就没人重建了——这里自己兜底
       mkdirSync(dir(), { recursive: true });
