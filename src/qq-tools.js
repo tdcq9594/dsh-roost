@@ -134,7 +134,7 @@ function buildSendFileDef({ caller, fileOf }) {
       },
     },
     output: {
-      schema: { type: 'object' },
+      schema: { type: 'object', additionalProperties: true },
       /** 必须是内容块数组——返回字符串会让 DSH 在结果投影处炸掉 */
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },
@@ -209,7 +209,7 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
       },
     },
     output: {
-      schema: { type: 'object' },
+      schema: { type: 'object', additionalProperties: true },
       /** 必须是内容块数组——字符串会让 DSH 的 content.some 炸掉（0.9.x 的真实事故） */
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },
@@ -283,7 +283,7 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
       resume: { type: 'string', description: '下次可以怎么接，一句话（可省）' },
     },
     output: {
-      schema: { type: 'object' },
+      schema: { type: 'object', additionalProperties: true },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },
     async execute({ point, resume } = {}) {
