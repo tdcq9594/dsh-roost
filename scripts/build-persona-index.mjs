@@ -106,9 +106,9 @@ async function build() {
     packFiles,
     index: {
     schema: 3,
-    // 只是给面板显示「仓库 tdcq9594/dsh-roost · personas/」用的，
+    // 只是给面板显示「仓库 tdcq9594/dsh-roost-personas · 」用的，
     // 真正拉取的地址由 sources 决定（可换源）。
-    repo: 'tdcq9594/dsh-roost',
+    repo: 'tdcq9594/dsh-roost-personas',
     branch: 'main',
     minVersion: MIN_VERSION,
     packs,

@@ -54,10 +54,22 @@ const OWN_VERSION = (() => {
  */
 const ALLOW_HOSTS = new Set(['raw.githubusercontent.com', 'gitee.com']);
 
-/** 默认源。GitHub 在前（内容是权威的），Gitee 在后（国内 raw 更稳） */
+/**
+ * 默认源。**人格的权威源是独立仓库 `dsh-roost-personas`**（2026-11-02 起）。
+ *
+ * 为什么搬出去：人格是内容，改一个字的频率远高于改代码；放在插件仓库里
+ * 意味着「改人设 → 发版 → 用户更新插件」三步，搬出去之后往那边推一下就行。
+ *
+ * 顺序 GitHub 在前（内容是权威的），Gitee 在后（国内 raw 更稳）。
+ *
+ * **`dsh-roost/personas/` 仍然存在，但它降级成两件东西**：
+ *   · npm 包内的首次 seed（新装插件时先把自带的几个拷过去）
+ *   · 老版本客户端的兜底（≤0.11.x 的 `DEFAULT_SOURCES` 还指着老地址）
+ * 所以两边要同步，别只改一边——见 `docs/人格仓库方案.md`。
+ */
 const DEFAULT_SOURCES = [
-  'https://raw.githubusercontent.com/tdcq9594/dsh-roost/main/personas',
-  'https://gitee.com/tdcq9594/dsh-roost/raw/main/personas',
+  'https://raw.githubusercontent.com/tdcq9594/dsh-roost-personas/main',
+  'https://gitee.com/tdcq9594/dsh-roost-personas/raw/main',
 ];
 
 /**
