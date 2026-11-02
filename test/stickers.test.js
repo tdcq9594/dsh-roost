@@ -16,7 +16,7 @@ import {
   parseSidecar,
   MAX_BYTES,
 } from '../src/stickers.js';
-import { buildStickerToolDefs } from '../src/sticker-tools.js';
+import { buildStickerToolDefs, registerStickerTools } from '../src/sticker-tools.js';
 
 /** 建一个临时库，files 是「相对路径 → 内容」 */
 function makeLib(files = {}) {
@@ -250,4 +250,43 @@ test('扫描上限：图太多时只认前 N 张，并说清还有更多', () =>
   assert.equal(s.list({}, { max: 10 }).length, 2);
   const text = s.prompt({});
   assert.ok(text.includes('只扫了前 2 张'), text);
+});
+
+test('侧车只写场合时，标签仍走文件名', () => {
+  const { stickers } = makeLib({
+    '熊猫开心.png': 'x',
+    '熊猫开心.png.tags': '; 对方说好笑的事',
+  });
+  const [s] = stickers.list({});
+  assert.deepEqual(s.tags, ['熊猫开心']); // 侧车没有标签，退回文件名
+  assert.equal(s.usage, '对方说好笑的事');
+});
+
+test('注册：sticker_pick 挂上 agent 的 tools，缺服务时不抛', async () => {
+  const registered = [];
+  const agent = {
+    ctx: {
+      tools: {
+        register: (t) => {
+          registered.push(t);
+          return () => {};
+        },
+      },
+    },
+  };
+
+  const r = await registerStickerTools({ agent, pickOf: () => ({ ok: true }) });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.names, ['sticker_pick']);
+  assert.equal(registered.length, 1);
+  assert.equal(registered[0].name, 'sticker_pick');
+  // 测试环境拿不到 @deepseek-ai/dsh-tools，走 plain 分支：扁平表要转成 JSON Schema
+  assert.equal(registered[0].parameters.type, 'object');
+  assert.ok(registered[0].parameters.properties.category);
+  r.off();
+
+  // 没有 tools 服务的 agent：返回失败而不是抛错（工具是增强，不能拖垮整轮对话）
+  const bad = await registerStickerTools({ agent: {}, pickOf: () => ({ ok: true }) });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.reason);
 });
