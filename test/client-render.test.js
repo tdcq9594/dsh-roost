@@ -93,7 +93,7 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-const TABS = ['overview', 'setup', 'her', 'market', 'memory', 'awake', 'context', 'chats', 'config', 'logs']
+const TABS = ['overview', 'setup', 'her', 'memory', 'awake', 'context', 'chats', 'config', 'logs']
 
 for (const tab of TABS) {
   test(`前端渲染：${tab} 页在空数据下不炸`, () => {
@@ -110,9 +110,9 @@ for (const tab of TABS) {
     }, `${tab} 页渲染抛异常`)
 
     assert.equal(tree?.props?.className, 'roost-root', '根节点不对')
-    // 页签条必须在每一页都在，且十个都在
+    // 页签条必须在每一页都在，且九个都在（「市场」并进了「人格」）
     const txt = textOf(tree)
-    for (const label of ['概览', '接入', '人格与情绪', '市场', '记忆', '主动搭话', '上下文', '会话', '设置', '日志']) {
+    for (const label of ['概览', '接入', '人格', '记忆', '主动搭话', '上下文', '会话', '设置', '日志']) {
       assert.ok(txt.includes(label), `页签缺「${label}」`)
     }
   })
@@ -590,4 +590,167 @@ test('前端渲染：市场页还没拿到清单时说「读着…」，不能�
 
   assert.ok(txt.includes('读着…'), '首屏加载中要显示「读着…」')
   assert.ok(!txt.includes('仓库里没读到人格'), '还没拉完就说「没读到」是假话')
+})
+
+test('前端渲染：人格页有「我的人格 / 人格仓库」两个分段', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  store['roost.tab'] = 'her'
+  rt.reset()
+  const txt = textOf(expand(mod.RoostPage(), rt))
+
+  assert.ok(txt.includes('我的人格'), '缺「我的人格」分段')
+  assert.ok(txt.includes('人格仓库'), '缺「人格仓库」分段')
+  assert.ok(txt.includes('从仓库更新'), '「我的人格」视图里要有从仓库更新按钮')
+  // 默认落在「我的人格」，仓库视图的内容不该同时铺开。
+  // 断言必须用 MarketTab 独有的文案——用「人格仓库」会被分段按钮自己兜住（假绿）。
+  // 用文本节点断言：placeholder 是属性，textOf 走不到
+  assert.ok(!txt.includes('收起治理'), '仓库视图的治理面板不该在默认视图里铺开')
+
+  /**
+   * 仓库视图要真的渲染出来。
+   *
+   * 假 React 不会因为 setState 重渲染，所以只能靠 defaultView 直接落在 repo。
+   * 不这么测的话，「仓库整块被删掉」是**绿**的——分段按钮自己就带着「人格仓库」四个字。
+   */
+  const repo = textOf(
+    expand(
+      h(mod.HerTab, {
+        config: null, personas: null, market: null, marketErr: '', mem: null,
+        toast: () => {}, save: async () => ({ ok: true }), reload: async () => {}, quick: null,
+        loadMarket: async () => {}, defaultView: 'repo',
+      }),
+      rt,
+    ),
+  )
+  assert.ok(repo.includes('治理'), '仓库视图没渲染出 MarketTab（治理按钮不在）')
+  assert.ok(!repo.includes('从仓库更新'), '仓库视图不该同时显示本地人格列表的按钮')
+})
+
+test('前端渲染：情绪搬到了主动搭话页，人格页不再有', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+
+  store['roost.tab'] = 'awake'
+  rt.reset()
+  const awake = textOf(expand(mod.RoostPage(), rt))
+  assert.ok(awake.includes('此刻情绪'), '主动搭话页缺「此刻情绪」')
+
+  store['roost.tab'] = 'her'
+  rt.reset()
+  const her = textOf(expand(mod.RoostPage(), rt))
+  assert.ok(!her.includes('此刻情绪'), '人格页不该再有情绪块')
+  assert.ok(!her.includes('语音条'), '人格页不该再有语音条')
+})
+
+test('前端渲染：表情包与语音条搬到了设置页', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+
+  /**
+   * 直接渲染 ConfigTab：空数据下 RoostPage 的 config 是 null，
+   * 设置页只显示「读取配置…」，看不到卡片。
+   */
+  const txt = textOf(
+    expand(
+      h(mod.ConfigTab, {
+        config: { stickers: { enabled: true, dir: '' } },
+        save: async () => ({ ok: true }),
+        saveCfg: async () => ({ ok: true }),
+        toast: () => {},
+        stickers: { dir: 'C:/x/stickers', items: [{ file: 'a.png', tags: [] }], chars: 42 },
+        setupSt: { pluginInstalled: true, pluginConfig: { ttsVoice: 'female' } },
+      }),
+      rt,
+    ),
+  )
+
+  assert.ok(txt.includes('表情包'), '设置页缺「表情包」卡片')
+  assert.ok(txt.includes('语音条'), '设置页缺「语音条」卡片')
+  assert.ok(txt.includes('42 字'), '表情包要显示它占多少提示词预算')
+  assert.ok(txt.includes('female'), '语音条要显示当前音色')
+})
+
+test('前端渲染：老的 market 页签状态会回退到人格页', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'market'
+  rt.reset()
+  const txt = textOf(expand(mod.RoostPage(), rt))
+  assert.ok(txt.includes('我的人格'), 'market 应该回退到人格页，而不是概览')
+})
+
+test('前端渲染：接入页有「组件版本」块（框架 / ai-chat 更新提示）', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'setup'
+  rt.reset()
+  const txt = textOf(expand(mod.RoostPage(), rt))
+
+  assert.ok(txt.includes('组件版本'), '接入页缺「组件版本」块')
+  assert.ok(txt.includes('重新检查'), '缺「重新检查」按钮')
+})
+
+test('前端渲染：组件版本块能显示「当前 → 最新」和更新提示', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+
+  // 直接渲染组件：放在接入页里时它读内部 state，假 React 不跑 effect，只能看到「读着…」
+  const txt = textOf(
+    expand(
+      h(mod.DepsBlock, {
+        busy: false,
+        onCheck: () => {},
+        info: {
+          framework: { installed: '0.9.9', latest: '0.9.10', hasUpdate: true },
+          plugin: { installed: '4.3.22', latest: '4.3.22', hasUpdate: false },
+        },
+      }),
+      rt,
+    ),
+  )
+
+  assert.ok(txt.includes('v0.9.9') && txt.includes('→ v0.9.10'), '框架要显示当前 → 最新')
+  assert.ok(txt.includes('有更新'), '框架有新版要提示')
+  assert.ok(txt.includes('已是最新'), '插件已最新要写清楚')
+  assert.ok(txt.includes('下载 tar 包解压覆盖'), '框架更新要给具体做法')
+  assert.ok(!txt.includes('插件有新版'), '插件没更新时不该出现插件的提示')
+})
+
+test('前端渲染：组件版本块查不到时不报错，只写「查不到最新版」', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+
+  const txt = textOf(
+    expand(
+      h(mod.DepsBlock, {
+        busy: false,
+        onCheck: () => {},
+        info: {
+          framework: { installed: '0.9.9', latest: '', hasUpdate: false, error: '网络不通' },
+          plugin: { installed: '', latest: '', hasUpdate: false, error: '网络不通' },
+        },
+      }),
+      rt,
+    ),
+  )
+
+  assert.ok(txt.includes('查不到最新版'), '没有最新版时要写明')
+  assert.ok(txt.includes('不影响使用'), '要说明不影响使用')
+})
+
+test('前端渲染：扫码 / 填配置那块要提示「换账号去 Roost 面板」', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'setup'
+  rt.reset()
+  const txt = textOf(expand(mod.RoostPage(), rt))
+
+  // 这个页面只建第一个机器人；改已有账号得去 Roost 面板的「配置」
+  assert.ok(txt.includes('要换账号'), '缺换账号提示')
+  assert.ok(txt.includes('Roost 面板的「配置」'), '要指明去哪儿改')
 })

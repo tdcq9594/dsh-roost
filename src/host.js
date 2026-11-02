@@ -33,6 +33,7 @@ import { createClosing } from './closing.js';
 import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand } from './personas.js';
 import { createPersonaRepo, scanPersona } from './persona-repo.js';
 import { createUpdater } from './update.js';
+import { createDepsCheck } from './deps.js';
 import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
@@ -490,6 +491,15 @@ export function apply(ctx) {
   });
 
   /** 一键流程：装 Roost、配插件、起停、打开面板 */
+  /**
+   * 框架 / ai-chat 的版本对照。只做提示：更新一个是解压 tar 包，一个是去市场点，
+   * 两条路都该由用户自己按（见 deps.js 头部）。
+   */
+  const deps = createDepsCheck({
+    detect: () => setup.detect(),
+    log: (m) => log.debug(m),
+  });
+
   const setup = createSetup({
     cfgOf: () => cfg,
     // 面板改配置时要同时更新这里的 cfg 引用，否则下次 detect 还是旧路径
@@ -3988,7 +3998,13 @@ export function apply(ctx) {
       route('/speakup/fire', async (req, res) => send(res, 200, await speakUp.fire('手动'))),
 
       route('/stickers', (req, res) =>
-        send(res, 200, { ok: true, dir: stickers.dir(cfg.stickers), items: stickers.list(cfg.stickers) }),
+        send(res, 200, {
+          ok: true,
+          dir: stickers.dir(cfg.stickers),
+          items: stickers.list(cfg.stickers),
+          /** 注入到提示词里的那段有多长：上下文页要显示它吃了多少预算 */
+          chars: stickers.prompt(cfg.stickers).length,
+        }),
       ),
 
       route('/personas', (req, res) => send(res, 200, {
@@ -4384,6 +4400,21 @@ export function apply(ctx) {
        * 断网是常态，前端要能照常显示「当前版本 + 查不到最新版」，
        * 而不是整块变成错误页。
        */
+      /**
+       * 框架 / ai-chat 的版本对照（面板「接入」页用）。
+       *
+       * 查不到最新版时**不报错**：两个来源都在境外，抖动很正常。
+       * 拿到的 error 会原样显示成「查不到最新版」，不影响用户继续用。
+       */
+      route('/update/deps', async (req, res) => {
+        try {
+          const force = String(req.url || '').includes('force=1');
+          return send(res, 200, await deps.check({ force }));
+        } catch (e) {
+          return send(res, 200, { ok: false, message: e.message });
+        }
+      }),
+
       route('/update/check', async (req, res) => {
         try {
           return send(res, 200, await updater.check());

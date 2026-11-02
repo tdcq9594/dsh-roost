@@ -2,7 +2,7 @@
   "schema": 3,
   "repo": "tdcq9594/dsh-roost",
   "branch": "main",
-  "minVersion": "0.10.7",
+  "minVersion": "0.11.0",
   "packs": [
     {
       "n": 0,

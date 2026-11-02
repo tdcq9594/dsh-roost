@@ -40,7 +40,7 @@ const TARGET = path.join(DIR, 'index.json');
  * 是因为 index.json 是要被**别的版本**读的：跟着 package.json 走会变成
  * 「自己校验自己」，每次发版都要重算一遍索引。
  */
-const MIN_VERSION = '0.10.7';
+const MIN_VERSION = '0.11.0';
 
 /**
  * pack 数量，**永久固定 16**。
