@@ -37,6 +37,7 @@ import { createDepsCheck } from './deps.js';
 import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
+import { registerStickerTools } from './sticker-tools.js';
 import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
 import { createFence, PEER } from './fence.js';
 import { audit, peerSummary } from './audit.js';
@@ -1704,6 +1705,30 @@ export function apply(ctx) {
         .catch((e) => {
           qqToolState.reason = e?.message ?? String(e);
           log.warn(`QQ 工具挂载异常：${qqToolState.reason}`);
+        });
+
+      /**
+       * 表情包工具：模型想要图时问一次，拿到真实路径再发。
+       *
+       * 为什么**无条件**挂上（而不是等用户建了分类目录再挂）：
+       * 注册只发生一次，而用户随时可能在面板旁边建一个 `开心/` 目录。
+       * 无条件挂上，工具立刻可用；要不要引导模型去用它，由提示词那边决定
+       * （`stickers.prompt()` 在平铺模式下根本不提这个工具）。
+       *
+       * 挂不上不抛错：表情是增强，不能因为工具的版本差异让整轮对话挂掉。
+       */
+      registerStickerTools({
+        agent,
+        pickOf: ({ category, limit }) => stickers.pick(cfg.stickers, { category, limit }),
+        log: (m) => log.warn(m),
+      })
+        .then((r) => {
+          if (r.ok) log.info(`表情工具已挂上：${r.names.join('、')}（${r.mode}）`);
+          else log.warn(`表情工具没挂上：${r.reason}`);
+          if (r.off) mountOffs.push(r.off);
+        })
+        .catch((e) => {
+          log.warn(`表情工具挂载异常：${e?.message ?? String(e)}`);
         });
     }
 
@@ -4002,6 +4027,8 @@ export function apply(ctx) {
           ok: true,
           dir: stickers.dir(cfg.stickers),
           items: stickers.list(cfg.stickers),
+          /** 分类清单（一级子目录）。平铺时为空数组，前端可以据此切换展示 */
+          categories: stickers.categories(cfg.stickers),
           /** 注入到提示词里的那段有多长：上下文页要显示它吃了多少预算 */
           chars: stickers.prompt(cfg.stickers).length,
         }),
