@@ -94,8 +94,18 @@ function safeHost(raw) {
 /** 索引缓存多久算新鲜。太短会每次开面板都打网络，太长会看不到刚推的更新 */
 const INDEX_TTL = 5 * 60_000;
 
-/** 单份人格正文上限。现在最长的大肥鱼 731 字节，8000 字符够写很多了 */
-const MAX_CHARS = 8000;
+/**
+ * 单份人格正文上限。
+ *
+ * 8000 曾经够用（内置最长 731 字节），但角色卡类人格（QQ-Agent 那批）动辄
+ * 一万多字符、最大 8 万多，8000 会把大半挡在门外。抬到 20000 覆盖绝大多数，
+ * 超过的仍然拒绝——真正该省 token 的地方是**每轮注入**（`persona.maxChars` 裁剪），
+ * 不是安装时一刀切。
+ */
+const MAX_CHARS = 20000;
+
+/** 正文太短就当没设人格：< 20 字符（比如 `@某助手`）装进来等于没内容 */
+const MIN_CHARS = 20;
 
 /** 单份人格 / 未知响应的上限 */
 const MAX_BYTES = 512 * 1024;
@@ -783,6 +793,7 @@ export function createPersonaRepo({
             fromPack = false;
           }
           if (text.length > MAX_CHARS) throw new Error(`正文 ${text.length} 字，超过 ${MAX_CHARS} 字上限`);
+          if (text.length < MIN_CHARS) throw new Error(`正文只有 ${text.length} 字，装进来等于没设人格（至少 ${MIN_CHARS} 字）`);
           const got = hashText(text);
           if (got !== p.sha256) {
             throw new Error(`内容校验失败（索引说 ${String(p.sha256).slice(0, 8)}…，实际 ${got.slice(0, 8)}…）`);
@@ -1027,6 +1038,7 @@ export function createPersonaRepo({
 
       const text = await getText(`${index.base}/${file}`);
       if (text.length > MAX_CHARS) throw new Error(`正文 ${text.length} 字，超过 ${MAX_CHARS} 字上限`);
+      if (text.length < MIN_CHARS) throw new Error(`正文只有 ${text.length} 字，装进来等于没设人格（至少 ${MIN_CHARS} 字）`);
       const got = hashText(text);
       if (got !== p.sha256) throw new Error(`内容校验失败（索引说 ${String(p.sha256).slice(0, 8)}…，实际 ${got.slice(0, 8)}…）`);
 
@@ -1077,6 +1089,7 @@ export function createPersonaRepo({
       const localName = localNameFor(id, file, inst);
       const text = await getText(`${index.base}/${file}`);
       if (text.length > MAX_CHARS) throw new Error(`正文 ${text.length} 字，超过 ${MAX_CHARS} 字上限`);
+      if (text.length < MIN_CHARS) throw new Error(`正文只有 ${text.length} 字，装进来等于没设人格（至少 ${MIN_CHARS} 字）`);
       const got = hashText(text);
       if (got !== p.sha256) throw new Error(`内容校验失败（索引说 ${String(p.sha256).slice(0, 8)}…，实际 ${got.slice(0, 8)}…）`);
 
