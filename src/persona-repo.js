@@ -1,5 +1,6 @@
 /**
- * 人格仓库：从 dsh-roost 仓库的 `personas/` 一键更新本地人格库。
+ * 人格仓库：从**独立仓库 `dsh-roost-personas`** 一键更新本地人格库。
+ * （2026-11-02 之前源是同仓的 `personas/`，现在那边只是出厂默认快照。）
  *
  * 为什么需要它
  * ------------
@@ -54,10 +55,24 @@ const OWN_VERSION = (() => {
  */
 const ALLOW_HOSTS = new Set(['raw.githubusercontent.com', 'gitee.com']);
 
-/** 默认源。GitHub 在前（内容是权威的），Gitee 在后（国内 raw 更稳） */
+/**
+ * 默认源。**人格的权威源是独立仓库 `dsh-roost-personas`**（2026-11-02 起）。
+ *
+ * 为什么搬出去：人格是内容，改一个字的频率远高于改代码；放在插件仓库里
+ * 意味着「改人设 → 发版 → 用户更新插件」三步，搬出去之后往那边推一下就行。
+ *
+ * 顺序 GitHub 在前（内容是权威的），Gitee 在后（国内 raw 更稳）。
+ *
+ * **`dsh-roost/personas/` 是冻结的「出厂默认」**（2026-11-02 起不再更新）：
+ *   · npm 包内首次 seed 用它（新装插件时先把自带的几个拷到数据目录）
+ *   · 老版本客户端（≤0.11.x）的兜底——它们的源地址写在代码里，升级后才切到新源
+ * 它是**快照**，不是镜像。新仓库那边加了人格、改了人设，这里都不会跟。
+ * 别在这个目录改东西：改了既不会发布，还会让 `build-persona-index --check`
+ * 与仓库里那份 index.json 对不上。
+ */
 const DEFAULT_SOURCES = [
-  'https://raw.githubusercontent.com/tdcq9594/dsh-roost/main/personas',
-  'https://gitee.com/tdcq9594/dsh-roost/raw/main/personas',
+  'https://raw.githubusercontent.com/tdcq9594/dsh-roost-personas/main',
+  'https://gitee.com/tdcq9594/dsh-roost-personas/raw/main',
 ];
 
 /**

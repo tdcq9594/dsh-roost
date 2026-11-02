@@ -194,6 +194,27 @@ export const DEFAULTS = {
     maxParts: 3,
   },
   /**
+   * 发文件（`qq_send_file`）。
+   *
+   * **默认不限制路径**：这台机器只有主人能调工具（`permissions.owner = 'all'`，
+   * 其余档位是 `chat`，工具在轮开始前就被收走），所以"能发哪些文件"本来就
+   * 等价于"主人想让发哪些文件"。再套一层白名单只会挡住他自己的正当操作。
+   *
+   * `restrictPaths` 留给需要收紧的场景（比如把机器人借给别人用）：
+   * 打开后只允许 `<数据目录>/workspace`、`<数据目录>/images` 和 `extraRoots`。
+   */
+  sendFile: {
+    /** true = 只允许白名单目录；false（默认）= 全盘可发 */
+    restrictPaths: false,
+    /**
+     * 额外允许的根目录（绝对路径）。
+     *
+     * 只在 `restrictPaths` 为 true 时有意义——默认配置下填了也不看。
+     * 典型用途：模型把文件生成在某个固定的项目目录里。
+     */
+    extraRoots: [],
+  },
+  /**
    * 觉醒（第 5 期）：**只唤醒，做不做她自己定**。
    *
    * 以前 `speakUp` 是"到点就发一句"，现在是"到点问她一句，她可以说不"。
@@ -310,7 +331,13 @@ export const DEFAULTS = {
      * `raw.githubusercontent.com` / `gitee.com`），否则面板就成了内网探测器。
      */
     repo: {
-      /** 例：["https://raw.githubusercontent.com/我/我的fork/main/personas"] */
+      /**
+       * 例：["https://raw.githubusercontent.com/我/我的fork/main"]
+       *
+       * **填人格目录的地址**（index.json 就在它下面），不是仓库 URL 本身。
+       * 官方仓库的根目录就是人格目录，所以结尾到 `main` 为止；如果你 fork 后
+       * 把人格放在子目录里，这里要带上那个子目录名。
+       */
       sources: [],
     },
   },

@@ -114,11 +114,11 @@ test('可以自己传白名单（给以后别的档位用）', () => {
  * 主动搭话那一轮没有"正在回的那条消息"，`qq_send` 挂着只会诱导模型调它，
  * 调了必然失败，然后按提示 `<<skip>>`——一轮模型调用白花（线上撞到过）。
  */
-test('主动搭话：只收 qq_send / qq_close，记忆工具留着', () => {
-  const all = [...REAL_TOOLS, 'qq_send', 'qq_close', 'memory_search', 'memory_note'];
+test('主动搭话：只收 qq_send / qq_close / qq_send_file，记忆工具留着', () => {
+  const all = [...REAL_TOOLS, 'qq_send', 'qq_close', 'qq_send_file', 'memory_search', 'memory_note'];
   const plan = planDenyTools(fakeTools(all));
   assert.equal(plan.ok, true);
-  assert.deepEqual(plan.deny.sort(), ['qq_close', 'qq_send']);
+  assert.deepEqual(plan.deny.sort(), ['qq_close', 'qq_send', 'qq_send_file']);
   assert.ok(!plan.deny.includes('memory_search'), '她翻日记在主动开口时同样有用');
   assert.ok(!plan.deny.includes('memory_note'), '记事也一样');
 });
@@ -141,8 +141,13 @@ test('主动搭话：名字取自 schemas()，两种形状都认', () => {
   assert.deepEqual(plan.deny.sort(), ['qq_close', 'qq_send']);
 });
 
-test('主动搭话：名单是可传的，默认就是那两个', () => {
-  assert.deepEqual(AWAKE_DENY_TOOLS, ['qq_send', 'qq_close']);
+test('主动搭话：名单是可传的，默认就是那三个', () => {
+  /**
+   * `qq_send_file` 必须在这个名单里：主动搭话没有"正在回的那条消息"，
+   * 工具一调必然失败（`fileOf` 会返回 `no-payload`），模型只好按提示
+   * `<<skip>>`，一轮模型调用白花。它和 `qq_send` 是完全一样的失败形态。
+   */
+  assert.deepEqual(AWAKE_DENY_TOOLS, ['qq_send', 'qq_close', 'qq_send_file']);
   const plan = planDenyTools(fakeTools(['qq_send', 'qq_close']), ['qq_close']);
   assert.deepEqual(plan.deny, ['qq_close']);
 });
@@ -193,11 +198,22 @@ test('人格工具：清单为空时明说没算成，不假装收住了', () =>
 });
 
 test('人格工具：输出通道永远保留（tools: [] 是「别碰机器」，不是「别说话」）', () => {
-  const all = [...REAL_TOOLS, ...OUTPUT_TOOLS];
+  const all = [...REAL_TOOLS, ...OUTPUT_TOOLS, 'qq_send_file'];
   const plan = planPersonaTools(fakeTools(all), []);
   assert.equal(plan.ok, true);
   assert.ok(!plan.deny.includes('qq_send'), 'qq_send 不能被收走，否则 907 的提示词会变成谎话');
   assert.ok(!plan.deny.includes('qq_close'));
+  /**
+   * `qq_send_file` 和上面两个**必须区分开**。
+   *
+   * `qq_send`/`qq_close` 只影响「怎么说」；`qq_send_file` 是「读这台机器任意
+   * 路径的文件并发出去」——是能力，不是表达方式。`OUTPUT_TOOLS` 在
+   * `planPersonaTools` 里是**无条件并回去**的，一旦把发文件塞进去，
+   * 群友档（默认 `chat`）在人格写 `tools: []` 时会重新拿到它，
+   * 群里随便一个人说「把 D:\xxx 发我」就能把任意文件外发出去。
+   * 2026-11-02 实际踩过这条，所以这里钉死。
+   */
+  assert.ok(plan.deny.includes('qq_send_file'), '发文件是「读文件外发」，人格 tools:[] 必须收走');
   assert.ok(plan.deny.includes('edit'));
 });
 
@@ -209,10 +225,11 @@ test('人格工具：全都允许时返回 nothing（调用方别当告警打）
 });
 
 test('人格工具：keep=[] 这种极端值也不能把输出通道切掉', () => {
-  const all = [...REAL_TOOLS, ...OUTPUT_TOOLS];
+  const all = [...REAL_TOOLS, ...OUTPUT_TOOLS, 'qq_send_file'];
   const plan = planPersonaTools(fakeTools(all), ['edit'], []);
   assert.equal(plan.ok, true);
   assert.ok(!plan.deny.includes('qq_send'), '输出通道永远不收');
   assert.ok(!plan.deny.includes('qq_close'));
+  assert.ok(plan.deny.includes('qq_send_file'), '发文件不是输出通道，档位不许就得收');
   assert.ok(plan.deny.includes('edit'), '人格放开但档位不许的，照样收');
 });

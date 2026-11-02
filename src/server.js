@@ -79,6 +79,19 @@ export async function postReply(payload, text, done = true, extra = {}) {
          * 空串不传——没有 id 时行为完全不变。
          */
         ...(extra?.requestId ? { requestId: String(extra.requestId) } : {}),
+        /**
+         * 要发出去的文件（绝对路径）。
+         *
+         * **跟 `text` 分开走**：这里只把路径交给 ai-chat 攒着，真正的上传和
+         * 发送由它在**这一轮结束后**做（那时它手上还有 `msg` 对象，能走被动
+         * 回复带 `msg_id`，不消耗主动额度）。所以这一段请求仍然很快，
+         * 不会被几 MB 的上传拖到 15 秒超时。
+         *
+         * 空数组不传——保持报文和老版本完全一致。
+         */
+        ...(Array.isArray(extra?.files) && extra.files.length
+          ? { files: extra.files.map(String).filter(Boolean) }
+          : {}),
       }),
       signal: AbortSignal.timeout(15000),
     });

@@ -14,7 +14,7 @@
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
 import { basename, join, resolve } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision } from './config.js';
 import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
@@ -34,9 +34,11 @@ import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand } fr
 import { createPersonaRepo, scanPersona } from './persona-repo.js';
 import { createUpdater } from './update.js';
 import { createDepsCheck } from './deps.js';
+import { pathAllowed, MAX_FILE_BYTES } from './send-file.js';
 import { createStickers } from './stickers.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
+import { registerStickerTools } from './sticker-tools.js';
 import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
 import { createFence, PEER } from './fence.js';
 import { audit, peerSummary } from './audit.js';
@@ -1689,6 +1691,122 @@ export function apply(ctx) {
           }
           return r;
         },
+        /**
+         * 发文件：这里只做「能不能发」的判断，**不上传**。
+         *
+         * 真正的上传和发送交给 ai-chat —— 只有它手上有 `msg` 对象，
+         * 才能走被动回复（带 `msg_id`，不消耗主动额度）。而上传一个
+         * 20MB 的文件要好几秒，塞进这条 15 秒超时的回话请求里迟早出事。
+         * 所以这里只把路径挂到这一轮的回话上，由它在轮末统一发。
+         */
+        fileOf: async (rawPath) => {
+          const c = cur();
+          if (!c.payload) {
+            return {
+              ok: false,
+              reason: 'no-payload',
+              message: '这一轮是主动开口，没有"正在回的那条消息"，发不了文件。',
+            };
+          }
+          const abs = resolve(String(rawPath));
+          /**
+           * 传输层支不支持发文件，得**问对面**，不能假设。
+           *
+           * 老版本 ai-chat 的 `/r/reply` 只读 `{id, token, text, done}`，
+           * 我们塞的 `files` 它直接忽略、照样回 200。那样这里的 `await`
+           * 会成功、工具会回 `ok:true`、模型会跟人说「发你了」——
+           * 而什么都没有发出去。按 `=== true` 判，缺了这个标记就当场拒绝，
+           * 模型也好改口说「这个版本发不了文件」。
+           */
+          if (c.payload?.channel?.files !== true) {
+            return {
+              ok: false,
+              reason: 'unsupported',
+              message: '当前 ai-chat 版本还不支持发文件（通道没打通），别答应对方，直接说发不了。',
+            };
+          }
+          const allowed = pathAllowed(abs, {
+            ...(cfg.sendFile || {}),
+            /**
+             * 内置允许的两个根：机器人工作区、收到的图片目录。
+             * 只在 `restrictPaths: true` 时生效（默认是全盘放开）。
+             */
+            roots: [join(dataDir(), 'workspace'), join(dataDir(), 'images')],
+          });
+          if (!allowed.ok) return allowed;
+
+          let st;
+          try {
+            st = statSync(abs);
+          } catch {
+            return { ok: false, reason: 'missing', message: `这个文件不存在：${abs}` };
+          }
+          if (!st.isFile()) {
+            return { ok: false, reason: 'not-file', message: `这是文件夹不是文件：${abs}` };
+          }
+          /** 200MB 是官方硬限，超了连分片都救不了。见文件头的 MAX_FILE_BYTES */
+          if (st.size > MAX_FILE_BYTES) {
+            const mb = (st.size / 1024 / 1024).toFixed(1);
+            return {
+              ok: false,
+              reason: 'too-big',
+              message: `这个文件 ${mb}MB，超过官方 200MB 上限，发不出去。`,
+            };
+          }
+
+          /**
+           * 一轮最多一个文件。
+           *
+           * 不是性能洁癖：被动回复总共只有 5 次，文本要占、随机附的图也要占，
+           * 一次塞三个文件会把后面的全挤掉（框架会静默降级成主动消息）。
+           * 而且 3×20MB 串行上传能超过一分钟，对方早就不在等了。
+           */
+          const turnSt = qqTurn.get(c.sid);
+          /**
+           * 拿不到这一轮的状态就**别发**。上限和记账都挂在它身上，
+           * 放行等于让「一轮一个」失效——桥那边还有个 `MAX_FILES` 兜底，
+           * 会静默丢掉第二个，用户看到的是「说了发两个，只来一个」。
+           */
+          if (!turnSt) {
+            return {
+              ok: false,
+              reason: 'no-turn',
+              message: '这一轮的会话状态没建起来，文件发不出去。',
+            };
+          }
+          if ((turnSt.files || 0) >= 1) {
+            return {
+              ok: false,
+              reason: 'too-many',
+              message: '这一轮已经发过一个文件了，剩下的下一轮再说。',
+            };
+          }
+
+          /**
+           * **先占位、再 await**。
+           *
+           * 中间这个 `await` 是个窗口：同一条 assistant 消息里并行调两次
+           * `qq_send_file` 时，两边都会读到 `files === 0` 然后都放行——
+           * 「一轮一个」形同虚设，桥那边 `MAX_FILES` 会照收两个，
+           * 第二个还会把被动回复预算挤掉一格。失败再回滚。
+           */
+          turnSt.files = (turnSt.files || 0) + 1;
+          turnSt.fileNames = [...(turnSt.fileNames || []), basename(abs)];
+          try {
+            await postReply(c.payload, '', false, { files: [abs] });
+          } catch (e) {
+            turnSt.files -= 1;
+            turnSt.fileNames.pop();
+            throw e;
+          }
+          log.info(`准备发文件 ${basename(abs)}（${(st.size / 1024 / 1024).toFixed(2)}MB）`);
+          return {
+            ok: true,
+            file: basename(abs),
+            size: st.size,
+            note: '文件会在这一轮回复的最后发出去，正文里不用再重复路径',
+          };
+        },
         cfgOf: () => cfg,
         stateOf: () => qqTurn.get(sidFor()) || { parts: 0 },
         log: (m) => log.warn(m),
@@ -1704,6 +1822,30 @@ export function apply(ctx) {
         .catch((e) => {
           qqToolState.reason = e?.message ?? String(e);
           log.warn(`QQ 工具挂载异常：${qqToolState.reason}`);
+        });
+
+      /**
+       * 表情包工具：模型想要图时问一次，拿到真实路径再发。
+       *
+       * 为什么**无条件**挂上（而不是等用户建了分类目录再挂）：
+       * 注册只发生一次，而用户随时可能在面板旁边建一个 `开心/` 目录。
+       * 无条件挂上，工具立刻可用；要不要引导模型去用它，由提示词那边决定
+       * （`stickers.prompt()` 在平铺模式下根本不提这个工具）。
+       *
+       * 挂不上不抛错：表情是增强，不能因为工具的版本差异让整轮对话挂掉。
+       */
+      registerStickerTools({
+        agent,
+        pickOf: ({ category, limit }) => stickers.pick(cfg.stickers, { category, limit }),
+        log: (m) => log.warn(m),
+      })
+        .then((r) => {
+          if (r.ok) log.info(`表情工具已挂上：${r.names.join('、')}（${r.mode}）`);
+          else log.warn(`表情工具没挂上：${r.reason}`);
+          if (r.off) mountOffs.push(r.off);
+        })
+        .catch((e) => {
+          log.warn(`表情工具挂载异常：${e?.message ?? String(e)}`);
         });
     }
 
@@ -1795,15 +1937,33 @@ export function apply(ctx) {
              * 读不到清单（老版本没有 schemas / 调用抛错）要按旧行为把这段留下，
              * 否则分段发言、表情、@ 会整块消失——比「多一段提示词」严重得多。
              */
-            if (Array.isArray(list) && !list.some((s) => String(s?.name ?? s?.tool?.name ?? '') === 'qq_send')) return '';
-            return [
+            const names = Array.isArray(list)
+              ? new Set(list.map((s) => String(s?.name ?? s?.tool?.name ?? '')))
+              : null;
+            if (names && !names.has('qq_send')) return '';
+            const lines = [
               '【发言方式】',
-              '你手上有两个工具：`qq_send`（发一段话）和 `qq_close`（给这段对话收尾）。',
+              '你手上有这几个工具：`qq_send`（发一段话）、`qq_close`（给这段对话收尾）'
+                + '，以及（装了的话）`qq_send_file`（发一个文件）。',
               '· 想说话就调 `qq_send`，调几次由你定（一轮最多 3 段）。**别把要发的话写进正文**。',
               '· 调过 `qq_send` 之后，你回复的正文**不会**再发出去——正文只当思考用。',
               '· 聊到自然结束、对方要走的时候，用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后可以不说话。',
               '· 一个工具都不调时，正文会照常发出去（旧方式）。**不要又调工具又写正文**——那样只发工具那条，正文会被丢掉。',
-            ].join('\n');
+            ];
+            /**
+             * 文件这一条**只在工具真的挂着时**才说。
+             *
+             * 说出来但工具没挂，模型会去调一个不存在的东西，失败后整轮白费；
+             * 反过来，工具挂着却不说，它就完全不知道有这回事，只会答
+             * 「我发不了文件」——这里以前就是这么错过一次的。
+             */
+            if (!names || names.has('qq_send_file')) {
+              lines.push(
+                '· 要发文件（文档、表格、压缩包、图片都算）就调 `qq_send_file`，参数是**绝对路径**，一轮最多一个。'
+                + '路径要来自你确实看到过的文件，别凭印象拼；它发不出去会直接告诉你。',
+              );
+            }
+            return lines.join('\n');
           },
         }),
       );
@@ -2341,7 +2501,7 @@ export function apply(ctx) {
        * 如果等 run 回来再清，就把这一轮刚记下的段数一起抹了。
        */
       const sidTurn = agent?.session?.id || '';
-      if (sidTurn) qqTurn.set(sidTurn, { parts: 0, texts: [], closed: false });
+      if (sidTurn) qqTurn.set(sidTurn, { parts: 0, texts: [], closed: false, files: 0, fileNames: [] });
 
       const rawReply = await turns.run(agent, text, {
         source: { kind: 'roost', chatId: chat.chatId, msgId: payload.id },
@@ -2377,6 +2537,26 @@ export function apply(ctx) {
       const spoken = used?.texts?.length ? used.texts.join('\n') : reply;
 
       /**
+       * 这一轮发了什么文件（一轮最多一个，所以这是个 0/1 的痕迹）。
+       * 只发文件不说话时，全靠它让日记有内容可写。
+       */
+      const fileNote = (used?.fileNames ?? []).length
+        ? `（发了文件：${used.fileNames.join('、')}）`
+        : '';
+
+      /**
+       * 日记里到底记什么。
+       *
+       * 两个都要记，不能二选一：
+       *   · 只说「发了文件」→ 那句话不见了；
+       *   · 只说那句话 → 「我给他发过这份文件」在长期记忆里不存在，
+       *     下一轮可能重复发，或者反过来否认发过。
+       * 以前这里是 `spoken || fileNote`，于是「发文件顺便说一句」这种
+       * **最常见的交付形态**恰好两头漏。
+       */
+      const journalText = [spoken, fileNote].filter(Boolean).join('\n');
+
+      /**
        * 回话。
        *
        * **模型走工具发过就不再发正文**：`qq_send` 已经把话送进 ai-chat 的
@@ -2394,7 +2574,7 @@ export function apply(ctx) {
       if (used?.parts > 0) {
         // 分几段发的每一段都已经单独发成功过了（`qq_send` 一次一成功），
         // 这里的空文本只是收尾——收尾失败也不影响"话已经说出去了"。
-        journalAdd(payload, chat, spoken, 'bot');
+        journalAdd(payload, chat, journalText, 'bot');
         await postReply(payload, '', true);
       } else if (used?.closed && !reply) {
         /**
@@ -2410,10 +2590,16 @@ export function apply(ctx) {
          *
          * 这一支不写日记：她一个字都没说。
          */
+        /**
+         * 收尾这一支**只在她一个字没说时**才走到，所以以前一条日记都不写。
+         * 但「发完文件就退场」是正常结局——文件那件事得留下，
+         * 否则下一轮她完全不记得自己发过东西。
+         */
+        if (fileNote) journalAdd(payload, chat, fileNote, 'bot');
         await postReply(payload, '<skip>', true);
       } else {
         await postReply(payload, reply, true);
-        journalAdd(payload, chat, spoken, 'bot');
+        journalAdd(payload, chat, journalText, 'bot');
       }
 
       /**
@@ -4002,6 +4188,8 @@ export function apply(ctx) {
           ok: true,
           dir: stickers.dir(cfg.stickers),
           items: stickers.list(cfg.stickers),
+          /** 分类清单（一级子目录）。平铺时为空数组，前端可以据此切换展示 */
+          categories: stickers.categories(cfg.stickers),
           /** 注入到提示词里的那段有多长：上下文页要显示它吃了多少预算 */
           chars: stickers.prompt(cfg.stickers).length,
         }),
