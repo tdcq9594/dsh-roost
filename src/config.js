@@ -331,7 +331,13 @@ export const DEFAULTS = {
      * `raw.githubusercontent.com` / `gitee.com`），否则面板就成了内网探测器。
      */
     repo: {
-      /** 例：["https://raw.githubusercontent.com/我/我的fork/main/personas"] */
+      /**
+       * 例：["https://raw.githubusercontent.com/我/我的fork/main"]
+       *
+       * **填人格目录的地址**（index.json 就在它下面），不是仓库 URL 本身。
+       * 官方仓库的根目录就是人格目录，所以结尾到 `main` 为止；如果你 fork 后
+       * 把人格放在子目录里，这里要带上那个子目录名。
+       */
       sources: [],
     },
   },

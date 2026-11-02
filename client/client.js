@@ -1576,7 +1576,7 @@ select.roost-input{color-scheme:dark}
             ? h('div', { style: { marginTop: 4 } },
                 h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
                   h('div', { style: { fontSize: 12, fontWeight: 650 } },
-                    `仓库 ${repo?.repo || 'tdcq9594/dsh-roost'} · personas/`),
+                    `仓库 ${repo?.repo || 'tdcq9594/dsh-roost-personas'}`),
                   h('button', {
                     type: 'button', className: 'roost-btn',
                     onClick: () => loadRepo(true),
@@ -3173,7 +3173,7 @@ select.roost-input{color-scheme:dark}
             h('div', { className: 'roost-note', style: { marginTop: 2 } },
               repo && repo.gate && repo.gate.ok === false
                 ? repo.gate.why + '，先升级本体。'
-                : '从 dsh-roost 仓库的 personas/ 拉。只覆盖没改过的，你自己改过和自建的一个不碰；即时生效不用重启。'),
+                : '从 dsh-roost-personas 仓库拉。只覆盖没改过的，你自己改过和自建的一个不碰；即时生效不用重启。'),
           ),
           h('div', { className: 'roost-acts' },
             h('button', {
