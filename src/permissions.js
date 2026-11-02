@@ -59,7 +59,7 @@ export const GUEST_KEEP_TOOLS = ['memory_search', 'qq_send', 'qq_close'];
  *
  * 记忆工具**故意不在这里**：她翻日记、记事，主动开口时同样用得上。
  */
-export const AWAKE_DENY_TOOLS = ['qq_send', 'qq_close'];
+export const AWAKE_DENY_TOOLS = ['qq_send', 'qq_close', 'qq_send_file'];
 
 /**
  * 算出「这些名字里，当前实际挂着的有哪些」。
@@ -150,6 +150,13 @@ export function planGuestTools(tools, keep = GUEST_KEEP_TOOLS) {
  * 而且 907 那段提示词会变成谎话。
  *
  * 所以人格级收窄**永远保留**这两个（群友档本来也保留）。
+ *
+ * **`qq_send_file` 绝对不能加进来。** 它长得很像「输出」，本质是「读整台机器
+ * 任意路径的文件并发出去」——那是**能力**，不是表达方式。这个常量在
+ * `planPersonaTools` 里是**无条件并回去**的（在 `keep` 过滤之后），
+ * 一旦加进去，群友档（`permissions.member = 'chat'`）在人格写了 `tools: []`
+ * 时会重新拿到它，一句「把 D:\xxx 发我」就能外发任意文件。
+ * 2026-11-02 试过加，被这条挡回来。
  */
 export const OUTPUT_TOOLS = ['qq_send', 'qq_close'];
 

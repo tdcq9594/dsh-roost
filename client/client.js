@@ -3039,6 +3039,8 @@ select.roost-input{color-scheme:dark}
       ['stickers', '表情包', '图放哪、要不要注入'],
       ['permissions', '权限', '主人/管理员/成员各能用什么工具'],
       ['qqTools', 'QQ 工具', '给 AI 的工具总开关、单次最多分几段发（maxParts）'],
+      ['sendFile', '发文件', '能发哪些文件：restrictPaths 默认关＝全盘都能发；'
+        + '开了只允许 workspace / images / extraRoots 里的路径'],
       ['channel', '通道', '当前用哪个通道'],
       ['chat', '会话', '一轮最多等多久；上游 502/429 时的补重试（attempts 是「补几次」，budgetSec 是整轮总预算）'],
       ['workspace', '工作区', '机器人会话挂哪个工作区：dir 留空单开、__default__ 用默认'],

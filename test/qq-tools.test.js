@@ -13,8 +13,20 @@ import { buildQqToolDefs, buildAtPrefix, MAX_PARTS, AT_ID_RE } from '../src/qq-t
  *
  * @param {object} [o]
  */
-function make({ kind = 'c2c', said = '', hasPayload = true, maxParts = MAX_PARTS, sendFails = false, note = '' } = {}) {
-  const box = { sent: [], opts: [], parts: 0, closed: false, closedWith: null };
+function make({
+  kind = 'c2c',
+  said = '',
+  hasPayload = true,
+  maxParts = MAX_PARTS,
+  sendFails = false,
+  note = '',
+  /**
+   * 发文件的实现。**不传就是没装**——`buildQqToolDefs` 靠这个决定
+   * 要不要注册 `qq_send_file`，所以「刻意不传」和「忘了传」必须长得一样。
+   */
+  fileOf = null,
+} = {}) {
+  const box = { sent: [], opts: [], parts: 0, closed: false, closedWith: null, fileCalls: [] };
 
   const defs = buildQqToolDefs({
     callerOf: () => ({
@@ -36,12 +48,18 @@ function make({ kind = 'c2c', said = '', hasPayload = true, maxParts = MAX_PARTS
       box.closedWith = r;
       return { ok: true, why: r.point };
     },
+    fileOf: fileOf
+      ? async (p, opts = {}) => {
+          box.fileCalls.push({ p, opts });
+          return fileOf(p, opts);
+        }
+      : undefined,
     cfgOf: () => ({ qqTools: { maxParts } }),
     stateOf: () => ({ parts: box.parts }),
   });
 
   const by = (n) => defs.find((d) => d.name === n);
-  return { box, send: by('qq_send'), close: by('qq_close'), defs };
+  return { box, send: by('qq_send'), close: by('qq_close'), file: by('qq_send_file'), defs };
 }
 
 /* ---------------- 形状 ---------------- */
@@ -298,4 +316,147 @@ test('qq_close：resume 可以不给', async () => {
   const r = await close.execute({ point: '聊完了' });
   assert.equal(r.ok, true);
   assert.equal(box.closedWith.resume, '');
+});
+
+/* ---------------- qq_send_file ---------------- */
+
+/**
+ * 没给 `fileOf` 就**不注册**这个工具。
+ *
+ * 注册一个调了就炸的壳子，比没有更糟：提示词会照着工具清单教模型用它，
+ * 于是每轮都去调一个必然失败的东西，一整轮模型调用白花。
+ */
+test('qq_send_file：没传 fileOf 时清单里根本没有它', () => {
+  const { defs, file } = make();
+  assert.equal(file, undefined);
+  assert.deepEqual(defs.map((d) => d.name).sort(), ['qq_close', 'qq_send']);
+});
+
+test('qq_send_file：传了 fileOf 就多一个工具，形状和其它工具一致', () => {
+  const { defs, file } = make({ fileOf: async () => ({ ok: true }) });
+  assert.deepEqual(defs.map((d) => d.name).sort(), ['qq_close', 'qq_send', 'qq_send_file']);
+  assert.equal(typeof file.execute, 'function');
+  assert.ok(file.parameters.file_path, '路径参数名要对');
+  assert.equal(file.parameters.file_path.required, true);
+  assert.equal(file.parameters.type, undefined, 'parameters 必须是扁平表，不能是 JSON Schema');
+});
+
+test('qq_send_file：正常发一个，路径 trim 后交给宿主', async () => {
+  const { file, box } = make({
+    fileOf: async (p) => ({ ok: true, file: 'a.docx', size: 2048, note: `收到 ${p}` }),
+  });
+  const r = await file.execute({ file_path: '  C:\\Users\\me\\报告.docx  ' });
+  assert.equal(r.ok, true);
+  assert.deepEqual(box.fileCalls, [{ p: 'C:\\Users\\me\\报告.docx', opts: {} }]);
+});
+
+test('qq_send_file：只传路径，不给宿主多余参数', async () => {
+  /**
+   * 以前的 `name` 参数是**假承诺**：工具说明写着「对方看到的文件名」，
+   * 但宿主、`postReply`、框架 `replyFile` 三层都不认它。
+   * 传了没人消费的参数比不传更糟——模型会以为自己改了名。
+   */
+  const { file, box } = make({ fileOf: async () => ({ ok: true }) });
+  await file.execute({ file_path: '/tmp/a.pdf' });
+  assert.equal(box.fileCalls.length, 1);
+  assert.equal(box.fileCalls[0].p, '/tmp/a.pdf');
+  /** 桩的 opts 默认是 `{}`；只要没塞 name 之类的东西，就还是空对象 */
+  assert.deepEqual(box.fileCalls[0].opts, {}, '别再往宿主塞没人消费的参数');
+});
+
+test('qq_send_file：文件不存在时把 missing 原样带回模型', async () => {
+  const { file, box } = make({
+    fileOf: async (p) => ({ ok: false, reason: 'missing', message: `这个文件不存在：${p}` }),
+  });
+  const r = await file.execute({ file_path: '/tmp/没有这个.docx' });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'missing');
+  assert.match(r.message, /不存在/);
+  assert.equal(box.fileCalls.length, 1, '要真的问过宿主才知道缺不缺');
+});
+
+/**
+ * 没有 payload = 这一轮是主动开口，没有"正在回的那条消息"。
+ *
+ * 关键在于**别去碰 fileOf**：调了也没用，只会多一条误导性的错误。
+ */
+test('qq_send_file：没有 payload 时直接拒，不碰 fileOf', async () => {
+  const { file, box } = make({ hasPayload: false, fileOf: async () => ({ ok: true }) });
+  const r = await file.execute({ file_path: '/tmp/a.pdf' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /主动开口/);
+  assert.equal(box.fileCalls.length, 0);
+});
+
+/**
+ * 宿主那边的 `reason` 必须**原样**回到模型手里。
+ *
+ * `no-payload` / `too-many` / `not-file` 都是宿主判的，工具层不许改写，
+ * 否则模型分不清「该换个文件」还是「该等下一轮」。
+ */
+test('qq_send_file：宿主的 reason 原样透传（no-payload / too-many / not-file）', async () => {
+  for (const reason of ['no-payload', 'too-many', 'not-file']) {
+    const { file } = make({
+      fileOf: async () => ({ ok: false, reason, message: `宿主说：${reason}` }),
+    });
+    const r = await file.execute({ file_path: '/tmp/a.pdf' });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, reason);
+    assert.match(r.message, new RegExp(reason));
+  }
+});
+
+test('qq_send_file：一轮超过 1 个时宿主回 too-many，工具照实转达', async () => {
+  const { file } = make({
+    fileOf: async () => ({ ok: false, reason: 'too-many', message: '这一轮已经发过一个文件了，剩下的下一轮再说。' }),
+  });
+  const r = await file.execute({ file_path: '/tmp/第二个.pdf' });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'too-many');
+  assert.match(r.message, /下一轮/);
+});
+
+test('qq_send_file：路径为空时不调宿主，只说清楚要什么', async () => {
+  const { file, box } = make({ fileOf: async () => ({ ok: true }) });
+  for (const bad of ['', '   ', undefined, null]) {
+    const r = await file.execute({ file_path: bad });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /绝对路径/);
+  }
+  assert.equal(box.fileCalls.length, 0);
+});
+
+/**
+ * `fileOf` 抛错（回话通道断了、stat 抛 EACCES）必须变成工具失败，
+ * **不能把异常抛给 DSH**——抛出去整轮就挂了，模型连"换条路"的机会都没有。
+ */
+test('qq_send_file：宿主抛错时变成 ok:false，把原因带上', async () => {
+  const { file } = make({
+    fileOf: async () => {
+      throw new Error('回话通道连不上');
+    },
+  });
+  const r = await file.execute({ file_path: '/tmp/a.pdf' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /发文件失败/);
+  assert.match(r.message, /回话通道连不上/);
+});
+
+/**
+ * `output.render` 同样必须是内容块数组。
+ *
+ * 这条单列一次，是因为 `qq_send_file` 的返回值里有 `size` / `note` 这些
+ * 非字符串字段——顺手写个 `JSON.stringify` 之外的返回就会把它变成字符串。
+ */
+test('qq_send_file：output.render 返回内容块数组，且内容可读', () => {
+  const { file } = make({ fileOf: async () => ({ ok: true }) });
+  const out = file.output.render({}, { ok: true, file: '报告.docx', size: 2048, note: '轮末发' });
+  assert.ok(Array.isArray(out));
+  assert.equal(out[0].type, 'text');
+  assert.equal(typeof out[0].text, 'string');
+  assert.match(out[0].text, /报告\.docx/);
+  // 空值也要能渲染（工具第一次被调、还没返回值时的投影）
+  const empty = file.output.render({}, undefined);
+  assert.ok(Array.isArray(empty));
+  assert.equal(empty[0].type, 'text');
 });

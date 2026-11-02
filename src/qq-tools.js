@@ -100,6 +100,64 @@ export function buildAtPrefix({ at, kind, markdown = true, parts = 0, senderId =
 }
 
 /**
+ * `qq_send_file`：把本地文件发出去。
+ *
+ * 为什么是**工具**而不是正文里的 `<<file: 路径>>` 标记（腾讯官方
+ * `dsh-qqbot` 的 `qqbot_send_file` 也是工具形态，不是巧合）：
+ *   ① 路径里有空格、中文、反斜杠，靠正则对抗迟早出岔子；
+ *   ② `qq_send` 逐段发时每段只取 `parseActions().text`，标记会被摘掉而
+ *      **不进 media** —— 文件静默消失（2026-11-02 记过的真事，图片同此病）；
+ *   ③ 工具能当场回「这个文件不存在」，标记方案只能靠事后翻日志。
+ *
+ * 参数只收路径：发给谁由宿主从这一轮的消息上下文取（`callerOf` 的 payload）。
+ * 不让模型填 openid —— 那是二十多位随机串，抄错一位官方照样 200，
+ * 只是没人收到，比报错难查得多。
+ *
+ * @param {object} o
+ * @param {() => {hasPayload:boolean}} o.caller
+ * @param {(path:string, opts:{name:string}) => Promise<object>} o.fileOf
+ */
+function buildSendFileDef({ caller, fileOf }) {
+  return {
+    name: 'qq_send_file',
+    description:
+      '把一个**已经存在**的本地文件发给对方（图片、文档、表格、压缩包都行，按扩展名自动分类）。'
+      + '参数给绝对路径，比如 C:\\Users\\me\\Desktop\\报告.docx 或 /home/me/a.pdf。'
+      + '一轮最多发 1 个，文件夹不行——要发多个就分几轮说。'
+      + '路径要来自你真正看到过的文件（列过目录、刚生成过），**不要凭印象拼**。'
+      + '文件不存在会当场告诉你；所以别先答应对方「马上发给你」，试过再说。',
+    parameters: {
+      file_path: {
+        type: 'string',
+        required: true,
+        description: '文件的绝对路径（带扩展名）',
+      },
+    },
+    output: {
+      schema: { type: 'object' },
+      /** 必须是内容块数组——返回字符串会让 DSH 在结果投影处炸掉 */
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ file_path } = {}) {
+      const c = caller();
+      if (!c.hasPayload) {
+        return {
+          ok: false,
+          message: '这一轮是主动开口，没有"正在回的那条消息"，发不了文件。',
+        };
+      }
+      const p = String(file_path ?? '').trim();
+      if (!p) return { ok: false, message: '要发哪个文件？给绝对路径。' };
+      try {
+        return await fileOf(p);
+      } catch (e) {
+        return { ok: false, message: `发文件失败：${e?.message ?? e}` };
+      }
+    },
+  };
+}
+
+/**
  * 拼工具定义。抽成纯函数是为了能单测——
  * 次数上限和「群聊不能收尾」这类判断写错，表现是刷屏或者群里莫名退场，
  * 都是只能靠线上观察才会发现的那种错。
@@ -112,7 +170,7 @@ export function buildAtPrefix({ at, kind, markdown = true, parts = 0, senderId =
  * @param {() => object} o.cfgOf
  * @param {() => {parts:number}} o.stateOf 本轮已发段数
  */
-export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
+export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf }) {
   const caller = () => callerOf?.() || { chatId: '', kind: '', said: '', hasPayload: false, bucket: '' };
   const maxParts = () => {
     const n = Number(cfgOf?.()?.qqTools?.maxParts);
@@ -255,7 +313,18 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
     },
   };
 
-  return [send, close];
+  return [
+    send,
+    close,
+    /**
+     * 没给 `fileOf` 就**不注册**这个工具，而不是注册一个调了就炸的壳子。
+     *
+     * 提示词那边是按「清单里有没有 `qq_send_file`」决定要不要教模型用它，
+     * 所以这里少注册一个，等于自动闭嘴；注册了却是坏的，就是「教了它一个
+     * 必然失败的操作」——那种一轮模型调用直接白花。
+     */
+    ...(typeof fileOf === 'function' ? [buildSendFileDef({ caller, fileOf })] : []),
+  ];
 }
 
 /**
@@ -266,8 +335,8 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf }) {
  *
  * @returns {Promise<{ok:boolean, names:string[], reason?:string, mode?:string, off?:Function}>}
  */
-export async function registerQqTools({ agent, callerOf, sendOf, closeOf, cfgOf, stateOf, log = () => {} }) {
-  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, cfgOf, stateOf });
+export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, log = () => {} }) {
+  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf });
   const registry = agent?.ctx?.tools;
   if (!registry?.register) {
     /**
