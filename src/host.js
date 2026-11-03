@@ -56,6 +56,9 @@ import { createSyncRetry } from './sync-retry.js';
 import { fitBudget } from './budget.js';
 import { sessionTitle, nextTitle } from './chat-name.js';
 import { createSwitchNote } from './switch-note.js';
+import { createTts, SHERPA_MODELS } from './tts.js';
+import { createTtsInstaller } from './tts-install.js';
+import { createGptSovits } from './gpt-sovits.js';
 
 export const name = 'roost';
 
@@ -280,6 +283,64 @@ export function apply(ctx) {
   }
 
   let cfg = loadConfig();
+  const tts = createTts({
+    cfgOf: () => cfg,
+    dataDir,
+    log: (m) => log.warn(m),
+  });
+  /**
+   * 本地语音的一键安装。
+   *
+   * 和 `tts` 分开成两个对象：合成是每轮都可能调的，安装是一辈子点一两次的，
+   * 混在一起会让「合成路径」里挂着一堆下载状态。
+   */
+  const ttsInstaller = createTtsInstaller({
+    dataDir,
+    log: (m) => log.info(m),
+    /** 装完马上把模型读进内存，用户第一次说话就不用等那 5 秒 */
+    onDone: () => { tts.warmup().catch(() => {}); },
+  });
+
+  /**
+   * GPT-SoVITS 的一键启动。
+   *
+   * 用户填一个安装目录，这边负责挑端口、拉进程、等就绪，**就绪后把
+   * baseUrl / endpointPath / apiVersion 自动写进配置**——这几项本来是
+   * 手抄最容易错的（端口尤其：9880 在 Windows 保留段里，绑不上）。
+   */
+  const gptLauncher = createGptSovits({
+    log: (m) => log.info(m),
+    onReady: ({ port, dir }) => {
+      const info = gptLauncher.probe(dir);
+      if (!info.ok) return;
+      const g = cfg.tts?.gptSovits || {};
+      cfg = patchConfig({
+        tts: {
+          gptSovits: {
+            installDir: dir,
+            baseUrl: `http://127.0.0.1:${port}/`,
+            endpointPath: info.endpointPath,
+            apiVersion: info.apiVersion,
+            /**
+             * 参考音频只在**用户没填**的时候才替它选。
+             * 填过就尊重原值——那个路径是他自己挑的音色样本，
+             * 我们猜出来的候选（训练切片）未必是同一个。
+             */
+            ...(String(g.referWavPath || '').trim() ? {} : { referWavPath: info.refCandidates[0] || '' }),
+          },
+        },
+      });
+      log.info(`GPT-SoVITS 就绪，配置已自动填好：127.0.0.1:${port}（${info.weightVersion || info.apiVersion}）`);
+    },
+  });
+  /**
+   * 启动后在后台预热一次本地语音。
+   *
+   * 只有用户已经启用 sherpa 才会真的加载（`warmup()` 自己判断），所以
+   * 关着语音的人不会平白多花 30MB 内存。延迟 5 秒是为了不跟启动时的
+   * 其它初始化抢 CPU。
+   */
+  setTimeout(() => { tts.warmup().catch(() => {}); }, 5000).unref?.();
 
   const sessions = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
   const turns = createTurnRunner({ ctx, log, timeoutSec: cfg.chat.turnTimeoutSec });
@@ -1976,6 +2037,20 @@ export function apply(ctx) {
               '· 调过 `qq_send` 之后，你回复的正文**不会**再发出去——正文只当思考用。',
               '· 聊到自然结束、对方要走的时候，用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后可以不说话。',
               '· 一个工具都不调时，正文会照常发出去（旧方式）。**不要又调工具又写正文**——那样只发工具那条，正文会被丢掉。',
+              /**
+               * 语音这一条必须说，而且必须点明「只能在正文里」。
+               *
+               * 上面刚说完「别把要发的话写进正文」，而 `<<say>>` 恰恰只能
+               * 写在正文里——不点破这个例外，模型就会把它塞进 `qq_send`，
+               * 结果群里收到一串 `<<say: ...>>` 字面量（2026-11-03 线上真实发生）。
+               *
+               * 只在语音真的开着时说：关着的时候教它写 `<<say>>`，
+               * 等于让它输出一个没人执行、还会漏给用户看的标记。
+               */
+              ...(cfg.tts?.enabled === true
+                ? ['· 想发**语音条**时，把 `<<say: 要念的内容>>` 写在**回复正文**里——'
+                  + '这个标记只有正文能执行，`qq_send` 发不出去（会原样进群）。这种情况别调 `qq_send`。']
+                : []),
             ];
             /**
              * 文件这一条**只在工具真的挂着时**才说。
@@ -2782,6 +2857,8 @@ export function apply(ctx) {
       ports: list,
       token: cfg.server.token,
       onInbound,
+      onTts: (text) => tts.synthesize(text),
+      onTtsStatus: () => tts.status(),
       log: (m) => log.info(m),
       /**
        * bind 成功后：写租约 + 同步 ai-chat。
@@ -2854,6 +2931,13 @@ export function apply(ctx) {
       server = null;
       clearSyncRetry();
       turns.dispose();
+      /**
+       * 顺手把自己起的 GPT-SoVITS 带走。
+       *
+       * 不带的话，重载插件后那个 python 还在后台占着几 GB 显存，
+       * 用户只看到「显存莫名其妙满了」。
+       */
+      gptLauncher.dispose();
     };
   }, 'dsh-roost: 收消息服务');
 
@@ -4209,6 +4293,102 @@ export function apply(ctx) {
        * 没配就返回 `ok:false`，**不建会话、不跑模型**。
        */
       route('/speakup/fire', async (req, res) => send(res, 200, await speakUp.fire('手动'))),
+
+      /**
+       * 语音合成的状态（面板用）。
+       *
+       * 名字带 `-status` 是为了和固定服务上的 `/tts` 区分开：那个是
+       * **合成入口、返回二进制音频**，这个是面板读状态、返回 JSON。
+       * 两个同名时，看日志/抓包的人第一眼一定会认错。
+       *
+       * 「开没开、配齐没配齐、缺哪个可选包」这些判断只有 `tts.js` 知道，
+       * 面板不该复制一份规则——复制了就会和实现漂移，用户看到「已配置」
+       * 而实际必填项是空的。所以这里直接把它算好的结果原样交出去。
+       */
+      route('/tts-status', async (req, res) => {
+        let status;
+        try {
+          status = await tts.status();
+        } catch (e) {
+          status = { enabled: false, configured: false, reason: 'status_unavailable' };
+        }
+        /**
+         * 顺带把安装状态和占用带回去。
+         *
+         * 面板在「语音合成」卡片里同时要看三件事：能不能用、装到哪一步了、
+         * 占了多少磁盘。分成三个接口就要三次轮询，中间还会出现
+         * 「状态说已配置、安装说还在下」这种自相矛盾的瞬间。
+         */
+        const model = String(cfg.tts?.sherpa?.model || 'aishell3');
+        return send(res, 200, {
+          ok: true,
+          ...status,
+          install: ttsInstaller.status(),
+          usage: ttsInstaller.usage(model),
+          /** GPT-SoVITS 的进程状态（有没有在跑、端口、最后几行日志） */
+          gpt: gptLauncher.status(),
+          models: Object.entries(SHERPA_MODELS).map(([id, spec]) => ({
+            id, label: spec.label, approxMB: spec.approxMB,
+          })),
+        });
+      }),
+
+      /**
+       * 一键安装本地语音引擎 + 模型。
+       *
+       * 返回**立刻**响应，不等下载完：30MB 模型 + 23MB 引擎，等完再回
+       * 请求会超时，而且面板也拿不到中途进度。进度靠轮询 `/tts-status`
+       * 里的 `install` 字段。
+       */
+      route('/tts/install', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const model = String(body?.model || cfg.tts?.sherpa?.model || 'aishell3');
+        const r = ttsInstaller.start(model);
+        return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      route('/tts/install-cancel', async (req, res) => {
+        const r = ttsInstaller.cancel();
+        return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      /**
+       * 卸载。只删 `tts-runtime` 和对应的模型目录，不碰配置——
+       * 用户重装之后 provider 还是 sherpa，不用重新选一遍。
+       */
+      route('/tts/uninstall', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const model = String(body?.model || cfg.tts?.sherpa?.model || 'aishell3');
+        const r = ttsInstaller.uninstall(model);
+        return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      /**
+       * 认一下这个目录是不是 GPT-SoVITS 的根目录。
+       *
+       * 只读不写：面板在用户填完目录、还没点启动时先探一次，把「找到什么」
+       * 摆出来（python 在哪、哪个版本、当前加载的角色是谁、有没有参考音频）。
+       * 填错了当场就知道，不用等启动失败。
+       */
+      route('/tts/gpt-probe', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const dir = String(body?.dir || cfg.tts?.gptSovits?.installDir || '');
+        return send(res, 200, gptLauncher.probe(dir));
+      }),
+
+      /**
+       * 一键启动。立刻返回，不等模型加载（实测 110 秒，HTTP 等不起）。
+       * 就绪后 `onReady` 会把 baseUrl / 路由 / 版本写进配置。
+       */
+      route('/tts/gpt-start', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const dir = String(body?.dir || cfg.tts?.gptSovits?.installDir || '');
+        const model = String(body?.model || cfg.tts?.gptSovits?.model || '');
+        const r = gptLauncher.start(dir, { model });
+        return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      route('/tts/gpt-stop', async (req, res) => send(res, 200, gptLauncher.stop())),
 
       route('/stickers', (req, res) =>
         send(res, 200, {

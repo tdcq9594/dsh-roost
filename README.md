@@ -73,6 +73,7 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ 本插件 ⇄ DSH �
 - ⬆️ **本体自更新**：设置页顶部查最新版、一键装。走 DSH 自己的 `pluginManager`（失败会回滚 `package.json` + `pnpm-lock.yaml`），装完提示重启。开发机（符号链接装的）自动禁用
 - 🎭 **双人格 preset**：私聊（`roost-private`）/ 群聊（`roost-social`）各一套提示词
 - 🖼️ **表情包**：图丢进目录就能用，文件名或侧车 `.tags` 当标签；图多了建子目录分类，`sticker_pick` 按需取图——**加图不会冲掉提示词缓存**
+- 🔊 **语音合成（选装，默认关）**：设置页「语音合成」卡片里选 **本地模型（一键安装，完全离线）**、OpenAI 兼容 `/audio/speech`，或本地 GPT-SoVITS 原生 API。本地模型点一下自动下 23MB 引擎 + 30MB 模型，装完就能用，**不联网、不要 Key**。不配就完全静默——不请求上游、不加载模型、不占提示词；配好后模型才能用 `<<say: 内容>>` 发语音条（转 silk 和发送在 ai-chat 那侧）
 
 ---
 
@@ -210,11 +211,60 @@ git clone https://github.com/tdcq9594/dsh-roost.git
   "speakUp": { /* 私聊排期：间隔/免打扰/每日上限 */ },
   "persona": { "current": "default", "byChat": {} },
   "stickers": { "enabled": true, "dir": "" },
+  "tts": {                  // 选装，默认关；面板「设置 → 语音合成」有专用表单
+    "enabled": false,
+    "provider": "openai",   // sherpa（本地离线）| openai | gpt-sovits
+    "baseUrl": "",          // openai: 含版本前缀，如 https://api.openai.com/v1
+    "apiKey": "",           // 面板里显示成 ******，原样保存不会覆盖真值
+    "model": "",            // openai: tts-1
+    "voice": "",            // openai: alloy
+    "timeoutSec": 30,
+    "maxChars": 300,        // 太长的会被 QQ 语音条截断，不如发文字
+    "sherpa": {             // provider=sherpa 时才用；引擎和模型都在数据目录，删目录即卸载
+      "model": "aishell3",  // 30MB / 8kHz / 174 个音色
+      "modelDir": "",       // 留空 = 数据目录/tts-models/vits-icefall-zh-aishell3
+      "sid": 88,            // 说话人编号（0-173），换一个就是换一个音色
+      "speed": 1,
+      "numThreads": 2
+    },
+    "gptSovits": {          // provider=gpt-sovits 时才用
+      "baseUrl": "http://127.0.0.1:9880",
+      "apiKey": "",         // 走反向代理时才填；本地原生 API 留空
+      "referWavPath": "",   // GPT-SoVITS 那台机器上的路径
+      "promptText": "",     // 必须与参考音频逐字一致
+      "promptLanguage": "中文",
+      "textLanguage": "中文",
+      "apiVersion": "v1",   // v1=api.py / v2=api_v2.py
+      "endpointPath": "/"
+    }
+  },
   "channel": { "current": "qq" }
 }
 ```
 
 **两边的地址要对上**：ai-chat 的「DSH 地址」= `http://127.0.0.1:<port>`。
+`server.token` 非空时，dsh-roost 会把它同步到 ai-chat 的「共享密钥」——
+不同步的话 `/inbound`、`/capabilities`、`/tts` 全是 401，而两边都不会主动说「密钥不对」。
+
+**本地语音（`provider=sherpa`）**：面板点「一键安装」，自动下 23MB 引擎（`sherpa-onnx-node`）
++ 30MB 模型（aishell3），解压后一共约 230MB，装到 `数据目录/tts-runtime` 和 `数据目录/tts-models`。
+**不进插件目录**——DSH 更新插件不会冲掉，卸载就是删这两个目录。
+
+- 那 230MB 里有 173MB 是 `rule.far`（多音字规则库）。它让「行长/银行」「2024年」这类读得准，所以留着
+- 解压用系统自带的 `tar`（Windows 10 1803+ / Linux / macOS 都有）。没有 tar 时会明确报错，不会假装在装
+- GitHub 下不动时，手动下 `vits-icefall-zh-aishell3.tar.bz2` 解压到 `tts-models/vits-icefall-zh-aishell3/` 即可，面板会认
+- 首次加载模型约 5 秒，之后合成 6 秒语音约 130ms。装完会自动预热，平时启动也会在后台预热一次
+- `sid` 是说话人编号（aishell3 有 174 个），换一个就是换一个音色
+
+**GPT-SoVITS（`provider=gpt-sovits`）**：面板填一个安装目录，点「一键启动」就行。
+
+- 自动认目录：找 `api_v2.py` / `api.py`、`runtime\python.exe`，从 `tts_infer.yaml` 读出当前加载的角色和版本
+- **扫描成下拉**：把 `GPT_weights_*` / `SoVITS_weights_*` 里的权重按角色名配对，同名的取最新 epoch，做成「角色」下拉；参考音频也扫出来做成下拉。选中的角色在服务就绪后通过 `/set_gpt_weights` + `/set_sovits_weights` 切过去，**不改你的 `tts_infer.yaml`**
+- 自动挑端口：从 17860 往上试绑。**不要用 9880**——它落在 Windows 保留段 9861–9960 里，绑上去是 `WinError 10013`
+- 就绪后自动把 `baseUrl` / `endpointPath` / `apiVersion` 写进配置，不用手抄
+- 参考音频只在**你没填**的时候才替你选；填过就尊重原值
+- 语种填「中文」「日文」就行，会自动转成 API 要的 `zh` / `ja`。v2 的字段是 `text_lang` / `prompt_lang`，v1 才是 `text_language`
+- 加载模型要一两分钟，期间面板会显示日志尾部；插件重载时会把进程一起带走
 
 ---
 

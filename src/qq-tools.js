@@ -29,6 +29,16 @@
 
 import { loadDefineTool, shapeTool } from './tools.js';
 import { acceptClose } from './closing.js';
+import { DOWNSTREAM_MARKERS } from './markers.js';
+
+/**
+ * 只有 ai-chat 才认识的标记（发图 / 发语音 / 按钮 / 语音条 / 静默）。
+ *
+ * 这些标记在**回复正文**里会被 ai-chat 的 `parseActions` 执行；
+ * 但 `qq_send` 走的是 `/r/reply` 直发通道，那边**不做标记解析**，
+ * 于是它们会被当成普通文字原样发进群。
+ */
+const DOWNSTREAM_RE = new RegExp(`<<\\s*(?:${DOWNSTREAM_MARKERS.join('|')})\\b`, 'i');
 
 /** 单轮最多发几段。QQ 被动回复同一条消息只让回 5 次（msg_seq 1–5），留余量 */
 export const MAX_PARTS = 3;
@@ -183,7 +193,9 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
       '把一段话发出去。想分两句说就调两次（每次一段），想只回一句就调一次。'
       + `一轮最多 ${maxParts()} 段，调多了会被拒。`
       + '**调过这个工具之后，回复正文就不会再自动发出去了**（正文只当思考用）——'
-      + '所以要么调工具、要么直接写正文，别两边都写。不想说话就一次都别调。',
+      + '所以要么调工具、要么直接写正文，别两边都写。不想说话就一次都别调。'
+      + '**这条通道只发文字**：不要在这里写 `<<say: …>>` 之类的语音标记，'
+      + '标记会被原样发进群里。要发语音就写在回复正文里，这一轮别调这个工具。',
     /** 扁平参数表（DSH defineTool 原生形状），普通注册时由 `shapeTool` 转换 */
     parameters: {
       text: {
@@ -216,6 +228,28 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
     async execute({ text, at } = {}) {
       const t = String(text ?? '').trim();
       if (!t) return { ok: false, message: '要说什么？' };
+      /**
+       * 下游标记在这条通道上发不出去，必须拦住。
+       *
+       * `<<say>>` / `<<image>>` / `<<voice>>` / `<<button>>` / `<<silence>>`
+       * 都是 **ai-chat** 解析的，而它只解析「模型最终回复的正文」；
+       * `qq_send` 走的是 `/r/reply` 直发通道，那边**不做标记解析**。
+       * 于是这些标记会被当成普通文字原样发进群——用户看到 `<<say: …>>`
+       * 或者一个本地文件路径，模型却以为语音/图片已经发出去了
+       * （2026-11-03 线上真实发生，用户当场问「为什么发出来的是文字」）。
+       *
+       * 不能「剥掉标记照发」：那只是把「标记泄漏」换成「该发语音却发了
+       * 文字」，模型依然不知道自己用错了通道，下次还这么干。直接拒绝，
+       * 并把正确写法说清楚，让它这一轮改用正文。
+       */
+      if (DOWNSTREAM_RE.test(t)) {
+        return {
+          ok: false,
+          message: '语音条 / 图片 / 按钮这类标记不能通过 qq_send 发：这条通道只发文字，'
+            + '标记会原样出现在群里。要发这些东西，就把标记写在**回复正文**里'
+            + '（正文会自动执行），并且这一轮不要调 qq_send。',
+        };
+      }
       const c = caller();
       /**
        * 没有"正在回的那条消息"时**引导她改用正文**，别让她以为这轮不能说话。

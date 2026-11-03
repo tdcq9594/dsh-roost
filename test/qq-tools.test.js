@@ -128,6 +128,52 @@ test('qq_send：空文本不发', async () => {
   assert.equal(box.sent.length, 0);
 });
 
+test('qq_send：拒绝语音标记，别让 <<say>> 原样发进群', async () => {
+  const { send, box } = make();
+  /**
+   * 2026-11-03 线上真实事故：模型把整句写成 `<<say: ...>>` 塞进 qq_send，
+   * 群里收到的是这串字面量。这条通道不经过 ai-chat 的标记解析，
+   * 所以必须在工具层拒掉，并告诉它改走正文。
+   */
+  const r = await send.execute({ text: '<<say: Sakura, 我在听。>>' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /不能通过 qq_send/);
+  assert.match(r.message, /回复正文/);
+  assert.equal(box.sent.length, 0, '带语音标记的那段一个字都不该发出去');
+});
+
+test('qq_send：say 大小写/空格写法都拦得住', async () => {
+  const { send, box } = make();
+  for (const text of ['<<SAY: 你好>>', '<< say : 你好>>', '前半句 <<say: 你好>> 后半句']) {
+    const r = await send.execute({ text });
+    assert.equal(r.ok, false, `${text} 应被拒`);
+  }
+  assert.equal(box.sent.length, 0);
+});
+
+test('qq_send：image / voice / button / silence 同样拦（都只有正文能执行）', async () => {
+  const { send, box } = make();
+  const cases = [
+    '<<image: C:/a/b.png>>',
+    '<<voice: C:/a/b.mp3>>',
+    '<<button: 点我 | 好的>>',
+    '<<silence>>',
+  ];
+  for (const text of cases) {
+    const r = await send.execute({ text });
+    assert.equal(r.ok, false, `${text} 应被拒`);
+    assert.match(r.message, /回复正文/);
+  }
+  assert.equal(box.sent.length, 0, '这些标记一个都不该发出去');
+});
+
+test('qq_send：正文里的普通尖括号不误伤', async () => {
+  const { send, box } = make();
+  const r = await send.execute({ text: '这个 <<不是标记>> 只是打字' });
+  assert.equal(r.ok, true);
+  assert.equal(box.sent.length, 1);
+});
+
 test('qq_send：超过上限就拒，并说清还剩几段', async () => {
   const { send, box } = make({ maxParts: 2 });
   await send.execute({ text: '一' });

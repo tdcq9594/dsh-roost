@@ -499,12 +499,13 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
             publicUrl: pluginConfig.publicUrl,
             apiKey: pluginConfig.apiKey ? '******' : '',
             /**
-             * 只读地把它露出来：功能页要显示「语音条开没开」。
+             * 宿主的共享密钥有没有同步过去。
              *
-             * 音色本来就只能在这边填（ai-chat 的配置），面板能读到状态就不用
-             * 再写一段「去插件设置里填 xxx」的跨插件教程——那种指引最容易过期。
+             * 以前这里露的是 ai-chat 的 `ttsVoice`（语音音色）——语音搬进宿主后
+             * 那个字段已经不存在了，继续读它只会永远是空串。换成真正会影响
+             * 「消息推不推得进去」的东西：密钥对不上就是 401，而且两边都不报错。
              */
-            ttsVoice: pluginConfig.ttsVoice ?? '',
+            tokenSynced: String(pluginConfig.dshToken || '') === String(cfgOf().server.token || ''),
           }
         : null,
       dshUrl: `http://127.0.0.1:${cfgOf().server.port}`,
@@ -782,10 +783,43 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       // 用户就是没打算走 DSH，不该硬改。**这个不用重试**
       return { ok: true, skipped: true, reason: 'not-dsh', message: 'ai-chat 没在用 DSH，不用改' };
     }
-    if (cur.dshUrl === want) return { ok: true, message: '已经是当前端口' };
 
-    await api('/api/plugins/ai-chat/config', { method: 'PUT', body: JSON.stringify({ dshUrl: want }) });
-    return { ok: true, message: `ai-chat 的 DSH 地址已改成 ${want}`, from: cur.dshUrl, to: want };
+    /**
+     * 共享密钥也要一起同步。
+     *
+     * `server.token` 非空时，宿主的 `/inbound`、`/capabilities`、`/tts`
+     * 都要求 `x-roost-token`。只同步地址不同步密钥的话，用户一设密钥
+     * 整条链路就 401——而两边都不会主动报「密钥不对」，表现只是机器人不回话。
+     *
+     * 清空也要同步：`wantToken` 为空而插件里还留着旧值时，说明用户把宿主的
+     * 密钥取消了，插件必须跟着清掉，否则同样 401。
+     */
+    const wantToken = String(cfgOf().server.token || '');
+    const curToken = String(cur.dshToken || '');
+
+    const patch = {};
+    if (cur.dshUrl !== want) patch.dshUrl = want;
+    if (curToken !== wantToken) patch.dshToken = wantToken;
+    if (!Object.keys(patch).length) return { ok: true, message: '已经是当前地址和密钥' };
+
+    await api('/api/plugins/ai-chat/config', { method: 'PUT', body: JSON.stringify(patch) });
+
+    /**
+     * 用 `in` 判断而不是看值真假：**清空密钥时 `patch.dshToken` 是空串**，
+     * 按真假判断会把这一段从文案里滤掉，用户只看到半句「ai-chat 的 」。
+     */
+    const hasUrl = 'dshUrl' in patch;
+    const hasToken = 'dshToken' in patch;
+    const changed = [
+      hasUrl ? `地址 ${cur.dshUrl || '(空)'} → ${want}` : '',
+      hasToken ? (wantToken ? '密钥已同步' : '密钥已清空') : '',
+    ].filter(Boolean).join('，');
+    return {
+      ok: true,
+      message: `ai-chat 的 ${changed}`,
+      ...(hasUrl ? { from: cur.dshUrl, to: want } : {}),
+      ...(hasToken ? { tokenSynced: Boolean(wantToken) } : {}),
+    };
   }
 
   async function configurePlugin(portOverride) {

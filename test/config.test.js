@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadConfig, saveConfig, patchConfig, readRawConfig, DEFAULTS, dataDir } from '../src/config.js';
+import { loadConfig, saveConfig, patchConfig, readRawConfig, DEFAULTS, dataDir, publicConfig } from '../src/config.js';
 
 /** 每个用例一个干净的 data 目录（dataDir() 每次读 env） */
 function freshDir() {
@@ -163,4 +163,58 @@ test('readRawConfig：没写过的键不会被默认值污染（迁移靠它判�
 test('聊天内切人格指令默认关闭（只对主人、不落盘）', () => {
   assert.equal(DEFAULTS.persona.command.enabled, false);
   assert.equal(DEFAULTS.persona.command.prefix, '/persona');
+});
+
+test('TTS 配置默认关闭且 provider 为配置项', () => {
+  freshDir();
+  assert.equal(DEFAULTS.tts.enabled, false);
+  assert.equal(loadConfig().tts.enabled, false);
+  assert.equal(loadConfig().tts.provider, 'openai');
+});
+
+test('配置全文：所有 secret 路径遮罩，保存掩码不会覆盖真值', () => {
+  freshDir();
+  saveConfig({
+    server: { token: 'server-secret' },
+    memory: { embedding: { model: 'embed', baseUrl: 'http://localhost/v1', apiKey: 'embed-secret' } },
+    tts: { enabled: true, apiKey: 'tts-secret', gptSovits: { apiKey: 'gpt-secret' } },
+  });
+
+  const view = publicConfig(loadConfig());
+  assert.equal(view.server.token, '******');
+  assert.equal(view.memory.embedding.apiKey, '******');
+  assert.equal(view.tts.apiKey, '******');
+  assert.equal(view.tts.gptSovits.apiKey, '******');
+
+  saveConfig(view);
+  const disk = JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'config.json'), 'utf8'));
+  assert.equal(disk.server.token, 'server-secret');
+  assert.equal(disk.memory.embedding.apiKey, 'embed-secret');
+  assert.equal(disk.tts.apiKey, 'tts-secret');
+  assert.equal(disk.tts.gptSovits.apiKey, 'gpt-secret');
+});
+
+test('局部配置保存：掩码保留旧值，显式空串能清除 TTS key', () => {
+  freshDir();
+  saveConfig({ tts: { apiKey: 'old-secret' } });
+  patchConfig({ tts: { apiKey: '******' } });
+  assert.equal(loadConfig().tts.apiKey, 'old-secret');
+  patchConfig({ tts: { apiKey: '' } });
+  assert.equal(loadConfig().tts.apiKey, '');
+});
+
+test('密钥：数组/对象这类非字符串值不会写进磁盘', () => {
+  freshDir();
+  /**
+   * 掩码回填只认「恰好等于 `******` 的字符串」，数组既不会被回填也不会被拦，
+   * 会原样落盘，之后发请求就拼出 `Bearer ******,******`（审查发现）。
+   */
+  saveConfig({ tts: { apiKey: ['******'] } });
+  assert.equal(loadConfig().tts.apiKey, '', '数组要当没设置');
+
+  saveConfig({ server: { token: { nested: 1 } } });
+  assert.equal(loadConfig().server.token, '', '对象也要当没设置');
+
+  saveConfig({ tts: { gptSovits: { apiKey: 12345 } } });
+  assert.equal(loadConfig().tts.gptSovits.apiKey, '', '数字同样不行');
 });

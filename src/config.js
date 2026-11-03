@@ -27,6 +27,62 @@ export const DEFAULTS = {
     /** 共享密钥。请求要带 X-Roost-Token 头；留空表示不校验（只绑本机时可行） */
     token: '',
   },
+  /**
+   * 可选语音合成。默认关闭：不请求上游、不加载本地模型。
+   * provider 的输出通过固定回环服务交给调用方，音频格式由响应 Content-Type 指明。
+   */
+  tts: {
+    enabled: false,
+    /** openai = OpenAI-compatible /audio/speech；gpt-sovits = 原生 API；sherpa = 本地 ONNX（离线） */
+    provider: 'openai',
+    /** OpenAI-compatible API 根地址，需包含版本前缀（例如 /v1） */
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    voice: '',
+    timeoutSec: 30,
+    maxChars: 300,
+    gptSovits: {
+      /** GPT-SoVITS 安装目录（含 api_v2.py 和 runtime 的那层）。填了就能在面板一键启动 */
+      installDir: '',
+      /** 要用的角色名（面板扫描出来的下拉）。留空 = 用 tts_infer.yaml 里已经加载的那个 */
+      model: '',
+      /** GPT-SoVITS API 根地址，例如 http://127.0.0.1:9880 */
+      baseUrl: '',
+      /** 反向代理可选 Bearer 密钥；原生本地 API 通常留空 */
+      apiKey: '',
+      /** GPT-SoVITS 服务进程能读取到的参考音频路径 */
+      referWavPath: '',
+      promptText: '',
+      promptLanguage: '中文',
+      textLanguage: '中文',
+      /** api.py 常见协议字段命名：v1=refer_wav_path，v2=ref_audio_path */
+      apiVersion: 'v1',
+      /** 原生 API 默认根路由；兼容 fork 可指定其固定相对路由 */
+      endpointPath: '/',
+    },
+    /**
+     * 本地 ONNX 推理（sherpa-onnx-node）。
+     *
+     * 引擎和模型都不进插件目录，放在数据目录里：
+     *   · `dataDir/tts-runtime/node_modules` —— 原生模块（23MB），删目录即卸载
+     *   · `dataDir/tts-models/<模型>`         —— 模型文件（aishell3 约 30MB）
+     *
+     * 这样 DSH 更新插件时不会把用户装的东西覆盖掉，也方便一键安装/卸载。
+     */
+    sherpa: {
+      /** 目前只有 aishell3（30MB / 8kHz / 174 个音色），加模型要在 tts.js 的 SHERPA_MODELS 里登记 */
+      model: 'aishell3',
+      /** 留空 = 数据目录/tts-models/vits-icefall-zh-aishell3；填了就按填的找 */
+      modelDir: '',
+      /** 说话人编号（aishell3 是 0-173），换一个就是换一个音色 */
+      sid: 88,
+      /** 语速倍率，1 是原速 */
+      speed: 1,
+      /** CPU 线程数。2 已经够快，加多了在小机器上反而抢 CPU */
+      numThreads: 2,
+    },
+  },
   chat: {
     /** 一轮最多等多久（秒）。ai-chat 那边等 180 秒，这里要更短，才能赶在它之前回话 */
     turnTimeoutSec: 150,
@@ -463,6 +519,64 @@ function pruneTo(shape, value) {
   return value === undefined ? shape : value;
 }
 
+const SECRET_MASK = '******';
+const SECRET_PATHS = [
+  ['server', 'token'],
+  ['memory', 'embedding', 'apiKey'],
+  ['tts', 'apiKey'],
+  ['tts', 'gptSovits', 'apiKey'],
+];
+
+function valueAt(root, path) {
+  return path.reduce((value, key) => value && typeof value === 'object' ? value[key] : undefined, root);
+}
+
+function putAt(root, path, value) {
+  let node = root;
+  for (const key of path.slice(0, -1)) {
+    if (!node[key] || typeof node[key] !== 'object' || Array.isArray(node[key])) node[key] = {};
+    node = node[key];
+  }
+  node[path.at(-1)] = value;
+}
+
+/** Masked values in a config-editor submission mean "keep existing", not a new secret. */
+function restoreMaskedSecrets(next, stored) {
+  const out = structuredClone(next && typeof next === 'object' ? next : {});
+  for (const path of SECRET_PATHS) {
+    if (valueAt(out, path) !== SECRET_MASK) continue;
+    const previous = valueAt(stored, path);
+    putAt(out, path, typeof previous === 'string' ? previous : '');
+  }
+  return out;
+}
+
+/**
+ * 密钥路径上只允许字符串。
+ *
+ * 上面那个回填只认**恰好等于 `******` 的字符串**——如果配置编辑器提交的是
+ * `{"apiKey": ["******"]}`（数组、对象），它既不会被回填、也不会被拦，
+ * 会原样写进磁盘，之后每次读配置都拿到一个非字符串的"密钥"，
+ * 发请求时拼出 `Bearer ******,******` 这种鬼东西（2026-11-03 审查发现）。
+ * 这里统一拍平：非字符串一律当"没设置"。
+ */
+function coerceSecrets(cfg) {
+  for (const path of SECRET_PATHS) {
+    const v = valueAt(cfg, path);
+    if (v !== undefined && typeof v !== 'string') putAt(cfg, path, '');
+  }
+  return cfg;
+}
+
+function maskSecrets(value) {
+  const out = structuredClone(value);
+  for (const path of SECRET_PATHS) {
+    const secret = valueAt(out, path);
+    if (typeof secret === 'string' && secret) putAt(out, path, SECRET_MASK);
+  }
+  return out;
+}
+
 export function saveConfig(next) {
   /**
    * 基线用 **DEFAULTS**，不用 `loadConfig()`。
@@ -481,8 +595,9 @@ export function saveConfig(next) {
    * 前提是 DEFAULTS 覆盖所有合法字段。已核对真实配置：除了 `tokenSet`，
    * 没有任何 DEFAULTS 之外的路径。
    */
-  const merged = merge(structuredClone(DEFAULTS), next);
-  const cfg = pruneTo(DEFAULTS, merged);
+  const safeNext = restoreMaskedSecrets(next, readRawConfig() || {});
+  const merged = merge(structuredClone(DEFAULTS), safeNext);
+  const cfg = coerceSecrets(pruneTo(DEFAULTS, merged));
   writeFileSync(FILE(), JSON.stringify(cfg, null, 2), 'utf8');
   return cfg;
 }
@@ -513,18 +628,10 @@ export function patchConfig(patch) {
 /** 给面板看：密钥打码 */
 export function publicConfig(cfg) {
   /**
-   * 先按 DEFAULTS 裁一遍。
+   * 先按 DEFAULTS 裁一遍，再统一遮住所有密钥路径。
    *
-   * `cfg` 来自 `loadConfig()`，而它会把磁盘上的键**全部**带出来——包括历史遗留的
-   * 展示字段 `tokenSet`。不裁的话它会出现在「配置全文」里，用户再点一次保存
-   * 就又写回磁盘了（这也是它当初能一直赖着不走的原因）。
-   *
-   * 另外这里**不额外加字段**：`token` 为 `''` 就是没设、为 `******` 就是设了，
-   * 光看这个就够判断，不需要 `tokenSet`。
+   * 不额外加 tokenSet / apiKeySet 字段：空串表示未设置，****** 表示已经设置。
+   * `saveConfig` 会把这些掩码回填成磁盘中的原值；显式提交空串仍能清除密钥。
    */
-  const clean = pruneTo(DEFAULTS, cfg);
-  return {
-    ...clean,
-    server: { ...clean.server, token: clean.server.token ? '******' : '' },
-  };
+  return maskSecrets(pruneTo(DEFAULTS, cfg));
 }

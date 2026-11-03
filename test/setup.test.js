@@ -36,8 +36,8 @@ function makeRoost({ port = 15210, aiChat = null } = {}) {
   return dir;
 }
 
-function makeSetup(dir) {
-  const cfg = { server: { port: 17321 }, setup: { roostDir: dir, version: 'v0.8.6' } };
+function makeSetup(dir, { token = '' } = {}) {
+  const cfg = { server: { port: 17321, token }, setup: { roostDir: dir, version: 'v0.8.6' } };
   return createSetup({ cfgOf: () => cfg, setCfg: () => {}, dataDir: () => dir, log: () => {} });
 }
 
@@ -149,6 +149,68 @@ test('同步：传了实际端口就用传的，不用配置值', async () => {
       await setup.syncDshUrl(17325);
       assert.equal(puts.length, 1);
       assert.equal(puts[0].dshUrl, 'http://127.0.0.1:17325', '被占顺延后要写实际端口');
+    },
+  );
+});
+
+/**
+ * 共享密钥也要跟着同步。
+ *
+ * `server.token` 非空时，宿主的 `/inbound`、`/capabilities`、`/tts` 都要求
+ * `x-roost-token`。只同步地址不同步密钥 = 消息一条都推不进去，而且两边
+ * 都不报错，现象只是「机器人突然不回话了」。
+ */
+test('同步：只改了密钥 → 只 PUT dshToken，不动地址', async () => {
+  const dir = makeRoost({ aiChat: { adapter: 'dsh', dshUrl: 'http://127.0.0.1:17321', dshToken: '' } });
+  const setup = makeSetup(dir, { token: 'NEW-SECRET' });
+  const puts = [];
+  await withFetch(
+    async (url, init) => {
+      if (init?.method === 'PUT') puts.push(JSON.parse(init.body));
+      return okRes({ ok: true, config: {} });
+    },
+    async () => {
+      const r = await setup.syncDshUrl();
+      assert.equal(r.ok, true);
+      assert.equal(puts.length, 1, '密钥不一致就要写一次');
+      assert.equal(puts[0].dshToken, 'NEW-SECRET');
+      assert.equal('dshUrl' in puts[0], false, '地址没变就不该带上，免得把顺延后的端口写回配置值');
+      assert.equal(r.tokenSynced, true);
+    },
+  );
+});
+
+test('同步：密钥被清空 → 也要同步，且文案不能是半句', async () => {
+  const dir = makeRoost({ aiChat: { adapter: 'dsh', dshUrl: 'http://127.0.0.1:17321', dshToken: 'OLD' } });
+  const setup = makeSetup(dir, { token: '' });
+  const puts = [];
+  await withFetch(
+    async (url, init) => {
+      if (init?.method === 'PUT') puts.push(JSON.parse(init.body));
+      return okRes({ ok: true, config: {} });
+    },
+    async () => {
+      const r = await setup.syncDshUrl();
+      assert.equal(puts.length, 1);
+      assert.equal(puts[0].dshToken, '', '插件里留旧值会一直 401');
+      assert.equal(r.tokenSynced, false);
+      assert.ok(r.message.includes('密钥已清空'), `文案残缺：${r.message}`);
+    },
+  );
+});
+
+test('同步：地址和密钥都一致 → 一次都不写', async () => {
+  const dir = makeRoost({ aiChat: { adapter: 'dsh', dshUrl: 'http://127.0.0.1:17321', dshToken: 'SAME' } });
+  const setup = makeSetup(dir, { token: 'SAME' });
+  const puts = [];
+  await withFetch(
+    async (url, init) => {
+      if (init?.method === 'PUT') puts.push(JSON.parse(init.body));
+      return okRes({ ok: true, config: {} });
+    },
+    async () => {
+      await setup.syncDshUrl();
+      assert.equal(puts.length, 0);
     },
   );
 });

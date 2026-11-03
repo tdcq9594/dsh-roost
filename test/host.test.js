@@ -171,6 +171,52 @@ test('健康检查', async () => {
   }
 });
 
+test('TTS HTTP：能力查询返回公开状态，成功响应为二进制音频', async () => {
+  const srv = createInboundServer({
+    port: 17395,
+    onInbound: () => {},
+    onTts: async (text) => ({ audio: Buffer.from(`audio:${text}`), contentType: 'audio/mpeg' }),
+    onTtsStatus: async () => ({ enabled: true, provider: 'openai', configured: true }),
+    log: () => {},
+  });
+  try {
+    const cap = await fetch('http://127.0.0.1:17395/capabilities');
+    assert.deepEqual(await cap.json(), { ok: true, tts: { enabled: true, provider: 'openai', configured: true } });
+
+    const res = await fetch('http://127.0.0.1:17395/tts', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '你好' }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'audio/mpeg');
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    assert.equal(Buffer.from(await res.arrayBuffer()).toString(), 'audio:你好');
+  } finally {
+    srv.close();
+  }
+});
+
+test('TTS HTTP：共享密钥保护 capabilities 与生成路由', async () => {
+  const srv = createInboundServer({
+    port: 17394, token: 'secret-token', onInbound: () => {},
+    onTts: async () => ({ audio: Buffer.from('audio'), contentType: 'audio/mpeg' }),
+    onTtsStatus: async () => ({ enabled: false, provider: 'openai', configured: false }),
+    log: () => {},
+  });
+  try {
+    const denied = await fetch('http://127.0.0.1:17394/capabilities');
+    assert.equal(denied.status, 401);
+
+    const res = await fetch('http://127.0.0.1:17394/tts', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-roost-token': 'secret-token' },
+      body: JSON.stringify({ text: '你好' }),
+    });
+    assert.equal(res.status, 200);
+  } finally {
+    srv.close();
+  }
+});
+
 test('回话：拒绝非本机地址（防 SSRF）', async () => {
   await assert.rejects(
     () => postReply({ id: 'e1', reply: { url: 'http://evil.example.com/reply', token: 't' } }, 'hi'),

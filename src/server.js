@@ -131,58 +131,112 @@ export async function postReply(payload, text, done = true, extra = {}) {
  * @param {(payload:object)=>void} p.onInbound 收到消息（不要 await，别拖住响应）
  * @param {(msg:string)=>void} [p.log]
  */
-export function createInboundServer({ port, ports, token = '', onInbound, onListening, log = () => {} }) {
+export function createInboundServer({
+  port, ports, token = '', onInbound, onTts, onTtsStatus, onListening, log = () => {},
+}) {
   const server = createServer(async (req, res) => {
     const send = (code, body) => {
       try {
-        res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
+        res.writeHead(code, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        });
         res.end(JSON.stringify(body));
       } catch {}
+    };
+
+    const readJson = async (limit) => {
+      const chunks = [];
+      let bytes = 0;
+      try {
+        for await (const chunk of req) {
+          const b = Buffer.from(chunk);
+          bytes += b.length;
+          if (bytes > limit) return { error: 'too_large' };
+          chunks.push(b);
+        }
+      } catch {
+        return { error: 'read_failed' };
+      }
+      try {
+        return { value: JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') };
+      } catch {
+        return { error: 'invalid_json' };
+      }
+    };
+
+    const auth = () => {
+      if (!token) return true;
+      if (req.headers['x-roost-token'] === token) return true;
+      log('固定服务鉴权失败：密钥不对');
+      send(401, { ok: false, error: 'unauthorized', message: '共享密钥不对' });
+      return false;
     };
 
     let url;
     try {
       url = new URL(req.url, 'http://127.0.0.1');
     } catch {
-      return send(400, { ok: false, error: '地址不合法' });
+      return send(400, { ok: false, error: 'bad_url', message: '地址不合法' });
     }
 
     if (url.pathname === '/health' && req.method === 'GET') {
       return send(200, { ok: true, plugin: 'dsh-roost' });
     }
 
-    if (url.pathname !== '/inbound' || req.method !== 'POST') {
-      return send(404, { ok: false, error: '没有这个地址' });
-    }
-
-    // 鉴权：配了密钥就必须带对
-    if (token) {
-      const given = req.headers['x-roost-token'];
-      if (given !== token) {
-        log('inbound 鉴权失败：密钥不对');
-        return send(401, { ok: false, error: '共享密钥不对' });
+    if (url.pathname === '/capabilities' && req.method === 'GET') {
+      if (!auth()) return;
+      try {
+        const tts = await onTtsStatus?.() ?? { enabled: false, configured: false };
+        return send(200, { ok: true, tts });
+      } catch {
+        return send(200, { ok: true, tts: { enabled: false, configured: false, reason: 'status_unavailable' } });
       }
     }
+
+    if (url.pathname === '/tts' && req.method === 'POST') {
+      if (!auth()) return;
+      const parsed = await readJson(64 * 1024);
+      if (parsed.error === 'too_large') return send(413, { ok: false, error: 'request_too_large', message: '语音请求太大' });
+      if (parsed.error === 'read_failed') return send(400, { ok: false, error: 'request_read_failed', message: '读取语音请求失败' });
+      if (parsed.error) return send(400, { ok: false, error: 'invalid_json', message: '不是合法 JSON' });
+      const text = typeof parsed.value?.text === 'string' ? parsed.value.text : '';
+      if (!text.trim()) return send(400, { ok: false, error: 'empty_text', message: '缺少待合成文本' });
+      if (typeof onTts !== 'function') return send(503, { ok: false, error: 'tts_unavailable', message: '语音服务未就绪' });
+
+      try {
+        const result = await onTts(text);
+        const audio = Buffer.from(result?.audio ?? []);
+        const contentType = String(result?.contentType ?? '').split(';', 1)[0].trim().toLowerCase();
+        if (!audio.length || !contentType.startsWith('audio/')) {
+          return send(502, { ok: false, error: 'invalid_audio_response', message: '语音服务返回内容无效' });
+        }
+        res.writeHead(200, {
+          'content-type': contentType,
+          'content-length': String(audio.length),
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        });
+        return res.end(audio);
+      } catch (e) {
+        const status = Number(e?.status) || 502;
+        const code = String(e?.code || 'upstream_error').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'upstream_error';
+        return send(status, { ok: false, error: code, message: String(e?.message || '语音合成失败') });
+      }
+    }
+
+    if (url.pathname !== '/inbound' || req.method !== 'POST') {
+      return send(404, { ok: false, error: 'not_found', message: '没有这个地址' });
+    }
+    if (!auth()) return;
 
     // 读 body（限 1MB，正常消息远小于这个）
-    let raw = '';
-    try {
-      for await (const chunk of req) {
-        raw += chunk;
-        if (raw.length > 1024 * 1024) {
-          return send(413, { ok: false, error: '消息太大了' });
-        }
-      }
-    } catch (e) {
-      return send(400, { ok: false, error: `读请求失败：${e.message}` });
-    }
-
-    let payload;
-    try {
-      payload = JSON.parse(raw || '{}');
-    } catch {
-      return send(400, { ok: false, error: '不是合法 JSON' });
-    }
+    const parsed = await readJson(1024 * 1024);
+    if (parsed.error === 'too_large') return send(413, { ok: false, error: '消息太大了' });
+    if (parsed.error === 'read_failed') return send(400, { ok: false, error: '读请求失败' });
+    if (parsed.error) return send(400, { ok: false, error: '不是合法 JSON' });
+    const payload = parsed.value;
     if (!payload?.id || !payload?.reply?.url) {
       return send(400, { ok: false, error: '缺 id 或 reply.url' });
     }

@@ -1203,6 +1203,18 @@ select.roost-input{color-scheme:dark}
                 }, cfgMsg)
               : null,
 
+          /**
+           * 密钥对不上 = 消息一条都推不进去，而且两边都不报错。
+           *
+           * 这是最容易被忽略的一种断链：用户在「服务」里设了共享密钥，
+           * ai-chat 那边没跟着改，表现只是「机器人突然不回话了」。
+           * 点上面那个「重新写一次」就会同步过去。
+           */
+          s.pluginConfigured && s.pluginConfig?.tokenSynced === false
+            ? h('div', { className: 'roost-note', style: { color: 'var(--bad)', marginTop: 4 } },
+                '⚠ ai-chat 的共享密钥和这里不一致 —— 消息会被宿主以 401 拒绝。点上面「重新写一次」同步过去。')
+            : null,
+
           h(Step, {
             n: 6, state: mark.ready, title: '在群里说句话',
             desc: s.pluginConfigured
@@ -3051,6 +3063,7 @@ select.roost-input{color-scheme:dark}
       ['chat', '会话', '一轮最多等多久；上游 502/429 时的补重试（attempts 是「补几次」，budgetSec 是整轮总预算）'],
       ['workspace', '工作区', '机器人会话挂哪个工作区：dir 留空单开、__default__ 用默认'],
       ['server', '服务', '端口与密钥'],
+      ['tts', '语音合成', '默认关闭；上面的「语音合成」卡片就是改这一段（也可以在这里手改）'],
       ['setup', '接入', '装在哪、用哪种接入方式'],
       ['update', '更新源', 'npm 源（registry）；留空用默认源'],
     ]
@@ -3289,6 +3302,511 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /**
+     * 语音合成（TTS）设置卡片。
+     *
+     * 为什么不再让用户去「配置全文」里手改 JSON：`tts` 段有十几个字段，
+     * 其中一半只在某个 provider 下才有意义。手改的代价是拼错一个键就静默失效
+     * （`pruneTo` 会把它裁掉），用户只会看到「开了但没声音」。
+     *
+     * 状态一律问服务端（`/tts-status`）：必填项判定、本地引擎和模型在不在，
+     * 都只有 `src/tts.js` 说了算。前端自己算一份必然漂移。
+     */
+    function TtsCard({ config, saveCfg, toast, reload }) {
+      const cfgTts = config?.tts || {}
+      const cfgJson = JSON.stringify(cfgTts)
+      const [st, setSt] = useState(null)
+      const [draft, setDraft] = useState(cfgTts)
+      const [dirty, setDirty] = useState(false)
+      const [busy, setBusy] = useState(false)
+      /** 正在点「一键安装」的那一下，防止连点两次 */
+      const [installing, setInstalling] = useState(false)
+
+      const loadStatus = async () => {
+        const r = await get('/tts-status')
+        setSt(r.ok === false ? null : r)
+      }
+      useEffect(() => { loadStatus() }, [])
+      /**
+       * 安装中每秒刷一次。
+       *
+       * 只在**真的在装**的时候轮询：平时这个页面不需要高频请求，
+       * 而安装是几十 MB 的下载，用户要看到数字在动。
+       */
+      const installRunning = st?.install?.running === true
+      useEffect(() => {
+        if (!installRunning) return undefined
+        const timer = setInterval(loadStatus, 1000)
+        return () => clearInterval(timer)
+      }, [installRunning])
+
+      /** GPT-SoVITS 的进程状态（来自 `/tts-status` 的 `gpt` 字段） */
+      const [probeInfo, setProbeInfo] = useState(null)
+      const gptPhase = st?.gpt?.phase || 'idle'
+      const gptStarting = gptPhase === 'starting'
+      const gptRunning = gptPhase === 'running'
+
+      /** 启动中每秒刷一次：加载模型要一两分钟，用户得看见它在动 */
+      useEffect(() => {
+        if (!gptStarting) return undefined
+        const timer = setInterval(loadStatus, 1000)
+        return () => clearInterval(timer)
+      }, [gptStarting])
+
+      /**
+       * 从「启动中」翻到「运行中」的那一刻刷新配置。
+       *
+       * 地址和路由是**后端**在就绪回调里写进配置的，前端手里的 config 还是旧的；
+       * 不刷一下，用户会看到「服务在跑，但地址栏还是空的」。
+       */
+      const prevGptPhase = useRef('')
+      useEffect(() => {
+        if (prevGptPhase.current === 'starting' && gptPhase === 'running') {
+          toast('已启动，地址和路由已自动填好')
+          reload?.()
+        }
+        prevGptPhase.current = gptPhase
+      }, [gptPhase])
+
+      const gptStatusText = (() => {
+        const g = st?.gpt
+        if (!g || g.phase === 'idle') return ''
+        if (g.phase === 'starting') return `启动中… 端口 ${g.port || '待定'}，加载模型要一两分钟`
+        if (g.phase === 'running') return `运行中：${g.baseUrl}（pid ${g.pid}）`
+        if (g.phase === 'stopped') return '已停止'
+        if (g.phase === 'error') return '启动失败：' + (g.error || '未知原因')
+        return ''
+      })()
+      /** 外部配置变了（比如刚在配置全文里保存）：没动过草稿就跟上 */
+      useEffect(() => {
+        if (dirty) return
+        setDraft(JSON.parse(cfgJson))
+      }, [cfgJson, dirty])
+
+      const v = (path, fallback = '') => {
+        const got = getPath(draft || {}, path)
+        return got === undefined || got === null ? fallback : got
+      }
+      const put = (path, value) => {
+        setDraft((d) => setPath(d || {}, path, value))
+        setDirty(true)
+      }
+
+      const provider = v('provider', 'openai')
+      /**
+       * 用对象而不是「值 + 文字」的二元数组。
+       *
+       * 设置页那段「各段是干什么的」的清单是靠正则从 `JSON_SECTIONS` 里读出来的，
+       * 它扫的是 `JSON_SECTIONS` 到 `ConfigTab` 之间的所有二元数组字面量。
+       * 这里再写一堆，会把 `v1` / `v2` 这类取值混进「配置段」里，
+       * 让对齐测试误报。对象写法没有这个歧义。
+       */
+      const PROVIDERS = [
+        { id: 'sherpa', label: '本地模型（离线，可一键安装）' },
+        { id: 'openai', label: 'OpenAI 兼容（/audio/speech）' },
+        { id: 'gpt-sovits', label: 'GPT-SoVITS 原生 API（本地）' },
+      ]
+
+      /** 服务端状态翻成人话。`reason` 的取值来自 `src/tts.js` 的 status() */
+      const reasonText = (() => {
+        /**
+         * 状态还没回来时**先用配置里的开关**，不要显示「读不到状态」——
+         * 那句话只在插件真的没响应时才该出现，正常打开页面会闪一下很难看。
+         */
+        if (!st) return cfgTts.enabled === true ? '已启用' : '未启用'
+        if (st.enabled !== true) return '未启用'
+        if (st.configured === true) return '已启用，配置齐全'
+        if (st.reason === 'configuration_incomplete') return '已启用，但必填项还没填完'
+        if (st.reason === 'runtime_missing') return '已启用，但本地引擎还没装'
+        if (st.reason === 'model_missing') return '已启用，但模型文件不全'
+        if (st.reason === 'upstream_unreachable') return '已启用，但语音服务刚失败过（检查服务是否启动）'
+        if (st.reason === 'unsupported_provider') return '已启用，但 provider 不认识'
+        return '已启用，状态未知'
+      })()
+
+      /** 认一下目录：只读探测，填错了当场知道，不用等启动失败 */
+      const probeGpt = async () => {
+        const r = await post('/tts/gpt-probe', { dir: v('gptSovits.installDir') })
+        setProbeInfo(r)
+        toast(r?.ok ? '目录认出来了' : (r?.message || '这个目录不像 GPT-SoVITS 的根目录'))
+      }
+
+      const startGpt = async () => {
+        const r = await post('/tts/gpt-start', {
+          dir: v('gptSovits.installDir'),
+          /** 选了角色就让它启动后切过去；空 = 用配置文件里已经加载的 */
+          model: v('gptSovits.model'),
+        })
+        if (r?.ok === false) toast(r.message || '起不来')
+        else toast('正在启动，加载模型要一两分钟')
+        await loadStatus()
+      }
+
+      const stopGpt = async () => {
+        await post('/tts/gpt-stop', {})
+        toast('已停止')
+        await loadStatus()
+      }
+
+      /**
+       * 一键安装本地引擎 + 模型。
+       *
+       * 请求**立刻返回**，不在这里等下载：30MB 模型加 23MB 引擎，等完
+       * 请求早超时了。进度靠 `st.install` 轮询。
+       */
+      const install = async () => {
+        setInstalling(true)
+        try {
+          const r = await post('/tts/install', { model: v('sherpa.model', 'aishell3') })
+          if (r?.ok === false) toast(r.message || '装不上')
+          else toast('开始下载，进度在下面')
+          await loadStatus()
+        } finally {
+          setInstalling(false)
+        }
+      }
+
+      const cancelInstall = async () => {
+        const r = await post('/tts/install-cancel', {})
+        if (r?.ok === false) toast(r.message || '没有在装')
+        await loadStatus()
+      }
+
+      /**
+       * 卸载会删掉下载好的引擎和模型（几十 MB），先问一句。
+       *
+       * 这里用 `window.confirm` 而不是面板的弹窗组件：卸载是一辈子点
+       * 一两次的操作，为它单独做一套模态框不值得，而且原生确认框
+       * 在 DSH 的 webview 里同样能弹。
+       */
+      const uninstall = async () => {
+        const ok = typeof window !== 'undefined' && window.confirm
+          ? window.confirm('会删掉已下载的本地语音引擎和模型，确定吗？')
+          : true
+        if (!ok) return
+        const r = await post('/tts/uninstall', { model: v('sherpa.model', 'aishell3') })
+        if (r?.ok === false) toast(r.message || '卸载失败')
+        else toast('已卸载')
+        await loadStatus()
+      }
+
+      const save = async () => {
+        setBusy(true)
+        try {
+          /**
+           * 数字字段要在这里转回 number。
+           * 输入框给的永远是字符串，直接存进去 `Number(cfg.timeoutSec)` 虽然也能用，
+           * 但配置全文里会变成 `"30"`，和默认值的类型不一致，看的人会以为坏了。
+           */
+          const next = {
+            ...draft,
+            timeoutSec: Number(draft?.timeoutSec) || 30,
+            maxChars: Number(draft?.maxChars) || 300,
+            ...(draft?.sherpa
+              ? {
+                  sherpa: {
+                    ...draft.sherpa,
+                    sid: Number(draft.sherpa.sid) || 0,
+                    speed: Number(draft.sherpa.speed) || 1,
+                    numThreads: Number(draft.sherpa.numThreads) || 2,
+                  },
+                }
+              : {}),
+          }
+          const r = await saveCfg({ tts: next })
+          if (r?.ok === false) return toast(r.message || '没存上')
+          setDirty(false)
+          toast(r?.message || '语音设置已保存（下一轮生效）')
+          await loadStatus()
+          reload?.()
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const field = (label, path, opts = {}) =>
+        h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: opts.flex || '1 1 240px' } },
+          h('span', { className: 'roost-note', style: { margin: 0 } }, label),
+          h('input', {
+            className: 'roost-input',
+            type: opts.type || 'text',
+            value: v(path),
+            placeholder: opts.placeholder || '',
+            spellCheck: false,
+            onChange: (e) => put(path, e.target.value),
+          }),
+        )
+
+      const select = (label, path, options) =>
+        h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 240px' } },
+          h('span', { className: 'roost-note', style: { margin: 0 } }, label),
+          h('select', {
+            className: 'roost-input',
+            value: v(path),
+            onChange: (e) => put(path, e.target.value),
+          }, options.map((o) => h('option', { key: o.id, value: o.id }, o.label))),
+        )
+
+      /** 只取文件名，下拉里显示全路径会撑爆 */
+      const shortName = (p) => String(p || '').split(/[\\/]/).pop()
+
+      /**
+       * 参考音频的选项：扫描到的候选 + 当前值。
+       *
+       * 把当前值也塞进去是为了「用户手填了一个不在候选里的路径」时
+       * 下拉不会变成空白——否则一保存就把他的路径清掉了。
+       */
+      const refPath = String(v('gptSovits.referWavPath') || '')
+      const refOptions = [...new Set([
+        ...(probeInfo?.refCandidates || []),
+        ...(refPath ? [refPath] : []),
+      ])]
+
+      return h(Sec, {
+        n: '05',
+        title: '语音合成',
+        right: h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+          h('span', { className: 'roost-note', style: { margin: 0 } }, reasonText),
+          h('button', {
+            type: 'button', className: 'roost-primary', disabled: busy || !dirty,
+            title: dirty ? '' : '没有改动',
+            onClick: save,
+          }, busy ? '保存中…' : '保存'),
+        ),
+      },
+        h('div', { className: 'roost-note', style: { marginTop: 2 } },
+          '默认关闭。开启后，模型可以用 <<say: 内容>> 让这句话变成语音条；'
+          + '合成在这里做，转成 QQ 要的 silk 和发送由 ai-chat 完成。'),
+        dirty
+          ? h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)' } },
+              '有未保存的改动。')
+          : null,
+
+        h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-end' } },
+          h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
+            h('input', {
+              type: 'checkbox',
+              checked: draft?.enabled === true,
+              onChange: (e) => put('enabled', e.target.checked),
+            }),
+            '启用语音合成'),
+          select('provider', 'provider', PROVIDERS),
+        ),
+
+        provider === 'openai'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('接口地址（含版本前缀）', 'baseUrl', { placeholder: 'https://api.openai.com/v1' }),
+                field('模型', 'model', { placeholder: 'tts-1' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('音色', 'voice', { placeholder: 'alloy' }),
+                field('API Key', 'apiKey', { placeholder: '留空表示不需要' }),
+              ),
+              h('div', { className: 'roost-note' },
+                '走 OpenAI 兼容的 POST /audio/speech，固定请求 mp3。'
+                + '硅基流动、one-api 这类中转也填这里。'),
+            )
+          : null,
+
+        provider === 'gpt-sovits'
+          ? h('div', null,
+              /**
+               * 目录 + 一键启动。
+               *
+               * 这一段存在的理由：起 GPT-SoVITS 的 API 有四个坑，每个都能
+               * 让人卡半小时——要 cd 到安装目录、要认 runtime\python.exe、
+               * 要挑一个**没被 Windows 保留**的端口（9880 就绑不上）、
+               * 起来以后还得把地址和路由抄回配置。全部收进这里。
+               */
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-end' } },
+                field('安装目录（含 api_v2.py 的那层）', 'gptSovits.installDir', {
+                  placeholder: 'D:\\GPT-SoVITS',
+                  flex: '2 1 380px',
+                }),
+                h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 2 } },
+                  h('button', { type: 'button', className: 'roost-btn', onClick: probeGpt }, '探测'),
+                  gptRunning || gptStarting
+                    ? h('button', { type: 'button', className: 'roost-btn', onClick: stopGpt }, '停止')
+                    : h('button', {
+                        type: 'button', className: 'roost-primary', disabled: !v('gptSovits.installDir'),
+                        onClick: startGpt,
+                      }, '一键启动'),
+                ),
+              ),
+
+              /** 探测结果：认出了什么，一眼看明白 */
+              probeInfo
+                ? probeInfo.ok
+                  ? h('div', { className: 'roost-note', style: { color: 'var(--good, #2e7d32)', marginTop: 6 } },
+                      `✓ ${probeInfo.apiVersion === 'v2' ? 'v2（接口 /tts）' : 'v1（接口 /）'}`
+                      + ` · ${probeInfo.weightVersion || '未读出版本'}`
+                      + (probeInfo.character ? ` · 当前角色「${probeInfo.character}」` : '')
+                      + (probeInfo.refCandidates?.length ? ` · 参考音频候选 ${probeInfo.refCandidates.length} 个` : ''),
+                    )
+                  : h('div', { className: 'roost-note', style: { color: 'var(--bad)', marginTop: 6 } },
+                      '✗ ' + (probeInfo.message || '这个目录不像 GPT-SoVITS 的根目录'))
+                : null,
+
+              /** 进程状态 */
+              gptStatusText
+                ? h('div', { className: 'roost-note', style: { marginTop: 6 } }, gptStatusText)
+                : null,
+
+              /**
+               * 扫描结果做成下拉。
+               *
+               * 用户不用知道「GPT_weights_v2ProPlus/角色A-e15.ckpt」这种路径，
+               * 只要在下拉里选「角色A」——启动后宿主会调 `/set_*_weights`
+               * 切过去，**不改 tts_infer.yaml**。
+               */
+              probeInfo?.ok && probeInfo.models?.length
+                ? h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                    select('角色（扫描到的权重）', 'gptSovits.model', [
+                      { id: '', label: probeInfo.character ? `用配置文件里的（${probeInfo.character}）` : '用配置文件里的' },
+                      ...probeInfo.models.map((m) => ({
+                        id: m.name,
+                        label: m.name + (m.version ? ` · ${m.version}` : ''),
+                      })),
+                    ]),
+                    refOptions.length
+                      ? h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 240px' } },
+                          h('span', { className: 'roost-note', style: { margin: 0 } }, `参考音频（扫描到 ${refOptions.length} 个）`),
+                          h('select', {
+                            className: 'roost-input',
+                            value: refPath,
+                            onChange: (e) => put('gptSovits.referWavPath', e.target.value),
+                          },
+                            h('option', { value: '' }, '（未选）'),
+                            ...refOptions.map((p) => h('option', { key: p, value: p }, shortName(p))),
+                          ),
+                        )
+                      : null,
+                  )
+                : null,
+
+              /** 日志尾部：启动失败时这是唯一能看出原因的东西 */
+              st?.gpt?.logs?.length
+                ? h('pre', {
+                    style: {
+                      marginTop: 6, maxHeight: 140, overflow: 'auto', fontSize: 11, lineHeight: 1.5,
+                      padding: '6px 8px', borderRadius: 4,
+                      background: 'var(--panel, rgba(128,128,128,.12))',
+                      whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                    },
+                  }, st.gpt.logs.join('\n'))
+                : null,
+
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('服务地址', 'gptSovits.baseUrl', { placeholder: 'http://127.0.0.1:17860/' }),
+                field('参考音频路径', 'gptSovits.referWavPath', { placeholder: 'GPT-SoVITS 那台机器上的路径' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('参考文本（须与音频逐字一致）', 'gptSovits.promptText', { flex: '2 1 320px' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('参考音频语种', 'gptSovits.promptLanguage', { placeholder: '中文 / 日文 / 英文' }),
+                field('合成文本语种', 'gptSovits.textLanguage', { placeholder: '中文 / 日文 / 英文' }),
+                select('接口版本', 'gptSovits.apiVersion', [
+                  { id: 'v1', label: 'v1（api.py）' },
+                  { id: 'v2', label: 'v2（api_v2.py）' },
+                ]),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('接口路由', 'gptSovits.endpointPath', { placeholder: '/tts' }),
+                field('Bearer 密钥（可选）', 'gptSovits.apiKey', { placeholder: '本地原生 API 通常留空' }),
+              ),
+              h('div', { className: 'roost-note' },
+                '语种填「中文」「日文」就行，会自动转成 API 要的 zh / ja。'
+                + '参考音频路径是「GPT-SoVITS 服务进程」要能读到的路径，不是 DSH 这边的。'
+                + '一键启动会自动挑一个没被系统保留的端口，就绪后把地址和路由填好——'
+                + '加载模型要一两分钟，这期间可以先干别的。'),
+            )
+          : null,
+
+        provider === 'sherpa'
+          ? h('div', null,
+              /**
+               * 模型 + 安装按钮同一行。
+               *
+               * 安装状态全部来自 `/tts-status` 的 `install` 字段，前端不自己
+               * 记「点了没点」——记了就会出现「页面刷新后按钮变回一键安装，
+               * 但其实还在下」。
+               */
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-end' } },
+                select('模型', 'sherpa.model',
+                  (st?.models?.length ? st.models : [{ id: 'aishell3', label: 'aishell3' }])
+                    .map((m) => ({ id: m.id, label: m.label }))),
+                h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 2 } },
+                  h('button', {
+                    type: 'button',
+                    className: 'roost-primary',
+                    disabled: installing || installRunning,
+                    onClick: install,
+                  }, installRunning ? '安装中…' : (st?.configured ? '重新安装' : '一键安装')),
+                  installRunning
+                    ? h('button', { type: 'button', className: 'roost-btn', onClick: cancelInstall }, '取消')
+                    : null,
+                  !installRunning && st?.usage?.total > 0
+                    ? h('button', { type: 'button', className: 'roost-btn', onClick: uninstall }, '卸载')
+                    : null,
+                ),
+              ),
+
+              installRunning
+                ? h('div', { style: { marginTop: 8 } },
+                    h('div', { className: 'roost-note', style: { margin: 0 } },
+                      st.install.message
+                      + (st.install.total > 0
+                        ? ` ${(st.install.received / 1048576).toFixed(1)} / ${(st.install.total / 1048576).toFixed(1)} MB（${st.install.percent}%）`
+                        : '')),
+                    h('div', {
+                      style: {
+                        height: 6, marginTop: 4, borderRadius: 3, overflow: 'hidden',
+                        background: 'var(--line, rgba(128,128,128,.3))',
+                      },
+                    }, h('div', {
+                      style: {
+                        width: `${st.install.percent}%`, height: '100%',
+                        background: 'var(--good, #3b82f6)', transition: 'width .3s',
+                      },
+                    })),
+                  )
+                : null,
+
+              st?.install?.phase === 'error' && st?.install?.error
+                ? h('div', { className: 'roost-note', style: { color: 'var(--bad)', marginTop: 6 } },
+                    '安装失败：' + st.install.error)
+                : null,
+
+              !installRunning && st?.usage?.total > 0
+                ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
+                    `已占用 ${(st.usage.total / 1048576).toFixed(1)} MB`
+                    + `（引擎 ${(st.usage.engine / 1048576).toFixed(1)} MB + 模型 ${(st.usage.model / 1048576).toFixed(1)} MB）`)
+                : null,
+
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('说话人编号（aishell3 是 0-173）', 'sherpa.sid', { placeholder: '88' }),
+                field('语速', 'sherpa.speed', { placeholder: '1' }),
+                field('线程数', 'sherpa.numThreads', { placeholder: '2' }),
+              ),
+              h('div', { className: 'roost-note' },
+                '完全离线：模型装在本机，不联网、不要 Key。一键安装会下 23MB 引擎 + '
+                + '30MB 模型（解压后一共约 230MB，其中多音字规则库 173MB），'
+                + '装到数据目录（不是插件目录，DSH 更新插件不会冲掉）。'
+                + '换说话人编号就是换音色，改完点上面的保存。'),
+            )
+          : null,
+
+        h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+          field('超时（秒）', 'timeoutSec', { placeholder: '30' }),
+          field('单次最多多少字', 'maxChars', { placeholder: '300' }),
+        ),
+        h('div', { className: 'roost-note' },
+          '最多字数要配合 QQ 语音条时长：太长的会被截断，不如直接发文字。'),
+      )
+    }
+
     function ConfigTab({ config, save, saveCfg, toast, stickers, setupSt, reload }) {
       const cfgJson = JSON.stringify(config, null, 2)
       const [draft, setDraft] = useState(cfgJson)
@@ -3444,18 +3962,7 @@ select.roost-input{color-scheme:dark}
             '把图片放进这个目录就会出现在清单里。攒太多会长期占提示词预算，看上面那个字数。'),
         ),
 
-        h(Sec, { n: '05', title: '语音条' },
-          setupSt?.pluginInstalled === false
-            ? h('div', { className: 'roost-empty' }, 'ai-chat 还没装')
-            : setupSt?.pluginConfig?.ttsVoice === undefined
-              ? h('div', { className: 'roost-empty' }, '读不到 ai-chat 的配置（Roost 没在跑？）')
-              : h('div', null,
-                  h('div', null, setupSt.pluginConfig.ttsVoice ? '开 · ' + setupSt.pluginConfig.ttsVoice : '关着'),
-                  setupSt.pluginConfig.ttsVoice
-                    ? null
-                    : h('div', { className: 'roost-note' }, '音色在 ai-chat 的设置里填，这里只读。'),
-                ),
-        ),
+        h(TtsCard, { config, saveCfg, toast, reload }),
 
         h(Sec, { n: '06', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
           h('button', { type: 'button', className: 'roost-btn', onClick: reloadDraft }, '还原'),

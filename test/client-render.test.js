@@ -252,7 +252,7 @@ test('前端渲染：她页人格列表显示名字/字数/标签', () => {
       mem: { chatId: 'g1', personaOverride: '', authz: null },
       mood: { valence: -0.3, energy: 0.2, sociability: 0.7, updatedAt: Date.now() },
       stickers: { dir: 'C:/x/stickers', items: [] },
-      setupSt: { pluginInstalled: true, pluginConfig: { ttsVoice: '' } },
+      setupSt: { pluginInstalled: true, pluginConfig: {} },
       quick: () => {},
       save: () => {},
       reload: () => {},
@@ -644,7 +644,7 @@ test('前端渲染：情绪搬到了主动搭话页，人格页不再有', () =>
   assert.ok(!her.includes('语音条'), '人格页不该再有语音条')
 })
 
-test('前端渲染：表情包与语音条搬到了设置页', () => {
+test('前端渲染：表情包与语音合成搬到了设置页', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   const h = rt.React.createElement
@@ -652,25 +652,80 @@ test('前端渲染：表情包与语音条搬到了设置页', () => {
   /**
    * 直接渲染 ConfigTab：空数据下 RoostPage 的 config 是 null，
    * 设置页只显示「读取配置…」，看不到卡片。
+   *
+   * 语音这一段现在有**专用表单**（不再是只读地显示 ai-chat 的音色）：
+   * provider、地址、模型、音色都在这里配，所以断言换成这些字段。
    */
   const txt = textOf(
     expand(
       h(mod.ConfigTab, {
-        config: { stickers: { enabled: true, dir: '' } },
+        config: { stickers: { enabled: true, dir: '' }, tts: { enabled: false, provider: 'openai' } },
         save: async () => ({ ok: true }),
         saveCfg: async () => ({ ok: true }),
         toast: () => {},
         stickers: { dir: 'C:/x/stickers', items: [{ file: 'a.png', tags: [] }], chars: 42 },
-        setupSt: { pluginInstalled: true, pluginConfig: { ttsVoice: 'female' } },
+        setupSt: { pluginInstalled: true, pluginConfig: {} },
       }),
       rt,
     ),
   )
 
   assert.ok(txt.includes('表情包'), '设置页缺「表情包」卡片')
-  assert.ok(txt.includes('语音条'), '设置页缺「语音条」卡片')
+  assert.ok(txt.includes('语音合成'), '设置页缺「语音合成」卡片')
   assert.ok(txt.includes('42 字'), '表情包要显示它占多少提示词预算')
-  assert.ok(txt.includes('female'), '语音条要显示当前音色')
+  assert.ok(txt.includes('启用语音合成'), '语音合成要有一个明确的启用开关')
+  assert.ok(txt.includes('OpenAI 兼容'), '语音合成要能选 provider')
+  assert.ok(txt.includes('默认关闭'), '要说明默认关闭，否则用户会以为坏了')
+
+  /**
+   * 本地模型分支要有一键安装。
+   *
+   * 这条单独渲染一次：默认 provider 是 openai，走不到 sherpa 那段。
+   * 用户最关心的就是「点一下能不能装好」，所以按钮文案必须真的出现在页面上。
+   */
+  const localTxt = textOf(
+    expand(
+      h(mod.ConfigTab, {
+        config: { stickers: { enabled: true, dir: '' }, tts: { enabled: true, provider: 'sherpa', sherpa: { model: 'aishell3', sid: 88 } } },
+        save: async () => ({ ok: true }),
+        saveCfg: async () => ({ ok: true }),
+        toast: () => {},
+        stickers: { dir: 'C:/x/stickers', items: [], chars: 0 },
+        setupSt: { pluginInstalled: true, pluginConfig: {} },
+      }),
+      rt,
+    ),
+  )
+  assert.ok(localTxt.includes('本地模型'), 'provider 列表要有本地模型')
+  assert.ok(localTxt.includes('一键安装'), '本地模型要有「一键安装」按钮')
+  assert.ok(localTxt.includes('说话人编号'), '本地模型要能换音色（sid）')
+  assert.ok(localTxt.includes('完全离线'), '要说明本地模型不联网')
+
+  /**
+   * GPT-SoVITS 分支：填目录 + 探测 + 一键启动。
+   *
+   * 这条以前根本没有——用户得自己 cd 到安装目录、起 python、挑端口、
+   * 再把地址抄回面板。这四项每一件都能让人卡住。
+   */
+  const gptTxt = textOf(
+    expand(
+      h(mod.ConfigTab, {
+        config: {
+          stickers: { enabled: true, dir: '' },
+          tts: { enabled: true, provider: 'gpt-sovits', gptSovits: { installDir: 'D:/GPT-SoVITS' } },
+        },
+        save: async () => ({ ok: true }),
+        saveCfg: async () => ({ ok: true }),
+        toast: () => {},
+        stickers: { dir: 'C:/x/stickers', items: [], chars: 0 },
+        setupSt: { pluginInstalled: true, pluginConfig: {} },
+      }),
+      rt,
+    ),
+  )
+  assert.ok(gptTxt.includes('安装目录'), 'GPT-SoVITS 要有「安装目录」输入')
+  assert.ok(gptTxt.includes('探测'), 'GPT-SoVITS 要能先探测目录')
+  assert.ok(gptTxt.includes('一键启动'), 'GPT-SoVITS 要能一键启动')
 })
 
 test('前端渲染：老的 market 页签状态会回退到人格页', () => {
