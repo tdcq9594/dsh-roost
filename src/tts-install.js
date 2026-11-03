@@ -59,7 +59,12 @@ const PHASE = {
   ERROR: 'error',
 };
 
-function platformPackage() {
+/**
+ * 当前平台该装哪个预编译包。导出是为了让测试用同一张表——
+ * 测试里手写 `sherpa-onnx-win-x64` 会在 Linux CI 上请求
+ * `sherpa-onnx-linux-x64` 而桩里没有，直接 404（2026-11-04 真实踩到）。
+ */
+export function platformPackage() {
   return PLATFORM_PACKAGES[`${process.platform}-${process.arch}`] || '';
 }
 

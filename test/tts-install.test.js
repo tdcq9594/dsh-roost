@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createTtsInstaller } from '../src/tts-install.js';
+import { createTtsInstaller, platformPackage } from '../src/tts-install.js';
 
 /**
  * 安装器靠系统 tar 解压，所以这些用例只在有 tar 的机器上跑。
@@ -105,15 +105,25 @@ test('安装器：正在装时第二次点击返回 busy，不并发写同一个
 });
 
 test('安装器：完整装一遍，引擎和模型都落在数据目录', { skip: !TAR && '本机没有 tar' }, async () => {
+  /**
+   * 平台包名必须问安装器要，不能写死。
+   *
+   * 这里原来写的是 `sherpa-onnx-win-x64`——在 Windows 上跑得好好的，
+   * 到了 Linux CI 上安装器请求的是 `sherpa-onnx-linux-x64`，桩里没有
+   * 对应条目，于是下载 404，整个 job 变红（2026-11-04）。
+   */
+  const platformPkg = platformPackage();
+  if (!platformPkg) return; // 这个平台没有预编译包，跳过
+
   const dir = mkdtempSync(join(tmpdir(), 'roost-inst-'));
   const work = mkdtempSync(join(tmpdir(), 'roost-pkg-'));
   const nodeTgz = makeNpmTgz(work, 'sherpa-onnx-node', { 'sherpa-onnx.js': 'module.exports={};\n' });
-  const platformTgz = makeNpmTgz(work, 'sherpa-onnx-win-x64', { 'index.js': 'module.exports={};\n' });
+  const platformTgz = makeNpmTgz(work, platformPkg, { 'index.js': 'module.exports={};\n' });
   const modelTar = makeModelTar(work);
 
   const fetchImpl = fakeFetch({
     'sherpa-onnx-node/-/sherpa-onnx-node': nodeTgz,
-    'sherpa-onnx-win-x64/-/sherpa-onnx-win-x64': platformTgz,
+    [`${platformPkg}/-/${platformPkg}`]: platformTgz,
     'vits-icefall-zh-aishell3.tar.bz2': modelTar,
   });
 
@@ -126,7 +136,7 @@ test('安装器：完整装一遍，引擎和模型都落在数据目录', { ski
 
   // 引擎：两个包都解到 node_modules 下，且没有残留的 .tmp
   assert.equal(existsSync(join(dir, 'tts-runtime', 'node_modules', 'sherpa-onnx-node', 'sherpa-onnx.js')), true);
-  assert.equal(existsSync(join(dir, 'tts-runtime', 'node_modules', 'sherpa-onnx-win-x64', 'index.js')), true);
+  assert.equal(existsSync(join(dir, 'tts-runtime', 'node_modules', platformPkg, 'index.js')), true);
   assert.equal(existsSync(join(dir, 'tts-runtime', '.tmp')), false);
 
   // 模型：目录名必须和 tts.js 里登记的 dir 一致，否则合成时找不到
