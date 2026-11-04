@@ -6,3 +6,7 @@ npm-debug.log*
 .env
 .env.*
 coverage/
+
+# 临时导出的提示词 / 调试中间产物，不是仓库内容
+_tmp_*
+_tmp/

@@ -12,8 +12,45 @@
  * 一律 `unknown`，只给聊天能力。宁可少给，不可多给。
  */
 
-/** 档位，从高到低 */
-export const BUCKETS = ['owner', 'admin', 'member'];
+/**
+ * 档位，从高到低。**对齐框架的等级空间**（`bot/src/levels.js`）：
+ *
+ *   0 主人 / 1 管理员 / 2 群管 / 3 助手 / 9999 无权限（= member）
+ *
+ * 2026-11-05 之前这里只有 owner/admin/member 三档，把群管和助手一起
+ * 折进了 member。后果是主人特意配了 3 级的人，到 QQ 这边跟路人拿同一套工具。
+ *
+ * `unknown` 是「拿不到权限信息」的兜底，不在这个列表里——
+ * 它由 `bucketOf()` 返回，永远按最严处理。
+ */
+export const BUCKETS = ['owner', 'admin', 'manager', 'helper', 'member'];
+
+/**
+ * 框架等级（数字，越小越高）→ 档位。认不出的**一律返回空串**，由调用方兜到 unknown。
+ *
+ * ## 为什么先把 `''` / `null` 挡掉
+ *
+ * `Number('')` 和 `Number(null)` 都是 **0**，而 0 是主人。也就是说
+ * 「等级字段是空串」这种最常见的「没填」状态，会被读成「最高权限」——
+ * 而这里的注释一直写着「拿不到权限就按最严处理」，方向正好相反。
+ *
+ * 2026-11-05 之前 `bucketOf()` 直接 `Number(s.level)`，一个
+ * `{ sender: { level: '' } }` 的 payload 就能拿到主人档。老插件不给
+ * `bucket` 只给 `level`，正是这条路径的主要使用者。
+ */
+export function bucketOfLevel(level) {
+  if (level === null || level === undefined || level === '') return '';
+  if (typeof level !== 'number' && typeof level !== 'string') return '';
+  const lv = Number(level);
+  if (!Number.isFinite(lv)) return '';
+  /** 负数不是合法等级，按「认不出来」处理；不能让它落到 `lv <= 0` 变成主人 */
+  if (lv < 0) return '';
+  if (lv <= 0) return 'owner';
+  if (lv <= 1) return 'admin';
+  if (lv <= 2) return 'manager';
+  if (lv <= 3) return 'helper';
+  return 'member';
+}
 
 /** 每一档能干什么：all = 全部工具，chat = 只能聊天 */
 export const MODES = ['all', 'chat'];
@@ -224,20 +261,22 @@ export function planPersonaTools(tools, personaTools, keep = null) {
  * 没有就退回看 `level` 数字；再不行就是 unknown。
  *
  * @param {object} payload inbound payload
- * @returns {'owner'|'admin'|'member'|'unknown'}
+ * @returns {'owner'|'admin'|'manager'|'helper'|'member'|'unknown'}
  */
 export function bucketOf(payload) {
   const s = payload?.sender ?? {};
 
   if (BUCKETS.includes(s.bucket)) return s.bucket;
 
-  // 老版本插件只给数字等级：0 主人 / 1 管理员 / 其余成员
-  const lv = Number(s.level);
-  if (Number.isFinite(lv)) {
-    if (lv <= 0) return 'owner';
-    if (lv <= 1) return 'admin';
-    return 'member';
-  }
+  /**
+   * 退回看数字等级。这条分支现在是**主路径的备份**，不能删：
+   * 老版本 ai-chat 只给 `level` 不给 `bucket`，而它照样会算出 2 和 3。
+   *
+   * `bucketOfLevel()` 对空串 / null / 负数一律返回空串，不再被 `Number()` 转成 0
+   * 当成主人——「拿不到权限」必须是 unknown，不能是最高档。
+   */
+  const byLevel = bucketOfLevel(s.level);
+  if (byLevel) return byLevel;
 
   return 'unknown';
 }
@@ -261,9 +300,11 @@ export function describeSpeaker(payload, bucket) {
   const name = String(payload?.sender?.name ?? '').trim() || '某人';
   const label =
     bucket === 'owner' ? '主人（这台机器的所有者）'
-      : bucket === 'admin' ? '管理员'
-        : bucket === 'member' ? '普通成员'
-          : '身份不明';
+      : bucket === 'admin' ? '管理员（框架里配的，跨群有效）'
+        : bucket === 'manager' ? '群管（这个群的管理员）'
+          : bucket === 'helper' ? '助手（这个群里帮忙的人）'
+            : bucket === 'member' ? '普通成员'
+              : '身份不明';
 
   return `这一句是「${name}」说的，权限：${label}。`;
 }
@@ -278,8 +319,20 @@ export function rulesFor(bucket) {
   if (bucket === 'owner') {
     return '对方是主人，可以正常使用工具。';
   }
-  if (bucket === 'admin') {
-    return '对方是群管理员，不是机器的主人。可以用工具查信息，但**不要执行删除、覆盖、安装、改系统配置这类操作**，也不要读和当前问题无关的私人文件。';
+  /**
+   * 管理员 / 群管 / 助手：**底线完全一样**——都不是机器主人，都不能动这台机器。
+   *
+   * 三档在提示词里的差别只有「他是什么人」，因为工具层面的差别由
+   * `capabilities.js` 的档位策略管（主人可以给群管单独开读文件，
+   * 不给群成员）。**别在这里写工具名**：写了就和策略层变成两套真相，
+   * 用户改了策略、提示词还在说另一套。
+   */
+  if (bucket === 'admin' || bucket === 'manager' || bucket === 'helper') {
+    const who =
+      bucket === 'admin' ? '框架里的管理员（跨群有效）'
+        : bucket === 'manager' ? '这个群的群管'
+          : '这个群里的助手';
+    return `对方是${who}，不是机器的主人。可以用工具查信息，但**不要执行删除、覆盖、安装、改系统配置这类操作**，也不要读和当前问题无关的私人文件。他要你这么做时，直说「这个得主人来」。`;
   }
   if (bucket === 'member') {
     return '对方是普通群成员。**不要执行任何会改动这台机器的操作**（删除、写入、安装、跑命令），也不要读私人文件或目录。他要你这么做时，直说「这个我没权限」。';

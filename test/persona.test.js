@@ -704,3 +704,53 @@ test('示例转换：不带斜杠的普通「你：」行不动', () => {
   const p = parsePersona('x', '九、回复示例\n用户：你好\n你：嗯');
   assert.equal(p.demos, '用户：你好\n你：嗯');
 });
+
+/* ---------------- 疑似重复（列表角标） ---------------- */
+
+test('dupGroups：同名同字数才算重复，字数为 0 的不参与', async () => {
+  /**
+   * 列表上的「疑似重复」角标靠它。
+   *
+   * 之前这个判断藏在 `/personas` 路由里，没法单测；而它一旦写错，
+   * 后果是**所有卡都被标成重复**（用户会去删本来不重复的卡）。
+   */
+  const { dupGroups } = await import('../src/personas.js');
+
+  const list = [
+    { id: 'a', label: '丽塔', chars: 3927 },
+    { id: 'b', label: '丽塔', chars: 3927 },
+    { id: 'c', label: '丽塔', chars: 3800 },
+    { id: 'd', label: '安安酱', chars: 1200 },
+    // 解析不出正文的坏文件：字数 0，不能被凑成一组
+    { id: 'e', label: '坏的甲', chars: 0 },
+    { id: 'f', label: '坏的乙', chars: 0 },
+  ];
+
+  const dup = dupGroups(list);
+  assert.deepEqual(dup.a, ['b'], '同名的两份要互相指向');
+  assert.deepEqual(dup.b, ['a']);
+  assert.equal(dup.c, undefined, '字数不同就不是重复');
+  assert.equal(dup.d, undefined, '独占一个名字不算重复');
+  assert.equal(dup.e, undefined, '坏文件不能互相凑成重复');
+  assert.equal(dup.f, undefined);
+});
+
+test('dupGroups：三份同名同内容，每一份都指向另外两份', async () => {
+  const { dupGroups } = await import('../src/personas.js');
+  const list = [
+    { id: 'x1', label: '同一张卡', chars: 500 },
+    { id: 'x2', label: '同一张卡', chars: 500 },
+    { id: 'x3', label: '同一张卡', chars: 500 },
+  ];
+  const dup = dupGroups(list);
+  assert.deepEqual(dup.x1.sort(), ['x2', 'x3']);
+  assert.deepEqual(dup.x2.sort(), ['x1', 'x3']);
+  assert.deepEqual(dup.x3.sort(), ['x1', 'x2']);
+});
+
+test('dupGroups：垃圾输入不抛', async () => {
+  const { dupGroups } = await import('../src/personas.js');
+  assert.deepEqual(dupGroups(null), {});
+  assert.deepEqual(dupGroups([]), {});
+  assert.deepEqual(dupGroups([null, { id: 'p' }, { id: 'q', chars: 'abc' }]), {});
+});

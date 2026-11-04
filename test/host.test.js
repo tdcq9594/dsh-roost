@@ -14,7 +14,7 @@ import { createSessions } from '../src/sessions.js';
 import { createInboundServer, postReply } from '../src/server.js';
 import { createTurnRunner, textOf } from '../src/turn.js';
 import { DEFAULTS, publicConfig, saveConfig } from '../src/config.js';
-import { bucketOf, modeFor, describeSpeaker, rulesFor } from '../src/permissions.js';
+import { bucketOf, bucketOfLevel, modeFor, describeSpeaker, rulesFor } from '../src/permissions.js';
 import { createSetup } from '../src/setup.js';
 import { createPersonas } from '../src/personas.js';
 import { createStickers, tagsOf } from '../src/stickers.js';
@@ -362,11 +362,22 @@ test('权限：优先用插件给的 bucket', () => {
   assert.equal(bucketOf({ sender: { bucket: 'member' } }), 'member');
 });
 
-test('权限：只给数字等级时按 0/1 分档', () => {
+test('权限：数字等级按框架的 0/1/2/3 分档', () => {
+  /**
+   * 框架 `levels.js` 里 0 主人 / 1 管理员 / 2 群管 / 3 助手。
+   *
+   * 旧版本把 2 和 3 一起折进 member，这次展开成独立档位——
+   * 主人特意配了 3 级的人，不该跟路人拿同一套工具。
+   */
   assert.equal(bucketOf({ sender: { level: 0 } }), 'owner');
   assert.equal(bucketOf({ sender: { level: 1 } }), 'admin');
-  assert.equal(bucketOf({ sender: { level: 2 } }), 'member');
-  assert.equal(bucketOf({ sender: { level: 99 } }), 'member');
+  assert.equal(bucketOf({ sender: { level: 2 } }), 'manager');
+  assert.equal(bucketOf({ sender: { level: 3 } }), 'helper');
+  // 9999（NO_PERM，从没配过权限的人）和插件区等级都是普通成员
+  assert.equal(bucketOf({ sender: { level: 9999 } }), 'member');
+  assert.equal(bucketOf({ sender: { level: 42 } }), 'member');
+  // ai-chat 直接给 bucket 时以它为准
+  assert.equal(bucketOf({ sender: { bucket: 'manager', level: 3 } }), 'manager');
 });
 
 test('权限：拿不到信息就是 unknown（兜底）', () => {
@@ -374,6 +385,30 @@ test('权限：拿不到信息就是 unknown（兜底）', () => {
   assert.equal(bucketOf({ sender: {} }), 'unknown');
   assert.equal(bucketOf({ sender: { bucket: '随便写的' } }), 'unknown');
   assert.equal(bucketOf({ sender: { level: 'abc' } }), 'unknown');
+});
+
+test('权限：空的 / null 的等级不能被读成主人', () => {
+  /**
+   * `Number('')` 和 `Number(null)` 都是 **0**，而 0 是主人。
+   * 「等级字段是空串」是最常见的「没填」状态，被读成最高权限，
+   * 而这段代码的注释一直写着「拿不到权限就按最严处理」——方向正好相反。
+   *
+   * 老插件只给 `level` 不给 `bucket`，正是这条路径的主要使用者。
+   */
+  assert.equal(bucketOfLevel(''), '', '空串必须返回空串，由调用方兜到 unknown');
+  assert.equal(bucketOfLevel(null), '');
+  assert.equal(bucketOfLevel(undefined), '');
+  assert.equal(bucketOfLevel(-1), '', '负数不是合法等级');
+  assert.equal(bucketOfLevel(true), '', '布尔值不是等级');
+
+  assert.equal(bucketOf({ sender: { level: '' } }), 'unknown');
+  assert.equal(bucketOf({ sender: { level: null } }), 'unknown');
+  assert.equal(bucketOf({ sender: { level: -1 } }), 'unknown');
+
+  // 正常值不受影响
+  assert.equal(bucketOfLevel(0), 'owner');
+  assert.equal(bucketOfLevel('2'), 'manager');
+  assert.equal(bucketOfLevel(3), 'helper');
 });
 
 test('权限：unknown 默认只给聊天', () => {
@@ -1321,4 +1356,336 @@ test('配置：按群指定人格（persona.byChat）不会被裁剪掉', () => 
 
 test('配置：默认端口跟 ai-chat 的默认地址对上', () => {
   assert.equal(DEFAULTS.server.port, 17321);
+});
+
+test('面板 quick：能力页的启用 / 改 / 读，以及"没启用时不许改"', async () => {
+  /**
+   * 锁三件事：
+   *  1. 没有 `capabilities.json` 时 `enabled=false`——老用户装上新版本行为不变。
+   *  2. 未启用直接 patch 要 409，不能悄悄建一份文件出来。
+   *  3. 启用时**以旧的 `permissions` 为种子**：老用户把某档调成 `all`，
+   *     不能一启用就被打回白名单（那是悄悄降权）。
+   */
+  const host = await import('../src/host.js');
+  const dir = tmp();
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = join(dir, 'data');
+
+  const routes = new Map();
+  const cleanups = [];
+  const noop = () => () => {};
+  const ctx = {
+    agents: { get: () => null, list: () => [], create: async () => ({ id: 'a', ctx: {} }) },
+    sessions: { get: () => null, list: () => [], create: () => ({ id: 's' }) },
+    systemPrompt: { context: noop },
+    webServer: { register: (r) => { routes.set(r.path, r.handler); return noop; } },
+    config: {},
+    logger: { info: noop, warn: noop, error: noop, debug: noop },
+    effect: (cb) => { const off = cb(); if (typeof off === 'function') cleanups.push(off); return noop; },
+    on: () => noop,
+    dataDir: join(dir, 'data'),
+    dir,
+  };
+
+  const call = async (body) => {
+    const res = { statusCode: 0, setHeader() {}, end(s) { this.body = JSON.parse(s); } };
+    const req = {
+      headers: { host: '127.0.0.1:8931' },
+      async *[Symbol.asyncIterator]() { yield JSON.stringify(body); },
+    };
+    await routes.get('/roost/api/quick')(req, res);
+    return res;
+  };
+
+  const capFile = () => join(process.env.DSH_ROOST_DATA, 'capabilities.json');
+
+  try {
+    host.apply(ctx);
+
+    const before = await call({ op: 'capabilities.get' });
+    assert.equal(before.body.ok, true);
+    assert.equal(before.body.enabled, false, '没有文件时必须是未启用');
+    assert.equal(existsSync(capFile()), false, '读一次不该建文件');
+
+    const tooEarly = await call({ op: 'capabilities.patch', arg: { newTools: 'nobody' } });
+    assert.equal(tooEarly.statusCode, 409, '未启用就改必须拒绝');
+    assert.equal(existsSync(capFile()), false);
+
+    const bad = await call({ op: 'capabilities.patch', arg: 'nope' });
+    assert.ok(bad.statusCode === 400 || bad.statusCode === 409);
+
+    const on = await call({ op: 'capabilities.init' });
+    assert.equal(on.statusCode, 200, JSON.stringify(on.body));
+    assert.equal(on.body.enabled, true);
+    assert.ok(existsSync(capFile()), '启用后要真的写盘');
+    assert.deepEqual(on.body.store.defaults.owner.allow, ['*'], '主人档默认全给');
+    /**
+     * `permissions: 'chat'` 的档位迁移成**旧的 `GUEST_KEEP_TOOLS`**，
+     * 不是 `defaultStore()` 那套默认值。差在 `memory_note` / `sticker_pick`：
+     * 旧 chat 模式会把它们收走，用默认值当种子等于顺手给了权限——
+     * 而用户看到的是「我什么都没改，他们怎么多了两个能力」。
+     */
+    assert.deepEqual(
+      on.body.store.defaults.member.allow,
+      ['memory_search', 'qq_send', 'qq_close'],
+      'chat 档迁移必须和旧行为逐字等价',
+    );
+
+    const after = await call({ op: 'capabilities.get' });
+    assert.equal(after.body.enabled, true);
+    assert.ok(after.body.store.seen, '要带 seen 快照字段');
+
+    /**
+     * 试算必须覆盖**全部六档**。
+     *
+     * 之前这里默认只有四个（缺 manager / helper），而页面标题写「五个档位」——
+     * 前端 `if (!r) return null` 把缺数据的卡整块跳过，群管和助手两张卡
+     * 根本没渲染出来，工具弹窗里那两列也全是空勾。
+     */
+    const pv = await call({ op: 'capabilities.preview', arg: {} });
+    assert.equal(pv.statusCode, 200);
+    assert.deepEqual(
+      pv.body.results.map((r) => r.bucket),
+      ['owner', 'admin', 'manager', 'helper', 'member', 'unknown'],
+      '试算要五档 + 兜底档，不能少',
+    );
+
+    const patched = await call({ op: 'capabilities.patch', arg: { newTools: 'nobody' } });
+    assert.equal(patched.statusCode, 200);
+    assert.equal(patched.body.store.newTools, 'nobody');
+
+    const disk = JSON.parse(readFileSync(capFile(), 'utf8'));
+    assert.equal(disk.newTools, 'nobody', '改动要落盘');
+
+    const acked = await call({ op: 'capabilities.ack' });
+    assert.equal(acked.body.ok, true);
+  } finally {
+    for (const c of cleanups) { try { c(); } catch {} }
+    if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;
+    else process.env.DSH_ROOST_DATA = oldEnv;
+  }
+});
+
+test('面板 quick：功能开关的读写，以及「关掉功能要真的收工具」', async () => {
+  /**
+   * 锁四件事：
+   *  1. `features.get` 把 11 个开关和分组都给出来，且状态来自 config；
+   *  2. 关掉「分段说话」写的是 **config.json**（和设置页同一份），不是另存一份；
+   *  3. `awake` 依赖 `speakUp`，后者关着时打开前者要 409 并说清先开哪个；
+   *  4. 发文件没有 config 字段，未启用能力策略时改它会 409，而不是悄悄丢掉。
+   */
+  const host = await import('../src/host.js');
+  const dir = tmp();
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = join(dir, 'data');
+
+  const routes = new Map();
+  const cleanups = [];
+  const noop = () => () => {};
+  const ctx = {
+    agents: { get: () => null, list: () => [], create: async () => ({ id: 'a', ctx: {} }) },
+    sessions: { get: () => null, list: () => [], create: () => ({ id: 's' }) },
+    systemPrompt: { context: noop },
+    webServer: {
+      register: (r) => {
+        routes.set(r.path, r.handler);
+        return noop;
+      },
+    },
+    config: {},
+    logger: { info: noop, warn: noop, error: noop, debug: noop },
+    effect: (cb) => {
+      const off = cb();
+      if (typeof off === 'function') cleanups.push(off);
+      return noop;
+    },
+    on: () => noop,
+    dataDir: join(dir, 'data'),
+    dir,
+  };
+
+  const call = async (body) => {
+    const res = { statusCode: 0, setHeader() {}, end(s) { this.body = JSON.parse(s); } };
+    const req = {
+      headers: { host: '127.0.0.1:8931' },
+      async *[Symbol.asyncIterator]() { yield JSON.stringify(body); },
+    };
+    await routes.get('/roost/api/quick')(req, res);
+    return res;
+  };
+
+  try {
+    host.apply(ctx);
+
+    const all = await call({ op: 'features.get' });
+    assert.equal(all.body.ok, true);
+    assert.equal(all.body.features.length, 11, `开关数量变了：${all.body.features.length}`);
+    assert.equal(all.body.groups.length, 4);
+
+    // 默认：主动搭话关着（DEFAULTS 里就是 false），其余开
+    assert.equal(all.body.raw.speakUp, false, 'speakUp 默认关');
+    assert.equal(all.body.raw.awake, true, 'awake 配置是 true');
+    assert.equal(all.body.on.awake, false, 'awake 依赖 speakUp，应显示为关');
+    assert.ok(all.body.blocked.awake.includes('主动搭话'), `blocked 要说清原因：${all.body.blocked.awake}`);
+
+    // 依赖没满足时打开 → 409，且不写盘
+    const bad = await call({ op: 'features.patch', arg: { id: 'awake', on: true } });
+    assert.equal(bad.statusCode, 409);
+    assert.ok(bad.body.message.includes('主动搭话'));
+
+    // 关「分段说话」：写进 config.json
+    const off = await call({ op: 'features.patch', arg: { id: 'qqTools', on: false } });
+    assert.equal(off.statusCode, 200, JSON.stringify(off.body));
+    const disk = JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'config.json'), 'utf8'));
+    assert.equal(disk.qqTools.enabled, false, '要落到 config.json，不能另存一份');
+
+    const after = await call({ op: 'features.get' });
+    assert.equal(after.body.raw.qqTools, false);
+    // seen 是空的（没观察过工具），所以 wouldRemove 也就是空的——这里只验证不炸
+    assert.ok(Array.isArray(after.body.wouldRemove));
+
+    // 未知开关 → 400
+    const nope = await call({ op: 'features.patch', arg: { id: '没有这个', on: false } });
+    assert.equal(nope.statusCode, 400);
+
+    // 发文件存在能力策略里：没启用时改它要 409，而不是假装成功
+    const noStore = await call({ op: 'features.patch', arg: { id: 'sendFile', on: false } });
+    assert.equal(noStore.statusCode, 409, JSON.stringify(noStore.body));
+
+    // 启用能力策略之后就能改了
+    await call({ op: 'capabilities.init' });
+    const okStore = await call({ op: 'features.patch', arg: { id: 'sendFile', on: false } });
+    assert.equal(okStore.statusCode, 200, JSON.stringify(okStore.body));
+    const capDisk = JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'capabilities.json'), 'utf8'));
+    assert.equal(capDisk.features.sendFile, false);
+  } finally {
+    for (const c of cleanups) { try { c(); } catch {} }
+    if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;
+    else process.env.DSH_ROOST_DATA = oldEnv;
+  }
+});
+
+test('面板 quick：配额的读 / 改 / 清零，以及非法值要拒', async () => {
+  /**
+   * 配额写的是「用户手填的数字」，所以校验比功能开关重要：
+   * 一个 `"abc"` 混进去，`charge()` 里 `Number()` 得 NaN，
+   * `used >= NaN` 永远 false —— 额度静默变成不限，没人会发现。
+   */
+  const host = await import('../src/host.js');
+  const dir = tmp();
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = join(dir, 'data');
+
+  const routes = new Map();
+  const cleanups = [];
+  const noop = () => () => {};
+  const ctx = {
+    agents: { get: () => null, list: () => [], create: async () => ({ id: 'a', ctx: {} }) },
+    sessions: { get: () => null, list: () => [], create: () => ({ id: 's' }) },
+    systemPrompt: { context: noop },
+    webServer: { register: (r) => { routes.set(r.path, r.handler); return noop; } },
+    config: {},
+    logger: { info: noop, warn: noop, error: noop, debug: noop },
+    effect: (cb) => { const off = cb(); if (typeof off === 'function') cleanups.push(off); return noop; },
+    on: () => noop,
+    dataDir: join(dir, 'data'),
+    dir,
+  };
+
+  const call = async (body) => {
+    const res = { statusCode: 0, setHeader() {}, end(s) { this.body = JSON.parse(s); } };
+    const req = { headers: { host: '127.0.0.1:8931' }, async *[Symbol.asyncIterator]() { yield JSON.stringify(body); } };
+    await routes.get('/roost/api/quick')(req, res);
+    return res;
+  };
+
+  try {
+    host.apply(ctx);
+
+    const all = await call({ op: 'quota.get' });
+    assert.equal(all.body.ok, true);
+    assert.equal(all.body.rows.length, 5, `配额项数量变了：${all.body.rows.length}`);
+    const voice = all.body.rows.find((r) => r.feature === 'voice');
+    /** 默认不限（`-1`）：装上新版本不能突然开始拦人，见 quota.js 文件头 */
+    assert.equal(voice.max, -1);
+    assert.equal(voice.suggest, 3, '建议值还是要给出来，否则输入框只能瞎猜');
+    assert.equal(voice.per, 'person');
+    assert.equal(voice.window, 'day');
+
+    // 非法输入
+    assert.equal((await call({ op: 'quota.patch', arg: { feature: 'voice', max: 'abc' } })).statusCode, 400);
+    assert.equal((await call({ op: 'quota.patch', arg: { feature: 'voice', max: -5 } })).statusCode, 400);
+    assert.equal((await call({ op: 'quota.patch', arg: { feature: 'voice', window: '每周' } })).statusCode, 400);
+    assert.equal((await call({ op: 'quota.patch', arg: { feature: 'voice', per: '每人' } })).statusCode, 400);
+    // 名字不合法要拒（带空格 / 引号会把 quota.json 的键写坏）
+    assert.equal((await call({ op: 'quota.patch', arg: { feature: 'web search', max: 1 } })).statusCode, 400);
+    assert.equal((await call({ op: 'quota.patch', arg: { feature: '', max: 1 } })).statusCode, 400);
+    assert.equal((await call({ op: 'quota.patch', arg: { feature: 'voice' } })).statusCode, 400, '什么都没说要拒');
+
+    /**
+     * **任意工具名都能配**——这是「只给联网搜索限次数」的入口。
+     * 名字暂时不在池子里也放行：插件装了卸了、DSH 升级改名，
+     * 配额是持久配置，不该因为「此刻没有这个工具」就写不进去。
+     */
+    const tool = await call({ op: 'quota.patch', arg: { feature: 'web_search', max: 20 } });
+    assert.equal(tool.statusCode, 200, JSON.stringify(tool.body));
+    assert.equal(JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'config.json'), 'utf8')).quota.web_search.max, 20);
+
+    const withTool = await call({ op: 'quota.get' });
+    const row = withTool.body.rows.find((r) => r.feature === 'web_search');
+    assert.ok(row, '自定义工具配额要出现在 rows 里');
+    assert.equal(row.max, 20);
+    assert.equal(row.per, 'person', '没写单位时默认每人');
+    assert.equal(row.window, 'day', '没写窗口时默认每天');
+    assert.ok(Array.isArray(withTool.body.pool), 'quota.get 要带工具池');
+    assert.ok(Array.isArray(withTool.body.builtin), 'quota.get 要带内置项名单');
+
+    // -1 是「不限」的约定写法（面板清空输入框就是它），必须放行
+    assert.equal((await call({ op: 'quota.patch', arg: { feature: 'voice', max: -1 } })).statusCode, 200);
+
+    /**
+     * 按档位设额度：只改这一档，别动默认值。
+     *
+     * 混在一起的话，用户改完群成员，主人也跟着变——
+     * 那这个功能就等于没做。
+     */
+    const byB = await call({ op: 'quota.patch', arg: { feature: 'voice', max: 0, bucket: 'member' } });
+    assert.equal(byB.statusCode, 200, JSON.stringify(byB.body));
+    const bDisk = JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'config.json'), 'utf8'));
+    assert.equal(bDisk.quota.voice.byBucket.member, 0);
+    assert.equal(bDisk.quota.voice.max, -1, '顶层默认值不该被动过');
+
+    assert.equal((await call({ op: 'quota.patch', arg: { feature: 'voice', bucket: 'member' } })).statusCode, 400, '只给档位不给次数要拒');
+    assert.equal((await call({ op: 'quota.patch', arg: { feature: 'voice', max: 1, bucket: '老板' } })).statusCode, 400);
+
+    /**
+     * **五档都要能改**。
+     *
+     * 这条是回归测试：档位名单曾经在这里写死成四个（缺 manager / helper），
+     * 而前端下拉是五档——用户选「群管」改额度，直接吃一个 400，
+     * 界面上看是「点了没反应」。名单必须跟 `BUCKETS` 走，不能另抄一份。
+     */
+    for (const b of ['owner', 'admin', 'manager', 'helper', 'member', 'unknown']) {
+      const one = await call({ op: 'quota.patch', arg: { feature: 'voice', max: 3, bucket: b } });
+      assert.equal(one.statusCode, 200, `${b} 档应当能改额度：${JSON.stringify(one.body)}`);
+    }
+
+    // 正常改 → 落到 config.json，且立刻反映在 quota.get 里
+    const up = await call({ op: 'quota.patch', arg: { feature: 'voice', max: 7 } });
+    assert.equal(up.statusCode, 200, JSON.stringify(up.body));
+    const disk = JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'config.json'), 'utf8'));
+    assert.equal(disk.quota.voice.max, 7);
+
+    const after = await call({ op: 'quota.get' });
+    assert.equal(after.body.rows.find((r) => r.feature === 'voice').max, 7, '改完要立刻生效');
+
+    // 清零不报错（计数文件可能还不存在）
+    assert.equal((await call({ op: 'quota.reset', arg: { feature: 'voice' } })).statusCode, 200);
+    assert.equal((await call({ op: 'quota.reset', arg: {} })).statusCode, 200);
+    assert.equal((await call({ op: 'quota.reset', arg: { feature: '不存在' } })).statusCode, 400);
+  } finally {
+    for (const c of cleanups) { try { c(); } catch {} }
+    if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;
+    else process.env.DSH_ROOST_DATA = oldEnv;
+  }
 });

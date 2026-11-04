@@ -422,6 +422,40 @@ export function trimDemos(demos, budget = DEMOS_MAX) {
  *   就得依赖真实仓库内容，改一份人格就会连带改一堆测试。
  * @param {(msg: string) => void} [opts.log]
  */
+/**
+ * 疑似重复：**同名 + 同字数**。
+ *
+ * 为什么不用正文比：正文要读盘，三百多份就是三百多次 IO，
+ * 那是「点体检」时才该付的代价。列表进页面就要能标出角标，
+ * 否则用户搜出三个一模一样的东西，还得先去点一次体检才知道它们重复。
+ *
+ * 假阳性只有「同一张卡改了几个字、字数恰好没变」，可以接受；
+ * 面板上的措辞也写的是「疑似」，真判重仍以体检的正文比对为准。
+ *
+ * 字数为 0 的一律不参与：那是解析不出正文的坏文件，
+ * 拿它当依据会把所有坏文件凑成一组。
+ *
+ * @param {Array<{id:string,label?:string,name?:string,chars?:number}>} list
+ * @returns {Record<string, string[]>} id → 和它疑似重复的其他 id
+ */
+export function dupGroups(list) {
+  const buckets = new Map();
+  for (const p of Array.isArray(list) ? list : []) {
+    const chars = Number(p?.chars) || 0;
+    if (!chars) continue;
+    const k = `${p.label || p.name || p.id}|${chars}`;
+    if (!buckets.has(k)) buckets.set(k, []);
+    buckets.get(k).push(p.id);
+  }
+
+  const out = {};
+  for (const ids of buckets.values()) {
+    if (ids.length < 2) continue;
+    for (const id of ids) out[id] = ids.filter((x) => x !== id);
+  }
+  return out;
+}
+
 export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
   const dir = () => join(dataDir, 'personas');
 

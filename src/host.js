@@ -14,13 +14,18 @@
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
 import { basename, join, resolve } from 'node:path';
-import { mkdirSync, statSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision } from './config.js';
 import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
 import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf, speakerTag } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, AWAKE_DENY_TOOLS } from './permissions.js';
+import { resolvePolicy, dangerOf, BUCKETS } from './capabilities.js';
+import { FEATURES, FEATURE_GROUPS, readFeatures, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef } from './features.js';
+import { createCapabilityStore } from './capability-store.js';
+import { createQuota, QUOTA_DEFAULTS } from './quota.js';
 import { createSetup } from './setup.js';
 import { createMemory, W_EXPLICIT } from './memory.js';
 import { createJournal } from './journal.js';
@@ -32,7 +37,7 @@ import { createMood } from './mood.js';
 import { createClosing } from './closing.js';
 import { createAccount } from './account.js';
 import { createRewriter } from './rewrite.js';
-import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand, trimPersonaBody, trimDemos } from './personas.js';
+import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand, trimPersonaBody, trimDemos, dupGroups } from './personas.js';
 import { createPersonaRepo, scanPersona } from './persona-repo.js';
 import { createUpdater } from './update.js';
 import { createDepsCheck } from './deps.js';
@@ -102,6 +107,16 @@ function makeLogger(ctx) {
 }
 
 export function apply(ctx) {
+  /**
+   * **激活期异常要落盘。**
+   *
+   * 面板起不来的时候，用户端只能看到一个空白页——没有任何提示，
+   * 也没法把日志拿给开发者（2026-11-05 02:40 就是这么查了半天）。
+   *
+   * 所以最外层兜一次：记到 `~/.dsh/dsh-roost/activate-error.log`，然后**照样抛**，
+   * 不改变 DSH 对激活失败的处理。
+   */
+  try {
   /**
    * 最近的动静，面板「日志」页读它。
    *
@@ -186,11 +201,93 @@ export function apply(ctx) {
    *
    * 人格 `tools` 为 `null`（自己写的人格）时**保持旧行为**，只按档位收。
    */
-  function restrictTurnTools(agent, { mode, personaTools, denyExtra = [] }) {
+  /**
+   * 能力策略这一轮算出来的收工具计划。
+   *
+   * 返回 `null` = **没启用 / 算不出来**，调用方回退旧逻辑。这个返回值是整个
+   * 接线方案的安全阀：只要 `capabilities.json` 不存在，或者 DSH 报不出工具清单，
+   * 行为就和升级前完全一致，不会因为新功能把机器人的手砍掉。
+   *
+   * @returns {{ok:true, off:Function, names:string[]}|{ok:false, nothing?:boolean, reason:string}|null}
+   */
+  function planByCapabilities(agent, { bucket, chatId, personaTools, denyExtra = [] }) {
+    try {
+      if (!capStore.enabled()) return null;
+
+      const t = agent?.ctx?.tools;
+      if (!t || typeof t.schemas !== 'function') return null;
+
+      let pool = [];
+      try {
+        const list = t.schemas();
+        pool = (Array.isArray(list) ? list : [])
+          .map((s) => String(s?.name ?? s?.tool?.name ?? ''))
+          .filter(Boolean);
+      } catch (e) {
+        log.warn(`能力页：读不到工具清单，这一轮按旧规则收（${e?.message || e}）`);
+        return null;
+      }
+
+      // 顺手观察池子变化（新增/失效）。禁用时 observe 自己会跳过，这里不必再判。
+      capStore.observe(pool);
+
+      /**
+       * 功能关掉的工具在这一步强制收走。
+       *
+       * 放在策略里而不是在调用方补一次 restrict：`resolvePolicy` 保证
+       * 返回的 deny 全部来自 pool，调用方自己拼名字迟早混进不存在的项，
+       * 而 `tools.restrict` 一个名字不认识就整批拒绝（0.10.10 那次）。
+       */
+      const forced = forcedDenyTools(cfg, capStore.get(), pool);
+
+      const r = resolvePolicy({
+        pool,
+        bucket: bucket || 'member',
+        chatId: chatId || '',
+        store: capStore.get(),
+        personaTools,
+        forceDeny: forced,
+      });
+      if (!r.ok) {
+        log.warn(`能力页：${r.reason}，这一轮按旧规则收`);
+        return null;
+      }
+      if (r.warnings?.length) log.info(`能力页：${r.warnings.join('；')}`);
+      if (r.removed?.length) log.info(`能力页：配置里有 ${r.removed.length} 个工具已经不在了（${r.removed.slice(0, 5).join('、')}）`);
+
+      // 额外要收的（主动搭话的 qq 工具）叠加在策略之上，且只收池子里真有的
+      const denySet = new Set(r.deny);
+      const poolSet = new Set(pool);
+      for (const n of denyExtra) if (poolSet.has(n)) denySet.add(n);
+
+      if (!denySet.size) return { ok: false, nothing: true, reason: 'nothing' };
+
+      const deny = [...denySet];
+      try {
+        return { ok: true, off: t.restrict({ deny }), names: deny };
+      } catch (e) {
+        return { ok: false, reason: `${e?.message || e}（清单：${deny.join('、')}）` };
+      }
+    } catch (e) {
+      log.warn(`能力页：策略算炸了，这一轮按旧规则收（${e?.message || e}）`);
+      return null;
+    }
+  }
+
+  function restrictTurnTools(agent, { mode, bucket, chatId, personaTools, denyExtra = [] }) {
     const t = agent?.ctx?.tools;
     if (!t || typeof t.restrict !== 'function') {
       return { ok: false, reason: '这个 agent 的 tools 服务没有 restrict（版本差异）' };
     }
+
+    /**
+     * 先试能力策略。没启用 / 算不出来 → `null` → 继续走下面的旧逻辑。
+     *
+     * 位置放在这里而不是调用方，是因为四个调用点（普通回话 / 主动搭话 ×2 /
+     * 凌晨巩固）都需要同一套语义，漏一个就是"某条路上权限静默失效"。
+     */
+    const capPlan = planByCapabilities(agent, { bucket, chatId, personaTools, denyExtra });
+    if (capPlan) return capPlan;
 
     /** 档位还允许保留的白名单；主人档不额外限制，传 null */
     const keep = mode === 'chat' ? GUEST_KEEP_TOOLS : null;
@@ -206,8 +303,16 @@ export function apply(ctx) {
       else if (!plan.nothing) return plan;
     }
 
-    // 额外要收的（主动搭话时是 qq_send / qq_close），先按实际挂着的过滤
-    const extra = planDenyTools(t, denyExtra);
+    /**
+     * 额外要收的两类，一起按「实际挂着的」过滤：
+     *   · `denyExtra`：调用方临时加的限制（主动搭话时收 qq_send / qq_close）；
+     *   · `forced`：功能开关关掉的（发文件、记忆工具…）。
+     *
+     * **功能开关不依赖能力策略是否启用**：用户关了「发文件」，但他可能从没点过
+     * 「启用能力策略」。那也得真的发不出去——否则页面上关着、实际能用，
+     * 是最坏的一种不一致。
+     */
+    const extra = planDenyTools(t, [...denyExtra, ...forcedDenyTools(cfg, capStore.get())]);
     const deny = [...new Set([...base, ...(extra.ok ? extra.deny : [])])];
     if (!deny.length) return { ok: false, nothing: true, reason: 'nothing' };
 
@@ -346,6 +451,207 @@ export function apply(ctx) {
 
   const sessions = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
   const turns = createTurnRunner({ ctx, log, timeoutSec: cfg.chat.turnTimeoutSec });
+
+  /**
+   * 能力策略（面板「能力」页）。
+   *
+   * **文件不存在就完全不用它**——老用户升级后行为与以前一模一样。
+   * 这是这条链路上最重要的一个决定：新功能默认关，只有显式建了
+   * `capabilities.json`（面板上点「启用」）才接管收工具。
+   */
+  const capStore = createCapabilityStore({ dir: dataDir(), log });
+
+  /**
+   * 次数配额。跟着数据目录走，和 `capabilities.json` 平级。
+   *
+   * 配额表允许在 `config.json` 的 `quota` 段覆盖（面板会写），
+   * 所以用 `defaults` 传的是**当前配置里的覆盖值**，而不是烤死的默认值。
+   */
+  const quota = createQuota({ dir: dataDir(), log, defaults: () => cfg.quota || {} });
+
+  /**
+   * 工具次数守卫要**在激活阶段**挂，不能等到第一条消息。
+   *
+   * DSH 只允许插件激活时碰这些能力，在消息处理里访问会被拒
+   * （`cannot get property onTeardown without inject`），而且异常会把整条消息吞掉。
+   * `mountToolGuard` 在下面定义（函数声明会提升），这里调用没问题——
+   * 它内部引用的 `speaker` 虽然还没初始化，但守卫回调是**轮内**才执行的。
+   */
+  /**
+   * **可选功能绝不能拖垮 activate。**
+   *
+   * 2026-11-05 02:40 的事故：`mountToolGuard()` 挂在第 469 行，而路由注册在 3485 行之后。
+   * 它一抛错，`apply()` 整个中断 —— 前端 client.js 照常加载（侧边栏有 Roost、面板外壳也在），
+   * 但**所有 `/roost/api/*` 都是 404**，用户看到的就是"点 Roost 一片黑"。
+   *
+   * 症状完全误导：看起来像前端渲染问题，实际是后端激活到一半挂了。
+   * 所以这里不但要 catch，还要把失败原因记下来，让面板能显示。
+   */
+  let toolGuardOff = null;
+  let toolGuardErr = '';
+  try {
+    toolGuardOff = mountToolGuard();
+  } catch (e) {
+    toolGuardErr = String(e?.message || e);
+    log.warn(`工具次数守卫没挂上（不影响其他功能）：${toolGuardErr}`);
+  }
+
+  /**
+   * 现在 DSH 里**真实挂着**的工具清单。
+   *
+   * 优先问活着的 agent（`agent.ctx.tools.schemas()`），问不到才退回 `seen` 快照。
+   *
+   * 为什么必须现问：`seen` 是「上一次真跑过一轮时看到的」。新装用户、刚重启、
+   * 或者装了插件还没聊过天，`seen` 都是空的——面板上工具列表一片空白，
+   * 连「给 web_search 设一个次数上限」都做不到，而这恰恰是新用户最想配的。
+   *
+   * 为什么还得留 `seen` 兜底：DSH 里可能一个会话都没活着（都关掉了），
+   * 那时 `agents.get()` 拿不到东西，总不能显示「没有工具」——那比旧数据更误导。
+   * 所以返回 `source`，面板上照着写「实时」还是「上次记录」。
+   *
+   * @returns {{pool:string[], source:'live'|'seen'|'none', sessionId?:string}}
+   */
+  function currentPool() {
+    try {
+      const list = (sessions.list?.() || [])
+        .filter((x) => x?.sessionId)
+        .sort((x, y) => (y.at || 0) - (x.at || 0));
+      for (const one of list.slice(0, 8)) {
+        let names = [];
+        try {
+          const live = ctx.agents?.get?.(one.sessionId);
+          const t = live?.ctx?.tools;
+          if (!t || typeof t.schemas !== 'function') continue;
+          names = (t.schemas() || [])
+            .map((x) => String(x?.name ?? x?.tool?.name ?? ''))
+            .filter(Boolean);
+        } catch {
+          continue;
+        }
+        if (names.length) return { pool: names, source: 'live', sessionId: one.sessionId };
+      }
+    } catch (e) {
+      log.debug?.(`实时读工具清单失败：${e?.message || e}`);
+    }
+
+    const seen = Object.keys(capStore.get().seen?.tools || {});
+    return { pool: seen, source: seen.length ? 'seen' : 'none' };
+  }
+
+  /**
+   * 工具次数守卫：`web_search` 一天 20 次这种，超了**当场拒绝这一次调用**。
+   *
+   * 为什么必须挂在这里而不是 `restrict`：`restrict` 是**每轮开头**算一次的
+   * 掩码，它只知道「这一轮能不能调」，不知道「今天已经调了几次」。
+   * 想要「第 21 次就拦」，只能在真正分发的那一刻数。
+   * DSH 正好给了这个口子：`ctx.tools.guard(fn)` 是**同步**守卫，
+   * 返回一个字符串就等于拒绝，而且后续监听器无法把拒绝改回允许。
+   *
+   * ## 两个必须守住的边界
+   *
+   * ① **只对 QQ 会话生效。** guard 是全局的（plain-context 注册），
+   *    要是不加判断，用户在 DSH 里自己写代码时用 `web_search` 也会被扣——
+   *    那是别人的额度，凭什么算在他头上。
+   *    判据是 `sessions.list()` 里有没有这个 sessionId，也就是「这个会话是
+   *    Roost 建的」。找不到就不管。
+   *
+   * ② **没配配额就立刻返回。** `cfg.quota` 默认是 `{}`，这时连 list 都不做。
+   *    热路径上多一次遍历是白花的，而这个函数每次工具调用都会跑。
+   */
+  function mountToolGuard() {
+    try {
+      return mountToolGuardInner();
+    } catch (e) {
+      log?.warn?.(`工具次数守卫挂载失败（已跳过）：${e?.message || e}`);
+      return null;
+    }
+  }
+
+  function mountToolGuardInner() {
+    /**
+     * 两条路都试：`ctx.tools` 是服务直接挂在上下文上的形式，
+     * `ctx.get('tools')` 是按名取。哪个能用取决于 DSH 版本，
+     * 而且**不能写进 inject**——没有这个服务的版本会直接激活失败。
+     */
+    let t = null;
+    try {
+      if (typeof ctx?.tools?.guard === 'function') t = ctx.tools;
+    } catch {}
+    if (!t && typeof ctx.get === 'function') {
+      try {
+        t = ctx.get('tools');
+      } catch {}
+    }
+    if (!t || typeof t.guard !== 'function') {
+      /**
+       * 老版本 DSH 没有 guard。**不能因此在 inject 里写 `tools`**——
+       * 写进去会让插件在没这个服务的版本上直接激活失败，
+       * 比"少一个功能"严重得多（和 `pluginManager` 同一个取舍）。
+       */
+      log.info('这个 DSH 版本没有 tools.guard：工具次数限制不生效，其余照常');
+      return null;
+    }
+
+    const off = t.guard((exec) => {
+      try {
+        const q = cfg.quota || {};
+        if (!Object.keys(q).length) return undefined;
+
+        const name = String(exec?.name || '');
+        if (!name) return undefined;
+        // 只有用户真给这个工具配了次数才管
+        const spec = quota.table()[name];
+        if (!spec) return undefined;
+
+        const sid = String(exec?.agent?.session?.id || '');
+        if (!sid) return undefined;
+        // 只认 Roost 自己建的会话，别去扣 DSH 里正常编码会话的额度
+        const mine = (sessions.list?.() || []).find((x) => x?.sessionId === sid);
+        if (!mine) return undefined;
+
+        const sp = speaker.get(sid);
+        const chatId = String(mine.chatId || sp?.payload?.chat?.chatId || '');
+        const senderId = String(sp?.payload?.sender?.id || '');
+
+        /**
+         * 这一轮这次调用，先扣「总量」再扣「这个工具」。
+         *
+         * 总量默认是 `-1`（不限），`charge()` 会提前返回，零 IO——
+         * 所以绝大多数部署跑不到下面那句 save，不会因为多了个总闸变慢。
+         */
+        const who = {
+          per: senderId ? 'person' : 'chat',
+          id: senderId || chatId || sid,
+          bucket: sp?.bucket || mine.preset || '',
+        };
+        /** 同一次调用给两个 feature 用同一个 key：`dkey` 带了 feature 前缀，不会互相吃掉 */
+        const callKey = String(exec?.callId || '');
+
+        const total = quota.charge({ feature: 'tool', key: callKey, ...who });
+        if (!total.ok) {
+          return `${total.message}。这一轮别再调任何工具，直接告诉对方现在做不了。`;
+        }
+
+        const r = quota.charge({ feature: name, key: callKey, ...who });
+        if (r.ok) return undefined;
+        /** 具体工具超了，把刚才预扣的总量退回去——那次调用不会真的发生 */
+        total.undo?.();
+
+        /**
+         * 拒绝理由会被模型看到，所以要说清「别再试」。
+         * 只说「用完了」它会换个说法再调一次，白烧一轮。
+         */
+        return `${r.message}。这一轮不要再用 ${name}，直接告诉对方现在做不了，别答应稍后再试。`;
+      } catch (e) {
+        /** 守卫出错一律放行。配额是体验问题，不能因为它把工具调用全堵死 */
+        log.warn?.(`工具配额守卫出错（本次放行）：${e?.message || e}`);
+        return undefined;
+      }
+    });
+
+    log.info('工具次数守卫已挂上（只对 QQ 会话生效）');
+    return off;
+  }
 
   /** 人格库：正文在 personas/*.md 里，配置只记用哪个 */
   const personas = createPersonas({ dataDir: dataDir(), log: (m) => log.warn(m) });
@@ -536,6 +842,8 @@ export function apply(ctx) {
          */
         const cut = restrictTurnTools(agent, {
           mode: 'all',
+          bucket: 'owner',
+          chatId: chat.chatId,
           personaTools: personaToolsFor(chat),
           denyExtra: AWAKE_DENY_TOOLS,
         });
@@ -865,6 +1173,9 @@ export function apply(ctx) {
        */
       const cut = restrictTurnTools(agent, {
         mode: 'all',
+        bucket: 'owner',
+        /** 巩固是后台会话，没有"哪个群"的概念，显式留空以免吃到群覆盖 */
+        chatId: '',
         /** 后台维护不算「用过」：不然每晚巩固会把次数刷上去 */
         personaTools: personaToolsFor(chat, { count: false }),
         denyExtra: AWAKE_DENY_TOOLS,
@@ -1145,9 +1456,14 @@ export function apply(ctx) {
       /**
        * 同 speakup 那条路：主动开口没有"正在回的消息"，别让她看见 `qq_send`；
        * 同时叠上人格自己的工具限制（宿主发起的轮次也不能绕过 `tools: []`）。
+       *
+       * `bucket` 必须显式给 `owner`：这一轮没有真实说话人，`speaker` 里也就没有
+       * 那个人的档位。不传的话 `planByCapabilities()` 会退回 `member`——
+       * 主人被自己的机器人按群成员待遇收工具，表现为「私聊里她突然不能发文件了」。
        */
       const cut = restrictTurnTools(agent, {
         mode: 'all',
+        bucket: 'owner',
         personaTools: personaToolsFor(chat),
         denyExtra: AWAKE_DENY_TOOLS,
       });
@@ -1769,6 +2085,8 @@ export function apply(ctx) {
           payload: s?.payload || null,
           bucket: s?.bucket || '',
           chatId: s?.payload?.chat?.chatId || chat.chatId || '',
+          /** 这一句是谁说的。配额按人算的时候要它，拿不到就退回按会话算 */
+          senderId: String(s?.payload?.sender?.id ?? ''),
           kind: chat.kind,
           said: String(s?.payload?.text ?? ''),
         };
@@ -1957,6 +2275,26 @@ export function apply(ctx) {
            * 「一轮一个」形同虚设，桥那边 `MAX_FILES` 会照收两个，
            * 第二个还会把被动回复预算挤掉一格。失败再回滚。
            */
+          /**
+           * 次数配额：发文件是**重动作**（上传、占被动回复额度、对方要等）。
+           *
+           * 放在占位之前：不通过就别占名额，否则这一轮的名额被一次拒绝白白吃掉。
+           * `undo` 留给下面的 catch —— 扣完才 postReply，那一步还可能失败。
+           */
+          const q = quota.charge({
+            feature: 'file',
+            per: c.senderId ? 'person' : 'chat',
+            id: c.senderId || c.chatId || c.sid,
+            bucket: c.bucket,
+          });
+          if (!q.ok) {
+            return {
+              ok: false,
+              reason: 'quota',
+              message: `${q.message}。这一轮先别发，或者跟对方说明过一会儿再给。`,
+            };
+          }
+
           turnSt.files = (turnSt.files || 0) + 1;
           turnSt.fileNames = [...(turnSt.fileNames || []), basename(abs)];
           try {
@@ -1964,6 +2302,7 @@ export function apply(ctx) {
           } catch (e) {
             turnSt.files -= 1;
             turnSt.fileNames.pop();
+            q.undo?.();
             throw e;
           }
           log.info(`准备发文件 ${basename(abs)}（${(st.size / 1024 / 1024).toFixed(2)}MB）`);
@@ -2003,7 +2342,25 @@ export function apply(ctx) {
        */
       registerStickerTools({
         agent,
-        pickOf: ({ category, limit }) => stickers.pick(cfg.stickers, { category, limit }),
+        pickOf: ({ category, limit }) => {
+          const c = cur();
+          /**
+           * 表情包按「每群每轮一张」限。
+           *
+           * `turnKey` 必须用这一轮的 id：用会话 id 就变成「这个群一辈子一张」。
+           */
+          const q = quota.charge({
+            feature: 'sticker',
+            per: 'chat',
+            id: c.chatId || c.sid,
+            turnKey: qqTurn.get(c.sid)?.id || '',
+            bucket: c.bucket,
+          });
+          if (!q.ok) {
+            return { ok: false, message: `${q.message}。这一轮别再挑表情，用文字说就行。` };
+          }
+          return stickers.pick(cfg.stickers, { category, limit });
+        },
         log: (m) => log.warn(m),
       })
         .then((r) => {
@@ -2487,9 +2844,20 @@ export function apply(ctx) {
        * 轮末就 dispose 了，不需要额外的「重挂」逻辑。
        */
       const personaTools = personaToolsFor(chat);
-      if (mode === 'chat' || personaTools) {
+      /**
+       * 进门条件里有 `capStore.enabled()`。
+       *
+       * 这三个条件是「这一轮**需要**收工具吗」：旧档位模式是 chat、人格声明了
+       * `tools`、或者**启用过能力策略**。
+       *
+       * 少了最后一条就会出现这种情况：用户在「设置」页把某一档改成 `all`
+       * （`mode` 因此是 `'all'`），又在能力页把这一档收得只剩聊天——结果是
+       * 这条 `if` 直接不进，策略一次都没跑，面板上配的东西全是摆设。
+       * 启用策略之后 `permissions` 只当迁移种子用，不再决定要不要收。
+       */
+      if (capStore.enabled() || mode === 'chat' || personaTools) {
         try {
-          const r = restrictTurnTools(agent, { mode, personaTools });
+          const r = restrictTurnTools(agent, { mode, bucket, chatId: chat.chatId, personaTools });
           if (r.ok) restore = r.off;
           else if (!r.nothing) {
             log.warn(`收走本地工具失败：${r.reason}。这一轮会拿到比预期更多的工具`);
@@ -2715,7 +3083,19 @@ export function apply(ctx) {
        * 如果等 run 回来再清，就把这一轮刚记下的段数一起抹了。
        */
       const sidTurn = agent?.session?.id || '';
-      if (sidTurn) qqTurn.set(sidTurn, { parts: 0, texts: [], closed: false, files: 0, fileNames: [] });
+      /**
+       * `id` 是这一轮的标识，给「按轮计」的配额用（表情包每轮一张）。
+       *
+       * 不能用 sid：`qqTurn` 的 key 一直是同一个会话 id，同一会话连聊十轮
+       * 也只会有一个桶。也不能用对象引用——`get()` 拿到的是 Map 里的值，
+       * 轮次之间换了内容但调用方没法比较。
+       */
+      if (sidTurn) {
+        qqTurn.set(sidTurn, {
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          parts: 0, texts: [], closed: false, files: 0, fileNames: [],
+        });
+      }
 
       const rawReply = await turns.run(agent, text, {
         source: { kind: 'roost', chatId: chat.chatId, msgId: payload.id },
@@ -3269,10 +3649,333 @@ export function apply(ctx) {
          * 只记意图不记结果——失败时用户能看到 toast，这里要的是可追溯。
          * `memory.list` 是纯读，跳过，否则翻一次记忆就多一行噪音。
          */
-        if (op && op !== 'memory.list') audit({ op, chatId, peer: who.kind, peerId: who.id });
+        if (op && op !== 'memory.list' && op !== 'capabilities.get' && op !== 'capabilities.preview' && op !== 'features.get' && op !== 'quota.get') audit({ op, chatId, peer: who.kind, peerId: who.id });
 
         try {
           switch (op) {
+            /**
+             * 能力页：读一次就走。
+             *
+             * 纯读——不落盘、不改策略，所以不进审计（否则每开一次面板多一行噪音）。
+             * `pending` 是本次进程里观察到的「新增 / 失效」，读过即清。
+             */
+            case 'capabilities.get': {
+              const snap = capStore.snapshot();
+              return send(res, 200, {
+                ok: true,
+                chatId,
+                enabled: snap.enabled,
+                store: snap.store,
+                pending: snap.pending,
+                /** 旧的档位表，只给面板做「从 permissions 迁移」的说明用 */
+                legacyPermissions: cfg.permissions || {},
+              });
+            }
+
+            /**
+             * 启用：以旧的 `permissions` 为种子写一份 `capabilities.json`。
+             *
+             * 不拿默认值直接覆盖——老用户可能把某档调成了 `all`，一启用就掉回
+             * 白名单等于悄悄降权。迁移只做一次，之后 `permissions` 只读。
+             */
+            case 'capabilities.init': {
+              const seed = { defaults: {} };
+              /**
+               * 迁移只做一次，之后 `permissions` 只读。
+               *
+               * `chat` 要映射成**旧的 `GUEST_KEEP_TOOLS`**，不是 `defaultStore()` 里
+               * 那套默认值。两边的差别是 `memory_note` 和 `sticker_pick`：
+               * 旧 `chat` 模式会把它们一起收走，用默认值当种子等于顺手给了权限。
+               * 迁移的承诺是「启用后行为不变」，方向是收紧也不行——
+               * 用户看到的是「我什么都没改，他们怎么多了两个能力」。
+               *
+               * 想放宽就去面板上勾，那是一个他会看见的动作。
+               */
+              for (const b of ['owner', 'admin', 'member', 'unknown']) {
+                const legacy = cfg.permissions?.[b];
+                seed.defaults[b] = {
+                  allow: legacy === 'all' ? ['*'] : [...GUEST_KEEP_TOOLS],
+                };
+              }
+              capStore.init(seed);
+              return send(res, 200, { ok: true, message: '已启用，下一条消息开始生效', enabled: true, store: capStore.get() });
+            }
+
+            /**
+             * 改策略。`arg` 是**顶层键的浅合并**（`defaults` / `chats` / `skills` /
+             * `newTools` / `danger` 之一），深层由调用方给完整值。
+             * 不深合并是故意的：数组合并语义说不清，猜错比报错更麻烦。
+             */
+            case 'capabilities.patch': {
+              if (!arg || typeof arg !== 'object' || Array.isArray(arg)) {
+                return send(res, 400, { ok: false, message: '缺要改的内容' });
+              }
+              if (!capStore.enabled()) {
+                return send(res, 409, { ok: false, message: '还没启用，先点「启用」' });
+              }
+              const next = capStore.patch(arg);
+              return send(res, 200, { ok: true, message: '已保存，下一条消息开始生效', enabled: true, store: next });
+            }
+
+            /** 「我看到了」：清掉新增/失效提示，不动策略 */
+            case 'capabilities.ack': {
+              capStore.ack();
+              return send(res, 200, { ok: true });
+            }
+
+            /**
+             * 试算：给定档位（可选群），算出这一轮会看到哪些工具。
+             *
+             * pool 用「上次观察到的工具」（`seen.tools`）而不是现问 agent——
+             * 面板打开时不一定有活着的 agent，而 `seen` 正是上一轮真实见过的清单。
+             * 算的是同一份 `resolvePolicy()`，所以**试算结果 = 真实生效结果**，
+             * 不会出现"面板说没有、实际有"。
+             */
+            case 'capabilities.preview': {
+              const store = capStore.get();
+              const cur = currentPool();
+              const pool = cur.pool;
+              const chatId = String(arg?.chatId || '');
+              /**
+               * 默认算**全部五档 + 兜底档**。
+               *
+               * 2026-11-05 之前这里写死四个（缺 manager / helper），而页面标题
+               * 写的是「五个档位」——前端 `if (!r) return null` 把缺数据的卡整块跳过，
+               * 于是群管和助手两张卡根本没渲染出来，工具弹窗里那两列也全是空勾。
+               * 默认值必须跟着 `BUCKETS` 走，别在这里另抄一份名单。
+               */
+              const want = Array.isArray(arg?.buckets) && arg.buckets.length
+                ? arg.buckets
+                : BUCKETS;
+              const results = want
+                .filter((b) => BUCKETS.includes(String(b)))
+                .map((b) => ({
+                  bucket: String(b),
+                  ...resolvePolicy({ pool, bucket: String(b), chatId, store }),
+                }));
+              /**
+               * 危险标记由服务端判：`danger` 名单和通配语义都在 `capabilities.js` 里，
+               * 前端再实现一遍必然漂。返回 `name → 命中的模式`，前端只负责标红。
+               */
+              const danger = {};
+              for (const n of pool) {
+                const hit = dangerOf(n, store);
+                if (hit) danger[n] = hit;
+              }
+              return send(res, 200, {
+                ok: true,
+                enabled: capStore.enabled(),
+                pool,
+                /** 面板要照实说这份清单是现问的还是上次留下的 */
+                poolSource: cur.source,
+                chatId,
+                results,
+                danger,
+              });
+            }
+
+            /**
+             * 功能开关：读一遍全部状态。
+             *
+             * 纯读，不进审计。返回里带三样面板要用的东西：
+             *   · `on`       —— 算过依赖后的实际状态（`awake` 会因为 `speakUp` 关着显示为关）；
+             *   · `raw`      —— 配置里到底写的什么（判断「用户自己关的」还是「被依赖带下去的」）；
+             *   · `wouldRemove` —— 现在这些关着的开关会让哪些工具消失（按上次见到的池子算）。
+             */
+            case 'features.get': {
+              const store = capStore.get();
+              const cur = currentPool();
+              const pool = cur.pool;
+              const blocked = {};
+              for (const f of FEATURES) blocked[f.id] = cannotEnable(cfg, store, f.id);
+              return send(res, 200, {
+                ok: true,
+                on: readFeatures(cfg, store),
+                raw: Object.fromEntries(FEATURES.map((f) => [f.id, rawFeature(cfg, store, f.id)])),
+                features: FEATURES.map((f) => ({
+                  id: f.id,
+                  label: f.label,
+                  desc: f.desc,
+                  offHint: f.offHint,
+                  risky: !!f.risky,
+                  source: f.source,
+                  affects: f.affects,
+                  requires: f.requires,
+                })),
+                groups: FEATURE_GROUPS,
+                blocked,
+                wouldRemove: forcedDenyTools(cfg, store, pool),
+                pool,
+                poolSource: cur.source,
+                enabled: capStore.enabled(),
+              });
+            }
+
+            /**
+             * 功能开关：开一个 / 关一个。
+             *
+             * 两类落点（见 `features.js` 文件头）：
+             *   · config 里有字段的 → 写 `config.json`，和设置页是同一份，不会出现两个真相；
+             *   · 没有字段的（发文件）→ 写 `capabilities.json` 的 `features`。
+             *
+             * 写 config 用 `cfg = patchConfig(...)` 而不是 `setCfg`：后者不在本闭包里，
+             * 调了是 ReferenceError，还会被外层 try/catch 吞成一句「操作失败」。
+             */
+            case 'features.patch': {
+              const id = String(arg?.id || '');
+              const def = featureDef(id);
+              if (!def) return send(res, 400, { ok: false, message: `没有这个开关：${id || '(空)'}` });
+
+              const on = arg?.on !== false;
+              if (on) {
+                const why = cannotEnable(cfg, capStore.get(), id);
+                if (why) return send(res, 409, { ok: false, message: why });
+              }
+
+              const p = patchForFeature(id, on);
+              if (p.config) {
+                cfg = patchConfig(p.config);
+              } else if (p.store) {
+                if (!capStore.enabled()) {
+                  return send(res, 409, { ok: false, message: '这个开关存在能力策略里，先去「能力」页点「启用」' });
+                }
+                /**
+                 * `capStore.patch` 是**浅合并**，直接 `{ features: { sendFile: false } }`
+                 * 会把 `features` 里别的键整段冲掉。所以先读出来再叠加。
+                 */
+                const cur = capStore.get();
+                capStore.patch({ features: { ...(cur.features || {}), ...(p.store.features || {}) } });
+              }
+
+              return send(res, 200, {
+                ok: true,
+                message: on ? '已打开，下一条消息开始生效' : '已关闭，下一条消息开始生效',
+                id,
+                on,
+              });
+            }
+
+            /** 配额：各功能用了多少、上限多少。纯读 */
+            case 'quota.get': {
+              const u = quota.usage();
+              const cur = currentPool();
+              return send(res, 200, {
+                ok: true,
+                ...u,
+                overrides: cfg.quota || {},
+                /** 池子用来给「给某个工具设次数」提供候选，别让用户手打名字 */
+                pool: cur.pool,
+                poolSource: cur.source,
+                builtin: Object.keys(QUOTA_DEFAULTS),
+              });
+            }
+
+            /**
+             * 配额：改某个功能的额度。
+             *
+             * 只接受 `max` / `window` / `per` 三个字段，别的原样拒绝——
+             * 这里写进去的东西会被 `charge()` 直接当数用，放任意键等于给
+             * 「配错一个字段，整条路径静默失效」开一扇门。
+             */
+            case 'quota.patch': {
+              const feature = String(arg?.feature || '');
+              /**
+               * 除了内置那几项，**任何工具名都能配**。
+               *
+               * 这就是「只给联网搜索限次数」的实现方式：用户写
+               * `{ feature: 'web_search', max: 20 }`，`quota.js` 的
+               * `table()` 会把它当一项，`tools.guard` 每次调用就来扣。
+               *
+               * 不校验「这个名字在工具池里」：池子会变（插件装/卸、DSH 升级），
+               * 而配额是持久配置。名字暂时不存在时写进去只是**暂时不生效**，
+               * 等那个工具回来就自动生效——比「配不了」友好。
+               * 但字符集要挡：带空格、引号的名字进桶键会把文件写坏。
+               */
+              const nameOk = /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(feature);
+              if (!nameOk) {
+                return send(res, 400, { ok: false, message: `配额名不合法：${feature || '(空)'}` });
+              }
+              const clean = {};
+              if (arg.max !== undefined) {
+                const n = Number(arg.max);
+                /**
+                 * `-1` 是唯一的负数特例，含义是「不限」（面板上把输入框清空就是它）。
+                 * 其余负数一律拒：`-5` 只可能是手滑或算错，
+                 * 而 `charge()` 对所有负数是同一套处理，写进去就悄悄变成不限了。
+                 */
+                if (!Number.isFinite(n) || (n < 0 && n !== -1)) {
+                  return send(res, 400, { ok: false, message: '次数要填 0、正整数，或 -1（不限）' });
+                }
+                clean.max = Math.floor(n);
+              }
+              if (arg.window !== undefined) {
+                if (!['message', 'turn', 'minute', 'hour', 'day'].includes(arg.window)) {
+                  return send(res, 400, { ok: false, message: '窗口只能是 每条 / 每轮 / 每分钟 / 每小时 / 每天' });
+                }
+                clean.window = arg.window;
+              }
+              if (arg.per !== undefined) {
+                if (!['person', 'chat', 'global'].includes(arg.per)) {
+                  return send(res, 400, { ok: false, message: '统计单位只能是 每人 / 每个群 / 全局' });
+                }
+                clean.per = arg.per;
+              }
+              /**
+               * 档位。传了就只改**这一档**的额度（写进 `byBucket`），
+               * 不传就改所有档位的默认值（顶层 `max`）。
+               *
+               * 两个位置是不同的语义：顶层是「没单独设的档位都按这个来」，
+               * `byBucket` 是「这一档例外」。混成一个字段的话，
+               * 用户改完群成员的额度，主人那边也会跟着变——那就不叫分级了。
+               */
+              const bucket = arg.bucket === undefined ? '' : String(arg.bucket);
+              /**
+               * 档位名单**直接用 `BUCKETS`**，不在这里另抄一份。
+               *
+               * 2026-11-05 之前这里写死 `['owner','admin','member','unknown']`，
+               * 而前端下拉是五档——用户选「群管」改额度，直接 400「没有这个档位」。
+               * 两份名单不会自动同步，差一个就是一个静默不能用。
+               */
+              if (bucket && !BUCKETS.includes(bucket)) {
+                return send(res, 400, { ok: false, message: `没有这个档位：${bucket}` });
+              }
+              if (!Object.keys(clean).length) return send(res, 400, { ok: false, message: '没说要改什么' });
+              if (bucket && (clean.window !== undefined || clean.per !== undefined)) {
+                return send(res, 400, { ok: false, message: '窗口和统计单位是全局的，不能按档位分开设' });
+              }
+              if (bucket && clean.max === undefined) {
+                return send(res, 400, { ok: false, message: '要改某个档位，得同时给次数' });
+              }
+
+              const prev = cfg.quota?.[feature] || {};
+              const next = { ...(cfg.quota || {}) };
+              if (bucket) {
+                /** `byBucket` 的值是**数字**，不是对象——`charge()` 里直接拿它当上限 */
+                next[feature] = {
+                  ...prev,
+                  byBucket: { ...(prev.byBucket || {}), [bucket]: clean.max },
+                };
+              } else {
+                next[feature] = { ...prev, ...clean };
+              }
+              cfg = patchConfig({ quota: next });
+              return send(res, 200, {
+                ok: true,
+                message: bucket ? '这一档的额度改好了' : '改好了，下一次就按新额度算',
+                quota: cfg.quota,
+              });
+            }
+
+            /** 配额：清空计数。改坏了的兜底，也是「今天已经用满了想再用」的出口 */
+            case 'quota.reset': {
+              const feature = String(arg?.feature || '');
+              if (feature && !/^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(feature)) {
+                return send(res, 400, { ok: false, message: `配额名不合法：${feature}` });
+              }
+              quota.reset(feature);
+              return send(res, 200, { ok: true, message: feature ? '这一项的计数清空了' : '所有计数清空了' });
+            }
+
             case 'persona.set':
               memory.setPersonaOverride(chatId, String(arg ?? ''));
               return send(res, 200, { ok: true, message: arg ? '这个群的人设换了' : '回到默认人格' });
@@ -4622,16 +5325,35 @@ export function apply(ctx) {
         }),
       ),
 
-      route('/personas', (req, res) => send(res, 200, {
-        ok: true,
-        personas: personas.list(),
-        current: cfg.persona?.current || 'default',
-        byChat: cfg.persona?.byChat || {},
-        /** 她的名字（全局）：面板顶部直接用，不用再拉一次 /config */
-        globalName: globalName(),
-        /** 用过几次：面板列表上显示，帮用户删掉从没用过的 */
-        usage: personas?.prefs?.read?.().usage ?? {},
-      })),
+      route('/personas', (req, res) => {
+        const list = personas.list();
+
+        /**
+         * 疑似重复：**同名 + 同字数**。
+         *
+         * 为什么不在这个接口里比正文：`/personas/gov?scan=1` 要读三百多个文件，
+         * 那是「点体检」时才该付的代价。列表要的是**进页面就能看见**，
+         * 所以用 label + chars 做廉价指纹——两份内容一样的卡，这两个值必然相同，
+         * 假阳性只有「同一张卡改了几个字但字数恰好没变」，可以忽略。
+         *
+         * 真判重仍然以体检为准（`byRaw` 比的是正文）。这里给的是"可能重复"，
+         * 面板上的措辞也是「疑似」，别把它说成定论。
+         */
+        const dupOf = dupGroups(list);
+
+        return send(res, 200, {
+          ok: true,
+          personas: list,
+          current: cfg.persona?.current || 'default',
+          byChat: cfg.persona?.byChat || {},
+          /** 她的名字（全局）：面板顶部直接用，不用再拉一次 /config */
+          globalName: globalName(),
+          /** 用过几次：面板列表上显示，帮用户删掉从没用过的 */
+          usage: personas?.prefs?.read?.().usage ?? {},
+          /** id → 和它疑似重复的其他 id。列表上用来打角标，空对象表示没有 */
+          dupOf,
+        });
+      }),
 
       /**
        * 读一个人格的正文。
@@ -5085,6 +5807,8 @@ export function apply(ctx) {
           /** 自测也没有"正在回的消息"，同样要收走 qq 工具、并叠上人格限制；也不计入使用次数 */
           const cut = restrictTurnTools(agent, {
             mode: 'all',
+            /** 自测是主人点的按钮，按主人档算（不传会退回 member） */
+            bucket: 'owner',
             personaTools: personaToolsFor(chat, { count: false }),
             denyExtra: AWAKE_DENY_TOOLS,
           });
@@ -5136,7 +5860,7 @@ export function apply(ctx) {
        *   `webserver: duplicate exact route "/roost/api/status"`
        * `mountOffs` 是 mount() 挂上去的权限上下文，也要一起清。
        */
-      for (const off of [...offs, ...mountOffs]) {
+      for (const off of [toolGuardOff, ...offs, ...mountOffs]) {
         try {
           off?.();
         } catch {}
@@ -5144,4 +5868,15 @@ export function apply(ctx) {
       mountOffs.length = 0;
     };
   }, 'dsh-roost: 面板接口');
+  } catch (e) {
+    try {
+      const dir = join(homedir(), '.dsh', 'dsh-roost');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'activate-error.log'),
+        `${new Date().toISOString()}\n${(e && e.stack) || e}\n\n`);
+    } catch {
+      /* 连日志都写不了就算了，别掩盖原始异常 */
+    }
+    throw e;
+  }
 }

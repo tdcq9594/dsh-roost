@@ -308,6 +308,50 @@ select.roost-input{color-scheme:dark}
 .roost-item .t{flex:1;min-width:0;word-break:break-word}
 .roost-item .d{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary, inherit)}
 .roost-scroll{max-height:320px;overflow:auto}
+/* 功能开关的分组：标题一行、条目一列。
+   **不能套 .roost-item**（它 .t{flex:1} + 兄弟 flex:0 0 auto，标题会被压成一个字一行，
+   2026-11-04 在关系确认块上就是这么错的，这次又犯了一遍）。 */
+.cap-group{padding:11px 0;border-top:1px solid var(--line-soft)}
+.cap-group:first-child{border-top:none;padding-top:2px}
+.cap-group-t{font-size:11px;font-weight:650;letter-spacing:.05em;opacity:.75;margin-bottom:9px}
+.cap-group-b{display:flex;flex-direction:column;gap:13px}
+.cap-row{display:flex;align-items:flex-start;gap:8px}
+.cap-row-b{flex:1 1 auto;min-width:0}
+.cap-cap{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+.cap-cap input[type=number]{width:62px}
+/* 档位卡：标题一行、按钮一行、摘要一行。
+   原来整块塞进 .roost-item 的 .t 里，兄弟 .d 是 flex:0 0 auto 不换行，
+   工具名一长就把整行撑出屏幕（截图里右侧被切掉）。 */
+.cap-card{padding:12px 0;border-top:1px solid var(--line-soft)}
+.cap-card:first-child{border-top:none;padding-top:2px}
+.cap-card-h{display:flex;align-items:baseline;gap:8px;margin-bottom:9px;min-width:0}
+.cap-card-h .n{font-size:13px;font-weight:640}
+.cap-card-h .m{flex:1 1 auto;min-width:0;font-size:11px;opacity:.6;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cap-card-h .c{flex:0 0 auto;font-size:11px;opacity:.75;font-variant-numeric:tabular-nums}
+.cap-card-b{display:flex;flex-wrap:wrap;gap:6px}
+.cap-card-a{margin-top:8px;font-size:11px;line-height:1.55;opacity:.6;word-break:break-all}
+/* 工具行：名字在左占满、勾选框固定右边。原来名字和勾选框挤在同一个
+   inline 流里，长名字把勾选框推得忽左忽右，眼睛没法上下对齐。 */
+.cap-tool{display:flex;align-items:center;gap:10px;padding:3px 0;font-size:12px;min-width:0}
+.cap-tool .n{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px}
+.cap-tool .bx{flex:0 0 auto;display:flex;gap:9px;align-items:center}
+.cap-tool .bx label{display:flex;align-items:center;gap:3px;font-size:10.5px;opacity:.65}
+.cap-tool-h{display:flex;align-items:center;gap:10px;padding:2px 0 6px;font-size:10.5px;opacity:.55}
+.cap-tool-h .n{flex:1 1 auto}
+.cap-tool-h .bx{flex:0 0 auto;display:flex;gap:9px}
+.cap-tool-h .bx span{width:14px;text-align:center}
+/* 弹窗：搜索 + 长列表，不再把页面撑成一米长 */
+.cap-modal{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:60;
+  display:flex;align-items:center;justify-content:center;padding:24px}
+.cap-modal-b{background:var(--bg, #1b1b1b);border:1px solid var(--line-soft);border-radius:12px;
+  width:min(760px,100%);max-height:min(78vh,720px);display:flex;flex-direction:column;overflow:hidden}
+.cap-modal-h{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line-soft)}
+.cap-modal-h .t{flex:1 1 auto;font-size:13.5px;font-weight:640;min-width:0}
+.cap-modal-s{padding:10px 16px;border-bottom:1px solid var(--line-soft)}
+.cap-modal-s input{width:100%}
+.cap-modal-c{padding:10px 16px 16px;overflow:auto;flex:1 1 auto;min-height:0}
 /* 人格行：左两行文字、右一排动作。窗口窄时优先保住名字 */
 .roost-acts{flex:0 0 auto;display:flex;gap:6px;align-items:center}
 
@@ -1464,11 +1508,23 @@ select.roost-input{color-scheme:dark}
       const [riskNote, setRiskNote] = useState(null)
       /** 本地人格的搜索词。仓库视图早就有搜索框，自己的清单反而没有，200 个只能肉眼翻 */
       const [pq, setPq] = useState('')
-      /** 点「编辑」后把编辑区滚进视野：不然在 200 行清单下面，看不出刚才那下有没有生效 */
-      const editRef = useRef(null)
-      useEffect(() => {
-        if (editId) editRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-      }, [editId])
+      /**
+       * 仓库里没装的那批**默认折叠**。
+       *
+       * 用户的诉求是「我本地就想列我下载/同步过来的那几个」——三百多份卡里
+       * 绝大多数他这辈子不会装，全铺在列表里会把真正在用的挤出屏幕。
+       *
+       * 但**不能退回到「我的人格 / 人格仓库」两个页签**（那是更早的形态，
+       * 同一个名字两边各出现一次，用户得先判断在哪一页才能动手）。
+       * 所以是一张表，仓库那段收成一行，点开才展开。
+       */
+      const [showRepo, setShowRepo] = useState(false)
+      /**
+       * 编辑区改成弹窗之后，这里不再需要 `scrollIntoView`。
+       *
+       * 原来那行是 `block:'nearest'` —— 它只保证"刚好露出一角"，
+       * 编辑区一高标题就被顶出屏幕，用户的原话是「编辑框在最下面操作有点…」。
+       */
 
       const loadRepo = async (force) => {
         try {
@@ -1562,6 +1618,17 @@ select.roost-input{color-scheme:dark}
        * 现在只有一张表：装了的能切换/编辑，没装的行内直接装。
        * 本地排前面（那是你手上有的），仓库里没装的接在后面。
        */
+      /**
+       * id → 和它疑似重复的其他 id（服务端按「同名 + 同字数」算的）。
+       *
+       * 为什么列表要自己算一份而不是用体检结果：体检要读三百多个正文，
+       * 是「点体检」时才付的代价。列表进页面就得能看见角标，
+       * 否则用户搜出三个一模一样的东西，还得先去点一次体检才知道它们重复。
+       */
+      const dupOf = personas?.dupOf || {}
+      /** `persona-82876cff15` → `82876cff15`：重复时要把 id 露出来，否则两个同名项没法区分 */
+      const shortId = (id) => String(id || '').replace(/^persona-/, '')
+
       const mineAll = personas?.personas || []
       const localIds = new Set(mineAll.map((p) => p.id))
       const repoRows = repo?.personas || []
@@ -1580,11 +1647,17 @@ select.roost-input{color-scheme:dark}
         })),
       ]
       const kw = pq.trim().toLowerCase()
-      const rows = kw
+      const matched = kw
         ? allRows.filter((p) =>
             [p.label || p.name || '', p.id, p.selfName || '', ...(p.tags || [])]
               .join(' ').toLowerCase().includes(kw))
         : allRows
+      /**
+       * 有搜索词就**两边都搜**：用户明确在找东西，把仓库那批藏起来等于让他搜不到。
+       * 没搜索词时才按折叠状态决定。
+       */
+      const showRemote = showRepo || Boolean(kw)
+      const rows = showRemote ? matched : matched.filter((p) => p.from === 'local')
 
       /** 装一个仓库里的人格（「装上」和「更新」是同一个动作，服务端会拒绝覆盖你改过的） */
       const installOne = async (p) => {
@@ -1610,6 +1683,21 @@ select.roost-input{color-scheme:dark}
         setPreview(null)
         await reload()
         await loadRepo(true)
+      }
+
+      /**
+       * 关掉编辑弹窗。
+       *
+       * **有未保存改动就不关**，只提示。关弹窗这个动作太轻，不该承担丢正文的后果；
+       * 而正文是用户自己敲的，比"顺手关掉"重要得多。
+       */
+      const closeEdit = () => {
+        if (dirty) {
+          toast('有未保存的改动，先点「保存」或「放弃改动」')
+          return
+        }
+        setEditId('')
+        setRaw('')
       }
 
       /** 正在编辑的那份在仓库里是什么状态（决定要不要提示「你改过」） */
@@ -1786,8 +1874,11 @@ select.roost-input{color-scheme:dark}
             h('span', { className: 'pv-count' },
               !personas ? '读着…'
                 : kw ? `${rows.length} / ${allRows.length} 个`
-                  : `${mineAll.length} 个`
-                    + (remoteOnly.length ? ` · 仓库还有 ${remoteOnly.length} 个没装` : '')),
+                  : showRepo
+                    // 展开时要说清 "这几个是仓库的"，否则 342 突然变 349 会让人以为多了
+                    ? `${rows.length} 个（本地 ${mineAll.length} + 仓库 ${remoteOnly.length}）`
+                    : `${mineAll.length} 个`
+                      + (remoteOnly.length ? ` · 仓库还有 ${remoteOnly.length} 个没装` : '')),
             deletedCount
               ? h('button', {
                   type: 'button', className: 'roost-btn',
@@ -1956,13 +2047,22 @@ select.roost-input{color-scheme:dark}
                     isCur ? h(Pill, { tone: 'ok' }, '正在用') : null,
                     !isRepo && st === 'update' ? h(Pill, { tone: 'warn' }, '有更新') : null,
                     !isRepo && st === 'modified' ? h(Pill, { tone: 'warn' }, '你改过') : null,
+                    /**
+                     * 疑似重复：**必须标在列表里**。
+                     *
+                     * 之前只在「体检」的建议列表里能看到，而主列表照样显示三行同名同字的卡，
+                     * 用户根本不知道它们是重复的，更不知道该删哪个。
+                     */
+                    !isRepo && dupOf[p.id] ? h(Pill, { tone: 'warn' }, `疑似重复 ${dupOf[p.id].length} 份`) : null,
                   ),
                   h('div', { className: 'pv-meta' },
                     `${p.chars ?? 0} 字`
                     // 有更新时把两个字数并排放，才看得出差多少（只给字数确实不够直观）
                     + (!isRepo && st === 'update' && localChars ? `（仓库版 ${p.repo.chars} 字）` : '')
                     + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')
-                    + (used > 0 ? ` · 用过 ${used} 次` : '')),
+                    + (used > 0 ? ` · 用过 ${used} 次` : '')
+                    // 重复时把 id 露出来：两份卡名字一模一样，不给个区分依据就只能瞎删
+                    + (dupOf[p.id] ? ` · ${shortId(p.id)}` : '')),
                 ),
                 h('div', { className: 'pv-acts' },
                   isRepo
@@ -2056,6 +2156,22 @@ select.roost-input{color-scheme:dark}
               ]
             }),
             /**
+             * 仓库折叠条。
+             *
+             * 只在**没有搜索词**时出现：有搜索词的时候 `showRemote` 强制为真
+             * （用户明确在找东西，藏起来等于让他搜不到），这条就没意义了。
+             */
+            !kw && remoteOnly.length
+              ? h('div', { style: { padding: '10px 0 2px' } },
+                  h('button', {
+                    type: 'button', className: 'roost-btn', style: { width: '100%' },
+                    title: '仓库里还没装的卡，装上就等于复制到本地',
+                    onClick: () => setShowRepo((v) => !v),
+                  }, showRepo
+                    ? `收起在线仓库（${remoteOnly.length} 个没装）`
+                    : `▸ 在线仓库还有 ${remoteOnly.length} 个没装`))
+              : null,
+            /**
              * 三种空态分开说：读着 / 一个都没有 / 搜不到。
              * 原来只有一句「读不到人格列表」——加载中也是这句话，像坏了。
              */
@@ -2065,14 +2181,31 @@ select.roost-input{color-scheme:dark}
                 ? h('div', { className: 'pv-empty' },
                     '还没有人格。上面「新建」可以建一个，或者点「从仓库更新」装一批。')
                 : !rows.length
-                  ? h('div', { className: 'pv-empty' },
-                      `没有匹配「${pq.trim()}」的人格`,
-                      h('div', { style: { marginTop: 9 } },
-                        h('button', {
-                          type: 'button', className: 'roost-btn',
-                          onClick: () => setPq(''),
-                        }, '清空搜索')),
-                    )
+                  ? kw
+                    ? h('div', { className: 'pv-empty' },
+                        `没有匹配「${pq.trim()}」的人格`,
+                        h('div', { style: { marginTop: 9 } },
+                          h('button', {
+                            type: 'button', className: 'roost-btn',
+                            onClick: () => setPq(''),
+                          }, '清空搜索')),
+                      )
+                    /**
+                     * 本地一份都没有、但仓库里有 —— **新装用户就是这个状态**。
+                     *
+                     * 不区分的话会显示「没有匹配「」的人格」：搜索词明明是空的，
+                     * 用户会以为页面坏了。这里要直接把话说明白并给个按钮。
+                     */
+                    : h('div', { className: 'pv-empty' },
+                        '本地还没有人格。',
+                        remoteOnly.length
+                          ? h('div', { style: { marginTop: 9 } },
+                              h('button', {
+                                type: 'button', className: 'roost-primary',
+                                onClick: () => setShowRepo(true),
+                              }, `看看仓库里的 ${remoteOnly.length} 个`))
+                          : null,
+                      )
                   : null,
           ),
 
@@ -2150,18 +2283,29 @@ select.roost-input{color-scheme:dark}
         ),
 
         /**
-         * 编辑区：**只在真的打开了某个人格时**才占一节。
+         * 编辑区：**弹窗**，不是页面上最下面的一节。
          *
-         * 之前无论有没有打开都渲染一节「编辑人格」，空的时候留一句
-         * 「点上面某一行的编辑读正文」——占位 + 指路，占了版面也占了编号。
+         * 原来它渲染在列表之后，靠 `scrollIntoView({block:'nearest'})` 滚过来。
+         * 但 `nearest` 只保证"刚好露出一角"：编辑区一高，标题就被顶到屏幕外；
+         * 想回去对照上面那行，一滚就离开编辑区。用户的原话是
+         * 「点编辑后，那个编辑框在最下面操作有点…」。
+         *
+         * 收进弹窗之后，列表和编辑不再抢同一根滚动条。
          */
         editId
-          ? h('div', { ref: editRef },
-              sec('编辑「' + labelOf(editId) + '」', {
-                right: h('span', { className: 'roost-note', style: { margin: 0 } },
-                  `${raw.length} 字` + (dirty ? ' · 有未保存改动' : '')),
+          ? h('div', { className: 'cap-modal', onClick: closeEdit },
+              h('div', {
+                className: 'cap-modal-b',
+                style: { width: 'min(920px,100%)' },
+                onClick: (e) => e.stopPropagation(),
               },
-              h('div', null,
+              h('div', { className: 'cap-modal-h' },
+                h('span', { className: 't' }, '编辑「' + labelOf(editId) + '」'),
+                h('span', { className: 'roost-note', style: { margin: 0 } },
+                  `${raw.length} 字` + (dirty ? ' · 有未保存改动' : '')),
+                h('button', { type: 'button', className: 'roost-btn', onClick: closeEdit }, '关闭'),
+              ),
+              h('div', { className: 'cap-modal-c' },
                 /**
                  * 「你改过」的恢复入口放在编辑区，而不是每行挂一颗按钮。
                  *
@@ -2182,7 +2326,7 @@ select.roost-input{color-scheme:dark}
                   : null,
                 h('textarea', {
                   className: 'roost-input',
-                  style: { minHeight: 300, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 12, lineHeight: 1.7, resize: 'vertical' },
+                  style: { minHeight: 380, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 12, lineHeight: 1.7, resize: 'vertical' },
                   value: raw,
                   spellCheck: false,
                   onChange: (e) => { setRaw(e.target.value); setDirty(true) },
@@ -2224,7 +2368,7 @@ select.roost-input{color-scheme:dark}
                     '--- 之间是 name/tags；正文可分四段：性格（默认）、## 开场白、## 世界书、## 说话示例'),
                 ),
               ),
-            )
+            ),
           )
           : null,
 
@@ -3380,6 +3524,883 @@ select.roost-input{color-scheme:dark}
 
     /* ---------------- 会话 ---------------- */
 
+    /* ---------------- 能力 ---------------- */
+
+    /**
+     * 「能力」页：谁、在哪个群、能调什么。
+     *
+     * 第一版是**只读**的，只回答一个问题：「它手里现在有什么，分别给了谁」。
+     *
+     * 为什么先做只读版：这三十多个工具是宿主插件自动继承来的，
+     * `gh_*` / `ops_*` / `mcp__*` 在装插件那天就挂上了，主人根本没配过。
+     * 先把这件事摆出来，本身就是一次安全改进——而且不改任何行为，零风险。
+     *
+     * 开关、分群、配额留到后面几版；这一版只有「看」和「启用」。
+     */
+    /** 四个档位：id / 名字 / 一句话说明。CapsTab 和弹窗都要用，提到外面 */
+    /**
+     * 五个可配档位，**对齐框架的 0/1/2/3 等级**。
+     *
+     * 之前只有主人/管理员/群成员三张卡，把群管和助手一起折进了群成员——
+     * 主人在框架里给某人配了 3 级，到这儿跟路人一个待遇。
+     */
+    const CAP_BUCKETS = [
+      ['owner', '主人', '你自己'],
+      ['admin', '管理员', '框架里配的，跨群有效'],
+      ['manager', '群管', '这个群的管理员'],
+      ['helper', '助手', '这个群里帮忙的人'],
+      ['member', '群成员', '其他所有人'],
+    ]
+
+    /**
+     * 兜底档：**写死不可配**。
+     *
+     * 它表示「拿不到权限信息」（插件没给、字段坏了、版本对不上）。
+     * 做成可配置就等于留了一个能手动放开的开关，而这一档恰恰是
+     * 出问题时的最后一道闸——保持只给聊天，别给它任何操作入口。
+     */
+    const CAP_FALLBACK = ['unknown', '身份不明', '认不出来的，固定只给聊天']
+
+    /**
+     * 通配匹配，和 `capabilities.js` 的 `matchPattern` **同语义**（`*` 跨任意字符）。
+     *
+     * 前端只需要判断「这条 `deny` 有没有盖住这个工具」，不需要完整策略计算。
+     * 两套实现是不得已（前端拿不到那个函数），所以测试里用同一组样例
+     * 两边各跑一遍——语义漂了会被抓住。
+     */
+    function matchPat(name, pattern) {
+      if (pattern === '*') return true
+      if (!pattern.includes('*')) return pattern === name
+      const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      return new RegExp('^' + pattern.split('*').map(esc).join('[\\s\\S]*') + '$').test(name)
+    }
+
+    /**
+     * 勾选 / 取消一个工具之后，这一档的 `defaults` 该变成什么样。
+     *
+     * **纯函数，单独导出给测试**——这段逻辑出过两次事，而且两次都
+     * 「渲染正常、不报错」，只有真点一下才看得出来，所以必须能断言。
+     *
+     * 四种情况要分清，混掉任何一种都会「界面变了、权限没变」：
+     *
+     *   · 该档有具体 `allow`  → 加 / 减那一项
+     *   · 该档是 `*`          → 取消时先展开成具体清单再减（`*` 是无限集，
+     *                           没有「除了某个」的写法）；勾上时不用动
+     *   · 该档**没有** `allow` → 它在继承更低档。加一项写 `[name]`（增量，
+     *                           继承照旧）；**取消一项只能写 `deny`**——
+     *                           写 `allow: []` 的语义是「这一档整档清零」
+     *   · 该档有 `deny`       → 勾上时要先把盖住它的那条去掉，否则勾了也没用
+     *
+     * @param {object} o
+     * @param {object} o.cur      这一档当前的配置（可能没有 allow / deny）
+     * @param {string} o.name     工具名
+     * @param {boolean} o.on      true = 勾上
+     * @param {string[]} o.expanded 该档 `*` 展开后的实际清单（取消 `*` 里的某一项要用）
+     * @returns {object} 新的那一档配置（不含其它档）
+     */
+    function planToolToggle({ cur, name, on, expanded }) {
+      const src = cur && typeof cur === 'object' ? cur : {}
+      /** `null` = 没有 `allow` 字段（继承更低档），和空数组不是一回事 */
+      let allow = Array.isArray(src.allow) ? [...src.allow] : null
+      let deny = Array.isArray(src.deny) ? [...src.deny] : []
+
+      if (on) {
+        /** `deny` 会盖住 `allow`：想勾上，先去掉盖着它的那条 */
+        deny = deny.filter((p) => !matchPat(name, p))
+        if (allow === null) allow = [name]
+        else if (!allow.includes('*') && !allow.includes(name)) allow.push(name)
+      } else if (allow === null) {
+        if (!deny.some((p) => matchPat(name, p))) deny.push(name)
+      } else if (allow.includes('*')) {
+        allow = (Array.isArray(expanded) ? expanded : []).filter((n) => n !== name)
+      } else {
+        allow = allow.filter((n) => n !== name)
+      }
+
+      const next = { ...src }
+      if (allow === null) delete next.allow
+      else next.allow = allow
+      if (deny.length) next.deny = deny
+      else delete next.deny
+      return next
+    }
+
+    /**
+     * 工具权限弹窗：搜索 + 分组 + 四列勾选。
+     *
+     * 抽成独立组件而不是内联，是为了能单独渲染测试——
+     * 内联的话它默认是关着的，测试永远看不到里面的内容，
+     * 「弹窗打开后是不是空白」这种问题就只能靠肉眼发现。
+     */
+    function ToolsModal({ pool, caps, busy, danger, pinned, suggested, riskGroups, allowedIn, onToggle, q, setQ, onClose }) {
+      const kw = String(q || '').trim().toLowerCase()
+      const filtered = (pool || []).filter((n) => !kw || n.toLowerCase().includes(kw))
+      /** 表头简称。五档 + 兜底，一列一个字，弹窗里挤得下 */
+      const SHORT = { owner: '主', admin: '管', manager: '群', helper: '助', member: '员', unknown: '?' }
+      const isLocked = (n) => (pinned || []).includes(n)
+      const isSuggested = (n) => (suggested || []).includes(n)
+
+      return h('div', { className: 'cap-modal', onClick: onClose },
+        h('div', { className: 'cap-modal-b', onClick: (e) => e.stopPropagation() },
+          h('div', { className: 'cap-modal-h' },
+            h('span', { className: 't' }, `工具权限（${(pool || []).length} 个）`),
+            h('button', { type: 'button', className: 'roost-btn', onClick: onClose }, '关闭'),
+          ),
+          h('div', { className: 'cap-modal-s' },
+            h('input', {
+              className: 'roost-input',
+              type: 'search',
+              placeholder: '搜工具名，比如 search / memory / gh_',
+              value: q,
+              onChange: (e) => setQ(e.target.value),
+            }),
+          ),
+          h('div', { className: 'cap-modal-c' },
+            h('div', { className: 'cap-tool-h' },
+              h('span', { className: 'n' }, '工具名'),
+              h('span', { className: 'bx' },
+                CAP_BUCKETS.map(([id, label]) => h('span', { key: id, title: label }, SHORT[id]))),
+            ),
+            filtered.length
+              ? (riskGroups || []).map(([title, pick]) => {
+                  const names = filtered.filter(pick)
+                  if (!names.length) return null
+                  return h('div', { key: title, style: { marginTop: '10px' } },
+                    h('div', { className: 'cap-group-t' }, `${title} · ${names.length}`),
+                    names.map((n) => {
+                      const locked = isLocked(n)
+                      return h('div', { key: n, className: 'cap-tool' },
+                        h('span', {
+                          className: 'n',
+                          title: locked
+                            ? '钉住项：关掉它机器人就说不出话'
+                            : isSuggested(n) ? '建议保留：关掉不影响说话，只是它会少一样本事' : n,
+                        },
+                          ((danger || {})[n] ? '🔴 ' : '') + n + (locked ? ' 🔒' : '')),
+                        h('span', { className: 'bx' },
+                          CAP_BUCKETS.map(([id, label]) =>
+                            h('input', {
+                              key: id,
+                              type: 'checkbox',
+                              title: `${label}：${n}`,
+                              disabled: busy || !caps?.enabled || locked,
+                              checked: allowedIn(id, n),
+                              onChange: (e) => onToggle(id, n, e.target.checked),
+                            }),
+                          ),
+                        ),
+                      )
+                    }),
+                  )
+                })
+              : h('div', { className: 'roost-empty' }, `没有匹配「${q}」的工具`),
+          ),
+          h('div', { style: { padding: '0 16px 14px', fontSize: 11, opacity: 0.6, lineHeight: 1.7 } },
+            '🔒 钉住项：只有发言出口和收尾两个，关了它就彻底说不出话，所以不给勾。🔴 是危险动作——它真的会动你电脑上的东西。',
+            h('br'),
+            '某一档现在是「全权」时，取消一个工具会把 * 展开成具体清单——之后新装的插件就不会自动给这一档了。'),
+        ),
+      )
+    }
+
+    function CapsTab({ caps, preview, chats, feat, quota, toast, reload, quick, busy }) {
+      /**
+       * 工具面板是**弹窗**，不是页面上的一节。
+       *
+       * 二十多个工具 × 四个勾位铺在页面上就是一米多长，滚到底已经忘了上面在讲什么。
+       * 收进弹窗之后，页面上只留一行「逐个调整（25 个）」，要细调的人再进去。
+       *
+       * **hooks 必须在 `if (!caps) return` 之前**——条件返回之后再调 hook
+       * 会让 hook 顺序在两次渲染之间变化，React 直接报错。
+       */
+      const [toolsOpen, setToolsOpen] = useState(false)
+      const [toolQ, setToolQ] = useState('')
+      /**
+       * 次数限制当前在编辑哪一档。
+       *
+       * 默认「群成员」：那是绝大多数人真正要限的档——
+       * 主人的额度他一般懒得改，而群友才是最需要管住的那批人。
+       */
+      const [quotaBucket, setQuotaBucket] = useState('member')
+      /**
+       * 「刚点了添加、还没填数字」的工具。
+       *
+       * 只存在前端、**不写配置**：填 0 才落盘会让人莫名其妙地禁用一个工具。
+       * 它唯一的作用是把那一行的空输入框显示出来。
+       */
+      const [addingTools, setAddingTools] = useState([])
+      const BUCKET = CAP_BUCKETS
+
+      /** 按来源前缀分组；认不出的归「其他」 */
+      const GROUP_OF = (n) => {
+        if (n.startsWith('mcp__')) return 'MCP'
+        if (/^(gh_|pr_|issue_|review_)/.test(n)) return 'GitHub'
+        if (n.startsWith('ops_')) return '运维'
+        if (/^(memory_|qq_|sticker_)/.test(n)) return '记忆 / 发言（自带）'
+        if (/^(edit|read|write|read_image|working_directory|pwsh|bash)$/.test(n)) return '文件 / 命令'
+        if (n.startsWith('acp_')) return '会话 / 图片'
+        return '其他'
+      }
+
+      if (!caps) return h('div', { className: 'roost-empty' }, '正在读工具清单…')
+
+      const enable = async () => {
+        const r = await quick('capabilities.init')
+        toast(r.message || (r.ok ? '已启用' : '启用失败'))
+        reload()
+      }
+
+      const ack = async () => {
+        await quick('capabilities.ack')
+        reload()
+      }
+
+      /**
+       * 四个角色 = 四套 allow 预设。
+       *
+       * 为什么不让人从 30 多个工具里勾：绝大多数人只想知道"它在这个档位算老几"。
+       * 角色是给他们的；想抠细节的往下走到工具清单（下一版）。
+       *
+       * 顺序按**危险度递增**排，默认第一项是最保守的——手滑点到最右边才出事。
+       */
+      const ROLES = [
+        {
+          /**
+           * 「跟随」= 不写 `allow`，自动等于所有更低档的并集。
+           *
+           * 这是群管 / 助手的**默认形态**，也是它们的正确形态：
+           * 你调了「群成员」那一档，它们跟着变，不用改三遍。
+           * 一旦给它们选了具体角色，它们就固定下来，不再跟随。
+           */
+          id: 'inherit',
+          label: '跟随',
+          hint: '和更低的档位一样，跟着变。想让它们多点什么就选右边任何一个',
+          inherit: true,
+        },
+        {
+          id: 'chat',
+          label: '只聊天',
+          hint: '只会回话、记人、发表情，不碰你电脑上的任何东西',
+          allow: ['memory_search', 'memory_note', 'qq_send', 'sticker_pick'],
+        },
+        {
+          id: 'read',
+          label: '能查能看',
+          hint: '加上读文件、看图片、查 GitHub —— 只读，改不了',
+          allow: [
+            'memory_search', 'memory_note', 'qq_send', 'sticker_pick',
+            'read', 'read_image', 'working_directory', 'search_context',
+            'gh_search', 'gh_repo',
+          ],
+        },
+        {
+          /**
+           * 「能干活」用**分组**列举，不是 `*`。
+           *
+           * 差别在以后：分组只覆盖我们已经认识的那几类（文件/运维/GitHub/MCP），
+           * 以后新装的插件不会因为它就被放行；`*` 则是"连将来的一起给"。
+           * 这两个必须能区分开，否则「能干活」和「全权」就是同一个东西。
+           */
+          id: 'work',
+          label: '能干活',
+          hint: '加上改文件、跑命令、调 MCP。⚠️ 它真的会动你电脑上的东西',
+          allow: [
+            'memory_search', 'memory_note', 'qq_send', 'sticker_pick',
+            'group:files', 'group:ops', 'group:github', 'group:mcp',
+          ],
+        },
+        { id: 'all', label: '全权', hint: '所有工具，**包括以后新装的插件**', allow: ['*'] },
+      ]
+
+      /** 当前这档属于哪个角色：按 allow 完全相等判，判不出来就是「自定义」 */
+      const roleOf = (allow) => {
+        /**
+         * 没写 `allow` = 继承更低的档。
+         *
+         * 这个分支必须排在前面：`JSON.stringify([])` 是 `'[]'`，
+         * 不匹配任何角色，界面会显示成「自定义」——用户看到
+         * 「群管：自定义」会以为自己配过什么，实际上他什么都没动。
+         */
+        if (!Array.isArray(allow)) return 'inherit'
+        const key = JSON.stringify([...allow].sort())
+        /**
+         * **必须跳过没有 `allow` 的角色**。
+         *
+         * 「跟随」这一项只有 `inherit: true`，故意没有 `allow`（它不是一个具体权限集）。
+         * 不加这个判断，`[...r.allow]` 就是 `[...undefined]` → `TypeError: r.allow is not iterable`，
+         * 整个能力页连同 Roost 面板一起黑屏——2026-11-05 02:41 就是这么崩的。
+         *
+         * 测试当时没抓到，因为用例里 `caps.store.defaults` 是空的，
+         * `roleOf(undefined)` 走上面那行 early return，根本没走到 `find`。
+         */
+        const hit = ROLES.find((r) => Array.isArray(r.allow)
+          && JSON.stringify([...r.allow].sort()) === key)
+        return hit ? hit.id : 'custom'
+      }
+
+      const setRole = async (bucket, role) => {
+        if (!caps.enabled) {
+          toast('先点上面「启用能力策略」')
+          return
+        }
+        const defaults = { ...(caps.store?.defaults || {}) }
+        /** 保留已有的 `deny`：用户手配的例外不该因为换个角色就被清掉 */
+        const prev = { ...(caps.store?.defaults?.[bucket] || {}) }
+        if (role.inherit) {
+          /**
+           * 「跟随」= 把 `allow` 整段删掉，不是写成空数组。
+           * `allow: []` 的语义是「这一档什么都不给」，正好相反。
+           */
+          delete prev.allow
+        } else {
+          prev.allow = [...role.allow]
+        }
+        defaults[bucket] = prev
+        const r = await quick('capabilities.patch', { defaults })
+        toast(r.message || (r.ok ? '改好了，下一条消息生效' : '没改成'))
+        reload()
+      }
+
+      /**
+       * 改某个群的例外。`val === null` = 删掉这条记录（回到跟随默认）。
+       *
+       * 覆盖是**增量**的：删掉就干净了，不会在文件里留一个空对象。
+       */
+      const setChat = async (chatId, val, label) => {
+        if (!caps.enabled) {
+          toast('先点上面「启用策略」')
+          return
+        }
+        const next = { ...(caps.store?.chats || {}) }
+        if (val) next[chatId] = { ...val, label: label || '' }
+        else delete next[chatId]
+        const r = await quick('capabilities.patch', { chats: next })
+        toast(r.message || (r.ok ? '改好了，下一条消息生效' : '没改成'))
+        reload()
+      }
+
+      /**
+       * 开/关一个功能。
+       *
+       * 后端会拒掉「依赖没满足」的组合（比如主动搭话关着却要开判断层），
+       * 这里把原因直接 toast 出来——比把按钮灰掉又不说原因要好。
+       */
+      const toggleFeat = async (id, on) => {
+        const r = await quick('features.patch', { id, on })
+        toast(r.message || (r.ok ? '改好了，下一条消息生效' : '没改成'))
+        reload()
+      }
+
+      /**
+       * 渲染一组配额行。
+       *
+       * @param {'builtin'|'tool'} kind
+       *   builtin = 内置动作（语音/发文件/表情包…）；
+       *   tool = 工具，**除了已经配过的，还要把池子里没配过的也列出来**——
+       *          不列的话用户根本不知道能给哪些工具设次数，只能去翻文档。
+       */
+      const quotaRows = (kind) => {
+        const builtin = (quota && quota.builtin) || []
+        const rows = (quota && quota.rows) || []
+        const pool = (quota && quota.pool) || []
+        const isBuiltin = (f) => kind === 'builtin' ? builtin.includes(f) : !builtin.includes(f)
+        const configured = rows.filter((r) => isBuiltin(r.feature))
+        /**
+         * 工具那一组**默认只列已配了额度的**。
+         *
+         * 二十多个工具全铺出来就是用户说的「划不到头」。想加新的时候
+         * 用下面那个下拉挑一个，挑完这一行才出现——列表长度跟着「你真正
+         * 管了几个工具」走，而不是跟着装了多少插件走。
+         */
+        const names = kind === 'builtin'
+          ? configured.map((r) => r.feature)
+          : [...new Set([...configured.map((r) => r.feature), ...addingTools])]
+
+        const addPick = kind === 'tool' && pool.length
+          ? h('div', { key: '__add', style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' } },
+              h('select', {
+                className: 'roost-input',
+                style: { flex: '1 1 auto', padding: '3px 6px' },
+                defaultValue: '',
+                disabled: busy,
+                onChange: (e) => {
+                  const v = e.target.value
+                  if (!v) return
+                  e.target.value = ''
+                  if (!addingTools.includes(v)) setAddingTools([...addingTools, v])
+                },
+              },
+                h('option', { value: '' }, `＋ 给某个工具加次数限制${pool.length ? `（池里 ${pool.filter((n) => !builtin.includes(n)).length} 个）` : ''}`),
+                pool.filter((n) => !builtin.includes(n) && !names.includes(n))
+                  .map((n) => h('option', { key: n, value: n }, n)),
+              ),
+            )
+          : null
+
+        if (!names.length) {
+          return [h('div', { key: 'empty', className: 'roost-note', style: { margin: 0 } },
+            kind === 'tool' ? '还没有限过任何工具的次数。下面挑一个就行。' : '这一组还没有可配的东西。'), addPick].filter(Boolean)
+        }
+
+        return names.map((name) => {
+          const r = configured.find((x) => x.feature === name)
+          const perLabel = !r ? '每人' : r.per === 'person' ? '每人' : r.per === 'chat' ? '每个群' : '全局'
+          const winLabel = !r ? '每天' : r.window === 'day' ? '每天'
+            : r.window === 'hour' ? '每小时'
+              : r.window === 'minute' ? '每分钟'
+                : r.window === 'turn' ? '每轮' : '每条'
+          /**
+           * 当前档位的**实际**额度：该档单独设过就用它，否则跟随默认。
+           *
+           * 两个值要能区分开：用户改完群成员那一档，回头切到主人，
+           * 看到的应该还是主人自己的数——如果这里只读 `max`，
+           * 四档会永远显示同一个数字，界面上根本看不出「分级」这件事。
+           */
+          const bv = r && r.byBucket ? r.byBucket[quotaBucket] : undefined
+          const own = bv !== undefined
+          const maxNum = own ? Number(bv) : (r ? Number(r.max) : -1)
+          const unlimited = !(maxNum >= 0)
+          const full = !unlimited && Number(r.peak) >= maxNum
+          const wired = !r || r.wired !== false
+          return h('div', { key: name, className: 'cap-row', style: { alignItems: 'center', opacity: wired ? 1 : 0.6 } },
+            h('div', { className: 'cap-row-b' },
+              h('div', null, r ? r.label : name, wired ? null : ' · 暂未生效'),
+              h('div', { className: 'roost-note', style: { margin: 0 } },
+                unlimited ? `${perLabel} · ${winLabel} · 不限`
+                  : `${perLabel} · ${winLabel} · 目前最多 ${r.peak}`,
+                own ? ' · 这一档单独设了' : '',
+                full ? ' · 🔴 用满了' : '',
+                wired ? '' : ' · 还没接到实际动作上，填了也不拦'),
+            ),
+            h('div', { className: 'cap-cap' },
+              h('input', {
+                type: 'number',
+                min: '0',
+                /**
+                 * 占位符带上建议值。
+                 *
+                 * 默认额度是「不限」（见 `quota.js` 的 `QUOTA_DEFAULTS`），
+                 * 所以每一行都是空的——只说「不限」等于让人自己猜该填几。
+                 * `suggest` 是服务端给的经验数，照抄就行。
+                 */
+                placeholder: r && r.suggest ? `不限（建议 ${r.suggest}）` : '不限',
+                /** -1 = 不限，输入框留空表示它；直接显示 -1 会让人以为填错了 */
+                defaultValue: unlimited ? '' : String(maxNum),
+                title: '留空 = 不限；0 = 完全禁用',
+                disabled: busy,
+                /** 非受控 + 失焦提交：受控输入在没有重渲染的环境里会吃掉输入 */
+                onBlur: (e) => setQuota(name, e.target.value, quotaBucket),
+              }),
+              '次',
+              r
+                ? h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: busy,
+                    onClick: () => resetQuota(name),
+                  }, '清零')
+                : null,
+            ),
+          )
+        }).concat(addPick ? [addPick] : [])
+      }
+
+      /**
+       * 改某个功能**在某一档**的额度。留空 = 不限（写 -1），交给后端判。
+       *
+       * 一定带 `bucket`：不带就是改「所有档位的默认值」，
+       * 用户改群成员会把主人一起改了——那就不叫分级了。
+       */
+      const setQuota = async (feature, raw, bucket = quotaBucket) => {
+        const txt = String(raw ?? '').trim()
+        const max = txt === '' ? -1 : Number(txt)
+        if (!Number.isFinite(max)) {
+          toast('填一个数字，或者留空表示不限')
+          return
+        }
+        const r = await quick('quota.patch', { feature, max, bucket })
+        toast(r.message || (r.ok ? '改好了' : '没改成'))
+        reload()
+      }
+
+      const resetQuota = async (feature) => {
+        const r = await quick('quota.reset', { feature })
+        toast(r.message || (r.ok ? '清零了' : '没清成'))
+        reload()
+      }
+
+      const featList = (feat && feat.features) || []
+      const featOnCount = featList.filter((f) => feat.on?.[f.id]).length
+      const featOffCount = featList.length - featOnCount
+
+      const results = (preview && preview.results) || []
+      const byBucket = Object.fromEntries(results.map((r) => [r.bucket, r]))
+      const pool = (preview && preview.pool) || Object.keys(caps.store?.seen?.tools || [])
+      const pending = caps.pending || { added: [], gone: [] }
+      const added = pending.added || []
+      const gone = pending.gone || []
+      const changed = added.length || gone.length
+
+      const groups = {}
+      for (const n of pool) {
+        const g = GROUP_OF(n)
+        if (!groups[g]) groups[g] = []
+        groups[g].push(n)
+      }
+
+      const listOf = (names, max = 5) =>
+        names.slice(0, max).join('、') + (names.length > max ? ` …+${names.length - max}` : '')
+
+      /** 钉住项：关掉会失忆或说不出话，界面上不给勾（服务端也会把它们钉回来） */
+      /**
+       * 硬钉：**不可勾掉**。判据是「没了它就完全说不出话」——
+       * 只有发言出口和主动收尾两个。
+       *
+       * 这里必须和后端 `capabilities.js` 的 `PINNED_KEEP` 保持一致：
+       * 前端锁着、后端放行 = 用户以为自己关不掉，其实能关；
+       * 反过来更糟——用户以为关掉了，实际每次都被钉回来。
+       */
+      const PINNED = ['qq_send', 'qq_close']
+      /**
+       * 建议保留：能勾掉，但标一下。记忆、表情、技能关掉都不会让机器人失声，
+       * 只是"不记得你""语气变干"，那是主人的选择。
+       */
+      const SUGGESTED = ['memory_search', 'memory_note', 'sticker_pick', 'roost_skill']
+
+      /** 危险标记**由服务端给**（`preview.danger`）——通配语义在 `capabilities.js` 里，前端再实现一遍必然漂 */
+      const danger = (preview && preview.danger) || {}
+
+      const RISK_GROUPS = [
+        ['会改你的电脑', (n) => !!danger[n]],
+        ['会对外说话', (n) => /^qq_/.test(n) && !danger[n]],
+        ['只看不改', (n) => !danger[n] && !/^qq_/.test(n)],
+      ]
+
+      const allowedIn = (bucket, name) => ((byBucket[bucket] && byBucket[bucket].allow) || []).includes(name)
+
+      /**
+       * 勾 / 取消一个工具。
+       *
+       * 真正算「变成什么样」的是模块级的 `planToolToggle()`——那段逻辑出过两次事
+       * （`deny` 被冲掉、继承档取消写成 `allow: []`），而且都「界面正常但不生效」，
+       * 所以抽成纯函数以便断言。这里只负责提交和刷新。
+       */
+      const toggleTool = async (bucket, name, on) => {
+        if (!caps.enabled) {
+          toast('先点上面「启用策略」')
+          return
+        }
+        const next = planToolToggle({
+          cur: caps.store?.defaults?.[bucket],
+          name,
+          on,
+          /** 该档 `*` 展开后的实际清单；取消 `*` 里的某一项要靠它 */
+          expanded: (byBucket[bucket] && byBucket[bucket].allow) || [],
+        })
+        const defaults = { ...(caps.store?.defaults || {}) }
+        defaults[bucket] = next
+        const r = await quick('capabilities.patch', { defaults })
+        toast(r.message || (r.ok ? '改好了，下一条消息生效' : '没改成'))
+        reload()
+      }
+
+      const toolsModal = toolsOpen
+        ? h(ToolsModal, {
+            pool,
+            caps,
+            busy,
+            danger,
+            pinned: PINNED,
+            suggested: SUGGESTED,
+            riskGroups: RISK_GROUPS,
+            allowedIn,
+            onToggle: toggleTool,
+            q: toolQ,
+            setQ: setToolQ,
+            onClose: () => setToolsOpen(false),
+          })
+        : null
+
+      return h('div', null,
+        toolsModal,
+        h(Sec, {
+          n: '01', title: '这一页管什么',
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新'),
+        },
+          h('div', { className: 'roost-note' },
+            '你在 DSH 里装的插件、接的 MCP，工具会自动进到机器人手里。这一页让你看清有哪些，以及给了谁。'),
+          caps.enabled
+            ? h('div', { className: 'roost-note' },
+                '已启用：策略存在 capabilities.json，改完下一条消息生效，不用重启 DSH。')
+            : h('div', null,
+                h('div', { className: 'roost-note' },
+                  '还没启用。现在按 config.json 里的 permissions 走（老规则）。启用后以那份配置为起点，不会悄悄降权。'),
+                h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: enable }, '启用能力策略'),
+              ),
+          changed
+            ? h('div', { className: 'roost-item' },
+                h('span', { className: 't' },
+                  '列表有变化',
+                  h('span', { className: 'd' },
+                    added.length ? ` · 新增 ${added.length} 个` : '',
+                    gone.length ? ` · 失效 ${gone.length} 个` : '',
+                    added.length ? `（${listOf(added, 4)}）` : '',
+                  ),
+                ),
+                h('button', { type: 'button', className: 'roost-btn', onClick: ack }, '我知道了'),
+              )
+            : null,
+        ),
+
+        h(Sec, {
+          n: '02', title: '她会做什么',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } },
+            feat ? `开着 ${featOnCount} 个 · 关着 ${featOffCount} 个` : ''),
+        },
+          h('div', { className: 'roost-note' },
+            '这些是「有没有这个功能」，和下面的「谁能用」是两层：这里关掉，谁的调不出来。'),
+          feat
+            ? (feat.groups || []).map((g) => {
+                const items = (feat.features || []).filter((f) => (g.ids || []).includes(f.id))
+                if (!items.length) return null
+                return h('div', { key: g.id, className: 'cap-group' },
+                  h('div', { className: 'cap-group-t' }, g.label),
+                  h('div', { className: 'cap-group-b' },
+                    items.map((f) => {
+                      const on = !!feat.on?.[f.id]
+                      const blocked = !on && feat.blocked?.[f.id]
+                      return h('div', { key: f.id, className: 'cap-row' },
+                        h('input', {
+                          type: 'checkbox',
+                          checked: on,
+                          disabled: busy || !!blocked,
+                          title: blocked || '',
+                          onChange: (e) => toggleFeat(f.id, e.target.checked),
+                        }),
+                        h('div', { className: 'cap-row-b' },
+                          h('div', null, f.label, f.risky ? ' 🔴' : ''),
+                          h('div', { className: 'roost-note', style: { margin: 0 } }, f.desc),
+                          on ? null : h('div', { className: 'roost-note', style: { margin: 0 } }, `关掉之后：${f.offHint}`),
+                          blocked ? h('div', { className: 'roost-note', style: { margin: 0 } }, `⚠️ ${blocked}`) : null,
+                        ),
+                      )
+                    }),
+                  ),
+                )
+              })
+            : h('div', { className: 'roost-empty' }, '正在读功能开关…'),
+          feat && (feat.wouldRemove || []).length
+            ? h('div', { className: 'roost-note' },
+                `按现在的设置，这一轮会收走：${listOf(feat.wouldRemove, 6)}`)
+            : null,
+          h('div', { className: 'roost-note' },
+            '带 config 的开关和「设置」页是同一份，在哪儿改都一样；发文件那个存在能力策略里。'),
+        ),
+
+        h(Sec, {
+          n: '03', title: '五个档位',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } }, `工具池 ${pool.length} 个`),
+        },
+          /**
+           * 没启用时，下面这份是**按默认策略试算**的结果，和真实生效无关
+           * （真实生效还走旧的 permissions）。不说明的话，用户会以为
+           * 「这里有内容 = 已经管上了」，然后再也不点启用。
+           */
+          caps.enabled
+            ? null
+            : h('div', { className: 'roost-note' },
+                '还没启用。下面是按默认策略算出来的预览，用来让你看看启用后大致是什么样；现在实际生效的还是设置页那一套。'),
+          results.length
+            ? h('div', { className: 'roost-list roost-scroll' },
+                BUCKET.map(([id, label, who]) => {
+                  const r = byBucket[id]
+                  if (!r) return null
+                  const allow = r.allow || []
+                  const deny = r.deny || []
+                  /**
+                   * 当前角色按**配置原文**判（`store.defaults[b].allow`），
+                   * 不按试算结果判：试算会把 `*` 和 `group:x` 展开成几十个名字，
+                   * 拿它去和预设的 `['*']` 比永远不相等，界面会一直显示「自定义」。
+                   */
+                  const cur = roleOf(caps.store?.defaults?.[id]?.allow)
+                  return h('div', { key: id, className: 'cap-card' },
+                    h('div', { className: 'cap-card-h' },
+                      h('span', { className: 'n' }, label),
+                      h('span', { className: 'm' }, who),
+                      h('span', { className: 'c' },
+                        `能用 ${allow.length} · 收走 ${deny.length}`,
+                        cur === 'inherit' ? ' · 跟随更低档' : cur === 'custom' ? ' · 自定义' : ''),
+                    ),
+                    h('div', { className: 'cap-card-b' },
+                      /**
+                       * 用 `.roost-chip` 而不是 `.roost-btn`：
+                       * chip 有 `[data-on="1"]` 的选中样式（描边 + 加粗 + 淡底），
+                       * btn 没有——所以之前四个按钮长得一模一样，看不出选了哪个。
+                       */
+                      ROLES.filter((role) => !role.inherit || id !== 'owner').map((role) =>
+                        h('button', {
+                          key: role.id,
+                          type: 'button',
+                          className: 'roost-chip',
+                          'data-on': cur === role.id ? '1' : '0',
+                          title: role.hint,
+                          disabled: busy || !caps.enabled,
+                          onClick: () => setRole(id, role),
+                        }, (cur === role.id ? '✓ ' : '') + role.label),
+                      ),
+                    ),
+                    h('div', { className: 'cap-card-a', title: allow.join('、') },
+                      allow.length ? `能用：${listOf(allow, 8)}` : '什么都调不了'),
+                  )
+                }).concat([
+                  /**
+                   * 兜底档只展示、不给按钮。
+                   * 它不是一个「配置项」，而是「出问题时降到哪」——
+                   * 给了入口就等于给了手动放开它的机会。
+                   */
+                  h('div', { key: 'unknown', className: 'cap-card', style: { opacity: 0.5 } },
+                    h('div', { className: 'cap-card-h' },
+                      h('span', { className: 'n' }, CAP_FALLBACK[1]),
+                      h('span', { className: 'm' }, CAP_FALLBACK[2]),
+                      h('span', { className: 'c' }, '🔒 固定'),
+                    ),
+                    h('div', { className: 'cap-card-a' },
+                      '拿不到权限信息时用这一档。没有操作入口，是故意的——它是最后一道闸。'),
+                  ),
+                ]),
+              )
+            : h('div', { className: 'roost-empty' },
+                caps.enabled
+                  ? '还没有观察记录：在群里说一句话，这一页就有数据了。'
+                  : '启用之后这里会显示五个档位各能用什么。'),
+        ),
+
+        h(Sec, {
+          n: '04', title: '工具清单',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } },
+            h('button', {
+              type: 'button',
+              className: 'roost-btn',
+              style: { marginRight: '8px' },
+              disabled: busy || !caps.enabled || !pool.length,
+              onClick: () => setToolsOpen(true),
+            }, `逐个调整${pool.length ? `（${pool.length} 个）` : ''}`),
+            '按来源分组'),
+        },
+          pool.length
+            ? h('div', { className: 'roost-list roost-scroll' },
+                Object.keys(groups).map((g) =>
+                  h('div', { key: g, className: 'roost-item' },
+                    h('span', { className: 't' }, g, h('span', { className: 'd' }, ` · ${groups[g].length} 个`)),
+                    h('span', { className: 'd', title: groups[g].join('、') }, listOf(groups[g], 5)),
+                  ),
+                ),
+              )
+            : h('div', { className: 'roost-empty' }, '还没看到工具。先让它在群里回一句话。'),
+          h('div', { className: 'roost-note' },
+            '清单来自 DSH 实际挂载的工具，不是我们写死的名单——装了新插件、接了新 MCP，这里会自己多出来。'),
+        ),
+
+        h(Sec, {
+          n: '05', title: '分群例外',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } }, '只配例外'),
+        },
+          h('div', { className: 'roost-note' },
+            '默认按档位。这里只配例外——**没有列出来的群，一律走上面的默认**。'),
+          (chats || []).length
+            ? h('div', { className: 'roost-list roost-scroll' },
+                (chats || []).map((c) => {
+                  const ov = caps.store?.chats?.[c.chatId]
+                  const mode = ov?.chatOnly ? 'chatOnly' : ov ? 'custom' : 'inherit'
+                  return h('div', { key: c.chatId, className: 'roost-item' },
+                    h('span', { className: 't' },
+                      c.title || String(c.chatId).slice(0, 10),
+                      h('span', { className: 'd' },
+                        ' · ' + (mode === 'chatOnly' ? '只能聊天' : mode === 'custom' ? '自定义覆盖' : '跟随默认')),
+                    ),
+                    h('span', { className: 'd' },
+                      h('button', {
+                        type: 'button', className: 'roost-btn',
+                        'data-on': mode === 'inherit' ? '1' : '0',
+                        style: { marginRight: '6px', opacity: mode === 'inherit' ? 1 : 0.75 },
+                        disabled: busy || !caps.enabled,
+                        onClick: () => setChat(c.chatId, null, c.title),
+                      }, '跟随默认'),
+                      h('button', {
+                        type: 'button', className: 'roost-btn',
+                        'data-on': mode === 'chatOnly' ? '1' : '0',
+                        style: { opacity: mode === 'chatOnly' ? 1 : 0.75 },
+                        disabled: busy || !caps.enabled,
+                        onClick: () => setChat(c.chatId, { chatOnly: true, label: c.title || '' }, c.title),
+                      }, '只能聊天'),
+                    ),
+                  )
+                }),
+              )
+            : h('div', { className: 'roost-empty' },
+                '还没有群说过话。等它在某个群回一句，这里就会出现那个群。'),
+          h('div', { className: 'roost-note' },
+            '「只能聊天」是硬承诺：不管群成员档被改成什么，这个群都只给回话必需的工具。适合公开群。'),
+          h('div', { className: 'roost-note' },
+            '列表只包含**说过话的群**——群名来自 Roost 推过来的消息，没说过话的群这里看不到，但它照样走默认。'),
+        ),
+
+        /**
+         * 次数限制放在最后。
+         *
+         * 前面的都决定「能不能」，这一节决定「一天能几次」——
+         * 前者是主人每天要看的，后者是配一次就不动的，所以放末尾。
+         */
+        h(Sec, { n: '06', title: '次数限制',
+          right: h('span', { className: 'roost-note', style: { margin: 0, display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+            '按',
+            h('select', {
+              className: 'roost-input',
+              style: { width: 'auto', padding: '2px 6px' },
+              value: quotaBucket,
+              onChange: (e) => setQuotaBucket(e.target.value),
+            },
+              BUCKET.map(([id, label]) => h('option', { key: id, value: id }, label)),
+            ),
+            '算',
+            h('button', { type: 'button', className: 'roost-btn', style: { marginLeft: '6px' }, onClick: reload }, '刷新'),
+          ) },
+          h('div', { className: 'roost-note' },
+            '默认全部不限——装上新版本不会突然开始拦人，填了数字才开始算。留空 = 不限，填 0 = 完全禁用。防刷屏用的，不是安全边界——换个号就能绕，真正拦人的是上面的档位。'),
+          quota && quota.rows && quota.rows.length
+            ? h('div', null,
+                /**
+                 * 内置动作和工具**分开列**。
+                 *
+                 * 内置那几个（语音条 / 发文件 / 表情包）是「她主动做的事」，
+                 * 用户脑子里有明确概念；工具是「她能调的能力」，数量几十个，
+                 * 混在一张表里会把前三行淹掉。
+                 */
+                h('div', { className: 'cap-group' },
+                  h('div', { className: 'cap-group-t' }, '她主动做的事'),
+                  h('div', { className: 'cap-group-b' }, quotaRows('builtin')),
+                ),
+                h('div', { className: 'cap-group' },
+                  h('div', { className: 'cap-group-t' },
+                    '工具（只填想限的）',
+                    h('span', { style: { fontWeight: 400, marginLeft: '8px' } },
+                      quota.poolSource === 'live' ? `清单来自 DSH，共 ${(quota.pool || []).length} 个`
+                        : quota.poolSource === 'seen' ? '当前没有活着的会话，清单来自上次记录'
+                          : '还没看到任何工具'),
+                  ),
+                  h('div', { className: 'cap-group-b' }, quotaRows('tool')),
+                ),
+              )
+            : h('div', { className: 'roost-empty' }, '正在读用量…'),
+          h('div', { className: 'roost-note' },
+            '「目前最多用到」看的是**用得最多的那一个**，不是总和——十个人各用一次不等于超了十倍。'),
+          h('div', { className: 'roost-note' },
+            '工具次数是**真的当场拦**（DSH 的 tools.guard）：超了这一次调用直接失败，模型会被告知「别再试」。'),
+          h('div', { className: 'roost-note' },
+            '想给主人单独放宽：把上面的下拉切到「主人」，填一个更大的数——那一档会单独存一份，不影响别人。'),
+        ),
+      )
+    }
+
     function ChatsTab({ chats, reload, toast }) {
       return h('div', null,
         h(Sec, { n: '01', title: 'QQ 会话 → DSH 会话', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
@@ -4056,6 +5077,8 @@ select.roost-input{color-scheme:dark}
       ['stickers', '表情包', '图放哪、要不要注入'],
       ['permissions', '权限', '主人/管理员/成员各能用什么工具'],
       ['qqTools', 'QQ 工具', '给 AI 的工具总开关、单次最多分几段发（maxParts）'],
+      ['quota', '次数限制', '语音/发文件/表情包的额度覆盖。默认值在代码里（quota.js 的 QUOTA_DEFAULTS），'
+        + '这里只填要改的；日常用「能力」页调，这里是手改的口子'],
       ['sendFile', '发文件', '能发哪些文件：restrictPaths 默认关＝全盘都能发；'
         + '开了只允许 workspace / images / extraRoots 里的路径'],
       ['channel', '通道', '当前用哪个通道'],
@@ -5297,7 +6320,19 @@ select.roost-input{color-scheme:dark}
         const r = await get('/personas/gov' + (scan ? '?scan=1' : ''))
         if (r.ok === false) return toast(r.message || '读不到治理信息')
         setGov(r)
-        setPicked([])
+        /**
+         * **重复项默认勾好**。
+         *
+         * 理由是这两类建议的性质不同：
+         *   · 「内容重复」是**确定的冗余**，两份一模一样的卡，删一份不会有任何损失；
+         *   · 「长期未用」要人判断（可能只是这阵子没聊），不能替他决定。
+         *
+         * 敢默认勾是因为删除**可撤销**（`/personas/batch/undo`，留最近 5 批），
+         * 而且按钮上就写着「删除选中（N）」——数字变了用户看得见。
+         */
+        setPicked(((r.health && r.health.suggestions) || [])
+          .filter((x) => x.why === '内容重复')
+          .map((x) => x.id))
       }, [toast])
 
       useEffect(() => { load(false) }, [load, tick])
@@ -5348,7 +6383,12 @@ select.roost-input{color-scheme:dark}
                       `引用失效 ${gov.invalid.length} 个会话（已静默回退 default）`)
                   : null,
 
-                h('div', { style: { marginTop: 10, fontSize: 12, fontWeight: 650 } }, '清理建议'),
+                h('div', { style: { marginTop: 10, fontSize: 12, fontWeight: 650 } },
+                  '清理建议',
+                  (health.dup || []).length
+                    ? h('span', { style: { fontWeight: 400, opacity: 0.6, marginLeft: 8 } },
+                        '重复项已经帮你勾好了 —— 删掉的那份可以点下面的「撤销」找回')
+                    : null),
                 (health.suggestions || []).length
                   ? h('div', { className: 'roost-list' },
                       health.suggestions.map((s) => h('div', { key: s.id, className: 'roost-item' },
@@ -5453,9 +6493,66 @@ select.roost-input{color-scheme:dark}
        * 但又不是每天要看的东西，所以不放在前面抢首屏。
        */
       ['account', '账号迁移'],
+      /**
+       * 「能力」放「设置」左边。
+       *
+       * 顺序的道理：前面几页都是「她是谁、她记得什么、她会不会主动」，
+       * 「设置」是收尾的杂项；能力属于**运行时的行为**，不是安装配置，
+       * 所以紧贴在设置之前，读起来是「她怎么工作 → 最后才是机器怎么配」。
+       *
+       * key 用 `caps`，别改成 `ability`——localStorage 里存着上次的页签。
+       */
+      ['caps', '能力'],
       ['config', '设置'],
       ['logs', '日志'],
     ]
+
+    /**
+     * 渲染错误边界：**把黑屏变成一句话**。
+     *
+     * 为什么需要：面板一旦在渲染期抛异常，React 会把整棵子树卸载，
+     * 用户看到的就是"点 Roost 一片黑"，既没有报错也没有线索。
+     * 2026-11-05 02:41 就撞上过一次，只能靠猜。
+     *
+     * 用 class 是因为这是 React 唯一还认的错误边界写法（`componentDidCatch`）。
+     * 测试用的假 React 没有 `Component`，那里降级成直通——断言渲染结果不受影响。
+     */
+    const RenderBoundary = React.Component
+      ? class RenderBoundary extends React.Component {
+          constructor(props) {
+            super(props)
+            this.state = { err: null }
+          }
+
+          static getDerivedStateFromError(err) {
+            return { err }
+          }
+
+          componentDidCatch(err, info) {
+            // 控制台也留一份，方便用户复制给开发者
+            try { console.error('[roost] 面板渲染失败', err, info); } catch {}
+          }
+
+          render() {
+            const e = this.state.err
+            if (!e) return this.props.children
+            return h('div', { style: { padding: 24, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 12, lineHeight: 1.7 } },
+              h('div', { style: { fontSize: 14, fontWeight: 650, marginBottom: 10 } }, 'Roost 面板渲染出错'),
+              h('div', { style: { opacity: 0.85, marginBottom: 10 } }, String(e && e.message ? e.message : e)),
+              h('div', { style: { opacity: 0.55, marginBottom: 14 } },
+                '这段报错可以直接截图发给开发者；改完代码后重载 DSH 即可，不需要重装。'),
+              h('button', {
+                type: 'button',
+                onClick: () => this.setState({ err: null }),
+                style: { padding: '4px 10px', cursor: 'pointer' },
+              }, '重试渲染'),
+              h('pre', {
+                style: { marginTop: 14, whiteSpace: 'pre-wrap', opacity: 0.6, fontSize: 11 },
+              }, String(e && e.stack ? e.stack : '')),
+            )
+          }
+        }
+      : ({ children }) => children
 
     function RoostPage() {
       useStyle()
@@ -5513,6 +6610,16 @@ select.roost-input{color-scheme:dark}
       const [usageInfo, setUsageInfo] = useState(null)
       const [mind, setMind] = useState(null)
       const [chats, setChats] = useState(null)
+      /** 能力页：策略 + 本次观察到的变化 */
+      const [caps, setCaps] = useState(null)
+      /** 能力页：四个档位的试算结果（服务端 resolvePolicy 算的，前端只渲染） */
+      const [capPreview, setCapPreview] = useState(null)
+      /** 能力页：已知群列表（分群例外用） */
+      const [capChats, setCapChats] = useState(null)
+      /** 能力页：功能开关（哪些功能整个关着） */
+      const [capFeat, setCapFeat] = useState(null)
+      /** 能力页：次数配额（每个功能用了多少 / 上限多少） */
+      const [capQuota, setCapQuota] = useState(null)
       const [ch, setCh] = useState(null)
       const [reg, setReg] = useState(null)
       const [busy, setBusy] = useState(false)
@@ -5649,6 +6756,7 @@ select.roost-input{color-scheme:dark}
             })
         }
 
+        if (tab === 'caps') once('caps', loadCaps)
         if (tab === 'memory') once('memory', () => loadMemory())
         if (tab === 'her') {
           once('her', loadHer)
@@ -5713,6 +6821,32 @@ select.roost-input{color-scheme:dark}
         const r = await post('/quick', { op, arg, chatId: mem?.chatId || '' })
         return r
       }, [mem])
+
+      /**
+       * 能力页：一次拉两份——策略本体 + 四个档位的试算。
+       *
+       * 试算放服务端算（`capabilities.preview`），用的是和真实生效同一个
+       * `resolvePolicy()`。前端自己展开 `*` / `group:x` 的话，迟早和后台算出两套结果，
+       * 那就是"面板说没有、实际有"这类最伤信任的 bug。
+       */
+      const loadCaps = useCallback(async () => {
+        const r = await quick('capabilities.get')
+        if (r.ok === false) {
+          setCaps(null)
+          return
+        }
+        setCaps(r)
+        const [p, c, f, q] = await Promise.all([
+          quick('capabilities.preview', {}),
+          get('/chats'),
+          quick('features.get'),
+          quick('quota.get'),
+        ])
+        setCapPreview(p.ok === false ? null : p)
+        setCapChats(c && c.ok !== false ? c.chats || [] : [])
+        setCapFeat(f.ok === false ? null : f)
+        setCapQuota(q.ok === false ? null : q)
+      }, [quick])
 
       /**
        * 局部保存（切人格、改名字）。
@@ -5791,6 +6925,7 @@ select.roost-input{color-scheme:dark}
                 mem, toast, save: saveCfg, reload: loadHer, quick,
               })
             : null,
+          tab === 'caps' ? h(CapsTab, { caps, preview: capPreview, chats: capChats, feat: capFeat, quota: capQuota, toast, reload: loadCaps, quick, busy }) : null,
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat }) : null,
           tab === 'awake'
             ? h(AwakeTab, {
@@ -5853,7 +6988,8 @@ select.roost-input{color-scheme:dark}
     function apply(ctx) {
       const slots = ctx.get('slots')
       if (slots === undefined) return
-      slots.inject('main', () => slots.register({ name: 'main', key: PANEL_ID }, RoostPage))
+      slots.inject('main', () => slots.register({ name: 'main', key: PANEL_ID }, () =>
+        h(RenderBoundary, null, h(RoostPage))))
       slots.inject('sidebar.panellist', () =>
         slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 20, label: () => 'Roost' }, RoostIcon),
       )
@@ -5866,6 +7002,14 @@ select.roost-input{color-scheme:dark}
     exports.ConfigTab = ConfigTab
     exports.DepsBlock = DepsBlock
     exports.HerTab = HerTab
+    exports.CapsTab = CapsTab
+    exports.ToolsModal = ToolsModal
+    /**
+     * 导出给测试盯住。这段逻辑出过两次事（`deny` 被冲掉、继承档取消写成
+     * `allow: []`），两次都「渲染正常、不报错」，只有真点一下才看得出来。
+     */
+    exports.planToolToggle = planToolToggle
+    exports.matchPat = matchPat
     exports.AwakeTab = AwakeTab
     /**
      * 导出给测试盯住。这个函数出过一次「拿配置端口冒充实际端口」的事故——

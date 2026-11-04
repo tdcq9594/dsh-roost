@@ -93,7 +93,7 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-const TABS = ['overview', 'setup', 'her', 'memory', 'awake', 'context', 'chats', 'config', 'logs']
+const TABS = ['overview', 'setup', 'her', 'memory', 'awake', 'context', 'chats', 'account', 'caps', 'config', 'logs']
 
 for (const tab of TABS) {
   test(`前端渲染：${tab} 页在空数据下不炸`, () => {
@@ -112,7 +112,7 @@ for (const tab of TABS) {
     assert.equal(tree?.props?.className, 'roost-root', '根节点不对')
     // 页签条必须在每一页都在，且九个都在（「市场」并进了「人格」）
     const txt = textOf(tree)
-    for (const label of ['概览', '接入', '人格', '记忆', '主动搭话', '上下文', '会话', '设置', '日志']) {
+    for (const label of ['概览', '接入', '人格', '能力', '记忆', '主动搭话', '上下文', '会话', '设置', '日志']) {
       assert.ok(txt.includes(label), `页签缺「${label}」`)
     }
   })
@@ -588,15 +588,21 @@ test('前端渲染：装了的人格在前，仓库里没装的接在后，且�
     },
   }), rt))
 
-  for (const must of ['大肥鱼', '小栖', '自建的', '仓库里的']) {
+  /**
+   * **默认只列本地的**（2026-11-05 改）。
+   *
+   * 用户的诉求是「我本地就想列我下载/同步过来的那几个」——三百多份卡里
+   * 绝大多数这辈子不会装，全铺出来会把在用的挤出屏幕。
+   *
+   * 所以仓库那批收成一行折叠条；搜索时（`pq` 非空）才两边都搜。
+   * `pq` 是内部 state，这里测不到搜索态，只测默认态 + 折叠条。
+   */
+  for (const must of ['大肥鱼', '小栖', '自建的']) {
     assert.ok(txt.includes(must), `清单里缺「${must}」`)
   }
-  assert.ok(txt.includes('未安装'), '仓库里没装的那行要标「未安装」')
-  assert.ok(txt.includes('装上'), '未安装的行要能直接装')
+  assert.ok(!txt.includes('仓库里的'), '默认不该把仓库里没装的铺出来')
+  assert.ok(txt.includes('在线仓库还有 1 个没装'), '要告诉用户仓库里还有几个（否则他以为没了）')
   assert.ok(txt.includes('有更新'), '本地那份有更新时要标出来')
-  assert.ok(txt.includes('更新'), '有更新的行要能直接更新')
-  // 装了的一律在前：未安装的名字必须排在所有本地名字之后
-  assert.ok(txt.indexOf('自建的') < txt.indexOf('仓库里的'), '装了的人格要排在没装的前面')
   // 计数要把两边都说清
   assert.ok(txt.includes('3 个 · 仓库还有 1 个没装'), '头部要写清「已装几个、仓库还有几个」')
   // 删过的不默认挂在清单里，但要给捞回来的入口
@@ -832,4 +838,323 @@ test('前端渲染：扫码 / 填配置那块要提示「换账号去 Roost 面�
   // 这个页面只建第一个机器人；改已有账号得去 Roost 面板的「配置」
   assert.ok(txt.includes('要换账号'), '缺换账号提示')
   assert.ok(txt.includes('Roost 面板的「配置」'), '要指明去哪儿改')
+})
+
+test('前端渲染：能力页要能显示四档结论，且缺数据不炸', () => {
+  /**
+   * 这一页最容易犯的错是**读空数据就炸**：新装用户没有 `seen`、
+   * 没启用时没有 `results`，任何一处少写 `?.` 就是白屏。
+   *
+   * 同时盯住内容真的渲染出来了——只断言"不抛"的话，
+   * 把整个 return 换成 null 也能过。
+   */
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  assert.equal(typeof mod.CapsTab, 'function', '必须导出 CapsTab')
+
+  const base = {
+    enabled: true,
+    store: {
+      seen: { tools: { edit: 1, read: 1, gh_repo: 1, mcp__graphflow__gf_exec: 1 } },
+      /**
+       * **`defaults` 必须给**，而且五种形态都要覆盖。
+       *
+       * 2026-11-05 02:41 的黑屏就出在这里：`defaults` 为空时
+       * `roleOf(undefined)` 直接 early return，测试全绿；
+       * 但真实用户有配置，`roleOf` 会走到 `ROLES.find`，
+       * 而「跟随」那一项没有 `allow` → `[...undefined]` → TypeError → 整页黑屏。
+       *
+       * 所以这里刻意给全：
+       *   owner  → `['*']`（匹配「全权」）
+       *   admin  → 四项（匹配「只聊天」）
+       *   manager → **不写 allow**（走「跟随」）
+       *   member → 三项（匹配「只聊天」）
+       *   unknown → 空数组（走「自定义」）
+       */
+      defaults: {
+        owner: { allow: ['*'] },
+        admin: { allow: ['memory_search', 'memory_note', 'qq_send', 'sticker_pick'] },
+        manager: {},
+        member: { allow: ['memory_search', 'qq_send', 'sticker_pick'] },
+        unknown: { allow: [] },
+      },
+    },
+    pending: { added: ['gh_repo'], gone: [] },
+  }
+  const preview = {
+    danger: { edit: 'edit', mcp__graphflow__gf_exec: 'mcp__*__*_exec' },
+    pool: ['edit', 'read', 'gh_repo', 'mcp__graphflow__gf_exec'],
+    results: [
+      { bucket: 'owner', allow: ['edit', 'read', 'gh_repo', 'mcp__graphflow__gf_exec'], deny: [] },
+      { bucket: 'admin', allow: ['read'], deny: ['edit', 'gh_repo', 'mcp__graphflow__gf_exec'] },
+      { bucket: 'manager', allow: ['read'], deny: ['edit', 'gh_repo', 'mcp__graphflow__gf_exec'] },
+      { bucket: 'helper', allow: ['read'], deny: ['edit', 'gh_repo', 'mcp__graphflow__gf_exec'] },
+      { bucket: 'member', allow: ['read'], deny: ['edit', 'gh_repo', 'mcp__graphflow__gf_exec'] },
+      { bucket: 'unknown', allow: [], deny: ['edit', 'read', 'gh_repo', 'mcp__graphflow__gf_exec'] },
+    ],
+  }
+
+  const feat = {
+    on: { memory: true, qqTools: false, speakUp: false, awake: false },
+    raw: { qqTools: false },
+    features: [
+      { id: 'qqTools', label: '分段说话 / 退场 / @人', desc: '把说几句交给她', offHint: '退回一整段', risky: false, source: 'config', affects: ['qq_send'], requires: [] },
+      { id: 'memory', label: '三层记忆', desc: '记人', offHint: '不再记', risky: false, source: 'config', affects: [], requires: [] },
+    ],
+    groups: [
+      { id: 'talk', label: '怎么说话', ids: ['qqTools'] },
+      { id: 'memory', label: '记不记得', ids: ['memory'] },
+    ],
+    blocked: { awake: '主动搭话' },
+    wouldRemove: ['qq_send', 'qq_close'],
+  }
+
+  rt.reset()
+  let tree
+  assert.doesNotThrow(() => {
+    const quota = {
+      builtin: ['voice', 'file', 'sticker', 'tool', 'memory'],
+      /** 工具池：故意留一个没配额度的（gh_search），它也要被列出来 */
+      pool: ['web_search', 'gh_search'],
+      poolSource: 'live',
+      rows: [
+        { feature: 'voice', label: '语音条', window: 'day', per: 'person', max: 3, peak: 3, buckets: 1, byBucket: { member: 3 } },
+        { feature: 'file', label: '发文件', window: 'hour', per: 'person', max: 2, peak: 0, buckets: 0 },
+        { feature: 'web_search', label: 'web_search', window: 'day', per: 'person', max: 20, peak: 7, buckets: 2 },
+      ],
+    }
+    tree = expand(mod.CapsTab({ caps: base, preview, chats: [{ chatId: 'G1', title: '测试群' }], feat, quota, toast: () => {}, reload: () => {}, quick: async () => ({}), busy: false }), rt)
+  })
+
+  const txt = textOf(tree)
+  assert.ok(txt.includes('主人'), '缺主人档')
+  assert.ok(txt.includes('群成员'), '缺群成员档')
+  assert.ok(txt.includes('新增 1 个'), '没提示新增的工具')
+  assert.ok(txt.includes('MCP'), '工具清单没分组')
+  assert.ok(txt.includes('已启用'), '启用状态没渲染')
+  // 四档角色按钮：没有这排按钮，用户就只能去手改 JSON
+  for (const role of ['只聊天', '能查能看', '能干活', '全权']) {
+    assert.ok(txt.includes(role), `缺角色「${role}」`)
+  }
+  // 五档要对齐框架的 0/1/2/3，少一张卡就等于少一个能配的身份
+  for (const b of ['主人', '管理员', '群管', '助手', '群成员']) {
+    assert.ok(txt.includes(b), `缺档位「${b}」`)
+  }
+  assert.ok(txt.includes('五个档位'), '标题要改成五档')
+  assert.ok(txt.includes('跟随'), '缺「跟随」这个继承态')
+  // 角色判定要能同时处理「有 allow」「没有 allow」「匹配不上」三种情况
+  assert.ok(txt.includes('跟随更低档'), 'manager 没 allow 时要显示「跟随更低档」，不能显示成自定义')
+  assert.ok(txt.includes('自定义'), 'unknown 的 allow 是空数组、匹配不上任何角色，要显示「自定义」')
+  assert.ok(txt.includes('固定'), '兜底档要标成固定不可配')
+  // 明细已收进弹窗，页面上只留入口
+  assert.ok(txt.includes('逐个调整'), '缺打开工具面板的按钮')
+  // 分群例外：没这句说明用户会以为"每个群都得配一遍"
+  assert.ok(txt.includes('跟随默认'), '缺分群入口')
+  assert.ok(txt.includes('测试群'), '群名没渲染出来')
+  // 功能开关：分组、关掉的说明、被依赖挡住的原因
+  assert.ok(txt.includes('她会做什么'), '缺功能开关区')
+  assert.ok(txt.includes('怎么说话'), '功能开关没按分组渲染')
+  assert.ok(txt.includes('关掉之后'), '关着的开关要说明后果')
+  assert.ok(txt.includes('收走'), '要显示这些关闭会收走哪些工具')
+  // 次数限制：功能名、单位、用满提示
+  assert.ok(txt.includes('次数限制'), '缺次数限制区')
+  assert.ok(txt.includes('语音条'), '配额行没渲染')
+  assert.ok(txt.includes('每人 · 每天'), '单位和窗口要用中文')
+  assert.ok(txt.includes('用满了'), '用满的要标出来')
+  // 工具那组：内置/工具分开、池里没配过的也要列、不限要写出来
+  assert.ok(txt.includes('工具（只填想限的）'), '缺工具配额组')
+  assert.ok(txt.includes('web_search'), '已配的工具没渲染')
+  // 未配的工具不铺在列表里（那样又变回一米长），但要能从下拉里选到
+  assert.ok(txt.includes('gh_search'), '没配过的工具也要能从下拉里选到')
+  assert.ok(JSON.stringify(tree).includes('＋ 给某个工具加次数限制'), '缺「添加工具」下拉')
+  assert.ok(txt.includes('不限'), '留空的含义要写出来')
+  // 按档位设额度：下拉在、单独设过的档位要能看出来
+  assert.ok(JSON.stringify(tree).includes('"value":"member"'), '缺档位下拉')
+  assert.ok(txt.includes('这一档单独设了'), '单独设过的档位没有标识')
+
+  // 空数据（刚装、还没观察过）不能炸
+  rt.reset()
+  assert.doesNotThrow(() => {
+    expand(mod.CapsTab({ caps: { enabled: false, store: {}, pending: {} }, preview: null, toast: () => {}, reload: () => {}, quick: async () => ({}), busy: false }), rt)
+  })
+  // caps 整个是 null 时给一句占位，而不是白屏
+  rt.reset()
+  const empty = textOf(expand(mod.CapsTab({ caps: null, preview: null, toast: () => {}, reload: () => {}, quick: async () => ({}), busy: false }), rt))
+  assert.ok(empty.includes('正在读'), '没有数据时要有占位文案')
+})
+
+test('页签顺序：能力排在设置左边', () => {
+  /**
+   * 位置是需求的一部分，所以要断言。
+   *
+   * 只断言「两页都在」是不够的——顺序调错了测试照样绿，
+   * 而页签顺序是用户每天都要扫一遍的东西。
+   */
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const caps = src.indexOf("['caps', '能力']")
+  const config = src.indexOf("['config', '设置']")
+  assert.ok(caps > 0, '找不到能力页签')
+  assert.ok(config > 0, '找不到设置页签')
+  assert.ok(caps < config, '「能力」必须在「设置」左边')
+})
+
+
+test('前端渲染：工具权限弹窗能搜索、能标出危险与钉住项', () => {
+  /**
+   * 弹窗默认是关着的，混在 CapsTab 里永远测不到里面的内容——
+   * 「打开之后一片空白」这种问题只能靠肉眼发现。所以单独渲染一次。
+   */
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  assert.equal(typeof mod.ToolsModal, 'function', '必须导出 ToolsModal')
+
+  const pool = ['edit', 'read', 'memory_search', 'gh_repo']
+  const allowedIn = (b, n) => b === 'owner' || n === 'memory_search'
+  const base = {
+    pool,
+    caps: { enabled: true },
+    busy: false,
+    danger: { edit: 'edit' },
+    pinned: ['memory_search'],
+    riskGroups: [
+      ['会改你的电脑', (n) => n === 'edit'],
+      ['只看不改', (n) => n !== 'edit'],
+    ],
+    allowedIn,
+    onToggle: () => {},
+    q: '',
+    setQ: () => {},
+    onClose: () => {},
+  }
+
+  rt.reset()
+  const tree = expand(mod.ToolsModal(base), rt)
+  const txt = textOf(tree)
+  assert.ok(txt.includes('工具权限（4 个）'), '标题要带数量')
+  assert.ok(txt.includes('会改你的电脑'), '没按危险度分组')
+  assert.ok(txt.includes('🔴'), '危险工具没标红')
+  assert.ok(txt.includes('🔒'), '钉住项没标锁')
+  /**
+   * 搜索框是 `type=search` 的 input，`placeholder` 在属性上——
+   * `textOf` 只收文本节点，拿不到它。所以直接看树里有没有这个类型的 input。
+   */
+  assert.ok(JSON.stringify(tree).includes('"type":"search"'), '缺搜索框')
+  // 表头五列，对齐框架 0/1/2/3：主 管 群 助 员
+  for (const k of ['主', '管', '群', '助', '员']) assert.ok(txt.includes(k), `表头缺「${k}」`)
+
+  // 搜不到时给一句人话，而不是空白
+  rt.reset()
+  const none = textOf(expand(mod.ToolsModal({ ...base, q: '不存在的东西' }), rt))
+  assert.ok(none.includes('没有匹配'), '搜不到要有提示')
+
+  // 搜索过滤：只留命中项
+  rt.reset()
+  const hit = textOf(expand(mod.ToolsModal({ ...base, q: 'gh_' }), rt))
+  assert.ok(hit.includes('gh_repo'))
+  assert.ok(!hit.includes('memory_search'), '不该留下没命中的')
+})
+
+test('前端渲染：本地一份都没有时，不能说「没有匹配「」」', () => {
+  /**
+   * 新装用户就是这个状态：本地 0 份、仓库 349 份。
+   *
+   * 旧逻辑只看 `rows.length`，而折叠后 rows 只剩本地的 → 0 →
+   * 走进「没有匹配「${pq}」」，而 pq 是空的，页面上出现一对空引号，
+   * 用户会以为页面坏了。必须单独一条分支把话说明白。
+   */
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  rt.reset()
+
+  const txt = textOf(expand(h(mod.HerTab, {
+    config: { persona: { current: 'default' } },
+    personas: { ok: true, current: 'default', byChat: {}, usage: {}, personas: [] },
+    mem: { chatId: '', personaOverride: '', authz: null },
+    toast: () => {}, save: async () => ({ ok: true }), reload: async () => {}, quick: null,
+    repoSeed: {
+      ok: true, pending: 0, stale: false, gate: { ok: true },
+      personas: [
+        { id: 'r1', label: '仓库甲', chars: 100, state: 'missing' },
+        { id: 'r2', label: '仓库乙', chars: 200, state: 'missing' },
+        { id: 'r3', label: '仓库丙', chars: 300, state: 'missing' },
+      ],
+    },
+  }), rt))
+
+  assert.ok(txt.includes('本地还没有人格'), '要说清是「本地没有」而不是「搜不到」')
+  assert.ok(!txt.includes('没有匹配「」'), '空搜索词配「没有匹配」是明显的坏文案')
+  assert.ok(txt.includes('看看仓库里的 3 个'), '要给一个能立刻点开的入口')
+})
+
+test('能力页：勾工具要保住 deny，继承档取消要写 deny（不是 allow: []）', () => {
+  /**
+   * 这是 2026-11-05 检查里最隐蔽的一处。原来 `toggleTool` 一行
+   * `defaults[bucket] = { allow: next }`，把两件事同时做错了：
+   *
+   *  1. **`deny` 整段丢失**：用户在「助手」档配了「不给记忆」，
+   *     去弹窗里勾任意一个工具，这条例外就无声消失了。
+   *  2. **继承档取消写成了 `allow: []`**：`accumulateAllow` 把空数组
+   *     当成「没写」继续继承低档，于是取消等于没点——勾选框变空，
+   *     刷新后又勾回来。
+   *
+   * 两种错都「渲染正常、不报错」，所以只能断言算出来的配置本身。
+   */
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const plan = mod.planToolToggle
+  assert.equal(typeof plan, 'function', '必须导出 planToolToggle 才能测')
+
+  // ① 有具体 allow + deny：勾一个新工具，deny 不能丢
+  const a = plan({ cur: { allow: ['read'], deny: ['memory_search'] }, name: 'edit', on: true, expanded: [] })
+  assert.deepEqual(a.allow, ['read', 'edit'], '勾上要追加')
+  assert.deepEqual(a.deny, ['memory_search'], 'deny 不能被这次勾选冲掉')
+
+  // ② 继承档（没有 allow）：取消一项只能写 deny
+  const b = plan({ cur: {}, name: 'read', on: false, expanded: ['read', 'qq_send'] })
+  assert.equal(b.allow, undefined, '不能写 allow: []，那语义是「这一档整档清零」')
+  assert.deepEqual(b.deny, ['read'], '继承档取消要靠 deny 盖住低档')
+
+  // ③ 继承档：勾一项写增量 allow，不把低档的清单抄进来
+  const c = plan({ cur: {}, name: 'read', on: true, expanded: [] })
+  assert.deepEqual(c.allow, ['read'], '`allow` 是增量：只写多出来的那个')
+
+  // ④ 被 deny 盖着的工具，勾上要把那条 deny 去掉，否则勾了也没用
+  const d = plan({ cur: { allow: [], deny: ['gh_*'] }, name: 'gh_repo', on: true, expanded: [] })
+  assert.equal(d.deny, undefined, '通配 deny 盖住的项，勾上时要清掉（清空后连字段一起删）')
+  assert.deepEqual(d.allow, ['gh_repo'])
+
+  // ⑤ `*` 里取消一项：展开成具体清单再减（`*` 是无限集，删不掉）
+  const e = plan({ cur: { allow: ['*'] }, name: 'read', on: false, expanded: ['read', 'edit'] })
+  assert.deepEqual(e.allow, ['edit'])
+
+  // ⑥ 重复勾同一个不产生重复项
+  const f = plan({ cur: { allow: ['read'] }, name: 'read', on: true, expanded: [] })
+  assert.deepEqual(f.allow, ['read'])
+
+  // ⑦ deny 清空之后要删掉字段，别在文件里留一个空数组
+  const g = plan({ cur: { allow: ['read'], deny: ['edit'] }, name: 'edit', on: true, expanded: [] })
+  assert.equal(g.deny, undefined)
+})
+
+test('能力页：前端通配匹配必须和后端同语义（`*` 跨下划线）', () => {
+  /**
+   * 前端要判断「这条 deny 有没有盖住这个工具」，拿不到后端的 `matchPattern`，
+   * 只能自己实现一份。语义一旦漂了，表现是「配置写了但那个工具还在」——
+   * 所以用同一组样例两边各跑一遍。
+   */
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const cases = [
+    ['mcp__graphflow__gf_exec', 'mcp__*__*_exec', true],
+    ['mcp__graphflow__gf_read', 'mcp__*__*_exec', false],
+    ['gh_repo', 'gh_*', true],
+    ['gh_repo', 'pr_*', false],
+    ['edit', 'edit', true],
+    ['edit', '*', true],
+    ['editx', 'edit', false],
+  ]
+  for (const [name, pat, want] of cases) {
+    assert.equal(mod.matchPat(name, pat), want, `matchPat(${name}, ${pat})`)
+  }
 })
