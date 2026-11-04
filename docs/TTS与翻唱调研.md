@@ -144,3 +144,14 @@ DSH 插件 → HTTP → 本地 RVC 服务（用户自己跑）
 | **人格库** | Aurabot `personas[]` + `current` | 配置里放数组，按群覆盖 |
 | **表情包库** | Aurabot `stickers.match(query)` | 目录 + 索引，把清单写进提示词 |
 | **主动搭话** | Aurabot `speakUp` | 定时任务 + ai-chat 暴露主动发消息接口 |
+
+---
+
+> **2026-11-04 补记（落地结果，正文是当时的调研，保留原貌）**
+>
+> 本调研里「首选 Python 版 edge-tts + 建 venv」的结论**没有采用**。
+> 实际落地用的是下面表格里那条纯 Node 方案 `@andresaya/edge-tts@1.9.1`：
+> 不需要 Python、不需要 venv，三个纯 JS 包约 0.4MB，在面板点「一键安装」
+> 装到 `数据目录/tts-edge/node_modules`。已作为 dsh-roost 的第四个
+> TTS provider（`edge`）上线，语速走统一的 `tts.speed`。
+> 注意它是 GPL-3.0-only：只下载到用户数据目录，**不随插件分发**。

@@ -27,6 +27,7 @@
 - [权限：AI 知道是谁在说话](#权限ai-知道是谁在说话)
 - [面板](#面板)
 - [配置](#配置)
+- [账号迁移](#账号迁移v100)
 - [表情包](#表情包)
 - [目录结构](#目录结构)
 - [和 Aurabot 的对比](#和-aurabot-的对比)
@@ -73,7 +74,8 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ 本插件 ⇄ DSH �
 - ⬆️ **本体自更新**：设置页顶部查最新版、一键装。走 DSH 自己的 `pluginManager`（失败会回滚 `package.json` + `pnpm-lock.yaml`），装完提示重启。开发机（符号链接装的）自动禁用
 - 🎭 **双人格 preset**：私聊（`roost-private`）/ 群聊（`roost-social`）各一套提示词
 - 🖼️ **表情包**：图丢进目录就能用，文件名或侧车 `.tags` 当标签；图多了建子目录分类，`sticker_pick` 按需取图——**加图不会冲掉提示词缓存**
-- 🔊 **语音合成（选装，默认关）**：设置页「语音合成」卡片里选 **本地模型（一键安装，完全离线）**、OpenAI 兼容 `/audio/speech`，或本地 GPT-SoVITS 原生 API。本地模型点一下自动下 23MB 引擎 + 30MB 模型，装完就能用，**不联网、不要 Key**。不配就完全静默——不请求上游、不加载模型、不占提示词；配好后模型才能用 `<<say: 内容>>` 发语音条（转 silk 和发送在 ai-chat 那侧）
+- 🔊 **语音合成（选装，默认关）**：四种 provider 任选 —— **本地模型**（一键装 23MB 引擎 + 30MB 模型，完全离线）、**微软在线朗读**（免费、不要 Key，一键装 0.4MB 依赖）、OpenAI 兼容 `/audio/speech`、本地 GPT-SoVITS 原生 API。**语速一份 `tts.speed` 四个 provider 共用**，切换时不用重填。不配就完全静默——不请求上游、不加载模型、不占提示词；配好后模型才能用 `<<say: 内容>>` 发语音条（转 silk 和发送在 ai-chat 那侧）
+- 🔑 **账号迁移**：把 QQ号 / 群号和 openid 对上，换机器人（换 AppID）后旧记忆照样读得到。支持批量追加 openid、群成员 QQ号绑定、昵称候选提示，以及「一键改写」——把某号码名下所有旧键合并到号码键后删掉（带备份与一键回退）。**昵称候选只提示不自动绑**：官方不给 QQ号，自动猜会把别人的记忆串过来
 
 ---
 
@@ -213,7 +215,8 @@ git clone https://github.com/tdcq9594/dsh-roost.git
   "stickers": { "enabled": true, "dir": "" },
   "tts": {                  // 选装，默认关；面板「设置 → 语音合成」有专用表单
     "enabled": false,
-    "provider": "openai",   // sherpa（本地离线）| openai | gpt-sovits
+    "provider": "openai",   // sherpa（本地离线）| edge（微软在线）| openai | gpt-sovits
+    "speed": 1,             // 四个 provider 共用的语速，0.5–2，1 是原速
     "baseUrl": "",          // openai: 含版本前缀，如 https://api.openai.com/v1
     "apiKey": "",           // 面板里显示成 ******，原样保存不会覆盖真值
     "model": "",            // openai: tts-1
@@ -224,10 +227,16 @@ git clone https://github.com/tdcq9594/dsh-roost.git
       "model": "aishell3",  // 30MB / 8kHz / 174 个音色
       "modelDir": "",       // 留空 = 数据目录/tts-models/vits-icefall-zh-aishell3
       "sid": 88,            // 说话人编号（0-173），换一个就是换一个音色
-      "speed": 1,
       "numThreads": 2
     },
+    "edge": {               // provider=edge 时才用；不用填地址和 Key
+      "voice": "zh-CN-XiaoxiaoNeural"
+    },
     "gptSovits": {          // provider=gpt-sovits 时才用
+      "installDir": "",     // 含 api_v2.py 的那层，填了才能在面板一键启动
+      "model": "",          // 扫描出来的角色名；留空 = 用 tts_infer.yaml 里已加载的
+      "gptWeights": "",     // 手填权重路径，优先于按角色名自动配对
+      "sovitsWeights": "",  // 两个都填最稳；只填一个时面板会警告另一半仍是猜的
       "baseUrl": "http://127.0.0.1:9880",
       "apiKey": "",         // 走反向代理时才填；本地原生 API 留空
       "referWavPath": "",   // GPT-SoVITS 那台机器上的路径
@@ -265,6 +274,61 @@ git clone https://github.com/tdcq9594/dsh-roost.git
 - 参考音频只在**你没填**的时候才替你选；填过就尊重原值
 - 语种填「中文」「日文」就行，会自动转成 API 要的 `zh` / `ja`。v2 的字段是 `text_lang` / `prompt_lang`，v1 才是 `text_language`
 - 加载模型要一两分钟，期间面板会显示日志尾部；插件重载时会把进程一起带走
+- **选的就是配置文件里已加载的角色时会跳过切换**：v2 切一次权重等于重新加载一遍模型，没必要白等一轮。切换失败时面板红字写明「现在实际生效的是谁」，不会显示「正常」却放着别的音色
+- **音色不对时优先手填权重**：自动配对靠文件名猜角色名，权重一多（比如十几个）很容易把不同 epoch / 不同角色的 GPT 和 SoVITS 配错一对。填了 `gptWeights` / `sovitsWeights` 就以它为准；只填一个时面板会警告另一半仍是自动配对的。另外**参考音频也要和模型配套**，音色主要由它决定
+
+**微软在线朗读（`provider=edge`）**：不用填地址、不用填 Key，选一个音色就能用。
+
+- 依赖是三个纯 JS 包（约 0.4MB），点「一键安装依赖」装到 `数据目录/tts-edge/node_modules`——**不进插件目录**，DSH 更新插件不会冲掉；也刻意和本地模型的 `tts-runtime` 分开，两边不会互相删
+- 输出 mp3，宿主自己转 silk。要念的**文本会发到微软的服务器**，介意隐私就用本地模型
+- `@andresaya/edge-tts` 是 GPL-3.0，只下载到你自己的数据目录，**不随插件分发**
+- 卸载本地模型后不会再刷「预热失败」：没装是正常状态，装了但加载不起来才是故障
+
+**语速**：`tts.speed` 一份配置，四个 provider 共用，范围 0.5–2。
+
+| provider | 映射成 |
+|---|---|
+| 本地 sherpa | 推理参数 `speed` |
+| OpenAI 兼容 | 请求体 `speed`（只在非原速时带，避免被中转服务拒） |
+| GPT-SoVITS v2 | `speed_factor`；**v1 接口没有语速参数，不支持** |
+| 微软朗读 | `rate: '+20%'` 这种百分比字符串 |
+
+以前只有 `sherpa.speed`，现在统一到 `tts.speed`；老配置会自动迁移，不用手动改。
+
+---
+
+## 账号迁移（v1.0.0）
+
+QQ 官方事件只给 `openid`（群是 `group_openid`），**从来不给 QQ号**。换机器人、
+换 AppID 之后 openid 就变一次，旧记忆还在盘上却再也没人去找它。
+这一页把号码和 openid 对上——**读取时合并，存量数据一个字节不动**。
+
+| 分区 | 干什么 |
+|---|---|
+| 01 待迁移 | 本机数据里有记忆、但还没绑过号码的 openid 键 |
+| 02 已绑定 | Roost 身份表里的号码；给已有号码**追加**新 openid（旧的一条不删） |
+| 03 群里的人 | 群发言人的 QQ号。**会话键里没有他们**（除非开过私聊），数据来自 Roost 的 `unresolved.users` |
+| 04 批量追加 | 选一个号码 → 勾多个新 openid → 一次提交。换机器人后让新旧 openid 都指向同一个号码 |
+| 05 一键改写 | 把某号码名下所有旧键**合并到号码键后删掉**，把结构改干净 |
+
+**昵称候选只提示，绝不自动绑**：官方不给 QQ号，`uin` 是从绑定表反查的，
+按昵称 / 群名猜出来的「这个人可能是 10001」没有任何权威依据，绑错会把
+别人的记忆串过来。候选只帮你少打字，必须人工确认。
+
+### ⚠️ 一键改写是唯一会重写记忆数据的操作
+
+前面所有操作都只写 `identity.json`（叠加层），这一个会真的改
+`memory.json` / `sessions.json` / `journal.sqlite` / `graph.sqlite`。
+执行前必须：
+
+1. **先停掉旧机器人**——它还跑着就会继续往旧 openid 写记忆，改完又多出一个键
+2. 点「预览改写清单」，核对要动的文件（绝对路径）、每个键的条数
+3. 勾选「已停掉旧机器人」+ 原样输入「改写」，两样齐了才能执行
+
+执行时自动整文件备份到 `D://WorkBuddy//_archive//2026-11-04-账号改写//<时间戳>//`
+（这个盘写不了时退到 `数据目录/rewrite-backups`），失败自动回退；
+成功后「可回退的备份」列表里仍可一键回退。改写和回退成功后页面会重新拉数据，
+上面「待迁移」列表里那些键会消失。
 
 ---
 
