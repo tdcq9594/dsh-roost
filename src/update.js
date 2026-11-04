@@ -35,22 +35,86 @@ const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
 const MIN_AGE_MS = 24 * 3600_000;
 
 /**
- * `ManagementFailure.code` → 人话。
+ * DSH 的 `ChangeResult.application` 取值。
  *
- * 直接把 code 抛给用户没人看得懂，而这几种是**用户能自己动手解决**的，
- * 必须说清下一步做什么。没列到的走兜底（附原始 code，方便搜）。
+ * **没有 `success`。** 真实的成功值是 `applied`；`restart-required`（装好了但要重启）
+ * 和 `overridden`（被别的组合包接管）同样属于成功。
+ * 以前这里拿 `'success'` 判，于是**每一次成功都被判成失败**——
+ * 面板永远显示「更新失败，本地什么都没动」，而实际上文件已经换好了。
+ */
+const APP_OK = new Set(['applied', 'restart-required', 'overridden', 'success']);
+
+/**
+ * `result.error.code` → 人话。
+ *
+ * 这批键名来自 DSH `pluginManager` 的返回 schema（`@deepseek-ai/dsh-plugin-manager`），
+ * **不是 `packageResult.code`**——那个字段不存在，读它永远拿到 undefined，
+ * 于是所有失败都落到兜底文案，用户看不出任何可行动的信息。
  */
 const FAIL_TEXT = {
+  'already-installed': '这一版已经装过了（DSH 在热更新模式下会拒绝重装同一个包）。重启 DSH 再看版本；要换别的版本得先卸载。',
   'invalid-spec': '版本号不合法，可能是 registry 返回了脏数据。稍后重试，或去 DSH 插件管理里手动更新。',
-  'already-installed': '已经是这个版本了（DSH 在热更新模式下重装同一个包会被拒）。重启 DSH 再看版本。',
-  'registry-unreachable': '连不上 registry。检查网络，或在设置里换个源。',
-  'cancelled': '已取消，本地什么都没动。',
+  'incompatible-version': '这个版本要求更高版本的 DSH，当前装不了。先升级 DSH。',
+  'management-required': '这个 DSH 没给插件管理权限。去 DSH 设置里打开后重试。',
+  unaddressable: '包地址解析不出来（registry 或 spec 有问题）。',
+  'unknown-plugin': '找不到这个插件（可能已下架）。',
+  'ambiguous-install': '有多个同名来源，DSH 不确定装哪个。去 DSH 插件管理里手动指定。',
+  'not-bundle': '这个包不是 DSH 插件包（没有 bundle 声明）。',
+  'not-removable': '这个包不能卸载（它承载着插件管理），所以装不了别的版本。',
+  'stop-profile': 'DSH 正在停止或重启，等它起来再试。',
+  'bundle-in-use': '这个包正在被使用，先停掉相关插件。',
+  'stale-approval': '构建许可过期了，再点一次即可。',
+  'operation-error': '安装过程报错，具体看下面的诊断。',
+  cancelled: '已取消，本地什么都没动。',
 };
 
-export function humanFail(code) {
-  if (!code) return '更新失败，本地什么都没动。去 DSH 插件管理里手动更新试试。';
-  if (FAIL_TEXT[code]) return FAIL_TEXT[code];
-  return `更新失败（${code}），本地什么都没动。去 DSH 插件管理里手动更新试试。`;
+/** `installBundle` 的另一种返回：`{ status:'refused', problem, reason }` */
+const REFUSE_TEXT = {
+  network: '连不上 registry（或这个 spec 的下载主机）。检查网络、代理，或在设置里换个源。',
+  'not-found': 'registry 上没有这个版本（可能刚发布还没同步）。过几分钟再试。',
+  'not-a-package': '拉下来的东西不是 npm 包。',
+  'not-a-bundle': '这个包不是 DSH 插件包（没有 bundle 声明）。',
+  'invalid-spec': FAIL_TEXT['invalid-spec'],
+  'already-installed': FAIL_TEXT['already-installed'],
+  unknown: 'DSH 拒绝了这次安装，原因不明，见下面的诊断。',
+};
+
+/**
+ * `packageResult.kind` → 人话。
+ *
+ * 这是**用户唯一能据此自查**的信息：断网、没权限、磁盘满，处理方式完全不同。
+ */
+const KIND_TEXT = {
+  network: '网络问题（连不上 registry 或下载源）',
+  timeout: '卡住超时（包管理器长时间没有输出）',
+  integrity: '下载内容校验不通过（缓存坏了，或源被篡改）',
+  'pnpm-missing': '找不到 pnpm',
+  'not-found': 'registry 上没有这个版本',
+  'no-matching-version': '没有匹配的版本（可能被 24 小时冷却挡住）',
+  'disk-full': '磁盘空间不足',
+  permission: '没有写权限（node_modules 或缓存目录）',
+  'build-blocked': '安装脚本被拦（build 未批准）',
+  unknown: '包管理器报错',
+};
+
+export function humanFail(code, extra = {}) {
+  const { kind, failedAt, diagnostic } = extra;
+  const base = FAIL_TEXT[code] || REFUSE_TEXT[code]
+    || (code
+      ? `更新失败（${code}），本地什么都没动。去 DSH 插件管理里手动更新试试。`
+      : '更新失败，本地什么都没动。去 DSH 插件管理里手动更新试试。');
+
+  const bits = [base];
+  /**
+   * 分类比错误码更接近"我该做什么"：`operation-error` 只能说明"报错了"，
+   * 而 `kind: network` 能让人立刻想到代理。
+   */
+  if (kind && KIND_TEXT[kind] && !base.includes(KIND_TEXT[kind])) bits.push(`原因：${KIND_TEXT[kind]}。`);
+  if (failedAt === 'registry') bits.push('（卡在 registry）');
+  else if (failedAt === 'spec-host') bits.push('（卡在下载主机）');
+  /** 诊断是 pnpm 原文，可能很长；toast 只放一句，完整内容走 detail */
+  if (diagnostic && !code) bits.push(diagnostic.slice(0, 120));
+  return bits.join(' ');
 }
 
 /** 「发布 30 分钟前」这种人话 */
@@ -175,6 +239,23 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
 
   const profile = () => profileDir ?? findProfileDir(import.meta.dirname);
   const kind = () => installKind(profile());
+
+  /**
+   * 磁盘上**已经装着的**版本（≠ 正在运行的版本）。
+   *
+   * `own` 是模块加载时读的一次快照：装完新版不重启，它永远不会变。
+   * 拿它判断"要不要装/还有没有新版"，会让按钮在更新成功后继续挂着，
+   * 用户再点一次就撞上 `already-installed`。
+   */
+  function installedVersion() {
+    try {
+      const p = join(profile(), 'node_modules', PKG, 'package.json');
+      return JSON.parse(readFileSync(p, 'utf8')).version || '';
+    } catch {
+      return '';
+    }
+  }
+
   const pm = () => {
     try {
       return ctx?.get?.('pluginManager') ?? null;
@@ -183,15 +264,46 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     }
   };
 
-  /** registry：配置 > DSH 自己的 registries() > 官方。形状不明确，所以防着取 */
-  function registryUrl() {
+  /**
+   * registry：配置 > DSH 自己的 registries() > 官方。
+   *
+   * **必须 await。** `pluginManager.registries()` 的签名是
+   * `async registries(): Promise<PluginRegistries>`，返回值由 remote 层包成
+   * `{ ok, value: { registry, fallbackRegistries, resolved } }`。
+   * 以前这里当同步数组取（`Array.isArray(...)`），Promise 永远不是数组、
+   * `r.registries` 也永远不存在——于是**不管用户配了什么镜像，都退回官方
+   * registry.npmjs.org**，国内 8 秒超时几乎必挂。
+   *
+   * 形状在 DSH 几个版本间飘过（数组 / `{registries}` / `{ok,value}`），
+   * 所以几种都认，认不出再用官方。
+   */
+  async function registryUrl() {
     if (registry) return String(registry).replace(/\/+$/, '');
     try {
-      const r = pm()?.registries?.();
-      const arr = Array.isArray(r) ? r : Array.isArray(r?.registries) ? r.registries : [];
-      const first = arr[0];
-      const url = typeof first === 'string' ? first : first?.url || first?.registry;
-      if (url) return String(url).replace(/\/+$/, '');
+      let r = await pm()?.registries?.();
+      // remote 包装层：{ ok, value }
+      if (r && typeof r === 'object' && 'ok' in r) {
+        if (!r.ok) return DEFAULT_REGISTRY;
+        r = r.value;
+      }
+      const pick = (v) => (typeof v === 'string' && v ? String(v).replace(/\/+$/, '') : '');
+      if (typeof r === 'string') return pick(r) || DEFAULT_REGISTRY;
+      if (Array.isArray(r)) {
+        const first = r[0];
+        const url = typeof first === 'string' ? first : first?.url || first?.registry;
+        if (pick(url)) return pick(url);
+        return DEFAULT_REGISTRY;
+      }
+      if (r && typeof r === 'object') {
+        // PluginRegistries：{ registry, fallbackRegistries, resolved }
+        const direct = pick(r.registry) || pick(r.registries?.[0]?.url) || pick(r.resolved);
+        if (direct) return direct;
+        const arr = Array.isArray(r.registries) ? r.registries
+          : Array.isArray(r.fallbackRegistries) ? r.fallbackRegistries : [];
+        const first = arr[0];
+        const url = typeof first === 'string' ? first : first?.url || first?.registry;
+        if (pick(url)) return pick(url);
+      }
     } catch {}
     return DEFAULT_REGISTRY;
   }
@@ -204,7 +316,7 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
    * 只查一次，两个信息都拿到。
    */
   async function check() {
-    const reg = registryUrl();
+    const reg = await registryUrl();
     const url = `${reg}/${PKG}`;
     let latest = '';
     let publishedAt = 0;
@@ -227,9 +339,13 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
 
     const age = publishedAt ? Date.now() - publishedAt : NaN;
     const k = kind();
+    /** 磁盘上装着的版本；读不到就退回运行中版本（测试环境没有真实 node_modules） */
+    const installed = installedVersion();
+    const base = installed || own;
     return {
       ok: true,
       own,
+      installed,
       latest,
       registry: reg,
       error: err,
@@ -238,7 +354,17 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       // 不只看有没有这个服务，还要看它到底有没有 installBundle——
       // 两个条件不一致会让面板显示一个点了没反应的按钮
       canSelf: k === 'real' && typeof pm()?.installBundle === 'function',
-      hasUpdate: latest ? compareVersion(latest, own) > 0 : false,
+      /**
+       * 比的是**磁盘上那份**，不是运行中那份。
+       *
+       * 比运行中版本的话，装完新版不重启就永远"有更新"，
+       * 按钮一直挂着，用户再点一次必然撞 already-installed。
+       */
+      hasUpdate: latest ? compareVersion(latest, base) > 0 : false,
+      /** 查不到最新版（网络/registry 挂了）。面板据此给一个「按 latest 试装」的出口 */
+      unknownLatest: Boolean(err && !latest),
+      /** 装好了但还没重启：磁盘版本 ≠ 运行中版本 */
+      pendingRestart: Boolean(installed && compareVersion(installed, own) > 0),
       publishedAt,
       ageMs: Number.isFinite(age) ? age : null,
       ageText: Number.isFinite(age) ? ageText(age) : '',
@@ -298,11 +424,37 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     }
 
     const info = await check();
-    if (info.error && !info.latest) return { ok: false, code: 'registry', message: `查不到最新版：${info.error}` };
-    if (!info.hasUpdate) return { ok: true, already: true, version: own, message: `已经是最新版（v${own}）` };
+    /**
+     * 查不到最新版**不再直接阻断**。
+     *
+     * `check()` 只是前置判断：它去拉 registry 的 packument，8 秒超时，
+     * 国内直连或挂代理的环境经常失败。而真正安装时 pnpm 自己会解析
+     * `dsh-roost@latest`，根本不需要我们先知道版本号。
+     * 以前这里一失败就 return，于是"网断了"和"其实能装"变成同一句
+     * 「查不到最新版」，用户连试都试不了。
+     */
+    const unknownLatest = Boolean(info.error && !info.latest);
+    if (unknownLatest) log(`查不到最新版（${info.error}），仍尝试按 latest 标签安装`);
+
+    /**
+     * 已经装上最新版：不再装第二次。
+     *
+     * 用 `installed`（磁盘）判断，不是 `own`（运行中）——装完没重启时后者还是旧值，
+     * 会重复调 installBundle，然后被 DSH 以 already-installed 拒掉。
+     */
+    if (!unknownLatest && !info.hasUpdate) {
+      return {
+        ok: true,
+        already: true,
+        version: info.installed || own,
+        message: info.pendingRestart
+          ? `已经装好 v${info.installed}，重启 DSH 生效。`
+          : `已经是最新版（v${own}）`,
+      };
+    }
 
     let exemption = null;
-    if (fresh && info.cooling) {
+    if (fresh && info.cooling && info.latest) {
       try {
         exemption = exempt(info.latest);
       } catch (e) {
@@ -312,41 +464,100 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     }
 
     const requestId = `roost-self-${Date.now()}`;
+    /** 版本号未知时交给 pnpm 解析 latest tag */
+    const spec = unknownLatest ? `${PKG}@latest` : `${PKG}@${info.latest}`;
     let result;
     try {
-      result = await manager.installBundle(`${PKG}@${info.latest}`, { saveExact: true, requestId });
+      result = await manager.installBundle(spec, { saveExact: true, requestId });
     } catch (e) {
       return { ok: false, code: 'throw', message: `更新失败：${e.message}（本地什么都没动）` };
     }
 
+    /**
+     * DSH 的返回有**两种形态**，都必须认：
+     *
+     *   ChangeResult { changed, application, restartReason?, error?, packageResult?, bundle?, … }
+     *   { status: 'refused', problem, reason }        ← 连 pnpm 都没跑就被拒
+     *
+     * 以前只认 `application === 'success'`（这个值不存在）并去读
+     * `packageResult.code`（这个字段也不存在），结果**每一次成功都被报成失败**，
+     * 真正的错误码也全被丢掉，用户只能看到兜底文案。
+     */
     const app = result?.application;
-    if (app === 'cancelled') return { ok: false, code: 'cancelled', message: humanFail('cancelled') };
-    if (app !== 'success') {
-      const code = result?.packageResult?.code || result?.code || '';
-      return { ok: false, code: code || 'failed', message: humanFail(code), raw: result };
+    const refused = result?.status === 'refused';
+    const errCode = result?.error?.code || (refused ? result?.problem : '') || '';
+    /** 给人看的细节：错误码之外还有 pnpm 的分类、原文和日志路径 */
+    const detail = {
+      code: errCode,
+      diagnostic: result?.error?.diagnostic || (refused ? result?.reason : '') || '',
+      kind: result?.packageResult?.kind || '',
+      failedAt: result?.failedAt || '',
+      exitCode: result?.packageResult?.exitCode ?? null,
+      timedOut: Boolean(result?.packageResult?.timedOut),
+      logPath: result?.packageResult?.logPath || '',
+      // pnpm 输出可能很长；只带前 400 字，够定位又不会把响应撑大
+      output: String(result?.packageResult?.output || '').slice(0, 400),
+    };
+
+    if (app === 'cancelled') {
+      return { ok: false, code: 'cancelled', message: humanFail('cancelled'), detail };
+    }
+    if (refused || app === 'failed' || (result?.error && !APP_OK.has(app))) {
+      return {
+        ok: false,
+        code: errCode || 'failed',
+        message: humanFail(errCode, detail),
+        detail,
+        raw: result,
+      };
+    }
+    if (!APP_OK.has(app)) {
+      /**
+       * 拿不到 `application`：可能是更老的 DSH，或返回结构又变了。
+       * **不能当成功**——那样用户会以为装好了，重启后还是旧版。
+       */
+      return {
+        ok: false,
+        code: 'unexpected',
+        message: '更新返回了看不懂的结果，本地可能没动。去 DSH 插件管理里看一眼版本。',
+        detail,
+        raw: result,
+      };
     }
 
     /**
      * 核对**实际装到的**版本。
      *
+     * 版本在 `bundle.version`（顶层没有 version 字段）；读不到就退回请求的版本。
      * 请求 0.10.7 却装到 0.10.6 只有一种原因：24 小时冷却让 pnpm 降级了。
      * 这种情况必须明说——不然用户看到"更新成功"、重启后版本没变，只会以为坏了。
      */
-    const got = String(result?.version ?? '').replace(/^v/i, '') || info.latest;
-    const downgraded = compareVersion(got, info.latest) < 0;
+    const got = String(result?.bundle?.version || result?.version || '').replace(/^v/i, '') || info.latest || '';
+    // 只有两边都有版本号才谈得上"降级"；查不到 latest 时不能凭空判
+    const downgraded = Boolean(info.latest && got && compareVersion(got, info.latest) < 0);
+    /** `restart-required` / `overridden` 都表示"现在还没生效" */
+    const needRestart = app === 'restart-required' || app === 'overridden'
+      || Boolean(result?.restartReason) || result?.changed === true;
     return {
       ok: true,
       version: got,
       wanted: info.latest,
       downgraded,
       exemption,
+      application: app,
+      restartReason: result?.restartReason || '',
       message: downgraded
         ? `已装 v${got}，不是最新的 v${info.latest}——因为新版本发布不满 24 小时，pnpm 降级了。`
           + '可以点「立即安装（不等 24 小时）」，或明天再更新。'
-        : `已装 v${got}，**重启 DSH 才生效**。`,
-      restart: true,
+        // toast 是纯文本，别在这里写 markdown 星号（会原样显示出来）
+        : unknownLatest
+          // 版本号是 pnpm 解析出来的；这次没查到"最新"，就别编一个数字
+          ? `已装 ${got ? 'v' + got : '最新版'}，重启 DSH 才生效（没查到版本号，按 latest 标签装的）。`
+          : `已装 v${got}，重启 DSH 才生效。`,
+      restart: needRestart,
+      unknownLatest,
     };
   }
 
-  return { own: () => own, check, self, exempt, profileDir: profile, kind, registryUrl };
+  return { own: () => own, installedVersion, check, self, exempt, profileDir: profile, kind, registryUrl };
 }

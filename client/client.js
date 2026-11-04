@@ -3417,6 +3417,8 @@ select.roost-input{color-scheme:dark}
       const [repo, setRepo] = useState(null)
       const [busy, setBusy] = useState('')
       const [at, setAt] = useState('')
+      /** 上一次自更新的失败详情：错误码之外还有 pnpm 的分类、原文和日志路径 */
+      const [fail, setFail] = useState(null)
 
       const loadCheck = async () => {
         const r = await get('/update/check')
@@ -3435,6 +3437,14 @@ select.roost-input{color-scheme:dark}
         setBusy(fresh ? 'fresh' : 'self')
         try {
           const r = await post('/update/self', { fresh })
+          /**
+           * 失败时把**完整结果**留下来，而不只是弹一句 toast。
+           *
+           * 以前所有失败都只弹「更新失败，本地什么都没动」，用户没法定性；
+           * 现在错误码、pnpm 分类、诊断原文、日志路径都在 `r.detail` 里，
+           * 折在下面让他随时能翻出来发给别人。
+           */
+          setFail(r && r.ok === false ? r : null)
           toast(r.message || (r.ok ? '更新完成，重启 DSH 生效' : '没更新成'))
           await loadCheck()
         } finally {
@@ -3474,9 +3484,12 @@ select.roost-input{color-scheme:dark}
             h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
               h('span', { style: { fontWeight: 600 } }, 'dsh-roost 本体'),
               h('span', { className: 'roost-note', style: { margin: 0 } },
-                `当前 ${own}` + (latest ? ` · 最新 ${latest}` : '')
+                `当前 ${own}`
+                + (info?.pendingRestart ? ` · 已装 v${info.installed}（重启生效）` : '')
+                + (latest ? ` · 最新 ${latest}` : '')
                 + (info?.ageText ? `（${info.ageText}）` : '')),
               info?.hasUpdate ? h(Pill, { tone: 'info' }, '有新版') : null,
+              info?.pendingRestart && !info?.hasUpdate ? h(Pill, { tone: 'ok' }, '待重启') : null,
             ),
             /**
              * 三种装法要说清，不然用户点不动按钮也不知道为什么：
@@ -3485,11 +3498,17 @@ select.roost-input{color-scheme:dark}
             h('div', { className: 'roost-note', style: { marginTop: 2 } },
               info?.kind === 'linked'
                 ? '开发模式（node_modules 里是符号链接）：自更新已禁用，改完源码重启 DSH 即可。'
-                : info?.kind === 'real'
-                  ? '装完要**重启 DSH** 才生效。'
-                  : info?.hasManager === false
-                    ? '这个 DSH 版本没有 pluginManager，请去 DSH 插件管理里手动更新。'
-                    : (info?.error ? '查不到最新版：' + info.error : '')),
+                : info?.pendingRestart
+                  // 装完没重启：磁盘上已经是新版，运行中的还是旧版。这句话不写清楚，
+                  // 用户会以为"更新失败"，然后再点一次
+                  ? `新版已经装到磁盘上了，重启 DSH 就会生效（面板上的版本号要重启后才变）。`
+                  : info?.kind === 'real'
+                    ? '装完要重启 DSH 才生效。'
+                    : info?.hasManager === false
+                      ? '这个 DSH 版本没有 pluginManager，请去 DSH 插件管理里手动更新。'
+                      : (info?.error
+                        ? `查不到最新版：${info.error}——不影响试装，pnpm 会自己解析 latest。`
+                        : '')),
             info?.cooling && info?.hasUpdate
               ? h('div', { className: 'roost-note', style: { color: 'var(--warn)', marginTop: 2 } },
                   `${latest} 发布不满 24 小时（pnpm 默认不装这么新的版本，会降级），${info.coolingLeftText}。`
@@ -3497,11 +3516,36 @@ select.roost-input{color-scheme:dark}
               : null,
           ),
           h('div', { className: 'roost-acts' },
+            /**
+             * 装好待重启时给一颗**禁用**按钮，而不是什么都不显示。
+             *
+             * 按钮直接消失会让人以为"更新入口没了"；留一颗灰的，
+             * 顺带把"该做什么"写在按钮上（重启）。
+             */
+            info?.pendingRestart && !info?.hasUpdate
+              ? h('button', {
+                  type: 'button', className: 'roost-btn', disabled: true,
+                  title: '重启 DSH 之后版本号和功能才会变',
+                }, `已装 v${info.installed} · 待重启`)
+              : null,
             info?.canSelf && info?.hasUpdate
               ? h('button', {
                   type: 'button', className: 'roost-primary', disabled: Boolean(busy),
                   onClick: () => doSelf(false),
                 }, busy === 'self' ? '更新中…' : `更新到 ${latest}`)
+              : null,
+            /**
+             * 查不到最新版时的出口。
+             *
+             * `check()` 只是前置判断，装的时候 pnpm 自己会解析 latest tag。
+             * 不给这个按钮的话，registry 一超时（国内很常见）用户就彻底没辙了。
+             */
+            info?.canSelf && info?.unknownLatest
+              ? h('button', {
+                  type: 'button', className: 'roost-primary', disabled: Boolean(busy),
+                  title: '查不到版本号不影响安装：让 pnpm 自己解析 latest',
+                  onClick: () => doSelf(false),
+                }, busy === 'self' ? '更新中…' : '按 latest 试装')
               : null,
             info?.canSelf && info?.hasUpdate && info?.cooling
               ? h('button', {
@@ -3512,6 +3556,40 @@ select.roost-input{color-scheme:dark}
               : null,
           ),
         ),
+        /**
+         * 自更新失败的详情。
+         *
+         * toast 一闪就没了，而"为什么失败"恰恰是用户唯一的求助材料：
+         * 错误码、pnpm 的分类（网络/权限/磁盘满）、诊断原文、日志路径，
+         * 全折在这里，需要时展开抄给别人。
+         */
+        fail
+          ? h('div', { className: 'pv-warn', style: { marginTop: 8 } },
+              h('div', { style: { flex: '1 1 100%' } },
+                h('div', { style: { fontSize: 12, fontWeight: 600 } }, '这次没装上'),
+                h('div', { className: 'roost-note', style: { marginTop: 2 } }, fail.message || '没有更多信息'),
+              ),
+              (() => {
+                const d = fail.detail || {}
+                const lines = [
+                  fail.code ? `code: ${fail.code}` : '',
+                  d.kind ? `kind: ${d.kind}${d.timedOut ? '（静默超时）' : ''}` : '',
+                  d.failedAt ? `failedAt: ${d.failedAt}` : '',
+                  d.exitCode != null ? `exitCode: ${d.exitCode}` : '',
+                  d.logPath ? `log: ${d.logPath}` : '',
+                  d.diagnostic ? `diagnostic: ${d.diagnostic}` : '',
+                  d.output ? `output: ${d.output}` : '',
+                ].filter(Boolean)
+                if (!lines.length) return null
+                return h('details', { className: 'roost-note', style: { flex: '1 1 100%', margin: 0 } },
+                  h('summary', { style: { cursor: 'pointer' } }, '技术细节（复制给别人更好排查）'),
+                  h('div', { className: 'roost-mono', style: { marginTop: 5, whiteSpace: 'pre-wrap', lineHeight: 1.6 } },
+                    lines.join('\n')),
+                )
+              })(),
+              h('button', { type: 'button', className: 'roost-btn', onClick: () => setFail(null) }, '知道了'),
+            )
+          : null,
 
         /* ---- 人格库 ---- */
         h('div', { className: 'roost-item', style: { marginTop: 8 } },

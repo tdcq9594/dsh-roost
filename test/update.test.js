@@ -66,12 +66,23 @@ test('版本比较：按数字比，不按字符串比', () => {
   assert.equal(compareVersion('v0.10.7', '0.10.7'), 0);
 });
 
+/**
+ * 失败码翻译。
+ *
+ * 键名必须是 DSH 的 `error.code` / `refused.problem` 里真实存在的值。
+ * 以前这里用的是 `packageResult.code`（不存在的字段）里编出来的码——
+ * 测试一直绿，线上一次都没命中过，用户只能看到兜底文案。
+ */
 test('失败码翻译：用户能自己解决的几种要说清下一步', () => {
   assert.match(humanFail('already-installed'), /重启 DSH/);
-  assert.match(humanFail('registry-unreachable'), /换(个)?源/);
-  assert.match(humanFail('invalid-spec'), /脏数据/);
+  assert.match(humanFail('incompatible-version'), /升级 DSH/);
+  assert.match(humanFail('not-removable'), /不能卸载/);
   assert.match(humanFail('weird-code-123'), /weird-code-123/, '没见过的码要原样带出来，方便搜');
   assert.match(humanFail(''), /本地什么都没动/);
+  // 真实场景：error.code 往往只是 operation-error，可行动信息在 packageResult.kind
+  assert.match(humanFail('operation-error', { kind: 'network', failedAt: 'registry' }), /网络/);
+  assert.match(humanFail('', { kind: 'permission' }), /写权限/);
+  assert.match(humanFail('', { kind: 'disk-full' }), /磁盘/);
 });
 
 test('发布时长：分钟 / 小时 / 天三档', () => {
@@ -320,20 +331,244 @@ test('自更新：请求 99.0.0 却装到 0.10.6 时要明说是降级，不能�
   }
 });
 
+/**
+ * 真实失败形态：`application: 'failed'` + `error.code` + `packageResult.kind`。
+ *
+ * 「更新失败，本地什么都没动」这句兜底以前几乎每次都会出现——
+ * 因为代码去读 `packageResult.code`（没有这个字段），拿到的永远是空。
+ */
 test('自更新：失败要翻译成人话，并且说明本地什么都没动', async () => {
   const { d, done } = tmp();
   try {
     const u = createUpdater({
       ctx: fakeCtx({
-        pm: { installBundle: async () => ({ application: 'failed', packageResult: { code: 'registry-unreachable' } }) },
+        pm: {
+          installBundle: async () => ({
+            changed: false,
+            application: 'failed',
+            error: { code: 'operation-error', diagnostic: 'ERR_PNPM_FETCH_404  dsh-roost@99.0.0' },
+            packageResult: { exitCode: 1, output: 'ERR_PNPM_FETCH_404', kind: 'network', logPath: '/tmp/x.log' },
+            failedAt: 'registry',
+            registries: ['https://registry.npmjs.org'],
+          }),
+        },
       }),
       profileDir: profileReal(d),
       fetchImpl: fakeFetch('99.0.0'),
     });
     const r = await u.self();
     assert.equal(r.ok, false);
-    assert.equal(r.code, 'registry-unreachable');
-    assert.match(r.message, /换(个)?源/);
+    assert.equal(r.code, 'operation-error');
+    assert.match(r.message, /网络/, '要把 packageResult.kind 翻成人话，光有 error.code 不够');
+    assert.match(r.message, /registry/, 'failedAt 要说明卡在哪一段');
+    assert.equal(r.detail.kind, 'network');
+    assert.match(r.detail.diagnostic, /ERR_PNPM_FETCH_404/, '诊断原文要留着，别丢');
+    assert.equal(r.detail.logPath, '/tmp/x.log');
+  } finally {
+    done();
+  }
+});
+
+/**
+ * DSH 的 `application` 里**没有 `success`**：成功是 `applied`。
+ *
+ * 这一条就是"每次更新都提示失败"的回归测试——把 applied 当失败的话会红。
+ */
+test('自更新：application=applied 算成功，不能报失败', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: { installBundle: async () => ({ changed: true, application: 'applied', bundle: { version: '99.0.0' } }) },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: fakeFetch('99.0.0'),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, true, 'applied 是成功，不是失败');
+    assert.equal(r.version, '99.0.0', '版本在 bundle.version 里');
+    assert.equal(r.downgraded, false);
+  } finally {
+    done();
+  }
+});
+
+/** `restart-required` 也是成功，只是要重启 */
+test('自更新：application=restart-required 算成功，并说明为什么必须重启', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => ({
+            changed: true,
+            application: 'restart-required',
+            restartReason: 'no-hmr',
+            bundle: { version: '99.0.0' },
+          }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: fakeFetch('99.0.0'),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, true);
+    assert.equal(r.restart, true);
+    assert.equal(r.restartReason, 'no-hmr');
+    assert.match(r.message, /重启 DSH/);
+  } finally {
+    done();
+  }
+});
+
+/**
+ * 另一种返回形态：`{ status:'refused', problem }`。
+ *
+ * 只认 `application` 的话，already-installed 这种"连 pnpm 都没跑"的拒绝
+ * 会落到兜底文案，用户看不出"其实已经装过了"。
+ */
+test('自更新：refused 形态要按 problem 翻译，不当成未知失败', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => ({
+            status: 'refused',
+            problem: 'already-installed',
+            reason: 'dsh-roost@99.0.0 is already installed',
+          }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: fakeFetch('99.0.0'),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'already-installed');
+    assert.match(r.message, /已经装过/);
+    assert.match(r.detail.diagnostic, /already installed/);
+  } finally {
+    done();
+  }
+});
+
+/**
+ * 用户配了镜像就得用镜像。
+ *
+ * `pluginManager.registries()` 是 `async`，返回值还被 remote 层包成
+ * `{ ok, value: { registry, fallbackRegistries } }`。以前这里当同步数组取，
+ * 拿到的永远是 Promise → 一律退回官方 registry.npmjs.org（国内必超时）。
+ */
+test('检查：用 DSH 配的 registry，而不是永远官方源', async () => {
+  const { d, done } = tmp();
+  try {
+    let asked = '';
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => ({ application: 'applied' }),
+          registries: async () => ({
+            ok: true,
+            value: { registry: 'https://registry.npmmirror.com', fallbackRegistries: [], resolved: null },
+          }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: async (url) => {
+        asked = url;
+        return { ok: true, status: 200, json: async () => ({ 'dist-tags': { latest: '99.0.0' }, time: {} }) };
+      },
+    });
+    await u.check();
+    assert.match(asked, /registry\.npmmirror\.com/, '必须去问用户配的源');
+    assert.doesNotMatch(asked, /registry\.npmjs\.org/);
+  } finally {
+    done();
+  }
+});
+
+/** 老形状（直接返回数组）也要认，别因为 DSH 换过结构就退回官方 */
+test('检查：registries() 直接给数组时也能取到第一个', async () => {
+  const { d, done } = tmp();
+  try {
+    let asked = '';
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { installBundle: async () => ({}), registries: async () => ['https://mirror.example.com'] } }),
+      profileDir: profileReal(d),
+      fetchImpl: async (url) => {
+        asked = url;
+        return { ok: true, status: 200, json: async () => ({ 'dist-tags': { latest: '99.0.0' }, time: {} }) };
+      },
+    });
+    await u.check();
+    assert.match(asked, /mirror\.example\.com/);
+  } finally {
+    done();
+  }
+});
+
+/**
+ * 查不到最新版不该把人堵死。
+ *
+ * `check()` 只是个前置；装的时候 pnpm 自己解析 `latest` 标签。
+ * 以前这里直接 return「查不到最新版」，于是 registry 一超时用户连试都试不了。
+ */
+test('自更新：查不到最新版时，仍按 latest 标签尝试安装', async () => {
+  const { d, done } = tmp();
+  try {
+    let spec = '';
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async (s) => {
+            spec = s;
+            return { changed: true, application: 'applied', bundle: { version: '1.2.3' } };
+          },
+        },
+      }),
+      profileDir: profileReal(d),
+      // 拉 packument 直接失败：模拟 registry 超时
+      fetchImpl: async () => { throw new Error('The operation was aborted due to timeout'); },
+    });
+    const info = await u.check();
+    assert.equal(info.unknownLatest, true);
+    assert.equal(info.hasUpdate, false, '拿不到 latest 时不知道有没有新版');
+
+    const r = await u.self();
+    assert.equal(r.ok, true, '查不到版本号不等于不能装');
+    assert.equal(spec, 'dsh-roost@latest', '交给 pnpm 解析 latest');
+    assert.equal(r.version, '1.2.3');
+    assert.match(r.message, /重启 DSH/);
+  } finally {
+    done();
+  }
+});
+
+/**
+ * 「装完没重启」时，磁盘版本已经是最新，`hasUpdate` 必须变 false。
+ *
+ * 以前比的是运行中的 `own`（模块加载时的常量），装完永远是"还有新版"，
+ * 按钮一直挂着，用户再点一次必然撞 already-installed。
+ */
+test('检查：装好但没重启时，不再提示有新版，而是提示重启', async () => {
+  const { d, done } = tmp();
+  try {
+    const p = profileReal(d);
+    writeFileSync(join(p, 'node_modules', PKG, 'package.json'), JSON.stringify({ name: PKG, version: '99.0.0' }), 'utf8');
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'applied' }) } }),
+      profileDir: p,
+      fetchImpl: fakeFetch('99.0.0'),
+    });
+    const info = await u.check();
+    assert.equal(info.installed, '99.0.0', '要报出磁盘上装着的版本');
+    assert.equal(info.hasUpdate, false, '磁盘已是最新，就不该再提示有新版');
+    assert.equal(info.pendingRestart, true, '磁盘比运行中新，属于"待重启"');
+
+    const r = await u.self();
+    assert.equal(r.already, true);
+    assert.match(r.message, /重启 DSH/);
   } finally {
     done();
   }
