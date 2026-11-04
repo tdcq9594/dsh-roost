@@ -549,83 +549,106 @@ test('端口：ai-chat 没配时不报红，指去接入第 5 步', () => {
   assert.equal(pv.action, undefined)
 })
 
-test('前端渲染：市场页能列出人格、标签和状态', () => {
-  const rt = makeReact()
-  const mod = loadClient(rt.React)
-  rt.reset()
-
-  const tree = expand(mod.MarketTab({
-    market: {
-      personas: [
-        { id: 'a', name: '甲', tags: ['短句'], chars: 100, localChars: 0, state: 'missing' },
-        { id: 'b', name: '乙', tags: ['吐槽'], chars: 200, localChars: 210, state: 'deleted' },
-      ],
-      pending: 1,
-      deleted: 1,
-    },
-    marketErr: '',
-    toast: () => {},
-    loadMarket: () => {},
-    reload: () => {},
-  }), rt)
-
-  const txt = textOf(tree)
-  assert.ok(txt.includes('甲') && txt.includes('乙'), '两个人格都要列出来')
-  assert.ok(txt.includes('未安装'), '缺 missing 的状态文案')
-  assert.ok(txt.includes('已删除'), '缺 deleted 的状态文案')
-  assert.ok(txt.includes('短句') && txt.includes('吐槽'), '标签要显示')
-  assert.ok(txt.includes('装上'), '未安装的那行要有「装上」按钮');
-  assert.ok(txt.includes('2 个 · 1 个可更新 · 1 个你删过'), '头部要给出总数与分类，且不能被「12 个」误匹配')
-  assert.ok(txt.includes('默认不许用工具') || txt.includes('不许用工具'), '要说清装的时候会补工具限制')
-})
-
-test('前端渲染：市场页还没拿到清单时说「读着…」，不能说成「没读到」', () => {
-  const rt = makeReact()
-  const mod = loadClient(rt.React)
-  rt.reset()
-
-  const txt = textOf(expand(mod.MarketTab({
-    market: null, marketErr: '', toast: () => {}, loadMarket: () => {}, reload: () => {},
-  }), rt))
-
-  assert.ok(txt.includes('读着…'), '首屏加载中要显示「读着…」')
-  assert.ok(!txt.includes('仓库里没读到人格'), '还没拉完就说「没读到」是假话')
-})
-
-test('前端渲染：人格页有「我的人格 / 人格仓库」两个分段', () => {
+/**
+ * 合并清单：装了的一律在前，仓库里没装的接在后，行内直接装。
+ *
+ * 这里取代了原来的「市场页」两条测试。原来本地和仓库是两页，
+ * 同一个名字在两边各出现一次，用户得先判断自己在哪一页才能动手；
+ * 现在是一张表，所以断言也变成「一张表里两类行都在、顺序对、动作对」。
+ */
+test('前端渲染：装了的人格在前，仓库里没装的接在后，且能直接装', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   const h = rt.React.createElement
+  rt.reset()
+
+  const txt = textOf(expand(h(mod.HerTab, {
+    config: { persona: { current: 'default' } },
+    personas: {
+      ok: true,
+      current: 'default',
+      byChat: {},
+      usage: {},
+      personas: [
+        { id: 'default', label: '大肥鱼', tags: ['短句'], chars: 290 },
+        { id: 'xiaoqi', label: '小栖', tags: ['日常'], chars: 103 },
+        { id: 'mine', label: '自建的', tags: [], chars: 66 },
+      ],
+    },
+    mem: { chatId: 'g1', personaOverride: '', authz: null },
+    toast: () => {}, save: async () => ({ ok: true }), reload: async () => {}, quick: null,
+    repoSeed: {
+      ok: true, pending: 1, stale: false, gate: { ok: true },
+      personas: [
+        { id: 'default', label: '大肥鱼', chars: 320, localChars: 290, state: 'update' },
+        { id: 'xiaoqi', label: '小栖', chars: 100, localChars: 103, state: 'same' },
+        { id: 'remote', label: '仓库里的', tags: ['吐槽'], chars: 210, state: 'missing' },
+        { id: 'gone', label: '删掉的', tags: [], chars: 90, state: 'deleted' },
+      ],
+    },
+  }), rt))
+
+  for (const must of ['大肥鱼', '小栖', '自建的', '仓库里的']) {
+    assert.ok(txt.includes(must), `清单里缺「${must}」`)
+  }
+  assert.ok(txt.includes('未安装'), '仓库里没装的那行要标「未安装」')
+  assert.ok(txt.includes('装上'), '未安装的行要能直接装')
+  assert.ok(txt.includes('有更新'), '本地那份有更新时要标出来')
+  assert.ok(txt.includes('更新'), '有更新的行要能直接更新')
+  // 装了的一律在前：未安装的名字必须排在所有本地名字之后
+  assert.ok(txt.indexOf('自建的') < txt.indexOf('仓库里的'), '装了的人格要排在没装的前面')
+  // 计数要把两边都说清
+  assert.ok(txt.includes('3 个 · 仓库还有 1 个没装'), '头部要写清「已装几个、仓库还有几个」')
+  // 删过的不默认挂在清单里，但要给捞回来的入口
+  assert.ok(!txt.includes('删掉的'), '删过的人格不该默认显示')
+  assert.ok(txt.includes('已删 1'), '要给一个「已删 N」的入口')
+})
+
+/**
+ * 仓库出问题时，本地清单不能被一起吞掉。
+ *
+ * 门槛不过（老版本解析不了新格式）时仓库行**必须整体不参与**——
+ * 列出来点「装」只会装进半个人格。但本地那几份照常能切换、能编辑。
+ */
+test('前端渲染：仓库读不了时，本地人格照常显示', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  rt.reset()
+
+  const txt = textOf(expand(h(mod.HerTab, {
+    config: null,
+    personas: {
+      ok: true, current: 'xiaoqi', byChat: {}, usage: {},
+      personas: [{ id: 'xiaoqi', label: '小栖', tags: ['日常'], chars: 103 }],
+    },
+    mem: { chatId: 'g1', personaOverride: '', authz: null },
+    toast: () => {}, save: async () => ({ ok: true }), reload: async () => {}, quick: null,
+    repoSeed: {
+      ok: true, pending: 0, stale: true,
+      gate: { ok: false, why: '这批人格需要 dsh-roost 9.9 以上（你装的是 0.1）' },
+      personas: [{ id: 'remote', label: '装不了的', tags: [], chars: 200, state: 'missing' }],
+    },
+  }), rt))
+
+  assert.ok(txt.includes('小栖'), '仓库门槛不过时，本地人格必须照常显示')
+  assert.ok(txt.includes('这批人格需要 dsh-roost 9.9 以上'), '要把门槛原因说出来')
+  assert.ok(txt.includes('缓存的仓库清单'), '用的是缓存要说一声')
+  assert.ok(!txt.includes('装不了的'), '门槛不过时不许把仓库里的人格拉出来诱人点击')
+})
+
+test('前端渲染：人格页不再分「我的人格 / 人格仓库」两段', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
   store['roost.tab'] = 'her'
   rt.reset()
   const txt = textOf(expand(mod.RoostPage(), rt))
 
-  assert.ok(txt.includes('我的人格'), '缺「我的人格」分段')
-  assert.ok(txt.includes('人格仓库'), '缺「人格仓库」分段')
-  assert.ok(txt.includes('从仓库更新'), '「我的人格」视图里要有从仓库更新按钮')
-  // 默认落在「我的人格」，仓库视图的内容不该同时铺开。
-  // 断言必须用 MarketTab 独有的文案——用「人格仓库」会被分段按钮自己兜住（假绿）。
-  // 用文本节点断言：placeholder 是属性，textOf 走不到
-  assert.ok(!txt.includes('收起治理'), '仓库视图的治理面板不该在默认视图里铺开')
-
-  /**
-   * 仓库视图要真的渲染出来。
-   *
-   * 假 React 不会因为 setState 重渲染，所以只能靠 defaultView 直接落在 repo。
-   * 不这么测的话，「仓库整块被删掉」是**绿**的——分段按钮自己就带着「人格仓库」四个字。
-   */
-  const repo = textOf(
-    expand(
-      h(mod.HerTab, {
-        config: null, personas: null, market: null, marketErr: '', mem: null,
-        toast: () => {}, save: async () => ({ ok: true }), reload: async () => {}, quick: null,
-        loadMarket: async () => {}, defaultView: 'repo',
-      }),
-      rt,
-    ),
-  )
-  assert.ok(repo.includes('治理'), '仓库视图没渲染出 MarketTab（治理按钮不在）')
-  assert.ok(!repo.includes('从仓库更新'), '仓库视图不该同时显示本地人格列表的按钮')
+  assert.ok(!txt.includes('人格仓库'), '分段控件「人格仓库」应该没了')
+  assert.ok(!txt.includes('我的人格'), '分段控件「我的人格」应该没了')
+  assert.ok(txt.includes('从仓库更新'), '合并后仍要有「从仓库更新」按钮')
+  assert.ok(txt.includes('新建'), '合并后仍要有「新建」')
+  assert.ok(txt.includes('整理'), '批量整理要有入口')
 })
 
 test('前端渲染：情绪搬到了主动搭话页，人格页不再有', () => {
@@ -734,7 +757,8 @@ test('前端渲染：老的 market 页签状态会回退到人格页', () => {
   store['roost.tab'] = 'market'
   rt.reset()
   const txt = textOf(expand(mod.RoostPage(), rt))
-  assert.ok(txt.includes('我的人格'), 'market 应该回退到人格页，而不是概览')
+  // 锚点用「从仓库更新」：分段的「我的人格」已经删了，而概览页没有这个按钮
+  assert.ok(txt.includes('从仓库更新'), 'market 应该回退到人格页，而不是概览')
 })
 
 test('前端渲染：接入页有「组件版本」块（框架 / ai-chat 更新提示）', () => {

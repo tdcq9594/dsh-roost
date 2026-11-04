@@ -152,7 +152,11 @@ window.__ModuleLoader__.load({
 /* 页头：标题 + 通道 + 页签，永远在、不参与滚动 */
 .roost-head{flex:0 0 auto;width:100%;max-width:860px;box-sizing:border-box;padding:18px 22px 0}
 /* 唯一的滚动区。滚动条要看得见、拖得动，但别太抢眼 */
-.roost-scroll-body{flex:1 1 auto;min-height:0;width:100%;max-width:860px;box-sizing:border-box;
+.roost-scroll-body{flex:1 1 auto;min-height:0;
+  /* min-width:0 是必需的：它是 flex 子项，自动最小尺寸会让"最宽的那一行内容"
+     把整个面板撑宽（侧边栏里表现为横向溢出、右边按钮被裁掉）。
+     行内的宽度收缩自己解决，容器不许被内容撑大。 */
+  min-width:0;width:100%;max-width:860px;box-sizing:border-box;
   padding:16px 22px 40px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;
   /* 滚动元素本身也带一层底色：它的层先画，再画子内容 */
   background:var(--dsw-alias-bg-base, #16181c)}
@@ -219,12 +223,6 @@ select.roost-input{color-scheme:dark}
 .roost-v{flex:1;min-width:0}
 .roost-v-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 
-.roost-seg{display:flex;gap:0;margin:4px 0 12px;border:1px solid var(--dsw-alias-border-secondary, #333);border-radius:8px;overflow:hidden;width:max-content;max-width:100%}
-.roost-seg-btn{appearance:none;background:transparent;border:0;color:inherit;font:inherit;font-size:12.5px;padding:6px 14px;cursor:pointer;opacity:.72}
-.roost-seg-btn:hover{opacity:.95}
-.roost-seg-btn:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
-.roost-seg-btn[aria-pressed='true']{background:var(--dsw-alias-fill-secondary, rgba(255,255,255,.1));opacity:1;font-weight:600}
-.roost-seg-btn+.roost-seg-btn{border-left:1px solid var(--dsw-alias-border-secondary, #333)}
 .roost-mood{display:flex;flex-direction:column;gap:8px}
 .roost-mood-row{display:flex;align-items:center;gap:10px}
 .roost-mood-k{flex:0 0 42px;font-size:11.5px;color:var(--dsw-alias-label-secondary, inherit)}
@@ -278,8 +276,128 @@ select.roost-input{color-scheme:dark}
 .roost-item .d{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary, inherit)}
 .roost-scroll{max-height:320px;overflow:auto}
 /* 人格行：左两行文字、右一排动作。窗口窄时优先保住名字 */
-.roost-persona{align-items:flex-start;padding:9px 0}
 .roost-acts{flex:0 0 auto;display:flex;gap:6px;align-items:center}
+
+/* ── 人格页（pv-*）─────────────────────────────────────────────
+   这一页的主体是「一份 200 行的清单」。原来每行四个同级按钮平铺，
+   一屏就有几十个按钮，名字被按钮抢走注意力；搜索框也没有，
+   200 个人格只能靠肉眼滚。以下分组按「先答案、再工具、后清单」排。 */
+.pv-top{display:flex;flex-direction:column;gap:11px;margin-bottom:16px}
+.pv-k{flex:0 0 auto;font-size:11px;font-weight:650;letter-spacing:.04em;
+  color:var(--dsw-alias-label-secondary,inherit)}
+.pv-name{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pv-name .roost-input{flex:1 1 180px;max-width:280px}
+.pv-hint{font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-tertiary,inherit);
+  margin-top:-7px}
+/* 当前生效：先给一个确定答案，再把两个作用域摆开 */
+.pv-now{display:flex;flex-direction:column;gap:10px;padding:11px 13px;border-radius:11px;
+  border:1px solid var(--line-soft);background:var(--surface)}
+.pv-now-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pv-now-name{font-size:14.5px;font-weight:650;letter-spacing:-.01em}
+.pv-sels{display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:10px}
+.pv-sel{display:flex;flex-direction:column;gap:4px;min-width:0}
+.pv-sel .roost-input{max-width:none}
+.pv-sel-h{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.pv-sel-k{font-size:11.5px;color:var(--dsw-alias-label-secondary,inherit)}
+.pv-sel-d{font-size:11px;color:var(--dsw-alias-label-tertiary,inherit)}
+/* 工具条：搜索占主位，动作靠右，不与列表标题抢一行 */
+.pv-bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 6px}
+.pv-bar .roost-input{flex:1 1 220px;min-width:130px;max-width:420px}
+/* 第二行：只说数量与状态，别和搜索框抢一行 */
+.pv-sub{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 8px;min-height:16px}
+.pv-count{font-size:11.5px;color:var(--dsw-alias-label-tertiary,inherit);
+  font-variant-numeric:tabular-nums;margin-right:auto}
+.pv-sub .roost-btn{padding:2px 9px;font-size:11.5px}
+/* 新建/粘贴导入：虚线框，表示「这是就地展开的一块，不是常驻区域」 */
+.pv-new{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px;
+  padding:9px 10px;border-radius:10px;border:1px dashed var(--line-soft);background:var(--surface)}
+.pv-new .roost-input{flex:1 1 190px;max-width:320px}
+/* 清单：卡片行；次要操作默认 62% 不透明度，指到/聚焦才全额
+   —— 这样默认视觉里每行只剩「名字 + 一个主操作」，可点性没变 */
+.pv-list{display:flex;flex-direction:column;gap:1px;padding:2px 0;
+  max-height:min(52vh,520px);overflow-y:auto;overscroll-behavior:contain;
+  scrollbar-width:thin;border-radius:10px}
+.pv-list::-webkit-scrollbar{width:8px}
+.pv-list::-webkit-scrollbar-track{background:transparent}
+.pv-list::-webkit-scrollbar-thumb{background:color-mix(in srgb,currentColor 16%,transparent);
+  border-radius:6px;border:2px solid transparent;background-clip:content-box}
+.pv-list:hover::-webkit-scrollbar-thumb{background:color-mix(in srgb,currentColor 30%,transparent);
+  background-clip:content-box}
+.pv-row{display:flex;align-items:center;gap:12px;padding:7px 10px;border-radius:10px;
+  border:1px solid transparent;transition:background .14s ease,border-color .14s ease}
+.pv-row:hover{background:var(--hover);border-color:var(--line-soft)}
+.pv-row.is-cur{background:color-mix(in srgb,var(--accent) 8%,transparent);
+  border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
+.pv-row.is-edit{border-color:var(--line);background:var(--hover)}
+.pv-row .t{flex:1;min-width:0}
+.pv-nm{font-size:13px;font-weight:600;line-height:1.45;overflow-wrap:anywhere}
+.pv-row.is-cur .pv-nm{font-weight:650}
+/* 状态标签跟在名字后面：一行里读成「名字 · 状态」，不用再去右边对照 */
+.pv-nm .roost-pill{margin-left:7px;font-weight:400;vertical-align:1px}
+/* 仓库里有、本地没装的：名字降一档字重，和已经装好的区分开
+   （顺序上它们本来就在后面，这里只做轻微提示，不做成"禁用"的样子） */
+.pv-row.is-repo .pv-nm{font-weight:500}
+/* 清单里的分组头：解释"从这里开始是还没装的" */
+.pv-group{display:flex;align-items:center;gap:9px;margin:10px 0 3px;padding:0 10px;
+  font-size:11px;letter-spacing:.02em;color:var(--dsw-alias-label-tertiary,inherit)}
+.pv-group::after{content:'';flex:1;height:1px;background:var(--line-soft)}
+.pv-alias{font-size:11px;font-weight:400;margin-left:6px;
+  color:var(--dsw-alias-label-tertiary,inherit)}
+.pv-meta{font-size:11px;line-height:1.55;overflow-wrap:anywhere;
+  color:var(--dsw-alias-label-tertiary,inherit)}
+.pv-acts{flex:0 0 auto;display:flex;gap:2px;align-items:center}
+/* 只淡化次要项：主操作「用这个」的边框必须始终看得见，
+   否则一屏行读下来又变成"右边有一片灰字"。
+   0.62 是折中：静止时安静但读得清，指到这一行或键盘聚焦就全额。 */
+.pv-acts .roost-btn:not(.pv-main),.pv-acts .pv-del{opacity:.62;
+  transition:opacity .14s ease}
+.pv-row:hover .pv-acts .roost-btn,.pv-row:focus-within .pv-acts .roost-btn,
+.pv-row:hover .pv-acts .pv-del,.pv-row:focus-within .pv-acts .pv-del{opacity:1}
+.pv-acts .roost-btn{padding:3px 9px;border-color:transparent;background:transparent;
+  font-size:11.5px;color:var(--dsw-alias-label-secondary,inherit)}
+.pv-acts .roost-btn:hover:not(:disabled){background:var(--hover);
+  border-color:var(--line-soft);color:var(--dsw-alias-label-primary,inherit)}
+.pv-acts .roost-btn.armed{background:var(--bad);border-color:var(--bad);color:#fff}
+/* 每行只有一个主操作（用这个 / 更新 / 装上），只有它带边框 */
+.pv-acts .pv-main{border-color:var(--line);color:inherit}
+.pv-acts .pv-del .roost-btn:hover:not(:disabled){color:var(--bad);
+  border-color:color-mix(in srgb,var(--bad) 45%,transparent)}
+/* 长篇说明折叠：默认收起，需要时展开，不再把人推到页底 */
+.pv-help{margin-top:16px;border-top:1px solid var(--line-soft);padding-top:9px}
+.pv-help summary{display:flex;align-items:center;gap:7px;cursor:pointer;list-style:none;
+  font-size:12px;color:var(--dsw-alias-label-secondary,inherit)}
+.pv-help summary::-webkit-details-marker{display:none}
+.pv-help summary::before{content:'›';font-size:15px;line-height:1;display:inline-block;
+  transition:transform .14s ease}
+.pv-help[open] summary::before{transform:rotate(90deg)}
+.pv-help summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:5px}
+.pv-empty{padding:14px 10px;font-size:12px;line-height:1.7;text-align:center;
+  color:var(--dsw-alias-label-tertiary,inherit)}
+/* 预览（装之前先读正文）：和「当前人格」卡片同一套底，别用 currentColor 描边把整页割开 */
+.pv-preview{margin:2px 0 8px;padding:11px 12px;border-radius:10px;
+  border:1px solid var(--line-soft);background:var(--surface)}
+/**
+ * 窄栏适配走**容器查询**，不走媒体查询。
+ *
+ * 这是侧边栏：面板可能只有 400px 宽，而浏览器窗口是 1440——
+ * 媒体查询量的是**视口**，这种情况下永远不触发，按钮就一路溢出到看不见。
+ * 容器查询量的是这一页自己的宽度，两种情形都对。
+ */
+.pv-root{container-type:inline-size}
+@container (max-width:560px){
+  /* 一行放不下四个动作时，动作行整体折到下一行、右对齐；名字拿到整行 */
+  .pv-row{flex-wrap:wrap;row-gap:2px}
+  .pv-acts{width:100%;justify-content:flex-end}
+  .pv-bar .roost-input{flex:1 1 100%;max-width:none}
+  .pv-sels{grid-template-columns:1fr}
+  .pv-now-name{font-size:13.5px}
+}
+/* 编辑区顶部的「你改过这份」提示：带一个覆盖动作，所以用警示色而不是红 */
+.pv-warn{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:9px;
+  padding:8px 11px;border-radius:9px;font-size:11.5px;line-height:1.65;
+  border:1px solid color-mix(in srgb,var(--warn) 40%,transparent);
+  background:color-mix(in srgb,var(--warn) 8%,transparent)}
+.pv-warn span{flex:1;min-width:0}
 
 /* ── 概览用的统计块与故障条 ── */
 .roost-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:9px}
@@ -1268,13 +1386,15 @@ select.roost-input{color-scheme:dark}
 
     /* ---------------- 人格（页签 key 仍是 her） ---------------- */
 
-    function HerTab({ config, personas, market, marketErr, mem, toast, save, reload, quick, loadMarket, defaultView = 'mine' }) {
-      /** mine = 我的人格（本地）；repo = 人格仓库（原「市场」页）。defaultView 只为测试能直接渲染仓库视图 */
-      const [src, setSrc] = useState(defaultView)
-      /** 切到仓库视图才拉清单：按钮点、或测试传 defaultView，两条路都覆盖 */
-      useEffect(() => {
-        if (src === 'repo' && !market) loadMarket()
-      }, [src, market, loadMarket])
+    /**
+     * `repoSeed` 只为渲染测试注入一份仓库快照。
+     *
+     * 生产路径不传：清单由下面的 `loadRepo()` 在挂载时拉一次。
+     * 测试环境的 useEffect 不跑（要避免真打网络），没有这个口子就没法断言
+     * 「未安装的行长什么样」——而这正是合并清单最关键的一段。
+     */
+    function HerTab({ config, personas, mem, toast, save, reload, quick, repoSeed }) {
+      /** 编辑区正在打开的人格 id */
       const [editId, setEditId] = useState('')
       const [raw, setRaw] = useState('')
       const [newId, setNewId] = useState('')
@@ -1300,12 +1420,22 @@ select.roost-input{color-scheme:dark}
        * 什么状态（没装 / 已是最新 / 有更新 / 你改过）。服务端有 5 分钟缓存，
        * 所以进这一页拉一次不会每次都打网络。
        */
-      const [repo, setRepo] = useState(null)
+      const [repo, setRepo] = useState(repoSeed || null)
       const [repoErr, setRepoErr] = useState('')
       const [repoBusy, setRepoBusy] = useState(false)
-      const [repoOpen, setRepoOpen] = useState(false)
+      /** 「整理」面板（批量打标签 / 删除 / 撤销、健康扫描）。它不属于仓库，是本地清单的工具 */
+      const [govOpen, setGovOpen] = useState(false)
+      /** 你删过、仓库里还在的那几个默认不显示：删掉的东西不该一直挂在清单里催你 */
+      const [showDeleted, setShowDeleted] = useState(false)
       const [preview, setPreview] = useState(null)
       const [riskNote, setRiskNote] = useState(null)
+      /** 本地人格的搜索词。仓库视图早就有搜索框，自己的清单反而没有，200 个只能肉眼翻 */
+      const [pq, setPq] = useState('')
+      /** 点「编辑」后把编辑区滚进视野：不然在 200 行清单下面，看不出刚才那下有没有生效 */
+      const editRef = useRef(null)
+      useEffect(() => {
+        if (editId) editRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      }, [editId])
 
       const loadRepo = async (force) => {
         try {
@@ -1339,7 +1469,7 @@ select.roost-input{color-scheme:dark}
             const parts = []
             if (r.updated?.length) parts.push(`更新 ${r.updated.length} 个（${r.updated.map((x) => x.name).join('、')}）`)
             if (r.untouched?.length) parts.push(`跳过 ${r.untouched.length} 个（你改过）`)
-            if (r.deleted?.length) parts.push(`${r.deleted.length} 个你删过，没动（要的话在下面点「恢复」）`)
+            if (r.deleted?.length) parts.push(`${r.deleted.length} 个你删过，没动（要的话点上面的「已删」捞回来）`)
             if (r.failed?.length) parts.push(`失败 ${r.failed.length} 个（${r.failed[0].why}）`)
             toast(parts.join('；') || '已经是最新的')
             const risky = (r.updated || []).filter((x) => (x.risky || []).length)
@@ -1349,8 +1479,6 @@ select.roost-input{color-scheme:dark}
           }
           await reload()
           await loadRepo(true)
-          // 市场清单是另一份 state：不刷的话切到仓库还显示「有 N 个可更新」
-          await loadMarket(true)
         } finally {
           setRepoBusy(false)
         }
@@ -1393,6 +1521,67 @@ select.roost-input{color-scheme:dark}
       }
       const override = mem?.personaOverride || ''
 
+      /**
+       * 一张清单：本地 + 仓库里没装的。
+       *
+       * 原来分成「我的人格 / 人格仓库」两页，同一个名字在两边各出现一次，
+       * 一边能切换、一边能安装，用户得先判断自己在哪一页才能动手。
+       * 现在只有一张表：装了的能切换/编辑，没装的行内直接装。
+       * 本地排前面（那是你手上有的），仓库里没装的接在后面。
+       */
+      const mineAll = personas?.personas || []
+      const localIds = new Set(mineAll.map((p) => p.id))
+      const repoRows = repo?.personas || []
+      const repoById = new Map(repoRows.map((r) => [r.id, r]))
+      /** 门槛不过时仓库行不参与：老版本解析不了新格式，装进来只会是半个人格 */
+      const repoGated = Boolean(repo && repo.gate && repo.gate.ok === false)
+      /** 你删过、仓库里还在的：默认不露出来，但给个入口捞回来 */
+      const deletedCount = repoRows.filter((r) => r.state === 'deleted' && !localIds.has(r.id)).length
+      const remoteOnly = repoGated ? [] : repoRows.filter((r) => !localIds.has(r.id)
+        && (r.state === 'missing' || (r.state === 'deleted' && showDeleted)))
+      const allRows = [
+        ...mineAll.map((p) => ({ ...p, from: 'local', repo: repoById.get(p.id) || null })),
+        ...remoteOnly.map((r) => ({
+          id: r.id, label: r.label || r.name || r.id, chars: r.chars, tags: r.tags || [],
+          selfName: '', from: 'repo', repo: r,
+        })),
+      ]
+      const kw = pq.trim().toLowerCase()
+      const rows = kw
+        ? allRows.filter((p) =>
+            [p.label || p.name || '', p.id, p.selfName || '', ...(p.tags || [])]
+              .join(' ').toLowerCase().includes(kw))
+        : allRows
+
+      /** 装一个仓库里的人格（「装上」和「更新」是同一个动作，服务端会拒绝覆盖你改过的） */
+      const installOne = async (p) => {
+        const r = await post('/personas/install', { id: p.id })
+        if (r.ok === false) return toast(r.why || r.message || '没装上')
+        // 撞名时 localId 和仓库里的 file 不同名，不是和 id 比
+        const stem = String(p.repo?.file || p.id).replace(/\.md$/i, '')
+        const saved = r.localId && r.localId !== stem ? `（存为 ${r.localId}）` : ''
+        toast(r.already ? '已经装过了' : `已装上${saved}${r.injected ? '，默认不许用工具' : ''}`)
+        setPreview(null)
+        await reload()
+        await loadRepo(true)
+      }
+
+      /** 把本地那份换回仓库版本（「恢复官方」）；`deleted` 只影响文案和按钮色 */
+      const restoreOne = async (p, deleted) => {
+        const r = await post('/personas/restore', { id: p.id })
+        // gate 不过时服务端返回 {ok:false, skipped:true, why}，没有 message
+        if (r.ok === false) return toast(r.why || r.message || '没恢复成')
+        toast(deleted
+          ? '已恢复'
+          : r.backup ? '已恢复官方版本（旧内容已备份）' : '已恢复官方版本')
+        setPreview(null)
+        await reload()
+        await loadRepo(true)
+      }
+
+      /** 正在编辑的那份在仓库里是什么状态（决定要不要提示「你改过」） */
+      const editRepo = editId ? repoById.get(editId) || null : null
+
       /** 打开一个人格的正文。列表里没有 raw，得单独读一次 */
       const openPersona = async (id) => {
         const r = await get('/personas/read?id=' + encodeURIComponent(id))
@@ -1402,102 +1591,146 @@ select.roost-input{color-scheme:dark}
         setDirty(false)
       }
 
-      return h('div', null,
+      return h('div', { className: 'pv-root' },
         /**
          * 名字放在最上面：它决定「她是谁」，人格只决定「她怎么说话」。
          * 0.11 起名字全局生效——换人格不会改名。
          * 0.12 起人格可写 `selfName` 声明「我就是这个名字」（角色卡），
          * 写了会盖过这里填的全局名；所以这里的语义是「默认名字」。
          */
-        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 } },
-          h('span', { style: { fontSize: 12, fontWeight: 650 } }, '名字'),
-          h('input', {
-            className: 'roost-input', value: nameDraft, placeholder: '默认名字（人格没声明 selfName 时用）',
-            'aria-label': '她的名字', style: { maxWidth: 240 },
-            onChange: (e) => { setNameDraft(e.target.value); setNameDirty(true) },
-          }),
-          h('button', {
-            type: 'button', className: 'roost-btn',
-            onClick: async () => {
-              const name = nameDraft.trim()
-              if (!name) return toast('名字不能为空')
-              const r = await save({ persona: { name } })
-              if (r.ok === false) return toast(r.message || '没存上')
-              setNameDirty(false)
-              toast('名字已更新')
-            },
-          }, '保存'),
-          h('span', { className: 'roost-note', style: { margin: 0 } },
-            '全局生效；换人格不改名字，人格里的名字只是标签。'),
-        ),
-        /**
-         * 当前人格：全局下拉 + 本群覆盖。
-         *
-         * 全局和本群分开显示，是因为「本群指定了谁」和「全局默认是谁」经常不是同一个人，
-         * 只显示一个值会让人以为改错了。本群按钮只在知道 chatId 时出现。
-         */
-        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 } },
-          h('span', { style: { fontSize: 12, fontWeight: 650 } }, '当前人格'),
-          h('select', {
-            className: 'roost-input', value: globalId, 'aria-label': '全局当前人格',
-            style: { maxWidth: 200 },
-            onChange: async (e) => {
-              const id = e.target.value
-              const r = await post('/personas/use', { id })
-              if (r.ok === false) return toast(r.message || '没换成')
-              toast('换好了')
-              await reload()
-            },
-          },
-            /** 当前人格被删/进墓碑时，受控 select 会显示空白——补一个占位选项说清楚 */
-            (personas?.personas || []).some((p) => p.id === globalId) || !personas
-              ? null
-              : h('option', { value: globalId }, `（已删除：${globalId}）`),
-            (personas?.personas || []).map((p) =>
-              h('option', { key: p.id, value: p.id }, p.label || p.name || p.id))),
-          h('span', { style: { fontSize: 12, fontWeight: 650 } }, '本群'),
-          chatId
-            ? h('select', {
-                className: 'roost-input', value: chatPick || '', 'aria-label': '本群使用的人格',
-                title: '只对最近说话的这个会话生效；换会话后这里跟着变',
-                style: { maxWidth: 180 },
-                onChange: async (e) => {
-                  const id = e.target.value
-                  const r = id
-                    ? await post('/personas/use', { id, chatId })
-                    : await post('/personas/unuse', { chatId })
-                  if (r.ok === false) return toast(r.message || '没改成')
-                  toast(id ? '本群已指定' : '本群已跟随全局')
-                  await reload()
-                },
-              },
-                h('option', { value: '' }, '跟随全局'),
-                (personas?.personas || []).map((p) =>
-                  h('option', { key: p.id, value: p.id }, p.label || p.name || p.id)))
-            : h('span', { className: 'roost-note', style: { margin: 0 } }, '读取会话中…'),
-        ),
-        h('div', { className: 'roost-seg' },
-          h('button', {
-            type: 'button', className: 'roost-seg-btn',
-            'aria-pressed': src === 'mine' ? 'true' : 'false',
-            onClick: () => setSrc('mine'),
-          }, personas ? `我的人格 (${(personas.personas || []).length})` : '我的人格'),
-          h('button', {
-            type: 'button', className: 'roost-seg-btn',
-            'aria-pressed': src === 'repo' ? 'true' : 'false',
-            onClick: () => setSrc('repo'),
-          }, '人格仓库'),
-        ),
-
-        src === 'mine'
-          ? sec('人格', {
+        h('div', { className: 'pv-top' },
           /**
-           * 标题右边两个按钮。
+           * 名字：一行「标签 + 输入 + 保存」，说明挪到下一行。
+           *
+           * 原来说明和输入框挤在同一行，窗口一窄输入框被压成一条缝，
+           * 而那句话本身是解释语义的，不是操作提示——放行尾只会添乱。
+           * 「保存」在没有改动时禁用：避免点了得到一个"已更新"的空动作。
+           */
+          h('div', { className: 'pv-name' },
+            h('span', { className: 'pv-k' }, '名字'),
+            h('input', {
+              className: 'roost-input', value: nameDraft, placeholder: '她的默认名字',
+              'aria-label': '她的名字',
+              onChange: (e) => { setNameDraft(e.target.value); setNameDirty(true) },
+            }),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              disabled: !nameDirty || !nameDraft.trim(),
+              title: nameDirty ? '保存这个名字' : '没有改动',
+              onClick: async () => {
+                const name = nameDraft.trim()
+                if (!name) return toast('名字不能为空')
+                const r = await save({ persona: { name } })
+                if (r.ok === false) return toast(r.message || '没存上')
+                setNameDirty(false)
+                toast('名字已更新')
+              },
+            }, '保存'),
+          ),
+          h('div', { className: 'pv-hint' },
+            '全局生效，换人格不会改名；人格里写了 selfName 就会盖过这里。'),
+
+          /**
+           * 当前人格：**先回答「本群现在是谁」，再给两个作用域**。
+           *
+           * 原来两个下拉并排、没有「所以到底是谁」的结论——本群跟随全局时，
+           * 用户看到两个框都得自己推一遍。现在顶上是一行结论，
+           * 下面两格分别标清「全局默认」和「这个群」，改动前就知道影响面。
+           */
+          h('div', { className: 'pv-now' },
+            h('div', { className: 'pv-now-head' },
+              h('span', { className: 'pv-k' }, chatId ? '本群现在用' : '现在用'),
+              h('span', { className: 'pv-now-name' }, labelOf(curId)),
+              override
+                ? h(Pill, { tone: 'warn' }, '本会话被覆盖')
+                : chatPick
+                  ? h(Pill, { tone: 'ok' }, '本群指定')
+                  : h(Pill, null, '跟随全局'),
+              chatPick && chatPick !== globalId
+                ? h('span', { className: 'roost-note', style: { margin: 0 } }, `全局默认是「${labelOf(globalId)}」`)
+                : null,
+            ),
+            h('div', { className: 'pv-sels' },
+              h('div', { className: 'pv-sel' },
+                h('div', { className: 'pv-sel-h' },
+                  h('span', { className: 'pv-sel-k' }, '全局默认'),
+                  h('span', { className: 'pv-sel-d' }, '没单独指定的群都用这个'),
+                ),
+                h('select', {
+                  className: 'roost-input', value: globalId, 'aria-label': '全局当前人格',
+                  onChange: async (e) => {
+                    const id = e.target.value
+                    const r = await post('/personas/use', { id })
+                    if (r.ok === false) return toast(r.message || '没换成')
+                    toast('换好了')
+                    await reload()
+                  },
+                },
+                  /** 当前人格被删/进墓碑时，受控 select 会显示空白——补一个占位选项说清楚 */
+                  (personas?.personas || []).some((p) => p.id === globalId) || !personas
+                    ? null
+                    : h('option', { value: globalId }, `（已删除：${globalId}）`),
+                  (personas?.personas || []).map((p) =>
+                    h('option', { key: p.id, value: p.id }, p.label || p.name || p.id))),
+              ),
+              chatId
+                ? h('div', { className: 'pv-sel' },
+                    h('div', { className: 'pv-sel-h' },
+                      h('span', { className: 'pv-sel-k' }, '这个群'),
+                      h('span', { className: 'pv-sel-d' }, '只影响本群，别的群不变'),
+                    ),
+                    h('select', {
+                      className: 'roost-input', value: chatPick || '', 'aria-label': '本群使用的人格',
+                      title: '只对最近说话的这个会话生效；换会话后这里跟着变',
+                      onChange: async (e) => {
+                        const id = e.target.value
+                        const r = id
+                          ? await post('/personas/use', { id, chatId })
+                          : await post('/personas/unuse', { chatId })
+                        if (r.ok === false) return toast(r.message || '没改成')
+                        toast(id ? '本群已指定' : '本群已跟随全局')
+                        await reload()
+                      },
+                    },
+                      h('option', { value: '' }, personas ? `跟随全局（${labelOf(globalId)}）` : '跟随全局'),
+                      /** 本群指定的那份被删了：受控 select 会显示空白，补一行说清楚（跟上面全局那个同理） */
+                      chatPick && personas && !personas.personas.some((p) => p.id === chatPick)
+                        ? h('option', { value: chatPick }, `（已删除：${chatPick}）`)
+                        : null,
+                      (personas?.personas || []).map((p) =>
+                        h('option', { key: p.id, value: p.id }, p.label || p.name || p.id)))
+                  )
+                : h('div', { className: 'pv-sel' },
+                    h('div', { className: 'pv-sel-h' },
+                      h('span', { className: 'pv-sel-k' }, '这个群'),
+                      h('span', { className: 'pv-sel-d' }, '先聊一句，才有会话可选'),
+                    ),
+                  ),
+            ),
+          ),
+        ),
+        sec('人格', null,
+          /**
+           * 工具条：搜索 + 计数 + 入口。
+           *
+           * 装了的一律排在前面，仓库里没装的接在后面——同一张表，只是顺序不同。
+           * 不再有「我的人格 / 人格仓库」两个页签：同一个名字在两边各出现一次，
+           * 一边能切换一边能安装，用户得先判断自己在哪一页才能动手。
            *
            * 「从仓库更新」带角标：有几个可更新就显示几。**不自动更新**——
            * 人格突然变味比"版本旧"难受得多，必须用户自己点。
            */
-          right: h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+          h('div', { className: 'pv-bar' },
+            h('input', {
+              className: 'roost-input', value: pq, placeholder: '搜名字、标签或 id',
+              'aria-label': '搜索人格',
+              onChange: (e) => setPq(e.target.value),
+              onKeyDown: (e) => { if (e.key === 'Escape') setPq('') },
+            }),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => setShowNew((v) => !v),
+            }, showNew ? '收起新建' : '新建'),
             h('button', {
               type: 'button', className: 'roost-btn',
               disabled: repoBusy,
@@ -1506,27 +1739,62 @@ select.roost-input{color-scheme:dark}
             }, repoBusy ? '更新中…' : `从仓库更新${pending ? ' ' + pending : ''}`),
             h('button', {
               type: 'button', className: 'roost-btn',
-              onClick: () => { setRepoOpen((v) => !v); if (!repoOpen && !repo) loadRepo(true) },
-            }, repoOpen ? '收起仓库' : '仓库'),
-            h('button', {
-              type: 'button', className: 'roost-btn',
-              onClick: () => setShowNew((v) => !v),
-            }, showNew ? '收起新建' : '新建'),
+              title: '批量打标签 / 删除 / 撤销，以及重名和超预算扫描',
+              onClick: () => setGovOpen((v) => !v),
+            }, govOpen ? '收起整理' : '整理'),
           ),
-        },
           /**
-           * 新建入口放在「人格」这一节里，而不是单开一节。
+           * 第二行只说状态：一共几份、仓库里还有几份没装、删过几份。
            *
-           * 之前它单独占一节「编辑人格」，可那一节平时是空的（占位），
+           * 这些原来挤在工具条里，把搜索框压到 150px 宽——
+           * 而搜索才是这一页最常用的控件。
+           */
+          h('div', { className: 'pv-sub' },
+            h('span', { className: 'pv-count' },
+              !personas ? '读着…'
+                : kw ? `${rows.length} / ${allRows.length} 个`
+                  : `${mineAll.length} 个`
+                    + (remoteOnly.length ? ` · 仓库还有 ${remoteOnly.length} 个没装` : '')),
+            deletedCount
+              ? h('button', {
+                  type: 'button', className: 'roost-btn',
+                  title: '你删过、但仓库里还有的；点开才能装回来',
+                  onClick: () => setShowDeleted((v) => !v),
+                }, showDeleted ? '收起已删' : `已删 ${deletedCount}`)
+              : null,
+          ),
+          /**
+           * 仓库的三种异常各说一句。
+           *
+           * 合并成一张清单之后，「仓库拿不到」不再是"另一个页的事"——
+           * 它直接决定清单里有没有那批没装的人格，所以必须在这里说明白，
+           * 并且说清「本地这些不受影响」，别让人以为整个人格页挂了。
+           */
+          repoErr
+            ? h('div', { className: 'roost-note', style: { color: '#c0392b', marginTop: -3 } },
+                `仓库连不上（${repoErr}）——下面只有本地已有的人格，仓库那份暂时看不到。`)
+            : null,
+          repoGated
+            ? h('div', { className: 'roost-note', style: { marginTop: -3 } },
+                repo.gate.why + '，先升级 dsh-roost 再看仓库里的人格。')
+            : null,
+          repo?.stale
+            ? h('div', { className: 'roost-note', style: { marginTop: -3 } },
+                '用的是缓存的仓库清单，可能不是最新（点「从仓库更新」会强制重拉）。')
+            : null,
+          /**
+           * 新建入口紧贴工具条，不用单开一节。
+           *
+           * 之前它占一节「编辑人格」，可那一节平时是空的（占位），
            * 真正的编辑动作又发生在点开某一行之后——入口和动作被拆到两处。
-           * 现在：标题右边「新建」开输入框；点某行的「编辑」就地展开正文。
+           * 现在：工具条「新建」展开输入框；点某行的「编辑」在下方展开正文。
            *
-           * **位置紧贴按钮**：这几块原来排在整节末尾（人格列表 + 若干说明之后），
+           * **位置紧贴工具条**：这几块原来排在整节末尾（人格列表 + 若干说明之后），
            * 点完按钮要往下翻半天才看到输入框，读起来就是「按了没反应」。
-           * 现在按「按钮 → 新建 / 仓库 / 预览 → 人格列表」排，点开就在眼前。
+           * 现在按「工具条 → 新建 / 预览 → 人格列表」排，点开就在眼前。
            */
           showNew
-            ? h('div', { style: { display: 'flex', gap: 8, marginTop: 4 } },
+            ? h('div', { className: 'pv-new' },
                 h('input', {
                   className: 'roost-input', placeholder: '新建一个：英文 id（如 lazycat）', value: newId,
                   onChange: (e) => setNewId(e.target.value), style: { flex: 1 },
@@ -1575,95 +1843,9 @@ select.roost-input{color-scheme:dark}
                   }, '粘贴导入'),
               )            : null,
 
-          /**
-           * 仓库面板：仓库里有哪些人格、本地各自什么状态。
-           *
-           * 刻意**不做单条安装**：安装动作只有「从仓库更新」一个按钮，
-           * 点一次装全部该装的。多一个入口就多一套状态，而这里的需求
-           * 本来就是"顺手点一下"，不是逐条挑着装。
-           * 面板存在的意义是**看清楚**：谁没装、谁有更新、谁是你改过的。
-           *
-           * 和「新建」一样紧贴标题栏渲染：它在人格列表**上面**，
-           * 点一下「仓库」就能看到清单，不用先翻过本地人格列表。
-           */
-          repoOpen
-            ? h('div', { style: { marginTop: 4 } },
-                h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                  h('div', { style: { fontSize: 12, fontWeight: 650 } },
-                    `仓库 ${repo?.repo || 'tdcq9594/dsh-roost-personas'}`),
-                  h('button', {
-                    type: 'button', className: 'roost-btn',
-                    onClick: () => loadRepo(true),
-                  }, '刷新'),
-                  repo?.stale ? h(Pill, { tone: 'warn' }, '用的是缓存清单') : null,
-                ),
-                repoErr ? h('div', { className: 'roost-note', style: { color: '#c0392b' } }, '连不上仓库：' + repoErr) : null,
-                repo && repo.gate && repo.gate.ok === false
-                  ? h('div', { className: 'roost-note' }, repo.gate.why + '，先升级 dsh-roost 再看。')
-                  : null,
-
-                h('div', { className: 'roost-list', style: { marginTop: 8 } },
-                  (repo?.personas || []).map((p) => {
-                    const label = p.state === 'deleted' ? '已删除'
-                      : p.state === 'missing' ? '未安装'
-                        : p.state === 'update' ? '有更新'
-                          : p.state === 'modified' ? '你改过'
-                            : '已是最新'
-                    return h('div', { key: p.id, className: 'roost-item' },
-                      h('div', { className: 't' },
-                        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                          h('span', { style: { fontWeight: 500 } }, p.label || p.name || p.id),
-                          h(Pill, { tone: p.state === 'modified' || p.state === 'deleted' ? 'warn' : p.state === 'same' ? 'ok' : 'info' }, label),
-                        ),
-                        h('div', { className: 'roost-note', style: { marginTop: 1 } },
-                          `仓库 ${p.chars} 字` + (p.localChars ? ` · 本地 ${p.localChars} 字` : '')
-                          + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')),
-                      ),
-                      h('div', { className: 'roost-acts' },
-                        h('button', {
-                          type: 'button', className: 'roost-btn',
-                          onClick: async () => {
-                            const r = await get('/personas/repo/preview?id=' + encodeURIComponent(p.id))
-                            if (r.ok === false) return toast(r.message || '预览不了')
-                            setPreview(r)
-                          },
-                        }, '预览'),
-                        /**
-                         * 「恢复」对两种状态出现：
-                         *   · `modified`——一键更新刻意不碰你改过的文件，这是反悔的出口；
-                         *   · `deleted`——你删过的内置人格，一键更新也不会自动装回来，
-                         *     误删之后从这里捞回来（服务端会顺手清掉墓碑）。
-                         * 覆盖前都会自动备份到 personas/.backup/。
-                         */
-                        p.state === 'modified' || p.state === 'deleted'
-                          ? h(ConfirmLink, {
-                              label: p.state === 'deleted' ? '恢复' : '恢复官方',
-                              confirmLabel: p.state === 'deleted' ? '确认恢复？' : '确认覆盖？',
-                              onConfirm: async () => {
-                                const r = await post('/personas/restore', { id: p.id })
-                                toast(r.ok === false
-                                  ? (r.message || '没恢复成')
-                                  : p.state === 'deleted' ? '已恢复' : '已恢复官方版本（旧内容已备份）')
-                                await reload()
-                                await loadRepo(true)
-                              },
-                            })
-                          : null,
-                      ),
-                    )
-                  }),
-                  !(repo?.personas || []).length ? h('div', { className: 'roost-empty' }, '仓库里没读到人格') : null,
-                ),
-                h('div', { className: 'roost-note' },
-                  '只装「没被改过」的：一键更新会跳过你手改过的那几份，'
-                  + '自建的人格（不在仓库清单里的）完全不碰。'
-                  + '删掉的内置人格也不会被装回来（标「已删除」），点「恢复」才回来。'),
-              )
-            : null,
-
           /** 预览：装之前先读一遍正文。人格是要读的，光看标签决定不了 */
           preview
-            ? h('div', { style: { marginTop: 12, border: '1px solid currentColor', borderRadius: 8, padding: 10 } },
+            ? h('div', { className: 'pv-preview' },
                 h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
                   h('div', { style: { fontSize: 12, fontWeight: 650 } }, `预览：${preview.label || preview.name || preview.id}`),
                   h('span', { className: 'roost-note', style: { margin: 0 } }, `${preview.chars || 0} 字`),
@@ -1684,70 +1866,181 @@ select.roost-input{color-scheme:dark}
               )
             : null,
 
-          h('div', { className: 'roost-list' },
-            (personas?.personas || []).map((p) => {
-              const isCur = p.id === curId
-              const isDefault = p.id === 'default'
-              return h('div', { key: p.id, className: 'roost-item roost-persona' },
+          /**
+           * 清单本体。
+           *
+           * 每行只留两行字（名字 / 元信息）和一排动作：
+           *   · 当前行把「用这个」换成「正在用」标签——已生效的动作不该还能点；
+           *   · 「用这个」（或「更新」「装上」）是唯一带边框的主操作，
+           *     其余动作降到次级色 + 62% 不透明度，指到那一行或键盘聚焦才全额；
+           *   · 删除逐行下沉成弱色链路（点两次的确认机制没动）。
+           * 视觉上从「四颗同级按钮」变成「一个主操作 + 三个备选」，
+           * 一屏几十行也不再像一排按钮墙。可点性没减，只是不再同等抢眼。
+           *
+           * 装了的一律在前、仓库里没装的在同一个列表的后面（中间一条分组说明），
+           * 不再分成「我的人格 / 人格仓库」两页。
+           */
+          h('div', { className: 'pv-list' },
+            rows.map((p, i) => {
+              /** 仓库里有、本地没有的（含你删过的）——这类行只有「预览 / 装上」 */
+              const isRepo = p.from === 'repo'
+              const st = p.repo?.state || ''
+              const isCur = !isRepo && p.id === curId
+              const isDefault = !isRepo && p.id === 'default'
+              const used = usage[p.id]?.useCount ?? usage[p.id] ?? 0
+              const localChars = p.repo?.localChars || 0
+              /** 第一条「仓库有、本地没有」的行前面插一个分组头：装了的一律在前，这里是分界 */
+              const grp = isRepo && rows[i - 1]?.from !== 'repo'
+              return [
+                grp
+                  ? h('div', { key: 'grp-' + p.id, className: 'pv-group' },
+                      `仓库里还能装的（${rows.filter((r) => r.from === 'repo').length} 个）`)
+                  : null,
+                h('div', {
+                  key: p.id,
+                  className: 'pv-row' + (isCur ? ' is-cur' : '')
+                    + (isRepo ? ' is-repo' : '') + (editId === p.id ? ' is-edit' : ''),
+                },
                 /**
-                 * 两行：名字一行、字数与标签一行。
+                 * 两行：名字一行（带状态）、字数与标签一行。
                  *
                  * 之前全挤在一行，右侧还要放三个按钮——窗口一窄，名字就被压没了。
-                 * 「当前」也不再做成禁用按钮（禁用态看着像坏了），改用标签。
                  */
                 h('div', { className: 't' },
-                  h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                    h('span', { style: { fontWeight: isCur ? 650 : 500 } }, p.label || p.name || p.id),
+                  h('div', { className: 'pv-nm' },
+                    p.label || p.name || p.id,
                     // 人格自报的名字跟全局名不同时，标出来——否则用户会以为切了人格还是「大肥鱼」
                     p.selfName && p.selfName !== p.label
-                      ? h('span', { className: 'roost-note', style: { fontWeight: 400 } }, `自称 ${p.selfName}`)
+                      ? h('span', { className: 'pv-alias' }, `自称 ${p.selfName}`)
                       : null,
+                    isRepo
+                      ? h(Pill, { tone: st === 'deleted' ? 'warn' : null }, st === 'deleted' ? '已删除' : '未安装')
+                      : null,
+                    /**
+                     * 「正在用」和「有更新」可以同时成立：当前这份正好是旧版。
+                     * 少写前一个的话，正在用的那一行会看不出自己是当前人格。
+                     */
                     isCur ? h(Pill, { tone: 'ok' }, '正在用') : null,
+                    !isRepo && st === 'update' ? h(Pill, { tone: 'warn' }, '有更新') : null,
+                    !isRepo && st === 'modified' ? h(Pill, { tone: 'warn' }, '你改过') : null,
                   ),
-                  h('div', { className: 'roost-note', style: { marginTop: 1 } },
+                  h('div', { className: 'pv-meta' },
                     `${p.chars ?? 0} 字`
+                    // 有更新时把两个字数并排放，才看得出差多少（只给字数确实不够直观）
+                    + (!isRepo && st === 'update' && localChars ? `（仓库版 ${p.repo.chars} 字）` : '')
                     + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')
-                    + ((usage[p.id]?.useCount ?? usage[p.id] ?? 0) > 0 ? ` · 用过 ${usage[p.id].useCount ?? usage[p.id]} 次` : '')),
+                    + (used > 0 ? ` · 用过 ${used} 次` : '')),
                 ),
-                h('div', { className: 'roost-acts' },
-                  /** 只给「当前这个群」指定，不动全局 */
-                  chatId && p.id !== curId
-                    ? h('button', {
-                        type: 'button', className: 'roost-btn',
-                        onClick: async () => {
-                          const r = await post('/personas/use', { id: p.id, chatId })
-                          if (r.ok === false) return toast(r.message || '没指定成')
-                          toast('本群已指定')
-                          await reload()
-                        },
-                      }, '本群用')
-                    : null,
-                  isCur
-                    ? null
-                    : h('button', {
-                        type: 'button', className: 'roost-btn',
-                        onClick: async () => {
-                          const r = await save({ persona: { current: p.id } })
-                          toast(r.ok === false ? (r.message || '没换成') : '换好了')
-                          reload()
-                        },
-                      }, '用这个'),
-                  h('button', { type: 'button', className: 'roost-btn', onClick: () => openPersona(p.id) }, '编辑'),
-                  isDefault
-                    ? null
-                    : h(ConfirmLink, {
-                        label: '删除', confirmLabel: '确认删除',
-                        onConfirm: async () => {
-                          const r = await post('/personas/remove', { id: p.id })
-                          toast(r.ok === false ? (r.message || '没删掉') : '删了')
-                          if (editId === p.id) { setEditId(''); setRaw('') }
-                          reload()
-                        },
-                      }),
+                h('div', { className: 'pv-acts' },
+                  isRepo
+                    ? [
+                        h('button', {
+                          key: 'pv',
+                          type: 'button', className: 'roost-btn',
+                          onClick: async () => {
+                            const r = await get('/personas/repo/preview?id=' + encodeURIComponent(p.id))
+                            if (r.ok === false) return toast(r.message || '预览不了')
+                            setPreview(r)
+                          },
+                        }, '预览'),
+                        /**
+                         * 装 / 装回来。
+                         *
+                         * 「装回来」走 restore（服务端会顺手清掉墓碑，否则下次一键更新
+                         * 还会把你删过的当成"你删的"跳过）；「装上」走 install。
+                         */
+                        st === 'deleted'
+                          ? h('button', {
+                              key: 'in',
+                              type: 'button', className: 'roost-btn pv-main',
+                              onClick: () => restoreOne(p, true),
+                            }, '装回来')
+                          : h('button', {
+                              key: 'in',
+                              type: 'button', className: 'roost-btn pv-main',
+                              title: '装上这份（可以随时删掉）',
+                              onClick: () => installOne(p),
+                            }, '装上'),
+                      ]
+                    : [
+                        st === 'update'
+                          ? h('button', {
+                              key: 'up',
+                              type: 'button', className: 'roost-btn pv-main',
+                              title: '换成仓库里的新版本（旧内容会备份）',
+                              onClick: () => installOne(p),
+                            }, '更新')
+                          : isCur
+                            ? h(Pill, { key: 'cur', tone: 'ok' }, '正在用')
+                            : h('button', {
+                                key: 'use',
+                                type: 'button', className: 'roost-btn pv-main',
+                                title: '所有群都换成它（只改全局默认）',
+                                onClick: async () => {
+                                  const r = await save({ persona: { current: p.id } })
+                                  toast(r.ok === false ? (r.message || '没换成') : '换好了')
+                                  reload()
+                                },
+                              }, '用这个'),
+                        /** 只给「当前这个群」指定，不动全局 */
+                        chatId && !isCur
+                          ? h('button', {
+                              key: 'chat',
+                              type: 'button', className: 'roost-btn',
+                              title: '只给这个群用，其他群还是全局那个',
+                              onClick: async () => {
+                                const r = await post('/personas/use', { id: p.id, chatId })
+                                if (r.ok === false) return toast(r.message || '没指定成')
+                                toast('本群已指定')
+                                await reload()
+                              },
+                            }, '本群用')
+                          : null,
+                        h('button', {
+                          key: 'edit',
+                          type: 'button', className: 'roost-btn',
+                          onClick: () => openPersona(p.id),
+                        }, editId === p.id ? '编辑中' : '编辑'),
+                        isDefault
+                          ? null
+                          : h('span', { key: 'del', className: 'pv-del' },
+                              h(ConfirmLink, {
+                                label: '删除', confirmLabel: '确认删除',
+                                onConfirm: async () => {
+                                  const r = await post('/personas/remove', { id: p.id })
+                                  toast(r.ok === false ? (r.message || '没删掉') : '删了')
+                                  if (editId === p.id) { setEditId(''); setRaw('') }
+                                  await reload()
+                                  // 仓库快照也要重算：删掉的那份会变成 deleted，
+                                  // 「已删 N」的入口和状态标签都靠它
+                                  await loadRepo(true)
+                                },
+                              }),
+                            ),
+                      ],
                 ),
-              )
+              ),
+              ]
             }),
-            !(personas?.personas || []).length ? h('div', { className: 'roost-empty' }, '读不到人格列表') : null,
+            /**
+             * 三种空态分开说：读着 / 一个都没有 / 搜不到。
+             * 原来只有一句「读不到人格列表」——加载中也是这句话，像坏了。
+             */
+            !personas
+              ? h('div', { className: 'pv-empty' }, '正在读取人格列表…')
+              : !allRows.length
+                ? h('div', { className: 'pv-empty' },
+                    '还没有人格。上面「新建」可以建一个，或者点「从仓库更新」装一批。')
+                : !rows.length
+                  ? h('div', { className: 'pv-empty' },
+                      `没有匹配「${pq.trim()}」的人格`,
+                      h('div', { style: { marginTop: 9 } },
+                        h('button', {
+                          type: 'button', className: 'roost-btn',
+                          onClick: () => setPq(''),
+                        }, '清空搜索')),
+                    )
+                  : null,
           ),
 
           /** 更新完的高危提醒（不拦，只亮出来让人自己判断） */
@@ -1788,26 +2081,40 @@ select.roost-input{color-scheme:dark}
               )
             : null,
 
-          h('div', { className: 'roost-note' },
-            '人格正文在 personas/*.md，这里改的是文件本身。'
-            + (byChatCount ? `另有 ${byChatCount} 个会话单独指定了人格（在上面的「正在用」里会显示成那个）。` : '')
-            + ' 模型自己用 <<persona:>> 写的覆盖优先级更高，出现在上面那一行。'),
+          /**
+           * 说明折叠。
+           *
+           * 三段解释原来直接铺在清单末尾——200 行之后，等于没写。
+           * 收进 <details> 后，要查的人展开就有，不查的人不必被推着滚，
+           * 清单本身也不会被这段"文档"衬得像说明书。
+           */
+          h('details', { className: 'pv-help' },
+            h('summary', null, '人格文件放在哪、正文怎么写'),
+            h('div', { className: 'roost-note', style: { marginTop: 7 } },
+              '人格正文在 personas/*.md，这里改的是文件本身。'
+              + (byChatCount ? `另有 ${byChatCount} 个会话单独指定了人格（在上面的「正在用」里会显示成那个）。` : '')
+              + ' 模型自己用 <<persona:>> 写的覆盖优先级更高，出现在上面那一行。'),
+            /**
+             * 四段式说明。
+             *
+             * 不写这段的话，用户只会往正文里堆散文——
+             * 而「开场白」「世界书」这两段是**结构**，堆在散文里不生效。
+             */
+            h('div', { className: 'roost-note' },
+              '正文可以分四段：默认那段是性格；'
+              + '「## 开场白」是她主动搭话时习惯的第一句（不会每次照抄）；'
+              + '「## 世界书」一行一条，写 `触发词1, 触发词2 | 内容`，只有聊到这些词才注入（省 token）；'
+              + '「## 说话示例」写 2~3 轮对话，比任何形容词都准。'),
+          ),
 
           /**
-           * 四段式说明。
+           * 整理面板：批量加标签 / 删除 / 撤销、重名与超预算扫描。
            *
-           * 不写这段的话，用户只会往正文里堆散文——
-           * 而「开场白」「世界书」这两段是**结构**，堆在散文里不生效。
+           * 它不属于"市场"，是这张清单的维护工具，所以并进这一页，
+           * 而不是再开一个入口让人猜「治理」在哪。
            */
-          h('div', { className: 'roost-note' },
-            '正文可以分四段：默认那段是性格；'
-            + '「## 开场白」是她主动搭话时习惯的第一句（不会每次照抄）；'
-            + '「## 世界书」一行一条，写 `触发词1, 触发词2 | 内容`，只有聊到这些词才注入（省 token）；'
-            + '「## 说话示例」写 2~3 轮对话，比任何形容词都准。'),
-
-
-          )
-          : h(MarketTab, { market, marketErr, toast, loadMarket, reload }),
+          govOpen ? h(GovPanel, { toast, reload, tick: 0, onAfter: () => loadRepo(true) }) : null,
+        ),
 
         /**
          * 编辑区：**只在真的打开了某个人格时**才占一节。
@@ -1815,9 +2122,31 @@ select.roost-input{color-scheme:dark}
          * 之前无论有没有打开都渲染一节「编辑人格」，空的时候留一句
          * 「点上面某一行的编辑读正文」——占位 + 指路，占了版面也占了编号。
          */
-        src === 'mine' && editId
-          ? sec('编辑「' + editId + '」', null,
+        editId
+          ? h('div', { ref: editRef },
+              sec('编辑「' + labelOf(editId) + '」', {
+                right: h('span', { className: 'roost-note', style: { margin: 0 } },
+                  `${raw.length} 字` + (dirty ? ' · 有未保存改动' : '')),
+              },
               h('div', null,
+                /**
+                 * 「你改过」的恢复入口放在编辑区，而不是每行挂一颗按钮。
+                 *
+                 * 覆盖是不可逆的（有备份也要重找），把它放在**正文旁边**——
+                 * 你正在看自己改成什么样，才有依据决定要不要换回官方的。
+                 * 行内留着只会让「你改过」的行挤到五个按钮。
+                 */
+                editRepo && editRepo.state === 'modified'
+                  ? h('div', { className: 'pv-warn' },
+                      h('span', null,
+                        `这份你改过（本地 ${raw.length} 字 / 仓库 ${editRepo.chars ?? 0} 字）。`
+                        + '恢复官方会覆盖本地正文，旧内容自动备份到 personas/.backup/。'),
+                      h(ConfirmLink, {
+                        label: '恢复官方', confirmLabel: '确认覆盖？',
+                        onConfirm: () => restoreOne({ id: editId, repo: editRepo }, false),
+                      }),
+                    )
+                  : null,
                 h('textarea', {
                   className: 'roost-input',
                   style: { minHeight: 300, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 12, lineHeight: 1.7, resize: 'vertical' },
@@ -1825,13 +2154,16 @@ select.roost-input{color-scheme:dark}
                   spellCheck: false,
                   onChange: (e) => { setRaw(e.target.value); setDirty(true) },
                 }),
-                h('div', { style: { display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' } },
+                h('div', { style: { display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' } },
                   h('button', {
                     type: 'button', className: 'roost-primary',
+                    disabled: !dirty,
+                    title: dirty ? '写回 personas/' + editId + '.md' : '没有改动',
                     onClick: async () => {
                       const r = await post('/personas/save', { id: editId, raw })
                       toast(r.ok === false ? (r.message || '没存上') : '存好了')
-                      if (r.ok !== false) { setDirty(false); reload() }
+                      // 改过之后这份就变成「你改过」了，仓库快照得重算，否则提示条不出现
+                      if (r.ok !== false) { setDirty(false); await reload(); await loadRepo(true) }
                     },
                   }, dirty ? '保存（有未保存改动）' : '保存'),
                   h('button', {
@@ -1860,6 +2192,7 @@ select.roost-input{color-scheme:dark}
                 ),
               ),
             )
+          )
           : null,
 
 
@@ -4051,7 +4384,7 @@ select.roost-input{color-scheme:dark}
      * 首屏**不扫描**（`health: null`），显示「未扫描」而不是四张 0——
      * 0 会被读成「没问题」，那比不显示更糟。
      */
-    function GovPanel({ toast, reload, loadMarket, tick }) {
+    function GovPanel({ toast, reload, tick, onAfter }) {
       const [gov, setGov] = useState(null)
       const [busy, setBusy] = useState(false)
       const [picked, setPicked] = useState([])
@@ -4144,7 +4477,9 @@ select.roost-input{color-scheme:dark}
                       setTagDraft('')
                       await load(true)
                       reload?.()
-                      loadMarket?.(true)
+                      // 合并成一张清单之后，删/改也会改变仓库那边的状态（deleted / modified），
+                      // 不刷的话「已删 N」和行内标签要等下次进页才对得上
+                      onAfter?.()
                     }),
                   }, '加标签'),
                   h('button', {
@@ -4155,7 +4490,9 @@ select.roost-input{color-scheme:dark}
                       toast(`删了 ${r.removed.length} 份` + (r.batch ? '，可以撤销' : ''))
                       await load(true)
                       reload?.()
-                      loadMarket?.(true)
+                      // 合并成一张清单之后，删/改也会改变仓库那边的状态（deleted / modified），
+                      // 不刷的话「已删 N」和行内标签要等下次进页才对得上
+                      onAfter?.()
                     }),
                   }, `删除选中（${picked.length}）`),
                   h('button', {
@@ -4169,216 +4506,14 @@ select.roost-input{color-scheme:dark}
                       toast(`恢复了 ${r.restored.length} 份`)
                       await load(true)
                       reload?.()
-                      loadMarket?.(true)
+                      // 合并成一张清单之后，删/改也会改变仓库那边的状态（deleted / modified），
+                      // 不刷的话「已删 N」和行内标签要等下次进页才对得上
+                      onAfter?.()
                     }),
                   }, batches.length ? `撤销上一批（${batches[0].count} 份）` : '没有可撤销的批次'),
                 ),
               ),
         ),
-      )
-    }
-
-    /* ---------------- 市场 ---------------- */
-
-    /**
-     * 市场：从仓库里挑人格。
-     *
-     * 列表、搜索、标签、预览、单条安装/更新、恢复已删除。
-     * 安装会补 `tools: []`（作者显式声明过就按作者的）；一键更新在「人格」页的「我的人格」里。
-     *
-     * 列表上限 50 行 + 「再看 N 个」：几百份人格全量铺开，面板会卡。
-     */
-    function MarketTab({ market, marketErr, toast, loadMarket, reload }) {
-      const [q, setQ] = useState('')
-      const [tag, setTag] = useState('')
-      const [limit, setLimit] = useState(50)
-      const [preview, setPreview] = useState(null)
-      /** 治理是仓库视图里的一块，不另开页签（页签已经够多了，窄屏会换行） */
-      const [govOpen, setGovOpen] = useState(false)
-      /** 装/恢复之后让治理面板重挂，否则「正在用/建议」还是旧快照 */
-      const [govTick, setGovTick] = useState(0)
-      const refreshAll = async () => {
-        await loadMarket(true)
-        setGovTick((n) => n + 1)
-        reload?.()
-      }
-
-      const all = market?.personas || []
-      /** 标签栏用**全量**算：用过滤后的算，选中一个标签后其它标签会消失，没法切换 */
-      const tags = [...new Set(all.flatMap((p) => p.tags || []))]
-        .sort((a, b) => a.localeCompare(b))
-        .slice(0, 14)
-      /** 选中的标签必须还在：刷新后它可能掉出前 14，那时页面会「筛着却取消不掉」 */
-      if (tag && !tags.includes(tag)) tags.unshift(tag)
-
-      const kw = q.trim().toLowerCase()
-      const rows = all.filter((p) => {
-        if (tag && !(p.tags || []).includes(tag)) return false
-        if (!kw) return true
-        return [p.label || p.name || '', p.id, ...(p.tags || [])].join(' ').toLowerCase().includes(kw)
-      })
-
-      const label = (s) =>
-        s === 'deleted' ? '已删除'
-          : s === 'missing' ? '未安装'
-            : s === 'update' ? '有更新'
-              : s === 'modified' ? '你改过'
-                : s === 'same' ? '已是最新'
-                  : '未知'
-
-      /** 门槛不过时列表是空的，但那是「看不到」不是「没有」，别显示空态文案 */
-      const gated = Boolean(market && market.gate && market.gate.ok === false)
-
-      const shown = rows.slice(0, limit)
-
-      return h('div', null,
-        h(Sec, {
-          n: '01',
-          title: '人格仓库',
-          right: h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-            h('span', { className: 'roost-note', style: { margin: 0 } },
-              !market ? '读着…'
-                : gated ? '先升级再看'
-                  : `${all.length} 个`
-                    + (market.pending ? ` · ${market.pending} 个可更新` : '')
-                    + (market.deleted ? ` · ${market.deleted} 个你删过` : '')),
-            h('button', {
-              type: 'button', className: 'roost-btn',
-              onClick: () => setGovOpen((v) => !v),
-            }, govOpen ? '收起治理' : '治理'),
-          ),
-        },
-          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 8 } },
-            h('input', {
-              className: 'roost-input', value: q, placeholder: '搜名字、id 或标签',
-              'aria-label': '搜索人格',
-              onChange: (e) => { setQ(e.target.value); setLimit(50) },
-              style: { maxWidth: 260 },
-            }),
-            h('button', {
-              type: 'button', className: 'roost-btn',
-              onClick: () => { setPreview(null); loadMarket(true) },
-            }, '刷新'),
-            market?.stale ? h(Pill, { tone: 'warn' }, '用的是缓存清单') : null,
-          ),
-          marketErr
-            ? h('div', { className: 'roost-note', style: { color: '#c0392b', marginTop: 6 } }, '连不上仓库：' + marketErr)
-            : null,
-          gated
-            ? h('div', { className: 'roost-note', style: { marginTop: 6 } }, market.gate.why + '，先升级 dsh-roost 再看。')
-            : null,
-
-          tags.length
-            ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 } },
-                tags.map((t) => h('button', {
-                  key: t, type: 'button', className: 'roost-chip',
-                  'data-on': tag === t ? '1' : '0',
-                  'aria-pressed': tag === t ? 'true' : 'false',
-                  onClick: () => { setTag(tag === t ? '' : t); setLimit(50) },
-                }, t)),
-              )
-            : null,
-
-          h('div', { className: 'roost-list', style: { marginTop: 10 } },
-            shown.map((p) => h('div', { key: p.id, className: 'roost-item' },
-              h('div', { className: 't' },
-                h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                  h('span', { style: { fontWeight: 500 } }, p.label || p.name || p.id),
-                  h(Pill, { tone: p.state === 'same' ? 'ok' : (p.state === 'modified' || p.state === 'deleted' || p.state === 'update') ? 'warn' : null }, label(p.state)),
-                ),
-                h('div', { className: 'roost-note', style: { marginTop: 1 } },
-                  `${p.chars || 0} 字`
-                  + (p.localChars ? ` · 本地 ${p.localChars} 字` : '')
-                  + ((p.tags || []).length ? ` · ${p.tags.join(' / ')}` : '')),
-              ),
-              h('div', { className: 'roost-acts' },
-                h('button', {
-                  type: 'button', className: 'roost-btn',
-                  onClick: async () => {
-                    const r = await get('/personas/repo/preview?id=' + encodeURIComponent(p.id))
-                    if (r.ok === false) return toast(r.message || '预览不了')
-                    setPreview(r)
-                  },
-                }, '预览'),
-                /** 装新的 / 升到新版本：单个装，不覆盖你改过的（服务端会拒绝） */
-                p.state === 'missing' || p.state === 'update'
-                  ? h('button', {
-                      type: 'button', className: 'roost-btn',
-                      onClick: async () => {
-                        const r = await post('/personas/install', { id: p.id })
-                        if (r.ok === false) return toast(r.why || r.message || '没装上')
-                        // 撞名时 localId 和仓库里的 file 不同名，不是和 id 比
-                        const stem = String(p.file || p.id).replace(/\.md$/i, '')
-                        const saved = r.localId && r.localId !== stem ? `（存为 ${r.localId}）` : ''
-                        toast(r.already ? '已经装过了' : `已装上${saved}${r.injected ? '，默认不许用工具' : ''}`)
-                        setPreview(null)
-                        await refreshAll()
-                      },
-                    }, p.state === 'update' ? '更新' : '装上')
-                  : null,
-                /** 只对「改过的」和「删过的」给恢复；装新的走上面的 install */
-                p.state === 'modified' || p.state === 'deleted'
-                  ? h(ConfirmLink, {
-                      label: p.state === 'deleted' ? '恢复' : '恢复官方',
-                      confirmLabel: p.state === 'deleted' ? '确认恢复？' : '确认覆盖？',
-                      /** 「恢复已删除」不是破坏性动作，别用红底；「恢复官方」会覆盖，才要红 */
-                      danger: p.state !== 'deleted',
-                      onConfirm: async () => {
-                        const r = await post('/personas/restore', { id: p.id })
-                        // gate 不过时服务端返回 {ok:false, skipped:true, why}，没有 message
-                        if (r.ok === false) return toast(r.why || r.message || '没恢复成')
-                        toast(p.state === 'deleted'
-                          ? '已恢复'
-                          : r.backup ? '已恢复官方版本（旧内容已备份）' : '已恢复官方版本')
-                        setPreview(null)
-                        await refreshAll()
-                      },
-                    })
-                  : null,
-              ),
-            )),
-            !rows.length && !gated
-              ? h('div', { className: 'roost-empty' },
-                  !market ? '读着…' : all.length ? '没有匹配的人格' : '仓库里没读到人格')
-              : null,
-          ),
-
-          rows.length > shown.length
-            ? h('div', { style: { marginTop: 8 } },
-                h('button', {
-                  type: 'button', className: 'roost-btn',
-                  onClick: () => setLimit(limit + 50),
-                }, `再看 ${Math.min(50, rows.length - shown.length)} 个`),
-              )
-            : null,
-
-          preview
-            ? h('div', { style: { marginTop: 12, border: '1px solid currentColor', borderRadius: 8, padding: 10 } },
-                h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
-                  h('div', { style: { fontSize: 12, fontWeight: 650 } }, `预览：${preview.label || preview.name || preview.id}`),
-                  h('span', { className: 'roost-note', style: { margin: 0 } }, `${preview.chars || 0} 字`),
-                  h('button', { type: 'button', className: 'roost-btn', onClick: () => setPreview(null) }, '关闭'),
-                ),
-                (preview.risky || []).length
-                  ? h('div', { className: 'roost-note', style: { color: '#c0392b', marginTop: 6 } },
-                      `⚠ 提到工具或敏感路径 ${preview.risky.length} 处（只是提醒，不拦）：`,
-                      h('div', null, preview.risky.slice(0, 5).map((r, i) =>
-                        h('div', { key: i }, `第 ${r.line} 行 · ${r.why}：${r.text}`))))
-                  : null,
-                h('pre', {
-                  style: {
-                    marginTop: 8, maxHeight: 260, overflow: 'auto', fontSize: 12, lineHeight: 1.7,
-                    whiteSpace: 'pre-wrap', fontFamily: 'ui-monospace,Menlo,Consolas,monospace',
-                  },
-                }, preview.text || ''),
-              )
-            : null,
-
-          h('div', { className: 'roost-note', style: { marginTop: 10 } },
-            '装的时候会给市场人格补上「不许用工具」的默认值（作者自己声明过就按作者的）；'
-            + '你改过的那份不会被覆盖，撞名会另存一个名字。'),
-        ),
-        govOpen ? h(GovPanel, { toast, reload, loadMarket, tick: govTick }) : null,
       )
     }
 
@@ -4462,8 +4597,6 @@ select.roost-input{color-scheme:dark}
        */
       const [her, setHer] = useState(null)
       /** 市场：仓库清单 + 每个条目在本地的状态（`/personas/repo` 原样存） */
-      const [market, setMarket] = useState(null)
-      const [marketErr, setMarketErr] = useState('')
       const [aw, setAw] = useState(null)
       const [sp, setSp] = useState(null)
       const [ctxInfo, setCtxInfo] = useState(null)
@@ -4578,27 +4711,6 @@ select.roost-input{color-scheme:dark}
       const loadChats = useCallback(async () => {
         const r = await get('/chats')
         setChats(r.ok === false ? null : r.chats || [])
-      }, [])
-
-      /**
-       * 市场清单。
-       *
-       * `force` 只给「刷新」按钮用：`/personas/repo` 服务端有 5 分钟缓存，
-       * 用户刚在 GitHub 推了一份、回来点刷新却还是旧清单，会以为没推上去。
-       */
-      const loadMarket = useCallback(async (force = false) => {
-        setMarketErr('')
-        const r = await get('/personas/repo' + (force ? '?force=1' : ''))
-        if (r.ok === false) {
-          /**
-           * 失败时**保留旧清单**：清成 null 会让列表整块消失，而且 `market`
-           * 一变又会触发一次 effect，等于自动重试一次（这次不带 force，可能
-           * 命中缓存「自己好了」），错误条一闪而过，用户只看到列表闪了一下。
-           */
-          setMarketErr(r.message || '拉不到清单')
-          return
-        }
-        setMarket(r)
       }, [])
 
       /** 首屏 + 切页时按需拉，不一次性全打一遍 */
@@ -4766,7 +4878,6 @@ select.roost-input{color-scheme:dark}
             ? h(HerTab, {
                 config,
                 personas: her?.personas ?? null,
-                market, marketErr, loadMarket,
                 mem, toast, save: saveCfg, reload: loadHer, quick,
               })
             : null,
@@ -4841,8 +4952,6 @@ select.roost-input{color-scheme:dark}
     exports.inject = inject
     exports.RoostPage = RoostPage
     exports.RoostIcon = RoostIcon
-    // 给渲染测试用：市场页的过滤/状态文案要能单独跑一遍
-    exports.MarketTab = MarketTab
     exports.ConfigTab = ConfigTab
     exports.DepsBlock = DepsBlock
     exports.HerTab = HerTab
