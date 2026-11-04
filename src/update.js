@@ -322,12 +322,33 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     let publishedAt = 0;
     let err = '';
     try {
-      const res = await fetchImpl(url, {
-        signal: AbortSignal.timeout(8000),
-        headers: { accept: 'application/vnd.npm.install-v1+json, application/json' },
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const j = await res.json();
+      /**
+       * 必须拉**完整 packument**（application/json）。
+       *
+       * npm 的简版元数据 application/vnd.npm.install-v1+json 只有
+       * name / dist-tags / versions / modified，**不带 time**；
+       * 之前用简版取 `j.time[latest]` 永远是 undefined → publishedAt=0
+       * → age=NaN → cooling 恒 false，冷却警告和「立即安装」按钮都不渲染，
+       * 24 小时豁免在生产环境一次都没生效过。
+       *
+       * 完整 packument 更大：保留 8 秒超时；失败时退回简版只拿 latest，
+       * 发布时间标成「未知」（coolingUnknown），而不是假装不在冷却期。
+       */
+      const getPackument = async (accept, timeoutMs) => {
+        const res = await fetchImpl(url, {
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { accept },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      };
+      let j;
+      try {
+        j = await getPackument('application/json', 8000);
+      } catch (e) {
+        log(`完整 packument 拉取失败（${e.message}），退回简版元数据（拿不到发布时间）`);
+        j = await getPackument('application/vnd.npm.install-v1+json', 4000);
+      }
       latest = String(j?.['dist-tags']?.latest ?? '');
       const t = j?.time?.[latest];
       publishedAt = t ? Date.parse(t) || 0 : 0;
@@ -338,6 +359,14 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     }
 
     const age = publishedAt ? Date.now() - publishedAt : NaN;
+    const ageKnown = Number.isFinite(age);
+    /** 拿不到发布时间 ≠ 不在冷却期：三态处理，别让「立即安装」出口凭空消失 */
+    const coolingUnknown = !ageKnown;
+    const cooling = ageKnown && age < MIN_AGE_MS;
+    // 按分钟取整再拆小时：Math.ceil 到小时会把 23 小时 04 分说成「还差 24 小时满 24 小时」
+    const leftMin = cooling ? Math.ceil((MIN_AGE_MS - age) / 60_000) : 0;
+    const leftH = Math.floor(leftMin / 60);
+    const leftM = leftMin % 60;
     const k = kind();
     /** 磁盘上装着的版本；读不到就退回运行中版本（测试环境没有真实 node_modules） */
     const installed = installedVersion();
@@ -366,12 +395,14 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       /** 装好了但还没重启：磁盘版本 ≠ 运行中版本 */
       pendingRestart: Boolean(installed && compareVersion(installed, own) > 0),
       publishedAt,
-      ageMs: Number.isFinite(age) ? age : null,
-      ageText: Number.isFinite(age) ? ageText(age) : '',
+      ageMs: ageKnown ? age : null,
+      ageText: ageKnown ? ageText(age) : '',
       // 不满 24 小时：pnpm 可能降级装旧版，得提前告诉用户
-      cooling: Number.isFinite(age) ? age < MIN_AGE_MS : false,
-      coolingLeftText: Number.isFinite(age) && age < MIN_AGE_MS
-        ? `还差 ${Math.ceil((MIN_AGE_MS - age) / 3600_000)} 小时满 24 小时`
+      cooling,
+      /** 发布时间未知（简版元数据 / 时间字段缺失）：仍允许走豁免，不冒充「已过冷却期」 */
+      coolingUnknown,
+      coolingLeftText: cooling
+        ? `还差 ${leftH} 小时${leftM ? ` ${leftM} 分钟` : ''}满 24 小时`
         : '',
       hasManager: typeof pm()?.installBundle === 'function',
     };
@@ -454,7 +485,9 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     }
 
     let exemption = null;
-    if (fresh && info.cooling && info.latest) {
+    // 冷却期内、或发布时间未知，都允许走豁免；后者正是简版元数据把 cooling
+    // 恒判成 false 时唯一能装上新版的路。
+    if (fresh && (info.cooling || info.coolingUnknown) && info.latest) {
       try {
         exemption = exempt(info.latest);
       } catch (e) {
@@ -526,34 +559,44 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     }
 
     /**
-     * 核对**实际装到的**版本。
+     * 核对**实际装到的**版本：优先读磁盘，其次信 installBundle 的返回。
      *
-     * 版本在 `bundle.version`（顶层没有 version 字段）；读不到就退回请求的版本。
-     * 请求 0.10.7 却装到 0.10.6 只有一种原因：24 小时冷却让 pnpm 降级了。
-     * 这种情况必须明说——不然用户看到"更新成功"、重启后版本没变，只会以为坏了。
+     * 旧写法拿 `info.latest`（请求的版本）兜底 `got`，等于自己骗自己：
+     * pnpm 被 24 小时冷却挡住时会静默保留旧版、且返回里未必有 version，
+     * 兜底成请求版本后 downgraded 恒为 false → 用户看到「已装 v1.0.0」，
+     * 重启后还是 0.13.0。写进磁盘的那份才是事实。
      */
-    const got = String(result?.bundle?.version || result?.version || '').replace(/^v/i, '') || info.latest || '';
-    // 只有两边都有版本号才谈得上"降级"；查不到 latest 时不能凭空判
-    const downgraded = Boolean(info.latest && got && compareVersion(got, info.latest) < 0);
+    const reported = String(result?.bundle?.version || result?.version || '').replace(/^v/i, '');
+    const onDisk = String(installedVersion() || '').replace(/^v/i, '');
+    const got = onDisk || reported;
+    const wanted = info.latest || reported;
+    /** 两个来源都没版本号：不能报「已装 vX」，如实说没核对到 */
+    const unverified = !got;
+    // 只有两边都有版本号才谈得上"降级"
+    const downgraded = Boolean(wanted && got && compareVersion(got, wanted) < 0);
     /** `restart-required` / `overridden` 都表示"现在还没生效" */
     const needRestart = app === 'restart-required' || app === 'overridden'
       || Boolean(result?.restartReason) || result?.changed === true;
     return {
       ok: true,
       version: got,
-      wanted: info.latest,
+      wanted,
       downgraded,
+      unverified,
       exemption,
       application: app,
       restartReason: result?.restartReason || '',
       message: downgraded
-        ? `已装 v${got}，不是最新的 v${info.latest}——因为新版本发布不满 24 小时，pnpm 降级了。`
+        ? `已装 v${got}，不是最新的 v${wanted}——因为新版本发布不满 24 小时，pnpm 降级了。`
           + '可以点「立即安装（不等 24 小时）」，或明天再更新。'
-        // toast 是纯文本，别在这里写 markdown 星号（会原样显示出来）
-        : unknownLatest
-          // 版本号是 pnpm 解析出来的；这次没查到"最新"，就别编一个数字
-          ? `已装 ${got ? 'v' + got : '最新版'}，重启 DSH 才生效（没查到版本号，按 latest 标签装的）。`
-          : `已装 v${got}，重启 DSH 才生效。`,
+        : unverified
+          ? '安装已返回成功，但没能核对到实际装到的版本。重启 DSH 后到「设置 → 更新」看版本号；'
+            + '如果仍是旧版，点「立即安装（不等 24 小时）」。'
+          // toast 是纯文本，别在这里写 markdown 星号（会原样显示出来）
+          : unknownLatest
+            // 版本号是 pnpm 解析出来的；这次没查到"最新"，就别编一个数字
+            ? `已装 ${got ? 'v' + got : '最新版'}，重启 DSH 才生效（没查到版本号，按 latest 标签装的）。`
+            : `已装 v${got}，重启 DSH 才生效。`,
       restart: needRestart,
       unknownLatest,
     };

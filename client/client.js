@@ -4085,6 +4085,8 @@ select.roost-input{color-scheme:dark}
       const [at, setAt] = useState('')
       /** 上一次自更新的失败详情：错误码之外还有 pnpm 的分类、原文和日志路径 */
       const [fail, setFail] = useState(null)
+      /** 「成功但版本不对」也要留一块持久提示：降级是静默的，toast 一闪就没 */
+      const [notice, setNotice] = useState(null)
 
       const loadCheck = async () => {
         const r = await get('/update/check')
@@ -4111,6 +4113,9 @@ select.roost-input{color-scheme:dark}
            * 折在下面让他随时能翻出来发给别人。
            */
           setFail(r && r.ok === false ? r : null)
+          // 降级 / 没核对到版本：toast 一闪就没，必须留一块持久提示，
+          // 否则用户看到「已装新版」，重启后还是旧版
+          setNotice(r && r.ok && (r.downgraded || r.unverified) ? r : null)
           toast(r.message || (r.ok ? '更新完成，重启 DSH 生效' : '没更新成'))
           await loadCheck()
         } finally {
@@ -4175,10 +4180,13 @@ select.roost-input{color-scheme:dark}
                       : (info?.error
                         ? `查不到最新版：${info.error}——不影响试装，pnpm 会自己解析 latest。`
                         : '')),
-            info?.cooling && info?.hasUpdate
+            (info?.cooling || info?.coolingUnknown) && info?.hasUpdate
               ? h('div', { className: 'roost-note', style: { color: 'var(--warn)', marginTop: 2 } },
-                  `${latest} 发布不满 24 小时（pnpm 默认不装这么新的版本，会降级），${info.coolingLeftText}。`
-                  + '点「立即安装」会先给 dsh-roost 加一条豁免再装。')
+                  info?.cooling
+                    ? `${latest} 发布不满 24 小时（pnpm 默认不装这么新的版本，会降级），${info.coolingLeftText}。`
+                      + '点「立即安装」会先给 dsh-roost 加一条豁免再装。'
+                    : `查不到 ${latest} 的发布时间，可能仍在 pnpm 的 24 小时冷却期内。`
+                      + '点「立即安装」会加一条只对本包生效的豁免，避免静默装到旧版。')
               : null,
           ),
           h('div', { className: 'roost-acts' },
@@ -4213,7 +4221,7 @@ select.roost-input{color-scheme:dark}
                   onClick: () => doSelf(false),
                 }, busy === 'self' ? '更新中…' : '按 latest 试装')
               : null,
-            info?.canSelf && info?.hasUpdate && info?.cooling
+            info?.canSelf && info?.hasUpdate && (info?.cooling || info?.coolingUnknown)
               ? h('button', {
                   type: 'button', className: 'roost-btn', disabled: Boolean(busy),
                   title: '改 pnpm-workspace.yaml 加一条只对 dsh-roost 生效的豁免，然后立刻装',
@@ -4254,6 +4262,20 @@ select.roost-input{color-scheme:dark}
                 )
               })(),
               h('button', { type: 'button', className: 'roost-btn', onClick: () => setFail(null) }, '知道了'),
+            )
+          : null,
+
+        /**
+         * 更新「成功」但没装到想要的版本：持久展示，别只弹 toast。
+         * pnpm 被 24h 冷却挡住时是**静默降级、不报错**，用户唯一的线索就是这块。
+         */
+        notice
+          ? h('div', { className: 'pv-warn', style: { marginTop: 8 } },
+              h('div', { style: { flex: '1 1 100%' } },
+                h('div', { style: { fontSize: 12, fontWeight: 600 } }, '装上了，但版本不对'),
+                h('div', { className: 'roost-note', style: { marginTop: 2 } }, notice.message || '没能核对到实际装到的版本'),
+              ),
+              h('button', { type: 'button', className: 'roost-btn', onClick: () => setNotice(null) }, '知道了'),
             )
           : null,
 

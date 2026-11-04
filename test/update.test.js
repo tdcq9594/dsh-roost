@@ -634,3 +634,107 @@ test('「不等 24 小时」：不在冷却期就不该动那个文件', async (
     done();
   }
 });
+
+/* ---------------- 回归：24 小时冷却判定失效 ---------------- */
+
+/**
+ * npm 的真实简版元数据（application/vnd.npm.install-v1+json）只有
+ * name / dist-tags / versions / modified，**没有 time**。
+ * 旧实现拿简版取 `time` → publishedAt=0 → age=NaN → cooling 恒 false，
+ * 冷却警告与「立即安装」按钮都不渲染，24h 豁免在生产环境一次都没生效。
+ */
+test('检查：响应里没有 time → 冷却标为未知，且请求的是完整 packument', async () => {
+  const { d, done } = tmp();
+  try {
+    let accept = '';
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { installBundle: async () => ({}) } }),
+      profileDir: profileReal(d),
+      fetchImpl: async (_url, init) => {
+        accept = String(init?.headers?.accept || '');
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            name: PKG,
+            'dist-tags': { latest: '1.0.0' },
+            versions: { '1.0.0': { name: PKG, version: '1.0.0' } },
+            modified: '2026-11-04T08:36:37Z',
+          }), // 真实 abbreviated：没有 time
+        };
+      },
+    });
+    const r = await u.check();
+    assert.match(accept, /application\/json/, '不能用简版元数据当唯一数据源');
+    assert.equal(r.latest, '1.0.0');
+    assert.equal(r.publishedAt, 0);
+    assert.equal(r.cooling, false);
+    assert.equal(r.coolingUnknown, true, '时间未知 ≠ 已经过了冷却期');
+  } finally {
+    done();
+  }
+});
+
+test('检查：冷却剩余按分钟显示，23 小时 04 分不再说成 24 小时', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: {} }),
+      profileDir: profileReal(d),
+      fetchImpl: fakeFetch('99.0.0', { publishedAgoMs: 56 * 60_000 }),
+    });
+    const r = await u.check();
+    assert.equal(r.cooling, true);
+    assert.equal(r.coolingLeftText, '还差 23 小时 4 分钟满 24 小时');
+  } finally {
+    done();
+  }
+});
+
+/**
+ * pnpm 被 24h 冷却挡住时**静默保留旧版、不报错**，返回里也未必带 version。
+ * 旧实现拿 info.latest 兜底 got，于是「装好了 v1.0.0」、重启后还是 0.13.0。
+ */
+test('自更新：installBundle 没给 version 时，以磁盘版本为准判降级', async () => {
+  const { d, done } = tmp();
+  try {
+    const p = profileReal(d);
+    writeFileSync(join(p, 'node_modules', PKG, 'package.json'),
+      JSON.stringify({ name: PKG, version: '0.13.0' }), 'utf8');
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { installBundle: async () => ({ changed: true, application: 'applied' }) } }),
+      profileDir: p,
+      fetchImpl: fakeFetch('1.0.0', { publishedAgoMs: 56 * 60_000 }),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, true);
+    assert.equal(r.version, '0.13.0', '不能拿请求的版本 1.0.0 兜底');
+    assert.equal(r.downgraded, true, '磁盘仍是旧版，必须判降级');
+    assert.match(r.message, /降级/);
+  } finally {
+    done();
+  }
+});
+
+test('「不等 24 小时」：发布时间未知时也允许写豁免（否则永远装不上新版）', async () => {
+  const { d, done } = tmp();
+  try {
+    const p = profileReal(d);
+    const yaml = join(p, 'pnpm-workspace.yaml');
+    writeFileSync(yaml, YAML, 'utf8');
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success', version: '99.0.0' }) } }),
+      profileDir: p,
+      // 无 time：模拟简版元数据 / 镜像缺时间字段
+      fetchImpl: async () => ({
+        ok: true, status: 200,
+        json: async () => ({ 'dist-tags': { latest: '99.0.0' }, versions: {}, modified: '2026-11-04T00:00:00Z' }),
+      }),
+    });
+    const r = await u.self({ fresh: true });
+    assert.equal(r.ok, true);
+    assert.ok(r.exemption?.changed, '年龄未知也要能加豁免');
+    assert.match(readFileSync(yaml, 'utf8'), /- dsh-roost@99\.0\.0/);
+  } finally {
+    done();
+  }
+});
