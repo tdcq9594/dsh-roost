@@ -15,6 +15,8 @@ import {
   guessCharacter,
   readCustomSection,
   scanModels,
+  decideSwitch,
+  buildWeightUrls,
 } from '../src/gpt-sovits.js';
 
 /** 真实 tts_infer.yaml 的形状（含 `\uXXXX` 转义，GPT-SoVITS 就是这么写的） */
@@ -176,4 +178,75 @@ test('停止：没在跑的时候不报错，也不假装停过', () => {
   assert.equal(r.ok, true);
   assert.equal(r.stopped, false);
   assert.equal(g.status().phase, 'idle');
+});
+
+/* ---------------- 启动慢 / 音色不对（2026-11-04 截图反馈） ---------------- */
+
+test('启动：选的就是配置文件已加载的角色时跳过切权重（否则白等一轮模型加载）', () => {
+  /**
+   * 权重一多，「启动/探测卡好久」主要是这一下：v2 要发两个
+   * `/set_*_weights`，每次都重新加载权重，而加载本身就要 110 秒。
+   */
+  assert.deepEqual(decideSwitch({ wanted: '角色A', character: '角色A', hasManual: false }), { needed: true, skip: true });
+  assert.deepEqual(decideSwitch({ wanted: '', character: '角色A', hasManual: false }), { needed: false, skip: false });
+  assert.deepEqual(decideSwitch({ wanted: '角色B', character: '角色A', hasManual: false }), { needed: true, skip: false });
+  /** 手填了路径就不能跳——用户明确要换文件，哪怕角色名一样 */
+  assert.deepEqual(decideSwitch({ wanted: '角色A', character: '角色A', hasManual: true }), { needed: true, skip: false });
+  assert.deepEqual(decideSwitch({ wanted: '', character: '', hasManual: true }), { needed: true, skip: false });
+});
+
+test('权重：手填路径优先于扫描配对（自动配对配错时音色会完全不对）', () => {
+  const models = [{ name: '角色A', version: 'v2', gpt: 'GPT_weights/角色A-e15.ckpt', sovits: 'SoVITS_weights/角色A_e8_s200.pth' }];
+  const r = buildWeightUrls(17860, '角色A', models, {
+    gptWeights: 'D://my//真的模型.ckpt',
+    sovitsWeights: 'D://my//真的模型.pth',
+  });
+  assert.equal(r.urls.length, 2);
+  assert.ok(r.urls[0].includes(encodeURIComponent('D://my//真的模型.ckpt')), 'GPT 要用手填的');
+  assert.ok(r.urls[1].includes(encodeURIComponent('D://my//真的模型.pth')), 'SoVITS 要用手填的');
+  assert.ok(!r.urls[0].includes('角色A-e15'), '扫描出来的那条不能被用上');
+});
+
+test('权重：只填一个也行，另一个用扫描结果', () => {
+  const models = [{ name: '角色A', gpt: 'GPT_weights/角色A-e15.ckpt', sovits: 'SoVITS_weights/角色A_e8_s200.pth' }];
+  const r = buildWeightUrls(17860, '角色A', models, { gptWeights: 'D://my//真的模型.ckpt' });
+  assert.ok(r.urls[0].includes(encodeURIComponent('D://my//真的模型.ckpt')));
+  assert.ok(r.urls[1].includes(encodeURIComponent('SoVITS_weights/角色A_e8_s200.pth')));
+});
+
+test('权重：没选角色也没手填路径时报错，别发空请求', () => {
+  assert.throws(() => buildWeightUrls(17860, '不存在', [], {}), /没有「不存在」的权重/);
+  /** 扫到了角色但两个权重都没配出来，也要挡住，不能发一个空 URL */
+  assert.throws(
+    () => buildWeightUrls(17860, '角色空', [{ name: '角色空', gpt: '', sovits: '' }], {}),
+    /没有可用的权重路径/,
+  );
+});
+
+test('权重：路径要 URL 编码（盘符、中文、空格不能把 query 拆了）', () => {
+  const r = buildWeightUrls(17860, '', [], { gptWeights: 'D://GPT 权重\\角色 A-e15.ckpt' });
+  assert.ok(r.urls[0].includes('set_gpt_weights'));
+  assert.ok(!r.urls[0].includes(' '), '空格不能裸着进 URL');
+  assert.ok(r.urls[0].includes(encodeURIComponent('D://GPT 权重\\角色 A-e15.ckpt')));
+});
+
+test('状态：切换失败后要能看出「实际生效的是谁」', () => {
+  /** 初始状态带 activeModel / warning，面板才有东西可显示 */
+  const g = createGptSovits();
+  const s = g.status();
+  assert.equal(s.activeModel, '');
+  assert.equal(s.warning, '');
+  g.dispose();
+});
+
+test('权重：只填一个路径时标出「另一半仍是自动配对」', () => {
+  const models = [{ name: '角色A', gpt: 'GPT_weights/a.ckpt', sovits: 'SoVITS_weights/a.pth' }];
+  assert.equal(buildWeightUrls(1, '角色A', models, { gptWeights: 'D:/x.ckpt' }).partial, true);
+  assert.equal(buildWeightUrls(1, '角色A', models, { sovitsWeights: 'D:/y.pth' }).partial, true);
+  assert.equal(
+    buildWeightUrls(1, '角色A', models, { gptWeights: 'D:/x.ckpt', sovitsWeights: 'D:/y.pth' }).partial,
+    false,
+    '两个都填了就不是 partial',
+  );
+  assert.equal(buildWeightUrls(1, '角色A', models, {}).partial, false, '都不填走自动配对，不算 partial');
 });

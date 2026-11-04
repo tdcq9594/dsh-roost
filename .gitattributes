@@ -1,1 +1,20 @@
+# 一律按 LF 存，和框架仓 / 插件仓保持一致。
+# 三个仓都在 Windows 上开发、CI 跑 Linux。本机 core.autocrlf=true 时
+# 工作区是 CRLF、blob 是 LF——任何按**工作区字节**算哈希、或把源文件原文
+# 内嵌进产物的脚本，都会和 Linux CI 对不上（2026-11-02 人格仓踩过）。
+* text=auto eol=lf
+
+# 人格文件也是纯文本，明确写一遍，别让上面的规则顺序产生歧义
 personas/** text eol=lf
+
+# 二进制别碰
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+

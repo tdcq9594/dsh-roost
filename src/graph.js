@@ -180,6 +180,30 @@ export function createGraph({ file, log = () => {} } = {}) {
     return Number(r.lastInsertRowid);
   }
 
+  /**
+   * 查实体 id，**不建新的**。找不到返回 0。
+   *
+   * 关边 / 删边用：`ensureEntity` 会顺手插一条实体，为了关一条边而造出
+   * 两条孤儿实体纯属垃圾数据。命中规则和 `ensureEntity` 一致（先精确 key，
+   * 再按别名反查），只是少了「没有就插」这一步。
+   */
+  function findEntityId(name, chatId = '') {
+    const d = open();
+    if (!d) return 0;
+    const key = normKey(String(name ?? '').trim().slice(0, 60));
+    if (!key) return 0;
+    try {
+      const hit = d.prepare('SELECT id FROM entity WHERE key=? AND chat_id=?').get(key, chatId);
+      if (hit) return Number(hit.id);
+      const byAlias = d
+        .prepare('SELECT id FROM entity WHERE aliases_json LIKE ? AND chat_id=?')
+        .get(`%"${key}"%`, chatId);
+      return byAlias ? Number(byAlias.id) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
   function addEpisode({ at = Date.now(), chatId = '', text = '', journalId = null } = {}) {
     const d = open();
     if (!d) return 0;
@@ -226,23 +250,41 @@ export function createGraph({ file, log = () => {} } = {}) {
   /**
    * 关掉一条边（约定办完了、关系结束了）。
    * 不传 dst 就把这组 (src, rel) 的活边全关。
+   *
+   * `aliases` 一起关：换机器人之后「这条约定」横跨好几个 openid，
+   * 只关当前键的话，旧键那条活边还能被别名读出来——约定永远办不完。
    */
-  function closeEdge({ src, rel, dst = '', at = Date.now(), chatId = '' } = {}) {
+  function closeEdge({ src, rel, dst = '', at = Date.now(), chatId = '', aliases = [] } = {}) {
     const d = open();
     if (!d) return 0;
     const t = Number(at) || Date.now();
-    const sid = ensureEntity(src, { chatId, at: t });
-    if (!sid) return 0;
     const r0 = String(rel ?? '').trim();
-    let r;
-    if (dst) {
-      const did = ensureEntity(dst, { chatId, at: t });
-      if (!did) return 0;
-      r = d.prepare('UPDATE edge SET valid_to=? WHERE src_id=? AND rel=? AND dst_id=? AND valid_to IS NULL').run(t, sid, r0, did);
-    } else {
-      r = d.prepare('UPDATE edge SET valid_to=? WHERE src_id=? AND rel=? AND valid_to IS NULL').run(t, sid, r0);
+    const keys = chatKeys(chatId, aliases);
+    /** 空 chatId = 不分会话，和 `suppressEdge` 的全局语义一致 */
+    const scopes = keys.length ? keys : [''];
+    let n = 0;
+    for (const key of scopes) {
+      /**
+       * 实体是**按会话隔离**的（`entity(key, chat_id)` 唯一），所以每个键都要
+       * 各自查一遍 id。用同一个 id 去关别的键的边，`changes` 恒为 0。
+       */
+      const sid = findEntityId(src, key);
+      if (!sid) continue;
+      if (dst) {
+        const did = findEntityId(dst, key);
+        if (!did) continue;
+        n += Number(
+          d
+            .prepare('UPDATE edge SET valid_to=? WHERE src_id=? AND rel=? AND dst_id=? AND valid_to IS NULL')
+            .run(t, sid, r0, did).changes || 0,
+        );
+      } else {
+        n += Number(
+          d.prepare('UPDATE edge SET valid_to=? WHERE src_id=? AND rel=? AND valid_to IS NULL').run(t, sid, r0).changes || 0,
+        );
+      }
     }
-    return Number(r.changes || 0);
+    return n;
   }
 
   /**
@@ -265,7 +307,7 @@ export function createGraph({ file, log = () => {} } = {}) {
    * @param {string} [o.why] 为什么删（面板上显示，省得以后想不起）
    * @returns {{ok:boolean, removed:number, reason?:string}}
    */
-  function suppressEdge({ src, rel, dst, chatId = '', why = '', at = Date.now() } = {}) {
+  function suppressEdge({ src, rel, dst, chatId = '', why = '', at = Date.now(), aliases = [] } = {}) {
     const d = open();
     if (!d) return { ok: false, removed: 0, reason: '图谱没启用' };
     const s = String(src ?? '').trim();
@@ -277,6 +319,14 @@ export function createGraph({ file, log = () => {} } = {}) {
     const sk = normKey(s);
     const ok = normKey(o);
     const cid = String(chatId ?? '');
+    /**
+     * 删边要覆盖**所有别名键**，墓碑只立一条（立在当前键上）。
+     *
+     * 只删当前键的话：读路径带别名把旧键的边读出来了（面板看得见），
+     * 用户点「删掉这条」→ `removed: 0` → 一刷新它还在。
+     * 墓碑不用每个键都立一条：`isSuppressed` 已经会看别名键。
+     */
+    const keys = chatKeys(chatId, aliases);
 
     let removed = 0;
     try {
@@ -287,14 +337,28 @@ export function createGraph({ file, log = () => {} } = {}) {
        * `ensureEntity` 会顺手把不存在的实体插进去——为了删一条边而造出
        * 两条实体，纯属垃圾。这里直接 join 名字。
        */
-      removed = Number(
-        d
-          .prepare(
-            `DELETE FROM edge WHERE rel=? AND src_id IN (SELECT id FROM entity WHERE key=?)
-             AND dst_id IN (SELECT id FROM entity WHERE key=?) AND (?='' OR chat_id=?)`,
-          )
-          .run(r, sk, ok, cid, cid).changes || 0,
+      const del = d.prepare(
+        `DELETE FROM edge WHERE rel=? AND src_id IN (SELECT id FROM entity WHERE key=?)
+         AND dst_id IN (SELECT id FROM entity WHERE key=?) AND chat_id=?`,
       );
+      if (!keys.length) {
+        /**
+         * `chatId` 空 = **全局屏蔽**（面板「这条关系不对，所有会话都别写」）。
+         * 这时候删的是**所有会话**的边，不是只删 `chat_id=''` 那几条——
+         * 旧实现靠 `(?='' OR chat_id=?)` 做到这点，改成按键循环之后
+         * 必须显式保留，否则「全局删除」会变成「几乎什么都没删」。
+         */
+        removed = Number(
+          d
+            .prepare(
+              `DELETE FROM edge WHERE rel=? AND src_id IN (SELECT id FROM entity WHERE key=?)
+               AND dst_id IN (SELECT id FROM entity WHERE key=?)`,
+            )
+            .run(r, sk, ok).changes || 0,
+        );
+      } else {
+        for (const key of keys) removed += Number(del.run(r, sk, ok, key).changes || 0);
+      }
       d.prepare(
         `INSERT INTO suppress(src_key, rel, dst_key, chat_id, at, why) VALUES (?,?,?,?,?,?)
          ON CONFLICT(src_key, rel, dst_key, chat_id)
@@ -343,7 +407,7 @@ export function createGraph({ file, log = () => {} } = {}) {
    *
    * @returns {boolean}
    */
-  function isSuppressed({ src, rel, dst, chatId = '' } = {}) {
+  function isSuppressed({ src, rel, dst, chatId = '', aliases = [] } = {}) {
     const d = open();
     if (!d) return false;
     const sk = normKey(src);
@@ -351,12 +415,17 @@ export function createGraph({ file, log = () => {} } = {}) {
     const ok = normKey(dst);
     if (!sk || !r || !ok) return false;
     try {
+      /**
+       * 别名键也看：墓碑可能立在换机器人之前的旧键上。
+       * 不看的话，旧键屏蔽过的关系会被巩固原样写回来。
+       */
+      const keys = chatKeys(chatId, aliases);
       const hit = d
         .prepare(
           `SELECT 1 FROM suppress WHERE src_key=? AND rel=? AND dst_key=?
-           AND (chat_id='' OR chat_id=?) LIMIT 1`,
+           AND (chat_id='' OR chat_id IN (${keys.map(() => '?').join(',') || "''"})) LIMIT 1`,
         )
-        .get(sk, r, ok, String(chatId ?? ''));
+        .get(sk, r, ok, ...keys);
       return Boolean(hit);
     } catch {
       return false;
@@ -392,45 +461,71 @@ export function createGraph({ file, log = () => {} } = {}) {
     JOIN entity s ON s.id = e.src_id
     JOIN entity t ON t.id = e.dst_id
   `;
+  /**
+   * `chat_id` 的过滤片段：`(e.chat_id IN (?,?) OR e.chat_id='')`。
+   *
+   * `aliases` 是换机器人之后的备用键（号码 + 该号码名下的所有 openid）。
+   * 图谱按会话隔离，不带别名的话旧边读不到——「她记得以前」就成了空话。
+   * 跨群（`chat_id=''`）那一支保持原样，不受影响。
+   *
+   * @returns {{sql: string, args: string[]}} 没有 chatId 时返回空片段
+   */
+  /**
+   * 当前键 + 别名，去重、去空、当前键排第一。
+   *
+   * 读路径和写路径（关边 / 删边）都要用同一份。写路径漏掉它，
+   * 就会出现「读得到、删不掉」——用户说「这条关系不对」，删完一刷新还在。
+   */
+  function chatKeys(chatId, aliases) {
+    const keys = [];
+    for (const k of [chatId, ...(Array.isArray(aliases) ? aliases : [])]) {
+      const v = String(k ?? '').trim();
+      if (v && !keys.includes(v)) keys.push(v);
+    }
+    return keys;
+  }
+
+  function chatScope(chatId, aliases, col = 'e.chat_id') {
+    const keys = chatKeys(chatId, aliases);
+    if (!keys.length) return { sql: '', args: [] };
+    return { sql: ` AND (${col} IN (${keys.map(() => '?').join(',')}) OR ${col}='')`, args: keys };
+  }
+
   /** 现在的状态：只要活边。`chatId` 给定时包含跨群（chat_id=''）的边 */
-  function nowEdges({ chatId = '', limit = 50 } = {}) {
+  function nowEdges({ chatId = '', limit = 50, aliases = [] } = {}) {
     const d = open();
     if (!d) return [];
-    const sql = chatId
-      ? `${SELECT_EDGE} WHERE e.valid_to IS NULL AND (e.chat_id=? OR e.chat_id='') ORDER BY e.valid_from DESC LIMIT ?`
-      : `${SELECT_EDGE} WHERE e.valid_to IS NULL ORDER BY e.valid_from DESC LIMIT ?`;
-    return d.prepare(sql).all(...(chatId ? [chatId, limit] : [limit])).map(edgeView);
+    const scope = chatScope(chatId, aliases);
+    const sql = `${SELECT_EDGE} WHERE e.valid_to IS NULL${scope.sql} ORDER BY e.valid_from DESC LIMIT ?`;
+    return d.prepare(sql).all(...scope.args, limit).map(edgeView);
   }
 
   /** 某个时刻的状态（"九月住哪"）。双时态的第二个维度 */
-  function edgesAsOf(ts, { chatId = '', limit = 50 } = {}) {
+  function edgesAsOf(ts, { chatId = '', limit = 50, aliases = [] } = {}) {
     const d = open();
     if (!d) return [];
     const t = Number(ts) || Date.now();
-    const sql = chatId
-      ? `${SELECT_EDGE} WHERE e.valid_from<=? AND (e.valid_to IS NULL OR e.valid_to>?) AND (e.chat_id=? OR e.chat_id='') ORDER BY e.valid_from DESC LIMIT ?`
-      : `${SELECT_EDGE} WHERE e.valid_from<=? AND (e.valid_to IS NULL OR e.valid_to>?) ORDER BY e.valid_from DESC LIMIT ?`;
-    return d.prepare(sql).all(...(chatId ? [t, t, chatId, limit] : [t, t, limit])).map(edgeView);
+    const scope = chatScope(chatId, aliases);
+    const sql = `${SELECT_EDGE} WHERE e.valid_from<=? AND (e.valid_to IS NULL OR e.valid_to>?)${scope.sql} ORDER BY e.valid_from DESC LIMIT ?`;
+    return d.prepare(sql).all(t, t, ...scope.args, limit).map(edgeView);
   }
 
   /** 已经结束的边（想看"改过什么主意"时用） */
-  function endedEdges({ chatId = '', limit = 50 } = {}) {
+  function endedEdges({ chatId = '', limit = 50, aliases = [] } = {}) {
     const d = open();
     if (!d) return [];
-    const sql = chatId
-      ? `${SELECT_EDGE} WHERE e.valid_to IS NOT NULL AND (e.chat_id=? OR e.chat_id='') ORDER BY e.valid_to DESC LIMIT ?`
-      : `${SELECT_EDGE} WHERE e.valid_to IS NOT NULL ORDER BY e.valid_to DESC LIMIT ?`;
-    return d.prepare(sql).all(...(chatId ? [chatId, limit] : [limit])).map(edgeView);
+    const scope = chatScope(chatId, aliases);
+    const sql = `${SELECT_EDGE} WHERE e.valid_to IS NOT NULL${scope.sql} ORDER BY e.valid_to DESC LIMIT ?`;
+    return d.prepare(sql).all(...scope.args, limit).map(edgeView);
   }
 
-  function entities({ chatId = '', limit = 50 } = {}) {
+  function entities({ chatId = '', limit = 50, aliases = [] } = {}) {
     const d = open();
     if (!d) return [];
-    const sql = chatId
-      ? 'SELECT * FROM entity WHERE chat_id=? OR chat_id=\'\' ORDER BY last_seen DESC LIMIT ?'
-      : 'SELECT * FROM entity ORDER BY last_seen DESC LIMIT ?';
+    const scope = chatScope(chatId, aliases, 'chat_id');
+    const sql = `SELECT * FROM entity WHERE 1=1${scope.sql} ORDER BY last_seen DESC LIMIT ?`;
     return d.prepare(sql)
-      .all(...(chatId ? [chatId, limit] : [limit]))
+      .all(...scope.args, limit)
       .map((r) => ({
         id: Number(r.id),
         name: String(r.name),
@@ -454,9 +549,9 @@ export function createGraph({ file, log = () => {} } = {}) {
    * 为什么不把历史边一起给：那是查档案的活，不是聊天的活，
    * 给了反而让她把"以前住杭州"当"现在住杭州"说出去。
    */
-  function text({ chatId = '', max = 300, limit = 10 } = {}) {
+  function text({ chatId = '', max = 300, limit = 10, aliases = [] } = {}) {
     if (!enabled()) return '';
-    const rows = nowEdges({ chatId, limit });
+    const rows = nowEdges({ chatId, limit, aliases });
     if (!rows.length) return '';
     const lines = rows.map((e) => `${e.src}—${e.rel}→${e.dst}`);
     let out = '';
@@ -476,26 +571,20 @@ export function createGraph({ file, log = () => {} } = {}) {
    * 走 `episode.journal_id` 反查，**不改表结构**——episode 本来就记着来源日记。
    * （更准的做法是 edge 直接存 journal_id，但那要迁移；先用现成的。）
    */
-  function linkedJournalIds(entityName, { chatId = '', limit = 20 } = {}) {
+  function linkedJournalIds(entityName, { chatId = '', limit = 20, aliases = [] } = {}) {
     const d = open();
     if (!d) return [];
     const key = normKey(entityName);
     if (!key) return [];
     try {
-      const sql = chatId
-        ? `SELECT DISTINCT e.journal_id AS jid
+      const scope = chatScope(chatId, aliases, 'g.chat_id');
+      const sql = `SELECT DISTINCT e.journal_id AS jid
            FROM entity n
            JOIN edge g ON (g.src_id = n.id OR g.dst_id = n.id)
            JOIN episode e ON e.id = g.episode_id
-           WHERE n.key = ? AND e.journal_id IS NOT NULL AND (g.chat_id = ? OR g.chat_id = '')
-           LIMIT ?`
-        : `SELECT DISTINCT e.journal_id AS jid
-           FROM entity n
-           JOIN edge g ON (g.src_id = n.id OR g.dst_id = n.id)
-           JOIN episode e ON e.id = g.episode_id
-           WHERE n.key = ? AND e.journal_id IS NOT NULL
+           WHERE n.key = ? AND e.journal_id IS NOT NULL${scope.sql}
            LIMIT ?`;
-      const rows = d.prepare(sql).all(...(chatId ? [key, chatId, limit] : [key, limit]));
+      const rows = d.prepare(sql).all(key, ...scope.args, limit);
       return rows.map((r) => String(r.jid)).filter(Boolean);
     } catch (e) {
       log(`实体反查日记失败：${e.message}`);
@@ -504,17 +593,28 @@ export function createGraph({ file, log = () => {} } = {}) {
   }
 
   /** 这条 (主语, 关系) 现在有没有活边。给"改主意"的护栏用 */
-  function hasActive(src, rel, { chatId = '' } = {}) {
+  /**
+   * 这组 (src, rel) 还有没有活边。
+   *
+   * `aliases` 一起看：换机器人之后旧活边在旧键下，只看当前键会判成「没有」，
+   * 于是 `op='update'` 不去关旧边，新边加上去 → 带别名读出来**两个答案**。
+   */
+  function hasActive(src, rel, { chatId = '', aliases = [] } = {}) {
     const d = open();
     if (!d) return false;
     const r0 = String(rel ?? '').trim();
     if (!src || !r0) return false;
-    const sid = ensureEntity(src, { chatId, at: Date.now() });
-    if (!sid) return false;
-    const row = d
-      .prepare('SELECT id FROM edge WHERE src_id=? AND rel=? AND valid_to IS NULL LIMIT 1')
-      .get(sid, r0);
-    return Boolean(row);
+    const keys = chatKeys(chatId, aliases);
+    for (const key of keys.length ? keys : ['']) {
+      /** 用查找而不是 `ensureEntity`：问一句「有没有」不该顺手造实体 */
+      const sid = findEntityId(src, key);
+      if (!sid) continue;
+      const row = d
+        .prepare('SELECT id FROM edge WHERE src_id=? AND rel=? AND valid_to IS NULL LIMIT 1')
+        .get(sid, r0);
+      if (row) return true;
+    }
+    return false;
   }
 
   function stats() {
@@ -528,6 +628,131 @@ export function createGraph({ file, log = () => {} } = {}) {
       ended: one('SELECT COUNT(*) c FROM edge WHERE valid_to IS NOT NULL'),
       episodes: one('SELECT COUNT(*) c FROM episode'),
     };
+  }
+
+  /**
+   * 按会话统计（「账号迁移」页扫描用）。只读。
+   *
+   * `edges` 只数**现在还成立的**边（`valid_to IS NULL`），和 `stats()` 同口径；
+   * 结束掉的边算进去会让「这个键还有没有记忆」看起来虚高。
+   */
+  function scanChats() {
+    const d = open();
+    if (!d) return [];
+    const out = new Map();
+    const bump = (col, sql) => {
+      for (const r of d.prepare(sql).all()) {
+        const k = String(r.chat_id || '');
+        if (!k) continue;
+        const e = out.get(k) || { chatId: k, edges: 0, episodes: 0 };
+        e[col] = Number(r.c || 0);
+        out.set(k, e);
+      }
+    };
+    bump('edges', 'SELECT chat_id, COUNT(*) c FROM edge WHERE valid_to IS NULL GROUP BY chat_id');
+    bump('episodes', 'SELECT chat_id, COUNT(*) c FROM episode GROUP BY chat_id');
+    return [...out.values()];
+  }
+
+  /**
+   * 把一批旧键的图谱痕迹**整体搬**到号码键下（一键改写用），然后旧键不再有数据。
+   *
+   * 难点全在唯一约束上，不能一句 `UPDATE ... SET chat_id=?` 了事：
+   *   · `entity` 有 `UNIQUE(key, chat_id)` —— 目标键下已有同名实体时要合并，
+   *     并把引用旧实体 id 的边重定向，不能撞约束。
+   *   · `edge` 有 `edge_alive` 部分唯一索引 `(src_id, rel, dst_id) WHERE valid_to IS NULL`
+   *     —— 合并实体后可能产生重复活边，要先去重。
+   *   · `suppress` 也有唯一索引，同组合的墓碑只留一条。
+   *
+   * 整个流程一个事务：中途任何一步失败全部回滚，不能留下「改了一半」的图谱。
+   */
+  function rekey(fromKeys, toKey) {
+    const to = String(toKey ?? '').trim();
+    const keys = [
+      ...new Set((Array.isArray(fromKeys) ? fromKeys : []).map((k) => String(k ?? '').trim()).filter(Boolean)),
+    ].filter((k) => k !== to);
+    const d = open();
+    const zero = { entities: 0, edges: 0, episodes: 0, suppress: 0, mergedEntities: 0 };
+    if (!to || !keys.length || !d) return zero;
+    const marks = keys.map(() => '?').join(',');
+
+    d.exec('BEGIN');
+    try {
+      /** 1. 旧实体 → 目标键下同名实体的 id；没有同名的就原地改归属 */
+      const idMap = new Map();
+      const dropEntities = new Set();
+      const oldEnts = d.prepare(`SELECT id, key FROM entity WHERE chat_id IN (${marks})`).all(...keys);
+      for (const e of oldEnts) {
+        const hit = d.prepare('SELECT id FROM entity WHERE key=? AND chat_id=?').get(e.key, to);
+        if (hit) {
+          idMap.set(e.id, hit.id);
+          dropEntities.add(e.id);
+        } else {
+          idMap.set(e.id, e.id);
+        }
+      }
+
+      /** 2. 目标键下已有的活边，用来判重 */
+      const alive = new Set();
+      for (const r of d.prepare('SELECT src_id, rel, dst_id FROM edge WHERE chat_id=? AND valid_to IS NULL').all(to)) {
+        alive.add(`${r.src_id}\u0000${r.rel}\u0000${r.dst_id}`);
+      }
+
+      /** 3. 旧边：算好新 id，重复的活边删掉，其余改归属 */
+      const delEdge = d.prepare('DELETE FROM edge WHERE id=?');
+      const updEdge = d.prepare('UPDATE edge SET src_id=?, dst_id=?, chat_id=? WHERE id=?');
+      let edges = 0;
+      const oldEdges = d.prepare(`SELECT * FROM edge WHERE chat_id IN (${marks})`).all(...keys);
+      for (const e of oldEdges) {
+        const ns = idMap.get(e.src_id) ?? e.src_id;
+        const nd = idMap.get(e.dst_id) ?? e.dst_id;
+        const k = `${ns}\u0000${e.rel}\u0000${nd}`;
+        if (e.valid_to == null && alive.has(k)) {
+          /** 目标键下已经有一条一模一样的活边了，旧键这条是重复 */
+          delEdge.run(e.id);
+          continue;
+        }
+        updEdge.run(ns, nd, to, e.id);
+        if (e.valid_to == null) alive.add(k);
+        edges += 1;
+      }
+
+      /** 4. 删掉被合并掉的旧实体，剩下的改归属 */
+      const delEnt = d.prepare('DELETE FROM entity WHERE id=?');
+      for (const id of dropEntities) delEnt.run(id);
+      const updEnt = d.prepare('UPDATE entity SET chat_id=? WHERE id=?');
+      let entities = 0;
+      for (const e of oldEnts) {
+        if (dropEntities.has(e.id)) continue;
+        entities += Number(updEnt.run(to, e.id).changes || 0);
+      }
+
+      /** 5. 原始片段直接改归属（引用的是行 id，不受实体合并影响） */
+      const episodes = Number(
+        d.prepare(`UPDATE episode SET chat_id=? WHERE chat_id IN (${marks})`).run(to, ...keys).changes || 0,
+      );
+
+      /** 6. 墓碑：目标键已有同组合就保留那条，删掉旧键的重复 */
+      let suppress = 0;
+      const oldSup = d.prepare(`SELECT * FROM suppress WHERE chat_id IN (${marks})`).all(...keys);
+      for (const s of oldSup) {
+        const dup = d
+          .prepare('SELECT id FROM suppress WHERE src_key=? AND rel=? AND dst_key=? AND chat_id=?')
+          .get(s.src_key, s.rel, s.dst_key, to);
+        if (dup) {
+          d.prepare('DELETE FROM suppress WHERE id=?').run(s.id);
+          continue;
+        }
+        d.prepare('UPDATE suppress SET chat_id=? WHERE id=?').run(to, s.id);
+        suppress += 1;
+      }
+
+      d.exec('COMMIT');
+      return { entities, edges, episodes, suppress, mergedEntities: dropEntities.size };
+    } catch (e) {
+      try { d.exec('ROLLBACK'); } catch {}
+      throw e;
+    }
   }
 
   /**
@@ -613,6 +838,10 @@ export function createGraph({ file, log = () => {} } = {}) {
     hasActive,
     text,
     stats,
+    /** 按会话统计（「账号迁移」页扫描用），只读 */
+    scanChats,
+    /** 一键改写：把一批旧键的图谱痕迹整体搬到号码键下（事务） */
+    rekey,
     reset,
     isFunctional: (rel) => FUNCTIONAL.test(String(rel ?? '')),
     close() {

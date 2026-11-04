@@ -219,6 +219,84 @@ test('用量：/usage 返回汇总结构，空库也不报错', async () => {
   off?.();
 });
 
+/* ---------------- 账号迁移（路由层：真的接上了才算） ---------------- */
+
+const OLD_OPENID = 'AAAA1111BBBB2222CCCC3333DDDD4444';
+
+test('账号迁移：/account/scan 把记忆里的旧 openid 列出来', async () => {
+  const { call, off } = await bootHost({}, {
+    memory: { global: ['主人住在杭州'], chats: { [OLD_OPENID]: ['这个群叫我小离'] } },
+    sessions: { [OLD_OPENID]: { sessionId: 's1', title: '倦飞之鸟', kind: 'c2c' } },
+    journal: [{ chatId: OLD_OPENID, text: '今天聊了搬家', role: 'user', kind: 'chat', at: Date.now() }],
+  });
+  const r = await call('/account/scan');
+  assert.equal(r.status, 200);
+  const hit = r.json.items.find((x) => x.key === OLD_OPENID);
+  assert.ok(hit, `扫描结果里没有 ${OLD_OPENID}：${JSON.stringify(r.json.items.map((x) => x.key))}`);
+  assert.equal(hit.facts, 1, 'facts 条数要和 memory.json 对得上');
+  assert.equal(hit.journal, 1, 'journal 条数要和库里对得上');
+  assert.equal(hit.kind, 'c2c', '类型从 sessions.json 来');
+  assert.equal(hit.title, '倦飞之鸟');
+  /**
+   * 测试环境没有 roost 在跑，所以 `roost.ok` 必须是 false ——
+   * 但**列表照样要有**。这一条守的是「roost 挂了不能白屏」。
+   */
+  assert.equal(r.json.roost.ok, false);
+  off?.();
+});
+
+test('账号迁移：/account/scan 空库也返回 200 + 空列表（新装用户的常态）', async () => {
+  const { call, off } = await bootHost();
+  const r = await call('/account/scan');
+  assert.equal(r.status, 200, 'roost 挂了也不能让扫描接口 500');
+  assert.equal(r.json.ok, true);
+  assert.deepEqual(r.json.items, []);
+  /**
+   * 空列表时**不发反查请求**，所以 `roost.ok` 是 true——它只说明
+   * 「这一批没有需要查的」，不说明 roost 活着。
+   * 界面要判断「能不能绑定」得看 `/account/bots`，那条是真打 roost。
+   */
+  assert.equal(r.json.roost.ok, true);
+  const b = await call('/account/bots');
+  assert.equal(b.json.ok, false, '/account/bots 才是「roost 到底通不通」的信号');
+  off?.();
+});
+
+test('账号迁移：/account/bound 和 /account/bots 连不上 roost 时给原因，不 500', async () => {
+  const { call, off } = await bootHost();
+  for (const p of ['/account/bound', '/account/bots']) {
+    const r = await call(p);
+    assert.equal(r.status, 200, `${p} 不该 500`);
+    assert.equal(r.json.ok, false);
+    assert.ok(r.json.error, `${p} 要说清为什么`);
+  }
+  off?.();
+});
+
+test('账号迁移：/account/bind 号码不合法 → 400，且不往下打请求', async () => {
+  const { call, off } = await bootHost();
+  const r = await call('/account/bind', {
+    method: 'POST',
+    body: { kind: 'user', uin: '01234', openid: OLD_OPENID },
+  });
+  assert.equal(r.status, 400);
+  assert.equal(r.json.code, 'INVALID');
+  off?.();
+});
+
+test('账号迁移：/account/attach 走的是同一个绑定实现（语义是追加）', async () => {
+  const { call, off } = await bootHost();
+  const r = await call('/account/attach', {
+    method: 'POST',
+    body: { kind: 'group', uin: '763366431', openid: OLD_OPENID },
+  });
+  /** 没 roost 可连 → 400 + 原因；关键是**路由通**、参数过了校验 */
+  assert.equal(r.status, 400);
+  assert.ok(r.json.error);
+  assert.notEqual(r.json.code, 'INVALID', '号码和 openid 都合法，不该被判非法');
+  off?.();
+});
+
 /* ---------------- 前后端对齐（结构性检查） ---------------- */
 
 /**
@@ -644,4 +722,29 @@ test('配置：GET 读磁盘；旧版本号 409；成功后回新版本号', asy
   } finally {
     h.off?.();
   }
+});
+
+test('路由：账号迁移的四项扩展接口都注册了，且预览是只读的', async () => {
+  const { routes, call, off } = await bootHost();
+  for (const p of [
+    '/roost/api/account/people',
+    '/roost/api/account/suggest',
+    '/roost/api/account/rewrite-plan',
+    '/roost/api/account/backups',
+    '/roost/api/tts/edge-install',
+  ]) {
+    assert.ok(routes.has(p), `缺路由 ${p}`);
+  }
+
+  /** 预览只读：拿不到绑定表时返回 ok:false，但绝不能抛 500 或写文件 */
+  const r = await call('/account/rewrite-plan');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, false, '没连上 Roost 时预览应该老实说读不到身份表');
+  assert.ok(r.json.error);
+
+  /** 没有确认词，执行必须被拒 */
+  const bad = await call('/account/rewrite', { method: 'POST', body: { confirm: '' } });
+  assert.equal(bad.json.code, 'CONFIRM_REQUIRED', '公开路由不能绕过二次确认');
+
+  off?.();
 });

@@ -77,18 +77,49 @@ export function speakerTag(payload, chat) {
     .trim()
     .slice(0, 24) || id.slice(0, 6);
 
-  return `[${name} (${id})] `;
+  /**
+   * **有 QQ号 时号码排在前面**：`[小明 (QQ 10001 / CBF1E6B3…)] `。
+   *
+   * openid 是每个 AppID 一套的，换机器人就全变；号码不会。
+   * 两个都给，模型才会「有号码按号码认人，没有才退回 openid」——
+   * 只给 openid 的话，换一次机器人它就把老朋友当陌生人了。
+   * openid 仍然保留（@ 人只认它，见上面的注释）。
+   */
+  const uin = String(payload?.sender?.uin ?? '').replace(/\D/g, '');
+  return `[${name} (${uin ? `QQ ${uin} / ${id}` : id})] `;
 }
 
 /** 会话标识：群和私聊要分开，同一个 openid 在两种场景下不是一回事 */
 export function chatOf(payload) {
   const chatId = String(payload?.chat?.chatId ?? '');
   const kind = payload?.chat?.kind === 'c2c' ? 'c2c' : 'group';
+
+  /**
+   * 身份：QQ号 / 群号 + 读旧记忆的备用键。
+   *
+   * `uin` 是**说话的人**（私聊时就是对方），`groupUin` 是群号。
+   * `aliases` 是「这个号码名下所有 openid」——换过机器人之后，
+   * 旧记忆的键是另一个 openid，只有靠它才读得到。
+   * 群聊给群的别名、私聊给人的别名，**两组不能混**（混了群会话会读到私聊记忆）。
+   *
+   * `identityId` 是跨机器人稳定的主键：`g:763366431` / `u:10001`。
+   * 没绑号码时是空串——**空串不等于「同一个人」**，不能拿它当键用。
+   */
+  const uin = String(payload?.chat?.uin ?? '').replace(/\D/g, '');
+  const groupUin = String(payload?.chat?.groupUin ?? '').replace(/\D/g, '');
+  const aliases = (Array.isArray(payload?.chat?.aliases) ? payload.chat.aliases : [])
+    .map((x) => String(x ?? '').trim())
+    .filter((x) => x && x !== chatId);
+
   return {
     kind,
     chatId,
     groupId: String(payload?.chat?.groupId ?? ''),
     name: String(payload?.chat?.name ?? ''),
     preset: kind === 'c2c' ? 'roost-private' : 'roost-social',
+    uin,
+    groupUin,
+    aliases,
+    identityId: kind === 'c2c' ? (uin ? `u:${uin}` : '') : groupUin ? `g:${groupUin}` : '',
   };
 }

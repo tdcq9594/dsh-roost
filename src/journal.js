@@ -433,11 +433,30 @@ function createSqliteStore(file, log) {
       return n;
     },
 
-    /** 抹掉某个会话的全部正文（`clearChat` 的落点）：行留着，时间线不断 */
-    clearChat(chatId) {
+    /**
+     * 抹掉某个会话的全部正文（`clearChat` 的落点）：行留着，时间线不断。
+     *
+     * `aliases` 一起抹：换机器人之后「这个群」横跨好几个 openid，
+     * 只抹当前键的话，旧键那些行还能被别名读出来——用户以为清干净了，
+     * 下一条消息她又想起来了。
+     */
+    clearChat(chatId, aliases = []) {
       const d = open();
       if (!d) return 0;
-      const ids = d.prepare('SELECT id FROM journal WHERE chat_id=?').all(chatId).map((r) => String(r.id));
+      const keys = chatKeys(chatId, aliases);
+      if (!keys.length) return 0;
+      /**
+       * 已经抹过的行不再算一次。
+       *
+       * 不排掉的话，同一个会话清第二遍会返回「又抹了 N 条」——
+       * 用户看到这个数字会以为第一次没清干净。
+       * `ERASED`（`forget` 留下的占位符）同样跳过：正文早就没了，
+       * 再算一次只会让「忘掉 1 条」之后紧跟着「清空 2 条」。
+       */
+      const ids = d
+        .prepare(`SELECT id FROM journal WHERE chat_id IN (${marks(keys.length)}) AND text<>? AND text<>?`)
+        .all(...keys, CLEARED, ERASED)
+        .map((r) => String(r.id));
       if (!ids.length) return 0;
       /** 同 `erase`：正文、摘要、原文快照、向量一起清，索引只删不回填 */
       const upd = d.prepare(
@@ -485,13 +504,14 @@ function createSqliteStore(file, log) {
       return Boolean(changed);
     },
 
-    recent(chatId, n, kind = 'chat') {
+    recent(chatId, n, kind = 'chat', aliases = []) {
       const d = open();
       if (!d) return [];
-      const sql = chatId
-        ? 'SELECT * FROM journal WHERE chat_id=? AND kind=? ORDER BY at DESC LIMIT ?'
+      const keys = chatKeys(chatId, aliases);
+      const sql = keys.length
+        ? `SELECT * FROM journal WHERE chat_id IN (${marks(keys.length)}) AND kind=? ORDER BY at DESC LIMIT ?`
         : 'SELECT * FROM journal WHERE kind=? ORDER BY at DESC LIMIT ?';
-      const args = chatId ? [chatId, kind, n] : [kind, n];
+      const args = keys.length ? [...keys, kind, n] : [kind, n];
       return d.prepare(sql).all(...args).map(normRow);
     },
 
@@ -519,20 +539,65 @@ function createSqliteStore(file, log) {
      * 这类操作必须扫全库，否则超过窗口的旧记录既搜不到也删不掉。
      * 用户说「忘掉三个月前那件事」，实际没忘，是最不能接受的一种失败。
      */
-    listChat(chatId, limit = 500) {
+    listChat(chatId, limit = 500, aliases = []) {
       const d = open();
       if (!d) return [];
       const n = Number(limit);
       const all = !(n > 0);
-      const sql = chatId
-        ? `SELECT * FROM journal WHERE chat_id=? ORDER BY at DESC${all ? '' : ' LIMIT ?'}`
+      const keys = chatId ? chatKeys(chatId, aliases) : [];
+      const sql = keys.length
+        ? `SELECT * FROM journal WHERE chat_id IN (${marks(keys.length)}) ORDER BY at DESC${all ? '' : ' LIMIT ?'}`
         : `SELECT * FROM journal ORDER BY at DESC${all ? '' : ' LIMIT ?'}`;
-      const args = chatId ? (all ? [chatId] : [chatId, n]) : all ? [] : [n];
+      const args = keys.length ? (all ? keys : [...keys, n]) : all ? [] : [n];
       return d.prepare(sql).all(...args).map(normRow);
     },
 
+    /**
+     * 按会话统计条数。**只读**，不改任何东西。
+     *
+     * 给「账号迁移」页用：那一页要列出「库里有记忆、但认不出号码」的键。
+     * 不能靠 `listChat` 一个个试——键可能上千个，而且试不出来哪些键存在。
+     */
+    scanChats() {
+      const d = open();
+      if (!d) return [];
+      return d
+        .prepare('SELECT chat_id, COUNT(*) c FROM journal GROUP BY chat_id')
+        .all()
+        .map((r) => ({ chatId: String(r.chat_id || ''), journal: Number(r.c || 0) }))
+        .filter((x) => x.chatId);
+    },
+
+    /**
+     * 把一批旧键的行**整体改挂**到号码键下（一键改写用）。
+     *
+     * 只改 `chat_id`，行 id / 时间 / 正文 / 摘要 / 向量都不动。
+     * FTS 表索引的是 `(jid, tok)`，不含 chat_id，所以不用重建索引。
+     *
+     * 一个事务包住所有键：中途失败全部回滚，不能出现「改了一半」。
+     * 上层（`rewrite.js`）在调用前已经做过整目录备份，这里是第二道保险。
+     */
+    rekey(fromKeys, toKey) {
+      const to = String(toKey ?? '').trim();
+      const keys = [...new Set((Array.isArray(fromKeys) ? fromKeys : []).map((k) => String(k ?? '').trim()).filter(Boolean))]
+        .filter((k) => k !== to);
+      const d = open();
+      if (!to || !keys.length || !d) return 0;
+      const upd = d.prepare('UPDATE journal SET chat_id=? WHERE chat_id=?');
+      d.exec('BEGIN');
+      try {
+        let n = 0;
+        for (const k of keys) n += Number(upd.run(to, k).changes || 0);
+        d.exec('COMMIT');
+        return n;
+      } catch (e) {
+        try { d.exec('ROLLBACK'); } catch {}
+        throw e;
+      }
+    },
+
     /** FTS 检索：bm25 排序（越小越相关，所以 ORDER BY 直接升序） */
-    searchTerms(terms, { chatId = '', limit = 40, crossCritical = false } = {}) {
+    searchTerms(terms, { chatId = '', limit = 40, crossCritical = false, aliases = [] } = {}) {
       const d = open();
       if (!d) return [];
       const expr = matchExpr(terms);
@@ -550,11 +615,17 @@ function createSqliteStore(file, log) {
          */
         let where = 'journal_fts MATCH ?';
         const args = [expr];
-        if (chatId) {
+        /**
+         * 别名键也一起查：换过机器人之后，旧日记还在旧 `chat_id` 下面。
+         * 不带上的话 AI「主动想起来」时永远搜不到以前的事——
+         * 注入里有、检索里没有，是最难发现的一种半失效。
+         */
+        const keys = chatId ? chatKeys(chatId, aliases) : [];
+        if (keys.length) {
           where += crossCritical
-            ? " AND (j.chat_id=? OR j.chat_id='' OR j.level='critical')"
-            : ' AND j.chat_id=?';
-          args.push(chatId);
+            ? ` AND (j.chat_id IN (${marks(keys.length)}) OR j.chat_id='' OR j.level='critical')`
+            : ` AND j.chat_id IN (${marks(keys.length)})`;
+          args.push(...keys);
         }
         args.push(limit);
         return d
@@ -567,13 +638,14 @@ function createSqliteStore(file, log) {
       }
     },
 
-    withVec({ chatId = '', limit = 2000 } = {}) {
+    withVec({ chatId = '', limit = 2000, aliases = [] } = {}) {
       const d = open();
       if (!d) return [];
-      const sql = chatId
-        ? 'SELECT * FROM journal WHERE vec IS NOT NULL AND (chat_id=? OR chat_id=\'\') ORDER BY at DESC LIMIT ?'
+      const keys = chatId ? chatKeys(chatId, aliases) : [];
+      const sql = keys.length
+        ? `SELECT * FROM journal WHERE vec IS NOT NULL AND (chat_id IN (${marks(keys.length)}) OR chat_id='') ORDER BY at DESC LIMIT ?`
         : 'SELECT * FROM journal WHERE vec IS NOT NULL ORDER BY at DESC LIMIT ?';
-      return d.prepare(sql).all(...(chatId ? [chatId, limit] : [limit])).map(normRow);
+      return d.prepare(sql).all(...(keys.length ? [...keys, limit] : [limit])).map(normRow);
     },
 
     /** 还没有向量的条目（巩固时批量补算，白天不花这个钱） */
@@ -756,12 +828,21 @@ function createJsonlStore(file, log) {
     return rows;
   }
 
+  /**
+   * 全量重写 JSONL。
+   *
+   * **返回是否真的写成功**。以前吞掉异常只记一条日志，于是 `rekey()` 在
+   * 盘写不进去时照样 `return n`：内存说改好了、盘上没改，重启后旧键复活，
+   * 而一键改写那边报的是「成功」。
+   */
   function rewrite() {
     try {
       ensureDir(file);
       writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''), 'utf8');
+      return true;
     } catch (e) {
       log(`日记文件写不进去：${e.message}`);
+      return false;
     }
   }
 
@@ -839,11 +920,14 @@ function createJsonlStore(file, log) {
       return n;
     },
 
-    clearChat(chatId) {
+    clearChat(chatId, aliases = []) {
       load();
+      const keys = new Set(chatKeys(chatId, aliases));
       let n = 0;
       for (const r of rows) {
-        if (r.chatId !== chatId) continue;
+        if (!keys.has(r.chatId)) continue;
+        /** 同 SQLite 后端：已经抹过的（`forget` 的 ERASED 也算）不再算一次 */
+        if (r.text === CLEARED || r.text === ERASED) continue;
         r.text = CLEARED;
         r.digest = null;
         r.level = 'normal';
@@ -869,9 +953,10 @@ function createJsonlStore(file, log) {
       return true;
     },
 
-    recent(chatId, n, kind = 'chat') {
+    recent(chatId, n, kind = 'chat', aliases = []) {
+      const keys = chatKeys(chatId, aliases);
       return load()
-        .filter((r) => r.kind === kind && (!chatId || r.chatId === chatId))
+        .filter((r) => r.kind === kind && (!keys.length || keys.includes(r.chatId)))
         .sort((a, b) => b.at - a.at)
         .slice(0, n);
     },
@@ -883,23 +968,59 @@ function createJsonlStore(file, log) {
         .sort((a, b) => a.at - b.at);
     },
 
-    listChat(chatId, limit = 500) {
+    listChat(chatId, limit = 500, aliases = []) {
+      const keys = chatKeys(chatId, aliases);
       const rows = load()
-        .filter((r) => !chatId || r.chatId === chatId)
+        .filter((r) => !keys.length || keys.includes(r.chatId))
         .sort((a, b) => b.at - a.at);
       const n = Number(limit);
       // 同 SQLite 后端：0 / 负数 = 不限
       return n > 0 ? rows.slice(0, n) : rows;
     },
 
-    searchTerms(terms, { chatId = '', limit = 40, crossCritical = false } = {}) {
+    /** 同 SQLite 后端：按会话统计条数，只读 */
+    scanChats() {
+      const out = new Map();
+      for (const r of load()) {
+        const k = String(r.chatId || '');
+        if (!k) continue;
+        out.set(k, (out.get(k) || 0) + 1);
+      }
+      return [...out].map(([chatId, journal]) => ({ chatId, journal }));
+    },
+
+    /** 同 SQLite 后端：把一批旧键的行整体改挂到号码键下 */
+    rekey(fromKeys, toKey) {
+      const to = String(toKey ?? '').trim();
+      const keys = new Set(
+        (Array.isArray(fromKeys) ? fromKeys : []).map((k) => String(k ?? '').trim()).filter(Boolean),
+      );
+      keys.delete(to);
+      if (!to || !keys.size) return 0;
       load();
+      let n = 0;
+      for (const r of rows) {
+        if (!keys.has(String(r.chatId || ''))) continue;
+        r.chatId = to;
+        n += 1;
+      }
+      if (n) {
+        reindex();
+        /** 写盘失败要抛：调用方（一键改写）靠这个走自动回退，不能静默成功 */
+        if (!rewrite()) throw new Error('日记改挂之后写盘失败，改动没有落盘');
+      }
+      return n;
+    },
+
+    searchTerms(terms, { chatId = '', limit = 40, crossCritical = false, aliases = [] } = {}) {
+      load();
+      const keys = chatId ? chatKeys(chatId, aliases) : [];
       const hit = new Map(); // 下标 → 命中词数
       for (const t of terms) {
         for (const i of index.get(t) || []) {
           const r = rows[i];
-          // 跨群只放 critical 进来（身份事实），群内梗仍然拦住
-          if (chatId && r.chatId !== chatId && r.chatId !== '' && !(crossCritical && r.level === 'critical')) continue;
+          // 跨群只放 critical 进来（身份事实），群内梗仍然拦住；别名键等同于当前键
+          if (keys.length && !keys.includes(r.chatId) && r.chatId !== '' && !(crossCritical && r.level === 'critical')) continue;
           hit.set(i, (hit.get(i) || 0) + 1);
         }
       }
@@ -909,9 +1030,10 @@ function createJsonlStore(file, log) {
         .map(([i]) => rows[i]);
     },
 
-    withVec({ chatId = '', limit = 2000 } = {}) {
+    withVec({ chatId = '', limit = 2000, aliases = [] } = {}) {
+      const keys = chatId ? chatKeys(chatId, aliases) : [];
       return load()
-        .filter((r) => r.vec && (!chatId || r.chatId === chatId || r.chatId === ''))
+        .filter((r) => r.vec && (!keys.length || keys.includes(r.chatId) || r.chatId === ''))
         .sort((a, b) => b.at - a.at)
         .slice(0, limit);
     },
@@ -1043,6 +1165,45 @@ function requireChat(chatId, what = '日记操作') {
 }
 
 /**
+ * 「当前会话键 + 别名键」→ 去重后的键列表。
+ *
+ * 别名是换机器人之后唯一能读到旧日记的东西：openid 变了，旧记录还在旧
+ * `chat_id` 下面。这里只负责拼键，SQL / 数组过滤两种后端都用它，
+ * 免得两边各写一套、其中一边漏掉空值处理。
+ */
+function chatKeys(chatId, aliases) {
+  const out = [];
+  for (const k of [chatId, ...(Array.isArray(aliases) ? aliases : [])]) {
+    const s = String(k ?? '').trim();
+    if (s && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
+/** `[a,b]` → `'?,?'`，给 `IN (...)` 用 */
+function marks(n) {
+  return Array.from({ length: n }, () => '?').join(',');
+}
+
+/**
+ * 每个键**各取一段**，拼起来（去重和排序交给调用方）。
+ *
+ * 为什么不是「一次 `IN (...)` 取一段」：那样窗口是被所有键共用的，
+ * 活跃的新键会把旧键挤到窗口外。`top` / `digests` 都是「挑最重要的几条」，
+ * 被挤掉的恰好是最该出现的老记忆。
+ *
+ * `chatId` 为空且没有别名时**保持旧行为**（`take('')` = 不过滤 = 看全部）：
+ * 那是有意义的「全局视角」，不能悄悄变成空结果。
+ */
+function perKeyRows(chatId, aliases, take) {
+  const keys = chatKeys(chatId, aliases);
+  if (!keys.length) return take('');
+  const out = [];
+  for (const k of keys) for (const r of take(k)) out.push(r);
+  return out;
+}
+
+/**
  * @param {object} o
  * @param {string} o.file    sqlite 或 jsonl 的落盘路径
  * @param {object} [o.embed] createEmbedder() 的返回；没有就纯关键词
@@ -1140,12 +1301,38 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     },
 
     get: (id) => get().get(id),
-    recent: (chatId, n = 5, kind = 'chat') => get().recent(chatId, n, kind),
-    byDay: (day) => get().byDay(day),
 
-    /** 某个会话里"重要性×衰减+访问"最高的若干条（给注入用） */
-    top(chatId, { limit = 6, kinds = ['chat'], levels = ['critical', 'important'] } = {}) {
-      const rows = get().listChat(chatId, 400).filter((r) => kinds.includes(r.kind) && levels.includes(r.level));
+    /**
+     * `aliases` 是**换机器人之后**才有的东西：旧 openid 下的日记也该读得到。
+     *
+     * 注意这一层必须显式往下传——`host` 那边早就按四个参数在调了，
+     * 少传一层不会报错，只会让别名静默失效（最难发现的那种）。
+     */
+    recent: (chatId, n = 5, kind = 'chat', aliases = []) => get().recent(chatId, n, kind, aliases),
+    byDay: (day) => get().byDay(day),
+    /** 按会话统计条数（「账号迁移」页扫描用），只读 */
+    scanChats: () => get().scanChats(),
+    /** 一键改写：把一批旧键的行整体改挂到号码键下；两个后端都实现 */
+    rekey: (fromKeys, toKey) => get().rekey(fromKeys, toKey),
+
+    /**
+     * 某个会话里"重要性×衰减+访问"最高的若干条（给注入用）。
+     *
+     * **每个键各取一段，再合并。** 共用一个 400 行窗口是不行的：
+     * `listChat` 按 `at DESC` 取最新 400 条，迁移之后新键一两天就能攒满，
+     * 旧键那条 `important` 排在第 401 位被截掉——而且是在**按等级过滤之前**
+     * 就被截掉了，于是【记得比较深的】永远只有换机器人之后的事。
+     * 别名通常 2~5 个键，多查几次不值一提。
+     */
+    top(chatId, { limit = 6, kinds = ['chat'], levels = ['critical', 'important'], aliases = [] } = {}) {
+      const rows = [];
+      const seen = new Set();
+      for (const r of perKeyRows(chatId, aliases, (k) => get().listChat(k, 400))) {
+        if (seen.has(r.id)) continue;
+        seen.add(r.id);
+        if (!kinds.includes(r.kind) || !levels.includes(r.level)) continue;
+        rows.push(r);
+      }
       const t = now();
       return rows
         .map((r) => ({ ...r, score: scoreOf(r, t) }))
@@ -1159,11 +1346,14 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      * 被 `forget` / `clearChat` 抹掉的不返回：行还在库里（时间线连续），
      * 但它已经没有内容了，进【这几天】只会多一行占位符噪音。
      * 多取一截再切，免得抹掉几条之后摘要凭空少一半。
+     *
+     * **这里不需要按每个键各取窗口**（`top` 需要）：摘要按时间取最新的几条，
+     * 「这几天」本来就该是最近的——旧键那条一百天前的摘要，挤进来反而是错的。
      */
-    digests(chatId, limit = 5) {
+    digests(chatId, limit = 5, aliases = []) {
       const want = Math.max(1, Number(limit) || 5);
       return get()
-        .recent(chatId, want + 10, 'digest')
+        .recent(chatId, want + 10, 'digest', aliases)
         .filter((r) => r.text !== ERASED && r.text !== CLEARED)
         .slice(0, want);
     },
@@ -1180,7 +1370,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      *
      * @returns {Promise<Array>} 按相关度排序的日记（带 score/why）
      */
-    async search(query, { chatId = '', limit = 5, crossCritical = true, entityJournalIds = [] } = {}) {
+    async search(query, { chatId = '', limit = 5, crossCritical = true, entityJournalIds = [], aliases = [] } = {}) {
       const terms = queryTerms(query);
       const entIds = [...new Set((entityJournalIds || []).filter(Boolean))];
       // 有实体路也能搜（查询词为空但提到了某个人）
@@ -1188,7 +1378,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       const s = get();
 
       const kw = terms.length
-        ? s.searchTerms(terms, { chatId, limit: 40, crossCritical }).filter((r) => passesCoverage(terms, indexTerms(r.text)))
+        ? s.searchTerms(terms, { chatId, limit: 40, crossCritical, aliases }).filter((r) => passesCoverage(terms, indexTerms(r.text)))
         : [];
       const ranks = new Map();
       /**
@@ -1223,7 +1413,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         try {
           const qv = await embed.one(query);
           if (qv) {
-            const cands = s.withVec({ chatId });
+            const cands = s.withVec({ chatId, aliases });
             const scored = [];
             for (const r of cands) {
               const v = toVec(r.vec);
@@ -1323,7 +1513,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      * 那不是「忘了」，那是「原文忘了、结论还记得」，比不删更让人不安。
      * @returns {number} 抹掉几条
      */
-    forget({ chatId = '', word = '' } = {}) {
+    forget({ chatId = '', word = '', aliases = [] } = {}) {
       const w = String(word ?? '').trim();
       if (!w) return 0;
       const scope = requireChat(chatId, '忘掉关键词');
@@ -1343,12 +1533,19 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
        *
        * `scope` 必须是具体会话：传空串在 `listChat` 里等于「不过滤」，
        * 那句「忘掉小美」就会把**所有群**里带「小美」的日记一起抹了。
+       *
+       * 别名键一起扫：读的时候把旧键的行读出来了（面板看得见、注入里也有），
+       * 只抹当前键就会出现「说了忘掉、下一条又想起来了」。
+       * 这也是 `journal.js` 开头那句「实际没忘，是最不能接受的一种失败」
+       * 在别名机制下唯一正确的处理方式。
        */
       const ids = [];
-      for (const r of s.listChat(scope, 0)) {
-        if (r.kind !== 'chat' && r.kind !== 'digest') continue;
-        const hit = r.text.includes(w) || (terms.length && passesCoverage(terms, indexTerms(r.text)));
-        if (hit) ids.push(r.id);
+      for (const key of chatKeys(scope, aliases)) {
+        for (const r of s.listChat(key, 0)) {
+          if (r.kind !== 'chat' && r.kind !== 'digest') continue;
+          const hit = r.text.includes(w) || (terms.length && passesCoverage(terms, indexTerms(r.text)));
+          if (hit) ids.push(r.id);
+        }
       }
       /** 一次事务抹完；逐条 `update` 是 O(N²)（JSONL 每条重写整个文件） */
       return s.erase(ids);
@@ -1361,8 +1558,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      * 留个 5000 条的上限等于「清了一部分」——用户以为清干净了，
      * 实际更早的记录还在，而且他自己不会发现。
      */
-    clearChat(chatId) {
-      return get().clearChat(requireChat(chatId, '清空日记'));
+    clearChat(chatId, aliases = []) {
+      return get().clearChat(requireChat(chatId, '清空日记'), aliases);
     },
 
     /**

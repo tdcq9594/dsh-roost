@@ -217,6 +217,39 @@ select.roost-input{color-scheme:dark}
 .roost-sec-h::after{content:'';flex:1;height:1px;background:var(--line-soft);transform:translateY(-2px)}
 .roost-note{font-size:11.5px;line-height:1.62;color:var(--dsw-alias-label-tertiary, inherit);margin-top:4px}
 .roost-empty{font-size:12px;line-height:1.65;color:var(--dsw-alias-label-tertiary, inherit);padding:4px 0}
+
+/* ---------------- 账号迁移 ---------------- */
+/* 用 grid 不用 table：table 在 flex 容器里宽度不可控（会被内容撑宽），
+   而行内又有输入框，列宽会被输入框的固有宽度顶歪。 */
+.acc-head,.acc-row{
+  display:grid;
+  grid-template-columns:minmax(0,1.6fr) 44px 44px 44px 74px minmax(0,1.25fr) 62px;
+  gap:8px;align-items:center;padding:7px 0;
+}
+.acc-head{
+  font-size:10.5px;color:var(--dsw-alias-label-tertiary, inherit);
+  border-bottom:1px solid var(--line-soft);padding-bottom:5px;
+  /* 表头跟列对齐：数字列右对齐，其余左对齐 */
+}
+.acc-head>span:nth-child(2),.acc-head>span:nth-child(3),.acc-head>span:nth-child(4){text-align:right}
+.acc-row{border-top:1px solid var(--line-soft);font-size:12px}
+.acc-row:first-of-type{border-top:none}
+.acc-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acc-num{font-variant-numeric:tabular-nums;text-align:right;
+  color:var(--dsw-alias-label-secondary, inherit);font-size:11.5px}
+/* 输入框压扁一点：这一列是「顺手填个号码」，不该跟正文一样高 */
+.acc-uin{padding:4px 8px;font-size:12px;border-radius:6px}
+.acc-row .roost-btn{padding:4px 9px;font-size:11.5px}
+.acc-claims{display:flex;flex-direction:column;gap:2px;margin-top:2px}
+.acc-claim{font-size:10.5px;line-height:1.5;opacity:.72}
+/* 「需要 Roost」这类提示条：不是错误，是说明，所以用中性的边框 */
+.acc-warn{
+  margin:0 0 10px;padding:8px 11px;border-radius:7px;font-size:11.5px;line-height:1.6;
+  border:1px solid color-mix(in srgb, currentColor 22%, transparent);
+  background:color-mix(in srgb, currentColor 6%, transparent);
+}
+.acc-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+
 .roost-row{display:flex;gap:14px;padding:11px 0;border-top:1px solid var(--line-soft)}
 .roost-row:first-of-type{border-top:none;padding-top:2px}
 .roost-k{flex:0 0 62px;font-size:12px;color:var(--dsw-alias-label-secondary, inherit);padding-top:1px}
@@ -3377,6 +3410,639 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /* ---------------- 账号迁移 ---------------- */
+
+    /**
+     * 把「记忆里躺着的旧 openid」对上号码。
+     *
+     * 和 Roost 自己面板的「身份」页**不重复**，分工要说清楚：
+     *   · 那边看**最近发过言**的人（统计库 + 最近发言人）
+     *   · 这边看**库里有记忆**的键（换机器人后早就不说话的那批）
+     * 两边的交集是空的，缺一边就漏。
+     *
+     * 三条规矩，都写进了 `src/account.js`，这里只是把它们摆到界面上：
+     *   1. 扫描只读，不碰记忆一个字节
+     *   2. 类型**不猜**——没有会话记录时让用户选
+     *   3. 追加不替换——给号码补 openid 绝不删旧的
+     */
+    function AccountTab({ toast }) {
+      const [scan, setScan] = useState(null)
+      const [bound, setBound] = useState(null)
+      const [bots, setBots] = useState([])
+      /** `/account/bots` 的完整回包：`ok` 是「roost 到底通不通」的信号 */
+      const [botsResult, setBotsResult] = useState(null)
+      /** key → 用户填的号码（还没提交） */
+      const [uinDraft, setUinDraft] = useState({})
+      /** key → 'group' | 'c2c'。只有 sessions.json 里没类型时才需要用户选 */
+      const [kindDraft, setKindDraft] = useState({})
+      /** key → 冲突时服务端说的「已经属于谁」 */
+      const [conflict, setConflict] = useState({})
+      /** `${kind}:${uin}` → 追加时选中的 openid */
+      const [appendDraft, setAppendDraft] = useState({})
+      const [botPick, setBotPick] = useState('')
+      /** roost 当前在跑的那只鸟，用来给「记到哪个机器人」选默认值 */
+      const [botCur, setBotCur] = useState('')
+      const [busy, setBusy] = useState('')
+      const [loading, setLoading] = useState(true)
+
+      const load = useCallback(async () => {
+        setLoading(true)
+        const [s, b, bt] = await Promise.all([get('/account/scan'), get('/account/bound'), get('/account/bots')])
+        setScan(s)
+        setBound(b)
+        setBots(bt?.bots || [])
+        setBotsResult(bt || null)
+        setBotCur(bt?.current || '')
+        setLoading(false)
+      }, [])
+
+      useEffect(() => { load() }, [load])
+      // 默认绑到当前在跑的那只鸟；列表回来之后再设，避免空值提交
+      useEffect(() => {
+        if (botPick || !bots.length) return
+        setBotPick((bots.find((x) => x.id === botCur) || bots[0]).id)
+      }, [bots, botCur, botPick])
+
+      const items = scan?.items || []
+      const todo = items.filter((x) => !x.bound)
+      /**
+       * roost 可用吗 → 绑定按钮能不能点。
+       *
+       * 两个信号都要看，缺一不可：
+       *   · `scan.roost.ok` —— 反查那一批成功了
+       *   · `botsOk`        —— `/account/bots` 通了
+       *
+       * 只看第一个会误判：**待迁移列表是空的时候根本不发反查请求**，
+       * 于是 `roost.ok` 是 true，界面把按钮点亮，用户一按就报「连不上」。
+       * 空库恰恰是新装用户的常态。
+       */
+      const botsOk = Boolean(botsResult?.ok)
+      const roostOk = Boolean(scan && scan.roost && scan.roost.ok) && botsOk
+      const roostWhy = scan?.roost?.error || botsResult?.error || ''
+
+      const kindOf = (item) => kindDraft[item.key] || item.kind || ''
+
+      const bindOne = async (item, force = false) => {
+        const u = String(uinDraft[item.key] ?? '').trim()
+        if (!u) return toast('先填号码')
+        const k = kindOf(item)
+        if (k !== 'group' && k !== 'c2c') return toast('先选类型（群 / 私聊）')
+        setBusy(item.key)
+        const r = await post('/account/bind', {
+          kind: k === 'group' ? 'group' : 'user',
+          uin: u,
+          openid: item.key,
+          botId: botPick,
+          force,
+        })
+        setBusy('')
+        if (r.ok) {
+          toast(`绑好了：${u}`)
+          /**
+           * 成功之后把这一行的冲突标记清掉。
+           *
+           * 不清的话：409 之后冲突方被别人解绑了，用户再点「全部绑定」成功，
+           * 这一行仍然显示「改绑」按钮和「已在 X」的占位符——看起来像没绑上。
+           */
+          setConflict((c) => { const n = { ...c }; delete n[item.key]; return n })
+          await load()
+          return
+        }
+        if (r.code === 'CONFLICT') {
+          /**
+           * 冲突**不自动改绑**。同一个 openid 从 A 挪到 B，A 的记忆立刻读不到，
+           * 得让人看见「从谁挪到谁」再决定。所以这里只记下 owner，界面上
+           * 把「绑定」换成「改绑」让人二次确认。
+           */
+          setConflict((c) => ({ ...c, [item.key]: r.owner || '别的号码' }))
+          toast(r.error || '这个 openid 已经绑给别的号码了')
+          return
+        }
+        toast(r.message || r.error || '绑定失败')
+      }
+
+      /** 把填了号码的行一次提交。逐条走，失败的单独报，不影响成功的 */
+      const bindAll = async () => {
+        const ready = todo.filter((x) => String(uinDraft[x.key] ?? '').trim() && (kindOf(x) === 'group' || kindOf(x) === 'c2c'))
+        if (!ready.length) return toast('没有填好号码的行')
+        setBusy('all')
+        const failed = []
+        const done = []
+        for (const item of ready) {
+          const r = await post('/account/bind', {
+            kind: kindOf(item) === 'group' ? 'group' : 'user',
+            uin: String(uinDraft[item.key]).trim(),
+            openid: item.key,
+            botId: botPick,
+          })
+          if (r.ok) done.push(item.key)
+          else failed.push(`${String(uinDraft[item.key]).trim()}：${r.error || '失败'}`)
+        }
+        setBusy('')
+        /**
+         * 成功的行要把冲突标记清掉。
+         *
+         * 不清的话：409 之后冲突方被别人解绑了，用户再点「全部绑定」成功，
+         * 这一行仍然显示「改绑」按钮和「已在 X」的占位符——看起来像没绑上。
+         */
+        if (done.length) {
+          setConflict((c) => {
+            const n = { ...c }
+            for (const k of done) delete n[k]
+            return n
+          })
+        }
+        await load()
+        toast(failed.length ? `${done.length} 条成功，${failed.length} 条失败（${failed[0]}）` : `${done.length} 条都绑好了`)
+      }
+
+      /** 给已有号码追加一个 openid（加一条 claim，**不删旧的**） */
+      const append = async (rec) => {
+        const id = `${rec.kind}:${rec.uin}`
+        const openid = appendDraft[id] || ''
+        if (!openid) return toast('先选一个要追加的 openid')
+        setBusy(id)
+        const r = await post('/account/attach', {
+          kind: rec.kind === 'group' ? 'group' : 'user',
+          uin: rec.uin,
+          openid,
+          botId: botPick,
+        })
+        setBusy('')
+        if (!r.ok) return toast(r.error || '追加失败')
+        toast(`已追加到 ${rec.uin}（旧的 openid 都留着）`)
+        setAppendDraft((d) => ({ ...d, [id]: '' }))
+        await load()
+      }
+
+      if (loading && !scan) return h('div', { className: 'roost-empty' }, '扫描本机数据…')
+
+      const boundRecs = [...(bound?.users || []), ...(bound?.groups || [])]
+
+      return h('div', null,
+        roostOk
+          ? null
+          : h('div', { className: 'acc-warn' },
+              '连不上 Roost（' + (roostWhy || '未知原因') + '）。上半区照样能看——扫描只读本地数据，',
+              '但绑定要先让 Roost 跑起来。'),
+
+        h(Sec, {
+          n: '01',
+          title: `未对上（${todo.length}）`,
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: load, disabled: loading }, '重新扫描'),
+        },
+          h('div', { className: 'roost-note' },
+            '这些键在记忆里有东西，但认不出是哪个号码。填上号码、选好类型，点绑定。',
+            '只写 Roost 的身份表，**不碰记忆一个字节**。'),
+          todo.length
+            ? h('div', null,
+                h('div', { className: 'acc-head' },
+                  h('span', null, '会话键'), h('span', null, '记忆'), h('span', null, '日记'),
+                  h('span', null, '关系'), h('span', null, '类型'), h('span', null, '号码'), h('span', null, ''),
+                ),
+                todo.map((item) => {
+                  const k = kindOf(item)
+                  const lockKind = Boolean(item.kind)
+                  const bad = conflict[item.key]
+                  return h('div', { className: 'acc-row', key: item.key },
+                    h('div', { className: 'acc-key' },
+                      h('div', { className: 'acc-name', title: item.key },
+                        item.title || (item.isOpenid ? '（无会话记录）' : '（不像 openid）')),
+                      h('div', { className: 'roost-mono' }, item.short + '…'),
+                    ),
+                    h('div', { className: 'acc-num' }, String(item.facts ?? 0)),
+                    h('div', { className: 'acc-num' }, item.journal == null ? '—' : String(item.journal)),
+                    h('div', { className: 'acc-num' }, item.edges == null ? '—' : String(item.edges)),
+                    h('select', {
+                      className: 'roost-input acc-uin',
+                      value: k,
+                      // 会话记录里已有类型就锁住：那是**事实**，不是可选项
+                      disabled: lockKind || !roostOk,
+                      onChange: (e) => setKindDraft((d) => ({ ...d, [item.key]: e.target.value })),
+                    },
+                      h('option', { value: '' }, '选…'),
+                      h('option', { value: 'group' }, '群'),
+                      h('option', { value: 'c2c' }, '私聊'),
+                    ),
+                    h('input', {
+                      className: 'roost-input acc-uin',
+                      placeholder: bad ? `已在 ${bad}` : '号码',
+                      value: uinDraft[item.key] || '',
+                      disabled: !roostOk,
+                      onChange: (e) => setUinDraft((d) => ({ ...d, [item.key]: e.target.value })),
+                      onKeyDown: (e) => { if (e.key === 'Enter') bindOne(item) },
+                    }),
+                    bad
+                      ? h(ConfirmLink, {
+                          label: '改绑', confirmLabel: '确认改绑',
+                          onConfirm: () => bindOne(item, true),
+                        })
+                      : h('button', {
+                          type: 'button', className: 'roost-btn',
+                          disabled: !roostOk || busy === item.key,
+                          onClick: () => bindOne(item),
+                        }, busy === item.key ? '…' : '绑定'),
+                  )
+                }),
+                h('div', { className: 'acc-tools' },
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: !roostOk || busy === 'all',
+                    onClick: bindAll,
+                  }, busy === 'all' ? '提交中…' : '全部绑定'),
+                  h('span', { className: 'roost-note', style: { margin: 0 } }, '只提交填了号码的行'),
+                  bots.length
+                    ? h('span', { style: { marginLeft: 'auto' } },
+                        h('span', { className: 'roost-note', style: { margin: 0 } }, '记到 '),
+                        h('select', {
+                          className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
+                          value: botPick,
+                          onChange: (e) => setBotPick(e.target.value),
+                        }, bots.map((b) => h('option', { key: b.id, value: b.id }, b.name || b.id))),
+                      )
+                    : null,
+                ),
+              )
+            : h('div', { className: 'roost-empty' }, '没有待迁移的键。要么都绑好了，要么记忆本来就认得出号码。'),
+        ),
+
+        h(Sec, { n: '02', title: `已绑定（${boundRecs.length}）` },
+          h('div', { className: 'roost-note' },
+            '换机器人之后，新 openid 要**追加**到同一个号码下面。',
+            '旧的 openid 一条都不会删——删了旧记忆就没人引用了，看起来像「迁移完记忆全没了」。'),
+          boundRecs.length
+            ? h('div', { className: 'roost-list' },
+                boundRecs.map((rec) => {
+                  const id = `${rec.kind}:${rec.uin}`
+                  const live = (rec.claims || []).filter((c) => c.state !== 'revoked')
+                  const revoked = (rec.claims || []).filter((c) => c.state === 'revoked')
+                  /**
+                   * 追加的候选只从**还没绑过**的键里挑。
+                   *
+                   * 拿已经绑过的去追加，服务端必然 409（同一个 openid 不能
+                   * 同时属于两个号码），用户只会看到一句莫名其妙的冲突提示。
+                   *
+                   * 类型必须一致，而且要用 `kindOf()`（用户选的那个）而不是
+                   * `x.kind`（会话记录里的那个）：类型留空的键 `x.kind` 是空串，
+                   * `!x.kind` 恒真，会同时出现在群和人的候选里——
+                   * 把群的 openid 追加到 QQ号 下面，正是注释里说的那种
+                   * 「界面上完全看不出来」的错。
+                   */
+                  const wantKind = rec.kind === 'group' ? 'group' : 'c2c'
+                  const cands = todo.filter((x) => kindOf(x) === wantKind)
+                  return h('div', { key: id, className: 'roost-item' },
+                    h('span', { className: 't' },
+                      h('span', { style: { fontWeight: 600 } }, rec.uin),
+                      h('span', { className: 'd' }, rec.kind === 'group' ? '  群' : '  私聊'),
+                      h('div', { className: 'acc-claims' },
+                        live.map((c) => h('div', { key: c.openid, className: 'acc-claim roost-mono' },
+                          `${c.botId || '无归属'} · ${c.openid}`)),
+                        revoked.length
+                          ? h('div', { className: 'acc-claim' }, `另有 ${revoked.length} 条已撤销（留痕，不参与读取）`)
+                          : null,
+                      ),
+                    ),
+                    h('span', { className: 'd', style: { display: 'flex', gap: '6px', alignItems: 'center' } },
+                      h('select', {
+                        className: 'roost-input',
+                        style: { width: '132px', padding: '3px 6px', fontSize: '11px' },
+                        value: appendDraft[id] || '',
+                        disabled: !roostOk || !cands.length,
+                        onChange: (e) => setAppendDraft((d) => ({ ...d, [id]: e.target.value })),
+                      },
+                        h('option', { value: '' }, cands.length ? '选 openid…' : '没有可追加的'),
+                        cands.map((c) => h('option', { key: c.key, value: c.key },
+                          (c.title || c.short) + '（' + (c.journal ?? 0) + ' 条日记）')),
+                      ),
+                      h('button', {
+                        type: 'button', className: 'roost-btn',
+                        disabled: !roostOk || busy === id || !appendDraft[id],
+                        onClick: () => append(rec),
+                      }, busy === id ? '…' : '追加'),
+                    ),
+                  )
+                }),
+              )
+            : h('div', { className: 'roost-empty' },
+                bound?.ok === false
+                  ? (bound.error || '读不到 Roost 的身份表')
+                  : '还没有绑定过任何号码。'),
+          bound?.botName ? h('div', { className: 'roost-note' }, `当前 Roost 机器人：${bound.botName}（${bound.bot}）`) : null,
+        ),
+
+        /** 群成员绑定 / 批量追加 / 一键改写：各自带状态，别把上面这页撑成一团 */
+        h(AccountExtras, { toast, reload: load, roostOk }),
+      )
+    }
+
+
+    /* ---------------- 账号迁移 · 扩展区 ---------------- */
+
+    /**
+     * 群成员绑定 / 批量追加 / 一键改写。
+     *
+     * 单独成组件是为了不给 AccountTab 再塞十几个 state——上面那页
+     * 已经够长了，而且这三块各有自己的加载与危险操作确认流程。
+     */
+    function AccountExtras({ toast, reload, roostOk }) {
+      const [people, setPeople] = useState(null)
+      const [bound, setBound] = useState(null)
+      const [scan, setScan] = useState(null)
+      const [suggest, setSuggest] = useState(null)
+      const [uins, setUins] = useState({})
+      const [batchUin, setBatchUin] = useState('')
+      const [picked, setPicked] = useState({})
+      const [plan, setPlan] = useState(null)
+      const [backups, setBackups] = useState([])
+      const [confirmWord, setConfirmWord] = useState('')
+      const [stoppedOld, setStoppedOld] = useState(false)
+      const [busy, setBusy] = useState('')
+      const [lastResult, setLastResult] = useState(null)
+
+      const loadAll = useCallback(async () => {
+        const [p, b, s, g, bk] = await Promise.all([
+          get('/account/people'),
+          get('/account/bound'),
+          get('/account/scan'),
+          get('/account/suggest'),
+          get('/account/backups'),
+        ])
+        setPeople(p)
+        setBound(b)
+        setScan(s)
+        setSuggest(g)
+        setBackups(bk?.items || [])
+      }, [])
+      useEffect(() => { loadAll() }, [loadAll])
+
+      const numberList = [
+        ...(bound?.users || []).map((r) => ({ id: String(r.uin || ''), kind: 'user', label: `QQ号 ${r.uin} · ${r.name || '人'}` })),
+        ...(bound?.groups || []).map((r) => ({ id: String(r.groupUin || r.uin || ''), kind: 'group', label: `群号 ${r.groupUin || r.uin} · ${r.name || '群'}` })),
+      ]
+      const batchRec = numberList.find((n) => n.id === batchUin)
+
+      /** 批量追加的候选：记忆库里未绑定的键 + Roost 最近发言人（含群成员） */
+      const attachCands = (() => {
+        const m = new Map()
+        for (const it of scan?.items || []) {
+          if (!it.bound) m.set(it.key, { key: it.key, label: it.title || it.short })
+        }
+        for (const u of people?.users || []) {
+          if (!m.has(u.openid)) m.set(u.openid, { key: u.openid, label: u.name || u.openid.slice(0, 8) })
+        }
+        return [...m.values()]
+      })()
+      const pickedKeys = Object.keys(picked).filter((k) => picked[k])
+
+      const bindPerson = async (openid) => {
+        const uin = String(uins[openid] || '').trim()
+        if (!uin) return toast('先填 QQ号')
+        setBusy(openid)
+        const r = await post('/account/bind', { kind: 'user', uin, openid })
+        setBusy('')
+        if (!r.ok) return toast(r.error || '绑定失败')
+        toast(`绑好了：${uin}`)
+        setUins((d) => ({ ...d, [openid]: '' }))
+        await loadAll()
+        await reload?.()
+      }
+
+      const doBatch = async () => {
+        if (!batchRec || !pickedKeys.length) return toast('先选号码，再勾几个 openid')
+        setBusy('batch')
+        const r = await post('/account/batch-attach', {
+          kind: batchRec.kind, uin: batchRec.id, openids: pickedKeys,
+        })
+        setBusy('')
+        /**
+         * 一律走可选链：接口被中间层改成空 body、或者老版本没返回这两个字段时，
+         * `r.done.length` 会抛 TypeError，而 `setBusy('')` 已经执行过了——
+         * 按钮恢复、用户什么提示都没有，就是「点了没反应」。
+         */
+        const okN = r?.done?.length ?? 0
+        const failN = r?.failed?.length ?? 0
+        toast(failN
+          ? `${okN} 条追加成功，${failN} 条失败（${r.failed[0]?.error || '原因未知'}）`
+          : `${okN} 条都追加好了（旧 openid 一条没删）`)
+        setPicked({})
+        await loadAll()
+        await reload?.()
+      }
+
+      const doPlan = async () => {
+        setBusy('plan')
+        const r = await get('/account/rewrite-plan')
+        setBusy('')
+        setPlan(r)
+        if (!r.ok) toast(r.error || '预览失败')
+      }
+
+      const doRewrite = async () => {
+        setBusy('rewrite')
+        const r = await post('/account/rewrite', { confirm: confirmWord })
+        setBusy('')
+        setLastResult(r)
+        toast(r.ok ? '改写完成，备份路径在下面' : (r.error || '改写失败'))
+        setConfirmWord('')
+        setStoppedOld(false)
+        /** 旧清单已经不对了（那些键被合并掉了），清掉免得用户对着过期数据做决定 */
+        setPlan(null)
+        /**
+         * 必须重新拉一遍：改写之后上面「待迁移」列表里那几个键已经不存在了，
+         * 不刷新的话用户看到的是旧数据，会以为「点了没生效」。
+         */
+        await loadAll()
+        await reload?.()
+      }
+
+      const doRollback = async (backup) => {
+        setBusy('rollback')
+        const r = await post('/account/rollback', { backup })
+        setBusy('')
+        toast(r.ok ? '已回退，数据重新读盘了' : (r.error || '回退失败'))
+        setLastResult(r)
+        setPlan(null)
+        await loadAll()
+        await reload?.()
+      }
+
+      return h('div', null,
+        /* 03 群里的人 */
+        h(Sec, { n: '03', title: `群里的人 / 私聊对象（${(people?.users || []).length}）` },
+          h('div', { className: 'roost-note' },
+            '上面两区列的是「会话键」；群里某个发言人的 QQ号是另一回事。',
+            '这里列 Roost 最近发言人，填号码直接绑成「人」。'),
+          people?.ok === false
+            ? h('div', { className: 'roost-empty' }, people.error || '读不到 Roost 的未识别用户')
+            : (people?.users || []).length
+              ? h('div', { className: 'roost-list roost-scroll' },
+                  people.users.map((u) =>
+                    h('div', { key: u.openid, className: 'roost-item' },
+                      h('span', { className: 't' },
+                        u.name || u.openid.slice(0, 8),
+                        h('span', { className: 'd' }, ' ' + u.openid.slice(0, 8) + '…'),
+                        u.chatId ? h('span', { className: 'd' }, ' · 在 ' + u.chatId.slice(0, 8)) : null,
+                      ),
+                      h('input', {
+                        className: 'roost-input', style: { width: '120px', padding: '4px 8px', fontSize: 12 },
+                        placeholder: 'QQ号', value: uins[u.openid] || '',
+                        onChange: (e) => setUins((d) => ({ ...d, [u.openid]: e.target.value })),
+                        onKeyDown: (e) => { if (e.key === 'Enter') bindPerson(u.openid) },
+                      }),
+                      h('button', {
+                        type: 'button', className: 'roost-btn', disabled: !roostOk || busy === u.openid,
+                        onClick: () => bindPerson(u.openid),
+                      }, busy === u.openid ? '…' : '绑定'),
+                    ),
+                  ),
+                )
+              : h('div', { className: 'roost-empty' }, '没有未识别的人。'),
+        ),
+
+        /* 04 换机器人 · 批量追加 */
+        h(Sec, { n: '04', title: '换机器人 · 批量追加 openid' },
+          h('div', { className: 'roost-note' },
+            '新机器人给同一个人/群换了 openid，就把它**追加**到原来的号码下面。',
+            '旧的 openid 一条都不删——删了旧记忆就没人引用了。'),
+
+          /** 昵称候选：只提示，绝不自动绑 */
+          (suggest?.items || []).length
+            ? h('div', { className: 'acc-warn' },
+                h('div', null, suggest.note),
+                ...suggest.items.slice(0, 6).map((it) =>
+                  h('div', { key: it.key, style: { marginTop: 4 } },
+                    `「${it.label}」可能是 `,
+                    ...it.candidates.slice(0, 2).map((c) =>
+                      h('button', {
+                        key: c.uin, type: 'button', className: 'roost-btn',
+                        style: { padding: '2px 7px', marginRight: 4, fontSize: 11 },
+                        onClick: () => setBatchUin(c.uin),
+                      }, `${c.uin}（${c.kind === 'group' ? '群' : '人'}）`),
+                    ),
+                  ),
+                ),
+              )
+            : null,
+
+          h('div', { className: 'acc-tools' },
+            h('select', {
+              className: 'roost-input', style: { width: 'auto', minWidth: 220, padding: '5px 9px' },
+              value: batchUin, onChange: (e) => setBatchUin(e.target.value),
+            },
+              h('option', { value: '' }, numberList.length ? '选一个已绑定的号码…' : '还没有绑定过任何号码'),
+              ...numberList.map((n) => h('option', { key: n.id, value: n.id }, n.label)),
+            ),
+            h('span', { className: 'roost-note', style: { margin: 0 } }, `已勾 ${pickedKeys.length} 个`),
+            h('button', {
+              type: 'button', className: 'roost-primary',
+              disabled: !roostOk || !batchRec || !pickedKeys.length || busy === 'batch',
+              onClick: doBatch,
+            }, busy === 'batch' ? '提交中…' : '一键追加'),
+          ),
+          attachCands.length
+            ? h('div', { className: 'roost-list roost-scroll', style: { marginTop: 8, maxHeight: 200 } },
+                attachCands.map((c) =>
+                  h('label', { key: c.key, className: 'roost-item', style: { alignItems: 'center', cursor: 'pointer' } },
+                    h('input', {
+                      type: 'checkbox', checked: Boolean(picked[c.key]),
+                      onChange: (e) => setPicked((d) => ({ ...d, [c.key]: e.target.checked })),
+                    }),
+                    h('span', { className: 't' }, c.label),
+                    h('span', { className: 'd roost-mono' }, c.key.slice(0, 12) + '…'),
+                  ),
+                ),
+              )
+            : h('div', { className: 'roost-empty' }, '没有可追加的 openid（新机器人还没说过话？让它先收一条消息）。'),
+        ),
+
+        /* 05 一键改写（危险） */
+        h(Sec, { n: '05', title: '一键改写：合并后删掉旧键' },
+          h('div', { className: 'acc-warn' },
+            '⚠ 这是整条链路里唯一会**重写记忆数据**的操作：把某号码名下所有旧 openid 键的',
+            ' facts / 日记 / 图谱 / 授权 / 会话映射合并到号码键，旧键删除。',
+            '执行前自动整文件备份，失败自动回退，成功后仍可一键回退。',
+            plan?.warning ? h('div', { style: { marginTop: 6 } }, plan.warning) : null,
+          ),
+
+          h('div', { className: 'acc-tools' },
+            h('button', { type: 'button', className: 'roost-btn', onClick: doPlan, disabled: busy === 'plan' },
+              busy === 'plan' ? '扫描中…' : '预览改写清单'),
+            h('span', { className: 'roost-note', style: { margin: 0 } },
+              '预览只读，不改任何东西'),
+          ),
+
+          plan?.ok
+            ? h('div', { style: { marginTop: 8 } },
+                h('div', { className: 'roost-note' },
+                  `数据目录：${plan.dataDir}`,
+                  h('br'),
+                  `备份位置：${plan.backupRoot}`,
+                  h('br'),
+                  `合计：${plan.totals.keys} 个旧键 · ${plan.totals.facts} 条 facts · ${plan.totals.journal} 条日记 · ${plan.totals.edges} 条关系`),
+                h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 180, marginTop: 6 } },
+                  (plan.files || []).filter((f) => f.exists).map((f) =>
+                    h('div', { key: f.name, className: 'roost-item' },
+                      h('span', { className: 't roost-mono' }, f.abs),
+                    ),
+                  ),
+                  ...(plan.items || []).map((it) =>
+                    h('div', { key: it.uin, className: 'roost-item' },
+                      h('span', { className: 't' }, `${it.uin} ← ${it.keys.length} 个旧键`),
+                      h('span', { className: 'd' },
+                        it.keys.map((k) => `${k.key.slice(0, 8)}(${k.facts}/${k.journal}/${k.edges})`).join('、')),
+                    ),
+                  ),
+                ),
+
+                h('div', { className: 'acc-tools' },
+                  h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
+                    h('input', {
+                      type: 'checkbox', checked: stoppedOld,
+                      onChange: (e) => setStoppedOld(e.target.checked),
+                    }),
+                    '我已经停掉旧机器人'),
+                  h('input', {
+                    className: 'roost-input', style: { width: 130, padding: '5px 9px' },
+                    placeholder: '输入「改写」', value: confirmWord,
+                    onChange: (e) => setConfirmWord(e.target.value),
+                  }),
+                  h('button', {
+                    type: 'button', className: 'roost-primary',
+                    disabled: !stoppedOld || confirmWord.trim() !== '改写' || busy === 'rewrite' || !plan.totals.keys,
+                    onClick: doRewrite,
+                  }, busy === 'rewrite' ? '改写中…' : '执行改写'),
+                ),
+              )
+            : null,
+
+          lastResult
+            ? h('div', { className: 'roost-note', style: { marginTop: 8, color: lastResult.ok ? 'var(--good, #2e7d32)' : 'var(--bad)' } },
+                lastResult.ok
+                  ? `改写完成。备份：${lastResult.backup} · ${lastResult.hint}`
+                  : `${lastResult.error}${lastResult.rolledBack ? '（已自动回退）' : ''}${lastResult.backup ? ` · 备份 ${lastResult.backup}` : ''}`)
+            : null,
+
+          backups.length
+            ? h('div', { style: { marginTop: 8 } },
+                h('div', { className: 'roost-note' }, '可回退的备份（最近的在前）'),
+                h('div', { className: 'roost-list' },
+                  backups.slice(0, 5).map((b) =>
+                    h('div', { key: b.dir, className: 'roost-item' },
+                      h('span', { className: 't roost-mono' }, b.dir),
+                      h('span', { className: 'd' }, `${b.files} 个文件`),
+                      h('button', {
+                        type: 'button', className: 'roost-btn', disabled: busy === 'rollback',
+                        onClick: () => doRollback(b.dir),
+                      }, '一键回退'),
+                    ),
+                  ),
+                ),
+              )
+            : null,
+        ),
+      )
+    }
+
     /* ---------------- 设置 ---------------- */
 
     const JSON_SECTIONS = [
@@ -3783,11 +4449,17 @@ select.roost-input{color-scheme:dark}
         const g = st?.gpt
         if (!g || g.phase === 'idle') return ''
         if (g.phase === 'starting') return `启动中… 端口 ${g.port || '待定'}，加载模型要一两分钟`
-        if (g.phase === 'running') return `运行中：${g.baseUrl}（pid ${g.pid}）`
+        if (g.phase === 'running') {
+          /** 把「实际生效的角色」摆出来——切换失败时它和用户选的不是同一个 */
+          return `运行中：${g.baseUrl}（pid ${g.pid}）`
+            + (g.activeModel ? ` · 实际生效角色「${g.activeModel}」` : '')
+        }
         if (g.phase === 'stopped') return '已停止'
         if (g.phase === 'error') return '启动失败：' + (g.error || '未知原因')
         return ''
       })()
+      /** 权重没切过去：服务能出声但音色不对，必须单独用醒目的一行说出来 */
+      const gptWarning = String(st?.gpt?.warning || '')
       /** 外部配置变了（比如刚在配置全文里保存）：没动过草稿就跟上 */
       useEffect(() => {
         if (dirty) return
@@ -3813,9 +4485,30 @@ select.roost-input{color-scheme:dark}
        * 让对齐测试误报。对象写法没有这个歧义。
        */
       const PROVIDERS = [
+        { id: 'edge', label: '微软在线朗读（免费 · 不用 Key · 一键配好）' },
         { id: 'sherpa', label: '本地模型（离线，可一键安装）' },
         { id: 'openai', label: 'OpenAI 兼容（/audio/speech）' },
         { id: 'gpt-sovits', label: 'GPT-SoVITS 原生 API（本地）' },
+      ]
+
+      /**
+       * 微软音色清单。
+       *
+       * 和 `src/tts.js` 的 `EDGE_VOICES` 是同一份（客户端不能 import 服务端模块）。
+       * 一样用**对象**而不是 `[值, 文字]` 二元数组：设置页的对齐测试会扫
+       * `JSON_SECTIONS` 到 `ConfigTab` 之间的所有二元数组字面量，
+       * 写二元数组会把音色名误当成「配置段」报缺失。
+       */
+      const EDGE_VOICES = [
+        { id: 'zh-CN-XiaoxiaoNeural', label: '晓晓 · 普通话女声（默认）' },
+        { id: 'zh-CN-YunxiNeural', label: '云希 · 普通话男声' },
+        { id: 'zh-CN-YunjianNeural', label: '云健 · 普通话男声（沉稳）' },
+        { id: 'zh-CN-XiaoyiNeural', label: '晓伊 · 普通话女声（轻快）' },
+        { id: 'zh-CN-YunyangNeural', label: '云扬 · 普通话男声（播报）' },
+        { id: 'zh-CN-liaoning-XiaobeiNeural', label: '晓北 · 东北话女声' },
+        { id: 'zh-HK-HiuMaanNeural', label: '曉曼 · 粤语女声' },
+        { id: 'ja-JP-NanamiNeural', label: 'Nanami · 日语女声' },
+        { id: 'en-US-JennyNeural', label: 'Jenny · 英语女声' },
       ]
 
       /** 服务端状态翻成人话。`reason` 的取值来自 `src/tts.js` 的 status() */
@@ -3828,12 +4521,33 @@ select.roost-input{color-scheme:dark}
         if (st.enabled !== true) return '未启用'
         if (st.configured === true) return '已启用，配置齐全'
         if (st.reason === 'configuration_incomplete') return '已启用，但必填项还没填完'
-        if (st.reason === 'runtime_missing') return '已启用，但本地引擎还没装'
+        /** edge 和 sherpa 都会报 runtime_missing，文案别写死「本地引擎」 */
+        if (st.reason === 'runtime_missing') return '已启用，但依赖没装（点下面一键安装）'
         if (st.reason === 'model_missing') return '已启用，但模型文件不全'
         if (st.reason === 'upstream_unreachable') return '已启用，但语音服务刚失败过（检查服务是否启动）'
         if (st.reason === 'unsupported_provider') return '已启用，但 provider 不认识'
         return '已启用，状态未知'
       })()
+
+      /**
+       * 「一键配好」：启用 + 切到微软朗读 + 填默认音色，一次保存。
+       *
+       * 不填地址、不填 Key 是这个 provider 的全部意义——用户要做的只剩
+       * 点一下安装依赖，然后选个音色。
+       */
+      const oneKeyEdge = () => save({
+        enabled: true,
+        provider: 'edge',
+        edge: { voice: v('edge.voice') || 'zh-CN-XiaoxiaoNeural' },
+      })
+
+      /** 一键装微软朗读的三个纯 JS 包（约 0.4MB），进度走 st.install 轮询 */
+      const installEdge = async () => {
+        const r = await post('/tts/edge-install', {})
+        if (r?.ok === false) toast(r.message || '装不上')
+        else toast('开始下载，几秒就好')
+        await loadStatus()
+      }
 
       /** 认一下目录：只读探测，填错了当场知道，不用等启动失败 */
       const probeGpt = async () => {
@@ -3847,6 +4561,9 @@ select.roost-input{color-scheme:dark}
           dir: v('gptSovits.installDir'),
           /** 选了角色就让它启动后切过去；空 = 用配置文件里已经加载的 */
           model: v('gptSovits.model'),
+          /** 手填的权重路径优先于自动配对；留空 = 用扫描结果 */
+          gptWeights: v('gptSovits.gptWeights'),
+          sovitsWeights: v('gptSovits.sovitsWeights'),
         })
         if (r?.ok === false) toast(r.message || '起不来')
         else toast('正在启动，加载模型要一两分钟')
@@ -3901,25 +4618,32 @@ select.roost-input{color-scheme:dark}
         await loadStatus()
       }
 
-      const save = async () => {
+      /**
+       * 保存。`override` 给「一键配好」用：按钮要一次写入多个字段，
+       * 而 `put()` 走的是 setState，紧接着读 `draft` 还是旧值——
+       * 不能靠连续三次 put 再 save。
+       */
+      const save = async (override = null) => {
         setBusy(true)
         try {
+          const src = override ? { ...(draft || {}), ...override } : draft
           /**
            * 数字字段要在这里转回 number。
            * 输入框给的永远是字符串，直接存进去 `Number(cfg.timeoutSec)` 虽然也能用，
            * 但配置全文里会变成 `"30"`，和默认值的类型不一致，看的人会以为坏了。
            */
           const next = {
-            ...draft,
-            timeoutSec: Number(draft?.timeoutSec) || 30,
-            maxChars: Number(draft?.maxChars) || 300,
-            ...(draft?.sherpa
+            ...src,
+            timeoutSec: Number(src?.timeoutSec) || 30,
+            maxChars: Number(src?.maxChars) || 300,
+            /** 语速夹在 0.5–2，和 `speedOf()` 同一套范围；空值回原速 */
+            speed: Math.max(0.5, Math.min(2, Number(src?.speed) || 1)),
+            ...(src?.sherpa
               ? {
                   sherpa: {
-                    ...draft.sherpa,
-                    sid: Number(draft.sherpa.sid) || 0,
-                    speed: Number(draft.sherpa.speed) || 1,
-                    numThreads: Number(draft.sherpa.numThreads) || 2,
+                    ...src.sherpa,
+                    sid: Number(src.sherpa.sid) || 0,
+                    numThreads: Number(src.sherpa.numThreads) || 2,
                   },
                 }
               : {}),
@@ -3981,7 +4705,7 @@ select.roost-input{color-scheme:dark}
           h('button', {
             type: 'button', className: 'roost-primary', disabled: busy || !dirty,
             title: dirty ? '' : '没有改动',
-            onClick: save,
+            onClick: () => save(),
           }, busy ? '保存中…' : '保存'),
         ),
       },
@@ -4002,6 +4726,19 @@ select.roost-input{color-scheme:dark}
             }),
             '启用语音合成'),
           select('provider', 'provider', PROVIDERS),
+          /**
+           * 语速放在 provider 旁边，**四个 provider 共用这一个**。
+           * 以前只有本地模型有语速，而且输入框埋在它自己的分区里——
+           * 切到云端之后那个框还在，改了却完全没反应。
+           */
+          h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '0 0 110px' } },
+            h('span', { className: 'roost-note', style: { margin: 0 } }, '语速（0.5–2）'),
+            h('input', {
+              className: 'roost-input', type: 'number', step: '0.1', min: '0.5', max: '2',
+              value: v('speed', 1),
+              onChange: (e) => put('speed', e.target.value),
+            }),
+          ),
         ),
 
         provider === 'openai'
@@ -4017,6 +4754,41 @@ select.roost-input{color-scheme:dark}
               h('div', { className: 'roost-note' },
                 '走 OpenAI 兼容的 POST /audio/speech，固定请求 mp3。'
                 + '硅基流动、one-api 这类中转也填这里。'),
+            )
+          : null,
+
+        provider === 'edge'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-end' } },
+                h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 260px' } },
+                  h('span', { className: 'roost-note', style: { margin: 0 } }, '音色'),
+                  h('select', {
+                    className: 'roost-input',
+                    value: v('edge.voice') || 'zh-CN-XiaoxiaoNeural',
+                    onChange: (e) => put('edge.voice', e.target.value),
+                  }, EDGE_VOICES.map((o) => h('option', { key: o.id, value: o.id }, o.label))),
+                ),
+                h('button', {
+                  type: 'button', className: 'roost-primary', disabled: busy,
+                  onClick: oneKeyEdge,
+                }, '一键配好'),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  disabled: st?.install?.running === true,
+                  onClick: installEdge,
+                }, st?.edgeInstalled ? '重装依赖' : '一键安装依赖'),
+              ),
+
+              st?.install?.running
+                ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
+                    `${st.install.message || '安装中…'}${st.install.percent ? ` · ${st.install.percent}%` : ''}`)
+                : null,
+
+              h('div', { className: 'roost-note' },
+                '免费、不用 API Key，装好依赖选个音色就能用；输出 mp3，宿主自己转 silk。'),
+              h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)' } },
+                '注意：要念的文本会发到微软的服务器。介意隐私就换「本地模型」，那个完全离线。',
+                '依赖 @andresaya/edge-tts 是 GPL-3.0，只下载到你自己的数据目录，不随插件分发。'),
             )
           : null,
 
@@ -4065,6 +4837,15 @@ select.roost-input{color-scheme:dark}
                 : null,
 
               /**
+               * 权重没切过去是最容易误判的一种状态：服务在跑、音频正常返回，
+               * 只是音色是另一个模型的。不单独用醒目的一行说出来，
+               * 用户只会以为「模型训练坏了」。
+               */
+              gptWarning
+                ? h('div', { className: 'roost-note', style: { color: 'var(--bad)', marginTop: 6 } }, '⚠ ' + gptWarning)
+                : null,
+
+              /**
                * 扫描结果做成下拉。
                *
                * 用户不用知道「GPT_weights_v2ProPlus/角色A-e15.ckpt」这种路径，
@@ -4095,6 +4876,28 @@ select.roost-input{color-scheme:dark}
                       : null,
                   )
                 : null,
+
+              /**
+               * 手动权重路径：**优先于**上面的自动配对。
+               *
+               * `scanModels()` 靠文件名猜角色名，权重一多很容易把不同 epoch、
+               * 不同角色的 GPT / SoVITS 配错一对——能出声，但音色完全不是
+               * 自己训的那个。留空就用扫描结果，填了就以这里为准。
+               */
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('GPT 权重路径（可选，填了优先）', 'gptSovits.gptWeights', {
+                  placeholder: 'D:\\GPT-SoVITS\\GPT_weights_v2\\角色-e15.ckpt',
+                  flex: '1 1 300px',
+                }),
+                field('SoVITS 权重路径（可选，填了优先）', 'gptSovits.sovitsWeights', {
+                  placeholder: 'D:\\GPT-SoVITS\\SoVITS_weights_v2\\角色_e8_s200.pth',
+                  flex: '1 1 300px',
+                }),
+              ),
+              h('div', { className: 'roost-note' },
+                '路径要填 GPT-SoVITS 服务进程能读到的（绝对路径最稳）。',
+                '两个都留空 = 按角色名自动配对；音色不对时优先改成手填，',
+                '另外参考音频也要和这个模型配套，音色主要由它决定。'),
 
               /** 日志尾部：启动失败时这是唯一能看出原因的东西 */
               st?.gpt?.logs?.length
@@ -4198,7 +5001,7 @@ select.roost-input{color-scheme:dark}
 
               h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
                 field('说话人编号（aishell3 是 0-173）', 'sherpa.sid', { placeholder: '88' }),
-                field('语速', 'sherpa.speed', { placeholder: '1' }),
+                /** 语速已经统一到上面 provider 旁边那个框，这里不再重复 */
                 field('线程数', 'sherpa.numThreads', { placeholder: '2' }),
               ),
               h('div', { className: 'roost-note' },
@@ -4621,6 +5424,13 @@ select.roost-input{color-scheme:dark}
       ['awake', '主动搭话'],
       ['context', '上下文'],
       ['chats', '会话'],
+      /**
+       * 「账号迁移」放「会话」之后、「设置」之前。
+       *
+       * 位置是有讲究的：它是**会话的延伸**（都是「这个 chatId 是什么」），
+       * 但又不是每天要看的东西，所以不放在前面抢首屏。
+       */
+      ['account', '账号迁移'],
       ['config', '设置'],
       ['logs', '日志'],
     ]
@@ -4974,6 +5784,7 @@ select.roost-input{color-scheme:dark}
               })
             : null,
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
+          tab === 'account' ? h(AccountTab, { toast }) : null,
           tab === 'config'
             ? (config
                 ? h(ConfigTab, {

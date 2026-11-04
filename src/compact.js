@@ -284,6 +284,7 @@ export function buildOpening({ digests = [], recent = [], agreements = [], now =
  * @param {object} o.sessions  createSessions()
  * @param {object} o.journal
  * @param {object} o.agreementsOf  (chatId) => string[]
+ * @param {(chatId:string)=>string[]} [o.aliasesOf] 这个会话的备用键（号码 + 旧 openid）
  * @param {(chatId:string, text:string)=>void} [o.onOpening] 把开场交给宿主，等下一轮拼进消息
  */
 export function createCompact({
@@ -292,6 +293,12 @@ export function createCompact({
   sessions,
   journal,
   agreementsOf = () => [],
+  /**
+   * 压缩开场要从日记里捞「换机前的对话尾巴」。
+   * 不带别名的话，刚换完机器人就触发压缩，开场里只剩新机器人之后的那几句——
+   * 而压缩正是**最需要**旧上下文的时候。
+   */
+  aliasesOf = () => [],
   onOpening = () => {},
   /** 新会话建好后套默认模型（和主路径 agentFor 一致）；失败不能拦住压缩 */
   applyModelOf = async () => {},
@@ -375,13 +382,13 @@ export function createCompact({
        *
        * 多取一些再分（40 条），因为 8 条用户消息可能散落在 30 条里。
        */
-      const pool = journal.recent(chatId, 40);
+      const pool = journal.recent(chatId, 40, 'chat', aliasesOf(chatId));
       const users = pool.filter((r) => r.role !== 'bot').slice(0, Number(c.keepRecentUser) || 8);
       const bots = pool.filter((r) => r.role === 'bot').slice(0, Number(c.keepRecentBot) || 3);
       const recent = [...users, ...bots].sort((a, b) => a.at - b.at);
 
       opening = buildOpening({
-        digests: journal.digests(chatId, c.keepDigests),
+        digests: journal.digests(chatId, c.keepDigests, aliasesOf(chatId)),
         recent,
         agreements: agreementsOf(chatId) || [],
         now: now(),

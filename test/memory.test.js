@@ -1829,3 +1829,125 @@ test('supersede：本群层的事实也能定位', () => {
   assert.equal(r.scope, 'chat');
   assert.deepEqual(m.list('g1').chat, []);
 });
+
+/* ---------------- 别名合并（换机器人之后读旧记忆） ---------------- */
+
+/**
+ * openid 是每个 AppID 一套的：换机器人之后同一个群变成了另一个 chatId，
+ * 旧记忆还在旧键下面。`aliases` 就是「号码 + 这个号码名下的所有 openid」，
+ * 读取时一起查，存量数据一个字节都不用改。
+ */
+test('别名：当前键 + 别名键的事实合起来读', () => {
+  const m = freshFacts();
+  m.add('763366431', '这个群只聊斗罗', 'chat');
+  m.add('AAAABBBBCCCCDDDDEEEEFFFF00001111', '这个群不欢迎广告', 'chat');
+  m.add('AAAABBBBCCCCDDDDEEEEFFFF00001111', '群主叫老张', 'chat');
+
+  // 不传别名：只看到当前键那一条（老行为）
+  assert.deepEqual(m.list('763366431').chat, ['这个群只聊斗罗']);
+
+  // 传了别名：三条都在
+  const aliases = ['AAAABBBBCCCCDDDDEEEEFFFF00001111'];
+  const got = m.list('763366431', aliases).chat;
+  assert.equal(got.length, 3);
+  assert.ok(got.includes('这个群只聊斗罗'));
+  assert.ok(got.includes('这个群不欢迎广告'));
+  assert.ok(got.includes('群主叫老张'));
+});
+
+test('别名：当前键排在最前（同分时新的优先）', () => {
+  const m = freshFacts();
+  m.add('OLDKEY', '旧键里的事', 'chat');
+  m.add('763366431', '新键里的事', 'chat');
+  const got = m.list('763366431', ['OLDKEY']).chat;
+  assert.equal(got[0], '新键里的事', '当前键的内容要排在别名前面');
+});
+
+test('别名：同一条事实两边都有时只出现一次', () => {
+  const m = freshFacts();
+  m.add('763366431', '群主叫老张', 'chat');
+  m.add('OLDKEY', '群主叫老张', 'chat');
+  assert.deepEqual(m.list('763366431', ['OLDKEY']).chat, ['群主叫老张']);
+});
+
+test('别名：解绑后的历史（until）仍然不注入', () => {
+  const m = freshFacts();
+  m.add('OLDKEY', '主人住在杭州', 'chat');
+  m.supersede('OLDKEY', '杭州');
+  assert.deepEqual(m.list('763366431', ['OLDKEY']).chat, [], '被取代的说法不该借别名还魂');
+});
+
+test('别名：不参与时间衰减，重要的老事实还能挤进前 3 条', () => {
+  const m = freshFacts();
+  const old = Date.now() - 60 * DAY;
+
+  /**
+   * 场景：换过机器人。旧键里有一条**被反复强调过**的事（w=3，60 天前），
+   * 新键里已经有 3 条今天刚记的（w=1）。
+   *
+   * 不做豁免的话：旧的那条分数 = 3 × 0.5^(60/30) = 0.75，
+   * 低于三条新的 1.0，`slice(0, 3)` 永远轮不到它——「记得牢」那半就断了。
+   * 做了下限之后：衰减最多打一次对折，它 = 3 × 0.5 = 1.5，稳稳排第一。
+   */
+  m.add('OLDKEY', '主人对花生过敏（严重）', 'chat', { w: 3, at: old });
+  for (const f of ['新事一', '新事二', '新事三']) m.add('763366431', f, 'chat');
+
+  const r = m.listRanked('763366431', ['OLDKEY']).chat;
+  assert.equal(r.length, 4);
+  assert.equal(r[0], '主人对花生过敏（严重）', `重要的老事实应该排第一: ${JSON.stringify(r)}`);
+});
+
+test('别名：衰减豁免不改变「当前键优先」的同分顺序', () => {
+  const m = freshFacts();
+  const old = Date.now() - 90 * DAY;
+  // 旧键三条同权重、都很老；新键三条今天的
+  for (const f of ['旧一', '旧二', '旧三']) m.add('OLDKEY', f, 'chat', { w: 1, at: old });
+  for (const f of ['新一', '新二', '新三']) m.add('763366431', f, 'chat');
+
+  const r = m.listRanked('763366431', ['OLDKEY']).chat;
+  // 权重一样时当前键优先，同组内新的优先（和改动前的 tie-break 一致）
+  assert.deepEqual(r.slice(0, 3), ['新三', '新二', '新一'], JSON.stringify(r));
+});
+
+test('别名：没有别名时 listRanked 与只传 chatId 完全一致', () => {
+  const m = freshFacts();
+  m.add('g1', '本群只聊斗罗', 'chat');
+  m.add('g1', '主人住在杭州');
+  const a = m.listRanked('g1');
+  const b = m.listRanked('g1', []);
+  assert.deepEqual(a, b);
+  assert.deepEqual(m.list('g1'), m.list('g1', []));
+  assert.deepEqual(m.listFull('g1'), m.listFull('g1', []));
+});
+
+test('别名：空串 / null / 非数组都不该把读取搞崩', () => {
+  const m = freshFacts();
+  m.add('g1', '本群只聊斗罗', 'chat');
+  assert.deepEqual(m.list('g1', ['', null, '   ']).chat, ['本群只聊斗罗']);
+  assert.deepEqual(m.list('g1', null).chat, ['本群只聊斗罗']);
+  assert.deepEqual(m.list('g1', 'OLDKEY').chat, ['本群只聊斗罗'], '字符串当空处理，别按字符拆');
+});
+
+test('别名：别名等于主键时不会读两遍', () => {
+  const m = freshFacts();
+  m.add('g1', '本群只聊斗罗', 'chat');
+  assert.deepEqual(m.list('g1', ['g1']).chat, ['本群只聊斗罗']);
+});
+
+test('别名：listFull 带出旧键的权重和出处', () => {
+  const m = freshFacts();
+  m.add('OLDKEY', '主人对花生过敏', 'chat', { w: 3 });
+  const [it] = m.listFull('763366431', ['OLDKEY']).chat;
+  assert.equal(it.text, '主人对花生过敏');
+  assert.equal(it.w, 3);
+});
+
+test('别名：新记忆仍然写在当前键下（别名只影响读）', () => {
+  const m = freshFacts();
+  m.add('OLDKEY', '旧事', 'chat');
+  m.add('763366431', '新事', 'chat');
+  m.list('763366431', ['OLDKEY']); // 读一遍不该改任何东西
+  const raw = readRaw();
+  assert.deepEqual(raw.chats['OLDKEY'], ['旧事']);
+  assert.deepEqual(raw.chats['763366431'], ['新事']);
+});
