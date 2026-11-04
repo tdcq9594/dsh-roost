@@ -78,17 +78,17 @@ const dayKey = (ts) => new Date(ts).toDateString();
  * 图谱那边更准（有状态），facts 那边更全（模型顺手写的）。
  * 去重后返回纯文本。
  */
-export function readAgreements({ memory, graph, chatId = '' } = {}) {
+export function readAgreements({ memory, graph, chatId = '', aliases = [] } = {}) {
   const out = new Set();
   try {
-    const m = memory?.list?.(chatId);
+    const m = memory?.list?.(chatId, aliases);
     for (const f of [...(m?.global || []), ...(m?.chat || [])]) {
       const s = String(f || '');
       if (s.startsWith('约定：')) out.add(s.slice(3).trim());
     }
   } catch {}
   try {
-    for (const e of graph?.nowEdges?.({ chatId, limit: 30 }) || []) {
+    for (const e of graph?.nowEdges?.({ chatId, limit: 30, aliases }) || []) {
       if (e.rel === '约定' && e.dst) out.add(String(e.dst).trim());
     }
   } catch {}

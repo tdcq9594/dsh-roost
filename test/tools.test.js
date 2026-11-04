@@ -309,3 +309,47 @@ test('注册：工具名被别的插件占了，要指名道姓地说清，而�
   assert.match(r.reason, /memory_search/);
   assert.equal(registerCalled, false, '预检命中就不该再去注册，避免半套工具');
 });
+
+/* ---------------- 别名：工具这条路最容易漏 ---------------- */
+
+test('工具：检索会把别名传下去（注入里有、检索里没有是最隐蔽的半失效）', async () => {
+  /**
+   * 换机器人之后，注入那边带了别名（旧记忆照样进提示词），
+   * 工具这边不带的话，模型问「上次说的那个方案」会拿到 `count: 0`
+   * 加一句「没查到，可以换个说法」，然后回一句「我不记得了」。
+   * 用户以为她失忆了，实际是检索没合上。
+   */
+  const searched = [];
+  const defs = buildToolDefs({
+    journal: {
+      async search(q, opts) {
+        searched.push({ q, opts });
+        return [];
+      },
+      add() { return { added: true, level: 'normal' }; },
+    },
+    graphOf: () => ({ nowEdges: () => [] }),
+    callerOf: () => ({ bucket: 'member', chatId: 'newOpenid', aliases: ['10001', 'oldOpenid'] }),
+    cfgOf: () => ({ memory: { enabled: true } }),
+  });
+  const s = defs.find((d) => d.name === 'memory_search');
+  await s.execute({ query: '方案' });
+  assert.deepEqual(searched[0].opts.aliases, ['10001', 'oldOpenid'], '别名必须原样传给 journal.search');
+});
+
+test('工具：callerOf 没给 aliases 时退回空数组（老调用方不能炸）', async () => {
+  const searched = [];
+  const defs = buildToolDefs({
+    journal: {
+      async search(q, opts) { searched.push({ q, opts }); return []; },
+      add() { return { added: true, level: 'normal' }; },
+    },
+    graphOf: () => ({ nowEdges: () => [] }),
+    callerOf: () => ({ bucket: 'owner', chatId: 'g1' }),
+    cfgOf: () => ({ memory: { enabled: true } }),
+  });
+  const s = defs.find((d) => d.name === 'memory_search');
+  const r = await s.execute({ query: '方案' });
+  assert.equal(r.ok, true);
+  assert.deepEqual(searched[0].opts.aliases, []);
+});

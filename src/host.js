@@ -30,6 +30,8 @@ import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
 import { createMood } from './mood.js';
 import { createClosing } from './closing.js';
+import { createAccount } from './account.js';
+import { createRewriter } from './rewrite.js';
 import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand, trimPersonaBody, trimDemos } from './personas.js';
 import { createPersonaRepo, scanPersona } from './persona-repo.js';
 import { createUpdater } from './update.js';
@@ -639,6 +641,32 @@ export function apply(ctx) {
   /** 最近一次的场景快照：给 roost-scene 和 /mind 调试接口用 */
   let lastScene = null;
 
+  /**
+   * 会话 → 备用键（号码 + 该号码名下的所有 openid）。
+   *
+   * 为什么要单独存一份而不是只从 `lastScene` 读：面板的 /memory 接口、
+   * 「记住」工具都能按**任意** chatId 读记忆，那时 lastScene 可能已经是别的会话了。
+   * 只放内存、不落盘：下次有人说话就会重新填，持久化没有意义（而且
+   * 号码是 identity.json 那边的事，这里只做一次转手）。
+   */
+  const chatAliases = new Map();
+  const CHAT_ALIASES_MAX = 300;
+  const aliasesOf = (chatId) => chatAliases.get(String(chatId ?? '')) ?? [];
+  const rememberAliases = (chatId, aliases) => {
+    const key = String(chatId ?? '');
+    if (!key) return;
+    if (Array.isArray(aliases) && aliases.length) {
+      chatAliases.set(key, aliases);
+      // 上限只是防内存无限涨：超出就丢最早的（Map 保插入序）
+      if (chatAliases.size > CHAT_ALIASES_MAX) {
+        chatAliases.delete(chatAliases.keys().next().value);
+      }
+    } else {
+      // 解绑之后别名会变空，**必须覆盖成空**，不能留着旧的继续读
+      chatAliases.set(key, []);
+    }
+  };
+
   /** 这一轮用户说的话（截断），世界书按它匹配触发词 */
   let lastMsgText = '';
 
@@ -736,6 +764,38 @@ export function apply(ctx) {
   const self = createSelf({ log: (m) => log.warn(m) });
 
   /**
+   * 账号迁移：从**记忆数据**出发找「认不出号码」的旧 openid。
+   *
+   * 和 Roost 面板「身份」页的分工：
+   *   · 那边看**最近发过言**的人（统计库 + 最近发言人）
+   *   · 这边看**库里有记忆**的键（换机器人后早就不说话的那批）
+   * 两边的交集是空的，缺一个就会漏。
+   */
+  const account = createAccount({
+    memory,
+    journal,
+    graph,
+    sessions,
+    setup,
+    log: (m) => log.warn(m),
+  });
+
+  /**
+   * 一键改写（合并后删旧键 + 备份 + 一键回退）。
+   *
+   * 这是整条链路里唯一会动记忆数据的模块，和上面的只读扫描/绑定分开建，
+   * 免得哪天有人给 `account.scan()` 顺手加个写操作，把「只读」这条底线破了。
+   */
+  const rewriter = createRewriter({
+    memory,
+    journal,
+    graph,
+    sessions,
+    boundList: () => account.boundList(),
+    log: (m) => log.warn(m),
+  });
+
+  /**
    * 每轮记忆注入用的临时状态：deep（这次要不要全量）+ hits（这一句检索到什么）。
    *
    * 为什么放这儿而不是现算：`systemPrompt.context` 的 text() 是**同步**的，
@@ -788,6 +848,7 @@ export function apply(ctx) {
     graph,
     memory,
     self,
+    aliasesOf,
     log: (m) => log.info(m),
     generate: async (prompt) => {
       const chat = {
@@ -1010,7 +1071,7 @@ export function apply(ctx) {
       return ch ? { ...ch, send: sendOut } : null;
     },
     log: (m) => log.info(m),
-    authzOf: (chatId) => memory.hasAuthz(chatId, 'group_push'),
+    authzOf: (chatId) => memory.hasAuthz(chatId, 'group_push', aliasesOf(chatId)),
     contextOf: ({ kind, chatId = '' } = {}) => {
       const cid = chatId || cfg.speakUp?.chatId || '';
       const m = mood.get();
@@ -1029,7 +1090,7 @@ export function apply(ctx) {
         moodText: mood.text(),
         /** 这个人格习惯怎么开口：主动搭话时用来锚语气，不必逐字照抄 */
         opener: personas.resolve(cid, cfg.persona).firstMes || '',
-        agreements: readAgreements({ memory, graph, chatId: cid }),
+        agreements: readAgreements({ memory, graph, chatId: cid, aliases: aliasesOf(cid) }),
         /**
          * 没有会话 id 时**返回空**，不要去查全库。
          *
@@ -1039,7 +1100,7 @@ export function apply(ctx) {
          */
         recent: cid
           ? journal
-            .recent(cid, 4)
+            .recent(cid, 4, 'chat', aliasesOf(cid))
             .reverse()
             .map((r) => `${r.role === 'bot' ? '你' : r.sender || '对方'}：${String(r.digest || r.text).slice(0, 60)}`)
           : [],
@@ -1118,7 +1179,8 @@ export function apply(ctx) {
     workspaceIdOf: () => workspaceId(),
     sessions,
     journal,
-    agreementsOf: (chatId) => readAgreements({ memory, graph, chatId }),
+    agreementsOf: (chatId) => readAgreements({ memory, graph, chatId, aliases: aliasesOf(chatId) }),
+    aliasesOf,
     onOpening: (chatId, text) => {
       if (text) pendingOpening.set(chatId, text);
     },
@@ -1174,7 +1236,7 @@ export function apply(ctx) {
   const groupCandidatesView = () =>
     groupCandidates({
       groups: cfg.awake?.groups || [],
-      authzOf: (chatId) => memory.hasAuthz(chatId, 'group_push'),
+      authzOf: (chatId) => memory.hasAuthz(chatId, 'group_push', aliasesOf(chatId)),
       stateOf: (chatId) => awake.groupState(chatId),
       cfg: cfg.awake || {},
     });
@@ -1258,11 +1320,25 @@ export function apply(ctx) {
      * "最近记的"，跟权重毫无关系 —— 一条被反复强调、权重 5 的事，
      * 只要最近没人再提，就永久沉在数组前段，平时那 6 个名额永远轮不到它。
      */
-    const m = memory.listRanked(chatId);
+    const m = memory.listRanked(chatId, aliasesOf(chatId));
     const st = memState.get(chatId) || {};
     const deep = typeof override === 'boolean' ? override : Boolean(st.deep);
 
-    const rules = '记着的事可以拿来用，但**只在这个群发生过的事别拿到别处说**；判断不了就当作不知道。';
+    /**
+     * 认人认群的顺序写在这里，是因为模型只从这一段知道「号码比 openid 稳」。
+     *
+     * openid 是每个 AppID 一套的，换机器人就全变；QQ号 / 群号不变。
+     * 不写这一句，模型看到 `[小明 (QQ 10001 / CBF1E6B3…)]` 会随便挑一个当身份，
+     * 换机器人之后就对不上了。**号码优先，openid 只用来 @ 人**。
+     *
+     * 但**只在当前会话确实有号码时才加**：没绑的人看到一条用不上的规则，
+     * 等于白占 token；更要紧的是前缀会变，没绑定用户的 prompt cache 会全废。
+     */
+    const baseRules = '记着的事可以拿来用，但**只在这个群发生过的事别拿到别处说**；判断不了就当作不知道。';
+    const rules =
+      lastScene?.uin || lastScene?.groupUin
+        ? `${baseRules}认人认群时**先看 QQ号 / 群号，没有号码才看 openid**——openid 会随机器人账号变，号码不会；要 @ 人还是用 openid（官方只认它）。`
+        : baseRules;
     const lines = (arr) => arr.map((f) => `· ${f}`).join('\n');
 
     /**
@@ -1295,18 +1371,18 @@ export function apply(ctx) {
         } catch (e) {
           log.debug(`取自述失败：${e.message}`);
         }
-        const ds = journal.digests(chatId, 5);
+        const ds = journal.digests(chatId, 5, aliasesOf(chatId));
         if (ds.length) {
           digestSec = `【这几天】\n${ds
             .reverse()
             .map((d) => `· ${dayStr(d.at)} ${d.text}`)
             .join('\n')}`;
         }
-        const top = journal.top(chatId, { limit: cfg.memory?.topK || 6 });
+        const top = journal.top(chatId, { limit: cfg.memory?.topK || 6, aliases: aliasesOf(chatId) });
         if (top.length) {
           topSec = `【记得比较深的】\n${top.map((r) => `· ${clip(r.digest || r.text, 60)}`).join('\n')}`;
         }
-        const g = graph.text({ chatId, max: 240 });
+        const g = graph.text({ chatId, max: 240, aliases: aliasesOf(chatId) });
         if (g) graphSec = `【关系】\n${g}`;
       } catch (e) {
         log.debug(`取记忆深度块失败：${e.message}`);
@@ -1343,7 +1419,7 @@ export function apply(ctx) {
 
     let recentSec = '';
     try {
-      const recent = journal.recent(chatId, 3).reverse();
+      const recent = journal.recent(chatId, 3, 'chat', aliasesOf(chatId)).reverse();
       if (recent.length) {
         recentSec = `【刚才说到】\n${recent
           .map((r) => `· ${r.role === 'bot' ? '你' : r.sender || '对方'}：${clip(r.text, 40)}`)
@@ -1400,7 +1476,7 @@ export function apply(ctx) {
    * 摘干净再发出去——群里不该看到 `<<remember: ...>>`。
    */
   /** 标记执行拆到 `apply-markers.js`（阶段 8）：依赖注入，能单测 */
-  const applyMemoryMarkers = createMarkerApplier({ memory, journal, self, closing, mood, log });
+  const applyMemoryMarkers = createMarkerApplier({ memory, journal, self, closing, mood, aliasesOf, log });
 
   /** 裁到上限，超了加省略号 */
   function clip(text, max) {
@@ -1412,19 +1488,32 @@ export function apply(ctx) {
   /**
    * 场景块：告诉模型「你现在在哪、跟谁说话」。
    *
-   * 官方**没有群号**，只有群 openid（每个机器人独立、不可读），
-   * 所以标识用「群名 + openid 前 8 位」，不要写"群号 xxx"。
+   * 官方**没有群号**，只有群 openid（每个机器人独立、不可读）。
+   * 所以这里只能给「群名 + openid 前 8 位」——**除非管理员在面板绑过群号**，
+   * 那时才写得出「群号 763366431」。绑不绑是两套文案，不能混着写：
+   * 没绑还写「群号」就是编的，模型会拿它去认群，换机器人就对不上了。
    */
   function sceneText() {
     const s = lastScene;
     if (!s) return '';
     const isGroup = s.kind === 'group';
+    /**
+     * 号码优先、openid 兜底。
+     *
+     * openid 换机器人就全变；号码不变。两个都给，模型才有得选——
+     * 只给 openid 的话，换一次机器人它就把老朋友、老群当陌生人了。
+     */
+    const num = isGroup ? String(s.groupUin || '') : String(s.uin || '');
+    const mark = num ? `群号 ${num}，标识 ${s.idShort}` : `群标识 ${s.idShort}`;
     const parts = [
       isGroup
-        ? `你现在在 QQ 群${s.name ? `「${s.name}」` : ''}里说话（群标识 ${s.idShort}）。这是群聊，不是私聊。`
-        : `你现在在和${s.name ? `「${s.name}」` : '对方'}私聊（标识 ${s.idShort}）。`,
+        ? `你现在在 QQ 群${s.name ? `「${s.name}」` : ''}里说话（${mark}）。这是群聊，不是私聊。`
+        : `你现在在和${s.name ? `「${s.name}」` : '对方'}私聊（${num ? `QQ ${num}，标识 ${s.idShort}` : `标识 ${s.idShort}`}）。`,
     ];
-    if (s.sender) parts.push(`刚说话的是「${s.sender}」${s.bucket ? `（${s.bucket}）` : ''}。`);
+    if (s.sender) {
+      const who = s.uin ? `${s.sender} / QQ ${s.uin}` : s.sender;
+      parts.push(`刚说话的是「${who}」${s.bucket ? `（${s.bucket}）` : ''}。`);
+    }
     if (isGroup) parts.push('群里可能还有别人在聊，不必每句都接；接不上就不说。');
     return clip(parts.join(''), SCENE_MAX);
   }
@@ -1633,7 +1722,9 @@ export function apply(ctx) {
         graphOf: () => graph,
         callerOf: () => {
           const cur = sidFor() ? speaker.get(sidFor()) : null;
-          return { bucket: cur?.bucket, chatId: cur?.payload?.chat?.chatId || chat.chatId || '' };
+          const cid = cur?.payload?.chat?.chatId || chat.chatId || '';
+          /** 别名要跟着走：工具检索和注入必须看同一批键，否则「注入里有、检索里没有」 */
+          return { bucket: cur?.bucket, chatId: cid, aliases: aliasesOf(cid) };
         },
         cfgOf: () => cfg,
         /**
@@ -1938,7 +2029,7 @@ export function apply(ctx) {
              */
             const persona = personas.resolve(chat.chatId, personaCfgFor(chat));
             // 按群覆盖优先（模型用 <<persona:>> 写的），没有才用文件里那个人格
-            const override = memory.getPersonaOverride(chat.chatId);
+            const override = memory.getPersonaOverride(chat.chatId, aliasesOf(chat.chatId));
             const extra = chat.kind === 'c2c' ? p.rulesPrivate : p.rulesSocial;
 
             /**
@@ -2360,8 +2451,25 @@ export function apply(ctx) {
         name: String(chat.name || '').trim(),
         idShort: String(chat.chatId || '').slice(0, 8),
         sender: String(payload?.sender?.name || '').trim(),
+        /**
+         * 身份：QQ号 / 群号 + 别名 + 稳定 id。
+         *
+         * 场景块每轮被覆盖，只留得住「最后说话的那个人」，但**号码必须留着**：
+         * openid 换机器人就全变，号码不变。模型下一轮想说「刚才 10001 说的」
+         * 时得有东西可抓。
+         */
+        uin: String(chat.uin || ''),
+        groupUin: String(chat.groupUin || ''),
+        aliases: Array.isArray(chat.aliases) ? chat.aliases : [],
+        identityId: String(chat.identityId || ''),
         bucket,
       };
+
+      /**
+       * 别名转存一份：后面所有「按 chatId 读记忆」的地方都要用它。
+       * 空数组也要记（解绑之后不能还读旧键）。
+       */
+      rememberAliases(chat.chatId, chat.aliases);
 
       /**
        * 硬限制：按档位收走本地工具。
@@ -2537,9 +2645,11 @@ export function apply(ctx) {
           let entIds = [];
           try {
             const named = graph
-              .entities({ chatId: chat.chatId, limit: 40 })
+              .entities({ chatId: chat.chatId, limit: 40, aliases: aliasesOf(chat.chatId) })
               .filter((e) => e.name && e.name.length >= 2 && text.includes(e.name));
-            entIds = named.flatMap((e) => graph.linkedJournalIds(e.name, { chatId: chat.chatId, limit: 5 }));
+            entIds = named.flatMap((e) =>
+              graph.linkedJournalIds(e.name, { chatId: chat.chatId, limit: 5, aliases: aliasesOf(chat.chatId) }),
+            );
           } catch (e) {
             log.debug(`实体路跳过：${e.message}`);
           }
@@ -2547,6 +2657,8 @@ export function apply(ctx) {
             chatId: chat.chatId,
             limit: Number(cfg.memory?.hits) || 3,
             entityJournalIds: entIds,
+            // 换过机器人时旧日记在旧 openid 下面，别名一起查
+            aliases: aliasesOf(chat.chatId),
           });
         } catch (e) {
           log.warn(`日记检索失败（不影响这轮）：${e.message}`);
@@ -3166,7 +3278,7 @@ export function apply(ctx) {
               return send(res, 200, { ok: true, message: arg ? '这个群的人设换了' : '回到默认人格' });
 
             case 'memory.list':
-              return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId) });
+              return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId, aliasesOf(chatId)) });
 
             /**
              * 这个会话「不记也不读」的开关（纯净模式）。
@@ -3212,7 +3324,7 @@ export function apply(ctx) {
                * chatId 为空时是**不过滤**语义 = 全库，所以先挡一道。
                */
               if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话再删' });
-              const n = memory.remove(chatId, word);
+              const n = memory.remove(chatId, word, aliasesOf(chatId));
               /**
                * 日记同删。
                *
@@ -3222,7 +3334,7 @@ export function apply(ctx) {
                */
               let j = 0;
               try {
-                j = journal.forget({ chatId, word });
+                j = journal.forget({ chatId, word, aliases: aliasesOf(chatId) });
               } catch (e) {
                 log.warn(`日记遗忘失败：${e.message}`);
               }
@@ -3270,7 +3382,9 @@ export function apply(ctx) {
                 return send(res, 400, { ok: false, message: '缺 src / rel / dst（要删哪条关系）' });
               }
               const scope = arg?.chatId === undefined ? chatId : String(arg.chatId ?? '');
-              const r = graph.suppressEdge({ src, rel, dst, chatId: scope, why: String(arg?.why ?? '') });
+              const r = graph.suppressEdge({
+                src, rel, dst, chatId: scope, why: String(arg?.why ?? ''), aliases: aliasesOf(scope),
+              });
               if (!r.ok) return send(res, 500, { ok: false, message: r.reason || '没删掉' });
 
               let facts = 0;
@@ -3282,7 +3396,7 @@ export function apply(ctx) {
                    * `memory.remove` 虽然也会搜全局，但反过来（群里的约定、
                    * 面板停在私聊）就删不到了。
                    */
-                  facts = memory.remove(scope, `约定：${dst}`);
+                  facts = memory.remove(scope, `约定：${dst}`, aliasesOf(scope));
                 } catch (e) {
                   log.warn(`删约定的 facts 失败：${e.message}`);
                 }
@@ -3329,7 +3443,7 @@ export function apply(ctx) {
                 return send(res, 400, { ok: false, message: '缺 src / rel / dst（要关哪条关系）' });
               }
               const scope = arg?.chatId === undefined ? chatId : String(arg.chatId ?? '');
-              const n = graph.closeEdge({ src, rel, dst, chatId: scope });
+              const n = graph.closeEdge({ src, rel, dst, chatId: scope, aliases: aliasesOf(scope) });
               return send(res, 200, {
                 ok: true,
                 closed: n,
@@ -3339,10 +3453,10 @@ export function apply(ctx) {
 
             case 'memory.clear': {
               if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话' });
-              memory.clearChat(chatId);
+              memory.clearChat(chatId, aliasesOf(chatId));
               let j = 0;
               try {
-                j = journal.clearChat(chatId);
+                j = journal.clearChat(chatId, aliasesOf(chatId));
               } catch (e) {
                 log.warn(`清日记失败：${e.message}`);
               }
@@ -3363,7 +3477,7 @@ export function apply(ctx) {
              */
             case 'memory.purge': {
               if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话' });
-              memory.clearChat(chatId);
+              memory.clearChat(chatId, aliasesOf(chatId));
               let j = 0;
               try {
                 j = journal.purgeChat(chatId);
@@ -3511,7 +3625,7 @@ export function apply(ctx) {
         const url = new URL(req.url || '/', 'http://x');
         const asked = String(url.searchParams.get('chatId') || '').trim();
         const chatId = asked || lastScene?.chatId || '';
-        const facts = memory.list(chatId);
+        const facts = memory.list(chatId, aliasesOf(chatId));
 
         /**
          * 带权重和出处的版本，给面板的「事实」那一节用。
@@ -3522,7 +3636,7 @@ export function apply(ctx) {
          */
         let factsDetail = null;
         try {
-          factsDetail = memory.listFull(chatId);
+          factsDetail = memory.listFull(chatId, aliasesOf(chatId));
         } catch (e) {
           factsDetail = { error: e.message };
         }
@@ -3540,7 +3654,7 @@ export function apply(ctx) {
          */
         let evidence = null;
         try {
-          const rows = journal.recent(chatId, 20);
+          const rows = journal.recent(chatId, 20, 'chat', aliasesOf(chatId));
           const withIds = rows.filter((r) => Array.isArray(r.eventIds) && r.eventIds.length);
           evidence = {
             rows: rows.length,
@@ -3592,10 +3706,10 @@ export function apply(ctx) {
             backend: journal.backend(),
             stats: journalStat(),
             /** 每天的摘要（巩固产出的那种一句话） */
-            digests: journal.digests(chatId, 7).map((d) => ({ at: d.at, day: d.day, text: d.text })),
+            digests: journal.digests(chatId, 7, aliasesOf(chatId)).map((d) => ({ at: d.at, day: d.day, text: d.text })),
             /** 重要记忆 TopK（重要性×衰减+访问频率） */
             top: journal
-              .top(chatId, { limit: Number(cfg.memory?.topK) || 6 })
+              .top(chatId, { limit: Number(cfg.memory?.topK) || 6, aliases: aliasesOf(chatId) })
               .map((r) => ({
                 id: r.id,
                 at: r.at,
@@ -3605,7 +3719,7 @@ export function apply(ctx) {
                 accessed: r.accessed,
               })),
             /** 最近说的几条（含原文，方便看"她到底记得什么"） */
-            recent: journal.recent(chatId, 10).map((r) => ({
+            recent: journal.recent(chatId, 10, 'chat', aliasesOf(chatId)).map((r) => ({
               id: r.id,
               at: r.at,
               level: r.level,
@@ -3624,9 +3738,9 @@ export function apply(ctx) {
           gp = {
             stats: graph.stats(),
             /** 现在的实体（人/地点/东西） */
-            entities: graph.entities({ chatId, limit: 20 }),
+            entities: graph.entities({ chatId, limit: 20, aliases: aliasesOf(chatId) }),
             /** 现在还成立的关系（双时态里 valid_to IS NULL 的那些） */
-            edges: graph.nowEdges({ chatId, limit: 20 }),
+            edges: graph.nowEdges({ chatId, limit: 20, aliases: aliasesOf(chatId) }),
           };
         } catch (e) {
           gp = { error: e.message };
@@ -3671,7 +3785,7 @@ export function apply(ctx) {
           /** 第五层：她自己写下的（跨群汇总，不属于任何单个会话） */
           self: sf,
           authz: memory.authz(chatId),
-          personaOverride: memory.getPersonaOverride(chatId),
+          personaOverride: memory.getPersonaOverride(chatId, aliasesOf(chatId)),
         });
       }),
 
@@ -3689,7 +3803,11 @@ export function apply(ctx) {
         if (req.method === 'GET') {
           try {
             if (q) {
-              const rows = await journal.search(q, { chatId, limit: Number(url.searchParams.get('limit')) || 8 });
+              const rows = await journal.search(q, {
+                chatId,
+                limit: Number(url.searchParams.get('limit')) || 8,
+                aliases: aliasesOf(chatId),
+              });
               return send(res, 200, {
                 ok: true,
                 q,
@@ -3709,8 +3827,8 @@ export function apply(ctx) {
               ok: true,
               backend: journal.backend(),
               stats: journalStat(),
-              recent: journal.recent(chatId, 20),
-              digests: journal.digests(chatId, 7),
+              recent: journal.recent(chatId, 20, 'chat', aliasesOf(chatId)),
+              digests: journal.digests(chatId, 7, aliasesOf(chatId)),
             });
           } catch (e) {
             return send(res, 500, { ok: false, message: e.message });
@@ -3747,7 +3865,7 @@ export function apply(ctx) {
           let selfN = 0;
           if (hint) {
             try {
-              facts = memory.remove(scope, hint);
+              facts = memory.remove(scope, hint, aliasesOf(scope));
             } catch (e) {
               log.warn(`单条遗忘：清 facts 失败：${e.message}`);
             }
@@ -3781,11 +3899,11 @@ export function apply(ctx) {
          *
          * 只抹日记的话，facts 和自述里那句话还在，用户换个问法又能问出来。
          */
-        const n = journal.forget({ chatId: scope, word });
+        const n = journal.forget({ chatId: scope, word, aliases: aliasesOf(scope) });
         let facts = 0;
         let selfN = 0;
         try {
-          facts = memory.remove(scope, word);
+          facts = memory.remove(scope, word, aliasesOf(scope));
         } catch (e) {
           log.warn(`关键词遗忘：清 facts 失败：${e.message}`);
         }
@@ -3815,9 +3933,9 @@ export function apply(ctx) {
             ok: true,
             chatId,
             stats: graph.stats(),
-            entities: graph.entities({ chatId, limit: 50 }),
-            edges: graph.nowEdges({ chatId, limit: 50 }),
-            ended: graph.endedEdges({ chatId, limit: 20 }),
+            entities: graph.entities({ chatId, limit: 50, aliases: aliasesOf(chatId) }),
+            edges: graph.nowEdges({ chatId, limit: 50, aliases: aliasesOf(chatId) }),
+            ended: graph.endedEdges({ chatId, limit: 20, aliases: aliasesOf(chatId) }),
             /** 删过的关系（墓碑）。面板要给一个「能撤销」的入口 */
             suppressed: graph.suppressed({ chatId, limit: 50 }),
           });
@@ -3918,7 +4036,7 @@ export function apply(ctx) {
               hits: (st.hits || []).map((r) => ({ at: r.at, why: r.why, text: clip(r.digest || r.text, 60) })),
             },
           },
-          memory: memory.list(chatId),
+          memory: memory.list(chatId, aliasesOf(chatId)),
           journal: journalStat(),
           graph: graph.stats(),
           /** 记忆工具装上了没——静默失败最难查，面板必须看得见 */
@@ -3933,6 +4051,89 @@ export function apply(ctx) {
       }),
 
       route('/chats', (req, res) => send(res, 200, { ok: true, chats: sessions.list() })),
+
+      /* ---------------- 账号迁移 ---------------- */
+
+      /**
+       * 扫描本机数据里「认不出号码」的键。
+       *
+       * 只读：不改 memory / journal / graph 一个字节。绑定是另一个接口。
+       * roost 没启动时也返回 200 —— 上半区照样能看，只是 `roost.ok` 为 false，
+       * 界面据此把绑定按钮禁用并说明原因，而不是白屏。
+       */
+      route('/account/scan', async (req, res) => send(res, 200, await account.scan())),
+
+      /** 机器人列表：换机器人时要选往哪个 bot 下面加 openid */
+      route('/account/bots', async (req, res) => send(res, 200, await account.bots())),
+
+      /** 已绑定的号码（下半区），代理 roost `/api/identity` */
+      route('/account/bound', async (req, res) => send(res, 200, await account.boundList())),
+
+      /**
+       * 绑定 / 追加。
+       *
+       * `attach` 和 `bind` 走**同一个实现**：给已有号码补一条 openid，
+       * 服务端就是往 claims 里 push，不会删旧的。分成两条路径迟早会分叉。
+       */
+      route('/account/bind', async (req, res) => {
+        const body = await readBody(req);
+        const r = await account.bind(body);
+        return send(res, r.ok ? 200 : r.code === 'CONFLICT' ? 409 : 400, r);
+      }),
+
+      route('/account/attach', async (req, res) => {
+        const body = await readBody(req);
+        const r = await account.bind(body);
+        return send(res, r.ok ? 200 : r.code === 'CONFLICT' ? 409 : 400, r);
+      }),
+
+      /** 「人」分区：群里发言的人 / 私聊对象（代理 roost 的未识别用户） */
+      route('/account/people', async (req, res) => send(res, 200, await account.people())),
+
+      /** 按号码一次追加多个 openid，逐条报结果，失败的单独列出来 */
+      route('/account/batch-attach', async (req, res) => {
+        const body = await readBody(req);
+        const r = await account.batchAttach(body);
+        return send(res, r.done?.length || r.failed?.length ? 200 : 400, r);
+      }),
+
+      /** 换机器人时的候选提示。只提示，绝不自动绑定 */
+      route('/account/suggest', async (req, res) => send(res, 200, await account.suggest())),
+
+      /* ---------------- 一键改写：合并后删旧键（危险操作） ---------------- */
+
+      /**
+       * 预览。**只读**。列出要动的每个文件（绝对路径）、每个键、各多少条。
+       * 界面二次确认时要把这份清单原样摆给用户。
+       */
+      route('/account/rewrite-plan', async (req, res) => {
+        const uins = String(new URL(req.url, 'http://local').searchParams.get('uins') || '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        return send(res, 200, await rewriter.plan({ uins }));
+      }),
+
+      /**
+       * 执行。服务端**强制**校验确认词——公开路由能被直接 POST，
+       * 光靠前端弹窗拦不住。内部会自动先整文件备份，失败自动回退。
+       */
+      route('/account/rewrite', async (req, res) => {
+        const body = await readBody(req);
+        const r = await rewriter.apply(body);
+        const status = r.ok ? 200 : r.code === 'CONFIRM_REQUIRED' ? 400 : 409;
+        return send(res, status, r);
+      }),
+
+      /** 一键回退：把备份文件逐个覆盖回去，并让四个存储重新读盘 */
+      route('/account/rollback', async (req, res) => {
+        const body = await readBody(req);
+        const r = rewriter.rollback(body);
+        return send(res, r.ok ? 200 : 400, r);
+      }),
+
+      /** 可回退的备份列表（最近的在前） */
+      route('/account/backups', async (req, res) => send(res, 200, { ok: true, items: rewriter.listBackups() })),
 
       /**
        * 对话收尾（只私聊）。面板「记忆」页底部用。
@@ -4325,6 +4526,8 @@ export function apply(ctx) {
           ...status,
           install: ttsInstaller.status(),
           usage: ttsInstaller.usage(model),
+          /** 微软朗读的依赖装好没有（面板据此显示安装按钮） */
+          edgeInstalled: ttsInstaller.edgeReady(),
           /** GPT-SoVITS 的进程状态（有没有在跑、端口、最后几行日志） */
           gpt: gptLauncher.status(),
           models: Object.entries(SHERPA_MODELS).map(([id, spec]) => ({
@@ -4349,6 +4552,17 @@ export function apply(ctx) {
 
       route('/tts/install-cancel', async (req, res) => {
         const r = ttsInstaller.cancel();
+        return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      /**
+       * 一键装微软朗读的依赖（三个纯 JS 包，约 0.4MB）。
+       *
+       * 和 sherpa 的安装共用同一个「同时只跑一个任务」的状态机，
+       * 但落在不同目录——互不覆盖。进度走 `/tts-status` 的 install 字段。
+       */
+      route('/tts/edge-install', async (req, res) => {
+        const r = ttsInstaller.startEdge();
         return send(res, r.ok ? 200 : 409, r);
       }),
 
@@ -4382,9 +4596,15 @@ export function apply(ctx) {
        */
       route('/tts/gpt-start', async (req, res) => {
         const body = await readBody(req).catch(() => ({}));
-        const dir = String(body?.dir || cfg.tts?.gptSovits?.installDir || '');
-        const model = String(body?.model || cfg.tts?.gptSovits?.model || '');
-        const r = gptLauncher.start(dir, { model });
+        const g = cfg.tts?.gptSovits || {};
+        const dir = String(body?.dir || g.installDir || '');
+        const model = String(body?.model || g.model || '');
+        /** 手填的权重路径优先于按角色名自动配对，见 gpt-sovits.js 的 switchModel */
+        const r = gptLauncher.start(dir, {
+          model,
+          gptWeights: String(body?.gptWeights || g.gptWeights || ''),
+          sovitsWeights: String(body?.sovitsWeights || g.sovitsWeights || ''),
+        });
         return send(res, r.ok ? 200 : 409, r);
       }),
 

@@ -14,12 +14,17 @@ export function createSessions({ dataDir, log = () => {} }) {
   const file = join(dataDir, 'sessions.json');
 
   let map = { chats: {} };
-  try {
-    const raw = JSON.parse(readFileSync(file, 'utf8'));
-    if (raw && typeof raw === 'object' && raw.chats) map = raw;
-  } catch {
-    // 没有就用空的，不是错误
+
+  function load() {
+    try {
+      const raw = JSON.parse(readFileSync(file, 'utf8'));
+      map = raw && typeof raw === 'object' && raw.chats ? raw : { chats: {} };
+    } catch {
+      // 没有就用空的，不是错误
+      map = { chats: {} };
+    }
   }
+  load();
 
   function save() {
     try {
@@ -30,6 +35,15 @@ export function createSessions({ dataDir, log = () => {} }) {
   }
 
   return {
+    /**
+     * 重新读盘。
+     *
+     * 「一键改写 / 一键回退」会直接覆盖 `sessions.json`。这份映射在内存里
+     * 是一份常驻副本，不重载的话下一次 `set()` 会把旧映射写回去，
+     * 把刚恢复的文件盖掉。
+     */
+    reload: load,
+
     /** 取这个会话的 DSH 会话 id；没有就返回空串 */
     get(chatId) {
       const e = map.chats[chatId];

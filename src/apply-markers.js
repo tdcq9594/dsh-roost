@@ -17,11 +17,15 @@ import { parseClose, acceptClose } from './closing.js';
 import { W_EXPLICIT } from './memory.js';
 
 /**
- * @param {{memory:object, journal:object, self:object, closing:object, mood:object, log?:object}} deps
+ * @param {{memory:object, journal:object, self:object, closing:object, mood:object,
+ *          aliasesOf?:(chatId:string)=>string[], log?:object}} deps
  *   `log` 是 logger **对象**（`log.debug` / `log.warn`），不是函数——和 host 里一致。
+ *   `aliasesOf` 给「忘掉 / 清空」用：读的时候带别名把旧键的事读出来了，
+ *   删的时候不带，就会出现「说了忘掉、下一条又想起来了」。
  */
-export function createMarkerApplier({ memory, journal, self, closing, mood, log = () => {} }) {
+export function createMarkerApplier({ memory, journal, self, closing, mood, aliasesOf = () => [], log = () => {} }) {
   return function applyMemoryMarkers(text, chatId, said = '', kind = 'group', src = null) {
+    const aliases = aliasesOf(chatId);
     let out = String(text ?? '');
     let touched = '';
 
@@ -83,7 +87,7 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, log 
     });
 
     out = out.replace(/<<clear>>/gi, () => {
-      memory.clearChat(chatId);
+      memory.clearChat(chatId, aliases);
       memory.setPersonaOverride(chatId, '');
       /**
        * **日记也要清。**
@@ -94,7 +98,7 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, log 
        * "这天有过东西，是被人清掉的"），内容本身已经没了。
        */
       try {
-        journal.clearChat(chatId);
+        journal.clearChat(chatId, aliases);
       } catch (e) {
         log.warn(`清日记失败：${e.message}`);
       }
@@ -134,10 +138,10 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, log 
        * 第五层的自述也要扫：她可能写过「今天聊到 X，我记错了」，
        * 用户要求忘掉 X 之后那句自述还留着，等于换个说法继续记着。
        */
-      const n = memory.remove(chatId, word);
+      const n = memory.remove(chatId, word, aliases);
       let j = 0;
       try {
-        j = journal.forget({ chatId, word });
+        j = journal.forget({ chatId, word, aliases });
       } catch (e) {
         log.warn(`日记遗忘失败：${e.message}`);
       }

@@ -154,6 +154,90 @@ export function normalizeSrc(raw) {
   return Object.keys(out).length ? out : null;
 }
 
+/**
+ * 合并「当前会话键 + 别名键」的聊天层事实。
+ *
+ * 别名是什么：这个群 / 这个人的**号码**，以及它名下**所有** openid
+ * （含以前那只机器人给的）。openid 换机器人就变，旧记忆还在旧键下面——
+ * 不多试几个键，换一次机器人记忆就等于丢了。存量数据一个字节都不动。
+ *
+ * 三条规矩：
+ *   1. **当前键排在最前**，同一条事实在两处都有时用当前键的元数据（更新的）
+ *   2. `fromAlias` 标出「这条是从别的键读来的」——它们不参与时间衰减，
+ *      否则几十天前的老事实一上来就被 0.5^(天数/30) 打到看不见，
+ *      「能读到」等于白搭
+ *   3. 空键、非字符串一律跳过（脏数据不该让整个记忆读不出来）
+ */
+function collectChat(m, chatId, aliases) {
+  const keys = chatKeys(chatId, aliases);
+  const list = [];
+  const meta = {};
+  const fromAlias = new Set();
+  const seen = new Set();
+
+  for (const [i, k] of keys.entries()) {
+    const arr = m.chats?.[k];
+    if (!Array.isArray(arr)) continue;
+    const mm = m.meta?.chats?.[k] ?? {};
+    for (const text of arr) {
+      if (typeof text !== 'string' || !text || seen.has(text)) continue;
+      seen.add(text);
+      list.push(text);
+      if (mm[text]) meta[text] = mm[text];
+      if (i > 0) fromAlias.add(text);
+    }
+  }
+  return { list, meta, fromAlias };
+}
+
+/**
+ * 当前键 + 别名，去重、去空、**当前键永远排第一**。
+ *
+ * 读写两条路都要用它。只给读路径用是这个功能最容易犯的错：
+ * 读的时候把旧键的事读出来了（面板上看得见、提示词里也注入了），
+ * 用户说「忘掉这个」却只删当前键——删完再读，那条还在。
+ * `journal.js` 里那句注释说得很准：「用户说忘掉三个月前那件事，
+ * 实际没忘，是最不能接受的一种失败」。
+ */
+function chatKeys(chatId, aliases) {
+  const out = [];
+  const seen = new Set();
+  for (const k of [chatId, ...(Array.isArray(aliases) ? aliases : [])]) {
+    const s = String(k ?? '').trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+/**
+ * 从**别名键**读来的事实的分数：**衰减最多打一次对折**。
+ *
+ * 为什么不能直接用 `scoreOfFact`：别名键里的都是换机器人之前的老事实，
+ * 90 天前记的分数只剩 0.125，`slice(0, 3)` 永远轮不到——「能读到」等于白搭。
+ *
+ * 为什么也不能干脆不衰减：那样一条 `w=1` 的老事实分数正好是 1，
+ * 而刚记的那条是 `1 × 0.5^(几毫秒/30天) ≈ 0.999999999`，
+ * 老事实会以 1e-9 之差赢过刚说的话。所以给个**下限**而不是豁免：
+ * 重要的老事（w 高）照样能浮上来，同权重的仍然让位给新的。
+ */
+function scoreOfAliasFact(meta, now = Date.now()) {
+  const at = Number(meta?.at) || 0;
+  /**
+   * **没有 `at` 的老数据按「很老」算，不能按「刚记的」算。**
+   *
+   * 早期版本的 facts 只有字符串、没有 meta。直接 `scoreOfFact(undefined)`
+   * 会返回 1，而刚记的那条是 `1 × 0.5^(几毫秒/30天) ≈ 0.999999999`——
+   * 于是「一条不知道多久以前的老事实」以 1e-9 之差压过刚说的话。
+   * 而老数据恰恰最可能没有 meta。
+   */
+  if (!at) return scoreOfFact({ ...meta, at: now - HALF_LIFE_DAYS * DAY_MS }, now);
+  const days = Math.max(0, (now - at) / DAY_MS);
+  const capped = Math.min(days, HALF_LIFE_DAYS);
+  return scoreOfFact({ ...meta, at: now - capped * DAY_MS }, now);
+}
+
 export function createMemory({ now = () => Date.now() } = {}) {
   const file = () => join(dataDir(), 'memory.json');
   let cache = null;
@@ -297,19 +381,34 @@ export function createMemory({ now = () => Date.now() } = {}) {
 
   return {
     /**
+     * 丢掉内存缓存，下次读盘重来。
+     *
+     * 「一键改写 / 一键回退」会直接覆盖 `memory.json`。不清缓存的话，
+     * 下一次 `save()` 会把内存里那份旧数据原样写回去，把刚恢复的文件又盖掉——
+     * 用户点了「回退」，看起来成功了，一刷新数据还是改写后的。
+     */
+    reload() {
+      cache = null;
+    },
+
+    /**
      * 读两层（正文）。签名不变——注入路径和面板都按字符串用。
      *
      * **只返回活的**：被取代的说法（`meta.until` 有值）不进这里。
      * 默认安全优先 —— 谁拿 `list()` 去拼提示词都不会把历史说法带进去。
      * 要看历史的用 `listFull()`。
+     *
+     * `aliases` 是这个会话的备用键（号码 + 该号码名下的所有 openid）。
+     * 换机器人之后旧事实在旧键下面，靠它才读得到；不传就是老行为。
      */
-    list(chatId) {
+    list(chatId, aliases = []) {
       const m = load();
+      const c = collectChat(m, chatId, aliases);
       const alive = (arr, mm) =>
         (Array.isArray(arr) ? arr : []).filter((text) => !mm?.[text]?.until);
       return {
         global: alive(m.global, m.meta.global),
-        chat: alive(m.chats?.[chatId], m.meta.chats?.[chatId]),
+        chat: alive(c.list, c.meta),
       };
     },
 
@@ -331,18 +430,36 @@ export function createMemory({ now = () => Date.now() } = {}) {
      *
      * 历史（`until`）不参与排序：它不注入，排进来只会白占名额。
      */
-    listRanked(chatId) {
+    listRanked(chatId, aliases = []) {
       const m = load();
       const t = now();
-      const rank = (list, mm) =>
+      /**
+       * 从别名键读来的事实用 `scoreOfAliasFact`：衰减最多打一次对折。
+       *
+       * 完全按天数衰减，90 天前的老事只剩 0.125，`slice(0, 3)` 永远轮不到；
+       * 完全不衰减，又会以浮点误差赢过刚说的话。所以给下限，不给奖励。
+       *
+       * 排序三层：
+       *   1. 分数高的先
+       *   2. **同分时当前键优先**——这一层必须显式写，不能靠下标：
+       *      下标是插入序，别名的下标更大，`b.i - a.i` 会让别名反赢
+       *   3. 同一组里同分新的优先（老行为，升级不该换一批）
+       */
+      const rank = (list, mm, noDecay) =>
         (Array.isArray(list) ? list : [])
           .filter((text) => !mm?.[text]?.until)
-          .map((text, i) => ({ text, i, s: scoreOfFact(mm?.[text], t) }))
-          .sort((a, b) => b.s - a.s || b.i - a.i)
+          .map((text, i) => {
+            const meta = mm?.[text];
+            const alias = Boolean(noDecay?.has(text));
+            const s = alias ? scoreOfAliasFact(meta, t) : scoreOfFact(meta, t);
+            return { text, i, s, alias };
+          })
+          .sort((a, b) => b.s - a.s || (a.alias === b.alias ? b.i - a.i : a.alias ? 1 : -1))
           .map((x) => x.text);
+      const c = collectChat(m, chatId, aliases);
       return {
-        global: rank(m.global, m.meta.global),
-        chat: rank(m.chats?.[chatId], m.meta.chats?.[chatId]),
+        global: rank(m.global, m.meta.global, null),
+        chat: rank(c.list, c.meta, c.fromAlias),
       };
     },
 
@@ -354,7 +471,7 @@ export function createMemory({ now = () => Date.now() } = {}) {
      *
      * `until` 有值 = 这条被后来的说法取代了，仍然留着但不注入。
      */
-    listFull(chatId) {
+    listFull(chatId, aliases = []) {
       const m = load();
       const one = (list, mm) =>
         (Array.isArray(list) ? list : []).map((text) => {
@@ -367,9 +484,10 @@ export function createMemory({ now = () => Date.now() } = {}) {
             until: Number(x.until) > 0 ? Number(x.until) : null,
           };
         });
+      const c = collectChat(m, chatId, aliases);
       return {
         global: one(m.global, m.meta.global),
-        chat: one(m.chats?.[chatId], m.meta.chats?.[chatId]),
+        chat: one(c.list, c.meta),
       };
     },
 
@@ -465,8 +583,13 @@ export function createMemory({ now = () => Date.now() } = {}) {
       return { ok: true, text: h.text, scope: h.scope };
     },
 
-    /** 按关键词删，两层都搜；返回删掉几条 */
-    remove(chatId, word) {
+    /**
+     * 按关键词删，两层都搜；返回删掉几条。
+     *
+     * `aliases` 必须传：读的时候把别名键的事读出来了，删的时候只删当前键，
+     * 就会出现「说了忘掉、下一条又想起来了」——用户会以为她故意装傻。
+     */
+    remove(chatId, word, aliases = []) {
       const w = String(word ?? '').trim();
       if (!w) return 0;
       const m = load();
@@ -483,23 +606,36 @@ export function createMemory({ now = () => Date.now() } = {}) {
       m.global = drop(m.global, m.meta.global);
       n += g0 - m.global.length;
 
-      if (chatId && Array.isArray(m.chats[chatId])) {
-        const c0 = m.chats[chatId].length;
-        m.chats[chatId] = drop(m.chats[chatId], (m.meta.chats[chatId] = m.meta.chats[chatId] || {}));
-        n += c0 - m.chats[chatId].length;
+      for (const k of chatId ? chatKeys(chatId, aliases) : []) {
+        if (!Array.isArray(m.chats[k])) continue;
+        const c0 = m.chats[k].length;
+        m.chats[k] = drop(m.chats[k], (m.meta.chats[k] = m.meta.chats[k] || {}));
+        n += c0 - m.chats[k].length;
       }
       if (n) save();
       return n;
     },
 
-    /** 清本群层，不动全局 */
-    clearChat(chatId) {
+    /**
+     * 清本群层，不动全局。
+     *
+     * 别名键一起清：「这个群忘了」是**对这个人/这个群**说的，
+     * 不是对某个 openid 说的。留一半下来只会让下一条消息又想起来。
+     */
+    clearChat(chatId, aliases = []) {
       const m = load();
-      if (chatId && m.chats[chatId]) {
-        delete m.chats[chatId];
-        delete m.meta.chats[chatId];
-        save();
+      let dirty = false;
+      for (const k of chatId ? chatKeys(chatId, aliases) : []) {
+        if (m.chats[k]) {
+          delete m.chats[k];
+          dirty = true;
+        }
+        if (m.meta.chats[k]) {
+          delete m.meta.chats[k];
+          dirty = true;
+        }
       }
+      if (dirty) save();
     },
 
     /** 清全局（等于让它忘掉所有跨群的事） */
@@ -510,11 +646,20 @@ export function createMemory({ now = () => Date.now() } = {}) {
       save();
     },
 
-    /** 这个群的人设覆盖（没有就返回空串，回落到 personas/*.md） */
-    getPersonaOverride(chatId) {
+    /**
+     * 这个群的人设覆盖（没有就返回空串，回落到 personas/*.md）。
+     *
+     * 别名键也看：换机器人之后如果只在旧键下指定过人格，不带别名就会
+     * 「群里突然变回默认人格」——用户完全不知道是自己换机器人换出来的。
+     */
+    getPersonaOverride(chatId, aliases = []) {
       if (!chatId) return '';
       const m = load();
-      return String(m.personas?.[chatId]?.text ?? '');
+      for (const k of chatKeys(chatId, aliases)) {
+        const t = String(m.personas?.[k]?.text ?? '');
+        if (t) return t;
+      }
+      return '';
     },
 
     /** 设/清这个群的人设覆盖。传空串就是清掉。 */
@@ -541,11 +686,21 @@ export function createMemory({ now = () => Date.now() } = {}) {
       save();
     },
 
-    /** 查这个会话有没有某个授权 */
-    hasAuthz(chatId, scope) {
+    /**
+     * 查这个会话有没有某个授权。
+     *
+     * 别名键任一有就算有。不这么做的后果很具体：旧机器人时期群授权过
+     * `group_push`，换机器人后 chatId 变了 → 恒 false → **这个群永久不主动说话**，
+     * 而面板上看不出任何异常。迁移页特意把「只授权过、一句话没记」的键
+     * 也列出来让人绑，就是为这一步铺路——绑完这里还读不到，那页就白做了。
+     */
+    hasAuthz(chatId, scope, aliases = []) {
       const m = load();
-      const a = m.authz?.[chatId];
-      return Boolean(a && (!scope || a.scope === scope));
+      for (const k of chatKeys(chatId, aliases)) {
+        const a = m.authz?.[k];
+        if (a && (!scope || a.scope === scope)) return true;
+      }
+      return false;
     },
 
     /**
@@ -559,6 +714,39 @@ export function createMemory({ now = () => Date.now() } = {}) {
       const a = chatId ? m.authz?.[chatId] : null;
       if (!a) return null;
       return { scope: String(a.scope || ''), at: Number(a.at || 0), type: a.type, optScene: a.optScene };
+    },
+
+    /**
+     * 把这份文件里出现过的**所有会话键**列出来（「账号迁移」页扫描用）。
+     *
+     * 扫四个地方，不是只扫 `chats`：
+     *   · `chats`       —— 事实正文
+     *   · `meta.chats`  —— 只有元数据、正文被清空过的残留
+     *   · `personas`    —— 按群的人设覆盖
+     *   · `authz`       —— 主动消息授权
+     *
+     * 后两个经常是**唯一**留痕的地方：一个群可能只授权过、一句话没记，
+     * 只扫 `chats` 就会漏掉它，换机器人之后那条授权再也对不上，
+     * 表现是「群里她突然不主动说话了」——很难归因。
+     *
+     * 只读，不改文件。
+     */
+    scanKeys() {
+      const m = load();
+      const out = new Map();
+      const touch = (k) => {
+        const key = String(k || '');
+        if (!key) return;
+        if (!out.has(key)) out.set(key, 0);
+      };
+      for (const [k, v] of Object.entries(m.chats || {})) {
+        touch(k);
+        out.set(k, out.get(k) + (Array.isArray(v) ? v.length : 0));
+      }
+      for (const k of Object.keys(m.meta?.chats || {})) touch(k);
+      for (const k of Object.keys(m.personas || {})) touch(k);
+      for (const k of Object.keys(m.authz || {})) touch(k);
+      return [...out].map(([chatId, facts]) => ({ chatId, facts }));
     },
 
     /**

@@ -33,7 +33,7 @@ export const DEFAULTS = {
    */
   tts: {
     enabled: false,
-    /** openai = OpenAI-compatible /audio/speech；gpt-sovits = 原生 API；sherpa = 本地 ONNX（离线） */
+    /** openai = OpenAI 兼容 /audio/speech；gpt-sovits = 原生 API；sherpa = 本地 ONNX（离线）；edge = 微软在线朗读 */
     provider: 'openai',
     /** OpenAI-compatible API 根地址，需包含版本前缀（例如 /v1） */
     baseUrl: '',
@@ -42,11 +42,32 @@ export const DEFAULTS = {
     voice: '',
     timeoutSec: 30,
     maxChars: 300,
+    /**
+     * 语速倍率，四个 provider **共用这一个**。1 是原速。
+     *
+     * 范围 0.5–2：各家上限不同（OpenAI 到 4、微软 rate 到 +200%），
+     * 取交集最保守，面板上一个输入框切换 provider 时不用重填。
+     * 各 provider 内部再各自夹紧一次。
+     *
+     * 以前只有 `sherpa.speed`，云端和 GPT-SoVITS 都没得调——同一个「语速」
+     * 分成两套配置最容易出现「改了没反应，因为改的不是当前 provider 那份」。
+     */
+    speed: 1,
     gptSovits: {
       /** GPT-SoVITS 安装目录（含 api_v2.py 和 runtime 的那层）。填了就能在面板一键启动 */
       installDir: '',
       /** 要用的角色名（面板扫描出来的下拉）。留空 = 用 tts_infer.yaml 里已经加载的那个 */
       model: '',
+      /**
+       * 手动指定权重路径，**优先于上面按角色名自动配对的结果**。
+       *
+       * 自动配对靠 `guessCharacter()` 从文件名猜角色名，权重一多（用户实测
+       * 有 15 个）很容易把不同 epoch、不同角色的 GPT/SoVITS 配错一对，
+       * 表现就是「输出正常但音色完全不对」。填了这两个就以它为准。
+       * 路径是 **GPT-SoVITS 服务进程**能读到的（绝对路径最稳），留空 = 用扫描结果。
+       */
+      gptWeights: '',
+      sovitsWeights: '',
       /** GPT-SoVITS API 根地址，例如 http://127.0.0.1:9880 */
       baseUrl: '',
       /** 反向代理可选 Bearer 密钥；原生本地 API 通常留空 */
@@ -60,6 +81,16 @@ export const DEFAULTS = {
       apiVersion: 'v1',
       /** 原生 API 默认根路由；兼容 fork 可指定其固定相对路由 */
       endpointPath: '/',
+    },
+    /**
+     * 微软在线朗读（Edge TTS）。
+     *
+     * 不用填地址、不用填 Key，选一个音色就能用；依赖在面板一键装到
+     * `dataDir/tts-edge/node_modules`。**文本会发到微软的服务器**，
+     * 介意隐私就换本地 sherpa。
+     */
+    edge: {
+      voice: 'zh-CN-XiaoxiaoNeural',
     },
     /**
      * 本地 ONNX 推理（sherpa-onnx-node）。
@@ -77,8 +108,11 @@ export const DEFAULTS = {
       modelDir: '',
       /** 说话人编号（aishell3 是 0-173），换一个就是换一个音色 */
       sid: 88,
-      /** 语速倍率，1 是原速 */
-      speed: 1,
+      /**
+       * 语速已经统一到 `tts.speed`（四个 provider 共用一份）。
+       * 这里**不再有** `speed` 字段：留着一个改了不生效的同名字段，
+       * 比没有更让人困惑——「我明明改了语速」却听不出区别。
+       */
       /** CPU 线程数。2 已经够快，加多了在小机器上反而抢 CPU */
       numThreads: 2,
     },
@@ -485,6 +519,25 @@ export function configRevision() {
   }
 }
 
+/**
+ * 把老的 `tts.sherpa.speed` 迁到 `tts.speed`（语速统一之前只有前者）。
+ *
+ * 不迁的话，以前调过语速的用户升级后语速悄悄回到原速——面板上完全看不出来，
+ * 只会觉得「声音变快了/变慢了」。就地改 `saved`（用户文件的那份），
+ * 之后任何一次保存都会把新字段固化下来。
+ *
+ * 只在 `tts.speed` 还没写过时迁，用户自己设过就以他为准。
+ */
+export function migrateTtsSpeed(saved) {
+  const tts = saved?.tts;
+  if (!tts || typeof tts !== 'object') return false;
+  if (tts.speed !== undefined) return false;
+  const legacy = Number(tts.sherpa?.speed);
+  if (!Number.isFinite(legacy) || legacy <= 0) return false;
+  tts.speed = legacy;
+  return true;
+}
+
 export function loadConfig() {
   let saved = {};
   try {
@@ -492,6 +545,7 @@ export function loadConfig() {
   } catch {
     saved = {};
   }
+  migrateTtsSpeed(saved);
   return upgradeOldDefaults(merge(structuredClone(DEFAULTS), saved));
 }
 

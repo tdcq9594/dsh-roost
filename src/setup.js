@@ -277,7 +277,19 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     try {
       json = text ? JSON.parse(text) : null;
     } catch {}
-    if (!res.ok) throw new Error(json?.error || json?.message || `HTTP ${res.status}`);
+    if (!res.ok) {
+      const err = new Error(json?.error || json?.message || `HTTP ${res.status}`);
+      /**
+       * 状态码和响应体都带上。
+       *
+       * 只留一句 message 的话，调用方没法区分「409 这个 openid 已经绑给别人了」
+       * 和「500 服务端炸了」——而这两者要做的事完全不同（前者问要不要改绑，
+       * 后者只能报错）。`owner` 这类字段也只有带上 body 才拿得到。
+       */
+      err.status = res.status;
+      err.body = json;
+      throw err;
+    }
     return json;
   }
 
@@ -893,6 +905,14 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     webuiUrl,
     /** 面板根地址（不带 key），拼别的接口用 */
     baseUrl,
+    /**
+     * 带 key 请求 Roost 面板 API。
+     *
+     * 暴露出去是为了「账号迁移」页（`src/account.js`）——
+     * 它要代理 `/api/identity/*` 和 `/api/bots`。这些请求必须带上 key，
+     * 而 key 只在这边有；让调用方自己拼 URL 迟早会漏掉鉴权。
+     */
+    api,
     /** Roost 配置里的主人 openid（主动搭话的收件人）。空 = 那边也没配 */
     roostOwner,
     /** 面板密钥的 query 片段，没有就是空串 */

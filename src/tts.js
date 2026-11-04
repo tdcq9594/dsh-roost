@@ -38,6 +38,33 @@ export const SHERPA_MODELS = {
   },
 };
 
+/**
+ * 微软在线朗读（Edge TTS）的常用音色。
+ *
+ * 来源：`bot/plugins/ai-chat/tts.js` 里已经跑通过的那套方案
+ * （`@andresaya/edge-tts`），以及 `docs/TTS与翻唱调研.md` 的选型结论：
+ * 纯 Node 实现、不用 Python / venv、不要 API Key。
+ *
+ * **两个必须让用户知道的点**：
+ *   1. 文本会发到微软的服务器。介意隐私就用本地 sherpa。
+ *   2. `@andresaya/edge-tts@1.9.1` 是 GPL-3.0-only。它**不随本插件分发**，
+ *      由用户在自己的数据目录里点「一键安装」下载，所以不进我们的产物。
+ *      如果哪天要把它打进发布包，得先重新过一遍许可。
+ */
+export const EDGE_VOICES = [
+  { id: 'zh-CN-XiaoxiaoNeural', label: '晓晓 · 普通话女声（默认）' },
+  { id: 'zh-CN-YunxiNeural', label: '云希 · 普通话男声' },
+  { id: 'zh-CN-YunjianNeural', label: '云健 · 普通话男声（沉稳）' },
+  { id: 'zh-CN-XiaoyiNeural', label: '晓伊 · 普通话女声（轻快）' },
+  { id: 'zh-CN-YunyangNeural', label: '云扬 · 普通话男声（播报）' },
+  { id: 'zh-CN-liaoning-XiaobeiNeural', label: '晓北 · 东北话女声' },
+  { id: 'zh-HK-HiuMaanNeural', label: '曉曼 · 粤语女声' },
+  { id: 'ja-JP-NanamiNeural', label: 'Nanami · 日语女声' },
+  { id: 'en-US-JennyNeural', label: 'Jenny · 英语女声' },
+];
+
+export const EDGE_DEFAULT_VOICE = 'zh-CN-XiaoxiaoNeural';
+
 export class TtsError extends Error {
   constructor(code, message, status = 502) {
     super(message);
@@ -154,6 +181,67 @@ function timeoutSignal(seconds) {
   return AbortSignal.timeout(Math.max(1, Math.min(300, Number(seconds) || 30)) * 1000);
 }
 
+/**
+ * 语速倍率。四个 provider **共用 `tts.speed` 这一份**。
+ *
+ * 范围夹在 0.5–2：各家上限不一样（OpenAI 到 4、微软 rate 到 +200%、
+ * GPT-SoVITS 没写上限），取交集最保守，用户切换 provider 时不用重填。
+ *
+ * 非法值一律回 1：`Number('')` 是 0、`Number(undefined)` 是 NaN，
+ * 不挡住的话会合成出 0 倍速的静音，而日志里只有一条「合成成功」。
+ */
+export function speedOf(cfg) {
+  const n = Number(cfg?.speed);
+  if (Number.isFinite(n) && n > 0) return Math.max(0.5, Math.min(2, n));
+  /**
+   * 老配置只有 `sherpa.speed`（语速统一之前）。`loadConfig()` 会把它迁到
+   * `tts.speed`，这里再兜一层是给**直接构造 cfg 的调用方**（测试、插件）
+   * 用的——不然它们传老形状会静默回到原速。
+   */
+  const legacy = Number(cfg?.sherpa?.speed);
+  if (Number.isFinite(legacy) && legacy > 0) return Math.max(0.5, Math.min(2, legacy));
+  return 1;
+}
+
+/**
+ * 语速 → 微软朗读的 `rate` 字符串。
+ *
+ * 它要的是百分比字符串（`'+10%'` / `'-20%'` / `'100%'`），不是倍率。
+ * 1.0 特意返回空串：默认语速下**不传 options**，和 ai-chat 那边
+ * 已经跑通的两参数调用保持一致，少一个可能被上游挑刺的字段。
+ */
+export function edgeRateOf(speed) {
+  const n = Number(speed);
+  if (!Number.isFinite(n) || n === 1) return '';
+  const pct = Math.round((n - 1) * 100);
+  if (!pct) return '';
+  return `${pct > 0 ? '+' : ''}${pct}%`;
+}
+
+/**
+ * 从音频头认格式。
+ *
+ * 微软朗读的 `toBuffer()` 只给字节，不给 Content-Type；上游默认输出格式
+ * 也没写成契约。硬编码 `audio/mpeg` 的话，哪天默认换成 opus，宿主拿到的
+ * 就是「标着 mp3 的 webm」——播放器直接报错，而日志里只会有上游成功。
+ * 认魔数比信文档稳，顺带把「压根不是音频」的坏响应挡在外面。
+ */
+function detectAudioType(buf) {
+  const b = Buffer.from(buf ?? []);
+  if (!b.length) return '';
+  if (b.subarray(0, 3).toString('ascii') === 'ID3') return 'audio/mpeg';
+  if (b.length >= 2 && b[0] === 0xff && (b[1] & 0xe0) === 0xe0) return 'audio/mpeg';
+  const four = b.subarray(0, 4).toString('ascii');
+  /**
+   * `RIFF` 只是个容器头，`RIFF....WEBP` / `RIFF....AVI ` 都是它。
+   * 只看前四个字节会把一张 WebP 图片当成 wav 交给宿主。
+   */
+  if (four === 'RIFF') return b.subarray(8, 12).toString('ascii') === 'WAVE' ? 'audio/wav' : '';
+  if (four === 'OggS') return 'audio/ogg';
+  if (four === 'fLaC') return 'audio/flac';
+  return '';
+}
+
 function publicError(error) {
   if (error instanceof TtsError) return error;
   if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
@@ -203,11 +291,14 @@ export function encodeWav(samples, sampleRate) {
  *   · openai      —— OpenAI 兼容 /audio/speech，云端，要 key
  *   · gpt-sovits  —— 本地 GPT-SoVITS 原生 API，自己起服务
  *   · sherpa      —— 本地 ONNX 推理（sherpa-onnx-node），完全离线，面板可一键装
+ *   · edge        —— 微软在线朗读（@andresaya/edge-tts），免费无 Key，文本会发给微软
  */
 export function createTts({
   cfgOf = () => ({}),
   fetchImpl = (...args) => fetch(...args),
   loadSherpa,
+  /** 测试注入：返回 { EdgeTTS }。生产不传，走 tts-edge/node_modules */
+  loadEdge,
   dataDir = () => '',
   log = () => {},
 } = {}) {
@@ -244,6 +335,120 @@ export function createTts({
     return join(dataDir(), 'tts-runtime');
   }
 
+  /**
+   * 微软朗读的依赖单独放一个目录，**不和 sherpa 的 tts-runtime 混**。
+   *
+   * 原因很实际：`tts-install.js` 装 sherpa 时会把 `tts-runtime/node_modules`
+   * 整个删掉重建。共用目录的话，装完本地模型，微软朗读就莫名其妙不能用了
+   * （反过来也一样）。两个目录、两条安装任务，互不干扰。
+   */
+  function edgeDir() {
+    return join(dataDir(), 'tts-edge');
+  }
+
+  function edgeState() {
+    if (typeof loadEdge === 'function') return { configured: true };
+    const pkg = join(edgeDir(), 'node_modules', '@andresaya', 'edge-tts');
+    if (!existsSync(pkg)) return { configured: false, reason: 'runtime_missing' };
+    return { configured: true, edgeDir: edgeDir() };
+  }
+
+  /**
+   * 微软在线朗读。
+   *
+   * 用法照搬 `bot/plugins/ai-chat/tts.js` 里已经跑通的那两行
+   * （`synthesize(text, voice)` → `toBuffer()`），不自己猜 API。
+   * ai-chat 那边还要把 mp3 转 silk 给 QQ，这里宿主直接收 mp3 就行，
+   * 所以不需要 mpg123-decoder / silk-wasm。
+   */
+  async function edgeSpeech(text, cfg) {
+    const e = cfg.edge && typeof cfg.edge === 'object' ? cfg.edge : {};
+    const voice = String(e.voice || '').trim() || EDGE_DEFAULT_VOICE;
+    if (!EDGE_VOICES.some((v) => v.id === voice)) {
+      throw new TtsError('invalid_config', `不认识的微软音色：${voice}`, 400);
+    }
+
+    let EdgeTTS;
+    if (typeof loadEdge === 'function') {
+      ({ EdgeTTS } = loadEdge());
+    } else {
+      const state = edgeState();
+      if (!state.configured) {
+        throw new TtsError('runtime_missing', '微软语音依赖没装：在设置页点「一键安装」', 503);
+      }
+      /** 和 sherpa 同一个套路：从数据目录解析，别让插件更新把用户装的包冲掉 */
+      const req = createRequire(join(edgeDir(), 'noop.cjs'));
+      try {
+        ({ EdgeTTS } = req('@andresaya/edge-tts'));
+      } catch (err) {
+        throw new TtsError('runtime_missing', `微软语音依赖加载失败，重装一次试试：${err?.message || err}`, 503);
+      }
+    }
+    if (typeof EdgeTTS !== 'function') {
+      throw new TtsError('runtime_missing', '微软语音依赖版本不对：找不到 EdgeTTS', 503);
+    }
+
+    try {
+      const tts = new EdgeTTS();
+      /**
+       * 用法照抄官方 README：`synthesize(text, voice)` → `toBuffer()`。
+       * 语速走第三个参数的 `rate`（百分比字符串），原速时不传 options——
+       * 和 ai-chat 那边已经跑通的调用一模一样。
+       */
+      const rate = edgeRateOf(speedOf(cfg));
+      /**
+       * **必须自己加超时。**
+       *
+       * 其它 provider 都过 `timeoutSignal(cfg.timeoutSec)`，微软这条路是
+       * 库内部的 WebSocket，没有可传的 signal。上游挂住时 `synthesize`
+       * 会一直 pending——这一轮 `<<say>>` 就永远不结束，插件那边只能
+       * 等自己的 90 秒兜底，用户看到的是「说完话半天没动静」。
+       */
+      const ms = Math.max(1, Math.min(300, Number(cfg.timeoutSec) || 30)) * 1000;
+      let timer = null;
+      const timedOut = new Promise((_, reject) => {
+        /**
+         * **不能 unref。** unref 的定时器不维持事件循环——合成挂住时
+         * 事件循环正好是空的，进程会直接退出，这个超时永远等不到。
+         * 正常合成完成时 `finally` 里的 `clearTimeout` 会把它清掉，
+         * 不会拖住宿主退出。
+         */
+        timer = setTimeout(() => reject(new TtsError('timeout', '微软朗读超时（网络或上游无响应）', 504)), ms);
+      });
+      const run = (async () => {
+        if (rate) await tts.synthesize(text, voice, { rate });
+        else await tts.synthesize(text, voice);
+        return Buffer.from(await tts.toBuffer());
+      })();
+      let bytes;
+      try {
+        bytes = await Promise.race([run, timedOut]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      if (!bytes.length) throw new TtsError('empty_audio', '微软朗读返回了空音频', 502);
+      /**
+       * 大小上限必须在这里挡。
+       *
+       * 其它 provider 走 `readResponse()`，那里按 `content-length` 和实际
+       * 长度双重检查 10MB；edge 这条路是 `toBuffer()` 直接给字节，
+       * 没有那道关。上游抽风回一个整页 HTML 或大文件时，
+       * 这几十 MB 会原样进宿主内存。
+       */
+      if (bytes.length > MAX_AUDIO_BYTES) {
+        throw new TtsError('audio_too_large', '微软朗读返回的音频太大', 502);
+      }
+      const mime = detectAudioType(bytes);
+      if (!mime) throw new TtsError('unsupported_audio', '微软朗读返回的不是支持的音频格式', 502);
+      return audioResult(bytes, mime);
+    } catch (err) {
+      /** 空音频 / 格式不对这类是 `audioResult` 已经判好的，别改成「上游错误」把原因吞了 */
+      if (err instanceof TtsError) throw err;
+      /** 微软那边连不上 / 音色下架，都归到上游失败，冷却一分钟别每轮都撞 */
+      throw new TtsError('upstream_error', `微软语音合成失败：${err?.message || err}`, 502);
+    }
+  }
+
   function modelDirOf(sherpa) {
     const custom = String(sherpa?.modelDir || '').trim();
     if (custom) return custom;
@@ -273,8 +478,18 @@ export function createTts({
     const enabled = cfg.enabled === true;
     const provider = String(cfg.provider || 'openai');
     if (!enabled) return { enabled: false, provider, configured: false };
-    if (!['openai', 'gpt-sovits', 'sherpa'].includes(provider)) {
+    if (!['openai', 'gpt-sovits', 'sherpa', 'edge'].includes(provider)) {
       return { enabled: true, provider, configured: false, reason: 'unsupported_provider' };
+    }
+    if (provider === 'edge') {
+      /**
+       * 「一键配置」的含义：不用填地址、不用填 Key，只要装好依赖 + 有个音色。
+       * 缺依赖时明确报 runtime_missing，面板据此显示「一键安装」按钮。
+       */
+      const state = edgeState();
+      if (!state.configured) return { enabled: true, provider, configured: false, reason: 'runtime_missing' };
+      if (cooling(provider)) return { enabled: true, provider, configured: false, reason: 'upstream_unreachable' };
+      return { enabled: true, provider, configured: true, voice: String(cfg.edge?.voice || '') || EDGE_DEFAULT_VOICE };
     }
     if (provider === 'openai') {
       const configured = Boolean(String(cfg.baseUrl || '').trim() && String(cfg.model || '').trim());
@@ -307,6 +522,7 @@ export function createTts({
       if (provider === 'openai') result = await openAiSpeech(input, cfg);
       else if (provider === 'gpt-sovits') result = await gptSovitsSpeech(input, cfg);
       else if (provider === 'sherpa') result = await sherpaSpeech(input, cfg);
+      else if (provider === 'edge') result = await edgeSpeech(input, cfg);
       else throw new TtsError('unsupported_provider', '未支持这个语音 provider', 400);
       /** 成功一次就把冷却清掉，服务恢复了不用等满一分钟 */
       lastFail = { at: 0, provider: '', code: '' };
@@ -317,7 +533,11 @@ export function createTts({
        * 只有「服务那边出问题」才进冷却。配置错、文本超长这类是调用方
        * 自己的问题，冷却了反而会把错误藏起来——用户改了配置还得等一分钟。
        */
-      if (!['invalid_config', 'unsupported_provider', 'text_too_long', 'empty_text'].includes(safe.code)) {
+      if (![
+        'invalid_config', 'unsupported_provider', 'text_too_long', 'empty_text',
+        /** 缺依赖是本地状态，不是上游挂了；冷却它只会把「去一键安装」这个提示藏掉 */
+        'runtime_missing',
+      ].includes(safe.code)) {
         lastFail = { at: Date.now(), provider, code: safe.code };
       }
       log(`TTS ${provider} 失败：${safe.code}`);
@@ -332,6 +552,7 @@ export function createTts({
     const url = requestUrl(base, 'audio/speech', 'OpenAI-compatible TTS');
     const headers = { 'content-type': 'application/json', accept: 'audio/mpeg' };
     if (cfg.apiKey) headers.authorization = `Bearer ${String(cfg.apiKey)}`;
+    const speed = speedOf(cfg);
     const res = await fetchImpl(url, {
       method: 'POST',
       headers,
@@ -340,6 +561,14 @@ export function createTts({
         input: text,
         ...(cfg.voice ? { voice: String(cfg.voice) } : {}),
         response_format: 'mp3',
+        /**
+         * 只在非原速时才带 `speed`。
+         *
+         * 走 one-api / 硅基流动这类中转时，多一个字段有可能被上游
+         * 直接 400（它们的请求体校验比 OpenAI 严）。原速是绝大多数情况，
+         * 让它走和以前**一模一样**的请求体，不引入新的失败面。
+         */
+        ...(speed !== 1 ? { speed } : {}),
       }),
       signal: timeoutSignal(cfg.timeoutSec),
     });
@@ -390,6 +619,7 @@ function langCode(value) {
      * 之前 v2 也发了 `text_language`，上游直接 400 `text_lang is required`——
      * 而且是在真实服务上才暴露的（单测只验了字段映射，没验字段名对不对）。
      */
+    const speed = speedOf(cfg);
     const body = version === 'v2'
       ? {
           ref_audio_path: String(gpt.referWavPath),
@@ -397,6 +627,11 @@ function langCode(value) {
           prompt_lang: langCode(gpt.promptLanguage),
           text,
           text_lang: langCode(gpt.textLanguage),
+          /**
+           * 只有 v2 有语速参数。`api.py`（v1）的接口签名里根本没有 speed，
+           * 硬塞一个字段可能被它的请求体校验拒掉——v1 就不支持调语速。
+           */
+          ...(speed !== 1 ? { speed_factor: speed } : {}),
         }
       : {
           refer_wav_path: String(gpt.referWavPath),
@@ -498,7 +733,7 @@ function langCode(value) {
     const spec = SHERPA_MODELS[key] || SHERPA_MODELS.aishell3;
 
     const sid = Number.isInteger(Number(sherpa.sid)) ? Number(sherpa.sid) : spec.defaultSid;
-    const speed = Math.max(0.5, Math.min(2, Number(sherpa.speed) || 1));
+    const speed = speedOf(cfg);
     const GenerationConfig = mod.GenerationConfig;
 
     try {
@@ -567,6 +802,21 @@ function langCode(value) {
     const cfg = config();
     if (cfg.enabled !== true) return { ok: false, reason: 'disabled' };
     if (String(cfg.provider || 'openai') !== 'sherpa') return { ok: false, reason: 'not_sherpa' };
+    /**
+     * **没装就静默跳过，不要打日志。**
+     *
+     * 卸载只删 `tts-runtime` / `tts-models`，**不动配置**（那是刻意的：
+     * 重装之后 provider 还是 sherpa，不用重新选一遍）。于是「卸了模型、
+     * 但 provider 还指着它」是正常状态，每次启动预热都会撞一次
+     * `runtime_missing`，日志里天天一条「本地语音预热失败」——
+     * 用户会以为卸载没卸干净、或者程序还在偷偷用它。
+     *
+     * 真正的故障是「装了但加载不起来」（文件损坏、架构不对、显存不够），
+     * 那种才值得记一条。装没装由 `status()` 告诉面板，那里有明确的
+     * 「已启用，但依赖没装」。
+     */
+    const state = sherpaState(cfg.sherpa && typeof cfg.sherpa === 'object' ? cfg.sherpa : {});
+    if (!state.configured) return { ok: false, reason: state.reason || 'not_installed' };
     try {
       sherpaEngine(cfg.sherpa && typeof cfg.sherpa === 'object' ? cfg.sherpa : {});
       return { ok: true };

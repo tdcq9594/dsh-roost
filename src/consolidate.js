@@ -175,7 +175,7 @@ export function buildSelfPrompt({ day, said = [], corrected = [] } = {}) {
  * @param {object} [o.self]   createSelf() 的返回（第五层：自我叙述）
  * @param {(p:string)=>Promise<string>} [o.generate] 没给就只做机械压缩
  */
-export function createConsolidate({ journal, graph, memory, self = null, generate = null, log = () => {}, now = () => Date.now() } = {}) {
+export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now() } = {}) {
   /** 上一次的结果，面板和 /consolidate 接口读它 */
   let last = null;
   let running = false;
@@ -465,8 +465,14 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
          * `update` 把唯一那条事实关掉。
          */
         const op = String(tr?.op ?? '').toLowerCase();
+        /**
+         * 关边 / 查墓碑都带别名：换机器人之后「这条关系」横跨好几个 openid，
+         * 只按当前键处理的话，旧键那条活边关不掉、旧键的墓碑也查不到——
+         * 表现是「说改主意了，问起来还是两个答案」。
+         */
+        const als = aliasesOf(scope);
         if (op === 'invalidate') {
-          if (graph.closeEdge({ src: s, rel, dst: o, at, chatId: scope })) out.closed += 1;
+          if (graph.closeEdge({ src: s, rel, dst: o, at, chatId: scope, aliases: als })) out.closed += 1;
           continue;
         }
         /**
@@ -479,12 +485,12 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
          * 查的是 `scope`：删的时候选了"只删这个会话"，那别的会话照样能写；
          * 选的是全局，`chat_id=''` 的墓碑对所有会话都命中。
          */
-        if (graph.isSuppressed?.({ src: s, rel, dst: o, chatId: scope })) {
+        if (graph.isSuppressed?.({ src: s, rel, dst: o, chatId: scope, aliases: als })) {
           out.suppressed += 1;
           continue;
         }
-        if (op === 'update' && graph.hasActive?.(s, rel, { chatId: scope })) {
-          graph.closeEdge({ src: s, rel, at, chatId: scope });
+        if (op === 'update' && graph.hasActive?.(s, rel, { chatId: scope, aliases: als })) {
+          graph.closeEdge({ src: s, rel, at, chatId: scope, aliases: als });
         }
         if (graph.addEdge({ src: s, rel, dst: o, at, chatId: scope, episodeId: ep })) out.triples += 1;
       }
@@ -504,8 +510,13 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       /**
        * 约定也有墓碑。删掉的那条如果又从日记里被抽出来，
        * 会同时污染 facts 和图谱两个地方，所以两边都得先问一句。
+       *
+       * `aliases` 必须带：墓碑可能立在**新**键上（用户在新会话里删的），
+       * 而巩固是按**旧**键跑（昨天的日记还在旧键下）。
+       * 不带的话查不到墓碑，约定被原样写回来，读路径带别名又能读出来——
+       * 用户看到的就是「删了又长回来」。
        */
-      if (graph?.isSuppressed?.({ src: '主人', rel: '约定', dst: text.slice(0, 40), chatId })) {
+      if (graph?.isSuppressed?.({ src: '主人', rel: '约定', dst: text.slice(0, 40), chatId, aliases: aliasesOf(chatId) })) {
         out.suppressed += 1;
         continue;
       }
@@ -546,8 +557,10 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
        * 实体是**按会话**存的（`entity WHERE key=? AND chat_id=?`），
        * `closeEdge` 靠 `src_id` 定位：用 `''` 去找「主人」会拿到另一个
        * 实体行，`src_id` 对不上 → 一条都关不掉，约定永远留在"没办完"里。
+       *
+       * 换机器人之后「建边时」可能是旧键，所以别名要一起关。
        */
-      out.closed += graph?.closeEdge?.({ src: s, rel, dst: o, at, chatId }) || 0;
+      out.closed += graph?.closeEdge?.({ src: s, rel, dst: o, at, chatId, aliases: aliasesOf(chatId) }) || 0;
     }
 
     return out;

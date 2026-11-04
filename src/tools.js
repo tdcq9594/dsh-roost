@@ -124,14 +124,26 @@ export function shapeTool(def, defineTool) {
  * @param {object} o
  * @param {object} o.journal
  * @param {(chatId:string)=>object} o.graphOf
- * @param {() => {bucket:string, chatId:string}} o.callerOf  当前这一轮是谁在说
+ * @param {() => {bucket:string, chatId:string, aliases?:string[]}} o.callerOf  当前这一轮是谁在说
  * @param {() => object} o.cfgOf
  */
 export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = null }) {
-  /** 当前调用者的档位与所属会话 */
+  /** 当前调用者的档位、所属会话、以及这个会话的别名键 */
   const caller = () => {
     const s = callerOf?.() || {};
-    return { bucket: String(s.bucket || 'unknown'), chatId: String(s.chatId || '') };
+    return {
+      bucket: String(s.bucket || 'unknown'),
+      chatId: String(s.chatId || ''),
+      /**
+       * 别名键（号码 + 该号码名下所有 openid）。
+       *
+       * **工具这条路最容易漏**：注入那边带了别名，工具这边不带，
+       * 模型问「上次说的那个方案」时会拿到 `count: 0` 加一句
+       * 「没查到，可以换个说法」，而同一时刻系统提示词里正注入着那条记忆。
+       * 模型据此回一句「我不记得了」——用户以为她失忆了，实际是检索没合上。
+       */
+      aliases: Array.isArray(s.aliases) ? s.aliases : [],
+    };
   };
 
   /** 只有主人能写长期记忆 */
@@ -174,10 +186,10 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
       const q = String(query || '').trim();
       if (!q) return { ok: false, message: '要查什么？给个关键词' };
       if (cfgOf?.()?.memory?.enabled === false) return { ok: false, message: '记忆功能关着' };
-      const { chatId, bucket } = caller();
+      const { chatId, bucket, aliases } = caller();
       const cross = scope === 'global' && canCrossGroup();
       try {
-        const rows = await journal.search(q, { chatId, limit: 5, crossCritical: cross });
+        const rows = await journal.search(q, { chatId, limit: 5, crossCritical: cross, aliases });
         /**
          * 场景片段（阶段 4）：命中之后把**原文和前后文**也带出来。
          *

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createTtsInstaller, platformPackage } from '../src/tts-install.js';
+import { createTtsInstaller, platformPackage, npmTgz, EDGE_PACKAGES } from '../src/tts-install.js';
 
 /**
  * 安装器靠系统 tar 解压，所以这些用例只在有 tar 的机器上跑。
@@ -210,4 +210,42 @@ test('卸载：删掉引擎和模型目录，配置不动', () => {
   assert.equal(installer.uninstall('aishell3').ok, true);
   assert.equal(existsSync(join(dir, 'tts-runtime')), false);
   assert.equal(existsSync(modelDir), false);
+});
+
+/* ---------------- 微软朗读依赖的一键安装 ---------------- */
+
+test('npmTgz：scoped 包的 tarball 文件名不带 scope', () => {
+  assert.equal(
+    npmTgz('@andresaya/edge-tts', '1.9.1'),
+    'https://registry.npmjs.org/@andresaya/edge-tts/-/edge-tts-1.9.1.tgz',
+  );
+  /** 普通包不能因为这处改动被拼坏 */
+  assert.equal(
+    npmTgz('sherpa-onnx-node', '2.0.1'),
+    'https://registry.npmjs.org/sherpa-onnx-node/-/sherpa-onnx-node-2.0.1.tgz',
+  );
+});
+
+test('EDGE_PACKAGES：三个包版本都固定，且包含运行时依赖 ws', () => {
+  assert.equal(EDGE_PACKAGES.length, 3);
+  const byName = Object.fromEntries(EDGE_PACKAGES);
+  assert.equal(byName['@andresaya/edge-tts'], '1.9.1');
+  assert.ok(byName.ws, 'EdgeTTS 要连 WebSocket，缺了 ws 起不来');
+  assert.ok(byName.commander);
+  for (const [name, version] of EDGE_PACKAGES) {
+    assert.ok(name && /^\d+\.\d+\.\d+$/.test(version), `${name} 版本必须写死，不能跟 latest`);
+  }
+});
+
+test('edgeReady / startEdge：和 sherpa 共用状态机但各管各的目录', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-edge-install-'));
+  const inst = createTtsInstaller({ dataDir: () => dir });
+  assert.equal(inst.edgeReady(), false);
+  /** 造一个装好的样子 */
+  mkdirSync(join(dir, 'tts-edge', 'node_modules', '@andresaya', 'edge-tts'), { recursive: true });
+  assert.equal(inst.edgeReady(), true);
+  /** 装 sherpa 的目录不该被误判成装好了 edge */
+  const other = mkdtempSync(join(tmpdir(), 'roost-sherpa-only-'));
+  mkdirSync(join(other, 'tts-runtime', 'node_modules', '@andresaya', 'edge-tts'), { recursive: true });
+  assert.equal(createTtsInstaller({ dataDir: () => other }).edgeReady(), false);
 });

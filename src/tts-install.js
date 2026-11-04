@@ -40,6 +40,23 @@ const execFileAsync = promisify(execFile);
  */
 export const SHERPA_NODE_VERSION = '2.0.1';
 
+/**
+ * 微软朗读要装的三个包，版本全部**固定**。
+ *
+ * 来源：`https://registry.npmjs.org/@andresaya%2Fedge-tts/latest` 查到的
+ * 1.9.1 依赖表（`ws ^8.18.3`、`commander ^12.1.0`），加上
+ * `docs/TTS与翻唱调研.md` 的选型结论。跟着 latest 走等于把上游发新版
+ * 变成用户的安装失败。
+ *
+ * 许可提醒：`@andresaya/edge-tts` 是 GPL-3.0-only。这里**只下载到用户自己的
+ * 数据目录**，不随插件分发；打包进发布物前必须重新过许可。
+ */
+export const EDGE_PACKAGES = [
+  ['@andresaya/edge-tts', '1.9.1'],
+  ['ws', '8.18.3'],
+  ['commander', '12.1.0'],
+];
+
 /** npm 包 → 平台包。sherpa 的预编译模块按平台分包，装错平台等于装了个不能加载的壳 */
 const PLATFORM_PACKAGES = {
   'win32-x64': 'sherpa-onnx-win-x64',
@@ -68,8 +85,14 @@ export function platformPackage() {
   return PLATFORM_PACKAGES[`${process.platform}-${process.arch}`] || '';
 }
 
-function npmTgz(name, version) {
-  return `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`;
+export function npmTgz(name, version) {
+  /**
+   * scoped 包（`@andresaya/edge-tts`）的 tarball 文件名**不带 scope**：
+   *   https://registry.npmjs.org/@andresaya/edge-tts/-/edge-tts-1.9.1.tgz
+   * 用整个 name 拼会变成 `.../-/@andresaya/edge-tts-1.9.1.tgz` → 404。
+   */
+  const short = name.includes('/') ? name.split('/').pop() : name;
+  return `https://registry.npmjs.org/${name}/-/${short}-${version}.tgz`;
 }
 
 /**
@@ -137,6 +160,8 @@ export function createTtsInstaller({
 
   const runtimeDir = () => join(dataDir(), 'tts-runtime');
   const modelsRoot = () => join(dataDir(), 'tts-models');
+  /** 微软朗读的依赖单独放，见 src/tts.js 里「为什么不和 sherpa 共用」 */
+  const edgeDir = () => join(dataDir(), 'tts-edge');
 
   function snapshot() {
     const percent = state.total > 0
@@ -288,7 +313,90 @@ export function createTtsInstaller({
     } catch {}
   }
 
+  /**
+   * 装微软朗读的三个纯 JS 包。
+   *
+   * 和 sherpa 那条流程刻意**分开目录**：`installEngine()` 会把
+   * `tts-runtime/node_modules` 整个删掉重建，共用目录的话，
+   * 装完任意一个，另一个就不能用了。
+   *
+   * 同样是先解到 `.tmp`、全部成功再 rename 顶替，中途失败用户的旧版本还在。
+   */
+  async function runEdge(signal) {
+    const tar = await resolveTar();
+    if (!tar) throw new Error('系统里找不到 tar 命令，没法解压微软语音依赖');
+    const root = edgeDir();
+    const tmp = join(root, '.tmp');
+    rmSync(tmp, { recursive: true, force: true });
+    mkdirSync(join(tmp, 'node_modules'), { recursive: true });
+
+    for (const [name, version] of EDGE_PACKAGES) {
+      const tgz = join(tmp, `${name.replace(/[\\/@]/g, '_')}.tgz`);
+      set({ received: 0, total: 0, message: `下载 ${name}…` });
+      await download(npmTgz(name, version), tgz, signal);
+      set({ phase: PHASE.ENGINE, message: `解压 ${name}…` });
+      await untar(tar, tgz, tmp, '-xzf');
+      const unpacked = join(tmp, 'package');
+      if (!existsSync(unpacked)) throw new Error(`${name} 压缩包结构不对（没有 package 目录）`);
+      /** scoped 包要落到 node_modules/@scope/name，不能拍平成一层 */
+      const dest = join(tmp, 'node_modules', ...name.split('/'));
+      mkdirSync(dirname(dest), { recursive: true });
+      renameSync(unpacked, dest);
+    }
+
+    const target = join(root, 'node_modules');
+    rmSync(target, { recursive: true, force: true });
+    renameSync(join(tmp, 'node_modules'), target);
+    rmSync(tmp, { recursive: true, force: true });
+    set({
+      phase: PHASE.DONE,
+      message: '装好了：微软在线朗读（不用 Key）',
+      running: false,
+      finishedAt: Date.now(),
+    });
+    log('微软语音依赖安装完成');
+    try {
+      onDone('edge');
+    } catch {}
+  }
+
   return {
+    /** 微软朗读的依赖装好没有（面板据此显示「一键安装」还是「已装好」） */
+    edgeReady() {
+      return existsSync(join(edgeDir(), 'node_modules', '@andresaya', 'edge-tts'));
+    },
+
+    /** 开始装微软朗读依赖。立刻返回，进度还是走 `status()` 轮询 */
+    startEdge() {
+      if (state.running) return { ok: false, reason: 'busy', message: '已经有安装任务在跑' };
+      controller = new AbortController();
+      state = {
+        running: true,
+        phase: PHASE.ENGINE,
+        model: 'edge',
+        received: 0,
+        total: 0,
+        message: '准备中…',
+        error: '',
+        startedAt: Date.now(),
+        finishedAt: 0,
+      };
+      runEdge(controller.signal).catch((e) => {
+        const aborted = controller?.signal?.aborted;
+        set({
+          running: false,
+          phase: aborted ? PHASE.IDLE : PHASE.ERROR,
+          error: aborted ? '' : String(e?.message || e),
+          message: aborted ? '已取消' : '安装失败',
+          finishedAt: Date.now(),
+        });
+        if (!aborted) log(`微软语音依赖安装失败：${e?.message || e}`);
+        rmSync(join(edgeDir(), '.tmp'), { recursive: true, force: true });
+        controller = null;
+      });
+      return { ok: true, started: true, model: 'edge' };
+    },
+
     /** 开始装。返回是否真的启动了——已经在跑时不重复启动 */
     start(key = 'aishell3') {
       if (state.running) return { ok: false, reason: 'busy', message: '已经有安装任务在跑' };
