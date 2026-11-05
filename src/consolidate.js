@@ -20,6 +20,7 @@
 
 import { dayOf } from './journal.js';
 import { RE_CORRECTION, MIN_BOT_LINES } from './self.js';
+import { isRevocation, isIdentityFact, isPoliteRevocation } from './journal-bridge.js';
 
 /** 单次巩固最多改多少条等级。防模型一口气把整天的日记全升成 critical */
 const MAX_RANK_CHANGES = 30;
@@ -93,8 +94,64 @@ export function pickRows(rows, { maxRows = MAX_ROWS, maxChars = MAX_INPUT_CHARS 
   return out;
 }
 
+/**
+ * **L3 语义兜底的候选集**（批次 2 的第三级，00:5x 补做）。
+ *
+ * L1（引用精确作废）/ L2（显式改口句式）在写日记时就能确定性命中；
+ * 命中的旧行已被 `invalidate` 标失效，而 `byDay()` 统一过滤失效行，
+ * 所以**这里拿到的天然就是「L1/L2 没处理掉的」**。
+ *
+ * 只剩一种情况需要模型：同一会话里还留着 ≥2 条高等级记录，且后面
+ * 明确推翻了前面（改口句指不出具体旧约定、L2 因此没敢作废）。
+ *
+ * 与 §10.6 原规格的一处技术调整（20:42「想到更好的就用你的」授权）：
+ * 原写「无显式改口词时判一次」，这里改成**把改口句当时间上界**。
+ * 理由：L2 命中时旧行已失效、撤销句又不 append，于是「当天有改口句
+ * 却仍剩 ≥2 条高等级行」恰恰是 L2 未命中的信号；按原规格跳过会漏掉
+ * 真机 P4 的残余。时间上界同时挡住「把新约定误作废」。
+ *
+ * @returns {{ids:string[], before:number, lines:string[]}|null} 条件不满足返回 null
+ */
+export function l3Candidates(rows, { maxRows = 12 } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const high = list
+    .filter((r) => r && r.kind === 'chat' && r.role === 'user'
+      && (r.level === 'critical' || r.level === 'important')
+      && !r.invalidAt
+      && !isIdentityFact(r.text)
+      && !isRevocation(r.text))
+    .slice(-maxRows);
+  if (high.length < 2) return null;
+
+  /**
+   * 时间上界只认**用户说的、真正的改口**。
+   *
+   * 00:5x 独立复核抓到的 P0：原来 `revokes` 把当天所有含改口词的行都算上，
+   * 还取 `Math.min`（最早那条）。于是更早一句客套「不用了谢谢」、甚至 bot
+   * 回声里的「别再发图了」，都会把上界压到所有约定之前，`apply()` 的
+   * `row.at >= before` 把全部候选挡掉 —— L3 静默不触发。
+   *
+   * 三处收紧：只收 user/chat；排除 L2 已识别的纯客套（复用同一判据）；
+   * 取**最后**一条合格改口句（改口之后才定下的新约定仍被挡，旧约定不误挡）。
+   */
+  const revokes = list.filter((r) => r && r.role === 'user' && r.kind === 'chat'
+    && isRevocation(r.text) && !isPoliteRevocation(r.text));
+  const before = revokes.length ? Math.max(...revokes.map((r) => Number(r.at) || 0)) : 0;
+  const lines = [
+    ...high.map((r) => `[${r.id}] ${hhmm(r.at)} ${r.sender || '某人'}(${r.level}): ${r.text}`),
+    ...revokes.slice(-3).map((r) => `（改口）${hhmm(r.at)} ${r.sender || '某人'}: ${r.text}`),
+  ];
+  return { ids: high.map((r) => r.id), before, lines };
+}
+
 /** 拼提示词 */
-export function buildPrompt({ day, chatName, items }) {
+export function buildPrompt({ day, chatName, items, revocation = null }) {
+  const fmt = [
+    '{"summary":"...","ranks":[["id","level"]],"compress":[{"id":"...","digest":"..."}],',
+    ' "triples":[{"s":"...","rel":"...","o":"...","scope":"global"}],"agreements":["..."],"closed":[]',
+    revocation ? ',"revoked":[]' : '',
+    '}',
+  ].join('');
   return [
     `下面是你 ${day} 这天在「${chatName || '一个会话'}」里聊过的话（她=你自己说的，其他人=对方说的）。`,
     '请做四件事，只输出一个 JSON，不要解释、不要代码块围栏：',
@@ -121,13 +178,23 @@ export function buildPrompt({ day, chatName, items }) {
     '   · 没有可抽的就给空数组',
     '5. agreements：里面出现的"约定 / 答应 / 说好要办的事"，一条一句；没有就给空数组',
     '6. closed：以前答应过、今天明显已经办完的约定，给 [{"s":"主语","rel":"约定","o":"那件事"}]；没有就给空数组',
+    /**
+     * 第 7 项只在 L3 候选成立时才加。合并进巩固这一次调用，不再单独调模型：
+     * 凌晨一天一次的成本不变，也不会给消息热链路添任何调用。
+     */
+    ...(revocation ? [
+      '7. revoked：下面「需要判定的重要记录」里，如果**后面一条明确推翻了前面一条**，',
+      '   把被推翻那条的 id 放进数组，最多一条。同一件事改了主意、明确说不用/别再、后一条否定前一条才算；',
+      '   只是话题相近、补充细节、或两件能同时成立的事，都不算。',
+      '   拿不准就给空数组——宁可多留一条，也不要误作废。id 必须原样照抄方括号里的值。',
+    ] : []),
     '',
     '输出格式（严格按这个键名）：',
-    '{"summary":"...","ranks":[["id","level"]],"compress":[{"id":"...","digest":"..."}],',
-    ' "triples":[{"s":"...","rel":"...","o":"...","scope":"global"}],"agreements":["..."],"closed":[]}',
+    fmt,
     '',
     '—— 下面是一天的记录 ——',
     ...items.map((i) => i.line),
+    ...(revocation ? ['', '—— 需要判定的重要记录 ——', ...revocation.lines] : []),
   ].join('\n');
 }
 
@@ -210,6 +277,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       triples: 0,
       agreements: 0,
       closed: 0,
+      /** L3 语义兜底：这次巩固标失效的旧约定条数（不删行） */
+      revoked: 0,
       digests: 0,
       /** 被墓碑挡下来的条数（用户删过、巩固又抽出来的） */
       suppressed: 0,
@@ -251,11 +320,16 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         stats.chats += 1;
         const items = pickRows(list);
         const chatName = list.find((r) => r.chatId === chatId)?.chatId?.slice(0, 8) || '';
+        /**
+         * L3 候选在这轮就算好：条件不成立时 `buildPrompt` 不带第 7 项，
+         * 模型连「可以作废」这个选项都看不到，不会自作主张。
+         */
+        const revocation = l3Candidates(list);
         let plan = null;
 
         if (generate) {
           try {
-            const raw = await generate(buildPrompt({ day: target, chatName, items }));
+            const raw = await generate(buildPrompt({ day: target, chatName, items, revocation }));
             plan = parseJsonLoose(raw);
             if (!plan) {
               log(`巩固 ${target}/${chatName}：模型输出不是 JSON，退回机械压缩`);
@@ -267,8 +341,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
           }
         }
 
-        const res = apply({ day: target, chatId, list, plan, dry });
-        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'digests', 'suppressed']) {
+        const res = apply({ day: target, chatId, list, plan, dry, revocation });
+        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'revoked', 'digests', 'suppressed']) {
           stats[k] += res[k] || 0;
         }
 
@@ -386,8 +460,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
    * 每条建议都要能被拒绝：id 对不上就跳过、等级非法就跳过、
    * critical 降级由 journal.setLevel 那道护栏挡掉。**宁可少改。**
    */
-  function apply({ day, chatId, list, plan, dry }) {
-    const out = { ranked: 0, compressed: 0, triples: 0, agreements: 0, closed: 0, digests: 0, suppressed: 0 };
+  function apply({ day, chatId, list, plan, dry, revocation = null }) {
+    const out = { ranked: 0, compressed: 0, triples: 0, agreements: 0, closed: 0, revoked: 0, digests: 0, suppressed: 0 };
     const byId = new Map(list.map((r) => [r.id, r]));
     const at = list.length ? list[list.length - 1].at : now();
 
@@ -561,6 +635,31 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
        * 换机器人之后「建边时」可能是旧键，所以别名要一起关。
        */
       out.closed += graph?.closeEdge?.({ src: s, rel, dst: o, at, chatId, aliases: aliasesOf(chatId) }) || 0;
+    }
+
+    /* 6. L3 语义兜底：模型点名的旧约定标失效（**不删行**，留原文与出处） */
+    if (revocation && Array.isArray(plan?.revoked)) {
+      const allow = new Set(revocation.ids);
+      const picked = [];
+      for (const raw of plan.revoked) {
+        /** 一次最多作废一条：模型判错的代价远大于多留一条旧约定 */
+        if (picked.length >= 1) break;
+        const id = String(raw ?? '');
+        const row = byId.get(id);
+        if (!row || !allow.has(id)) continue;              // 只认本轮候选集里的 id
+        if (revocation.before > 0 && row.at >= revocation.before) continue; // 只作废改口之前的旧行
+        picked.push(id);
+      }
+      if (picked.length) {
+        if (dry) {
+          out.revoked += picked.length;                  // dry 只算不写
+        } else if (typeof journal.invalidate === 'function') {
+          out.revoked += Number(journal.invalidate(picked, {
+            at,
+            supersededBy: `consolidate:${day}`,
+          })) || 0;
+        }
+      }
     }
 
     return out;

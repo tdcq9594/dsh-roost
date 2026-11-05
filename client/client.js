@@ -319,6 +319,10 @@ select.roost-input{color-scheme:dark}
 .cap-row-b{flex:1 1 auto;min-width:0}
 .cap-cap{display:flex;align-items:center;gap:6px;flex:0 0 auto}
 .cap-cap input[type=number]{width:62px}
+/* 「数值 / 下拉」型功能项：控件要窄且不被 flex 拉伸，否则会挤掉右边的说明文字 */
+.cap-row > input.cap-num,.cap-row > .cap-ctl{width:96px;flex:0 0 96px}
+.cap-row > .cap-ctl{display:flex;flex-direction:column;gap:4px}
+.cap-row > .cap-ctl select,.cap-row > .cap-ctl input{width:100%;min-width:0}
 /* 档位卡：标题一行、按钮一行、摘要一行。
    原来整块塞进 .roost-item 的 .t 里，兄弟 .d 是 flex:0 0 auto 不换行，
    工具名一长就把整行撑出屏幕（截图里右侧被切掉）。 */
@@ -2809,7 +2813,7 @@ select.roost-input{color-scheme:dark}
               type: 'button', className: 'roost-btn', disabled: busy,
               onClick: async () => {
                 const r = await post('/consolidate', {})
-                toast(r.ok ? `巩固完成：压缩 ${r.compressed} 条、三元组 ${r.triples} 个` : (r.reason || '没跑成'))
+                toast(r.ok ? `巩固完成：压缩 ${r.compressed} 条、三元组 ${r.triples} 个、撤销 ${r.revoked || 0} 条` : (r.reason || '没跑成'))
                 reload()
               },
             }, '手动跑一次巩固'),
@@ -3716,6 +3720,15 @@ select.roost-input{color-scheme:dark}
       const [toolsOpen, setToolsOpen] = useState(false)
       const [toolQ, setToolQ] = useState('')
       /**
+       * 「数值 / 下拉」型设置正在编辑的值。
+       *
+       * 不能直接拿 `feat.settings[id]` 当受控 value：用户每敲一个字符就会
+       * 发一次 patch，敲「30」会先存 3 再存 30；而且服务端还没回来时
+       * 输入框会被旧值覆盖，看起来像打不了字。
+       * 所以编辑期间用本地草稿，失焦 / 回车才提交。
+       */
+      const [featDraft, setFeatDraft] = useState({})
+      /**
        * 次数限制当前在编辑哪一档。
        *
        * 默认「群成员」：那是绝大多数人真正要限的档——
@@ -3892,6 +3905,27 @@ select.roost-input{color-scheme:dark}
       }
 
       /**
+       * 改「数值 / 下拉」型设置。
+       *
+       * 布尔项走 `on`，这里走 `value`——后端 `features.patch` 按 `kind` 分开收。
+       * 共用一个字段会出事：`on: 0` 是「关」，而 `queueMax: 0` 是「不排队」，
+       * 两个 0 语义不同。
+       *
+       * 不管成功失败都清草稿：失败时让输入框回到服务端的真值，
+       * 否则页面显示一个根本没保存的数，比报错更糟。
+       */
+      const setFeatValue = async (id, value) => {
+        const r = await quick('features.patch', { id, value })
+        toast(r.message || (r.ok ? '已保存' : '没改成'))
+        setFeatDraft((d) => {
+          const n = { ...d }
+          delete n[id]
+          return n
+        })
+        reload()
+      }
+
+      /**
        * 渲染一组配额行。
        *
        * @param {'builtin'|'tool'} kind
@@ -4029,8 +4063,10 @@ select.roost-input{color-scheme:dark}
       }
 
       const featList = (feat && feat.features) || []
-      const featOnCount = featList.filter((f) => feat.on?.[f.id]).length
-      const featOffCount = featList.length - featOnCount
+      /** 数值 / 下拉项没有「开着 / 关着」，算进来会让右上角那个数字虚高 */
+      const toggleList = featList.filter((f) => (f.kind || 'toggle') === 'toggle')
+      const featOnCount = toggleList.filter((f) => feat.on?.[f.id]).length
+      const featOffCount = toggleList.length - featOnCount
 
       const results = (preview && preview.results) || []
       const byBucket = Object.fromEntries(results.map((r) => [r.bucket, r]))
@@ -4166,20 +4202,110 @@ select.roost-input{color-scheme:dark}
                   h('div', { className: 'cap-group-t' }, g.label),
                   h('div', { className: 'cap-group-b' },
                     items.map((f) => {
+                      const kind = f.kind || 'toggle'
+                      const isToggle = kind === 'toggle'
                       const on = !!feat.on?.[f.id]
                       const blocked = !on && feat.blocked?.[f.id]
-                      return h('div', { key: f.id, className: 'cap-row' },
-                        h('input', {
+                      /** 非布尔项的当前值来自 `feat.settings`，不来自 `feat.on` */
+                      const cur = feat.settings?.[f.id] ?? f.default
+                      const draft = featDraft[f.id]
+
+                      let control
+                      if (isToggle) {
+                        control = h('input', {
                           type: 'checkbox',
                           checked: on,
                           disabled: busy || !!blocked,
                           title: blocked || '',
                           onChange: (e) => toggleFeat(f.id, e.target.checked),
-                        }),
+                        })
+                      } else if (kind === 'select') {
+                        /** 当前值不在预设选项里 = 用户填过「自定义」 */
+                        const known = (f.options || []).some((o) => String(o.value) === String(cur))
+                        const opts = [
+                          ...(f.options || []).map((o) =>
+                            h('option', { key: String(o.value), value: String(o.value) }, o.label)),
+                          ...(f.custom ? [h('option', { key: '__custom', value: '__custom' }, '自定义…')] : []),
+                          ...(!known && !f.custom
+                            ? [h('option', { key: '__cur', value: String(cur) }, String(cur))]
+                            : []),
+                        ]
+                        control = h('div', { className: 'cap-ctl' },
+                          h('select', {
+                            value: draft !== undefined ? String(draft)
+                              : (known ? String(cur) : (f.custom ? '__custom' : String(cur))),
+                            disabled: busy,
+                            onChange: (e) => {
+                              const v = e.target.value
+                              if (v === '__custom') {
+                                setFeatDraft((d) => ({ ...d, [f.id]: '__custom' }))
+                                return
+                              }
+                              setFeatValue(f.id, v)
+                            },
+                          }, opts),
+                          (f.custom && (draft === '__custom' || (!known && draft === undefined)))
+                            ? h('input', {
+                                type: 'number', min: f.min, max: f.max,
+                                defaultValue: known ? '' : String(cur),
+                                disabled: busy,
+                                onKeyDown: (e) => { if (e.key === 'Enter') e.target.blur() },
+                                onBlur: (e) => {
+                                  const v = String(e.target.value ?? '').trim()
+                                  if (v) setFeatValue(f.id, v)
+                                },
+                              })
+                            : null,
+                        )
+                      } else {
+                        /** number：编辑期用草稿，失焦 / 回车才提交 */
+                        control = h('input', {
+                          type: 'number',
+                          className: 'cap-num',
+                          min: f.min,
+                          max: f.max,
+                          value: draft !== undefined ? draft : String(cur ?? ''),
+                          disabled: busy,
+                          onChange: (e) => setFeatDraft((d) => ({ ...d, [f.id]: e.target.value })),
+                          onKeyDown: (e) => { if (e.key === 'Enter') e.target.blur() },
+                          onBlur: (e) => {
+                            const v = String(e.target.value ?? '').trim()
+                            const clear = () => setFeatDraft((d) => {
+                              const n = { ...d }; delete n[f.id]; return n
+                            })
+                            /**
+                             * 清空输入框 = 放弃这次编辑，**不能发 patch**。
+                             *
+                             * 后端 `normalizeSetting` 现在会拒空值（返回 400），
+                             * 但更早在前端挡掉能少一次无谓请求和一句报错 toast。
+                             * 以前这里把 `''` 提交上去，`Number('')` 是 0，
+                             * 会把 `queueMax` 静默改成 0（关掉排队）。
+                             */
+                            if (!v) return clear()
+                            /**
+                             * 按数值比较：'02' / '2 ' 和 2 是同一个值，不必多发一次 patch。
+                             * 但 `cur` 若是空串 / null（后端异常返回），`Number(cur)` 会得 0——
+                             * 那时用户真想填 0 会被误判成「没改」而丢掉提交，所以先判 cur 是否有效。
+                             */
+                            const curValid = cur !== '' && cur !== null && cur !== undefined
+                            if (v === String(cur ?? '') || (curValid && Number(v) === Number(cur))) return clear()
+                            setFeatValue(f.id, v)
+                          },
+                        })
+                      }
+
+                      return h('div', { key: f.id, className: 'cap-row' },
+                        control,
                         h('div', { className: 'cap-row-b' },
                           h('div', null, f.label, f.risky ? ' 🔴' : ''),
                           h('div', { className: 'roost-note', style: { margin: 0 } }, f.desc),
-                          on ? null : h('div', { className: 'roost-note', style: { margin: 0 } }, `关掉之后：${f.offHint}`),
+                          isToggle && !on
+                            ? h('div', { className: 'roost-note', style: { margin: 0 } }, `关掉之后：${f.offHint}`)
+                            : null,
+                          !isToggle
+                            ? h('div', { className: 'roost-note', style: { margin: 0 } },
+                                `当前 ${cur}${f.max !== undefined ? ` · 可填 ${f.min}–${f.max}` : ''}`)
+                            : null,
                           blocked ? h('div', { className: 'roost-note', style: { margin: 0 } }, `⚠️ ${blocked}`) : null,
                         ),
                       )

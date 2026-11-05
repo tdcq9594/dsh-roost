@@ -48,6 +48,19 @@ export const LEVELS = ['critical', 'important', 'normal'];
 export const ERASED = '（已按用户要求遗忘）';
 export const CLEARED = '（已清空）';
 
+/**
+ * 失效（invalidate-not-delete）的两条统一口径，批次 2 加。
+ *
+ * 用户改口时旧约定**不删、不抹正文**，只写 `invalid_at`（失效时刻）与
+ * `superseded_by`（指向推翻它的那条消息 id）——原文、`event_ids`、
+ * `evidence`、`vec` 全部留着，事后能查「为什么她突然改了口」。
+ *
+ * 两个后端各用各的形式，但**判据只有这一处定义**：SQLite 拼进 WHERE，
+ * JSONL 走 `isActive()`。写死字面量的话，加一条读路径忘一处就前功尽弃。
+ */
+const NOT_INVALIDATED_SQL = 'invalid_at = 0';
+const isActive = (r) => Number(r?.invalidAt ?? 0) === 0;
+
 /** 注入排序用的等级权重（1.7：重要性 × 衰减 + 访问频率） */
 const LEVEL_W = { critical: 3, important: 2, normal: 1 };
 
@@ -192,6 +205,13 @@ function normRow(r) {
     eventIds: parseList(r.event_ids ?? r.eventIds),
     /** 原文快照 `[{eventId, at, sender, excerpt}]`，events 删了它也还在 */
     evidence: parseList(r.evidence),
+    /**
+     * 失效标记（批次 2）。两个名字都要认：SQLite 出来是蛇形，JSONL 文件里
+     * 存的是 `normRow()` 自己的驼峰输出。漏一个，JSONL 在「读 → 改 → 重写」
+     * 之后就会把失效状态整条丢掉，而且只影响 JSONL 后端，最难发现。
+     */
+    invalidAt: Number(r.invalid_at ?? r.invalidAt ?? 0),
+    supersededBy: String(r.superseded_by ?? r.supersededBy ?? ''),
   };
 }
 
@@ -272,7 +292,11 @@ function createSqliteStore(file, log) {
           vec BLOB,
           -- 场景片段（阶段 4）：这条记忆是从哪几条消息来的，以及原文快照
           event_ids TEXT,
-          evidence TEXT
+          evidence TEXT,
+          -- 失效（批次 2）：0 = 有效；被推翻时写失效时刻，并把推翻它的
+          -- 消息 id 记进 superseded_by。行、正文、出处一律不删
+          invalid_at INTEGER NOT NULL DEFAULT 0,
+          superseded_by TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS journal_day ON journal(day);
         CREATE INDEX IF NOT EXISTS journal_chat ON journal(chat_id, at);
@@ -298,6 +322,14 @@ function createSqliteStore(file, log) {
       const cols = new Set(db.prepare('PRAGMA table_info(journal)').all().map((c) => c.name));
       if (!cols.has('event_ids')) db.exec('ALTER TABLE journal ADD COLUMN event_ids TEXT');
       if (!cols.has('evidence')) db.exec('ALTER TABLE journal ADD COLUMN evidence TEXT');
+      /**
+       * 失效两列同样按列判，不引 `user_version`。真机库的 `user_version=0`，
+       * 而且这套代码从来没有版本迁移号——用版本号反而会把「已经手工补过列」
+       * 的库判成旧库，撞 `duplicate column name`。
+       * `ALTER TABLE ... NOT NULL DEFAULT` 在 SQLite 合法，老行自动拿到 0 / ''。
+       */
+      if (!cols.has('invalid_at')) db.exec('ALTER TABLE journal ADD COLUMN invalid_at INTEGER NOT NULL DEFAULT 0');
+      if (!cols.has('superseded_by')) db.exec(`ALTER TABLE journal ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''`);
       /**
        * FTS5 单独一张表而不是 external content：
        * external content 要靠触发器同步，改一行忘了同步就静默不一致。
@@ -390,6 +422,54 @@ function createSqliteStore(file, log) {
     },
 
     /**
+     * 标失效（批次 2）：只写 `invalid_at` / `superseded_by` 两列，
+     * **不碰正文、摘要、`event_ids`、`evidence`、`vec`，也不删 FTS**。
+     *
+     * 和 `erase()` 的区别正是这次改动的核心：`erase()` 服务「用户说别记这个」，
+     * 要把正文抹成占位符并清掉原文快照和向量；失效服务「这条约定被推翻了」，
+     * 原文与溯源反而**必须留着**，否则事后查不出「她为什么突然不发图了」。
+     *
+     * `WHERE invalid_at=0` 让重复撤销不会反复改写失效时刻；事务包住整批，
+     * 理由同 `erase()`——`DatabaseSync` 是同步 API，逐条隐式事务会卡住事件循环。
+     * 检索侧靠各读路径的 `invalid_at = 0` 过滤，不是靠删索引（删了就没法溯源）。
+     *
+     * @param {string[]} ids 要作废的行 id
+     * @returns {number} 本次实际作废几条
+     */
+    invalidate(ids, { at = Date.now(), supersededBy = '' } = {}) {
+      const d = open();
+      const list = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
+      if (!d || !list.length) return 0;
+      const t = Number(at) || Date.now();
+      const by = String(supersededBy ?? '');
+      const upd = d.prepare(
+        'UPDATE journal SET invalid_at=?, superseded_by=? WHERE id=? AND invalid_at=0',
+      );
+      let n = 0;
+      d.exec('BEGIN');
+      try {
+        for (const id of list) n += Number(upd.run(t, by, id).changes || 0);
+        d.exec('COMMIT');
+      } catch (e) {
+        try { d.exec('ROLLBACK'); } catch {}
+        throw e;
+      }
+      return n;
+    },
+
+    /** 排查看：列出已失效的行（原文与 `superseded_by` 都在），不进任何注入集 */
+    invalidated({ chatId = '', limit = 50, aliases = [] } = {}) {
+      const d = open();
+      if (!d) return [];
+      const keys = chatKeys(chatId, aliases);
+      const lim = Math.min(Math.max(Number(limit) || 50, 1), 500);
+      const sql = keys.length
+        ? `SELECT * FROM journal WHERE invalid_at>0 AND chat_id IN (${marks(keys.length)}) ORDER BY invalid_at DESC LIMIT ?`
+        : 'SELECT * FROM journal WHERE invalid_at>0 ORDER BY invalid_at DESC LIMIT ?';
+      return d.prepare(sql).all(...(keys.length ? [...keys, lim] : [lim])).map(normRow);
+    },
+
+    /**
      * 批量抹正文（`forget` 的落点）：置占位符 + 清摘要 + 清原文快照/向量 + 降级，一个事务。
      *
      * 为什么不让上层循环调 `update()`：那样每行 3 条语句、各自一个隐式事务，
@@ -454,7 +534,7 @@ function createSqliteStore(file, log) {
        * 再算一次只会让「忘掉 1 条」之后紧跟着「清空 2 条」。
        */
       const ids = d
-        .prepare(`SELECT id FROM journal WHERE chat_id IN (${marks(keys.length)}) AND text<>? AND text<>?`)
+        .prepare(`SELECT id FROM journal WHERE chat_id IN (${marks(keys.length)}) AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL}`)
         .all(...keys, CLEARED, ERASED)
         .map((r) => String(r.id));
       if (!ids.length) return 0;
@@ -509,10 +589,52 @@ function createSqliteStore(file, log) {
       if (!d) return [];
       const keys = chatKeys(chatId, aliases);
       const sql = keys.length
-        ? `SELECT * FROM journal WHERE chat_id IN (${marks(keys.length)}) AND kind=? ORDER BY at DESC LIMIT ?`
-        : 'SELECT * FROM journal WHERE kind=? ORDER BY at DESC LIMIT ?';
+        ? `SELECT * FROM journal WHERE chat_id IN (${marks(keys.length)}) AND kind=? AND ${NOT_INVALIDATED_SQL} ORDER BY at DESC LIMIT ?`
+        : `SELECT * FROM journal WHERE kind=? AND ${NOT_INVALIDATED_SQL} ORDER BY at DESC LIMIT ?`;
       const args = keys.length ? [...keys, kind, n] : [kind, n];
       return d.prepare(sql).all(...args).map(normRow);
+    },
+
+    /**
+     * 按会话取「时间线」：只要真的对话（user / bot），不要摘要行。
+     *
+     * 和 `recent()` 的三个区别，都是给 `chat_look` 用的：
+     *   · 排掉 `role='digest'`——那是巩固写的摘要，不是谁说过的话；
+     *   · 排掉被抹除的行（`ERASED` / `CLEARED`）——用户明确要求忘掉的内容
+     *     不能再以「（已按用户要求遗忘）」的形式出现在时间线里；
+     *   · 支持 `before` 游标翻页（`recent()` 只能取「最近 N 条」）。
+     *
+     * 返回**倒序**（新的在前），由调用方决定怎么展示——和 `recent()` 一致。
+     */
+    recentTimeline(chatId, { limit = 20, before = 0, aliases = [] } = {}) {
+      const d = open();
+      if (!d) return [];
+      const keys = chatKeys(chatId, aliases);
+      const lim = Math.min(Math.max(Number(limit) || 20, 1), 50);
+      const cur = Number(before) || 0;
+      const where = [
+        keys.length ? `chat_id IN (${marks(keys.length)})` : '',
+        NOT_INVALIDATED_SQL,
+        `kind = 'chat'`,
+        `role IN ('user','bot')`,
+        `text NOT IN (?,?)`,
+        cur > 0 ? 'at < ?' : '',
+      ].filter(Boolean);
+      const args = [
+        ...(keys.length ? keys : []),
+        ERASED,
+        CLEARED,
+        ...(cur > 0 ? [cur] : []),
+        lim,
+      ];
+      try {
+        return d
+          .prepare(`SELECT * FROM journal WHERE ${where.join(' AND ')} ORDER BY at DESC LIMIT ?`)
+          .all(...args)
+          .map(normRow);
+      } catch {
+        return [];
+      }
     },
 
     /**
@@ -527,7 +649,7 @@ function createSqliteStore(file, log) {
       const d = open();
       if (!d) return [];
       return d
-        .prepare('SELECT * FROM journal WHERE day=? AND text<>? AND text<>? ORDER BY at')
+        .prepare(`SELECT * FROM journal WHERE day=? AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL} ORDER BY at`)
         .all(day, ERASED, CLEARED)
         .map(normRow);
     },
@@ -546,8 +668,8 @@ function createSqliteStore(file, log) {
       const all = !(n > 0);
       const keys = chatId ? chatKeys(chatId, aliases) : [];
       const sql = keys.length
-        ? `SELECT * FROM journal WHERE chat_id IN (${marks(keys.length)}) ORDER BY at DESC${all ? '' : ' LIMIT ?'}`
-        : `SELECT * FROM journal ORDER BY at DESC${all ? '' : ' LIMIT ?'}`;
+        ? `SELECT * FROM journal WHERE chat_id IN (${marks(keys.length)}) AND ${NOT_INVALIDATED_SQL} ORDER BY at DESC${all ? '' : ' LIMIT ?'}`
+        : `SELECT * FROM journal WHERE ${NOT_INVALIDATED_SQL} ORDER BY at DESC${all ? '' : ' LIMIT ?'}`;
       const args = keys.length ? (all ? keys : [...keys, n]) : all ? [] : [n];
       return d.prepare(sql).all(...args).map(normRow);
     },
@@ -562,7 +684,7 @@ function createSqliteStore(file, log) {
       const d = open();
       if (!d) return [];
       return d
-        .prepare('SELECT chat_id, COUNT(*) c FROM journal GROUP BY chat_id')
+        .prepare(`SELECT chat_id, COUNT(*) c FROM journal WHERE ${NOT_INVALIDATED_SQL} GROUP BY chat_id`)
         .all()
         .map((r) => ({ chatId: String(r.chat_id || ''), journal: Number(r.c || 0) }))
         .filter((x) => x.chatId);
@@ -613,7 +735,7 @@ function createSqliteStore(file, log) {
          * 这和 facts 分"跨群/本群"两层是同一个道理，只是那边由模型声明，
          * 这边由等级兜底。
          */
-        let where = 'journal_fts MATCH ?';
+        let where = `journal_fts MATCH ? AND j.${NOT_INVALIDATED_SQL}`;
         const args = [expr];
         /**
          * 别名键也一起查：换过机器人之后，旧日记还在旧 `chat_id` 下面。
@@ -643,8 +765,8 @@ function createSqliteStore(file, log) {
       if (!d) return [];
       const keys = chatId ? chatKeys(chatId, aliases) : [];
       const sql = keys.length
-        ? `SELECT * FROM journal WHERE vec IS NOT NULL AND (chat_id IN (${marks(keys.length)}) OR chat_id='') ORDER BY at DESC LIMIT ?`
-        : 'SELECT * FROM journal WHERE vec IS NOT NULL ORDER BY at DESC LIMIT ?';
+        ? `SELECT * FROM journal WHERE vec IS NOT NULL AND (chat_id IN (${marks(keys.length)}) OR chat_id='') AND ${NOT_INVALIDATED_SQL} ORDER BY at DESC LIMIT ?`
+        : `SELECT * FROM journal WHERE vec IS NOT NULL AND ${NOT_INVALIDATED_SQL} ORDER BY at DESC LIMIT ?`;
       return d.prepare(sql).all(...(keys.length ? [...keys, limit] : [limit])).map(normRow);
     },
 
@@ -661,7 +783,7 @@ function createSqliteStore(file, log) {
       if (!d) return [];
       return d
         /** 先补**老**条目的向量：按 DESC 取的话，最新的先补，最老的永远轮不到 */
-        .prepare('SELECT * FROM journal WHERE vec IS NULL AND text<>? AND text<>? ORDER BY at ASC LIMIT ?')
+        .prepare(`SELECT * FROM journal WHERE vec IS NULL AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL} ORDER BY at ASC LIMIT ?`)
         .all(ERASED, CLEARED, limit)
         .map(normRow);
     },
@@ -685,6 +807,7 @@ function createSqliteStore(file, log) {
           `SELECT * FROM journal
             WHERE kind='chat' AND level<>'critical' AND digest IS NULL
               AND keep_until>0 AND keep_until<=?
+              AND ${NOT_INVALIDATED_SQL}
               AND text<>? AND text<>?
             ORDER BY keep_until ASC LIMIT ?`,
         )
@@ -701,6 +824,7 @@ function createSqliteStore(file, log) {
           `SELECT COUNT(*) c FROM journal
             WHERE kind='chat' AND level<>'critical' AND digest IS NULL
               AND keep_until>0 AND keep_until<=?
+              AND ${NOT_INVALIDATED_SQL}
               AND text<>? AND text<>?`,
         )
         .get(at, ERASED, CLEARED);
@@ -710,7 +834,11 @@ function createSqliteStore(file, log) {
     stats() {
       const d = open();
       if (!d) return null;
-      const by = (sql, ...a) => d.prepare(sql).get(...a) || {};
+      /** 统计只看有效行：失效行还在库里、能溯源，但不该混进「有多少记忆」 */
+      const by = (sql, ...a) => d.prepare(
+        `${sql}${sql.includes('WHERE') ? ' AND ' : ' WHERE '}${NOT_INVALIDATED_SQL}`,
+      ).get(...a) || {};
+      const gone = d.prepare('SELECT COUNT(*) c FROM journal WHERE invalid_at>0').get() || {};
       return {
         total: Number(by('SELECT COUNT(*) c FROM journal').c || 0),
         critical: Number(by("SELECT COUNT(*) c FROM journal WHERE level='critical'").c || 0),
@@ -718,6 +846,7 @@ function createSqliteStore(file, log) {
         normal: Number(by("SELECT COUNT(*) c FROM journal WHERE level='normal'").c || 0),
         compressed: Number(by('SELECT COUNT(*) c FROM journal WHERE digest IS NOT NULL').c || 0),
         withVec: Number(by('SELECT COUNT(*) c FROM journal WHERE vec IS NOT NULL').c || 0),
+        invalidated: Number(gone.c || 0),
         firstAt: Number(by('SELECT MIN(at) m FROM journal').m || 0),
         lastAt: Number(by('SELECT MAX(at) m FROM journal').m || 0),
       };
@@ -893,6 +1022,35 @@ function createJsonlStore(file, log) {
       return true;
     },
 
+    /** 同 SQLite 后端：只写两列，正文 / 出处 / 向量 / 倒排都不动 */
+    invalidate(ids, { at = Date.now(), supersededBy = '' } = {}) {
+      load();
+      const want = new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean));
+      if (!want.size) return 0;
+      const t = Number(at) || Date.now();
+      const by = String(supersededBy ?? '');
+      let n = 0;
+      for (const r of rows) {
+        /** 已失效的不再改写，和 SQLite 的 `WHERE invalid_at=0` 同口径 */
+        if (!want.has(r.id) || !isActive(r)) continue;
+        r.invalidAt = t;
+        r.supersededBy = by;
+        n += 1;
+      }
+      if (n) rewrite();
+      return n;
+    },
+
+    /** 同 SQLite 后端：排查看已失效的行 */
+    invalidated({ chatId = '', limit = 50, aliases = [] } = {}) {
+      const keys = chatKeys(chatId, aliases);
+      const lim = Math.min(Math.max(Number(limit) || 50, 1), 500);
+      return load()
+        .filter((r) => !isActive(r) && (!keys.length || keys.includes(r.chatId)))
+        .sort((a, b) => Number(b.invalidAt) - Number(a.invalidAt))
+        .slice(0, lim);
+    },
+
     /**
      * 批量抹正文（同 SQLite 后端）。
      *
@@ -925,7 +1083,7 @@ function createJsonlStore(file, log) {
       const keys = new Set(chatKeys(chatId, aliases));
       let n = 0;
       for (const r of rows) {
-        if (!keys.has(r.chatId)) continue;
+        if (!keys.has(r.chatId) || !isActive(r)) continue;
         /** 同 SQLite 后端：已经抹过的（`forget` 的 ERASED 也算）不再算一次 */
         if (r.text === CLEARED || r.text === ERASED) continue;
         r.text = CLEARED;
@@ -956,22 +1114,42 @@ function createJsonlStore(file, log) {
     recent(chatId, n, kind = 'chat', aliases = []) {
       const keys = chatKeys(chatId, aliases);
       return load()
-        .filter((r) => r.kind === kind && (!keys.length || keys.includes(r.chatId)))
+        .filter((r) => isActive(r) && r.kind === kind && (!keys.length || keys.includes(r.chatId)))
         .sort((a, b) => b.at - a.at)
         .slice(0, n);
+    },
+
+    /** 同 SQLite 后端：只要对话行、排掉抹除行、支持 before 游标 */
+    recentTimeline(chatId, { limit = 20, before = 0, aliases = [] } = {}) {
+      const keys = chatKeys(chatId, aliases);
+      const lim = Math.min(Math.max(Number(limit) || 20, 1), 50);
+      const cur = Number(before) || 0;
+      return load()
+        .filter(
+          (r) =>
+            isActive(r)
+            && r.kind === 'chat'
+            && (r.role === 'user' || r.role === 'bot')
+            && r.text !== ERASED
+            && r.text !== CLEARED
+            && (!keys.length || keys.includes(r.chatId))
+            && (!cur || r.at < cur),
+        )
+        .sort((a, b) => b.at - a.at)
+        .slice(0, lim);
     },
 
     /** 同 SQLite 后端：抹除过的行不进巩固的原料 */
     byDay(day) {
       return load()
-        .filter((r) => r.day === day && r.text !== ERASED && r.text !== CLEARED)
+        .filter((r) => isActive(r) && r.day === day && r.text !== ERASED && r.text !== CLEARED)
         .sort((a, b) => a.at - b.at);
     },
 
     listChat(chatId, limit = 500, aliases = []) {
       const keys = chatKeys(chatId, aliases);
       const rows = load()
-        .filter((r) => !keys.length || keys.includes(r.chatId))
+        .filter((r) => isActive(r) && (!keys.length || keys.includes(r.chatId)))
         .sort((a, b) => b.at - a.at);
       const n = Number(limit);
       // 同 SQLite 后端：0 / 负数 = 不限
@@ -982,6 +1160,7 @@ function createJsonlStore(file, log) {
     scanChats() {
       const out = new Map();
       for (const r of load()) {
+        if (!isActive(r)) continue;
         const k = String(r.chatId || '');
         if (!k) continue;
         out.set(k, (out.get(k) || 0) + 1);
@@ -1019,6 +1198,7 @@ function createJsonlStore(file, log) {
       for (const t of terms) {
         for (const i of index.get(t) || []) {
           const r = rows[i];
+          if (!isActive(r)) continue;
           // 跨群只放 critical 进来（身份事实），群内梗仍然拦住；别名键等同于当前键
           if (keys.length && !keys.includes(r.chatId) && r.chatId !== '' && !(crossCritical && r.level === 'critical')) continue;
           hit.set(i, (hit.get(i) || 0) + 1);
@@ -1033,7 +1213,7 @@ function createJsonlStore(file, log) {
     withVec({ chatId = '', limit = 2000, aliases = [] } = {}) {
       const keys = chatId ? chatKeys(chatId, aliases) : [];
       return load()
-        .filter((r) => r.vec && (!keys.length || keys.includes(r.chatId) || r.chatId === ''))
+        .filter((r) => isActive(r) && r.vec && (!keys.length || keys.includes(r.chatId) || r.chatId === ''))
         .sort((a, b) => b.at - a.at)
         .slice(0, limit);
     },
@@ -1041,7 +1221,7 @@ function createJsonlStore(file, log) {
     noVec(limit = 64) {
       // 同 SQLite 后端：占位符不补算向量；先补**老**条目（DESC 会让最老的永远轮不到）
       return load()
-        .filter((r) => !r.vec && r.text !== ERASED && r.text !== CLEARED)
+        .filter((r) => isActive(r) && !r.vec && r.text !== ERASED && r.text !== CLEARED)
         .sort((a, b) => a.at - b.at)
         .slice(0, limit);
     },
@@ -1051,7 +1231,8 @@ function createJsonlStore(file, log) {
       return load()
         .filter(
           (r) =>
-            r.kind === 'chat'
+            isActive(r)
+            && r.kind === 'chat'
             && r.level !== 'critical'
             && !r.digest
             && r.keepUntil > 0
@@ -1066,7 +1247,8 @@ function createJsonlStore(file, log) {
     dueCount(at = Date.now()) {
       return load().filter(
         (r) =>
-          r.kind === 'chat'
+          isActive(r)
+          && r.kind === 'chat'
           && r.level !== 'critical'
           && !r.digest
           && r.keepUntil > 0
@@ -1078,15 +1260,18 @@ function createJsonlStore(file, log) {
 
     stats() {
       load();
+      /** 同 SQLite：统计只看有效行，另给一个已失效条数供排查 */
+      const live = rows.filter(isActive);
       return {
-        total: rows.length,
-        critical: rows.filter((r) => r.level === 'critical').length,
-        important: rows.filter((r) => r.level === 'important').length,
-        normal: rows.filter((r) => r.level === 'normal').length,
-        compressed: rows.filter((r) => r.digest).length,
-        withVec: rows.filter((r) => r.vec).length,
-        firstAt: rows.length ? Math.min(...rows.map((r) => r.at)) : 0,
-        lastAt: rows.length ? Math.max(...rows.map((r) => r.at)) : 0,
+        total: live.length,
+        critical: live.filter((r) => r.level === 'critical').length,
+        important: live.filter((r) => r.level === 'important').length,
+        normal: live.filter((r) => r.level === 'normal').length,
+        compressed: live.filter((r) => r.digest).length,
+        withVec: live.filter((r) => r.vec).length,
+        invalidated: rows.length - live.length,
+        firstAt: live.length ? Math.min(...live.map((r) => r.at)) : 0,
+        lastAt: live.length ? Math.max(...live.map((r) => r.at)) : 0,
       };
     },
 
@@ -1309,6 +1494,19 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      * 少传一层不会报错，只会让别名静默失效（最难发现的那种）。
      */
     recent: (chatId, n = 5, kind = 'chat', aliases = []) => get().recent(chatId, n, kind, aliases),
+    /**
+     * 某个会话的全部行（`limit` 传 0 = 不限），批次 2 的撤销判定要用。
+     *
+     * store 层早就有这个方法，公开层却一直没透出——调用方若只用
+     * `typeof journal.listChat === 'function'` 做兼容判断，整条撤销链路会
+     * 静默跳过（生产上表现为「说了不用了，她还在发表情包」）。
+     */
+    listChat: (chatId, limit = 500, aliases = []) => get().listChat(chatId, limit, aliases),
+    /**
+     * 时间线（`chat_look` 用）：只要 user/bot 行、排掉抹除行、支持 before 游标。
+     * 同样必须显式把 `aliases` 往下传，否则「号码 → 多个 openid」的会话查不全。
+     */
+    recentTimeline: (chatId, opts = {}) => get().recentTimeline(chatId, opts),
     byDay: (day) => get().byDay(day),
     /** 按会话统计条数（「账号迁移」页扫描用），只读 */
     scanChats: () => get().scanChats(),
@@ -1368,6 +1566,12 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      * 为什么用 RRF 而不是加权求和：bm25 和余弦的量纲完全不可比，
      * 加权需要为每份数据调参数；RRF 只看名次，天然免疫量纲。
      *
+     * `crossCritical` 默认 **true**，这是**设计**不是疏漏：
+     *   · 判成 `critical` 的只有「身份事实」（名字、住处、明确要求记住的约定）；
+     *   · 群内梗、闲聊永远进不了这一档，所以不会串场。
+     * 两条验收锁着它：`memory.test.js` 的「验收1」（换群答得上来）和「验收2」（梗不串场）。
+     * 想关掉必须两个都改，别只改这里——只改默认值会让验收1 静默失效。
+     *
      * @returns {Promise<Array>} 按相关度排序的日记（带 score/why）
      */
     async search(query, { chatId = '', limit = 5, crossCritical = true, entityJournalIds = [], aliases = [] } = {}) {
@@ -1404,7 +1608,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
          * 死 id 是正常现象（删过日记就会留），所以这里直接跳过，不报错。
          */
         const row = byId.get(id) || s.get(id);
-        if (!row) return;
+        /** `get()` 故意不过滤（写路径与溯源要用），实体路这里得自己挡一道 */
+        if (!row || !isActive(row)) return;
         byId.set(id, row);
         bump(id, i, 0.5);
       });
@@ -1501,6 +1706,28 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     },
 
     /**
+     * 标失效（批次 2 的 2.2 三级撤销共用落点）。
+     *
+     * 只写 `invalid_at` / `superseded_by`，行、正文、`event_ids`、
+     * `evidence` 全留着；`invalidated()` 能把这些行查回来做溯源。
+     * 两个后端都实现同名方法（和 `rekey` 一样），否则回落到 JSONL 时
+     * 会在运行时抛 TypeError。
+     *
+     * @param {string[]} ids 要作废的日记行 id
+     * @param {{at?:number, supersededBy?:string}} opts `supersededBy` 传推翻它的那条消息 id
+     * @returns {number} 本次实际作废几条
+     */
+    invalidate(ids, opts = {}) {
+      return get().invalidate(ids, {
+        at: opts.at ?? now(),
+        supersededBy: String(opts.supersededBy ?? ''),
+      });
+    },
+
+    /** 排查看：列出已失效的行（原文与 supersededBy 都在），默认 50 条 */
+    invalidated: (opts = {}) => get().invalidated(opts),
+
+    /**
      * **真的忘掉**：按关键词抹掉正文。
      *
      * 这是铁律的唯一例外，理由：用户说"别记这个"是**指令**，
@@ -1513,7 +1740,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      * 那不是「忘了」，那是「原文忘了、结论还记得」，比不删更让人不安。
      * @returns {number} 抹掉几条
      */
-    forget({ chatId = '', word = '', aliases = [] } = {}) {
+    forget({ chatId = '', word = '', aliases = [], onStale = null } = {}) {
       const w = String(word ?? '').trim();
       if (!w) return 0;
       const scope = requireChat(chatId, '忘掉关键词');
@@ -1547,8 +1774,47 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
           if (hit) ids.push(r.id);
         }
       }
+      /**
+       * **失效行扫不到，但要提示。**
+       *
+       * `listChat` 从批次 2 起就过滤 `invalid_at = 0`（注入/检索/计数都不该
+       * 看见已作废的约定），于是「忘掉表情包」对一条被撤销的旧约定会返回 0，
+       * 用户以为没生效。
+       *
+       * 但失效行**不能抹**：它们是 invalidate-not-delete 的溯源链，
+       * `invalidated()` 是唯一还能查回原文与 `evidence` 的路径。所以这里只
+       * 读数一遍、写一条日志，不动任何一行历史数据，返回类型也不变
+       * （调用方都按 number 用）。
+       */
+      let gone = 0;
+      try {
+        const stale = typeof s.invalidated === 'function'
+          ? s.invalidated({ chatId: scope, aliases, limit: 500 })
+          : [];
+        gone = stale.filter((r) => (r.kind === 'chat' || r.kind === 'digest')
+          && (r.text.includes(w) || (terms.length && passesCoverage(terms, indexTerms(r.text))))).length;
+      } catch {
+        /** 提示是附加信息，读不到就算了——不能影响真正的抹除 */
+      }
       /** 一次事务抹完；逐条 `update` 是 O(N²)（JSONL 每条重写整个文件） */
-      return s.erase(ids);
+      const erased = s.erase(ids);
+      if (gone) {
+        log(`忘掉「${w}」：抹掉 ${erased} 条；另有 ${gone} 条已作废记录含这个词，`
+          + '按「失效不改原文」保留（要溯源可用 invalidated() 查回）');
+        /**
+         * 只写日志的话，用户侧仍然看到「没有匹配的」——「以为没生效」这个
+         * 原始症状一点没解决。所以给调用方一个回调，由它决定怎么把这件事
+         * 说给人听（面板文案 / QQ 里的回复）。回调出错不许影响遗忘本身。
+         */
+        if (typeof onStale === 'function') {
+          try {
+            onStale(gone);
+          } catch (e) {
+            log(`遗忘提示回调出错：${e?.message ?? e}`);
+          }
+        }
+      }
+      return erased;
     },
 
     /**

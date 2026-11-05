@@ -83,12 +83,12 @@ function offenders(schema, path = 'schema', out = []) {
   return out;
 }
 
-test('工具 schema：能造出全部 6 个工具', () => {
+test('工具 schema：能造出全部 7 个工具', () => {
   const defs = allToolDefs();
   const names = defs.map((d) => d.name).sort();
   assert.deepEqual(
     names,
-    ['memory_note', 'memory_search', 'qq_close', 'qq_send', 'qq_send_file', 'sticker_pick'],
+    ['chat_look', 'memory_note', 'memory_search', 'qq_close', 'qq_send', 'qq_send_file', 'sticker_pick'],
     '少一个就说明某个回调没给全，下面那条 schema 检查会因此少查一个工具（假绿）',
   );
 });

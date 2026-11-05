@@ -127,13 +127,20 @@ export function shapeTool(def, defineTool) {
  * @param {() => {bucket:string, chatId:string, aliases?:string[]}} o.callerOf  当前这一轮是谁在说
  * @param {() => object} o.cfgOf
  */
-export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = null }) {
+export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = null, ledgerOf = null, sessionOf = null, allowMemory = true }) {
   /** 当前调用者的档位、所属会话、以及这个会话的别名键 */
   const caller = () => {
     const s = callerOf?.() || {};
     return {
       bucket: String(s.bucket || 'unknown'),
       chatId: String(s.chatId || ''),
+      /**
+       * 群 / 私聊。**隐私判定要用它**：`bucket === 'owner'` 在主人所在的群里
+       * 同样成立（`permissions.js` 的 `bucketOf()` 根本不看 chat kind），
+       * 只判 bucket 会让「主人在群里随口一句」变成「群友能查别群」。
+       * 缺省给空串——7 处老测试只传 `{bucket, chatId}`，不容缺省会全红。
+       */
+      kind: String(s.kind || ''),
       /**
        * 别名键（号码 + 该号码名下所有 openid）。
        *
@@ -290,7 +297,246 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
     },
   };
 
-  return [search, note];
+  /**
+   * 翻聊天记录。
+   *
+   * 和 `memory_search` 的分工要说清，否则模型会拿它当检索用：
+   *   · `memory_search` = 给几个词，命中几条摘要（检索式）
+   *   · `chat_look`     = 某个会话最近发生了什么（时间线式）
+   *
+   * 两个源：`ledger`（账本，全量入站，7 天或永久）和 `journal`（日记，
+   * 只记触发过她的轮次，长期）。默认账本——只有它能回答「群里刚才聊了什么」，
+   * 因为群里没叫她的消息不进日记。
+   */
+  const look = {
+    name: 'chat_look',
+    /**
+     * 描述要用**正面、鼓励调用**的写法。
+     *
+     * 真机实测：原来写「查别的群只有主人私聊里可以」，模型在主人私聊里
+     * 也把它读成「这件事大概不许做」，reasoning 直接写「Better answer simply」
+     * 然后凭印象回「看不着呀」，一次都没调工具。权限判定在 execute 里做，
+     * 描述层不该先替模型把门关上——越界时 execute 会明确拒绝并说明原因。
+     */
+    description:
+      '翻聊天记录。被问到"刚才在聊什么""别的群说了啥""上次那个话题"时，'
+      + '先调这个工具再答，不要凭印象说自己看不见。'
+      + '不知道有哪些会话就先用 what=chats 列一遍，拿到 chatId 再查具体内容。'
+      + '它给的是时间线（谁在什么时候说了什么），不是关键词检索——找特定内容用 memory_search。',
+    parameters: {
+      what: {
+        type: 'string',
+        enum: ['recent', 'chats'],
+        description: 'recent=某会话最近的记录（默认）；chats=有哪些会话',
+      },
+      chatId: {
+        type: 'string',
+        /**
+         * 3.2：不写「只有私聊可以」「群里一定不行」这类硬编码条件。
+         * 条件会随能力页开关变化，写死在描述里就会像真机 P6 那样——
+         * 开关已经打开，模型却仍凭描述里的旧条件答「看不了呀」。
+         * 能不能看、能看哪些，一律由 execute() 的返回值说明。
+         */
+        description: '要查哪个会话。不传 = 当前会话；能不能查别处、能查哪些，以工具返回值为准',
+      },
+      limit: { type: 'number', description: 'recent 取几条，默认 20，上限 50' },
+      cursor: { type: 'string', description: '翻页游标：用上一次返回的 next' },
+      source: {
+        type: 'string',
+        enum: ['ledger', 'journal'],
+        description: 'ledger=账本（全量，默认）；journal=日记（长期，但只含叫过她的轮次）',
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      /** 同 memory_search：必须是内容块数组，字符串会让 DSH 的 content.some 炸掉 */
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ what = 'recent', chatId, limit = 20, cursor = '', source = 'ledger' } = {}) {
+      if (cfgOf?.()?.chat?.tools === false) return { ok: false, message: '翻记录这个功能关着' };
+
+      const me = caller();
+      const want = String(chatId || '').trim() || me.chatId;
+      if (!want) return { ok: false, message: '不知道该查哪个会话' };
+
+      /**
+       * 隐私：跨会话只有「主人的私聊」可以，而且只能查群。
+       *
+       * 两个条件缺一不可——`bucket === 'owner'` 在主人所在的群里也成立，
+       * 只判它的话，主人在群里说一句，模型就能把 B 群的内容拉进 A 群。
+       * 传入的 chatId 还必须真的是群（查 `sessions` 映射，不靠 openid 长相猜）。
+       */
+      const cross = want !== me.chatId;
+      if (cross) {
+        /**
+         * 跨群的两道门，缺一不可：
+         *   ① 只有主人——`bucket === 'owner'` 在群里也成立，所以这条要单独判；
+         *   ② 场景：私聊一律可以；群里要看 `chat.crossChatInGroup`（默认关）。
+         *      为什么默认关：群里的回复所有人都看得见，允许「在 A 群问 B 群」
+         *      等于把 B 群的对话说给 A 群听。
+         *
+         * 3.2 / 3.5 拒绝文案：按当前开关状态 + 身份动态生成，不再静态写
+         * 「到能力页打开 XX 开关」。静态那句有两个毛病：开关名会随配置改，
+         * 而且等于教模型去劝用户改设置；对群友还暴露了开关的存在性。
+         * 非 owner 一律只给中性原因，连「当前设置」都不提。
+         */
+        const allowInGroup = cfgOf?.()?.chat?.crossChatInGroup === true;
+        const isOwner = me.bucket === 'owner';
+        const denyCross = (why) => {
+          if (why === 'private-target') return '只能查群聊。别人的私聊任何情况下都不查。';
+          /**
+           * 目标不存在和「别人的私聊」是两回事，别共用一句会误导的文案。
+           * 调用点前面已经拦掉非 owner，这里再按身份分叉是死代码，收敛成一句。
+           */
+          if (why === 'missing') return '找不到这个会话，先列一遍能看的会话再挑 chatId。';
+          const base = '只能查当前这个会话。换个群的事，在跟主人的私聊里问。';
+          if (!isOwner) return base;
+          /**
+           * 群里 / 频道的回复会被旁听：「当前设置」只是本轮是否放开的事实，可以说；
+           * 但「权限由能力页设置决定」等于当众教人改权限，这半句按**输出位置**砍掉，
+           * 不能只看调用者是不是 owner——主人在群里说话时 bucket 也是 owner。
+           */
+          const status = `（当前设置${allowInGroup ? '允许' : '不允许'}在群里查别的群）`;
+          if (me.kind === 'group' || me.kind === 'channel') return `${base}${status}`;
+          return `${base}${status}；权限由主人自己的能力页设置决定。`;
+        };
+        if (!isOwner) {
+          return { ok: false, message: denyCross('bucket') };
+        }
+        const fromPrivate = me.kind === 'c2c';
+        if (!fromPrivate && !(me.kind === 'group' && allowInGroup)) {
+          return { ok: false, message: denyCross('in-group') };
+        }
+        const ent = sessionOf?.(want);
+        if (!ent) return { ok: false, message: denyCross('missing') };
+        if (String(ent.kind ?? '') !== 'group') {
+          return { ok: false, message: denyCross('private-target') };
+        }
+      }
+
+      const lim = Math.min(Math.max(Number(limit) || 20, 1), 50);
+      const nameOf = (id) => {
+        const t = String(sessionOf?.(id)?.title ?? '').replace(/^QQ · /, '').trim();
+        return t || `${String(id).slice(0, 8)}…`;
+      };
+
+      try {
+        if (what === 'chats') {
+          /** 会话清单只有账本源提供；日记源不是「账本没开」，别用那句把模型带偏 */
+          if (source === 'journal') {
+            return {
+              ok: false,
+              message: '日记源不提供会话清单；要列会话请用默认的账本源，或用 what=recent 直接查当前会话',
+            };
+          }
+          const src = ledgerOf?.();
+          if (!src?.available?.()) {
+            return { ok: false, message: '账本没开（或没找到库），只能查当前会话' };
+          }
+          /**
+           * 3.3（20:42「会话清单 / 跨群内容两个开关合并」）：不新增 `chatsInGroup`。
+           *
+           * `what='chats'` 时 want = me.chatId → cross=false，上面那段隐私判定
+           * 根本不触发，所以「群里能不能列别的会话」必须在这个分支里自己判，
+           * 复用 `chat.crossChatInGroup`：关着时群里只返回当前会话一条，
+           * 打开时才列全部。真机 P7 就是这么漏出去的。
+           *
+           * 过滤下推到 `ledger-read.js` 的 SQL（`onlyChatId`），不能只对取回的
+           * 12 行做 filter —— 当前会话若不在最近 12 个活跃会话里，会静默返回空清单。
+           */
+          const listOthers = me.kind !== 'group'
+            || cfgOf?.()?.chat?.crossChatInGroup === true;
+          const rows = src.chats(listOthers
+            ? { limit: 12 }
+            : { limit: 12, onlyChatId: me.chatId });
+          return {
+            ok: true,
+            what: 'chats',
+            count: rows.length,
+            chats: rows.map((r) => ({
+              chatId: r.chatId,
+              name: nameOf(r.chatId),
+              kind: r.kind,
+              count: r.count,
+              lastAt: new Date(r.lastAt).toISOString().slice(0, 16).replace('T', ' '),
+            })),
+            hint: rows.length
+              ? (listOthers
+                ? '把 chatId 传给下一次 chat_look 就能看具体内容'
+                /**
+                 * 别在这里鼓励「再查一次」：开关关着时列不出别的会话，
+                 * 而 V3.1 让模型「列不出就照它给的说法回答」。给一个能收尾的结论。
+                 */
+                : '这一轮在群里只列得出当前会话，别的会话的内容拿不到')
+              : '账本里还没有记录',
+          };
+        }
+
+        const before = Number(String(cursor || '').replace(/[^\d]/g, '')) || 0;
+
+        if (source === 'journal') {
+          const rows = journal.recentTimeline(want, { limit: lim, before, aliases: me.aliases });
+          const items = rows.reverse().map((r) => ({
+            at: r.at,
+            time: new Date(r.at).toISOString().slice(11, 16),
+            who: r.role === 'bot' ? '我' : r.sender || '（未知）',
+            text: String(r.digest || r.text).slice(0, 200),
+          }));
+          return {
+            ok: true,
+            what: 'recent',
+            source: 'journal',
+            chatId: want,
+            name: nameOf(want),
+            count: items.length,
+            items,
+            next: items.length >= lim ? String(items[0].at) : '',
+          };
+        }
+
+        const src = ledgerOf?.();
+        if (!src?.available?.()) return { ok: false, message: '账本没开（或没找到库）' };
+        const items = src.recent({ chatId: want, limit: lim, beforeSeq: before });
+        return {
+          ok: true,
+          what: 'recent',
+          source: 'ledger',
+          chatId: want,
+          name: nameOf(want),
+          count: items.length,
+          /**
+           * 白名单式重映射（历史如此）。`ledger-read.js` 新补的引用两列
+           * 不在这里显式带出来就会被丢掉，L1 与面板都看不到「这条引用了谁」。
+           * 只在有值时加键，老库 / 无引用的行输出形状保持原样。
+           */
+          items: items.map((x) => ({
+            at: x.at,
+            time: x.time,
+            who: x.who,
+            text: String(x.text).slice(0, 200),
+            ...(x.quoted ? { quoted: String(x.quoted).slice(0, 200) } : {}),
+            ...(x.refMsgIdx ? { refMsgIdx: String(x.refMsgIdx) } : {}),
+          })),
+          next: items.length >= lim ? String(items[0].seq) : '',
+          hint: items.length ? '' : '这个会话在这段时间里没有记录',
+        };
+      } catch (e) {
+        return { ok: false, message: `翻记录失败：${e.message}` };
+      }
+    },
+  };
+
+  /**
+   * 按功能开关挑要挂哪几个。
+   *
+   * 记忆工具和翻记录是**两个开关**：记忆关着时她照样该知道「群里刚才聊了什么」，
+   * 反过来也一样。所以不能因为一个关了就全不挂。
+   */
+  const cfg = cfgOf?.() || {};
+  const defs = [];
+  if (allowMemory && cfg.memory?.tools !== false) defs.push(search, note);
+  if (cfg.chat?.tools !== false) defs.push(look);
+  return defs;
 }
 
 /**
@@ -299,8 +545,19 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
  * @returns {Promise<{ok:boolean, names:string[], reason?:string, off?:Function}>}
  *   失败**不抛错**——工具是增强，装不上不能让整轮对话挂掉；但必须把原因带出去。
  */
-export async function registerMemoryTools({ agent, journal, graphOf, callerOf, cfgOf, contextOf = null, log = () => {} }) {
-  const defs = buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf });
+export async function registerMemoryTools({
+  agent,
+  journal,
+  graphOf,
+  callerOf,
+  cfgOf,
+  contextOf = null,
+  ledgerOf = null,
+  sessionOf = null,
+  allowMemory = true,
+  log = () => {},
+}) {
+  const defs = buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf, ledgerOf, sessionOf, allowMemory });
   const registry = agent?.ctx?.tools;
   if (!registry?.register) {
     /**

@@ -120,3 +120,33 @@ test('未知标记要摘掉，不能漏给用户', () => {
   const { apply } = rig();
   assert.equal(apply('前 <<unknown: x>> 后', 'g1').text, '前  后');
 });
+
+test('forget：只有失效行命中时也要回一句（别让用户以为没找到）', () => {
+  const log = { debug: () => {}, info: () => {}, warn: () => {} };
+  const apply = createMarkerApplier({
+    memory: { remove: () => 0, add() {}, supersede() {}, setPersonaOverride() {}, clearChat() {} },
+    journal: {
+      forget: (o) => { o.onStale?.(3); return 0; },
+      clearChat() {},
+    },
+    self: { forget: () => 0 },
+    closing: { set: () => ({ ok: true }) },
+    mood: { set() {} },
+    log,
+  });
+  const r = apply('<<forget: 表情包>>', 'g1');
+  assert.match(r.touched, /3 条之前已经被作废/, '失效行只提示、不抹，但要让人看见');
+});
+
+test('forget：什么都没命中时不瞎回话', () => {
+  const log = { debug: () => {}, info: () => {}, warn: () => {} };
+  const apply = createMarkerApplier({
+    memory: { remove: () => 0, add() {}, supersede() {}, setPersonaOverride() {}, clearChat() {} },
+    journal: { forget: () => 0, clearChat() {} },
+    self: { forget: () => 0 },
+    closing: { set: () => ({ ok: true }) },
+    mood: { set() {} },
+    log,
+  });
+  assert.equal(apply('<<forget: 不存在的东西>>', 'g1').touched, '');
+});

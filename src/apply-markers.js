@@ -140,8 +140,10 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
        */
       const n = memory.remove(chatId, word, aliases);
       let j = 0;
+      /** 失效行不抹（溯源要用），但要让用户知道「本来就已作废」而不是「没找到」 */
+      let stale = 0;
       try {
-        j = journal.forget({ chatId, word, aliases });
+        j = journal.forget({ chatId, word, aliases, onStale: (c) => { stale = Number(c) || 0; } });
       } catch (e) {
         log.warn(`日记遗忘失败：${e.message}`);
       }
@@ -152,6 +154,7 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
         log.warn(`自述遗忘失败：${e.message}`);
       }
       if (n || j || s) touched = `忘掉了 ${n + j + s} 条`;
+      else if (stale) touched = `这 ${stale} 条之前已经被作废过了，内容本来就不再使用（原文还留着，要溯源可以在「记忆」里查）`;
       return '';
     });
 

@@ -87,6 +87,33 @@ export const MODES = ['all', 'chat'];
 export const GUEST_KEEP_TOOLS = ['memory_search', 'qq_send', 'qq_close'];
 
 /**
+ * 能力页「群友也能翻聊天记录」是否放行（20:42 主人拍板：做成开关，默认关）。
+ *
+ * 这是**放宽权限**的判据，所以严格 `=== true`：配置缺失、写错类型、
+ * 传裸对象，一律按关算（fail-closed）。主人档不受影响——它本来就是 `*`。
+ *
+ * 抽成纯函数是因为两条权限路径都要用同一个判据：
+ *   · `capabilities.resolvePolicy({forceAllow})`（能力策略启用时）
+ *   · `guestKeepTools()`（能力策略没启用、走旧白名单时）
+ * 两处各写一遍迟早会漂移，而且只有纯函数才单测得到。
+ */
+export function memberLookAllowed(cfg = {}, bucket = '') {
+  return cfg?.chat?.chatLookForMembers === true && bucket !== 'owner';
+}
+
+/**
+ * 群友档位的工具白名单（旧权限路径）。
+ *
+ * 开关打开时补上 `chat_look`；`tools.js` 的 execute 仍按 bucket / kind /
+ * 目标群硬拒跨会话，群友永远只能翻当前会话。
+ */
+export function guestKeepTools(cfg = {}, bucket = '') {
+  return memberLookAllowed(cfg, bucket)
+    ? [...GUEST_KEEP_TOOLS, 'chat_look']
+    : [...GUEST_KEEP_TOOLS];
+}
+
+/**
  * 主动搭话那一轮要收走的工具。
  *
  * `qq_send` / `qq_close` 的语义是「回复**当前这条**消息」——目标来自

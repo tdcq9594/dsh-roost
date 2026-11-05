@@ -299,7 +299,7 @@ export function accumulateAllow(store, bucket) {
   return { allow, deny, from };
 }
 
-export function resolvePolicy({ pool, bucket, chatId = '', store, personaTools, forceDeny = [] }) {
+export function resolvePolicy({ pool, bucket, chatId = '', store, personaTools, forceDeny = [], forceAllow = [] }) {
   if (!Array.isArray(pool)) return { ok: false, reason: 'pool 不是数组' };
   if (!pool.length) return { ok: false, reason: 'DSH 报不出工具清单（schemas 是空的）' };
 
@@ -327,6 +327,17 @@ export function resolvePolicy({ pool, bucket, chatId = '', store, personaTools, 
     allow = new Set([...allow].filter((n) => Object.hasOwn(seen, n)));
     warnings.push('newTools=nobody：未见过的新工具不会自动给这一档');
   }
+
+  /**
+   * ②.5 运行期放宽（能力页「群友也能翻聊天记录」）。
+   *
+   * 只补**档位白名单**这一层，不碰更硬的边界：后面的 `chatOnly` 硬承诺、
+   * 人格 `tools` 收窄、群级 `deny`、⑤.5 功能开关强制收走都能盖过它。
+   * 调用方负责只给非 owner 档传值（主人档本来就是 `*`）。
+   * 名字先和 pool 求交——`tools.restrict` 不认识的名字会让整批拒绝。
+   */
+  const extraAllow = (Array.isArray(forceAllow) ? forceAllow : []).filter((n) => poolSet.has(n));
+  for (const n of extraAllow) allow.add(n);
 
   // ③ 群覆盖（增量，deny 优先）
   const chat = chatId ? S.chats?.[chatId] : null;

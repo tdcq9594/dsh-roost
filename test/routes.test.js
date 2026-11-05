@@ -35,7 +35,14 @@ async function bootHost(cfgPatch = {}, seed = {}) {
   if (seed.journal?.length) {
     const { createJournal } = await import('../src/journal.js');
     const j = createJournal({ file: join(dir, 'journal.sqlite') });
-    for (const row of seed.journal) j.add(row);
+    const stale = [];
+    for (const row of seed.journal) {
+      const { invalid, ...rest } = row;
+      j.add(rest);
+      /** 种子里要「已作废」的行走真 invalidate，不手改库 */
+      if (invalid) stale.push(rest.id);
+    }
+    if (stale.length) j.invalidate(stale, { supersededBy: 'seed' });
     j.close();
   }
   // host 里的 dataDir() 读这个环境变量，必须在 import 之前设
@@ -746,5 +753,45 @@ test('路由：账号迁移的四项扩展接口都注册了，且预览是只�
   const bad = await call('/account/rewrite', { method: 'POST', body: { confirm: '' } });
   assert.equal(bad.json.code, 'CONFIRM_REQUIRED', '公开路由不能绕过二次确认');
 
+  off?.();
+});
+
+/* ---------- forget：失效行只提示不抹（面板入口 /quick 也要说清楚） ---------- */
+
+const STALE_SEED = {
+  journal: [{
+    id: 'agree',
+    at: Date.now() - 60000,
+    chatId: 'g1',
+    sender: '甲',
+    role: 'user',
+    kind: 'chat',
+    text: '每句话都要配表情包',
+    level: 'critical',
+    invalid: true,
+  }],
+};
+
+test('路由：/quick memory.remove 只碰到失效行时说「已作废」而不是「没找到」', async () => {
+  const { call, off } = await bootHost({}, STALE_SEED);
+  const r = await call('/quick', {
+    method: 'POST',
+    body: { op: 'memory.remove', arg: '表情包', chatId: 'g1' },
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.removed, 0, '失效行不该被抹');
+  assert.match(r.json.message, /之前已经被作废/, '面板 toast 不能再说「没找到」');
+  off?.();
+});
+
+test('路由：/journal 关键词遗忘同样区分「已作废」与「没匹配」', async () => {
+  const { call, off } = await bootHost({}, STALE_SEED);
+  const r = await call('/journal', {
+    method: 'POST',
+    body: { word: '表情包', chatId: 'g1' },
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.journal, 0);
+  assert.match(r.json.message, /之前已经被作废/);
   off?.();
 });

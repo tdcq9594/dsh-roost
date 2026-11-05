@@ -23,8 +23,9 @@
  * 不是拼成一段。这条链路 2026-10 改的，改之前多段会被 `planChunks` 合并
  * （它只在超过 1800 字时才切），"分两句说"等于没分。
  *
- * 上限对齐官方硬限制：同一条消息最多被动回复 5 次（`msg_seq` 1–5），
- * 所以 ai-chat 侧 `MAX_SEGMENTS` 也是 5，这里默认 3 是留余量。
+ * 上限对齐官方硬限制（群聊 5 次 / 单聊 4 次，见框架 `outbound.js` 的
+ * `PASSIVE_MAX_REPLIES`）：ai-chat 侧预算按 `maxSegmentsOf(msg)` 分场景取，
+ * `MAX_SEGMENTS = 5` 只是群聊口径兼段数硬顶；这里默认 3 是留余量。
  */
 
 import { loadDefineTool, shapeTool } from './tools.js';

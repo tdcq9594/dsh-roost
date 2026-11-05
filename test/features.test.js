@@ -1,16 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
-  FEATURES,
-  FEATURE_GROUPS,
-  readFeatures,
-  rawFeature,
-  forcedDenyTools,
-  patchForFeature,
-  cannotEnable,
-  featureDef,
-} from '../src/features.js';
+import { FEATURES, FEATURE_GROUPS, readFeatures, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, readSettings, normalizeSetting } from '../src/features.js';
 import { resolvePolicy, defaultStore, PINNED_KEEP } from '../src/capabilities.js';
 
 const POOL = [
@@ -57,6 +48,25 @@ test('features：每个开关的 path 都能在对应来源里找到，没有空
   const grouped = new Set(FEATURE_GROUPS.flatMap((g) => g.ids));
   for (const f of FEATURES) assert.ok(grouped.has(f.id), `${f.id} 没进任何分组`);
   for (const id of grouped) assert.ok(featureDef(id), `分组里有个不存在的开关 ${id}`);
+});
+
+test('features：数值项拒空值（Number(\'\') === 0 会静默关掉排队）', () => {
+  /**
+   * 真实 bug：能力页的数字输入框清空后失焦，前端把 `''` 提交上来，
+   * 后端 `Number('')` 得 0，而 `queueMax.min` 恰好是 0（0 = 关掉排队，合法），
+   * 于是写进 config 并回「已保存」——排队被静默关掉，用户完全看不出来。
+   */
+  const f = featureDef('queueMax');
+  for (const v of ['', '  ', null, undefined, false, [], {}]) {
+    assert.equal(normalizeSetting(f, v), null, `空值 ${JSON.stringify(v)} 必须被拒`);
+    assert.equal(patchForFeature('queueMax', v), null, `patch 也必须拒 ${JSON.stringify(v)}`);
+  }
+  /** 0 本身是合法值，别为了挡空串把它一起误伤 */
+  assert.equal(normalizeSetting(f, 0), 0, '0 = 关掉排队，是合法值');
+  assert.equal(normalizeSetting(f, 4), 4);
+  assert.equal(normalizeSetting(f, 11), null, '超过 max 要拒');
+  assert.equal(normalizeSetting(f, -1), null, '低于 min 要拒');
+  assert.equal(normalizeSetting(f, 2.5), null, '非整数要拒');
 });
 
 test('features：全开时什么都不收', () => {
@@ -115,7 +125,33 @@ test('features：没写过的字段当「开」，写了 false 才是关', () =>
    * 用户升级之后会发现语音、表情包全没了——而他从没关过。
    */
   const on = readFeatures({}, {});
-  for (const f of FEATURES) assert.equal(on[f.id], true, `${f.id} 在空配置下应当是开`);
+  for (const f of FEATURES) {
+    /** 非布尔项（保留期下拉）不参与开关语义，`0` 是「永久」不是「关」 */
+    if (kindOf(f) !== 'toggle') continue;
+    /**
+     * 例外：声明了 `default: false` 的「放宽权限」类开关，没配过也必须当关。
+     * 其余 toggle 保持历史语义（老配置升级不丢功能）。
+     */
+    assert.equal(
+      on[f.id],
+      f.default === false ? false : true,
+      f.default === false ? `${f.id} 默认关，空配置下也应当是关` : `${f.id} 在空配置下应当是开`,
+    );
+  }
+  assert.equal(on.chatLookForMembers, false, '群友查记录默认关，不能靠「没配」变成开');
+  assert.equal(rawFeature({}, {}, 'chatLookForMembers'), false, '面板显示的原始值也按默认关');
+  assert.equal(
+    readFeatures({ chat: { chatLookForMembers: true } }, {}).chatLookForMembers,
+    true,
+    '显式写了 true 才真的放行',
+  );
+  /**
+   * 非布尔项的默认值单独验一次。
+   *
+   * 这里用一个**临时**定义验机制本身：账本的保留期不在 dsh-roost 的 config 里
+   * （它在 bot 那边），所以不能拿它当例子——那会变成「面板显示永久、实际按 7 天删」。
+   */
+  assert.deepEqual(readSettings({}, {}), { queueMax: 2, queueMinBudgetSec: 30 }, '非布尔项取定义里的默认值');
 
   assert.equal(readFeatures({ tts: { enabled: false } }, {}).voice, false);
 });

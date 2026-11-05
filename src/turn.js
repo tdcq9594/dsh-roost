@@ -205,7 +205,15 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
    *   模型这才「看得见」图，否则它只看到一行「（发了一张图）」。
    * @returns {Promise<string>} AI 的最终文本
    */
-  async function run(agent, text, { source = { kind: 'roost' }, images = [] } = {}) {
+  async function run(agent, text, { source = { kind: 'roost' }, images = [], timeoutMs = 0 } = {}) {
+    /**
+     * 单次尝试的超时。
+     *
+     * 默认用实例化时的 `timeoutSec`（150 秒）；排队那边会在剩余预算不多时
+     * 传一个更小的值——**只查「剩余 31 秒」就放进去跑 150 秒，等于没查**。
+     * 注意这是**每次 attempt** 的上限，重试仍按 `retryCfg` 走。
+     */
+    const attemptMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : timeoutSec * 1000;
     /**
      * 投一次，等它说完。
      *
@@ -225,7 +233,7 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
     const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         finish(sid, false, '', { kind: 'timeout' });
-      }, timeoutSec * 1000);
+      }, attemptMs);
       timer.unref?.();
       waiters.set(sid, { turn: -1, text: '', resolve, reject, timer });
     });
@@ -362,6 +370,16 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
 
   return {
     run,
+    /**
+     * 这个会话有没有一轮在跑。
+     *
+     * 给「主动搭话/觉醒让路」用：它们不入队，只能问锁本身。
+     * **参数必须是 sid**（`waiters` 的键就是它），传 chatId 会恒为 false——
+     * 而新会话首轮时队列的 key 恰好就是 chatId，两者长得一样，最容易写错。
+     */
+    isWaiting(sid) {
+      return waiters.has(String(sid ?? ''));
+    },
     get waiting() {
       return waiters.size;
     },

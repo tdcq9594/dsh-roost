@@ -33,9 +33,9 @@ function rig({ bucket = 'member', chatId = 'g1', enabled = true, searchRows = []
   return { byName, added, searched, journal };
 }
 
-test('工具：两个都在，名字固定', () => {
+test('工具：三个都在，名字固定', () => {
   const { byName } = rig();
-  assert.deepEqual(Object.keys(byName).sort(), ['memory_note', 'memory_search']);
+  assert.deepEqual(Object.keys(byName).sort(), ['chat_look', 'memory_note', 'memory_search']);
 });
 
 test('工具：群友不能写长期记忆', async () => {
@@ -123,7 +123,7 @@ test('注册：agent 没有 tools 服务时明确失败，不抛错', async () =
   assert.match(r.reason, /register/);
 });
 
-test('注册：有 registry 时把两个工具都注册进去，并能干净卸掉', async () => {
+test('注册：有 registry 时把三个工具都注册进去，并能干净卸掉', async () => {
   const registered = [];
   const disposed = [];
   const agent = {
@@ -145,9 +145,9 @@ test('注册：有 registry 时把两个工具都注册进去，并能干净卸�
     log: () => {},
   });
   assert.equal(r.ok, true);
-  assert.deepEqual(registered.sort(), ['memory_note', 'memory_search']);
+  assert.deepEqual(registered.sort(), ['chat_look', 'memory_note', 'memory_search']);
   r.off();
-  assert.equal(disposed.length, 2, '插件停用时必须把工具收回，否则重载会重复注册');
+  assert.equal(disposed.length, 3, '插件停用时必须把工具收回，否则重载会重复注册');
 });
 
 test('注册：注册抛错时返回失败原因（不许静默吞掉）', async () => {

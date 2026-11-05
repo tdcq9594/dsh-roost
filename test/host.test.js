@@ -1519,8 +1519,10 @@ test('面板 quick：功能开关的读写，以及「关掉功能要真的收�
 
     const all = await call({ op: 'features.get' });
     assert.equal(all.body.ok, true);
-    assert.equal(all.body.features.length, 11, `开关数量变了：${all.body.features.length}`);
-    assert.equal(all.body.groups.length, 4);
+    assert.equal(all.body.features.length, 16, `开关数量变了：${all.body.features.length}`);
+    assert.equal(all.body.groups.length, 5);
+    assert.equal(all.body.raw.chatLookForMembers, false, '新开关默认关（DEFAULTS 里显式写了 false）');
+    assert.equal(all.body.on.chatLookForMembers, false, '面板上也是关');
 
     // 默认：主动搭话关着（DEFAULTS 里就是 false），其余开
     assert.equal(all.body.raw.speakUp, false, 'speakUp 默认关');
@@ -1547,6 +1549,22 @@ test('面板 quick：功能开关的读写，以及「关掉功能要真的收�
     // 未知开关 → 400
     const nope = await call({ op: 'features.patch', arg: { id: '没有这个', on: false } });
     assert.equal(nope.statusCode, 400);
+
+    /**
+     * 数值项：空值必须 400。走完整 quick 路径，不只是纯函数——
+     * `Number('') === 0` 会把 `queueMax` 静默写成 0（关掉排队）并回「已保存」，
+     * 这是审校抓到的真实 P0，前后端各挡一层、测试锁死。
+     */
+    for (const v of ['', '  ', null]) {
+      const empty = await call({ op: 'features.patch', arg: { id: 'queueMax', value: v } });
+      assert.equal(empty.statusCode, 400, `空值 ${JSON.stringify(v)} 不能写进配置`);
+    }
+    const zero = await call({ op: 'features.patch', arg: { id: 'queueMax', value: 0 } });
+    assert.equal(zero.statusCode, 200, '0 是合法的「关掉排队」');
+    assert.equal(zero.body.value, 0);
+    const four = await call({ op: 'features.patch', arg: { id: 'queueMax', value: 4 } });
+    assert.equal(four.statusCode, 200);
+    assert.equal(four.body.value, 4);
 
     // 发文件存在能力策略里：没启用时改它要 409，而不是假装成功
     const noStore = await call({ op: 'features.patch', arg: { id: 'sendFile', on: false } });
