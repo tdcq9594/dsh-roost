@@ -6192,6 +6192,427 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /**
+     * 表情包目录编辑器。
+     *
+     * 以前这里只有「复制目录」和一行只读文本：想换目录只能滚到「配置全文」手改
+     * JSON，填错一个反斜杠就静默失效——`dir` 改了但读不到图，面板只显示 0 张。
+     *
+     * 两个必须做对的点：
+     * ① **打不开的目录要标红**。路径填错时唯一的反馈如果只是「共 0 张」，用户
+     *    没法区分「路径错了」和「目录真是空的」，只能去猜。
+     * ② **保存形态按数量还原**：0 个 → `''`（回落默认），1 个 → 字符串，多个 → 数组。
+     *    单一目录仍写字符串，是因为没必要因为支持了数组就把所有人的 config.json 都改成数组。
+     */
+    function StickerDirsCard({ config, stickers, saveCfg, toast, reload }) {
+      /** 服务端 → 编辑态。老服务端只回 `dir` 一个字符串，也要能显示 */
+      const fromServer = (s) => {
+        const list = Array.isArray(s?.dirs) && s.dirs.length ? s.dirs : (s?.dir ? [s.dir] : [])
+        return list.map((x) => String(x ?? '')).filter(Boolean)
+      }
+
+      const [paths, setPaths] = useState(() => fromServer(stickers))
+      const [dirty, setDirty] = useState(false)
+      const [busy, setBusy] = useState(false)
+      const [syncOpen, setSyncOpen] = useState(false)
+
+      /** 「未分类」里有多少张：同步进来的图都先落这儿，提醒用户自己分类 */
+      const uncat = (stickers?.categories || []).find((c) => c.name === '未分类')
+
+      /**
+       * 只在**服务端真的变了**（别处改过 / 保存后回填）时覆盖编辑框。
+       *
+       * 不用「!dirty 就跟上」那套：保存成功那一刻 dirty 刚清掉、而 reload 还没回来，
+       * 编辑框会被服务端的旧值闪一下。比 sig 更直接。
+       */
+      const sig = JSON.stringify(fromServer(stickers))
+      const lastSig = useRef(sig)
+      useEffect(() => {
+        if (sig === lastSig.current) return
+        lastSig.current = sig
+        setPaths(JSON.parse(sig))
+        setDirty(false)
+      }, [sig])
+
+      /** 打不开的目录：后端 /stickers 的 `missing`。前端只负责标出来 */
+      const missing = (stickers?.missing || []).map((x) => String(x).toLowerCase().replace(/[\\/]+$/, ''))
+      const isMissing = (p) => {
+        const s = String(p || '').trim().toLowerCase().replace(/[\\/]+$/, '')
+        return !!s && missing.includes(s)
+      }
+
+      /** 去空串、去重（大小写不敏感，Windows 一个目录两种写法很常见） */
+      const clean = () => {
+        const out = []
+        const seen = new Set()
+        for (const p of paths) {
+          const s = String(p ?? '').trim()
+          if (!s) continue
+          const k = s.toLowerCase()
+          if (seen.has(k)) continue
+          seen.add(k)
+          out.push(s)
+        }
+        return out
+      }
+
+      const save = async () => {
+        const list = clean()
+        setBusy(true)
+        const r = await saveCfg({
+          stickers: { dir: list.length === 0 ? '' : (list.length === 1 ? list[0] : list) },
+        })
+        setBusy(false)
+        if (r?.ok === false) return toast(r.message || '没存上')
+        setPaths(list)
+        setDirty(false)
+        toast(list.length === 0 ? '已恢复默认目录' : `已保存 ${list.length} 个目录`)
+        // 张数、分类、字数都要重算，不刷的话上面还写着旧数字
+        reload?.()
+      }
+
+      const copy = () => {
+        const list = clean()
+        const text = (list.length ? list : (stickers?.dir ? [stickers.dir] : [])).join('\n')
+        try { navigator.clipboard?.writeText(text); toast(list.length > 1 ? '目录路径已复制（每行一个）' : '目录路径已复制') }
+        catch { toast('复制失败，手动选一下吧') }
+      }
+
+      return h('div', null,
+        h(Sec, {
+        n: '04',
+        title: '表情包',
+        right: h('div', { style: { display: 'flex', gap: 10, alignItems: 'center' } },
+          h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
+            h('input', {
+              type: 'checkbox',
+              checked: config?.stickers?.enabled !== false,
+              onChange: async (e) => {
+                const on = e.target.checked
+                const r = await saveCfg({ stickers: { enabled: on } })
+                toast(r?.ok === false ? (r.message || '没改成') : (on ? '表情包已开' : '表情包已关'))
+                if (r?.ok !== false) reload?.()
+              },
+            }),
+            '启用'),
+          h('button', { type: 'button', className: 'roost-link', onClick: copy }, '复制目录'),
+        ),
+      },
+        h('div', { className: 'roost-note' },
+          '图片放进这些目录就会出现在清单里；每个目录的一级子目录算一个分类。'),
+        paths.length === 0
+          ? h('div', { className: 'roost-note' },
+              `现在没配路径，用默认目录：${stickers?.dir || '（插件刚起来时会空几秒）'}`)
+          : h('div', null,
+              ...paths.map((p, i) => h('div', {
+                key: i,
+                style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' },
+              },
+                h('input', {
+                  className: 'roost-input',
+                  value: p,
+                  placeholder: '例如 D:\\表情包',
+                  spellCheck: false,
+                  style: {
+                    flex: '1 1 320px',
+                    fontFamily: 'ui-monospace,Menlo,Consolas,monospace',
+                    fontSize: 12,
+                    ...(isMissing(p) ? { borderColor: 'var(--bad, #c0392b)' } : null),
+                  },
+                  onChange: (e) => {
+                    const next = paths.slice()
+                    next[i] = e.target.value
+                    setPaths(next)
+                    setDirty(true)
+                  },
+                }),
+                isMissing(p)
+                  ? h('span', { style: { color: 'var(--bad, #c0392b)', fontSize: 12, whiteSpace: 'nowrap' } }, '打不开')
+                  : null,
+                h('button', {
+                  type: 'button', className: 'roost-link',
+                  onClick: () => {
+                    setPaths(paths.filter((_, j) => j !== i))
+                    setDirty(true)
+                  },
+                }, '移除'),
+              ))),
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' } },
+          h('button', {
+            type: 'button', className: 'roost-btn',
+            onClick: () => { setPaths([...paths, '']); setDirty(true) },
+          }, '+ 添加目录'),
+          h('button', {
+            type: 'button', className: 'roost-primary',
+            disabled: !dirty || busy,
+            title: dirty ? '' : '没改动',
+            onClick: save,
+          }, '保存路径'),
+          dirty ? h('span', { className: 'roost-note', style: { margin: 0 } }, '还没保存') : null,
+          h('button', {
+            type: 'button', className: 'roost-btn',
+            onClick: () => setSyncOpen(true),
+          }, '同步缓存图'),
+        ),
+        /**
+         * 「未分类」里的图是同步进来的，没有语义标签——模型只认分类名。
+         * 所以这行不是装饰，是提醒：不分类的话它们基本用不上。
+         */
+        uncat && uncat.count
+          ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
+              `「未分类」里有 ${uncat.count} 张——拖进「开心」「无语」这类目录才算真的分类，模型只认目录名。`)
+          : null,
+        stickers
+          ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
+              `共 ${stickers.items?.length || 0} 张 · 约 ${stickers.chars || 0} 字（注入系统提示词，order 901）`)
+          : h('div', { className: 'roost-note', style: { marginTop: 6 } },
+              '读不到表情包目录——插件刚起来时会空几秒'),
+        ),
+        syncOpen
+          ? h(SyncModal, {
+              categories: stickers?.categories || [],
+              onClose: () => setSyncOpen(false), toast, onDone: reload,
+            })
+          : null,
+      )
+    }
+
+    /**
+     * 同步缓存图弹窗。
+     *
+     * 两步走：先预览、再确认。因为筛选**只能看尺寸**（没有内容识别，原因见
+     * `sticker-sync.js` 头注释），规则必然有误伤和漏网，让人先看一眼
+     * 比事后去表情包目录里翻着删省事。
+     *
+     * 缩略图走 `fetch + blob` 而不是 `<img src>`：面板 API 有一道
+     * `connection.admit()` 栅栏，`<img>` 裸请求不一定带得上宿主认证，
+     * 表现是满屏破图。用 fetch 走的是和别的接口同一条路，稳。
+     */
+    function SyncModal({ categories = [], onClose, toast, onDone }) {
+      const [st, setSt] = useState(null)
+      const [picked, setPicked] = useState(() => new Set())
+      const [busy, setBusy] = useState(false)
+      const [thumbs, setThumbs] = useState({})
+      /** 每张图的去向：`{ [缓存文件名]: { folder, tags } }`。留空就是「进未分类、不打标签」 */
+      const [meta, setMeta] = useState({})
+      /** 批量填充用，不参与提交 */
+      const [bulk, setBulk] = useState({ folder: '', tags: '' })
+
+      useEffect(() => {
+        let dead = false
+        ;(async () => {
+          const r = await get('/stickers/sync/preview')
+          if (dead) return
+          setSt(r)
+          if (r?.ok !== false) {
+            /** 默认全选通过筛选的那批，用户只需要取消不想要的 */
+            setPicked(new Set((r.items || []).filter((x) => x.ok).map((x) => x.name)))
+          }
+        })()
+        return () => { dead = true }
+      }, [])
+
+      const items = st?.items || []
+      const key = items.map((x) => x.name).join('|')
+
+      /** 拉缩略图。一张失败就少一个预览，不影响勾选 */
+      useEffect(() => {
+        if (!items.length) return undefined
+        let dead = false
+        const made = []
+        ;(async () => {
+          const next = {}
+          for (const it of items) {
+            if (dead) break
+            try {
+              const res = await fetch(API + '/stickers/thumb?name=' + encodeURIComponent(it.name))
+              if (!res.ok) continue
+              const blob = await res.blob()
+              const url = URL.createObjectURL(blob)
+              made.push(url)
+              next[it.name] = url
+            } catch {}
+          }
+          if (dead) return
+          setThumbs(next)
+        })()
+        return () => {
+          dead = true
+          for (const u of made) { try { URL.revokeObjectURL(u) } catch {} }
+        }
+      }, [key])
+
+      const total = picked.size
+      const toggle = (n) => {
+        const next = new Set(picked)
+        if (next.has(n)) next.delete(n)
+        else next.add(n)
+        setPicked(next)
+      }
+      const allOn = items.length > 0 && items.every((x) => picked.has(x.name))
+      const toggleAll = () => setPicked(allOn ? new Set() : new Set(items.map((x) => x.name)))
+
+      const run = async () => {
+        if (!total) return toast('一张都没选')
+        setBusy(true)
+        const picks = [...picked].map((n) => ({
+          name: n,
+          folder: String(meta[n]?.folder ?? '').trim(),
+          tags: String(meta[n]?.tags ?? '').trim(),
+        }))
+        const r = await post('/stickers/sync/apply', { picks })
+        setBusy(false)
+        if (r?.ok === false) return toast(r.message || '同步失败')
+        const n = r.copied || 0
+        const bad = (r.failed || []).length
+        const parts = Object.entries(r.folders || {}).map(([k, v]) => `${k} ${v} 张`)
+        toast(bad
+          ? `同步了 ${n} 张，${bad} 张失败`
+          : `同步了 ${n} 张${parts.length ? '：' + parts.join('、') : ''}`)
+        onDone?.()
+        onClose?.()
+      }
+
+      /** 改单张的去向 */
+      const setOne = (name, key, val) => setMeta((m) => ({ ...m, [name]: { ...(m[name] || {}), [key]: val } }))
+      /** 把批量框里的文件夹/标签刷给所有勾选的行 */
+      const applyBulk = () => {
+        if (!picked.size) return toast('先勾几张')
+        setMeta((m) => {
+          const next = { ...m }
+          for (const n of picked) next[n] = { ...(next[n] || {}), folder: bulk.folder, tags: bulk.tags }
+          return next
+        })
+        toast(`已给 ${picked.size} 张套上同一组设置`)
+      }
+
+      /**
+       * 重置同步记录：删掉表情包目录里的图之后，想让它们再来一次。
+       * 不重置的话账本还记着「已同步过」，它们永远不会再出现。
+       */
+      const resetLedger = async () => {
+        const r = await post('/stickers/sync/reset', {})
+        if (r?.ok === false) return toast(r.message || '没重置成')
+        setPicked(new Set())
+        const p = await get('/stickers/sync/preview')
+        setSt(p)
+        toast('同步记录已清空')
+      }
+
+      return h('div', { className: 'cap-modal', onClick: onClose },
+        h('div', { className: 'cap-modal-b', onClick: (e) => e.stopPropagation() },
+          h('div', { className: 'cap-modal-h' },
+            h('span', { className: 't' }, `同步缓存图（可同步 ${st?.willSync ?? '…'} 张）`),
+            h('button', { type: 'button', className: 'roost-btn', onClick: onClose }, '关闭'),
+          ),
+          h('div', { className: 'cap-modal-s' },
+            h('div', { className: 'roost-note', style: { margin: 0 } },
+              st?.dir
+                ? `复制到 ${st.dir} 这一层。判断只看尺寸（边长 / 长宽比 / 体积），不看内容——不对的勾掉就行。`
+                : '正在读缓存目录…'),
+            h('div', { className: 'roost-note', style: { margin: 0 } },
+              '下面可以给每张填文件夹和标签：填了标签就用它当文件名，填了文件夹就进那个分类，**都留空就进「未分类」**。'),
+            st?.ok === false
+              ? h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)', marginBottom: 0 } }, st.message || '没有可同步的图')
+              : null,
+          ),
+          h('div', { className: 'cap-modal-s', style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+            h('span', { className: 'roost-note', style: { margin: 0 } }, '批量：'),
+            h('input', {
+              className: 'roost-input', list: 'sticker-folders',
+              placeholder: '文件夹（留空=未分类）',
+              value: bulk.folder,
+              style: { width: 168, fontSize: 11 },
+              onChange: (e) => setBulk({ ...bulk, folder: e.target.value }),
+            }),
+            h('input', {
+              className: 'roost-input',
+              placeholder: '标签，逗号分隔',
+              value: bulk.tags,
+              style: { width: 150, fontSize: 11 },
+              onChange: (e) => setBulk({ ...bulk, tags: e.target.value }),
+            }),
+            h('button', { type: 'button', className: 'roost-link', onClick: applyBulk }, '应用到选中的'),
+          ),
+          /** 现有分类当输入提示：不用记名字，点一下就填上 */
+          h('datalist', { id: 'sticker-folders' },
+            categories.filter((c) => c.name !== '未分类')
+              .map((c) => h('option', { key: c.name, value: c.name }))),
+          h('div', { className: 'cap-modal-c' },
+            items.length
+              ? items.map((it) => h('div', {
+                  key: it.name,
+                  style: {
+                    display: 'flex', gap: 8, alignItems: 'center', padding: '4px 2px', flexWrap: 'wrap',
+                    opacity: it.reason.includes('已同步') ? 0.45 : 1,
+                  },
+                },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: picked.has(it.name),
+                    disabled: it.reason.includes('已同步'),
+                    onChange: () => toggle(it.name),
+                  }),
+                  thumbs[it.name]
+                    ? h('img', {
+                        src: thumbs[it.name],
+                        alt: '',
+                        style: { width: 40, height: 40, objectFit: 'contain', borderRadius: 4, background: 'rgba(0,0,0,.06)', flex: '0 0 auto' },
+                      })
+                    : h('span', { style: { width: 40, height: 40, flex: '0 0 auto' } }),
+                  /**
+                   * 文件名可点 = 勾选。整行不再是 `<label>`：里面有两个输入框，
+                   * 用 label 包着会让「点输入框」也触发勾选，打字时状态乱跳。
+                   */
+                  h('span', {
+                    style: { fontSize: 12, minWidth: 110, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis' },
+                    onClick: () => { if (!it.reason.includes('已同步')) toggle(it.name) },
+                    title: it.name,
+                  },
+                    it.name.slice(0, 8) + '…',
+                    h('span', { style: { opacity: 0.6, marginLeft: 6 } },
+                      it.w ? `${it.w}×${it.h}` : '',
+                      ` ${Math.max(1, Math.round(it.size / 1024))}KB`)),
+                  h('input', {
+                    className: 'roost-input',
+                    list: 'sticker-folders',
+                    placeholder: '未分类',
+                    value: meta[it.name]?.folder ?? '',
+                    style: { width: 96, fontSize: 11 },
+                    onChange: (e) => setOne(it.name, 'folder', e.target.value),
+                  }),
+                  h('input', {
+                    className: 'roost-input',
+                    placeholder: '标签',
+                    value: meta[it.name]?.tags ?? '',
+                    style: { width: 116, fontSize: 11 },
+                    onChange: (e) => setOne(it.name, 'tags', e.target.value),
+                  }),
+                  it.reason
+                    ? h('span', {
+                        style: {
+                          marginLeft: 'auto', fontSize: 11, whiteSpace: 'nowrap',
+                          color: it.ok ? 'var(--ok, #2e7d32)' : 'var(--bad, #c0392b)',
+                        },
+                      }, it.ok ? '可同步' : it.reason)
+                    : null,
+                ))
+              : h('div', { className: 'roost-note' }, st ? '没有图片缓存。群里有人发图之后再看。' : '读取中…'),
+          ),
+          h('div', { className: 'cap-modal-s', style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+            h('button', { type: 'button', className: 'roost-btn', onClick: toggleAll }, allOn ? '全不选' : '全选'),
+            h('button', {
+              type: 'button', className: 'roost-primary', disabled: busy || !total,
+              onClick: run,
+            }, busy ? '同步中…' : `同步选中的 ${total} 张`),
+            h('span', { className: 'roost-note', style: { margin: 0 } },
+              `共 ${st?.total ?? 0} 张缓存，跳过 ${st?.skipped ?? 0} 张`),
+            h('button', { type: 'button', className: 'roost-link', onClick: resetLedger }, '重置同步记录'),
+          ),
+        ),
+      )
+    }
+
     function ConfigTab({ config, save, saveCfg, toast, stickers, setupSt, reload }) {
       const cfgJson = JSON.stringify(config, null, 2)
       const [draft, setDraft] = useState(cfgJson)
@@ -6314,38 +6735,7 @@ select.roost-input{color-scheme:dark}
 
         h(WorkspaceCard, { saveCfg, toast }),
 
-        h(Sec, { n: '04', title: '表情包', right: h('div', { style: { display: 'flex', gap: 10, alignItems: 'center' } },
-          h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
-            h('input', {
-              type: 'checkbox',
-              checked: config?.stickers?.enabled !== false,
-              onChange: async (e) => {
-                const on = e.target.checked
-                const r = await saveCfg({ stickers: { enabled: on } })
-                toast(r?.ok === false ? (r.message || '没改成') : (on ? '表情包已开' : '表情包已关'))
-                // 关掉之后 chars 会变 0，不刷的话上面还写着「约 N 字」
-                if (r?.ok !== false) reload?.()
-              },
-            }),
-            '启用'),
-          h('button', {
-            type: 'button', className: 'roost-link',
-            onClick: () => {
-              try { navigator.clipboard?.writeText(stickers?.dir || ''); toast('目录路径已复制') }
-              catch { toast('复制失败，手动选一下吧') }
-            },
-          }, '复制目录'),
-        ) },
-          stickers
-            ? h('div', null,
-                h('div', { className: 'roost-note' }, '目录：' + (stickers.dir || '（还没建目录）')),
-                h('div', { className: 'roost-note' },
-                  `共 ${stickers.items?.length || 0} 张 · 约 ${stickers.chars || 0} 字（注入系统提示词，order 901）`),
-              )
-            : h('div', { className: 'roost-note' }, '读不到表情包目录——插件刚起来时会空几秒'),
-          h('div', { className: 'roost-note' },
-            '把图片放进这个目录就会出现在清单里。攒太多会长期占提示词预算，看上面那个字数。'),
-        ),
+        h(StickerDirsCard, { config, stickers, saveCfg, toast, reload }),
 
         h(TtsCard, { config, saveCfg, toast, reload }),
 

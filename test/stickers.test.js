@@ -290,3 +290,144 @@ test('注册：sticker_pick 挂上 agent 的 tools，缺服务时不抛', async 
   assert.equal(bad.ok, false);
   assert.ok(bad.reason);
 });
+
+// ── 多目录（`dir` 是数组）─────────────────────────────────────────────
+//
+// 攒图的人往往已经有好几个目录。这一组的重点不是「能扫两个目录」，
+// 而是**合并之后仍然只呈现一个库**：一个「开心」、一个「未分类」、示例路径能真的打开。
+
+/** 两个独立目录，像「下载」和「旧备份」。files 是「相对路径 → 内容」 */
+function makeTwoLib(a = {}, b = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'roost-stk2-'));
+  const write = (dir, files) => {
+    fs.mkdirSync(dir, { recursive: true });
+    for (const [rel, body] of Object.entries(files)) {
+      const p = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, body ?? 'x');
+    }
+  };
+  const d1 = path.join(root, 'lib1');
+  const d2 = path.join(root, 'lib2');
+  write(d1, a);
+  write(d2, b);
+  return { root, d1, d2, stickers: createStickers({ dataDir: root, cacheMs: 0 }) };
+}
+
+test('清单：建了真实「未分类」目录时，根目录的散图归它而不是消失', () => {
+  // 同步缓存图会建 `未分类/`。这时如果根目录还有老图，它们不能凭空消失：
+  // 提示词那条「单列未分类」的例外会因为同名分类存在而跳掉，必须在这里合并
+  const { stickers } = makeLib({ '零散.png': 'x', '未分类/a.png': 'x' });
+  const cats = stickers.categories({});
+  const uncat = cats.find((c) => c.name === '未分类');
+  assert.equal(uncat.count, 2, JSON.stringify(cats));
+
+  const text = stickers.prompt({});
+  assert.ok(text.includes('未分类（2 张）'), text);
+  // 合并进分类之后，不该再出现一行虚拟的「未分类」
+  assert.equal(text.split('- 未分类（').length - 1, 1, text);
+
+  const r = stickers.pick({}, { category: '未分类', limit: 3 });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.items.map((x) => x.file).sort(), ['a.png', '零散.png']);
+});
+
+test('多目录：两个目录的图合并成一个清单', () => {
+  const { stickers, d1, d2 } = makeTwoLib({ 'a.png': 'x' }, { 'b.png': 'x' });
+  const items = stickers.list({ dir: [d1, d2] }, { max: 10 });
+  assert.deepEqual(items.map((s) => s.path), [
+    path.join(d1, 'a.png'),
+    path.join(d2, 'b.png'),
+  ]);
+  // root 字段用来回显「这张来自哪个目录」，多根下 rel 可能重名
+  assert.deepEqual(items.map((s) => s.root), [d1, d2]);
+});
+
+test('多目录：同名分类合并成一个，计数相加', () => {
+  const { stickers, d1, d2 } = makeTwoLib(
+    { '开心/a.png': 'x', '开心/_desc.txt': '高兴时用' },
+    { '开心/b.png': 'x', '开心/c.png': 'x' },
+  );
+  const cats = stickers.categories({ dir: [d1, d2] });
+  // 出现两行「开心」的话，模型没法判断该往哪边找
+  assert.equal(cats.length, 1);
+  assert.equal(cats[0].name, '开心');
+  assert.equal(cats[0].count, 3);
+  assert.equal(cats[0].desc, '高兴时用');
+  assert.deepEqual(cats[0].dirs, [path.join(d1, '开心'), path.join(d2, '开心')]);
+
+  const text = stickers.prompt({ dir: [d1, d2] });
+  assert.equal(text.split('- 开心（').length - 1, 1, text);
+});
+
+test('多目录：跨根「未分类」也合并成一类', () => {
+  const { stickers, d1, d2 } = makeTwoLib({ '零散1.png': 'x' }, { '零散2.png': 'x' });
+  const r = stickers.pick({ dir: [d1, d2] }, { category: '未分类', limit: 2 });
+  assert.equal(r.ok, true);
+  assert.equal(r.category, '未分类');
+  assert.equal(r.items.length, 2);
+  assert.deepEqual(r.items.map((x) => x.file).sort(), ['零散1.png', '零散2.png']);
+});
+
+test('多目录：提示词列出每个目录，示例路径必须真的能打开', () => {
+  // 排序后第一张来自第二个目录：示例若还按「第一个根 + 文件名」拼，必然指向不存在的文件
+  const { stickers, d1, d2 } = makeTwoLib({ 'b.png': 'x' }, { 'a.png': 'x' });
+  const text = stickers.prompt({ dir: [d1, d2] });
+  assert.ok(text.includes(d1) && text.includes(d2), text);
+
+  // 只认独占一行的示例（说明行里的 `<<image: <完整路径>>` 是占位符，不是文件）
+  const m = text.match(/^<<image: (.+?)>>$/m);
+  assert.ok(m, text);
+  assert.ok(fs.existsSync(m[1]), `示例路径不存在：${m[1]}\n${text}`);
+});
+
+test('多目录：空配置、空数组、空白字符串都回落默认目录', () => {
+  const { root } = makeTwoLib({});
+  const s = createStickers({ dataDir: root, cacheMs: 0 });
+  const def = path.join(root, 'stickers');
+  assert.deepEqual(s.dirs({}), [def]);
+  assert.deepEqual(s.dirs({ dir: '' }), [def]);
+  assert.deepEqual(s.dirs({ dir: [] }), [def]);
+  assert.deepEqual(s.dirs({ dir: ['', '   '] }), [def]);
+  // 默认目录会被建出来（用户往里丢图就行）
+  assert.ok(fs.existsSync(def));
+});
+
+test('多目录：空串不产生重复条目', () => {
+  const { stickers, d1 } = makeTwoLib({ 'a.png': 'x' }, {});
+  const items = stickers.list({ dir: [d1, '', '  '] }, { max: 10 });
+  assert.equal(items.length, 1);
+
+  // Windows 不区分大小写：同一个目录换个大小写不该扫两遍
+  if (process.platform === 'win32') {
+    assert.equal(stickers.list({ dir: [d1, d1.toUpperCase()] }, { max: 10 }).length, 1);
+  }
+});
+
+test('多目录：扫描预算按目录均分，后面的目录不能饿死', () => {
+  const { root, d1, d2 } = makeTwoLib(
+    { '1.png': 'x', '2.png': 'x', '3.png': 'x', '4.png': 'x' },
+    { '5.png': 'x', '6.png': 'x' },
+  );
+  const s = createStickers({ dataDir: root, cacheMs: 0, maxScan: 4 });
+  const items = s.list({ dir: [d1, d2] }, { max: 10 });
+  assert.equal(items.length, 4);
+  assert.equal(items.filter((i) => i.root === d2).length, 2, `第二个目录被饿死了：${items.map((i) => i.path).join('、')}`);
+});
+
+test('多目录：打不开的目录单独报出来，不是静默 0 张', () => {
+  const { stickers, d1 } = makeTwoLib({ 'a.png': 'x' }, {});
+  const gone = path.join(d1, '没有这个目录');
+  const snap = stickers.snapshot({ dir: [d1, gone] });
+  assert.deepEqual(snap.missing, [gone]);
+  assert.equal(snap.items.length, 1);
+});
+
+test('多目录：同名文件不会被当成「刚发过的那张」', () => {
+  // 两个目录都有 1.png。用 rel 做「刚给过」的键时，第二次挑图会拿到同一张
+  const { stickers, d1, d2 } = makeTwoLib({ '1.png': 'x' }, { '1.png': 'x' });
+  const first = stickers.pick({ dir: [d1, d2] }, { limit: 1 });
+  const second = stickers.pick({ dir: [d1, d2] }, { limit: 1 });
+  assert.ok(first.ok && second.ok);
+  assert.notEqual(second.items[0].path, first.items[0].path);
+});

@@ -28,6 +28,16 @@
  * 靠猜永远猜不准，不如给一个「写一句就行」的口子。
  *
  * 文件名兜底仍保留：`开心_猫.png` → 开心、猫（老习惯继续能用）。
+ *
+ * ## 多个目录（`dir` 是数组时）
+ *
+ * 攒图的人通常已经有好几个目录（手机同步、下载、旧版备份），让他把图都搬到一起
+ * 不现实。所以 `stickers.dir` 允许写成数组，多个目录**合并成一个库**：
+ * 同名分类相加计数，「未分类」也相加。
+ *
+ * 为什么不按目录分开成「库A / 库B」让模型选：那是把用户的目录结构泄漏给模型，
+ * 模型每轮都要先问「你从哪个盘找」，而且同一个「开心」在两个盘里会让它纠结。
+ * 目录是用户的组织方式，不该变成模型的决策负担。
  */
 
 import { readdirSync, statSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
@@ -138,18 +148,22 @@ function describe(s) {
   return '未标注';
 }
 
-/** 扫一层或两层：根目录的图 + 一级子目录当分类 */
-function scan(root, { maxBytes, maxScan = MAX_SCAN } = {}) {
+/**
+ * 扫一层或两层：根目录的图 + 一级子目录当分类。
+ *
+ * `limit` 是**本次调用**的硬上限（多根时由上层按比例分配），`state` 是跨根共享的
+ * 计数器——扫描预算必须整体算，否则每个根各自扫满 1000 张，`MAX_SCAN` 就形同虚设。
+ */
+function scan(root, { maxBytes, limit = MAX_SCAN, state = { scanned: 0, truncated: false } } = {}) {
   const items = [];
   const cats = [];
   const skipped = [];
-  let truncated = false;
-  let scanned = 0;
   let names = [];
   try {
     names = readdirSync(root);
   } catch {
-    return { items, cats, skipped, truncated };
+    /** 目录不存在/没权限。交给上层报给面板——在这里静默成「0 张」，用户永远猜不到原因 */
+    return { items, cats, skipped, missing: true };
   }
 
   const addFile = (dir, name, cat) => {
@@ -159,8 +173,8 @@ function scan(root, { maxBytes, maxScan = MAX_SCAN } = {}) {
      * 到上限就停，但**继续数下去会置 `truncated`**——这样提示词能说
      * 「还有更多」，而不是让用户以为库就这么点。
      */
-    if (scanned >= maxScan) {
-      truncated = true;
+    if (state.scanned >= limit) {
+      state.truncated = true;
       return false;
     }
     const p = join(dir, name);
@@ -172,7 +186,7 @@ function scan(root, { maxBytes, maxScan = MAX_SCAN } = {}) {
     }
     if (!st.isFile()) return false;
     if (maxBytes && st.size > maxBytes) {
-      skipped.push(name);
+      skipped.push(cat ? `${cat}/${name}` : name);
       return false;
     }
     /**
@@ -189,12 +203,14 @@ function scan(root, { maxBytes, maxScan = MAX_SCAN } = {}) {
       path: p,
       rel: cat ? `${cat}/${name}` : name,
       cat,
+      /** 这张图属于哪个根目录。多根时 `rel` 可能重名，靠它区分并回显路径 */
+      root,
       tags: side?.tags?.length ? side.tags : fromName,
       usage: side?.usage || '',
       size: st.size,
       mtime: st.mtimeMs,
     });
-    scanned++;
+    state.scanned++;
     return true;
   };
 
@@ -222,11 +238,31 @@ function scan(root, { maxBytes, maxScan = MAX_SCAN } = {}) {
     if (count > 0) cats.push({ name: n, count, desc, dir: p });
   }
 
+  /**
+   * 子目录里有个真的叫「未分类」的：根目录那批散图**归它**。
+   *
+   * 不归的话会两头落空——提示词那边因为「已经有同名分类」而不单列根目录的图
+   * （见 prompt 里的例外），而分类清单只数目录里的文件，结果是根目录那些图
+   * 在清单里**彻底消失**：模型挑不到，用户也看不出少了什么。
+   *
+   * 语义上也该合并：用户建 `未分类/` 的意图本来就是「这些是还没分好的」，
+   * 根目录的散图正是同一批东西。归进去之后 `pick('未分类')` 也能一起挑到。
+   */
+  const uncat = cats.find((c) => c.name === UNCATEGORIZED);
+  if (uncat) {
+    for (const it of items) {
+      if (it.cat) continue;
+      it.cat = UNCATEGORIZED;
+      it.rel = `${UNCATEGORIZED}/${it.file}`;
+      uncat.count += 1;
+    }
+  }
+
   /** 自然序：`1.png, 2.png, 10.png`。以前用裸 localeCompare 会排成 1、10、2 */
   const cmp = (a, b) => a.localeCompare(b, 'zh', { numeric: true });
   items.sort((a, b) => cmp(a.rel, b.rel));
   cats.sort((a, b) => cmp(a.name, b.name));
-  return { items, cats, skipped, truncated };
+  return { items, cats, skipped, missing: false };
 }
 
 /**
@@ -245,27 +281,112 @@ export function createStickers({ dataDir, log = () => {}, cacheMs = 3000, maxSca
   /** 上次报过「有图被跳过」的那批文件名。提示词每轮都会扫，同一批不该反复刷日志 */
   let lastSkipped = '';
 
-  const dirOf = (cfg = {}) => cfg.dir || join(dataDir, 'stickers');
+  /** 默认目录：没配 `dir` 时用它，也是**唯一**会自动创建的目录 */
+  const defaultDir = join(dataDir, 'stickers');
 
-  /** 目录（首次会建出来，用户往里丢图就行） */
-  const dir = (cfg) => {
-    const d = dirOf(cfg);
+  /** 默认目录首次被用到时建出来（用户往里丢图就行） */
+  const ensureDefault = () => {
     try {
-      if (!existsSync(d)) mkdirSync(d, { recursive: true });
+      if (!existsSync(defaultDir)) mkdirSync(defaultDir, { recursive: true });
     } catch (e) {
       log(`表情包目录建不出来：${e.message}`);
     }
-    return d;
   };
 
+  /**
+   * 配置里的 `dir` → 干净的绝对路径数组。
+   *
+   * 接受字符串或数组，去空串、去重（Windows 不区分大小写，按小写比）。
+   * 空配置回落到默认目录——**只有它会自动创建**：用户手填的路径应当已经存在，
+   * 替他建目录等于在他盘上凭空造东西，填错盘符（`D:\png`）时尤其糟。
+   */
+  const rootsOf = (cfg = {}) => {
+    const raw = cfg?.dir;
+    const arr = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const foldCase = process.platform === 'win32';
+    const out = [];
+    const seen = new Set();
+    for (const x of arr) {
+      const s = String(x ?? '').trim();
+      if (!s) continue;
+      const k = foldCase ? s.toLowerCase() : s;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(s);
+    }
+    if (!out.length) {
+      ensureDefault();
+      out.push(defaultDir);
+    }
+    return out;
+  };
+
+  /** 所有根目录。`dir()` 只给首个——老调用方只关心「往哪丢图」 */
+  const dirs = (cfg) => rootsOf(cfg);
+  const dir = (cfg) => rootsOf(cfg)[0];
+
   const snapshot = (cfg = {}) => {
-    const root = dir(cfg);
+    const roots = rootsOf(cfg);
     const maxBytes = Number(cfg.maxBytes) > 0 ? Number(cfg.maxBytes) : MAX_BYTES;
-    const key = `${root}|${maxBytes}|${maxScan}`;
+    const key = `${roots.join('|')}|${maxBytes}|${maxScan}`;
     if (cacheMs > 0 && cache && cache.key === key && now() - cache.at < cacheMs) {
       return cache.value;
     }
-    const value = { root, ...scan(root, { maxBytes, maxScan }) };
+
+    /**
+     * 预算按根均分（`剩余预算 / 剩余根数`，至少 1）。
+     *
+     * 不能给每个根都发满 `MAX_SCAN`：4000 张的目录排在第一位时，后面的目录一张
+     * 都扫不到，面板写着「共 1000 张」而他刚加的那个目录是 0 张——没法解释。
+     * 均分保证每个目录都能露头；前一个没用满时，后面的份额自动变大。
+     */
+    const state = { scanned: 0, truncated: false };
+    const items = [];
+    const skipped = [];
+    const missing = [];
+    /** 同名分类跨根合并：两个盘都放了 `开心/`，模型只该看到一个「开心」 */
+    const catMap = new Map();
+
+    for (let i = 0; i < roots.length; i++) {
+      const root = roots[i];
+      const share = Math.max(1, Math.ceil((maxScan - state.scanned) / (roots.length - i)));
+      const r = scan(root, { maxBytes, limit: state.scanned + share, state });
+      if (r.missing) {
+        missing.push(root);
+        continue;
+      }
+      items.push(...r.items);
+      skipped.push(...r.skipped);
+      for (const c of r.cats) {
+        const prev = catMap.get(c.name);
+        if (prev) {
+          prev.count += c.count;
+          prev.dirs.push(c.dir);
+          /** 说明取先到的非空那份：两处都有 `_desc.txt` 时，以先配的目录为准 */
+          if (!prev.desc && c.desc) prev.desc = c.desc;
+        } else {
+          catMap.set(c.name, { ...c, dirs: [c.dir] });
+        }
+      }
+    }
+
+    /**
+     * 合并后要整体重排：每个根内部已排过，但拼起来是「根A全部 + 根B全部」。
+     * 第二键用 root，让同名 rel 的两张按目录稳定排列（不然顺序看遍历运气）。
+     */
+    const cmp = (a, b) => a.localeCompare(b, 'zh', { numeric: true });
+    items.sort((a, b) => cmp(a.rel, b.rel) || cmp(a.root, b.root));
+
+    const value = {
+      /** 首个根目录。老代码（和只认单目录的调用方）还在读这个字段 */
+      root: roots[0],
+      roots,
+      items,
+      cats: [...catMap.values()].sort((a, b) => cmp(a.name, b.name)),
+      skipped,
+      missing,
+      truncated: state.truncated,
+    };
 
     /**
      * 「有图被跳过」只在**这批文件名变了**的时候报一次。
@@ -301,8 +422,15 @@ export function createStickers({ dataDir, log = () => {}, cacheMs = 3000, maxSca
    */
   const prompt = (cfg = {}) => {
     if (cfg.enabled === false) return '';
-    const { root, items, cats, truncated } = snapshot(cfg);
+    const { root, roots, items, cats, truncated } = snapshot(cfg);
     if (!items.length) return '';
+
+    /**
+     * 多目录时的抬头：**逐个列出**，不能只写第一个。
+     * 少了哪一行，模型就会以为图都在第一个目录里，拼出来的路径直接找不到文件。
+     */
+    const multi = roots.length > 1;
+    const rootLines = multi ? roots.map((r) => `- ${r}`).join('\n') : '';
 
     if (cats.length) {
       /**
@@ -335,7 +463,9 @@ export function createStickers({ dataDir, log = () => {}, cacheMs = 3000, maxSca
         lines.push(`- ${UNCATEGORIZED}（${rootList.length} 张）${ex ? '；例：' + ex : ''}`);
       }
       return [
-        `【表情包】根目录 ${root}，按分类存放：`,
+        multi
+          ? `【表情包】${roots.length} 个目录合并成一个库：\n${rootLines}\n按分类存放：`
+          : `【表情包】根目录 ${root}，按分类存放：`,
         ...lines,
         truncated ? `（图太多，这次只扫了前 ${items.length} 张，各分类的数目可能偏小）` : '',
         '要发图时先调 sticker_pick(category) 拿具体文件路径，再输出 <<image: 该路径>>。',
@@ -347,12 +477,15 @@ export function createStickers({ dataDir, log = () => {}, cacheMs = 3000, maxSca
     const shown = items.slice(0, MAX_LIST);
     const more = items.length - shown.length;
     return [
-      `【表情包】目录 ${root}（${items.length} 张）`,
+      multi
+        ? `【表情包】${roots.length} 个目录合并成一个库（共 ${items.length} 张）：\n${rootLines}`
+        : `【表情包】目录 ${root}（${items.length} 张）`,
       ...shown.map((s) => `- ${s.file}（${describe(s)}）`),
       more > 0 ? `…还有 ${more} 张没列出来（按文件名排序取前 ${MAX_LIST} 张）` : '',
       truncated ? `（图太多，这次只扫了前 ${items.length} 张；没扫到的不会出现在清单里）` : '',
-      '要发表情时用 <<image: <上面的目录>\\文件名>>，例如：',
-      `<<image: ${join(root, shown[0].file)}>>`,
+      '要发表情时用 <<image: <完整路径>>，例如：',
+      /** 用 item 自己的 path，不拼 root——多目录时 `join(第一个根, 文件名)` 会指到不存在的文件 */
+      `<<image: ${shown[0].path}>>`,
       '没有合适的就别发。',
     ].filter(Boolean).join('\n');
   };
@@ -422,12 +555,17 @@ export function createStickers({ dataDir, log = () => {}, cacheMs = 3000, maxSca
        * 时候才给出去——否则模型第一眼就拿到一张「发出去会变成文件」的图，
        * 要么发个附件、要么反复纠结。
        */
-      .map((s) => ({ s, last: used.get(s.rel) || 0, heavy: s.size > SOFT_BYTES ? 1 : 0 }))
+      /**
+       * 「刚给过」的键是**绝对路径**，不是 `rel`。
+       * 多个目录里都有 `开心/1.png` 时，用 `rel` 会把两张完全不同的图当成同一张，
+       * 于是「避开上一张」失效，群里连发两张看起来一样的图。
+       */
+      .map((s) => ({ s, last: used.get(s.path) || 0, heavy: s.size > SOFT_BYTES ? 1 : 0 }))
       .sort((a, b) => a.heavy - b.heavy || a.last - b.last)
       .slice(0, n)
       .map((x) => x.s);
 
-    for (const s of picked) used.set(s.rel, t);
+    for (const s of picked) used.set(s.path, t);
 
     return {
       ok: true,
@@ -479,5 +617,5 @@ export function createStickers({ dataDir, log = () => {}, cacheMs = 3000, maxSca
     return best ? best.path : null;
   };
 
-  return { dir, list, categories, prompt, pick, resolve, snapshot, tagsOf };
+  return { dir, dirs, list, categories, prompt, pick, resolve, snapshot, tagsOf };
 }

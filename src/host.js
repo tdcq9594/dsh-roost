@@ -13,8 +13,8 @@
 // ⚠️ 权限按**每一条消息**判定：主人、管理员、普通成员拿到的工具不一样，
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
-import { basename, join, resolve } from 'node:path';
-import { mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve, extname } from 'node:path';
+import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream } from 'node:fs';
 import { homedir } from 'node:os';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision } from './config.js';
 import { createSessions } from './sessions.js';
@@ -46,6 +46,7 @@ import { createUpdater } from './update.js';
 import { createDepsCheck } from './deps.js';
 import { pathAllowed, MAX_FILE_BYTES } from './send-file.js';
 import { createStickers } from './stickers.js';
+import { createStickerSync } from './sticker-sync.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { registerStickerTools } from './sticker-tools.js';
@@ -834,6 +835,9 @@ export function apply(ctx) {
 
   /** 表情包：只做「把清单写进提示词」，发图复用已有的 <<image:>> */
   const stickers = createStickers({ dataDir: dataDir(), log: (m) => log.warn(m) });
+
+  /** 缓存图同步：把 images/ 里像表情包的图搬成 `未分类/`。不做内容识别（见 sticker-sync.js 头注释） */
+  const stickerSync = createStickerSync({ dataDir: dataDir(), stickers, log: (m) => log.warn(m) });
 
   /**
    * 主人自己写的额外指令（`speakUp.prompt`），**改过才用**。
@@ -5607,17 +5611,75 @@ export function apply(ctx) {
 
       route('/tts/gpt-stop', async (req, res) => send(res, 200, gptLauncher.stop())),
 
-      route('/stickers', (req, res) =>
-        send(res, 200, {
+      route('/stickers', (req, res) => {
+        const snap = stickers.snapshot(cfg.stickers);
+        return send(res, 200, {
           ok: true,
-          dir: stickers.dir(cfg.stickers),
+          /** 首个目录。老前端只认这个字段 */
+          dir: snap.root,
+          /** 全部目录（可能只有一个）。面板的路径编辑器读这个 */
+          dirs: snap.roots,
+          /**
+           * 打不开的目录（盘符填错、目录被删、没权限）。
+           * 必须单独给出去：只回「0 张」的话，用户完全看不出是路径错了还是真没图。
+           */
+          missing: snap.missing,
           items: stickers.list(cfg.stickers),
           /** 分类清单（一级子目录）。平铺时为空数组，前端可以据此切换展示 */
           categories: stickers.categories(cfg.stickers),
           /** 注入到提示词里的那段有多长：上下文页要显示它吃了多少预算 */
           chars: stickers.prompt(cfg.stickers).length,
-        }),
-      ),
+        });
+      }),
+
+      /**
+       * 同步缓存图：**先预览、再执行**。
+       *
+       * 不做一个「一键同步」按钮，是因为筛选只能是启发式（没有内容识别），
+       * 总有该收的被挡住、不该收的漏进来。让人先看一眼再落盘，
+       * 比事后去表情包目录里翻着删省事。
+       */
+      route('/stickers/sync/preview', (req, res) => send(res, 200, stickerSync.preview(cfg.stickers))),
+
+      route('/stickers/sync/apply', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const r = stickerSync.apply(cfg.stickers, {
+          /** 逐张的去向：`{name, folder, tags}`。folder 空 = 未分类 */
+          picks: Array.isArray(body?.picks) ? body.picks : [],
+          names: Array.isArray(body?.names) ? body.names : [],
+        });
+        return send(res, r.ok === false ? 400 : 200, r);
+      }),
+
+      /** 账本清零：删过图之后想让它们重新同步一次 */
+      route('/stickers/sync/reset', (req, res) => send(res, 200, stickerSync.reset())),
+
+      /**
+       * 缓存图缩略图。
+       *
+       * 面板是浏览器，读不了 `file://`，预览只能走 HTTP。但**这个端点绝不能
+       * 变成任意文件读取**：只收文件名（`basename` 先砍掉 `../`），拼出来的路径
+       * 再确认一次还在 `images/` 下面才肯读。
+       */
+      route('/stickers/thumb', (req, res) => {
+        const q = new URL(req.url || '/', 'http://local').searchParams;
+        const name = basename(String(q.get('name') || ''));
+        const root = join(dataDir(), 'images');
+        const file = join(root, name);
+        if (!name || !file.startsWith(root) || !existsSync(file)) {
+          return send(res, 404, { ok: false, message: '没有这张图' });
+        }
+        const MIME = {
+          '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+          '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+        };
+        res.writeHead(200, {
+          'Content-Type': MIME[extname(name).toLowerCase()] || 'application/octet-stream',
+          'Cache-Control': 'private, max-age=60',
+        });
+        createReadStream(file).pipe(res);
+        return undefined;
+      }),
 
       route('/personas', (req, res) => {
         const list = personas.list();
