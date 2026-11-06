@@ -46,6 +46,26 @@ export function candidates(want, lastActual, scan = SCAN) {
   return out;
 }
 
+/**
+ * pid 还活着吗。
+ *
+ * **只看进程在不在，不看它是不是 node、是不是本框架**——租约只是「路标」
+ * 不是「互斥」，它只决定「去哪个端口探活」。判错方向跟 `instances.json`
+ * 正好相反：租约判错最多多探一次端口（无害），把活进程判死才会导致
+ * 「以为没在跑 → 再拉一个」（重复 spawn）。所以这里只问存在性。
+ */
+function aliveOf(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (e) {
+    // EPERM = 进程在、但没权限发信号（别的用户开的），一样算活着
+    return e.code === 'EPERM';
+  }
+}
+
 export function createLease({ file, log = () => {} }) {
   function read() {
     try {
@@ -77,10 +97,22 @@ export function createLease({ file, log = () => {} }) {
     return all[kind];
   }
 
-  /** 拿某个槽位的实际端口（没有就 null） */
+  /**
+   * 拿某个槽位的实际端口（没有就 null）。
+   *
+   * **写这条租约的进程已经死了就返回 null。** 不校验的话会出现这样的连环：
+   * Roost 曾因端口被占漂到 `want+1`，租约里 `actual` 停在那儿；之后某次
+   * Roost 干净地回到 `want`，而 dsh-roost 仍拿旧 `actual` 去探 → 探空 →
+   * 判定「没在跑」→ 再 spawn 一个 → 第二个进程 claim 同一个 AppID 失败。
+   * 也就是用户看到的「只配了一个机器人，却说已有实例在运行」。
+   */
   function actualOf(kind) {
-    const n = Number(read()?.[kind]?.actual);
-    return Number.isInteger(n) && n > 0 ? n : null;
+    const rec = read()?.[kind];
+    const n = Number(rec?.actual);
+    if (!Number.isInteger(n) || n <= 0) return null;
+    // 老文件里可能没有 pid，那就不查——拿不到证据时不否决
+    if (Number.isInteger(rec?.pid) && rec.pid > 0 && !aliveOf(rec.pid)) return null;
+    return n;
   }
 
   /** 拿某个槽位的意愿端口 */

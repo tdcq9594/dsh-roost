@@ -1033,11 +1033,39 @@ test('租约: 没有上次记录就从 want 开始', () => {
 test('租约: 写进去能读出来（want 和 actual 分开存）', () => {
   const dir = tmp();
   const lease = createLease({ file: join(dir, 'ports.json') });
-  lease.claim('dsh', { want: 17321, actual: 17322, pid: 123 });
+  // pid 用自己的：actualOf 会校验「写这条租约的进程还活着没」，假 pid 会被当成僵死租约
+  lease.claim('dsh', { want: 17321, actual: 17322, pid: process.pid });
 
   assert.equal(lease.actualOf('dsh'), 17322);
   assert.equal(lease.wantOf('dsh'), 17321);
   assert.equal(lease.actualOf('roost'), null, '没写过的槽位是 null');
+});
+
+/**
+ * 僵死租约不能当路标。
+ *
+ * 真实事故：Roost 曾因端口被占漂到 `want+1`，租约里 actual 停在那儿；之后它干净地
+ * 回到 want，而 dsh-roost 仍拿旧 actual 去探 → 探空 → 判定「没在跑」→ 再拉一个进程
+ * → 第二个进程 claim 同一个 AppID 失败，用户看到「只配了一个机器人却说已有实例在运行」。
+ *
+ * pid 用一个几乎不可能存在的值（4 亿以后的 pid 在 Windows 上不会分配）。
+ */
+test('租约: 写入者已经死了，actual 不算数（否则会重复拉起）', () => {
+  const dir = tmp();
+  const lease = createLease({ file: join(dir, 'ports.json') });
+  lease.claim('roost', { want: 15207, actual: 15208, pid: 400000001 });
+
+  assert.equal(lease.actualOf('roost'), null, '僵死租约必须返回 null');
+  assert.equal(lease.wantOf('roost'), 15207, 'want 是用户写的，不受 pid 影响');
+});
+
+test('租约: 没有 pid 字段的老文件仍然可读（拿不到证据时不否决）', () => {
+  const dir = tmp();
+  const file = join(dir, 'ports.json');
+  writeFileSync(file, JSON.stringify({ roost: { want: 15207, actual: 15208 } }), 'utf8');
+
+  const lease = createLease({ file });
+  assert.equal(lease.actualOf('roost'), 15208, '老格式没有 pid，不能因此判成僵死');
 });
 
 test('租约: 两个槽位互不覆盖', () => {

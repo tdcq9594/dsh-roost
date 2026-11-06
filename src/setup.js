@@ -12,7 +12,7 @@
  * 这三步之外的都能点一下搞定。
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -119,10 +119,36 @@ function pickPort(start = 8080, tries = 20) {
   });
 }
 
+/**
+ * 进程还在不在。
+ *
+ * 只看存在性，不问「是不是本框架」「有没有权限」——实例表里的 pid 是当年
+ * claim 那个进程自己写的，它还活着就说明那条记录仍然有效。EPERM 表示进程
+ * 存在但没权限发信号（别的用户开的），一样算活着。
+ */
+function alivePid(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
 export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
   /** 我们自己拉起来的那个进程。DSH 重启后为 null，但 Roost 可能还在跑 */
   let child = null;
   let busy = '';
+  /**
+   * 上一次探活**真的应答了**的端口。
+   *
+   * 只用来让 `api()` / `webuiUrl()` 跟着探活结果走：Roost 的端口可能因为被占
+   * 而漂到 `want+1`，这时配置端口上什么都没有，但面板其实活在另一个端口上。
+   * 没探到东西时置回 null，退回「按配置算」。
+   */
+  let activePort = null;
 
   /**
    * 当前在用的 Roost 目录。
@@ -207,9 +233,56 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
    * 配置里的 webui.port 是「意愿」，不能直接当现实用。
    * 租约没有（旧版本 / 没换过）才退回配置值。
    */
+  /**
+   * dsh-roost 眼里「Roost 面板在哪」。
+   *
+   * **顺序必须和 Roost 自己一致：配置端口优先。**
+   *
+   * Roost 启动时从 `webui.port` 开始往后顺延找空位（`listenWithFallback`），
+   * 它**从不读** `ports.json`；而这里原来是 `actual` 优先。两边各看各的后果是：
+   * Roost 干净地回到配置端口，dsh-roost 还在旧 `actual` 上探 → 探空 →
+   * 判定「没在跑」→ 再 spawn 一个 → 第二个进程 claim 同一个 AppID 失败。
+   * 这就是「只配了一个机器人，却说已有实例在运行」的由来。
+   *
+   * `actual` 只在「配置里根本没写端口」时兜底，且它自己也会校验写入者的
+   * pid 是否还活着（见 `lease.js` 的 `actualOf`）。
+   *
+   * 兜底值用 15207：Roost 主仓 2026-10-22（`f77121f`）把默认端口从 8080 改成了
+   * 15207，这里之前没跟。配置里写了 port 就走不到这一档，只有「配置完全没有
+   * webui.port」时才会用到——那种情况下 Roost 自己用的就是 15207。
+   */
   function portOf() {
+    const cfgPort = Number(roostGlobal().webui?.port) || 0;
+    if (cfgPort > 0) return cfgPort;
     const leased = createLease({ file: join(dirOf(), 'data', 'ports.json') }).actualOf('roost');
-    return leased || Number(roostGlobal().webui?.port) || 8080;
+    return leased || 15207;
+  }
+
+  /**
+   * 探活时要**依次试**的端口。
+   *
+   * 只探「配置端口」不够：Roost 启动时从 `webui.port` 往后顺延找空位
+   * （`listenWithFallback`），端口被占就漂到 +1 / +2。那一刻配置端口上什么也
+   * 没有，探空 → 判定「没在跑」，接着三处一起出错：
+   *   · `start()` 以为没在跑（还好有 instances.json 拦着，不至于再拉一个）
+   *   · `stop()` 直接回「已停止」——**其实一个进程都没停**
+   *   · `createBot()` 跳过重启 —— 新加的机器人永远不上线，界面上还说「配置好了」
+   *
+   * 所以按「配置端口 → 租约里记的实际端口 → 兜底」的顺序都探一遍，谁先应答算谁的。
+   */
+  function portCandidates() {
+    const out = [];
+    const push = (n) => {
+      const v = Number(n);
+      if (Number.isInteger(v) && v > 0 && v < 65536 && !out.includes(v)) out.push(v);
+    };
+    push(roostGlobal().webui?.port);
+    try {
+      // actualOf 内部会校验写租约的进程还活着（死进程留下的端口不算数）
+      push(createLease({ file: join(dirOf(), 'data', 'ports.json') }).actualOf('roost'));
+    } catch {}
+    push(15207);
+    return out;
   }
   function keyOf() {
     return String(roostGlobal().webui?.accessKey || '');
@@ -256,7 +329,7 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     return id;
   }
   function baseUrl() {
-    return `http://127.0.0.1:${portOf()}`;
+    return `http://127.0.0.1:${activePort || portOf()}`;
   }
   function webuiUrl() {
     const k = keyOf();
@@ -379,13 +452,82 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     return null;
   }
 
-  async function isRunning() {
-    try {
-      const r = await fetch(`${baseUrl()}/api/status`, { signal: AbortSignal.timeout(1500) });
-      return r.ok;
-    } catch {
-      return false;
+  /**
+   * 问面板「你和你的机器人怎么样了」。
+   *
+   * **探 `/healthz`，不是 `/api/status`。** 面板设了访问密钥（`webui.accessKey`）
+   * 之后，`/api/status` 走统一鉴权，不带 key 恒 401 ——「在跑」被判成「没在跑」，
+   * 于是又 spawn 第二个。`/healthz` 在鉴权判断之前就应答（`server.js` 里它排在
+   * `authorized()` 调用前面），专门用于探活。
+   *
+   * 返回 `{ok, bots:[{id,state}], online, total}`：
+   *   · 面板活着、机器人也上线 → 200
+   *   · 面板活着、机器人全掉线 → **503**（进程仍在！不能当「没在跑」）
+   *   · 端口上是别的服务 / 连不上 → null
+   *
+   * 所以判定「在跑」是「拿到合法 body」，不是「HTTP 200」。
+   */
+  async function panelHealth() {
+    for (const port of portCandidates()) {
+      const body = await healthAt(port);
+      if (body) {
+        /**
+         * 记下**真正应答的那个端口**，`api()` / `webuiUrl()` 之后都跟着它走。
+         * 不记的话：Roost 漂到 15208、配置写 15207，探活能通过，但后面调
+         * `/api/*` 仍然往 15207 发，全变成「没应答」。
+         */
+        activePort = port;
+        return body;
+      }
     }
+    activePort = null;
+    return null;
+  }
+
+  /** 问某个端口上的面板。应答了但不是本框架的东西（没有 bots 字段）返回 null */
+  async function healthAt(port) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(1500) });
+      if (r.status !== 200 && r.status !== 503) return null;
+      /**
+       * 用 `text()` + JSON.parse，不用 `json()`：测试里替换掉的 fetch 假响应
+       * 往往只实现 text()，调 json() 会直接 TypeError，症状是「Roost 明明在跑
+       * 却判成 roost-down」——排查起来完全指不到这里。
+       */
+      const raw = await r.text().catch(() => '');
+      let body = null;
+      try {
+        body = raw ? JSON.parse(raw) : null;
+      } catch {}
+      // 端口被别的 HTTP 服务占着时会返回别的 JSON，靠 bots 字段认出来
+      return body && Array.isArray(body.bots) ? body : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 面板进程还活着吗（机器人上没上线不影响这个判断） */
+  async function isRunning() {
+    return (await panelHealth()) !== null;
+  }
+
+  /**
+   * 把 `/healthz` 的结果翻译成「启动成没成功」。
+   *
+   * 三种情况：
+   *   · 一只机器人都没配 → 算起来了。全新安装还没填 AppID 时没有「上线」可言，
+   *     不这么判的话新用户会卡满 20 秒再收到一句莫名其妙的失败。
+   *   · 至少一只是 online → 算起来了。
+   *   · 面板在、机器人全掉线 → **不算起来**。这正是以前被放过的那种半死状态：
+   *     面板能开，用户以为好了，其实机器人在哪都收不到消息。
+   */
+  function startVerdict(h) {
+    if (!h.total) return { done: true, message: `起来了：${webuiUrl()}（还没配机器人）` };
+    if (h.online > 0) return { done: true, message: `起来了：${webuiUrl()}（${h.online}/${h.total} 已上线）` };
+    return {
+      done: false,
+      message: `面板起来了（${webuiUrl()}），但 ${h.total} 只机器人一只都没连上——去面板看日志里的报错`,
+    };
   }
 
   /* ---------------- 检测 ---------------- */
@@ -622,7 +764,17 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
    * 没有就直接退出——所以这时候还没有 API 可调。
    * 只写必需的几个字段，其余由 Roost 自己跟默认值合并。
    */
-  async function createBot({ name = 'main', appId, appSecret }) {
+  async function createBot(opts = {}) {
+    if (busy) throw new Error(`正在${busy}，等它完成`);
+    busy = '写机器人配置';
+    try {
+      return await createBotOnce(opts);
+    } finally {
+      busy = '';
+    }
+  }
+
+  async function createBotOnce({ name = 'main', appId, appSecret }) {
     if (!appId || !appSecret) throw new Error('AppID 和 AppSecret 都要填');
     const dir = dirOf();
     const botsDir = join(dir, 'config', 'bots');
@@ -657,8 +809,9 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     let restarted = false;
     try {
       if (await isRunning()) {
-        await stop();
-        await start();
+        // 走 *Once：createBot 自己占着 busy，再过一次闸门会撞上它自己
+        await stopOnce();
+        await startOnce();
         restarted = true;
         log('已重启 Roost，新凭证生效');
       }
@@ -676,9 +829,77 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
 
   /* ---------------- 起停 ---------------- */
 
+  /**
+   * 读 Roost 自己的实例表，找出「还在跑、且不是我这个进程」的 Roost。
+   *
+   * **为什么用实例表而不是 HTTP 探活**：端口可能刚改过、可能被别的程序占着、
+   * 密钥可能刚设置过——探不通不等于没在跑。而实例表是 Roost 自己写的，
+   * 里面记的 pid 还活着，就说明那个 Roost 真的在跑。这条判断不依赖网络。
+   *
+   * @returns {Array<{appId:string, pid:number}>} 可能为空
+   */
+  function liveRoostPids() {
+    let data;
+    try {
+      data = JSON.parse(readFileSync(join(dirOf(), 'data', 'instances.json'), 'utf8'));
+    } catch {
+      return []; // 没这个文件、或写坏了 —— 当作没有实例
+    }
+    if (!data || typeof data !== 'object') return [];
+    const out = [];
+    for (const [appId, rec] of Object.entries(data)) {
+      const pid = Number(rec?.pid);
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+      if (alivePid(pid)) out.push({ appId, pid });
+    }
+    return out;
+  }
+
+  /** 杀掉我们自己拉起来的进程。停不掉也不抛——调用方本来就在错误路径上 */
+  function killChild() {
+    if (!child) return;
+    try {
+      child.kill();
+    } catch {}
+    child = null;
+  }
+
+  /**
+   * 启动。外面这层只管并发闸门：连点两下「启动」不该 spawn 出两个进程。
+   */
   async function start() {
+    if (busy) throw new Error(`正在${busy}，等它完成`);
+    busy = '启动';
+    try {
+      return await startOnce();
+    } finally {
+      busy = '';
+    }
+  }
+
+  /**
+   * 真正的一次启动。**成功判据分三层**，不再是「面板能开就算起来了」：
+   *
+   *   ① 起之前：实例表里还有活着的 Roost → 直接拒绝，**不 spawn**。
+   *      这道最可靠：不看端口、不看密钥，只问进程。
+   *   ② 起来了：面板应答，**且**机器人至少一只 online（或根本没配机器人）。
+   *   ③ 面板在、机器人全掉线：**保留进程**，返回 `ok:false` 说明原因。
+   *      不 kill 是因为面板正是用户唯一的排查入口，杀掉等于把线索一起删了。
+   *
+   * 只有「20 秒内面板一次都没应答」才 kill：那种进程要么卡在启动里、
+   * 要么端口都没绑上，留着只占端口，而且用户拿它没办法（`--no-open` 没有控制台）。
+   */
+  async function startOnce() {
     if (await isRunning()) return { ok: true, message: '已经在跑了' };
     if (!existsSync(join(dirOf(), 'src', 'main.js'))) throw new Error('还没装，先点安装');
+
+    const live = liveRoostPids();
+    if (live.length) {
+      const who = live.map((x) => `PID ${x.pid}（AppID ${x.appId}）`).join('、');
+      throw new Error(
+        `已经有一个 Roost 在跑：${who}。先停掉它再启动；面板「设置 → 实例锁」能看到详情并清理残留记录`,
+      );
+    }
 
     const dir = dirOf();
     child = spawn(process.execPath, ['src/main.js', '--serve', '--no-open'], {
@@ -693,24 +914,110 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     });
 
     // 等它起来（最多 20 秒）
+    let panel = null;
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 500));
-      if (await isRunning()) return { ok: true, message: `起来了：${webuiUrl()}` };
       if (!child) throw new Error('Roost 启动后马上退出了。看它的日志：可能缺 AppID/AppSecret，或端口被占');
+      panel = await panelHealth();
+      if (!panel) continue;
+      const verdict = startVerdict(panel);
+      if (verdict.done) return { ok: true, message: verdict.message };
     }
-    throw new Error('等了 20 秒还没起来，去目录里手动跑 node src/main.js 看看报什么错');
+
+    if (!panel) {
+      killChild();
+      throw new Error('等了 20 秒面板还没起来，进程已结束。去目录里手动跑 node src/main.js 看报什么错');
+    }
+    // 面板活着，机器人没连上：留着进程，把状态如实返回
+    const verdict = startVerdict(panel);
+    return { ok: false, message: verdict.message };
   }
 
-  async function stop() {
-    if (child) {
+  /** 停一个进程。**跨平台差别很大**，见下面两条注释 */
+  function termPid(pid) {
+    if (process.platform === 'win32') {
+      /**
+       * Windows 上没有 POSIX 信号：`process.kill(pid, 'SIGTERM')` 的 signal 参数
+       * 会被忽略，直接强杀（等同 SIGKILL）——Roost 来不及 releaseInstance，
+       * 留下一堆脏记录。所以先发 `taskkill`（不带 /F，等于请它自己关）。
+       * 控制台程序大多不响应，抛错是正常的，交给强杀兜底。
+       */
       try {
-        child.kill();
+        execFileSync('taskkill', ['/PID', String(pid), '/T'], { stdio: 'ignore', timeout: 5000 });
       } catch {}
-      child = null;
+      return;
     }
-    // 不是我们拉起来的（比如用户自己开的），只能提示
-    if (await isRunning()) return { ok: false, message: '这不是本插件启动的进程，请到它的控制台关掉' };
-    return { ok: true, message: '已停止' };
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch (e) {
+      log(`停 PID ${pid} 失败：${e.message}`);
+    }
+  }
+
+  /** 强杀。Unix 上给 SIGKILL，Windows 用 taskkill /F */
+  function forceKillPid(pid) {
+    if (process.platform === 'win32') {
+      try {
+        execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 5000 });
+      } catch {}
+      return;
+    }
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {}
+  }
+
+  /**
+   * 停止。
+   *
+   * 以前只 kill 自己手里的 `child`。可是 DSH 重启之后那个变量是 null，
+   * 而 Roost 还在跑 —— 于是提示「请到它的控制台关掉」，可 `--no-open` 起的
+   * 进程**根本没有控制台**，用户被卡在死循环里。现在补一条：手里没有 child、
+   * 但面板确实活着时，按实例表里的 pid 去停。
+   */
+  async function stop() {
+    if (busy) throw new Error(`正在${busy}，等它完成`);
+    busy = '停止';
+    try {
+      return await stopOnce();
+    } finally {
+      busy = '';
+    }
+  }
+
+  /** 停止的实际动作。`createBot` 重启时直接用这个，不能再过闸门（会撞上它自己的 busy） */
+  async function stopOnce() {
+    killChild();
+    if (!(await isRunning())) return { ok: true, message: '已停止' };
+
+    /**
+     * 先礼后兵：SIGTERM / taskkill（不带 /F）→ 等 3 秒 → 还活着就强杀。
+     *
+     * 为什么不直接强杀：Roost 收到优雅终止会 releaseInstance、把 instances.json
+     * 写干净。强杀会留下「PID xxx 还占着这个 AppID」的脏记录——那正是这次
+     * 那个莫名其妙的 PID 的成因之一。脏记录虽然会在下次启动时被剪掉，
+     * 但面板上看着就像有个幽灵进程。
+     */
+    const targets = liveRoostPids();
+    for (const { pid } of targets) termPid(pid);
+    for (let i = 0; i < 6; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (!(await isRunning())) return { ok: true, message: '已停止' };
+    }
+
+    for (const { pid } of liveRoostPids()) forceKillPid(pid);
+    for (let i = 0; i < 4; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (!(await isRunning())) return { ok: true, message: '已停止（进程没响应退出请求，已强制结束）' };
+    }
+
+    const left = liveRoostPids().map((x) => `PID ${x.pid}`).join('、');
+    return {
+      ok: false,
+      message: left
+        ? `停不下来：${left} 还活着。可能是别的用户开的，或者需要管理员权限`
+        : '面板还在应答，但实例表里没有对应记录。它可能是别的程序占着这个端口',
+    };
   }
 
   /* ---------------- 装插件 + 配好 ---------------- */
