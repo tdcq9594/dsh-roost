@@ -101,6 +101,29 @@ export function bigramsOf(text) {
   return out;
 }
 
+/**
+ * 两句话是不是「互相矛盾」——字面很像但意思相反，不能当改口取代掉。
+ *
+ * `similarityOf` 只看字符二元组，看不出「过敏 / 不过敏」和
+ * 「3 栋 / 4 栋」这种一个字的差别。相似度越高越危险：恰恰是这类
+ * 句子会越过 0.75 阈值，把旧事实误标成历史，留下一条错的事实。
+ *
+ * 只查两件零成本的事：否定词个数、数字序列。宁可漏判（继续让模型
+ * 用 `<<replace>>` 显式改口），也不能把相反的意思合成一条。
+ */
+const NEG_WORDS = /[不没无非未勿否别]/g;
+export function conflicting(a, b) {
+  const x = String(a ?? '');
+  const y = String(b ?? '');
+  const nx = (x.match(NEG_WORDS) || []).length;
+  const ny = (y.match(NEG_WORDS) || []).length;
+  if (nx !== ny) return true;
+  const dx = x.match(/\d+(?:\.\d+)?/g) || [];
+  const dy = y.match(/\d+(?:\.\d+)?/g) || [];
+  if (dx.length !== dy.length) return true;
+  return dx.some((n, i) => n !== dy[i]);
+}
+
 /** 两句话有多像（0~1）。Jaccard：不看顺序、不看长度 */
 export function similarityOf(a, b) {
   const A = bigramsOf(a);
@@ -334,6 +357,7 @@ export function createMemory({ now = () => Date.now() } = {}) {
         if (om?.until) continue; // 已经是历史了，不重复打
         if (other.length < SUPERSEDE_MIN_LEN) continue;
         if (similarityOf(other, f) < SUPERSEDE_SIM) continue;
+        if (conflicting(other, f)) continue; // 过敏 / 不过敏、3 栋 / 4 栋：不是改口，都留着
         metaMap[other] = { ...om, until: t };
       }
     };

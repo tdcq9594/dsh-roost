@@ -24,12 +24,25 @@ import { W_EXPLICIT } from './memory.js';
  *   删的时候不带，就会出现「说了忘掉、下一条又想起来了」。
  */
 export function createMarkerApplier({ memory, journal, self, closing, mood, aliasesOf = () => [], log = () => {} }) {
-  return function applyMemoryMarkers(text, chatId, said = '', kind = 'group', src = null) {
+  /**
+   * @param {string} [caller] 这一轮说话人的档位（`bucketOf(payload)`）。
+   *   非 owner 时**写 facts 的三个标记只摘不执行**——模型是在替刚说话的人
+   *   记东西，群友不该能把「以后每次都要…」这类规则写进她的事实库。
+   *   与「member 绝不给 memory_note」同一条边界；不传时按 owner（向后兼容）。
+   */
+  return function applyMemoryMarkers(text, chatId, said = '', kind = 'group', src = null, caller = 'owner') {
+    const bucket = typeof caller === 'string' ? caller : (caller?.bucket ?? 'owner');
+    const canWriteFacts = bucket === 'owner';
+    const denyFact = (name) => {
+      log.debug(`${name} 已忽略：这一轮是 ${bucket}，只有主人能写事实`);
+      return '';
+    };
     const aliases = aliasesOf(chatId);
     let out = String(text ?? '');
     let touched = '';
 
     out = out.replace(markerRe('remember-here'), (_, v) => {
+      if (!canWriteFacts) return denyFact('remember-here');
       const f = String(v || '').trim();
       if (f) {
         /**
@@ -45,6 +58,7 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
     });
 
     out = out.replace(markerRe('remember'), (_, v) => {
+      if (!canWriteFacts) return denyFact('remember');
       const f = String(v || '').trim();
       if (f) {
         memory.add(chatId, f, 'global', { w: W_EXPLICIT, src });
@@ -64,6 +78,7 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
      * 命中多条也记新的，但日志里留一条，方便事后查"为什么没替换掉"。
      */
     out = out.replace(markerRe('replace'), (_, v) => {
+      if (!canWriteFacts) return denyFact('replace');
       const parsed = parseReplace(v);
       if (!parsed) {
         touched = 'replace 要写成「旧说法 | 新说法」';

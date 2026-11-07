@@ -3,6 +3,7 @@
 // 这几块最容易"看起来跑通了其实没生效"——压了但原文没了、改了但旧边删了、
 // 忘了但第二天又想起来。所以这里的断言基本都在盯**副作用**，不盯返回值。
 
+import { conflicting } from '../src/memory.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1950,4 +1951,42 @@ test('别名：新记忆仍然写在当前键下（别名只影响读）', () =>
   const raw = readRaw();
   assert.deepEqual(raw.chats['OLDKEY'], ['旧事']);
   assert.deepEqual(raw.chats['763366431'], ['新事']);
+});
+
+// ---- conflicting()：字面很像但意思相反，不能当改口取代 ----
+
+test('conflicting：否定词个数不同就是矛盾', () => {
+  assert.equal(conflicting('主人花生过敏', '主人花生不过敏'), true);
+  assert.equal(conflicting('他喜欢猫', '他不喜欢猫'), true);
+  assert.equal(conflicting('主人住在杭州', '主人住在杭州市'), false);
+});
+
+test('conflicting：数字序列不同就是矛盾', () => {
+  assert.equal(conflicting('主人住3栋501室', '主人住4栋501室'), true);
+  assert.equal(conflicting('生日3月5号', '生日3月6号'), true);
+  assert.equal(conflicting('生日3月5号', '生日是3月5号'), false);
+});
+
+test('facts：过敏 / 不过敏 不能互相取代（长句，相似度已过 0.75）', () => {
+  const m = freshFacts();
+  m.add('g1', '主人明确说过他对花生过敏这件事');
+  m.add('g1', '主人明确说过他对花生不过敏这件事');
+  const full = m.listFull('g1').global;
+  assert.equal(full.length, 2);
+  assert.ok(full.every((x) => !x.until), '两条都该是活的，不能把其中一条标成历史');
+});
+
+test('facts：门牌号不同 不能互相取代', () => {
+  const m = freshFacts();
+  m.add('g1', '主人明确说过他住在3栋501室这件事');
+  m.add('g1', '主人明确说过他住在4栋501室这件事');
+  assert.equal(m.listFull('g1').global.filter((x) => !x.until).length, 2);
+});
+
+test('facts：只改了个尾巴仍然取代（回归）', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  m.add('g1', '主人住在杭州市');
+  const full = m.listFull('g1').global;
+  assert.ok(full.find((x) => x.text === '主人住在杭州').until > 0);
 });

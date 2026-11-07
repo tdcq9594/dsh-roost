@@ -2303,7 +2303,7 @@ export function apply(ctx) {
            * 复用同一个函数而不是另写一份清理：标记的语义不该因为
            * 它出现在正文还是工具参数里而不同。
            */
-          const { text, touched } = applyMemoryMarkers(raw, c.chatId, c.said, c.kind, srcOf(c.payload));
+          const { text, touched } = applyMemoryMarkers(raw, c.chatId, c.said, c.kind, srcOf(c.payload), bucketOf(c.payload));
           if (touched) log.info(`工具发言里的标记已执行：${touched}`);
           if (!text) {
             /**
@@ -3318,6 +3318,7 @@ export function apply(ctx) {
         String(payload?.text ?? ''),
         chat.kind,
         srcOf(payload),
+        bucketOf(payload),
       );
       if (touched) log.info(`记忆：${touched}`);
 
