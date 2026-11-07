@@ -26,6 +26,30 @@ const openAiCfg = (patch = {}) => ({
   },
 });
 
+const mimoCfg = (patch = {}) => ({
+  tts: {
+    enabled: true,
+    provider: 'mimo',
+    timeoutSec: 10,
+    maxChars: 300,
+    mimo: {
+      baseUrl: 'https://api.xiaomimimo.com/v1',
+      apiKey: 'sk-mimo',
+      model: 'mimo-v2.5-tts',
+      voice: 'mimo_default',
+      prompt: '请朗读',
+    },
+    ...patch,
+  },
+});
+
+/** MiMo 的响应：音频以 base64 塞在 message.audio.data 里 */
+const mimoJson = (payload, init = {}) => new Response(JSON.stringify(payload), {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+  ...init,
+});
+
 test('TTS 默认关闭：不请求上游、不加载本地引擎', async () => {
   let fetches = 0;
   let loads = 0;
@@ -579,4 +603,128 @@ test('微软朗读：上游挂住时要按 timeoutSec 超时，不能无限等',
 test('微软朗读：RIFF 但不是 WAVE 的（WebP / AVI）不能当 wav 交出去', async () => {
   const tts = createTts({ cfgOf: () => edgeCfg(), loadEdge: fakeEdge([], { bytes: 'RIFFxxxxWEBPVP8 ' }) });
   await assert.rejects(tts.synthesize('你好'), (e) => e instanceof TtsError && e.code === 'unsupported_audio');
+});
+
+/**
+ * 小米 MiMo（issue #4）。
+ *
+ * 它和 OpenAI 兼容那条路的差别不是「换个路径」：请求体形态、响应形态、
+ * 错误形态三样全不一样，所以这组用例逐项钉住，免得以后有人「顺手」
+ * 把它合进 `openAiSpeech()`。
+ */
+test('MiMo：走 chat/completions，文本在 assistant 消息里，音频按 base64 解出来', async () => {
+  const mp3 = Buffer.from([0xff, 0xf3, 0x64, 0xc0, 0x11, 0x22, 0x33]);
+  let request;
+  const tts = createTts({
+    cfgOf: () => mimoCfg(),
+    fetchImpl: async (url, init) => {
+      request = { url: String(url), init };
+      return mimoJson({ choices: [{ message: { audio: { data: mp3.toString('base64') } } }] });
+    },
+  });
+
+  const result = await tts.synthesize('你好，我是大肥鱼。');
+  assert.equal(request.url, 'https://api.xiaomimimo.com/v1/chat/completions');
+  assert.equal(request.init.headers.authorization, 'Bearer sk-mimo');
+
+  const body = JSON.parse(request.init.body);
+  assert.equal(body.model, 'mimo-v2.5-tts');
+  assert.deepEqual(body.messages, [
+    { role: 'user', content: '请朗读' },
+    { role: 'assistant', content: '你好，我是大肥鱼。' },
+  ]);
+  assert.deepEqual(body.audio, { format: 'mp3', voice: 'mimo_default' });
+  assert.equal(body.input, undefined, '不是 /audio/speech 那套字段');
+  assert.equal(body.response_format, undefined);
+  assert.equal(body.speed, undefined, 'MiMo 没有 speed 参数，别硬塞');
+
+  assert.equal(result.contentType, 'audio/mpeg');
+  assert.deepEqual([...result.audio], [...mp3]);
+});
+
+test('MiMo：data URL 前缀要剥掉，不然 base64 解出来是垃圾', async () => {
+  const mp3 = Buffer.from([0xff, 0xf3, 0x64, 0xc0]);
+  const tts = createTts({
+    cfgOf: () => mimoCfg(),
+    fetchImpl: async () => mimoJson({
+      choices: [{ message: { audio: { data: `data:audio/mp3;base64,${mp3.toString('base64')}` } } }],
+    }),
+  });
+  const result = await tts.synthesize('你好');
+  assert.deepEqual([...result.audio], [...mp3]);
+});
+
+test('MiMo：没有 Key 就算没配好，且不发请求', async () => {
+  let fetches = 0;
+  const tts = createTts({
+    cfgOf: () => mimoCfg({ mimo: { baseUrl: 'https://api.xiaomimimo.com/v1', apiKey: '', model: 'mimo-v2.5-tts' } }),
+    fetchImpl: async () => { fetches += 1; return mimoJson({}); },
+  });
+  assert.deepEqual(await tts.status(), {
+    enabled: true, provider: 'mimo', configured: false, reason: 'configuration_incomplete',
+  });
+  await assert.rejects(tts.synthesize('你好'), (e) => e instanceof TtsError && e.code === 'invalid_config');
+  assert.equal(fetches, 0);
+});
+
+test('MiMo：地址和模型有默认值，只填 Key 也算配好了', async () => {
+  const tts = createTts({
+    cfgOf: () => ({ tts: { enabled: true, provider: 'mimo', mimo: { apiKey: 'sk-mimo' } } }),
+    fetchImpl: async () => mimoJson({ choices: [{ message: { audio: { data: '//9k' } } }] }),
+  });
+  const st = await tts.status();
+  assert.equal(st.configured, true);
+  assert.equal(st.voice, 'mimo_default');
+  assert.equal(st.model, 'mimo-v2.5-tts');
+});
+
+test('MiMo：401 归一成 upstream_auth，且不回显 Key', async () => {
+  const tts = createTts({
+    cfgOf: () => mimoCfg(),
+    fetchImpl: async () => new Response('{"error":{"message":"bad key sk-mimo"}}', { status: 401 }),
+  });
+  await assert.rejects(tts.synthesize('你好'), (e) => {
+    assert.equal(e.code, 'upstream_auth');
+    assert.doesNotMatch(e.message, /sk-mimo/);
+    return true;
+  });
+});
+
+test('MiMo：429 归一成 upstream_rate_limited', async () => {
+  const tts = createTts({
+    cfgOf: () => mimoCfg(),
+    fetchImpl: async () => new Response('{}', { status: 429 }),
+  });
+  await assert.rejects(tts.synthesize('你好'), (e) => e.code === 'upstream_rate_limited');
+});
+
+test('MiMo：没给 audio.data 时说清原因，但把 Key 抹掉', async () => {
+  const tts = createTts({
+    cfgOf: () => mimoCfg(),
+    fetchImpl: async () => mimoJson({ error: { message: 'model not found for sk-mimo' } }),
+  });
+  await assert.rejects(tts.synthesize('你好'), (e) => {
+    assert.equal(e.code, 'upstream_error');
+    assert.match(e.message, /model not found/);
+    assert.doesNotMatch(e.message, /sk-mimo/);
+    return true;
+  });
+});
+
+test('MiMo：回 HTML（地址填成网页）时不硬当音频', async () => {
+  const tts = createTts({
+    cfgOf: () => mimoCfg(),
+    fetchImpl: async () => new Response('<html>404</html>', { headers: { 'content-type': 'text/html' } }),
+  });
+  await assert.rejects(tts.synthesize('你好'), (e) => e.code === 'upstream_error');
+});
+
+test('MiMo：声明长度超上限时直接拒，不把整段收进内存', async () => {
+  const tts = createTts({
+    cfgOf: () => mimoCfg(),
+    fetchImpl: async () => new Response('{}', {
+      headers: { 'content-type': 'application/json', 'content-length': String(99 * 1024 * 1024) },
+    }),
+  });
+  await assert.rejects(tts.synthesize('你好'), (e) => e.code === 'audio_too_large');
 });

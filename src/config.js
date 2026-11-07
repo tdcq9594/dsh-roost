@@ -33,7 +33,10 @@ export const DEFAULTS = {
    */
   tts: {
     enabled: false,
-    /** openai = OpenAI 兼容 /audio/speech；gpt-sovits = 原生 API；sherpa = 本地 ONNX（离线）；edge = 微软在线朗读 */
+    /**
+     * openai = OpenAI 兼容 /audio/speech；gpt-sovits = 原生 API；sherpa = 本地 ONNX（离线）；
+     * edge = 微软在线朗读；mimo = 小米 MiMo（音频从 chat/completions 里以 base64 回）
+     */
     provider: 'openai',
     /** OpenAI-compatible API 根地址，需包含版本前缀（例如 /v1） */
     baseUrl: '',
@@ -91,6 +94,27 @@ export const DEFAULTS = {
      */
     edge: {
       voice: 'zh-CN-XiaoxiaoNeural',
+    },
+    /**
+     * 小米 MiMo（`mimo-v2.5-tts` 系列）。
+     *
+     * 它**没有** `/audio/speech`：音频是走 `POST /chat/completions` 合成的，
+     * 以 base64 回在 `choices[0].message.audio.data` 里。所以必须单独一个
+     * provider——填进 openai 分支的话，`status()` 会判「已配置」，
+     * 直到真正合成才 404（issue #4 实测）。
+     *
+     * `messages` 里 **`assistant` 那条才是要念的文本**，`user` 那条是语气/
+     * 音色描述（`voicedesign` 模型下必填）。没有 `speed` 参数，固定原速。
+     */
+    mimo: {
+      /** 根地址，含版本前缀；代码里会自动接 `/chat/completions` */
+      baseUrl: 'https://api.xiaomimimo.com/v1',
+      apiKey: '',
+      model: 'mimo-v2.5-tts',
+      /** 预置音色见 `src/tts.js` 的 `MIMO_VOICES`；`voiceclone` 模型也可填样本 */
+      voice: 'mimo_default',
+      /** 语气提示，会作为 `user` 消息发出去 */
+      prompt: '请用自然、亲切的语气朗读下面这句话。',
     },
     /**
      * 本地 ONNX 推理（sherpa-onnx-node）。
@@ -657,6 +681,7 @@ const SECRET_PATHS = [
   ['memory', 'embedding', 'apiKey'],
   ['tts', 'apiKey'],
   ['tts', 'gptSovits', 'apiKey'],
+  ['tts', 'mimo', 'apiKey'],
 ];
 
 function valueAt(root, path) {

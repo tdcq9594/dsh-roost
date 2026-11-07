@@ -5648,6 +5648,14 @@ select.roost-input{color-scheme:dark}
 
       const provider = v('provider', 'openai')
       /**
+       * MiMo 的音色下拉要**保住手填值**。
+       *
+       * `voiceclone` 模型允许填音频样本、也允许填清单外的新音色；直接把
+       * `mimo.voice` 硬设成清单里的第一项，用户手填的值会在下一次渲染时
+       * 被下拉框悄悄改掉。
+       */
+      const mimoVoice = String(v('mimo.voice') || 'mimo_default')
+      /**
        * 用对象而不是「值 + 文字」的二元数组。
        *
        * 设置页那段「各段是干什么的」的清单是靠正则从 `JSON_SECTIONS` 里读出来的，
@@ -5660,6 +5668,7 @@ select.roost-input{color-scheme:dark}
         { id: 'sherpa', label: '本地模型（离线，可一键安装）' },
         { id: 'openai', label: 'OpenAI 兼容（/audio/speech）' },
         { id: 'gpt-sovits', label: 'GPT-SoVITS 原生 API（本地）' },
+        { id: 'mimo', label: '小米 MiMo（chat/completions 出音频）' },
       ]
 
       /**
@@ -5680,6 +5689,25 @@ select.roost-input{color-scheme:dark}
         { id: 'zh-HK-HiuMaanNeural', label: '曉曼 · 粤语女声' },
         { id: 'ja-JP-NanamiNeural', label: 'Nanami · 日语女声' },
         { id: 'en-US-JennyNeural', label: 'Jenny · 英语女声' },
+      ]
+
+      /**
+       * 小米 MiMo 的预置音色。
+       *
+       * 和 `src/tts.js` 的 `MIMO_VOICES` 是同一份（客户端不能 import 服务端模块）。
+       * 服务端**不**按这张表校验：`voiceclone` 模型还接受音频样本，
+       * 写死白名单会把那条路堵死。
+       */
+      const MIMO_VOICES = [
+        { id: 'mimo_default', label: 'MiMo 默认' },
+        { id: '冰糖', label: '冰糖' },
+        { id: '茉莉', label: '茉莉' },
+        { id: '苏打', label: '苏打' },
+        { id: '白桦', label: '白桦' },
+        { id: 'Mia', label: 'Mia' },
+        { id: 'Chloe', label: 'Chloe' },
+        { id: 'Milo', label: 'Milo' },
+        { id: 'Dean', label: 'Dean' },
       ]
 
       /** 服务端状态翻成人话。`reason` 的取值来自 `src/tts.js` 的 status() */
@@ -6106,6 +6134,41 @@ select.roost-input{color-scheme:dark}
                 + '参考音频路径是「GPT-SoVITS 服务进程」要能读到的路径，不是 DSH 这边的。'
                 + '一键启动会自动挑一个没被系统保留的端口，就绪后把地址和路由填好——'
                 + '加载模型要一两分钟，这期间可以先干别的。'),
+            )
+          : null,
+
+        provider === 'mimo'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('接口地址（含版本前缀）', 'mimo.baseUrl', { placeholder: 'https://api.xiaomimimo.com/v1' }),
+                field('模型', 'mimo.model', { placeholder: 'mimo-v2.5-tts' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-end' } },
+                h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 200px' } },
+                  h('span', { className: 'roost-note', style: { margin: 0 } }, '音色'),
+                  h('select', {
+                    className: 'roost-input',
+                    value: mimoVoice,
+                    onChange: (e) => put('mimo.voice', e.target.value),
+                  }, [
+                    ...MIMO_VOICES,
+                    ...(MIMO_VOICES.some((o) => o.id === mimoVoice)
+                      ? []
+                      : [{ id: mimoVoice, label: `${mimoVoice}（手填）` }]),
+                  ].map((o) => h('option', { key: o.id, value: o.id }, o.label))),
+                ),
+                field('API Key', 'mimo.apiKey', { placeholder: '必填，sk-…' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('语气提示', 'mimo.prompt', {
+                  placeholder: '请用自然、亲切的语气朗读下面这句话。',
+                  flex: '2 1 320px',
+                }),
+              ),
+              h('div', { className: 'roost-note' },
+                'MiMo 没有 /audio/speech：走 POST /chat/completions，'
+                + '要念的文本放在 assistant 那条消息里，音频以 base64 回在 message.audio.data。'
+                + '因此它不支持语速——上面那个「语速」对 MiMo 无效。'),
             )
           : null,
 

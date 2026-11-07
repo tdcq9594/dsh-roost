@@ -74,7 +74,7 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ 本插件 ⇄ DSH �
 - ⬆️ **本体自更新**：设置页顶部查最新版、一键装。走 DSH 自己的 `pluginManager`（失败会回滚 `package.json` + `pnpm-lock.yaml`），装完提示重启。开发机（符号链接装的）自动禁用
 - 🎭 **双人格 preset**：私聊（`roost-private`）/ 群聊（`roost-social`）各一套提示词
 - 🖼️ **表情包**：图丢进目录就能用，文件名或侧车 `.tags` 当标签；图多了建子目录分类，`sticker_pick` 按需取图——**加图不会冲掉提示词缓存**
-- 🔊 **语音合成（选装，默认关）**：四种 provider 任选 —— **本地模型**（一键装 23MB 引擎 + 30MB 模型，完全离线）、**微软在线朗读**（免费、不要 Key，一键装 0.4MB 依赖）、OpenAI 兼容 `/audio/speech`、本地 GPT-SoVITS 原生 API。**语速一份 `tts.speed` 四个 provider 共用**，切换时不用重填。不配就完全静默——不请求上游、不加载模型、不占提示词；配好后模型才能用 `<<say: 内容>>` 发语音条（转 silk 和发送在 ai-chat 那侧）
+- 🔊 **语音合成（选装，默认关）**：五种 provider 任选 —— **本地模型**（一键装 23MB 引擎 + 30MB 模型，完全离线）、**微软在线朗读**（免费、不要 Key，一键装 0.4MB 依赖）、OpenAI 兼容 `/audio/speech`、本地 GPT-SoVITS 原生 API、**小米 MiMo**（`mimo-v2.5-tts`，音频从 `chat/completions` 里以 base64 回）。**语速一份 `tts.speed` 五个 provider 共用**（MiMo 本身不支持语速，会忽略），切换时不用重填。不配就完全静默——不请求上游、不加载模型、不占提示词；配好后模型才能用 `<<say: 内容>>` 发语音条（转 silk 和发送在 ai-chat 那侧）
 - 🔑 **账号迁移**：把 QQ号 / 群号和 openid 对上，换机器人（换 AppID）后旧记忆照样读得到。支持批量追加 openid、群成员 QQ号登记（需本人提供）、昵称候选提示，以及「一键改写」——把某号码名下所有旧键合并到号码键后删掉（带备份与一键回退）。**昵称候选只提示不自动绑**：官方不给 QQ号，自动猜会把别人的记忆串过来。**绑定完全自愿、非必需**，不绑定不影响任何功能（详见「账号迁移」章节的声明）
 
 ---
@@ -235,14 +235,21 @@ git clone https://github.com/tdcq9594/dsh-roost.git
   "stickers": { "enabled": true, "dir": "" },
   "tts": {                  // 选装，默认关；面板「设置 → 语音合成」有专用表单
     "enabled": false,
-    "provider": "openai",   // sherpa（本地离线）| edge（微软在线）| openai | gpt-sovits
-    "speed": 1,             // 四个 provider 共用的语速，0.5–2，1 是原速
+    "provider": "openai",   // sherpa（本地离线）| edge（微软在线）| openai | gpt-sovits | mimo（小米）
+    "speed": 1,             // 五个 provider 共用的语速，0.5–2，1 是原速（mimo 忽略）
     "baseUrl": "",          // openai: 含版本前缀，如 https://api.openai.com/v1
     "apiKey": "",           // 面板里显示成 ******，原样保存不会覆盖真值
     "model": "",            // openai: tts-1
     "voice": "",            // openai: alloy
     "timeoutSec": 30,
     "maxChars": 300,        // 太长的会被 QQ 语音条截断，不如发文字
+    "mimo": {               // provider=mimo 时才用；它没有 /audio/speech
+      "baseUrl": "https://api.xiaomimimo.com/v1",
+      "apiKey": "",         // 必填；有 Key 就算配好，地址和模型不用管
+      "model": "mimo-v2.5-tts",
+      "voice": "mimo_default",  // 预置还有 冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean
+      "prompt": "请用自然、亲切的语气朗读下面这句话。"  // 作为 user 消息发出去，控制语气
+    },
     "sherpa": {             // provider=sherpa 时才用；引擎和模型都在数据目录，删目录即卸载
       "model": "aishell3",  // 30MB / 8kHz / 174 个音色
       "modelDir": "",       // 留空 = 数据目录/tts-models/vits-icefall-zh-aishell3
@@ -304,7 +311,15 @@ git clone https://github.com/tdcq9594/dsh-roost.git
 - `@andresaya/edge-tts` 是 GPL-3.0，只下载到你自己的数据目录，**不随插件分发**
 - 卸载本地模型后不会再刷「预热失败」：没装是正常状态，装了但加载不起来才是故障
 
-**语速**：`tts.speed` 一份配置，四个 provider 共用，范围 0.5–2。
+**小米 MiMo（`provider=mimo`）**：填一个 API Key 就能用，地址和模型都有默认值。
+
+- **它没有 `/audio/speech`**：音频走 `POST /chat/completions`，以 base64 回在 `choices[0].message.audio.data` 里。所以单独一个 provider——填进「OpenAI 兼容」的话地址能存下，但一合成就是 404
+- 要念的文本放在 **`assistant`** 那条消息里，`user` 那条是语气提示（面板上的「语气提示」，`voicedesign` 模型下它决定音色描述）
+- **不支持语速**：接口没有 `speed` 字段，面板上的语速对它无效；也不会硬塞字段去撞 400
+- 只传 `apiKey` 也算配好；模型默认 `mimo-v2.5-tts`，音色默认 `mimo_default`（预置还有冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean）
+- 请求 mp3 并按魔数校验，回来的不是音频就报错，不当 mp3 硬发
+
+**语速**：`tts.speed` 一份配置，五个 provider 共用，范围 0.5–2。
 
 | provider | 映射成 |
 |---|---|
@@ -312,6 +327,7 @@ git clone https://github.com/tdcq9594/dsh-roost.git
 | OpenAI 兼容 | 请求体 `speed`（只在非原速时带，避免被中转服务拒） |
 | GPT-SoVITS v2 | `speed_factor`；**v1 接口没有语速参数，不支持** |
 | 微软朗读 | `rate: '+20%'` 这种百分比字符串 |
+| 小米 MiMo | **不支持**，接口没有对应字段，配了也会忽略 |
 
 以前只有 `sherpa.speed`，现在统一到 `tts.speed`；老配置会自动迁移，不用手动改。
 

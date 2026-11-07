@@ -755,6 +755,33 @@ test('前端渲染：表情包与语音合成搬到了设置页', () => {
   assert.ok(gptTxt.includes('安装目录'), 'GPT-SoVITS 要有「安装目录」输入')
   assert.ok(gptTxt.includes('探测'), 'GPT-SoVITS 要能先探测目录')
   assert.ok(gptTxt.includes('一键启动'), 'GPT-SoVITS 要能一键启动')
+
+  /**
+   * MiMo 分支：它没有 /audio/speech，字段形态和 openai 不一样。
+   *
+   * 用户最容易踩的两件事——Key 是必填、语速对它无效——都必须在页面上
+   * 说出来，否则只会得到「填了地址也没声」。
+   */
+  const mimoTxt = textOf(
+    expand(
+      h(mod.ConfigTab, {
+        config: {
+          stickers: { enabled: true, dir: '' },
+          tts: { enabled: true, provider: 'mimo', mimo: { apiKey: 'sk-x' } },
+        },
+        save: async () => ({ ok: true }),
+        saveCfg: async () => ({ ok: true }),
+        toast: () => {},
+        stickers: { dir: 'C:/x/stickers', items: [], chars: 0 },
+        setupSt: { pluginInstalled: true, pluginConfig: {} },
+      }),
+      rt,
+    ),
+  )
+  assert.ok(mimoTxt.includes('小米 MiMo'), 'provider 列表要有 MiMo')
+  assert.ok(mimoTxt.includes('API Key'), 'MiMo 要能填 Key')
+  assert.ok(mimoTxt.includes('语气提示'), 'MiMo 要能填语气提示（它决定 assistant 那条的语气）')
+  assert.ok(mimoTxt.includes('不支持语速'), '要说明语速对 MiMo 无效')
 })
 
 test('前端渲染：老的 market 页签状态会回退到人格页', () => {

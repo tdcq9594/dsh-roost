@@ -177,7 +177,7 @@ test('配置全文：所有 secret 路径遮罩，保存掩码不会覆盖真值
   saveConfig({
     server: { token: 'server-secret' },
     memory: { embedding: { model: 'embed', baseUrl: 'http://localhost/v1', apiKey: 'embed-secret' } },
-    tts: { enabled: true, apiKey: 'tts-secret', gptSovits: { apiKey: 'gpt-secret' } },
+    tts: { enabled: true, apiKey: 'tts-secret', gptSovits: { apiKey: 'gpt-secret' }, mimo: { apiKey: 'mimo-secret' } },
   });
 
   const view = publicConfig(loadConfig());
@@ -185,6 +185,7 @@ test('配置全文：所有 secret 路径遮罩，保存掩码不会覆盖真值
   assert.equal(view.memory.embedding.apiKey, '******');
   assert.equal(view.tts.apiKey, '******');
   assert.equal(view.tts.gptSovits.apiKey, '******');
+  assert.equal(view.tts.mimo.apiKey, '******');
 
   saveConfig(view);
   const disk = JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'config.json'), 'utf8'));
@@ -192,6 +193,7 @@ test('配置全文：所有 secret 路径遮罩，保存掩码不会覆盖真值
   assert.equal(disk.memory.embedding.apiKey, 'embed-secret');
   assert.equal(disk.tts.apiKey, 'tts-secret');
   assert.equal(disk.tts.gptSovits.apiKey, 'gpt-secret');
+  assert.equal(disk.tts.mimo.apiKey, 'mimo-secret', 'MiMo 的 Key 也要落盘且不被掩码覆盖');
 });
 
 test('局部配置保存：掩码保留旧值，显式空串能清除 TTS key', () => {

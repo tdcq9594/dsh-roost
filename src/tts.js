@@ -65,6 +65,74 @@ export const EDGE_VOICES = [
 
 export const EDGE_DEFAULT_VOICE = 'zh-CN-XiaoxiaoNeural';
 
+/**
+ * 小米 MiMo 的预置音色。
+ *
+ * 和 `client/client.js` 的 `MIMO_VOICES` 是同一份（客户端不能 import 服务端模块）。
+ *
+ * **这里不拿它当白名单。** 微软那条路会校验音色，因为音色名拼错时上游
+ * 会静默合成一个默认嗓子，用户以为「选了没用」；MiMo 这边拼错会明确报错，
+ * 而且 `voiceclone` 模型还接受 base64 音频样本——写死一张表会把那条路堵死。
+ */
+export const MIMO_VOICES = [
+  { id: 'mimo_default', label: 'MiMo 默认' },
+  { id: '冰糖', label: '冰糖' },
+  { id: '茉莉', label: '茉莉' },
+  { id: '苏打', label: '苏打' },
+  { id: '白桦', label: '白桦' },
+  { id: 'Mia', label: 'Mia' },
+  { id: 'Chloe', label: 'Chloe' },
+  { id: 'Milo', label: 'Milo' },
+  { id: 'Dean', label: 'Dean' },
+];
+
+export const MIMO_DEFAULT_VOICE = 'mimo_default';
+export const MIMO_DEFAULT_BASE = 'https://api.xiaomimimo.com/v1';
+export const MIMO_DEFAULT_MODEL = 'mimo-v2.5-tts';
+export const MIMO_DEFAULT_PROMPT = '请用自然、亲切的语气朗读下面这句话。';
+
+/**
+ * 把 `tts` 里 MiMo 那段补齐成完整配置。
+ *
+ * 老配置里没有 `mimo` 段（它是后加的），面板也可能只填了 Key——
+ * 地址和模型都有默认值，缺了就回落到默认，不让用户为一个能猜对的字段
+ * 卡在 `invalid_config` 上。
+ *
+ * `baseUrl` 还会回落到顶层的同名字段：从 openai 分支切过来的人往往已经把
+ * 地址填在那儿了，能直接复用就不必再抄一遍。**Key 不回落**（见下面）。
+ */
+function mimoOf(cfg) {
+  const m = cfg?.mimo && typeof cfg.mimo === 'object' ? cfg.mimo : {};
+  return {
+    baseUrl: String(m.baseUrl || cfg?.baseUrl || '').trim() || MIMO_DEFAULT_BASE,
+    /**
+     * **只认 `mimo.apiKey`，不回落到顶层 `tts.apiKey`。**
+     *
+     * 顶层那个是 OpenAI 兼容的 Key。回落会让「切到 MiMo 但没填 Key」变成
+     * 「把 OpenAI 的 Key 发给小米」——既 401 得莫名其妙，也是把别家的凭证
+     * 发给了第三方。宁可明确报「没配 Key」。
+     */
+    apiKey: String(m.apiKey || '').trim(),
+    model: String(m.model || '').trim() || MIMO_DEFAULT_MODEL,
+    voice: String(m.voice || '').trim() || MIMO_DEFAULT_VOICE,
+    prompt: String(m.prompt || '').trim() || MIMO_DEFAULT_PROMPT,
+  };
+}
+
+/**
+ * 上游 JSON 里的错误原因，**抹掉密钥再截断**。
+ *
+ * 直接把 `error.message` 抛给调用方，一是会进日志和面板，二是上游有时会把
+ * 请求体（含 Authorization）原样回显。留 120 字足够定位「模型名不对」
+ * 这类问题，又不至于把一整页 HTML 塞进错误消息。
+ */
+function upstreamReason(json, secret) {
+  const raw = String(json?.error?.message || json?.message || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  const clean = secret ? raw.split(secret).join('***') : raw;
+  return `：${clean.slice(0, 120)}`;
+}
+
 export class TtsError extends Error {
   constructor(code, message, status = 502) {
     super(message);
@@ -156,14 +224,66 @@ function audioResult(bytes, contentType) {
  */
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 
-async function readResponse(res) {
-  if (!res?.ok) {
-    if (res?.status === 401 || res?.status === 403) {
-      throw new TtsError('upstream_auth', '语音服务鉴权失败', 502);
-    }
-    if (res?.status === 429) throw new TtsError('upstream_rate_limited', '语音服务当前限流', 503);
-    throw new TtsError('upstream_error', `语音服务请求失败（HTTP ${Number(res?.status) || 0}）`, 502);
+/**
+ * MiMo 那条路的上限按「body 长度」算，不是音频长度。
+ *
+ * base64 会膨胀 4/3，外面还有一层 JSON；10MB 音频对应约 13.4MB 文本。
+ * 用音频上限去卡 body 会在合法的长语音上误杀，所以单独给一个换算后的上限。
+ */
+const MAX_JSON_BYTES = Math.ceil((MAX_AUDIO_BYTES * 4) / 3) + 1024 * 1024;
+
+/**
+ * 上游 HTTP 状态 → 我们的错误码。
+ *
+ * 抽出来是因为 MiMo 不能走 `readResponse()`（它回的是 JSON 不是音频流），
+ * 但 401/429 的语义必须和其它 provider 一模一样，否则 ai-chat 那边的
+ * 「鉴权失败要提示去填 Key、限流要退避」就分不清了。
+ */
+function httpStatusError(res) {
+  const status = Number(res?.status) || 0;
+  if (status === 401 || status === 403) {
+    throw new TtsError('upstream_auth', '语音服务鉴权失败', 502);
   }
+  if (status === 429) throw new TtsError('upstream_rate_limited', '语音服务当前限流', 503);
+  throw new TtsError('upstream_error', `语音服务请求失败（HTTP ${status}）`, 502);
+}
+
+/**
+ * 读 body，**边读边卡上限**。
+ *
+ * `res.arrayBuffer()` 会先把整段收进内存再让我们判断大小——上游抽风回一个
+ * 几百 MB 的东西时，判不判断都已经来不及了。这里按流分块累计，超了立刻
+ * cancel，和 `readResponse()` 那道 content-length 关卡是同一套思路。
+ */
+async function readLimitedBody(res, limit) {
+  const declared = Number(res?.headers?.get?.('content-length') || 0);
+  if (declared > limit) throw new TtsError('audio_too_large', '语音服务返回的内容太大', 502);
+
+  const stream = res?.body;
+  if (!stream || typeof stream.getReader !== 'function') {
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > limit) throw new TtsError('audio_too_large', '语音服务返回的内容太大', 502);
+    return buf;
+  }
+
+  const reader = stream.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value?.length || 0;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      throw new TtsError('audio_too_large', '语音服务返回的内容太大', 502);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function readResponse(res) {
+  if (!res?.ok) httpStatusError(res);
   const mime = normalizeMime(res.headers?.get?.('content-type'));
   if (!mime) throw new TtsError('unsupported_audio', '语音服务没有返回受支持的音频 Content-Type', 502);
   const declared = Number(res.headers?.get?.('content-length') || 0);
@@ -292,6 +412,7 @@ export function encodeWav(samples, sampleRate) {
  *   · gpt-sovits  —— 本地 GPT-SoVITS 原生 API，自己起服务
  *   · sherpa      —— 本地 ONNX 推理（sherpa-onnx-node），完全离线，面板可一键装
  *   · edge        —— 微软在线朗读（@andresaya/edge-tts），免费无 Key，文本会发给微软
+ *   · mimo        —— 小米 MiMo，音频从 chat/completions 的 base64 里取，云端，要 key
  */
 export function createTts({
   cfgOf = () => ({}),
@@ -478,7 +599,7 @@ export function createTts({
     const enabled = cfg.enabled === true;
     const provider = String(cfg.provider || 'openai');
     if (!enabled) return { enabled: false, provider, configured: false };
-    if (!['openai', 'gpt-sovits', 'sherpa', 'edge'].includes(provider)) {
+    if (!['openai', 'gpt-sovits', 'sherpa', 'edge', 'mimo'].includes(provider)) {
       return { enabled: true, provider, configured: false, reason: 'unsupported_provider' };
     }
     if (provider === 'edge') {
@@ -504,6 +625,19 @@ export function createTts({
       if (cooling(provider)) return { enabled: true, provider, configured: false, reason: 'upstream_unreachable' };
       return { enabled: true, provider, configured };
     }
+    if (provider === 'mimo') {
+      /**
+       * **只要有 Key 就算配好。**
+       *
+       * 地址和模型都有默认值（见 `mimoOf()`），把它们也算进必填会在面板上
+       * 逼用户抄一遍默认值——抄错一个字反而变成「配好了但 404」。
+       * 没有 Key 则明确报未完成：MiMo 是纯云端，不给 Key 一定失败。
+       */
+      const m = mimoOf(cfg);
+      if (!m.apiKey) return { enabled: true, provider, configured: false, reason: 'configuration_incomplete' };
+      if (cooling(provider)) return { enabled: true, provider, configured: false, reason: 'upstream_unreachable' };
+      return { enabled: true, provider, configured: true, voice: m.voice, model: m.model };
+    }
     return { enabled: true, provider, ...sherpaState(cfg.sherpa) };
   }
 
@@ -523,6 +657,7 @@ export function createTts({
       else if (provider === 'gpt-sovits') result = await gptSovitsSpeech(input, cfg);
       else if (provider === 'sherpa') result = await sherpaSpeech(input, cfg);
       else if (provider === 'edge') result = await edgeSpeech(input, cfg);
+      else if (provider === 'mimo') result = await mimoSpeech(input, cfg);
       else throw new TtsError('unsupported_provider', '未支持这个语音 provider', 400);
       /** 成功一次就把冷却清掉，服务恢复了不用等满一分钟 */
       lastFail = { at: 0, provider: '', code: '' };
@@ -573,6 +708,70 @@ export function createTts({
       signal: timeoutSignal(cfg.timeoutSec),
     });
     return readResponse(res);
+  }
+
+  /**
+   * 小米 MiMo。
+   *
+   * 和另外三家最大的不同：**它没有音频端点**。音频走普通对话接口
+   * `POST /chat/completions`，以 base64 塞在 `choices[0].message.audio.data`。
+   * 所以这条路既不能复用 `readResponse()`（它要求 Content-Type 是 audio/*，
+   * 而 MiMo 回的是 application/json），也不能复用 `openAiSpeech()` 的请求体
+   * （那套 `input` / `response_format` 在这个接口上就是 404 的来源）。
+   *
+   * 另外两个反直觉的点（issue #4 实测）：
+   *   · `messages[assistant].content` 才是要念的文本，`user` 那条是语气描述；
+   *   · 没有 `speed` 参数——面板上的语速对这个 provider 无效，别硬塞字段。
+   */
+  async function mimoSpeech(text, cfg) {
+    const m = mimoOf(cfg);
+    if (!m.apiKey) throw new TtsError('invalid_config', 'MiMo 需要配置 API Key', 400);
+    const url = requestUrl(m.baseUrl, 'chat/completions', 'MiMo');
+    const headers = {
+      'content-type': 'application/json',
+      accept: 'application/json',
+      authorization: `Bearer ${m.apiKey}`,
+    };
+    const res = await fetchImpl(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: m.model,
+        messages: [
+          { role: 'user', content: m.prompt },
+          { role: 'assistant', content: String(text) },
+        ],
+        /** 显式要 mp3：上游默认 wav，体积差一倍；ai-chat 那边两种都能转 silk */
+        audio: { format: 'mp3', voice: m.voice },
+      }),
+      signal: timeoutSignal(cfg.timeoutSec),
+    });
+    if (!res?.ok) httpStatusError(res);
+
+    const raw = await readLimitedBody(res, MAX_JSON_BYTES);
+    let json = null;
+    try {
+      json = JSON.parse(raw.toString('utf8'));
+    } catch {
+      /**
+       * 回 HTML 通常意味着地址填错（指到了网页或者 404 页），
+       * 说清楚比抛一个「JSON 解析失败」有用得多。
+       */
+      throw new TtsError('upstream_error', 'MiMo 返回的不是 JSON（检查接口地址是否填对）', 502);
+    }
+
+    const b64 = String(json?.choices?.[0]?.message?.audio?.data || '')
+      /** 有的中转会把 `data:audio/mp3;base64,` 前缀一起回，留着解码就是垃圾 */
+      .replace(/^data:[^,]*,/, '');
+    if (!b64) {
+      throw new TtsError('upstream_error', `MiMo 没给音频${upstreamReason(json, m.apiKey)}`, 502);
+    }
+
+    const bytes = Buffer.from(b64, 'base64');
+    if (!bytes.length) throw new TtsError('empty_audio', 'MiMo 返回了空音频', 502);
+    if (bytes.length > MAX_AUDIO_BYTES) throw new TtsError('audio_too_large', 'MiMo 返回的音频太大', 502);
+    /** 认魔数而不是信 `format`：中转改写响应时，标着 mp3 的可能是别的东西 */
+    return audioResult(bytes, detectAudioType(bytes));
   }
 
 /**
