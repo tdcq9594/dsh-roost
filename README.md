@@ -10,7 +10,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/tdcq9594/dsh-roost?color=eab308)](https://github.com/tdcq9594/dsh-roost)
 [![DSH plugin](https://img.shields.io/badge/dsh--plugin-✅-green)](https://github.com/topics/dsh-plugin)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](#)
-[![License](https://img.shields.io/badge/license-非商业自定义-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
 
 **让 QQ 机器人从「只会聊天」变成「能用 DSH 的全部能力」** —— 工具、记忆、上下文压缩、主动搭话，都归它。
 
@@ -356,7 +356,8 @@ QQ 官方事件只给 `openid`（群是 `group_openid`），**从来不给 QQ号
 
 ## 表情包
 
-往里丢图，她自己在合适的时候配一张。**不发明新机制**：发的还是 `<<image: 路径>>`，
+往里丢图，她自己在合适的时候配一张。**不发明新机制**：发图就两种写法——
+`<<image: 路径>>` 图文同条，`<<image-alone: 路径>>` 单独发一条。
 这边只负责让她知道「有哪些图、这些图是什么意思」——她不认识文件名以外的东西。
 
 图放在 `<数据目录>/stickers/`（面板「设置 → 表情包」能直接改路径、看到字数和张数）。
@@ -440,7 +441,7 @@ stickers/
 ### 她会怎么选
 
 - 平铺：清单里有每张图的文件名和标签，她自己判断该不该用
-- 分类：先调 `sticker_pick("开心")` 拿 1~3 个真实路径，再用 `<<image: 路径>>` 发
+- 分类：先调 `sticker_pick("开心")` 拿 1~3 个真实路径，再写 `<<image: 路径>>`（图文同条）或 `<<image-alone: 路径>>`（单独一条）
 - 两种模式都会告诉她「没有合适的就别发」——宁可不配图，不要为了配图硬凑
 
 同一张图不会连着给两次（按「最久没给过」排序）；会降级成文件的图排在后面。
@@ -546,4 +547,4 @@ CI（GitHub Actions，Node 22 / 24 矩阵）跑同样这些，外加三件单测
 
 ## 许可
 
-沿用 [Roost](https://github.com/tdcq9594/qq-bot-roost) 的许可：**永久免费，禁止任何形式的收费与商业使用**。全文见 [LICENSE](LICENSE)。
+沿用 [Roost](https://github.com/tdcq9594/qq-bot-roost) 的许可：**GNU Affero General Public License v3.0 only（AGPL-3.0-only）**。允许商业使用与收费分发，但分发或通过网络提供服务时必须同样以 AGPL-3.0-only 开源并提供完整对应源码。全文见 [LICENSE](LICENSE)。

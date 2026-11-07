@@ -29,6 +29,7 @@ import { FEATURES, FEATURE_GROUPS, readFeatures, readSettings, rawFeature, force
 import { createCapabilityStore } from './capability-store.js';
 import { createQuota, QUOTA_DEFAULTS } from './quota.js';
 import { createSetup } from './setup.js';
+import { maxPartsOf } from './qq-tools.js';
 import { createMemory, W_EXPLICIT } from './memory.js';
 import { createJournal } from './journal.js';
 import { createLedgerReader } from './ledger-read.js';
@@ -833,7 +834,7 @@ export function apply(ctx) {
     log: (m) => log.warn(m),
   });
 
-  /** 表情包：只做「把清单写进提示词」，发图复用已有的 <<image:>> */
+  /** 表情包：只做「把清单写进提示词」，发图复用 <<image:>>（图文同条）/ <<image-alone:>>（单独一条） */
   const stickers = createStickers({ dataDir: dataDir(), log: (m) => log.warn(m) });
 
   /** 缓存图同步：把 images/ 里像表情包的图搬成 `未分类/`。不做内容识别（见 sticker-sync.js 头注释） */
@@ -2661,11 +2662,19 @@ export function apply(ctx) {
               ? new Set(list.map((s) => String(s?.name ?? s?.tool?.name ?? '')))
               : null;
             if (names && !names.has('qq_send')) return '';
+            /**
+             * 段数上限**必须和 `qq-tools.js` 用同一个值**（`maxPartsOf`）。
+             *
+             * 以前这里写死 3：配置是 5 的时候，模型被告知只能发 3 段（少发两段，
+             * 但至少不报错）；配置是 2 的时候更糟——它按 3 组织内容，第 3 段被工具
+             * 直接拒掉，用户只觉得「话说一半没了」。两处各写一份必然漂，所以共用。
+             */
+            const maxParts = maxPartsOf(cfg, chat.kind);
             const lines = [
               '【发言方式】',
               '你手上有这几个工具：`qq_send`（发一段话）、`qq_close`（给这段对话收尾）'
                 + '，以及（装了的话）`qq_send_file`（发一个文件）。',
-              '· 想说话就调 `qq_send`，调几次由你定（一轮最多 3 段）。**别把要发的话写进正文**。',
+              `· 想说话就调 \`qq_send\`，调几次由你定（一轮最多 ${maxParts} 段）。**别把要发的话写进正文**。`,
               '· 调过 `qq_send` 之后，你回复的正文**不会**再发出去——正文只当思考用。',
               '· 聊到自然结束、对方要走的时候，用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后可以不说话。',
               '· 一个工具都不调时，正文会照常发出去（旧方式）。**不要又调工具又写正文**——那样只发工具那条，正文会被丢掉。',
@@ -5175,13 +5184,23 @@ export function apply(ctx) {
         }
         const body = await readBody(req);
         /**
-         * `?mode=patch`：局部保存（切人格、改名字）。
+         * 保存语义由**显式模式**决定，默认走局部（`patch`）。
          *
-         * 默认仍然是「整份替换」——「配置全文」那个编辑器允许删字段，
-         * 删掉就该回落到默认值。但面板上那些只提交一小段的按钮**不能**走整份替换：
-         * `saveConfig` 的基线是 DEFAULTS，局部提交会把 token 清空、端口改回 17321。
+         *   `?mode=full`  → 整份替换：没提交的字段回落到 DEFAULTS。
+         *                    「配置全文」编辑器用，删字段就是删字段。
+         *   其它（默认）  → 局部合并：没提交的字段保持磁盘现值。
+         *
+         * 为什么默认反过来：**外部的设置页不一定知道要带参数**。DSH 的通用设置页
+         * 只提交它渲染出来的那几项，旧默认（整份替换）会顺手把 `speakUp.prompt`、
+         * `qqTools.maxParts`、`persona.name`、`tts.provider` 一起抹成默认值
+         * ——用户看到的是「升级后她变了个人」，日志里却一个字都没有
+         * （2026-11 外部实测，四项同时被抹）。
+         *
+         * 方向选择：局部语义最多让「删字段」失效（用整份模式再存一次即可），
+         * 整份语义会**静默丢配置**。两者代价不对称，所以默认取局部。
          */
-        const patchMode = new URL(req.url || '/', 'http://x').searchParams.get('mode') === 'patch';
+        const mode = new URL(req.url || '/', 'http://x').searchParams.get('mode');
+        const fullSave = mode === 'full';
 
         /**
          * 根必须是对象。
@@ -5207,7 +5226,8 @@ export function apply(ctx) {
          * 冲突检测：面板拿的是旧快照就别整份覆盖。
          * 整份保存是「以提交的为准」，别处刚改过（比如换人格写了 byChat）就会被抹掉。
          */
-        if (typeof body.__revision === 'string' && body.__revision && body.__revision !== configRevision()) {
+        const revision = typeof body.__revision === 'string' ? body.__revision : '';
+        if (revision && revision !== configRevision()) {
           return send(res, 409, {
             ok: false,
             message: '配置在别处改过了，先刷新再保存',
@@ -5216,6 +5236,7 @@ export function apply(ctx) {
           });
         }
         delete body.__revision;
+        /** 整份 vs 局部：看 `?mode=full`（见上面那段口径） */
 
         if (body?.server?.token === '******') body.server.token = cfg.server.token;
 
@@ -5240,7 +5261,7 @@ export function apply(ctx) {
         const beforePort = cfg.server.port;
         const beforeToken = cfg.server.token;
         const beforeCurrent = cfg.persona.current;
-        cfg = patchMode ? patchConfig(body) : saveConfig(body);
+        cfg = fullSave ? saveConfig(body) : patchConfig(body);
         if (cfg.persona.current !== beforeCurrent) {
           const hit = personas.list().find((p) => p.id === cfg.persona.current);
           switchNote.set(hit?.label || hit?.name || cfg.persona.current);

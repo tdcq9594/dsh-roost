@@ -58,17 +58,20 @@ export function isPoliteRevocation(text) {
 /**
  * 动作标记：值里可能出现单个 `>`，所以不能用 `[^>]*` 截断。
  * `(?!<<)` 是逐字保护——value 不许跨过下一个 `<<`，否则嵌套
- * `<<image: <<image: x>> y>>` 的外层会一口咬到内层的 `>>`，留下 ` y>>` 残骸。
+ * `<<say: <<say: x>> y>>` 的外层会一口咬到内层的 `>>`，留下 ` y>>` 残骸。
  * 加了保护后引擎从最内层起匹配，配合 cleanBotText 的逐层循环剥干净。
+ *
+ * 两个图片标记都要认：`<<image: 路径>>`（图文同条）与 `<<image-alone: 路径>>`
+ * （单独一条）。它们都是标记、要摘，摘完补一条「发了图片」的占位。
  */
-const RE_ACTION = /<<\s*(image|voice|say|button|silence|remember)\s*(?::|：)\s*((?:(?!<<)[\s\S])*?)>>/gi;
+const RE_ACTION = /<<\s*(image-alone|image|voice|say|button|silence|remember)\s*(?::|：)\s*((?:(?!<<)[\s\S])*?)>>/gi;
 /** 兜底只认已知动作名，避免 `a << b >> c` 这类正文被误伤 */
 const RE_ANY_MARK = /<<\s*(?:image|voice|say|button|silence|remember|forget|mood)\s*(?::|：)?(?:(?!<<)[\s\S])*?>>/gi;
 /**
  * 半截标记只摘到**第一个句末标点或换行**为止。
  *
  * 复核实测：用 `[\s\S]*$` 会把同一行后面的正常正文、乃至下一行整条吞掉
- * （「你好<<image: 断了，后面还有正常正文」→「你好」）。宁可留个逗号，
+ * （「你好<<say: 断了，后面还有正常正文」→「你好」）。宁可留个逗号，
  * 也不能把她说过的话静默删掉。同样不许跨过下一个 `<<`。
  */
 const RE_UNCLOSED = /<<\s*(?:image|voice|say|button|silence|remember|forget|mood)\s*(?::|：)?(?:(?!<<)[^，。！？\n])*/gi;
@@ -127,15 +130,19 @@ export function isIdentityFact(text) {
 /**
  * bot 行写日记前的清洗（2.1）。
  *
- * `apply-markers.js:199` 的负向前瞻**故意保留** `image/voice/button/say/silence`
- * ——它们是发给 ai-chat 执行的指令，宿主不能在那边摘。但日记是派生层，
- * 只该收「她说过的话」：真机 19:17:22–19:24:11 连续 8 条 bot 行原样存着
- * `<<image: ...\stickers\希露.jpg>>`，模型下一轮把这些标记读成自己说过的约定。
+ * 日记是派生层，只该收「她说过的话」：真机 19:17:22–19:24:11 连续 8 条
+ * bot 行原样存着图片标记，模型下一轮把这些标记读成自己说过的约定。
  *
  * 有个必须补的洞（§10.5 关键 P1）：`fileNote` 只来自 `qq_send` 的
- * `fileNames`，而表情包走 `<<image:>>` 不走那条路。剥完标记若什么都不补，
+ * `fileNames`，而表情包不走那条路。剥完图片节点若什么都不补，
  * 「她发过图」这件事就彻底从记忆里消失了——用户要的是不发图，不是不记得
- * 发过图。所以剥 image / voice 时各补一条中文占位。
+ * 发过图。所以剥标准图片节点 / voice 时各补一条中文占位。
+ *
+ * 正文里的 `![](路径)`（ai-chat 把标记转换后的形态）同理：不是 `<<>>` 标记，
+ * 上面几套正则都吃不到，但里面是本地绝对路径，留在日记里会让模型下一轮
+ * 把它当成自己说过的约定。一并剥掉、同样计入「发了图片」。
+ *
+ * 两种标记都会发图（一种是图文同条、一种是单独一条），所以都补占位。
  *
  * `<<say: 内容>>` 里的「内容」是她真的念出来的话，保留文本、只摘外壳。
  */
@@ -147,14 +154,14 @@ export function cleanBotText(text) {
   /**
    * 嵌套标记要逐层剥：外层 value 不跨 `<<`，第一轮吃掉最内层，
    * 外层要到下一轮才成形。循环到不动点，5 轮上限防病态输入。
-   * 畸形嵌套会把一个 image 计成 ×2，真机遇不到，按「宁可多留一条痕迹」处理。
+   * 畸形嵌套会把一个 voice 计成 ×2，真机遇不到，按「宁可多留一条痕迹」处理。
    */
   for (let round = 0; round < 5; round += 1) {
     const before = out;
     out = out.replace(RE_ACTION, (_full, name, value) => {
       const k = String(name).toLowerCase();
       const v = String(value ?? '').trim();
-      if (k === 'image') { images += 1; return ''; }
+      if (k === 'image' || k === 'image-alone') { images += 1; return ''; }
       if (k === 'voice') { voices += 1; return ''; }
       if (k === 'say') return v;
       // button / silence / remember 都是指令，不是正文
@@ -165,6 +172,14 @@ export function cleanBotText(text) {
   }
   /** 半截标记：只摘标记本身，后面的正文留着 */
   out = out.replace(RE_UNCLOSED, '');
+  /**
+   * 标准 markdown 图片（框架通用图文出口的新写法）。
+   * 在循环外做一次，避免每轮重复计数；alt 里的 `#宽px #高px` 一起丢掉。
+   */
+  out = out.replace(/!\[[^\]]*\]\([^)]*\)/g, () => {
+    images += 1;
+    return '';
+  });
   const notes = [];
   if (images) notes.push(images > 1 ? `（发了图片 ×${images}）` : '（发了图片）');
   if (voices) notes.push(voices > 1 ? `（发了语音 ×${voices}）` : '（发了语音）');

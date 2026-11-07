@@ -679,7 +679,9 @@ test('表情: 清单里给完整路径（不然模型拼不对）', () => {
   assert.match(p, /表情包/);
   assert.match(p, /开心\/猫/); // 标签
   assert.ok(p.includes(join(d, '开心_猫.png')), '要给完整路径');
-  assert.match(p, /<<image:/);
+  assert.match(p, /<<image: /, '图文同条要教');
+  assert.match(p, /<<image-alone: /, '单独发图也要教');
+  assert.doesNotMatch(p, /!\[说明\]/, '标准 markdown 语法不该再教给模型');
 });
 
 test('表情: 没图 / 关掉时不注入', () => {

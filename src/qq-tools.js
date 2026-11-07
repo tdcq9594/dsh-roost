@@ -30,19 +30,58 @@
 
 import { loadDefineTool, shapeTool } from './tools.js';
 import { acceptClose } from './closing.js';
-import { DOWNSTREAM_MARKERS } from './markers.js';
 
 /**
- * 只有 ai-chat 才认识的标记（发图 / 发语音 / 按钮 / 语音条 / 静默）。
+ * `qq_send` 里**仍然要拦**的标记：`say` / `button` / `silence`。
  *
- * 这些标记在**回复正文**里会被 ai-chat 的 `parseActions` 执行；
- * 但 `qq_send` 走的是 `/r/reply` 直发通道，那边**不做标记解析**，
- * 于是它们会被当成普通文字原样发进群。
+ * 为什么以前连 `image` / `voice` 也拦：注释里写的理由是「`/r/reply` 直发通道
+ * 不做解析，标记会原样进群」。**这条理由不成立**——`sendOf` 走的是
+ * `postReply()`，落点是 ai-chat 的 `POST /reply`，那边把 `parts` 拼成 text
+ * 之后照样跑 `parseActions`，标记会被消费掉，不会漏给用户。
+ *
+ * 拦它们的真实代价（2026-11 外部实测）：DSH 模式下模型主要在 `qq_send` 里说话，
+ * 而「调过 qq_send，回复正文就不会再发出去」——于是**图片和语音根本没有
+ * 能到达 ai-chat 的通道**：写正文被丢弃，写 qq_send 被工具拒。用户那边是靠
+ * 改这里（放行 image/voice）绕过去的，属于在补我们的洞。
+ *
+ * 所以现在放行 `image` / `image-alone` / `voice`（都由 ai-chat 解析执行）。
+ * 剩下三个继续拦，理由各不相同：
+ *   · `say`：本机 TTS 关掉时 ai-chat 会把它摘掉，有正文的情况下那句话
+ *     会彻底消失（只留一行 warn）。宁可在工具这一层明确拒绝，让模型改用
+ *     `<<voice: 路径>>`，也不要静默吞掉用户本该听到的话。
+ *   · `button` / `silence`：只在正文链路上验证过，`qq_send` 分段时挂按钮 /
+ *     设静默没有真机结论，先不放开。
+ *
+ * 标准 markdown 图片 `![说明](路径)` 仍然拦：模型侧协议已经换成标记，
+ * 写 markdown 属于旧习惯；这里给一个明确错误（并告诉它正确写法）比
+ * 让它猜「为什么图没出来」好。
  */
-const DOWNSTREAM_RE = new RegExp(`<<\\s*(?:${DOWNSTREAM_MARKERS.join('|')})\\b`, 'i');
+const SEND_BLOCKED = ['say', 'button', 'silence'];
+const DOWNSTREAM_RE = new RegExp(`<<\\s*(?:${SEND_BLOCKED.join('|')})\\b`, 'i');
+const INLINE_IMAGE_RE = /!\[[^\]]*\]\([^)]*\)/;
 
 /** 单轮最多发几段。QQ 被动回复同一条消息只让回 5 次（msg_seq 1–5），留余量 */
 export const MAX_PARTS = 3;
+
+/**
+ * 段数上限的唯一来源。
+ *
+ * 工具（`qq_send` 的拒绝判据 + 描述）和提示词里的「一轮最多 N 段」
+ * **必须用同一个值**。以前提示词写死 3、这里读配置：配置大于 3 时模型白
+ * 浪费两格；配置小于 3 时更糟——模型按 3 组织内容，第 3 段被工具拒掉，
+ * 用户只觉得「话说一半没了」，而且不报错（2026-11 外部实测）。
+ *
+ * 上限夹到 8：再大就会撞「被动回复 5 次」的硬顶，调上去也没用。
+ *
+ * @param {object} [cfg] 完整配置（只读 `qqTools.maxParts`）
+ * @param {string} [kind='group'] 会话类型；被动回复硬上限是群 5 / 私聊 4
+ * @returns {number}
+ */
+export function maxPartsOf(cfg, kind = 'group') {
+  const hardMax = kind === 'c2c' ? 4 : 5;
+  const n = Number(cfg?.qqTools?.maxParts);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, hardMax) : Math.min(MAX_PARTS, hardMax);
+}
 
 /**
  * openid 的合法形状：QQ 官方的 `member_openid` / `user_openid` 是
@@ -183,20 +222,26 @@ function buildSendFileDef({ caller, fileOf }) {
  */
 export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf }) {
   const caller = () => callerOf?.() || { chatId: '', kind: '', said: '', hasPayload: false, bucket: '' };
-  const maxParts = () => {
-    const n = Number(cfgOf?.()?.qqTools?.maxParts);
-    return Number.isFinite(n) && n > 0 ? Math.min(n, 8) : MAX_PARTS;
-  };
+  const maxParts = () => maxPartsOf(cfgOf?.(), caller().kind);
 
   const send = {
     name: 'qq_send',
     description:
       '把一段话发出去。想分两句说就调两次（每次一段），想只回一句就调一次。'
-      + `一轮最多 ${maxParts()} 段，调多了会被拒。`
+      + '一轮上限按当前会话和配置执行，超额会被拒；以本轮系统提示中的具体段数为准。'
       + '**调过这个工具之后，回复正文就不会再自动发出去了**（正文只当思考用）——'
       + '所以要么调工具、要么直接写正文，别两边都写。不想说话就一次都别调。'
-      + '**这条通道只发文字**：不要在这里写 `<<say: …>>` 之类的语音标记，'
-      + '标记会被原样发进群里。要发语音就写在回复正文里，这一轮别调这个工具。',
+      /**
+       * 图片和语音**必须在这一段里说清楚能写**。
+       *
+       * 以前这里写的是「只发文字，别写标记」——在 DSH 模式下的实际后果是
+       * 图片永远发不出去：正文被丢弃（上一句刚承诺的），`qq_send` 又不让写。
+       * 标记由 ai-chat 解析，不会原样进群，所以这里放开 image/voice。
+       */
+      + '这一段里可以带图片和语音标记：`<<image: 路径>>` 让图和这句话排在同一条，'
+      + '`<<image-alone: 路径>>` 单独发一条图，`<<voice: 路径>>` 发语音条。'
+      + '但 `<<say: …>>` 不要写在这里——宿主 TTS 关着时它会被丢掉，'
+      + '改用 setsuna-tts 合成后拿路径写 `<<voice: …>>`。',
     /** 扁平参数表（DSH defineTool 原生形状），普通注册时由 `shapeTool` 转换 */
     parameters: {
       text: {
@@ -230,25 +275,21 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
       const t = String(text ?? '').trim();
       if (!t) return { ok: false, message: '要说什么？' };
       /**
-       * 下游标记在这条通道上发不出去，必须拦住。
+       * 只剩 `say` / `button` / `silence` 要拦（`image` / `image-alone` /
+       * `voice` 已放行，见 `SEND_BLOCKED` 上方那段口径）。
        *
-       * `<<say>>` / `<<image>>` / `<<voice>>` / `<<button>>` / `<<silence>>`
-       * 都是 **ai-chat** 解析的，而它只解析「模型最终回复的正文」；
-       * `qq_send` 走的是 `/r/reply` 直发通道，那边**不做标记解析**。
-       * 于是这些标记会被当成普通文字原样发进群——用户看到 `<<say: …>>`
-       * 或者一个本地文件路径，模型却以为语音/图片已经发出去了
-       * （2026-11-03 线上真实发生，用户当场问「为什么发出来的是文字」）。
-       *
-       * 不能「剥掉标记照发」：那只是把「标记泄漏」换成「该发语音却发了
-       * 文字」，模型依然不知道自己用错了通道，下次还这么干。直接拒绝，
-       * 并把正确写法说清楚，让它这一轮改用正文。
+       * 拒绝而不是「剥掉照发」：剥掉只是把「标记泄漏」换成「该发语音却发了
+       * 文字」，模型依然不知道自己用错了通道。直接拒绝并把正确写法说清楚，
+       * 让它这一轮就改过来。
        */
-      if (DOWNSTREAM_RE.test(t)) {
+      if (DOWNSTREAM_RE.test(t) || INLINE_IMAGE_RE.test(t)) {
         return {
           ok: false,
-          message: '语音条 / 图片 / 按钮这类标记不能通过 qq_send 发：这条通道只发文字，'
-            + '标记会原样出现在群里。要发这些东西，就把标记写在**回复正文**里'
-            + '（正文会自动执行），并且这一轮不要调 qq_send。',
+          message: '`<<say>>` / `<<button>>` / `<<silence>>` 不能通过 qq_send 发，'
+            + '标准 markdown 图片 `![](路径)` 也不行。'
+            + '图片用 `<<image: 路径>>`（和这句话同条）或 `<<image-alone: 路径>>`（单独一条），'
+            + '语音用 `<<voice: 路径>>`——这三个写在**同一次 qq_send 的 text 里**就行，'
+            + '不要改写成正文（调过 qq_send 之后正文不会发出去）。',
         };
       }
       const c = caller();

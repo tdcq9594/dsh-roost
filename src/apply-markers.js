@@ -199,14 +199,16 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
      * `mood` 已经这么漏过一次（写进 `qq_send` 参数里，工具通道直接 `postReply`）。
      * 只匹配「字母开头 + 可选冒号值」的形状，不会误伤正文里的尖括号。
      *
-     * **负向前瞻 `(?!image|voice|button|say|silence)\b` 是本次修复的关键**：
-     * 这几个是**下游 ai-chat** 的 `parseActions` 负责执行的标记（发图 / 发语音 /
-     * 按钮 / 语音条 / 静默），宿主这边不认识、也不该碰，必须原样保留让它们
-     * 随文本传到 ai-chat 去执行。
+     * `stripUnknown` 里放行 `DOWNSTREAM_MARKERS`（单独发图 / 语音 / 按钮 /
+     * 语音条 / 静默）——这几个由 ai-chat 执行，宿主原样留给它。
      *
-     * 真实事故：模型把 `<<image: 路径>>` 写进 `qq_send` 的 text 参数，
-     * 这里没保护 → 被兜底当成「未知标记」静默删掉 → ai-chat 拿到的
-     * 是纯文本、解析不出 image 动作 → 图根本没发出去，模型却以为「发你了」。
+     * 图片有**两种**标记，别混：
+     *   · `<<image: 路径>>` 是「图文同条」，由 ai-chat 换成框架认的
+     *     markdown 图片、在正文里就地排版，所以必须原样放行；
+     *   · `<<image-alone: 路径>>` 是「单独发一条图」，由 ai-chat 抽成动作后
+     *     另发一条。
+     * 两者 `qq_send` 直发通道都一律拒绝（见 `qq-tools.js`），
+     * 两边都不能让本地路径漏出去。
      */
     out = stripUnknown(out);
 

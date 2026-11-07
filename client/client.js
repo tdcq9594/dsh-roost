@@ -7382,7 +7382,7 @@ select.roost-input{color-scheme:dark}
 
       /** 「配置全文」用：整份替换（删字段 = 回落默认值） */
       const saveAll = useCallback(async (full) => {
-        const r = await post('/config', { ...full, __revision: configRev })
+        const r = await post('/config?mode=full', { ...full, __revision: configRev })
         if (r.httpStatus === 409) {
           setConfig(r.config || null)
           setConfigRev(String(r.revision || ''))

@@ -96,9 +96,12 @@ test('清单：平铺时目录只写一次，不逐条重复路径', () => {
   const text = stickers.prompt({});
   assert.ok(text.includes('海妖.png（海妖）'), text);
   assert.ok(text.includes('水解.png（水解）'), text);
-  // 每行不该再带一遍盘符：整段里目录最多出现两次（抬头 + 示例）
+  // 每行不该再带一遍盘符：清单行只写文件名
+  const listLines = text.split('\n').filter((l) => l.startsWith('- '));
+  assert.ok(listLines.length >= 2 && listLines.every((l) => !l.includes(dir)), text);
+  // 整段里目录只该出现在抬头和两种写法的示例里（最多 3 次）
   const hits = text.split(dir).length - 1;
-  assert.ok(hits <= 2, `目录出现了 ${hits} 次：\n${text}`);
+  assert.ok(hits <= 3, `目录出现了 ${hits} 次：\n${text}`);
 });
 
 test('清单：有分类时只列分类和少量示例，把具体文件交给工具', () => {
@@ -217,6 +220,8 @@ test('工具：字符串参数能用，空分类被挡，返回值带「怎么�
   assert.equal(one.items.length, 1);
   // 只给路径不给用法时，模型会把路径写进正文，群里看到一串盘符
   assert.ok(one.how.includes('<<image:'), JSON.stringify(one));
+  assert.ok(one.how.includes('<<image-alone:'), '单独发图这条路也要教给模型');
+  assert.ok(!one.how.includes('![说明]'), '标准 markdown 语法不该再教给模型');
 
   const bad = await tool.execute({ category: '生气' });
   assert.equal(bad.ok, false);
@@ -375,10 +380,14 @@ test('多目录：提示词列出每个目录，示例路径必须真的能打�
   const text = stickers.prompt({ dir: [d1, d2] });
   assert.ok(text.includes(d1) && text.includes(d2), text);
 
-  // 只认独占一行的示例（说明行里的 `<<image: <完整路径>>` 是占位符，不是文件）
-  const m = text.match(/^<<image: (.+?)>>$/m);
-  assert.ok(m, text);
-  assert.ok(fs.existsSync(m[1]), `示例路径不存在：${m[1]}\n${text}`);
+  // 两种标记的示例都要指向真实文件（占位符 `<完整路径>` 不算）。
+  const one = text.match(/单独发一条图：<<image-alone: (.+?)>>/);
+  assert.ok(one, text);
+  assert.ok(fs.existsSync(one[1]), `单独发图示例路径不存在：${one[1]}\n${text}`);
+
+  const inline = text.match(/图和文字同一条：<<image: (.+?)>>/);
+  assert.ok(inline, text);
+  assert.ok(fs.existsSync(inline[1]), `内联示例路径不存在：${inline[1]}\n${text}`);
 });
 
 test('多目录：空配置、空数组、空白字符串都回落默认目录', () => {

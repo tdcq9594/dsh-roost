@@ -138,15 +138,20 @@ test('失效机制：JSONL 后端同口径，rewrite 之后失效字段不丢', 
 
 /* ---------------- 2.1 剥动作标记 ---------------- */
 
-test('2.1：bot 行剥动作标记，但补上「发过图」的痕迹', () => {
+test('2.1：bot 行剥动作标记，但补上「发过图 / 发过语音」的痕迹', () => {
   assert.equal(cleanBotText('你好<<image: C:\\stickers\\希露.jpg>>'), '你好\n（发了图片）');
-  assert.equal(cleanBotText('<<image: a>><<image: b>>'), '（发了图片 ×2）');
+  // 两个图片标记都会发图：一个就地排版、一个单独发，日记里都记「发过图」
+  assert.equal(cleanBotText('你好<<image-alone: C:\\stickers\\希露.jpg>>'), '你好\n（发了图片）');
+  assert.equal(cleanBotText('<<image: a>><<image-alone: b>>'), '（发了图片 ×2）');
   assert.equal(cleanBotText('早上好<<voice: a.mp3>>'), '早上好\n（发了语音）');
   assert.equal(cleanBotText('<<say: 晚安>>'), '晚安', 'say 里念出来的那句话是正文');
   assert.equal(cleanBotText('<<say: 内容里有 > 号>>'), '内容里有 > 号', '值里的 > 不该截断');
   assert.equal(cleanBotText('在吗<<silence:2h>><<button: x>><<remember: y>>'), '在吗');
   assert.equal(cleanBotText('1 < 2 > 0'), '1 < 2 > 0', '普通尖括号不能误伤');
   assert.equal(cleanBotText('a << b >> c'), 'a << b >> c', '双尖括号正文不能误伤');
+});
+
+test('2.1：半截的图片标记只清掉，不写空行也不吃正文', () => {
   assert.equal(cleanBotText('<<image: 没闭合'), '', '半截标记摘干净，不写空行');
   assert.equal(
     cleanBotText('你好<<image: 断了，后面还有正常正文'),
@@ -154,6 +159,21 @@ test('2.1：bot 行剥动作标记，但补上「发过图」的痕迹', () => {
     '半截标记不能把同一行后面的正文吃掉',
   );
   assert.equal(cleanBotText('<<image: 断了\n第二行正常正文'), '第二行正常正文', '换行后的正文要留着');
+});
+
+test('2.1：标准 markdown 图片（框架通用图文出口）同样剥净并补痕迹', () => {
+  assert.equal(
+    cleanBotText('你好![笑](C:\\stickers\\希露.jpg)'),
+    '你好\n（发了图片）',
+    '本地绝对路径不能留在日记里',
+  );
+  assert.equal(cleanBotText('![笑 #200px #200px](a.png)![哭](b.png)'), '（发了图片 ×2）');
+  assert.equal(
+    cleanBotText('前![笑](a.png)后'),
+    '前后\n（发了图片）',
+    '图片位置不留空行，alt 里的尺寸参数一起丢',
+  );
+  assert.equal(cleanBotText('[看这里](https://x/y)'), '[看这里](https://x/y)', '普通链接不误伤');
 });
 
 /* ---------------- 2.3 撤销判定 ---------------- */
@@ -271,7 +291,7 @@ function bridgeRig({ rows = [] } = {}) {
 
 test('2.1：写进日记的 bot 正文与快照都是清洗后的', () => {
   const { bridge, added } = bridgeRig();
-  bridge.add({ id: 'm1', eventIds: ['ev-1'] }, { chatId: 'g1' }, '好呀<<image: a.jpg>>', 'bot');
+  bridge.add({ id: 'm1', eventIds: ['ev-1'] }, { chatId: 'g1' }, '好呀![笑](a.jpg)', 'bot');
   assert.equal(added[0].text, '好呀\n（发了图片）');
   assert.equal(added[0].evidence[0].excerpt, '好呀\n（发了图片）', '快照不能抄标记');
 });

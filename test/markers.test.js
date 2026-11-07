@@ -7,7 +7,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { markerRe, stripUnclosed, stripUnknown, parseReplace, VALUE_MARKERS } from '../src/markers.js';
+import {
+  markerRe, stripUnclosed, stripUnknown, parseReplace,
+  VALUE_MARKERS, DOWNSTREAM_MARKERS,
+} from '../src/markers.js';
 
 /** 复刻 host.js 里的执行顺序：先摘已知标记，再兜底，最后清未闭合 */
 function pipeline(text) {
@@ -54,8 +57,9 @@ test('未闭合：截断的标记吞到行尾，不留给用户', () => {
 });
 
 test('未闭合：下游标记要清，闭合的下游标记不能碰', () => {
-  // 闭合的必须原样留给 ai-chat，摘了图就发不出去
+  // 闭合的必须原样留给 ai-chat，摘了图/语音就发不出去
   assert.equal(stripUnclosed('<<image: a.png>>'), '<<image: a.png>>');
+  assert.equal(stripUnclosed('<<say: 你好>>'), '<<say: 你好>>');
   // 未闭合的没有闭合位置，ai-chat 也匹配不到，留着就是漏
   assert.equal(stripUnclosed('<<image: a.png'), '');
   assert.equal(stripUnclosed('<<image：a.png'), '');
@@ -69,10 +73,21 @@ test('未闭合：正文里的尖括号不能误伤', () => {
 test('兜底：未知标记摘掉，下游标记原样保留', () => {
   assert.equal(stripUnknown('<<unknown: x>>'), '');
   assert.equal(stripUnknown('<<unknown：x>>'), '', '全角冒号也要摘');
-  for (const keep of ['image', 'voice', 'button', 'say', 'silence']) {
+  for (const keep of DOWNSTREAM_MARKERS) {
     const s = `<<${keep}: v>>`;
     assert.equal(stripUnknown(s), s, `${keep} 必须留给 ai-chat`);
   }
+});
+
+test('名单：两个图片标记都留给 ai-chat（一个就地排版、一个单独发）', () => {
+  assert.ok(DOWNSTREAM_MARKERS.includes('image'));
+  assert.ok(DOWNSTREAM_MARKERS.includes('image-alone'));
+  assert.ok(DOWNSTREAM_MARKERS.includes('voice'));
+  // 闭合的标记要留给 ai-chat 执行，摘了图就发不出去
+  assert.equal(stripUnknown('<<image: C:/stickers/笑.png>>'), '<<image: C:/stickers/笑.png>>');
+  assert.equal(stripUnknown('<<image-alone: C:/stickers/笑.png>>'), '<<image-alone: C:/stickers/笑.png>>');
+  // 未闭合的仍然要清（没有闭合位置，ai-chat 的正则也匹配不到）
+  assert.equal(stripUnclosed('<<image-alone: C:/a.png'), '');
 });
 
 test('整条链路：三种已知漏法都不再漏', () => {

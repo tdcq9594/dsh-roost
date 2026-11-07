@@ -26,13 +26,18 @@
 export const VALUE_MARKERS = ['remember-here', 'remember', 'replace', 'persona', 'mood', 'forget', 'close'];
 
 /**
- * 下游（ai-chat）负责执行的标记。
+ * 下游（ai-chat）负责执行的标记，宿主必须原样放行闭合写法。
  *
- * 宿主**不能摘掉闭合的**——摘了 ai-chat 就发不出图了（真实事故见 `stripUnknown`）。
+ * 摘了它们，ai-chat 就发不出图 / 语音 / 按钮了（真实事故见 `stripUnknown`）。
  * 但**未闭合的必须摘**：它没有闭合位置，ai-chat 的正则也匹配不到，
  * 留着就是原样进群。反正缺 `>>` 的标记本来就执行不了。
+ *
+ * 两个图片标记分工（2026-11-07 起模型侧只教这两种）：
+ *   `<<image: 路径>>`        就地插图，图和文字同一条
+ *   `<<image-alone: 路径>>`  单独发一条图
+ * 两者都是 `<<>>` 标记，宿主**不能摘**——摘了 ai-chat 就拿不到位置/意图。
  */
-export const DOWNSTREAM_MARKERS = ['image', 'voice', 'button', 'say', 'silence'];
+export const DOWNSTREAM_MARKERS = ['image', 'image-alone', 'voice', 'button', 'say', 'silence'];
 
 /**
  * 一个标记的匹配式。**半角冒号和全角冒号都认**。
@@ -87,15 +92,17 @@ export function parseReplace(value) {
  * 标记协议是**两个仓库各自实现**的（这里是这套，ai-chat 的 `parseActions`
  * 是另一套）。哪边加了新标记、另一边没跟上，标记就会原样进群。
  *
- * 负向前瞻里的那几个是**下游 ai-chat** 负责执行的（发图/语音/按钮/静默），
- * 宿主不认识也不该碰——必须原样留给它。真实事故：`<<image: 路径>>` 被这里
- * 当未知标记删掉，图没发出去，模型却以为「发你了」。
+ * 负向前瞻放行 `DOWNSTREAM_MARKERS`——那几个由 **ai-chat** 执行
+ * （单独发图 / 语音 / 按钮 / 语音条 / 静默），宿主不认识也不该碰。
+ * 名单从常量动态生成，别再手写一遍导致两边漂移。
  *
  * @param {string} text
  */
 export function stripUnknown(text) {
-  return String(text ?? '').replace(
-    /<<(?!image|voice|button|say|silence)\b[a-z][a-z-]{0,20}(?:[:：][^<>]{0,2000})?>>/gi,
-    '',
+  const preserve = DOWNSTREAM_MARKERS.map((n) => n.replace(/-/g, '\\-')).join('|');
+  const re = new RegExp(
+    `<<(?!${preserve})\\b[a-z][a-z-]{0,20}(?:[:：][^<>]{0,2000})?>>`,
+    'gi',
   );
+  return String(text ?? '').replace(re, '');
 }

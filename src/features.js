@@ -239,7 +239,7 @@ export const FEATURES = [
     path: ['stickers', 'enabled'],
     requires: NONE,
     affects: ['sticker_pick'],
-    offHint: '不再发表情包，`<<image:>>` 标记也不再生效。',
+    offHint: '不再发表情包，`<<image:>>` 与 `<<image-alone:>>` 都不会再发图。',
   },
   {
     id: 'voice',

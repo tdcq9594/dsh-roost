@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildQqToolDefs, buildAtPrefix, MAX_PARTS, AT_ID_RE } from '../src/qq-tools.js';
+import { buildQqToolDefs, buildAtPrefix, MAX_PARTS, AT_ID_RE, maxPartsOf } from '../src/qq-tools.js';
 
 /**
  * 造一套工具，返回 { send, close } 和记账用的箱子。
@@ -128,18 +128,18 @@ test('qq_send：空文本不发', async () => {
   assert.equal(box.sent.length, 0);
 });
 
-test('qq_send：拒绝语音标记，别让 <<say>> 原样发进群', async () => {
+test('qq_send：拒绝 say 标记，避免 TTS 关闭时文字被吞', async () => {
   const { send, box } = make();
   /**
-   * 2026-11-03 线上真实事故：模型把整句写成 `<<say: ...>>` 塞进 qq_send，
-   * 群里收到的是这串字面量。这条通道不经过 ai-chat 的标记解析，
-   * 所以必须在工具层拒掉，并告诉它改走正文。
+   * `qq_send` 的分段会交给 ai-chat 解析标记，但 TTS 关闭时 `<<say>>` 会被摘掉；
+   * 所以必须在工具层拒掉，并告诉模型改写成普通文字或用语音文件标记。
    */
   const r = await send.execute({ text: '<<say: Sakura, 我在听。>>' });
   assert.equal(r.ok, false);
   assert.match(r.message, /不能通过 qq_send/);
-  assert.match(r.message, /回复正文/);
-  assert.equal(box.sent.length, 0, '带语音标记的那段一个字都不该发出去');
+  assert.match(r.message, /同一次 qq_send 的 text 里/);
+  assert.doesNotMatch(r.message, /回复正文/);
+  assert.equal(box.sent.length, 0, '带 say 标记的那段不该发出去');
 });
 
 test('qq_send：say 大小写/空格写法都拦得住', async () => {
@@ -151,20 +151,26 @@ test('qq_send：say 大小写/空格写法都拦得住', async () => {
   assert.equal(box.sent.length, 0);
 });
 
-test('qq_send：image / voice / button / silence 同样拦（都只有正文能执行）', async () => {
+test('qq_send：放行 image / image-alone / voice，只拦 button / silence', async () => {
   const { send, box } = make();
-  const cases = [
+  const allowed = [
     '<<image: C:/a/b.png>>',
+    '<<image-alone: C:/a/b.png>>',
     '<<voice: C:/a/b.mp3>>',
-    '<<button: 点我 | 好的>>',
-    '<<silence>>',
   ];
-  for (const text of cases) {
+  for (const text of allowed) {
+    const r = await send.execute({ text });
+    assert.equal(r.ok, true, `${text} 应交给 ai-chat 解析`);
+  }
+  assert.deepEqual(box.sent, allowed, '允许的标记应原样交给下游解析');
+
+  for (const text of ['<<button: 点我 | 好的>>', '<<silence>>']) {
     const r = await send.execute({ text });
     assert.equal(r.ok, false, `${text} 应被拒`);
-    assert.match(r.message, /回复正文/);
+    assert.match(r.message, /同一次 qq_send 的 text 里/);
+    assert.doesNotMatch(r.message, /回复正文/);
   }
-  assert.equal(box.sent.length, 0, '这些标记一个都不该发出去');
+  assert.equal(box.sent.length, allowed.length, '被拦的标记一个都不该发出去');
 });
 
 test('qq_send：正文里的普通尖括号不误伤', async () => {
@@ -172,6 +178,25 @@ test('qq_send：正文里的普通尖括号不误伤', async () => {
   const r = await send.execute({ text: '这个 <<不是标记>> 只是打字' });
   assert.equal(r.ok, true);
   assert.equal(box.sent.length, 1);
+});
+
+test('qq_send：标准 markdown 图片必须拦（否则本地绝对路径发进群）', async () => {
+  const { send, box } = make();
+  const cases = [
+    '![笑](C:/stickers/开心.png)',
+    '前 ![笑 #200px #200px](C:/a b/c.png) 后',
+    '![图](https://x/a.png)',
+  ];
+  for (const text of cases) {
+    const r = await send.execute({ text });
+    assert.equal(r.ok, false, `${text} 应被拒`);
+    assert.match(r.message, /标准 markdown 图片/);
+    assert.match(r.message, /同一次 qq_send 的 text 里/);
+    assert.doesNotMatch(r.message, /回复正文/);
+  }
+  assert.equal(box.sent.length, 0, '一条都不该发出去');
+  const link = await send.execute({ text: '看这里 [链接](https://x/y)' });
+  assert.equal(link.ok, true, '普通 markdown 链接不能误伤');
 });
 
 test('qq_send：超过上限就拒，并说清还剩几段', async () => {
@@ -182,6 +207,25 @@ test('qq_send：超过上限就拒，并说清还剩几段', async () => {
   assert.equal(r.ok, false);
   assert.match(r.message, /上限 2 段/);
   assert.equal(box.sent.length, 2, '超限那次不该发出去');
+});
+
+/**
+ * 段数上限的唯一来源：提示词与工具必须读到同一个值。
+ *
+ * 2026-11 外部实测：提示词里写死「一轮最多 3 段」，而这里读配置（对方配的是 5）
+ * ——模型只发 3 段，后面两格白浪费。反过来配置成 2 时更糟：模型按 3 组织内容，
+ * 第 3 段被工具拒掉且不报错，用户只觉得「话说一半没了」。
+ */
+test('段数上限：配置值受会话被动回复硬上限约束', () => {
+  assert.equal(maxPartsOf({ qqTools: { maxParts: 5 } }, 'group'), 5);
+  assert.equal(maxPartsOf({ qqTools: { maxParts: 8 } }, 'group'), 5);
+  assert.equal(maxPartsOf({ qqTools: { maxParts: 99 } }, 'c2c'), 4);
+  assert.equal(maxPartsOf({ qqTools: { maxParts: 5 } }, 'c2c'), 4);
+  assert.equal(maxPartsOf({ qqTools: { maxParts: 0 } }, 'group'), MAX_PARTS);
+  assert.equal(maxPartsOf({ qqTools: { maxParts: -3 } }, 'group'), MAX_PARTS);
+  assert.equal(maxPartsOf({ qqTools: { maxParts: 'abc' } }, 'group'), MAX_PARTS);
+  assert.equal(maxPartsOf({}, 'group'), MAX_PARTS);
+  assert.equal(maxPartsOf(undefined, 'group'), MAX_PARTS);
 });
 
 test('qq_send：这一轮没有 payload 时拒（不该发生，但别静默）', async () => {
