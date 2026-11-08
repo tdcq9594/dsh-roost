@@ -61,6 +61,44 @@ export const DEFAULTS = {
   skipBackoffMaxMinutes: 360,
 };
 
+/* ---------------- C3 主人反馈闭环 ---------------- */
+
+export const KIND_WEIGHT_MIN = 0.5;
+export const KIND_WEIGHT_MAX = 1.5;
+export const KIND_WEIGHT_STEP = 0.05;
+/** 同一类主动连续两次没人回，才降权重（一次可能是刚好在忙） */
+export const NO_REPLY_PENALTY = 0.08;
+
+export function defaultKindWeights() {
+  return { agreement: 1, miss: 1, casual: 1 };
+}
+
+/** 只动被反馈的那一类；夹在 [0.5, 1.5]，别让一两次点踩把某类机会彻底掐死 */
+export function adjustKindWeights(weights = {}, kind, delta) {
+  const cur = { ...defaultKindWeights(), ...(weights || {}) };
+  if (!KINDS.includes(kind)) return cur;
+  const v = Number(cur[kind] ?? 1);
+  const raw = Number.isFinite(v) ? v : 1;
+  cur[kind] = Math.round(
+    Math.min(KIND_WEIGHT_MAX, Math.max(KIND_WEIGHT_MIN, raw + Number(delta || 0))) * 1000,
+  ) / 1000;
+  return cur;
+}
+
+/**
+ * 主人下一条私聊回复的态度。只作**补充**信号：官方点赞点踩（/mood）更可靠，
+ * 用户不一定会点。中文没词边界，所以先判否定——「不要」「不好」里都带正面的字。
+ */
+export function classifyOwnerReply(text) {
+  const s = String(text ?? '').trim().toLowerCase();
+  if (!s) return 'neutral';
+  if (/(别再|别发|不要|不用了|不想|烦|吵|闭嘴|无聊|够了|算了|讨厌|没空|很忙|少来|行了)/.test(s)) return 'negative';
+  if (/(谢谢|太棒|好棒|好呀|好的|真好|喜欢|有意思|哈哈|可爱|厉害|赞|不错|开心|对呀|嗯嗯)/.test(s)) return 'positive';
+  /** 「嗯」是敷衍不是夸，只有叠字「嗯嗯」算正面（已在上面那条里） */
+  if (/^(好|行|ok|okay|可以|好啊)$/.test(s)) return 'positive';
+  return 'neutral';
+}
+
 /** 在不在清醒时段（跨零点也支持） */
 export function inWindow(hour, from, to) {
   if (from === to) return true;
@@ -110,7 +148,7 @@ export function readAgreements({ memory, graph, chatId = '', aliases = [] } = {}
  * @param {boolean} [o.noMiss] 不算「想你」这一档（群聊用）
  * @returns {Array<{kind:string, score:number, reason:string}>} 按分降序
  */
-export function opportunities({ now = Date.now(), mood = {}, agreements = [], state = {}, cfg = {}, noMiss = false, pending = '' } = {}) {
+export function opportunities({ now = Date.now(), mood = {}, agreements = [], state = {}, cfg = {}, noMiss = false, pending = '', weights = null } = {}) {
   const c = { ...DEFAULTS, ...(cfg || {}) };
   const hour = new Date(now).getHours();
   if (!inWindow(hour, c.awakeFrom, c.awakeTo)) return [];
@@ -197,7 +235,16 @@ export function opportunities({ now = Date.now(), mood = {}, agreements = [], st
     });
   }
 
+  /**
+   * C3：权重乘在**过阈值之前**，否则被降权的 kind 照样进列表、只是排序靠后，
+   * 「说了没人理就少说这类」根本没生效。默认全 1 时乘完数值逐字节不变。
+   */
+  const w = { ...defaultKindWeights(), ...(weights || {}) };
   return out
+    .map((o) => {
+      const k = Number(w[o.kind]);
+      return { ...o, score: o.score * (Number.isFinite(k) ? k : 1) };
+    })
     .filter((o) => o.score >= c.minScore)
     .map((o) => ({ ...o, score: Math.max(0, Math.min(1, Number(o.score.toFixed(3)))) }))
     .sort((a, b) => b.score - a.score);
@@ -528,7 +575,14 @@ export function createAwake({
    * 的候选来自配置白名单，脏条目不会真被当成群，但面板「她为什么不说」那栏
    * 一旦有人按 state 去看，就会多出一个不存在的群。
    */
-  let state = { groups: {}, c2c: { lastUserAt: 0 }, casualDay: '', casualCount: 0, lastWakeAt: 0, lastKind: '', lastWhy: '' };
+  let state = {
+    groups: {}, c2c: { lastUserAt: 0 }, casualDay: '', casualCount: 0,
+    lastWakeAt: 0, lastKind: '', lastWhy: '',
+    /** C3：三类机会的反馈权重（默认全 1 = 与未上线前一致） */
+    kindWeights: defaultKindWeights(),
+    /** 上一次主动说出去是哪一类、有没有结算过、连续几次没人回 */
+    lastWakeKind: '', settled: true, noReplyStreak: 0, lastFeedbackAt: 0,
+  };
   try {
     state = { ...state, ...JSON.parse(readFileSync(file(), 'utf8')) };
   } catch {}
@@ -600,6 +654,65 @@ export function createAwake({
   }
 
   /**
+   * C3：上一次主动说出去之后，主人一直没回。
+   *
+   * 在**下一次 compose 之前**结算：又轮到她想说话了，说明上一次确实没人接。
+   * 连续两次才降权，一次可能只是对方在忙。`settled` 由 noteOwnerReply /
+   * feedback 置回 true；老盘没有这个字段（undefined）时这里直接跳过，
+   * 保证升级上来的部署行为不变。
+   */
+  function settleNoReply() {
+    if (state.settled !== false) return;
+    state.noReplyStreak = Number(state.noReplyStreak || 0) + 1;
+    if (state.noReplyStreak >= 2 && KINDS.includes(state.lastWakeKind)) {
+      state.kindWeights = adjustKindWeights(state.kindWeights, state.lastWakeKind, -NO_REPLY_PENALTY);
+      log(`主动 ${state.lastWakeKind} 连续 ${state.noReplyStreak} 次没回音，权重降了 ${NO_REPLY_PENALTY}`);
+    }
+    state.settled = true;
+    save();
+  }
+
+  /** C3：官方点赞点踩（/mood）——比文本分类可靠，优先走这条 */
+  function feedback({ positive, kind = '' } = {}) {
+    if (typeof positive !== 'boolean') return false;
+    /** 显式传了不认识的 kind 就拒，别悄悄退回 lastWakeKind 调错一类 */
+    const k = kind ? (KINDS.includes(kind) ? kind : '') : (state.lastWakeKind || state.lastKind);
+    if (!KINDS.includes(k)) return false;
+    state.kindWeights = adjustKindWeights(
+      state.kindWeights, k, positive ? KIND_WEIGHT_STEP : -KIND_WEIGHT_STEP,
+    );
+    state.noReplyStreak = 0;
+    state.settled = true;
+    state.lastFeedbackAt = now();
+    save();
+    return true;
+  }
+
+  /** C3：主人下一条私聊回复的文本分类（补充信号） */
+  function noteOwnerReply(text) {
+    const c = classifyOwnerReply(text);
+    /** 有回音就清计数、结算上一次主动——跟态度是正还是中性无关 */
+    state.noReplyStreak = 0;
+    state.settled = true;
+    /**
+     * 同一条回复只结算一次：先点了赞、又顺手回一句「好呀」，不该 ±0.05 算两遍。
+     * 5 分钟窗口覆盖「点完按钮再打字」的间隔。
+     */
+    const justSettled = state.lastFeedbackAt > 0 && now() - state.lastFeedbackAt < 5 * MINUTE;
+    if (c !== 'neutral' && !justSettled) {
+      const k = state.lastWakeKind || state.lastKind;
+      if (KINDS.includes(k)) {
+        state.kindWeights = adjustKindWeights(
+          state.kindWeights, k, c === 'positive' ? KIND_WEIGHT_STEP : -KIND_WEIGHT_STEP,
+        );
+        state.lastFeedbackAt = now();
+      }
+    }
+    save();
+    return c;
+  }
+
+  /**
    * **只做决定，不发送**。这是整套东西的分工线：
    *   · `speakup.js` 管「什么时候轮到她」（间隔、日上限、免打扰，已有测试）
    *   · 这里管「这次说什么、要不要说」
@@ -612,6 +725,8 @@ export function createAwake({
    * @returns {Promise<{speak:boolean, text:string, kind:string, why:string}>}
    */
   async function compose({ kind = 'c2c', chatId = '', extraPrompt = '' } = {}) {
+    /** C3：先把上一次「说了没人理」结算掉，再用新权重算这一轮的机会 */
+    settleNoReply();
     const c = cfg();
     const ctx = contextOf?.({ kind, chatId }) || {};
     const opps = opportunities({
@@ -638,6 +753,8 @@ export function createAwake({
       noMiss: kind === 'group',
       /** C2：惦记只作用私聊随性这一档；群主动传进来也不该被抬分 */
       pending: kind === 'group' ? '' : ctx.pending,
+      /** C3：反馈后的权重直接影响「该不该开口」（过阈值之前乘） */
+      weights: state.kindWeights,
     });
     if (!opps.length) return { speak: false, text: '', kind: '', why: '没有值得说的机会', asked: false };
 
@@ -697,6 +814,14 @@ export function createAwake({
       const today = dayKey(now());
       state.casualCount = state.casualDay === today ? Number(state.casualCount || 0) + 1 : 1;
       state.casualDay = today;
+    }
+    /**
+     * C3：这次说出口了，等主人下一条私聊回复来结算。
+     * 群主动不记：群里的插话没有「等主人回」这回事，混进来会误伤私聊权重。
+     */
+    if (kind === 'c2c') {
+      state.lastWakeKind = opp.kind;
+      state.settled = false;
     }
     save();
     return { speak: true, text: v.text, kind: opp.kind, why: opp.reason, asked: true };
@@ -807,6 +932,9 @@ export function createAwake({
     noteUser,
     compose,
     wakeGroups,
+    /** C3：官方点赞点踩 / 主人回复文本，两个反馈入口 */
+    feedback,
+    noteOwnerReply,
     /** 私聊最后一次收到消息的时间戳（0 = 没记录）。`contextOf` 算「想你」用它 */
     c2cLastUserAt,
     /** 某个群的觉醒状态（面板/日志看"为什么不说话"用） */
@@ -818,7 +946,12 @@ export function createAwake({
       lastOpportunities: (() => {
         try {
           const ctx = contextOf?.({ kind: 'c2c' }) || {};
-          return opportunities({ now: now(), mood: ctx.mood, agreements: ctx.agreements, state: ctx.state || {}, cfg: cfg() });
+          return opportunities({
+            now: now(), mood: ctx.mood, agreements: ctx.agreements,
+            state: ctx.state || {}, cfg: cfg(),
+            /** 面板算的机会分必须和 compose 用同一份权重与惦记，否则「她为什么不说」会答错 */
+            pending: ctx.pending, weights: state.kindWeights,
+          });
         } catch {
           return [];
         }

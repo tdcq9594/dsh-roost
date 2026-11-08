@@ -37,7 +37,7 @@ import { createGraph } from './graph.js';
 import { createSelf } from './self.js';
 import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
-import { createMood } from './mood.js';
+import { createMood, normalizeFeedback } from './mood.js';
 import { observe, moodPrompt } from './mood-observe.js';
 import { createHistoryRing } from './history-ring.js';
 import { memoryLines } from './memory-line.js';
@@ -3302,6 +3302,12 @@ export function apply(ctx) {
       const said = text;
 
       /**
+       * C3：主人私聊回复按态度调主动权重（正/负 ±0.05，中性只算「有回音」）。
+       * 群里的发言不参与——反馈闭环等的是主人本人。
+       */
+      if (chat.kind === 'c2c') awake.noteOwnerReply(said);
+
+      /**
        * B1：聊天内容轻轻带动心情。默认关（mood.effects），打开后只在
        * 明确被夸/被凶时推一点 valence，30 秒节流；其余交给模型自己的
        * `<<mood:>>` 标记。主人说的话权重高一点。
@@ -4934,6 +4940,12 @@ export function apply(ctx) {
           return send(res, 400, { ok: false, message: `不认识的反馈：${String(raw).slice(0, 20)}`, ...mood.get() });
         }
         moodHistory.push({ valence: r.valence, reason: r.reason, source: 'feedback' });
+        /**
+         * C3：官方点赞点踩直接结算到主动 kind 权重（§14.2-13 要求优先复用
+         * 这条现成通路，文本分类只作补充）。判方向用 normalizeFeedback，
+         * 别自己再解析一遍 raw——`r.valence` 是新状态不是增量，正负不可靠。
+         */
+        awake.feedback({ positive: normalizeFeedback(raw) === 'LIKE' });
         send(res, 200, { ok: true, applied: true, ...r });
       }),
 
