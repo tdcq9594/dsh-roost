@@ -5,6 +5,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { createJournalBridge } from '../src/journal-bridge.js';
 
@@ -22,6 +25,36 @@ function rig({ off = false, throwOnAdd = false } = {}) {
   const bridge = createJournalBridge({ journal, memoryOff: () => off, log });
   return { bridge, added, warns };
 }
+
+test('kind 默认 chat；主动搭话传 proactive 并剥动作标记', () => {
+  const { bridge, added } = rig();
+  bridge.add({ id: 'm1' }, { chatId: 'c1' }, '在吗', 'user');
+  assert.equal(added[0].kind, 'chat', '对话默认 kind=chat，不能变');
+  bridge.add({ id: 'p1' }, { chatId: 'c1' }, '今天想你了<<image: x.png>>', 'bot', { kind: 'proactive' });
+  assert.equal(added[1].kind, 'proactive');
+  assert.equal(added[1].role, 'bot');
+  assert.ok(!added[1].text.includes('<<image'), 'bot 行仍要剥动作标记');
+});
+
+test('proactive 与 chat 在 journal 里分开：对话 recent 取不到主动话', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-proactive-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+  const { createJournal } = await import('../src/journal.js');
+  const j = createJournal({ file: join(dir, 'j.sqlite'), log: () => {} });
+  const bridge = createJournalBridge({
+    journal: j, memoryOff: () => false, log: { info() {}, warn() {} },
+  });
+  bridge.add({ id: 'p1', eventIds: [] }, { chatId: 'c1' }, '今天想你了', 'bot', { kind: 'proactive' });
+  bridge.add({ id: 'm1', eventIds: [] }, { chatId: 'c1' }, '在吗', 'user');
+
+  const pro = j.recent('c1', 10, 'proactive');
+  assert.equal(pro.length, 1);
+  assert.equal(pro[0].text, '今天想你了');
+  const chat = j.recent('c1', 10, 'chat');
+  assert.equal(chat.length, 1, '主动话不能混进对话 recent（巩固只取 chat）');
+  assert.equal(chat[0].text, '在吗');
+  j.close();
+});
 
 test('正常写一条：id 带角色后缀，出处在 evidence 里', () => {
   const { bridge, added } = rig();

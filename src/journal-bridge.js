@@ -303,7 +303,12 @@ export function pickRevocationTargets(rows, { quoted = '', text = '', before = D
  * @param {{journal:object, memoryOff:(chatId:string)=>boolean, log:object}} deps
  */
 export function createJournalBridge({ journal, memoryOff, log }) {
-  function add(payload, chat, text, role) {
+  /**
+   * @param {object} [opts] `kind` 默认 'chat'（对话原文）。主动搭话传 'proactive'：
+   *   C1 防复读要能看到它，但凌晨巩固只取 `kind==='chat'`，不该把主动话
+   *   当对话素材提炼成事实/摘要。
+   */
+  function add(payload, chat, text, role, { kind = 'chat' } = {}) {
     if (memoryOff(chat?.chatId)) return;
     try {
       const base = String(payload?.id ?? '').trim();
@@ -370,6 +375,7 @@ export function createJournalBridge({ journal, memoryOff, log }) {
         chatId: chat.chatId,
         sender: role === 'bot' ? '' : String(payload?.sender?.name ?? '').trim(),
         role,
+        kind,
         text: body,
         eventIds,
         /**

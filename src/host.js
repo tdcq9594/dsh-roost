@@ -1707,6 +1707,24 @@ export function apply(ctx) {
     if (shouldNotePending({ ok: r?.ok, pending: r?.pending, scene: payload?.scene, text: payload?.text })) {
       closing.notePending(payload?.target, payload.text);
     }
+    /**
+     * C1：主动消息也进 journal（`kind='proactive'`）。
+     *
+     * 之前只有被动回复写 bot 行，`wakeMaterials()` 的 `recentBot` 因此看不到
+     * 主动说过什么——主动搭话之间互相重复防不住（审查 §11 的 C1 素材范围）。
+     * 只在**明确送达**时写：pending 还没确定过审，写了就是「她以为说过」。
+     * 用 `proactive` 而不是 `chat`：凌晨巩固只取 `kind==='chat'`，主动话不该
+     * 被当对话素材提炼成事实/摘要；C1 取数时两个 kind 合并。
+     */
+    if (r?.ok && !r.pending && String(payload?.text ?? '').trim()) {
+      journalAdd(
+        { id: String(payload?.requestId || payload?.id || ''), eventIds: [] },
+        { chatId: String(payload?.target || ''), aliases: [] },
+        payload.text,
+        'bot',
+        { kind: 'proactive' },
+      );
+    }
     return r;
   };
 
@@ -1760,11 +1778,21 @@ export function apply(ctx) {
           : [],
         /**
          * C1 + C4：素材拼装交给 `wakeMaterials()` 纯函数（有单测）。
-         * 主动消息本来就写进 journal 的 bot 行，不另建数组；D8 经历层
-         * 只在开关开着时给，关着就别把旧动作翻出来说。
+         *
+         * **两个 kind 都要取**：对话原文是 `chat`，主动搭话是 `proactive`
+         * （`sendOut` 送达后写）。只取 `chat` 会让防复读看不到自己上次主动
+         * 说过什么——审查 §11 抓到的 C1 素材缺口。合并后按时间倒序取最近 16 条。
+         * D8 经历层只在开关开着时给，关着就别把旧动作翻出来说。
          */
         ...wakeMaterials({
-          journalRows: cid ? journal.recent(cid, 16, 'chat', aliasesOf(cid)) : [],
+          journalRows: cid
+            ? [
+                ...journal.recent(cid, 16, 'chat', aliasesOf(cid)),
+                ...journal.recent(cid, 16, 'proactive', aliasesOf(cid)),
+              ]
+                .sort((a, b) => Number(b.at) - Number(a.at))
+                .slice(0, 16)
+            : [],
           eventRows: cfg.events?.enabled === true ? events.recent(3) : [],
           eventsEnabled: cfg.events?.enabled === true,
           labels: EVENT_LABELS,
