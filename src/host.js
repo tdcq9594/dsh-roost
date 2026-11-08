@@ -43,6 +43,7 @@ import { createHistoryRing } from './history-ring.js';
 import { memoryLines } from './memory-line.js';
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
+import { offpeakState } from './offpeak.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing } from './closing.js';
 import { createAccount } from './account.js';
@@ -1124,6 +1125,8 @@ export function apply(ctx) {
 
   /** 这一轮用户说的话（截断），世界书按它匹配触发词 */
   let lastMsgText = '';
+  /** D10：最近一次收到消息的时间，给峰谷判据的「安静期」用（只读观测，不改调度） */
+  let lastActiveAt = 0;
 
   /** 关键词切人格：chatId → personaId。**只在内存里**，重启失效（设计如此） */
   const keywordPick = new Map();
@@ -3804,6 +3807,8 @@ export function apply(ctx) {
    * 少包一层就等于没排队。
    */
   function onInbound(payload) {
+    /** D10：只记时间戳，不在这条热链路上做任何判断 */
+    lastActiveAt = Date.now();
     return inboundShell.onInbound(payload);
   }
 
@@ -5394,6 +5399,11 @@ export function apply(ctx) {
           memoryStaticText: memoryStatic(forced),
           memoryDynamicText: memoryDynamic(),
           memoryText: mtext,
+          /**
+           * D10：当前是峰还是谷，给排障和阶段 7 的慢工具错峰用。
+           * 这里只是**观测**，不改变任何后台任务的调度（见 offpeak.js 头注）。
+           */
+          offpeak: offpeakState({ now: Date.now(), lastActiveAt }),
         });
       }),
 
