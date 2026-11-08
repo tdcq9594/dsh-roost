@@ -110,7 +110,7 @@ export function readAgreements({ memory, graph, chatId = '', aliases = [] } = {}
  * @param {boolean} [o.noMiss] 不算「想你」这一档（群聊用）
  * @returns {Array<{kind:string, score:number, reason:string}>} 按分降序
  */
-export function opportunities({ now = Date.now(), mood = {}, agreements = [], state = {}, cfg = {}, noMiss = false } = {}) {
+export function opportunities({ now = Date.now(), mood = {}, agreements = [], state = {}, cfg = {}, noMiss = false, pending = '' } = {}) {
   const c = { ...DEFAULTS, ...(cfg || {}) };
   const hour = new Date(now).getHours();
   if (!inWindow(hour, c.awakeFrom, c.awakeTo)) return [];
@@ -178,18 +178,22 @@ export function opportunities({ now = Date.now(), mood = {}, agreements = [], st
   const inCloseCool = closedAt > 0 && now - closedAt < closeCool;
 
   if (casualUsed < c.casualPerDay && !inCloseCool) {
+    /**
+     * C2：心里惦记着一句没被回的话时，随性这一档 +0.35（照 aurabot 的权重），
+     * 并打上 `pendingBoost` 让 `pickOpportunity` 有一半机会直接优先它。
+     * 不给「约定」加：答应过的事本来就该提，不需要靠惦记抬分。
+     */
+    /**
+     * 基础分 + 精力项的系数是照着 `minScore` 定的：精力中性 0.5 时约 0.39
+     * 能过线（阈值 0.35），掉到 0.2 时约 0.34 自动不过线——累了就不想
+     * 随便搭话。C2 的 pending 加成叠在这上面，不另造一档机会。
+     */
+    const thought = String(pending ?? '').trim().slice(0, 60);
     out.push({
       kind: 'casual',
-      /**
-       * 基础分 + 精力项。
-       *
-       * 系数是照着 `minScore` 定的：精力取中性值 0.5 时约 0.39，能过线（阈值 0.35）；
-       * 精力掉到 0.2 时约 0.34，**自动不过线**——累了就不想随便搭话，
-       * 这比"到点了硬说一句"自然。写成 `0.25 + 0.15*energy` 的话，
-       * 中性精力下只有 0.325，随性这一档等于永远选不到。
-       */
-      score: 0.3 + 0.18 * energy,
-      reason: '没什么特别的事，就是想随便说句话',
+      score: 0.3 + 0.18 * energy + (thought ? 0.35 : 0),
+      reason: thought ? `心里还惦记着「${thought}」` : '没什么特别的事，就是想随便说句话',
+      ...(thought ? { pendingBoost: true } : {}),
     });
   }
 
@@ -285,6 +289,13 @@ export function isDuplicateText(text, recent = [], threshold = DUP_THRESHOLD) {
 export function pickOpportunity(list, rand = Math.random) {
   const items = (list || []).filter((o) => o.score > 0);
   if (!items.length) return null;
+  /**
+   * C2：心里惦记着的事有一半机会直接插队。
+   * 只在这条标记存在时才多摇一次随机数——没 pending 的部署随机序列
+   * 与改动前完全一致（老测试的固定 rand 不会因此漂移）。
+   */
+  const boosted = items.find((o) => o.pendingBoost);
+  if (boosted && rand() < 0.5) return boosted;
   const total = items.reduce((s, o) => s + o.score, 0);
   let r = rand() * total;
   for (const o of items) {
@@ -327,6 +338,15 @@ export function buildWakePrompt({ opp, ctx = {}, group = null, extra = '' } = {}
       ? `【上次聊到这儿】\n收在：${ctx.closing.point}`
         + (ctx.closing.resume ? `\n你本来打算下次这么接：${ctx.closing.resume}` : '')
         + '\n（可以从这儿接着聊，也可以就着这件事起个头；别装作没发生过。）'
+      : '',
+    /**
+     * C2：上次主动问出去、对方没回的话。
+     * 明确写「别追问怎么不回我」——否则模型很容易把惦记演成催回复，
+     * 那比干脆不提更烦人。也照样给 <<skip>> 的出口。
+     */
+    ctx.pending
+      ? `【心里还惦记着】\n上次你主动问了「${String(ctx.pending).slice(0, 60)}」，对方没回。`
+        + '\n（可以自然地接着聊那件事，别追问「怎么不回我」；没什么想说的就输出 <<skip>>。）'
       : '',
     ctx.recent?.length ? `【最近说过的话】\n${ctx.recent.map((r) => `· ${r}`).join('\n')}` : '',
     /**
@@ -616,6 +636,8 @@ export function createAwake({
       cfg: kind === 'group' ? { ...c, casualPerDay: 0 } : c,
       // 群里也没有"想你"：她不在群里等谁，等谁的是私聊
       noMiss: kind === 'group',
+      /** C2：惦记只作用私聊随性这一档；群主动传进来也不该被抬分 */
+      pending: kind === 'group' ? '' : ctx.pending,
     });
     if (!opps.length) return { speak: false, text: '', kind: '', why: '没有值得说的机会', asked: false };
 

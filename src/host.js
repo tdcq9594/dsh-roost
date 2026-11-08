@@ -45,7 +45,7 @@ import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { offpeakState } from './offpeak.js';
 import { searchWithShortContext, recallRow } from './recall.js';
-import { createClosing } from './closing.js';
+import { createClosing, shouldNotePending } from './closing.js';
 import { createAccount } from './account.js';
 import { createRewriter } from './rewrite.js';
 import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand, trimPersonaBody, trimDemos, dupGroups } from './personas.js';
@@ -1664,6 +1664,14 @@ export function apply(ctx) {
     if (r?.ok && !r.pending && cfg.events?.enabled === true) {
       events.push({ kind: 'proactive', scene: payload?.scene });
     }
+    /**
+     * C2：主动问句**确实送达**才记成「心里惦记着」。
+     * 进审核（pending）不记——还没确定送到，记了又是「她以为问过、其实没人看见」；
+     * 只私聊，群里不惦记谁没回。判问句复用 closing.js 的纯函数，不另写一份。
+     */
+    if (shouldNotePending({ ok: r?.ok, pending: r?.pending, scene: payload?.scene, text: payload?.text })) {
+      closing.notePending(payload?.target, payload.text);
+    }
     return r;
   };
 
@@ -1749,6 +1757,8 @@ export function apply(ctx) {
         },
         /** 上次收在哪：主动搭话时用来接上话头，别装作没发生过 */
         closing: closed ? { point: closed.point, resume: closed.resume } : null,
+        /** C2：上次主动问了没被回的话（只影响私聊随性这一档） */
+        pending: closing.pending(cid)?.text || '',
       };
     },
     /**
@@ -3265,6 +3275,8 @@ export function apply(ctx) {
        * 而私聊决策读的是另一份（`speakUp.lastOwnerAt`），两边对不上。
        */
       awake.noteUser(chat.chatId, chat.kind);
+      /** C2：主人回话了，那句没被回的问句就翻篇（只清 pending，不动收尾记录） */
+      if (chat.kind === 'c2c') closing.clearPending(chat.chatId);
 
       /**
        * 链路 id：框架进站时生成，ai-chat 透传过来。

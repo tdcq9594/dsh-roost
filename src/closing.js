@@ -36,6 +36,13 @@ export const DEFAULTS = {
   coolMinutes: 90,
   /** 最多留几个会话的收尾记录，防止文件无限长 */
   maxChats: 200,
+  /**
+   * C2「心里惦记着」：主动问了句没被回，留多久（天）。
+   * 比收尾长一倍：上次的问句隔几天再提还自然，收尾隔 7 天就接不上了。
+   */
+  pendingTtlDays: 14,
+  /** 最多同时惦记几个会话 */
+  pendingMax: 20,
 };
 
 /** 收尾后冷却期（毫秒） */
@@ -84,6 +91,18 @@ export function looksLikeQuestion(text) {
 }
 
 /**
+ * C2：这一条主动发送值不值得记成「心里惦记着」。
+ *
+ * 三道闸缺一不可：**确实送达**（进审核的还没算说过）、**私聊**（群里不惦记
+ * 谁没回）、**是问句**（陈述句没有「等答复」这回事）。抽成纯函数是因为
+ * 漏任意一道都是静默的：数据照样写、面板照样不报错，只是她开始惦记
+ * 一些根本没人看见的话。
+ */
+export function shouldNotePending({ ok, pending, scene, text } = {}) {
+  return Boolean(ok) && !pending && scene === 'c2c' && looksLikeQuestion(text);
+}
+
+/**
  * 这次收尾该不该接受。
  *
  * 抽成纯函数是因为三条拒绝**全是静默失败**——错了不会有任何报错，
@@ -118,9 +137,15 @@ export function createClosing(cfg = {}) {
     if (cache) return cache;
     try {
       const raw = JSON.parse(readFileSync(file(), 'utf8'));
-      cache = raw && typeof raw === 'object' && raw.chats ? raw : { chats: {} };
+      const obj = raw && typeof raw === 'object' ? raw : {};
+      cache = {
+        ...obj,
+        chats: obj.chats && typeof obj.chats === 'object' ? obj.chats : {},
+        /** 老文件没有这一段，读取时补上，不写迁移脚本 */
+        pending: obj.pending && typeof obj.pending === 'object' ? obj.pending : {},
+      };
     } catch {
-      cache = { chats: {} };
+      cache = { chats: {}, pending: {} };
     }
     return cache;
   }
@@ -151,6 +176,12 @@ export function createClosing(cfg = {}) {
   function alive(rec, now = Date.now()) {
     if (!rec || !rec.at) return false;
     return now - rec.at <= conf().ttlDays * DAY;
+  }
+
+  /** C2：惦记的问句用自己的 TTL，比收尾长，别跟着 7 天一起消失 */
+  function pendingAlive(rec, now = Date.now()) {
+    if (!rec || !rec.at) return false;
+    return now - rec.at <= conf().pendingTtlDays * DAY;
   }
 
   return {
@@ -205,6 +236,47 @@ export function createClosing(cfg = {}) {
     },
 
     /**
+     * C2：记下一句主动问出去、还没人回的话。
+     *
+     * 存在同一个 `closing.json` 的 `pending` map 里，**不占用 `chats`**：
+     * 两者混在一格会互相覆盖，而且「对方回话了要清掉 pending」会顺手
+     * 把「上次聊到哪儿」的收尾记录也删了——那条是被动接话要用的。
+     * 只私聊：群里插话不该「惦记着谁没回」。
+     */
+    notePending(chatId, text, kind = 'c2c') {
+      const c = conf();
+      if (!c.enabled || !chatId || kind === 'group') return false;
+      const t = String(text ?? '').trim().slice(0, 120);
+      if (!t) return false;
+      const db = load();
+      db.pending[chatId] = { at: Date.now(), text: t };
+      const keys = Object.keys(db.pending);
+      if (keys.length > c.pendingMax) {
+        keys
+          .sort((a, b) => (db.pending[a].at || 0) - (db.pending[b].at || 0))
+          .slice(0, keys.length - c.pendingMax)
+          .forEach((k) => { delete db.pending[k]; });
+      }
+      save();
+      return true;
+    },
+
+    /** 还惦记着的那句话；过期 / 不存在返回 null */
+    pending(chatId, now = Date.now()) {
+      const rec = load().pending?.[chatId];
+      return pendingAlive(rec, now) ? { ...rec } : null;
+    },
+
+    /** 对方回话了就翻篇。只清 pending，不动收尾记录 */
+    clearPending(chatId) {
+      const db = load();
+      if (!db.pending?.[chatId]) return false;
+      delete db.pending[chatId];
+      save();
+      return true;
+    },
+
+    /**
      * 注入给模型的一段话。**没有记录就返回空串**——不要注入
      * 「上次没有收尾记录」这种废话，那是白吃 token。
      */
@@ -244,6 +316,13 @@ export function createClosing(cfg = {}) {
       for (const k of keys) {
         if (!alive(db.chats[k], now)) {
           delete db.chats[k];
+          changed = true;
+        }
+      }
+      /** C2：过期的惦记也一起清，TTL 是独立的 14 天 */
+      for (const k of Object.keys(db.pending || {})) {
+        if (!pendingAlive(db.pending[k], now)) {
+          delete db.pending[k];
           changed = true;
         }
       }
