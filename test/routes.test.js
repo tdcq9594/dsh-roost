@@ -16,6 +16,18 @@ import { join } from 'node:path';
 const noop = () => () => {};
 
 /**
+ * 路由层测试不该依赖真实网络。
+ *
+ * 本机若真跑着 Roost（默认 15207），`setup.api()` 会打到它，于是
+ * 「连不上 roost」那几条断言会假红（2026-11-08 实测：本机 15207 在线，
+ * `/account/scan` 的 `roost.ok` 变成 true，5 条测试挂掉）。
+ * 整文件把 fetch 打死，测试可重复、也不受用户开着面板影响。
+ */
+globalThis.fetch = () => Promise.reject(
+  Object.assign(new Error('connect ECONNREFUSED 127.0.0.1'), { cause: { code: 'ECONNREFUSED' } }),
+);
+
+/**
  * 造一个假 ctx 并把 host 跑起来。
  * @param {object} cfgPatch 写进 config.json 的覆盖项
  */

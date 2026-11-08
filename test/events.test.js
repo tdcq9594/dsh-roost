@@ -97,6 +97,19 @@ test('D8：动作表覆盖报告里的四类，全都有人话', () => {
   }
 });
 
+test('D8：旧盘/手改的非法 kind 读侧过滤，不注入 undefined', () => {
+  const { ev } = fresh({
+    seed: [
+      { at: T0, kind: 'proactive', scene: 'c2c', count: 1 },
+      { at: T0, kind: '偷偷塞的', scene: 'c2c', count: 1 },
+    ],
+  });
+  assert.equal(ev.recent().length, 1, '非法 kind 不出现在只读列表里');
+  const text = ev.text();
+  assert.match(text, /主动找过人|主动找过你/);
+  assert.ok(!text.includes('undefined'), `注入块里混进了 undefined：${text}`);
+});
+
 test('D8 注入闸门：只有「开着 + owner + 私聊」三个条件同时成立', () => {
   assert.equal(shouldInjectEvents({ enabled: true, bucket: 'owner', kind: 'c2c' }), true);
   assert.equal(shouldInjectEvents({ enabled: false, bucket: 'owner', kind: 'c2c' }), false, '默认关必须一个字都不注入');

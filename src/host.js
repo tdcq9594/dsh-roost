@@ -1558,10 +1558,12 @@ export function apply(ctx) {
       if (!day) return;
       /**
        * D11：一天一次的记忆淡出（只在点过「应用」之后才真的动数据）。
-       * 放在巩固 try 之外：巩固失败不该让淡出停摆，淡出失败也不该带崩
-       * 巩固——`retentionSweep()` 自己吞异常只记日志。
+       * 和巩固在同一个 tick 里，但**独立兜一次异常**：淡出失败不该把
+       * `consolidate.run()` 一起跳过。`retentionSweep()` 自己已吞异常只记
+       * 日志，这层是第二道保险（注释别再写成「在巩固 try 之外」，实际在内）。
        */
-      retentionSweep();
+      try { retentionSweep(); }
+      catch (e) { log.warn(`记忆淡出没跑成（不影响巩固）：${e?.message ?? e}`); }
       log.info(`巩固定时器：开始处理 ${day}`);
       const r = await consolidate.run({ day });
       if (r.ok) {

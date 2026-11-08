@@ -92,7 +92,12 @@ export function adjustKindWeights(weights = {}, kind, delta) {
 export function classifyOwnerReply(text) {
   const s = String(text ?? '').trim().toLowerCase();
   if (!s) return 'neutral';
-  if (/(别再|别发|不要|不用了|不想|烦|吵|闭嘴|无聊|够了|算了|讨厌|没空|很忙|少来|行了)/.test(s)) return 'negative';
+  /**
+   * 中文没词边界，否定必须先判：「不好 / 不太好 / 不怎么样」里都带正面的字，
+   * 落到下面的正面表就会被当成夸。
+   * 「不好」要排除「不好意思」——那是客气，不是否定（审查实测过误判）。
+   */
+  if (/(别再|别发|不要|不用了|不想|烦|吵|闭嘴|无聊|够了|算了|讨厌|没空|很忙|少来|行了|不好(?!意思)|不太好|不怎么样|不太行|没意思)/.test(s)) return 'negative';
   if (/(谢谢|太棒|好棒|好呀|好的|真好|喜欢|有意思|哈哈|可爱|厉害|赞|不错|开心|对呀|嗯嗯)/.test(s)) return 'positive';
   /** 「嗯」是敷衍不是夸，只有叠字「嗯嗯」算正面（已在上面那条里） */
   if (/^(好|行|ok|okay|可以|好啊)$/.test(s)) return 'positive';
@@ -678,6 +683,17 @@ export function createAwake({
     /** 显式传了不认识的 kind 就拒，别悄悄退回 lastWakeKind 调错一类 */
     const k = kind ? (KINDS.includes(kind) ? kind : '') : (state.lastWakeKind || state.lastKind);
     if (!KINDS.includes(k)) return false;
+    /**
+     * 同一条回复只结算一次（镜像窗口）：先回了「好呀」、5 分钟内又点 /mood 赞，
+     * 不该把 ±0.05 算两遍。noteOwnerReply 那边已有同款窗口，这里补上反向。
+     * 只清「没回音」状态，不刷 lastFeedbackAt，免得把窗口一路往后推。
+     */
+    if (state.lastFeedbackAt > 0 && now() - state.lastFeedbackAt < 5 * MINUTE) {
+      state.noReplyStreak = 0;
+      state.settled = true;
+      save();
+      return false;
+    }
     state.kindWeights = adjustKindWeights(
       state.kindWeights, k, positive ? KIND_WEIGHT_STEP : -KIND_WEIGHT_STEP,
     );

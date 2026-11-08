@@ -214,13 +214,23 @@ test('D11：一键恢复会撤掉自动授权，否则第二天又把刚恢复�
   assert.equal((await b.quick('features.preview')).body.autoSweep, true);
 });
 
-test('D11：自动 sweep 真的挂在凌晨巩固分支上（防止写了函数忘调用）', () => {
+test('D11：自动 sweep 真的挂在凌晨巩固分支上（防止写了函数忘调用或误移位置）', () => {
   const src = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   const tick = src.slice(src.indexOf('const consolidateTick'), src.indexOf('const consolidateBoot'));
   assert.ok(tick.length > 100, '没切到巩固定时器那段');
   assert.match(tick, /if \(!day\) return;/);
   assert.match(tick, /retentionSweep\(\);/, '一天一次的检查分支里必须调 sweep');
   assert.match(tick, /consolidate\.run\(\{ day \}\)/);
+  /**
+   * 原来只验「这几个串都在切片里」：把 sweep 挪到 `if (!day) return` 之前
+   * （变成每 10 分钟无条件跑、丢掉「一天一次」）用例照样全绿——审查抓到的
+   * 假阳性。改成位置断言，锁死「非巩固日直接返回之后、巩固 run 之前」。
+   */
+  const atReturn = tick.indexOf('if (!day) return;');
+  const atSweep = tick.indexOf('retentionSweep();');
+  const atRun = tick.indexOf('consolidate.run({ day })');
+  assert.ok(atReturn > 0 && atSweep > atReturn && atSweep < atRun,
+    `sweep 必须在「非巩固日返回」之后、巩固 run 之前：return=${atReturn} sweep=${atSweep} run=${atRun}`);
 });
 
 test('D11：purge 前必备份，备份带原文，真删后行确实没了', async (t) => {

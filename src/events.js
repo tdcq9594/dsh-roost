@@ -92,7 +92,12 @@ export function createEvents({
   }
 
   function recent(limit = 20) {
-    const all = [...prune()].reverse();
+    /**
+     * 读侧也要按白名单过滤：旧盘或手改过的 events.json 可能带白名单外的
+     * kind，`EVENT_LABELS[r.kind]` 会渲染成 `undefined`（审查实测复现）。
+     * 只滤读、不删盘，避免为了一行脏数据触发写文件。
+     */
+    const all = [...prune()].filter((r) => Object.hasOwn(EVENT_LABELS, r?.kind)).reverse();
     return limit > 0 ? all.slice(0, limit) : all;
   }
 

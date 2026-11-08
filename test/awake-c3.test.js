@@ -125,6 +125,31 @@ test('C3：官方点赞点踩直接结算；同一条回复只算一次', async 
   assert.equal(s.state().kindWeights.agreement, 1);
 });
 
+test('C3：中文否定先判，「不好 / 不太好 / 不怎么样」不被当成夸', () => {
+  for (const s of ['不好', '不太好', '不怎么样', '不太行', '没意思']) {
+    assert.equal(classifyOwnerReply(s), 'negative', `${s} 该算否定`);
+  }
+  assert.equal(classifyOwnerReply('不好意思，刚看到'), 'neutral', '「不好意思」是客气，不是否定');
+  assert.equal(classifyOwnerReply('不错'), 'positive', '别把「不错」误伤成否定');
+});
+
+test('C3：反向窗口——先回「好呀」再点赞，5 分钟内不重复结算', async () => {
+  const s = scene();
+  await s.a.compose({ kind: 'c2c' });
+  assert.equal(s.a.noteOwnerReply('好呀'), 'positive');
+  assert.equal(s.state().kindWeights.agreement, 1.05);
+
+  /** 同一条回复的第二次信号（文本 → 官方点赞）不该再 +0.05 */
+  assert.equal(s.a.feedback({ positive: true }), false);
+  assert.equal(s.state().kindWeights.agreement, 1.05);
+  assert.equal(s.state().settled, true, '仍要算「有回音」');
+  assert.equal(s.state().noReplyStreak, 0);
+
+  s.advance(6 * 60_000);
+  assert.equal(s.a.feedback({ positive: true }), true, '出了窗口就该正常结算');
+  assert.equal(s.state().kindWeights.agreement, 1.1);
+});
+
 test('C3：文本分类作补充，中性只算「有回音」', async () => {
   const s = scene();
   await s.a.compose({ kind: 'c2c' });
