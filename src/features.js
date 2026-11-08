@@ -374,7 +374,6 @@ export const FEATURES = [
     affects: NONE,
     offHint: '不再写档案，已有的档案不会被删。',
     advanced: true,
-    staged: true,
   },
   {
     id: 'events',

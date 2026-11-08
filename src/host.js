@@ -42,6 +42,7 @@ import { observe, moodPrompt } from './mood-observe.js';
 import { createHistoryRing } from './history-ring.js';
 import { memoryLines } from './memory-line.js';
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
+import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing } from './closing.js';
 import { createAccount } from './account.js';
@@ -1185,6 +1186,12 @@ export function apply(ctx) {
    * 不写 journal —— 否则巩固会把它写成摘要再注入回来，变成自己的回音。
    */
   const events = createEvents({ file: join(dataDir(), 'events.json'), log: (m) => log.warn(m) });
+  /**
+   * D7 人物小档案：跨群、独立 profiles.json，按 openid 归户。
+   * 写入只在凌晨巩固（天级），注入走稳定段但同一天冻结渲染结果，
+   * 两边都不碰消息热链路，也不动 prompt cache。
+   */
+  const profiles = createProfiles({ file: join(dataDir(), 'profiles.json'), log: (m) => log.warn(m) });
   /** 每个会话上一句用户原话：短句（<12 字）补检索用，只在内存里 */
   const recentUserText = new Map();
   /** B1 节流：同一段聊天别每句都推一次心情 */
@@ -1330,6 +1337,9 @@ export function apply(ctx) {
     memory,
     self,
     aliasesOf,
+    /** D7：实例常驻，开关实时读 cfg（能力页改了不用重启） */
+    profiles,
+    profilesEnabled: () => cfg.profiles?.enabled === true,
     log: (m) => log.info(m),
     generate: async (prompt) => {
       const chat = {
@@ -1961,6 +1971,22 @@ export function apply(ctx) {
     const lines = (arr) => arr.map((f) => `· ${f}`).join('\n');
 
     /**
+     * D7：熟人小档案进**稳定段**（system prompt）。
+     *
+     * `profiles.text()` 按日历日缓存渲染结果：同一天里凌晨巩固写了新档案，
+     * 这段也保持不变，prompt cache 不会因为一笔记档就整段作废；跨天才重算。
+     * 开关关着时连 `text()` 都不调，输出与未上线前逐字节一致。
+     */
+    let profilesSec = '';
+    if (shouldInjectProfiles({ enabled: cfg.profiles?.enabled })) {
+      try {
+        profilesSec = profiles.text({ enabled: true, day: dayKey(), limit: 6 });
+      } catch (e) {
+        log.debug(`取人物档案失败：${e.message}`);
+      }
+    }
+
+    /**
      * 平时只给分数最高的几条；深度时才全量。
      *
      * 深度也按同一顺序给：万一 `fitBudget` 要砍，砍掉的是分数低的尾巴，
@@ -2014,8 +2040,8 @@ export function apply(ctx) {
      * facts 是硬事实，自述是软状态。
      */
     const sections = deep
-      ? [rules, factsGlobal, factsChat, selfSec, digestSec, topSec, graphSec]
-      : [rules, factsGlobal, factsChat];
+      ? [rules, factsGlobal, factsChat, selfSec, profilesSec, digestSec, topSec, graphSec]
+      : [rules, factsGlobal, factsChat, profilesSec];
 
     const body = fitBudget(sections, deep ? MEMORY_DEEP_MAX : MEMORY_MAX);
     // 一句都没有（新装的、什么都没聊过）就别占地方
@@ -4531,6 +4557,15 @@ export function apply(ctx) {
               events.clear();
               return send(res, 200, { ok: true, message: '最近做过的事清了' });
 
+            /**
+             * D7：人物档案独立清空（契约 §3④，照 self.json 先例）。
+             * 跨群档案不挂 `memory.clear` —— 清某一个会话不该抹掉所有人的印象。
+             * 开关关着也能清，否则用户关掉功能后反而删不掉旧数据。
+             */
+            case 'profiles.clear':
+              profiles.clear();
+              return send(res, 200, { ok: true, message: '熟人小档案清了' });
+
             case 'memory.list':
               return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId, aliasesOf(chatId)) });
 
@@ -5069,6 +5104,17 @@ export function apply(ctx) {
             count: Number(r.count) || 1,
           })),
           eventsEnabled: cfg.events?.enabled === true,
+          /**
+           * D7 人物档案（只读展示）：开关关着也列出来，用户才清得掉旧数据。
+           * 只给印象/相处建议与名字，不把内部 openid 键铺到面板上。
+           */
+          profiles: profiles.recent(20).map((r) => ({
+            name: r.name || r.key,
+            impression: r.impression || '',
+            tips: r.tips || '',
+            at: r.at,
+          })),
+          profilesEnabled: cfg.profiles?.enabled === true,
           authz: memory.authz(chatId),
           personaOverride: memory.getPersonaOverride(chatId, aliasesOf(chatId)),
         });

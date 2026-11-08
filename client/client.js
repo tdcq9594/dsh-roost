@@ -3007,6 +3007,26 @@ select.roost-input{color-scheme:dark}
               : h('div', { className: 'roost-note' }, '还没写过。她自己说得够多、或者被纠正过的日子才会写一条。'),
         ),
 
+        /* D7 人物小档案：只读 + 独立清空。跨群档案，不随「清空本会话记忆」抹掉 */
+        h('div', { className: 'cap-group' },
+          h('div', { className: 'cap-group-t' }, '熟人小档案'),
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '每天凌晨从聊天里攒一小段印象和相处建议，跨群共用；同一天里不改提示词。开关关着也能在这儿查看和清空已有的。'),
+          (mem?.profiles || []).length
+            ? h('div', { style: { display: 'grid', gap: 4, marginBottom: 8 } },
+                (mem.profiles || []).map((p, i) => h('div', { key: i, className: 'roost-note' },
+                  '· ' + p.name + '：' + (p.impression || '') + (p.tips ? `（相处：${p.tips}）` : ''))))
+            : h('div', { className: 'roost-note', style: { marginBottom: 8 } }, '还没写过人物档案。'),
+          h(ConfirmLink, {
+            label: '清空人物档案', confirmLabel: '确认清空档案',
+            onConfirm: async () => {
+              const r = await quick('profiles.clear')
+              toast(r.message || '清了')
+              reload()
+            },
+          }),
+        ),
+
         /* D8 经历层：只读 + 独立清空。放在危险区之前，别让「查看」混进不可逆操作 */
         h('div', { className: 'cap-group' },
           h('div', { className: 'cap-group-t' }, '她最近做过的事（24 小时）'),
@@ -4390,7 +4410,7 @@ select.roost-input{color-scheme:dark}
           h('div', { className: 'roost-note' },
             '带 config 的开关和「设置」页是同一份，在哪儿改都一样；发文件那个存在能力策略里。'),
           h('div', { className: 'roost-note' },
-            '她记了什么、能清哪些：看左侧「记忆」页；以后上线的人物档案、经历、召回日志也归到那边查看和清空。'),
+            '她记了什么、能清哪些：看左侧「记忆」页；人物档案、经历、召回日志都归到那边查看和清空。'),
         ),
 
         h(Sec, {
@@ -5267,6 +5287,7 @@ select.roost-input{color-scheme:dark}
       ['memory', '记忆', '日记寿命、注入条数、多少轮全量重注、记忆工具开关'],
       ['mood', '心情', 'effects 打开后，聊天里被夸/被凶会带动心情，心情还会影响配图发语音的兴致；日常在「能力」页的高级组里点'],
       ['events', '经历', 'enabled：记不记她主动做过的事（找过人、发过文件）。24 小时自动过期，只给主人私聊当素材；关着也能在「记忆」页查看和清空已有的'],
+      ['profiles', '人物档案', 'enabled：要不要把对熟人的印象攒成一小段，聊天时带上。每天凌晨巩固时提炼、跨群共用，同一天里提示词不变；关着也能在「记忆」页查看和清空已有的'],
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
       ['awake', '主动说话', '清醒时段、机会分门槛、群白名单（开着时 speakUp.prompt 会当额外要求一起给）'],
       ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],

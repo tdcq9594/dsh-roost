@@ -210,16 +210,23 @@ export function planAgreementOp(item, facts = []) {
   return { ...base, will: 'supersede', reason: `唯一定位「${hits[0]}」`, match: hits[0] };
 }
 
-export function buildPrompt({ day, chatName, items, revocation = null, facts = [] }) {
+export function buildPrompt({ day, chatName, items, revocation = null, facts = [], profiles = null }) {
   const factLines = (Array.isArray(facts) ? facts : [])
     .map((f) => String(f ?? '').trim()).filter(Boolean)
     .slice(0, MAX_PROMPT_FACTS)
     .map((f, i) => `  [${i + 1}] ${f}`);
+  /**
+   * D7：人物档案是**可选**的一项。关着时下面两段条件都插空串，
+   * 整个 prompt 与未上线前逐字节一致——否则等于给所有默认用户改了
+   * 巩固提示词（模型输出会跟着变，属于静默回归）。
+   */
+  const withProfiles = Boolean(profiles?.enabled);
   const fmt = [
     '{"summary":"...","ranks":[["id","level"]],"compress":[{"id":"...","digest":"..."}],',
     ' "triples":[{"s":"...","rel":"...","o":"...","scope":"global"}],',
     ' "agreements":["...", {"text":"...","op":"update","old":"..."}],"closed":[]',
     revocation ? ',"revoked":[]' : '',
+    withProfiles ? ',"profiles":[{"who":"显示名","openid":"拿不到就留空","impression":"一小句","tips":"一小句"}]' : '',
     '}',
   ].join('');
   return [
@@ -255,6 +262,18 @@ export function buildPrompt({ day, chatName, items, revocation = null, facts = [
     '     所以拿不准就写字符串，宁可多留一条，也不要误作废。',
     '6. closed：以前答应过、今天明显已经办完的约定，给 [{"s":"主语","rel":"约定","o":"那件事"}]；没有就给空数组',
     /**
+     * D7 第 8 项：把「对一个人的印象」交给每天这次巩固顺带提炼。
+     * 不另开一次模型调用（凌晨一天一次的成本不变），也不放在消息热链路上。
+     * 关着时模型连这个选项都看不到，输出形状与老版本完全一致。
+     */
+    ...(withProfiles ? [
+      '8. profiles：今天**明显看得出来**的、对某个人的印象和跟他相处要注意什么，给',
+      '   [{"who":"显示名","openid":"他的 openid（拿不到就留空）","impression":"一小句印象","tips":"一小句相处建议"}]；',
+      '   · 只写当天真有依据的，别猜、别把群里的玩笑当结论，也别写身份事实（那是 triples 的活）',
+      '   · 已有的档案列在下面，改口就照实写新的一条，别重复',
+      '   · 没有就给空数组——宁可漏，也别编一个出来',
+    ] : []),
+    /**
      * 第 7 项只在 L3 候选成立时才加。合并进巩固这一次调用，不再单独调模型：
      * 凌晨一天一次的成本不变，也不会给消息热链路添任何调用。
      */
@@ -269,6 +288,9 @@ export function buildPrompt({ day, chatName, items, revocation = null, facts = [
     fmt,
     ...(factLines.length
       ? ['', '—— 你已经记得的事（判断 update / outdated 时对照；old 要从这里摘） ——', ...factLines]
+      : []),
+    ...(withProfiles && Array.isArray(profiles?.lines) && profiles.lines.length
+      ? ['', '—— 已经写过的熟人档案（要改就照实写新的，别重复） ——', ...profiles.lines]
       : []),
     '',
     '—— 下面是一天的记录 ——',
@@ -321,7 +343,13 @@ export function buildSelfPrompt({ day, said = [], corrected = [] } = {}) {
  * @param {object} [o.self]   createSelf() 的返回（第五层：自我叙述）
  * @param {(p:string)=>Promise<string>} [o.generate] 没给就只做机械压缩
  */
-export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now() } = {}) {
+export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false } = {}) {
+  /**
+   * D7：开关判据留在 host（config 是唯一真相），这里只认「有没有实例 + 开没开」。
+   * 传函数是为了运行时改配置能立刻生效，不用重启 DSH。
+   */
+  const profOn = () => Boolean(profiles) && (typeof profilesEnabled === 'function'
+    ? profilesEnabled() === true : profilesEnabled === true);
   /** 上一次的结果，面板和 /consolidate 接口读它 */
   let last = null;
   let running = false;
@@ -364,6 +392,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       /** 第五层：这条自述写没写（0/1），没写的理由放 selfSkip */
       self: 0,
       selfSkip: '',
+      /** D7：这次巩固写下的熟人档案条数（默认关时恒 0） */
+      profiles: 0,
       /** D6：dry-run 预览会列出每条约定的处置计划；另记护栏退化/作废的次数 */
       agreementOps: [],
       fallback: 0,
@@ -416,6 +446,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
             const prompt = buildPrompt({
               day: target, chatName, items, revocation,
               facts: factsForPrompt(chatId),
+              profiles: profilesForPrompt(),
             });
             let raw = await generate(prompt);
             plan = parseJsonLoose(raw);
@@ -440,7 +471,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         }
 
         const res = apply({ day: target, chatId, list, plan, dry, revocation });
-        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'revoked', 'digests', 'suppressed', 'fallback', 'outdated', 'updated']) {
+        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'revoked', 'digests', 'suppressed', 'fallback', 'outdated', 'updated', 'profiles']) {
           stats[k] += res[k] || 0;
         }
         stats.agreementOps.push(...(res.agreementOps || []));
@@ -582,8 +613,24 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
     }
   }
 
+  /**
+   * D7：给巩固 prompt 的已有档案对照。
+   * 故意用 `recent()` 而不是 `text()`——后者是带防漏出台头的**注入块**，
+   * 而且写着天级渲染缓存；在这里调会把缓存提前冻住，注入侧当天就再也不更新了。
+   */
+  function profilesForPrompt() {
+    if (!profOn() || !profiles?.recent) return null;
+    try {
+      const lines = profiles.recent(6).map((r) =>
+        `· ${r.name || r.key}（${r.key}）：${r.impression || ''}${r.tips ? `；相处：${r.tips}` : ''}`);
+      return { enabled: true, lines };
+    } catch {
+      return { enabled: true, lines: [] };
+    }
+  }
+
   function apply({ day, chatId, list, plan, dry, revocation = null }) {
-    const out = { ranked: 0, compressed: 0, triples: 0, agreements: 0, closed: 0, revoked: 0, digests: 0, suppressed: 0, agreementOps: [], fallback: 0, outdated: 0, updated: 0 };
+    const out = { ranked: 0, compressed: 0, triples: 0, agreements: 0, closed: 0, revoked: 0, digests: 0, suppressed: 0, agreementOps: [], fallback: 0, outdated: 0, updated: 0, profiles: 0 };
     const byId = new Map(list.map((r) => [r.id, r]));
     const at = list.length ? list[list.length - 1].at : now();
 
@@ -758,6 +805,32 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       memory.add(chatId, `约定：${item.text.slice(0, 160)}`, chatId ? 'chat' : 'global');
       graph?.addEdge?.({ src: '主人', rel: '约定', dst: item.text.slice(0, 40), at, chatId });
       out.agreements += 1;
+    }
+
+    /* 4.5 D7：熟人小档案 —— 每天巩固顺带提炼，天级写入，不进消息热链路 */
+    if (profOn()) {
+      const ppl = Array.isArray(plan?.profiles) ? plan.profiles : [];
+      for (const p of ppl) {
+        const who = String(p?.who ?? '').trim().slice(0, 24);
+        if (!who) continue;
+        if (dry) {
+          out.profiles += 1;
+          continue;
+        }
+        try {
+          profiles.note({
+            who,
+            openid: String(p?.openid ?? '').slice(0, 64),
+            impression: String(p?.impression ?? ''),
+            tips: String(p?.tips ?? ''),
+            /** 换机器人后 openid 变了，归到同一条档案（报告 §15.1-D） */
+            aliases: aliasesOf(chatId),
+          });
+          out.profiles += 1;
+        } catch (e) {
+          log(`写人物档案失败：${e.message}`);
+        }
+      }
     }
 
     /* 5. 办完的约定 → 关掉活边（不删，valid_to 打上时间） */
