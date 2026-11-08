@@ -38,6 +38,9 @@ import { createSelf } from './self.js';
 import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
 import { createMood } from './mood.js';
+import { observe, moodPrompt } from './mood-observe.js';
+import { createHistoryRing } from './history-ring.js';
+import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing } from './closing.js';
 import { createAccount } from './account.js';
 import { createRewriter } from './rewrite.js';
@@ -1161,6 +1164,16 @@ export function apply(ctx) {
 
   const memory = createMemory();
   const mood = createMood();
+  /**
+   * 两份行为日志（B4 / D3）。**不存消息正文**：心情历史只有数值和原因，
+   * 召回日志只有 id / 分数 / 命中原因和检索词长度，面板展示了也不会变成第二份聊天记录。
+   */
+  const moodHistory = createHistoryRing({ file: join(dataDir(), 'mood-history.json'), max: 200, log: (m) => log.warn(m) });
+  const recallLog = createHistoryRing({ file: join(dataDir(), 'recall-log.json'), max: 200, log: (m) => log.warn(m) });
+  /** 每个会话上一句用户原话：短句（<12 字）补检索用，只在内存里 */
+  const recentUserText = new Map();
+  /** B1 节流：同一段聊天别每句都推一次心情 */
+  let lastMoodObserveAt = 0;
   /** 对话收尾（只私聊）：记「收在哪 / 下次怎么接」，给下一轮和主动搭话用 */
   const closing = createClosing(() => cfg.closing);
 
@@ -2888,7 +2901,8 @@ export function apply(ctx) {
         agent.ctx.systemPrompt.context({
           name: 'roost-mood',
           order: 904,
-          text: () => mood.text(),
+          /** B2：心情影响「想不想配图/发语音」的软提示，只在 mood.effects 打开时给 */
+          text: () => moodPrompt(mood.text(), mood.get(), cfg.mood?.effects === true),
         }),
       );
     } catch (e) {
@@ -3093,6 +3107,22 @@ export function apply(ctx) {
       const said = text;
 
       /**
+       * B1：聊天内容轻轻带动心情。默认关（mood.effects），打开后只在
+       * 明确被夸/被凶时推一点 valence，30 秒节流；其余交给模型自己的
+       * `<<mood:>>` 标记。主人说的话权重高一点。
+       */
+      if (cfg.mood?.effects === true) {
+        const obs = observe(said, { owner: bucketOf(payload) === 'owner' });
+        if (obs && Date.now() - lastMoodObserveAt > 30_000) {
+          lastMoodObserveAt = Date.now();
+          const cur = mood.get();
+          const valence = Math.max(-1, Math.min(1, cur.valence + obs.valence));
+          mood.set({ valence, reason: obs.reason });
+          moodHistory.push({ valence, reason: obs.reason, source: 'observe' });
+        }
+      }
+
+      /**
        * 这一轮用户说了什么：世界书按它匹配触发词。
        *
        * **必须放在 `text` 声明之后**——放到场景快照那里会踩 TDZ：
@@ -3223,13 +3253,23 @@ export function apply(ctx) {
           } catch (e) {
             log.debug(`实体路跳过：${e.message}`);
           }
-          hits = await journal.search(text, {
+          const limit = Number(cfg.memory?.hits) || 3;
+          const opts = {
             chatId: chat.chatId,
-            limit: Number(cfg.memory?.hits) || 3,
+            limit,
             entityJournalIds: entIds,
             // 换过机器人时旧日记在旧 openid 下面，别名一起查
             aliases: aliasesOf(chat.chatId),
-          });
+          };
+          const q = String(text ?? '');
+          /** D4：短句连上一句补检索，按原分补位、不乘系数（见 recall.js） */
+          const prev = recentUserText.get(chat.chatId) || '';
+          const rec = await searchWithShortContext(journal, q, opts, prev);
+          hits = rec.hits;
+          recentUserText.set(chat.chatId, q);
+
+          /** D3：召回日志只留结构化字段，连检索词都不落盘 */
+          recallLog.push(recallRow(chat.chatId, q, hits, rec));
         } catch (e) {
           log.warn(`日记检索失败（不影响这轮）：${e.message}`);
         }
@@ -4266,6 +4306,15 @@ export function apply(ctx) {
               memory.setPersonaOverride(chatId, String(arg ?? ''));
               return send(res, 200, { ok: true, message: arg ? '这个群的人设换了' : '回到默认人格' });
 
+            /** D3：面板看「她刚才想起了什么、为什么」。只给结构化字段，没有正文 */
+            case 'recall.log':
+              return send(res, 200, { ok: true, rows: recallLog.list(Math.min(200, Math.max(1, Number(arg?.limit) || 50))) });
+
+            /** B4：心情历史属行为日志，独立清空，不随记忆清；当前心情不动 */
+            case 'mood.history.clear':
+              moodHistory.clear();
+              return send(res, 200, { ok: true, message: '心情历史清了，当前心情没动' });
+
             case 'memory.list':
               return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId, aliasesOf(chatId)) });
 
@@ -4454,6 +4503,9 @@ export function apply(ctx) {
             case 'memory.clear': {
               if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话' });
               memory.clearChat(chatId, aliasesOf(chatId));
+              /** D3：召回日志随本会话记忆一起清（只留本群那段，别把别处的排障记录抹了） */
+              recallLog.clear();
+              recentUserText.delete(chatId);
               let j = 0;
               try {
                 j = journal.clearChat(chatId, aliasesOf(chatId));
@@ -4588,7 +4640,10 @@ export function apply(ctx) {
        * 现在两边都归一化（`normalizeFeedback`），认不出来就明说没生效。
        */
       route('/mood', async (req, res) => {
-        if (req.method === 'GET') return send(res, 200, { ok: true, ...mood.get() });
+        /** B4：心情历史跟着状态一起回，面板不用再开一个请求 */
+        if (req.method === 'GET') {
+          return send(res, 200, { ok: true, ...mood.get(), history: moodHistory.list(20) });
+        }
         const body = await readBody(req);
         const raw = body?.feedback;
         if (raw == null) return send(res, 400, { ok: false, message: '缺 feedback' });
@@ -4597,6 +4652,7 @@ export function apply(ctx) {
           log.warn(`不认识的反馈：${String(raw).slice(0, 20)}（只认 like/unlike/up/down）`);
           return send(res, 400, { ok: false, message: `不认识的反馈：${String(raw).slice(0, 20)}`, ...mood.get() });
         }
+        moodHistory.push({ valence: r.valence, reason: r.reason, source: 'feedback' });
         send(res, 200, { ok: true, applied: true, ...r });
       }),
 

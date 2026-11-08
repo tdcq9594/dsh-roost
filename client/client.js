@@ -5201,6 +5201,7 @@ select.roost-input{color-scheme:dark}
 
     const JSON_SECTIONS = [
       ['memory', '记忆', '日记寿命、注入条数、多少轮全量重注、记忆工具开关'],
+      ['mood', '心情', 'effects 打开后，聊天里被夸/被凶会带动心情，心情还会影响配图发语音的兴致；日常在「能力」页的高级组里点'],
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
       ['awake', '主动说话', '清醒时段、机会分门槛、群白名单（开着时 speakUp.prompt 会当额外要求一起给）'],
       ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],

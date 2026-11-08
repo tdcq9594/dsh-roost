@@ -274,15 +274,28 @@ test('语气：高数值能说出「精神很好」和「想聊天」', async ()
   }
 });
 
-test('语气：中性时不带任何倾向', async () => {
+test('语气：中性时什么都不注入（B3）', async () => {
   const { dir, done } = fresh();
   const { createMood } = await import('../src/mood.js');
   try {
     const m = createMood();
-    const t = m.text();
-    assert.ok(t.includes('心情一般'), t);
-    assert.ok(!t.includes('累'), t);
-    assert.ok(!t.includes('想聊天'), t);
+    /**
+     * 以前恒定给一句「你心情一般」，每轮都进 system prompt。
+     * 那既是噪声，又会让模型照着「一般」演——现在空串，挂载点自己跳过。
+     */
+    assert.equal(m.text(), '', `中性不该有任何语气指令：${m.text()}`);
+  } finally {
+    done();
+  }
+});
+
+test('语气：只有原因还在保质期时也照常给一句', async () => {
+  const { dir, done } = fresh();
+  const { createMood } = await import('../src/mood.js');
+  try {
+    const m = createMood();
+    m.set({ reason: '被夸了' });
+    assert.match(m.text(), /被夸了/);
   } finally {
     done();
   }

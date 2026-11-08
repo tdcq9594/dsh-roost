@@ -1549,8 +1549,15 @@ test('面板 quick：功能开关的读写，以及「关掉功能要真的收�
 
     const all = await call({ op: 'features.get' });
     assert.equal(all.body.ok, true);
-    assert.equal(all.body.features.length, 16, `开关数量变了：${all.body.features.length}`);
-    assert.equal(all.body.groups.length, 5);
+    /**
+     * 别写死数字：阶段 4a 起骨架开关逐个上线（moodEffects 是第一个），
+     * 每上一个都要改一次老用例太脆，而且失败信息看不出是谁多了。
+     * 直接拿 features.js 的可见集合对，顺便锁住「面板下发的 = 已上线的」。
+     */
+    const { visibleFeatures, visibleGroups } = await import('../src/features.js');
+    const visible = visibleFeatures();
+    assert.equal(all.body.features.length, visible.length, `开关数量变了：${all.body.features.length}`);
+    assert.equal(all.body.groups.length, visibleGroups(visible).length);
     assert.equal(all.body.raw.chatLookForMembers, false, '新开关默认关（DEFAULTS 里显式写了 false）');
     assert.equal(all.body.on.chatLookForMembers, false, '面板上也是关');
 

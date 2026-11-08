@@ -208,7 +208,12 @@ export function createMood() {
     const parts = [];
     if (m.valence > 0.4) parts.push('你现在心情不错，说话轻快些');
     else if (m.valence < -0.4) parts.push('你现在有点烦，别勉强热情，句子短一点');
-    else parts.push('你心情一般');
+    /**
+     * B3：中性时**什么都不注入**。
+     * 以前恒定给一句「你心情一般」，每轮都进 system prompt，既是噪声、
+     * 又会让模型照着「一般」演。没内容就返回空串，挂载点自己会跳过。
+     */
+    // else 故意留空
 
     if (m.energy < LOW) parts.push('有点累，不太想长篇大论');
     else if (m.energy > HIGH) parts.push('精神很好');
@@ -218,7 +223,7 @@ export function createMood() {
 
     // 原因过期就别提了——三天前那句夸奖不该还在影响语气
     if (reasonFresh(m)) parts.push(`（原因：${m.reason}）`);
-    return parts.join('；') + '。';
+    return parts.length ? `${parts.join('；')}。` : '';
   }
 
   return {

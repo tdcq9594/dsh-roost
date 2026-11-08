@@ -336,16 +336,16 @@ export const FEATURES = [
   },
   {
     id: 'moodEffects',
-    label: '心情影响发送习惯',
-    desc: '心情好时更爱配表情和语音，低落时少插话',
+    label: '心情影响说话习惯',
+    desc: '聊天里被夸/被凶会带动心情；心情好时更想配图发语音，低落时话短些',
     source: 'config',
     path: ['mood', 'effects'],
     default: false,
     requires: NONE,
     affects: NONE,
-    offHint: '心情只影响说话语气，不改变会不会发语音、发图。',
+    offHint: '心情只跟点赞点踩、模型自己写的 <<mood:>> 走；不看聊天内容，也不影响配图发语音。',
     advanced: true,
-    staged: true,
+    /** 阶段 4a 已实现 B1/B2/B4，去掉 staged 后这个开关才出现在面板 */
   },
   {
     id: 'profiles',
