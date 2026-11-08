@@ -46,6 +46,7 @@
   "files": [
     "src",
     "client",
+    "scripts/backup.mjs",
     "personas",
     "cordis.patch.yml",
     "README.md",

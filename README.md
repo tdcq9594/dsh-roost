@@ -28,6 +28,7 @@
 - [面板](#面板)
 - [配置](#配置)
 - [账号迁移](#账号迁移v100)
+- [一键备份（换电脑）](#一键备份换电脑)
 - [表情包](#表情包)
 - [目录结构](#目录结构)
 - [和 Aurabot 的对比](#和-aurabot-的对比)
@@ -367,6 +368,33 @@ QQ 官方事件只给 `openid`（群是 `group_openid`），**从来不给 QQ号
 （这个盘写不了时退到 `数据目录/rewrite-backups`），失败自动回退；
 成功后「可回退的备份」列表里仍可一键回退。改写和回退成功后页面会重新拉数据，
 上面「待迁移」列表里那些键会消失。
+
+---
+
+## 一键备份（换电脑）
+
+把整个数据目录（配置、记忆、日记、图谱、人格、心情、主动状态……）打成一个 zip，
+换电脑或重装前导出去。命令行在插件目录下跑：
+
+```bash
+node scripts/backup.mjs export                       # 导出到 数据目录/backups/
+node scripts/backup.mjs export --out D:\备份         # 换个地方放
+node scripts/backup.mjs import <备份.zip>            # 在新机器上校验并暂存
+node scripts/backup.mjs list                        # 看有哪些备份
+node scripts/backup.mjs cancel                      # 反悔：取消待生效的恢复
+```
+
+数据目录默认 `~/.dsh/dsh-roost`，可用环境变量 `DSH_ROOST_DATA` 或 `--data <目录>` 覆盖。
+
+**导入不会立刻改现在的数据**：运行中插件内存里的配置和状态随时会写回磁盘，
+直接覆盖会被盖掉。所以 `import` 只把文件校验后解到 `数据目录/.restore/`，
+**下次启动 dsh-roost 时、读配置之前**才换上；被换掉的旧文件留在
+`backups/pre-restore-<时间戳>/`，随时能找回。反悔就执行 `cancel`。
+
+SQLite（`journal.sqlite` / `graph.sqlite`）用只读连接的 `VACUUM INTO` 做一致性
+快照，运行中导出也不会拿到写了一半的页；恢复时旧的 `-wal` / `-shm` 会一起挪走，
+免得旧事务重放到新库上。备份里不含 logs、缓存、`node_modules`、备份自身，
+也不含已进快照的 WAL/SHM 文件。零依赖：`node:zlib` 手写 zip，不装任何包。
 
 ---
 

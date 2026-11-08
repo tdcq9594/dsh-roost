@@ -14,7 +14,7 @@
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
 import { basename, join, resolve, extname } from 'node:path';
-import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision } from './config.js';
 import { createSessions } from './sessions.js';
@@ -79,6 +79,10 @@ import { createSwitchNote } from './switch-note.js';
 import { createTts, SHERPA_MODELS } from './tts.js';
 import { createTtsInstaller } from './tts-install.js';
 import { createGptSovits } from './gpt-sovits.js';
+import {
+  applyPendingRestore, cancelRestore, createBackup, listBackups,
+  pendingRestore, restoreRetentionRows,
+} from './backup.js';
 
 /**
  * 安全边界文案（`roost-guard`，order 910，注册一次、每轮现读）。
@@ -237,6 +241,25 @@ export function apply(ctx) {
     warn: (...a) => { const m = joinLog(a); raw.warn(m); addLog('warn', 'core', m); },
     error: (...a) => { const m = joinLog(a); raw.error(m); addLog('error', 'core', m); },
   };
+
+  /**
+   * E4 一键备份：**启动时、读配置之前**把 `.restore/` 换上（交接 §3③）。
+   *
+   * 按契约放在最前面：`loadConfig()` / `createMemory()` / `createJournal()`
+   * 都在后面把盘上的内容读进内存。先换盘再让任何 store 初始化，才不必赌
+   * 「刚恢复、又被旧内存写回」——各部署的写回时机并不一致。
+   * 失败只记日志，不让一份坏备份拖垮整个插件激活；`.restore/` 与
+   * pending 原样留着，下次启动还能再试。
+   */
+  let restoreApplied = { applied: 0, kept: null };
+  try {
+    restoreApplied = applyPendingRestore({ root: dataDir() });
+  } catch (e) {
+    log.warn(`备份恢复失败（原数据没动，暂存保留）：${e?.message ?? e}`);
+  }
+  if (restoreApplied.applied) {
+    log.info(`已从备份换上 ${restoreApplied.applied} 个文件，旧文件在 ${restoreApplied.kept || '（没有旧文件）'}`);
+  }
 
   /**
    * 主动搭话那一轮，`qq_send` / `qq_close` 必须收走（`AWAKE_DENY_TOOLS`）。
@@ -4161,7 +4184,7 @@ export function apply(ctx) {
          * 只记意图不记结果——失败时用户能看到 toast，这里要的是可追溯。
          * `memory.list` 是纯读，跳过，否则翻一次记忆就多一行噪音。
          */
-        if (op && op !== 'memory.list' && op !== 'capabilities.get' && op !== 'capabilities.preview' && op !== 'features.get' && op !== 'features.preview' && op !== 'quota.get') audit({ op, chatId, peer: who.kind, peerId: who.id });
+        if (op && op !== 'memory.list' && op !== 'capabilities.get' && op !== 'capabilities.preview' && op !== 'features.get' && op !== 'features.preview' && op !== 'quota.get' && op !== 'backup.list') audit({ op, chatId, peer: who.kind, peerId: who.id });
 
         try {
           switch (op) {
@@ -4449,6 +4472,58 @@ export function apply(ctx) {
               return send(res, 200, {
                 ok: true, facts, journal: journalRows, autoSweep: false,
                 message: `恢复了 ${facts} 条事实、${journalRows} 条日记${stopped ? '；已停止每天自动淡出' : ''}（真删的要用备份手工恢复）`,
+              });
+            }
+
+            /** E4：备份清单（只读）与「下次启动生效」的恢复状态 */
+            case 'backup.list': {
+              return send(res, 200, {
+                ok: true,
+                items: listBackups(dataDir()),
+                pending: pendingRestore(dataDir()),
+              });
+            }
+
+            /**
+             * E4 / D11 备份还原：按份把 `purge` 真删的原文**原样插回**。
+             *
+             * 名字先过白名单（不能让面板传 `../config.json`）；重复点、或行
+             * 已经存在都由 `restoreRetentionRows()` 报 skipped，不产生重复行。
+             * 还原等于用户反悔 → 撤掉 `appliedAt`，否则第二天凌晨的自动
+             * sweep 会把刚插回的行再作废一次（契约 §3③）。
+             */
+            case 'backup.restoreRetention': {
+              const name = String(arg?.name || '');
+              if (!/^pre-retention-[\w.-]+\.json$/.test(name)) {
+                return send(res, 400, { ok: false, message: '这不是一份记忆淡出备份' });
+              }
+              let payload;
+              try {
+                payload = JSON.parse(readFileSync(join(dataDir(), 'backups', name), 'utf8'));
+              } catch (e) {
+                return send(res, 404, { ok: false, message: `读不到这份备份：${e?.message ?? e}` });
+              }
+              const r = restoreRetentionRows({ payload, memory, journal });
+              let stopped = false;
+              if (Number(cfg.memory?.retention?.appliedAt)) {
+                cfg = patchConfig({ memory: { retention: { appliedAt: 0 } } });
+                stopped = true;
+              }
+              return send(res, 200, {
+                ok: true, ...r, autoSweep: false,
+                message: `还原了 ${r.facts} 条事实、${r.journal} 条日记`
+                  + `${r.skipped ? `，跳过 ${r.skipped} 条（已存在或重复）` : ''}；`
+                  + (stopped ? '已停止每天自动淡出，要重新点「应用」' : '自动淡出没开'),
+              });
+            }
+
+            /** 反悔：取消还没生效的整包恢复，不碰现有数据 */
+            case 'backup.cancelRestore': {
+              const p = pendingRestore(dataDir());
+              cancelRestore(dataDir());
+              return send(res, 200, {
+                ok: true,
+                message: p ? '已取消待生效的整包恢复，现有数据没动' : '没有待生效的恢复',
               });
             }
 
@@ -5145,6 +5220,19 @@ export function apply(ctx) {
           })),
           eventsEnabled: cfg.events?.enabled === true,
           /**
+           * E4 备份（只读）：完整包与 D11 行级备份共用一份清单，不做成三套。
+           * label 后端拼好，前端不用维护第二份动作名表（同 4b 的 events）。
+           */
+          backups: listBackups(dataDir())
+            .map((x) => ({
+              name: x.name,
+              kind: x.kind,
+              label: x.kind === 'full' ? '完整备份' : '记忆淡出前的原文',
+              at: x.at,
+              bytes: x.bytes,
+            })),
+          restorePending: pendingRestore(dataDir()),
+          /**
            * D7 人物档案（只读展示）：开关关着也列出来，用户才清得掉旧数据。
            * 只给印象/相处建议与名字，不把内部 openid 键铺到面板上。
            */
@@ -5526,6 +5614,43 @@ export function apply(ctx) {
 
       /** 可回退的备份列表（最近的在前） */
       route('/account/backups', async (req, res) => send(res, 200, { ok: true, items: rewriter.listBackups() })),
+
+      /**
+       * E4：面板「导出备份」。生成 zip 后直接下载。
+       *
+       * 面板**只放导出**，不放导入（交接 §3③）：按契约导入统一走 CLI 的
+       * `.restore/` + 下次启动生效，不在运行中替换。这里同步打包
+       * 会短暂占住事件循环，但只在用户点一次时发生，比留个「点了没反应」
+       * 的上传入口实在。
+       */
+      route('/backup/export', (req, res) => {
+        /**
+         * 打包是同步的，`createBackup()` 会主动抛（比如 SQLite 快照失败、
+         * 数据超过 4GB）。**不能让异常穿过 handler**：route() 的包装是
+         * `Promise.resolve(handler(...)).catch(...)`，参数求值时的同步抛错
+         * 根本进不了 catch，会让请求挂住甚至带崩进程。先兜成 500。
+         */
+        let r;
+        let buf;
+        try {
+          r = createBackup({ root: dataDir() });
+          buf = readFileSync(r.file);
+        } catch (e) {
+          log.warn(`备份没生成：${e?.message ?? e}`);
+          return send(res, 500, { ok: false, message: `备份没生成：${e?.message ?? e}` });
+        }
+        try {
+          res.statusCode = 200;
+          res.setHeader?.('content-type', 'application/zip');
+          res.setHeader?.('content-disposition', `attachment; filename="${r.name}"`);
+          res.setHeader?.('cache-control', 'no-store');
+          res.end?.(buf);
+          log.info(`导出备份：${r.name}（${r.files} 个文件）`);
+        } catch (e) {
+          log.warn(`备份已生成但下载没送出去（文件在 ${r.file}）：${e?.message ?? e}`);
+        }
+        return undefined;
+      }),
 
       /**
        * 对话收尾（只私聊）。面板「记忆」页底部用。

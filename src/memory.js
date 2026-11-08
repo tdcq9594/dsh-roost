@@ -926,5 +926,32 @@ export function createMemory({ now = () => Date.now() } = {}) {
         return this.entries().filter((e) => e.expiredBy === 'retention' && e.until > 0);
       },
     },
+
+    /**
+     * E4 / D11 备份还原：**原样插回**一条事实。
+     *
+     * 绝对不能走 `add()`：它会先跑 `addInto()` 的 `supersede()`，字面相似度
+     * 过 0.75 就给别的活事实打 `until` —— 还原一条旧事实会顺手作废另一条
+     * 无关的（交接 §3③）。这里直接写回 `list` + `meta`，保留 `w/at/src/until`
+     * 与作废来源。按 `(scope, chatId, 正文)` 判重，重复还原不产生第二行。
+     */
+    insertRaw(row) {
+      const m = load();
+      const scope = row?.scope === 'chat' ? 'chat' : 'global';
+      const cid = String(row?.chatId || '');
+      const text = String(row?.text ?? '');
+      if (!text) return false;
+      const list = scope === 'global' ? m.global : (m.chats[cid] || (m.chats[cid] = []));
+      const mm = scope === 'global' ? m.meta.global : (m.meta.chats[cid] || (m.meta.chats[cid] = {}));
+      if (list.includes(text)) return false;
+      const meta = { w: Number(row.w) || 1, at: Number(row.at) || 0 };
+      if (row.src != null) meta.src = row.src;
+      if (Number(row.until) > 0) meta.until = Number(row.until);
+      if (row.expiredBy) meta.expiredBy = String(row.expiredBy);
+      list.push(text);
+      mm[text] = meta;
+      save();
+      return true;
+    },
   };
 }

@@ -185,6 +185,48 @@ function deleteFtsMany(d, ids) {
 }
 
 /** 一行的标准形状。上层只认这个，两种后端都产出它 */
+/** 一个 vec 最多认多少个数字键：正常嵌入向量几千个，超了就当坏数据丢掉 */
+const MAX_VEC_KEYS = 1_000_000;
+
+/**
+ * 备份还原时的 `vec` 兼容（E4 行级还原，§3③「原样插回」）。
+ *
+ * `toBlob()` 存进 SQLite 的是 `Uint8Array`；`node:sqlite` 读出来也是
+ * `Uint8Array`（**不是 Buffer**），`JSON.stringify` 之后会变成
+ * `{"0":123,"1":45,…}` 这样的数字键对象；Buffer 则是 `{type:'Buffer',data:[…]}`。
+ * 三种形状都得认回来，否则还原后 `vec` 变 null、语义检索静默失效。
+ *
+ * 一律返回**独立且 byteOffset=0** 的 Uint8Array：`toVec()` 要拿它构造
+ * `Float32Array(u8.buffer, u8.byteOffset, …)`，Buffer 池化时 byteOffset
+ * 不是 4 的倍数会抛 RangeError，那条检索就白算了。
+ */
+function asVec(v) {
+  if (!v) return null;
+  let bytes = null;
+  if (v instanceof Float32Array) return Uint8Array.from(toBlob(v));
+  if (v instanceof Uint8Array || Buffer.isBuffer(v)) bytes = v;
+  else if (Array.isArray(v)) bytes = v;
+  else if (v && v.type === 'Buffer' && Array.isArray(v.data)) bytes = v.data;
+  else if (v && typeof v === 'object') {
+    const keys = Object.keys(v);
+    /**
+     * 别用 `Math.max(...keys.map(Number))`：键一多展开参数就爆栈（实测 20 万键
+     * `Maximum call stack size exceeded`），JSONL 的 `load()` 又会空吞这个异常，
+     * 整行静默消失。改成循环 + 键数上限，畸形 vec 直接当没有。
+     */
+    if (keys.length && keys.length <= MAX_VEC_KEYS && keys.every((k) => /^\d+$/.test(k))) {
+      let max = 0;
+      for (const k of keys) { const n = Number(k); if (n > max) max = n; }
+      if (max < MAX_VEC_KEYS) {
+        const out = new Array(max + 1).fill(0);
+        for (const k of keys) out[Number(k)] = Number(v[k]) & 0xff;
+        bytes = out;
+      }
+    }
+  }
+  return bytes ? Uint8Array.from(bytes) : null;
+}
+
 function normRow(r) {
   return {
     id: String(r.id),
@@ -200,7 +242,8 @@ function normRow(r) {
     keepUntil: Number(r.keep_until ?? r.keepUntil ?? 0),
     accessed: Number(r.accessed ?? 0),
     lastAccess: Number(r.last_access ?? r.lastAccess ?? 0),
-    vec: r.vec ?? null,
+    /** 统一过 asVec：JSONL 读回来的数字键对象也要还原成可用字节视图 */
+    vec: asVec(r.vec),
     /** 这条记忆从哪几条消息来（阶段 4）。解析失败当空数组，不让坏数据拖垮整行 */
     eventIds: parseList(r.event_ids ?? r.eventIds),
     /** 原文快照 `[{eventId, at, sender, excerpt}]`，events 删了它也还在 */
@@ -376,6 +419,49 @@ function createSqliteStore(file, log) {
         );
       if (!r.changes) return false; // 幂等：同一条消息写了两次
       d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(row.id, indexText(row.text));
+      return true;
+    },
+
+    /**
+     * E4 / D11 备份还原：**原样插回**一整行。
+     * 不走 `insert()`：那条会重算 level / keepUntil、丢掉 accessed / invalidAt /
+     * supersededBy，等于把「被作废过的历史」洗成新行。按 id 幂等，重复还原
+     * 靠 `ON CONFLICT DO NOTHING` 挡住。
+     */
+    insertRaw(row) {
+      const d = open();
+      if (!d) return false;
+      const id = String(row?.id ?? '');
+      if (!id) return false;
+      const at = Number(row.at) || 0;
+      const r = d
+        .prepare(
+          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,accessed,last_access,invalid_at,superseded_by)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(id) DO NOTHING`,
+        )
+        .run(
+          id,
+          at,
+          String(row.day || dayOf(at)),
+          String(row.chatId ?? ''),
+          String(row.sender ?? ''),
+          String(row.role ?? 'user'),
+          String(row.text ?? ''),
+          LEVELS.includes(row.level) ? row.level : 'normal',
+          String(row.kind ?? 'chat'),
+          row.digest == null ? null : String(row.digest),
+          Number(row.keepUntil) || 0,
+          asVec(row.vec),
+          row.eventIds?.length ? JSON.stringify(row.eventIds) : null,
+          row.evidence?.length ? JSON.stringify(row.evidence) : null,
+          Number(row.accessed) || 0,
+          Number(row.lastAccess) || 0,
+          Number(row.invalidAt) || 0,
+          String(row.supersededBy ?? ''),
+        );
+      if (!r.changes) return false;
+      d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(id, indexText(String(row.text ?? '')));
       return true;
     },
 
@@ -1032,6 +1118,19 @@ function createJsonlStore(file, log) {
         if (!index.has(t)) index.set(t, new Set());
         index.get(t).add(i);
       }
+      return true;
+    },
+
+    /** E4：原样插回（不走会重算 level 的 insert()），按 id 幂等。 */
+    insertRaw(row) {
+      load();
+      const id = String(row?.id ?? '');
+      if (!id || rows.some((r) => r.id === id)) return false;
+      const r = normRow(row);
+      r.vec = asVec(row.vec);
+      rows.push(r);
+      if (!rewrite()) return false;
+      reindex();
       return true;
     },
 
@@ -1772,6 +1871,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     invalidated: (opts = {}) => get().invalidated(opts),
     /** D11 retention 的一键恢复：只把本功能作废的行放回；ids 为空 = 全库 */
     restore: (ids) => get().restore(ids),
+    /** E4 / D11 备份还原：原样插回一行，保留 accessed / invalidAt / vec */
+    insertRaw: (row) => get().insertRaw(row),
 
     /**
      * **真的忘掉**：按关键词抹掉正文。

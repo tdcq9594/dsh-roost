@@ -3049,6 +3049,73 @@ select.roost-input{color-scheme:dark}
           }),
         ),
 
+        /* E4 备份：导出 + 只读清单 + 行级还原。放在危险区之前，别跟不可逆操作混在一起 */
+        h('div', { className: 'cap-group' },
+          h('div', { className: 'cap-group-t' }, '备份与恢复'),
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '导出会打包配置、记忆、日记、图谱、人格等；SQLite 用一致性快照，运行中导出也安全。'
+            + '⚠ 包里含 config.json（里面有密钥），别外传。'
+            + '导入请用命令行 node scripts/backup.mjs import <zip>：只暂存到 .restore/，下次启动 DSH 才生效，'
+            + '所以面板不放导入按钮。'),
+          mem?.restorePending
+            ? h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+                `有一份整包恢复等着下次启动生效（${mem.restorePending.files} 个文件，${mem.restorePending.createdAt || ''}）。`,
+                h('button', {
+                  type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+                  onClick: async () => {
+                    const r = await quick('backup.cancelRestore')
+                    toast(r.message || '已取消')
+                    reload()
+                  },
+                }, '取消这次恢复'))
+            : null,
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 } },
+            h('button', {
+              type: 'button', className: 'roost-primary',
+              onClick: async () => {
+                try {
+                  const res = await fetch(API + '/backup/export')
+                  if (!res.ok) throw new Error('HTTP ' + res.status)
+                  const blob = await res.blob()
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = 'dsh-roost-backup.zip'
+                  document.body.appendChild(a)
+                  a.click()
+                  a.remove()
+                  setTimeout(() => { try { URL.revokeObjectURL(url) } catch {} }, 1000)
+                  toast('备份已导出')
+                  reload()
+                } catch (e) {
+                  toast('导出失败：' + e.message)
+                }
+              },
+            }, '导出备份（zip）'),
+          ),
+          (mem?.backups || []).length
+            ? h('div', { style: { display: 'grid', gap: 4 } },
+                (mem.backups || []).slice(0, 8).map((b, i) => h('div', {
+                  key: i, className: 'roost-note',
+                  style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: 0 },
+                },
+                  '· ' + new Date(b.at).toLocaleString('zh-CN', {
+                    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+                  }) + ' ' + b.label + ' · ' + (b.bytes / 1024).toFixed(1) + ' KB',
+                  b.kind === 'retention'
+                    ? h(ConfirmLink, {
+                        label: '还原这一份', confirmLabel: '确认还原这些原文',
+                        onConfirm: async () => {
+                          const r = await quick('backup.restoreRetention', { name: b.name })
+                          toast(r.message || '还原了')
+                          reload()
+                        },
+                      })
+                    : null,
+                )))
+            : h('div', { className: 'roost-note', style: { margin: 0 } }, '还没有备份。'),
+        ),
+
         /* 危险区放最后 */
         h(Sec, { n: '07', title: '清空' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
