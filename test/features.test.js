@@ -221,9 +221,10 @@ test('骨架：每个 config 来源的开关都能在 DEFAULTS 里找到真实�
 
 test('骨架：未上线的开关不下发、不影响工具池、也不许被 patch', () => {
   const staged = FEATURES.filter((f) => f.staged);
-  /** 阶段 4a 起 moodEffects 已实现并删掉 staged，骨架项逐个减少是预期 */
-  assert.ok(staged.length >= 6, `还剩 ${staged.length} 个未上线的骨架开关`);
+  /** 阶段 4a 删 moodEffects、4b 删 events；骨架项逐个减少是预期 */
+  assert.ok(staged.length >= 5, `还剩 ${staged.length} 个未上线的骨架开关`);
   assert.ok(!staged.some((f) => f.id === 'moodEffects'), 'moodEffects 已上线，不该还在骨架里');
+  assert.ok(!staged.some((f) => f.id === 'events'), 'events 已上线，不该还在骨架里');
   for (const f of staged) {
     assert.deepEqual(f.affects, [], `${f.id} 的 affects 必须留空（forcedDenyTools 的 P0 坑）`);
     assert.ok(!visibleFeatures().includes(f), `${f.id} 不该出现在面板可见列表里`);

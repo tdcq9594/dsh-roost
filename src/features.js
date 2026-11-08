@@ -371,7 +371,7 @@ export const FEATURES = [
     affects: NONE,
     offHint: '不再记经历，已有的经历不会被删。',
     advanced: true,
-    staged: true,
+    /** 阶段 4b 已实现 events.js，去掉 staged 后这个开关才出现在面板 */
   },
   {
     id: 'extensions',

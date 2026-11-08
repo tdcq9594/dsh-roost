@@ -41,6 +41,7 @@ import { createMood } from './mood.js';
 import { observe, moodPrompt } from './mood-observe.js';
 import { createHistoryRing } from './history-ring.js';
 import { memoryLines } from './memory-line.js';
+import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing } from './closing.js';
 import { createAccount } from './account.js';
@@ -1178,6 +1179,11 @@ export function apply(ctx) {
    */
   const moodHistory = createHistoryRing({ file: join(dataDir(), 'mood-history.json'), max: 200, log: (m) => log.warn(m) });
   const recallLog = createHistoryRing({ file: join(dataDir(), 'recall-log.json'), max: 200, log: (m) => log.warn(m) });
+  /**
+   * D8 经历层：她主动做过的事，24h 过期，独立 events.json。
+   * 不写 journal —— 否则巩固会把它写成摘要再注入回来，变成自己的回音。
+   */
+  const events = createEvents({ file: join(dataDir(), 'events.json'), log: (m) => log.warn(m) });
   /** 每个会话上一句用户原话：短句（<12 字）补检索用，只在内存里 */
   const recentUserText = new Map();
   /** B1 节流：同一段聊天别每句都推一次心情 */
@@ -1533,6 +1539,14 @@ export function apply(ctx) {
         text: payload?.text,
       });
       log.info(`主动消息进审核，登记等确认（${r.requestId}）`);
+    }
+    /**
+     * D8：只记**明确送到了**的主动消息。pending 还不知道会不会过审，
+     * 记了就是「她以为找过你、其实没人看见」——投递账本那套教训照搬。
+     * 不存正文、不存 target，只留一个动作类型（见 events.js 白名单）。
+     */
+    if (r?.ok && !r.pending && cfg.events?.enabled === true) {
+      events.push({ kind: 'proactive', scene: payload?.scene });
     }
     return r;
   };
@@ -1947,9 +1961,22 @@ export function apply(ctx) {
       idxSec = `（还有一本日记，记着 ${st2.total} 条，最早到 ${dayStr(st2.firstAt || Date.now())}；翻细节时按需要回忆）`;
     }
 
-    // 优先级：指代 > 命中 > 索引。前两块缺了会直接影响这一轮说得对不对，
-    // 索引只是"知道还有东西"，砍它最不疼
-    return fitBudget([recentSec, hitSec, idxSec], MEMORY_DYN_MAX, '\n');
+    /**
+     * D8 经历层：**只给主人私聊**。群里不该让群友看出她做过什么，
+     * 也不该把别处的事带进群。默认关，开着时这块每轮变，所以放易变段。
+     */
+    let eventsSec = '';
+    if (shouldInjectEvents({ enabled: cfg.events?.enabled, bucket, kind: lastScene?.kind })) {
+      try {
+        eventsSec = events.text(6);
+      } catch (e) {
+        log.debug(`取经历失败：${e.message}`);
+      }
+    }
+
+    // 优先级：指代 > 命中 > 经历 > 索引。前两块缺了会直接影响这一轮说得对不对，
+    // 经历只是「她最近忙了什么」的背景，索引最不疼
+    return fitBudget([recentSec, hitSec, eventsSec, idxSec], MEMORY_DYN_MAX, '\n');
   }
 
   /** 两段拼起来（调试接口和面板用；真正注入是分开走的，别在这里合并回去） */
@@ -3462,6 +3489,19 @@ export function apply(ctx) {
       }
 
       /**
+       * D8：发过文件也算她做过的事。放在三个发送分支之后，
+       * 保证是「确实发出去了」才记；只记数量和场合，文件名不进 events。
+       */
+      if (cfg.events?.enabled === true && used?.fileNames?.length) {
+        events.push({
+          kind: 'file',
+          scene: chat.kind === 'group' ? 'group' : 'c2c',
+          chatId: chat.chatId,
+          count: used.fileNames.length,
+        });
+      }
+
+      /**
        * 上下文压缩（第 6 期）：到阈值就开新会话 + 摘要开场。
        *
        * **放在回话之后**：压缩会改 `chatId → sessionId` 映射，
@@ -4328,6 +4368,11 @@ export function apply(ctx) {
               moodHistory.clear();
               return send(res, 200, { ok: true, message: '心情历史清了，当前心情没动' });
 
+            /** D8：经历层独立清空入口（开关关着也能清），不碰日记与 facts */
+            case 'events.clear':
+              events.clear();
+              return send(res, 200, { ok: true, message: '最近做过的事清了' });
+
             case 'memory.list':
               return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId, aliasesOf(chatId)) });
 
@@ -4519,6 +4564,8 @@ export function apply(ctx) {
               /** D3：召回日志随本会话记忆一起清（只留本群那段，别把别处的排障记录抹了） */
               recallLog.clear();
               recentUserText.delete(chatId);
+              /** D8：经历也随「清空本会话记忆」一起清（契约 §3④），不留在盘上 */
+              events.clear();
               let j = 0;
               try {
                 j = journal.clearChat(chatId, aliasesOf(chatId));
@@ -4853,6 +4900,17 @@ export function apply(ctx) {
           graph: gp,
           /** 第五层：她自己写下的（跨群汇总，不属于任何单个会话） */
           self: sf,
+          /**
+           * D8 经历层（只读展示）：即使开关关着也列出来，用户才清得掉旧数据。
+           * label 在后端拼好，前端不用再维护一份动作名表。
+           */
+          events: events.recent(20).map((r) => ({
+            at: r.at,
+            label: EVENT_LABELS[r.kind] || r.kind,
+            where: r.scene === 'group' ? '群里' : '私聊',
+            count: Number(r.count) || 1,
+          })),
+          eventsEnabled: cfg.events?.enabled === true,
           authz: memory.authz(chatId),
           personaOverride: memory.getPersonaOverride(chatId, aliasesOf(chatId)),
         });

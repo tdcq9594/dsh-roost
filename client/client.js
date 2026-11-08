@@ -3007,6 +3007,28 @@ select.roost-input{color-scheme:dark}
               : h('div', { className: 'roost-note' }, '还没写过。她自己说得够多、或者被纠正过的日子才会写一条。'),
         ),
 
+        /* D8 经历层：只读 + 独立清空。放在危险区之前，别让「查看」混进不可逆操作 */
+        h('div', { className: 'cap-group' },
+          h('div', { className: 'cap-group-t' }, '她最近做过的事（24 小时）'),
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '只记动作、不记说过的话；过期自动删。开关关着也能在这儿查看和清空已有的。'),
+          (mem?.events || []).length
+            ? h('div', { style: { display: 'grid', gap: 4, marginBottom: 8 } },
+                (mem.events || []).map((e, i) => h('div', { key: i, className: 'roost-note' },
+                  '· ' + new Date(e.at).toLocaleString('zh-CN', {
+                    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+                  }) + ' ' + e.where + ' ' + e.label + (e.count > 1 ? `（${e.count} 次）` : ''))))
+            : h('div', { className: 'roost-note', style: { marginBottom: 8 } }, '最近没记下什么。'),
+          h(ConfirmLink, {
+            label: '清空这些经历', confirmLabel: '确认清空经历',
+            onConfirm: async () => {
+              const r = await quick('events.clear')
+              toast(r.message || '清了')
+              reload()
+            },
+          }),
+        ),
+
         /* 危险区放最后 */
         h(Sec, { n: '07', title: '清空' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
@@ -5202,6 +5224,7 @@ select.roost-input{color-scheme:dark}
     const JSON_SECTIONS = [
       ['memory', '记忆', '日记寿命、注入条数、多少轮全量重注、记忆工具开关'],
       ['mood', '心情', 'effects 打开后，聊天里被夸/被凶会带动心情，心情还会影响配图发语音的兴致；日常在「能力」页的高级组里点'],
+      ['events', '经历', 'enabled：记不记她主动做过的事（找过人、发过文件）。24 小时自动过期，只给主人私聊当素材；关着也能在「记忆」页查看和清空已有的'],
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
       ['awake', '主动说话', '清醒时段、机会分门槛、群白名单（开着时 speakUp.prompt 会当额外要求一起给）'],
       ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],

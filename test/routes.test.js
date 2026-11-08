@@ -377,15 +377,17 @@ test('对齐：后端有的配置段，设置页也要列出来', async () => {
    * 白名单不是永久豁免：下面按 id 反查 `staged`，功能上线时删掉那行
    * 就会让这条断言变红，逼着把段列进 `JSON_SECTIONS` 并移出白名单。
    */
-  /** 阶段 4a 起 mood 段已列进设置页，从白名单移除（反查仍挡着另外三段） */
-  const NOT_SHIPPED = ['profiles', 'events', 'extensions'];
+  /** 阶段 4b 起 events 段已列进设置页，从白名单移除（反查仍挡着另外两段） */
+  const NOT_SHIPPED = ['profiles', 'extensions'];
   const { FEATURES } = await import('../src/features.js');
-  for (const id of ['profiles', 'events', 'extensions']) {
+  for (const id of ['profiles', 'extensions']) {
     assert.equal(FEATURES.find((f) => f.id === id)?.staged, true,
       `「${id}」已上线：把它的配置段列进设置页 JSON_SECTIONS，并从 NOT_SHIPPED 移除`);
   /** moodEffects 已上线，配置段必须真的列在设置页（防止有人把上面那行 staged 加回去） */
   assert.equal(FEATURES.find((f) => f.id === 'moodEffects')?.staged, undefined,
     'moodEffects 已上线，不该还挂着 staged');
+  assert.equal(FEATURES.find((f) => f.id === 'events')?.staged, undefined,
+    'events 已上线，不该还挂着 staged');
   }
 
   const missing = Object.keys(DEFAULTS).filter((k) => !keys.includes(k) && !NOT_SHIPPED.includes(k));
