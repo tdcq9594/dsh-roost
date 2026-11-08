@@ -85,6 +85,7 @@ async function boot({ factsMode = 'expire', journalMode = 'off', seedJournal = t
   return {
     quick, call, data, mfile,
     mem: () => (existsSync(mfile) ? readFileSync(mfile, 'utf8') : null),
+    cfg: () => JSON.parse(readFileSync(join(data, 'config.json'), 'utf8')),
     backups: () => {
       const d = join(data, 'backups');
       return existsSync(d) ? readdirSync(d).filter((n) => n.startsWith('pre-retention-')) : [];
@@ -171,6 +172,55 @@ test('D11：只开 journal 一路时，facts 一条都不动', async (t) => {
   assert.equal(b.mem(), before, 'facts 盘上逐字节不变');
   const back = await b.quick('retention.restore');
   assert.equal(back.body.journal, 1);
+});
+
+test('D11：没点过「应用」不自动；点过一次才写凭据，两路都关又停下', async (t) => {
+  const b = await boot();
+  t.after(b.done);
+  const pv0 = await b.quick('features.preview');
+  assert.equal(pv0.body.autoSweep, false, '默认用户绝不能被自动改动');
+  assert.ok(!b.cfg().memory.retention.appliedAt, '盘上不该有手动确认凭据（缺省就是 0）');
+
+  const r = await b.quick('retention.apply');
+  assert.equal(r.body.ok, true, r.body.message);
+  const c1 = b.cfg().memory.retention;
+  assert.ok(c1.appliedAt > 0, '手动确认要留下凭据');
+  assert.equal(c1.factsMode, 'expire', '写凭据不能把两路 mode 冲掉');
+  assert.equal(c1.journalMode, 'off');
+  assert.equal(c1.thresholdPct, 5);
+  const pv1 = await b.quick('features.preview');
+  assert.equal(pv1.body.autoSweep, true);
+
+  /** 两路都关 = 停，凭据留着但判据不许放行 */
+  const p = await b.quick('features.patch', { id: 'retentionFactsMode', value: 'off' });
+  assert.equal(p.body.ok, true, p.body.message);
+  assert.ok(b.cfg().memory.retention.appliedAt > 0, '改档位不该丢凭据');
+  assert.equal((await b.quick('features.preview')).body.autoSweep, false);
+});
+
+test('D11：一键恢复会撤掉自动授权，否则第二天又把刚恢复的作废', async (t) => {
+  const b = await boot();
+  t.after(b.done);
+  await b.quick('retention.apply');
+  assert.equal((await b.quick('features.preview')).body.autoSweep, true);
+  const back = await b.quick('retention.restore');
+  assert.equal(back.body.ok, true);
+  assert.equal(back.body.autoSweep, false);
+  assert.match(back.body.message, /已停止每天自动淡出/);
+  assert.equal(b.cfg().memory.retention.appliedAt, 0);
+  assert.equal((await b.quick('features.preview')).body.autoSweep, false);
+  /** 想再自动，重新点一次「应用」即可 */
+  await b.quick('retention.apply');
+  assert.equal((await b.quick('features.preview')).body.autoSweep, true);
+});
+
+test('D11：自动 sweep 真的挂在凌晨巩固分支上（防止写了函数忘调用）', () => {
+  const src = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const tick = src.slice(src.indexOf('const consolidateTick'), src.indexOf('const consolidateBoot'));
+  assert.ok(tick.length > 100, '没切到巩固定时器那段');
+  assert.match(tick, /if \(!day\) return;/);
+  assert.match(tick, /retentionSweep\(\);/, '一天一次的检查分支里必须调 sweep');
+  assert.match(tick, /consolidate\.run\(\{ day \}\)/);
 });
 
 test('D11：purge 前必备份，备份带原文，真删后行确实没了', async (t) => {

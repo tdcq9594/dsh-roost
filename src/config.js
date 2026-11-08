@@ -337,12 +337,18 @@ export const DEFAULTS = {
      *
      * 注意：默认开的只是**策略档位**，不会自动改盘上数据。要点面板上的
      * 「应用」才落 `until`/`invalid_at`，没点之前记忆文件逐字节不变。
+     *
+     * `appliedAt` 是「用户手动点过一次『应用』」的凭据（0 = 没点过）。
+     * 没点过时凌晨的自动 sweep 一律跳过，默认用户的数据零改动；点过之后
+     * 才按当前策略每天自动重复。「一键恢复」会把它清回 0，否则第二天又把
+     * 刚恢复的条目重新作废。
      */
     retention: {
       factsMode: 'expire',
       journalMode: 'off',
       thresholdPct: 5,
       minProtectDays: 30,
+      appliedAt: 0,
     },
   },
   /** 心情影响发送概率（调研报告 B2）。状态本身在 mood.json，这里只放开关 */

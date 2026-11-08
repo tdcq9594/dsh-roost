@@ -71,7 +71,7 @@ import { createQrRegistration, createManualRegistration, createRegistrationRegis
 import { createLease, candidates } from './lease.js';
 import { createSyncRetry } from './sync-retry.js';
 import { fitBudget } from './budget.js';
-import { planRetentionAll, formatImpactAll, normalizeEntry } from './dry-run.js';
+import { planRetentionAll, formatImpactAll, normalizeEntry, shouldAutoSweep } from './dry-run.js';
 import { sessionTitle, nextTitle } from './chat-name.js';
 import { createSwitchNote } from './switch-note.js';
 import { createTts, SHERPA_MODELS } from './tts.js';
@@ -1367,6 +1367,102 @@ export function apply(ctx) {
   });
 
   /**
+   * D11 retention（4c 追加：点过一次「应用」之后，每天凌晨自动重复）。
+   *
+   * `appliedAt` 是用户**手动确认过一次**的凭据，不是开关：
+   *   · 没点过 → 默认用户一条记忆都不会被自动改动（等价基线）；
+   *   · 点过   → 之后每天巩固时按当前策略再跑一次；
+   *   · 点「一键恢复」→ 把凭据清掉，否则第二天又会把刚恢复的条目重新作废。
+   */
+  const collectRetention = () => ({
+    facts: memory.retention.entries().map((e) => normalizeEntry(e, 'facts', e.chatId)),
+    journal: journal.listChat('', 0).map((r) => normalizeEntry(r, 'journal', r.chatId)),
+  });
+
+  /** purge 前先落一份能人工核对的备份；写不成就停手，一条都不许删 */
+  const backupRetention = (payload) => {
+    try {
+      const dir = join(dataDir(), 'backups');
+      mkdirSync(dir, { recursive: true });
+      const name = `pre-retention-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      writeFileSync(join(dir, name), JSON.stringify({ at: Date.now(), ...payload }, null, 2), 'utf8');
+      return name;
+    } catch (e) {
+      log.warn(`retention 备份没写成：${e.message}`);
+      return null;
+    }
+  };
+
+  /**
+   * 真正处置一次。手动「应用」和凌晨自动 sweep **共用这一份**，
+   * 否则两条路径迟早算出两套结果。
+   * @param {{confirm?:boolean}} opts confirm=true 时写下 appliedAt 凭据
+   */
+  const runRetentionApply = ({ confirm = false } = {}) => {
+    const plan = planRetentionAll(collectRetention(), cfg.memory?.retention || {});
+    const fExp = plan.facts.mode === 'expire' ? plan.facts.items : [];
+    const fPur = plan.facts.mode === 'purge' ? plan.facts.items : [];
+    const jExp = plan.journal.mode === 'expire' ? plan.journal.items : [];
+    const jPur = plan.journal.mode === 'purge' ? plan.journal.items : [];
+    if (!fExp.length && !fPur.length && !jExp.length && !jPur.length) {
+      return {
+        ok: true, affected: 0, message: '按现在的配置没有记忆会被作废。',
+        facts: { expired: 0, purged: 0 }, journal: { expired: 0, purged: 0 },
+      };
+    }
+
+    let backup = null;
+    if (fPur.length || jPur.length) {
+      const rawFacts = memory.retention.entries();
+      const pickFact = (it) => rawFacts.find((e) =>
+        e.text === it.id && e.scope === it.scope && e.chatId === it.chatId) || it;
+      backup = backupRetention({
+        facts: fPur.map(pickFact),
+        journal: jPur.map((it) => journal.get(it.id) || it),
+      });
+      if (!backup) return { ok: false, message: '备份没写成，已经停手，一条记忆都没删' };
+    }
+
+    const at = Date.now();
+    const expiredFacts = fExp.length ? memory.retention.expire(fExp, at) : 0;
+    const purgedFacts = fPur.length ? memory.retention.purge(fPur) : 0;
+    const expiredJournal = jExp.length
+      ? journal.invalidate(jExp.map((x) => x.id), { at, supersededBy: 'retention' }) : 0;
+    let purgedJournal = 0;
+    for (const it of jPur) if (journal.remove(it.id)) purgedJournal += 1;
+    const affected = expiredFacts + purgedFacts + expiredJournal + purgedJournal;
+
+    /** 只在用户手动确认的那一瞬间写凭据；自动 sweep 不重复写盘 */
+    if (confirm && !Number(cfg.memory?.retention?.appliedAt)) {
+      cfg = patchConfig({ memory: { retention: { appliedAt: Date.now() } } });
+    }
+    return {
+      ok: true,
+      message: `已处置 ${affected} 条：作废 ${expiredFacts + expiredJournal} 条、真删 ${purgedFacts + purgedJournal} 条${backup ? `（备份 ${backup}）` : ''}`,
+      facts: { expired: expiredFacts, purged: purgedFacts },
+      journal: { expired: expiredJournal, purged: purgedJournal },
+      affected,
+      backup,
+    };
+  };
+
+  /** 每天凌晨巩固时跑一次；失败只记日志，绝不拖垮巩固 */
+  const retentionSweep = () => {
+    const r = cfg.memory?.retention || {};
+    if (!shouldAutoSweep(r)) {
+      return { skipped: Number(r.appliedAt) ? '两路都关' : '没点过「应用」' };
+    }
+    try {
+      const out = runRetentionApply();
+      if (out.affected) log.info(`记忆淡出（自动）：处置 ${out.affected} 条`);
+      return out;
+    } catch (e) {
+      log.warn(`记忆淡出自动执行失败（不影响巩固）：${e?.message ?? e}`);
+      return { ok: false, message: String(e?.message ?? e) };
+    }
+  };
+
+  /**
    * 凌晨巩固的检查循环。
    *
    * 为什么不用 DSH 的 `ctx.schedule`：那是**提醒**服务——它会在 DSH 界面上
@@ -1414,6 +1510,12 @@ export function apply(ctx) {
       const hour = Number(cfg.memory?.consolidateHour) || 4;
       const day = consolidate.dueDay({ hour });
       if (!day) return;
+      /**
+       * D11：一天一次的记忆淡出（只在点过「应用」之后才真的动数据）。
+       * 放在巩固 try 之外：巩固失败不该让淡出停摆，淡出失败也不该带崩
+       * 巩固——`retentionSweep()` 自己吞异常只记日志。
+       */
+      retentionSweep();
       log.info(`巩固定时器：开始处理 ${day}`);
       const r = await consolidate.run({ day });
       if (r.ok) {
@@ -4001,32 +4103,6 @@ export function apply(ctx) {
          */
         if (op && op !== 'memory.list' && op !== 'capabilities.get' && op !== 'capabilities.preview' && op !== 'features.get' && op !== 'features.preview' && op !== 'quota.get') audit({ op, chatId, peer: who.kind, peerId: who.id });
 
-        /**
-         * D11 retention：把真实记忆条目喂给纯函数。
-         *
-         * facts 走 `memory.retention.entries()`（含已作废的，让 canExpire 过滤）；
-         * journal 走 `listChat('', 0)`——limit 0 = 不限，两个后端同口径，而且它
-         * 本来就只返回 `invalid_at=0` 的活行，已作废的不会重复算。
-         */
-        const collectRetention = () => ({
-          facts: memory.retention.entries().map((e) => normalizeEntry(e, 'facts', e.chatId)),
-          journal: journal.listChat('', 0).map((r) => normalizeEntry(r, 'journal', r.chatId)),
-        });
-
-        /** purge 前先落一份能人工核对的备份；写不成就停手，一条都不许删 */
-        const backupRetention = (payload) => {
-          try {
-            const dir = join(dataDir(), 'backups');
-            mkdirSync(dir, { recursive: true });
-            const name = `pre-retention-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-            writeFileSync(join(dir, name), JSON.stringify({ at: Date.now(), ...payload }, null, 2), 'utf8');
-            return name;
-          } catch (e) {
-            log.warn(`retention 备份没写成：${e.message}`);
-            return null;
-          }
-        };
-
         try {
           switch (op) {
             /**
@@ -4157,11 +4233,14 @@ export function apply(ctx) {
              * 「应用」。两路独立，所以哪怕只开 facts，日记那路也是 enabled=false。
              */
             case 'features.preview': {
-              const plan = planRetentionAll(collectRetention(), cfg.memory?.retention || {});
+              const rt = cfg.memory?.retention || {};
+              const plan = planRetentionAll(collectRetention(), rt);
               return send(res, 200, {
                 ok: true,
                 ...plan,
                 text: formatImpactAll(plan),
+                /** 点过一次「应用」且还有一路开着，才会每天凌晨自动重复 */
+                autoSweep: shouldAutoSweep(rt),
                 expiredFacts: memory.retention.expired().length,
                 expiredJournal: journal.invalidated({ limit: 500 })
                   .filter((r) => String(r.supersededBy ?? '') === 'retention').length,
@@ -4282,64 +4361,34 @@ export function apply(ctx) {
             /**
              * D11：把 dry-run 算出的命中条目真正处置掉。
              *
-             * 为什么不跟着 `features.patch` 自动跑：改档位和改数据是两件事，
-             * 用户得先看预览再确认一次。默认开的只是策略档位，没点「应用」
-             * 之前盘上一条记忆都不会变。
-             *
-             * 两路各自按自己的 mode 走：expire 只作废、purge 才真删；
-             * 真删前必须先写备份，写不成就整批停手。
+             * 改档位和改数据是两件事，用户得先看预览再确认一次。**这一次的
+             * 手动确认**会写下 `appliedAt`，之后每天凌晨巩固时按同一策略自动
+             * 重复（主人 12:5x 选「点过一次应用后才自动」）；没点过之前，
+             * 默认用户盘上一条记忆都不会变。
              */
             case 'retention.apply': {
-              const plan = planRetentionAll(collectRetention(), cfg.memory?.retention || {});
-              const fExp = plan.facts.mode === 'expire' ? plan.facts.items : [];
-              const fPur = plan.facts.mode === 'purge' ? plan.facts.items : [];
-              const jExp = plan.journal.mode === 'expire' ? plan.journal.items : [];
-              const jPur = plan.journal.mode === 'purge' ? plan.journal.items : [];
-              if (!fExp.length && !fPur.length && !jExp.length && !jPur.length) {
-                return send(res, 200, {
-                  ok: true, affected: 0, message: '按现在的配置没有记忆会被作废。',
-                  facts: { expired: 0, purged: 0 }, journal: { expired: 0, purged: 0 },
-                });
-              }
-
-              /** 备份要带原文，不能只存 id——真删之后就找不回来了 */
-              let backup = null;
-              if (fPur.length || jPur.length) {
-                const rawFacts = memory.retention.entries();
-                const pickFact = (it) => rawFacts.find((e) =>
-                  e.text === it.id && e.scope === it.scope && e.chatId === it.chatId) || it;
-                backup = backupRetention({
-                  facts: fPur.map(pickFact),
-                  journal: jPur.map((it) => journal.get(it.id) || it),
-                });
-                if (!backup) return send(res, 500, { ok: false, message: '备份没写成，已经停手，一条记忆都没删' });
-              }
-
-              const at = Date.now();
-              const expiredFacts = fExp.length ? memory.retention.expire(fExp, at) : 0;
-              const purgedFacts = fPur.length ? memory.retention.purge(fPur) : 0;
-              const expiredJournal = jExp.length
-                ? journal.invalidate(jExp.map((x) => x.id), { at, supersededBy: 'retention' }) : 0;
-              let purgedJournal = 0;
-              for (const it of jPur) if (journal.remove(it.id)) purgedJournal += 1;
-              const affected = expiredFacts + purgedFacts + expiredJournal + purgedJournal;
-              return send(res, 200, {
-                ok: true,
-                message: `已处置 ${affected} 条：作废 ${expiredFacts + expiredJournal} 条、真删 ${purgedFacts + purgedJournal} 条${backup ? `（备份 ${backup}）` : ''}`,
-                facts: { expired: expiredFacts, purged: purgedFacts },
-                journal: { expired: expiredJournal, purged: purgedJournal },
-                affected,
-                backup,
-              });
+              const r = runRetentionApply({ confirm: true });
+              return send(res, r.ok ? 200 : 500, r);
             }
 
-            /** D11：一键恢复本功能作废过的记忆；别人改口作废的不动 */
+            /**
+             * D11：一键恢复本功能作废过的记忆；别人改口作废的不动。
+             *
+             * **顺手撤掉自动授权**：不清 `appliedAt` 的话，第二天凌晨会把刚
+             * 恢复的条目再作废一次，恢复按钮等于白做。要重新自动，再点一次
+             * 「应用」即可。
+             */
             case 'retention.restore': {
               const facts = memory.retention.restore();
               const journalRows = journal.restore();
+              let stopped = false;
+              if (Number(cfg.memory?.retention?.appliedAt)) {
+                cfg = patchConfig({ memory: { retention: { appliedAt: 0 } } });
+                stopped = true;
+              }
               return send(res, 200, {
-                ok: true, facts, journal: journalRows,
-                message: `恢复了 ${facts} 条事实、${journalRows} 条日记（真删的要用备份手工恢复）`,
+                ok: true, facts, journal: journalRows, autoSweep: false,
+                message: `恢复了 ${facts} 条事实、${journalRows} 条日记${stopped ? '；已停止每天自动淡出' : ''}（真删的要用备份手工恢复）`,
               });
             }
 

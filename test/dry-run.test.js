@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   DRY_RUN_FEATURES, RETENTION_MODES, retentionR, normalizeEntry,
   canExpire, canExpireFacts, canExpireJournal,
-  planRetention, planRetentionAll, formatImpact, formatImpactAll,
+  planRetention, planRetentionAll, formatImpact, formatImpactAll, shouldAutoSweep,
 } from '../src/dry-run.js';
 /** 判据不能和真实数据层漂移：直接拿这边的常量当输入来验 */
 import { W_EXPLICIT } from '../src/memory.js';
@@ -149,6 +149,21 @@ test('dry-run：purge 只是标记，返回的仍是同一批 id（真删由调�
   assert.equal(expire.purge, false);
   assert.match(formatImpact(purge), /真删/);
   assert.match(formatImpact(expire), /作废不删行/);
+});
+
+test('dry-run：自动 sweep 只在「手动确认过 + 还有一路开着」时允许', () => {
+  assert.equal(shouldAutoSweep({}), false);
+  assert.equal(shouldAutoSweep({ factsMode: 'expire', journalMode: 'off' }), false,
+    '默认档位没确认过，绝不自动');
+  assert.equal(shouldAutoSweep({ factsMode: 'off', journalMode: 'off', appliedAt: 123 }), false,
+    '两路都关 = 停');
+  assert.equal(shouldAutoSweep({ factsMode: 'expire', appliedAt: 123 }), true);
+  assert.equal(shouldAutoSweep({ journalMode: 'purge', appliedAt: 123 }), true);
+  assert.equal(shouldAutoSweep({ factsMode: 'off', journalMode: 'purge', appliedAt: 123 }), true);
+  assert.equal(shouldAutoSweep({ factsMode: 'bogus', journalMode: 'bogus', appliedAt: 123 }), false,
+    '坏档位不猜');
+  assert.equal(shouldAutoSweep({ factsMode: 'expire', appliedAt: 0 }), false,
+    '「一键恢复」把凭据清 0，自动立刻停');
 });
 
 test('dry-run：normalizeEntry 把两路真实字段映射对', () => {

@@ -4351,7 +4351,11 @@ select.roost-input{color-scheme:dark}
                 h('div', { className: 'cap-group-b' },
                   h('div', { className: 'roost-note', style: { margin: 0 } }, retention.text),
                   h('div', { className: 'roost-note', style: { margin: 0 } },
-                    `事实：${retention.facts.enabled ? retention.facts.mode : '关'} · 日记：${retention.journal.enabled ? retention.journal.mode : '关'}；共扫 ${retention.total} 条。改档位不会自动改数据，要下面这个按钮才生效。`),
+                    `事实：${retention.facts.enabled ? retention.facts.mode : '关'} · 日记：${retention.journal.enabled ? retention.journal.mode : '关'}；共扫 ${retention.total} 条。改档位不碰数据，要下面这个按钮才生效。`),
+                  h('div', { className: 'roost-note', style: { margin: 0 } },
+                    retention.autoSweep
+                      ? '已手动确认过一次：之后每天凌晨巩固时按当前策略自动重复。点「一键恢复」会停止自动。'
+                      : '还没点过「应用」，不会自动改动记忆。点一次之后，才会每天凌晨自动重复同一策略。'),
                   (retention.expiredFacts || retention.expiredJournal)
                     ? h('div', { className: 'roost-note', style: { margin: 0 } },
                         `已作废 ${retention.expiredFacts} 条事实、${retention.expiredJournal} 条日记，可一键恢复。`)

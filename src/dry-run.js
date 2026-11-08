@@ -191,6 +191,19 @@ export function planRetentionAll(sources = {}, cfg = {}, now = Date.now()) {
   };
 }
 
+/**
+ * 允许「每天凌晨自动重复」吗。
+ *
+ * 主人 12:5x 选「点过一次应用后才自动」：默认用户没确认过 → 一律不自动；
+ * 确认过且还有一路开着 → 才按当前策略重复。两路都关掉也算停。
+ * `appliedAt` 是**手动确认的凭据**，不是开关，所以这里不用布尔开关，
+ * 也不放进 FEATURES（面板上多一个「自动」开关反而让人以为是第三态）。
+ */
+export function shouldAutoSweep(rt = {}) {
+  return Boolean(Number(rt.appliedAt))
+    && [rt.factsMode, rt.journalMode].some((m) => m === 'expire' || m === 'purge');
+}
+
 /** 面板用的一句人话。条数 + 处置方式，不说「已删除」——默认只是作废 */
 export function formatImpact(plan) {
   if (!plan) return '没算出结果';
