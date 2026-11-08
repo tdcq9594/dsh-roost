@@ -40,6 +40,7 @@ import { createEmbedder } from './embed.js';
 import { createMood } from './mood.js';
 import { observe, moodPrompt } from './mood-observe.js';
 import { createHistoryRing } from './history-ring.js';
+import { memoryLines } from './memory-line.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing } from './closing.js';
 import { createAccount } from './account.js';
@@ -1086,6 +1087,13 @@ export function apply(ctx) {
   let lastScene = null;
 
   /**
+   * 最近一轮说话人的档位。`/mind` 面板要显示「这一轮真正注入了什么」，
+   * 记忆行按档位裁 sender，所以面板得用同一档，不能自己假设是主人。
+   * 默认 member：没收到过消息时不泄露任何人的名字。
+   */
+  let lastBucket = 'member';
+
+  /**
    * 会话 → 备用键（号码 + 该号码名下的所有 openid）。
    *
    * 为什么要单独存一份而不是只从 `lastScene` 读：面板的 /memory 接口、
@@ -1906,7 +1914,7 @@ export function apply(ctx) {
    *
    * 「刚才说到」必须留着：上下文一压缩，`那个`/`上面第二个` 就没了指代对象。
    */
-  function memoryDynamic() {
+  function memoryDynamic(bucket = lastBucket) {
     const chatId = lastScene?.chatId || '';
     if (memoryOff(chatId)) return '';
     const st = memState.get(chatId) || {};
@@ -1923,9 +1931,13 @@ export function apply(ctx) {
 
     let hitSec = '';
     if (st.hits?.length) {
-      hitSec = `【可能有关的旧事】\n${st.hits
-        .map((r) => `· ${dayStr(r.at)} ${clip(r.digest || r.text, 60)}`)
-        .join('\n')}`;
+      /**
+       * D5：命中行统一走 memoryLine（时间 + 出处 +「当时：」）。
+       * 按当轮档位裁 sender：群成员那一轮不告诉她是谁说的，
+       * 与「member 的 memory_search 不返回 sender」同一条边界。
+       */
+      const lines = memoryLines(st.hits, { bucket, chatId });
+      if (lines.length) hitSec = `【可能有关的旧事】\n${lines.join('\n')}`;
     }
 
     /** 一行索引：让她知道"还有东西在，只是没铺开"（对照表 1.14） */
@@ -2965,6 +2977,7 @@ export function apply(ctx) {
     const started = Date.now();
     /** 这一句是谁说的、他能让 AI 干到什么程度 */
     const bucket = bucketOf(payload);
+    lastBucket = bucket;
     let sid = '';
     let restore = null;
     /**
@@ -3283,7 +3296,7 @@ export function apply(ctx) {
        * 为什么不放 system prompt：它每轮都变，会把 system 前缀的缓存废掉。
        */
       if (cfg.memory?.freezeSystem !== false) {
-        const dyn = memoryDynamic();
+        const dyn = memoryDynamic(bucket);
         if (dyn) text = `${dyn}\n\n${text}`;
       }
 

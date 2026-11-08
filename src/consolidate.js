@@ -62,6 +62,27 @@ export function parseJsonLoose(text) {
 }
 
 /**
+ * A10③：模型把输出预算全花在思考上、一个 JSON 都没给，值得再试一次。
+ *
+ * 对方的做法是「放宽 maxTokens 到 16000 重试」，**我们照搬不了**：
+ * 巩固走 DSH 宿主会话，输出预算在会话配置里，`turn.run()` 只有
+ * source / images / timeoutMs 三个可选参数，调用点改不了上限。
+ * 能做的等价物是**把要求收紧一次**：只认「空输出」和「长篇但没有
+ * `{`」这两种真·思考吃光预算的形态，别的坏输出保持原样退回机械压缩，
+ * 免得每天凌晨平白多调一次模型。
+ */
+export function needsJsonRetry(raw, plan) {
+  if (plan) return false;
+  const s = String(raw ?? '');
+  return !s.trim() || (s.length > 200 && !s.includes('{'));
+}
+
+/** 重试不重发那一整天的记录，只在末尾追加一句硬要求（省输入 token） */
+export function terseJsonPrompt(prompt) {
+  return `${String(prompt ?? '')}\n\n（上一轮没有给出 JSON。这次不要思考过程、不要解释，直接输出一个 JSON 对象。）`;
+}
+
+/**
  * 没有模型（或模型抽风）时的机械压缩。
  *
  * 截前 40 字而不是"丢掉"：铁律是压不是删，机械手段也得遵守。
@@ -329,8 +350,19 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
 
         if (generate) {
           try {
-            const raw = await generate(buildPrompt({ day: target, chatName, items, revocation }));
+            const prompt = buildPrompt({ day: target, chatName, items, revocation });
+            let raw = await generate(prompt);
             plan = parseJsonLoose(raw);
+            if (needsJsonRetry(raw, plan)) {
+              log(`巩固 ${target}/${chatName}：模型没写出 JSON，收紧要求再试一次`);
+              try {
+                raw = await generate(terseJsonPrompt(prompt));
+                plan = parseJsonLoose(raw);
+              } catch (e) {
+                /** 重试失败不算新错误：主调用已经成功，照旧退回机械压缩 */
+                log(`巩固 ${target}/${chatName} 重试失败：${e.message}`);
+              }
+            }
             if (!plan) {
               log(`巩固 ${target}/${chatName}：模型输出不是 JSON，退回机械压缩`);
               stats.errors.push('模型输出解析失败');
