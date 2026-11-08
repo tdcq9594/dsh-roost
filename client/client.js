@@ -4194,12 +4194,17 @@ select.roost-input{color-scheme:dark}
         },
           h('div', { className: 'roost-note' },
             '这些是「有没有这个功能」，和下面的「谁能用」是两层：这里关掉，谁的调不出来。'),
+          /** 两页分属两个进程，用户调「她怎么聊天」最容易走错页（§16.4-1） */
+          h('div', { className: 'roost-note' },
+            '接话策略、防吵、冷却在 Roost 面板「插件 → ai-chat → 配置」；这一页管记忆、心情、主动和扩展。'),
           feat
             ? (feat.groups || []).map((g) => {
                 const items = (feat.features || []).filter((f) => (g.ids || []).includes(f.id))
                 if (!items.length) return null
-                return h('div', { key: g.id, className: 'cap-group' },
-                  h('div', { className: 'cap-group-t' }, g.label),
+                /** 高级组用原生 details 默认收起：新开关多了不能一上来把人淹没（§16.5-4） */
+                return h(g.advanced ? 'details' : 'div', { key: g.id, className: 'cap-group' },
+                  h(g.advanced ? 'summary' : 'div', { className: 'cap-group-t' },
+                    g.advanced ? `${g.label} · ${items.length} 项，点开看看` : g.label),
                   h('div', { className: 'cap-group-b' },
                     items.map((f) => {
                       const kind = f.kind || 'toggle'
@@ -4320,6 +4325,8 @@ select.roost-input{color-scheme:dark}
             : null,
           h('div', { className: 'roost-note' },
             '带 config 的开关和「设置」页是同一份，在哪儿改都一样；发文件那个存在能力策略里。'),
+          h('div', { className: 'roost-note' },
+            '她记了什么、能清哪些：看左侧「记忆」页；以后上线的人物档案、经历、召回日志也归到那边查看和清空。'),
         ),
 
         h(Sec, {

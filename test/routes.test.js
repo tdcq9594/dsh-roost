@@ -369,7 +369,22 @@ test('对齐：后端有的配置段，设置页也要列出来', async () => {
   const block = client.slice(client.indexOf('const JSON_SECTIONS'), client.indexOf('function ConfigTab'));
   const keys = [...block.matchAll(/\['([a-zA-Z]+)',/g)].map((m) => m[1]);
 
-  const missing = Object.keys(DEFAULTS).filter((k) => !keys.includes(k));
+  /**
+   * 阶段 2 的配置骨架：字段和默认值先落地，功能分批上线（§18.3）。
+   * 这几段对应的开关在 `features.js` 里还标着 `staged`，能力页不下发，
+   * 设置页也不该提前列一个「改了什么都不会发生」的 JSON 块。
+   *
+   * 白名单不是永久豁免：下面按 id 反查 `staged`，功能上线时删掉那行
+   * 就会让这条断言变红，逼着把段列进 `JSON_SECTIONS` 并移出白名单。
+   */
+  const NOT_SHIPPED = ['mood', 'profiles', 'events', 'extensions'];
+  const { FEATURES } = await import('../src/features.js');
+  for (const id of ['moodEffects', 'profiles', 'events', 'extensions']) {
+    assert.equal(FEATURES.find((f) => f.id === id)?.staged, true,
+      `「${id}」已上线：把它的配置段列进设置页 JSON_SECTIONS，并从 NOT_SHIPPED 移除`);
+  }
+
+  const missing = Object.keys(DEFAULTS).filter((k) => !keys.includes(k) && !NOT_SHIPPED.includes(k));
   assert.deepEqual(missing, [], `后端有、设置页没列出的配置段：${missing.join('、')}`);
 });
 

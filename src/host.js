@@ -25,7 +25,7 @@ import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf, speakerTag } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS } from './permissions.js';
 import { resolvePolicy, dangerOf, BUCKETS } from './capabilities.js';
-import { FEATURES, FEATURE_GROUPS, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting } from './features.js';
+import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting } from './features.js';
 import { createCapabilityStore } from './capability-store.js';
 import { createQuota, QUOTA_DEFAULTS } from './quota.js';
 import { createSetup } from './setup.js';
@@ -4042,18 +4042,21 @@ export function apply(ctx) {
               const store = capStore.get();
               const cur = currentPool();
               const pool = cur.pool;
+              /** 只下发已上线的开关：staged 项功能还没写，出现在面板上就是「点了没反应」 */
+              const shown = visibleFeatures();
               const blocked = {};
-              for (const f of FEATURES) blocked[f.id] = cannotEnable(cfg, store, f.id);
+              for (const f of shown) blocked[f.id] = cannotEnable(cfg, store, f.id);
               return send(res, 200, {
                 ok: true,
                 on: readFeatures(cfg, store),
-                raw: Object.fromEntries(FEATURES.map((f) => [f.id, rawFeature(cfg, store, f.id)])),
-                features: FEATURES.map((f) => ({
+                raw: Object.fromEntries(shown.map((f) => [f.id, rawFeature(cfg, store, f.id)])),
+                features: shown.map((f) => ({
                   id: f.id,
                   label: f.label,
                   desc: f.desc,
                   offHint: f.offHint,
                   risky: !!f.risky,
+                  advanced: !!f.advanced,
                   source: f.source,
                   affects: f.affects,
                   requires: f.requires,
@@ -4069,7 +4072,7 @@ export function apply(ctx) {
                 })),
                 /** 非布尔项的当前值（`retentionDays` 之类），和 `on` 分开给 */
                 settings: readSettings(cfg, store),
-                groups: FEATURE_GROUPS,
+                groups: visibleGroups(shown),
                 blocked,
                 wouldRemove: forcedDenyTools(cfg, store, pool),
                 pool,
@@ -4092,6 +4095,8 @@ export function apply(ctx) {
               const id = String(arg?.id || '');
               const def = featureDef(id);
               if (!def) return send(res, 400, { ok: false, message: `没有这个开关：${id || '(空)'}` });
+              /** 功能还没上线的开关，连手调 API 也不许写：避免盘上出现无效配置 */
+              if (def.staged) return send(res, 409, { ok: false, message: `「${def.label}」还没上线，先别改` });
 
               const isToggle = kindOf(def) === 'toggle';
               /**

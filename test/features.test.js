@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { FEATURES, FEATURE_GROUPS, readFeatures, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, readSettings, normalizeSetting } from '../src/features.js';
+import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, readSettings, normalizeSetting } from '../src/features.js';
 import { resolvePolicy, defaultStore, PINNED_KEEP } from '../src/capabilities.js';
+import { DEFAULTS } from '../src/config.js';
 
 const POOL = [
   'memory_search',
@@ -151,7 +152,14 @@ test('features：没写过的字段当「开」，写了 false 才是关', () =>
    * 这里用一个**临时**定义验机制本身：账本的保留期不在 dsh-roost 的 config 里
    * （它在 bot 那边），所以不能拿它当例子——那会变成「面板显示永久、实际按 7 天删」。
    */
-  assert.deepEqual(readSettings({}, {}), { queueMax: 2, queueMinBudgetSec: 30 }, '非布尔项取定义里的默认值');
+  /**
+   * 不整对象 deepEqual 了：阶段 2 起会陆续新增非布尔项，写死两个键等于
+   * 每加一个开关就要改一次老用例，而且失败信息看不出是谁缺默认值。
+   * 新增项的默认值由下面「骨架：新开关默认值都是关」那条统一验。
+   */
+  const settings = readSettings({}, {});
+  assert.equal(settings.queueMax, 2, '非布尔项取定义里的默认值');
+  assert.equal(settings.queueMinBudgetSec, 30, '非布尔项取定义里的默认值');
 
   assert.equal(readFeatures({ tts: { enabled: false } }, {}).voice, false);
 });
@@ -189,4 +197,74 @@ test('features：forcedDenyTools 只返回池子里真有的名字', () => {
   // 不传 pool 时给全集，交给调用方按实际挂载过滤
   const all = forcedDenyTools(cfg, {}).sort();
   assert.deepEqual(all, ['memory_note', 'memory_search']);
+});
+
+// ---- 阶段 2：配置骨架（新功能开关先注册、功能分批上线）----
+
+test('骨架：每个 config 来源的开关都能在 DEFAULTS 里找到真实字段', () => {
+  /**
+   * `saveConfig()` 会按 DEFAULTS 的形状裁剪，DEFAULTS 里没有的键一律丢掉。
+   * 所以「面板保存成功、下次读又回去了」这类 bug 只能靠这条测试挡：
+   * 光在 features.js 写个 path 是不够的，config.js 必须同步登记。
+   */
+  for (const f of FEATURES) {
+    if (f.source !== 'config') continue;
+    let cur = DEFAULTS;
+    for (const k of f.path) {
+      assert.ok(cur !== null && typeof cur === 'object', `${f.id} 的 path ${f.path.join('.')} 指到了非对象`);
+      assert.ok(Object.hasOwn(cur, k), `${f.id} 的 path ${f.path.join('.')} 在 DEFAULTS 里没有「${k}」`);
+      cur = cur[k];
+    }
+    if (f.default !== undefined) assert.deepEqual(cur, f.default, `${f.id} 的 DEFAULTS 值要和 default 一致`);
+  }
+});
+
+test('骨架：未上线的开关不下发、不影响工具池、也不许被 patch', () => {
+  const staged = FEATURES.filter((f) => f.staged);
+  assert.ok(staged.length >= 7, '阶段 2 注册了至少 7 个骨架开关');
+  for (const f of staged) {
+    assert.deepEqual(f.affects, [], `${f.id} 的 affects 必须留空（forcedDenyTools 的 P0 坑）`);
+    assert.ok(!visibleFeatures().includes(f), `${f.id} 不该出现在面板可见列表里`);
+  }
+  // 默认配置下，新增的骨架开关一个工具都不许收走
+  assert.deepEqual(forcedDenyTools(DEFAULTS, {}, POOL), []);
+
+  const groups = visibleGroups();
+  assert.ok(groups.every((g) => g.ids.length), '空组不该下发');
+  const visibleIds = new Set(visibleFeatures().map((f) => f.id));
+  for (const g of groups) for (const id of g.ids) assert.ok(visibleIds.has(id), `${id} 不该出现在可见分组里`);
+});
+
+test('骨架：字符串枚举 select 能存能取，数字型 select 行为不变', () => {
+  const f = featureDef('retentionMode');
+  assert.equal(kindOf(f), 'select');
+  assert.equal(normalizeSetting(f, 'off'), 'off');
+  assert.equal(normalizeSetting(f, 'expire'), 'expire');
+  assert.equal(normalizeSetting(f, 'purge'), 'purge');
+  assert.equal(normalizeSetting(f, 'PURGE'), null, '大小写不猜，静默写错值比拒绝更糟');
+  assert.equal(normalizeSetting(f, ''), null);
+  assert.equal(normalizeSetting(f, null), null);
+  assert.equal(normalizeSetting(f, 0), null, '数字 0 不该被当成某个枚举');
+  assert.deepEqual(patchForFeature('retentionMode', 'expire'), {
+    config: { memory: { retention: { mode: 'expire' } } },
+    value: 'expire',
+  });
+
+  // 老的数字型 select（带 options/custom）保持原样
+  const numeric = { kind: 'select', options: [{ value: 7 }, { value: 30 }], min: 1, max: 365, custom: true };
+  assert.equal(normalizeSetting(numeric, '7'), 7);
+  assert.equal(normalizeSetting(numeric, 14), 14, 'custom 允许选项外的整数');
+  assert.equal(normalizeSetting(numeric, 'abc'), null);
+});
+
+test('骨架：新开关默认值都是关，裸配置读出来也绝不会误开', () => {
+  const on = readFeatures({});
+  for (const id of ['moodEffects', 'profiles', 'events', 'extensions']) {
+    assert.equal(on[id], false, `${id} 默认必须关`);
+  }
+  const settings = readSettings({});
+  assert.equal(settings.retentionMode, 'off');
+  assert.equal(settings.retentionThresholdPct, 5);
+  assert.equal(settings.retentionMinProtectDays, 30);
+  assert.deepEqual(readSettings(DEFAULTS), settings, 'DEFAULTS 与裸配置的默认值必须一致');
 });

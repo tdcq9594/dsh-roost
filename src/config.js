@@ -322,6 +322,37 @@ export const DEFAULTS = {
      * 才开；留空就是纯关键词，不报错。
      */
     embedding: null,
+    /**
+     * 可选过期策略（调研报告 D11，默认关）。
+     *
+     * 三态只用一个 `mode` 字段：`off` / `expire`（作废不删行）/ `purge`
+     * （真删，但先自动备份）。不拆成 `enabled` 布尔 + `policy` 枚举，
+     * 否则又出现「两份真相」——布尔关着、枚举却写着 purge 时算哪个。
+     *
+     * `thresholdPct` 用整数百分数（5 = R < 0.05）而不是小数，
+     * 因为能力页的 number 控件只收整数（`normalizeSetting` 明确拒非整数）。
+     */
+    retention: {
+      mode: 'off',
+      thresholdPct: 5,
+      minProtectDays: 30,
+    },
+  },
+  /** 心情影响发送概率（调研报告 B2）。状态本身在 mood.json，这里只放开关 */
+  mood: {
+    effects: false,
+  },
+  /** 人物小档案（D7）：数据落在 profiles.json，清除入口独立，不挂会话级清空 */
+  profiles: {
+    enabled: false,
+  },
+  /** 经历层（D8）：数据落在 events.json，随 memory.clear 清 */
+  events: {
+    enabled: false,
+  },
+  /** 用户扩展总闸（F）：一期 HTTP/独立进程，默认关；目录 extensions/ 不受升级覆盖 */
+  extensions: {
+    enabled: false,
   },
   /**
    * 对话收尾：**她也会把话说完，然后退场**。

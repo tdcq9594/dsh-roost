@@ -272,6 +272,120 @@ export const FEATURES = [
     affects: NONE,
     offHint: '只能在面板上换人格，聊天里换不了。',
   },
+
+  // ---- 以下是调研报告 §15 新功能的开关骨架（阶段 2 先注册，功能分批上线）----
+  //
+  // `staged: true` = 功能还没实现，`features.get` 不下发给面板、`features.patch`
+  // 也拒绝写入。理由：能力页出现一个「点了什么也不会发生」的开关，比没有这个
+  // 开关更糟。对应功能上线时（阶段 4/5/8）**只删这一行**，字段、默认值、
+  // 读写链路、测试都已经在跑了，不用再改一遍骨架。
+  //
+  // `affects` 一律留空：这些都不是「关掉就收工具」的功能开关；
+  // `forcedDenyTools()` 见到 false 会把 affects 里的工具全收走（见 :121/:148 两处 P0）。
+
+  {
+    id: 'retentionMode',
+    label: '旧记忆自动淡出',
+    desc: '很久没被想起、又不重要的自动提炼记忆，慢慢退出注入与检索',
+    source: 'config',
+    path: ['memory', 'retention', 'mode'],
+    kind: 'select',
+    options: [
+      { value: 'off', label: '关（保持现状）' },
+      { value: 'expire', label: '作废不删行（可恢复）' },
+      { value: 'purge', label: '真删（先自动备份）' },
+    ],
+    default: 'off',
+    requires: NONE,
+    affects: NONE,
+    offHint: '',
+    advanced: true,
+    staged: true,
+  },
+  {
+    id: 'retentionThresholdPct',
+    label: '淡出阈值（%）',
+    desc: '保留度低于这个百分数就过期。只作用自动提炼、不重要的条目',
+    source: 'config',
+    path: ['memory', 'retention', 'thresholdPct'],
+    kind: 'number',
+    min: 1,
+    max: 50,
+    default: 5,
+    requires: NONE,
+    affects: NONE,
+    offHint: '',
+    advanced: true,
+    staged: true,
+  },
+  {
+    id: 'retentionMinProtectDays',
+    label: '最短保护期（天）',
+    desc: '刚记下没多久的事不参与过期，0 = 不保护',
+    source: 'config',
+    path: ['memory', 'retention', 'minProtectDays'],
+    kind: 'number',
+    min: 0,
+    max: 365,
+    default: 30,
+    requires: NONE,
+    affects: NONE,
+    offHint: '',
+    advanced: true,
+    staged: true,
+  },
+  {
+    id: 'moodEffects',
+    label: '心情影响发送习惯',
+    desc: '心情好时更爱配表情和语音，低落时少插话',
+    source: 'config',
+    path: ['mood', 'effects'],
+    default: false,
+    requires: NONE,
+    affects: NONE,
+    offHint: '心情只影响说话语气，不改变会不会发语音、发图。',
+    advanced: true,
+    staged: true,
+  },
+  {
+    id: 'profiles',
+    label: '给熟人写小档案',
+    desc: '把对一个人的印象攒成一小段，聊天时带上',
+    source: 'config',
+    path: ['profiles', 'enabled'],
+    default: false,
+    requires: NONE,
+    affects: NONE,
+    offHint: '不再写档案，已有的档案不会被删。',
+    advanced: true,
+    staged: true,
+  },
+  {
+    id: 'events',
+    label: '记得自己做过什么',
+    desc: '把她主动做过的事记成短时经历，只给主人私聊当素材',
+    source: 'config',
+    path: ['events', 'enabled'],
+    default: false,
+    requires: NONE,
+    affects: NONE,
+    offHint: '不再记经历，已有的经历不会被删。',
+    advanced: true,
+    staged: true,
+  },
+  {
+    id: 'extensions',
+    label: '用户扩展',
+    desc: '允许加载你放进 extensions/ 的功能扩展',
+    source: 'config',
+    path: ['extensions', 'enabled'],
+    default: false,
+    requires: NONE,
+    affects: NONE,
+    offHint: '扩展一个都不加载；已放进去的文件不会被删。',
+    advanced: true,
+    staged: true,
+  },
 ];
 
 /** id → 定义。查不到返回 undefined 而不是抛错：调用方常来自面板参数 */
@@ -441,6 +555,18 @@ export function normalizeSetting(f, value) {
     return n < min || n > max ? null : n;
   }
   if (kind === 'select') {
+    /**
+     * 字符串枚举（如 retention 的 off/expire/purge）走这一支。
+     * 老实现一律 `Number(value)`，字符串会被算成 NaN 而拒掉——面板提交
+     * 字符串 select 会永远得到「这个值不合法」。数字型 select 仍走下面的老路，
+     * 两套按 options 里的 value 类型自动分流，调用方不用知道区别。
+     */
+    const strOpts = (f.options || []).filter((o) => typeof o.value === 'string');
+    if (strOpts.length) {
+      const raw = String(value);
+      const hit = strOpts.find((o) => o.value === raw);
+      return hit ? hit.value : null;
+    }
     const opts = (f.options || []).map((o) => Number(o.value));
     if (opts.includes(n)) return n;
     if (f.custom) {
@@ -481,4 +607,25 @@ export const FEATURE_GROUPS = [
   { id: 'queue', label: '消息来不及回的时候', ids: ['queueMax', 'queueMinBudgetSec'] },
   { id: 'proactive', label: '会不会主动找你', ids: ['speakUp', 'awake'] },
   { id: 'work', label: '干不干活', ids: ['sendFile', 'personaCommand'] },
+  {
+    /** 高级项：默认折叠（前端 Sec 02 按 `advanced` 收进 details），避免一上来 20+ 个开关淹没用户 */
+    id: 'advanced', label: '高级 · 新功能（逐步开放）', advanced: true,
+    ids: ['retentionMode', 'retentionThresholdPct', 'retentionMinProtectDays', 'moodEffects', 'profiles', 'events', 'extensions'],
+  },
 ];
+
+/**
+ * 面板可见的开关：`staged` 项的功能还没实现，不下发也不许改。
+ * 对应功能上线时删掉那一行 `staged: true` 就自动出现，不用再动骨架。
+ */
+export function visibleFeatures() {
+  return FEATURES.filter((f) => !f.staged);
+}
+
+/** 分组里去掉不可见的 id，空组不下发（前端本来也会跳过，这里少传一点） */
+export function visibleGroups(features = visibleFeatures()) {
+  const ids = new Set(features.map((f) => f.id));
+  return FEATURE_GROUPS
+    .map((g) => ({ ...g, ids: g.ids.filter((id) => ids.has(id)) }))
+    .filter((g) => g.ids.length);
+}

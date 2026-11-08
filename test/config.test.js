@@ -220,3 +220,33 @@ test('密钥：数组/对象这类非字符串值不会写进磁盘', () => {
   saveConfig({ tts: { gptSovits: { apiKey: 12345 } } });
   assert.equal(loadConfig().tts.gptSovits.apiKey, '', '数字同样不行');
 });
+
+test('配置：阶段 2 新增的开关字段存得下去（pruneTo 不会把它们裁掉）', () => {
+  /**
+   * `saveConfig()` 按 DEFAULTS 的形状裁剪，DEFAULTS 里没有的键一律丢。
+   * 能力页写 `memory.retention.mode = 'expire'`，如果忘了在 DEFAULTS 登记，
+   * 现象是「面板提示已保存，刷新又变回关」，而且不报错。
+   */
+  const d = freshDir();
+  const c = patchConfig({
+    memory: { retention: { mode: 'expire', thresholdPct: 8, minProtectDays: 14 } },
+    mood: { effects: true },
+    profiles: { enabled: true },
+    events: { enabled: true },
+    extensions: { enabled: true },
+  });
+  assert.equal(c.memory.retention.mode, 'expire');
+  assert.equal(c.memory.retention.thresholdPct, 8);
+  assert.equal(c.memory.retention.minProtectDays, 14);
+  assert.equal(c.mood.effects, true);
+  assert.equal(c.profiles.enabled, true);
+  assert.equal(c.events.enabled, true);
+  assert.equal(c.extensions.enabled, true);
+
+  /** 重新读一次（走合并 + 裁剪），值必须还在 */
+  const again = loadConfig();
+  assert.equal(again.memory.retention.mode, 'expire');
+  assert.equal(again.mood.effects, true);
+  const onDisk = JSON.parse(readFileSync(join(d, 'config.json'), 'utf8'));
+  assert.equal(onDisk.memory.retention.mode, 'expire', '盘上也得是真的');
+});
