@@ -352,3 +352,13 @@ test('兼容：老 mood.json 没有 reasonAt 也能读', async () => {
     done();
   }
 });
+
+test('C3：feedbackArgsOf 只认已知反馈，方向统一走 normalizeFeedback', async () => {
+  const { feedbackArgsOf } = await import('../src/mood.js');
+  assert.deepEqual(feedbackArgsOf('up'), { positive: true });
+  assert.deepEqual(feedbackArgsOf('点赞'), { positive: true });
+  assert.deepEqual(feedbackArgsOf('down'), { positive: false });
+  assert.deepEqual(feedbackArgsOf('点踩'), { positive: false });
+  assert.equal(feedbackArgsOf('随便什么'), null, '认不出来别结算');
+  assert.equal(feedbackArgsOf(''), null);
+});

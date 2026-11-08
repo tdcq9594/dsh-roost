@@ -5359,6 +5359,8 @@ select.roost-input{color-scheme:dark}
       ['awake', '主动说话', '清醒时段、机会分门槛、群白名单（开着时 speakUp.prompt 会当额外要求一起给）'],
       ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],
       ['closing', '收尾', '对话冷掉前自己补一句：多久算冷（coolMinutes）、盯几个会话（maxChats）、记录留几天（ttlDays）'],
+      ['leakGuard', '防复读', 'enabled：她回复里整段复述了注入的记忆块，出站前删掉那几句。默认关，日常在「能力」页高级组里点'],
+      ['bridge', '对外联动（实验）', 'enabled：让别的 DSH 插件通过 ctx.get("aurabot") 主动发消息、读状态；接口可能变，默认关'],
       ['model', '模型', 'byChat：按会话指定 provider / model / reasoningEffort，没配就用 DSH 的全局默认模型'
         + '（例：{"群openid":{"provider":"deepseek","model":"deepseek-chat"}}）。'
         + '思考强度会先问 DSH 这个模型支持哪几档，不支持就不传，避免整轮直接报错'],

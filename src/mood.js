@@ -97,6 +97,21 @@ export function normalizeFeedback(kind) {
 }
 
 /**
+ * C3：官方点赞点踩 → `awake.feedback()` 的参数。
+ *
+ * `/mood` 路由以前直接写 `{ positive: normalizeFeedback(raw) === 'LIKE' }`，
+ * 这一行埋路由里没有单测。抽出来之后「raw 到底算不算正反馈」可以单独测，
+ * 也保证全仓只有 `normalizeFeedback` 一份判方向逻辑。
+ *
+ * @returns {{positive:boolean}|null} 认不出来返回 null（调用方别结算）
+ */
+export function feedbackArgsOf(raw) {
+  const dir = normalizeFeedback(raw);
+  if (!dir) return null;
+  return { positive: dir === 'LIKE' };
+}
+
+/**
  * 解析 `<<mood: ...>>` 里的参数。
  *
  * 支持 `valence=-0.3, reason=被凶了`；只有一段文字时整段当原因。

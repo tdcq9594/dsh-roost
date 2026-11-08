@@ -20,16 +20,16 @@
  */
 
 /**
- * 选这次要用的模型：单个聊天覆盖 > 全局默认。
+ * 选这次要用的模型：单个聊天 > 会话类型默认 > 全局默认。
  *
- * 只做「私聊/群各自一个 chatId 键」这一层：`byChat[chatId]`。报告 §14.2-18
- * 要求的「单个私聊 > 单个群 > 默认」在 QQ 这边落到同一个键上（私聊和群的
- * chatId 都唯一），不需要再按 kind 分一层。
+ * 三层顺序对齐 aurabot `chat-model.js` 的「单个私聊 / 单个群 > 私聊默认 /
+ * 群默认 > 全局」：QQ 里私聊和群的 chatId 都唯一，所以前两层落到同一个
+ * `byChat[chatId]` 键上；后两层是 `byKind[kind]`（`c2c` / `group`）。
  *
- * @param {{byChat?:object, chatId?:string, globalSel?:object}} opts
+ * @param {{byChat?:object, byKind?:object, chatId?:string, kind?:string, globalSel?:object}} opts
  * @returns {{provider:string, model:string, reasoningEffort:string}|null}
  */
-export function pickModelFor({ byChat, chatId = '', globalSel } = {}) {
+export function pickModelFor({ byChat, byKind, chatId = '', kind = '', globalSel } = {}) {
   const pick = (o) => {
     if (!o || typeof o !== 'object') return null;
     const provider = String(o.provider ?? '').trim();
@@ -43,7 +43,9 @@ export function pickModelFor({ byChat, chatId = '', globalSel } = {}) {
   };
   const key = String(chatId ?? '').trim();
   const own = key && byChat && typeof byChat === 'object' ? byChat[key] : null;
-  return pick(own) || pick(globalSel);
+  const k = String(kind ?? '').trim();
+  const byType = k && byKind && typeof byKind === 'object' ? byKind[k] : null;
+  return pick(own) || pick(byType) || pick(globalSel);
 }
 
 /**

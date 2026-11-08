@@ -389,6 +389,30 @@ export const FEATURES = [
     /** 阶段 4b 已实现 events.js，去掉 staged 后这个开关才出现在面板 */
   },
   {
+    id: 'leakGuard',
+    label: '防她把提示词背出来',
+    desc: '她回复里如果整段复述了注入的记忆块，出站前删掉那几句',
+    source: 'config',
+    path: ['leakGuard', 'enabled'],
+    default: false,
+    requires: NONE,
+    affects: NONE,
+    offHint: '不拦复读；她偶尔会把记忆块当成自己的话背出来。',
+    advanced: true,
+  },
+  {
+    id: 'bridge',
+    label: '对外联动（实验）',
+    desc: '让别的 DSH 插件通过 ctx.get("aurabot") 主动发消息、读状态；接口可能变',
+    source: 'config',
+    path: ['bridge', 'enabled'],
+    default: false,
+    requires: NONE,
+    affects: NONE,
+    offHint: '别的 DSH 插件拿不到她；本插件功能不受影响。',
+    advanced: true,
+  },
+  {
     id: 'extensions',
     label: '用户扩展',
     desc: '允许加载你放进 extensions/ 的功能扩展',
@@ -625,7 +649,7 @@ export const FEATURE_GROUPS = [
   {
     /** 高级项：默认折叠（前端 Sec 02 按 `advanced` 收进 details），避免一上来 20+ 个开关淹没用户 */
     id: 'advanced', label: '高级 · 新功能（逐步开放）', advanced: true,
-    ids: ['retentionFactsMode', 'retentionJournalMode', 'retentionThresholdPct', 'retentionMinProtectDays', 'moodEffects', 'profiles', 'events', 'extensions'],
+    ids: ['retentionFactsMode', 'retentionJournalMode', 'retentionThresholdPct', 'retentionMinProtectDays', 'moodEffects', 'profiles', 'events', 'leakGuard', 'bridge', 'extensions'],
   },
 ];
 

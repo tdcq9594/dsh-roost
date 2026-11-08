@@ -21,8 +21,11 @@ test('接线：sendOut 只在明确送达时写 proactive，C1 取数合并两�
   assert.match(block, /r\?\.ok && !r\.pending/, 'pending 不能写：还没确定送到，写了就是「她以为说过」');
   assert.match(block, /kind: 'proactive'/);
   assert.match(block, /journalAdd\(/, '要复用写日记的关口（剥标记 + 记忆开关）');
-  assert.match(src, /journal\.recent\(cid, 16, 'chat'/, 'C1 仍要取对话原文');
-  assert.match(src, /journal\.recent\(cid, 16, 'proactive'/, 'C1 必须同时取主动话，否则防复读仍然看不到');
+  /** 取数已抽到 `wake-context.js`（纯函数，有真库测试），host 只负责调用 */
+  assert.match(src, /wakeContext\(/, 'host 要走统一的取数函数');
+  const wc = readFileSync(new URL('../src/wake-context.js', import.meta.url), 'utf8');
+  assert.match(wc, /'chat'/, 'C1 仍要取对话原文');
+  assert.match(wc, /'proactive'/, 'C1 必须同时取主动话，否则防复读仍然看不到');
 });
 
 test('巩固只取 kind=chat，主动话不会被提炼成事实/摘要', () => {

@@ -36,6 +36,17 @@ test('E6：覆盖项残缺 / 空值 / 两边都没有', () => {
   assert.equal(pickModelFor(), null);
 });
 
+test('E6：会话类型默认夹在单会话与全局之间', () => {
+  const globalSel = { provider: 'g', model: 'gm' };
+  const byKind = { c2c: { provider: 'c', model: 'cm' }, group: { provider: 'G', model: 'GM' } };
+  const byChat = { g1: { provider: 'x', model: 'xm' } };
+  assert.equal(pickModelFor({ byChat, byKind, chatId: 'g1', kind: 'c2c', globalSel }).provider, 'x', '单会话最优先');
+  assert.equal(pickModelFor({ byChat, byKind, chatId: 'g2', kind: 'c2c', globalSel }).provider, 'c', '没单会话用私聊默认');
+  assert.equal(pickModelFor({ byChat, byKind, chatId: 'g2', kind: 'group', globalSel }).provider, 'G', '群默认');
+  assert.equal(pickModelFor({ byChat, byKind, chatId: 'g2', kind: 'unknown', globalSel }).provider, 'g', '未知类型回退全局');
+  assert.equal(pickModelFor({ byKind: { c2c: {} }, chatId: 'g2', kind: 'c2c', globalSel }).provider, 'g', '空的类型默认回退全局');
+});
+
 test('E6：字段去空格，provider/model 必须都有', () => {
   const r = pickModelFor({ byChat: { g1: { provider: '  deepseek ', model: ' deepseek-chat ' } }, chatId: 'g1' });
   assert.deepEqual(r, { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: '' });
@@ -59,7 +70,8 @@ test('E8：effort 不支持就不传；未知（没公布档位）保持原值',
 });
 
 test('接线：DEFAULTS 有 model.byChat；applyDefaultModel 用纯函数 + 官方 select 优先', () => {
-  assert.deepEqual(DEFAULTS.model, { byChat: {} });
+  assert.deepEqual(DEFAULTS.model.byChat, {});
+  assert.deepEqual(DEFAULTS.model.byKind, { c2c: {}, group: {} });
   const src = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   const at = src.indexOf('async function applyDefaultModel');
   assert.ok(at > 0);
@@ -68,8 +80,8 @@ test('接线：DEFAULTS 有 model.byChat；applyDefaultModel 用纯函数 + 官�
   assert.match(block, /pickReasoningEffort\(/, 'E8 必须先校验思考强度');
   assert.match(block, /agent\?\.model\?\.select/, '官方入口优先');
   assert.match(block, /remote\?\.selectModel/, '桌面版旧接口作回退');
-  assert.match(src, /applyDefaultModel\(sid, chat\.chatId\)/);
-  assert.match(src, /applyDefaultModel\(newSid, chat\.chatId\)/);
+  assert.match(src, /applyDefaultModel\(sid, chat\.chatId, chat\.kind\)/);
+  assert.match(src, /applyDefaultModel\(newSid, chat\.chatId, chat\.kind\)/);
 });
 
 test('E10：quick 有 model.get / model.set，写 byChat 用整体替换并清缓存', () => {

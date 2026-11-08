@@ -363,6 +363,20 @@ export const DEFAULTS = {
   events: {
     enabled: false,
   },
+  /**
+   * 出站防复读（leak-guard 低配版，默认关）。
+   * 开着时她回复里整段复述了注入的记忆块/档案，出站前删掉那几句。
+   */
+  leakGuard: {
+    enabled: false,
+  },
+  /**
+   * 对外联动（实验，默认关）：别的 DSH 插件 `ctx.get('aurabot')` 拿她。
+   * 只给主动发送 + 只读状态；**接口可能变**，面板标「实验」。
+   */
+  bridge: {
+    enabled: false,
+  },
   /** 用户扩展总闸（F）：一期 HTTP/独立进程，默认关；目录 extensions/ 不受升级覆盖 */
   extensions: {
     enabled: false,
@@ -536,6 +550,12 @@ export const DEFAULTS = {
    */
   model: {
     byChat: {},
+    /**
+     * 按会话类型默认（E6 补全）：`c2c` / `group` 各一份。
+     * 优先级：`byChat[chatId]` > `byKind[kind]` > DSH 全局默认。
+     * 给「所有私聊统一用 A 模型、所有群统一用 B 模型」用。
+     */
+    byKind: { c2c: {}, group: {} },
   },
   persona: {
     /** 当前用哪个人格（对应 personas/<id>.md） */

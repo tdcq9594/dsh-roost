@@ -37,7 +37,7 @@ import { createGraph } from './graph.js';
 import { createSelf } from './self.js';
 import { createConsolidate } from './consolidate.js';
 import { createEmbedder } from './embed.js';
-import { createMood, normalizeFeedback } from './mood.js';
+import { createMood, normalizeFeedback, feedbackArgsOf } from './mood.js';
 import { observe, moodPrompt } from './mood-observe.js';
 import { createHistoryRing } from './history-ring.js';
 import { memoryLines } from './memory-line.js';
@@ -62,7 +62,10 @@ import { registerStickerTools } from './sticker-tools.js';
 import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
 import { createFence, PEER } from './fence.js';
 import { audit, peerSummary } from './audit.js';
-import { createAwake, readAgreements, groupCandidates, wakeMaterials } from './awake.js';
+import { createAwake, readAgreements, groupCandidates } from './awake.js';
+import { wakeContext } from './wake-context.js';
+import { stripLeak } from './leak-guard.js';
+import { createBridge } from './bridge.js';
 import { createCompact } from './compact.js';
 import { createUsage } from './usage.js';
 import { segmentsOf } from './timing.js';
@@ -1771,30 +1774,16 @@ export function apply(ctx) {
          * 私聊主动搭话会引用到群里的对话（串场），而且看起来还挺像回事，
          * 排查时极难发现。chatId 空说明本来就不该走到这一步。
          */
-        recent: cid
-          ? journal
-            .recent(cid, 4, 'chat', aliasesOf(cid))
-            .reverse()
-            .map((r) => `${r.role === 'bot' ? '你' : r.sender || '对方'}：${String(r.digest || r.text).slice(0, 60)}`)
-          : [],
         /**
-         * C1 + C4：素材拼装交给 `wakeMaterials()` 纯函数（有单测）。
-         *
-         * **两个 kind 都要取**：对话原文是 `chat`，主动搭话是 `proactive`
-         * （`sendOut` 送达后写）。只取 `chat` 会让防复读看不到自己上次主动
-         * 说过什么——审查 §11 抓到的 C1 素材缺口。合并后按时间倒序取最近 16 条。
-         * D8 经历层只在开关开着时给，关着就别把旧动作翻出来说。
+         * C1 + C4：【刚才说到】与【最近你已经主动说过】的取数统一走
+         * `wakeContext()`（纯函数，有单测）——**两个 kind 都取**、按时间倒序、
+         * events 开关透传。审查 §11 抓到的「只取 chat 漏 proactive」就是这一层。
          */
-        ...wakeMaterials({
-          journalRows: cid
-            ? [
-                ...journal.recent(cid, 16, 'chat', aliasesOf(cid)),
-                ...journal.recent(cid, 16, 'proactive', aliasesOf(cid)),
-              ]
-                .sort((a, b) => Number(b.at) - Number(a.at))
-                .slice(0, 16)
-            : [],
-          eventRows: cfg.events?.enabled === true ? events.recent(3) : [],
+        ...wakeContext({
+          journal,
+          events,
+          chatId: cid,
+          aliases: aliasesOf(cid),
           eventsEnabled: cfg.events?.enabled === true,
           labels: EVENT_LABELS,
         }),
@@ -1878,6 +1867,31 @@ export function apply(ctx) {
       }
     },
   });
+
+  /**
+   * 对外联动（实验）：别的 DSH 插件 `ctx.get('aurabot')` 拿她。
+   * 默认关；只暴露主动发送 + 只读状态，不给记忆写接口。
+   * Cordis 的服务注册口在不同版本叫 `provide` / `set`，两个都试；
+   * 注册不上只记日志，不影响主链路。
+   */
+  if (cfg.bridge?.enabled === true) {
+    try {
+      const api = createBridge({
+        sendOut,
+        statusOf: () => ({ chatId: lastScene?.chatId || '', awake: awake.status?.() || null }),
+        log: (m) => log.warn(m),
+      });
+      const reg = ctx.provide?.bind(ctx) || ctx.set?.bind(ctx);
+      if (typeof reg === 'function') {
+        reg('aurabot', api);
+        log.info('对外联动已开启（实验）：ctx.get("aurabot") 可用');
+      } else {
+        log.warn('宿主没有 provide/set，对外联动没注册上（实验功能，不影响主链路）');
+      }
+    } catch (e) {
+      log.warn(`对外联动注册失败（不影响主链路）：${e?.message ?? e}`);
+    }
+  }
 
   /**
    * 压缩（第 6 期）：上下文到阈值 → 开新会话 + 摘要开场，旧会话保留。
@@ -2202,6 +2216,25 @@ export function apply(ctx) {
   }
 
   /**
+   * leak-guard：出站前删掉复述注入块的句子（默认关）。
+   *
+   * 只比**稳定段**（`memoryStatic`）：易变段里就是「刚才说到」的原话，
+   * 她正常引用不会被误删。全删光发一句占位，别发空串（会被当成出错）。
+   */
+  function guardOutbound(text) {
+    if (cfg.leakGuard?.enabled !== true) return text;
+    try {
+      const blocks = [memoryStatic()].filter(Boolean);
+      const r = stripLeak(text, blocks);
+      if (r.removed) log.info(`leak-guard：删掉 ${r.removed} 句复读`);
+      return r.text || '……';
+    } catch (e) {
+      log.warn(`leak-guard 没跑成：${e?.message ?? e}`);
+      return text;
+    }
+  }
+
+  /**
    * 这条事实是从哪来的。
    *
    * 用途只有一个：事后能回答「她为什么记着这个」。面板上一条事实旁边
@@ -2365,13 +2398,15 @@ export function apply(ctx) {
    * 不支持就不传——官方文档明确「显式 effort 会在任何 provider I/O 之前校验，
    * 不支持直接失败」，不能拿别的模型的档位硬塞。
    */
-  async function applyDefaultModel(sessionId, chatId = '') {
+  async function applyDefaultModel(sessionId, chatId = '', kind = '') {
     if (!sessionId || modelApplied.has(sessionId)) return;
     try {
       const dm = ctx.get?.('agentDefaultModel');
       const sel = pickModelFor({
         byChat: cfg.model?.byChat,
+        byKind: cfg.model?.byKind,
         chatId,
+        kind,
         globalSel: dm?.currentSelection?.(),
       });
       if (!sel) {
@@ -2433,7 +2468,7 @@ export function apply(ctx) {
          * 不能对所有既有会话都补：`modelApplied` 在内存里，重启后为空，
          * 那样会把用户在 DSH 里手选的模型覆盖掉。
          */
-        if (modelFailed.has(sid)) await applyDefaultModel(sid, chat.chatId);
+        if (modelFailed.has(sid)) await applyDefaultModel(sid, chat.chatId, chat.kind);
         return { agent, sessionId: sid };
       } catch (e) {
         log.warn(`${chat.chatId}：旧会话 ${sid.slice(-8)} 拉不起来了（${e.message}），重建`);
@@ -2449,7 +2484,7 @@ export function apply(ctx) {
     } catch {}
     sessions.set(chat.chatId, newSid, { preset: chat.preset, title, kind: chat.kind });
     log.info(`为 ${chat.chatId} 新建 DSH 会话 ${newSid.slice(-8)}（${chat.preset}）`);
-    await applyDefaultModel(newSid, chat.chatId);
+    await applyDefaultModel(newSid, chat.chatId, chat.kind);
     return { agent: await resolveAgent(newSid), sessionId: newSid };
   }
 
@@ -3732,7 +3767,7 @@ export function apply(ctx) {
          * 后缀 `:main` 是必须的——`delivery.claim` 对已发送的 requestId
          * 一律返回 reuse、不比较正文，同一轮里再加第二个回话点必须换后缀。
          */
-        await postReply(payload, reply, true, { requestId: `${payload.id}:main` });
+        await postReply(payload, guardOutbound(reply), true, { requestId: `${payload.id}:main` });
         journalAdd(payload, chat, journalText, 'bot');
       }
 
@@ -4575,15 +4610,47 @@ export function apply(ctx) {
              */
             case 'model.get': {
               const cid = String(arg?.chatId || chatId || '');
+              const kind = String(arg?.kind || '');
               const dm = ctx.get?.('agentDefaultModel');
               return send(res, 200, {
                 ok: true,
                 chatId: cid,
+                kind,
                 override: cid ? (cfg.model?.byChat?.[cid] || null) : null,
+                byKind: kind ? (cfg.model?.byKind?.[kind] || null) : null,
                 global: dm?.currentSelection?.() || null,
               });
             }
             case 'model.set': {
+              const kind = String(arg?.kind || '');
+              /** 带 kind = 改「所有私聊 / 所有群」的默认（byKind）；不带 = 改单个会话 */
+              if (kind) {
+                if (!['c2c', 'group'].includes(kind)) {
+                  return send(res, 400, { ok: false, message: 'kind 只认 c2c / group' });
+                }
+                const byKind = { ...(cfg.model?.byKind || {}) };
+                if (arg?.off) {
+                  byKind[kind] = {};
+                } else {
+                  const provider = String(arg?.provider || '').trim();
+                  const model = String(arg?.model || '').trim();
+                  if (!provider || !model) {
+                    return send(res, 400, { ok: false, message: '要 provider 和 model（或 off 恢复全局）' });
+                  }
+                  byKind[kind] = {
+                    provider,
+                    model,
+                    ...(arg?.reasoningEffort ? { reasoningEffort: String(arg.reasoningEffort) } : {}),
+                  };
+                }
+                const curKind = loadConfig();
+                curKind.model = { ...(curKind.model || {}), byKind };
+                cfg = saveConfig(curKind);
+                /** 该类型的所有会话下一轮重新套；全清只是多套一次，开销可忽略 */
+                modelApplied.clear();
+                modelFailed.clear();
+                return send(res, 200, { ok: true, kind, byKind: byKind[kind] || null });
+              }
               const cid = String(arg?.chatId || chatId || '');
               if (!cid) return send(res, 400, { ok: false, message: '缺 chatId' });
               const next = { ...(cfg.model?.byChat || {}) };
@@ -5162,7 +5229,9 @@ export function apply(ctx) {
          * 这条现成通路，文本分类只作补充）。判方向用 normalizeFeedback，
          * 别自己再解析一遍 raw——`r.valence` 是新状态不是增量，正负不可靠。
          */
-        awake.feedback({ positive: normalizeFeedback(raw) === 'LIKE' });
+        /** C3：判方向抽成 `feedbackArgsOf()`（纯函数，有单测），别再在路由里现写 */
+        const fb = feedbackArgsOf(raw);
+        if (fb) awake.feedback(fb);
         send(res, 200, { ok: true, applied: true, ...r });
       }),
 
