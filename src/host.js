@@ -15,8 +15,8 @@
 
 import { basename, join, resolve, extname } from 'node:path';
 import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision } from './config.js';
+import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets } from './config.js';
+import { redactText, redactValue, addSecretProvider } from './redact.js';
 import { createSessions } from './sessions.js';
 import { createTurnRunner } from './turn.js';
 import { createTurnQueue } from './turnqueue.js';
@@ -203,7 +203,8 @@ export function apply(ctx) {
    */
   const logs = [];
   function addLog(level, area, text) {
-    logs.push({ time: new Date().toTimeString().slice(0, 8), at: Date.now(), level, area, text: String(text) });
+    /** E7：所有面板日志在这一层统一脱敏，调用点不用各自记着 */
+    logs.push({ time: new Date().toTimeString().slice(0, 8), at: Date.now(), level, area, text: redactText(text) });
     if (logs.length > 400) logs.shift();
   }
 
@@ -225,7 +226,8 @@ export function apply(ctx) {
     if (a instanceof Error) return a.stack || a.message || String(a);
     if (a && typeof a === 'object') {
       try {
-        return JSON.stringify(a);
+        /** E7：对象先按字段名脱敏再序列化，别把 `{"token":"…"}` 原样拼进日志 */
+        return JSON.stringify(redactValue(a));
       } catch {
         return String(a);
       }
@@ -235,11 +237,13 @@ export function apply(ctx) {
   const joinLog = (args) => args.map(fmtLog).filter(Boolean).join(' ');
 
   // 包一层：所有走 log.* 的都同时进面板日志
+  // E7：四档统一在这里脱敏一次（addLog 入口再兜一道，幂等）；debug 以前是
+  // 直接把 raw.debug 交出去的裸引用，不过这一层，会漏掉 DSH 宿主日志。
   const log = {
-    debug: raw.debug,
-    info: (...a) => { const m = joinLog(a); raw.info(m); addLog('info', 'core', m); },
-    warn: (...a) => { const m = joinLog(a); raw.warn(m); addLog('warn', 'core', m); },
-    error: (...a) => { const m = joinLog(a); raw.error(m); addLog('error', 'core', m); },
+    debug: (...a) => { const m = redactText(joinLog(a)); raw.debug(m); },
+    info: (...a) => { const m = redactText(joinLog(a)); raw.info(m); addLog('info', 'core', m); },
+    warn: (...a) => { const m = redactText(joinLog(a)); raw.warn(m); addLog('warn', 'core', m); },
+    error: (...a) => { const m = redactText(joinLog(a)); raw.error(m); addLog('error', 'core', m); },
   };
 
   /**
@@ -502,6 +506,12 @@ export function apply(ctx) {
   }
 
   let cfg = loadConfig();
+  /**
+   * E7：把当前配置里的密钥挂给日志脱敏器；`cfg` 被 patchConfig 换掉后自动跟随。
+   * **用 add 而不是 set**：同进程多次 apply() 时，后者会把前一个实例的 provider
+   * 覆盖掉，那个实例的密钥就裸奔了。返回 off 交给 ctx.effect 随实例卸载。
+   */
+  ctx.effect(() => addSecretProvider(() => collectSecrets(cfg)));
   const tts = createTts({
     cfgOf: () => cfg,
     dataDir,
@@ -4019,6 +4029,34 @@ export function apply(ctx) {
   /* ---------------- 面板接口 ---------------- */
 
   ctx.effect(() => {
+    /**
+     * E7：面板回显的「错误/提示文案」也可能带凭证 —— `e.message`、用户传的
+     * `op` / `feedback`、`server.lastError` 都会原样回到浏览器（实测 `/quick`
+     * 的「不认识的快捷操作：${op}」与 `/mood` 的「不认识的反馈：${raw}」）。
+     *
+     * **只处理顶层这几个字段，不递归业务正文**：`/memory` 的事实原文、
+     * `/journal` 的日记是用户内容，递归脱敏会把里面的 `token=abc` 改成
+     * `token=***`，那是改数据不是脱敏。名字不在白名单的值一律原样。
+     */
+    const OUTBOUND_TEXT_KEY = /^(message|msg|error|errorMessage|errMsg|why|reason|serverError|hint|detail|note)$/i;
+    /**
+     * depth ≤ 2 的**按 key** 浅层递归：只改命中白名单的字符串值，别的键
+     * （text / facts / recent / 日记正文…）一个字节都不碰。数组只处理前 20 项，
+     * 免得 `/memory` 那种大响应被整棵深拷贝。
+     */
+    const safeOutbound = (body, depth = 0) => {
+      if (depth > 2) return body;
+      if (Array.isArray(body)) return body.map((x, i) => (i < 20 ? safeOutbound(x, depth + 1) : x));
+      if (!body || typeof body !== 'object') return body;
+      const out = { ...body };
+      for (const k of Object.keys(out)) {
+        const v = out[k];
+        if (OUTBOUND_TEXT_KEY.test(k) && typeof v === 'string') out[k] = redactText(v);
+        else if (v && typeof v === 'object') out[k] = safeOutbound(v, depth + 1);
+      }
+      return out;
+    };
+
     const send = (res, code, body) => {
       try {
         res.statusCode = code;
@@ -4031,7 +4069,7 @@ export function apply(ctx) {
          * 前端 `r.json()` 就会报 `Unexpected end of JSON input`——
          * 表现是「连不上插件」，但其实是某个接口少返回了一个值。
          */
-        res.end?.(JSON.stringify(body === undefined ? { ok: true } : body));
+        res.end?.(JSON.stringify(safeOutbound(body === undefined ? { ok: true } : body)));
       } catch {}
     };
 
@@ -6754,10 +6792,14 @@ export function apply(ctx) {
   }, 'dsh-roost: 面板接口');
   } catch (e) {
     try {
-      const dir = join(homedir(), '.dsh', 'dsh-roost');
-      mkdirSync(dir, { recursive: true });
+      /**
+       * E7：激活期异常的 stack 常带 URL / 凭证，落盘前必须脱敏。
+       * 路径改用 dataDir() 而不是硬编码 homedir()：前者会按 DSH_ROOST_DATA
+       * 走，也和插件其余文件落在同一处，不用维护第二份路径。
+       */
+      const dir = dataDir();
       writeFileSync(join(dir, 'activate-error.log'),
-        `${new Date().toISOString()}\n${(e && e.stack) || e}\n\n`);
+        `${new Date().toISOString()}\n${redactText((e && e.stack) || e)}\n\n`);
     } catch {
       /* 连日志都写不了就算了，别掩盖原始异常 */
     }

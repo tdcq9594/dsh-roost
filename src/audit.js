@@ -14,6 +14,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
+import { redactText } from './redact.js';
 
 /**
  * 写一行审计。
@@ -38,7 +39,12 @@ export function audit(entry = {}) {
     const row = { at: Date.now() };
     for (const k of ['op', 'chatId', 'peer', 'peerId', 'note']) {
       const v = entry[k];
-      if (v !== undefined && v !== '') row[k] = v;
+      /**
+       * E7：别只护 `note` —— `op` / `chatId` 同样来自面板请求、能自报
+       * （实测 `POST /quick {op:'Bearer …', chatId:'token=…'}` 会原样落盘）。
+       * 白名单里的字段都是字符串，整行走一遍脱敏。
+       */
+      if (v !== undefined && v !== '') row[k] = typeof v === 'string' ? redactText(v) : v;
     }
 
     appendFileSync(join(dir, 'audit.log'), `${JSON.stringify(row)}\n`, 'utf8');

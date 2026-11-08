@@ -753,6 +753,20 @@ function valueAt(root, path) {
   return path.reduce((value, key) => value && typeof value === 'object' ? value[key] : undefined, root);
 }
 
+/**
+ * E7：把配置里已知的密钥交给日志脱敏器（`redact.js` 的 `setSecretProvider`）。
+ * 和上面的 `SECRET_PATHS` **共用一份名单**，别在别处再抄一遍路径；
+ * 掩码值（`******`）和空串不算密钥。
+ */
+export function collectSecrets(cfg) {
+  const out = [];
+  for (const p of SECRET_PATHS) {
+    const v = valueAt(cfg || {}, p);
+    if (typeof v === 'string' && v && v !== SECRET_MASK) out.push(v);
+  }
+  return out;
+}
+
 function putAt(root, path, value) {
   let node = root;
   for (const key of path.slice(0, -1)) {
