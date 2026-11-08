@@ -61,7 +61,7 @@ import { registerStickerTools } from './sticker-tools.js';
 import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
 import { createFence, PEER } from './fence.js';
 import { audit, peerSummary } from './audit.js';
-import { createAwake, readAgreements, groupCandidates } from './awake.js';
+import { createAwake, readAgreements, groupCandidates, wakeMaterials } from './awake.js';
 import { createCompact } from './compact.js';
 import { createUsage } from './usage.js';
 import { segmentsOf } from './timing.js';
@@ -1715,6 +1715,17 @@ export function apply(ctx) {
             .reverse()
             .map((r) => `${r.role === 'bot' ? '你' : r.sender || '对方'}：${String(r.digest || r.text).slice(0, 60)}`)
           : [],
+        /**
+         * C1 + C4：素材拼装交给 `wakeMaterials()` 纯函数（有单测）。
+         * 主动消息本来就写进 journal 的 bot 行，不另建数组；D8 经历层
+         * 只在开关开着时给，关着就别把旧动作翻出来说。
+         */
+        ...wakeMaterials({
+          journalRows: cid ? journal.recent(cid, 16, 'chat', aliasesOf(cid)) : [],
+          eventRows: cfg.events?.enabled === true ? events.recent(3) : [],
+          eventsEnabled: cfg.events?.enabled === true,
+          labels: EVENT_LABELS,
+        }),
         state: {
           /**
            * 私聊「多久没聊」取两个来源里**更近**的那个。

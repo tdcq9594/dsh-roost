@@ -200,6 +200,83 @@ export function opportunities({ now = Date.now(), mood = {}, agreements = [], st
 }
 
 /**
+ * C1 防复读：两段主动文本像不像。
+ *
+ * 用**字符 bigram 的 Dice 系数**：中文短句没有空格可分，整句等值判断
+ * 又挡不住「在干嘛」→「在干嘛呀」这种换个尾巴的复读。bigram 能给出
+ * 连续程度而不是布尔值，阈值才有意义。
+ * 阈值 0.55 借 aurabot `engine.js:755`（报告 §6.4）。
+ *
+ * 比较前先抹掉括号里的动作/神态和标点——「（伸懒腰）在干嘛」和「在干嘛」
+ * 是同一句，不该因为加了动作就放过复读。
+ */
+export const DUP_THRESHOLD = 0.55;
+
+function compareKey(s) {
+  return String(s ?? '')
+    .replace(/[（(][^）)]{0,40}[）)]/g, '')
+    .replace(/[\s\p{P}\p{S}]/gu, '')
+    .toLowerCase();
+}
+
+function bigrams(s) {
+  const t = compareKey(s);
+  if (!t) return [];
+  const out = [];
+  for (let i = 0; i < t.length - 1; i += 1) out.push(t.slice(i, i + 2));
+  return out.length ? out : [t];
+}
+
+export function textSimilarity(a, b) {
+  const A = bigrams(a);
+  const B = bigrams(b);
+  if (!A.length || !B.length) return 0;
+  const pool = new Map();
+  for (const g of B) pool.set(g, (pool.get(g) || 0) + 1);
+  let hit = 0;
+  for (const g of A) {
+    const n = pool.get(g) || 0;
+    if (n > 0) {
+      hit += 1;
+      pool.set(g, n - 1);
+    }
+  }
+  return (2 * hit) / (A.length + B.length);
+}
+
+/**
+ * C1/C4：从现成数据里挑出给主动提示词的素材。
+ *
+ * 抽成纯函数是为了让「查了哪些行、取几条、开关关着给不给」都能单测，
+ * 而不是只靠看 host 里那段 JSX 似的拼装代码。调用方负责查数据：
+ *   · journalRows = `journal.recent(chatId, 16, 'chat', aliases)`（最新在前）
+ *   · eventRows   = `events.recent(3)`（D8 经历层，最新在前）
+ *
+ * eventsEnabled=false 时 `done` 一定是空数组——功能关了就把旧动作翻出来
+ * 说，等于「关了还在生效」，也破坏了默认关时 prompt 逐字节一致的基线。
+ */
+export function wakeMaterials({ journalRows = [], eventRows = [], eventsEnabled = false, labels = {} } = {}) {
+  const recentBot = (Array.isArray(journalRows) ? journalRows : [])
+    .filter((r) => r?.role === 'bot')
+    .slice(0, 3)
+    .map((r) => String(r.digest || r.text || '').slice(0, 60))
+    .filter(Boolean);
+  const done = eventsEnabled
+    ? (Array.isArray(eventRows) ? eventRows : []).slice(0, 3)
+      .map((r) => `${r?.scene === 'group' ? '在群里' : '在私聊'}${labels[r?.kind] || r?.kind || '做过点什么'}`)
+    : [];
+  return { recentBot, done };
+}
+
+/** 和最近说过的任一 text 相似度 ≥ 阈值就算复读 */
+export function isDuplicateText(text, recent = [], threshold = DUP_THRESHOLD) {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  return (Array.isArray(recent) ? recent : [])
+    .some((r) => textSimilarity(t, r) >= threshold);
+}
+
+/**
  * 从机会里挑一个。
  *
  * 不直接取最高分：那样"约定"会永远压过其它，行为会变得可预测。
@@ -252,7 +329,24 @@ export function buildWakePrompt({ opp, ctx = {}, group = null, extra = '' } = {}
         + '\n（可以从这儿接着聊，也可以就着这件事起个头；别装作没发生过。）'
       : '',
     ctx.recent?.length ? `【最近说过的话】\n${ctx.recent.map((r) => `· ${r}`).join('\n')}` : '',
+    /**
+     * C1：最近几次**她主动说过的话**（journal 的 bot 行，不另建数组）。
+     * 只摆事实、不下「不许重复」的命令就算了：模型看到清单会自然避开，
+     * 而明确的「别重复」能挡住「换个措辞再说一遍」这类最像复读的情况。
+     */
+    ctx.recentBot?.length
+      ? `【最近你已经主动说过】\n${ctx.recentBot.map((r) => `· ${r}`).join('\n')}`
+        + '\n（别换个说法再说一遍；没什么新事就输出 <<skip>>。）'
+      : '',
     ctx.agreements?.length ? `【答应过还没做的】\n${ctx.agreements.map((a) => `· ${a}`).join('\n')}` : '',
+    /**
+     * C4：casual / agreement 的**真实素材**。D8 事件层默认关，那段就没内容，
+     * 此时 prompt 与未上线前逐字节一致；关着也不该把旧动作翻出来说。
+     * 「想你」那一档不喂这个——刚沉默很久就汇报自己做过什么，很不像人。
+     */
+    opp?.kind && opp.kind !== 'miss' && ctx.done?.length
+      ? `【最近做过的事】\n${ctx.done.map((r) => `· ${r}`).join('\n')}\n（可以顺口提一句，别写成汇报。）`
+      : '',
     /**
      * 主人自己写的指令（`speakUp.prompt`）。
      *
@@ -543,6 +637,12 @@ export function createAwake({
     }
 
     const v = parseVerdict(raw);
+    /**
+     * C1：模型写出来的正文若和最近几次主动文本太像，直接当「这次不说」。
+     * 不重生成一次——那要再花一次模型调用，而且第二遍常常只是换个语气，
+     * 照样像复读。少说一句永远比重复一句安全。
+     */
+    const dup = v.speak && isDuplicateText(v.text, ctx.recentBot);
     state.lastKind = opp.kind;
     state.lastWhy = opp.reason;
     /**
@@ -553,10 +653,11 @@ export function createAwake({
      * 不写在发送成功之后：问了但决定不说是醒过的，问了但没发出去也是醒过的。
      */
     state.lastWakeAt = now();
-    if (!v.speak) {
-      log(`觉醒了但没说（${opp.kind}）：${v.why}`);
+    if (!v.speak || dup) {
+      const why = dup ? '和最近主动说过的话太像（防复读）' : v.why;
+      log(`觉醒了但没说（${opp.kind}）：${why}`);
       save();
-      return { speak: false, text: '', kind: opp.kind, why: v.why, asked: true };
+      return { speak: false, text: '', kind: opp.kind, why, asked: true, ...(dup ? { duplicate: true } : {}) };
     }
     /**
      * 「随性每天最多一次」的计数。
