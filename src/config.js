@@ -323,17 +323,24 @@ export const DEFAULTS = {
      */
     embedding: null,
     /**
-     * 可选过期策略（调研报告 D11，默认关）。
+     * 可选过期策略（调研报告 D11）。
      *
-     * 三态只用一个 `mode` 字段：`off` / `expire`（作废不删行）/ `purge`
-     * （真删，但先自动备份）。不拆成 `enabled` 布尔 + `policy` 枚举，
-     * 否则又出现「两份真相」——布尔关着、枚举却写着 purge 时算哪个。
+     * 2026-11-08 主人拍板「两类都做，让用户自由开关」→ 拆成**两路各自一个
+     * mode**，共用阈值与最短保护期：
+     *   · `factsMode`   自动提炼的事实（w=1、非手记）；默认 `expire`
+     *   · `journalMode` 低等级日记行；默认 `off`（碰检索候选集，风险高一档）
+     * 三态仍只用一个字段：`off` / `expire`（作废不删行）/ `purge`（真删，先备份）。
+     * 不拆成 `enabled` 布尔 + 枚举，否则又出现「两份真相」。
      *
      * `thresholdPct` 用整数百分数（5 = R < 0.05）而不是小数，
      * 因为能力页的 number 控件只收整数（`normalizeSetting` 明确拒非整数）。
+     *
+     * 注意：默认开的只是**策略档位**，不会自动改盘上数据。要点面板上的
+     * 「应用」才落 `until`/`invalid_at`，没点之前记忆文件逐字节不变。
      */
     retention: {
-      mode: 'off',
+      factsMode: 'expire',
+      journalMode: 'off',
       thresholdPct: 5,
       minProtectDays: 30,
     },
@@ -671,6 +678,26 @@ export function migrateTtsSpeed(saved) {
   return true;
 }
 
+/**
+ * 阶段 2 的 D11 只有单个 `memory.retention.mode`（当时开关是 staged，面板改不了，
+ * 只有手改过 config.json 的人会有），阶段 4c 拆成两路。
+ *
+ * 老值只带到 **facts 路**：journal 一路一律保持默认关。不能因为一次升级就把
+ * 日记检索也打开——那是「改配置却悄悄改了她记得什么」。
+ * 和 tts 迁移一样就地改 `saved`，之后任何一次保存会把新字段固化下来。
+ */
+export function migrateRetentionMode(saved) {
+  const r = saved?.memory?.retention;
+  if (!r || typeof r !== 'object' || r.mode === undefined) return false;
+  const legacy = String(r.mode);
+  if (r.factsMode === undefined) {
+    r.factsMode = ['off', 'expire', 'purge'].includes(legacy) ? legacy : 'off';
+  }
+  if (r.journalMode === undefined) r.journalMode = 'off';
+  delete r.mode;
+  return true;
+}
+
 export function loadConfig() {
   let saved = {};
   try {
@@ -679,6 +706,7 @@ export function loadConfig() {
     saved = {};
   }
   migrateTtsSpeed(saved);
+  migrateRetentionMode(saved);
   return upgradeOldDefaults(merge(structuredClone(DEFAULTS), saved));
 }
 

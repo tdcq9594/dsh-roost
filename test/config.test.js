@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadConfig, saveConfig, patchConfig, readRawConfig, DEFAULTS, dataDir, publicConfig } from '../src/config.js';
+import { loadConfig, saveConfig, patchConfig, readRawConfig, DEFAULTS, dataDir, publicConfig, migrateRetentionMode } from '../src/config.js';
 
 /** 每个用例一个干净的 data 目录（dataDir() 每次读 env） */
 function freshDir() {
@@ -224,18 +224,19 @@ test('密钥：数组/对象这类非字符串值不会写进磁盘', () => {
 test('配置：阶段 2 新增的开关字段存得下去（pruneTo 不会把它们裁掉）', () => {
   /**
    * `saveConfig()` 按 DEFAULTS 的形状裁剪，DEFAULTS 里没有的键一律丢。
-   * 能力页写 `memory.retention.mode = 'expire'`，如果忘了在 DEFAULTS 登记，
-   * 现象是「面板提示已保存，刷新又变回关」，而且不报错。
+   * 能力页写 `memory.retention.factsMode = 'purge'`，如果忘了在 DEFAULTS 登记，
+   * 现象是「面板提示已保存，刷新又变回原值」，而且不报错。
    */
   const d = freshDir();
   const c = patchConfig({
-    memory: { retention: { mode: 'expire', thresholdPct: 8, minProtectDays: 14 } },
+    memory: { retention: { factsMode: 'purge', journalMode: 'expire', thresholdPct: 8, minProtectDays: 14 } },
     mood: { effects: true },
     profiles: { enabled: true },
     events: { enabled: true },
     extensions: { enabled: true },
   });
-  assert.equal(c.memory.retention.mode, 'expire');
+  assert.equal(c.memory.retention.factsMode, 'purge');
+  assert.equal(c.memory.retention.journalMode, 'expire');
   assert.equal(c.memory.retention.thresholdPct, 8);
   assert.equal(c.memory.retention.minProtectDays, 14);
   assert.equal(c.mood.effects, true);
@@ -245,8 +246,24 @@ test('配置：阶段 2 新增的开关字段存得下去（pruneTo 不会把它
 
   /** 重新读一次（走合并 + 裁剪），值必须还在 */
   const again = loadConfig();
-  assert.equal(again.memory.retention.mode, 'expire');
+  assert.equal(again.memory.retention.factsMode, 'purge');
   assert.equal(again.mood.effects, true);
   const onDisk = JSON.parse(readFileSync(join(d, 'config.json'), 'utf8'));
-  assert.equal(onDisk.memory.retention.mode, 'expire', '盘上也得是真的');
+  assert.equal(onDisk.memory.retention.factsMode, 'purge', '盘上也得是真的');
+});
+
+test('配置：阶段 2 单 mode 的老配置迁到双路，日记那路不许被顺手打开', () => {
+  const d = freshDir();
+  /** 阶段 2 的开关是 staged，只有手改 config.json 的人会留下 `mode` */
+  writeCfg(d, { memory: { retention: { mode: 'purge', thresholdPct: 9 } } });
+  const c = loadConfig();
+  assert.equal(c.memory.retention.factsMode, 'purge', '老档位带到 facts 路');
+  assert.equal(c.memory.retention.journalMode, 'off', 'journal 一律保持默认关');
+  assert.equal(c.memory.retention.mode, undefined);
+  assert.equal(c.memory.retention.thresholdPct, 9, '共用参数不能丢');
+  const legacy = { memory: { retention: { mode: 'bogus' } } };
+  assert.equal(migrateRetentionMode(legacy), true);
+  assert.equal(legacy.memory.retention.factsMode, 'off', '坏档位退回 off');
+  assert.equal(legacy.memory.retention.journalMode, 'off');
+  assert.equal(legacy.memory.retention.mode, undefined, '老字段要删，别留两份真相');
 });

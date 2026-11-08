@@ -3729,7 +3729,7 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    function CapsTab({ caps, preview, chats, feat, quota, toast, reload, quick, busy }) {
+    function CapsTab({ caps, preview, chats, feat, retention, quota, toast, reload, quick, busy }) {
       /**
        * 工具面板是**弹窗**，不是页面上的一节。
        *
@@ -4341,6 +4341,44 @@ select.roost-input{color-scheme:dark}
                 )
               })
             : h('div', { className: 'roost-empty' }, '正在读功能开关…'),
+          /**
+           * D11：影响已存数据的开关必须先给 dry-run 预览，用户确认了才动数据。
+           * 「默认开」开的只是策略档位，没点「应用」前盘上一条记忆都不会变。
+           */
+          retention && retention.ok
+            ? h('div', { className: 'cap-group' },
+                h('div', { className: 'cap-group-t' }, '旧记忆淡出 · 先看会动到什么'),
+                h('div', { className: 'cap-group-b' },
+                  h('div', { className: 'roost-note', style: { margin: 0 } }, retention.text),
+                  h('div', { className: 'roost-note', style: { margin: 0 } },
+                    `事实：${retention.facts.enabled ? retention.facts.mode : '关'} · 日记：${retention.journal.enabled ? retention.journal.mode : '关'}；共扫 ${retention.total} 条。改档位不会自动改数据，要下面这个按钮才生效。`),
+                  (retention.expiredFacts || retention.expiredJournal)
+                    ? h('div', { className: 'roost-note', style: { margin: 0 } },
+                        `已作废 ${retention.expiredFacts} 条事实、${retention.expiredJournal} 条日记，可一键恢复。`)
+                    : null,
+                  h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+                    h('button', {
+                      type: 'button', className: 'roost-primary',
+                      disabled: busy || !retention.affected,
+                      onClick: async () => {
+                        const r = await quick('retention.apply')
+                        toast(r.message || (r.ok ? '应用好了' : '没改成'))
+                        reload()
+                      },
+                    }, retention.purge ? '应用（会真删，先自动备份）' : '应用（作废，可恢复）'),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      disabled: busy || !(retention.expiredFacts || retention.expiredJournal),
+                      onClick: async () => {
+                        const r = await quick('retention.restore')
+                        toast(r.message || (r.ok ? '恢复了' : '没改成'))
+                        reload()
+                      },
+                    }, '一键恢复'),
+                  ),
+                ),
+              )
+            : null,
           feat && (feat.wouldRemove || []).length
             ? h('div', { className: 'roost-note' },
                 `按现在的设置，这一轮会收走：${listOf(feat.wouldRemove, 6)}`)
@@ -7228,6 +7266,8 @@ select.roost-input{color-scheme:dark}
       const [capChats, setCapChats] = useState(null)
       /** 能力页：功能开关（哪些功能整个关着） */
       const [capFeat, setCapFeat] = useState(null)
+      /** 能力页：D11 记忆淡出的 dry-run 预览（纯读，不动数据） */
+      const [capRetention, setCapRetention] = useState(null)
       /** 能力页：次数配额（每个功能用了多少 / 上限多少） */
       const [capQuota, setCapQuota] = useState(null)
       const [ch, setCh] = useState(null)
@@ -7446,16 +7486,18 @@ select.roost-input{color-scheme:dark}
           return
         }
         setCaps(r)
-        const [p, c, f, q] = await Promise.all([
+        const [p, c, f, q, rt] = await Promise.all([
           quick('capabilities.preview', {}),
           get('/chats'),
           quick('features.get'),
           quick('quota.get'),
+          quick('features.preview'),
         ])
         setCapPreview(p.ok === false ? null : p)
         setCapChats(c && c.ok !== false ? c.chats || [] : [])
         setCapFeat(f.ok === false ? null : f)
         setCapQuota(q.ok === false ? null : q)
+        setCapRetention(rt.ok === false ? null : rt)
       }, [quick])
 
       /**
@@ -7535,7 +7577,7 @@ select.roost-input{color-scheme:dark}
                 mem, toast, save: saveCfg, reload: loadHer, quick,
               })
             : null,
-          tab === 'caps' ? h(CapsTab, { caps, preview: capPreview, chats: capChats, feat: capFeat, quota: capQuota, toast, reload: loadCaps, quick, busy }) : null,
+          tab === 'caps' ? h(CapsTab, { caps, preview: capPreview, chats: capChats, feat: capFeat, retention: capRetention, quota: capQuota, toast, reload: loadCaps, quick, busy }) : null,
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat }) : null,
           tab === 'awake'
             ? h(AwakeTab, {

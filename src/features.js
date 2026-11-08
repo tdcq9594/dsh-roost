@@ -284,11 +284,30 @@ export const FEATURES = [
   // `forcedDenyTools()` 见到 false 会把 affects 里的工具全收走（见 :121/:148 两处 P0）。
 
   {
-    id: 'retentionMode',
-    label: '旧记忆自动淡出',
-    desc: '很久没被想起、又不重要的自动提炼记忆，慢慢退出注入与检索',
+    /** 阶段 4c 已实现：两路各自一个 mode，用户可以只开一路、也可以两路都关 */
+    id: 'retentionFactsMode',
+    label: '旧事实自动淡出',
+    desc: '很久没被想起、又不重要的自动提炼事实慢慢退出注入；默认「作废不删行」，可一键恢复',
     source: 'config',
-    path: ['memory', 'retention', 'mode'],
+    path: ['memory', 'retention', 'factsMode'],
+    kind: 'select',
+    options: [
+      { value: 'off', label: '关（保持现状）' },
+      { value: 'expire', label: '作废不删行（可恢复）' },
+      { value: 'purge', label: '真删（先自动备份）' },
+    ],
+    default: 'expire',
+    requires: NONE,
+    affects: NONE,
+    offHint: '',
+    advanced: true,
+  },
+  {
+    id: 'retentionJournalMode',
+    label: '旧日记自动淡出',
+    desc: '低等级普通日记行也按遗忘曲线退出检索；会动到她「想起什么」，默认关',
+    source: 'config',
+    path: ['memory', 'retention', 'journalMode'],
     kind: 'select',
     options: [
       { value: 'off', label: '关（保持现状）' },
@@ -300,12 +319,11 @@ export const FEATURES = [
     affects: NONE,
     offHint: '',
     advanced: true,
-    staged: true,
   },
   {
     id: 'retentionThresholdPct',
     label: '淡出阈值（%）',
-    desc: '保留度低于这个百分数就过期。只作用自动提炼、不重要的条目',
+    desc: '保留度低于这个百分数就过期。只作用自动提炼的事实与低等级日记',
     source: 'config',
     path: ['memory', 'retention', 'thresholdPct'],
     kind: 'number',
@@ -316,7 +334,6 @@ export const FEATURES = [
     affects: NONE,
     offHint: '',
     advanced: true,
-    staged: true,
   },
   {
     id: 'retentionMinProtectDays',
@@ -332,7 +349,6 @@ export const FEATURES = [
     affects: NONE,
     offHint: '',
     advanced: true,
-    staged: true,
   },
   {
     id: 'moodEffects',
@@ -610,7 +626,7 @@ export const FEATURE_GROUPS = [
   {
     /** 高级项：默认折叠（前端 Sec 02 按 `advanced` 收进 details），避免一上来 20+ 个开关淹没用户 */
     id: 'advanced', label: '高级 · 新功能（逐步开放）', advanced: true,
-    ids: ['retentionMode', 'retentionThresholdPct', 'retentionMinProtectDays', 'moodEffects', 'profiles', 'events', 'extensions'],
+    ids: ['retentionFactsMode', 'retentionJournalMode', 'retentionThresholdPct', 'retentionMinProtectDays', 'moodEffects', 'profiles', 'events', 'extensions'],
   },
 ];
 

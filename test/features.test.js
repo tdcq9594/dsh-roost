@@ -221,8 +221,8 @@ test('骨架：每个 config 来源的开关都能在 DEFAULTS 里找到真实�
 
 test('骨架：未上线的开关不下发、不影响工具池、也不许被 patch', () => {
   const staged = FEATURES.filter((f) => f.staged);
-  /** 阶段 4a 删 moodEffects、4b 删 events；骨架项逐个减少是预期 */
-  assert.ok(staged.length >= 5, `还剩 ${staged.length} 个未上线的骨架开关`);
+  /** 阶段 4a 删 moodEffects、4b 删 events、4c 删 retention 三项；骨架逐个减少是预期 */
+  assert.ok(staged.length >= 2, `还剩 ${staged.length} 个未上线的骨架开关`);
   assert.ok(!staged.some((f) => f.id === 'moodEffects'), 'moodEffects 已上线，不该还在骨架里');
   assert.ok(!staged.some((f) => f.id === 'events'), 'events 已上线，不该还在骨架里');
   for (const f of staged) {
@@ -239,7 +239,7 @@ test('骨架：未上线的开关不下发、不影响工具池、也不许被 p
 });
 
 test('骨架：字符串枚举 select 能存能取，数字型 select 行为不变', () => {
-  const f = featureDef('retentionMode');
+  const f = featureDef('retentionFactsMode');
   assert.equal(kindOf(f), 'select');
   assert.equal(normalizeSetting(f, 'off'), 'off');
   assert.equal(normalizeSetting(f, 'expire'), 'expire');
@@ -248,9 +248,14 @@ test('骨架：字符串枚举 select 能存能取，数字型 select 行为不�
   assert.equal(normalizeSetting(f, ''), null);
   assert.equal(normalizeSetting(f, null), null);
   assert.equal(normalizeSetting(f, 0), null, '数字 0 不该被当成某个枚举');
-  assert.deepEqual(patchForFeature('retentionMode', 'expire'), {
-    config: { memory: { retention: { mode: 'expire' } } },
+  assert.deepEqual(patchForFeature('retentionFactsMode', 'expire'), {
+    config: { memory: { retention: { factsMode: 'expire' } } },
     value: 'expire',
+  });
+  /** 两路是独立开关：改 facts 绝不能顺带写 journal */
+  assert.deepEqual(patchForFeature('retentionJournalMode', 'purge'), {
+    config: { memory: { retention: { journalMode: 'purge' } } },
+    value: 'purge',
   });
 
   // 老的数字型 select（带 options/custom）保持原样
@@ -260,13 +265,15 @@ test('骨架：字符串枚举 select 能存能取，数字型 select 行为不�
   assert.equal(normalizeSetting(numeric, 'abc'), null);
 });
 
-test('骨架：新开关默认值都是关，裸配置读出来也绝不会误开', () => {
+test('骨架：新开关默认值与 DEFAULTS 对齐，裸配置读出来也绝不会误开', () => {
   const on = readFeatures({});
   for (const id of ['moodEffects', 'profiles', 'events', 'extensions']) {
     assert.equal(on[id], false, `${id} 默认必须关`);
   }
   const settings = readSettings({});
-  assert.equal(settings.retentionMode, 'off');
+  /** 主人 2026-11-08 定：facts 路默认开「作废」，journal 路默认关 */
+  assert.equal(settings.retentionFactsMode, 'expire');
+  assert.equal(settings.retentionJournalMode, 'off');
   assert.equal(settings.retentionThresholdPct, 5);
   assert.equal(settings.retentionMinProtectDays, 30);
   assert.deepEqual(readSettings(DEFAULTS), settings, 'DEFAULTS 与裸配置的默认值必须一致');
