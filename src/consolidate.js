@@ -166,10 +166,59 @@ export function l3Candidates(rows, { maxRows = 12 } = {}) {
 }
 
 /** 拼提示词 */
-export function buildPrompt({ day, chatName, items, revocation = null }) {
+/** 旧事实进 prompt 的上限（D6）：多了既烧 token，又让模型挑花眼 */
+export const MAX_PROMPT_FACTS = 10;
+
+/**
+ * D6：把 agreements 的一条归一化成 `{text, op, old}`。
+ *
+ * 老模型 / 老盘上跑出来的 `agreements` 是纯字符串数组，必须继续按新增处理；
+ * 新格式是对象三态。缺 `old` 的 update/outdated 一律退化成 add——没有定位词
+ * 就让模型去「作废某条旧约定」，等于给它一张空白支票。
+ */
+export function normalizeAgreement(raw) {
+  if (typeof raw === 'string') return { text: raw.trim(), op: 'add', old: '' };
+  const o = raw && typeof raw === 'object' ? raw : {};
+  const text = String(o.text ?? '').trim();
+  const want = String(o.op ?? '').toLowerCase();
+  const op = ['add', 'update', 'outdated'].includes(want) ? want : 'add';
+  const old = String(o.old ?? '').trim();
+  if (!text) return { text: '', op: 'add', old: '' };
+  if (!old && op !== 'add') return { text, op: 'add', old: '', degraded: '缺 old 定位词' };
+  return { text, op, old };
+}
+
+/**
+ * D6：只读地算出这一条会怎么处置，给 dry-run 预览用。
+ *
+ * 判据和 `memory.supersede()` 一致（活事实里 `includes(old)`，0 条 / 多条都不猜），
+ * 但**这里不是最终护栏**：真正落盘时仍由 `supersede()` 再判一次，
+ * 预览和真实之间若有别名/并发差异，宁可退化成新增，也不会误作废。
+ */
+export function planAgreementOp(item, facts = []) {
+  const base = { text: item.text, op: item.op, old: item.old };
+  if (item.op === 'add' || !item.old) return { ...base, will: 'add', reason: '新增' };
+  const hits = (Array.isArray(facts) ? facts : [])
+    .filter((f) => !f?.until && String(f?.text ?? '').includes(item.old))
+    .map((f) => String(f.text));
+  if (!hits.length) {
+    return { ...base, will: 'add', reason: `没找到包含「${item.old}」的活事实，不猜，按新增` };
+  }
+  if (hits.length > 1) {
+    return { ...base, will: 'add', reason: `「${item.old}」匹配 ${hits.length} 条，不猜，按新增`, candidates: hits };
+  }
+  return { ...base, will: 'supersede', reason: `唯一定位「${hits[0]}」`, match: hits[0] };
+}
+
+export function buildPrompt({ day, chatName, items, revocation = null, facts = [] }) {
+  const factLines = (Array.isArray(facts) ? facts : [])
+    .map((f) => String(f ?? '').trim()).filter(Boolean)
+    .slice(0, MAX_PROMPT_FACTS)
+    .map((f, i) => `  [${i + 1}] ${f}`);
   const fmt = [
     '{"summary":"...","ranks":[["id","level"]],"compress":[{"id":"...","digest":"..."}],',
-    ' "triples":[{"s":"...","rel":"...","o":"...","scope":"global"}],"agreements":["..."],"closed":[]',
+    ' "triples":[{"s":"...","rel":"...","o":"...","scope":"global"}],',
+    ' "agreements":["...", {"text":"...","op":"update","old":"..."}],"closed":[]',
     revocation ? ',"revoked":[]' : '',
     '}',
   ].join('');
@@ -197,7 +246,13 @@ export function buildPrompt({ day, chatName, items, revocation = null }) {
     '   · scope=chat：只在这个群成立的（群友的绰号、群内梗、小圈子关系）',
     '   · rel 用两三个字的动词或名词（住在/喜欢/叫/生日是/工作在/养了/认识）',
     '   · 没有可抽的就给空数组',
-    '5. agreements：里面出现的"约定 / 答应 / 说好要办的事"，一条一句；没有就给空数组',
+    '5. agreements：里面出现的"约定 / 答应 / 说好要办的事"，一条一句；没有就给空数组。',
+    '   若这一天里**改了以前记下的约定**、或**以前的约定已经不算了**，那一条改写成对象：',
+    '   {"text":"新约定","op":"update"|"outdated","old":"旧说法里能唯一定位它的几个字"}。',
+    '   · op=update：旧约定换成新说法 → 按 old 找到那一条作废，再记下新的',
+    '   · op=outdated：旧约定不再成立、也没有新值 → 只作废，不记新的',
+    '   · 其余照旧给字符串（= 新增）。old 找不到、或匹配到多条时我不会猜，一律按新增处理；',
+    '     所以拿不准就写字符串，宁可多留一条，也不要误作废。',
     '6. closed：以前答应过、今天明显已经办完的约定，给 [{"s":"主语","rel":"约定","o":"那件事"}]；没有就给空数组',
     /**
      * 第 7 项只在 L3 候选成立时才加。合并进巩固这一次调用，不再单独调模型：
@@ -212,6 +267,9 @@ export function buildPrompt({ day, chatName, items, revocation = null }) {
     '',
     '输出格式（严格按这个键名）：',
     fmt,
+    ...(factLines.length
+      ? ['', '—— 你已经记得的事（判断 update / outdated 时对照；old 要从这里摘） ——', ...factLines]
+      : []),
     '',
     '—— 下面是一天的记录 ——',
     ...items.map((i) => i.line),
@@ -306,6 +364,11 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       /** 第五层：这条自述写没写（0/1），没写的理由放 selfSkip */
       self: 0,
       selfSkip: '',
+      /** D6：dry-run 预览会列出每条约定的处置计划；另记护栏退化/作废的次数 */
+      agreementOps: [],
+      fallback: 0,
+      outdated: 0,
+      updated: 0,
       mode: generate ? 'model' : 'mechanical',
       errors: [],
     };
@@ -350,7 +413,10 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
 
         if (generate) {
           try {
-            const prompt = buildPrompt({ day: target, chatName, items, revocation });
+            const prompt = buildPrompt({
+              day: target, chatName, items, revocation,
+              facts: factsForPrompt(chatId),
+            });
             let raw = await generate(prompt);
             plan = parseJsonLoose(raw);
             if (needsJsonRetry(raw, plan)) {
@@ -374,9 +440,10 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         }
 
         const res = apply({ day: target, chatId, list, plan, dry, revocation });
-        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'revoked', 'digests', 'suppressed']) {
+        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'revoked', 'digests', 'suppressed', 'fallback', 'outdated', 'updated']) {
           stats[k] += res[k] || 0;
         }
+        stats.agreementOps.push(...(res.agreementOps || []));
 
         /**
          * 摘要条目：即使模型给了 summary 也要落一条。
@@ -492,8 +559,31 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
    * 每条建议都要能被拒绝：id 对不上就跳过、等级非法就跳过、
    * critical 降级由 journal.setLevel 那道护栏挡掉。**宁可少改。**
    */
+  /**
+   * D6：给 prompt 的旧事实（≤10 条）。拿不到就给空——机械模式、
+   * 或老版本没这些方法的 memory 实例照样能把巩固跑完。
+   */
+  function factsForPrompt(chatId) {
+    try {
+      const r = memory?.listRanked?.(chatId, aliasesOf(chatId)) || { global: [], chat: [] };
+      return [...(r.global || []), ...(r.chat || [])].slice(0, MAX_PROMPT_FACTS);
+    } catch {
+      return [];
+    }
+  }
+
+  /** D6：给 dry-run 判据的旧事实，要带 `until` 才能排掉已经作废的 */
+  function factsForApply(chatId) {
+    try {
+      const full = memory?.listFull?.(chatId, aliasesOf(chatId)) || { global: [], chat: [] };
+      return [...(full.global || []), ...(full.chat || [])];
+    } catch {
+      return [];
+    }
+  }
+
   function apply({ day, chatId, list, plan, dry, revocation = null }) {
-    const out = { ranked: 0, compressed: 0, triples: 0, agreements: 0, closed: 0, revoked: 0, digests: 0, suppressed: 0 };
+    const out = { ranked: 0, compressed: 0, triples: 0, agreements: 0, closed: 0, revoked: 0, digests: 0, suppressed: 0, agreementOps: [], fallback: 0, outdated: 0, updated: 0 };
     const byId = new Map(list.map((r) => [r.id, r]));
     const at = list.length ? list[list.length - 1].at : now();
 
@@ -604,13 +694,18 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       out.triples += triples.length;
     }
 
-    /* 4. 约定 → 长期事实（**按会话**，并且图里留一条活边，办完关掉） */
+    /* 4. 约定 → 长期事实（D6：比对旧记忆，op=add/update/outdated） */
     const agreements = Array.isArray(plan?.agreements) ? plan.agreements : [];
+    const factsNow = factsForApply(chatId);
     for (const a of agreements) {
-      const text = String(a ?? '').trim();
-      if (!text) continue;
+      const item = normalizeAgreement(a);
+      if (!item.text) continue;
+      const preview = planAgreementOp(item, factsNow);
+      out.agreementOps.push(preview);
+
+      /** dry-run 只算不写：把每条会怎么处置摆出来，面板/CLI 能直接看 */
       if (dry) {
-        out.agreements += 1;
+        out.agreements += item.op === 'outdated' ? 0 : 1;
         continue;
       }
       /**
@@ -622,9 +717,28 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
        * 不带的话查不到墓碑，约定被原样写回来，读路径带别名又能读出来——
        * 用户看到的就是「删了又长回来」。
        */
-      if (graph?.isSuppressed?.({ src: '主人', rel: '约定', dst: text.slice(0, 40), chatId, aliases: aliasesOf(chatId) })) {
+      if (graph?.isSuppressed?.({ src: '主人', rel: '约定', dst: item.text.slice(0, 40), chatId, aliases: aliasesOf(chatId) })) {
         out.suppressed += 1;
         continue;
+      }
+      /**
+       * 真实处置的**终极护栏**在 `memory.supersede()`：命中 0 条 / 多条都不猜。
+       * 预览说能作废、真跑却不敢时一律退化成新增，绝不误作废一条无关的事实。
+       */
+      if (preview.will === 'supersede') {
+        const r = memory?.supersede?.(chatId, item.old, { at });
+        if (!r?.ok) {
+          out.fallback += 1;
+          out.agreementOps[out.agreementOps.length - 1] = {
+            ...preview, will: 'add', reason: `护栏拦下：${r?.why || '没有 supersede 接口'}`,
+          };
+          if (item.op === 'outdated') continue;
+        } else if (item.op === 'outdated') {
+          out.outdated += 1;
+          continue;
+        } else {
+          out.updated += 1;
+        }
       }
       /**
        * 约定**不能跨群**，这条以前是错的。
@@ -641,8 +755,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
        * `chatId` 为空时（老日记没有归属）退回全局：宁可放错位置，
        * 也不要因为拿不到 id 就把一条约定静默丢掉。
        */
-      memory.add(chatId, `约定：${text.slice(0, 160)}`, chatId ? 'chat' : 'global');
-      graph?.addEdge?.({ src: '主人', rel: '约定', dst: text.slice(0, 40), at, chatId });
+      memory.add(chatId, `约定：${item.text.slice(0, 160)}`, chatId ? 'chat' : 'global');
+      graph?.addEdge?.({ src: '主人', rel: '约定', dst: item.text.slice(0, 40), at, chatId });
       out.agreements += 1;
     }
 
