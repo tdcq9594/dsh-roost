@@ -5359,6 +5359,9 @@ select.roost-input{color-scheme:dark}
       ['awake', '主动说话', '清醒时段、机会分门槛、群白名单（开着时 speakUp.prompt 会当额外要求一起给）'],
       ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],
       ['closing', '收尾', '对话冷掉前自己补一句：多久算冷（coolMinutes）、盯几个会话（maxChats）、记录留几天（ttlDays）'],
+      ['model', '模型', 'byChat：按会话指定 provider / model / reasoningEffort，没配就用 DSH 的全局默认模型'
+        + '（例：{"群openid":{"provider":"deepseek","model":"deepseek-chat"}}）。'
+        + '思考强度会先问 DSH 这个模型支持哪几档，不支持就不传，避免整轮直接报错'],
       ['persona', '人格', '当前用哪个人格、按群指定；换人格去「人格」页点「用这个」'
         + '（name / text 是 0.10.0 之前的旧字段，只在人格文件读不出正文时才兜底）'],
       ['stickers', '表情包', '图放哪、要不要注入'],

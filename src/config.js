@@ -527,6 +527,16 @@ export const DEFAULTS = {
       maxBytes: 1048576,
     },
   },
+  /**
+   * 按聊天选模型（E6）。
+   *
+   * `byChat[chatId] = { provider, model, reasoningEffort? }`；没配就沿用 DSH
+   * 的全局默认模型。chatId 是 QQ 的 openid，私聊和群都适用（各自唯一，
+   * 不用再按 kind 分一层）。空对象当开放字典，`pruneTo` 会整份保留。
+   */
+  model: {
+    byChat: {},
+  },
   persona: {
     /** 当前用哪个人格（对应 personas/<id>.md） */
     current: 'default',

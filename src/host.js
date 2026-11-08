@@ -44,6 +44,7 @@ import { memoryLines } from './memory-line.js';
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { offpeakState } from './offpeak.js';
+import { pickModelFor, pickReasoningEffort } from './model-pick.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing, shouldNotePending } from './closing.js';
 import { createAccount } from './account.js';
@@ -2354,33 +2355,56 @@ export function apply(ctx) {
     modelWarned.add(key);
     log.warn(msg);
   };
-  async function applyDefaultModel(sessionId) {
+  /**
+   * 给会话套模型：**按聊天覆盖 > DSH 全局默认**（E6）。
+   *
+   * 写入口优先用官方 `agent.model.select({provider, model, reasoningEffort?})`；
+   * 桌面版的 `remote.session.selectModel` 保留作回退（老部署没有前者）。
+   *
+   * E8：写之前先问 `ctx.llm.resolveModelInfo` 这个模型支持哪几档思考强度，
+   * 不支持就不传——官方文档明确「显式 effort 会在任何 provider I/O 之前校验，
+   * 不支持直接失败」，不能拿别的模型的档位硬塞。
+   */
+  async function applyDefaultModel(sessionId, chatId = '') {
     if (!sessionId || modelApplied.has(sessionId)) return;
     try {
       const dm = ctx.get?.('agentDefaultModel');
-      const sel = dm?.currentSelection?.();
-      if (!sel?.provider || !sel?.model) {
+      const sel = pickModelFor({
+        byChat: cfg.model?.byChat,
+        chatId,
+        globalSel: dm?.currentSelection?.(),
+      });
+      if (!sel) {
         modelFailed.add(sessionId);
         warnOnce('no-default', 'DSH 没有默认模型（或宿主没暴露 agentDefaultModel），新会话可能拿不到模型');
         return;
       }
-      const remote = controller().remote?.session;
-      if (typeof remote?.selectModel !== 'function') {
-        modelFailed.add(sessionId);
-        warnOnce('no-select', '宿主没有暴露 session.selectModel，新会话可能拿不到默认模型');
-        return;
-      }
-      await remote.selectModel({
-        sessionId,
+      const llm = ctx.get?.('llm');
+      const effort = await pickReasoningEffort(sel, llm?.resolveModelInfo?.bind(llm));
+      const choice = {
         provider: sel.provider,
         model: sel.model,
-        ...(sel.reasoningEffort ? { reasoningEffort: sel.reasoningEffort } : {}),
-      });
+        ...(effort ? { reasoningEffort: effort } : {}),
+      };
+
+      /** 官方入口优先；拿不到 agent（刚建的会话还没 resolve）再走桌面版 remote */
+      const agent = ctx.agents?.get?.(sessionId) || ctx.agents?.get?.('session-' + sessionId);
+      if (typeof agent?.model?.select === 'function') {
+        await agent.model.select(choice);
+      } else {
+        const remote = controller().remote?.session;
+        if (typeof remote?.selectModel !== 'function') {
+          modelFailed.add(sessionId);
+          warnOnce('no-select', '宿主没有暴露 agent.model.select / session.selectModel，新会话可能拿不到模型');
+          return;
+        }
+        await remote.selectModel({ sessionId, ...choice });
+      }
       modelApplied.add(sessionId);
       modelFailed.delete(sessionId);
     } catch (e) {
       modelFailed.add(sessionId);
-      warnOnce(`fail:${e.message}`, `套用默认模型失败：${e.message}`);
+      warnOnce(`fail:${e.message}`, `套用模型失败：${e.message}`);
     }
   }
 
@@ -2409,7 +2433,7 @@ export function apply(ctx) {
          * 不能对所有既有会话都补：`modelApplied` 在内存里，重启后为空，
          * 那样会把用户在 DSH 里手选的模型覆盖掉。
          */
-        if (modelFailed.has(sid)) await applyDefaultModel(sid);
+        if (modelFailed.has(sid)) await applyDefaultModel(sid, chat.chatId);
         return { agent, sessionId: sid };
       } catch (e) {
         log.warn(`${chat.chatId}：旧会话 ${sid.slice(-8)} 拉不起来了（${e.message}），重建`);
@@ -2425,7 +2449,7 @@ export function apply(ctx) {
     } catch {}
     sessions.set(chat.chatId, newSid, { preset: chat.preset, title, kind: chat.kind });
     log.info(`为 ${chat.chatId} 新建 DSH 会话 ${newSid.slice(-8)}（${chat.preset}）`);
-    await applyDefaultModel(newSid);
+    await applyDefaultModel(newSid, chat.chatId);
     return { agent: await resolveAgent(newSid), sessionId: newSid };
   }
 
