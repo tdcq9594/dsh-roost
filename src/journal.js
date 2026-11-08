@@ -457,6 +457,33 @@ function createSqliteStore(file, log) {
       return n;
     },
 
+    /**
+     * 恢复失效（D11 retention 的「一键恢复」）：只认本功能打过的标记。
+     *
+     * 为什么按 `superseded_by='retention'` 过滤：失效还被「改口旧约定」用着，
+     * 一键恢复不能把那些本来就该失效的行也放回注入。
+     * ids 为空 = 全库恢复；传了就只恢复这批 id。
+     */
+    restore(ids) {
+      const d = open();
+      if (!d) return 0;
+      const list = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
+      const sql = list.length
+        ? `UPDATE journal SET invalid_at=0, superseded_by='' WHERE invalid_at>0 AND superseded_by='retention' AND id IN (${marks(list.length)})`
+        : `UPDATE journal SET invalid_at=0, superseded_by='' WHERE invalid_at>0 AND superseded_by='retention'`;
+      const upd = d.prepare(sql);
+      let n = 0;
+      d.exec('BEGIN');
+      try {
+        n = Number(upd.run(...list).changes || 0);
+        d.exec('COMMIT');
+      } catch (e) {
+        try { d.exec('ROLLBACK'); } catch {}
+        throw e;
+      }
+      return n;
+    },
+
     /** 排查看：列出已失效的行（原文与 `superseded_by` 都在），不进任何注入集 */
     invalidated({ chatId = '', limit = 50, aliases = [] } = {}) {
       const d = open();
@@ -1035,6 +1062,23 @@ function createJsonlStore(file, log) {
         if (!want.has(r.id) || !isActive(r)) continue;
         r.invalidAt = t;
         r.supersededBy = by;
+        n += 1;
+      }
+      if (n) rewrite();
+      return n;
+    },
+
+    /** 同 SQLite 后端：只把 `supersededBy='retention'` 的行放回，别动改口作废的 */
+    restore(ids) {
+      load();
+      const list = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
+      const want = list.length ? new Set(list) : null;
+      let n = 0;
+      for (const r of rows) {
+        if (isActive(r) || String(r.supersededBy ?? r.superseded_by ?? '') !== 'retention') continue;
+        if (want && !want.has(String(r.id))) continue;
+        r.invalidAt = 0;
+        r.supersededBy = '';
         n += 1;
       }
       if (n) rewrite();
@@ -1726,6 +1770,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
 
     /** 排查看：列出已失效的行（原文与 supersededBy 都在），默认 50 条 */
     invalidated: (opts = {}) => get().invalidated(opts),
+    /** D11 retention 的一键恢复：只把本功能作废的行放回；ids 为空 = 全库 */
+    restore: (ids) => get().restore(ids),
 
     /**
      * **真的忘掉**：按关键词抹掉正文。

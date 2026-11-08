@@ -403,6 +403,30 @@ export function createMemory({ now = () => Date.now() } = {}) {
     return list.filter((text) => keep.has(text));
   }
 
+  /**
+   * D11 retention：按 (scope, chatId, 正文) 精确定位一条事实。
+   *
+   * 不复用 `supersede()` / `remove()`：前者按关键词 `includes` 找、命中多条
+   * 就「不猜」返回失败，拿完整正文当 needle 还会误伤「约定：A」与「约定：A 补充」；
+   * 后者是关键词抹除，两个后端都按覆盖率删，同样会误伤。dry-run 已经算出
+   * 精确的三元组，这里只认完全相等。
+   */
+  function locateFact(m, it) {
+    const scope = String(it?.scope || 'global');
+    const chatId = String(it?.chatId || '');
+    const text = String(it?.text ?? it?.id ?? '');
+    if (!text) return null;
+    if (scope === 'chat') {
+      if (!chatId) return null;
+      const list = m.chats?.[chatId];
+      const mm = m.meta.chats?.[chatId];
+      if (!Array.isArray(list) || !mm || !list.includes(text)) return null;
+      return { list, mm, text };
+    }
+    if (!Array.isArray(m.global) || !m.global.includes(text)) return null;
+    return { list: m.global, mm: m.meta.global, text };
+  }
+
   return {
     /**
      * 丢掉内存缓存，下次读盘重来。
@@ -798,6 +822,109 @@ export function createMemory({ now = () => Date.now() } = {}) {
       }
       save();
       return n;
+    },
+
+    /**
+     * D11 retention 专用接口（阶段 4c）。
+     *
+     * 作废复用现成的 `until`（注入只取活条目），另加 `expiredBy='retention'`
+     * 标明来源：恢复时只清自己打过的，不能把「被新说法取代」的历史也放回来。
+     * 所有方法**只在真有改动时才 save()**——默认状态下不写盘，这是
+     * §3⑤「默认关输出逐字节一致」的一部分。
+     */
+    retention: {
+      /** 全库条目（含已作废的），给 dry-run 收集用。只读 */
+      entries() {
+        const m = load();
+        const out = [];
+        const push = (scope, chatId, list, mm) => {
+          for (const text of Array.isArray(list) ? list : []) {
+            const x = mm?.[text] || {};
+            out.push({
+              id: text,
+              text,
+              scope,
+              chatId,
+              at: Number(x.at) || 0,
+              w: Number(x.w) > 0 ? Number(x.w) : 1,
+              src: x.src || null,
+              until: Number(x.until) > 0 ? Number(x.until) : 0,
+              expiredBy: String(x.expiredBy || ''),
+            });
+          }
+        };
+        push('global', '', m.global, m.meta.global);
+        for (const [cid, list] of Object.entries(m.chats || {})) {
+          push('chat', cid, list, m.meta.chats?.[cid]);
+        }
+        return out;
+      },
+
+      /** 作废：打 until，不删行。返回实际作废条数 */
+      expire(items, at = now()) {
+        const m = load();
+        const t = Number(at) > 0 ? Number(at) : now();
+        let n = 0;
+        for (const it of Array.isArray(items) ? items : []) {
+          const hit = locateFact(m, it);
+          if (!hit || hit.mm[hit.text]?.until) continue;
+          hit.mm[hit.text] = { ...(hit.mm[hit.text] || {}), until: t, expiredBy: 'retention' };
+          n += 1;
+        }
+        if (n) save();
+        return n;
+      },
+
+      /** 恢复：只清本功能打过的标记。items 为空 = 全部恢复 */
+      restore(items) {
+        const m = load();
+        const want = Array.isArray(items) && items.length
+          ? new Set(items.map((x) => JSON.stringify([
+            String(x.scope || 'global'), String(x.chatId || ''), String(x.text ?? x.id ?? ''),
+          ])))
+          : null;
+        let n = 0;
+        const each = (scope, chatId, list, mm) => {
+          for (const text of Array.isArray(list) ? list : []) {
+            const x = mm?.[text];
+            if (!x || x.expiredBy !== 'retention' || !x.until) continue;
+            if (want && !want.has(JSON.stringify([scope, chatId, text]))) continue;
+            const next = { ...x };
+            delete next.until;
+            delete next.expiredBy;
+            mm[text] = next;
+            n += 1;
+          }
+        };
+        each('global', '', m.global, m.meta.global);
+        for (const [cid, list] of Object.entries(m.chats || {})) {
+          each('chat', cid, list, m.meta.chats?.[cid]);
+        }
+        if (n) save();
+        return n;
+      },
+
+      /** 真删行（purge）：调用方必须先备份。返回实际删掉条数 */
+      purge(items) {
+        const m = load();
+        let n = 0;
+        for (const it of Array.isArray(items) ? items : []) {
+          const hit = locateFact(m, it);
+          if (!hit) continue;
+          const idx = hit.list.indexOf(hit.text);
+          if (idx < 0) continue;
+          hit.list.splice(idx, 1);
+          delete hit.mm[hit.text];
+          n += 1;
+        }
+        if (n) save();
+        return n;
+      },
+
+      /** 面板「已过期」：本功能作废过的条目 */
+      expired() {
+        return this.entries().filter((e) => e.expiredBy === 'retention' && e.until > 0);
+      },
     },
   };
 }
