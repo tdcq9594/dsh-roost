@@ -71,3 +71,12 @@ test('接线：DEFAULTS 有 model.byChat；applyDefaultModel 用纯函数 + 官�
   assert.match(src, /applyDefaultModel\(sid, chat\.chatId\)/);
   assert.match(src, /applyDefaultModel\(newSid, chat\.chatId\)/);
 });
+
+test('E10：quick 有 model.get / model.set，写 byChat 用整体替换并清缓存', () => {
+  const src = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.match(src, /case 'model\.get'/);
+  assert.match(src, /case 'model\.set'/);
+  /** 必须是整体替换：patchConfig 是深合并，删掉的 chatId 会被合回来 */
+  assert.match(src, /cur\.model = \{ \.\.\.\(cur\.model \|\| \{\}\), byChat: next \}/);
+  assert.match(src, /modelApplied\.delete\(sid\)/, '改完要让已存在的会话重新套模型');
+});

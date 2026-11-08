@@ -4567,6 +4567,56 @@ export function apply(ctx) {
               });
             }
 
+            /**
+             * E10：QQ 命令 `/model` 的后端——看/改这个会话的模型覆盖。
+             *
+             * 写的是 `model.byChat[chatId]`（E6 的表），不碰 DSH 全局默认。
+             * 改完清掉该会话的 `modelApplied` 缓存，下一轮才会重新套模型。
+             */
+            case 'model.get': {
+              const cid = String(arg?.chatId || chatId || '');
+              const dm = ctx.get?.('agentDefaultModel');
+              return send(res, 200, {
+                ok: true,
+                chatId: cid,
+                override: cid ? (cfg.model?.byChat?.[cid] || null) : null,
+                global: dm?.currentSelection?.() || null,
+              });
+            }
+            case 'model.set': {
+              const cid = String(arg?.chatId || chatId || '');
+              if (!cid) return send(res, 400, { ok: false, message: '缺 chatId' });
+              const next = { ...(cfg.model?.byChat || {}) };
+              if (arg?.off) {
+                delete next[cid];
+              } else {
+                const provider = String(arg?.provider || '').trim();
+                const model = String(arg?.model || '').trim();
+                if (!provider || !model) {
+                  return send(res, 400, { ok: false, message: '要 provider 和 model（或 off 恢复默认）' });
+                }
+                next[cid] = {
+                  provider,
+                  model,
+                  ...(arg?.reasoningEffort ? { reasoningEffort: String(arg.reasoningEffort) } : {}),
+                };
+              }
+              /**
+               * 用 `saveConfig` 整体替换而不是 `patchConfig`：后者是深合并，
+               * 删掉的 chatId 键会被旧配置「合」回来，`/model off` 等于没生效。
+               */
+              const cur = loadConfig();
+              cur.model = { ...(cur.model || {}), byChat: next };
+              cfg = saveConfig(cur);
+              /** 已存在的会话要重新套一次（`modelApplied` 缓存会挡住） */
+              const sid = sessions.get(cid);
+              if (sid) {
+                modelApplied.delete(sid);
+                modelFailed.delete(sid);
+              }
+              return send(res, 200, { ok: true, chatId: cid, override: next[cid] || null });
+            }
+
             /** E4：备份清单（只读）与「下次启动生效」的恢复状态 */
             case 'backup.list': {
               return send(res, 200, {
