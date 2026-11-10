@@ -13,7 +13,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { join } from 'node:path';
 
-import { createApiV1, V1_ROUTES, V1_SCOPES } from '../src/api-v1.js';
+import {
+  createApiV1, V1_ROUTES, V1_SCOPES, V1_IMPLEMENTED_HOOKS, V1_BUILTIN_ROUTES, isRouteImplemented,
+} from '../src/api-v1.js';
 import { createClientStore, createExtSecrets, createExtRegistry, EXT_KIND } from '../src/ext-registry.js';
 
 function tmpHome(t) {
@@ -205,4 +207,58 @@ test('G3-10 install 自动发令牌、remove 自动吊销（ext-registry 接线�
   assert.equal(reg.remove('bili').ok, true);
   assert.equal(store.get('ext:bili'), null);
   assert.equal(secrets.read('bili'), null);
+});
+
+/**
+ * 自查补的守卫：**文档说的「可用」必须等于真实行为**。
+ *
+ * 之前 `docs/API.md` 把 16 条端点写得一模一样，而实际只有 5 条能跑、10 条恒回
+ * 501。第三方照着文档开发，写完才发现一半端点不通。这条断言把「未接线清单」
+ * 钉成快照：接一条就少一条，测试会红，逼着同步文档与 `V1_IMPLEMENTED_HOOKS`。
+ */
+test('自查：未接线端点清单是硬快照（10 条 501），文档状态列跟着走', () => {
+  const notReady = Object.keys(V1_ROUTES).filter((k) => !isRouteImplemented(k)).sort();
+  assert.deepEqual(notReady, [
+    'GET /v1/context',
+    'GET /v1/memory',
+    'GET /v1/mood',
+    'GET /v1/state',
+    'POST /v1/memory',
+    'POST /v1/message',
+    'POST /v1/proactive',
+    'POST /v1/say',
+    'POST /v1/session.configure',
+    'POST /v1/session.ensure',
+  ], '接线一条就更新这份快照，并重跑 build-ext-docs');
+
+  // 已实现的 hook 必须真在路由表里被用到，不能是死名单
+  for (const name of V1_IMPLEMENTED_HOOKS) {
+    assert.ok(
+      Object.values(V1_ROUTES).some((r) => r.hook === name),
+      `V1_IMPLEMENTED_HOOKS 里的「${name}」没有任何路由在用`,
+    );
+  }
+  // 内置路由不能靠 hook 蒙混
+  for (const key of V1_BUILTIN_ROUTES) {
+    assert.ok(key in V1_ROUTES, `V1_BUILTIN_ROUTES 里的「${key}」不在路由表`);
+    assert.equal(V1_ROUTES[key].hook, null, `内置路由「${key}」不该声明 hook`);
+  }
+  // 每条未实现的路由都必须有 hook 名（否则是漏写了路由定义，不是「未接线」）
+  for (const key of notReady) {
+    assert.ok(V1_ROUTES[key].hook, `${key} 既没实现也没 hook 名，路由表定义不完整`);
+  }
+});
+
+test('自查：声明已实现但没传 hook 时要有 warn（不静默降级成 501）', (t) => {
+  const warns = [];
+  createApiV1({
+    dir: tmpHome(t),
+    clientStore: null,
+    auditFn: () => {},
+    hooks: {}, // 一个都不传
+    log: { warn: (m) => warns.push(m) },
+  });
+  for (const name of V1_IMPLEMENTED_HOOKS) {
+    assert.ok(warns.some((w) => w.includes(name)), `缺 hook「${name}」没告警：${warns.join(' | ')}`);
+  }
 });

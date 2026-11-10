@@ -77,13 +77,37 @@ const MUTATIONS = [
     test: ['test/ext-patch.test.js'],
   },
   {
+    /**
+     * §12 第「自动注入不得读 ext-memory/」项。
+     *
+     * ⚠️ 上一版这里有两个问题，自查时发现并修正：
+     *  1. `find` 用的是 `const c = collectChat(m, chatId, aliases);` —— 这个串在
+     *     `memory.js` 出现 3 次（`list` / `listRanked` / `listFull`），
+     *     `String.replace` 只替第一处，**实际改的是 `list()` 而不是 `listRanked`**；
+     *  2. 注入的代码是 `try { readFileSync(目录) } catch {}` —— 读目录必抛 EISDIR、
+     *     被自己吞掉，**运行时零副作用**。它之所以「变红」，只是因为 G4-11 全文扫
+     *     到了 `ext-memory` 这个字面量，属于文本级假红。
+     *
+     * 现在：锚点带后续两行保证唯一命中 `listRanked`，且注入真的会把扩展记忆
+     * 混进自动注入结果，由行为断言（G4-11b）抓。
+     */
     id: 'ranked-ext', label: '让 listRanked 误读 ext-memory/（隔离被破坏）',
     file: 'src/memory.js',
-    find: 'const c = collectChat(m, chatId, aliases);',
+    find: [
+      '      const c = collectChat(m, chatId, aliases);',
+      '      return {',
+      '        global: rank(m.global, m.meta.global, null),',
+    ].join('\n'),
     replace: [
-      'const c = collectChat(m, chatId, aliases);',
-      '      // MUTATION: 自动注入误读 ext-memory/',
-      "      try { readFileSync(join(dataDir(), 'ext-memory'), 'utf8'); } catch { /* ignore */ }",
+      '      const c = collectChat(m, chatId, aliases);',
+      '      // MUTATION: 自动注入误读扩展记忆目录（变量拼路径，绕开全文文本扫描）',
+      '      try {',
+      "        const dirName = ['ext', 'memory'].join('-');",
+      "        const leaked = readFileSync(join(dataDir(), dirName, 'bili.json'), 'utf8');",
+      "        m.global.push('EXTLEAK:' + leaked.slice(0, 24));",
+      '      } catch { /* ignore */ }',
+      '      return {',
+      '        global: rank(m.global, m.meta.global, null),',
     ].join('\n'),
     test: ['test/ext-memory-store.test.js'],
   },
@@ -228,9 +252,36 @@ const failCount = (out) => {
 function runOne(m) {
   const file = join(ROOT, m.file);
   const original = fs.readFileSync(file, 'utf8');
-  const hit = typeof m.find === 'string' ? original.includes(m.find) : m.find.test(original);
+  /**
+   * 锚点按**文件实际行尾**适配。
+   *
+   * 仓库里 `src/*.js` 是 CRLF（Windows checkout），而多行锚点是用 `\n` 拼的；
+   * 不适配就永远「找不到锚点」—— 上一版 `ranked-ext` 因此悄悄退回到单行锚点，
+   * 结果命中了 `list()` 而不是 `listRanked`。单行锚点不受影响（不含换行）。
+   */
+  const eol = original.includes('\r\n') ? '\r\n' : '\n';
+  const fit = (s) => (eol === '\n' ? s : s.replace(/\n/g, '\r\n'));
+  const find = typeof m.find === 'string' ? fit(m.find) : m.find;
+  const replace = typeof m.replace === 'string' ? fit(m.replace) : m.replace;
+
+  const hit = typeof find === 'string' ? original.includes(find) : find.test(original);
   if (!hit) return { ok: false, why: `找不到锚点（${m.file}）` };
-  const mutated = original.replace(m.find, m.replace);
+
+  /**
+   * **锚点必须恰好命中一次。**
+   *
+   * `String.replace` 只替第一处，所以「命中多处」不是小问题：它会静默改到
+   * 一个不相干的同名行，测试照样变红、报告照样 ✓，实际守卫的那条约束
+   * 一次都没被验证过（`ranked-ext` 就是这么假红了两个阶段）。
+   */
+  const hits = typeof find === 'string'
+    ? original.split(find).length - 1
+    : (original.match(new RegExp(find.source, find.flags.includes('g') ? find.flags : `${find.flags}g`)) || []).length;
+  if (hits !== 1) {
+    return { ok: false, why: `锚点在 ${m.file} 命中 ${hits} 次（必须恰好 1 次，否则会改错位置）` };
+  }
+
+  const mutated = original.replace(find, replace);
   if (mutated === original) return { ok: false, why: '替换后无变化' };
 
   // 先确认基线全绿：基线本来就红的话，「变异后仍红」毫无意义。

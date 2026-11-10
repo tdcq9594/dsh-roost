@@ -146,7 +146,17 @@ export function createExtMemory({
   async function onClear(action, opts = {}) {
     const alsoExt = opts?.clearExtMemory === true;
     if (action === 'memory.clear' || action === 'memory.purge') {
-      if (!alsoExt) return { touched: false, message: '扩展记忆按会话清没有意义，未改动' };
+      /**
+       * 默认不动：扩展记忆是**跨会话**的，按 chatId 清没有意义。
+       * 这句会拼进面板 toast，所以要写成用户能懂的话，不能只说「未改动」——
+       * 否则用户以为扩展记忆也一起清了（§5.6 要求面板**说明**这一点）。
+       */
+      if (!alsoExt) {
+        return {
+          touched: false,
+          message: '扩展记忆不属于任何会话，这次没动（可在「设置 → 扩展」里单独清）',
+        };
+      }
       const r = await store.clearAll({ respectOnClear: true });
       return {
         touched: r.cleared > 0, cleared: r.cleared, kept: r.kept,

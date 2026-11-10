@@ -160,21 +160,40 @@ export function createExtPatch({
   profileDir = findProfileDir(SRC_DIR),
   apiUrl,
   port,
+  /** 返回**当前实际监听端口**。运行期求值，不能在创建时算死。 */
+  getPort = null,
   roostDir = ROOST_DIR,
   log = () => {},
 } = {}) {
   const file = join(profileDir, 'cordis.patch.yml');
   // 端口不硬编码：与 ai-chat 的「DSH 地址」同源，取 config.json 的 server.port。
   const cfgPort = port ?? (() => { try { return loadConfig()?.server?.port; } catch { return undefined; } })();
-  const opts = {
-    dir,
-    roostDir,
-    apiUrl: apiUrl || `http://127.0.0.1:${cfgPort || 17321}/v1`,
+
+  /**
+   * **每次渲染时**才定 URL。
+   *
+   * `config.json` 里的端口只是「想要的值」；被占时 `createInboundServer()` 会
+   * 顺着 `candidates()` 往后漂（`server.js` 的 `EADDRINUSE` 分支），真正在听的是
+   * `server.actualPort`。创建时算死就会把旧端口写进受管块，扩展连过去得到
+   * **connection refused**（不是 401）—— 连接层就断了，`ext.auth_failed` 不会记、
+   * 面板两个凭据状态都不会亮，表现是「装好了但一点反应都没有」。
+   *
+   * 优先级：显式 `apiUrl` > 运行期 `getPort()` > 配置端口 > 17321。
+   */
+  const resolveApiUrl = () => {
+    if (apiUrl) return apiUrl;
+    let p = cfgPort;
+    try {
+      const live = getPort?.();
+      if (live) p = live;
+    } catch { /* 取不到就退回配置值，不因此让安装失败 */ }
+    return `http://127.0.0.1:${p || 17321}/v1`;
   };
+  const opts = { dir, roostDir };
 
   /** 默认不写盘：`render()` 返回片段，面板给「一键复制」。 */
   function render(ids, { apply = false } = {}) {
-    const block = renderBlock(ids, opts);
+    const block = renderBlock(ids, { ...opts, apiUrl: resolveApiUrl() });
     const shape = assertManagedShape(block);
     if (!shape.ok) throw new Error(`受管块结构校验失败：${shape.problems.join('；')}`);
 

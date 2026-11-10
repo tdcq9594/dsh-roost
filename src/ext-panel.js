@@ -331,24 +331,71 @@ export function createExtPanel({
    *   · `ext.token_regenerated`  → 「令牌已重新生成」
    * **不看** `waiting-credentials`（官方零命中，v3.6 已作废）。
    */
+  /**
+   * 面板两个凭据状态的判定。
+   *
+   * **是「当前态」不是「曾经发生过」**：审计是只追加的日志，一个三个月前的
+   * 一次 401 若一直亮着红灯，面板就永远在喊「扩展鉴权失败」，而扩展其实早
+   * 就正常了 —— 这种永久的假警报比不显示更坏。
+   *
+   * 判据：最后一条 `ext.auth_failed` 之后，有没有**成功的 `/v1` 调用**
+   * （`v1.*` 且 `note === 'ok'`）。有 → 已经恢复 → 不亮。
+   * `authFailedEver` / `regeneratedEver` 保留「曾经发生过」的事实，供排查用。
+   *
+   * 另外 `audit.log` 没有轮转，长期运行可能很大；只读**末尾 256 KB**
+   * （一次滚动窗口内的事件足够判定当前态），避免每次开面板都全量读。
+   */
+  const TAIL_BYTES = 256 * 1024;
+
+  function readAuditTail() {
+    const file = join(dir, 'audit.log');
+    let fd = null;
+    try {
+      const st = fs.statSync(file);
+      const start = Math.max(0, st.size - TAIL_BYTES);
+      const len = st.size - start;
+      if (len <= 0) return '';
+      const buf = Buffer.alloc(len);
+      fd = fs.openSync(file, 'r');
+      fs.readSync(fd, buf, 0, len, start);
+      const text = buf.toString('utf8');
+      // 从中间截断时第一行多半是半截 JSON，丢掉（JSON.parse 失败本来也会 continue）。
+      return start > 0 ? text.slice(text.indexOf('\n') + 1) : text;
+    } catch {
+      return ''; // 没有审计文件 = 没有事件，不是错误
+    } finally {
+      if (fd !== null) { try { fs.closeSync(fd); } catch { /* 已关 */ } }
+    }
+  }
+
   function status() {
     const authFailed = [];
     const regenerated = [];
-    try {
-      const lines = fs.readFileSync(join(dir, 'audit.log'), 'utf8').split(/\r?\n/).filter(Boolean);
-      for (const line of lines) {
-        let r = null;
-        try { r = JSON.parse(line); } catch { continue; }
-        if (r?.op === 'ext.auth_failed') authFailed.push({ at: Number(r.at) || 0, note: String(r.note ?? '') });
-        if (r?.op === 'ext.token_regenerated') regenerated.push({ at: Number(r.at) || 0, note: String(r.note ?? '') });
+    let lastOkAt = 0;
+    for (const line of readAuditTail().split(/\r?\n/)) {
+      if (!line) continue;
+      let r = null;
+      try { r = JSON.parse(line); } catch { continue; }
+      const at = Number(r?.at) || 0;
+      if (r?.op === 'ext.auth_failed') authFailed.push({ at, note: String(r.note ?? '') });
+      else if (r?.op === 'ext.token_regenerated') regenerated.push({ at, note: String(r.note ?? '') });
+      else if (String(r?.op ?? '').startsWith('v1.') && r?.note === 'ok') {
+        lastOkAt = Math.max(lastOkAt, at);
       }
-    } catch { /* 没有审计文件 = 没有事件，不是错误 */ }
+    }
+    const lastFail = authFailed.length ? authFailed[authFailed.length - 1] : null;
+    const lastRegen = regenerated.length ? regenerated[regenerated.length - 1] : null;
     return {
       ok: true,
-      authFailed: authFailed.length > 0,
-      regenerated: regenerated.length > 0,
-      authFailedLast: authFailed.length ? authFailed[authFailed.length - 1] : null,
-      regeneratedLast: regenerated.length ? regenerated[regenerated.length - 1] : null,
+      /** 当前是否处于失败态（失败之后还没成功过）。 */
+      authFailed: Boolean(lastFail && lastFail.at > lastOkAt),
+      regenerated: Boolean(lastRegen && lastRegen.at > lastOkAt),
+      /** 历史事实：曾经失败过 / 曾经因备份还原重建过令牌。 */
+      authFailedEver: authFailed.length > 0,
+      regeneratedEver: regenerated.length > 0,
+      authFailedLast: lastFail,
+      regeneratedLast: lastRegen,
+      lastOkAt,
       hintAuthFailed: '扩展鉴权失败',
       hintRegenerated: '令牌已重新生成',
     };

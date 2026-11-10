@@ -60,24 +60,30 @@
 
 ## 6. 端点
 
-| 方法 | 路径 | scope | 说明 |
-|---|---|---|---|
-| POST | `/v1/agent.close` | `agent:write` | 关独立会话并撤销它的注册 |
-| GET | `/v1/agent.list` | `agent:write` | 列出当前开着的独立会话 |
-| POST | `/v1/agent.new` | `agent:write` | 开一个独立 Agent 会话（游戏裁判这类无 QQ 身份的场景） |
-| POST | `/v1/agent.prompt` | `agent:write` | 给独立会话发一轮；默认 SSE 流式 |
-| GET | `/v1/context` | `context:read` | 读当前会话的上下文摘要（条数、窗口占用） |
-| GET | `/v1/memory` | `memory:read` | 读当前会话的记忆（列表形态） |
-| POST | `/v1/memory` | `memory:write` | 往**当前会话**的记忆里写一条 |
-| POST | `/v1/memory/ext.add` | `memory:write` | 往**扩展自己的命名空间**写一条（extId 由令牌决定，body 自报无效） |
-| POST | `/v1/message` | `message:write` | 把一条消息送进 QQ（复用现有入站链路，不另写一条） |
-| GET | `/v1/mood` | `state:read` | 读当前心情 |
-| POST | `/v1/proactive` | `proactive:write` | 排一条主动消息（受清醒时段与频次约束） |
-| POST | `/v1/say` | `say:write` | 让机器人主动说一句；`pending` 表示进审核，不是已发出 |
-| POST | `/v1/session.configure` | `prompt:write` | 改会话配置（模型、人格、工具开关） |
-| POST | `/v1/session.ensure` | `session:write` | 确保会话存在 |
-| GET | `/v1/state` | `state:read` | 读机器人与当前会话的状态（在线、绑定、档位） |
-| GET | `/v1/whoami` | （任意有效令牌） | 回显令牌身份（不含 hash / 明文） |
+**「状态」列是硬事实，不是进度暗示**：标 ⛔ 的端点当前恒回 `501 not_implemented`，
+调用不会产生任何副作用。标 ✅ 的才是现在能用的。
+
+| 方法 | 路径 | scope | 状态 | 说明 |
+|---|---|---|---|---|
+| POST | `/v1/agent.close` | `agent:write` | ✅ 可用 | 关独立会话并撤销它的注册 |
+| GET | `/v1/agent.list` | `agent:write` | ✅ 可用 | 列出当前开着的独立会话 |
+| POST | `/v1/agent.new` | `agent:write` | ✅ 可用 | 开一个独立 Agent 会话（游戏裁判这类无 QQ 身份的场景） |
+| POST | `/v1/agent.prompt` | `agent:write` | ✅ 可用 | 给独立会话发一轮；默认 SSE 流式 |
+| GET | `/v1/context` | `context:read` | ⛔ 501 未接线 | 读当前会话的上下文摘要（条数、窗口占用） |
+| GET | `/v1/memory` | `memory:read` | ⛔ 501 未接线 | 读当前会话的记忆（列表形态） |
+| POST | `/v1/memory` | `memory:write` | ⛔ 501 未接线 | 往**当前会话**的记忆里写一条 |
+| POST | `/v1/memory/ext.add` | `memory:write` | ✅ 可用 | 往**扩展自己的命名空间**写一条（extId 由令牌决定，body 自报无效） |
+| POST | `/v1/message` | `message:write` | ⛔ 501 未接线 | 把一条消息送进 QQ（复用现有入站链路，不另写一条） |
+| GET | `/v1/mood` | `state:read` | ⛔ 501 未接线 | 读当前心情 |
+| POST | `/v1/proactive` | `proactive:write` | ⛔ 501 未接线 | 排一条主动消息（受清醒时段与频次约束） |
+| POST | `/v1/say` | `say:write` | ⛔ 501 未接线 | 让机器人主动说一句；`pending` 表示进审核，不是已发出 |
+| POST | `/v1/session.configure` | `prompt:write` | ⛔ 501 未接线 | 改会话配置（模型、人格、工具开关） |
+| POST | `/v1/session.ensure` | `session:write` | ⛔ 501 未接线 | 确保会话存在 |
+| GET | `/v1/state` | `state:read` | ⛔ 501 未接线 | 读机器人与当前会话的状态（在线、绑定、档位） |
+| GET | `/v1/whoami` | （任意有效令牌） | ✅ 可用 | 回显令牌身份（不含 hash / 明文） |
+
+> 未接线的 10 条端点已预留路由与鉴权（scope 校验、限频、幂等都在生效），
+> 只差业务实现。第三方可以先按此契约开发，但**不要**把它们当成已可用能力。
 
 ### 幂等与限频
 
@@ -111,7 +117,7 @@
 | 404 `not_found` | 没有这个 `/v1` 端点 |
 | 413 `request_too_large` | 请求体超过 1 MB |
 | 429 `rate_limited` | 每客户端每分钟 120 次（响应带 `retry-after`） |
-| 501 `not_implemented` | 该端点业务尚未接线（骨架阶段会见到） |
+| 501 `not_implemented` | 该端点业务尚未接线（见第 6 节「状态」列，当前有若干条） |
 
 ## 9. 为什么没生效
 

@@ -1141,7 +1141,16 @@ export function apply(ctx) {
    */
   let extPatch = null;
   try {
-    extPatch = createExtPatch({ dir: dataDir(), log });
+    /**
+     * `getPort` 读的是运行期 `server.actualPort`（`let server` 声明在后面，
+     * 这里是闭包、只在 render 时求值，安全）。端口被占时 DSH 会往后漂，
+     * 受管块里的 `ROOST_API_URL` 必须跟实际端口走，否则扩展连旧端口
+     * 得到 connection refused，而不是可诊断的 401。
+     */
+    extPatch = createExtPatch({
+      dir: dataDir(), log,
+      getPort: () => server?.actualPort || undefined,
+    });
   } catch (e) {
     log.warn?.(`受管块模块不可用（市场安装将不写 cordis.patch.yml）：${e?.message ?? e}`);
   }
@@ -4140,6 +4149,19 @@ export function apply(ctx) {
         // syncAdapterPort 自己会吞错并排队重试（Roost 可能还没起来），
         // 这里不用再接 catch——接了只会多一条误导人的「通知失败」
         void syncAdapterPort(actual);
+        /**
+         * 受管块里的 `ROOST_API_URL` 也要跟着实际端口走。
+         *
+         * 端口漂移后再没人刷新它，扩展就会连**旧**端口：连接层直接 refused，
+         * 不走鉴权、不记 `ext.auth_failed`、面板也不报警 —— 静默失联。
+         * `render()` 内部会比对内容，没变化不写盘，所以每次启动都调是安全的。
+         */
+        try {
+          const r = extMarket?.syncBlock?.();
+          if (r?.written) log.info(`扩展受管块已按端口 ${actual} 更新`);
+        } catch (e) {
+          log.warn?.(`扩展受管块按端口刷新失败：${e?.message ?? e}`);
+        }
       },
     });
   }

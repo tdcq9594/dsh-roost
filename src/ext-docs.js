@@ -15,6 +15,7 @@ import { join } from 'node:path';
 
 import {
   V1_ROUTES, V1_SCOPES, RATE_LIMIT, WINDOW_MS, IDEMPOTENT_TTL_MS, IDEMPOTENT_MAX, MAX_BODY_BYTES,
+  isRouteImplemented,
 } from './api-v1.js';
 import { REJECTION_LAYERS, SENSITIVE_SCOPES, LOCALLY_MODIFIED_LABEL } from './ext-panel.js';
 import { EXT_ID_RE, MANIFEST_FILE, SOURCE_FILE } from './ext-registry.js';
@@ -55,7 +56,7 @@ const errCodeRows = [
   ['404 `not_found`', '没有这个 `/v1` 端点'],
   ['413 `request_too_large`', '请求体超过 1 MB'],
   ['429 `rate_limited`', '每客户端每分钟 120 次（响应带 `retry-after`）'],
-  ['501 `not_implemented`', '该端点业务尚未接线（骨架阶段会见到）'],
+  ['501 `not_implemented`', '该端点业务尚未接线（见第 6 节「状态」列，当前有若干条）'],
 ];
 
 function routeRows() {
@@ -71,6 +72,8 @@ function routeRows() {
       key, method, path,
       scope: route.scope ?? '（任意有效令牌）',
       note: ROUTE_NOTES[key],
+      /** 按 `isRouteImplemented()` 判，不靠人工维护第二份名单。 */
+      ready: isRouteImplemented(key),
     });
   }
   return rows.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
@@ -134,9 +137,15 @@ ${V1_SCOPES.map((s) => `- \`${s}\`${SENSITIVE_SCOPES.includes(s) ? '（**敏感*
 
 ## 6. 端点
 
-| 方法 | 路径 | scope | 说明 |
-|---|---|---|---|
-${rows.map((r) => `| ${r.method} | \`${r.path}\` | ${r.scope === '（任意有效令牌）' ? r.scope : `\`${r.scope}\``} | ${r.note} |`).join('\n')}
+**「状态」列是硬事实，不是进度暗示**：标 ⛔ 的端点当前恒回 \`501 not_implemented\`，
+调用不会产生任何副作用。标 ✅ 的才是现在能用的。
+
+| 方法 | 路径 | scope | 状态 | 说明 |
+|---|---|---|---|---|
+${rows.map((r) => `| ${r.method} | \`${r.path}\` | ${r.scope === '（任意有效令牌）' ? r.scope : `\`${r.scope}\``} | ${r.ready ? '✅ 可用' : '⛔ 501 未接线'} | ${r.note} |`).join('\n')}
+
+> 未接线的 ${rows.filter((r) => !r.ready).length} 条端点已预留路由与鉴权（scope 校验、限频、幂等都在生效），
+> 只差业务实现。第三方可以先按此契约开发，但**不要**把它们当成已可用能力。
 
 ### 幂等与限频
 

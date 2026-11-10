@@ -162,3 +162,51 @@ test('多扩展：按 id 排序生成，结构校验逐条覆盖', () => {
   assert.equal(/ROOST_EXT_ID: 'other'/.test(block), false);
   assert.match(renderEntry('bili-helper', opts), /ROOST_EXT_ID: 'bili-helper'/);
 });
+
+/**
+ * 端口必须在**渲染时**求值，不能创建时算死。
+ *
+ * 真机场景：`config.json` 写 17321，被占 → `createInboundServer()` 漂到 17322 上真听。
+ * 若受管块仍写 17321，扩展连过去是 **connection refused**（不是 401）：
+ * 不走鉴权、不记 `ext.auth_failed`、面板两个状态都不亮 —— 静默失联。
+ */
+test('运行期端口优先：getPort 变化后重新渲染的 URL 跟着变', (t) => {
+  const profile = tmpProfile(t);
+  let live = 0;
+  const p = createExtPatch({
+    profileDir: profile, dir: opts.dir, roostDir: opts.roostDir,
+    port: 17321,
+    getPort: () => live || undefined,
+  });
+
+  const before = p.render(['bili']);
+  assert.ok(
+    before.block.includes("ROOST_API_URL: 'http://127.0.0.1:17321/v1'"),
+    `没 listen 时用配置端口，实际：${before.block.split('\n').find((l) => l.includes('ROOST_API_URL'))}`,
+  );
+
+  live = 17322; // 模拟真实端口漂移
+  const after = p.render(['bili']);
+  assert.ok(
+    after.block.includes("ROOST_API_URL: 'http://127.0.0.1:17322/v1'"),
+    `漂移后要用实际端口，实际：${after.block.split('\n').find((l) => l.includes('ROOST_API_URL'))}`,
+  );
+  assert.ok(!after.block.includes(':17321/'), '漂移后不能再残留旧端口');
+
+  // 显式 apiUrl 优先级最高（测试与自定义部署要用）
+  const forced = createExtPatch({
+    profileDir: profile, dir: opts.dir, roostDir: opts.roostDir,
+    apiUrl: 'http://127.0.0.1:19999/v1', getPort: () => 17322,
+  });
+  assert.match(forced.render(['bili']).block, /:19999\/v1/);
+});
+
+test('getPort 抛错时退回配置端口，不让安装因此失败', (t) => {
+  const profile = tmpProfile(t);
+  const p = createExtPatch({
+    profileDir: profile, dir: opts.dir, roostDir: opts.roostDir,
+    port: 17333,
+    getPort: () => { throw new Error('server 还没建'); },
+  });
+  assert.match(p.render(['bili']).block, /:17333\/v1/);
+});

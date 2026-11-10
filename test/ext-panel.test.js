@@ -240,6 +240,32 @@ test('G5-8 status 只认后端审计事件；waiting-credentials 不算鉴权失
   assert.equal(s.regeneratedLast.note, 'bili');
 });
 
+/**
+ * 自查补：状态是**当前态**，不是「曾经发生过」。
+ *
+ * 审计是只追加的日志。若一次 401 以后一直亮红灯，面板会永远喊「扩展鉴权失败」，
+ * 而扩展其实早就恢复了 —— 永久假警报比不显示更坏。判据是「最后一条失败之后，
+ * 有没有成功的 `/v1` 调用」。
+ */
+test('自查：失败之后成功调用过 → 当前态不再报鉴权失败；历史事实仍可查', () => {
+  const r = rig({});
+  fs.writeFileSync(join(r.d, 'audit.log'), [
+    JSON.stringify({ at: 1000, op: 'ext.auth_failed', note: 'ext:bili' }),
+    JSON.stringify({ at: 2000, op: 'v1.whoami', note: 'ok' }),
+  ].join('\n') + '\n', 'utf8');
+  const s = r.panel.status();
+  assert.equal(s.authFailed, false, '失败后已经成功过，当前态应是正常');
+  assert.equal(s.authFailedEver, true, '「曾经失败过」这个事实不能丢');
+  assert.equal(s.lastOkAt, 2000);
+
+  // 反过来：成功之后又失败 → 当前态是失败
+  fs.writeFileSync(join(r.d, 'audit.log'), [
+    JSON.stringify({ at: 1000, op: 'v1.whoami', note: 'ok' }),
+    JSON.stringify({ at: 2000, op: 'ext.auth_failed', note: 'ext:bili' }),
+  ].join('\n') + '\n', 'utf8');
+  assert.equal(r.panel.status().authFailed, true, '最后一次是失败，当前态就该报');
+});
+
 test('G5-9 总开关用 getter 实时读，config 改完不用重建实例', () => {
   const cfg = { extensions: { enabled: false } };
   const r = rig({ cfg: () => cfg });

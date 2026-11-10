@@ -57,6 +57,30 @@ export const V1_ROUTES = {
   'GET /v1/agent.list': { scope: 'agent:write', hook: 'agent' },
 };
 
+/**
+ * **已接线**的 hook 名单。
+ *
+ * 这份常量有两个用途，缺一个就会漂：
+ *  1. `ext-docs.js` 按它给端点表标「可用 / 501 未接线」——没有这一列，文档
+ *     会把 10 条恒 501 的端点写得和可用端点一模一样，第三方照着做必然踩空；
+ *  2. `createApiV1()` 启动时按它反查 `hooks` 实参，声明实现了却没传实现就 warn。
+ *
+ * ⚠️ 加 hook 时**三处一起改**：`V1_ROUTES`、这里的名单、`host.js` 的 `hooks`，
+ * 并同步 `test/api-v1.test.js` 的 501 清单快照 —— 漏一处测试会红。
+ */
+export const V1_IMPLEMENTED_HOOKS = Object.freeze(['agent', 'memory.ext.add']);
+
+/** 不依赖 hook、在 `handle()` 里内联实现的端点。 */
+export const V1_BUILTIN_ROUTES = Object.freeze(['GET /v1/whoami']);
+
+/** 这条路由现在会不会真的执行业务（false = 恒回 501）。 */
+export function isRouteImplemented(key) {
+  const route = V1_ROUTES[key];
+  if (!route) return false;
+  if (V1_BUILTIN_ROUTES.includes(key)) return true;
+  return Boolean(route.hook) && V1_IMPLEMENTED_HOOKS.includes(route.hook);
+}
+
 /** `agent.*` 不能被扩展令牌调用：scope 硬隔离（§5.4）。 */
 const EXT_ONLY_DENY = new Set([
   'POST /v1/agent.new', 'POST /v1/agent.prompt',
@@ -83,6 +107,17 @@ export function createApiV1({
   const store = clientStore ?? createClientStore({ dir });
   const hits = new Map();      // clientId -> number[]（滑动窗口时间戳）
   const seen = new Map();      // `${clientId}:${requestId}` -> {status, body, at}
+
+  /**
+   * 声明与实参对账：`V1_IMPLEMENTED_HOOKS` 是对外承诺（文档按它标「可用」），
+   * 实参才是真行为。声明了却没传 → 文档说能用、实际 501，这类偏差最难查。
+   * 反过来多传不算错（可能在做灰度），但也不许悄悄少传。
+   */
+  for (const name of V1_IMPLEMENTED_HOOKS) {
+    if (typeof hooks[name] !== 'function') {
+      log.warn?.(`/v1 声明已实现 hook「${name}」但没有传入实现，相关端点会回 501`);
+    }
+  }
 
   const note = (op, result) => {
     try { auditFn({ op: `v1.${op}`, note: String(result).slice(0, 40) }); } catch { /* 审计不能拖垮请求 */ }

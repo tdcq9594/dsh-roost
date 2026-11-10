@@ -3156,7 +3156,8 @@ select.roost-input{color-scheme:dark}
               label: '清空本会话记忆', confirmLabel: '确认清空本会话',
               onConfirm: async () => {
                 const r = await quick('memory.clear')
-                toast(r.message || '清了')
+                // §5.6：扩展记忆不属会话，默认不动 —— 必须当场说清楚，否则用户以为一起清了。
+                toast([r.message || '清了', r.extMemory?.message].filter(Boolean).join('。'))
                 reload()
               },
             }),
@@ -3171,7 +3172,7 @@ select.roost-input{color-scheme:dark}
               label: '彻底删除本会话', confirmLabel: '确认彻底删除（行也不留）',
               onConfirm: async () => {
                 const r = await quick('memory.purge')
-                toast(r.message || '删了')
+                toast([r.message || '删了', r.extMemory?.message].filter(Boolean).join('。'))
                 reload()
               },
             }),
@@ -3179,7 +3180,7 @@ select.roost-input{color-scheme:dark}
               label: '清空跨群记忆', confirmLabel: '确认清空跨群',
               onConfirm: async () => {
                 const r = await quick('memory.clearGlobal')
-                toast(r.message || '清了')
+                toast([r.message || '清了', r.extMemory?.message].filter(Boolean).join('。'))
                 reload()
               },
             }),
@@ -7240,7 +7241,9 @@ select.roost-input{color-scheme:dark}
         setSaving(id)
         try {
           const r = await EXT_POST('extensions.usage.save', { id, usage: drafts[id] ?? '' })
-          toast(r.message || (r.ok ? '已保存' : '保存失败'))
+          /** 后端会把超 200 字截断；不告诉用户就是「存了却少了一截」的静默数据丢失。 */
+          const cut = r.ok && r.truncated ? `（超过 200 字，已截断保存，实际 ${r.bytes} 字节）` : ''
+          toast(`${r.message || (r.ok ? '已保存' : '保存失败')}${cut}`)
           await load()
         } finally { setSaving('') }
       }
@@ -7322,8 +7325,14 @@ select.roost-input{color-scheme:dark}
               )),
             )
           : h('div', { className: 'roost-empty' }, '扩展目录里还没有东西。'),
-        h('div', { className: 'roost-note' },
-          `合计 ${data?.totalBytes ?? 0} 字节。编辑市场装的扩展会让清单 plugin.json 的 sha256 失效并标注「已本地修改，不再参与更新校验」；用户手写目录只读，面板不改它的清单。`),
+        h('div', {
+          className: 'roost-note',
+          /** 合计预算 2048 字节（与 `ext-usage.js` 的 USAGE_TOTAL_BYTE_LIMIT 对齐）。超了进提示词会被截，必须当场说。 */
+          style: (data?.totalBytes ?? 0) > 2048 ? { color: 'var(--warn)' } : undefined,
+        },
+          `合计 ${data?.totalBytes ?? 0} 字节${(data?.totalBytes ?? 0) > 2048
+            ? '（已超过合计 2048 字节预算，超出部分进提示词时会被截掉，请精简）'
+            : '（合计预算 2048 字节）'}。编辑市场装的扩展会让清单 plugin.json 的 sha256 失效并标注「已本地修改，不再参与更新校验」；用户手写目录只读，面板不改它的清单。`),
         /** 阶段 4 台账留的 5.2 待办：给「一并清除扩展记忆」一个真实入口。 */
         h('div', { className: 'roost-note', style: { marginTop: 8 } },
           '清扩展记忆：只删 ext-memory/<id>.json，不碰通用记忆；按清单的 onClear=keep 保留的会跳过。',

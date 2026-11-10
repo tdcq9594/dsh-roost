@@ -167,3 +167,39 @@ test('G4-11 listRanked 不读 ext-memory/：静态约束 + 候选池按需', (t)
   extMemoryCandidates(fake, { query: 'x' });
   assert.equal(reads, 1);
 });
+
+/**
+ * **行为层守卫**：G4-11 只是「源码里不许出现这个字面量」，用变量拼路径就能绕过。
+ * 这条真造一份扩展记忆 + 一份会话记忆，调自动注入用的 `listRanked()`，
+ * 断言扩展内容一个字都不许漏进来。
+ *
+ * 对应的变异是 `scripts/mutate.mjs` 的 `ranked-ext`（会让 listRanked 真去读
+ * `ext-memory/bili.json` 并推进 global）—— 只删这层断言，那条变异就会变绿。
+ */
+test('G4-11b 行为层：listRanked 结果里绝不出现扩展记忆正文', async (t) => {
+  const home = tmpHome(t);
+  const prev = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = home;
+  t.after(() => {
+    if (prev === undefined) delete process.env.DSH_ROOST_DATA;
+    else process.env.DSH_ROOST_DATA = prev;
+  });
+
+  // 扩展自己的命名空间：故意写一段和会话记忆完全无关、但很容易被认出来的正文
+  fs.mkdirSync(join(home, 'ext-memory'), { recursive: true });
+  fs.writeFileSync(join(home, 'ext-memory', 'bili.json'), JSON.stringify({
+    version: 1,
+    rows: [{ text: 'EXT_SECRET_FACT_扩展私有事实', w: 9, at: 1, src: 'ext:bili' }],
+    meta: {},
+  }), 'utf8');
+
+  const { createMemory } = await import('../src/memory.js');
+  const mem = createMemory({ now: () => 5000 });
+  mem.add('g1', '这个群管阿离叫小离', 'chat', { w: 5 });
+
+  const ranked = mem.listRanked('g1');
+  const dump = JSON.stringify(ranked);
+  assert.ok(dump.includes('小离'), '会话记忆本身要读得到（否则这条断言是空转）');
+  assert.ok(!dump.includes('EXT_SECRET_FACT'), `自动注入漏进了扩展记忆：${dump.slice(0, 200)}`);
+  assert.ok(!dump.includes('EXTLEAK'), `自动注入漏进了扩展目录：${dump.slice(0, 200)}`);
+});
