@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -389,13 +389,17 @@ test('对齐：后端有的配置段，设置页也要列出来', async () => {
    * 白名单不是永久豁免：下面按 id 反查 `staged`，功能上线时删掉那行
    * 就会让这条断言变红，逼着把段列进 `JSON_SECTIONS` 并移出白名单。
    */
-  /** 阶段 4b 起 events、阶段 5b 起 profiles 已列进设置页，白名单只剩 extensions */
-  const NOT_SHIPPED = ['extensions'];
+  /**
+   * §11 坑 2 / 门 G5：阶段 5 把最后一个骨架 `extensions` 上线，
+   * 白名单清空、反查 for 删除，`extensions` 必须真的列进 `JSON_SECTIONS`。
+   * 三处一起改，漏一处这条就红。
+   */
+  const NOT_SHIPPED = [];
+  assert.deepEqual(NOT_SHIPPED, [], '阶段 5 后不该再有「后端有、设置页没有」的豁免段');
   const { FEATURES } = await import('../src/features.js');
-  for (const id of ['extensions']) {
-    assert.equal(FEATURES.find((f) => f.id === id)?.staged, true,
-      `「${id}」已上线：把它的配置段列进设置页 JSON_SECTIONS，并从 NOT_SHIPPED 移除`);
-  }
+  assert.equal(FEATURES.find((f) => f.id === 'extensions')?.staged, undefined,
+    'extensions 已上线，不该还挂着 staged');
+  assert.ok(keys.includes('extensions'), '设置页 JSON_SECTIONS 必须列出 extensions 配置段');
   /** profiles 已上线，配置段必须真的列在设置页（防止有人把 staged 加回去） */
   assert.equal(FEATURES.find((f) => f.id === 'profiles')?.staged, undefined,
     'profiles 已上线，不该还挂着 staged');
@@ -867,4 +871,122 @@ test('路由：/journal 关键词遗忘同样区分「已作废」与「没匹�
   assert.equal(r.json.journal, 0);
   assert.match(r.json.message, /之前已经被作废/);
   off?.();
+});
+
+/* ---------------- 阶段 5：/quick 扩展 op 的真实接线 ---------------- */
+
+function seedExt(dir, id, withSource = true) {
+  const d = join(dir, 'extensions', id);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, 'plugin.json'), JSON.stringify({
+    id, serverName: id, name: `扩展${id}`, description: '说明', transport: 'stdio', command: 'node',
+    sha256: 'b'.repeat(64), size: 128, publishedAt: '2026-11-10',
+  }), 'utf8');
+  // §3.1 / §8.3：sha256 在清单里，`.source.json` 只是来源标记（不含校验和）。
+  if (withSource) writeFileSync(join(d, '.source.json'), JSON.stringify({ repo: 'market', tag: 'v1' }), 'utf8');
+}
+
+const extOp = (call, op, arg = {}) => call('/quick', { method: 'POST', body: { op, arg, chatId: '' } });
+
+test('G5-16 /quick 扩展 op 全接线：读清单 / 六档 / 诊断 / 状态都真注册了', async () => {
+  const { call, off, dir } = await bootHost({}, {});
+  try {
+    seedExt(dir, 'bili');
+    for (const op of ['extensions.get', 'extensions.clients.list', 'extensions.buckets', 'extensions.diagnose', 'extensions.status']) {
+      const r = await extOp(call, op);
+      assert.equal(r.status, 200, `${op} 必须注册且可用`);
+      assert.equal(r.json.ok, true);
+    }
+    const g = (await extOp(call, 'extensions.get')).json;
+    assert.equal(g.rows.length, 1);
+    assert.equal(g.rows[0].id, 'bili');
+    assert.equal(g.enabled, false, '默认关：扩展开关在能力页高级组里');
+    const b = (await extOp(call, 'extensions.buckets')).json;
+    assert.equal(b.buckets.length, 6);
+    assert.equal(b.fallback.degraded, true, '宿主探针读真实 speaker 表：没有活跃会话就该报退化');
+    // 假 ctx 没有观察到的工具池时如实回 null，不假装算过；有池子才用真实策略算。
+    assert.ok(b.fallback.allowCount === null || Number.isFinite(b.fallback.allowCount));
+    const d = (await extOp(call, 'extensions.diagnose')).json;
+    assert.deepEqual(d.layers.map((L) => L.id), ['fence', 'capabilities', 'quota', 'acl', 'guard']);
+  } finally { off?.(); }
+});
+
+test('G5-17 /quick usage.save：市场装扩展编辑后 sha256 失效，面板拿得到标注', async () => {
+  const { call, off, dir } = await bootHost({}, {});
+  try {
+    seedExt(dir, 'bili');
+    const saved = await extOp(call, 'extensions.usage.save', { id: 'bili', usage: '改过的说明' });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.json.invalidated, true);
+    const disk = JSON.parse(readFileSync(join(dir, 'extensions', 'bili', 'plugin.json'), 'utf8'));
+    assert.equal(disk.sha256, null, '清单校验和必须失效');
+    assert.equal(disk.locallyModified, true);
+    const src = JSON.parse(readFileSync(join(dir, 'extensions', 'bili', '.source.json'), 'utf8'));
+    assert.equal(src.repo, 'market');
+    assert.equal(src.locallyModified, true);
+    const row = (await extOp(call, 'extensions.get')).json.rows[0];
+    assert.equal(row.usage, '改过的说明');
+    assert.match(row.label, /已本地修改/);
+    assert.equal(row.sha256Valid, false);
+  } finally { off?.(); }
+});
+
+test('G5-18 /quick 客户端：发放 / 列表不回 hash / 吊销 / 坏 scope 400', async () => {
+  const { call, off } = await bootHost({}, {});
+  try {
+    const blocked = await extOp(call, 'extensions.clients.create', { name: '裁判', scopes: ['agent:write'] });
+    assert.equal(blocked.status, 400);
+    assert.equal(blocked.json.reason, 'needs_confirm', '高权限 scope 要二次确认');
+    const made = await extOp(call, 'extensions.clients.create', {
+      name: '裁判', scopes: ['agent:write'], confirm: true,
+    });
+    assert.equal(made.status, 200);
+    assert.ok(made.json.token.length >= 30);
+    const listed = (await extOp(call, 'extensions.clients.list')).json;
+    const one = listed.rows.find((r) => r.id === made.json.id);
+    assert.ok(one);
+    assert.equal(one.hash, undefined);
+    assert.equal(one.token, undefined);
+    assert.ok(listed.availableScopes.includes('agent:write'));
+    const bad = await extOp(call, 'extensions.clients.create', { scopes: ['nope'] });
+    assert.equal(bad.status, 400);
+    const revoked = await extOp(call, 'extensions.clients.revoke', { id: made.json.id });
+    assert.equal(revoked.status, 200);
+    assert.equal((await extOp(call, 'extensions.clients.list')).json.rows.some((r) => r.id === made.json.id), false);
+  } finally { off?.(); }
+});
+
+test('G5-21 /quick 清空扩展记忆：要显式确认，只删 ext-memory 单文件', async () => {
+  const { call, off, dir } = await bootHost({}, {});
+  try {
+    seedExt(dir, 'bili');
+    const memDir = join(dir, 'ext-memory');
+    mkdirSync(memDir, { recursive: true });
+    const file = join(memDir, 'bili.json');
+    writeFileSync(file, JSON.stringify({ version: 1, rows: [{ text: 'x' }], meta: { onClear: 'clear' } }), 'utf8');
+    assert.equal((await extOp(call, 'extensions.memory.clear')).status, 400, '破坏性操作必须显式确认');
+    assert.equal(existsSync(file), true);
+    const r = await extOp(call, 'extensions.memory.clear', { confirm: true });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.cleared, 1);
+    assert.equal(existsSync(file), false);
+    assert.equal(existsSync(join(dir, 'extensions', 'bili', 'plugin.json')), true, '清单不能跟着被删');
+  } finally { off?.(); }
+});
+
+test('G5-19 /quick status：面板两个状态只由后端审计事件点亮', async () => {
+  const { call, off, dir } = await bootHost({}, {});
+  try {
+    assert.equal((await extOp(call, 'extensions.status')).json.authFailed, false);
+    writeFileSync(join(dir, 'audit.log'), [
+      JSON.stringify({ op: 'ext.auth_failed', note: 'bili', at: 1 }),
+      JSON.stringify({ op: 'ext.token_regenerated', note: 'bili', at: 2 }),
+      JSON.stringify({ op: 'v1.waiting-credentials', note: '不算', at: 3 }),
+    ].join('\n') + '\n', 'utf8');
+    const s = (await extOp(call, 'extensions.status')).json;
+    assert.equal(s.authFailed, true);
+    assert.equal(s.regenerated, true);
+    assert.equal(s.hintAuthFailed, '扩展鉴权失败');
+    assert.equal(s.hintRegenerated, '令牌已重新生成');
+  } finally { off?.(); }
 });

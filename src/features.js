@@ -421,9 +421,9 @@ export const FEATURES = [
     default: false,
     requires: NONE,
     affects: NONE,
-    offHint: '扩展一个都不加载；已放进去的文件不会被删。',
+    offHint: '扩展说明不进 QQ 会话提示词；清单和 /v1 控制面照常，已放进去的文件不会被删。',
     advanced: true,
-    staged: true,
+    /** 阶段 5 已上线：开关只管「扩展说明进不进 QQ 会话提示词」；/v1 与令牌不受它管。 */
   },
 ];
 

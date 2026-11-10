@@ -219,18 +219,19 @@ test('骨架：每个 config 来源的开关都能在 DEFAULTS 里找到真实�
   }
 });
 
-test('骨架：未上线的开关不下发、不影响工具池、也不许被 patch', () => {
+test('骨架清零：阶段 5 拆完 staged 后所有开关都该上线且可见', () => {
+  /**
+   * §11 坑 1 / 门 G5：阶段 5 把最后一个骨架 `extensions` 上线，
+   * 这条断言从「还剩 >= 1 个」翻成「必须为空」。三处联动缺一处就红：
+   * features.js 去 staged + routes.test.js 清 NOT_SHIPPED + JSON_SECTIONS 补 extensions。
+   */
   const staged = FEATURES.filter((f) => f.staged);
-  /** 阶段 4a 删 moodEffects、4b 删 events、4c 删 retention 三项、5b 删 profiles；骨架逐个减少是预期 */
-  assert.ok(staged.length >= 1, `还剩 ${staged.length} 个未上线的骨架开关`);
-  assert.ok(!staged.some((f) => f.id === 'moodEffects'), 'moodEffects 已上线，不该还在骨架里');
-  assert.ok(!staged.some((f) => f.id === 'events'), 'events 已上线，不该还在骨架里');
-  assert.ok(!staged.some((f) => f.id === 'profiles'), 'profiles 已上线，不该还在骨架里');
-  for (const f of staged) {
-    assert.deepEqual(f.affects, [], `${f.id} 的 affects 必须留空（forcedDenyTools 的 P0 坑）`);
-    assert.ok(!visibleFeatures().includes(f), `${f.id} 不该出现在面板可见列表里`);
-  }
-  // 默认配置下，新增的骨架开关一个工具都不许收走
+  assert.equal(staged.length, 0, `骨架开关必须全上线，还剩 ${staged.map((f) => f.id).join('、')}`);
+  assert.deepEqual(visibleFeatures(), FEATURES, '所有开关都该下发到面板');
+  assert.ok(visibleFeatures().some((f) => f.id === 'extensions'), '用户扩展开关要能在能力页高级组里找到');
+  assert.deepEqual(FEATURES.find((f) => f.id === 'extensions')?.affects, [],
+    'extensions 不该收走任何工具（开关只管加载，权限走能力页）');
+  // 默认配置下，上线的开关一个工具都不许收走
   assert.deepEqual(forcedDenyTools(DEFAULTS, {}, POOL), []);
 
   const groups = visibleGroups();

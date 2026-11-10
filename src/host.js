@@ -52,6 +52,7 @@ import { createApiV1 } from './api-v1.js';
 import { createAgentV1 } from './agent-v1.js';
 import { createExtMemoryStore } from './ext-memory-store.js';
 import { createExtMemory } from './ext-memory.js';
+import { createExtPanel, createRejectionLog } from './ext-panel.js';
 import { pickModelFor, pickReasoningEffort } from './model-pick.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing, shouldNotePending } from './closing.js';
@@ -401,6 +402,21 @@ export function apply(ctx) {
       const deny = protectOutputTools([...denySet], { denyExtra, forceDeny: forced });
       if (!deny.length) return { ok: false, nothing: true, reason: 'nothing' };
 
+      /**
+       * 阶段 5 诊断页：能力层是真接了线的。只记扩展工具（mcp__ 前缀），
+       * 免得把每轮固定收走的一堆内置工具刷进日志。createRejectionLog 对
+       * 同规则 60 秒内去重，所以这里每轮调也不会撑爆上限。
+       */
+      const extDenied = deny.filter((n) => String(n).startsWith('mcp__'));
+      if (extDenied.length) {
+        try {
+          extRejections?.record({
+            layer: 'capabilities', tool: extDenied.join(','), bucket,
+            rule: `能力页 deny/forceDeny 收走 ${extDenied.length} 个扩展工具`,
+          });
+        } catch { /* 诊断是旁路 */ }
+      }
+
       try {
         const off = t.restrict({ deny });
         qqToolRegistry.setDenied(agent, deny);
@@ -662,6 +678,8 @@ export function apply(ctx) {
    * 所以这里不但要 catch，还要把失败原因记下来，让面板能显示。
    */
   let toolGuardOff = null;
+  /** 阶段 5 诊断日志在下面 ~1140 行赋值；guard 回调是轮内才执行的，这里先占位避免 TDZ。 */
+  let extRejections = null;
   let toolGuardErr = '';
   try {
     toolGuardOff = mountToolGuard();
@@ -803,6 +821,7 @@ export function apply(ctx) {
 
         const total = quota.charge({ feature: 'tool', key: callKey, ...who });
         if (!total.ok) {
+          try { extRejections?.record({ layer: 'guard', tool: name, bucket: who.bucket, rule: `总量额度：${total.message}` }); } catch { /* 旁路 */ }
           return `${total.message}。这一轮别再调任何工具，直接告诉对方现在做不了。`;
         }
 
@@ -810,6 +829,7 @@ export function apply(ctx) {
         if (r.ok) return undefined;
         /** 具体工具超了，把刚才预扣的总量退回去——那次调用不会真的发生 */
         total.undo?.();
+        try { extRejections?.record({ layer: 'guard', tool: name, bucket: who.bucket, rule: `工具额度：${r.message}` }); } catch { /* 旁路 */ }
 
         /**
          * 拒绝理由会被模型看到，所以要说清「别再试」。
@@ -1109,6 +1129,23 @@ export function apply(ctx) {
   const extClientStore = createClientStore({ dir: dataDir(), log });
   const extSecrets = createExtSecrets({ dir: dataDir(), log });
   const extRegistry = createExtRegistry({ dir: dataDir(), log, secrets: extSecrets, clientStore: extClientStore });
+  /** 阶段 5：拒绝事件日志 + 面板聚合。两者都是旁路，写失败不影响扩展本体。 */
+  extRejections = createRejectionLog({ dir: dataDir(), log });
+  const onReject = (entry) => extRejections.record(entry);
+  const extPanel = createExtPanel({
+    dir: dataDir(), registry: extRegistry, clientStore: extClientStore,
+    capStore, secrets: extSecrets, rejections: extRejections, quota,
+    cfg: () => cfg, log,
+    /** 闭包在 /quick 调用时才求值：speaker / lastBucket 声明在下面，运行期已就绪。 */
+    fallbackProbe: () => {
+      const active = [...speaker.values()];
+      return {
+        speakerKnown: active.length > 0,
+        effective: active.length ? String(active[active.length - 1]?.bucket || lastBucket) : lastBucket,
+        activeSessions: active.length,
+      };
+    },
+  });
   /**
    * 运行期**不用** `createExtUsage()` 聚合入口：它的 offs 是单个 Set，多 agent
    * 场景无法按会话撤销、关会话后还会留下条目。这里各模块自管 disposer ——
@@ -1126,9 +1163,10 @@ export function apply(ctx) {
     quota,
     log,
     installedIds: () => extRegistry.list().map((x) => x.id),
+    onReject,
   });
   const apiV1 = createApiV1({
-    dir: dataDir(), log, clientStore: extClientStore,
+    dir: dataDir(), log, clientStore: extClientStore, onReject,
     hooks: {
       agent: (a) => agentV1.handleHook(a),
       /** 后台写：extId 已由 api-v1 从令牌读出并覆盖 body，这里不再自报。 */
@@ -1149,10 +1187,13 @@ export function apply(ctx) {
   restoreTimer.unref?.();
   mountOffs.push(() => clearTimeout(restoreTimer));
   // E4 备份包不含 secrets/，还原后按清单补发令牌并更新 hash（§5.4 第 5 条）。
+  // 补令牌是运维动作，与「说明要不要进提示词」的开关无关，不 gate。
   for (const ext of extRegistry.list()) {
     try {
       if (extSecrets.ensure(ext.id, extClientStore).regenerated) {
         log.info?.(`扩展 ${ext.id} 的令牌已在备份还原后重新生成`);
+        // 面板「令牌已重新生成」只认审计事件，不认官方 waiting-credentials（零命中）。
+        audit({ op: 'ext.token_regenerated', note: ext.id });
       }
     } catch (e) {
       // 补令牌要写盘；磁盘满 / 权限错不能把整个插件激活拖崩（§5.4:614）。
@@ -2643,9 +2684,16 @@ export function apply(ctx) {
      * 独立 Agent 会话**不挂** usage（§9-#19），只在 `agent-v1.js` 里挂 B 过滤。
      * disposer 收进本轮的 offs，随 `mountOffs` 在插件 teardown 整组撤销。
      */
+    /**
+     * `config.extensions.enabled` 的语义收窄为「扩展说明进不进 QQ 会话提示词」。
+     * `/v1` 控制面、已发的客户端令牌、扩展记忆工具都不受它管 —— 装了扩展
+     * 就该能写记忆，哪怕主人暂时不想在提示词里看到说明。开关改完对新会话生效。
+     */
     try {
-      const usage = mountUsageSections(agent.ctx, extRegistry, { log });
-      offs.push(() => usage.dispose());
+      if (extPanel.enabled()) {
+        const usage = mountUsageSections(agent.ctx, extRegistry, { log });
+        offs.push(() => usage.dispose());
+      }
     } catch (e) {
       log.warn?.(`扩展 usage section 未挂载：${e?.message ?? e}`);
     }
@@ -4417,6 +4465,59 @@ export function apply(ctx) {
              * 纯读——不落盘、不改策略，所以不进审计（否则每开一次面板多一行噪音）。
              * `pending` 是本次进程里观察到的「新增 / 失效」，读过即清。
              */
+            /**
+             * 阶段 5 的扩展面板 op。全部走 `extPanel` 聚合层，不在路由里重写业务：
+             * 三处前端（能力页 / 设置页 / 接入页）共用同一份数据。
+             * `extensions.get` / `*.list` / `*.buckets` / `*.diagnose` / `*.status`
+             * 是纯读；写操作（`usage.save` / `clients.create` / `clients.revoke`）
+             * 由上面的 `audit()` 记一行，参数内容不进日志。
+             */
+            case 'extensions.get': {
+              return send(res, 200, { ok: true, ...extPanel.usageRows(), status: extPanel.status() });
+            }
+            case 'extensions.usage.save': {
+              const r = extPanel.saveUsage(arg?.id, arg?.usage);
+              return send(res, r.ok ? 200 : 400, r);
+            }
+            case 'extensions.clients.list': {
+              return send(res, 200, extPanel.clients());
+            }
+            case 'extensions.clients.create': {
+              const r = extPanel.createClient({
+                name: arg?.name,
+                scopes: Array.isArray(arg?.scopes) ? arg.scopes : [],
+                confirm: arg?.confirm === true,
+                principal: String(who?.kind ?? 'unknown'),
+              });
+              return send(res, r.ok ? 200 : 400, r);
+            }
+            case 'extensions.clients.revoke': {
+              const r = extPanel.revokeClient(arg?.id);
+              return send(res, r.ok ? 200 : 404, r);
+            }
+            case 'extensions.buckets': {
+              // 退化状态由宿主 fallbackProbe 判，前端不能自报 speakerKnown。
+              return send(res, 200, extPanel.effectiveBuckets({
+                chatId: String(arg?.chatId || chatId || ''),
+              }));
+            }
+            case 'extensions.diagnose': {
+              return send(res, 200, extPanel.diagnose({ limit: Number(arg?.limit) || 20 }));
+            }
+            case 'extensions.status': {
+              return send(res, 200, extPanel.status());
+            }
+            /**
+             * 设置页「只清扩展记忆」：阶段 4 台账留的 5.2 待办。破坏性操作要显式 confirm，
+             * 且只删 ext-memory/ 下的单文件，不碰 memory.json / 三个宿主清空动作。
+             */
+            case 'extensions.memory.clear': {
+              if (arg?.confirm !== true) {
+                return send(res, 400, { ok: false, message: '清空扩展记忆需要显式确认' });
+              }
+              return send(res, 200, await extMemory.clearAllFromPanel());
+            }
+
             case 'capabilities.get': {
               const snap = capStore.snapshot();
               return send(res, 200, {
@@ -5198,7 +5299,7 @@ export function apply(ctx) {
             case 'memory.clear': {
               if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话' });
               /** §5.6：ext 记忆是跨会话的，按 chatId 清没有意义，默认不动。 */
-              const extClear = await extMemory.onClear('memory.clear');
+              const extClear = await extMemory.onClear('memory.clear', { clearExtMemory: arg?.clearExtMemory === true });
               memory.clearChat(chatId, aliasesOf(chatId));
               /** D3：召回日志随本会话记忆一起清（只留本群那段，别把别处的排障记录抹了） */
               recallLog.clear();
@@ -5230,7 +5331,7 @@ export function apply(ctx) {
             case 'memory.purge': {
               if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话' });
               /** §5.6：彻底删同样默认不动 ext 记忆，面板另有单独清空入口。 */
-              const extClear = await extMemory.onClear('memory.purge');
+              const extClear = await extMemory.onClear('memory.purge', { clearExtMemory: arg?.clearExtMemory === true });
               memory.clearChat(chatId, aliasesOf(chatId));
               let j = 0;
               try {
@@ -5271,7 +5372,7 @@ export function apply(ctx) {
             case 'memory.clearGlobal': {
               memory.clearGlobal();
               /** §5.6：全局清空要清 ext-memory/*.json，但尊重每个扩展的 onClear:'keep'。 */
-              const extClear = await extMemory.onClear('memory.clearGlobal');
+              const extClear = await extMemory.onClear('memory.clearGlobal', { clearExtMemory: arg?.clearExtMemory === true });
               return send(res, 200, {
                 ok: true, extMemory: extClear,
                 message: `通用记忆清空了；${extClear.message}`,

@@ -72,8 +72,14 @@ export function createExtMemory({
   log = () => {},
   now = () => Date.now(),
   installedIds = () => [],
+  /** 阶段 5 诊断页：ACL / quota 两层的拒绝事件，不传就是空操作。 */
+  onReject = () => {},
 } = {}) {
   if (!store || typeof store.add !== 'function') throw new Error('createExtMemory 需要 ext-memory-store 实例');
+
+  const reject = (layer, entry) => {
+    try { onReject({ layer, ...entry }); } catch { /* 诊断是旁路 */ }
+  };
 
   const contextOf = (caller = {}) => ({
     bucket: String(caller.bucket ?? 'unknown'),
@@ -100,10 +106,12 @@ export function createExtMemory({
     const ctx = contextOf(caller);
     if (!extId) return { ok: false, reason: 'no_extId', message: '缺 extId' };
     if (!canWriteExt({ extId, bucket: ctx.bucket, acl })) {
+      reject('acl', { tool: 'ext_memory_note', bucket: ctx.bucket, rule: `命名空间 ${extId} 不允许当前档位写入` });
       return { ok: false, reason: 'acl', message: '当前档位不能写扩展记忆' };
     }
     const charge = quota?.charge?.({ feature: 'ext_memory', per: 'turn', bucket: ctx.bucket, key: `ext:${extId}` });
     if (charge && charge.ok === false) {
+      reject('quota', { tool: 'ext_memory_note', bucket: ctx.bucket, rule: charge.message ?? 'ext_memory 次数用完了' });
       return { ok: false, reason: 'quota', message: charge.message ?? '次数用完了' };
     }
     const r = await store.add(extId, { text: fact, src: `ext:${extId}`, at: now() });
@@ -130,9 +138,20 @@ export function createExtMemory({
    * 三个清空动作的 ext 契约（§5.6）：清本会话 / 彻底删**默认不动** ext 记忆
    * （它是跨会话的，按 chatId 清没有意义）；全局清空尊重每个扩展的 onClear。
    */
-  async function onClear(action) {
+  /**
+   * §5.6 三契约。阶段 5 补 `opts.clearExtMemory`：面板在设置页扩展段勾选
+   * 「一并清除」时传 true，清本会话 / 彻底删也清 ext 记忆（默认仍不动）。
+   * 宿主三个清空 op 不传 opts 时行为与阶段 4 完全一致。
+   */
+  async function onClear(action, opts = {}) {
+    const alsoExt = opts?.clearExtMemory === true;
     if (action === 'memory.clear' || action === 'memory.purge') {
-      return { touched: false, message: '扩展记忆按会话清没有意义，未改动' };
+      if (!alsoExt) return { touched: false, message: '扩展记忆按会话清没有意义，未改动' };
+      const r = await store.clearAll({ respectOnClear: true });
+      return {
+        touched: r.cleared > 0, cleared: r.cleared, kept: r.kept,
+        message: r.kept ? `清了 ${r.cleared} 个扩展的记忆，另有 ${r.kept} 个设为保留` : `清了 ${r.cleared} 个扩展的记忆`,
+      };
     }
     if (action === 'memory.clearGlobal') {
       const r = await store.clearAll({ respectOnClear: true });
@@ -181,6 +200,14 @@ export function createExtMemory({
   return {
     acl, visibleExtIds, canReadExt, canWriteExt,
     writeFromApi, writeFromTool, search, onClear, toolDefs,
+    /** 设置页「只清扩展记忆」入口：与宿主三个清空动作解耦，不碰 memory.json。 */
+    clearAllFromPanel: async () => {
+      const r = await store.clearAll({ respectOnClear: true });
+      return {
+        ok: true, cleared: r.cleared, kept: r.kept,
+        message: r.kept ? `清了 ${r.cleared} 个扩展的记忆，另有 ${r.kept} 个设为保留` : `清了 ${r.cleared} 个扩展的记忆`,
+      };
+    },
     /** 面板「扩展记忆」分组：删对应单文件。 */
     clearOne: (extId) => store.clear(extId),
     stats: () => store.stats(),

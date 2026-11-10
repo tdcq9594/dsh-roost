@@ -1491,6 +1491,7 @@ select.roost-input{color-scheme:dark}
               : null,
           ),
         ),
+        h(ExtClientsBlock, { toast }),
       )
     }
 
@@ -4296,6 +4297,7 @@ select.roost-input{color-scheme:dark}
 
       return h('div', null,
         toolsModal,
+        h(ExtCapsBlock, { quick, toast }),
         h(Sec, {
           n: '01', title: '这一页管什么',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新'),
@@ -5409,6 +5411,7 @@ select.roost-input{color-scheme:dark}
       ['tts', '语音合成', '默认关闭；上面的「语音合成」卡片就是改这一段（也可以在这里手改）'],
       ['setup', '接入', '装在哪、用哪种接入方式'],
       ['update', '更新源', 'npm 源（registry）；留空用默认源'],
+      ['extensions', '用户扩展', 'enabled：扩展说明要不要进 QQ 会话提示词。关着时清单还在、/v1 与已发令牌照常，只是不挂 usage section'],
     ]
 
     /**
@@ -7038,6 +7041,318 @@ select.roost-input{color-scheme:dark}
             ),
           ),
         ),
+        h(ExtSettingsBlock, { toast }),
+      )
+    }
+
+    /* ---------------- 扩展面板（阶段 5：能力页 / 设置页 / 接入页三段） ---------------- */
+
+    /** 三段都走 /quick 的扩展 op；这些是全局设置，chatId 留空。 */
+    const EXT_POST = (op, arg) => post('/quick', { op, arg, chatId: '' })
+    const EXT_BUCKET_LABEL = {
+      owner: '主人', admin: '管理员', manager: '群管', helper: '助手', member: '群成员', unknown: '未识别',
+    }
+    /** 与 src/ext-panel.js 的 REJECTION_LAYERS 同顺序；前端只用来把英文层名翻成中文。 */
+    const EXT_LAYER_LABEL = {
+      fence: '接入栅栏 / 令牌鉴权',
+      capabilities: '能力页 deny / forceDeny',
+      quota: '次数限制',
+      acl: '扩展记忆命名空间 ACL',
+      guard: '执行期工具 guard',
+    }
+
+    /**
+     * 能力页：按 `mcp__<id>__` 前缀自动归组 + 六档矩阵 + dry-run + 五层拒绝诊断。
+     * 不新开页签，`Sec` 不带编号，免得和既有 01–06 撞号。
+     */
+    function ExtCapsBlock({ quick, toast }) {
+      const [buckets, setBuckets] = useState(null)
+      const [diag, setDiag] = useState(null)
+      const [list, setList] = useState([])
+      const [pick, setPick] = useState('')
+      const [dry, setDry] = useState(null)
+      const [busy, setBusy] = useState(false)
+
+      const load = async () => {
+        const [a, b, c] = await Promise.all([
+          EXT_POST('extensions.get'),
+          EXT_POST('extensions.buckets'),
+          EXT_POST('extensions.diagnose', { limit: 20 }),
+        ])
+        setList(a.rows || [])
+        setBuckets(b)
+        setDiag(c)
+        if (!pick && (a.rows || []).length) setPick(a.rows[0].id)
+      }
+      useEffect(() => { load() }, [])
+
+      /** 试算只读：算「选中扩展的工具在各档会少几个」，确认后才真写 forceDeny。 */
+      const preview = () => {
+        if (!pick || !buckets) return
+        const prefix = `mcp__${pick}__`
+        const rows = (buckets.buckets || []).map((b) => ({
+          bucket: b.bucket,
+          hit: (b.allow || []).filter((n) => String(n).startsWith(prefix)).length,
+          total: b.allowCount,
+        }))
+        setDry({
+          id: pick, prefix, rows,
+          affected: rows.filter((r) => r.hit > 0).length,
+          totalHits: rows.reduce((n, r) => n + r.hit, 0),
+        })
+      }
+
+      /** 应用复用阶段 1 的 C′：forceDeny 支持通配且持久化，跨档硬否决。 */
+      const apply = async () => {
+        if (!dry) return
+        setBusy(true)
+        try {
+          /** 不拿 load 时的快照做读-改-写：两个人同时收紧时后点的会盖掉前点的。 */
+          const fresh = await EXT_POST('extensions.buckets')
+          const next = [...(fresh.rules?.forceDeny || buckets.rules?.forceDeny || []), `${dry.prefix}*`]
+          const r = await quick('capabilities.patch', { forceDeny: [...new Set(next)] })
+          toast(r.message || (r.ok ? '已收紧' : '收紧失败'))
+          setDry(null)
+          await load()
+        } finally { setBusy(false) }
+      }
+
+      return h(Sec, {
+        title: '扩展能力分组 · 六档矩阵 / 试算 / 拒绝诊断',
+        right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新'),
+      },
+        h('div', { className: 'roost-note' },
+          '按 mcp__<扩展id>__ 前缀自动归组。「实际生效档位」用和真实生效同一份策略算；发言人身份缺失时的兜底退化会在这里明说，不静默。'),
+        /** 常驻显示兜底档：退化状态由后端读真实 speaker 表，前端不自报。 */
+        h('div', {
+          className: 'roost-note',
+          style: buckets?.fallback?.degraded ? { color: 'var(--warn)' } : undefined,
+        },
+          `档位兜底：${buckets?.fallback?.reason || '读不到兜底信息'}`,
+          buckets?.fallback
+            ? `（兜底档 ${buckets.fallback.effective} 允许 ${buckets.fallback.allowCount === null ? '未能试算' : buckets.fallback.allowCount + ' 个工具'}，活跃会话 ${buckets.fallback.activeSessions ?? '未知'}）`
+            : '',
+        ),
+        h('div', { className: 'roost-list' },
+          (buckets?.buckets || []).map((b) => h('div', { key: b.bucket, className: 'roost-item' },
+            h('span', { className: 't' },
+              `${EXT_BUCKET_LABEL[b.bucket] || b.bucket}（${b.bucket}）`,
+              h('span', { className: 'd' }, ` · 允许 ${b.allowCount === null ? '未能试算' : b.allowCount + ' 个工具'}`),
+            ),
+          )),
+        ),
+        list.length
+          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+              '六档矩阵 · 每个扩展当前可调取的工具数：',
+              h('div', { className: 'roost-list' },
+                list.map((x) => h('div', { key: x.id, className: 'roost-item' },
+                  h('span', { className: 't' }, x.name, h('span', { className: 'd' }, ` · mcp__${x.id}__*`),
+                    h('span', { className: 'd' },
+                      ' · ' + (buckets?.buckets || []).map((b) =>
+                        `${EXT_BUCKET_LABEL[b.bucket] || b.bucket}:${(b.allow || []).filter((n) => String(n).startsWith(`mcp__${x.id}__`)).length}`).join(' / '),
+                    ),
+                  ),
+                )),
+              ),
+            )
+          : h('div', { className: 'roost-empty' }, '还没装扩展。装好后在「设置 → 扩展」里改说明。'),
+        h('div', { className: 'roost-note', style: { marginTop: 8 } },
+          'dry-run 预览：选一个扩展先试算，确认后才写进 forceDeny。',
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
+            h('select', {
+              className: 'roost-input', value: pick,
+              onChange: (e) => { setPick(e.target.value); setDry(null) },
+            }, list.map((x) => h('option', { key: x.id, value: x.id }, x.id))),
+            h('button', { type: 'button', className: 'roost-btn', disabled: !pick, onClick: preview }, '试算'),
+            dry
+              ? h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: apply }, '确认收紧')
+              : null,
+          ),
+          dry
+            ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
+                `确认后「群友明天会少这 ${dry.totalHits} 个能力」，影响 ${dry.affected} 个档位；次数覆盖仍由下面「次数限制」一节配置。`,
+                h('div', { className: 'roost-list' },
+                  dry.rows.filter((r) => r.hit > 0).map((r) => h('div', { key: r.bucket, className: 'roost-item' },
+                    h('span', { className: 't' }, `${EXT_BUCKET_LABEL[r.bucket] || r.bucket}：少 ${r.hit} 个`),
+                  )),
+                ),
+              )
+            : null,
+        ),
+        h('div', { className: 'roost-note', style: { marginTop: 8 } },
+          '统一「为什么没生效」诊断：五层来源各自可分辨，最近 N 次拒绝带工具名 / 档位 / 命中的规则。',
+          h('div', { className: 'roost-list' },
+            (diag?.layers || []).map((L) => h('div', { key: L.id, className: 'roost-item' },
+              h('span', { className: 't' },
+                `${L.label} · 捕获 ${L.events} 次`,
+                L.wired ? '' : h('span', { className: 'd' }, ' · 规则层，实际拦截事件由 guard 记'),
+              ),
+              h('span', { className: 'd' }, (L.rules || []).join('；').slice(0, 220)),
+            )),
+          ),
+          (diag?.recent || []).length
+            ? h('div', { className: 'roost-list' },
+                diag.recent.slice(0, 5).map((r, i) => h('div', { key: i, className: 'roost-item' },
+                  h('span', { className: 't' }, `${r.tool} · ${r.bucket}`),
+                  h('span', { className: 'd' }, ` · ${EXT_LAYER_LABEL[r.layer] || r.layer}：${r.rule}`),
+                )),
+              )
+            : h('div', { className: 'roost-empty' }, '最近没有拒绝记录。'),
+        ),
+      )
+    }
+
+    /** 设置页：扩展清单 + usage 预览编辑 + 两个凭据状态。 */
+    function ExtSettingsBlock({ toast }) {
+      const [data, setData] = useState(null)
+      const [drafts, setDrafts] = useState({})
+      const [saving, setSaving] = useState('')
+      const [confirmClear, setConfirmClear] = useState(false)
+      const load = async () => {
+        const r = await EXT_POST('extensions.get')
+        setData(r)
+        const d = {}
+        for (const x of (r.rows || [])) d[x.id] = x.usage
+        setDrafts(d)
+      }
+      useEffect(() => { load() }, [])
+      const save = async (id) => {
+        setSaving(id)
+        try {
+          const r = await EXT_POST('extensions.usage.save', { id, usage: drafts[id] ?? '' })
+          toast(r.message || (r.ok ? '已保存' : '保存失败'))
+          await load()
+        } finally { setSaving('') }
+      }
+      return h(Sec, {
+        title: '扩展 · 说明编辑与凭据状态',
+        right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新'),
+      },
+        h('div', { className: 'roost-note' },
+          data?.enabled
+            ? '总开关：开 —— 扩展说明会进 QQ 会话提示词。'
+            : '总开关：关 —— 清单还在、/v1 与已发令牌照常，只是不挂 usage section。去「能力 → 高级 · 新功能」打开「用户扩展」。'),
+        data?.status?.authFailed
+          ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } },
+              `⚠ ${data.status.hintAuthFailed}：后端审计里有 ext.auth_failed，检查 secrets/<id>.json 是否缺失或令牌被吊销。`)
+          : null,
+        data?.status?.regenerated
+          ? h('div', { className: 'roost-note', style: { color: 'var(--warn)' } },
+              `✓ ${data.status.hintRegenerated}：备份还原后 secrets 缺失，宿主已补发新令牌；旧令牌立即 401。`)
+          : null,
+        (data?.rows || []).length
+          ? h('div', { className: 'roost-list' },
+              data.rows.map((x) => h('div', { key: x.id, className: 'roost-item' },
+                h('span', { className: 't' },
+                  `${x.name} · ${x.id}`,
+                  h('span', { className: 'd' }, ` · ${x.bytes} 字节 / ${x.chars} 字（单条上限 ${x.cap} 字）`),
+                  h('span', { className: 'd' }, x.foreign ? ' · 用户手写' : ' · 市场装'),
+                  x.locallyModified ? h('span', { className: 'd', style: { color: 'var(--warn)' } }, ` · ${x.label}`) : null,
+                  x.sha256Valid ? h('span', { className: 'd' }, ' · 校验和有效') : null,
+                ),
+                h('textarea', {
+                  className: 'roost-input', rows: 2, style: { width: '100%', marginTop: 6 },
+                  value: drafts[x.id] ?? '', spellCheck: false, disabled: x.foreign,
+                  onChange: (e) => setDrafts({ ...drafts, [x.id]: e.target.value }),
+                }),
+                h('button', {
+                  type: 'button', className: 'roost-btn', style: { marginTop: 6 },
+                  disabled: saving === x.id || x.foreign, onClick: () => save(x.id),
+                }, x.foreign ? '用户手写 · 只读' : '保存 usage'),
+              )),
+            )
+          : h('div', { className: 'roost-empty' }, '扩展目录里还没有东西。'),
+        h('div', { className: 'roost-note' },
+          `合计 ${data?.totalBytes ?? 0} 字节。编辑市场装的扩展会让清单 plugin.json 的 sha256 失效并标注「已本地修改，不再参与更新校验」；用户手写目录只读，面板不改它的清单。`),
+        /** 阶段 4 台账留的 5.2 待办：给「一并清除扩展记忆」一个真实入口。 */
+        h('div', { className: 'roost-note', style: { marginTop: 8 } },
+          '清扩展记忆：只删 ext-memory/<id>.json，不碰通用记忆；按清单的 onClear=keep 保留的会跳过。',
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
+            h('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center' } },
+              h('input', {
+                type: 'checkbox', checked: confirmClear,
+                onChange: (e) => setConfirmClear(e.target.checked),
+              }),
+              '我确认清除',
+            ),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: !confirmClear,
+              onClick: async () => {
+                const r = await EXT_POST('extensions.memory.clear', { confirm: true })
+                toast(r.message || (r.ok ? '已清除' : '清除失败'))
+                setConfirmClear(false)
+              },
+            }, '清空扩展记忆'),
+          ),
+        ),
+      )
+    }
+
+    /** 接入页：发放带 agent:write 的客户端令牌（阶段 3 缺口 2 的落点）。 */
+    function ExtClientsBlock({ toast }) {
+      const [data, setData] = useState(null)
+      const [name, setName] = useState('')
+      /** §7 最小授权：默认一个 scope 都不给，高权限要单独勾 + 二次确认。 */
+      const [scopes, setScopes] = useState([])
+      const [confirm, setConfirm] = useState(false)
+      const [issued, setIssued] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const load = async () => setData(await EXT_POST('extensions.clients.list'))
+      useEffect(() => { load() }, [])
+      const create = async () => {
+        setBusy(true)
+        try {
+          const r = await EXT_POST('extensions.clients.create', { name, scopes, confirm })
+          toast(r.message || (r.ok ? '已生成' : '生成失败'))
+          if (r.ok) { setIssued(r); setName(''); setScopes([]); setConfirm(false) }
+          await load()
+        } finally { setBusy(false) }
+      }
+      const revoke = async (id) => {
+        const r = await EXT_POST('extensions.clients.revoke', { id })
+        toast(r.message || (r.ok ? '已吊销' : '吊销失败'))
+        await load()
+      }
+      const toggle = (s) => setScopes(scopes.includes(s) ? scopes.filter((x) => x !== s) : [...scopes, s])
+      return h(Sec, { title: '扩展 /v1 客户端令牌' },
+        h('div', { className: 'roost-note' },
+          '独立会话的 agent.* 需要 agent:write。默认最小授权（不给任何 scope）；勾高权限 scope 还要再勾一次「我确认授予」。令牌只存 hash，明文只显示一次；扩展令牌由安装/卸载自动管理，不在这里发。'),
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+          h('input', {
+            className: 'roost-input', placeholder: '客户端名字（可留空）', value: name,
+            onChange: (e) => setName(e.target.value),
+          }),
+          h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: create }, '生成令牌'),
+        ),
+        h('div', { className: 'roost-list' },
+          (data?.availableScopes || []).map((s) => h('label', { key: s, className: 'roost-item', style: { display: 'inline-flex', gap: 4, marginRight: 10 } },
+            h('input', { type: 'checkbox', checked: scopes.includes(s), onChange: () => { toggle(s); setConfirm(false) } }),
+            h('span', { className: 'roost-code' }, s),
+          )),
+        ),
+        h('label', { className: 'roost-note', style: { display: 'inline-flex', gap: 6, alignItems: 'center' } },
+          h('input', { type: 'checkbox', checked: confirm, onChange: (e) => setConfirm(e.target.checked) }),
+          '我确认授予高权限 scope（agent:write / say:write / prompt:write / proactive:write）',
+        ),
+        issued
+          ? h('div', { className: 'roost-note', style: { color: 'var(--ok)' } },
+              `只显示这一次：${issued.id} / ${issued.token}`,
+              h('br'),
+              '把它填到扩展的启动环境里；刷新页面后就再也读不出来了。')
+          : null,
+        (data?.rows || []).length
+          ? h('div', { className: 'roost-list' },
+              data.rows.map((c) => h('div', { key: c.id, className: 'roost-item' },
+                h('span', { className: 't' },
+                  `${c.name} · ${c.id}`,
+                  h('span', { className: 'd' }, ` · ${c.kind === 'ext' ? '扩展自动管理' : '面板发放'} · ${(c.scopes || []).join('、') || '无 scope'}`),
+                ),
+                c.kind === 'panel'
+                  ? h('button', { type: 'button', className: 'roost-btn', onClick: () => revoke(c.id) }, '吊销')
+                  : null,
+              )),
+            )
+          : h('div', { className: 'roost-empty' }, '还没有客户端。'),
       )
     }
 

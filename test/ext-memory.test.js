@@ -116,6 +116,24 @@ test('G4-17 清空契约：清本会话 / 彻底删不动 ext，全局清尊重 
   assert.equal(store.stats().douyu, undefined);
 });
 
+test('G5-20 阶段 5 面板清空入口：onClear 接 opts，clearAllFromPanel 只碰 ext 文件', async (t) => {
+  const { ext, store } = make(t);
+  await store.add('bili', { text: 'a' });
+  await store.setMeta('bili', { onClear: 'clear' });
+  /** 不传 opts 或显式 false 时，行为与阶段 4 完全一致。 */
+  assert.equal((await ext.onClear('memory.clear')).touched, false);
+  assert.equal((await ext.onClear('memory.purge', { clearExtMemory: false })).touched, false);
+  assert.equal(store.list('bili').length, 1);
+  /** 勾了「一并清除」才真清，且尊重 onClear=keep 的保留。 */
+  assert.equal((await ext.onClear('memory.clear', { clearExtMemory: true })).cleared, 1);
+  assert.equal(store.list('bili').length, 0);
+  await store.add('douyu', { text: 'b' });
+  await store.setMeta('douyu', { onClear: 'keep' });
+  const r = await ext.clearAllFromPanel();
+  assert.deepEqual({ cleared: r.cleared, kept: r.kept }, { cleared: 0, kept: 1 });
+  assert.equal(store.list('douyu').length, 1, 'keep 的扩展不能被面板入口绕过');
+});
+
 test('G4-18 搜索范围：默认只可见 / all:true 全搜 / extId 限定', async (t) => {
   const { ext, store } = make(t);
   await store.add('bili', { text: '番剧 更新' });

@@ -74,6 +74,8 @@ export function createApiV1({
   auditFn = auditDefault,
   clientStore = null,
   now = () => Date.now(),
+  /** 阶段 5 诊断页：接入层的拒绝事件；不传就是空操作，既有调用方零影响。 */
+  onReject = () => {},
 } = {}) {
   const store = clientStore ?? createClientStore({ dir });
   const hits = new Map();      // clientId -> number[]（滑动窗口时间戳）
@@ -81,6 +83,11 @@ export function createApiV1({
 
   const note = (op, result) => {
     try { auditFn({ op: `v1.${op}`, note: String(result).slice(0, 40) }); } catch { /* 审计不能拖垮请求 */ }
+  };
+
+  /** 诊断页是旁路：记不上也不能让鉴权结果变形。 */
+  const reject = (entry) => {
+    try { onReject({ layer: 'fence', ...entry }); } catch { /* 旁路 */ }
   };
 
   function rateOk(clientId, t) {
@@ -125,14 +132,17 @@ export function createApiV1({
       // 缺值 / 失效：不是静默失联，审计里留一条，面板据此显示「扩展鉴权失败」。
       note('auth_failed', key);
       try { auditFn({ op: 'ext.auth_failed', note: key.slice(0, 40) }); } catch { /* 同上 */ }
+      reject({ tool: key, bucket: 'unknown', rule: 'Bearer 令牌无效或已吊销（401）' });
       return send(401, { ok: false, error: 'unauthorized', message: '客户端令牌无效或已吊销' });
     }
     if (client.extId && EXT_ONLY_DENY.has(key)) {
       note('forbidden', key);
+      reject({ tool: key, bucket: 'ext', rule: `扩展令牌被 EXT_ONLY_DENY 挡下（403）：${key}` });
       return send(403, { ok: false, error: 'forbidden', message: '扩展令牌不能调用该端点' });
     }
     if (route.scope && !client.scopes?.includes(route.scope)) {
       note('forbidden', key);
+      reject({ tool: key, bucket: client.id, rule: `缺少 scope：${route.scope}（403）` });
       return send(403, { ok: false, error: 'forbidden', message: `缺少 scope：${route.scope}` });
     }
     let body = {};
@@ -158,6 +168,7 @@ export function createApiV1({
 
     if (!rateOk(client.id, t)) {
       note('rate_limited', key);
+      reject({ tool: key, bucket: client.id, rule: '每客户端每分钟 120 次（429）' });
       if (res?.setHeader) res.setHeader('retry-after', '60');
       return send(429, { ok: false, error: 'rate_limited', message: '每客户端每分钟 120 次' });
     }
