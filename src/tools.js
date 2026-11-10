@@ -127,7 +127,7 @@ export function shapeTool(def, defineTool) {
  * @param {() => {bucket:string, chatId:string, aliases?:string[]}} o.callerOf  当前这一轮是谁在说
  * @param {() => object} o.cfgOf
  */
-export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = null, ledgerOf = null, sessionOf = null, allowMemory = true }) {
+export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = null, ledgerOf = null, sessionOf = null, allowMemory = true, extMemory = null }) {
   /** 当前调用者的档位、所属会话、以及这个会话的别名键 */
   const caller = () => {
     const s = callerOf?.() || {};
@@ -536,6 +536,14 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
   const defs = [];
   if (allowMemory && cfg.memory?.tools !== false) defs.push(search, note);
   if (cfg.chat?.tools !== false) defs.push(look);
+  /**
+   * 阶段 4.2：扩展记忆的两个模型工具由 `ext-memory.js` 提供定义，这里只负责
+   * 挂上去，不重复实现 ACL / 截断。`extMemory` 没注入时（老测试夹具）两个工具
+   * 就不存在，行为与阶段 3 完全一致。
+   */
+  if (extMemory && typeof extMemory.toolDefs === 'function' && allowMemory && cfg.memory?.tools !== false) {
+    defs.push(...extMemory.toolDefs({ callerOf: caller, cfgOf }));
+  }
   return defs;
 }
 
@@ -555,9 +563,10 @@ export async function registerMemoryTools({
   ledgerOf = null,
   sessionOf = null,
   allowMemory = true,
+  extMemory = null,
   log = () => {},
 }) {
-  const defs = buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf, ledgerOf, sessionOf, allowMemory });
+  const defs = buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf, ledgerOf, sessionOf, allowMemory, extMemory });
   const registry = agent?.ctx?.tools;
   if (!registry?.register) {
     /**

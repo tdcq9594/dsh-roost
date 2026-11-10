@@ -52,3 +52,52 @@ export function recallRow(chatId, q, hits, { shortPhrase = false, usedPrev = fal
     items: (hits || []).map((h) => ({ id: h.id, score: h.score, why: h.why })),
   };
 }
+
+/**
+ * 扩展记忆的**按需候选池**（方案 §5.1 / §5.2 / 实施阶段 4.1）。
+ *
+ * 只在 `ext_memory_search` 被模型主动调用时才读 `ext-memory/`；
+ * `listRanked()` 的自动注入永远不碰这里 —— 一个刷 B 站扩展攒几千条视频
+ * 记录，不能把它们塞进每轮 prompt 冲垮人格记忆。
+ *
+ * 「默认范围」和「可见性」是两个维度（§5.4 / §9-#23）：
+ *   · `visibleExtIds` 由 `ext-memory.js` 的 ACL 算出，是**硬过滤**，任何情况下
+ *     都不得被 `all:true` 跳过 —— private 双条件与 `read:[]` 是隐私边界，
+ *     不是一个检索参数能放宽的「范围」；
+ *   · `all` 只表示调用方请求跨命名空间检索，不改变可见集；
+ *   · 传 `extId` 则限定单个命名空间，且它必须仍在可见集内。
+ *
+ * 纯函数：store 只被调 `listAll()`，不写盘、不缓存，测试可用假 store。
+ */
+export function extMemoryCandidates(store, {
+  query = '', extId = '', all = false, visibleExtIds = null, limit = 5, maxChars = 120,
+} = {}) {
+  const q = String(query ?? '').trim().toLowerCase();
+  if (!q || !store || typeof store.listAll !== 'function') return [];
+  const words = q.split(/\s+/).filter(Boolean);
+  // `all` 不参与这句：可见性是 ACL 的硬上限，不是检索范围开关。
+  // ⚠️ 不传 `visibleExtIds` 时本函数不过滤命名空间，因此**只能由
+  // `ext-memory.js` 的 `search()` 调用**（它永远传可见集并再做一次 ACL 兜底）。
+  // 别把本纯函数当成新入口直接暴露给模型 / HTTP，否则 private 命名空间会漏出去。
+  const visible = Array.isArray(visibleExtIds) ? new Set(visibleExtIds) : null;
+  const target = extId ? String(extId) : '';
+
+  const out = [];
+  for (const pool of store.listAll({ includeArchived: false })) {
+    if (target && pool.extId !== target) continue;
+    if (visible && !visible.has(pool.extId)) continue;
+    for (const row of pool.rows || []) {
+      const text = String(row.text ?? '');
+      const lower = text.toLowerCase();
+      if (!words.some((w) => lower.includes(w))) continue;
+      out.push({
+        extId: pool.extId,
+        text: `[${pool.extId}] ${[...text].slice(0, maxChars).join('')}`,
+        w: Number(row.w) || 0,
+        at: row.at ?? 0,
+        src: row.src ?? `ext:${pool.extId}`,
+      });
+    }
+  }
+  return out.sort((a, b) => b.w - a.w || b.at - a.at).slice(0, Math.max(1, limit));
+}

@@ -50,6 +50,8 @@ import { createClientStore, createExtSecrets, createExtRegistry } from './ext-re
 import { mountUsageSections, mountToolOutputBudget } from './ext-usage.js';
 import { createApiV1 } from './api-v1.js';
 import { createAgentV1 } from './agent-v1.js';
+import { createExtMemoryStore } from './ext-memory-store.js';
+import { createExtMemory } from './ext-memory.js';
 import { pickModelFor, pickReasoningEffort } from './model-pick.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing, shouldNotePending } from './closing.js';
@@ -1114,9 +1116,27 @@ export function apply(ctx) {
    * `rec.offs`，工具输出预算收进 mountOffs，撤销路径各自唯一。
    */
   const agentV1 = createAgentV1({ dir: dataDir(), ctx, log });
+  /**
+   * 阶段 4：每扩展一个 `ext-memory/<extId>.json`，不碰 `memory.json`（§5.1）。
+   * `installedIds` 从清单实时取，ACL 的可见集跟着已装扩展走。
+   */
+  const extMemoryStore = createExtMemoryStore({ dir: dataDir(), log });
+  const extMemory = createExtMemory({
+    store: extMemoryStore,
+    quota,
+    log,
+    installedIds: () => extRegistry.list().map((x) => x.id),
+  });
   const apiV1 = createApiV1({
     dir: dataDir(), log, clientStore: extClientStore,
-    hooks: { agent: (a) => agentV1.handleHook(a) },
+    hooks: {
+      agent: (a) => agentV1.handleHook(a),
+      /** 后台写：extId 已由 api-v1 从令牌读出并覆盖 body，这里不再自报。 */
+      'memory.ext.add': async ({ body }) => ({
+        status: 200,
+        body: await extMemory.writeFromApi({ extId: body.extId, fact: body.fact ?? body.text, body }),
+      }),
+    },
   });
   /**
    * persist 快照恢复（§6.3「恢复后按 id 拉回并重新注册 section」）。
@@ -2678,6 +2698,8 @@ export function apply(ctx) {
          * 传 null 就是「没有这条桥」，检索照常返回摘要，只是不带邻文。
          */
         contextOf,
+        /** 阶段 4.2：挂上 ext_memory_search / ext_memory_note 两个模型工具。 */
+        extMemory,
         log: (m) => log.warn(m),
       })
         .then((r) => {
@@ -5175,6 +5197,8 @@ export function apply(ctx) {
 
             case 'memory.clear': {
               if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话' });
+              /** §5.6：ext 记忆是跨会话的，按 chatId 清没有意义，默认不动。 */
+              const extClear = await extMemory.onClear('memory.clear');
               memory.clearChat(chatId, aliasesOf(chatId));
               /** D3：召回日志随本会话记忆一起清（只留本群那段，别把别处的排障记录抹了） */
               recallLog.clear();
@@ -5190,6 +5214,7 @@ export function apply(ctx) {
               return send(res, 200, {
                 ok: true,
                 journal: j,
+                extMemory: extClear,
                 message: `这个群的记忆清了（含日记 ${j} 条，通用记忆没动）`,
               });
             }
@@ -5204,6 +5229,8 @@ export function apply(ctx) {
              */
             case 'memory.purge': {
               if (!chatId) return send(res, 400, { ok: false, message: '不知道是哪个会话：缺 chatId，先选一个会话' });
+              /** §5.6：彻底删同样默认不动 ext 记忆，面板另有单独清空入口。 */
+              const extClear = await extMemory.onClear('memory.purge');
               memory.clearChat(chatId, aliasesOf(chatId));
               let j = 0;
               try {
@@ -5233,6 +5260,7 @@ export function apply(ctx) {
                 ok: true,
                 journal: j,
                 graph: g,
+                extMemory: extClear,
                 message: `彻底删了 ${j} 条日记`
                   + (g.episodes || g.edges || g.entities
                     ? `、${g.episodes} 段原文片段、${g.edges} 条关系；磁盘上的残留十分钟内自动压掉`
@@ -5240,9 +5268,15 @@ export function apply(ctx) {
               });
             }
 
-            case 'memory.clearGlobal':
+            case 'memory.clearGlobal': {
               memory.clearGlobal();
-              return send(res, 200, { ok: true, message: '通用记忆清空了' });
+              /** §5.6：全局清空要清 ext-memory/*.json，但尊重每个扩展的 onClear:'keep'。 */
+              const extClear = await extMemory.onClear('memory.clearGlobal');
+              return send(res, 200, {
+                ok: true, extMemory: extClear,
+                message: `通用记忆清空了；${extClear.message}`,
+              });
+            }
 
             /**
              * 重置自我叙述（第五层）。
