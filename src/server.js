@@ -54,7 +54,11 @@ export async function postReply(payload, text, done = true, extra = {}) {
    */
   if (!url) {
     const send = payload?.__channel?.send;
-    if (typeof send === 'function') return await send(String(text ?? ''));
+    /**
+     * `extra` 一起转交：`extra.requestId` 是框架投递账本的幂等键，丢了这条回复
+     * 就查不到终态（`/r/delivery` 永远空）。`done` 不传 —— 扩展的回复是一次性投递。
+     */
+    if (typeof send === 'function') return await send(String(text ?? ''), extra);
     throw new Error('payload 里没有回话地址');
   }
   if (!token) throw new Error('payload 里没有回话令牌');

@@ -20,7 +20,10 @@
  *  4. **`/v1/message` 的回复走通道回退**，不让扩展指定回话地址 ——
  *     `postReply` 收的是 `payload.reply.url` 的 HTTP 地址，外部可控就是 SSRF 面。
  */
+import { randomUUID } from 'node:crypto';
+
 import { shouldFire } from './speakup.js';
+import { chatOf } from './inbound.js';
 
 const MAX_TEXT = 4000;
 const MAX_FACT = 500;
@@ -43,16 +46,13 @@ export function createExtApiHooks({
   memoryOf = null,
   journalOf = null,
   aliasesOf = () => [],
-  capStoreOf = () => null,
   channelOf = null,
   speakUpOf = null,
   agentFor = null,
   mount = null,
   onInbound = null,
-  bucketOfFn = null,
   lastBucketOf = () => '',
   setupOf = () => ({}),
-  usedChatMemoryOf = null,
   log = () => {},
 } = {}) {
   const memory = () => {
@@ -145,9 +145,17 @@ export function createExtApiHooks({
     async 'memory.write'({ body, query }) {
       const chatId = targetOf(body, query);
       if (!chatId) return bad('缺 chatId / target');
+      /**
+       * **不许写 `global`。** 全局记忆是所有会话共享的一份，扩展有了
+       * `memory:write`（默认就给了）就能污染每一个群 —— 这是权限放大。
+       * 要写自己的东西请走 `/v1/memory/ext.add`（extId 由令牌绑定）。
+       */
+      if (body?.scope === 'global') {
+        return bad('扩展不能写全局记忆（会影响所有会话）；要记自己的东西请用 /v1/memory/ext.add', 403, 'forbidden');
+      }
       const fact = String(body?.fact ?? body?.text ?? '').trim().slice(0, MAX_FACT);
       if (!fact) return bad('缺 fact / text');
-      const scope = body?.scope === 'global' ? 'global' : 'chat';
+      const scope = 'chat';
       try { memory().add(chatId, fact, scope, { w: 1, src: { via: 'ext-api' } }); }
       catch (e) { return bad(`写记忆失败：${e?.message ?? e}`, 500, 'internal'); }
       return { status: 200, body: { ok: true, chatId, scope, chars: [...fact].length } };
@@ -163,7 +171,7 @@ export function createExtApiHooks({
       const scene = sceneOf(body);
       const target = targetOf(body, query);
       if (!target) return bad('缺 target / chatId');
-      const text = String(body?.text ?? '').trim();
+      const text = String(body?.text ?? '').slice(0, MAX_TEXT).trim();
       if (!text) return bad('缺 text');
 
       let hasGroupAuthz = true;
@@ -202,11 +210,26 @@ export function createExtApiHooks({
       const scene = sceneOf(body);
       const target = targetOf(body);
       if (!target) return bad('缺 target / chatId');
-      const text = String(body?.text ?? '').trim();
+      const text = String(body?.text ?? '').slice(0, MAX_TEXT).trim();
       if (!text) return bad('缺 text');
       if (typeof onInbound !== 'function') return bad('入站链路不可用', 500, 'internal');
 
       const payload = {
+        /**
+         * `id` 必须给且唯一：`handleTurn` 用它派生 `requestId`（`${payload.id}:main`）
+         * 和 journal 的主键。缺了会变成 `undefined:main` —— 所有 `/v1/message`
+         * 共用同一个投递 id，从第二条起被框架的幂等账本当重复而静默丢弃。
+         */
+        id: `api-${String(client?.extId ?? 'ext')}-${randomUUID()}`,
+        /** `target` 是宿主的「这条消息发往哪里」，`handleTurn` 用它记 pending / awake。 */
+        target,
+        /**
+         * **正文写在 `text` 里**。`renderInbound()` 只读 `p.text`
+         * （`inbound.js:13`）；写成 `said` 会让模型收到空消息 —— 上一版就是
+         * 这个错，测试因为断言自己造的字段而没抓到。
+         */
+        text,
+        said: text,
         chat: {
           chatId: target,
           kind: scene,
@@ -215,7 +238,6 @@ export function createExtApiHooks({
           aliases: [],
         },
         sender: { bucket: 'member', level: '', name: str(body?.senderName, 40) || '扩展消息' },
-        said: text,
         /**
          * 扩展没有 ai-chat 的回话窗口，`reply` 留空；`postReply` 见到
          * `__channel.send` 就改走发送通道（`server.js` 的回退分支）。
@@ -223,7 +245,7 @@ export function createExtApiHooks({
          */
         reply: null,
         __channel: {
-          send: async (replyText) => {
+          send: async (replyText, meta) => {
             const ch = channel().get?.();
             if (!ch?.send) return { ok: false, message: '发送通道不可用' };
             let authz = true;
@@ -231,7 +253,14 @@ export function createExtApiHooks({
               try { authz = Boolean(memory().hasAuthz(target, 'group_push', aliasesOf(target))); }
               catch { authz = false; }
             }
-            return await ch.send({ scene, target, text: replyText, hasGroupAuthz: authz });
+            return await ch.send({
+              scene,
+              target,
+              text: replyText,
+              hasGroupAuthz: authz,
+              /** 转交框架投递账本的幂等键（`postReply` 传进来的 `extra.requestId`）。 */
+              requestId: str(meta?.requestId, 80),
+            });
           },
         },
         __fromApi: { extId: client?.extId ?? null },
@@ -262,7 +291,14 @@ export function createExtApiHooks({
       if (!sp?.fire) return bad('主动消息模块不可用', 500, 'internal');
       let decision;
       try {
-        decision = shouldFire(sp.state?.() ?? {}, cfgOf()?.speakUp ?? {}, Date.now());
+        /**
+         * 优先用 `speakUp.canFire()`：它内部用的是 `cfgNow()` —— 已合并 `DEFAULTS`
+         * 并从 `ownerOf()` 补好 `chatId`。自己拿 `cfgOf().speakUp` 拼会漏掉这两步，
+         * 结果是「配置里没写 chatId」时端点永远回 429，看起来像频次拦的，实际是配置没读到。
+         */
+        decision = typeof sp.canFire === 'function'
+          ? sp.canFire()
+          : shouldFire(sp.state?.() ?? {}, cfgOf()?.speakUp ?? {}, Date.now());
       } catch (e) {
         return bad(`判定主动消息能否发送失败：${e?.message ?? e}`, 500, 'internal');
       }
@@ -285,11 +321,19 @@ export function createExtApiHooks({
       const chatId = targetOf(body, query);
       if (!chatId) return bad('缺 chatId / target');
       if (typeof agentFor !== 'function') return bad('会话服务不可用', 500, 'internal');
-      const chat = {
-        kind: body?.kind === 'c2c' ? 'c2c' : 'group',
-        chatId,
-        name: str(body?.name, 60) || chatId,
-      };
+      /**
+       * 用真实的 `chatOf()` 构造，不要手写：
+       * 它会按 kind 派生 `preset`（c2c → `roost-private`，group → `roost-social`）
+       * 以及 `identityId`。手写漏了 `preset`，`agentFor()` 就会用默认人格建会话 ——
+       * 表面上「会话建好了」，实际上跟真人说话时用的不是同一个人格。
+       */
+      const chat = chatOf({
+        chat: {
+          chatId,
+          kind: body?.kind === 'c2c' ? 'c2c' : 'group',
+          name: str(body?.name, 60),
+        },
+      });
       try {
         const { agent } = await agentFor(chat);
         if (typeof mount === 'function' && agent) mount(agent, chat);

@@ -386,5 +386,14 @@ export function createSpeakUp({ dataDir, cfgOf, ownerOf, generate, send, log = (
     fire,
     noteOwner,
     state: () => ({ ...state }),
+    /**
+     * 「现在能不能主动说话」——门与 `fire()` 内部用的是**同一份**配置。
+     *
+     * 外部（`/v1/proactive`）必须走这个方法，不要自己拿 `cfgOf().speakUp` 拼：
+     *   · 原始配置没合并 `DEFAULTS`，`enabled` 缺失会被判成「没开」；
+     *   · 没在 config 里填 `chatId` 时，`cfgNow()` 会从 `ownerOf()` 自动补，
+     *     原始配置拿不到 —— 两条加起来，端点会**永远**返回「不能发」。
+     */
+    canFire: (now = Date.now()) => shouldFire(state, cfgNow(), now),
   };
 }

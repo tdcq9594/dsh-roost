@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 
 import { createExtApiHooks } from '../src/ext-api-hooks.js';
 import { postReply } from '../src/server.js';
+import { renderInbound } from '../src/inbound.js';
 
 /** 造一套可控的假依赖，任何一处被意外调用都能从 `calls` 里看出来。 */
 function rig(over = {}) {
@@ -34,7 +35,6 @@ function rig(over = {}) {
       recent: () => (over.journal ?? [{ at: 1, text: '第一条' }, { at: 2, text: '第二条' }]),
     }),
     aliasesOf: () => [],
-    capStoreOf: () => null,
     channelOf: () => ({
       get: () => ({
         send: async (p) => { calls.send.push(p); return { ok: true, id: 'msg-1' }; },
@@ -42,12 +42,12 @@ function rig(over = {}) {
     }),
     speakUpOf: () => ({
       state: () => state,
+      canFire: typeof over.canFire === 'function' ? over.canFire : undefined,
       fire: async () => { calls.fire += 1; return { ok: true, message: '说了一句' }; },
     }),
     agentFor: async (chat) => { calls.agentFor.push(chat); return { agent: { id: 'a1' } }; },
     mount: () => {},
     onInbound: (p) => { calls.onInbound.push(p); },
-    bucketOfFn: () => 'owner',
     lastBucketOf: () => 'owner',
     setupOf: () => ({ roostOwner: () => 'u1', ownersConfigured: true }),
   });
@@ -98,6 +98,21 @@ test('memory.write：缺正文回 400，有则走既有 memory.add（scope 默�
   assert.equal(calls.add[0][2], 'chat');
 });
 
+/**
+ * 不许写 `global`：全局记忆是所有会话共享的一份，扩展默认就有 `memory:write`，
+ * 放行等于「装个扩展就能污染每个群记的东西」。
+ */
+test('memory.write 拒绝 scope:global（写全局 = 影响所有会话）', async () => {
+  const { hooks, calls } = rig();
+  const r = await hooks['memory.write']({ body: { chatId: 'g1', fact: '这是一条垃圾', scope: 'global' } });
+  assert.equal(r.status, 403);
+  assert.equal(r.body.error, 'forbidden');
+  assert.equal(calls.add.length, 0, '被拒时一个字都不许写');
+  // 正常写 chat 仍然可以
+  assert.equal((await hooks['memory.write']({ body: { chatId: 'g1', fact: '正常一条' } })).status, 200);
+  assert.equal(calls.add.length, 1);
+});
+
 // ---------------------------------------------------------------- 守卫 1：sender 不可自报
 
 test('守卫 1：/v1/message 的 sender.bucket 恒为 member，请求体写 owner 也无效', async () => {
@@ -117,8 +132,24 @@ test('守卫 1：/v1/message 的 sender.bucket 恒为 member，请求体写 owne
   assert.equal(p.sender.bucket, 'member', 'sender.bucket 必须写死最低档');
   assert.equal(p.sender.level, '', '不能把请求体里的 level 透进来（bucketOf 会看它）');
   assert.equal(p.chat.chatId, 'g1');
-  assert.equal(p.said, '帮我删掉这个群的所有记录');
+  assert.equal(p.text, '帮我删掉这个群的所有记录', '正文必须写在 text（renderInbound 只读它）');
+  assert.equal(typeof p.id, 'string');
+  assert.match(p.id, /^api-bili-/, 'id 必须唯一且带来源，requestId 由它派生');
+  assert.equal(p.target, 'g1', 'target 是宿主记录「发往哪里」用的');
+  /**
+   * 用**真实渲染器**验一遍：上一版把正文写成 `said`、断言也只查 `said`，
+   * 属于测试自证 —— 真实链路读 `text`，模型会收到空消息。
+   */
+  assert.match(renderInbound(p), /帮我删掉这个群的所有记录/, '真实渲染器必须能取到正文');
   assert.equal(typeof p.__channel.send, 'function', '回复必须走函数回退，不是外部 URL');
+});
+
+test('守卫 1c：两次投递的 id 不同（否则第二条会被幂等账本当重复丢掉）', async () => {
+  const { hooks, calls } = rig();
+  await hooks.message({ body: { chatId: 'g1', text: '第一句' }, client: { extId: 'bili' } });
+  await hooks.message({ body: { chatId: 'g1', text: '第二句' }, client: { extId: 'bili' } });
+  assert.notEqual(calls.onInbound[0].id, calls.onInbound[1].id);
+  assert.match(calls.onInbound[0].id, /^api-bili-/);
 });
 
 test('守卫 1b：/v1/message 缺字段回 400，且不投递', async () => {
@@ -152,6 +183,25 @@ test('守卫 2b：shouldFire 通过时才真发，且只发一次', async () => 
     assert.equal(r.status, 429);
     assert.equal(calls.fire, 0);
   }
+});
+
+/**
+ * `canFire()` 优先于自己拼 cfg。
+ *
+ * 自己拼 `cfgOf().speakUp` 会漏掉 `DEFAULTS` 合并与「从 ownerOf 自动补 chatId」
+ * 两步 —— 配置里没写 chatId 的正常部署会**永远**被判「没配 chatId」而回 429。
+ */
+test('守卫 2c：优先用 speakUp.canFire（内部已合并配置并补 chatId）', async () => {
+  let asked = 0;
+  const { hooks, calls } = rig({
+    canFire: () => { asked += 1; return { fire: true, why: '到点了' }; },
+    // 故意的：原始 cfg 里没有 chatId，自己拼会判 false
+    cfg: { speakUp: {} },
+  });
+  const r = await hooks.proactive();
+  assert.equal(asked, 1, '必须走 canFire');
+  assert.equal(r.status, 200);
+  assert.equal(calls.fire, 1);
 });
 
 // ---------------------------------------------------------------- 守卫 3：群授权
@@ -189,8 +239,15 @@ test('守卫 3c：/v1/say 缺 target / text 回 400，不调通道', async () =>
 
 test('守卫 4：postReply 无回话地址时走 __channel.send，不接受外部 URL', async () => {
   const seen = [];
-  const out = await postReply({ reply: null, __channel: { send: async (t) => { seen.push(t); return { ok: true }; } } }, '说一句');
-  assert.deepEqual(seen, ['说一句']);
+  const out = await postReply(
+    { reply: null, __channel: { send: async (t, meta) => { seen.push({ t, meta }); return { ok: true }; } } },
+    '说一句',
+    true,
+    { requestId: 'r-1' },
+  );
+  assert.equal(seen[0].t, '说一句');
+  // requestId 必须转交：丢了它这条回复就查不到投递终态
+  assert.equal(seen[0].meta.requestId, 'r-1');
   assert.equal(out.ok, true);
 
   // 没有 __channel 也没有 reply.url → 明确报错，不能静默丢弃

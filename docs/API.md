@@ -71,8 +71,8 @@
 | POST | `/v1/agent.new` | `agent:write` | ✅ 可用 | 开一个独立 Agent 会话（游戏裁判这类无 QQ 身份的场景） |
 | POST | `/v1/agent.prompt` | `agent:write` | ✅ 可用 | 给独立会话发一轮；默认 SSE 流式 |
 | GET | `/v1/context` | `context:read` | ✅ 可用 | 读当前会话的上下文摘要（条数、窗口占用） |
-| GET | `/v1/memory` | `memory:read` | ✅ 可用 | 读当前会话的记忆（列表形态） |
-| POST | `/v1/memory` | `memory:write` | ✅ 可用 | 往**当前会话**的记忆里写一条 |
+| GET | `/v1/memory` | `memory:read` | ✅ 可用 | 读当前会话的记忆（列表形态）；scope:global 会带上全局那层 |
+| POST | `/v1/memory` | `memory:write` | ✅ 可用 | 往**当前会话**的记忆里写一条；**不能写 global**（会影响所有会话），要记自己的东西用 /v1/memory/ext.add |
 | POST | `/v1/memory/ext.add` | `memory:write` | ✅ 可用 | 往**扩展自己的命名空间**写一条（extId 由令牌决定，body 自报无效） |
 | POST | `/v1/message` | `message:write` | ✅ 可用 | 把一条消息送进 QQ（复用现有入站链路，不另写一条） |
 | GET | `/v1/mood` | `state:read` | ✅ 可用 | 读当前心情 |
