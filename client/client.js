@@ -784,6 +784,16 @@ select.roost-input{color-scheme:dark}
       const perms = st?.permissions || {}
       const toolable = ['owner', 'admin', 'member'].filter((k) => perms[k] === 'all')
       const lt = st?.lastTurn
+      /** 后端还没重启时这几个字段都不存在，一律给兜底，不能让概览整页白掉 */
+      const capsOn = Boolean(st?.capabilitiesEnabled)
+      const q = st?.queue || { busy: 0, pending: 0, lanes: 0 }
+      const today = st?.today || null
+      const tools = st?.qqTools || null
+      /** token 只给量级，别在数字格里塞一长串；过了百万就换 M，别写出 1162.5k */
+      const tokens = today ? (today.uncached + today.cacheRead + today.cacheWrite + today.output) : 0
+      const tokenText = tokens >= 1e6
+        ? `${(tokens / 1e6).toFixed(2)}M`
+        : tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens)
 
       /** 概览上的最近动态：不用切到日志页就能看到刚刚发生了什么 */
       useEffect(() => {
@@ -844,8 +854,9 @@ select.roost-input{color-scheme:dark}
               h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新')),
           ),
           h('div', { className: 'roost-grid' },
-            h(Stat, { n: st?.chats ?? 0, label: 'QQ 会话' }),
-            h(Stat, { n: st?.waiting ?? 0, label: '正在等回复' }),
+            h(Stat, { n: st?.chats ?? 0, label: '已建立的会话' }),
+            h(Stat, { n: st?.waiting ?? 0, label: '正在等 DSH 回复' }),
+            h(Stat, { n: q.pending ?? 0, label: `排队中 · 正在跑 ${q.busy ?? 0} 条` }),
             h(Stat, {
               n: lt ? `${lt.ms}ms` : '—',
               label: lt
@@ -854,14 +865,32 @@ select.roost-input{color-scheme:dark}
                   + (lt.seg
                     ? ` · 排队 ${lt.seg.queue ?? '—'}ms / 准备 ${lt.seg.prep ?? '—'}ms / 生成 ${lt.seg.gen ?? '—'}ms`
                     : '')
-                : '还没跑过',
+                : '本次启动暂无记录',
               tone: lt ? (lt.ok ? 'ok' : 'bad') : null,
             }),
             h(Stat, {
-              n: toolable.length || 1,
-              label: toolable.length ? `能用本地工具的档位：${toolable.join('/')}` : '只有主人能用本地工具',
+              n: today ? today.turns : '—',
+              label: today ? `今日轮次 · ${tokenText} tokens` : '今日暂无用量',
+            }),
+            h(Stat, {
+              n: !tools || !tools.sessionCount ? '—' : (tools.ok ? '已挂' : '未挂'),
+              label: !tools || !tools.sessionCount
+                ? '等第一条消息挂载'
+                : `${tools.sessionCount} 个会话 · 失败 ${tools.failedCount}`,
+              tone: tools && tools.sessionCount ? (tools.ok ? 'ok' : 'bad') : null,
             }),
           ),
+          /**
+           * 权限说明不占数字格：七格会在窄面板里单独换行，而这格是文字、
+           * 长短和其他格差得多，会把整排撑歪（2026-11-10 面板截图实测）。
+           * 能力策略接管后旧 `permissions` 只是历史值，这里也不拿它冒充当前档位。
+           */
+          h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            capsOn
+              ? '权限：能力页已接管，档位与工具在「能力」页配置。'
+              : toolable.length
+                ? `权限：能用本地工具的档位 ${toolable.join(' / ')}（共 ${toolable.length} 档）。`
+                : '权限：没有档位开放全部工具。'),
         ),
 
         h(Sec, { n: '02', title: '接入进度',
@@ -874,7 +903,7 @@ select.roost-input{color-scheme:dark}
           ),
           allReady
             ? h('div', { className: 'roost-note' },
-                '五项都齐了。还差两件手工的事在 QQ 开放平台：开「接收所有消息」、把机器人拉进群。')
+                '链路这五项都齐了。剩下两件在 QQ 开放平台手动做：开「接收所有消息」、把机器人拉进群。')
             : h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
                 h('button', { type: 'button', className: 'roost-btn', onClick: () => onGo('setup') }, '去接入'),
                 h('span', { className: 'roost-note', style: { margin: 0 } },

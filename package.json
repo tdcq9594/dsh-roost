@@ -1,7 +1,7 @@
 {
   "name": "dsh-roost",
-  "version": "1.0.8",
-  "description": "ai-chat 插件的 DSH 宿主：把 QQ 消息交给 DSH 会话回答，带一键接入",
+  "version": "1.0.9",
+  "description": "给 QQ 机器人接上 DSH 的全部能力：工具、记忆、上下文压缩、主动搭话，带一键接入",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "src/host.js",

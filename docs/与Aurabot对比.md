@@ -1,6 +1,6 @@
 # 和 Aurabot 的功能对比
 
-> 对照对象：[dsh-aurabot-qq](https://github.com/accomplish07zrh-eng/dsh-aurabot-qq)（MIT）
+> 对照对象：[dsh-aurabot-qq](https://github.com/aureth-labs/dsh-aurabot-qq)（MIT）
 > 对照时间：2026-10-26，我们 = dsh-roost 0.3.5 + ai-chat 3.1.0
 
 ---

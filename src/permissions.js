@@ -225,6 +225,67 @@ export function planGuestTools(tools, keep = GUEST_KEEP_TOOLS) {
 export const OUTPUT_TOOLS = ['qq_send', 'qq_close'];
 
 /**
+ * 被动回话轮的输出通道硬保证：把这两个名字从「本轮要收走」的清单里摘出来。
+ *
+ * `qq_send` / `qq_close` 是「怎么说话」，不是「能碰这台机器的什么」。
+ * 档位白名单、人格 `tools: []`、群级 `deny` 算出来的收走清单都不该把它们
+ * 一起收掉——收掉的结果不是更安全，而是模型拿着「想说话就调 qq_send」的
+ * 提示词去调一个不存在的工具，连撞两次 `unknown tool` 后退回正文，
+ * 分段发言、表情、@ 全失效。2026-11-10 私聊实测：主人明确要求「一次多发几条」，
+ * 7 个插件工具被整批收走，后续几轮也没回来。
+ *
+ * 只有两种来源**允许**收走输出通道：
+ *   · `denyExtra`  —— 调用方明确点名（宿主发起轮的 `AWAKE_DENY_TOOLS`）；
+ *   · `forceDeny`  —— 用户在功能页主动关了「分段说话 / 退场 / @人」。
+ *
+ * 其余一律保住。做成纯函数是为了能单测：给它一份 deny，看输出通道还在不在。
+ *
+ * @param {string[]} deny 本轮算出来要收走的工具名
+ * @param {{denyExtra?:string[], forceDeny?:string[]}} [opts]
+ * @returns {string[]} 过滤后的 deny（新数组，不改入参）
+ */
+export function protectOutputTools(deny, { denyExtra = [], forceDeny = [] } = {}) {
+  const out = Array.isArray(deny) ? [...deny] : [];
+  if (!out.length) return out;
+  const explicit = new Set([...(Array.isArray(denyExtra) ? denyExtra : []), ...(Array.isArray(forceDeny) ? forceDeny : [])]);
+  const keep = new Set(OUTPUT_TOOLS.filter((n) => !explicit.has(n)));
+  return out.filter((n) => !keep.has(n));
+}
+
+/**
+ * 本轮是否收走了某个指定工具。提示词里按工具逐条裁剪时用它，
+ * 不能拿 `tools.schemas()` 判——那个报注册清单，读不到调用期掩码。
+ *
+ * @param {Set<string>|string[]|null|undefined} denied 本轮实际被收走的工具名
+ * @param {string} name 要问的工具名
+ * @returns {boolean}
+ */
+export function toolWasDenied(denied, name) {
+  const names = denied instanceof Set ? [...denied] : (Array.isArray(denied) ? denied : []);
+  return names.includes(name);
+}
+
+/**
+ * 本轮是否该把「发言方式」那段提示词整块收起。
+ *
+ * 那段提示词同时宣称 `qq_send` / `qq_close` 可用，任何一个被收走都得闭嘴，
+ * 否则模型照着提示去调一个不存在的工具，撞 `unknown tool` 后退回正文——
+ * 分段、表情、@ 这一轮全失效（2026-11-10 私聊实测）。
+ *
+ * `qq_send_file` 不在此列：功能页单独关掉「发文件」时分段发言照旧可用，
+ * 不该整块闭嘴。但提示词里提到它的两处必须另用 `toolWasDenied` 摘掉，
+ * 否则模型会被教去调一个本轮不存在的文件工具。
+ *
+ * 抽成纯函数是为了能单测：这段判定原本埋在 `apply()` 闭包里，改了没法验证。
+ *
+ * @param {Set<string>|string[]|null|undefined} denied 本轮实际被收走的工具名
+ * @returns {boolean}
+ */
+export function shouldHideOutputPrompt(denied) {
+  return OUTPUT_TOOLS.some((n) => toolWasDenied(denied, n));
+}
+
+/**
  * 人格级工具限制：这个人格这一轮允许碰哪些工具。
  *
  * 语义（抄 AstrBot `persona_plus`，三元）：

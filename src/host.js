@@ -23,7 +23,8 @@ import { createTurnQueue } from './turnqueue.js';
 import { createInboundShell } from './inbound-shell.js';
 import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf, speakerTag } from './inbound.js';
-import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS } from './permissions.js';
+import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools } from './permissions.js';
+import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
 import { resolvePolicy, dangerOf, BUCKETS } from './capabilities.js';
 import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting } from './features.js';
 import { createCapabilityStore } from './capability-store.js';
@@ -374,11 +375,21 @@ export function apply(ctx) {
       const poolSet = new Set(pool);
       for (const n of denyExtra) if (poolSet.has(n)) denySet.add(n);
 
-      if (!denySet.size) return { ok: false, nothing: true, reason: 'nothing' };
+      /**
+       * 输出通道硬保证：被动回话轮不许把 `qq_send` / `qq_close` 收走。
+       * 只有调用方明确点名（主动轮）或用户主动关了功能开关才允许收。
+       */
+      const deny = protectOutputTools([...denySet], { denyExtra, forceDeny: forced });
+      if (!deny.length) return { ok: false, nothing: true, reason: 'nothing' };
 
-      const deny = [...denySet];
       try {
-        return { ok: true, off: t.restrict({ deny }), names: deny };
+        const off = t.restrict({ deny });
+        qqToolRegistry.setDenied(agent, deny);
+        return {
+          ok: true,
+          off: qqToolRegistry.wrapRestore(agent, off),
+          names: deny,
+        };
       } catch (e) {
         return { ok: false, reason: `${e?.message || e}（清单：${deny.join('、')}）` };
       }
@@ -432,12 +443,23 @@ export function apply(ctx) {
      * 「启用能力策略」。那也得真的发不出去——否则页面上关着、实际能用，
      * 是最坏的一种不一致。
      */
-    const extra = planDenyTools(t, [...denyExtra, ...forcedDenyTools(cfg, capStore.get())]);
-    const deny = [...new Set([...base, ...(extra.ok ? extra.deny : [])])];
+    const forced = forcedDenyTools(cfg, capStore.get());
+    const extra = planDenyTools(t, [...denyExtra, ...forced]);
+    /** 输出通道硬保证：能力策略没启用时这条旧路同样要保住发言出口 */
+    const deny = protectOutputTools(
+      [...new Set([...base, ...(extra.ok ? extra.deny : [])])],
+      { denyExtra, forceDeny: forced },
+    );
     if (!deny.length) return { ok: false, nothing: true, reason: 'nothing' };
 
     try {
-      return { ok: true, off: t.restrict({ deny }), names: deny };
+      const off = t.restrict({ deny });
+      qqToolRegistry.setDenied(agent, deny);
+      return {
+        ok: true,
+        off: qqToolRegistry.wrapRestore(agent, off),
+        names: deny,
+      };
     } catch (e) {
       return { ok: false, reason: `${e?.message || e}（清单：${deny.join('、')}）` };
     }
@@ -982,6 +1004,8 @@ export function apply(ctx) {
         const chat = { kind: 'c2c', chatId: owner, name: '主动搭话', preset: 'roost-private' };
         const { agent } = await agentFor(chat);
         mount(agent, chat);
+        /** 工具是异步挂的：等挂完再开这一轮，否则第一轮拿到的工具清单是空的 */
+        await qqToolRegistry.waitFor(agent);
         /**
          * 这一轮没有"正在回的那条消息"，`qq_send` 挂着只会诱导模型调它然后失败。
          *
@@ -1390,6 +1414,8 @@ export function apply(ctx) {
       };
       const { agent } = await agentFor(chat);
       mount(agent, chat);
+      /** 工具是异步挂的：等挂完再开这一轮，否则第一轮拿到的工具清单是空的 */
+      await qqToolRegistry.waitFor(agent);
       /**
        * 巩固是无人值守的后台活：既没有"正在回的消息"，也不能绕过人格限制。
        * 以前这里什么都不收，带 `tools: []` 的人格在凌晨那一轮工具全开。
@@ -1841,6 +1867,8 @@ export function apply(ctx) {
       const chat = { kind: 'c2c', chatId: owner, name: '主动搭话', preset: 'roost-private' };
       const { agent } = await agentFor(chat);
       mount(agent, chat);
+      /** 工具是异步挂的：等挂完再开这一轮，否则第一轮拿到的工具清单是空的 */
+      await qqToolRegistry.waitFor(agent);
       /**
        * 同 speakup 那条路：主动开口没有"正在回的消息"，别让她看见 `qq_send`；
        * 同时叠上人格自己的工具限制（宿主发起的轮次也不能绕过 `tools: []`）。
@@ -2502,8 +2530,14 @@ export function apply(ctx) {
    */
   const qqTurn = new Map();
 
-  /** QQ 动作工具的注册结果 */
-  const qqToolState = { ok: false, names: [], reason: '还没挂' };
+  /**
+   * QQ 动作工具的状态：按 agent 记挂载结果、逐轮收走清单，落盘带会话明细。
+   *
+   * 抽到 `qq-tool-state.js` 是为了能单测：注册竞态、全局状态串味、提示词
+   * 与调用期掩码不同步，这三处 2026-11-10 的线上问题都出在这段逻辑里，
+   * 埋在 `apply()` 闭包内只能靠重启后碰运气验证。
+   */
+  const qqToolRegistry = createQqToolState({ dirOf: dataDir, log: (m) => log.warn(m) });
 
   /**
    * 挂人格 + 权限上下文（每个 agent 只挂一次，内容每轮现读）
@@ -2604,7 +2638,7 @@ export function apply(ctx) {
         };
       };
 
-      registerQqTools({
+      qqToolRegistry.setReady(agent, registerQqTools({
         agent,
         callerOf: () => {
           const c = cur();
@@ -2830,17 +2864,16 @@ export function apply(ctx) {
         log: (m) => log.warn(m),
       })
         .then((r) => {
-          qqToolState.ok = r.ok;
-          qqToolState.names = r.names;
-          qqToolState.reason = r.reason || '';
+          qqToolRegistry.setMounted(agent, chat, r);
           if (r.ok) log.info(`QQ 工具已挂上：${r.names.join('、')}（${r.mode}）`);
           else log.warn(`QQ 工具没挂上：${r.reason}`);
           if (r.off) mountOffs.push(r.off);
         })
         .catch((e) => {
-          qqToolState.reason = e?.message ?? String(e);
-          log.warn(`QQ 工具挂载异常：${qqToolState.reason}`);
-        });
+          const reason = e?.message ?? String(e);
+          qqToolRegistry.setMounted(agent, chat, { ok: false, reason });
+          log.warn(`QQ 工具挂载异常：${reason}`);
+        }));
 
       /**
        * 表情包工具：模型想要图时问一次，拿到真实路径再发。
@@ -2967,74 +3000,15 @@ export function apply(ctx) {
         agent.ctx.systemPrompt.context({
           name: 'roost-qq-tools',
           order: 907,
-          text: () => {
-            if (!qqToolState.ok) return '';
-            /**
-             * 这一轮 `qq_send` 可能已经被收走了（主动搭话 / 人格限制）。
-             *
-             * 提示词还宣称「你手上有两个工具」的话，模型会去调一个不存在的工具，
-             * 失败后按提示 `<<skip>>` —— 一轮模型调用白花。所以按**当前实际**
-             * 工具清单判断；读不到清单就按旧行为，别把正常轮次的分段发言也关掉。
-             */
-            let list = null;
-            try {
-              list = agent?.ctx?.tools?.schemas?.();
-            } catch {}
-            /**
-             * **只有确实拿到清单、且清单里没有 `qq_send` 时**才闭嘴。
-             * 读不到清单（老版本没有 schemas / 调用抛错）要按旧行为把这段留下，
-             * 否则分段发言、表情、@ 会整块消失——比「多一段提示词」严重得多。
-             */
-            const names = Array.isArray(list)
-              ? new Set(list.map((s) => String(s?.name ?? s?.tool?.name ?? '')))
-              : null;
-            if (names && !names.has('qq_send')) return '';
-            /**
-             * 段数上限**必须和 `qq-tools.js` 用同一个值**（`maxPartsOf`）。
-             *
-             * 以前这里写死 3：配置是 5 的时候，模型被告知只能发 3 段（少发两段，
-             * 但至少不报错）；配置是 2 的时候更糟——它按 3 组织内容，第 3 段被工具
-             * 直接拒掉，用户只觉得「话说一半没了」。两处各写一份必然漂，所以共用。
-             */
-            const maxParts = maxPartsOf(cfg, chat.kind);
-            const lines = [
-              '【发言方式】',
-              '你手上有这几个工具：`qq_send`（发一段话）、`qq_close`（给这段对话收尾）'
-                + '，以及（装了的话）`qq_send_file`（发一个文件）。',
-              `· 想说话就调 \`qq_send\`，调几次由你定（一轮最多 ${maxParts} 段）。**别把要发的话写进正文**。`,
-              '· 调过 `qq_send` 之后，你回复的正文**不会**再发出去——正文只当思考用。',
-              '· 聊到自然结束、对方要走的时候，用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后可以不说话。',
-              '· 一个工具都不调时，正文会照常发出去（旧方式）。**不要又调工具又写正文**——那样只发工具那条，正文会被丢掉。',
-              /**
-               * 语音这一条必须说，而且必须点明「只能在正文里」。
-               *
-               * 上面刚说完「别把要发的话写进正文」，而 `<<say>>` 恰恰只能
-               * 写在正文里——不点破这个例外，模型就会把它塞进 `qq_send`，
-               * 结果群里收到一串 `<<say: ...>>` 字面量（2026-11-03 线上真实发生）。
-               *
-               * 只在语音真的开着时说：关着的时候教它写 `<<say>>`，
-               * 等于让它输出一个没人执行、还会漏给用户看的标记。
-               */
-              ...(cfg.tts?.enabled === true
-                ? ['· 想发**语音条**时，把 `<<say: 要念的内容>>` 写在**回复正文**里——'
-                  + '这个标记只有正文能执行，`qq_send` 发不出去（会原样进群）。这种情况别调 `qq_send`。']
-                : []),
-            ];
-            /**
-             * 文件这一条**只在工具真的挂着时**才说。
-             *
-             * 说出来但工具没挂，模型会去调一个不存在的东西，失败后整轮白费；
-             * 反过来，工具挂着却不说，它就完全不知道有这回事，只会答
-             * 「我发不了文件」——这里以前就是这么错过一次的。
-             */
-            if (!names || names.has('qq_send_file')) {
-              lines.push(
-                '· 要发文件（文档、表格、压缩包、图片都算）就调 `qq_send_file`，参数是**绝对路径**，一轮最多一个。'
-                + '路径要来自你确实看到过的文件，别凭印象拼；它发不出去会直接告诉你。',
-              );
-            }
-            return lines.join('\n');
-          },
+          text: () => buildOutputPrompt({
+            mounted: qqToolRegistry.mountedOf(agent),
+            denied: qqToolRegistry.deniedOf(agent),
+            /** 注册清单只作跨版本兜底；本轮能不能用由 denied 决定 */
+            registeredNames: registeredToolNames(agent),
+            /** 段数上限和 qq-tools.js 共用同一个值 */
+            maxParts: maxPartsOf(cfg, chat.kind),
+            ttsEnabled: cfg.tts?.enabled === true,
+          }),
         }),
       );
     } catch (e) {
@@ -3296,6 +3270,8 @@ export function apply(ctx) {
       const { agent, sessionId } = await agentFor(chat);
       sid = sessionId;
       mount(agent, chat);
+      /** 工具是异步挂的：等挂完再开这一轮，否则第一轮拿到的工具清单是空的 */
+      await qqToolRegistry.waitFor(agent);
 
       // 主人自己说话了 → 主动搭话重新排期
       if (chat.kind === 'c2c') speakUp.noteOwner(chat.chatId);
@@ -4268,6 +4244,18 @@ export function apply(ctx) {
           permissions: cfg.permissions,
           lastTurn,
           mood: mood.get(),
+          /**
+           * 概览页用：`turnQueue.stats()` 是排队层（pending / busy / lanes），
+           * 和上面的 `waiting`（turn runner 里等 DSH 事件的轮次）不是一回事，
+           * 两个都给，别拿其中一个冒充另一个。
+           */
+          queue: turnQueue?.stats?.() ?? { busy: 0, pending: 0, lanes: 0 },
+          /** 今日用量。`summary()` 内部有内存缓存，面板 5 秒刷一次不会反复读盘 */
+          today: usage.summary({ days: 1 }).total,
+          /** 工具挂没挂上：对应 `unknown tool` 那类问题，不用再翻 tool-state.json */
+          qqTools: qqToolRegistry.summary(),
+          /** 能力策略接管后 `cfg.permissions` 不再是实际判据，面板要另作标注 */
+          capabilitiesEnabled: capStore.enabled(),
         }),
       ),
 
@@ -5728,7 +5716,7 @@ export function apply(ctx) {
           /** 记忆工具装上了没——静默失败最难查，面板必须看得见 */
           tools: { ...toolState },
           /** QQ 动作工具（qq_send / qq_close）装上了没，同样要看得见 */
-          qqTools: { ...qqToolState },
+          qqTools: qqToolRegistry.summary(),
           /** 分开给：调注入时最常搞混的就是"这段到底进 system 还是进用户消息" */
           memoryStaticText: memoryStatic(forced),
           memoryDynamicText: memoryDynamic(),
@@ -6899,6 +6887,8 @@ export function apply(ctx) {
           const chat = { kind: 'c2c', chatId: 'selftest', name: '自测', preset: 'roost-private' };
           const { agent } = await agentFor(chat);
           mount(agent, chat);
+          /** 工具是异步挂的：等挂完再开这一轮，否则第一轮拿到的工具清单是空的 */
+          await qqToolRegistry.waitFor(agent);
           /** 自测也没有"正在回的消息"，同样要收走 qq 工具、并叠上人格限制；也不计入使用次数 */
           const cut = restrictTurnTools(agent, {
             mode: 'all',
