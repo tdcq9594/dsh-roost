@@ -25,9 +25,10 @@ import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf, speakerTag } from './inbound.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools } from './permissions.js';
 import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
-import { resolvePolicy, dangerOf, BUCKETS } from './capabilities.js';
+import { resolvePolicy, dangerOf, BUCKETS, defaultStore } from './capabilities.js';
 import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting } from './features.js';
 import { createCapabilityStore } from './capability-store.js';
+import { createExtGroups } from './ext-groups.js';
 import { createQuota, QUOTA_DEFAULTS } from './quota.js';
 import { createSetup } from './setup.js';
 import { maxPartsOf } from './qq-tools.js';
@@ -344,7 +345,19 @@ export function apply(ctx) {
        * 返回的 deny 全部来自 pool，调用方自己拼名字迟早混进不存在的项，
        * 而 `tools.restrict` 一个名字不认识就整批拒绝（0.10.10 那次）。
        */
-      const forced = forcedDenyTools(cfg, capStore.get(), pool);
+      const capNow = capStore.get();
+      /**
+       * 方案 C′（扩展机制 1.3）：`capabilities.json` 的 `forceDeny` 是跨档
+       * 硬否决的持久化位置（面板「一键收紧」/ 市场 `revoked[]` 撤回写它）。
+       * 和「功能开关关掉」那批字面名合并后一起传进 `resolvePolicy()`；
+       * 里面允许 `mcp__bili__*` 这类通配，策略层会按最终工具名匹配。
+       *
+       * 注意 `protectOutputTools()` 下游按**字面名**判 `explicit`，通配
+       * `forceDeny:['qq_*']` 不会把 `qq_send` 标成「显式收走」；两层的
+       * 判定标准不同，但结果都落在 `PINNED_KEEP` 的输出通道硬保证上，
+       * 不是权限放大。别把通配硬否决理解成能收走发言工具。
+       */
+      const forced = [...new Set([...forcedDenyTools(cfg, capNow, pool), ...(capNow.forceDeny || [])])];
 
       /**
        * 20:42「群友能否用 chat_look 做成能力页开关，默认关」：
@@ -613,6 +626,8 @@ export function apply(ctx) {
    * `capabilities.json`（面板上点「启用」）才接管收工具。
    */
   const capStore = createCapabilityStore({ dir: dataDir(), log });
+  /** 影子权限组：只在能力页未启用时存声明，启用时由下面的 handler 合进 seed。 */
+  const extGroups = createExtGroups({ dir: dataDir(), log });
 
   /**
    * 次数配额。跟着数据目录走，和 `capabilities.json` 平级。
@@ -4347,8 +4362,38 @@ export function apply(ctx) {
                   allow: legacy === 'all' ? ['*'] : [...GUEST_KEEP_TOOLS],
                 };
               }
-              capStore.init(seed);
-              return send(res, 200, { ok: true, message: '已启用，下一条消息开始生效', enabled: true, store: capStore.get() });
+              /**
+               * 8b 主落点（§10.9 用产品真实模块实证 21/21）：把影子组合进
+               * `init(seed)` 的 seed。两处都必须是**追加**：
+               *   · `groups` 要 `{...defaultStore().groups, ...shadow.groups}` ——
+               *     `init()` 是顶层浅合并，直接 `seed.groups = shadow.groups` 会把
+               *     默认的 mcp / files / ops / github 四组整块冲掉；
+               *   · `member.allow` / `admin.allow` 只 push 缺的引用，不整档替换，
+               *     否则会冲掉上面刚由 `cfg.permissions` 迁移出来的白名单。
+               * 不改这里的后果：启用能力页后 `member.allow` 里没有
+               * `group:ext_bili`，扩展工具对非 owner 档**静默 deny**（P1 断档已复现），
+               * 而且不会报「分组不存在」——那只在有引用缺定义时才出现。
+               */
+              const shadow = extGroups.seedParts();
+              seed.groups = { ...defaultStore().groups, ...shadow.groups };
+              for (const ref of shadow.memberAllow) {
+                if (!seed.defaults.member.allow.includes(ref)) seed.defaults.member.allow.push(ref);
+              }
+              for (const t of shadow.adminAllow) {
+                if (!seed.defaults.admin.allow.includes(t)) seed.defaults.admin.allow.push(t);
+              }
+              const merged = capStore.init(seed);
+              /**
+               * 已启用时 `init()` 直接 `return get()`，seed 不生效。这里做一次
+               * **只补缺失**的对账，覆盖「备份只还原了 capabilities.json、
+               * 影子组丢了」的场景；绝不覆盖用户手改收紧过的配置。
+               */
+              const fix = extGroups.reconcile(merged);
+              if (fix) capStore.patch(fix);
+              const finalStore = capStore.get();
+              const refs = extGroups.validateReferences(finalStore);
+              if (!refs.ok) log.warn(`能力页：悬空的扩展组引用 ${refs.missing.join('、')}`);
+              return send(res, 200, { ok: true, message: '已启用，下一条消息开始生效', enabled: true, store: finalStore });
             }
 
             /**

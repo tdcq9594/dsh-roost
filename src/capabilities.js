@@ -158,6 +158,15 @@ export function defaultStore() {
     danger: ['edit', 'write', 'pwsh', 'ops_bash', 'qq_send_file', 'mcp__*__*_exec', 'mcp__*__*_edit'],
     /** 上次看到的 pool，用来算「新增 / 失效」 */
     seen: { tools: {}, skills: {}, lastScan: 0 },
+    /**
+     * 跨档硬否决（方案 C′，扩展机制 1.3）。
+     *
+     * 面板「一键收紧」与市场 `revoked[]` 撤回写这里；`defaults[bk].deny`
+     * 只约束本档。支持 `mcp__bili__*` 这类通配，按**最终工具名**匹配。
+     * 原来的 `forceDeny` 只是 `resolvePolicy()` 的调用期入参，没有持久化位置，
+     * 而且被 `poolSet.has()` 预筛丢了通配 —— 这个字段补的就是那个落点。
+     */
+    forceDeny: [],
   };
 }
 
@@ -311,9 +320,16 @@ export function resolvePolicy({ pool, bucket, chatId = '', store, personaTools, 
 
   // ① 档位基线：**累加**这一档和所有更低的档（见 accumulateAllow）
   const acc = accumulateAllow(S, bk);
-  const rawAllow = acc.deny.length
-    ? acc.allow.filter((n) => !acc.deny.some((p) => matchPattern(n, p)))
-    : acc.allow;
+  /**
+   * 方案 C′（扩展机制 1.3）：这里**不再**用 `acc.deny` 过滤字面 allow 条目。
+   *
+   * 旧写法有两个漏洞：① `group:ext_bili` 这类条目是字符串，deny 的通配
+   * 匹配不到，展开之后照样放行；② `acc.deny` 是「这一档 + 所有更低档」的
+   * 累加，低档的 deny 会连坐高档。判定统一挪到 ⑤.5，按展开后的最终工具名
+   * 一次过滤，且只取当前档的 deny（见 §4.2 / §10.7-bis）。
+   * `accumulateAllow()` 本身不动，它返回的 deny 仍供面板展示继承来源。
+   */
+  const rawAllow = acc.allow;
   const exp = expandAllow(rawAllow, pool, S.groups);
   let allow = exp.allow;
   warnings.push(...exp.warnings);
@@ -359,16 +375,11 @@ export function resolvePolicy({ pool, bucket, chatId = '', store, personaTools, 
     unknown.push(...add.unknown);
     for (const n of add.allow) allow.add(n);
     /**
-     * 群级 `deny` 也走通配匹配，和 `allowAdd` 对齐。
-     *
-     * 以前这里是 `allow.delete(n)`，只认字面名——用户写 `gh_*` 想把这个群的
-     * GitHub 工具全禁掉，结果一个都没禁。而 `allowAdd` 支持分组和通配，
-     * 一个支持一个不支持，是最容易让人以为「配置没生效」的那种不对称。
+     * 方案 C′：群级 deny 不再在这里过滤，统一交给 ⑤.5 的 deny-first 一次判定。
+     * 放在 `allowAdd` 之前过滤会被 `allowAdd` 重新加回来（deny 被 allow 覆盖），
+     * 与「deny 不被 allow 覆盖」的硬约束相反；现在它和档位 deny、forceDeny
+     * 一起，在所有 allow 来源都加完之后按最终工具名过滤。
      */
-    const denyList = (Array.isArray(chat.deny) ? chat.deny : []).filter((x) => typeof x === 'string' && x);
-    if (denyList.length) {
-      allow = new Set([...allow].filter((n) => !denyList.some((p) => matchPattern(n, p))));
-    }
   }
 
   // ④ 与人格求交：人格只能收窄。
@@ -403,14 +414,29 @@ export function resolvePolicy({ pool, bucket, chatId = '', store, personaTools, 
   for (const n of pinnedDeny) allow.delete(n);
 
   /**
-   * ⑤.5 功能关闭 → 强制收走。
+   * ⑤.5 deny-first 统一判定（方案 C′，扩展机制 1.3）。
    *
-   * 必须排在钉住项**之后**：`PINNED_KEEP` 会把 `qq_send` 之类加回来，
-   * 而「分段发言」关了的时候它本来就该消失。顺序反了就是功能开关失灵，
-   * 且看不出来（页面上关着，工具还在）。
+   * 必须排在所有 allow 来源之后 —— 钉住项、`allowAdd`、`forceAllow` 都会
+   * 把工具加回来，过滤早了就白挡。「功能关闭 → 强制收走」也在这里：
+   * 排在 `PINNED_KEEP` 之后，否则 `qq_send` 被钉住项加回来会盖过开关。
+   *
+   * 三条来源合并成一组模式，按**最终工具名**用 `matchPattern` 过滤：
+   *   · `defaults[bk].deny` —— 只取当前档，低档 deny 不再连坐高档
+   *   · `chat.deny`         —— 群级，与 allowAdd 对齐、支持通配
+   *   · `forceDeny`         —— 功能开关 + `capabilities.json` 持久化的跨档硬否决
+   *
+   * 关键：`forceDeny` 不再做 `poolSet.has()` 预筛。那条预筛会把
+   * `mcp__bili__*` 这种通配**字符串**丢掉，而它根本不是工具名。
    */
-  const forced = (Array.isArray(forceDeny) ? forceDeny : []).filter((n) => poolSet.has(n));
-  for (const n of forced) allow.delete(n);
+  const forced = (Array.isArray(forceDeny) ? forceDeny : []).filter((x) => typeof x === 'string' && x);
+  const denyPatterns = [
+    ...(Array.isArray(S.defaults?.[bk]?.deny) ? S.defaults[bk].deny : []),
+    ...(chat && !chat.chatOnly && Array.isArray(chat.deny) ? chat.deny : []),
+    ...forced,
+  ].filter((x) => typeof x === 'string' && x);
+  if (denyPatterns.length) {
+    allow = new Set([...allow].filter((n) => !denyPatterns.some((p) => matchPattern(n, p))));
+  }
 
   // ⑥ 只保留 pool 里真有的名字；其余记为「失效」，不参与 restrict
   const removed = [...new Set([...unknown, ...[...allow].filter((n) => !poolSet.has(n))])].filter(
@@ -512,6 +538,11 @@ export function normalizeStore(raw) {
   out.features = raw.features && typeof raw.features === 'object' && !Array.isArray(raw.features)
     ? Object.fromEntries(Object.entries(raw.features).filter(([, v]) => typeof v === 'boolean'))
     : {};
+  // 方案 C′：跨档硬否决是配置字段了，坏值一律退回空数组（fail-closed 的
+  // 另一面 —— 这里宁可少挡，也不能让一个字符串把整份策略变成不可解析）。
+  out.forceDeny = Array.isArray(raw.forceDeny)
+    ? [...new Set(raw.forceDeny.filter((x) => typeof x === 'string' && x))]
+    : [];
   return out;
 }
 

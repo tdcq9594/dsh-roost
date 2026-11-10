@@ -46,7 +46,12 @@ const MAX_UNPACKED = 512 * 1024 * 1024;  // 解包总量上限，挡 zip 炸弹
 const STORE_EXT = /\.(png|jpe?g|gif|webp|mp3|mp4|m4a|ogg|opus|webm|zip|7z|rar|pth|index|onnx|safetensors|wav|bin)$/i;
 
 /** 不进备份的东西：备份自身、恢复暂存、日志、缓存、依赖。 */
-const SKIP = ['backups', '.restore', '.restore-pending.json', 'logs', 'tmp', 'voice-cache', 'archive-cache'];
+const SKIP = [
+  'backups', '.restore', '.restore-pending.json', 'logs', 'tmp',
+  'voice-cache', 'archive-cache',
+  /** 方案 L：一扩展一令牌的明文，进 E4 包等于把长期凭据复制到备份文件 */
+  'secrets',
+];
 
 /**
  * 例外：D11 `purge` 留下的行级备份要**进统一包格式**（§3③），否则换电脑
@@ -70,6 +75,12 @@ export function safeRel(rel) {
 export function shouldSkip(rel) {
   if (RETENTION_BACKUP.test(rel)) return false; // 行级备份是唯一放行的备份目录条目
   if (SKIP.some((s) => rel === s || rel.startsWith(s + '/'))) return true;
+  /**
+   * 扩展原子落位的暂存 `.<id>.installing` 与回滚残留 `.<id>.old`：
+   * 名字里带 id，SKIP 的精确/前缀匹配管不到，按路径段形状判。
+   * `walk()` 不按点目录通用跳过，不显式排除会把半成品一起打包。
+   */
+  if (rel.split('/').some((s) => /^\.[^/]*\.(installing|old)$/.test(s))) return true;
   if (rel.split('/').includes('node_modules')) return true;
   if (rel.endsWith('.tmp') || rel.endsWith('.sqlite-wal') || rel.endsWith('.sqlite-shm')) return true;
   return false;
