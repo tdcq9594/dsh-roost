@@ -144,6 +144,12 @@ function rmrf(p) {
 export function createExtRegistry({ dir = dataDir(), log = () => {} } = {}) {
   const root = extensionsDir(dir);
 
+  /**
+   * §3.5 ①：usage 的**唯一运行期数据源**。section 的 `text()` 每轮 assembly
+   * 都会被调用，只读这张内存表（零 IO）；写盘只发生在下面的失效钩子里。
+   */
+  const usageCache = new Map();
+
   const pathOf = (id) => join(root, id);
   const sourcePathOf = (id) => join(pathOf(id), SOURCE_FILE);
 
@@ -160,6 +166,37 @@ export function createExtRegistry({ dir = dataDir(), log = () => {} } = {}) {
     if (!EXT_ID_RE.test(id)) return null;
     const v = validateManifest(readJson(join(pathOf(id), MANIFEST_FILE)), { expectedId: id });
     return v.ok ? v.manifest : null;
+  }
+
+  /** 清单里 `usage?: string` 可选覆盖自动文案；自动文案由 name + description 生成。 */
+  function usageFromManifest(m) {
+    return typeof m.usage === 'string' && m.usage.trim()
+      ? m.usage
+      : `${m.name}：${m.description}`;
+  }
+
+  /**
+   * §3.5 ① 的失效钩子：面板保存 usage / 安装 / 更新 / 卸载 / 启动加载清单后调用。
+   * 这里读一次盘，把结果放进内存；`liveUsage()` 之后完全不碰文件。
+   */
+  function refreshUsage(id) {
+    if (!EXT_ID_RE.test(id)) {
+      usageCache.delete(id);
+      return '';
+    }
+    const m = read(id);
+    if (!m) {
+      usageCache.delete(id);
+      return '';
+    }
+    const raw = usageFromManifest(m);
+    usageCache.set(id, raw);
+    return raw;
+  }
+
+  /** 只认内存表。没刷新过的 id 返回空串，绝不偷偷读文件。 */
+  function liveUsage(id) {
+    return usageCache.get(id) ?? '';
   }
 
   /** 扫描时跳过所有点开头目录：`.<id>.installing` / `.<id>.old` 不算已装扩展。 */
@@ -179,7 +216,16 @@ export function createExtRegistry({ dir = dataDir(), log = () => {} } = {}) {
         log.warn?.(`扩展 ${ent.name} 清单无效，跳过：${v.errors.join('；')}`);
         continue;
       }
+      // 启动加载清单 = §3.5 ① 的三个失效时机之一。只补 cache 里还没有的，
+      // 避免每次 list() 都重复读盘；面板改过的不被覆盖。
+      if (!usageCache.has(ent.name)) usageCache.set(ent.name, usageFromManifest(v.manifest));
       out.push({ id: ent.name, manifest: v.manifest, dir: join(root, ent.name), source: sourceOf(ent.name), foreign: isForeign(ent.name) });
+    }
+    // 只清「目录确实消失」的 usage。清单瞬时无效（手改到一半 / 写回瞬间 / 文件锁）
+    // 时保留 cache，别让面板刚改过的说明被一次扫描打回默认文案；目录恢复后
+    // 上面的 `!usageCache.has()` 分支也不会覆盖它，要生效请走 refreshUsage()。
+    for (const id of [...usageCache.keys()]) {
+      if (!out.some((x) => x.id === id) && !exists(pathOf(id))) usageCache.delete(id);
     }
     return out.sort((a, b) => a.id.localeCompare(b.id));
   }
@@ -253,6 +299,9 @@ export function createExtRegistry({ dir = dataDir(), log = () => {} } = {}) {
         throw e;
       }
       rmrf(old);
+      // 直接用二次校验过的清单填 cache，别再读一次目标文件：落位刚 rename 完，
+      // 若此刻读盘恰好失败，会出现「install 成功但 usage 为空」的窗口。
+      usageCache.set(id, usageFromManifest(v.manifest));
       return { ok: true, id, manifest: v.manifest, dir: dest, foreign: !source };
     } catch (e) {
       rmrf(staging);
@@ -268,8 +317,9 @@ export function createExtRegistry({ dir = dataDir(), log = () => {} } = {}) {
     if (!exists(dest)) return { ok: false, reason: `扩展 ${id} 不存在` };
     if (isForeign(id)) return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝卸载` };
     rmrf(dest);
+    usageCache.delete(id);
     return { ok: true, id };
   }
 
-  return { dir, root, list, read, sourceOf, isForeign, install, remove, pathOf };
+  return { dir, root, list, read, sourceOf, isForeign, install, remove, pathOf, liveUsage, refreshUsage };
 }
