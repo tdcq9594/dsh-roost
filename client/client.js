@@ -7208,6 +7208,26 @@ select.roost-input{color-scheme:dark}
       const [drafts, setDrafts] = useState({})
       const [saving, setSaving] = useState('')
       const [confirmClear, setConfirmClear] = useState(false)
+      /** 市场默认不自动拉：进设置页就打网络会让面板看起来卡住，改成手动「加载市场」。 */
+      const [market, setMarket] = useState(null)
+      const [marketBusy, setMarketBusy] = useState('')
+      const loadMarket = async (refresh = false) => {
+        setMarketBusy('list')
+        try {
+          const r = await EXT_POST('extensions.market.list', { refresh })
+          setMarket(r)
+          if (!r.ok) toast(r.message || '市场索引拉取失败')
+        } finally { setMarketBusy('') }
+      }
+      const marketAct = async (op, id) => {
+        setMarketBusy(id)
+        try {
+          const r = await EXT_POST(op, { id })
+          toast(r.message || (r.ok ? '完成' : '失败'))
+          await load()
+          if (market) await loadMarket(true)
+        } finally { setMarketBusy('') }
+      }
       const load = async () => {
         const r = await EXT_POST('extensions.get')
         setData(r)
@@ -7240,6 +7260,46 @@ select.roost-input{color-scheme:dark}
           ? h('div', { className: 'roost-note', style: { color: 'var(--warn)' } },
               `✓ ${data.status.hintRegenerated}：备份还原后 secrets 缺失，宿主已补发新令牌；旧令牌立即 401。`)
           : null,
+        h('div', { className: 'roost-note', style: { marginTop: 8 } },
+          '市场：复用 qq-bot-roost-plugins 的索引，只列 kind=dsh-extension 的条目；装之前会按索引 sha256 校验目录，对不上不落位。',
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: marketBusy === 'list',
+              onClick: () => loadMarket(true),
+            }, marketBusy === 'list' ? '拉取中…' : '加载市场'),
+            market?.repo ? h('span', { className: 'roost-code' }, `${market.repo}@${market.branch}`) : null,
+          ),
+          market && !market.ok
+            ? h('div', { style: { color: 'var(--bad)', marginTop: 4 } }, market.message || '索引拉取失败')
+            : null,
+          (market?.rows || []).length
+            ? h('div', { className: 'roost-list', style: { marginTop: 6 } },
+                market.rows.map((x) => h('div', { key: x.id, className: 'roost-item' },
+                  h('span', { className: 't' },
+                    `${x.name} · ${x.id}`,
+                    h('span', { className: 'd' }, ` · ${x.transport}${x.author ? ` · ${x.author}` : ''}`),
+                    x.revoked ? h('span', { className: 'd', style: { color: 'var(--bad)' } }, ' · 已撤回') : null,
+                    x.updateAvailable ? h('span', { className: 'd', style: { color: 'var(--warn)' } }, ' · 有更新') : null,
+                  ),
+                  x.description ? h('span', { className: 'd' }, x.description) : null,
+                  x.revoked
+                    ? h('span', { className: 'd' }, '拒绝安装')
+                    : h('button', {
+                        type: 'button', className: 'roost-btn', style: { marginTop: 6 },
+                        disabled: marketBusy === x.id || x.foreign,
+                        onClick: () => marketAct('extensions.market.install', x.id),
+                      }, x.foreign ? '用户手写 · 不覆盖' : x.installed ? (x.updateAvailable ? '更新' : '重装') : '安装'),
+                  x.installed && !x.foreign
+                    ? h('button', {
+                        type: 'button', className: 'roost-btn', style: { marginTop: 6, marginLeft: 6 },
+                        disabled: marketBusy === x.id,
+                        onClick: () => marketAct('extensions.market.remove', x.id),
+                      }, '卸载')
+                    : null,
+                )),
+              )
+            : (market ? h('div', { className: 'roost-empty' }, '市场里还没有扩展条目。') : null),
+        ),
         (data?.rows || []).length
           ? h('div', { className: 'roost-list' },
               data.rows.map((x) => h('div', { key: x.id, className: 'roost-item' },

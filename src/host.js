@@ -53,6 +53,8 @@ import { createAgentV1 } from './agent-v1.js';
 import { createExtMemoryStore } from './ext-memory-store.js';
 import { createExtMemory } from './ext-memory.js';
 import { createExtPanel, createRejectionLog } from './ext-panel.js';
+import { createExtPatch } from './ext-patch.js';
+import { createExtMarket } from './ext-market.js';
 import { pickModelFor, pickReasoningEffort } from './model-pick.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing, shouldNotePending } from './closing.js';
@@ -1132,6 +1134,20 @@ export function apply(ctx) {
   /** 阶段 5：拒绝事件日志 + 面板聚合。两者都是旁路，写失败不影响扩展本体。 */
   extRejections = createRejectionLog({ dir: dataDir(), log });
   const onReject = (entry) => extRejections.record(entry);
+  /**
+   * 受管块：市场安装/卸载后按「当前已装 id」整块重算 `cordis.patch.yml`。
+   * `findProfileDir()` 在非 DSH 环境里可能找不到 profile（测试 / 单机裸跑），
+   * 那时市场只是不写配置文件——不能因此让整个插件激活失败。
+   */
+  let extPatch = null;
+  try {
+    extPatch = createExtPatch({ dir: dataDir(), log });
+  } catch (e) {
+    log.warn?.(`受管块模块不可用（市场安装将不写 cordis.patch.yml）：${e?.message ?? e}`);
+  }
+  const extMarket = createExtMarket({
+    dir: dataDir(), registry: extRegistry, extGroups, extPatch, capStore, log,
+  });
   const extPanel = createExtPanel({
     dir: dataDir(), registry: extRegistry, clientStore: extClientStore,
     capStore, secrets: extSecrets, rejections: extRejections, quota,
@@ -4507,6 +4523,30 @@ export function apply(ctx) {
             case 'extensions.status': {
               return send(res, 200, extPanel.status());
             }
+            /**
+             * 阶段 6 市场：索引 → 下载校验 → 原子落位 → 权限组 → 受管块。
+             * 全部走 `extMarket` 编排；安装/卸载真要联网与写盘，因此只有面板显式点击才会到这里。
+             */
+            case 'extensions.market.list': {
+              const r = await extMarket.list({ refresh: arg?.refresh === true });
+              return send(res, 200, r);
+            }
+            case 'extensions.market.install': {
+              const r = await extMarket.install(arg?.id);
+              return send(res, r.ok ? 200 : 400, r);
+            }
+            case 'extensions.market.remove': {
+              const r = extMarket.remove(arg?.id);
+              return send(res, r.ok ? 200 : 400, r);
+            }
+            case 'extensions.market.updates': {
+              return send(res, 200, await extMarket.detectUpdates());
+            }
+            case 'extensions.market.revoke': {
+              const r = extMarket.revoke(arg?.id, { reason: arg?.reason });
+              return send(res, r.ok ? 200 : 400, r);
+            }
+
             /**
              * 设置页「只清扩展记忆」：阶段 4 台账留的 5.2 待办。破坏性操作要显式 confirm，
              * 且只删 ext-memory/ 下的单文件，不碰 memory.json / 三个宿主清空动作。

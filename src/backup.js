@@ -51,6 +51,9 @@ const SKIP = [
   'voice-cache', 'archive-cache',
   /** 方案 L：一扩展一令牌的明文，进 E4 包等于把长期凭据复制到备份文件 */
   'secrets',
+  /** 市场安装的暂存目录（`.market-tmp/<id>`）：随时可重建，没必要进包；
+   *  Windows 目录被占用时 rm 会静默失败，留残留也不该被备份带走。 */
+  '.market-tmp',
 ];
 
 /**

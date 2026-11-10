@@ -173,7 +173,12 @@ export function createExtPanel({
         truncated: Array.from(usage).length > USAGE_CHAR_LIMIT,
         foreign: Boolean(e.foreign),
         locallyModified,
-        sha256Valid: Boolean(e.manifest?.sha256) && !locallyModified,
+        /**
+         * 市场装的扩展清单里**没有** sha256（哈希记在 `.source.json`），
+         * 只读清单会让「校验和有效」永远不显示。两个来源取或，再用
+         * `locallyModified` 兜住「编辑过就不算有效」。
+         */
+        sha256Valid: Boolean(e.manifest?.sha256 || e.source?.sha256) && !locallyModified,
         label: locallyModified ? LOCALLY_MODIFIED_LABEL : '',
         hasToken: secrets ? Boolean(secrets.read(e.id)?.token) : null,
       };
