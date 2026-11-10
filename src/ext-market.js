@@ -20,8 +20,13 @@ import fs from 'node:fs';
 import { join } from 'node:path';
 
 import { dataDir } from './config.js';
-import { EXT_ID_RE } from './ext-registry.js';
+import { EXT_ID_RE, MANIFEST_FILE, sensitiveScopesOf } from './ext-registry.js';
 import { hashDir, extractTarGz, pickSubtree, writeFiles, rmrfSync } from './ext-bundle.js';
+
+/** 读一份 JSON：读不到返回 null（清单损坏时按「没有 scope 声明」处理，不崩）。 */
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
 
 export const EXT_KIND = 'dsh-extension';
 export const DEFAULT_EXT_INDEX_URL = 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json';
@@ -207,7 +212,7 @@ export function createExtMarket({
    * 安装一条。顺序固定：撤回 → foreign → 下载 → 哈希 → 落位 → 权限 → 受管块。
    * 后两步失败不回滚扩展本体（已经装好了，删掉反而更糟），以 `warnings` 返回。
    */
-  async function install(id) {
+  async function install(id, { confirmScopes = false } = {}) {
     const key = String(id ?? '');
     if (!EXT_ID_RE.test(key)) return { ok: false, reason: 'bad_id', message: '扩展 id 不合法' };
 
@@ -241,6 +246,24 @@ export function createExtMarket({
       if (got !== want) {
         throw new Error(`目录哈希与索引不一致（索引 ${want.slice(0, 12)}…，实际 ${got.slice(0, 12)}…）`);
       }
+      /**
+       * 敏感 scope 必须主人确认。
+       *
+       * 清单是扩展作者写的，索要 `say:write` / `proactive:write` 就等于
+       * 「装上后能以机器人身份往外说话」。一键装不能顺带把授权也点了 ——
+       * 这里在落位前拦一道，把要授什么原样报给面板。
+       */
+      const staged = readJson(join(staging, MANIFEST_FILE));
+      const sens = sensitiveScopesOf(staged);
+      if (sens.length && confirmScopes !== true) {
+        return {
+          ok: false,
+          reason: 'needs_scope_confirm',
+          scopes: sens,
+          message: `扩展「${key}」索要这些权限：${sens.join('、')}；确认后才安装`,
+        };
+      }
+
       const r = registry.install(staging, {
         source: {
           repo: idx.repo ?? '',

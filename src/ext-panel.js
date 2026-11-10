@@ -181,6 +181,17 @@ export function createExtPanel({
         sha256Valid: Boolean(e.manifest?.sha256 || e.source?.sha256) && !locallyModified,
         label: locallyModified ? LOCALLY_MODIFIED_LABEL : '',
         hasToken: secrets ? Boolean(secrets.read(e.id)?.token) : null,
+        /**
+         * 这个扩展的令牌**实际**拿到哪些 scope。
+         *
+         * 必须显示：清单可以声明，但装的时候主人可能没确认（或清单后来改了），
+         * 面板不展示的话，出问题只能靠 401/403 一条条试。
+         * `null` = 还没发令牌（不是「没有权限」）。
+         */
+        scopes: (() => {
+          const rec = clientStore?.get?.(`ext:${e.id}`);
+          return Array.isArray(rec?.scopes) ? [...rec.scopes] : null;
+        })(),
       };
     });
     return { ok: true, enabled: enabled(), rows: out, totalBytes: out.reduce((n, r) => n + r.bytes, 0) };

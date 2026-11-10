@@ -43,7 +43,20 @@ const CONNECT_ERR = {
 export async function postReply(payload, text, done = true, extra = {}) {
   const url = payload?.reply?.url;
   const token = payload?.reply?.token;
-  if (!url) throw new Error('payload 里没有回话地址');
+
+  /**
+   * 没有回话地址时的回退：`/v1/message` 投递的消息来自扩展，它没有 ai-chat 的
+   * 回话窗口（`payload.reply` 是空的），但**回复仍要送回同一个 target**。
+   * 调用方在 payload 里放一个 `__channel.send(text)`，这里转交给它。
+   *
+   * 这个分支只在该函数存在时生效，正常入站（有 `reply.url`）一行都不变。
+   * 也刻意**不接受**外部传 URL —— `reply.url` 是 HTTP 地址，外部可控就是 SSRF 面。
+   */
+  if (!url) {
+    const send = payload?.__channel?.send;
+    if (typeof send === 'function') return await send(String(text ?? ''));
+    throw new Error('payload 里没有回话地址');
+  }
   if (!token) throw new Error('payload 里没有回话令牌');
 
   let u;

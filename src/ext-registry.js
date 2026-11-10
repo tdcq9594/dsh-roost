@@ -26,6 +26,42 @@ export const EXT_KIND = 'dsh-extension';
 export const SOURCE_FILE = '.source.json';
 export const MANIFEST_FILE = 'plugin.json';
 
+/**
+ * 扩展令牌的 scope 策略。
+ *
+ * 默认**只给两件**：写自己的记忆（`memory:write`）+ 读状态心情（`state:read`）。
+ * 发消息、主动消息、开会话这些必须由扩展在清单里声明、主人在安装时显式确认 ——
+ * 默认值一旦放宽，等于「装上就能以机器人身份往外说话」。
+ *
+ * ⚠️ `EXT_ALLOWED_SCOPES` 必须与 `api-v1.js` 的 `V1_SCOPES` 逐项一致，
+ * 由 `test/ext-scopes.test.js` 断言（放在测试里而不是 import，避免循环依赖）。
+ */
+export const EXT_DEFAULT_SCOPES = Object.freeze(['memory:write', 'state:read']);
+
+export const EXT_ALLOWED_SCOPES = Object.freeze([
+  'message:write', 'say:write', 'state:read', 'context:read',
+  'memory:read', 'memory:write', 'proactive:write', 'session:write',
+  'prompt:write', 'agent:write',
+]);
+
+/** 会对外产生可见动作（说话 / 刷屏 / 改人格 / 开会话）的 scope，安装时必须主人点头。 */
+export const EXT_SENSITIVE_SCOPES = Object.freeze([
+  'message:write', 'say:write', 'proactive:write', 'session:write', 'prompt:write', 'agent:write',
+]);
+
+/** 去重 + 过滤未知项；结果为空时退回默认（绝不返回「无 scope 但令牌有效」这种半吊子态）。 */
+export function normalizeScopes(list) {
+  if (!Array.isArray(list)) return [...EXT_DEFAULT_SCOPES];
+  const clean = [...new Set(list.filter((s) => typeof s === 'string' && EXT_ALLOWED_SCOPES.includes(s)))];
+  return clean.length ? clean : [...EXT_DEFAULT_SCOPES];
+}
+
+/** 清单声明的 scope 里，哪些需要主人确认。 */
+export function sensitiveScopesOf(manifest) {
+  const want = Array.isArray(manifest?.scopes) ? manifest.scopes : [];
+  return want.filter((s) => EXT_SENSITIVE_SCOPES.includes(s));
+}
+
 /** 官方 `dsh-credentials/lib/index.js:13` 的 REF_PATTERN，短横线必须规范化。 */
 const REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -107,6 +143,18 @@ export function validateManifest(raw, { expectedId } = {}) {
     errors.push('streamable-http 的 url 必须是回环地址');
   }
   if (Object.hasOwn(m, 'env')) errors.push('清单不许自带 env 键（方案 L：env 由宿主注入）');
+  /**
+   * scope 声明：扩展要什么权限必须写在这里，装的时候主人确认。
+   * 未知项直接拒 —— 写错一个字母就静默少一个权限，比报错更难查。
+   */
+  if (m.scopes !== undefined) {
+    if (!Array.isArray(m.scopes) || m.scopes.some((x) => typeof x !== 'string')) {
+      errors.push('scopes 必须是字符串数组');
+    } else {
+      const bad = m.scopes.filter((x) => !EXT_ALLOWED_SCOPES.includes(x));
+      if (bad.length) errors.push(`scopes 含未知项：${bad.join('、')}（允许：${EXT_ALLOWED_SCOPES.join('、')}）`);
+    }
+  }
   if (m.mounts !== undefined && (!Array.isArray(m.mounts) || m.mounts.some((x) => typeof x !== 'string'))) {
     errors.push('mounts 必须是字符串数组');
   }
@@ -307,7 +355,8 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       // 否则面板会以为目录还在回滚、实际却已装好；只记 warn，由 G3 的 401 暴露。
       let tokenIssued = false;
       if (secrets && clientStore) {
-        try { secrets.issue(id, clientStore); tokenIssued = true; }
+        // scope 来自清单声明；没写就是默认的两件（写自己记忆 + 读状态）。
+        try { secrets.issue(id, clientStore, { scopes: v.manifest.scopes }); tokenIssued = true; }
         catch (e) { log.warn?.(`扩展 ${id} 令牌生成失败：${e?.message ?? e}`); }
       }
       return { ok: true, id, manifest: v.manifest, dir: dest, foreign: !source, tokenIssued };
@@ -429,14 +478,14 @@ export function createExtSecrets({ dir = dataDir(), log = () => {} } = {}) {
     try { fs.chmodSync(fileOf(id), 0o600); } catch { /* 平台差异 */ }
   }
 
-  function issue(id, store) {
+  function issue(id, store, { scopes } = {}) {
     if (!EXT_ID_RE.test(id)) throw new Error(`扩展 id 不合法：${id}`);
     const token = randomBytes(32).toString('base64url');
     const ref = credentialRef(id);
     writeSecret(id, token, ref);
     const client = {
       id: `ext:${id}`, name: `扩展 ${id}`, hash: sha256(token),
-      scopes: ['memory:write'], extId: id, enabled: true, createdAt: Date.now(),
+      scopes: normalizeScopes(scopes), extId: id, enabled: true, createdAt: Date.now(),
     };
     store?.add(client);
     return { token, ref, hash: client.hash, client };
@@ -447,8 +496,13 @@ export function createExtSecrets({ dir = dataDir(), log = () => {} } = {}) {
     fileOf,
     read: readSecret,
     issue,
-    rotate(id, store) {
-      const r = issue(id, null);
+    rotate(id, store, opts = {}) {
+      /**
+       * 轮换必须**保持原 scope**：从 api.clients 现有记录读，读不到才用清单/默认。
+       * 否则一次轮换会把主人刚授的 `say:write` 悄悄收回去，扩展突然 403。
+       */
+      const cur = store?.get?.(`ext:${id}`)?.scopes;
+      const r = issue(id, null, { scopes: Array.isArray(cur) && cur.length ? cur : opts.scopes });
       store?.rotate(`ext:${id}`, r.hash);
       return r;
     },
@@ -463,7 +517,13 @@ export function createExtSecrets({ dir = dataDir(), log = () => {} } = {}) {
     ensure(id, store) {
       if (readSecret(id)?.token) return { regenerated: false };
       log.warn?.(`扩展 ${id} 的 secrets 缺失，已重新生成令牌`);
-      return { regenerated: true, ...issue(id, store) };
+      /**
+       * 重建时**沿用 api.clients 里现有的 scope**：备份还原只丢了 secrets，
+       * 授权记录还在。若在这里回退到默认，主人当初授的 `say:write` 会被
+       * 静默收回，扩展恢复后突然 403，而面板只会说「令牌已重新生成」。
+       */
+      const cur = store?.get?.(`ext:${id}`)?.scopes;
+      return { regenerated: true, ...issue(id, store, { scopes: cur }) };
     },
   };
 }

@@ -28,6 +28,7 @@
 |---|---|
 | `kind` | 固定 `dsh-extension`；框架插件不应带这个值 |
 | `transport` | `stdio` 或 `streamable-http` |
+| `scopes` | 扩展要用的权限，可选。**不写 = 只有 `memory:write` + `state:read`**；`say:write` / `proactive:write` / `message:write` 等属于敏感项，安装时必须由主人二次确认。未知项会被拒。 |
 | `mounts` | **保留字段**：当前版本只做类型校验，尚未接到 `restrictTurnTools` |
 | `memory` | **保留字段**：`onClear` / `maxRows` 由 store 读取但安装时不会写入；`visibility` 未映射到 ACL |
 | `usage` | 可选，覆盖自动生成的能力说明（单条上限 **200 字**、全部合计 **2048 字节**） |
@@ -60,8 +61,8 @@
 
 ## 6. 端点
 
-**「状态」列是硬事实，不是进度暗示**：标 ⛔ 的端点当前恒回 `501 not_implemented`，
-调用不会产生任何副作用。标 ✅ 的才是现在能用的。
+**「状态」列是硬事实，不是进度暗示**：✅ 的才是能用的；⛔ 的当前恒回 `501 not_implemented`
+（已预留路由与鉴权，只差业务）；🚫 是**设计上不开放**给扩展的，不会随版本变成可用。
 
 | 方法 | 路径 | scope | 状态 | 说明 |
 |---|---|---|---|---|
@@ -69,20 +70,20 @@
 | GET | `/v1/agent.list` | `agent:write` | ✅ 可用 | 列出当前开着的独立会话 |
 | POST | `/v1/agent.new` | `agent:write` | ✅ 可用 | 开一个独立 Agent 会话（游戏裁判这类无 QQ 身份的场景） |
 | POST | `/v1/agent.prompt` | `agent:write` | ✅ 可用 | 给独立会话发一轮；默认 SSE 流式 |
-| GET | `/v1/context` | `context:read` | ⛔ 501 未接线 | 读当前会话的上下文摘要（条数、窗口占用） |
-| GET | `/v1/memory` | `memory:read` | ⛔ 501 未接线 | 读当前会话的记忆（列表形态） |
-| POST | `/v1/memory` | `memory:write` | ⛔ 501 未接线 | 往**当前会话**的记忆里写一条 |
+| GET | `/v1/context` | `context:read` | ✅ 可用 | 读当前会话的上下文摘要（条数、窗口占用） |
+| GET | `/v1/memory` | `memory:read` | ✅ 可用 | 读当前会话的记忆（列表形态） |
+| POST | `/v1/memory` | `memory:write` | ✅ 可用 | 往**当前会话**的记忆里写一条 |
 | POST | `/v1/memory/ext.add` | `memory:write` | ✅ 可用 | 往**扩展自己的命名空间**写一条（extId 由令牌决定，body 自报无效） |
-| POST | `/v1/message` | `message:write` | ⛔ 501 未接线 | 把一条消息送进 QQ（复用现有入站链路，不另写一条） |
-| GET | `/v1/mood` | `state:read` | ⛔ 501 未接线 | 读当前心情 |
-| POST | `/v1/proactive` | `proactive:write` | ⛔ 501 未接线 | 排一条主动消息（受清醒时段与频次约束） |
-| POST | `/v1/say` | `say:write` | ⛔ 501 未接线 | 让机器人主动说一句；`pending` 表示进审核，不是已发出 |
-| POST | `/v1/session.configure` | `prompt:write` | ⛔ 501 未接线 | 改会话配置（模型、人格、工具开关） |
-| POST | `/v1/session.ensure` | `session:write` | ⛔ 501 未接线 | 确保会话存在 |
-| GET | `/v1/state` | `state:read` | ⛔ 501 未接线 | 读机器人与当前会话的状态（在线、绑定、档位） |
+| POST | `/v1/message` | `message:write` | ✅ 可用 | 把一条消息送进 QQ（复用现有入站链路，不另写一条） |
+| GET | `/v1/mood` | `state:read` | ✅ 可用 | 读当前心情 |
+| POST | `/v1/proactive` | `proactive:write` | ✅ 可用 | 排一条主动消息（受清醒时段与频次约束） |
+| POST | `/v1/say` | `say:write` | ✅ 可用 | 让机器人主动说一句；`pending` 表示进审核，不是已发出 |
+| POST | `/v1/session.configure` | `prompt:write` | 🚫 设计不开放 | 改会话配置（模型、人格、工具开关） |
+| POST | `/v1/session.ensure` | `session:write` | ✅ 可用 | 确保会话存在 |
+| GET | `/v1/state` | `state:read` | ✅ 可用 | 读机器人与当前会话的状态（在线、绑定、档位） |
 | GET | `/v1/whoami` | （任意有效令牌） | ✅ 可用 | 回显令牌身份（不含 hash / 明文） |
 
-> 未接线的 10 条端点已预留路由与鉴权（scope 校验、限频、幂等都在生效），
+> 未接线的 0 条端点已预留路由与鉴权（scope 校验、限频、幂等都在生效），
 > 只差业务实现。第三方可以先按此契约开发，但**不要**把它们当成已可用能力。
 
 ### 幂等与限频

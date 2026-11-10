@@ -15,7 +15,7 @@ import { join } from 'node:path';
 
 import {
   V1_ROUTES, V1_SCOPES, RATE_LIMIT, WINDOW_MS, IDEMPOTENT_TTL_MS, IDEMPOTENT_MAX, MAX_BODY_BYTES,
-  isRouteImplemented,
+  isRouteImplemented, isRouteDesignedOff,
 } from './api-v1.js';
 import { REJECTION_LAYERS, SENSITIVE_SCOPES, LOCALLY_MODIFIED_LABEL } from './ext-panel.js';
 import { EXT_ID_RE, MANIFEST_FILE, SOURCE_FILE } from './ext-registry.js';
@@ -74,6 +74,7 @@ function routeRows() {
       note: ROUTE_NOTES[key],
       /** 按 `isRouteImplemented()` 判，不靠人工维护第二份名单。 */
       ready: isRouteImplemented(key),
+      off: isRouteDesignedOff(key),
     });
   }
   return rows.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
@@ -114,6 +115,7 @@ ${version ? `>\n> 对应版本：\`${version}\`\n` : ''}
 |---|---|
 | \`kind\` | 固定 \`dsh-extension\`；框架插件不应带这个值 |
 | \`transport\` | \`stdio\` 或 \`streamable-http\` |
+| \`scopes\` | 扩展要用的权限，可选。**不写 = 只有 \`memory:write\` + \`state:read\`**；\`say:write\` / \`proactive:write\` / \`message:write\` 等属于敏感项，安装时必须由主人二次确认。未知项会被拒。 |
 | \`mounts\` | **保留字段**：当前版本只做类型校验，尚未接到 \`restrictTurnTools\` |
 | \`memory\` | **保留字段**：\`onClear\` / \`maxRows\` 由 store 读取但安装时不会写入；\`visibility\` 未映射到 ACL |
 | \`usage\` | 可选，覆盖自动生成的能力说明（单条上限 **${USAGE_CHAR_LIMIT} 字**、全部合计 **${USAGE_TOTAL_BYTE_LIMIT} 字节**） |
@@ -137,14 +139,14 @@ ${V1_SCOPES.map((s) => `- \`${s}\`${SENSITIVE_SCOPES.includes(s) ? '（**敏感*
 
 ## 6. 端点
 
-**「状态」列是硬事实，不是进度暗示**：标 ⛔ 的端点当前恒回 \`501 not_implemented\`，
-调用不会产生任何副作用。标 ✅ 的才是现在能用的。
+**「状态」列是硬事实，不是进度暗示**：✅ 的才是能用的；⛔ 的当前恒回 \`501 not_implemented\`
+（已预留路由与鉴权，只差业务）；🚫 是**设计上不开放**给扩展的，不会随版本变成可用。
 
 | 方法 | 路径 | scope | 状态 | 说明 |
 |---|---|---|---|---|
-${rows.map((r) => `| ${r.method} | \`${r.path}\` | ${r.scope === '（任意有效令牌）' ? r.scope : `\`${r.scope}\``} | ${r.ready ? '✅ 可用' : '⛔ 501 未接线'} | ${r.note} |`).join('\n')}
+${rows.map((r) => `| ${r.method} | \`${r.path}\` | ${r.scope === '（任意有效令牌）' ? r.scope : `\`${r.scope}\``} | ${r.ready ? '✅ 可用' : r.off ? '🚫 设计不开放' : '⛔ 501 未接线'} | ${r.note} |`).join('\n')}
 
-> 未接线的 ${rows.filter((r) => !r.ready).length} 条端点已预留路由与鉴权（scope 校验、限频、幂等都在生效），
+> 未接线的 ${rows.filter((r) => !r.ready && !r.off).length} 条端点已预留路由与鉴权（scope 校验、限频、幂等都在生效），
 > 只差业务实现。第三方可以先按此契约开发，但**不要**把它们当成已可用能力。
 
 ### 幂等与限频

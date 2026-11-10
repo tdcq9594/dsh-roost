@@ -14,7 +14,8 @@ import os from 'node:os';
 import { join } from 'node:path';
 
 import {
-  createApiV1, V1_ROUTES, V1_SCOPES, V1_IMPLEMENTED_HOOKS, V1_BUILTIN_ROUTES, isRouteImplemented,
+  createApiV1, V1_ROUTES, V1_SCOPES, V1_IMPLEMENTED_HOOKS, V1_BUILTIN_ROUTES,
+  V1_DESIGNED_OFF, isRouteImplemented, isRouteDesignedOff,
 } from '../src/api-v1.js';
 import { createClientStore, createExtSecrets, createExtRegistry, EXT_KIND } from '../src/ext-registry.js';
 
@@ -88,7 +89,13 @@ test('G3-2 403：scope 不足 / 扩展令牌调 agent.* 与 say 被硬隔离', a
   const f = fixture(t);
   assert.equal((await call(f.api, 'POST', '/v1/say', { token: f.issued.token })).status, 403);
   assert.equal((await call(f.api, 'POST', '/v1/agent.new', { token: f.issued.token })).status, 403);
-  assert.equal((await call(f.api, 'GET', '/v1/state', { token: f.issued.token })).status, 403);
+  /**
+   * 阶段 8 起扩展令牌默认带 `state:read`（读状态心情是安全能力），
+   * 所以 `/v1/state` 不再被 403 拦；这里 501 是因为本测试的 fixture
+   * 只传了部分 hook —— 真实宿主里是 200。关键断言是：**不是 403**。
+   */
+  const st = await call(f.api, 'GET', '/v1/state', { token: f.issued.token });
+  assert.notEqual(st.status, 403, '默认 scope 含 state:read，不该再被拒');
   // 非扩展客户端拿到对应 scope 后可以调用，说明按 scope 判定而非一刀切。
   const other = f.secrets.issue('other', f.store);
   f.store.add({ ...f.store.get('ext:other'), extId: null, scopes: ['state:read'] });
@@ -164,7 +171,8 @@ test('G3-7 api.clients 只存 hash；明文只在 secrets/<id>.json', (t) => {
   const sec = JSON.parse(fs.readFileSync(secretPath, 'utf8'));
   assert.equal(sec.token, f.issued.token);
   assert.equal(sec.ref, 'ROOST_EXT_BILI_TOKEN');
-  assert.equal(f.store.get('ext:bili').scopes.join(), 'memory:write');
+  // 默认 scope：写自己记忆 + 读状态（阶段 8 起的策略）
+  assert.equal(f.store.get('ext:bili').scopes.join(), 'memory:write,state:read');
 });
 
 test('G3-8 吊销生效；轮换后旧令牌 401、新令牌可用', async (t) => {
@@ -216,20 +224,19 @@ test('G3-10 install 自动发令牌、remove 自动吊销（ext-registry 接线�
  * 501。第三方照着文档开发，写完才发现一半端点不通。这条断言把「未接线清单」
  * 钉成快照：接一条就少一条，测试会红，逼着同步文档与 `V1_IMPLEMENTED_HOOKS`。
  */
-test('自查：未接线端点清单是硬快照（10 条 501），文档状态列跟着走', () => {
+test('自查：未接线端点清单是硬快照（只剩设计上不开放的 session.configure）', () => {
   const notReady = Object.keys(V1_ROUTES).filter((k) => !isRouteImplemented(k)).sort();
   assert.deepEqual(notReady, [
-    'GET /v1/context',
-    'GET /v1/memory',
-    'GET /v1/mood',
-    'GET /v1/state',
-    'POST /v1/memory',
-    'POST /v1/message',
-    'POST /v1/proactive',
-    'POST /v1/say',
     'POST /v1/session.configure',
-    'POST /v1/session.ensure',
   ], '接线一条就更新这份快照，并重跑 build-ext-docs');
+
+  // 「未接线」与「设计不开放」必须分开：后者不会随版本变可用，不该被当成待办
+  assert.deepEqual([...V1_DESIGNED_OFF], ['POST /v1/session.configure']);
+  for (const key of V1_DESIGNED_OFF) {
+    assert.ok(key in V1_ROUTES, `V1_DESIGNED_OFF 里的「${key}」不在路由表`);
+    assert.equal(isRouteDesignedOff(key), true);
+    assert.equal(isRouteImplemented(key), false, '设计不开放的不能同时算已实现');
+  }
 
   // 已实现的 hook 必须真在路由表里被用到，不能是死名单
   for (const name of V1_IMPLEMENTED_HOOKS) {

@@ -7223,7 +7223,20 @@ select.roost-input{color-scheme:dark}
       const marketAct = async (op, id) => {
         setMarketBusy(id)
         try {
-          const r = await EXT_POST(op, { id })
+          let r = await EXT_POST(op, { id })
+          /**
+           * 扩展索要敏感权限（`say:write` / `proactive:write` 之类）：后端**不肯**
+           * 直接装，回 `needs_scope_confirm`。这里必须把「要授什么」摆出来让用户
+           * 点第二次，绝不自动带 `confirmScopes:true` 重试 —— 那样等于一键装顺带授权。
+           */
+          if (r?.reason === 'needs_scope_confirm') {
+            const list = (r.scopes || []).join('、')
+            const ok = typeof window !== 'undefined' && window.confirm
+              ? window.confirm(`扩展「${id}」索要这些权限：\n\n${list}\n\n授权后它能以机器人身份执行对应动作（发消息 / 主动发言等）。确认安装？`)
+              : false
+            if (!ok) { toast('已取消安装（未授权）'); return }
+            r = await EXT_POST(op, { id, confirmScopes: true })
+          }
           toast(r.message || (r.ok ? '完成' : '失败'))
           await load()
           if (market) await loadMarket(true)
@@ -7312,6 +7325,10 @@ select.roost-input{color-scheme:dark}
                   h('span', { className: 'd' }, x.foreign ? ' · 用户手写' : ' · 市场装'),
                   x.locallyModified ? h('span', { className: 'd', style: { color: 'var(--warn)' } }, ` · ${x.label}`) : null,
                   x.sha256Valid ? h('span', { className: 'd' }, ' · 校验和有效') : null,
+                  /** 令牌实际拿到的 scope：清单写的和实际授的可能不一样，必须看得见。 */
+                  h('span', { className: 'd' }, x.scopes
+                    ? ` · 权限：${x.scopes.length ? x.scopes.join('、') : '（无）'}`
+                    : ' · 权限：尚未发令牌'),
                 ),
                 h('textarea', {
                   className: 'roost-input', rows: 2, style: { width: '100%', marginTop: 6 },

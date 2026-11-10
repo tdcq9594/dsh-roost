@@ -68,7 +68,20 @@ export const V1_ROUTES = {
  * ⚠️ 加 hook 时**三处一起改**：`V1_ROUTES`、这里的名单、`host.js` 的 `hooks`，
  * 并同步 `test/api-v1.test.js` 的 501 清单快照 —— 漏一处测试会红。
  */
-export const V1_IMPLEMENTED_HOOKS = Object.freeze(['agent', 'memory.ext.add']);
+export const V1_IMPLEMENTED_HOOKS = Object.freeze([
+  'agent', 'memory.ext.add',
+  'message', 'say', 'state', 'mood', 'context',
+  'memory.read', 'memory.write', 'proactive', 'session.ensure',
+]);
+
+/**
+ * **设计上不开放**给扩展的端点（不是「还没做」）。
+ *
+ * `session.configure` 能改人格与模型 —— 等于让扩展改机器人的行为方式。
+ * 收益（扩展替用户省一次点击）与风险（人格被改写、模型被换掉）不成比例，
+ * 所以明确不开放，面板与文档都按「设计不开放」展示，避免被当成待办。
+ */
+export const V1_DESIGNED_OFF = Object.freeze(['POST /v1/session.configure']);
 
 /** 不依赖 hook、在 `handle()` 里内联实现的端点。 */
 export const V1_BUILTIN_ROUTES = Object.freeze(['GET /v1/whoami']);
@@ -79,6 +92,11 @@ export function isRouteImplemented(key) {
   if (!route) return false;
   if (V1_BUILTIN_ROUTES.includes(key)) return true;
   return Boolean(route.hook) && V1_IMPLEMENTED_HOOKS.includes(route.hook);
+}
+
+/** 这条路由是「设计上不开放」，而不是「尚未实现」。 */
+export function isRouteDesignedOff(key) {
+  return V1_DESIGNED_OFF.includes(key);
 }
 
 /** `agent.*` 不能被扩展令牌调用：scope 硬隔离（§5.4）。 */
@@ -234,8 +252,14 @@ export function createApiV1({
     }
 
     try {
+      /**
+       * `query` 必须一起交给 hook：`GET /v1/context?chatId=g1` 这类端点没有
+       * body，只传 `body` 会让它们永远判「缺 chatId」回 400 —— 而且错得很像
+       * 「参数没写对」，实际是实现漏了一层。
+       */
+      const query = Object.fromEntries(url.searchParams ?? []);
       // `agent.prompt` 是 SSE：hook 自己写响应头与流，本模块不 send JSON。
-      const out = await hook({ key, pathname, method: req.method, body: payload, client, req, res, send });
+      const out = await hook({ key, pathname, method: req.method, body: payload, query, client, req, res, send });
       if (res?.writableEnded || res?.headersSent) return;
       const status = Number(out?.status) || 200;
       const data = out?.body ?? { ok: true };

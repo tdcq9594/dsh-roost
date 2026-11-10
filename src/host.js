@@ -53,6 +53,7 @@ import { createAgentV1 } from './agent-v1.js';
 import { createExtMemoryStore } from './ext-memory-store.js';
 import { createExtMemory } from './ext-memory.js';
 import { createExtPanel, createRejectionLog } from './ext-panel.js';
+import { createExtApiHooks } from './ext-api-hooks.js';
 import { createExtPatch } from './ext-patch.js';
 import { createExtMarket } from './ext-market.js';
 import { pickModelFor, pickReasoningEffort } from './model-pick.js';
@@ -1190,6 +1191,32 @@ export function apply(ctx) {
     installedIds: () => extRegistry.list().map((x) => x.id),
     onReject,
   });
+  /**
+   * `/v1` 业务端点（阶段 8，把自查出来的「10 条恒 501」补上）。
+   *
+   * 依赖一律包成**函数**再传：`memory` / `journal` / `channels` / `aliasesOf`
+   * 都声明在本行之后，直接传值会在创建时求值、撞 TDZ；hook 是运行期才调用的，
+   * 闭包求值时它们已经就绪。
+   */
+  const extApiHooks = createExtApiHooks({
+    cfgOf: () => cfg,
+    moodOf: () => mood.get(),
+    moodTextOf: () => mood.text(),
+    memoryOf: () => memory,
+    journalOf: () => journal,
+    aliasesOf: (chatId) => aliasesOf(chatId),
+    capStoreOf: () => capStore,
+    channelOf: () => channels,
+    speakUpOf: () => speakUp,
+    agentFor: (chat) => agentFor(chat),
+    mount: (agent, chat) => mount(agent, chat),
+    onInbound: (p) => onInbound(p),
+    bucketOfFn: bucketOf,
+    lastBucketOf: () => lastBucket,
+    setupOf: () => setup,
+    log,
+  });
+
   const apiV1 = createApiV1({
     dir: dataDir(), log, clientStore: extClientStore, onReject,
     hooks: {
@@ -1199,6 +1226,7 @@ export function apply(ctx) {
         status: 200,
         body: await extMemory.writeFromApi({ extId: body.extId, fact: body.fact ?? body.text, body }),
       }),
+      ...extApiHooks,
     },
   });
   /**
@@ -4554,7 +4582,8 @@ export function apply(ctx) {
               return send(res, 200, r);
             }
             case 'extensions.market.install': {
-              const r = await extMarket.install(arg?.id);
+              // 清单索要敏感 scope 时返回 needs_scope_confirm，面板确认后再带 true 重试。
+              const r = await extMarket.install(arg?.id, { confirmScopes: arg?.confirmScopes === true });
               return send(res, r.ok ? 200 : 400, r);
             }
             case 'extensions.market.remove': {
