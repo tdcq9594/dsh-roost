@@ -46,6 +46,10 @@ import { memoryLines } from './memory-line.js';
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { offpeakState } from './offpeak.js';
+import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
+import { mountUsageSections, mountToolOutputBudget } from './ext-usage.js';
+import { createApiV1 } from './api-v1.js';
+import { createAgentV1 } from './agent-v1.js';
 import { pickModelFor, pickReasoningEffort } from './model-pick.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing, shouldNotePending } from './closing.js';
@@ -1090,6 +1094,59 @@ export function apply(ctx) {
   const mounted = new WeakSet();
   /** mount() 挂上去的取消函数。不能在 mount 里调 ctx.onTeardown，见下面注释 */
   const mountOffs = [];
+
+  /**
+   * 扩展运行期（阶段 3）：一份实例贯穿插件生命周期。
+   *
+   * `/v1` 挂在 `createInboundServer` 的同一个端口上（受管块的
+   * `ROOST_API_URL` 就是按 `server.port` 生成的），**不走 `route()` 的
+   * `fence()` 面板鉴权**：扩展拿的是 Bearer 客户端令牌，不是面板密钥。
+   * 独立会话的 `agent.*` 由 `agentV1` 提供，其余 `/v1` 业务端点按方案
+   * 排在阶段 4 / 5，骨架阶段未接线时明确回 501。
+   */
+  const extClientStore = createClientStore({ dir: dataDir(), log });
+  const extSecrets = createExtSecrets({ dir: dataDir(), log });
+  const extRegistry = createExtRegistry({ dir: dataDir(), log, secrets: extSecrets, clientStore: extClientStore });
+  /**
+   * 运行期**不用** `createExtUsage()` 聚合入口：它的 offs 是单个 Set，多 agent
+   * 场景无法按会话撤销、关会话后还会留下条目。这里各模块自管 disposer ——
+   * QQ usage 收进 `mount()` 的 offs，独立会话过滤收进 `agent-v1.js` 的
+   * `rec.offs`，工具输出预算收进 mountOffs，撤销路径各自唯一。
+   */
+  const agentV1 = createAgentV1({ dir: dataDir(), ctx, log });
+  const apiV1 = createApiV1({
+    dir: dataDir(), log, clientStore: extClientStore,
+    hooks: { agent: (a) => agentV1.handleHook(a) },
+  });
+  /**
+   * persist 快照恢复（§6.3「恢复后按 id 拉回并重新注册 section」）。
+   * `ctx.agents` 是延迟激活的服务（P2 探针约 3.5s 后才可用），所以排到后面；
+   * timer 用 unref 不阻进程退出，teardown 里清掉，失败只 warn 不拖崩激活。
+   */
+  const restoreTimer = setTimeout(() => {
+    void agentV1.restore().catch((e) => log.warn?.(`独立会话恢复失败：${e?.message ?? e}`));
+  }, 3500);
+  restoreTimer.unref?.();
+  mountOffs.push(() => clearTimeout(restoreTimer));
+  // E4 备份包不含 secrets/，还原后按清单补发令牌并更新 hash（§5.4 第 5 条）。
+  for (const ext of extRegistry.list()) {
+    try {
+      if (extSecrets.ensure(ext.id, extClientStore).regenerated) {
+        log.info?.(`扩展 ${ext.id} 的令牌已在备份还原后重新生成`);
+      }
+    } catch (e) {
+      // 补令牌要写盘；磁盘满 / 权限错不能把整个插件激活拖崩（§5.4:614）。
+      // 补不上就走 401 + ext.auth_failed，扩展工具不可用但宿主照常跑。
+      log.warn?.(`扩展 ${ext.id} 的令牌补发失败：${e?.message ?? e}`);
+    }
+  }
+  // 工具输出 4 KB 预算注册在宿主 ctx：waterfall 自己按 exec.agent 分 scope。
+  // 老版本 DSH 没有该事件时只记 warn，绝不让插件激活失败。
+  try {
+    mountOffs.push(mountToolOutputBudget(ctx));
+  } catch (e) {
+    log.warn?.(`工具输出预算未挂载：${e?.message ?? e}`);
+  }
 
   /**
    * 当前这一轮是谁在说话。
@@ -2562,6 +2619,18 @@ export function apply(ctx) {
     const offs = [];
 
     /**
+     * 阶段 3.3：QQ 会话的 usage section 正向挂载（§3.5 ①）。
+     * 独立 Agent 会话**不挂** usage（§9-#19），只在 `agent-v1.js` 里挂 B 过滤。
+     * disposer 收进本轮的 offs，随 `mountOffs` 在插件 teardown 整组撤销。
+     */
+    try {
+      const usage = mountUsageSections(agent.ctx, extRegistry, { log });
+      offs.push(() => usage.dispose());
+    } catch (e) {
+      log.warn?.(`扩展 usage section 未挂载：${e?.message ?? e}`);
+    }
+
+    /**
      * 记忆工具（第 2 批 M2）：给她两把"拉"的手。
      *
      * 挂在这里而不是插件的 ctx：`agent.ctx.tools` 是每轮都在用的那个
@@ -3970,6 +4039,8 @@ export function apply(ctx) {
       onInbound,
       onTts: (text) => tts.synthesize(text),
       onTtsStatus: () => tts.status(),
+      /** `/v1` 控制面：鉴权在 `api-v1.js` 内，不走这里的共享密钥 auth()。 */
+      onV1: (req, res, url, helpers) => apiV1.handle(req, res, url, helpers),
       log: (m) => log.info(m),
       /**
        * bind 成功后：写租约 + 同步 ai-chat。
@@ -6996,6 +7067,13 @@ export function apply(ctx) {
         } catch {}
       }
       mountOffs.length = 0;
+      /**
+       * 阶段 3.3：插件卸载 / HMR 时关掉全部独立会话。官方 practices 明确
+       * 「unloading the plugin does not dispose agent.ctx registrations by
+       * itself」——漏了这一步，旧 listener 会留在还活着的 agent 上。
+       */
+      try { void agentV1.dispose().catch((e) => log.warn?.(`独立会话清理失败：${e?.message ?? e}`)); }
+      catch (e) { log.warn?.(`独立会话清理异常：${e?.message ?? e}`); }
     };
   }, 'dsh-roost: 面板接口');
   } catch (e) {

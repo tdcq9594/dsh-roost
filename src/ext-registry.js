@@ -15,6 +15,7 @@
  */
 
 import fs from 'node:fs';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { basename, join, resolve } from 'node:path';
 
 import { dataDir } from './config.js';
@@ -141,7 +142,7 @@ function rmrf(p) {
   if (exists(p)) fs.rmSync(p, { recursive: true, force: true });
 }
 
-export function createExtRegistry({ dir = dataDir(), log = () => {} } = {}) {
+export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = null, clientStore = null } = {}) {
   const root = extensionsDir(dir);
 
   /**
@@ -302,7 +303,14 @@ export function createExtRegistry({ dir = dataDir(), log = () => {} } = {}) {
       // 直接用二次校验过的清单填 cache，别再读一次目标文件：落位刚 rename 完，
       // 若此刻读盘恰好失败，会出现「install 成功但 usage 为空」的窗口。
       usageCache.set(id, usageFromManifest(v.manifest));
-      return { ok: true, id, manifest: v.manifest, dir: dest, foreign: !source };
+      // 方案 L：安装即发一扩展一令牌。令牌生成失败不把「已落位」说成安装失败，
+      // 否则面板会以为目录还在回滚、实际却已装好；只记 warn，由 G3 的 401 暴露。
+      let tokenIssued = false;
+      if (secrets && clientStore) {
+        try { secrets.issue(id, clientStore); tokenIssued = true; }
+        catch (e) { log.warn?.(`扩展 ${id} 令牌生成失败：${e?.message ?? e}`); }
+      }
+      return { ok: true, id, manifest: v.manifest, dir: dest, foreign: !source, tokenIssued };
     } catch (e) {
       rmrf(staging);
       if (!keepOld) rmrf(old);
@@ -318,8 +326,144 @@ export function createExtRegistry({ dir = dataDir(), log = () => {} } = {}) {
     if (isForeign(id)) return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝卸载` };
     rmrf(dest);
     usageCache.delete(id);
+    // 删 api.clients 记录 + secrets 文件 = 吊销。删记录失败必须报出来，
+    // 否则「扩展已卸载、旧令牌却还能 verify」是静默的权限残留。
+    if (secrets) {
+      try { secrets.revoke(id, clientStore); }
+      catch (e) { log.warn?.(`扩展 ${id} 令牌吊销失败：${e?.message ?? e}`); }
+      // secrets 文件删了但客户端记录没删 = 旧令牌还能 verify，必须报出来。
+      if (!clientStore) log.warn?.(`扩展 ${id} 缺 clientStore，api.clients 记录未删除`);
+    }
     return { ok: true, id };
   }
 
   return { dir, root, list, read, sourceOf, isForeign, install, remove, pathOf, liveUsage, refreshUsage };
+}
+
+// ---------------------------------------------------------------------------
+// 方案 L 的令牌链路（实施阶段 3.2，§5.4 / §9-#30）
+//
+// 存储分两处，绝不混在一起：
+//   · `<dataDir>/api-clients.json` —— 宿主只存 sha256 hash + scope + extId，可进 E4 包；
+//   · `<dataDir>/secrets/<id>.json` —— 明文 0600，`backup.js` 的 SKIP 已排除，不进 E4 包。
+// 令牌不落 cordis.patch.yml、不进 process.env、不回显给任何接口。
+// ---------------------------------------------------------------------------
+
+export const CLIENTS_FILE = 'api-clients.json';
+const sha256 = (s) => createHash('sha256').update(String(s)).digest('hex');
+
+/** 客户端记录存储。每次 verify 都重读文件 —— 吊销 / 轮换立刻生效，无缓存 stale。 */
+export function createClientStore({ dir = dataDir(), log = () => {} } = {}) {
+  const file = join(dir, CLIENTS_FILE);
+
+  function readAll() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return Array.isArray(raw?.clients) ? raw.clients : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function writeAll(clients) {
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = join(dir, `.${CLIENTS_FILE}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+    fs.writeFileSync(tmp, `${JSON.stringify({ clients }, null, 2)}\n`, 'utf8');
+    fs.renameSync(tmp, file);
+  }
+
+  return {
+    file,
+    list: readAll,
+    get: (id) => readAll().find((c) => c.id === id) ?? null,
+    add(record) {
+      if (!record?.id || !record?.hash) throw new Error('客户端记录缺 id / hash');
+      const all = readAll().filter((c) => c.id !== record.id);
+      all.push(record);
+      writeAll(all);
+      return record;
+    },
+    rotate(id, hash) {
+      const all = readAll();
+      const one = all.find((c) => c.id === id);
+      if (!one) return null;
+      one.hash = hash;
+      writeAll(all);
+      return one;
+    },
+    revoke(id) {
+      const all = readAll();
+      const next = all.filter((c) => c.id !== id);
+      if (next.length === all.length) return false;
+      writeAll(next);
+      return true;
+    },
+    verify(token) {
+      if (typeof token !== 'string' || !token) return null;
+      const hb = Buffer.from(sha256(token), 'utf8');
+      for (const c of readAll()) {
+        if (c.enabled === false) continue;
+        const cb = Buffer.from(String(c.hash ?? ''), 'utf8');
+        if (cb.length === hb.length && timingSafeEqual(cb, hb)) return c;
+      }
+      log.warn?.('ext.auth_failed：令牌未在 api.clients 命中');
+      return null;
+    },
+  };
+}
+
+/** 私有 secrets 与「一扩展一令牌」的生成 / 轮换 / 吊销 / 备份还原重建。 */
+export function createExtSecrets({ dir = dataDir(), log = () => {} } = {}) {
+  const root = secretsDir(dir);
+  const fileOf = (id) => join(root, `${id}.json`);
+  const readSecret = (id) => {
+    try { return JSON.parse(fs.readFileSync(fileOf(id), 'utf8')); } catch { return null; }
+  };
+
+  function writeSecret(id, token, ref) {
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    const tmp = join(root, `.${id}.${randomBytes(4).toString('hex')}.tmp`);
+    fs.writeFileSync(tmp, `${JSON.stringify({ token, ref })}\n`, { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(tmp, fileOf(id));
+    // Windows 会忽略 mode，chmod 失败不算错误；POSIX 上确保 0600。
+    try { fs.chmodSync(fileOf(id), 0o600); } catch { /* 平台差异 */ }
+  }
+
+  function issue(id, store) {
+    if (!EXT_ID_RE.test(id)) throw new Error(`扩展 id 不合法：${id}`);
+    const token = randomBytes(32).toString('base64url');
+    const ref = credentialRef(id);
+    writeSecret(id, token, ref);
+    const client = {
+      id: `ext:${id}`, name: `扩展 ${id}`, hash: sha256(token),
+      scopes: ['memory:write'], extId: id, enabled: true, createdAt: Date.now(),
+    };
+    store?.add(client);
+    return { token, ref, hash: client.hash, client };
+  }
+
+  return {
+    root,
+    fileOf,
+    read: readSecret,
+    issue,
+    rotate(id, store) {
+      const r = issue(id, null);
+      store?.rotate(`ext:${id}`, r.hash);
+      return r;
+    },
+    revoke(id, store) {
+      try { fs.rmSync(fileOf(id), { force: true }); } catch { /* 已删 */ }
+      return store?.revoke(`ext:${id}`) ?? true;
+    },
+    /**
+     * E4 备份包不含 secrets/，还原后文件必然缺失：此时**重新生成**令牌并更新
+     * hash（旧 hash 不可逆），面板据此提示「扩展令牌已重新生成」（§5.4 第 5 条）。
+     */
+    ensure(id, store) {
+      if (readSecret(id)?.token) return { regenerated: false };
+      log.warn?.(`扩展 ${id} 的 secrets 缺失，已重新生成令牌`);
+      return { regenerated: true, ...issue(id, store) };
+    },
+  };
 }

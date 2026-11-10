@@ -142,11 +142,19 @@ export function resolveUsageOrder(systemPrompt, log = () => {}) {
   return USAGE_ORDER_FALLBACK;
 }
 
-/** Cordis 的 disposer 可能是函数，也可能是带 dispose() 的 effect 对象。 */
-export async function invokeDisposer(off) {
+/**
+ * Cordis 的 disposer 可能是函数，也可能是带 dispose() 的 effect 对象。
+ * 单个 disposer 抛错不能中断整组撤销 —— 否则后面没撤的 listener 会静默
+ * 残留在活着的 agent 上（§11 坑 3）。
+ */
+export async function invokeDisposer(off, log = () => {}) {
   if (!off) return;
-  if (typeof off === 'function') return await off();
-  if (typeof off.dispose === 'function') return await off.dispose();
+  try {
+    if (typeof off === 'function') return await off();
+    if (typeof off.dispose === 'function') return await off.dispose();
+  } catch (e) {
+    log.warn?.(`disposer 撤销失败（已跳过）：${e?.message ?? e}`);
+  }
 }
 
 async function groupDispose(offs) {
@@ -272,7 +280,14 @@ export function mountToolOutputBudget(ctx, { limit = TOOL_OUTPUT_BYTE_LIMIT, log
   return () => invokeDisposer(off);
 }
 
-/** 聚合入口：阶段 3.3 接 host.js 的 disposer 时用这个统一撤销。 */
+/**
+ * 聚合入口，**只适合单会话夹具 / 一次性脚本**。
+ *
+ * ⚠️ 多 agent 运行期不要用：这里的 `offs` 是单个 Set，关掉一个会话后条目
+ * 仍在、也无法单独撤销。host.js 运行期直接调本文件的三个 `mount*()`，
+ * 各自把 disposer 交给 `mount()` 的 offs / `rec.offs` / `mountOffs`，
+ * 撤销路径唯一（阶段 3.3 复核后定稿）。
+ */
 export function createExtUsage({ registry, log = () => {} } = {}) {
   const offs = new Set();
   const track = (off) => { if (off) offs.add(off); return off; };

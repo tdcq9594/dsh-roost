@@ -132,7 +132,7 @@ export async function postReply(payload, text, done = true, extra = {}) {
  * @param {(msg:string)=>void} [p.log]
  */
 export function createInboundServer({
-  port, ports, token = '', onInbound, onTts, onTtsStatus, onListening, log = () => {},
+  port, ports, token = '', onInbound, onTts, onTtsStatus, onListening, onV1, log = () => {},
 }) {
   const server = createServer(async (req, res) => {
     const send = (code, body) => {
@@ -183,6 +183,21 @@ export function createInboundServer({
 
     if (url.pathname === '/health' && req.method === 'GET') {
       return send(200, { ok: true, plugin: 'dsh-roost' });
+    }
+
+    /**
+     * `/v1` 控制面（阶段 3.1）。**必须排在 `auth()` 之前**：扩展用的是 Bearer
+     * 客户端令牌，不是面板的 X-Roost-Token 共享密钥；拿共享密钥去验扩展会
+     * 401，反过来把扩展令牌放行到面板接口更糟。鉴权全在 `api-v1.js` 内。
+     * `/inbound` 与面板 API 的分支一行未动。
+     */
+    if (url.pathname.startsWith('/v1/') && typeof onV1 === 'function') {
+      try {
+        return await onV1(req, res, url, { send, readJson });
+      } catch (e) {
+        log(`/v1 分发异常：${e?.message ?? e}`);
+        return send(500, { ok: false, error: 'v1_dispatch_error' });
+      }
     }
 
     if (url.pathname === '/capabilities' && req.method === 'GET') {
