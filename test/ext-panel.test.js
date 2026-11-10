@@ -342,6 +342,14 @@ test('G5-14 接线：ext-memory 的 ACL / quota 两层各自落到对应层', as
 
 // ---------------------------------------------------------------- 三处联动互锁
 
+test('G7-7 8h 面板用例：兜底档常驻可见，且前端真的走 extensions.buckets', () => {
+  const client = fs.readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  assert.match(client, /extensions\.buckets/, '能力页要真的请求实际生效档位');
+  assert.match(client, /档位兜底/, '兜底档必须常驻显示，不能只在退化时才出现');
+  assert.match(client, /活跃会话/, '要能看到当前有没有活跃说话人（退化判据）');
+  assert.ok(!client.includes('speakerKnown'), '前端不得自报 speakerKnown（退化由宿主探针判）');
+});
+
 test('G5-15 门 G5 三处联动：staged 清空、JSON_SECTIONS 补 extensions、白名单清空', async () => {
   const root = new URL('../', import.meta.url);
   const { FEATURES } = await import('../src/features.js');

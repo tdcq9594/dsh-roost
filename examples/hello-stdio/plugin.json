@@ -1,0 +1,19 @@
+{
+  "api": 1,
+  "kind": "dsh-extension",
+  "id": "hello-stdio",
+  "serverName": "hello-stdio",
+  "name": "Hello（stdio）",
+  "description": "最小 stdio MCP 扩展示例：一个 hello 工具，零依赖",
+  "usage": "示例扩展：让模型能调一个 hello 工具，用来验证扩展链路通不通",
+  "transport": "stdio",
+  "command": "node",
+  "args": ["server.mjs"],
+  "mounts": ["*"],
+  "memory": {
+    "writeTarget": "ext:hello-stdio",
+    "visibility": "all",
+    "onClear": "keep",
+    "maxRows": 100
+  }
+}

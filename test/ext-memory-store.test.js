@@ -143,6 +143,19 @@ test('G4-10 候选池：默认只搜可见命名空间，all:true 才全搜，�
   assert.deepEqual(extMemoryCandidates(store, { query: '' }), []);
 });
 
+/**
+ * §12 第 13 项变异原本是「固定 `.tmp` 名 → 同 extId 并发写丢更新」。
+ * 实测：读-改-写全同步、`.tmp` 写完立刻 rename，固定名在当前实现里**不会**
+ * 丢更新（真正兜底的是 per-ext 串行队列）。所以这条约束降级成「临时名必须唯一」，
+ * 用静态断言守住 —— 一旦有人把它改回固定名，这里立刻红。
+ */
+test('G7-2 写入临时名必须唯一（防退回固定 .tmp 名）', () => {
+  const src = fs.readFileSync(new URL('../src/ext-memory-store.js', import.meta.url), 'utf8');
+  assert.match(src, /randomUUID\(\)|randomBytes\(/, '临时文件名必须带随机后缀');
+  assert.ok(!/`\.\$\{id\}\.tmp`/.test(src), '不能退回固定 `.<id>.tmp`（并发写会互相覆盖）');
+  assert.match(src, /\$\{process\.pid\}/, '临时名应带进程号，避免多进程撞名');
+});
+
 test('G4-11 listRanked 不读 ext-memory/：静态约束 + 候选池按需', (t) => {
   const memorySrc = fs.readFileSync(new URL('../src/memory.js', import.meta.url), 'utf8');
   assert.ok(!memorySrc.includes('ext-memory'), 'memory.js 不得引用 ext-memory 目录');

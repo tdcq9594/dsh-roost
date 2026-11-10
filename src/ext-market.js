@@ -281,7 +281,20 @@ export function createExtMarket({
      * 索引校验，写进去只会让 DSH 拉起一个必然 401 的进程；§8.3 对手写的
      * 定位是「只读、面板不能卸」，不是代管。需要代管由用户自己加块。
      */
-    const ids = registry.list().filter((x) => !x.foreign).map((x) => x.id).filter((x) => EXT_ID_RE.test(x));
+    const ids = registry.list()
+      .filter((x) => !x.foreign)
+      /**
+       * **只给 stdio 形态写受管块。**
+       *
+       * `streamable-http` 没有可接管的子进程（方案 §5.4 第 6 条：不由宿主注入、
+       * 只给配置片段）。写进受管块会生成 `command: node … ext-launcher.mjs`，
+       * 而 launcher 读到 `transport: 'streamable-http'` 直接 `exit 1` ——
+       * 面板显示「已装」，DSH 那边永远拉不起来，且 `failOnStartupError:false`
+       * 让这个失败只落在日志里。
+       */
+      .filter((x) => (x.manifest?.transport ?? 'stdio') === 'stdio')
+      .map((x) => x.id)
+      .filter((x) => EXT_ID_RE.test(x));
     return extPatch.render(ids, { apply: true });
   }
 

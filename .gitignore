@@ -10,3 +10,6 @@ coverage/
 # 临时导出的提示词 / 调试中间产物，不是仓库内容
 _tmp_*
 _tmp/
+# 变异脚本的中断备份（可能含源码原文），绝不能提交
+.mutate-bak.json
+.mutate-bak.json.tmp

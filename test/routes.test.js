@@ -956,6 +956,29 @@ test('G5-18 /quick 客户端：发放 / 列表不回 hash / 吊销 / 坏 scope 4
   } finally { off?.(); }
 });
 
+test('G7-1 capabilities.init 真合并影子组：启用后 group:ext_bili 存在（8b 主落点 host 级）', async () => {
+  const { call, off, dir } = await bootHost({}, {});
+  try {
+    seedExt(dir, 'bili');
+    // 模拟「市场装完、能力页还没启用」：只有 ext-groups.json
+    mkdirSync(join(dir, 'extensions'), { recursive: true });
+    writeFileSync(join(dir, 'extensions', 'ext-groups.json'), JSON.stringify({
+      version: 1,
+      groups: { ext_bili: { match: ['mcp__bili__*'], label: 'B站' } },
+      memberAllow: ['group:ext_bili'],
+      adminAllow: ['ext_memory_note'],
+    }), 'utf8');
+
+    const r = await extOp(call, 'capabilities.init');
+    assert.equal(r.status, 200);
+    const caps = JSON.parse(readFileSync(join(dir, 'capabilities.json'), 'utf8'));
+    assert.ok(caps.groups.ext_bili, '影子组必须合并进 seed —— 不合并就是启用后群友静默断档');
+    assert.ok(caps.groups.mcp, '默认组不能被影子组整块冲掉');
+    assert.ok(caps.defaults.member.allow.includes('group:ext_bili'));
+    assert.ok(caps.defaults.admin.allow.includes('ext_memory_note'));
+  } finally { off?.(); }
+});
+
 test('G5-21 /quick 清空扩展记忆：要显式确认，只删 ext-memory 单文件', async () => {
   const { call, off, dir } = await bootHost({}, {});
   try {

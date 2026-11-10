@@ -1,0 +1,18 @@
+{
+  "api": 1,
+  "kind": "dsh-extension",
+  "id": "hello-http",
+  "serverName": "hello-http",
+  "name": "Hello（streamable-http）",
+  "description": "最小 streamable-http MCP 扩展示例：同一个 hello 工具，零依赖",
+  "usage": "示例扩展：用 HTTP 形态提供 hello 工具；这种形态不由宿主注入令牌",
+  "transport": "streamable-http",
+  "url": "http://127.0.0.1:17999/mcp",
+  "mounts": ["*"],
+  "memory": {
+    "writeTarget": "ext:hello-http",
+    "visibility": "all",
+    "onClear": "keep",
+    "maxRows": 100
+  }
+}

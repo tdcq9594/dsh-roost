@@ -14,7 +14,10 @@
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",
     "persona-index": "node scripts/build-persona-index.mjs",
-    "persona-index:check": "node scripts/build-persona-index.mjs --check"
+    "persona-index:check": "node scripts/build-persona-index.mjs --check",
+    "ext-docs": "node scripts/build-ext-docs.mjs",
+    "ext-docs:check": "node scripts/build-ext-docs.mjs --check",
+    "mutate": "node scripts/mutate.mjs"
   },
   "dsh": {
     "bundle": {
@@ -51,7 +54,9 @@
     "cordis.patch.yml",
     "README.md",
     "docs",
-    "LICENSE"
+    "LICENSE",
+    "examples",
+    "scripts/build-ext-docs.mjs"
   ],
   "repository": {
     "type": "git",

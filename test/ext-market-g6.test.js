@@ -222,6 +222,49 @@ test('G6-H 受管块只写市场装的：用户手写目录不进块', async () 
     '手写目录没有 secrets，写进受管块只会让 DSH 拉起一个必然 401 的进程；需要代管由用户自己加');
 });
 
+test('G6-I streamable-http 扩展不进受管块（没有可接管的子进程）', async () => {
+  const shaS = await shaFor('bili');
+  // http 形态的夹具：transport + url，其余同 stdio
+  const httpFiles = {
+    'plugin.json': `${JSON.stringify({
+      ...manifest('hello-http'), transport: 'streamable-http', url: 'http://127.0.0.1:17999/mcp', command: undefined, args: undefined,
+    }, null, 2)}\n`,
+    'server.mjs': '// http\n',
+  };
+  const httpShaDir = tmpHome();
+  writeTree(httpShaDir, httpFiles);
+  const shaH = await hashDir(httpShaDir);
+
+  const dir = tmpHome();
+  const profileDir = join(dir, 'profile');
+  fs.mkdirSync(profileDir, { recursive: true });
+  fs.writeFileSync(join(profileDir, 'cordis.patch.yml'), '[]\n', 'utf8');
+  const registry = createExtRegistry({ dir });
+  const extGroups = createExtGroups({ dir });
+  const extPatch = createExtPatch({ dir, profileDir, apiUrl: 'http://127.0.0.1:17321/v1' });
+  const market = createExtMarket({
+    dir, registry, extGroups, extPatch,
+    fetchText: async () => JSON.stringify({
+      repo: 'o/r',
+      plugins: [
+        { id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: shaS, transport: 'stdio' },
+        { id: 'hello-http', kind: 'dsh-extension', path: 'plugins/hello-http', sha256: shaH, transport: 'streamable-http' },
+      ],
+    }),
+    download: async (entry, dest) => writeTree(dest, entry.id === 'hello-http' ? httpFiles : filesFor(entry.id)),
+    log: { info: () => {}, warn: () => {} },
+  });
+  assert.equal((await market.install('bili')).ok, true);
+  assert.equal((await market.install('hello-http')).ok, true);
+
+  const yml = fs.readFileSync(join(profileDir, 'cordis.patch.yml'), 'utf8');
+  assert.match(yml, /id: mcp-bili/, 'stdio 扩展要进受管块');
+  assert.ok(!yml.includes('mcp-hello-http'),
+    'http 形态写进受管块会让 launcher 直接 exit 1（transport 不是 stdio），必须只给配置片段');
+  // 但扩展本身要装好，面板能看到
+  assert.ok(registry.read('hello-http'));
+});
+
 test('G6-G revoked 条目拒装，且不留下暂存目录', async () => {
   const sha = await shaFor('bili');
   const r = await rig([{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: sha }], { revoked: ['bili'] });

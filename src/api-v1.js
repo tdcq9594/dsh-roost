@@ -26,10 +26,13 @@ export const V1_SCOPES = [
   'agent:write',
 ];
 
-const WINDOW_MS = 60_000;
-const RATE_LIMIT = 120;
-const IDEMPOTENT_TTL_MS = 24 * 60 * 60 * 1000;
-const IDEMPOTENT_MAX = 500;
+/** 这些数字导出给 `ext-docs.js` 生成文档：改常量文档就跟着变，`--check` 会抓到没重跑。 */
+export const WINDOW_MS = 60_000;
+export const RATE_LIMIT = 120;
+export const IDEMPOTENT_TTL_MS = 24 * 60 * 60 * 1000;
+export const IDEMPOTENT_MAX = 500;
+/** 请求体上限（字节）。 */
+export const MAX_BODY_BYTES = 1024 * 1024;
 
 /**
  * 路由表。key 是 `METHOD /v1/xxx`；`scope:null` 表示只要令牌有效。
@@ -147,7 +150,7 @@ export function createApiV1({
     }
     let body = {};
     if (req.method === 'POST') {
-      const parsed = await readJson(1024 * 1024);
+      const parsed = await readJson(MAX_BODY_BYTES);
       if (parsed?.error === 'too_large') return send(413, { ok: false, error: 'request_too_large' });
       if (parsed?.error) return send(400, { ok: false, error: 'invalid_json' });
       body = parsed?.value ?? {};
