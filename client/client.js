@@ -1367,12 +1367,21 @@ select.roost-input{color-scheme:dark}
         onClick: () => { set(val); setQPage(0) },
       }, label, h('span', { className: 'n' }, String(n)))
 
-      /** 接入进度上的两个直达按钮：后端 /setup/start 与 /setup/webui 都已存在 */
+      /** 接入进度上的直达按钮：后端 /setup/start、/setup/stop 与 /setup/webui 都已存在 */
       const startRoost = async () => {
         setStarting(true)
         try {
           const r = await post('/setup/start', {})
           toast(r?.ok === false ? `启动失败：${r.message || '未知'}` : (r?.message || 'Roost 已启动'))
+          reload()
+        } finally { setStarting(false) }
+      }
+      /** 在跑的时候同一颗按钮要把 Roost 关掉，别让人只能去别的页找停止 */
+      const stopRoost = async () => {
+        setStarting(true)
+        try {
+          const r = await post('/setup/stop', {})
+          toast(r?.ok === false ? `关闭失败：${r.message || '未知'}` : (r?.message || 'Roost 已关闭'))
           reload()
         } finally { setStarting(false) }
       }
@@ -1436,8 +1445,14 @@ select.roost-input{color-scheme:dark}
             ),
           ),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 } },
-            h('button', { type: 'button', className: 'roost-primary', disabled: starting, onClick: startRoost },
-              starting ? '启动中…' : '一键启动 Roost'),
+            /** 一颗按钮两种含义：没跑就是「启动」，在跑就是「关闭」 */
+            s.running
+              ? h('button', { type: 'button', className: 'roost-btn', disabled: starting,
+                  title: '停掉 Roost 主进程；插件与配置都保留，下次点「一键启动」再起来',
+                  onClick: stopRoost },
+                  starting ? '关闭中…' : '关闭 Roost')
+              : h('button', { type: 'button', className: 'roost-primary', disabled: starting, onClick: startRoost },
+                  starting ? '启动中…' : '一键启动 Roost'),
             h('button', { type: 'button', className: 'roost-btn', onClick: openRoostPanel }, '打开 Roost 面板 ↗'),
             /** 向导入口不能随「五项全绿」消失：组件版本、重新检查、二维码都只在那一页 */
             h('button', { type: 'button', className: 'roost-btn', onClick: () => onGo('setup') },
