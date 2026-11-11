@@ -308,6 +308,17 @@ select.roost-input{color-scheme:dark}
 .roost-item .t{flex:1;min-width:0;word-break:break-word}
 .roost-item .d{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary, inherit)}
 .roost-scroll{max-height:320px;overflow:auto}
+/* 拒绝诊断 / 最近拒绝：标题一行、规则一行（**不能套 .roost-item**）。
+   .roost-item 是横排 flex，.t{flex:1;min-width:0} 会被兄弟 .d{flex:0 0 auto}
+   挤成一个字一行；而 .d 里装的是没有空格的 JSON（{"owner":{"allow":["*"]…}}），
+   自己不换行，还会把整行撑出屏幕（截图里右侧被切掉 + 底部横向滚动条）。
+   2026-11-04 关系确认块、2026-11-05 档位卡都是这个坑，扩展能力页是第三次。 */
+.diag-item{padding:7px 0;border-top:1px solid var(--line-soft);font-size:12.5px;min-width:0}
+.diag-item:first-child{border-top:none;padding-top:2px}
+.diag-item .t{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;min-width:0;word-break:break-word}
+.diag-item > .d{display:block;margin-top:2px;font-size:11px;line-height:1.6;
+  color:var(--dsw-alias-label-tertiary, inherit);overflow-wrap:anywhere;word-break:break-word}
+.diag-item .t .d{opacity:.72;font-size:11px}
 /* 功能开关的分组：标题一行、条目一列。
    **不能套 .roost-item**（它 .t{flex:1} + 兄弟 flex:0 0 auto，标题会被压成一个字一行，
    2026-11-04 在关系确认块上就是这么错的，这次又犯了一遍）。 */
@@ -7183,19 +7194,23 @@ select.roost-input{color-scheme:dark}
         h('div', { className: 'roost-note', style: { marginTop: 8 } },
           '统一「为什么没生效」诊断：五层来源各自可分辨，最近 N 次拒绝带工具名 / 档位 / 命中的规则。',
           h('div', { className: 'roost-list' },
-            (diag?.layers || []).map((L) => h('div', { key: L.id, className: 'roost-item' },
-              h('span', { className: 't' },
-                `${L.label} · 捕获 ${L.events} 次`,
-                L.wired ? '' : h('span', { className: 'd' }, ' · 规则层，实际拦截事件由 guard 记'),
-              ),
-              h('span', { className: 'd' }, (L.rules || []).join('；').slice(0, 220)),
-            )),
+            (diag?.layers || []).map((L) => {
+              const rules = (L.rules || []).join('；').slice(0, 220)
+              return h('div', { key: L.id, className: 'diag-item' },
+                h('div', { className: 't' },
+                  h('span', null, L.label),
+                  h('span', { className: 'd' }, `捕获 ${L.events} 次`),
+                  L.wired ? null : h('span', { className: 'd' }, '规则层，实际拦截事件由 guard 记'),
+                ),
+                rules ? h('div', { className: 'd' }, rules) : null,
+              )
+            }),
           ),
           (diag?.recent || []).length
             ? h('div', { className: 'roost-list' },
-                diag.recent.slice(0, 5).map((r, i) => h('div', { key: i, className: 'roost-item' },
-                  h('span', { className: 't' }, `${r.tool} · ${r.bucket}`),
-                  h('span', { className: 'd' }, ` · ${EXT_LAYER_LABEL[r.layer] || r.layer}：${r.rule}`),
+                diag.recent.slice(0, 5).map((r, i) => h('div', { key: i, className: 'diag-item' },
+                  h('div', { className: 't' }, `${r.tool} · ${r.bucket}`),
+                  h('div', { className: 'd' }, `${EXT_LAYER_LABEL[r.layer] || r.layer}：${r.rule}`),
                 )),
               )
             : h('div', { className: 'roost-empty' }, '最近没有拒绝记录。'),
