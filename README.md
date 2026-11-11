@@ -4,21 +4,7 @@
 
 > 给 QQ 机器人接上 DSH 的全部能力：工具、记忆、上下文压缩、主动搭话。
 
-![npm version](https://img.shields.io/npm/v/dsh-roost?color=6c5ce7)
-
-![npm downloads](https://img.shields.io/npm/dm/dsh-roost?color=4b6fff)
-
-![CI](https://github.com/tdcq9594/dsh-roost/actions/workflows/ci.yml/badge.svg)
-
-![GitHub stars](https://img.shields.io/github/stars/tdcq9594/dsh-roost?color=eab308)
-
-![DSH plugin](https://img.shields.io/badge/dsh--plugin-✅-green)
-
-
-
-![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)
-
-![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)
+[![npm version](https://img.shields.io/npm/v/dsh-roost?color=6c5ce7)](https://www.npmjs.com/package/dsh-roost) [![npm downloads](https://img.shields.io/npm/dm/dsh-roost?color=4b6fff)](https://www.npmjs.com/package/dsh-roost) [![CI](https://github.com/tdcq9594/dsh-roost/actions/workflows/ci.yml/badge.svg)](https://github.com/tdcq9594/dsh-roost/actions/workflows/ci.yml) [![GitHub stars](https://img.shields.io/github/stars/tdcq9594/dsh-roost?color=eab308)](https://github.com/tdcq9594/dsh-roost) [![DSH plugin](https://img.shields.io/badge/dsh--plugin-✅-green)](https://github.com/topics/dsh-plugin) [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](#) [![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
 
 **零依赖，装在 DSH 里**：权限、记忆、人格、能力、排期都在侧栏十一页面板里点着配。
 
