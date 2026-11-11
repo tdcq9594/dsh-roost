@@ -353,6 +353,17 @@ select.roost-input{color-scheme:dark}
 .roost-item:first-child{border-top:none}
 .roost-item .t{flex:1;min-width:0;word-break:break-word}
 .roost-item .d{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-tertiary, inherit)}
+/* 扩展 usage 编辑卡：标题 + 元信息一行、输入框一行、按钮一行，**必须竖排**。
+   套 .roost-item 会被两样东西挤死：兄弟「保存 usage」按钮是 flex:0 0 auto，
+   textarea 又是 width:100%，.t{flex:1;min-width:0} 只能缩到最小内容宽度 ——
+   中文没有词边界，于是变成「一个字一行」（2026-11-12 的截图就是这么来的，
+   这是第四次踩同一个坑，前三次是关系确认块 / 档位卡 / 扩展能力页）。 */
+.ext-row{padding:7px 0;border-top:1px solid var(--line-soft);font-size:12.5px;min-width:0}
+.ext-row:first-child{border-top:none;padding-top:2px}
+.ext-row .t{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;min-width:0;word-break:break-word}
+.ext-row .t .d{font-size:11px;color:var(--dsw-alias-label-tertiary, inherit)}
+.ext-row > .d{display:block;margin-top:3px;font-size:11px;line-height:1.6;
+  color:var(--dsw-alias-label-tertiary, inherit);overflow-wrap:anywhere}
 .roost-scroll{max-height:320px;overflow:auto}
 /* 拒绝诊断 / 最近拒绝：标题一行、规则一行（**不能套 .roost-item**）。
    .roost-item 是横排 flex，.t{flex:1;min-width:0} 会被兄弟 .d{flex:0 0 auto}
@@ -8470,7 +8481,7 @@ select.roost-input{color-scheme:dark}
             : null,
           (market?.rows || []).length
             ? h('div', { className: 'roost-list', style: { marginTop: 6 } },
-                market.rows.map((x) => h('div', { key: x.id, className: 'roost-item' },
+                market.rows.map((x) => h('div', { key: x.id, className: 'ext-row' },
                   h('span', { className: 't' },
                     `${x.name} · ${x.id}`,
                     h('span', { className: 'd' }, ` · ${x.transport}${x.author ? ` · ${x.author}` : ''}`),
@@ -8506,7 +8517,7 @@ select.roost-input{color-scheme:dark}
         h('div', { className: 'roost-diag-h', style: { marginTop: 12 } }, '已装扩展'),
         (data?.rows || []).length
           ? h('div', { className: 'roost-list' },
-              data.rows.map((x) => h('div', { key: x.id, className: 'roost-item' },
+              data.rows.map((x) => h('div', { key: x.id, className: 'ext-row' },
                 h('span', { className: 't' },
                   `${x.name} · ${x.id}`,
                   h('span', { className: 'd' }, ` · ${x.bytes} 字节 / ${x.chars} 字（单条上限 ${x.cap} 字）`),
