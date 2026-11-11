@@ -1,3 +1,19 @@
+## v1.1.3：扩展页不再「一字一行」，链接装法也判对了
+
+一句话：修两个 bug —— 扩展页两处排版被横排 flex 挤扁、Windows junction 装法被误判成 `unknown`。没有新接口、没有配置变化，升级即生效。
+
+### 修
+
+- **扩展的 usage 编辑卡被挤成一个汉字一行**：卡片套了横排 flex 的 `.roost-item`，`span.t{flex:1;min-width:0}` 被旁边 `flex:0 0 auto` 的「保存 usage」按钮和 `width:100%` 的输入框压到最小内容宽度，中文没有词边界，于是逐字换行。新增竖排块 `.ext-row`：标题 + 元信息一行 → 输入框一行 → 按钮一行。
+- **市场条目同样错位**：标题挤在最左、描述被 `flex:0 0 auto` 顶到最右一行。同一处换成 `.ext-row`，描述独占一行、按钮落到下一行。
+- **链接装法被误判成 `unknown`**（`src/update.js` 的 `installKind`）：原来是先 `existsSync()` 再 `lstat()`，而 Windows 的 junction 在部分环境里 `existsSync` 返回 false —— 它走 `stat`、会跟随链接，目标被策略挡住就抛 UNKNOWN；`lstat` 却明明看得见这个链接。后果是「明明是链接装法，却判不出 `linked`」，自更新那道防线等于没设。改成直接 `lstat`，拿不到才当未知。
+
+### 说明
+
+- `.ext-row` 是第四次给「横排 flex 里装竖排内容」这个坑收口（前三次：关系确认块、档位卡、扩展能力页）。CSS 里留了注释点名「不能套 .roost-item」，这次把带输入框 / 按钮的卡片统一走 `.ext-row`。
+- `installKind` 的修法来自本机实测：junction 上 `existsSync` 为 false、`lstat().isSymbolicLink()` 为 true。判定口径不变（`linked` 仍禁止自更新），只是终于判得出来了。
+- 全量测试 **1824 / 1824** 通过。修之前是 1822 / 1824，失败的两条正是 `test/update.test.js` 里「符号链接装法」那组。
+
 ## v1.1.2：接入向导不再失踪，概览页能一键关掉 Roost
 
 一句话：修 v1.1.1 的两个入口问题，顺手把「启动」做成开关。没有新接口、没有配置变化，升级即生效。
