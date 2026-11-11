@@ -34,7 +34,7 @@ export const EXT_ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
 /** 统一拒绝诊断页的五层来源。顺序固定，前端按这个顺序渲染。 */
 export const REJECTION_LAYERS = Object.freeze({
   fence: '接入栅栏 / 令牌鉴权',
-  capabilities: '能力页 deny / forceDeny',
+  capabilities: '权限页的收紧规则',
   quota: '次数限制',
   acl: '扩展记忆命名空间 ACL',
   guard: '执行期工具 guard',

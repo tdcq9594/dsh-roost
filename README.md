@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/dsh-roost?color=6c5ce7)](https://www.npmjs.com/package/dsh-roost) [![npm downloads](https://img.shields.io/npm/dm/dsh-roost?color=4b6fff)](https://www.npmjs.com/package/dsh-roost) [![CI](https://github.com/tdcq9594/dsh-roost/actions/workflows/ci.yml/badge.svg)](https://github.com/tdcq9594/dsh-roost/actions/workflows/ci.yml) [![GitHub stars](https://img.shields.io/github/stars/tdcq9594/dsh-roost?color=eab308)](https://github.com/tdcq9594/dsh-roost) [![DSH plugin](https://img.shields.io/badge/dsh--plugin-✅-green)](https://github.com/topics/dsh-plugin) [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](#) [![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
 
-**零依赖，装在 DSH 里**：权限、记忆、人格、能力、排期都在侧栏十一页面板里点着配。
+**零依赖，装在 DSH 里**：权限、记忆、人格、扩展、排期都在侧栏面板里点着配。
 
 [快速开始](#快速开始) ｜ [使用手册](docs/USER-MANUAL.md) ｜ [常见问题](#常见问题) ｜ [文档](#文档) ｜ [贡献](https://github.com/tdcq9594/dsh-roost/blob/main/CONTRIBUTING.md)
 
@@ -18,7 +18,7 @@
 
 ![dsh-roost 概览页](docs/images/overview.png)
 
-> **侧栏「概览」页**：六格实时状态（已建立的会话、等待回复、排队、最近一轮耗时、今日轮次与 token、工具挂载），下方是权限说明与接入进度 5/5。截图已裁掉 DSH 会话列表与桌面挂件；换图要求见 [docs/images/README.md](docs/images/README.md)。
+> **侧栏「概览」页**：最上面是接入进度与一键启动，接着是六格状态（托管会话 / 今日 Token / 排队并发 / 缓存命中 / 最近一轮 / 工具挂载）、近 7 天用量、8 周活跃度、Token 构成与耗时拆分、会话卡片与筛选，最后是快捷、端口与最近动态。所有用量只统计 dsh-roost 自己创建的会话。换图要求见 [docs/images/README.md](docs/images/README.md)。
 
 ---
 
@@ -36,7 +36,7 @@
 | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | 收发 QQ 消息、语音 ASR、引用 / 合并转发、切段、防吵（冷却 / 配额 / 认领） | [ai-chat](https://github.com/tdcq9594/qq-bot-roost-plugins) 插件 + [Roost](https://github.com/tdcq9594/qq-bot-roost) 框架 |
 | 会话、工具（文件 / 命令）、三层记忆、上下文压缩、人格                  | DSH                                                                                                                   |
-| 会话映射、逐条权限、十一页面板、一键接入、主动搭话与排期                  | **dsh-roost**                                                                                                         |
+| 会话映射、逐条权限、侧栏面板、一键接入、主动搭话与排期                  | **dsh-roost**                                                                                                         |
 
 **为什么值得接**：ai-chat 直连模型时，AI 只有「聊天」这一件事。挂到 DSH 上之后，它能用 DSH 的工具（文件、命令）、三层记忆、上下文压缩——这是 `adapter: dsh` 唯一的价值，也是它比直连贵的地方。
 
@@ -73,7 +73,7 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ dsh-roost ⇄ DSH �
 | 📎 能发文件                  | `qq_send_file`，可选路径白名单；发之前先问对面支不支持，一轮一个、200MB 上限、超 5MB 自动分片                                               |
 | 📣 能 @ 人                 | `at` 参数；`[昵称 (openid)]` 由宿主拼，模型不碰 id 语法，降级时会告诉它为什么                                                        |
 | 🗜️ 上下文压缩                | 群 85% / 私聊 75% 时开新会话 + 摘要开场，压缩前的缓存命中率记进面板                                                                 |
-| 📱 侧栏面板                  | 十一页：状态、记忆、人格、能力、排期、账号迁移、日志都在 DSH 里看                                                                       |
+| 📱 侧栏面板                  | 八页：概览、排障、人格、记忆、主动搭话、权限、扩展、设置都在 DSH 里看；接入与账号迁移从按钮打开                                                   |
 | 🧬 人格四段式                 | 性格 / 开场白 / 说话示例 / 世界书；世界书命中才注入，聊几十轮人设也不被冲淡                                                                |
 | 🔄 人格库一键更新               | 独立仓库 [dsh-roost-personas](https://github.com/tdcq9594/dsh-roost-personas) 推个 commit，面板点一下就拿到，不用发版；只覆盖没改过的 |
 | ⬆️ 本体自更新                 | 设置页查最新版一键装，失败回滚 `package.json` + lock；符号链接装的开发机自动禁用                                                       |
@@ -82,7 +82,7 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ dsh-roost ⇄ DSH �
 | 🔊 语音合成（选装，默认关）          | 五种 provider，`tts.speed` 一份共用；不配就完全静默，配好模型才能用 `<<say: 内容>>`                                                |
 | 🔑 账号迁移                  | 把 QQ号 / 群号和 openid 对上，换 AppID 后旧记忆照样读得到；绑定完全自愿、非必需                                                        |
 
-20 条特性的完整说明、配置全文、五种语音 provider 的字段、表情包侧车语法、账号改写备份路径、十一页面板明细等，全部在 **[使用手册](docs/USER-MANUAL.md)**（[特性逐条说明](docs/USER-MANUAL.md#特性逐条说明)）。
+20 条特性的完整说明、配置全文、五种语音 provider 的字段、表情包侧车语法、账号改写备份路径、面板明细等，全部在 **[使用手册](docs/USER-MANUAL.md)**（[特性逐条说明](docs/USER-MANUAL.md#特性逐条说明)）。
 
 ---
 
@@ -144,13 +144,13 @@ dsh plugin --profile web add dsh-roost
 
 | 文档                                                                      | 内容                                                    |
 | ----------------------------------------------------------------------- | ----------------------------------------------------- |
-| [使用手册](docs/USER-MANUAL.md)                                             | 配置全文、五种语音 provider、权限与能力页、十一页面板、账号迁移、备份、表情包、目录结构、开发测试 |
+| [使用手册](docs/USER-MANUAL.md)                                             | 配置全文、五种语音 provider、权限页、面板明细、账号迁移、备份、表情包、目录结构、开发测试 |
 | [接入说明](docs/接入说明.md)                                                    | 宿主协议两端：`/inbound` 请求形状、回复契约，排查「为什么没回话」                |
 | [能力页方案](docs/能力页方案.md)                                                  | 五档栈式继承、分群覆盖、功能开关与次数配额的设计                              |
 | [排队方案](docs/排队方案.md)                                                    | 同一会话并发轮次怎么排                                           |
 | [TTS 与翻唱调研](docs/TTS与翻唱调研.md)                                           | 语音 provider 选型与字段来源                                   |
 | [与 Aurabot 对比](docs/与Aurabot对比.md)                                      | 传输层、会话模型、能力边界的逐项对照                                    |
-| [扩展机制方案](docs/扩展机制方案.md)                                                | 阶段 8 的设计方案（**方案文档，尚未落地为已交付能力**）                       |
+| [扩展机制方案](docs/扩展机制方案.md)                                                | 扩展机制的设计与实测记录（v1.1.0 起已落地，实现细节以源码为准）                       |
 | [参与贡献](https://github.com/tdcq9594/dsh-roost/blob/main/CONTRIBUTING.md) | 本地跑起来、PR 前五步检查、代码约定                                   |
 
 `docs/` 下还有人格市场、人格名全局化、会话查询工具、更新中心、端口自动切换、DSH 分支等设计文档与调研，按主题索引上面这几份即可。
@@ -180,7 +180,7 @@ dsh plugin --profile web add dsh-roost
 
 DeepSeek 抽风 / 502 了怎么办
 
-**模型服务挂了插件救不了**。网关 502 时补重试能救回一部分，整体挂掉只能等它恢复；这种时候插件回一句「模型服务那边暂时抽风了」，不会把内部报错糊给你。可以先点面板「概览」里的**一键自测**——它不经过 QQ，直接跑一轮 DSH 对话，能区分是「会话建不起来」还是「QQ 那半边没通」。
+**模型服务挂了插件救不了**。网关 502 时补重试能救回一部分，整体挂掉只能等它恢复；这种时候插件回一句「模型服务那边暂时抽风了」，不会把内部报错糊给你。可以先点面板「概览」里的**跑一次自测**——它不经过 QQ，直接跑一轮 DSH 对话，能区分是「会话建不起来」还是「QQ 那半边没通」。
 
 
 </details>
@@ -213,7 +213,7 @@ DeepSeek 抽风 / 502 了怎么办
 
 <summary>装不上 / 七步卡住了看哪</summary>
 
-第 3 步的 AppID / AppSecret 要去 QQ 开放平台拿，第 6 步要开「接收所有消息」并让机器人进群——这两步是手动的。其余步骤都能单点点，跳着点不会搞坏（每步先检测前置条件）。下载优先 GitHub Release，拿不到才回退 npm 包。日志在面板「日志」页，按级别筛。
+第 3 步的 AppID / AppSecret 要去 QQ 开放平台拿，第 6 步要开「接收所有消息」并让机器人进群——这两步是手动的。其余步骤都能单点点，跳着点不会搞坏（每步先检测前置条件）。下载优先 GitHub Release，拿不到才回退 npm 包。日志在面板「排障」页，按级别筛。
 
 </details>
 
@@ -253,7 +253,7 @@ QQ 侧依托自家的 [栖 Roost](https://github.com/tdcq9594/qq-bot-roost) 与 
 
 - 只支持 QQ（`channel.current = 'qq'`），通道抽象已备好但还没接第二个平台
 - 语音靠官方 ASR（`asr_refer_text`），没有本地语音模型；TTS 音色由 ai-chat 设置，面板只读
-- 面板的配置正文仍是 JSON 直编辑（不是逐字段表单），代价是要看得懂结构——所以配了分节说明；「能力」页那批（档位、功能开关、次数限制、分群例外）已经是可点的
+- 面板的配置正文仍是 JSON 直编辑（不是逐字段表单），代价是要看得懂结构——所以配了分节说明；「权限」页那批（档位、功能开关、次数限制、分群例外）已经是可点的
 - **模型服务挂了插件救不了**：网关整体挂掉时只能等它自己恢复
 - 表情包发出去是**普通图片消息**，不是 QQ 收藏表情（协议层限制）
 - **排队只存内存**：进程重启时正在排的那条会丢；面板暂时看不到队列长度（`stats()` 已备好）

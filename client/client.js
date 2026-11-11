@@ -139,6 +139,8 @@ window.__ModuleLoader__.load({
   background:var(--dsw-alias-bg-base, #16181c);
   color:var(--dsw-alias-label-primary, inherit);
   font-size:13px;line-height:1.62;
+  /* 面板常驻窄侧栏，媒体查询量的是视口、永远不触发；量自己这一页才对 */
+  container-type:inline-size;
   --line:var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 22%, transparent));
   --line-soft:var(--dsw-alias-border-l1, color-mix(in srgb, currentColor 12%, transparent));
   --surface:var(--dsw-alias-bg-l1, color-mix(in srgb, currentColor 6%, transparent));
@@ -150,14 +152,14 @@ window.__ModuleLoader__.load({
   --accent:var(--dsw-alias-brand-primary, #2563eb);
 }
 /* 页头：标题 + 通道 + 页签，永远在、不参与滚动 */
-.roost-head{flex:0 0 auto;width:100%;max-width:860px;box-sizing:border-box;padding:18px 22px 0}
+.roost-head{flex:0 0 auto;width:100%;max-width:860px;box-sizing:border-box;padding:16px 24px 0}
 /* 唯一的滚动区。滚动条要看得见、拖得动，但别太抢眼 */
 .roost-scroll-body{flex:1 1 auto;min-height:0;
   /* min-width:0 是必需的：它是 flex 子项，自动最小尺寸会让"最宽的那一行内容"
      把整个面板撑宽（侧边栏里表现为横向溢出、右边按钮被裁掉）。
      行内的宽度收缩自己解决，容器不许被内容撑大。 */
   min-width:0;width:100%;max-width:860px;box-sizing:border-box;
-  padding:16px 22px 40px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;
+  padding:24px 24px 48px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;
   /* 滚动元素本身也带一层底色：它的层先画，再画子内容 */
   background:var(--dsw-alias-bg-base, #16181c)}
 .roost-scroll-body::-webkit-scrollbar{width:10px}
@@ -171,26 +173,30 @@ window.__ModuleLoader__.load({
 .roost-muted{color:var(--dsw-alias-label-secondary, inherit);opacity:.92}
 .roost-mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;word-break:break-all;color:var(--dsw-alias-label-secondary, inherit)}
 .roost-btn{
-  padding:5px 12px;border-radius:7px;border:1px solid var(--line);background:transparent;
-  color:inherit;cursor:pointer;font:inherit;font-size:12px;white-space:nowrap;
-  transition:background .14s ease,border-color .14s ease;
+  padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:transparent;
+  color:inherit;cursor:pointer;font:inherit;font-size:12.5px;white-space:nowrap;
+  transition:background .16s ease,border-color .16s ease,transform .16s ease;
 }
 .roost-btn:hover:not(:disabled){background:var(--hover)}
-.roost-btn:active:not(:disabled){transform:translateY(1px)}
+.roost-btn:active:not(:disabled){transform:scale(.97)}
 .roost-btn:disabled{opacity:.4;cursor:not-allowed}
-.roost-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+/* 能按的按钮用主文字色；只有真禁用才靠 opacity 变淡，两者要一眼分得开 */
+.roost-btn:not(:disabled){color:var(--dsw-alias-label-primary,inherit)}
+.roost-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .roost-primary{
-  padding:7px 16px;border-radius:7px;border:1px solid transparent;
+  padding:8px 18px;border-radius:8px;border:1px solid transparent;
   background:var(--dsw-alias-button-primary-fill, var(--accent));
   color:var(--dsw-alias-label-primary-foreground, #fff);
   cursor:pointer;font:inherit;font-size:12.5px;font-weight:600;
-  transition:filter .14s ease;
+  transition:filter .16s ease,transform .16s ease;
 }
-.roost-primary:hover:not(:disabled){filter:brightness(1.08)}
+.roost-primary:hover:not(:disabled){filter:brightness(1.08);transform:translateY(-1px)}
+.roost-primary:active:not(:disabled){transform:scale(.97)}
 .roost-primary:disabled{opacity:.55;cursor:not-allowed}
 .roost-input{
-  width:100%;box-sizing:border-box;padding:7px 10px;border-radius:7px;
+  width:100%;box-sizing:border-box;padding:8px 12px;border-radius:8px;
   border:1px solid var(--line);background:var(--field);color:inherit;font:inherit;font-size:13px;
+  transition:border-color .16s ease;
 }
 .roost-input::placeholder{opacity:.5}
 .roost-input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
@@ -200,21 +206,61 @@ window.__ModuleLoader__.load({
    弹层由系统绘制，拿不到我们的变量，必须给不透底的显式颜色。 */
 select.roost-input{color-scheme:dark}
 .roost-input option{background:#1c1d22;color:#e9eaee}
-.roost-tab{
-  padding:8px 13px;border:none;border-bottom:2px solid transparent;background:transparent;
-  color:inherit;opacity:.58;cursor:pointer;font:inherit;font-size:12.5px;margin-bottom:-1px;
-  transition:opacity .14s ease,border-color .14s ease;
+/* 浅色主题下原生弹层也要跟着翻：上面那组深色是深色主题的兜底，
+   不翻就会在白底页面上弹出一块黑色下拉（2026-11-11 查弹窗时顺带发现）。
+   原生 option 拿不到 --dsw-alias-*，只能按系统配色偏好切换。 */
+@media (prefers-color-scheme: light){
+  select.roost-input{color-scheme:light}
+  .roost-input option{background:#fff;color:#1c1d22}
 }
-.roost-tab:hover{opacity:.88}
-.roost-tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
-.roost-tab[data-on="1"]{opacity:1;font-weight:600;border-bottom-color:var(--accent)}
-
-.roost-sec{margin:22px 0 0}
+/* 分组导航：选中态是淡底药丸，不再用下划线压在 tablist 的底边上 */
+.roost-tab{
+  padding:6px 12px;border:1px solid transparent;border-radius:8px;background:transparent;
+  color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;font:inherit;font-size:12.5px;
+  transition:background .16s ease,color .16s ease,transform .16s ease;
+}
+.roost-tab:hover{color:var(--dsw-alias-label-primary,inherit);background:var(--hover)}
+.roost-tab:active{transform:scale(.97)}
+.roost-tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.roost-tab[data-on="1"]{color:var(--dsw-alias-label-primary,inherit);font-weight:600;
+  background:color-mix(in srgb,var(--accent) 16%,transparent);
+  border-color:color-mix(in srgb,var(--accent) 34%,transparent)}
+/* 隐藏页的当前位置标记：样式接近选中态但不可点 */
+.roost-nav-current{padding:6px 12px;border-radius:8px;font-size:12.5px;font-weight:600;
+  background:color-mix(in srgb,var(--accent) 16%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 34%,transparent)}
+.roost-tab.is-primary{font-weight:500}
+.roost-tab[data-on="1"].is-primary{font-weight:600}
+/* 分节头：编号徽标 + 标题 + 操作槽 + 折叠开关，下边框代替原先标题右侧的细线。
+   整页按 8pt 网格走，标题/正文/说明只留三级字阶。 */
+.roost-sec{margin:24px 0 0;animation:roost-sec-in .28s cubic-bezier(.2,.8,.2,1) backwards}
 .roost-sec:first-child{margin-top:2px}
-.roost-sec-h{display:flex;align-items:baseline;gap:9px;margin-bottom:10px}
-.roost-sec-n{font-size:10.5px;opacity:.4;font-variant-numeric:tabular-nums}
-.roost-sec-t{font-size:13px;font-weight:600;letter-spacing:.01em;flex-shrink:0}
-.roost-sec-h::after{content:'';flex:1;height:1px;background:var(--line-soft);transform:translateY(-2px)}
+.roost-sec:nth-child(2){animation-delay:.04s}
+.roost-sec:nth-child(3){animation-delay:.08s}
+.roost-sec:nth-child(4){animation-delay:.12s}
+.roost-sec:nth-child(n+5){animation-delay:.16s}
+@keyframes roost-sec-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.roost-sec-h{display:flex;align-items:center;gap:10px;margin-bottom:12px;min-height:26px;
+  padding-bottom:8px;border-bottom:1px solid var(--line-soft)}
+/* 排障页把 日志 / 上下文 / 会话 三块拼一页：后两块原本各自从 01 起编号，
+   一屏出现三个「01」像渲染坏了。用分区标题代替编号。 */
+.roost-diag-part{margin-top:16px;border-top:1px solid var(--line-soft);padding-top:10px}
+.roost-diag-h{font-size:12px;font-weight:650;opacity:.85;margin-bottom:6px}
+.roost-diag-part .roost-sec-n{display:none}
+.roost-sec-n{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;
+  min-width:20px;height:18px;padding:0 5px;border-radius:6px;
+  border:1px solid var(--line-soft);background:var(--surface);
+  font-size:10px;font-weight:600;font-variant-numeric:tabular-nums;
+  color:var(--dsw-alias-label-tertiary,inherit);opacity:.9}
+.roost-sec-t{font-size:14px;font-weight:600;letter-spacing:.01em;flex-shrink:0}
+.roost-sec-acts{margin-left:auto;display:inline-flex;align-items:center;gap:8px}
+.roost-sec-fold{flex:0 0 auto;width:22px;height:22px;padding:0;border-radius:6px;
+  border:1px solid transparent;background:transparent;color:inherit;
+  font:inherit;font-size:14px;line-height:1;cursor:pointer;opacity:.72;
+  transition:opacity .16s ease,background .16s ease}
+.roost-sec-fold:hover,.roost-sec-fold:focus-visible{opacity:1;background:var(--hover)}
+.roost-sec.is-folded .roost-sec-h{margin-bottom:0;padding-bottom:6px}
+.roost-sec.is-folded > *:not(.roost-sec-h){display:none}
 .roost-note{font-size:11.5px;line-height:1.62;color:var(--dsw-alias-label-tertiary, inherit);margin-top:4px}
 .roost-empty{font-size:12px;line-height:1.65;color:var(--dsw-alias-label-tertiary, inherit);padding:4px 0}
 
@@ -346,27 +392,73 @@ select.roost-input{color-scheme:dark}
 .cap-card-h .c{flex:0 0 auto;font-size:11px;opacity:.75;font-variant-numeric:tabular-nums}
 .cap-card-b{display:flex;flex-wrap:wrap;gap:6px}
 .cap-card-a{margin-top:8px;font-size:11px;line-height:1.55;opacity:.6;word-break:break-all}
-/* 工具行：名字在左占满、勾选框固定右边。原来名字和勾选框挤在同一个
-   inline 流里，长名字把勾选框推得忽左忽右，眼睛没法上下对齐。 */
-.cap-tool{display:flex;align-items:center;gap:10px;padding:3px 0;font-size:12px;min-width:0}
-.cap-tool .n{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+/* 工具权限：一行一条连续轨道 + 一个滑块，拨到哪档就开放到哪档。
+   五个透明热区均分轨道，圆心与表头五个标签严格对齐；轨道左右各让 19px，
+   让首尾停靠点正好落在第一、第五个热区的圆心上。 */
+.cap-tool-h,.cap-tool{
+  display:grid;grid-template-columns:minmax(0,1fr) 190px;
+  gap:8px;align-items:center;min-width:0;
+}
+.cap-tool-h{padding:2px 0 8px;font-size:10px;opacity:.72}
+.cap-tool-h .n{min-width:0}
+.cap-tool{padding:4px 0;font-size:12px}
+.cap-tool .n{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px}
-.cap-tool .bx{flex:0 0 auto;display:flex;gap:9px;align-items:center}
-.cap-tool .bx label{display:flex;align-items:center;gap:3px;font-size:10.5px;opacity:.65}
-.cap-tool-h{display:flex;align-items:center;gap:10px;padding:2px 0 6px;font-size:10.5px;opacity:.55}
-.cap-tool-h .n{flex:1 1 auto}
-.cap-tool-h .bx{flex:0 0 auto;display:flex;gap:9px}
-.cap-tool-h .bx span{width:14px;text-align:center}
+.cap-tool .n .note{font-family:inherit;font-size:10.5px;opacity:.62}
+.cap-tiers{position:relative;display:flex;align-items:center;width:190px;height:24px;min-width:0}
+.cap-tool-h .cap-tiers .t{flex:1 1 0;min-width:0;text-align:center;font-size:10px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cap-track{position:absolute;left:19px;right:19px;top:50%;height:5px;
+  transform:translateY(-50%);border-radius:3px;
+  background:color-mix(in srgb,var(--dsw-alias-label-secondary,inherit) 26%,transparent)}
+.cap-fill{position:absolute;left:0;top:0;height:100%;border-radius:3px;
+  background:var(--dsw-alias-button-primary-fill,var(--accent,#4d6bfe));
+  transition:width .2s ease}
+.cap-knob{position:absolute;top:50%;width:16px;height:16px;border-radius:50%;
+  background:var(--dsw-alias-button-primary-fill,var(--accent,#4d6bfe));
+  border:2px solid var(--dsw-alias-bg-base,#fff);
+  box-shadow:0 1px 4px rgba(0,0,0,.3);
+  transform:translate(-50%,-50%);transition:left .2s ease;pointer-events:none}
+/* 一档都不给时滑块停在起点并转成中性色，别伪装成「主人可用」 */
+.cap-tiers[data-level="-1"] .cap-knob{background:var(--dsw-alias-label-secondary,#8a93a6)}
+/* 钉住项整条滑块变淡：热区本身是透明的，只给 button 加 opacity 看不出来 */
+.cap-tiers[data-locked="1"] .cap-track,.cap-tiers[data-locked="1"] .cap-knob{opacity:.45}
+.cap-tier{position:relative;z-index:1;flex:1 1 0;min-width:0;height:24px;padding:0;
+  border:0;border-radius:6px;background:transparent;cursor:pointer;
+  appearance:none;-webkit-appearance:none}
+.cap-tier:hover:enabled{background:var(--hover)}
+.cap-tier:focus-visible{outline:2px solid var(--accent,#4d6bfe);outline-offset:-2px}
+.cap-tier:disabled{cursor:not-allowed;opacity:.45}
+@media (prefers-reduced-motion:reduce){
+  .cap-fill,.cap-knob{transition:none}
+}
 /* 弹窗：搜索 + 长列表，不再把页面撑成一米长 */
 .cap-modal{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:60;
-  display:flex;align-items:center;justify-content:center;padding:24px}
-.cap-modal-b{background:var(--bg, #1b1b1b);border:1px solid var(--line-soft);border-radius:12px;
-  width:min(760px,100%);max-height:min(78vh,720px);display:flex;flex-direction:column;overflow:hidden}
+  display:flex;justify-content:center;padding:24px;
+  overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
+/* 弹窗是渲染在 .roost-scroll-body 里的 fixed 层。
+   **主防线**是下面两条：小弹窗靠 :has() 锁住底层唯一滚动区，整页弹窗由
+   RoostPage 加 .is-locked；都是纯 CSS，弹窗卸载自动解锁，不用挂 effect。
+   **兜底**（不依赖 :has()）：遮罩用 overflow-y:auto 自己接住滚轮，滚到边界
+   被 overscroll-behavior:contain 截断，不会 chaining 给祖先。
+   ⚠️ 不能写成 overflow:hidden —— 不可滚动的容器不消费滚轮，Chromium 会
+   直接滚祖先，contain 也就永远不触发。 */
+.roost-scroll-body:has(.cap-modal){overflow:hidden}
+.roost-scroll-body.is-locked{overflow:hidden}
+/* 底色必须跟着主题令牌走：原来写 var(--bg, 深色兜底) 时 --bg 在本页根本没定义，
+   永远取深色兜底；浅色模式下文字是深色，就成了「深底深字」几乎看不见（2026-11-11 截图）。
+   用 --dsw-alias-bg-base 和 .roost-root 同一层底色，层次交给边框和投影。 */
+.cap-modal-b{background:var(--dsw-alias-bg-base, #1b1b1b);
+  box-shadow:0 16px 48px rgba(0,0,0,.38);
+  border:1px solid var(--line-soft);border-radius:12px;
+  width:min(760px,100%);max-height:min(78vh,720px);display:flex;flex-direction:column;overflow:hidden;
+  margin:auto}
 .cap-modal-h{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--line-soft)}
 .cap-modal-h .t{flex:1 1 auto;font-size:13.5px;font-weight:640;min-width:0}
 .cap-modal-s{padding:10px 16px;border-bottom:1px solid var(--line-soft)}
 .cap-modal-s input{width:100%}
-.cap-modal-c{padding:10px 16px 16px;overflow:auto;flex:1 1 auto;min-height:0}
+.cap-modal-c{padding:10px 16px 16px;overflow:auto;flex:1 1 auto;min-height:0;
+  overscroll-behavior:contain}
 /* 人格行：左两行文字、右一排动作。窗口窄时优先保住名字 */
 .roost-acts{flex:0 0 auto;display:flex;gap:6px;align-items:center}
 
@@ -438,15 +530,15 @@ select.roost-input{color-scheme:dark}
 .pv-meta{font-size:11px;line-height:1.55;overflow-wrap:anywhere;
   color:var(--dsw-alias-label-tertiary,inherit)}
 .pv-acts{flex:0 0 auto;display:flex;gap:2px;align-items:center}
-/* 只淡化次要项：主操作「用这个」的边框必须始终看得见，
-   否则一屏行读下来又变成"右边有一片灰字"。
-   0.62 是折中：静止时安静但读得清，指到这一行或键盘聚焦就全额。 */
-.pv-acts .roost-btn:not(.pv-main),.pv-acts .pv-del{opacity:.62;
+/* 次要项只比主操作轻一点，别淡到像禁用；指到这一行或键盘聚焦才给全额。
+   真禁用仍回 0.4，否则 0.85 会把禁用态和正常态抹成一样。 */
+.pv-acts .roost-btn:not(.pv-main):not(:disabled),.pv-acts .pv-del:not(:disabled){opacity:.85;
   transition:opacity .14s ease}
+.pv-acts .roost-btn:disabled,.pv-acts .pv-del:disabled{opacity:.4;cursor:not-allowed}
 .pv-row:hover .pv-acts .roost-btn,.pv-row:focus-within .pv-acts .roost-btn,
 .pv-row:hover .pv-acts .pv-del,.pv-row:focus-within .pv-acts .pv-del{opacity:1}
 .pv-acts .roost-btn{padding:3px 9px;border-color:transparent;background:transparent;
-  font-size:11.5px;color:var(--dsw-alias-label-secondary,inherit)}
+  font-size:11.5px;color:var(--dsw-alias-label-primary,inherit)}
 .pv-acts .roost-btn:hover:not(:disabled){background:var(--hover);
   border-color:var(--line-soft);color:var(--dsw-alias-label-primary,inherit)}
 .pv-acts .roost-btn.armed{background:var(--bad);border-color:var(--bad);color:#fff}
@@ -491,47 +583,262 @@ select.roost-input{color-scheme:dark}
   background:color-mix(in srgb,var(--warn) 8%,transparent)}
 .pv-warn span{flex:1;min-width:0}
 
-/* ── 概览用的统计块与故障条 ── */
-.roost-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:9px}
-.roost-stat{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border-radius:9px;
-  border:1px solid var(--line-soft);background:var(--surface)}
-.roost-stat b{font-size:19px;font-weight:650;letter-spacing:-.02em;line-height:1.25;
-  font-variant-numeric:tabular-nums}
-.roost-stat span{font-size:11px;color:var(--dsw-alias-label-tertiary,inherit);line-height:1.4}
-.roost-banner{display:flex;flex-direction:column;gap:3px;padding:10px 12px;margin-bottom:12px;
-  border-radius:9px;border:1px solid var(--line-soft);background:var(--surface)}
+/* ── 概览用的统计块与故障条 ──
+   尺寸与配色严格对齐 dsh-context 的 .lc-stat + .lc-ov-kpi：
+   gap 8 · padding 8 · radius 8 · label/sub 11px · value 20px · 三行居中。
+   底色跟页面一致，只留 1px 细边框，不再垫一层 --surface。 */
+/* 六宫格固定 3 列 2 行：对方 overview.css 的 .lc-ov-kpis 用 repeat(3,minmax(0,1fr)) */
+.roost-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.roost-stat{display:flex;flex-direction:column;align-items:center;text-align:center;
+  gap:2px;padding:8px;border-radius:8px;min-width:0;
+  border:1px solid var(--line);background:var(--dsw-alias-bg-base, transparent);
+  transition:border-color .16s ease}
+.roost-stat:hover{border-color:var(--dsw-alias-label-tertiary, var(--line))}
+.roost-stat b{font-size:20px;font-weight:600;letter-spacing:-.02em;line-height:1.2;
+  font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,inherit);
+  max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.roost-stat span{font-size:11px;color:var(--dsw-alias-label-secondary,inherit);line-height:1.4;
+  max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 三行统计卡：小标题 / 大数字 / 副标题（对齐 dsh-context 的读法） */
+.roost-stat .k{font-weight:600}
+.roost-stat .sub{font-weight:400}
+/* ── 概览洞察区：网格 / 尺寸 / 配色 / 动效严格对齐 dsh-context overview.css ──
+   .lc-ov-first 两列 gap 10、.lc-ov-stats 两列、.lc-ov-tiles 四列且每卡 280px 高、
+   .lc-card padding 10px 12px、热力格 20x20、柱宽 10px、字号 9~11px。 */
+.ov-first{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}
+.ov-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}
+.ov-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;align-items:stretch}
+/* 只给下限不锁死高度：280px 配 overflow:hidden 会把 7 行热力格和悬停气泡整条裁掉，
+   看起来就是「超框就没了」。四张卡由 grid 的 align-items:stretch 自动对齐高度。 */
+.ov-tile{display:flex;flex-direction:column;min-height:280px;min-width:0;overflow:visible}
+.ov-panel{border:1px solid var(--line);border-radius:8px;
+  background:var(--dsw-alias-bg-layer-2,var(--dsw-alias-bg-base,transparent));
+  padding:10px 12px;min-width:0;box-sizing:border-box;
+  transition:border-color .2s ease,background-color .2s ease,box-shadow .2s ease}
+.ov-panel:hover{border-color:var(--dsw-alias-label-secondary,var(--line));
+  background:var(--dsw-alias-interactive-bg-hover,var(--hover));
+  box-shadow:0 6px 18px rgba(0,0,0,.14)}
+.ov-panel h4{margin:0;font-size:12px;font-weight:600;
+  color:var(--dsw-alias-label-primary,inherit)}
+.ov-cap{font-size:10.5px;color:var(--dsw-alias-label-secondary,inherit);
+  margin:2px 0 8px;line-height:1.4}
+.ov-bars{display:flex;align-items:flex-end;gap:6px;height:104px;border-bottom:1px solid var(--line-soft)}
+.ov-bar{flex:1 1 0;min-width:0;height:100%;display:flex;flex-direction:column;
+  justify-content:flex-end;align-items:center;gap:3px}
+.ov-bar i{display:block;width:10px;border-radius:3px 3px 0 0;
+  background:#3b82f6;min-height:2px;transition:opacity .2s ease,filter .2s ease}
+.ov-bar:hover i{filter:brightness(1.15)}
+.ov-bar b,.ov-bar span{font-size:9px;font-weight:500;line-height:1.2;
+  font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,inherit);white-space:nowrap}
+.ov-donut-row{display:flex;align-items:center;gap:14px;min-width:0}
+.ov-donut{flex:0 0 auto;width:80px;height:80px}
+.ov-donut .ov-seg{transition:opacity .2s ease}
+.ov-donut:hover .ov-seg{opacity:.35}
+.ov-donut .ov-seg:hover{opacity:1}
+.ov-legend{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:5px}
+.ov-legend>div{display:flex;align-items:center;gap:6px;font-size:11px;min-width:0;
+  border-radius:6px;padding:1px 6px;margin:0 -6px;transition:background-color .2s ease}
+.ov-legend>div:hover{background:var(--hover)}
+.ov-legend i{width:8px;height:8px;border-radius:2px;flex:0 0 auto}
+.ov-legend .t{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ov-legend .v{flex:0 0 auto;font-variant-numeric:tabular-nums;opacity:.8}
+/* 对方 .lc-heat-cell 是 20x20 固定格。八周七行共 56 格，
+   格子若跟着卡宽涨到 40px，七行就塞不进卡片被裁（2026-11-11 截图）。
+   用 max-width 封顶 20px、窄卡再等比缩小，七行始终完整可见。 */
+.ov-heat{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:3px;justify-items:center}
+.ov-heat i{display:block;width:100%;max-width:20px;aspect-ratio:1;border-radius:20%;
+  background:color-mix(in srgb,var(--dsw-alias-label-secondary,inherit) 16%,transparent);
+  transition:box-shadow .2s ease,transform .2s ease}
+.ov-heat i:hover{box-shadow:0 0 0 1.5px color-mix(in srgb,#3b82f6 70%,transparent);
+  transform:scale(1.12)}
+.ov-rowline{display:flex;gap:8px;align-items:baseline;font-size:11px;padding:3px 0;min-width:0}
+.ov-rowline .t{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ov-rowline .v{flex:0 0 auto;font-variant-numeric:tabular-nums;opacity:.8}
+.ov-empty{font-size:11px;color:var(--dsw-alias-label-tertiary,inherit);padding:6px 0}
+/* 会话筛选与卡片：尺寸、字号、圆角、过渡对齐 dsh-context overview.css 的
+   lc-ov-search / lc-ov-cover / lc-gran / lc-ov-chip / lc-ov-grid / lc-ov-session。
+   卡内指标换成我们自己的四类 Token 与 DSH 会话号，不照搬费用或上下文占用。 */
+.ov-count{display:inline-block;padding:1px 7px;border-radius:8px;
+  background:var(--field,transparent);font-size:11px;font-variant-numeric:tabular-nums;
+  color:var(--dsw-alias-label-secondary,inherit)}
+.ov-filter{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.ov-filter .roost-input{width:auto}
+.ov-filter .ov-search{flex:1 1 160px;min-width:0;padding:4px 10px;font-size:12px}
+.ov-filter .ov-cover{flex:none;padding:4px 8px;border-radius:6px;font-size:12px}
+.ov-gran{display:flex;gap:2px;padding:1px;border:1px solid var(--line-soft);
+  border-radius:6px;background:var(--field,transparent)}
+.ov-gran button{border:0;background:transparent;font:inherit;font-size:11px;line-height:1;
+  padding:3px 8px;border-radius:5px;cursor:pointer;white-space:nowrap;
+  color:var(--dsw-alias-label-secondary,inherit);
+  transition:background-color .2s ease,color .2s ease}
+.ov-gran button:hover{background:var(--hover);color:var(--dsw-alias-label-primary,inherit)}
+.ov-gran button[data-on="1"]{background:var(--dsw-alias-button-primary-fill,var(--accent));
+  color:var(--dsw-alias-label-primary-foreground,#fff)}
+.ov-groups{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px}
+.ov-chip{display:inline-flex;align-items:baseline;gap:5px;
+  border:1px solid var(--line-soft);background:transparent;
+  color:var(--dsw-alias-label-secondary,inherit);font:inherit;
+  font-size:11px;line-height:1.5;padding:2px 10px;border-radius:999px;
+  cursor:pointer;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  transition:background-color .2s ease,border-color .2s ease,color .2s ease}
+.ov-chip:hover{background:var(--hover);color:var(--dsw-alias-label-primary,inherit)}
+.ov-chip[data-on="1"]{background:var(--dsw-alias-button-primary-fill,var(--accent));
+  border-color:transparent;color:var(--dsw-alias-label-primary-foreground,#fff)}
+.ov-chip .n{font-variant-numeric:tabular-nums;opacity:.65;font-size:10px}
+.ov-chip[data-on="1"] .n{opacity:.85}
+.ov-sessions{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
+.ov-card{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:10px;
+  border:1px solid var(--line);
+  background:var(--dsw-alias-bg-layer-1,transparent);
+  min-width:0;cursor:pointer;text-align:left;font:inherit;color:inherit;
+  transition:border-color .2s ease,background-color .2s ease,box-shadow .2s ease}
+.ov-card:hover{border-color:var(--dsw-alias-label-secondary,var(--line));
+  background:var(--dsw-alias-interactive-bg-hover,var(--hover));
+  box-shadow:0 6px 18px rgba(0,0,0,.14)}
+.ov-card[data-today="1"]{border-color:color-mix(in srgb,#3b82f6 65%,transparent)}
+.ovc-head{display:flex;align-items:flex-start;gap:6px;min-width:0}
+.ovc-dot{flex:none;width:7px;height:7px;border-radius:50%;background:#22c55e;margin-top:5px}
+.ovc-title{flex:1 1 auto;min-width:0;font-size:12px;font-weight:600;line-height:1.4;
+  overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
+  overflow-wrap:anywhere}
+.ovc-tag{flex:none;font-size:10px;line-height:1.5;color:#3b82f6;
+  border:1px solid color-mix(in srgb,#3b82f6 45%,transparent);border-radius:4px;padding:0 4px}
+.ovc-times{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:1px}
+.ovc-times span{font-size:10px;line-height:1.4;white-space:nowrap;
+  color:var(--dsw-alias-label-secondary,inherit);font-variant-numeric:tabular-nums}
+.ovc-crumb{display:flex;align-items:center;gap:5px;min-width:0;font-size:11px;
+  color:var(--dsw-alias-label-secondary,inherit);white-space:nowrap;overflow:hidden}
+.ovc-proj{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;line-height:1.6;
+  color:var(--dsw-alias-label-primary,inherit);
+  background:color-mix(in srgb,var(--dsw-alias-label-secondary,inherit) 16%,transparent);
+  border-radius:999px;padding:0 8px}
+.ovc-body{display:flex;gap:14px;align-items:center;min-width:0}
+.ovc-ring{flex:0 0 auto;width:64px;height:64px;position:relative}
+.ovc-ring svg{display:block;width:64px;height:64px}
+.ovc-ring .ov-seg{transition:opacity .2s ease}
+.ovc-ring:hover .ov-seg{opacity:.35}
+.ovc-ring .ov-seg:hover{opacity:1}
+.ovc-mid{position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;pointer-events:none;line-height:1.2}
+.ovc-mid b{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;
+  max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ovc-mini{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:3px}
+.ovc-mini>div{display:flex;justify-content:space-between;align-items:baseline;gap:6px;font-size:11px}
+/* 值不参与收缩：窄卡里宁可把标签省略，也不能让三行数值全被挤成空白 */
+.ovc-mini .l{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;color:var(--dsw-alias-label-secondary,inherit)}
+.ovc-mini .v{flex:0 0 auto;max-width:52%;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
+.ovc-preview{display:flex;align-items:baseline;gap:6px;margin-top:auto;padding-top:6px;
+  border-top:1px solid color-mix(in srgb,var(--line) 60%,transparent);min-width:0}
+.ovc-preview .l{flex:none;font-size:10px;color:var(--dsw-alias-label-secondary,inherit)}
+.ovc-preview .v{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ov-pager{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px;font-size:11px}
+.ov-pager button{flex:none;width:26px;height:22px;display:flex;align-items:center;
+  justify-content:center;border:1px solid var(--line-soft);background:transparent;color:inherit;
+  border-radius:6px;font:inherit;line-height:1;cursor:pointer;
+  transition:border-color .2s ease,background-color .2s ease}
+.ov-pager button:hover:enabled{background:var(--hover)}
+.ov-pager button:disabled{opacity:.4;cursor:default}
+/* 悬停气泡：对应对方 .lc-hovertip / .lc-stat-tip。
+   居中而非左对齐，最右一列格子 hover 时气泡不会整条甩到卡片外面被裁掉。 */
+.ov-tipbox{position:relative}
+.ov-tipbox[data-tip]:hover::after{content:attr(data-tip);position:absolute;left:50%;
+  transform:translateX(-50%);bottom:calc(100% + 6px);z-index:40;
+  max-width:min(180px,50vw);width:max-content;white-space:normal;
+  padding:6px 9px;border-radius:6px;
+  background:var(--dsw-alias-bg-layer-2,#22242a);border:1px solid var(--line);
+  color:var(--dsw-alias-label-primary,inherit);font-size:10.5px;line-height:1.5;
+  box-shadow:0 6px 20px rgba(0,0,0,.28);pointer-events:none}
+/* 热力格首列与末列的气泡贴边展开，别居中甩出卡片被滚动容器裁掉 */
+.ov-heat i:nth-child(8n+1).ov-tipbox:hover::after,
+.ov-heat i:nth-child(8n+2).ov-tipbox:hover::after{left:0;transform:none}
+.ov-heat i:nth-child(8n).ov-tipbox:hover::after{left:auto;right:0;transform:none}
+@keyframes ov-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+.ov-first>*,.ov-stats>*,.ov-tiles>*,.ov-sessions>*{animation:ov-in .28s ease both}
+.ov-first>*:nth-child(2),.ov-stats>*:nth-child(2){animation-delay:.06s}
+.ov-tiles>*:nth-child(2),.ov-sessions>*:nth-child(2){animation-delay:.05s}
+.ov-tiles>*:nth-child(3),.ov-sessions>*:nth-child(3){animation-delay:.1s}
+.ov-tiles>*:nth-child(4),.ov-sessions>*:nth-child(4){animation-delay:.15s}
+/* 对方在 932px 退单列，但本面板内容区只有 812px；照抄会永远单列。
+   主栏里保持并排，窄栏分别退单列：ov-stats 与 ov-sessions 700px、ov-first 620px。 */
+@container (max-width:700px){
+  .ov-stats{grid-template-columns:minmax(0,1fr)}
+  .ov-sessions{grid-template-columns:minmax(0,1fr)}
+}
+@container (max-width:640px){.ov-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@container (max-width:620px){.ov-first{grid-template-columns:minmax(0,1fr)}}
+@container (max-width:560px){.ov-tiles{grid-template-columns:minmax(0,1fr)}}
+@media (prefers-reduced-motion:reduce){
+  .ov-first>*,.ov-stats>*,.ov-tiles>*,.ov-sessions>*{animation:none}
+  .ov-panel,.ov-card,.ov-chip,.ov-bar i,.ov-heat i,.ov-gran button,
+  .ov-donut .ov-seg,.ovc-ring .ov-seg{transition:none}
+}
+.roost-banner{display:flex;flex-direction:column;gap:3px;padding:12px 16px;margin-bottom:16px;
+  border-radius:12px;border:1px solid var(--line-soft);background:var(--surface)}
 .roost-banner.bad{border-color:color-mix(in srgb,var(--bad) 45%,transparent);
   background:color-mix(in srgb,var(--bad) 9%,transparent)}
-.roost-banner b{font-size:12.5px;font-weight:600}
+.roost-banner b{font-size:13px;font-weight:600}
 .roost-banner i{font-style:normal;font-size:11.5px;line-height:1.6;
   color:var(--dsw-alias-label-tertiary,inherit)}
 
 /* ── 开关 / 芯片 / 单条记忆 / 文字链接 ── */
-.roost-switch{position:relative;width:32px;height:18px;border-radius:9px;border:1px solid var(--line);
-  background:var(--field);cursor:pointer;padding:0;flex:0 0 auto;
-  transition:background .16s ease,border-color .16s ease}
+/* 开关是 <button>：必须 appearance:none + 自带底色，否则深色下会露出
+   UA 的 ButtonFace 浅色皮（2026-11-11 截图里轨道整个发白）。 */
+/* 开关颜色一律写死，不碰 DSH 变量：
+   ① --dsw-alias-brand-primary 在深色主题下被映射成 --dsw-alias-label-primary
+      （主文字色 = 白），拿 --accent 做填充会得到纯白开关（2026-11-11 实测）；
+   ② 纯 color-mix / 变量链一旦不被支持，background 整条失效，<button>
+      会露出 UA 样式表里的 ButtonFace 白底。 */
+.roost-switch{position:relative;width:32px;height:18px;border-radius:9px;
+  border:1px solid #4a5060;
+  appearance:none;-webkit-appearance:none;
+  background:#313640;
+  cursor:pointer;padding:0;flex:0 0 auto;
+  transition:background .16s ease,border-color .16s ease,box-shadow .16s ease}
 .roost-switch::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;
-  background:var(--dsw-alias-label-secondary,currentColor);
+  background:#c9cedb;
   transition:transform .16s cubic-bezier(.2,.8,.2,1),background .16s ease}
-.roost-switch[data-on="1"]{background:var(--accent);border-color:var(--accent)}
+/* 开启态：DSH 品牌蓝（该变量在 app.asar 里的 fallback 值），深色里一眼看出开了 */
+.roost-switch[data-on="1"]{background:#4d6bfe;border-color:#4d6bfe;
+  box-shadow:0 0 0 2px rgba(77,107,254,.24)}
 .roost-switch[data-on="1"]::after{transform:translateX(14px);background:#fff}
-.roost-switch:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.roost-switch:focus-visible{outline:2px solid #4d6bfe;outline-offset:2px}
+.roost-switch:disabled{opacity:.4;cursor:not-allowed}
+@media (prefers-color-scheme: light){
+  .roost-switch{background:#d5d9e2;border-color:#b9bec9}
+  .roost-switch::after{background:#697080}
+}
 .roost-chip{padding:3px 10px;border-radius:20px;border:1px solid var(--line-soft);background:transparent;
   color:inherit;font:inherit;font-size:12px;cursor:pointer;transition:background .14s,border-color .14s}
 .roost-chip:hover{background:var(--hover)}
 .roost-chip[data-on="1"]{border-color:var(--accent);font-weight:600;
   background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.roost-chip[data-on="1"]:hover{filter:brightness(1.06)}
+/* 档位预设按能碰到的东西分级上色：只读最轻、全权最重，一眼看出放开到哪一层 */
+.roost-chip[data-on="1"][data-role="inherit"]{border-color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.roost-chip[data-on="1"][data-role="chat"]{border-color:#94a3b8;
+  background:color-mix(in srgb,#94a3b8 20%,transparent)}
+.roost-chip[data-on="1"][data-role="read"]{border-color:#22c55e;
+  background:color-mix(in srgb,#22c55e 18%,transparent)}
+.roost-chip[data-on="1"][data-role="work"]{border-color:#eab308;
+  background:color-mix(in srgb,#eab308 22%,transparent)}
+.roost-chip[data-on="1"][data-role="all"]{border-color:#ef4444;
+  background:color-mix(in srgb,#ef4444 18%,transparent)}
 .roost-fact{display:flex;gap:8px;align-items:flex-start;padding:5px 0;font-size:12.5px;
   border-top:1px solid var(--line-soft)}
 .roost-fact:first-child{border-top:none}
 .roost-fact span{flex:1;min-width:0;word-break:break-word}
-.roost-fact-x{flex:0 0 auto;border:none;background:transparent;color:inherit;opacity:.42;cursor:pointer;
+.roost-fact-x{flex:0 0 auto;border:none;background:transparent;color:inherit;opacity:.65;cursor:pointer;
   font:inherit;font-size:14px;line-height:1;padding:2px 5px;border-radius:5px}
 /* 删除只在鼠标移到这一行时才显眼：平时淡到几乎看不见，避免误点 */
 .roost-fact:hover .roost-fact-x,.roost-fact-x:focus-visible{opacity:.75}
 .roost-fact-x:hover{opacity:1;color:var(--bad);background:var(--hover)}
 .roost-fact-x:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-@media (hover:none){.roost-fact-x{opacity:.6}}
+@media (hover:none){.roost-fact-x{opacity:.65}}
 /* 危险动作：默认低饱和红，二次确认后实心红——和普通按钮明确区分 */
 /* 危险动作：平时和普通按钮一样（列表里挂一排红框非常吵），点一下才变红 */
 .roost-btn.danger{color:inherit;border-color:var(--line)}
@@ -551,6 +858,27 @@ select.roost-input{color-scheme:dark}
 /* 条形不做过渡：这是读数，不是会连续变化的控件；
    过渡会在数据落地那一下给元素提层，紧接着又整页重排，白白多一轮重绘 */
 .roost-bar.is-bi i{background:var(--warn)}
+
+/* ── 2026-11-11 重设计：页头字阶、窄栏收束、动效降级 ── */
+.roost-title-lg{font-size:18px;font-weight:600;letter-spacing:-.02em;line-height:1.3}
+.roost-sub{font-size:11.5px;line-height:1.55;
+  color:var(--dsw-alias-label-tertiary,inherit);margin-top:2px}
+.roost-head .roost-pill{font-size:10.5px;padding:1px 9px}
+/* 面板在窄侧栏里：统计卡回到两列，页头与页签一起收紧 */
+@container (max-width:620px){
+  .roost-head{padding:12px 16px 0}
+  .roost-scroll-body{padding:16px 16px 40px}
+  .roost-tab{padding:5px 9px;font-size:12px}
+  /* 窄侧栏收成 2 列 3 行，和 dsh-context 在 640px 以下的做法一致 */
+  .roost-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .roost-stat{padding:6px}
+  .roost-stat b{font-size:20px}
+}
+@media (prefers-reduced-motion:reduce){
+  .roost-sec{animation:none}
+  .roost-stat,.roost-btn,.roost-primary,.roost-tab,.roost-sec-fold,.roost-input{transition:none}
+  .roost-stat:hover,.roost-primary:hover:not(:disabled){transform:none}
+}
 `
 
     function useStyle() {
@@ -571,16 +899,43 @@ select.roost-input{color-scheme:dark}
 
     const Pill = ({ tone, children }) => h('span', { className: 'roost-pill' + (tone ? ' ' + tone : '') }, children)
 
-    /** 分节标题：序号 + 标题 + 一条细线。整个面板的排版骨架 */
-    const Sec = ({ n, title, children, right }) =>
-      h('div', { className: 'roost-sec' },
+    /**
+     * 分节：编号徽标 + 标题 + 操作槽 + 折叠开关。整个面板的排版骨架。
+     *
+     * 2026-11-11 重设计：配置、记忆、能力这些页一次铺开 6–7 节，
+     * 读起来是一整面文字墙。现在每节都能收起，状态按「编号 + 标题」
+     * 记在模块级表里：同页内稳定、不同页不串、也不写 localStorage
+     *（折叠只是本次使用习惯，不该变成长期配置）。默认全展开，
+     * 首屏信息和既有渲染断言一条都不少。
+     */
+    const foldState = Object.create(null)
+
+    function Sec({ n, title, children, right }) {
+      const key = String(n || '') + '|' + String(title || '')
+      const [open, setOpen] = useState(() => foldState[key] !== false)
+      return h('div', { className: 'roost-sec' + (open ? '' : ' is-folded') },
         h('div', { className: 'roost-sec-h' },
           n ? h('span', { className: 'roost-sec-n' }, n) : null,
           h('span', { className: 'roost-sec-t' }, title),
-          right ? h('span', { style: { marginLeft: 'auto' } }, right) : null,
+          right ? h('span', { className: 'roost-sec-acts' }, right) : null,
+          h('button', {
+            type: 'button',
+            className: 'roost-sec-fold',
+            'aria-expanded': open ? 'true' : 'false',
+            'aria-label': (open ? '收起' : '展开') + String(title || '这一节'),
+            title: open ? '收起这一节' : '展开这一节',
+            onClick: () => {
+              const next = !open
+              foldState[key] = next
+              setOpen(next)
+            },
+          }, open ? '−' : '+'),
         ),
+        /* 常驻渲染，折叠只由 CSS 隐藏：收起时组件不卸载，
+           输入框里没提交的内容、弹窗开关状态都还在，功能一条不少 */
         children,
       )
+    }
 
     const Row = ({ k, children }) =>
       h('div', { className: 'roost-row' },
@@ -620,7 +975,7 @@ select.roost-input{color-scheme:dark}
      * 而且它本身可点，会把下面所有按钮的点击全吃掉。
      * 正常流里最坏只是条画歪，不会变成盖住半屏的挡板。
      */
-    const Bar = ({ v, bi }) => {
+    const Bar = ({ v, bi, tone }) => {
       const val = Math.max(-1, Math.min(1, Number(v) || 0))
       const pct = bi ? Math.round(((val + 1) / 2) * 100) : Math.round(Math.max(0, val) * 100)
       const w = bi ? Math.abs(val) * 50 : Math.max(0, val) * 100
@@ -630,14 +985,18 @@ select.roost-input{color-scheme:dark}
         role: 'img',
         'aria-label': `${pct}%`,
         title: `${pct}%（只读，情绪由她自己变）`,
-      }, h('i', { style: { marginLeft: left + '%', width: w + '%' } }))
+      }, h('i', {
+        style: { marginLeft: left + '%', width: w + '%', ...(tone ? { background: tone } : {}) },
+      }))
     }
 
     /** 情绪三项的读法：数字是内部量，人看的是词 */
+    /** 三条各用一个色：玫瑰=情绪温度、琥珀=体力能量、青蓝=表达沟通。
+        深色底上都要够亮；不使用纯红/纯绿，避免被读成「好/坏」的判定色。 */
     const MOOD = [
-      { key: 'valence', label: '心情', bi: true, words: ['很糟', '不太好', '一般', '还行', '不错'] },
-      { key: 'energy', label: '精力', bi: false, words: ['很累', '有点累', '一般', '有精神', '很活跃'] },
-      { key: 'sociability', label: '想说话', bi: false, words: ['不想理人', '有点闷', '一般', '想聊', '很想说'] },
+      { key: 'valence', label: '心情', bi: true, tone: '#e8799f', words: ['很糟', '不太好', '一般', '还行', '不错'] },
+      { key: 'energy', label: '精力', bi: false, tone: '#e0a23c', words: ['很累', '有点累', '一般', '有精神', '很活跃'] },
+      { key: 'sociability', label: '想说话', bi: false, tone: '#3fa7d6', words: ['不想理人', '有点闷', '一般', '想聊', '很想说'] },
     ]
 
     /**
@@ -654,13 +1013,21 @@ select.roost-input{color-scheme:dark}
       return words[i]
     }
 
-    /** 概览上的一个数字格 */
-    const Stat = ({ n, label, tone }) =>
-      h('div', { className: 'roost-stat' },
+    /** 统计卡：小标题 k / 大数字 n / 副标题 sub。老调用只给 label 时仍是两行。
+        hint 放 title，长诊断（trace / 耗时拆分）不丢，但不会把卡片撑歪。 */
+    /** title 要同时带口径说明与副标题：窄栏里 .sub 是 ellipsis，
+        只挂 hint 的话被截断的副标题连悬停都看不全。 */
+    const Stat = ({ n, label, k, sub, tone, hint }) =>
+      h('div', {
+        className: 'roost-stat ov-tipbox',
+        'data-tip': [hint, sub || label].filter(Boolean).join(' · '),
+        title: [hint, sub || label].filter(Boolean).join(' · '),
+      },
+        k ? h('span', { className: 'k' }, k) : null,
         h('b', {
           style: tone === 'bad' ? { color: 'var(--bad)' } : tone === 'ok' ? { color: 'var(--ok)' } : null,
         }, n),
-        h('span', null, label),
+        h('span', { className: 'sub' }, sub || label),
       )
 
     /** 一行状态提示：只在真有问题（或真的好）时出现 */
@@ -692,7 +1059,7 @@ select.roost-input{color-scheme:dark}
       if (lt && !lt.ok) {
         return h('div', { className: 'roost-banner bad' },
           h('b', null, '最近一轮失败了。'),
-          h('i', null, `${lt.error || '未知错误'} —— 细节看「日志」。`))
+          h('i', null, `${lt.error || '未知错误'} —— 细节看「排障」。`))
       }
       return null
     }
@@ -788,10 +1155,33 @@ select.roost-input{color-scheme:dark}
       }
     }
 
-    function OverviewTab({ st, setupSt, toast, reload, busy, onGo }) {
-      const [logs, setLogs] = useState(null)
+    function OverviewTab({ st, setupSt, toast, reload, busy, onGo, logs }) {
       /** 「现在就改过来」按钮的忙碌态，和外面的 busy（自测）分开 */
       const [syncing, setSyncing] = useState(false)
+      /** 洞察区数据：/usage 按日历天补齐（56 天够画 7 天柱状图 + 8 周活跃度），
+       *  /chats 是我们自己创建并持有的 QQ↔DSH 会话清单。
+       *  两份都只读 dsh-roost 的账本，不会把宿主 DSH 里手动开的会话算进来。
+       *  只在挂载时拉一次，不加定时器；切回概览页会重拉，但两次请求都很轻。 */
+      const [usage, setUsage] = useState(null)
+      const [myChats, setMyChats] = useState(null)
+      useEffect(() => {
+        let alive = true
+        Promise.all([get('/usage?days=56'), get('/chats')])
+          .then(([u, c]) => {
+            if (!alive) return
+            setUsage(u.ok === false ? null : u)
+            setMyChats(c.ok === false ? null : (Array.isArray(c.chats) ? c.chats : []))
+          })
+          .catch(() => {})
+        return () => { alive = false }
+      }, [])
+      /** 会话筛选（对方洞察页下半部分）：搜索 / 群私聊 / 时间范围 / 排序 / 分页 */
+      const [qText, setQText] = useState('')
+      const [qKind, setQKind] = useState('all')
+      const [qRange, setQRange] = useState('all')
+      const [qSort, setQSort] = useState('recent')
+      const [qPage, setQPage] = useState(0)
+      const [starting, setStarting] = useState(false)
       const perms = st?.permissions || {}
       const toolable = ['owner', 'admin', 'member'].filter((k) => perms[k] === 'all')
       const lt = st?.lastTurn
@@ -802,18 +1192,196 @@ select.roost-input{color-scheme:dark}
       const tools = st?.qqTools || null
       /** token 只给量级，别在数字格里塞一长串；过了百万就换 M，别写出 1162.5k */
       const tokens = today ? (today.uncached + today.cacheRead + today.cacheWrite + today.output) : 0
-      const tokenText = tokens >= 1e6
-        ? `${(tokens / 1e6).toFixed(2)}M`
-        : tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens)
+      const fmtNum = (v) => {
+        const n = Number(v) || 0
+        if (!Number.isFinite(n)) return '—'
+        return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M`
+          : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+      }
+      const tokenText = fmtNum(tokens)
+      /** 命中率直接用后端 `usage.summary().total.cacheHit`（三个计费桶做分母），
+          不在前端另算一遍：自算的两桶口径会和上下文页的「命中率」差出一截。 */
+      const cacheHit = today && Number.isFinite(today.cacheHit) ? today.cacheHit : null
 
-      /** 概览上的最近动态：不用切到日志页就能看到刚刚发生了什么 */
-      useEffect(() => {
-        let alive = true
-        const load = () => get('/logs?limit=6').then((r) => alive && setLogs(r.ok === false ? [] : r.entries || []))
-        load()
-        const t = setInterval(load, 5000)
-        return () => { alive = false; clearInterval(t) }
-      }, [])
+      /** 一天的四类 Token 合计。/usage 的 days 是日历天补齐的，空天全是 0 */
+      const sumDay = (d) => (Number(d?.uncached) || 0) + (Number(d?.cacheRead) || 0)
+        + (Number(d?.cacheWrite) || 0) + (Number(d?.output) || 0)
+      const usageDays = Array.isArray(usage?.days) ? usage.days : []
+      const last7 = usageDays.slice(-7)
+      const heatDays = usageDays.slice(-56)
+      /** 最近一轮的结论：ok 字段缺失是「没读到」，不能当成「失败」报红 */
+      const turnWord = !lt ? '本次启动暂无记录'
+        : lt.ok === false ? '最近一轮失败'
+          : lt.ok ? `回了 ${lt.len ?? 0} 字` : '本轮状态未知'
+
+      /** 占比别用整数百分比：输出只占万分之四，Math.round 会把它显示成 0%，
+          看着像没统计。零值留空，非零但不到 0.1% 显示 <0.1%。 */
+      const pctText = (v, total) => {
+        if (!Number.isFinite(v) || !Number.isFinite(total)) return '—'
+        if (!(total > 0) || !(v > 0)) return '—'
+        const p = v / total * 100
+        return p < 0.1 ? '<0.1%' : `${p.toFixed(1)}%`
+      }
+
+      /** 环形图：SVG 描边拼接，不引图表库。parts = [{k, v, c}] */
+      const donut = (parts, center, cap) => {
+        const total = parts.reduce((a, p) => a + (Number(p.v) || 0), 0)
+        const C = 2 * Math.PI * 38
+        let off = 0
+        return h('div', { className: 'ov-donut-row' },
+          h('svg', { className: 'ov-donut', viewBox: '0 0 100 100', 'aria-hidden': 'true' },
+            h('circle', { cx: 50, cy: 50, r: 38, fill: 'none', stroke: 'var(--field)', 'stroke-width': 12 }),
+            total > 0 ? parts.filter((p) => p.v > 0).map((p) => {
+              const len = p.v / total * C
+              const el = h('circle', {
+                key: p.k, className: 'ov-seg', cx: 50, cy: 50, r: 38, fill: 'none', stroke: p.c,
+                'stroke-width': 12, 'stroke-dasharray': `${len} ${C - len}`,
+                'stroke-dashoffset': -off, transform: 'rotate(-90 50 50)',
+              }, h('title', null, `${p.k} · ${fmtNum(p.v)} tokens · ${pctText(p.v, total)}`))
+              off += len
+              return el
+            }) : null,
+            h('text', { x: 50, y: 52, 'text-anchor': 'middle', 'font-size': 12,
+              fill: 'var(--dsw-alias-label-primary, inherit)' }, center),
+          ),
+          h('div', { className: 'ov-legend' },
+            parts.map((p) => h('div', {
+              key: p.k, title: `${p.k} · ${fmtNum(p.v)} tokens`,
+            },
+              h('i', { style: { background: p.c } }),
+              h('span', { className: 't' }, p.k),
+              h('span', { className: 'v' }, pctText(p.v, total)),
+            )),
+            cap ? h('div', { className: 'ov-empty' }, cap) : null,
+          ),
+        )
+      }
+
+      /** 对应 dsh-context 底部「技能加载 / 工具调用 / 命令执行」那三格的位置；
+          只给 280px 下限，内容由 grid 拉齐，不锁死高度裁内容 */
+      const mini = (title, cap, rows) => h('div', { className: 'ov-panel ov-tile' },
+        h('h4', null, title),
+        h('div', { className: 'ov-cap' }, cap),
+        rows.length
+          ? rows.map(([k, v], i) => h('div', { key: i, className: 'ov-rowline' },
+              h('span', { className: 't' }, k), h('span', { className: 'v' }, v)))
+          : h('div', { className: 'ov-empty' }, '暂无数据'),
+      )
+
+      /** 对方 .lc-heat-0..4 的五档蓝；没有用量的日子用最低档灰 */
+      const heatColor = (v, max) => {
+        if (!v) return null
+        const p = v / max
+        const a = p > .8 ? 92 : p > .55 ? 72 : p > .3 ? 50 : p > .1 ? 28 : 16
+        return a === 16
+          ? 'color-mix(in srgb,var(--dsw-alias-label-secondary,inherit) 16%,transparent)'
+          : `color-mix(in srgb,#3b82f6 ${a}%,transparent)`
+      }
+      /** 会话筛选与卡片：只在我们创建并持有的会话里筛，用量只认自己的账本 */
+      const chatRow = (cid) => usage?.chats?.[cid] || null
+      const chatToken = (cid) => {
+        const v = chatRow(cid)
+        return v ? (Number(v.uncached) || 0) + (Number(v.cacheRead) || 0)
+          + (Number(v.cacheWrite) || 0) + (Number(v.output) || 0) : 0
+      }
+      const chatTurns = (cid) => Number(chatRow(cid)?.turns) || 0
+      /** 单个会话的命中率：和后端 summary 一样用三个计费桶做分母 */
+      const chatHit = (cid) => {
+        const v = chatRow(cid)
+        if (!v) return null
+        const billed = (Number(v.uncached) || 0) + (Number(v.cacheRead) || 0)
+          + (Number(v.cacheWrite) || 0)
+        return billed ? Math.round((Number(v.cacheRead) || 0) / billed * 1000) / 10 : null
+      }
+      /** 卡里的 64px 圆环：对方画上下文组成，我们画四个计费桶 */
+      const chatParts = (cid) => {
+        const v = chatRow(cid) || {}
+        return [
+          { k: '未缓存输入', v: Number(v.uncached) || 0, c: '#4d6bfe' },
+          { k: '缓存读取', v: Number(v.cacheRead) || 0, c: '#3fa7d6' },
+          { k: '缓存写入', v: Number(v.cacheWrite) || 0, c: '#e0a23c' },
+          { k: '模型输出', v: Number(v.output) || 0, c: '#e8799f' },
+        ]
+      }
+      const dstr = (t) => {
+        if (!Number.isFinite(Number(t)) || !(Number(t) > 0)) return '—'
+        const d = new Date(Number(t))
+        const p = (n) => String(n).padStart(2, '0')
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+      }
+      const relTime = (at) => {
+        const t = Number(at) || 0
+        if (!t) return '—'
+        const diff = Date.now() - t
+        if (diff < 0) return dstr(t)
+        if (diff < 60000) return '刚刚'
+        if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`
+        if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`
+        if (diff < 30 * 86400000) return `${Math.floor(diff / 86400000)} 天前`
+        return dstr(t)
+      }
+      /** 对方 Donut 的 42 格 viewBox + 15.9155 半径：周长正好 100，直接按百分比拼接 */
+      const ring = (parts, center) => {
+        const total = parts.reduce((a, p) => a + (p.v > 0 ? p.v : 0), 0)
+        let off = 0
+        return h('div', { className: 'ovc-ring' },
+          h('svg', { viewBox: '0 0 42 42', 'aria-hidden': 'true' },
+            h('circle', {
+              cx: 21, cy: 21, r: 15.9155, fill: 'none',
+              stroke: 'var(--field)', 'stroke-width': 4,
+            }),
+            total > 0 ? parts.filter((p) => p.v > 0).map((p) => {
+              const len = p.v / total * 100
+              const el = h('circle', {
+                key: p.k, className: 'ov-seg', cx: 21, cy: 21, r: 15.9155,
+                fill: 'none', stroke: p.c, 'stroke-width': 4,
+                'stroke-dasharray': `${len} ${100 - len}`, 'stroke-dashoffset': 125 - off,
+              }, h('title', null, `${p.k} · ${fmtNum(p.v)} tokens · ${pctText(p.v, total)}`))
+              off += len
+              return el
+            }) : null,
+          ),
+          h('div', { className: 'ovc-mid' }, h('b', null, center)),
+        )
+      }
+      const RANGE_DAYS = { today: 1, '7d': 7, '30d': 30, all: 0 }
+      const filteredChats = (myChats || []).filter(Boolean).filter((c) => {
+        if (qKind === 'group' && c.kind !== 'group') return false
+        if (qKind === 'c2c' && c.kind !== 'c2c') return false
+        const days = RANGE_DAYS[qRange] || 0
+        if (days && Date.now() - (Number(c.at) || 0) > days * 86400000) return false
+        const text = `${c.title || ''} ${c.chatId ?? ''} ${c.sessionId ?? ''} ${c.preset ?? ''}`
+          .toLowerCase()
+        return !qText.trim() || text.includes(qText.trim().toLowerCase())
+      }).sort((a, b) => qSort === 'tokens'
+        ? chatToken(b.chatId) - chatToken(a.chatId)
+        : qSort === 'turns'
+          ? chatTurns(b.chatId) - chatTurns(a.chatId)
+          : (Number(b.at) || 0) - (Number(a.at) || 0))
+      const PAGE_SIZE = 6
+      const pageCount = Math.max(1, Math.ceil(filteredChats.length / PAGE_SIZE))
+      const page = Math.max(0, Math.min(qPage, pageCount - 1))
+      const pageChats = filteredChats.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+      const chip = (label, val, cur, set, n) => h('button', {
+        type: 'button', className: 'ov-chip', 'data-on': cur === val ? '1' : '0',
+        onClick: () => { set(val); setQPage(0) },
+      }, label, h('span', { className: 'n' }, String(n)))
+
+      /** 接入进度上的两个直达按钮：后端 /setup/start 与 /setup/webui 都已存在 */
+      const startRoost = async () => {
+        setStarting(true)
+        try {
+          const r = await post('/setup/start', {})
+          toast(r?.ok === false ? `启动失败：${r.message || '未知'}` : (r?.message || 'Roost 已启动'))
+          reload()
+        } finally { setStarting(false) }
+      }
+      const openRoostPanel = async () => {
+        const r = await get('/setup/webui')
+        const url = r.ok !== false ? r.url : ''
+        if (url || s.webui) window.open(url || s.webui, '_blank', 'noopener')
+        else toast('还没装好 Roost，没有面板可开')
+      }
 
       /**
        * 接入进度用**真实字段**推，不再靠一个后端不存在的 `steps`。
@@ -857,54 +1425,9 @@ select.roost-input{color-scheme:dark}
 
       return h('div', null,
         h(Banner, { st, setupSt }),
-        h('div', { className: 'roost-sec', style: { marginTop: 0 } },
-          h('div', { className: 'roost-sec-h' },
-            h('span', { className: 'roost-sec-n' }, '01'),
-            h('span', { className: 'roost-sec-t' }, '现在这样'),
-            h('span', { style: { marginLeft: 'auto' } },
-              h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新')),
-          ),
-          h('div', { className: 'roost-grid' },
-            h(Stat, { n: st?.chats ?? 0, label: '已建立的会话' }),
-            h(Stat, { n: st?.waiting ?? 0, label: '正在等 DSH 回复' }),
-            h(Stat, { n: q.pending ?? 0, label: `排队中 · 正在跑 ${q.busy ?? 0} 条` }),
-            h(Stat, {
-              n: lt ? `${lt.ms}ms` : '—',
-              label: lt
-                ? `${lt.ok ? `最近一轮回了 ${lt.len} 字` : '最近一轮失败'}`
-                  + (lt.trace ? ` · trace ${lt.trace}` : '')
-                  + (lt.seg
-                    ? ` · 排队 ${lt.seg.queue ?? '—'}ms / 准备 ${lt.seg.prep ?? '—'}ms / 生成 ${lt.seg.gen ?? '—'}ms`
-                    : '')
-                : '本次启动暂无记录',
-              tone: lt ? (lt.ok ? 'ok' : 'bad') : null,
-            }),
-            h(Stat, {
-              n: today ? today.turns : '—',
-              label: today ? `今日轮次 · ${tokenText} tokens` : '今日暂无用量',
-            }),
-            h(Stat, {
-              n: !tools || !tools.sessionCount ? '—' : (tools.ok ? '已挂' : '未挂'),
-              label: !tools || !tools.sessionCount
-                ? '等第一条消息挂载'
-                : `${tools.sessionCount} 个会话 · 失败 ${tools.failedCount}`,
-              tone: tools && tools.sessionCount ? (tools.ok ? 'ok' : 'bad') : null,
-            }),
-          ),
-          /**
-           * 权限说明不占数字格：七格会在窄面板里单独换行，而这格是文字、
-           * 长短和其他格差得多，会把整排撑歪（2026-11-10 面板截图实测）。
-           * 能力策略接管后旧 `permissions` 只是历史值，这里也不拿它冒充当前档位。
-           */
-          h('div', { className: 'roost-note', style: { marginTop: 8 } },
-            capsOn
-              ? '权限：能力页已接管，档位与工具在「能力」页配置。'
-              : toolable.length
-                ? `权限：能用本地工具的档位 ${toolable.join(' / ')}（共 ${toolable.length} 档）。`
-                : '权限：没有档位开放全部工具。'),
-        ),
 
-        h(Sec, { n: '02', title: '接入进度',
+        /** 01 接入进度放最上面（主人 2026-11-11 指定），并把两个直达按钮放这里 */
+        h(Sec, { n: '01', title: '接入进度',
           right: h('span', { className: 'roost-note', style: { margin: 0 } }, `${doneCount} / ${checks.length}`) },
           h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
             checks.map(([label, ok]) =>
@@ -912,17 +1435,289 @@ select.roost-input{color-scheme:dark}
                 (ok ? '✓ ' : '· ') + label),
             ),
           ),
-          allReady
-            ? h('div', { className: 'roost-note' },
-                '链路这五项都齐了。剩下两件在 QQ 开放平台手动做：开「接收所有消息」、把机器人拉进群。')
-            : h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-                h('button', { type: 'button', className: 'roost-btn', onClick: () => onGo('setup') }, '去接入'),
-                h('span', { className: 'roost-note', style: { margin: 0 } },
-                  '缺哪一步在那一页有单独说明和按钮。'),
-              ),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 } },
+            h('button', { type: 'button', className: 'roost-primary', disabled: starting, onClick: startRoost },
+              starting ? '启动中…' : '一键启动 Roost'),
+            h('button', { type: 'button', className: 'roost-btn', onClick: openRoostPanel }, '打开 Roost 面板 ↗'),
+            allReady ? null
+              : h('button', { type: 'button', className: 'roost-btn', onClick: () => onGo('setup') }, '去接入'),
+          ),
+          h('div', { className: 'roost-note' },
+            allReady
+              ? '链路这五项都齐了。剩下两件在 QQ 开放平台手动做：开「接收所有消息」、把机器人拉进群。'
+              : '缺哪一步在那一页有单独说明和按钮。'),
         ),
 
-        h(Sec, { n: '03', title: '快捷',
+        /** 02 洞察区：网格严格按 dsh-context 的 .lc-ov-first / .lc-ov-stats / .lc-ov-tiles。
+            指标仍用我们自己的（四类 Token、三段耗时、我们创建的会话）。 */
+        h(Sec, { n: '02', title: '现在这样',
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
+          // 第一行：六格 KPI + 近 7 天用量
+          h('div', { className: 'ov-first' },
+            h('div', { className: 'roost-grid' },
+              h(Stat, {
+                k: '托管会话',
+                n: st ? (st.chats ?? 0) : '—',
+                sub: st ? `正在等 DSH 回复 ${st.waiting ?? 0}` : '读不到宿主状态',
+                hint: '只统计 dsh-roost 创建并持有的会话（含面板自测那一条），'
+                  + '不含你在 DSH 里手动开的会话；下面几格的用量、排队、工具挂载也是同一批会话。',
+              }),
+              h(Stat, {
+                k: '今日 Token', n: today ? tokenText : '—',
+                sub: today
+                  ? `${today.turns ?? 0} 轮 · 输出 ${fmtNum(today.output)}`
+                  : '今日暂无用量',
+              }),
+              h(Stat, {
+                k: '排队并发', n: q.pending ?? 0,
+                sub: `正在跑 ${q.busy ?? 0} 条 · ${q.lanes ?? 0} 车道`,
+              }),
+              h(Stat, {
+                k: '缓存命中', n: cacheHit === null ? '—' : `${cacheHit}%`,
+                sub: today
+                  ? `读取 ${fmtNum(today.cacheRead)} · 写入 ${fmtNum(today.cacheWrite)}`
+                  : '暂无输入用量',
+                hint: '命中率 = 缓存读取 ÷（未缓存输入 + 缓存读取 + 缓存写入），按宿主回报的用量算。',
+              }),
+              h(Stat, {
+                k: '最近一轮', n: lt && lt.ms != null ? `${lt.ms}ms` : '—',
+                sub: turnWord,
+                hint: lt
+                  ? turnWord
+                    + (lt.trace ? ` · 本轮编号 ${lt.trace}` : '')
+                    + (lt.seg
+                      ? ` · 排队 ${lt.seg.queue ?? '—'}ms / 准备 ${lt.seg.prep ?? '—'}ms / 生成 ${lt.seg.gen ?? '—'}ms`
+                      : '')
+                  : '',
+                tone: lt ? (lt.ok === false ? 'bad' : lt.ok ? 'ok' : null) : null,
+              }),
+              h(Stat, {
+                k: '工具挂载',
+                n: !tools || !tools.sessionCount ? '—' : (tools.ok ? '已挂' : '未挂'),
+                sub: !tools || !tools.sessionCount
+                  ? '等第一条消息挂载'
+                  : `${tools.sessionCount} 个会话 · 失败 ${tools.failedCount ?? 0}`,
+                tone: tools && tools.sessionCount ? (tools.ok ? 'ok' : 'bad') : null,
+              }),
+            ),
+            h('div', { className: 'ov-panel ov-tipbox', 'data-tip': '按自然日补齐，没数据的天算 0' },
+              h('h4', null, '近 7 天用量'),
+              h('div', { className: 'ov-cap' }, '每天用掉的 Token 总量 · 只统计我们创建的会话'),
+              last7.length
+                ? h('div', { className: 'ov-bars' },
+                    last7.map((d, i) => {
+                      const v = sumDay(d)
+                      const max = Math.max(1, ...last7.map(sumDay))
+                      return h('div', {
+                        key: d?.day || i, className: 'ov-bar ov-tipbox',
+                        'data-tip': `${d?.day || ''} · ${fmtNum(v)} tokens · ${d?.turns ?? 0} 轮`,
+                        title: `${d?.day || ''} · ${fmtNum(v)} tokens`,
+                      },
+                        h('b', null, v ? fmtNum(v) : ''),
+                        h('i', { style: { height: `${Math.max(2, Math.round(v / max * 62))}px` } }),
+                        h('span', null, String(d?.day || '').slice(5)),
+                      )
+                    }),
+                  )
+                : h('div', { className: 'ov-empty' }, '读取中…'),
+            ),
+          ),
+          // 第二行：两个环形图
+          h('div', { className: 'ov-stats' },
+            h('div', { className: 'ov-panel ov-tipbox', 'data-tip': '按输入、缓存、输出拆开，不是 DSH 的上下文占用' },
+              h('h4', null, 'Token 构成'),
+              h('div', { className: 'ov-cap' },
+                '近 7 天 · 悬停看具体数值 · 缓存写入这项上游没回报'),
+              donut([
+                { k: '未缓存输入', v: last7.reduce((a, d) => a + (Number(d?.uncached) || 0), 0), c: '#3b82f6' },
+                { k: '缓存读取', v: last7.reduce((a, d) => a + (Number(d?.cacheRead) || 0), 0), c: '#14b8a6' },
+                { k: '缓存写入', v: last7.reduce((a, d) => a + (Number(d?.cacheWrite) || 0), 0), c: '#f59e0b' },
+                { k: '模型输出', v: last7.reduce((a, d) => a + (Number(d?.output) || 0), 0), c: '#8b5cf6' },
+              ], fmtNum(last7.reduce((a, d) => a + sumDay(d), 0)), '中心是这四项加起来'),
+            ),
+            h('div', { className: 'ov-panel ov-tipbox', 'data-tip': '最近一轮的排队 / 准备 / 生成耗时' },
+              h('h4', null, '耗时拆分'),
+              h('div', { className: 'ov-cap' }, '最近一轮 · 排队 / 准备 / 生成'),
+              lt?.seg
+                ? donut([
+                    { k: '排队', v: Number(lt.seg.queue) || 0, c: '#3b82f6' },
+                    { k: '准备', v: Number(lt.seg.prep) || 0, c: '#8b5cf6' },
+                    { k: '生成', v: Number(lt.seg.gen) || 0, c: '#14b8a6' },
+                  ], lt.ms != null ? `${lt.ms}ms` : '—', lt.trace ? `本轮编号 ${lt.trace}` : '')
+                : h('div', { className: 'ov-empty' }, '最近一轮还没有耗时明细。'),
+            ),
+          ),
+          // 第三行：四张 280px 卡（对方 .lc-ov-tile）
+          h('div', { className: 'ov-tiles' },
+            h('div', { className: 'ov-panel ov-tile' },
+              h('h4', null, '活跃度'),
+              h('div', { className: 'ov-cap' }, '近 8 周每天的用量 · 颜色越深越高'),
+              heatDays.length
+                ? h('div', { className: 'ov-heat' },
+                    heatDays.map((d, i) => {
+                      const v = sumDay(d)
+                      const max = Math.max(1, ...heatDays.map(sumDay))
+                      return h('i', {
+                        key: d?.day || i, className: 'ov-tipbox',
+                        'data-tip': `${d?.day || ''} · ${fmtNum(v)} tokens`,
+                        title: `${d?.day || ''} · ${fmtNum(v)} tokens`,
+                        style: heatColor(v, max) ? { background: heatColor(v, max) } : null,
+                      })
+                    }),
+                  )
+                : h('div', { className: 'ov-empty' }, '读取中…'),
+            ),
+            mini('会话构成', '只统计我们创建并持有的会话', [
+              ['群会话', String((myChats || []).filter((c) => c.kind === 'group').length)],
+              ['私聊', String((myChats || []).filter((c) => c.kind === 'c2c').length)],
+              ['合计', String((myChats || []).length)],
+            ]),
+            mini('用量最高', '近 8 周各会话的用量',
+              Object.entries(usage?.chats || {})
+                .map(([cid, v]) => [cid, (Number(v?.uncached) || 0) + (Number(v?.cacheRead) || 0)
+                  + (Number(v?.cacheWrite) || 0) + (Number(v?.output) || 0)])
+                .sort((a, b) => b[1] - a[1]).slice(0, 4)
+                .map(([cid, v]) => [String(cid).slice(0, 10), fmtNum(v)])),
+            mini('最近更新', '按映射写入时间',
+              (myChats || []).slice().sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0)).slice(0, 4)
+                .map((c) => [c.title || String(c.chatId ?? '').slice(0, 10),
+                  c.at ? new Date(c.at).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : '—'])),
+          ),
+          /**
+           * 权限说明不占数字格：七格会在窄面板里单独换行，而这格是文字、
+           * 长短和其他格差得多，会把整排撑歪（2026-11-10 面板截图实测）。
+           * 能力策略接管后旧权限只是历史值，这里也不拿它冒充当前档位。
+           */
+          h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            capsOn
+              ? '权限：策略已接管，档位与工具在「权限」页配置。'
+              : toolable.length
+                ? `权限：能用本地工具的档位 ${toolable.join(' / ')}（共 ${toolable.length} 档）。`
+                : '权限：没有档位开放全部工具。'),
+        ),
+
+        /** 03 会话筛选：对应 dsh-context 洞察页下半部分的搜索 / 范围 / 排序 / 卡片 / 分页。
+            只在我们创建并持有的 QQ↔DSH 会话里筛，用量也只读我们自己的账本。
+            卡片尺寸与读法照对方 .lc-ov-session，指标换成四类 Token 与 DSH 会话号。 */
+        h(Sec, { n: '03', title: '会话',
+          right: h('span', { className: 'ov-count' }, String(filteredChats.length)) },
+          h('div', { className: 'ov-filter' },
+            h('input', {
+              className: 'roost-input ov-search', type: 'search',
+              placeholder: '搜名称、QQ 会话号或 DSH 会话号',
+              value: qText,
+              onChange: (e) => { setQText(e.target.value); setQPage(0) },
+            }),
+            h('select', {
+              className: 'roost-input ov-cover', value: qRange,
+              onChange: (e) => { setQRange(e.target.value); setQPage(0) },
+            },
+              h('option', { value: 'all' }, '全部时间'),
+              h('option', { value: 'today' }, '近 24 小时'),
+              h('option', { value: '7d' }, '近 7 天'),
+              h('option', { value: '30d' }, '近 30 天'),
+            ),
+            h('div', { className: 'ov-gran', role: 'group' },
+              [['recent', '最近更新'], ['tokens', 'Token 用量'], ['turns', '轮次']]
+                .map(([v, label]) => h('button', {
+                  key: v, type: 'button', 'data-on': qSort === v ? '1' : '0',
+                  onClick: () => { setQSort(v); setQPage(0) },
+                }, label)),
+            ),
+          ),
+          h('div', { className: 'ov-groups' },
+            chip('全部', 'all', qKind, setQKind, (myChats || []).length),
+            chip('群', 'group', qKind, setQKind,
+              (myChats || []).filter((c) => c.kind === 'group').length),
+            chip('私聊', 'c2c', qKind, setQKind,
+              (myChats || []).filter((c) => c.kind === 'c2c').length),
+          ),
+          h('div', { className: 'ov-sessions' },
+            pageChats.length
+              ? pageChats.map((c, i) => {
+                  const total = chatToken(c.chatId)
+                  const hit = chatHit(c.chatId)
+                  const at = Number(c.at) || 0
+                  const delta = Date.now() - at
+                  /** at 是映射写入时间，不是最后一条消息时间：文案一律按「更新」说。
+                      「今日」用日历日判定，别把昨天 23 点算成今天。 */
+                  const todayCard = at > 0 && delta >= 0 && dstr(at) === dstr(Date.now())
+                  const fresh = at > 0 && delta >= 0 && delta < 300000
+                  return h('div', {
+                    key: c.chatId || i, className: 'ov-card ov-tipbox',
+                    role: 'button', tabIndex: 0,
+                    'data-today': todayCard ? '1' : '0',
+                    'data-tip': `${c.title || '未命名'} · ${c.kind === 'group' ? '群' : '私聊'}`
+                      + ` · QQ 会话 ${String(c.chatId ?? '')} · DSH 会话 ${String(c.sessionId ?? '—')}`,
+                    onClick: () => onGo('chats'),
+                    onKeyDown: (e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        onGo('chats')
+                      }
+                    },
+                  },
+                    h('div', { className: 'ovc-head' },
+                      fresh ? h('i', { className: 'ovc-dot', title: '5 分钟内更新过映射' }) : null,
+                      h('span', { className: 'ovc-title', title: c.title || '' },
+                        (c.kind === 'group' ? 'QQ · 群 ' : 'QQ · 私聊 ')
+                          + (c.title || String(c.chatId ?? '').slice(0, 12))),
+                      todayCard ? h('span', { className: 'ovc-tag', title: '今天更新过映射' }, '今日') : null,
+                      h('span', { className: 'ovc-times' },
+                        h('span', null, relTime(c.at)),
+                        h('span', null, at ? dstr(at) : '—')),
+                    ),
+                    h('div', { className: 'ovc-crumb',
+                      title: `预设 ${c.preset || '默认'} · DSH 会话 ${String(c.sessionId ?? '—')}` },
+                      h('span', null, c.kind === 'group' ? '群会话' : '私聊'),
+                      h('span', { className: 'ovc-proj' },
+                        c.preset || (c.sessionId ? String(c.sessionId).slice(0, 8) : '未命名')),
+                    ),
+                    total > 0
+                      ? h('div', { className: 'ovc-body' },
+                          /** 圆环中心就是四类合计，不再塞「占近 8 周 x%」：
+                              我们没有上下文窗口这种分母，那行既没口径又会溢出 64px 环。 */
+                          ring(chatParts(c.chatId), fmtNum(total)),
+                          h('div', { className: 'ovc-mini' },
+                            h('div', null,
+                              h('span', { className: 'l' }, '轮次'),
+                              h('span', { className: 'v' }, `${chatTurns(c.chatId)} 轮`)),
+                            h('div', null,
+                              h('span', { className: 'l' }, '模型输出'),
+                              h('span', { className: 'v' },
+                                fmtNum(Number(chatRow(c.chatId)?.output) || 0))),
+                            h('div', null,
+                              h('span', { className: 'l' }, '缓存命中'),
+                              h('span', { className: 'v' }, hit === null ? '—' : `${hit}%`)),
+                          ),
+                        )
+                      : h('div', { className: 'ov-empty' },
+                          usage === null ? '用量暂时读不到' : '还没有用量记录'),
+                    h('div', { className: 'ovc-preview',
+                      title: `QQ 会话 ${String(c.chatId ?? '')} · DSH 会话 ${String(c.sessionId ?? '—')}` },
+                      h('span', { className: 'l' }, 'DSH 会话'),
+                      h('span', { className: 'v' },
+                        c.sessionId ? String(c.sessionId).slice(0, 12) : '—')),
+                  )
+                })
+              : h('div', { className: 'ov-empty' }, myChats === null ? '读取中…' : '没有匹配的会话。'),
+          ),
+          pageCount > 1
+            ? h('div', { className: 'ov-pager' },
+                h('button', {
+                  type: 'button', disabled: page <= 0,
+                  onClick: () => setQPage(page - 1),
+                }, '‹'),
+                h('span', { className: 'roost-note', style: { margin: 0 } }, `${page + 1} / ${pageCount}`),
+                h('button', {
+                  type: 'button', disabled: page >= pageCount - 1,
+                  onClick: () => setQPage(page + 1),
+                }, '›'),
+              )
+            : null,
+        ),
+
+        h(Sec, { n: '04', title: '快捷',
           right: h('span', { className: 'roost-note', style: { margin: 0 } }, '自测不经过 QQ') },
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h('button', { type: 'button', className: 'roost-primary', disabled: busy, onClick: selftest },
@@ -942,16 +1737,18 @@ select.roost-input{color-scheme:dark}
             '自测直接跑一轮 DSH 对话，验「会话建得起来、AI 回得来」；QQ 那一段不在里面。'),
         ),
 
-        h(Sec, { n: '04', title: '端口对得上吗' },
+        h(Sec, { n: '05', title: '端口对得上吗' },
           h('div', { className: 'roost-list' },
             [
               ['dsh-roost 实际监听', pv.cell || '—', 'ai-chat 要往这里推'],
-              ['Roost 面板', s.port || '—', 'Roost 自己的 webui 端口，和上面不是一回事'],
+              ['Roost 面板', s.port || '—', 'Roost 自己的面板端口，和上面不是一回事'],
               ['ai-chat 指向', s.pluginConfig?.dshUrl || '未配置', '它以为该推给谁'],
             ].map(([k, v, why]) =>
               h('div', { key: k, className: 'roost-item' },
                 h('span', { className: 't' }, k, h('span', { className: 'd' }, ' ' + why)),
-                h('span', { className: 'roost-mono', style: { flex: '0 0 auto' } }, String(v)),
+                /** URL 可能很长：允许收缩并断行，别把左边的说明挤成一个字一行 */
+                h('span', { className: 'roost-mono',
+                  style: { flex: '0 1 auto', minWidth: 0, overflowWrap: 'anywhere' } }, String(v)),
               ),
             ),
           ),
@@ -974,13 +1771,13 @@ select.roost-input{color-scheme:dark}
           ),
         ),
 
-        h(Sec, { n: '05', title: '最近动态' },
+        h(Sec, { n: '06', title: '最近动态' },
           logs === null
             ? h('div', { className: 'roost-empty' }, '读取中…')
             : logs.length === 0
               ? h('div', { className: 'roost-empty' }, '还没有动静。群里说句话，或者跑一次自测。')
               : h('div', { className: 'roost-list' },
-                  logs.slice().reverse().map((e, i) =>
+                  logs.slice(-6).reverse().map((e, i) =>
                     h('div', { key: i, className: 'roost-item' },
                       h('span', { className: 'roost-mono', style: { flex: '0 0 auto', opacity: 0.7 } }, e.time),
                       h('span', {
@@ -1502,7 +2299,6 @@ select.roost-input{color-scheme:dark}
               : null,
           ),
         ),
-        h(ExtClientsBlock, { toast }),
       )
     }
 
@@ -2424,6 +3220,16 @@ select.roost-input{color-scheme:dark}
     /* ---------------- 记忆（三层） ---------------- */
 
     function MemoryTab({ mem, toast, reload, quick, busy, onPickChat }) {
+      /** 召回记录：后端每轮都在写，这里给个入口看「她刚才想起了什么」 */
+      const [recallRows, setRecallRows] = useState(null)
+      const [recallErr, setRecallErr] = useState('')
+      const loadRecall = async () => {
+        const r = await quick('recall.log', { limit: 50 })
+        /** 读失败要明说，别统一显示「还没有记录」把报错伪装成空数据 */
+        setRecallErr(r?.ok === false ? (r.message || '召回记录读取失败') : '')
+        setRecallRows(r?.rows || [])
+      }
+      useEffect(() => { loadRecall() }, [])
       const [q, setQ] = useState('')
       const [hits, setHits] = useState(null)
       const [fact, setFact] = useState('')
@@ -3157,6 +3963,25 @@ select.roost-input{color-scheme:dark}
             : h('div', { className: 'roost-note', style: { margin: 0 } }, '还没有备份。'),
         ),
 
+        h(Sec, { title: '召回记录', right: h('button', {
+          type: 'button', className: 'roost-btn', onClick: loadRecall,
+        }, '刷新') },
+          recallErr
+            ? h('div', { className: 'roost-empty', style: { color: 'var(--bad)' } }, recallErr)
+            : recallRows === null
+              ? h('div', { className: 'roost-empty' }, '读取中…')
+              : recallRows.length === 0
+                ? h('div', { className: 'roost-empty' }, '还没有召回记录')
+                : h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 220 } },
+                    recallRows.map((x, i) =>
+                      h('div', { key: i, className: 'roost-item' },
+                        h('span', { className: 'd' }, x.at ? ago(x.at) : (x.time || '')),
+                        h('span', { className: 't' }, `命中 ${x.shown ?? 0} 条 · ${x.chatId || '—'}`),
+                        h('span', { className: 'd' },
+                          ` 查询 ${x.queryLen ?? 0} 字${x.shortPhrase ? ' · 短句' : ''}${x.usedPrev ? ' · 沿用上轮' : ''}`),
+                      ))),
+        ),
+
         /* 危险区放最后 */
         h(Sec, { n: '07', title: '清空' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
@@ -3235,7 +4060,7 @@ select.roost-input{color-scheme:dark}
 
     /* ---------------- 主动搭话 ---------------- */
 
-    function AwakeTab({ aw, mem, sp, chats, mood, toast, reload, reloadMood, reloadSp, busy }) {
+    function AwakeTab({ aw, mem, sp, chats, mood, toast, reload, reloadMood, reloadSp, busy, quick }) {
       const cfg = aw?.cfg || {}
       const opps = aw?.lastOpportunities || []
       const groups = aw?.groups || []
@@ -3329,7 +4154,7 @@ select.roost-input{color-scheme:dark}
                     const v = Math.max(-1, Math.min(1, Number(mood[m.key] ?? 0)))
                     return h('div', { key: m.key, className: 'roost-mood-row' },
                       h('span', { className: 'roost-mood-k' }, m.label),
-                      h(Bar, { v, bi: m.bi }),
+                      h(Bar, { v, bi: m.bi, tone: m.tone }),
                       h('span', { className: 'roost-mood-w' }, wordOf(v, m.words, m.bi)),
                     )
                   }),
@@ -3364,6 +4189,25 @@ select.roost-input{color-scheme:dark}
                 ),
               )
             : h('div', { className: 'roost-empty' }, '读不到情绪——插件刚起来时会空几秒'),
+        ),
+
+        h(Sec, { title: '此刻情绪 · 变化记录' },
+          (mood?.history || []).length
+            ? h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 180 } },
+                mood.history.map((x, i) =>
+                  h('div', { key: i, className: 'roost-item' },
+                    h('span', { className: 'd' }, x.at ? ago(x.at) : (x.time || '')),
+                    h('span', { className: 't' }, x.reason || x.source || '—'),
+                  )))
+            : h('div', { className: 'roost-empty' }, mood ? '还没有心情变化' : '读不到心情数据'),
+          h(ConfirmLink, {
+            label: '清空心情历史', confirmLabel: '确认清空（当前心情不动）',
+            onConfirm: async () => {
+              const r = await quick('mood.history.clear')
+              toast(r.message || (r.ok ? '已清空' : '清空失败'))
+              reloadMood()
+            },
+          }),
         ),
 
         h(Sec, { n: '03', title: '私聊排期', right: h('button', { type: 'button', className: 'roost-btn', onClick: reloadSp }, '刷新') },
@@ -3404,7 +4248,7 @@ select.roost-input{color-scheme:dark}
             spReady
               ? (sp?.ownerFrom === 'config'
                 ? '间隔随机、免打扰、每日上限都在这里管；「要不要说」交给上面的机会判断。'
-                : '收件人是从 Roost 那边自动取的，不用在这填。想换人就去 Roost 面板改主人，或者在这里填 chatId 覆盖它。')
+                : '收件人是从 Roost 那边自动取的，不用在这填。想换人就去 Roost 面板改主人，或者在这里填会话号覆盖它。')
               : `暂时不能手动触发：${spWhy}。在 Roost 面板上把主人配好，这个按钮就会亮。`),
         ),
 
@@ -3787,13 +4631,164 @@ select.roost-input{color-scheme:dark}
      * 内联的话它默认是关着的，测试永远看不到里面的内容，
      * 「弹窗打开后是不是空白」这种问题就只能靠肉眼发现。
      */
-    function ToolsModal({ pool, caps, busy, danger, pinned, suggested, riskGroups, allowedIn, onToggle, q, setQ, onClose }) {
+    /**
+     * 布尔配置开关：复用早就写好、但一直没接上的 `.roost-switch`。
+     * 只有「开 / 关」用它；多选清单和二次确认勾选仍用原生 checkbox ——
+     * 那两类不是开关，换成滑块反而会被误读成互斥项。
+     */
+    function Switch({ on, disabled, title, label, onToggle }) {
+      return h('button', {
+        type: 'button', className: 'roost-switch', role: 'switch',
+        'aria-checked': on ? 'true' : 'false',
+        'aria-label': label || undefined,
+        'data-on': on ? '1' : '0',
+        disabled: !!disabled, title: title || undefined,
+        onClick: () => onToggle(!on),
+      })
+    }
+
+    /** 统一确认弹窗：替掉 window.confirm（原生框和面板是两套皮，webview 里还常受限）。 */
+    function ConfirmModal({ title, message, confirmText, danger, busy, onConfirm, onClose }) {
+      return h('div', { className: 'cap-modal', onClick: onClose },
+        h('div', {
+          className: 'cap-modal-b', style: { width: 'min(460px,100%)' },
+          onClick: (e) => e.stopPropagation(),
+        },
+          h('div', { className: 'cap-modal-h' },
+            h('span', { className: 't' }, title || '请确认'),
+            h('button', { type: 'button', className: 'roost-btn', onClick: onClose }, '关闭'),
+          ),
+          h('div', {
+            className: 'cap-modal-c',
+            style: { whiteSpace: 'pre-wrap', fontSize: 12.5, lineHeight: 1.7 },
+          }, message),
+          h('div', {
+            className: 'cap-modal-s',
+            style: {
+              display: 'flex', gap: 8, justifyContent: 'flex-end',
+              borderBottom: 0, borderTop: '1px solid var(--line-soft)',
+            },
+          },
+            h('button', { type: 'button', className: 'roost-btn', onClick: onClose }, '取消'),
+            h('button', {
+              type: 'button', className: danger ? 'roost-btn' : 'roost-primary',
+              disabled: !!busy, onClick: onConfirm,
+            }, busy ? '处理中…' : (confirmText || '确定')),
+          ),
+        ),
+      )
+    }
+
+    /** 整页弹窗：把低频但很长的页（接入向导 / 账号迁移）从页签栏里挪出来。 */
+    function PageModal({ title, onClose, children }) {
+      return h('div', { className: 'cap-modal', onClick: onClose },
+        h('div', {
+          className: 'cap-modal-b', style: { width: 'min(920px,100%)' },
+          onClick: (e) => e.stopPropagation(),
+        },
+          h('div', { className: 'cap-modal-h' },
+            h('span', { className: 't' }, title),
+            h('button', { type: 'button', className: 'roost-btn', onClick: onClose }, '关闭'),
+          ),
+          h('div', { className: 'cap-modal-c' }, children),
+        ),
+      )
+    }
+
+    /** 能认出来的工具标一句中文 / 来源插件，只做展示，绝不改工具 key。 */
+    const TOOL_NOTE = {
+      edit: '改文件', write: '写文件', read: '读文件', read_image: '读图片',
+      working_directory: '看工作目录', pwsh: '跑 PowerShell', bash: '跑命令',
+      load_workspace_dependencies: '加载工作区依赖',
+      memory_search: '查记忆', memory_note: '记一笔', memory_clear: '清记忆',
+      qq_send: '发言出口', qq_close: '收尾出口', qq_send_file: '发文件',
+      sticker_pick: '挑表情包',
+      list_mcp_resources: 'MCP 资源列表',
+      list_mcp_resource_templates: 'MCP 资源模板',
+      read_mcp_resource: '读 MCP 资源',
+    }
+    const TOOL_PREFIX = [
+      ['gh_', 'GitHub'], ['pr_', 'GitHub · PR'], ['issue_', 'GitHub · 议题'],
+      ['review_', 'GitHub · 审查'], ['ops_', '运维'], ['acp_', '会话 / 图片'],
+      ['memory_', '记忆'], ['qq_', '发言'], ['sticker_', '表情包'],
+    ]
+    const MCP_TAIL = {
+      exec: '执行', edit: '编辑', read: '读取', macro: '宏', feed: '订阅流',
+      search: '搜索', list: '列表', get: '查询', write: '写入', add: '新增',
+    }
+    /** /v1 的 scope 名同样是英文，给一句中文；不认识的留空 */
+    const SCOPE_LABEL = {
+      'message:write': '发消息', 'say:write': '代她发言',
+      'state:read': '读状态', 'context:read': '读上下文',
+      'memory:read': '读记忆', 'memory:write': '写记忆',
+      'proactive:write': '主动发言', 'session:write': '写会话',
+      'prompt:write': '写提示词', 'agent:write': '开独立会话',
+    }
+    const scopeNote = (s) => (SCOPE_LABEL[s] ? `（${SCOPE_LABEL[s]}）` : '')
+    const scopesText = (arr) => (arr || []).map((s) => s + scopeNote(s)).join('、')
+
+    const toolNote = (n) => {
+      if (n.startsWith('mcp__')) {
+        const parts = n.split('__')
+        const srv = parts[1] || 'MCP'
+        const tail = parts.slice(2).join('__')
+        /** gf_edit / gf_exec 这类带前缀的，用最后一段认动作 */
+        const zh = MCP_TAIL[tail] || MCP_TAIL[String(tail).split('_').pop()]
+        return `（${srv} 扩展${zh ? ' · ' + zh : ''}）`
+      }
+      if (TOOL_NOTE[n]) return `（${TOOL_NOTE[n]}）`
+      for (const [pre, label] of TOOL_PREFIX) if (n.startsWith(pre)) return `（${label}）`
+      return ''
+    }
+
+    function ToolsModal({ pool, caps, busy, danger, pinned, suggested, riskGroups,
+      allowedIn, onSetLevel = () => {}, q, setQ, onClose }) {
       const kw = String(q || '').trim().toLowerCase()
       const filtered = (pool || []).filter((n) => !kw || n.toLowerCase().includes(kw))
-      /** 表头简称。五档 + 兜底，一列一个字，弹窗里挤得下 */
-      const SHORT = { owner: '主', admin: '管', manager: '群', helper: '助', member: '员', unknown: '?' }
       const isLocked = (n) => (pinned || []).includes(n)
       const isSuggested = (n) => (suggested || []).includes(n)
+      /**
+       * 一行一个连续滑块。档位从高到低排（主人→群成员），位置 = 开放到哪一档：
+       * 前 k+1 档给、其余收走。旧数据若有洞（主人开、管理员关、群管开），
+       * 归到最高的连续档；拨一下就会重写成连续，不会再留下洞。
+       */
+      const tierRow = (n, locked) => {
+        let level = -1
+        for (let i = 0; i < CAP_BUCKETS.length; i++) {
+          if (!allowedIn(CAP_BUCKETS[i][0], n)) break
+          level = i
+        }
+        const pct = `${Math.max(0, level) / (CAP_BUCKETS.length - 1) * 100}%`
+        return h('div', {
+          className: 'cap-tiers', 'data-level': String(level),
+          'data-locked': locked ? '1' : '0',
+          role: 'radiogroup', 'aria-label': `${n} 开放到哪一档`, tabIndex: 0,
+          onKeyDown: (e) => {
+            if (locked || busy || !caps?.enabled) return
+            const step = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0
+            if (!step) return
+            e.preventDefault()
+            /** -1 = 一档都不给（灰钮停在起点），点任一档位或按右键即可恢复 */
+            const next = Math.max(-1, Math.min(CAP_BUCKETS.length - 1, level + step))
+            onSetLevel(n, next)
+          },
+        },
+          h('div', { className: 'cap-track' },
+            h('i', { className: 'cap-fill', style: { width: pct } }),
+            h('i', { className: 'cap-knob', style: { left: pct } }),
+          ),
+          CAP_BUCKETS.map(([id, label], i) => h('button', {
+            key: id,
+            type: 'button', className: 'cap-tier', role: 'radio',
+            'aria-checked': i === level ? 'true' : 'false',
+            'aria-label': `开放到${label}：${n}`,
+            'data-on': i <= level ? '1' : '0',
+            title: `拨到「${label}」：这一档及更高档可用，更低档不可用`,
+            disabled: busy || !caps?.enabled || locked,
+            onClick: () => onSetLevel(n, i),
+          })),
+        )
+      }
 
       return h('div', { className: 'cap-modal', onClick: onClose },
         h('div', { className: 'cap-modal-b', onClick: (e) => e.stopPropagation() },
@@ -3813,8 +4808,9 @@ select.roost-input{color-scheme:dark}
           h('div', { className: 'cap-modal-c' },
             h('div', { className: 'cap-tool-h' },
               h('span', { className: 'n' }, '工具名'),
-              h('span', { className: 'bx' },
-                CAP_BUCKETS.map(([id, label]) => h('span', { key: id, title: label }, SHORT[id]))),
+              h('span', { className: 'cap-tiers' },
+                CAP_BUCKETS.map(([id, label]) =>
+                  h('span', { key: id, className: 't', title: label }, label))),
             ),
             filtered.length
               ? (riskGroups || []).map(([title, pick]) => {
@@ -3831,19 +4827,11 @@ select.roost-input{color-scheme:dark}
                             ? '钉住项：关掉它机器人就说不出话'
                             : isSuggested(n) ? '建议保留：关掉不影响说话，只是它会少一样本事' : n,
                         },
-                          ((danger || {})[n] ? '🔴 ' : '') + n + (locked ? ' 🔒' : '')),
-                        h('span', { className: 'bx' },
-                          CAP_BUCKETS.map(([id, label]) =>
-                            h('input', {
-                              key: id,
-                              type: 'checkbox',
-                              title: `${label}：${n}`,
-                              disabled: busy || !caps?.enabled || locked,
-                              checked: allowedIn(id, n),
-                              onChange: (e) => onToggle(id, n, e.target.checked),
-                            }),
-                          ),
-                        ),
+                          ((danger || {})[n] ? '🔴 ' : '') + n + (locked ? ' 🔒' : ''),
+                          toolNote(n)
+                            ? h('span', { className: 'note' }, ' ' + toolNote(n))
+                            : null),
+                        tierRow(n, locked),
                       )
                     }),
                   )
@@ -3851,9 +4839,11 @@ select.roost-input{color-scheme:dark}
               : h('div', { className: 'roost-empty' }, `没有匹配「${q}」的工具`),
           ),
           h('div', { style: { padding: '0 16px 14px', fontSize: 11, opacity: 0.6, lineHeight: 1.7 } },
-            '🔒 钉住项：只有发言出口和收尾两个，关了它就彻底说不出话，所以不给勾。🔴 是危险动作——它真的会动你电脑上的东西。',
+            '滑块拨到某一档 = 这一档及更高档可用，更低档不可用；档位从左到右是主人 → 群成员。灰色滑块 = 一档都不给，点任一档位或按方向键即可恢复。',
             h('br'),
-            '某一档现在是「全权」时，取消一个工具会把 * 展开成具体清单——之后新装的插件就不会自动给这一档了。'),
+            '🔒 钉住项：只有发言出口和收尾两个，关了它就彻底说不出话，所以不给动。🔴 是危险动作——它真的会动你电脑上的东西。',
+            h('br'),
+            '某一档现在是「全权」时，把滑块拨低会把 * 展开成具体清单；原本「跟随更低档」的档被拨过之后会记下一个增量，不再纯跟随。'),
         ),
       )
     }
@@ -4032,7 +5022,7 @@ select.roost-input{color-scheme:dark}
        */
       const setChat = async (chatId, val, label) => {
         if (!caps.enabled) {
-          toast('先点上面「启用策略」')
+          toast('先点上面「启用能力策略」')
           return
         }
         const next = { ...(caps.store?.chats || {}) }
@@ -4117,7 +5107,8 @@ select.roost-input{color-scheme:dark}
               },
                 h('option', { value: '' }, `＋ 给某个工具加次数限制${pool.length ? `（池里 ${pool.filter((n) => !builtin.includes(n)).length} 个）` : ''}`),
                 pool.filter((n) => !builtin.includes(n) && !names.includes(n))
-                  .map((n) => h('option', { key: n, value: n }, n)),
+                  .map((n) => h('option', { key: n, value: n },
+                    n + (toolNote(n) ? ' ' + toolNote(n) : ''))),
               ),
             )
           : null
@@ -4147,9 +5138,15 @@ select.roost-input{color-scheme:dark}
           const unlimited = !(maxNum >= 0)
           const full = !unlimited && Number(r.peak) >= maxNum
           const wired = !r || r.wired !== false
+          const shown = r ? String(r.label || name) : name
+          /** 后端已给中文 label 的不用再标；纯英文工具名补一句括号说明 */
+          const note = toolNote(name) && !/[^\x00-\x7F]/.test(shown) ? toolNote(name) : ''
           return h('div', { key: name, className: 'cap-row', style: { alignItems: 'center', opacity: wired ? 1 : 0.6 } },
             h('div', { className: 'cap-row-b' },
-              h('div', null, r ? r.label : name, wired ? null : ' · 暂未生效'),
+              h('div', null,
+                shown,
+                note ? h('span', { className: 'roost-note', style: { margin: 0 } }, ' ' + note) : null,
+                wired ? null : ' · 暂未生效'),
               h('div', { className: 'roost-note', style: { margin: 0 } },
                 unlimited ? `${perLabel} · ${winLabel} · 不限`
                   : `${perLabel} · ${winLabel} · 目前最多 ${r.peak}`,
@@ -4234,8 +5231,9 @@ select.roost-input{color-scheme:dark}
         groups[g].push(n)
       }
 
+      const withNote = (n) => n + (toolNote(n) ? ' ' + toolNote(n) : '')
       const listOf = (names, max = 5) =>
-        names.slice(0, max).join('、') + (names.length > max ? ` …+${names.length - max}` : '')
+        names.slice(0, max).map(withNote).join('、') + (names.length > max ? ` …+${names.length - max}` : '')
 
       /** 钉住项：关掉会失忆或说不出话，界面上不给勾（服务端也会把它们钉回来） */
       /**
@@ -4265,26 +5263,36 @@ select.roost-input{color-scheme:dark}
       const allowedIn = (bucket, name) => ((byBucket[bucket] && byBucket[bucket].allow) || []).includes(name)
 
       /**
-       * 勾 / 取消一个工具。
+       * 把滑块拨到第 k 档：前 k+1 档给、其余收走，一次提交。
        *
-       * 真正算「变成什么样」的是模块级的 `planToolToggle()`——那段逻辑出过两次事
-       * （`deny` 被冲掉、继承档取消写成 `allow: []`），而且都「界面正常但不生效」，
-       * 所以抽成纯函数以便断言。这里只负责提交和刷新。
+       * 逐档调 patch 会连发五次、后一次覆盖前一次，所以先把五档全算好再提交。
+       * 真正算「变成什么样」的还是模块级的 `planToolToggle()`——那段逻辑出过两次事
+       * （`deny` 被冲掉、继承档取消写成 `allow: []`），不要在这里另写一套。
        */
-      const toggleTool = async (bucket, name, on) => {
+      const setToolLevel = async (name, k) => {
         if (!caps.enabled) {
-          toast('先点上面「启用策略」')
+          toast('先点上面「启用能力策略」')
           return
         }
-        const next = planToolToggle({
-          cur: caps.store?.defaults?.[bucket],
-          name,
-          on,
-          /** 该档 `*` 展开后的实际清单；取消 `*` 里的某一项要靠它 */
-          expanded: (byBucket[bucket] && byBucket[bucket].allow) || [],
-        })
+        /**
+         * 展开 `*` 必须用「挂载了哪些工具」(pool)，不能用 preview 的最终生效清单：
+         * 后者已被 forceDeny / chat.deny 削过，写回 defaults 会把临时收紧固化成永久配置。
+         * 预览整个读不到时更要拒绝——空清单会把该档写成 `allow:[]`，
+         * 那不是「收走这一个工具」，而是整档清零并断掉继承链。
+         */
+        if (!Array.isArray(pool) || !pool.length) {
+          toast('工具清单还没读到，刷新一下再拨')
+          return
+        }
         const defaults = { ...(caps.store?.defaults || {}) }
-        defaults[bucket] = next
+        CAP_BUCKETS.forEach(([bucket], i) => {
+          defaults[bucket] = planToolToggle({
+            cur: caps.store?.defaults?.[bucket],
+            name,
+            on: i <= k,
+            expanded: pool,
+          })
+        })
         const r = await quick('capabilities.patch', { defaults })
         toast(r.message || (r.ok ? '改好了，下一条消息生效' : '没改成'))
         reload()
@@ -4300,7 +5308,7 @@ select.roost-input{color-scheme:dark}
             suggested: SUGGESTED,
             riskGroups: RISK_GROUPS,
             allowedIn,
-            onToggle: toggleTool,
+            onSetLevel: setToolLevel,
             q: toolQ,
             setQ: setToolQ,
             onClose: () => setToolsOpen(false),
@@ -4309,9 +5317,8 @@ select.roost-input{color-scheme:dark}
 
       return h('div', null,
         toolsModal,
-        h(ExtCapsBlock, { quick, toast }),
         h(Sec, {
-          n: '01', title: '这一页管什么',
+          n: '01', title: '工具与权限',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新'),
         },
           h('div', { className: 'roost-note' },
@@ -4369,12 +5376,12 @@ select.roost-input{color-scheme:dark}
 
                       let control
                       if (isToggle) {
-                        control = h('input', {
-                          type: 'checkbox',
-                          checked: on,
+                        control = h(Switch, {
+                          on,
                           disabled: busy || !!blocked,
                           title: blocked || '',
-                          onChange: (e) => toggleFeat(f.id, e.target.checked),
+                          label: f.label || f.id,
+                          onToggle: (next) => toggleFeat(f.id, next),
                         })
                       } else if (kind === 'select') {
                         /** 当前值不在预设选项里 = 用户填过「自定义」 */
@@ -4569,6 +5576,7 @@ select.roost-input{color-scheme:dark}
                           type: 'button',
                           className: 'roost-chip',
                           'data-on': cur === role.id ? '1' : '0',
+                          'data-role': role.id,
                           title: role.hint,
                           disabled: busy || !caps.enabled,
                           onClick: () => setRole(id, role),
@@ -4616,9 +5624,13 @@ select.roost-input{color-scheme:dark}
           pool.length
             ? h('div', { className: 'roost-list roost-scroll' },
                 Object.keys(groups).map((g) =>
-                  h('div', { key: g, className: 'roost-item' },
-                    h('span', { className: 't' }, g, h('span', { className: 'd' }, ` · ${groups[g].length} 个`)),
-                    h('span', { className: 'd', title: groups[g].join('、') }, listOf(groups[g], 5)),
+                  /** 不能套 .roost-item：横排 flex 里 .d 是不换行的长工具名，
+                      会把「其他 · 4 个」挤成一个字一行（2026-11-11 截图）。 */
+                  h('div', { key: g, className: 'diag-item' },
+                    h('div', { className: 't' }, g,
+                      h('span', { className: 'd' }, ` · ${groups[g].length} 个`)),
+                    h('div', { className: 'd', title: groups[g].map(withNote).join('、') },
+                      listOf(groups[g], 5)),
                   ),
                 ),
               )
@@ -5334,9 +6346,10 @@ select.roost-input{color-scheme:dark}
                     ),
                   ),
                   ...(plan.items || []).map((it) =>
-                    h('div', { key: it.uin, className: 'roost-item' },
-                      h('span', { className: 't' }, `${it.uin} ← ${it.keys.length} 个旧键`),
-                      h('span', { className: 'd' },
+                    /** 同样不能套 .roost-item：右边是用顿号拼的长串，会把标题压成竖排 */
+                    h('div', { key: it.uin, className: 'diag-item' },
+                      h('div', { className: 't' }, `${it.uin} ← ${it.keys.length} 个旧键`),
+                      h('div', { className: 'd' },
                         it.keys.map((k) => `${k.key.slice(0, 8)}(${k.facts}/${k.journal}/${k.edges})`).join('、')),
                     ),
                   ),
@@ -5395,14 +6408,14 @@ select.roost-input{color-scheme:dark}
 
     const JSON_SECTIONS = [
       ['memory', '记忆', '日记寿命、注入条数、多少轮全量重注、记忆工具开关'],
-      ['mood', '心情', 'effects 打开后，聊天里被夸/被凶会带动心情，心情还会影响配图发语音的兴致；日常在「能力」页的高级组里点'],
+      ['mood', '心情', 'effects 打开后，聊天里被夸/被凶会带动心情，心情还会影响配图发语音的兴致；日常在「权限」页的高级组里点'],
       ['events', '经历', 'enabled：记不记她主动做过的事（找过人、发过文件）。24 小时自动过期，只给主人私聊当素材；关着也能在「记忆」页查看和清空已有的'],
       ['profiles', '人物档案', 'enabled：要不要把对熟人的印象攒成一小段，聊天时带上。每天凌晨巩固时提炼、跨群共用，同一天里提示词不变；关着也能在「记忆」页查看和清空已有的'],
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
       ['awake', '主动说话', '清醒时段、机会分门槛、群白名单（开着时 speakUp.prompt 会当额外要求一起给）'],
       ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],
       ['closing', '收尾', '对话冷掉前自己补一句：多久算冷（coolMinutes）、盯几个会话（maxChats）、记录留几天（ttlDays）'],
-      ['leakGuard', '防复读', 'enabled：她回复里整段复述了注入的记忆块，出站前删掉那几句。默认关，日常在「能力」页高级组里点'],
+      ['leakGuard', '防复读', 'enabled：她回复里整段复述了注入的记忆块，出站前删掉那几句。默认关，日常在「权限」页高级组里点'],
       ['bridge', '对外联动（实验）', 'enabled：让别的 DSH 插件通过 ctx.get("aurabot") 主动发消息、读状态；接口可能变，默认关'],
       ['model', '模型', 'byChat：按会话指定 provider / model / reasoningEffort，没配就用 DSH 的全局默认模型'
         + '（例：{"群openid":{"provider":"deepseek","model":"deepseek-chat"}}）。'
@@ -5413,7 +6426,7 @@ select.roost-input{color-scheme:dark}
       ['permissions', '权限', '主人/管理员/成员各能用什么工具'],
       ['qqTools', 'QQ 工具', '给 AI 的工具总开关、单次最多分几段发（maxParts）'],
       ['quota', '次数限制', '语音/发文件/表情包的额度覆盖。默认值在代码里（quota.js 的 QUOTA_DEFAULTS），'
-        + '这里只填要改的；日常用「能力」页调，这里是手改的口子'],
+        + '这里只填要改的；日常用「权限」页调，这里是手改的口子'],
       ['sendFile', '发文件', '能发哪些文件：restrictPaths 默认关＝全盘都能发；'
         + '开了只允许 workspace / images / extraRoots 里的路径'],
       ['channel', '通道', '当前用哪个通道'],
@@ -6009,22 +7022,20 @@ select.roost-input{color-scheme:dark}
         await loadStatus()
       }
 
-      /**
-       * 卸载会删掉下载好的引擎和模型（几十 MB），先问一句。
-       *
-       * 这里用 `window.confirm` 而不是面板的弹窗组件：卸载是一辈子点
-       * 一两次的操作，为它单独做一套模态框不值得，而且原生确认框
-       * 在 DSH 的 webview 里同样能弹。
-       */
+      /** 卸载会删掉下载好的引擎和模型（几十 MB），用面板自己的弹窗问一句。 */
+      const [confirmUninstall, setConfirmUninstall] = useState(false)
+      const [uninstalling, setUninstalling] = useState(false)
       const uninstall = async () => {
-        const ok = typeof window !== 'undefined' && window.confirm
-          ? window.confirm('会删掉已下载的本地语音引擎和模型，确定吗？')
-          : true
-        if (!ok) return
-        const r = await post('/tts/uninstall', { model: v('sherpa.model', 'aishell3') })
-        if (r?.ok === false) toast(r.message || '卸载失败')
-        else toast('已卸载')
-        await loadStatus()
+        setUninstalling(true)
+        try {
+          const r = await post('/tts/uninstall', { model: v('sherpa.model', 'aishell3') })
+          if (r?.ok === false) toast(r.message || '卸载失败')
+          else toast('已卸载')
+          await loadStatus()
+        } finally {
+          setUninstalling(false)
+          setConfirmUninstall(false)
+        }
       }
 
       /**
@@ -6127,12 +7138,12 @@ select.roost-input{color-scheme:dark}
           : null,
 
         h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-end' } },
-          h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
-            h('input', {
-              type: 'checkbox',
-              checked: draft?.enabled === true,
-              onChange: (e) => put('enabled', e.target.checked),
-            }),
+            h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
+              h(Switch, {
+                on: draft?.enabled === true,
+                label: '启用',
+                onToggle: (next) => put('enabled', next),
+              }),
             '启用语音合成'),
           select('provider', 'provider', PROVIDERS),
           /**
@@ -6406,7 +7417,7 @@ select.roost-input{color-scheme:dark}
                     ? h('button', { type: 'button', className: 'roost-btn', onClick: cancelInstall }, '取消')
                     : null,
                   !installRunning && st?.usage?.total > 0
-                    ? h('button', { type: 'button', className: 'roost-btn', onClick: uninstall }, '卸载')
+                    ? h('button', { type: 'button', className: 'roost-btn', onClick: () => setConfirmUninstall(true) }, '卸载')
                     : null,
                 ),
               ),
@@ -6462,6 +7473,16 @@ select.roost-input{color-scheme:dark}
         ),
         h('div', { className: 'roost-note' },
           '最多字数要配合 QQ 语音条时长：太长的会被截断，不如直接发文字。'),
+
+        confirmUninstall
+          ? h(ConfirmModal, {
+              title: '卸载本地语音引擎',
+              message: '会删掉已下载的本地语音引擎和模型（几十 MB）。\n下次要用得重新下载，确定吗？',
+              confirmText: '卸载', danger: true, busy: uninstalling,
+              onClose: () => { if (!uninstalling) setConfirmUninstall(false) },
+              onConfirm: uninstall,
+            })
+          : null,
       )
     }
 
@@ -6556,12 +7577,11 @@ select.roost-input{color-scheme:dark}
         n: '04',
         title: '表情包',
         right: h('div', { style: { display: 'flex', gap: 10, alignItems: 'center' } },
-          h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
-            h('input', {
-              type: 'checkbox',
-              checked: config?.stickers?.enabled !== false,
-              onChange: async (e) => {
-                const on = e.target.checked
+          h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
+            h(Switch, {
+              on: config?.stickers?.enabled !== false,
+              label: '启用表情包',
+              onToggle: async (on) => {
                 const r = await saveCfg({ stickers: { enabled: on } })
                 toast(r?.ok === false ? (r.message || '没改成') : (on ? '表情包已开' : '表情包已关'))
                 if (r?.ok !== false) reload?.()
@@ -6880,13 +7900,96 @@ select.roost-input{color-scheme:dark}
             }, busy ? '同步中…' : `同步选中的 ${total} 张`),
             h('span', { className: 'roost-note', style: { margin: 0 } },
               `共 ${st?.total ?? 0} 张缓存，跳过 ${st?.skipped ?? 0} 张`),
-            h('button', { type: 'button', className: 'roost-link', onClick: resetLedger }, '重置同步记录'),
+            h(ConfirmLink, { label: '重置同步记录', confirmLabel: '确认重置', onConfirm: resetLedger }),
           ),
         ),
       )
     }
 
-    function ConfigTab({ config, save, saveCfg, toast, stickers, setupSt, reload }) {
+    /** 模型：按会话 / 按私聊群聊指定 provider + model（后端 model.get / model.set） */
+    function ModelBlock({ toast, currentChatId }) {
+      const [info, setInfo] = useState(null)
+      const [kind, setKind] = useState('c2c')
+      const [chatId, setChatId] = useState('')
+      const [provider, setProvider] = useState('')
+      const [model, setModel] = useState('')
+      const [busy, setBusy] = useState(false)
+      const call = async (op, arg) => {
+        const r = await post('/quick', { op, arg, chatId: '' })
+        if (r?.ok === false) toast(r.message || '操作失败')
+        return r
+      }
+      /** 必须带 kind：后端只在带 kind / chatId 时才回 byKind / override，空参数永远 null */
+      const load = async () => setInfo(await call('model.get', { kind }))
+      useEffect(() => { load() }, [kind])
+      const apply = async (arg, okText) => {
+        setBusy(true)
+        try {
+          const r = await call('model.set', arg)
+          toast(r?.ok ? okText : (r?.message || '没改成'))
+          await load()
+        } finally { setBusy(false) }
+      }
+      const byKind = info?.byKind
+      const fmt = (v) => v ? [v.provider, v.model].filter(Boolean).join(' / ') : '跟随全局'
+      return h(Sec, {
+        title: '模型',
+        right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新'),
+      },
+        h('div', { className: 'roost-note' },
+          '全局：' + (info?.global
+            ? (typeof info.global === 'string' ? info.global : [info.global.provider, info.global.model].filter(Boolean).join(' / ') || '已设置')
+            : '未设置')),
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' } },
+          h('input', {
+            className: 'roost-input', style: { width: 140 }, placeholder: 'provider',
+            value: provider, onChange: (e) => setProvider(e.target.value),
+          }),
+          h('input', {
+            className: 'roost-input', style: { width: 180 }, placeholder: 'model',
+            value: model, onChange: (e) => setModel(e.target.value),
+          }),
+          h('select', {
+            className: 'roost-input', style: { width: 110 },
+            value: kind, onChange: (e) => setKind(e.target.value),
+          },
+            h('option', { value: 'c2c' }, '私聊'),
+            h('option', { value: 'group' }, '群聊'),
+          ),
+        ),
+        h('div', { className: 'roost-note', style: { marginTop: 6 } }, '当前：' + fmt(byKind)),
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 6 } },
+          h('button', {
+            type: 'button', className: 'roost-primary', disabled: busy || !provider || !model,
+            onClick: () => apply({ kind, provider, model }, '已设为默认'),
+          }, '设为该类型默认'),
+          h('button', {
+            type: 'button', className: 'roost-btn', disabled: busy,
+            onClick: () => apply({ kind, off: true }, '已恢复默认'),
+          }, '恢复该类型默认'),
+        ),
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' } },
+          h('input', {
+            className: 'roost-input', style: { width: 220 }, placeholder: '会话 ID（单独指定）',
+            value: chatId, onChange: (e) => setChatId(e.target.value),
+          }),
+          h('button', {
+            type: 'button', className: 'roost-btn', disabled: !currentChatId,
+            onClick: () => setChatId(String(currentChatId)),
+          }, '用当前会话'),
+          h('button', {
+            type: 'button', className: 'roost-btn', disabled: busy || !chatId.trim() || !provider || !model,
+            onClick: () => apply({ chatId: chatId.trim(), provider, model }, '已设为该会话模型'),
+          }, '应用到会话'),
+          h('button', {
+            type: 'button', className: 'roost-btn', disabled: busy || !chatId.trim(),
+            onClick: () => apply({ chatId: chatId.trim(), off: true }, '已恢复该会话默认'),
+          }, '恢复该会话'),
+        ),
+      )
+    }
+
+    function ConfigTab({ config, save, saveCfg, toast, stickers, setupSt, reload, currentChatId }) {
       const cfgJson = JSON.stringify(config, null, 2)
       const [draft, setDraft] = useState(cfgJson)
       const [err, setErr] = useState('')
@@ -7002,6 +8105,8 @@ select.roost-input{color-scheme:dark}
       }
 
       return h('div', null,
+        h(ModelBlock, { toast, currentChatId }),
+
         h(UpdatesBlock, { toast }),
 
         h(FeedbackCard, { toast }),
@@ -7030,7 +8135,7 @@ select.roost-input{color-scheme:dark}
           h('textarea', {
             ref: taRef,
             className: 'roost-input',
-            style: { minHeight: 420, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 11.5, lineHeight: 1.6, resize: 'vertical' },
+            style: { minHeight: 240, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 11.5, lineHeight: 1.6, resize: 'vertical' },
             value: draft,
             spellCheck: false,
             onChange: (e) => { setDraft(e.target.value); setDirty(true) },
@@ -7053,11 +8158,10 @@ select.roost-input{color-scheme:dark}
             ),
           ),
         ),
-        h(ExtSettingsBlock, { toast }),
       )
     }
 
-    /* ---------------- 扩展面板（阶段 5：能力页 / 设置页 / 接入页三段） ---------------- */
+    /* ---------------- 扩展面板（三段已独立成「扩展」页） ---------------- */
 
     /** 三段都走 /quick 的扩展 op；这些是全局设置，chatId 留空。 */
     const EXT_POST = (op, arg) => post('/quick', { op, arg, chatId: '' })
@@ -7067,15 +8171,15 @@ select.roost-input{color-scheme:dark}
     /** 与 src/ext-panel.js 的 REJECTION_LAYERS 同顺序；前端只用来把英文层名翻成中文。 */
     const EXT_LAYER_LABEL = {
       fence: '接入栅栏 / 令牌鉴权',
-      capabilities: '能力页 deny / forceDeny',
+      capabilities: '权限页的收紧规则',
       quota: '次数限制',
       acl: '扩展记忆命名空间 ACL',
       guard: '执行期工具 guard',
     }
 
     /**
-     * 能力页：按 `mcp__<id>__` 前缀自动归组 + 六档矩阵 + dry-run + 五层拒绝诊断。
-     * 不新开页签，`Sec` 不带编号，免得和既有 01–06 撞号。
+     * 扩展档位：按 `mcp__<id>__` 前缀自动归组 + 六档矩阵 + dry-run + 五层拒绝诊断。
+     * 现挂在独立的「扩展」页里，`Sec` 不带编号，免得和该页其它块撞号。
      */
     function ExtCapsBlock({ quick, toast }) {
       const [buckets, setBuckets] = useState(null)
@@ -7158,7 +8262,8 @@ select.roost-input{color-scheme:dark}
               '六档矩阵 · 每个扩展当前可调取的工具数：',
               h('div', { className: 'roost-list' },
                 list.map((x) => h('div', { key: x.id, className: 'roost-item' },
-                  h('span', { className: 't' }, x.name, h('span', { className: 'd' }, ` · mcp__${x.id}__*`),
+                  h('span', { className: 't' }, x.name,
+                    h('span', { className: 'd' }, ` · mcp__${x.id}__*（${x.id} 扩展的全部工具）`),
                     h('span', { className: 'd' },
                       ' · ' + (buckets?.buckets || []).map((b) =>
                         `${EXT_BUCKET_LABEL[b.bucket] || b.bucket}:${(b.allow || []).filter((n) => String(n).startsWith(`mcp__${x.id}__`)).length}`).join(' / '),
@@ -7174,7 +8279,8 @@ select.roost-input{color-scheme:dark}
             h('select', {
               className: 'roost-input', value: pick,
               onChange: (e) => { setPick(e.target.value); setDry(null) },
-            }, list.map((x) => h('option', { key: x.id, value: x.id }, x.id))),
+            }, list.map((x) => h('option', { key: x.id, value: x.id },
+              x.id + (x.name && x.name !== x.id ? `（${x.name}）` : '')))),
             h('button', { type: 'button', className: 'roost-btn', disabled: !pick, onClick: preview }, '试算'),
             dry
               ? h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: apply }, '确认收紧')
@@ -7209,7 +8315,8 @@ select.roost-input{color-scheme:dark}
           (diag?.recent || []).length
             ? h('div', { className: 'roost-list' },
                 diag.recent.slice(0, 5).map((r, i) => h('div', { key: i, className: 'diag-item' },
-                  h('div', { className: 't' }, `${r.tool} · ${r.bucket}`),
+                  h('div', { className: 't' },
+                    `${r.tool}${toolNote(r.tool) ? ' ' + toolNote(r.tool) : ''} · ${EXT_BUCKET_LABEL[r.bucket] || r.bucket}`),
                   h('div', { className: 'd' }, `${EXT_LAYER_LABEL[r.layer] || r.layer}：${r.rule}`),
                 )),
               )
@@ -7223,8 +8330,10 @@ select.roost-input{color-scheme:dark}
       const [data, setData] = useState(null)
       const [drafts, setDrafts] = useState({})
       const [saving, setSaving] = useState('')
-      const [confirmClear, setConfirmClear] = useState(false)
-      /** 市场默认不自动拉：进设置页就打网络会让面板看起来卡住，改成手动「加载市场」。 */
+      /** 扩展索要敏感权限时先弹窗，绝不自动带 confirmScopes 重试 */
+      const [scopeAsk, setScopeAsk] = useState(null)
+      const [scopeBusy, setScopeBusy] = useState(false)
+      const [revokeAsk, setRevokeAsk] = useState(null)
       const [market, setMarket] = useState(null)
       const [marketBusy, setMarketBusy] = useState('')
       const loadMarket = async (refresh = false) => {
@@ -7245,17 +8354,49 @@ select.roost-input{color-scheme:dark}
            * 点第二次，绝不自动带 `confirmScopes:true` 重试 —— 那样等于一键装顺带授权。
            */
           if (r?.reason === 'needs_scope_confirm') {
-            const list = (r.scopes || []).join('、')
-            const ok = typeof window !== 'undefined' && window.confirm
-              ? window.confirm(`扩展「${id}」索要这些权限：\n\n${list}\n\n授权后它能以机器人身份执行对应动作（发消息 / 主动发言等）。确认安装？`)
-              : false
-            if (!ok) { toast('已取消安装（未授权）'); return }
-            r = await EXT_POST(op, { id, confirmScopes: true })
+            /** 把「要授什么」摆出来等用户点第二次，绝不在这里自动重试 */
+            setScopeAsk({ op, id, scopes: r.scopes || [] })
+            return
           }
           toast(r.message || (r.ok ? '完成' : '失败'))
           await load()
           if (market) await loadMarket(true)
         } finally { setMarketBusy('') }
+      }
+      const confirmScopeAct = async () => {
+        const ask = scopeAsk
+        if (!ask) return
+        setScopeBusy(true)
+        try {
+          const r = await EXT_POST(ask.op, { id: ask.id, confirmScopes: true })
+          toast(r.message || (r.ok ? '完成' : '失败'))
+          await load()
+          if (market) await loadMarket(true)
+        } finally {
+          setScopeBusy(false)
+          setScopeAsk(null)
+        }
+      }
+      const checkUpdates = async () => {
+        setMarketBusy('updates')
+        try {
+          const r = await EXT_POST('extensions.market.updates', {})
+          const rows = r?.rows || []
+          toast(rows.length ? `${rows.length} 个扩展有新版` : (r?.ok === false ? (r.message || '检查失败') : '都是最新版'))
+          await loadMarket(true)
+        } finally { setMarketBusy('') }
+      }
+      const revokeMarket = async (id) => {
+        setMarketBusy(id)
+        try {
+          const r = await EXT_POST('extensions.market.revoke', { id, reason: 'panel' })
+          toast(r.message || (r.ok ? '已停用' : '停用失败'))
+          await load()
+          await loadMarket(true)
+        } finally {
+          setMarketBusy('')
+          setRevokeAsk(null)
+        }
       }
       const load = async () => {
         const r = await EXT_POST('extensions.get')
@@ -7264,7 +8405,8 @@ select.roost-input{color-scheme:dark}
         for (const x of (r.rows || [])) d[x.id] = x.usage
         setDrafts(d)
       }
-      useEffect(() => { load() }, [])
+      /** 进扩展页就把市场拉出来，别让用户自己找「加载市场」按钮 */
+      useEffect(() => { load(); loadMarket() }, [])
       const save = async (id) => {
         setSaving(id)
         try {
@@ -7276,28 +8418,35 @@ select.roost-input{color-scheme:dark}
         } finally { setSaving('') }
       }
       return h(Sec, {
-        title: '扩展 · 说明编辑与凭据状态',
-        right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新'),
+        title: '扩展市场 / 已装扩展',
+        right: h('button', {
+          type: 'button', className: 'roost-btn',
+          onClick: () => { load(); loadMarket(true) },
+        }, '刷新'),
       },
         h('div', { className: 'roost-note' },
           data?.enabled
             ? '总开关：开 —— 扩展说明会进 QQ 会话提示词。'
-            : '总开关：关 —— 清单还在、/v1 与已发令牌照常，只是不挂 usage section。去「能力 → 高级 · 新功能」打开「用户扩展」。'),
+            : '总开关：关 —— 清单还在、已发令牌照常，只是不挂 usage section。去「权限 → 高级 · 新功能」打开「用户扩展」。'),
         data?.status?.authFailed
           ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } },
-              `⚠ ${data.status.hintAuthFailed}：后端审计里有 ext.auth_failed，检查 secrets/<id>.json 是否缺失或令牌被吊销。`)
+              `⚠ ${data.status.hintAuthFailed}：有扩展鉴权失败，检查令牌是否被吊销或凭据缺失。`)
           : null,
         data?.status?.regenerated
           ? h('div', { className: 'roost-note', style: { color: 'var(--warn)' } },
               `✓ ${data.status.hintRegenerated}：备份还原后 secrets 缺失，宿主已补发新令牌；旧令牌立即 401。`)
           : null,
         h('div', { className: 'roost-note', style: { marginTop: 8 } },
-          '市场：复用 qq-bot-roost-plugins 的索引，只列 kind=dsh-extension 的条目；装之前会按索引 sha256 校验目录，对不上不落位。',
+          '从插件市场安装或更新扩展。',
           h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
             h('button', {
               type: 'button', className: 'roost-btn', disabled: marketBusy === 'list',
               onClick: () => loadMarket(true),
-            }, marketBusy === 'list' ? '拉取中…' : '加载市场'),
+            }, marketBusy === 'list' ? '拉取中…' : '刷新市场'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: !!marketBusy,
+              onClick: checkUpdates,
+            }, marketBusy === 'updates' ? '检查中…' : '检查更新'),
             market?.repo ? h('span', { className: 'roost-code' }, `${market.repo}@${market.branch}`) : null,
           ),
           market && !market.ok
@@ -7317,20 +8466,28 @@ select.roost-input{color-scheme:dark}
                     ? h('span', { className: 'd' }, '拒绝安装')
                     : h('button', {
                         type: 'button', className: 'roost-btn', style: { marginTop: 6 },
-                        disabled: marketBusy === x.id || x.foreign,
+                        disabled: marketBusy === x.id || x.foreign || !!scopeAsk || !!revokeAsk,
                         onClick: () => marketAct('extensions.market.install', x.id),
                       }, x.foreign ? '用户手写 · 不覆盖' : x.installed ? (x.updateAvailable ? '更新' : '重装') : '安装'),
                   x.installed && !x.foreign
+                    ? h(ConfirmLink, {
+                        label: '卸载', confirmLabel: '确认卸载',
+                        disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
+                        onConfirm: () => marketAct('extensions.market.remove', x.id),
+                      })
+                    : null,
+                  x.installed && !x.foreign && !x.revoked
                     ? h('button', {
                         type: 'button', className: 'roost-btn', style: { marginTop: 6, marginLeft: 6 },
-                        disabled: marketBusy === x.id,
-                        onClick: () => marketAct('extensions.market.remove', x.id),
-                      }, '卸载')
+                        disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
+                        onClick: () => setRevokeAsk(x.id),
+                      }, '停用')
                     : null,
                 )),
               )
             : (market ? h('div', { className: 'roost-empty' }, '市场里还没有扩展条目。') : null),
         ),
+        h('div', { className: 'roost-diag-h', style: { marginTop: 12 } }, '已装扩展'),
         (data?.rows || []).length
           ? h('div', { className: 'roost-list' },
               data.rows.map((x) => h('div', { key: x.id, className: 'roost-item' },
@@ -7342,7 +8499,7 @@ select.roost-input{color-scheme:dark}
                   x.sha256Valid ? h('span', { className: 'd' }, ' · 校验和有效') : null,
                   /** 令牌实际拿到的 scope：清单写的和实际授的可能不一样，必须看得见。 */
                   h('span', { className: 'd' }, x.scopes
-                    ? ` · 权限：${x.scopes.length ? x.scopes.join('、') : '（无）'}`
+                    ? ` · 权限：${x.scopes.length ? scopesText(x.scopes) : '（无）'}`
                     : ' · 权限：尚未发令牌'),
                 ),
                 h('textarea', {
@@ -7364,28 +8521,41 @@ select.roost-input{color-scheme:dark}
         },
           `合计 ${data?.totalBytes ?? 0} 字节${(data?.totalBytes ?? 0) > 2048
             ? '（已超过合计 2048 字节预算，超出部分进提示词时会被截掉，请精简）'
-            : '（合计预算 2048 字节）'}。编辑市场装的扩展会让清单 plugin.json 的 sha256 失效并标注「已本地修改，不再参与更新校验」；用户手写目录只读，面板不改它的清单。`),
-        /** 阶段 4 台账留的 5.2 待办：给「一并清除扩展记忆」一个真实入口。 */
-        h('div', { className: 'roost-note', style: { marginTop: 8 } },
-          '清扩展记忆：只删 ext-memory/<id>.json，不碰通用记忆；按清单的 onClear=keep 保留的会跳过。',
-          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
-            h('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center' } },
-              h('input', {
-                type: 'checkbox', checked: confirmClear,
-                onChange: (e) => setConfirmClear(e.target.checked),
-              }),
-              '我确认清除',
-            ),
-            h('button', {
-              type: 'button', className: 'roost-btn', disabled: !confirmClear,
-              onClick: async () => {
-                const r = await EXT_POST('extensions.memory.clear', { confirm: true })
-                toast(r.message || (r.ok ? '已清除' : '清除失败'))
-                setConfirmClear(false)
-              },
-            }, '清空扩展记忆'),
-          ),
+            : '（合计预算 2048 字节）'}。`),
+        h('div', { style: { marginTop: 8 } },
+          h(ConfirmLink, {
+            label: '清空扩展记忆', confirmLabel: '确认清空（只删扩展自己的记忆）',
+            onConfirm: async () => {
+              const r = await EXT_POST('extensions.memory.clear', { confirm: true })
+              toast(r.message || (r.ok ? '已清除' : '清除失败'))
+            },
+          }),
         ),
+
+        /** 两个 ask 互斥：万一都非空，只显示停用确认，避免两层遮罩叠着误点「授权并安装」 */
+        scopeAsk && !revokeAsk
+          ? h(ConfirmModal, {
+              title: '扩展索要敏感权限',
+              message: `扩展「${scopeAsk.id}」索要：\n\n${scopesText(scopeAsk.scopes)}`
+                + '\n\n授权后它能以机器人身份执行对应动作（发消息 / 主动发言等）。确认安装？',
+              confirmText: '授权并安装', danger: true, busy: scopeBusy,
+              onClose: () => {
+                if (scopeBusy) return
+                setScopeAsk(null)
+                toast('已取消安装（未授权）')
+              },
+              onConfirm: confirmScopeAct,
+            })
+          : null,
+        revokeAsk
+          ? h(ConfirmModal, {
+              title: '停用扩展',
+              message: `停用「${revokeAsk}」后会禁止它的工具运行，已装文件保留，可再装回来。`,
+              confirmText: '停用', danger: true, busy: marketBusy === revokeAsk,
+              onClose: () => { if (marketBusy !== revokeAsk) setRevokeAsk(null) },
+              onConfirm: () => revokeMarket(revokeAsk),
+            })
+          : null,
       )
     }
 
@@ -7428,7 +8598,7 @@ select.roost-input{color-scheme:dark}
         h('div', { className: 'roost-list' },
           (data?.availableScopes || []).map((s) => h('label', { key: s, className: 'roost-item', style: { display: 'inline-flex', gap: 4, marginRight: 10 } },
             h('input', { type: 'checkbox', checked: scopes.includes(s), onChange: () => { toggle(s); setConfirm(false) } }),
-            h('span', { className: 'roost-code' }, s),
+            h('span', { className: 'roost-code' }, s + scopeNote(s)),
           )),
         ),
         h('label', { className: 'roost-note', style: { display: 'inline-flex', gap: 6, alignItems: 'center' } },
@@ -7449,7 +8619,7 @@ select.roost-input{color-scheme:dark}
                   h('span', { className: 'd' }, ` · ${c.kind === 'ext' ? '扩展自动管理' : '面板发放'} · ${(c.scopes || []).join('、') || '无 scope'}`),
                 ),
                 c.kind === 'panel'
-                  ? h('button', { type: 'button', className: 'roost-btn', onClick: () => revoke(c.id) }, '吊销')
+                  ? h(ConfirmLink, { label: '吊销', confirmLabel: '确认吊销', onConfirm: () => revoke(c.id) })
                   : null,
               )),
             )
@@ -7459,20 +8629,19 @@ select.roost-input{color-scheme:dark}
 
     /* ---------------- 日志 ---------------- */
 
-    function LogsTab() {
-      const [logs, setLogs] = useState(null)
-      useEffect(() => {
-        let alive = true
-        const load = async () => {
-          const r = await get('/logs')
-          // 路由返回的键是 entries；写成 r.logs 会永远是空列表（且不报错）
-          if (alive) setLogs(r.ok === false ? [] : r.entries || [])
-        }
-        load()
-        const t = setInterval(load, 3000)
-        return () => { alive = false; clearInterval(t) }
-      }, [])
+    /**
+     * 扩展独立页（2026-11-11）：装扩展是一整条动线 —— 档位 → 说明 → 令牌，
+     * 原先散在 能力 / 设置 / 接入 三页，也不该跟工具白名单挤在「能力」里。
+     */
+    function ExtTab({ quick, toast }) {
+      return h('div', null,
+        h(ExtSettingsBlock, { toast }),
+        h(ExtCapsBlock, { quick, toast }),
+        h(ExtClientsBlock, { toast }),
+      )
+    }
 
+    function LogsTab({ logs }) {
       const tone = (lv) => (lv === 'error' ? 'var(--bad)' : lv === 'warn' ? 'var(--warn)' : 'var(--ok)')
 
       return h(Sec, { n: '01', title: '最近的动静', right: h('span', { className: 'roost-note', style: { margin: 0 } }, '每 3 秒刷新') },
@@ -7661,41 +8830,35 @@ select.roost-input{color-scheme:dark}
      * 不动它是因为 `localStorage` 里存着上次停留的页签，改 key 会让
      * 老用户回来时落空、退回概览。
      */
+    /**
+     * 2026-11-11 大重排：11 → 8 个可见页签。
+     *
+     *  「排障」（原 logs）里同时放 日志 / 上下文 / 会话清理 —— 机器人不回消息
+     *    时不用再跨 5 个页签找；
+     *  接入、账号迁移整页收进弹窗（概览「去接入」、设置页底部按钮打开）；
+     *  扩展独立成「扩展」页：档位 / 说明编辑 / 客户端令牌一处走完，
+     *    不跟工具白名单挤在「能力」里，也不用跨三页。
+     *
+     * **隐藏页签仍可直接到达**：`chats / context / setup / account` 保留为可直接进入的页，
+     * 老 `localStorage['roost.tab']` 存着它们时照常渲染原页，功能与位置都不丢。
+     * 分组标题试过独占一行、窄侧栏白占三行，已去掉；`is-primary` 只略微提亮高频项。
+     */
     const TABS = [
       ['overview', '概览'],
-      ['setup', '接入'],
-      /**
-       * 「人格」= 原来的「人格与情绪」+「市场」（情绪已搬到「主动搭话」，表情包/语音条在「设置」）。
-       *
-       * 两个页签都在列人格、都能点「用这个」，用户不知道该在哪点；
-       * 而「市场」里本来就只有人格（数据源就是 /personas/repo），没有插件。
-       * 现在合成一页，用「我的人格 / 人格仓库」分段切换。
-       */
+      ['logs', '排障'],
       ['her', '人格'],
       ['memory', '记忆'],
       ['awake', '主动搭话'],
-      ['context', '上下文'],
-      ['chats', '会话'],
-      /**
-       * 「账号迁移」放「会话」之后、「设置」之前。
-       *
-       * 位置是有讲究的：它是**会话的延伸**（都是「这个 chatId 是什么」），
-       * 但又不是每天要看的东西，所以不放在前面抢首屏。
-       */
-      ['account', '账号迁移'],
-      /**
-       * 「能力」放「设置」左边。
-       *
-       * 顺序的道理：前面几页都是「她是谁、她记得什么、她会不会主动」，
-       * 「设置」是收尾的杂项；能力属于**运行时的行为**，不是安装配置，
-       * 所以紧贴在设置之前，读起来是「她怎么工作 → 最后才是机器怎么配」。
-       *
-       * key 用 `caps`，别改成 `ability`——localStorage 里存着上次的页签。
-       */
-      ['caps', '能力'],
+      ['caps', '权限'],
+      ['ext', '扩展'],
       ['config', '设置'],
-      ['logs', '日志'],
     ]
+    const HIDDEN_TABS = ['chats', 'context', 'setup', 'account']
+    const ALL_TABS = TABS.map(([id]) => id).concat(HIDDEN_TABS)
+
+    /** 每天扫一眼的页签，只用来略微提亮，不再渲染成标题 */
+    /** 每天都用的页签略微提亮；权限/设置这类低频页保持基础权重 */
+    const PRIMARY_TABS = ['overview', 'logs', 'memory', 'awake']
 
     /**
      * 渲染错误边界：**把黑屏变成一句话**。
@@ -7757,15 +8920,36 @@ select.roost-input{color-scheme:dark}
           const last = localStorage.getItem('roost.tab')
           /** 老用户存着 'market'：并进「人格」了，别让他打开就是概览 */
           const alias = last === 'market' ? 'her' : last
-          return TABS.some(([id]) => id === alias) ? alias : 'overview'
+          return ALL_TABS.includes(alias) ? alias : 'overview'
         } catch {
           return 'overview'
         }
       })
+      /** 接入 / 账号迁移是整页弹窗：不占页签，也不写「上次停留」 */
+      const [pageModal, setPageModal] = useState(null)
       const setTab = useCallback((id) => {
+        if (id === 'setup' || id === 'account') { setPageModal(id); return }
+        setPageModal(null)
         setTabState(id)
         try { localStorage.setItem('roost.tab', id) } catch {}
       }, [])
+      /** 日志统一拉一次：概览显示最近 6 条，排障页显示全量，别两处各起一个轮询 */
+      const [logs, setLogs] = useState(null)
+      useEffect(() => {
+        /** 只在概览/排障常驻轮询：client-effects 测试会真的执行 effect，
+            在别的页挂 setInterval 会让进程退不出去。切页时下面这行 load()
+            本来就会立即拉一次，所以停在别的页也不会看到旧数据。 */
+        if (tab !== 'overview' && tab !== 'logs') return
+        let alive = true
+        const load = async () => {
+          const r = await get('/logs')
+          if (alive) setLogs(r.ok === false ? [] : r.entries || [])
+        }
+        load()
+        const t = setInterval(load, 3000)
+        return () => { alive = false; clearInterval(t) }
+      }, [tab])
+
       const [st, setSt] = useState(null)
       const [setupSt, setSetupSt] = useState(null)
       const [config, setConfig] = useState(null)
@@ -7968,8 +9152,10 @@ select.roost-input{color-scheme:dark}
           if (!mem) once('memory', () => loadMemory())
           if (!chats) once('chats', loadChats)
         }
-        if (tab === 'context') {
+        /** 排障页把 日志 / 上下文 / 会话清理 放一起，三份数据都得预拉 */
+        if (tab === 'context' || tab === 'logs') {
           once('ctx', loadCtx)
+          once('chats', loadChats)
           // 「表情包 order 901 · N 字」那行要 /stickers
           if (!her?.stickers) once('her', loadHer)
         }
@@ -8084,33 +9270,50 @@ select.roost-input{color-scheme:dark}
       return h('div', { className: 'roost-root' },
         h('div', { className: 'roost-head' },
           h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
-            h('div', { style: { fontSize: 17, fontWeight: 650, letterSpacing: '-0.01em' } }, 'Roost'),
+            h('div', { className: 'roost-title-lg' }, 'Roost'),
             st
               ? h(Pill, { tone: st.listening ? 'ok' : 'bad' }, st.listening ? `:${st.actualPort || st.port}` : '端口没起')
               : null,
             ch?.current ? h(Pill, null, '通道 ' + ch.current) : null,
           ),
-          h('div', { className: 'roost-note', style: { marginTop: 3 } }, 'QQ 消息从这里交给 DSH 会话回答。'),
+          h('div', { className: 'roost-note roost-sub' }, 'QQ 消息从这里交给 DSH 会话回答。'),
 
           h('div', {
             role: 'tablist',
             'aria-label': 'Roost 各页',
-            style: { display: 'flex', gap: 2, flexWrap: 'wrap', margin: '16px 0 0', borderBottom: '1px solid var(--line-soft)' },
+            /* flexWrap 必须留着：窄侧栏靠换行排布，不许出现拖不动的滚动条 */
+            style: {
+              display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap',
+              margin: '16px 0 0', paddingBottom: 8,
+              borderBottom: '1px solid var(--line-soft)',
+            },
           },
-            TABS.map(([id, label]) =>
-              h('button', {
-                key: id, type: 'button', className: 'roost-tab',
+            TABS.reduce((out, [id, label]) => {
+              const primary = PRIMARY_TABS.indexOf(id) >= 0
+              out.push(h('button', {
+                key: id, type: 'button',
+                className: 'roost-tab' + (primary ? ' is-primary' : ''),
                 role: 'tab',
-              'aria-selected': tab === id ? 'true' : 'false',
-              'data-on': tab === id ? '1' : '0',
-              onClick: () => setTab(id),
-            }, label),
+                'aria-selected': tab === id ? 'true' : 'false',
+                'data-on': tab === id ? '1' : '0',
+                onClick: () => setTab(id),
+              }, label))
+              return out
+            }, []),
           ),
-          ),
+          /** 隐藏页标记放 tablist 外面：tablist 的 owned element 必须是 role=tab，
+              放外面既能保住 aria-current 的读屏语义，也不破坏 tablist 结构。 */
+          HIDDEN_TABS.includes(tab)
+            ? h('span', { className: 'roost-nav-current', 'aria-current': 'page' },
+                ({ chats: '会话', context: '上下文', setup: '接入', account: '账号迁移' })[tab] || tab)
+            : null,
         ),
 
-        h('div', { className: 'roost-scroll-body roost-fade', key: tab },
-          tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab }) : null,
+        h('div', {
+          className: 'roost-scroll-body roost-fade' + (pageModal ? ' is-locked' : ''),
+          key: tab,
+        },
+          tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta }) : null,
           tab === 'her'
             ? h(HerTab, {
@@ -8120,31 +9323,79 @@ select.roost-input{color-scheme:dark}
               })
             : null,
           tab === 'caps' ? h(CapsTab, { caps, preview: capPreview, chats: capChats, feat: capFeat, retention: capRetention, quota: capQuota, toast, reload: loadCaps, quick, busy }) : null,
+          tab === 'ext' ? h(ExtTab, { quick, toast }) : null,
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat }) : null,
           tab === 'awake'
             ? h(AwakeTab, {
                 aw, mem, sp, chats,
                 mood: her?.mood ?? null, reloadMood: loadHer,
-                toast, reload: loadAwake, reloadSp: loadAwake, busy,
+                toast, reload: loadAwake, reloadSp: loadAwake, busy, quick,
               })
             : null,
           tab === 'context'
-            ? h(ContextTab, {
-                ctxInfo, mind, usageInfo, stickers: her?.stickers ?? null,
-                toast, reload: loadCtx, busy,
-              })
+            /** 老 key 单独进来时复用排障页的分区外观，别出现「同一块两套皮」 */
+            ? h('div', { className: 'roost-diag-part' },
+                h('div', { className: 'roost-diag-h' }, '上下文 · 手动刷新'),
+                h(ContextTab, {
+                  ctxInfo, mind, usageInfo, stickers: her?.stickers ?? null,
+                  toast, reload: loadCtx, busy,
+                }))
             : null,
-          tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
+          tab === 'chats'
+            ? h('div', { className: 'roost-diag-part' },
+                h('div', { className: 'roost-diag-h' }, '会话 · 手动刷新'),
+                h(ChatsTab, { chats, reload: loadChats, toast }))
+            : null,
           tab === 'account' ? h(AccountTab, { toast }) : null,
           tab === 'config'
-            ? (config
-                ? h(ConfigTab, {
-                    config, save: saveAll, saveCfg, toast,
-                    stickers: her?.stickers ?? null, setupSt, reload: loadHer,
-                  })
-                : h('div', { className: 'roost-empty' }, '读取配置…'))
+            ? h('div', null,
+                config
+                  ? h(ConfigTab, {
+                      config, save: saveAll, saveCfg, toast,
+                      stickers: her?.stickers ?? null, setupSt, reload: loadHer,
+                      currentChatId: mem?.chatId || '',
+                    })
+                  : h('div', { className: 'roost-empty' }, '读取配置…'),
+                h(Sec, { title: '危险操作' },
+                  h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 } },
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: () => setPageModal('account'),
+                    }, '账号迁移…'),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: () => { setTab('memory'); toast('已切到「记忆」，清空在「07 清空」') },
+                    }, '清空记忆…'),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: () => { setTab('her'); toast('已切到「人格」，批量删除在「整理」') },
+                    }, '整理人格…'),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: () => { setTab('ext'); toast('已切到「扩展」，清空在「已装扩展」底部') },
+                    }, '清空扩展记忆…'),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: () => { setTab('awake'); toast('已切到「主动搭话」，在「此刻情绪 · 变化记录」里') },
+                    }, '清空心情历史…'),
+                  ),
+                ),
+              )
             : null,
-          tab === 'logs' ? h(LogsTab, null) : null,
+          tab === 'logs'
+            ? h('div', { className: 'roost-diag' },
+                h(LogsTab, { logs }),
+                h('div', { className: 'roost-diag-part' },
+                  h('div', { className: 'roost-diag-h' }, '上下文 · 手动刷新'),
+                  h(ContextTab, {
+                    ctxInfo, mind, usageInfo, stickers: her?.stickers ?? null,
+                    toast, reload: loadCtx, busy,
+                  })),
+                h('div', { className: 'roost-diag-part' },
+                  h('div', { className: 'roost-diag-h' }, '会话 · 手动刷新'),
+                  h(ChatsTab, { chats, reload: loadChats, toast })),
+              )
+            : null,
         ),
 
         /**
@@ -8153,6 +9404,15 @@ select.roost-input{color-scheme:dark}
          * 之前是普通 div 放在内容最后——「接入」页很长，点了第 5 步的按钮，
          * 提示出现在屏幕外，看起来就是「点了没反应」。
          */
+        pageModal === 'setup'
+          ? h(PageModal, { title: '首次接入 / 组件版本', onClose: () => setPageModal(null) },
+              h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta }))
+          : null,
+        pageModal === 'account'
+          ? h(PageModal, { title: '账号迁移', onClose: () => setPageModal(null) },
+              h(AccountTab, { toast }))
+          : null,
+
         toastMsg
           ? h('div', {
               style: {

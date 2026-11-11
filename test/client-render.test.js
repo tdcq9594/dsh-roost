@@ -93,9 +93,12 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-const TABS = ['overview', 'setup', 'her', 'memory', 'awake', 'context', 'chats', 'account', 'caps', 'config', 'logs']
+/* 与 client.js 的 TABS 同序：大重排后的 8 个可见页签（扩展独立成页） */
+const TABS = ['overview', 'logs', 'her', 'memory', 'awake', 'caps', 'ext', 'config']
+/* 隐藏页：老 localStorage 存着时仍要能正常渲染 */
+const HIDDEN_TABS = ['chats', 'context', 'setup', 'account']
 
-for (const tab of TABS) {
+for (const tab of TABS.concat(HIDDEN_TABS)) {
   test(`前端渲染：${tab} 页在空数据下不炸`, () => {
     const rt = makeReact()
     const mod = loadClient(rt.React)
@@ -110,9 +113,9 @@ for (const tab of TABS) {
     }, `${tab} 页渲染抛异常`)
 
     assert.equal(tree?.props?.className, 'roost-root', '根节点不对')
-    // 页签条必须在每一页都在，且九个都在（「市场」并进了「人格」）
+    // 页签条每一页都在；大重排后是 8 个可见页签
     const txt = textOf(tree)
-    for (const label of ['概览', '接入', '人格', '能力', '记忆', '主动搭话', '上下文', '会话', '设置', '日志']) {
+    for (const label of ['概览', '排障', '人格', '记忆', '主动搭话', '权限', '扩展', '设置']) {
       assert.ok(txt.includes(label), `页签缺「${label}」`)
     }
   })
@@ -310,9 +313,16 @@ test('前端渲染：每页分节编号连号，从 01 起', () => {
     const tree = expand(mod.RoostPage(), rt)
     const secs = sectionsOf(tree).filter((s) => s.n)
     if (!secs.length) continue // 这一页本来就没编号节（接入页用 1–6 圆点向导）
-    secs.forEach((s, i) => {
-      assert.equal(s.n, String(i + 1).padStart(2, '0'),
-        `${tab} 页第 ${i + 1} 节编号应为 ${String(i + 1).padStart(2, '0')}，实际「${s.n} ${s.title}」`)
+    /**
+     * 「排障」页把 日志 / 上下文 / 会话清理 三个组件合到一页，
+     * 每个组件各自从 01 起编号；遇到 01 就把计数归零，别把第二组判成错。
+     */
+    let k = 0
+    secs.forEach((s) => {
+      if (s.n === '01') k = 0
+      k++
+      assert.equal(s.n, String(k).padStart(2, '0'),
+        `${tab} 页第 ${k} 节编号应为 ${String(k).padStart(2, '0')}，实际「${s.n} ${s.title}」`)
     })
   }
 })
@@ -1008,9 +1018,66 @@ test('前端渲染：能力页要能显示四档结论，且缺数据不炸', ()
   rt.reset()
   const empty = textOf(expand(mod.CapsTab({ caps: null, preview: null, toast: () => {}, reload: () => {}, quick: async () => ({}), busy: false }), rt))
   assert.ok(empty.includes('正在读'), '没有数据时要有占位文案')
+  // 扩展已拆成独立页，能力页不再混放扩展块
+  assert.ok(!empty.includes('扩展 · 说明编辑与凭据状态'), '能力页不该再放扩展说明编辑')
 })
 
-test('页签顺序：能力排在设置左边', () => {
+test('设置页有数据时分节编号 01–07 连续（ConfigTab 不再空跑）', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  rt.reset()
+  const tree = expand(mod.ConfigTab({
+    config: {}, save: () => {}, saveCfg: () => {}, toast: () => {},
+    stickers: null, setupSt: null, reload: () => {},
+  }), rt)
+  const ns = sectionsOf(tree).filter((s) => s.n).map((s) => s.n)
+  assert.deepEqual(ns, ['01', '02', '03', '04', '05', '06', '07'], '设置页编号应 01–07 连续')
+})
+
+test('后端缺口已接入：市场 / 模型 / 召回 / 心情历史 / 危险操作', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const at = (t) => { store['roost.tab'] = t; rt.reset(); return textOf(expand(mod.RoostPage(), rt)) }
+  assert.ok(at('ext').includes('扩展市场'), '扩展页缺市场')
+  assert.ok(at('ext').includes('检查更新'), '市场缺检查更新入口')
+  rt.reset()
+  const cfgTxt = textOf(expand(mod.ConfigTab({
+    config: {}, save: () => {}, saveCfg: () => {}, toast: () => {},
+    stickers: null, setupSt: null, reload: () => {},
+  }), rt))
+  assert.ok(cfgTxt.includes('设为该类型默认'), '设置页缺 model.set 控件')
+  assert.ok(at('config').includes('危险操作'), '设置页缺危险操作总入口')
+  assert.ok(at('memory').includes('召回记录'), '记忆页缺 recall.log 入口')
+  assert.ok(at('awake').includes('清空心情历史'), '主动搭话缺 mood.history.clear 入口')
+})
+
+test('隐藏页有当前位置标记，页签栏不会看起来一个都没选', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'setup'
+  rt.reset()
+  let found = false
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.className === 'roost-nav-current') found = true
+    walk(n.props?.children)
+  })(expand(mod.RoostPage(), rt))
+  assert.ok(found, '隐藏页没有当前位置标记')
+})
+
+test('扩展独立页：市场 / 档位 / 客户端令牌都在', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'ext'
+  rt.reset()
+  const txt = textOf(expand(mod.RoostPage(), rt))
+  assert.ok(txt.includes('扩展市场'), '缺市场标题')
+  assert.ok(txt.includes('检查更新'), '缺检查更新入口')
+  assert.ok(txt.includes('扩展 /v1 客户端令牌'), '客户端令牌块缺失')
+})
+
+test('页签顺序：权限排在设置左边', () => {
   /**
    * 位置是需求的一部分，所以要断言。
    *
@@ -1018,7 +1085,7 @@ test('页签顺序：能力排在设置左边', () => {
    * 而页签顺序是用户每天都要扫一遍的东西。
    */
   const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
-  const caps = src.indexOf("['caps', '能力']")
+  const caps = src.indexOf("['caps', '权限']")
   const config = src.indexOf("['config', '设置']")
   assert.ok(caps > 0, '找不到能力页签')
   assert.ok(config > 0, '找不到设置页签')
@@ -1066,8 +1133,16 @@ test('前端渲染：工具权限弹窗能搜索、能标出危险与钉住项',
    * `textOf` 只收文本节点，拿不到它。所以直接看树里有没有这个类型的 input。
    */
   assert.ok(JSON.stringify(tree).includes('"type":"search"'), '缺搜索框')
-  // 表头五列，对齐框架 0/1/2/3：主 管 群 助 员
-  for (const k of ['主', '管', '群', '助', '员']) assert.ok(txt.includes(k), `表头缺「${k}」`)
+  // 表头五档写全，且与下方刻度共用同一套 grid 列宽
+  for (const k of ['主人', '管理员', '群管', '助手', '群成员']) {
+    assert.ok(txt.includes(k), `表头缺「${k}」`)
+  }
+  const raw = JSON.stringify(tree)
+  assert.ok(raw.includes('cap-tier'), '档位应是一条连续轨道上的滑块热区')
+  assert.ok(!raw.includes('"type":"checkbox"'), '不该再留五列勾选框')
+  // 全英文工具名要有中文 / 来源注释
+  assert.ok(txt.includes('改文件'), 'edit 该标中文说明')
+  assert.ok(txt.includes('GitHub'), 'gh_ 该标来源')
 
   // 搜不到时给一句人话，而不是空白
   rt.reset()
@@ -1184,4 +1259,81 @@ test('能力页：前端通配匹配必须和后端同语义（`*` 跨下划线�
   for (const [name, pat, want] of cases) {
     assert.equal(mod.matchPat(name, pat), want, `matchPat(${name}, ${pat})`)
   }
+})
+
+/* ---------------- 2026-11-11 重设计：功能不变量 ---------------- */
+
+/**
+ * 大重排后页签栏只放 8 个高频页，其余收进弹窗 / 合并页 / 隐藏页。
+ * 这里钉住「可见页签仍都是可点入口」，隐藏页由上面的循环逐个验渲染不炸。
+ */
+test('重设计：8 个可见页签都还是可点入口', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'overview'
+  rt.reset()
+  const tree = expand(mod.RoostPage(), rt)
+
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  for (const id of TABS) {
+    assert.ok(src.includes("['" + id + "',"), `页签 ${id} 从 TABS 里消失了`)
+  }
+
+  let tabs = 0
+  let groupLabels = 0
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.role === 'tab') {
+      tabs++
+      assert.equal(typeof n.props.onClick, 'function', '页签没有点击入口')
+    }
+    if (String(n.props?.className || '').includes('roost-nav-label')) groupLabels++
+    walk(n.props?.children)
+  })(tree)
+
+  assert.equal(tabs, TABS.length, `页签入口数应为 ${TABS.length}，实际 ${tabs}`)
+  assert.equal(groupLabels, 0, '分组标题已去掉：窄侧栏里它们会白占三行')
+})
+
+/**
+ * 折叠只由 CSS 隐藏，children 常驻 DOM：收起时组件不卸载，
+ * 输入框里没提交的内容、弹窗开关都还在，功能一条不少。
+ */
+test('重设计：分节默认全展开，折叠不卸载任何功能元素', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(
+    src.includes('.roost-sec.is-folded > *:not(.roost-sec-h){display:none}'),
+    '折叠必须只用 CSS 隐藏，不能在 JS 里条件渲染掉 children',
+  )
+
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  for (const tab of TABS) {
+    store['roost.tab'] = tab
+    rt.reset()
+    const tree = expand(mod.RoostPage(), rt)
+    let secs = 0
+    let folds = 0
+    let folded = 0
+    ;(function walk(n) {
+      if (!n || typeof n !== 'object') return
+      if (Array.isArray(n)) return n.forEach(walk)
+      const cls = String(n.props?.className || '')
+      if (cls.split(/\s+/).includes('roost-sec')) secs++
+      if (cls.includes('roost-sec-fold')) {
+        folds++
+        assert.equal(n.props['aria-expanded'], 'true', `${tab} 页有分节默认是收起的`)
+      }
+      if (cls.includes('is-folded')) folded++
+      walk(n.props?.children)
+    })(tree)
+    assert.equal(folded, 0, `${tab} 页不该有默认收起的分节`)
+    assert.equal(folds, secs, `${tab} 页分节数 ${secs} 与折叠开关数 ${folds} 不一致`)
+  }
+  // 概览固定 6 节：保证上面不是「两边都是 0」的假通过
+  store['roost.tab'] = 'overview'
+  rt.reset()
+  const overview = textOf(expand(mod.RoostPage(), rt))
+  assert.ok(overview.includes('现在这样') && overview.includes('接入进度'), '概览页的分节内容没渲染出来')
 })
