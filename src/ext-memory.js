@@ -154,7 +154,7 @@ export function createExtMemory({
       if (!alsoExt) {
         return {
           touched: false,
-          message: '扩展记忆不属于任何会话，这次没动（可在「设置 → 扩展」里单独清）',
+          message: '扩展记忆不属于任何会话，这次没动（可在「扩展 → 已装扩展」里单独清）',
         };
       }
       const r = await store.clearAll({ respectOnClear: true });

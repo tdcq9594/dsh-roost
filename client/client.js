@@ -1439,8 +1439,9 @@ select.roost-input{color-scheme:dark}
             h('button', { type: 'button', className: 'roost-primary', disabled: starting, onClick: startRoost },
               starting ? '启动中…' : '一键启动 Roost'),
             h('button', { type: 'button', className: 'roost-btn', onClick: openRoostPanel }, '打开 Roost 面板 ↗'),
-            allReady ? null
-              : h('button', { type: 'button', className: 'roost-btn', onClick: () => onGo('setup') }, '去接入'),
+            /** 向导入口不能随「五项全绿」消失：组件版本、重新检查、二维码都只在那一页 */
+            h('button', { type: 'button', className: 'roost-btn', onClick: () => onGo('setup') },
+              allReady ? '接入向导 / 组件版本' : '去接入'),
           ),
           h('div', { className: 'roost-note' },
             allReady
@@ -8272,7 +8273,7 @@ select.roost-input{color-scheme:dark}
                 )),
               ),
             )
-          : h('div', { className: 'roost-empty' }, '还没装扩展。装好后在「设置 → 扩展」里改说明。'),
+          : h('div', { className: 'roost-empty' }, '还没装扩展。装好后在「扩展 → 已装扩展」里改说明。'),
         h('div', { className: 'roost-note', style: { marginTop: 8 } },
           'dry-run 预览：选一个扩展先试算，确认后才写进 forceDeny。',
           h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },

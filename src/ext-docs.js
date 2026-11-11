@@ -103,7 +103,7 @@ ${version ? `>\n> 对应版本：\`${version}\`\n` : ''}
 ## 2. 三步装起来
 
 1. 在 \`${MANIFEST_FILE}\` 里写 \`"kind": "dsh-extension"\`，\`id\` 必须等于目录名（正则 \`${EXT_ID_RE}\`）；
-2. 把目录放进 \`<dataDir>/extensions/<id>/\`，或用面板「设置 → 扩展 → 市场」安装；
+2. 把目录放进 \`<dataDir>/extensions/<id>/\`，或用面板「扩展 → 市场」安装；
 3. 在权限页把该扩展的六档权限调好（装完会自动建 \`ext_<id>\` 影子组）。
 
 ## 3. 清单字段
