@@ -206,14 +206,19 @@ export function findProfileDir(startDir) {
 /**
  * 判断自己是怎么装的。
  *
- * - `linked`  符号链接（开发模式）→ **自更新必须禁用**
+ * - `linked`  符号链接 / Windows junction（开发模式）→ **自更新必须禁用**
  * - `real`    真实目录（npm 装的）→ 可以更新
  * - `unknown` 找不到 → 不给更新按钮，只显示版本
+ *
+ * ⚠️ **不要先用 `existsSync()` 判存在**（2026-11-12 实测）：Windows 的 junction
+ * 在某些环境里 `existsSync` 返回 false —— 它走 `stat`、会跟随链接，链接目标
+ * 一旦被策略挡住就抛 UNKNOWN；而 `lstat` 明明看得见这个链接。先判 `existsSync`
+ * 的后果是「明明是链接装法，却判成 unknown」，`linked` 这条防线等于没设。
+ * 直接 `lstat`：拿得到就按 isSymbolicLink 分类，拿不到（ENOENT / 权限）才当未知。
  */
 export function installKind(profileDir) {
   const p = join(profileDir, 'node_modules', PKG);
   try {
-    if (!existsSync(p)) return 'unknown';
     return lstatSync(p).isSymbolicLink() ? 'linked' : 'real';
   } catch {
     return 'unknown';
