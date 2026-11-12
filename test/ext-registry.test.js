@@ -125,6 +125,38 @@ test('install：覆盖更新要保住用户在面板里填的 config.json', (t) 
   assert.equal(reg.sourceOf('bili').version, '0.1.1', '扩展本体仍是新版本');
 });
 
+test('空目录（卸载残留）不算用户手写：能重新安装，也能被卸载', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  /**
+   * 复现：Windows 上 rmSync 遇到被占用的子进程句柄，会删内容留空目录。
+   * 旧判据把它当「用户手写」→ 更新与卸载双双被拒，面板上扩展还消失了。
+   */
+  const empty = join(extensionsDir(home), 'bili');
+  fs.mkdirSync(empty, { recursive: true });
+
+  assert.equal(reg.isForeign('bili'), false, '空目录不该被当成用户手写');
+  assert.deepEqual(reg.list().map((x) => x.id), [], '空目录不该出现在已装列表里');
+
+  const r = reg.install(src, { source: { repo: 'm', version: '0.1.1' } });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(reg.isForeign('bili'), false);
+  assert.equal(reg.read('bili')?.id, 'bili', '安装应该接管这个空目录');
+
+  // 卸掉之后目录应当整个消失，不留残骸
+  assert.equal(reg.remove('bili').ok, true);
+  assert.equal(fs.existsSync(empty), false);
+});
+
+test('用户手写目录（有 plugin.json 但没有 .source.json）仍然只读', (t) => {
+  const home = tmpHome(t);
+  const dir = join(extensionsDir(home), 'hand-written');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(join(dir, 'plugin.json'), JSON.stringify(manifest('hand-written'), null, 2));
+  const reg = createExtRegistry({ dir: home });
+  assert.equal(reg.isForeign('hand-written'), true);
+});
+
 test('foreign 保护：用户手写目录（无 .source.json）拒绝覆盖与卸载，不给 force 后门', (t) => {
   const { home, src } = staged(t, 'bili');
   const reg = createExtRegistry({ dir: home });

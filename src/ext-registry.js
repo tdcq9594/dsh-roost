@@ -196,8 +196,17 @@ function exists(p) {
   }
 }
 
+/**
+ * 递归删目录。
+ *
+ * `maxRetries` 不是洁癖：扩展进程的 **cwd 就是扩展目录**，Windows 上只要那个
+ * 进程还活着，删内容可以、删目录本身会被拒 —— 于是留下一个空目录。重试几次
+ * 能救回「进程刚好在退出」的情况；真删不掉时由调用方如实报出来，
+ * 不要静默吞成「卸载成功」。
+ */
 function rmrf(p) {
-  if (exists(p)) fs.rmSync(p, { recursive: true, force: true });
+  if (!exists(p)) return;
+  fs.rmSync(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
 }
 
 export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = null, clientStore = null } = {}) {
@@ -217,8 +226,24 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
     return readJson(sourcePathOf(id));
   }
 
+  /**
+   * 用户手写的扩展 = 目录存在、没有 `.source.json`、**而且真的是一份扩展**（有 `plugin.json`）。
+   *
+   * 为什么必须多最后这一条：Windows 上 `rmSync({recursive:true})` 遇到被占用的句柄
+   * （扩展的子进程还没退干净就是这个情况）会**删掉内容却留下空目录**。这种残留
+   * 没有 `.source.json`，按旧判据就成了「用户手写」——
+   *   · 更新 → `install()` 报「用户手写的扩展，拒绝覆盖」；
+   *   · 卸载 → `remove()` 同样被拒；
+   *   · 已装列表 → `list()` 读不到清单，直接跳过，面板上这个扩展凭空消失。
+   * 三个按钮一起废，而用户根本不知道发生了什么。
+   *
+   * 没有清单的目录不是任何人的作品，让安装直接接管即可。
+   */
   function isForeign(id) {
-    return exists(pathOf(id)) && !exists(sourcePathOf(id));
+    const dest = pathOf(id);
+    if (!exists(dest)) return false;
+    if (exists(sourcePathOf(id))) return false;
+    return exists(join(dest, MANIFEST_FILE));
   }
 
   function read(id) {
@@ -409,6 +434,12 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
     if (!exists(dest)) return { ok: false, reason: `扩展 ${id} 不存在` };
     if (isForeign(id)) return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝卸载` };
     rmrf(dest);
+    /**
+     * 删完要**回读确认**：扩展进程的 cwd 就在这个目录里，Windows 上句柄没退
+     * 干净时会「内容删光、目录留着」。**不能提前 return** —— 令牌吊销和密钥清理
+     * 必须照做（扩展已经没了，旧令牌绝不能还能验），所以只记个标记，最后一起报。
+     */
+    const leftoverDir = exists(dest);
     usageCache.delete(id);
     /**
      * 配置里的密钥存在**扩展目录之外**（`secrets/<id>.config.json`），
@@ -425,7 +456,14 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       // secrets 文件删了但客户端记录没删 = 旧令牌还能 verify，必须报出来。
       if (!clientStore) log.warn?.(`扩展 ${id} 缺 clientStore，api.clients 记录未删除`);
     }
-    return { ok: true, id };
+    return leftoverDir
+      ? {
+        ok: true,
+        id,
+        partial: true,
+        message: `扩展 ${id} 的文件已删除，但目录还在（扩展进程可能仍在运行）。重启 DSH 后会清掉；在此之前它不会出现在已装列表里。`,
+      }
+      : { ok: true, id };
   }
 
   return {
