@@ -93,10 +93,65 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-/* 与 client.js 的 TABS 同序：大重排后的 8 个可见页签（扩展独立成页） */
-const TABS = ['overview', 'logs', 'her', 'memory', 'awake', 'caps', 'ext', 'config']
-/* 隐藏页：老 localStorage 存着时仍要能正常渲染 */
-const HIDDEN_TABS = ['chats', 'context', 'setup', 'account']
+/* 与 client.js 的 TABS 同序：2026-11-12 细分后的 15 个可见页签 */
+const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'caps', 'express', 'model', 'ext', 'ext-market', 'ext-api', 'chats', 'logs', 'update', 'config']
+/* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats 已提升为正式页） */
+const HIDDEN_TABS = ['context', 'setup', 'account']
+
+/**
+ * 两层导航（2026-11-12）：一级分组 + 组内二级页面。
+ *
+ * 这里把结构抄一份，是为了在「页签改成两层」时**测试先红**——
+ * 以前那版断言的是「8 个 label 同时出现在一行里」，两层之后这条
+ * 自动失效，如果不重写就会变成「测试通过但导航其实坏了」。
+ */
+const NAV = {
+  home: { label: '概览', tabs: ['overview'] },
+  self: { label: '人设', tabs: ['her', 'mood', 'awake', 'memory'] },
+  power: { label: '能力', tabs: ['caps', 'express', 'model'] },
+  mods: { label: '扩展', tabs: ['ext', 'ext-market', 'ext-api'] },
+  system: { label: '系统', tabs: ['chats', 'logs', 'update', 'config'] },
+}
+const TAB_LABEL = {
+  overview: '概览', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆',
+  caps: '权限', express: '表达', model: '模型',
+  ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
+  chats: '身份', logs: '排障', update: '更新', config: '设置',
+}
+const HIDDEN_LABEL = { context: '上下文', setup: '接入', account: '账号迁移' }
+
+/** 收集渲染树里所有 role=tab 按钮的文字，以及 aria-current 标记 */
+function navTexts(tree) {
+  const tabs = []
+  let current = null
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.role === 'tab') tabs.push(textOf(n))
+    if (n.props?.['aria-current'] === 'page') current = textOf(n)
+    walk(n.props?.children)
+  })(tree)
+  return { tabs, current }
+}
+
+/**
+ * 按组件名在树里找元素。
+ *
+ * 2026-11-12 起滚动区多了一层 `.roost-body-inner`（限宽居中用），
+ * 不能再靠「滚动区的第一个孩子就是目标组件」——那一层现在是 div。
+ */
+function findComponent(node, name) {
+  if (!node || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const c of node) {
+      const r = findComponent(c, name)
+      if (r) return r
+    }
+    return null
+  }
+  if (typeof node.type === 'function' && node.type.name === name) return node
+  return findComponent(node.props?.children, name)
+}
 
 for (const tab of TABS.concat(HIDDEN_TABS)) {
   test(`前端渲染：${tab} 页在空数据下不炸`, () => {
@@ -113,10 +168,21 @@ for (const tab of TABS.concat(HIDDEN_TABS)) {
     }, `${tab} 页渲染抛异常`)
 
     assert.equal(tree?.props?.className, 'roost-root', '根节点不对')
-    // 页签条每一页都在；大重排后是 8 个可见页签
-    const txt = textOf(tree)
-    for (const label of ['概览', '排障', '人格', '记忆', '主动搭话', '权限', '扩展', '设置']) {
-      assert.ok(txt.includes(label), `页签缺「${label}」`)
+
+    const { tabs, current } = navTexts(tree)
+    // 一级分组永远全在：它们是进任何一页的入口，少一个就有一组页面点不到
+    for (const g of Object.values(NAV)) {
+      assert.ok(tabs.includes(g.label), `一级分组缺「${g.label}」`)
+    }
+    const groupId = Object.keys(NAV).find((id) => NAV[id].tabs.includes(tab))
+    if (groupId) {
+      // 当前组要把组内页面全列出来，否则组里有一页点了没反应
+      for (const id of NAV[groupId].tabs) {
+        assert.ok(tabs.includes(TAB_LABEL[id]), `「${NAV[groupId].label}」组缺「${TAB_LABEL[id]}」`)
+      }
+    } else {
+      // 隐藏页不属于任何组：一级没有高亮，靠 aria-current 标位置
+      assert.equal(current, HIDDEN_LABEL[tab], `隐藏页「${HIDDEN_LABEL[tab]}」没有位置标记`)
     }
   })
 }
@@ -235,8 +301,8 @@ test('前端渲染：她页人格列表显示名字/字数/标签', () => {
   // 从渲染树里把 HerTab 那个元素拎出来，喂真实形状的数据再渲染一次
   const raw = mod.RoostPage()
   const body = raw.props.children.find((n) => String(n?.props?.className || '').includes('roost-scroll-body'))
-  const el = body.props.children.find(Boolean)
-  assert.equal(el.type.name, 'HerTab', '滚动区第一个组件应该就是 HerTab')
+  const el = findComponent(body, 'HerTab')
+  assert.ok(el, '滚动区里应该有 HerTab')
 
   rt.reset()
   const tree = expand(
@@ -360,18 +426,27 @@ test('前端渲染：她页没有打开人格时不出现「编辑人格」占�
  * 位置也有讲究：它是**跨群汇总**的一份，不属于任何单个会话，
  * 所以「重置自我叙述」不能并进会话级清空那一排里冒充同一种操作。
  */
-test('前端渲染：记忆页有「她自己」一节，且在清空之前', () => {
+test('前端渲染：「她自己」归人格页，记忆页只剩数据', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
-  store['roost.tab'] = 'memory'
-  rt.reset()
-  const tree = expand(mod.RoostPage(), rt)
-  const titles = sectionsOf(tree).map((s) => s.title)
-  const iSelf = titles.indexOf('她自己')
-  const iClr = titles.indexOf('清空')
-  assert.ok(iSelf >= 0, '没有「她自己」节——第五层在面板上不可见')
-  assert.ok(iSelf < iClr, '自述是日常内容，不该排在危险区之后')
-});
+  const at = (t) => { store['roost.tab'] = t; rt.reset(); return expand(mod.RoostPage(), rt) }
+
+  /**
+   * 2026-11-12 从记忆页搬来：前四节记的是「关于用户」的事，
+   * 「她自己」回答的是「她最近怎么样、错在哪」——属于「她是谁」。
+   */
+  const herTitles = sectionsOf(at('her')).map((s) => s.title)
+  assert.ok(herTitles.includes('她自己'), '人格页没有「她自己」节——第五层在面板上不可见')
+  assert.ok(herTitles.indexOf('她自己') > herTitles.indexOf('人格'), '「她自己」应排在人设之后')
+
+  const memTitles = sectionsOf(at('memory')).map((s) => s.title)
+  assert.ok(!memTitles.includes('她自己'), '记忆页不该再有「她自己」')
+  assert.ok(!memTitles.includes('对话收尾'), '记忆页不该再有「对话收尾」')
+
+  /* 收尾归「开口时机」，和排期同一页 */
+  const awakeTitles = sectionsOf(at('awake')).map((s) => s.title)
+  assert.ok(awakeTitles.includes('对话收尾'), '主动搭话页缺「对话收尾」')
+})
 
 test('前端渲染：记忆页把导入和清空分成两节，清空在最后', () => {
   const rt = makeReact()
@@ -403,8 +478,8 @@ test('前端渲染：会话下拉标出「群 / 私聊」，且标题旁不再�
 
   const raw = mod.RoostPage()
   const body = raw.props.children.find((n) => String(n?.props?.className || '').includes('roost-scroll-body'))
-  const el = body.props.children.find(Boolean)
-  assert.equal(el.type.name, 'MemoryTab', '滚动区第一个组件应该就是 MemoryTab')
+  const el = findComponent(body, 'MemoryTab')
+  assert.ok(el, '滚动区里应该有 MemoryTab')
 
   rt.reset()
   const tree = expand(
@@ -667,50 +742,52 @@ test('前端渲染：人格页不再分「我的人格 / 人格仓库」两段',
   assert.ok(txt.includes('整理'), '批量整理要有入口')
 })
 
-test('前端渲染：情绪搬到了主动搭话页，人格页不再有', () => {
+test('前端渲染：心情独立成页，「主动搭话」里不再有情绪块', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
+  const at = (t) => { store['roost.tab'] = t; rt.reset(); return textOf(expand(mod.RoostPage(), rt)) }
 
-  store['roost.tab'] = 'awake'
-  rt.reset()
-  const awake = textOf(expand(mod.RoostPage(), rt))
-  assert.ok(awake.includes('此刻情绪'), '主动搭话页缺「此刻情绪」')
+  const moodTxt = at('mood')
+  assert.ok(moodTxt.includes('此刻情绪'), '心情页缺「此刻情绪」')
+  assert.ok(moodTxt.includes('变化记录'), '心情页缺变化记录')
+  assert.ok(moodTxt.includes('清空心情历史'), '心情页缺清空入口')
 
-  store['roost.tab'] = 'her'
-  rt.reset()
-  const her = textOf(expand(mod.RoostPage(), rt))
-  assert.ok(!her.includes('此刻情绪'), '人格页不该再有情绪块')
-  assert.ok(!her.includes('语音条'), '人格页不该再有语音条')
+  const awake = at('awake')
+  assert.ok(!awake.includes('此刻情绪'), '主动搭话页不该再有情绪块（已拆成心情页）')
+  assert.ok(awake.includes('这一轮算出来的机会'), '主动搭话页丢了排期内容')
+
+  const her = at('her')
+  assert.ok(!her.includes('此刻情绪'), '人格页不该有情绪块')
+  assert.ok(!her.includes('语音条'), '人格页不该有语音条')
 })
 
-test('前端渲染：表情包与语音合成搬到了设置页', () => {
+test('前端渲染：表情包与语音合成搬到「表达」页', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   const h = rt.React.createElement
 
   /**
-   * 直接渲染 ConfigTab：空数据下 RoostPage 的 config 是 null，
-   * 设置页只显示「读取配置…」，看不到卡片。
+   * 这两块从「设置」搬到「表达」（2026-11-12）：它们说的是
+   * **她怎么出声、怎么发表情**，和「配置文件在哪」没有关系。
    *
    * 语音这一段现在有**专用表单**（不再是只读地显示 ai-chat 的音色）：
    * provider、地址、模型、音色都在这里配，所以断言换成这些字段。
    */
   const txt = textOf(
     expand(
-      h(mod.ConfigTab, {
+      h(mod.ExpressTab, {
         config: { stickers: { enabled: true, dir: '' }, tts: { enabled: false, provider: 'openai' } },
-        save: async () => ({ ok: true }),
         saveCfg: async () => ({ ok: true }),
         toast: () => {},
+        reload: () => {},
         stickers: { dir: 'C:/x/stickers', items: [{ file: 'a.png', tags: [] }], chars: 42 },
-        setupSt: { pluginInstalled: true, pluginConfig: {} },
       }),
       rt,
     ),
   )
 
-  assert.ok(txt.includes('表情包'), '设置页缺「表情包」卡片')
-  assert.ok(txt.includes('语音合成'), '设置页缺「语音合成」卡片')
+  assert.ok(txt.includes('表情包'), '表达页缺「表情包」卡片')
+  assert.ok(txt.includes('语音合成'), '表达页缺「语音合成」卡片')
   assert.ok(txt.includes('42 字'), '表情包要显示它占多少提示词预算')
   assert.ok(txt.includes('启用语音合成'), '语音合成要有一个明确的启用开关')
   assert.ok(txt.includes('OpenAI 兼容'), '语音合成要能选 provider')
@@ -724,7 +801,7 @@ test('前端渲染：表情包与语音合成搬到了设置页', () => {
    */
   const localTxt = textOf(
     expand(
-      h(mod.ConfigTab, {
+      h(mod.ExpressTab, {
         config: { stickers: { enabled: true, dir: '' }, tts: { enabled: true, provider: 'sherpa', sherpa: { model: 'aishell3', sid: 88 } } },
         save: async () => ({ ok: true }),
         saveCfg: async () => ({ ok: true }),
@@ -748,7 +825,7 @@ test('前端渲染：表情包与语音合成搬到了设置页', () => {
    */
   const gptTxt = textOf(
     expand(
-      h(mod.ConfigTab, {
+      h(mod.ExpressTab, {
         config: {
           stickers: { enabled: true, dir: '' },
           tts: { enabled: true, provider: 'gpt-sovits', gptSovits: { installDir: 'D:/GPT-SoVITS' } },
@@ -774,7 +851,7 @@ test('前端渲染：表情包与语音合成搬到了设置页', () => {
    */
   const mimoTxt = textOf(
     expand(
-      h(mod.ConfigTab, {
+      h(mod.ExpressTab, {
         config: {
           stickers: { enabled: true, dir: '' },
           tts: { enabled: true, provider: 'mimo', mimo: { apiKey: 'sk-x' } },
@@ -1022,33 +1099,47 @@ test('前端渲染：能力页要能显示四档结论，且缺数据不炸', ()
   assert.ok(!empty.includes('扩展 · 说明编辑与凭据状态'), '能力页不该再放扩展说明编辑')
 })
 
-test('设置页有数据时分节编号 01–07 连续（ConfigTab 不再空跑）', () => {
+test('拆分后每页分节编号都从 01 起、连续', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
+  const ns = (node) => sectionsOf(node).filter((s) => s.n).map((s) => s.n)
+
+  /* 设置页：工作区 / 配置全文 / 各段说明 */
   rt.reset()
-  const tree = expand(mod.ConfigTab({
+  assert.deepEqual(ns(expand(mod.ConfigTab({
     config: {}, save: () => {}, saveCfg: () => {}, toast: () => {},
     stickers: null, setupSt: null, reload: () => {},
-  }), rt)
-  const ns = sectionsOf(tree).filter((s) => s.n).map((s) => s.n)
-  assert.deepEqual(ns, ['01', '02', '03', '04', '05', '06', '07'], '设置页编号应 01–07 连续')
+  }), rt)), ['01', '02', '03'], '设置页编号应 01–03 连续')
+
+  /* 表达页：语音合成 / 表情包（两边原本是 05 和 04，拆出来后各自的编号要归一） */
+  rt.reset()
+  assert.deepEqual(ns(expand(mod.ExpressTab({
+    config: {}, saveCfg: () => {}, toast: () => {}, reload: () => {}, stickers: null,
+  }), rt)), ['01', '02'], '表达页编号应 01–02 连续')
+
+  /* 心情页：此刻情绪 / 变化记录 */
+  rt.reset()
+  assert.deepEqual(ns(expand(mod.MoodTab({
+    mood: null, reloadMood: () => {}, toast: () => {}, quick: async () => ({}),
+  }), rt)), ['01', '02'], '心情页编号应 01–02 连续')
 })
 
 test('后端缺口已接入：市场 / 模型 / 召回 / 心情历史 / 危险操作', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   const at = (t) => { store['roost.tab'] = t; rt.reset(); return textOf(expand(mod.RoostPage(), rt)) }
-  assert.ok(at('ext').includes('扩展市场'), '扩展页缺市场')
-  assert.ok(at('ext').includes('检查更新'), '市场缺检查更新入口')
+  /* 扩展在 2026-11-12 独立成组并拆成三页：市场 / 已安装 / 接口 */
+  assert.ok(at('ext-market').includes('扩展市场'), '市场页缺市场')
+  assert.ok(at('ext-market').includes('检查更新'), '市场页缺检查更新入口')
+  assert.ok(at('ext-api').includes('扩展 /v1 客户端令牌'), '接口页缺令牌块')
+  /* 模型块已从设置页拆出（2026-11-12），这里跟着换到模型页验 */
   rt.reset()
-  const cfgTxt = textOf(expand(mod.ConfigTab({
-    config: {}, save: () => {}, saveCfg: () => {}, toast: () => {},
-    stickers: null, setupSt: null, reload: () => {},
-  }), rt))
-  assert.ok(cfgTxt.includes('设为该类型默认'), '设置页缺 model.set 控件')
+  const modelTxt = textOf(expand(mod.ModelTab({ toast: () => {}, currentChatId: '' }), rt))
+  assert.ok(modelTxt.includes('设为该类型默认'), '模型页缺 model.set 控件')
   assert.ok(at('config').includes('危险操作'), '设置页缺危险操作总入口')
   assert.ok(at('memory').includes('召回记录'), '记忆页缺 recall.log 入口')
-  assert.ok(at('awake').includes('清空心情历史'), '主动搭话缺 mood.history.clear 入口')
+  assert.ok(at('mood').includes('清空心情历史'), '心情页缺 mood.history.clear 入口')
+  assert.ok(at('update').includes('交流反馈群'), '更新页缺反馈群')
 })
 
 test('隐藏页有当前位置标记，页签栏不会看起来一个都没选', () => {
@@ -1066,15 +1157,25 @@ test('隐藏页有当前位置标记，页签栏不会看起来一个都没选',
   assert.ok(found, '隐藏页没有当前位置标记')
 })
 
-test('扩展独立页：市场 / 档位 / 客户端令牌都在', () => {
+test('扩展独立成组：已安装 / 市场 / 接口三页各管一件事', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
-  store['roost.tab'] = 'ext'
-  rt.reset()
-  const txt = textOf(expand(mod.RoostPage(), rt))
-  assert.ok(txt.includes('扩展市场'), '缺市场标题')
-  assert.ok(txt.includes('检查更新'), '缺检查更新入口')
-  assert.ok(txt.includes('扩展 /v1 客户端令牌'), '客户端令牌块缺失')
+  const at = (t) => { store['roost.tab'] = t; rt.reset(); return textOf(expand(mod.RoostPage(), rt)) }
+
+  /* 已安装：档位矩阵 + 已装清单；不再混市场条目 */
+  const installed = at('ext')
+  assert.ok(installed.includes('已装扩展'), '已安装页缺已装清单')
+  assert.ok(installed.includes('扩展能力分组'), '已安装页缺档位矩阵')
+  assert.ok(!installed.includes('检查更新'), '已安装页不该再有市场操作')
+
+  /* 市场：能装什么、装/更新 */
+  const market = at('ext-market')
+  assert.ok(market.includes('扩展市场'), '市场页缺标题')
+  assert.ok(market.includes('检查更新'), '市场页缺检查更新入口')
+  assert.ok(!market.includes('扩展能力分组'), '市场页不该有档位矩阵')
+
+  /* 接口：令牌 */
+  assert.ok(at('ext-api').includes('扩展 /v1 客户端令牌'), '接口页缺令牌块')
 })
 
 test('页签顺序：权限排在设置左边', () => {
@@ -1264,36 +1365,41 @@ test('能力页：前端通配匹配必须和后端同语义（`*` 跨下划线�
 /* ---------------- 2026-11-11 重设计：功能不变量 ---------------- */
 
 /**
- * 大重排后页签栏只放 8 个高频页，其余收进弹窗 / 合并页 / 隐藏页。
- * 这里钉住「可见页签仍都是可点入口」，隐藏页由上面的循环逐个验渲染不炸。
+ * 页签改成两层后（2026-11-12），这里钉两件事：
+ *   1. 8 个可见页仍然**都能点到**（在所属组的二级里，或在概览这一组里）
+ *   2. 每一页都**恰好高亮一个**一级分组——高亮两个说明 tab 被分进了两次
+ * 隐藏页由上面的循环逐个验渲染不炸。
  */
-test('重设计：8 个可见页签都还是可点入口', () => {
+test('重设计：两层导航里 8 个可见页都可达', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
-  store['roost.tab'] = 'overview'
-  rt.reset()
-  const tree = expand(mod.RoostPage(), rt)
 
   const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
   for (const id of TABS) {
     assert.ok(src.includes("['" + id + "',"), `页签 ${id} 从 TABS 里消失了`)
   }
 
-  let tabs = 0
-  let groupLabels = 0
-  ;(function walk(n) {
-    if (!n || typeof n !== 'object') return
-    if (Array.isArray(n)) return n.forEach(walk)
-    if (n.props?.role === 'tab') {
-      tabs++
-      assert.equal(typeof n.props.onClick, 'function', '页签没有点击入口')
-    }
-    if (String(n.props?.className || '').includes('roost-nav-label')) groupLabels++
-    walk(n.props?.children)
-  })(tree)
+  for (const id of TABS) {
+    store['roost.tab'] = id
+    rt.reset()
+    const tree = expand(mod.RoostPage(), rt)
 
-  assert.equal(tabs, TABS.length, `页签入口数应为 ${TABS.length}，实际 ${tabs}`)
-  assert.equal(groupLabels, 0, '分组标题已去掉：窄侧栏里它们会白占三行')
+    const { tabs } = navTexts(tree)
+    assert.ok(tabs.includes(TAB_LABEL[id]), `${id} 页在导航里找不到「${TAB_LABEL[id]}」入口`)
+
+    let on = 0
+    ;(function walk(n) {
+      if (!n || typeof n !== 'object') return
+      if (Array.isArray(n)) return n.forEach(walk)
+      if (n.props?.role === 'tab') {
+        assert.equal(typeof n.props.onClick, 'function', '页签没有点击入口')
+      }
+      if (String(n.props?.className || '').includes('roost-grp') && n.props?.['data-on'] === '1') on++
+      walk(n.props?.children)
+    })(tree)
+
+    assert.equal(on, 1, `${id} 页应恰好高亮一个一级分组，实际 ${on}`)
+  }
 })
 
 /**

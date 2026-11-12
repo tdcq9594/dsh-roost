@@ -152,16 +152,30 @@ window.__ModuleLoader__.load({
   --accent:var(--dsw-alias-brand-primary, #2563eb);
 }
 /* 页头：标题 + 通道 + 页签，永远在、不参与滚动 */
-.roost-head{flex:0 0 auto;width:100%;max-width:860px;box-sizing:border-box;padding:16px 24px 0}
+.roost-head{flex:0 0 auto;width:100%;box-sizing:border-box;padding:0}
+/**
+ * 内容宽度上限与居中（2026-11-12）。
+ *
+ * 原来直接把 max-width:860px 加在 .roost-head / .roost-scroll-body 上，
+ * 没有 margin:auto——面板一拉宽，多出来的宽度全堆在**右边**，看着就是
+ * 「边上空了一大块」。aurabot 的做法是 .ab-wrap{max-width:1040px;margin:0 auto}，
+ * 这里照同样的思路，但**滚动条要贴面板右边**，所以分两层：
+ *   · 外层（head / scroll-body）铺满，滚动条贴边
+ *   · 内层（*-inner）限宽居中，正文不跟着拉成一行一千多像素
+ */
+.roost-head-inner{width:100%;max-width:1040px;margin:0 auto;box-sizing:border-box;padding:16px 24px 0}
 /* 唯一的滚动区。滚动条要看得见、拖得动，但别太抢眼 */
 .roost-scroll-body{flex:1 1 auto;min-height:0;
   /* min-width:0 是必需的：它是 flex 子项，自动最小尺寸会让"最宽的那一行内容"
      把整个面板撑宽（侧边栏里表现为横向溢出、右边按钮被裁掉）。
      行内的宽度收缩自己解决，容器不许被内容撑大。 */
-  min-width:0;width:100%;max-width:860px;box-sizing:border-box;
-  padding:24px 24px 48px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;
+  min-width:0;width:100%;box-sizing:border-box;
+  padding:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;
   /* 滚动元素本身也带一层底色：它的层先画，再画子内容 */
   background:var(--dsw-alias-bg-base, #16181c)}
+/* 内层限宽居中：滚动条留在外层贴边，正文不会被拉得过宽 */
+.roost-body-inner{width:100%;max-width:1040px;margin:0 auto;box-sizing:border-box;
+  padding:24px 24px 48px}
 .roost-scroll-body::-webkit-scrollbar{width:10px}
 .roost-scroll-body::-webkit-scrollbar-track{background:transparent}
 .roost-scroll-body::-webkit-scrollbar-thumb{
@@ -213,24 +227,46 @@ select.roost-input{color-scheme:dark}
   select.roost-input{color-scheme:light}
   .roost-input option{background:#fff;color:#1c1d22}
 }
-/* 分组导航：选中态是淡底药丸，不再用下划线压在 tablist 的底边上 */
-.roost-tab{
-  padding:6px 12px;border:1px solid transparent;border-radius:8px;background:transparent;
+/* ── 两层导航（2026-11-12）─────────────────────────────────
+   一级是分组（图标 + 名字，淡底药丸），二级是组内页面（下划线）。
+   **两层必须用两种选中态**：都用底块会看成同一层，反而比原来那排更乱。
+   两级都只换行、不设 overflow——页签条一旦 overflow:auto，另一轴也会算成 auto，
+   窄侧栏里会凭空长出拖不动的竖滚动条（2026-11-06 踩过）。 */
+.roost-nav{margin:14px 0 0;border-top:1px solid var(--line-soft)}
+.roost-nav-top{display:flex;align-items:center;gap:2px;padding:6px 0 0;flex-wrap:wrap}
+.roost-grp{
+  flex:none;display:inline-flex;align-items:center;gap:6px;height:30px;
+  padding:0 11px;border:1px solid transparent;border-radius:9px;background:transparent;
   color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;font:inherit;font-size:12.5px;
   transition:background .16s ease,color .16s ease,transform .16s ease;
 }
-.roost-tab:hover{color:var(--dsw-alias-label-primary,inherit);background:var(--hover)}
-.roost-tab:active{transform:scale(.97)}
-.roost-tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.roost-tab[data-on="1"]{color:var(--dsw-alias-label-primary,inherit);font-weight:600;
-  background:color-mix(in srgb,var(--accent) 16%,transparent);
-  border-color:color-mix(in srgb,var(--accent) 34%,transparent)}
-/* 隐藏页的当前位置标记：样式接近选中态但不可点 */
-.roost-nav-current{padding:6px 12px;border-radius:8px;font-size:12.5px;font-weight:600;
-  background:color-mix(in srgb,var(--accent) 16%,transparent);
-  border:1px solid color-mix(in srgb,var(--accent) 34%,transparent)}
-.roost-tab.is-primary{font-weight:500}
-.roost-tab[data-on="1"].is-primary{font-weight:600}
+.roost-grp svg{width:15px;height:15px;flex:none;fill:none;stroke:currentColor;
+  stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.roost-grp:hover{color:var(--dsw-alias-label-primary,inherit);background:var(--hover)}
+.roost-grp:active{transform:scale(.97)}
+.roost-grp:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.roost-grp[data-on="1"]{color:var(--dsw-alias-label-primary,inherit);font-weight:600;
+  background:color-mix(in srgb,var(--accent) 14%,transparent);
+  border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
+.roost-nav-sub{display:flex;gap:2px;padding:0 2px;margin-top:3px;flex-wrap:wrap}
+/* 二级：下划线。不把 border-bottom 压在容器上，改用伪元素贴在 tab 自己底部，
+   这样容器可以没有边框，横向滚动时线不会跟着断。 */
+.roost-tab{
+  flex:none;position:relative;padding:8px 11px 9px;border:0;border-radius:0;
+  background:transparent;color:var(--dsw-alias-label-secondary,inherit);
+  cursor:pointer;font:inherit;font-size:12.5px;white-space:nowrap;
+  transition:color .16s ease;
+}
+.roost-tab:hover{color:var(--dsw-alias-label-primary,inherit)}
+.roost-tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:6px}
+.roost-tab::after{content:"";position:absolute;left:11px;right:11px;bottom:0;height:2px;
+  border-radius:2px;background:transparent;transition:background .16s ease}
+.roost-tab[data-on="1"]{color:var(--dsw-alias-label-primary,inherit);font-weight:600}
+.roost-tab[data-on="1"]::after{background:var(--accent)}
+/* 隐藏页的当前位置标记：样式接近二级选中态，但不可点 */
+.roost-nav-current{padding:8px 11px;border-radius:6px;font-size:12.5px;font-weight:600;
+  color:var(--dsw-alias-label-primary,inherit);
+  background:color-mix(in srgb,var(--accent) 14%,transparent)}
 /* 分节头：编号徽标 + 标题 + 操作槽 + 折叠开关，下边框代替原先标题右侧的细线。
    整页按 8pt 网格走，标题/正文/说明只留三级字阶。 */
 .roost-sec{margin:24px 0 0;animation:roost-sec-in .28s cubic-bezier(.2,.8,.2,1) backwards}
@@ -890,7 +926,12 @@ select.roost-input{color-scheme:dark}
 @container (max-width:620px){
   .roost-head{padding:12px 16px 0}
   .roost-scroll-body{padding:16px 16px 40px}
-  .roost-tab{padding:5px 9px;font-size:12px}
+  /* 窄栏里一级分组要挤进一行：4 个分组在 300px 左右刚好放得下，
+     再宽一点就会把最后一个挤到第二行，看着像"系统"掉队了 */
+  .roost-grp{padding:0 8px;height:28px;font-size:12px;gap:4px}
+  .roost-grp svg{width:13px;height:13px}
+  .roost-tab{padding:7px 9px 8px;font-size:12px}
+  .roost-tab::after{left:9px;right:9px}
   /* 窄侧栏收成 2 列 3 行，和 dsh-context 在 640px 以下的做法一致 */
   .roost-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   .roost-stat{padding:6px}
@@ -3340,6 +3381,41 @@ select.roost-input{color-scheme:dark}
         ),
 
         /**
+         * 第五层：她自己写的（2026-11-12 从「记忆」页搬来）。
+         *
+         * 放在这里而不是记忆页：前四节记的都是**关于用户**的事，
+         * 这一节回答的是「她自己最近怎么样、错在哪」——属于「她是谁」，
+         * 不属于「她记得什么」。搬过来之后，记忆页只剩纯数据。
+         *
+         * 不显示出来的话，用户没法判断她到底变好了还是在重复同一个错，
+         * 也没法在写歪的时候把它清掉。
+         */
+        sec('她自己', { right: mem?.self?.stats?.notes ? h(Pill, null, `${mem.self.stats.notes} 条`) : null },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '每天巩固时她自己写一条（跨群汇总，不属于任何一个群）。'
+            + '只在新会话开头和每 15 轮的深度重注时读一点——每轮都灌会变成表演。'),
+          mem?.self?.error
+            ? h('div', { className: 'roost-note' }, `读不出来：${mem.self.error}`)
+            : (mem?.self?.notes?.length || mem?.self?.chapters?.length)
+              ? h('div', null,
+                ...(mem.self.notes || []).map((n) =>
+                  h('div', { key: 'n' + n.day, style: { padding: '6px 0', borderTop: '1px solid var(--line-soft)' } },
+                    h('div', { className: 'roost-note', style: { marginBottom: 2 } }, n.day),
+                    h('div', null, n.text),
+                  ),
+                ),
+                ...(mem.self.chapters || []).map((c) =>
+                  h('div', { key: 'c' + c.from, style: { padding: '6px 0', borderTop: '1px solid var(--line-soft)' } },
+                    h('div', { className: 'roost-note', style: { marginBottom: 2 } },
+                      `${c.from} → ${c.to}（压成一段）`),
+                    h('div', { className: 'roost-muted' }, c.text),
+                  ),
+                ),
+              )
+              : h('div', { className: 'roost-note' }, '还没写过。她自己说得够多、或者被纠正过的日子才会写一条。'),
+        ),
+
+        /**
          * 编辑区：**弹窗**，不是页面上最下面的一节。
          *
          * 原来它渲染在列表之后，靠 `scrollIntoView({block:'nearest'})` 滚过来。
@@ -3995,81 +4071,6 @@ select.roost-input{color-scheme:dark}
           ),
         ),
 
-        /* 对话收尾：静默发生的东西，必须能看见 */
-        h(Sec, {
-          n: '05',
-          title: '对话收尾',
-          right: mem?.closing?.stat
-            ? h(Pill, null, `${mem.closing.stat.total} 个会话`)
-            : null,
-        },
-          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-            '她判断这段聊完了，就记一句「收在哪 / 下次怎么接」——不发言，也不动记忆。'
-            + '下一轮接得上；刚说完晚安 90 分钟内不会再随性搭话。只做私聊。'),
-          !mem?.closing?.chats?.length
-            ? h('div', { className: 'roost-note' }, '还没有收尾记录。')
-            : mem.closing.chats.map((c) =>
-                h(Row, { key: c.chatId, k: String(c.chatId || '').slice(0, 8) },
-                  h('div', { style: { display: 'flex', gap: 10, alignItems: 'flex-start' } },
-                    h('div', { style: { flex: 1, minWidth: 0 } },
-                      h('div', null, c.point),
-                      c.resume
-                        ? h('div', { className: 'roost-note' }, '下次：' + c.resume)
-                        : null,
-                      h('div', { className: 'roost-note' },
-                        sinceText(c.at) + (c.why ? ' · ' + c.why : '')),
-                    ),
-                    h('button', {
-                      className: 'roost-btn',
-                      onClick: async () => {
-                        const r = await post('/closing/clear', { chatId: c.chatId })
-                        toast(r.ok === false ? (r.message || '没清成') : '清掉了')
-                        reload()
-                      },
-                    }, '忘掉'),
-                  ),
-                ),
-              ),
-        ),
-
-        /**
-         * 第五层：她自己写的。
-         *
-         * 前几节都是「关于用户」的；这一节回答「她最近怎么样、错在哪」。
-         * 不显示出来的话，用户没法判断她到底是变好了还是在重复同一个错，
-         * 也没法在写歪的时候把它清掉。
-         */
-        h(Sec, {
-          n: '06',
-          title: '她自己',
-          right: mem?.self?.stats?.notes
-            ? h(Pill, null, `${mem.self.stats.notes} 条`)
-            : null,
-        },
-          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-            '每天巩固时她自己写一条（跨群汇总，不属于任何一个群）。'
-            + '只在新会话开头和每 15 轮的深度重注时读一点——每轮都灌会变成表演。'),
-          mem?.self?.error
-            ? h('div', { className: 'roost-note' }, `读不出来：${mem.self.error}`)
-            : (mem?.self?.notes?.length || mem?.self?.chapters?.length)
-              ? h('div', null,
-                ...(mem.self.notes || []).map((n) =>
-                  h('div', { key: 'n' + n.day, style: { padding: '6px 0', borderTop: '1px solid var(--line-soft)' } },
-                    h('div', { className: 'roost-note', style: { marginBottom: 2 } }, n.day),
-                    h('div', null, n.text),
-                  ),
-                ),
-                ...(mem.self.chapters || []).map((c) =>
-                  h('div', { key: 'c' + c.from, style: { padding: '6px 0', borderTop: '1px solid var(--line-soft)' } },
-                    h('div', { className: 'roost-note', style: { marginBottom: 2 } },
-                      `${c.from} → ${c.to}（压成一段）`),
-                    h('div', { className: 'roost-muted' }, c.text),
-                  ),
-                ),
-              )
-              : h('div', { className: 'roost-note' }, '还没写过。她自己说得够多、或者被纠正过的日子才会写一条。'),
-        ),
-
         /* D7 人物小档案：只读 + 独立清空。跨群档案，不随「清空本会话记忆」抹掉 */
         h('div', { className: 'cap-group' },
           h('div', { className: 'cap-group-t' }, '熟人小档案'),
@@ -4179,7 +4180,7 @@ select.roost-input{color-scheme:dark}
             : h('div', { className: 'roost-note', style: { margin: 0 } }, '还没有备份。'),
         ),
 
-        h(Sec, { title: '召回记录', right: h('button', {
+        h(Sec, { n: '05', title: '召回记录', right: h('button', {
           type: 'button', className: 'roost-btn', onClick: loadRecall,
         }, '刷新') },
           recallErr
@@ -4199,7 +4200,7 @@ select.roost-input{color-scheme:dark}
         ),
 
         /* 危险区放最后 */
-        h(Sec, { n: '07', title: '清空' },
+        h(Sec, { n: '06', title: '清空' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '「清空」抹掉事实和日记正文，行还留着（时间线不断）；'
             + '「彻底删除」连行一起删，磁盘上的旧页十分钟内自动压掉。两者都不可恢复。'),
@@ -4276,7 +4277,82 @@ select.roost-input{color-scheme:dark}
 
     /* ---------------- 主动搭话 ---------------- */
 
-    function AwakeTab({ aw, mem, sp, chats, mood, toast, reload, reloadMood, reloadSp, busy, quick }) {
+    /**
+     * 心情：从「主动搭话」里拆出来的一页。
+     *
+     * 原来它是 awake 的第 02 节。但「她现在心情怎么样」是**读数**，
+     * 「她什么时候会来找你」是**排期**——两件事混在一页，想看一眼心情
+     * 得先滚过整块「这一轮算出来的机会」。拆开之后两边都变短了。
+     */
+    function MoodTab({ mood, reloadMood, toast, quick }) {
+      return h('div', null,
+        h(Sec, { n: '01', title: '此刻情绪' },
+          mood
+            ? h('div', null,
+                h('div', { className: 'roost-mood' },
+                  MOOD.map((m) => {
+                    const v = Math.max(-1, Math.min(1, Number(mood[m.key] ?? 0)))
+                    return h('div', { key: m.key, className: 'roost-mood-row' },
+                      h('span', { className: 'roost-mood-k' }, m.label),
+                      h(Bar, { v, bi: m.bi, tone: m.tone }),
+                      h('span', { className: 'roost-mood-w' }, wordOf(v, m.words, m.bi)),
+                    )
+                  }),
+                ),
+                h('div', { className: 'roost-note' },
+                  mood.reason ? '原因：' + mood.reason : '还没被什么事影响过',
+                  mood.updatedAt ? ' · ' + ago(mood.updatedAt) : '',
+                ),
+                h('div', { className: 'roost-note' },
+                  '心情左边差、右边好；另两条从左到右是程度。这三项只决定她要不要主动开口、开口时什么语气，'
+                  + '不会当成数字喂给模型；没人理她，几小时后会自己回到中间。'),
+                h('div', { className: 'roost-note' },
+                  '这三条是读数、不能拖——她的情绪由聊天的结果自己变；想影响就用下面的赞 / 踩。'),
+                h('div', { style: { display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' } },
+                  h('span', { className: 'roost-note', style: { margin: 0 } }, '手动喂一次反馈：'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: async () => {
+                      const r = await post('/mood', { feedback: 'LIKE' })
+                      toast(r?.ok === false ? (r.message || '没记上') : '记了个赞')
+                      reloadMood()
+                    },
+                  }, '👍 赞'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: async () => {
+                      const r = await post('/mood', { feedback: 'UNLIKE' })
+                      toast(r?.ok === false ? (r.message || '没记上') : '记了个踩')
+                      reloadMood()
+                    },
+                  }, '👎 踩'),
+                ),
+              )
+            : h('div', { className: 'roost-empty' }, '读不到情绪——插件刚起来时会空几秒'),
+        ),
+
+        h(Sec, { n: '02', title: '变化记录' },
+          (mood?.history || []).length
+            ? h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 180 } },
+                mood.history.map((x, i) =>
+                  h('div', { key: i, className: 'roost-item' },
+                    h('span', { className: 'd' }, x.at ? ago(x.at) : (x.time || '')),
+                    h('span', { className: 't' }, x.reason || x.source || '—'),
+                  )))
+            : h('div', { className: 'roost-empty' }, mood ? '还没有心情变化' : '读不到心情数据'),
+          h(ConfirmLink, {
+            label: '清空心情历史', confirmLabel: '确认清空（当前心情不动）',
+            onConfirm: async () => {
+              const r = await quick('mood.history.clear')
+              toast(r.message || (r.ok ? '已清空' : '清空失败'))
+              reloadMood()
+            },
+          }),
+        ),
+      )
+    }
+
+    function AwakeTab({ aw, mem, sp, chats, toast, reload, reloadSp, busy, quick }) {
       const cfg = aw?.cfg || {}
       const opps = aw?.lastOpportunities || []
       const groups = aw?.groups || []
@@ -4362,71 +4438,7 @@ select.roost-input{color-scheme:dark}
         ),
 
         /* 私聊排期：speakup.js 管"什么时候轮到她"，awake 只管"要不要说" */
-        h(Sec, { n: '02', title: '此刻情绪' },
-          mood
-            ? h('div', null,
-                h('div', { className: 'roost-mood' },
-                  MOOD.map((m) => {
-                    const v = Math.max(-1, Math.min(1, Number(mood[m.key] ?? 0)))
-                    return h('div', { key: m.key, className: 'roost-mood-row' },
-                      h('span', { className: 'roost-mood-k' }, m.label),
-                      h(Bar, { v, bi: m.bi, tone: m.tone }),
-                      h('span', { className: 'roost-mood-w' }, wordOf(v, m.words, m.bi)),
-                    )
-                  }),
-                ),
-                h('div', { className: 'roost-note' },
-                  mood.reason ? '原因：' + mood.reason : '还没被什么事影响过',
-                  mood.updatedAt ? ' · ' + ago(mood.updatedAt) : '',
-                ),
-                h('div', { className: 'roost-note' },
-                  '心情左边差、右边好；另两条从左到右是程度。这三项只决定她要不要主动开口、开口时什么语气，'
-                  + '不会当成数字喂给模型；没人理她，几小时后会自己回到中间。'),
-                h('div', { className: 'roost-note' },
-                  '这三条是读数、不能拖——她的情绪由聊天的结果自己变；想影响就用下面的赞 / 踩。'),
-                h('div', { style: { display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' } },
-                  h('span', { className: 'roost-note', style: { margin: 0 } }, '手动喂一次反馈：'),
-                  h('button', {
-                    type: 'button', className: 'roost-btn',
-                    onClick: async () => {
-                      const r = await post('/mood', { feedback: 'LIKE' })
-                      toast(r?.ok === false ? (r.message || '没记上') : '记了个赞')
-                      reloadMood()
-                    },
-                  }, '👍 赞'),
-                  h('button', {
-                    type: 'button', className: 'roost-btn',
-                    onClick: async () => {
-                      const r = await post('/mood', { feedback: 'UNLIKE' })
-                      toast(r?.ok === false ? (r.message || '没记上') : '记了个踩')
-                      reloadMood()
-                    },
-                  }, '👎 踩'),
-                ),
-              )
-            : h('div', { className: 'roost-empty' }, '读不到情绪——插件刚起来时会空几秒'),
-        ),
-
-        h(Sec, { title: '此刻情绪 · 变化记录' },
-          (mood?.history || []).length
-            ? h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 180 } },
-                mood.history.map((x, i) =>
-                  h('div', { key: i, className: 'roost-item' },
-                    h('span', { className: 'd' }, x.at ? ago(x.at) : (x.time || '')),
-                    h('span', { className: 't' }, x.reason || x.source || '—'),
-                  )))
-            : h('div', { className: 'roost-empty' }, mood ? '还没有心情变化' : '读不到心情数据'),
-          h(ConfirmLink, {
-            label: '清空心情历史', confirmLabel: '确认清空（当前心情不动）',
-            onConfirm: async () => {
-              const r = await quick('mood.history.clear')
-              toast(r.message || (r.ok ? '已清空' : '清空失败'))
-              reloadMood()
-            },
-          }),
-        ),
-
-        h(Sec, { n: '03', title: '私聊排期', right: h('button', { type: 'button', className: 'roost-btn', onClick: reloadSp }, '刷新') },
+        h(Sec, { n: '02', title: '私聊排期', right: h('button', { type: 'button', className: 'roost-btn', onClick: reloadSp }, '刷新') },
           h(Row, { k: '发给' },
             sp?.owner
               ? `${String(sp.owner).slice(0, 8)}…（${OWNER_FROM[sp.ownerFrom] || '未知来源'}）`
@@ -4466,6 +4478,48 @@ select.roost-input{color-scheme:dark}
                 ? '间隔随机、免打扰、每日上限都在这里管；「要不要说」交给上面的机会判断。'
                 : '收件人是从 Roost 那边自动取的，不用在这填。想换人就去 Roost 面板改主人，或者在这里填会话号覆盖它。')
               : `暂时不能手动触发：${spWhy}。在 Roost 面板上把主人配好，这个按钮就会亮。`),
+        ),
+
+        /**
+         * 对话收尾（2026-11-12 从「记忆」页搬来）。
+         *
+         * 它决定的是「这段聊完了没有、什么时候可以再开口」，属于**开口时机**，
+         * 不是「记住了什么」。放回主动搭话这一页之后，记忆页只剩纯数据。
+         */
+        h(Sec, {
+          n: '03',
+          title: '对话收尾',
+          right: mem?.closing?.stat
+            ? h(Pill, null, `${mem.closing.stat.total} 个会话`)
+            : null,
+        },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '她判断这段聊完了，就记一句「收在哪 / 下次怎么接」——不发言，也不动记忆。'
+            + '下一轮接得上；刚说完晚安 90 分钟内不会再随性搭话。只做私聊。'),
+          !mem?.closing?.chats?.length
+            ? h('div', { className: 'roost-note' }, '还没有收尾记录。')
+            : mem.closing.chats.map((c) =>
+                h(Row, { key: c.chatId, k: String(c.chatId || '').slice(0, 8) },
+                  h('div', { style: { display: 'flex', gap: 10, alignItems: 'flex-start' } },
+                    h('div', { style: { flex: 1, minWidth: 0 } },
+                      h('div', null, c.point),
+                      c.resume
+                        ? h('div', { className: 'roost-note' }, '下次：' + c.resume)
+                        : null,
+                      h('div', { className: 'roost-note' },
+                        sinceText(c.at) + (c.why ? ' · ' + c.why : '')),
+                    ),
+                    h('button', {
+                      className: 'roost-btn',
+                      onClick: async () => {
+                        const r = await post('/closing/clear', { chatId: c.chatId })
+                        toast(r.ok === false ? (r.message || '没清成') : '清掉了')
+                        reload()
+                      },
+                    }, '忘掉'),
+                  ),
+                ),
+              ),
         ),
 
         h(Sec, { n: '04', title: '群聊主动（默认全关）' },
@@ -6993,7 +7047,7 @@ select.roost-input{color-scheme:dark}
       }
 
       return h(Sec, {
-        n: '03',
+        n: '01',
         title: '工作区',
         right: h('span', { className: 'roost-note', style: { margin: 0 } }, ws?.current?.title || ''),
       },
@@ -7384,7 +7438,7 @@ select.roost-input{color-scheme:dark}
       ])]
 
       return h(Sec, {
-        n: '05',
+        n: '01',
         title: '语音合成',
         right: h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
           h('span', { className: 'roost-note', style: { margin: 0 } }, reasonText),
@@ -7840,7 +7894,7 @@ select.roost-input{color-scheme:dark}
 
       return h('div', null,
         h(Sec, {
-        n: '04',
+        n: '02',
         title: '表情包',
         right: h('div', { style: { display: 'flex', gap: 10, alignItems: 'center' } },
           h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
@@ -8199,6 +8253,7 @@ select.roost-input{color-scheme:dark}
       const byKind = info?.byKind
       const fmt = (v) => v ? [v.provider, v.model].filter(Boolean).join(' / ') : '跟随全局'
       return h(Sec, {
+        n: '01',
         title: '模型',
         right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新'),
       },
@@ -8371,19 +8426,13 @@ select.roost-input{color-scheme:dark}
       }
 
       return h('div', null,
-        h(ModelBlock, { toast, currentChatId }),
-
-        h(UpdatesBlock, { toast }),
-
-        h(FeedbackCard, { toast }),
-
+        /**
+         * 2026-11-12：模型 / 更新 / 反馈 / 语音 / 表情包各自独立成页，
+         * 这里只剩「这台机器怎么配」——工作区位置、配置全文、各段说明。
+         */
         h(WorkspaceCard, { saveCfg, toast }),
 
-        h(StickerDirsCard, { config, stickers, saveCfg, toast, reload }),
-
-        h(TtsCard, { config, saveCfg, toast, reload }),
-
-        h(Sec, { n: '06', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
+        h(Sec, { n: '02', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
           h('button', { type: 'button', className: 'roost-btn', onClick: reloadDraft }, '还原'),
           h('button', {
             type: 'button', className: 'roost-primary', onClick: doSave,
@@ -8410,7 +8459,7 @@ select.roost-input{color-scheme:dark}
             '密钥显示成 ******。原样提交回来不会覆盖真密钥，只有填了新的才会改。'),
         ),
 
-        h(Sec, { n: '07', title: '各段是干什么的' },
+        h(Sec, { n: '03', title: '各段是干什么的' },
           h('div', { className: 'roost-list' },
             JSON_SECTIONS.map(([k, label, desc]) =>
               h('div', { key: k, className: 'roost-item' },
@@ -8427,7 +8476,7 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    /* ---------------- 扩展面板（三段已独立成「扩展」页） ---------------- */
+    /* ---------------- 扩展面板（2026-11-12 独立成一级分组「扩展」，下辖三页） ---------------- */
 
     /** 三段都走 /quick 的扩展 op；这些是全局设置，chatId 留空。 */
     const EXT_POST = (op, arg) => post('/quick', { op, arg, chatId: '' })
@@ -8445,7 +8494,7 @@ select.roost-input{color-scheme:dark}
 
     /**
      * 扩展档位：按 `mcp__<id>__` 前缀自动归组 + 六档矩阵 + dry-run + 五层拒绝诊断。
-     * 现挂在独立的「扩展」页里，`Sec` 不带编号，免得和该页其它块撞号。
+     * 现挂在「扩展 → 已安装」页里，`Sec` 不带编号，免得和该页其它块撞号。
      */
     function ExtCapsBlock({ quick, toast }) {
       const [buckets, setBuckets] = useState(null)
@@ -8538,7 +8587,7 @@ select.roost-input{color-scheme:dark}
                 )),
               ),
             )
-          : h('div', { className: 'roost-empty' }, '还没装扩展。装好后在「扩展 → 已装扩展」里改说明。'),
+          : h('div', { className: 'roost-empty' }, '还没装扩展。装好后在「扩展 → 已安装」里改说明。'),
         h('div', { className: 'roost-note', style: { marginTop: 8 } },
           'dry-run 预览：选一个扩展先试算，确认后才写进 forceDeny。',
           h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
@@ -8592,7 +8641,15 @@ select.roost-input{color-scheme:dark}
     }
 
     /** 设置页：扩展清单 + usage 预览编辑 + 两个凭据状态。 */
-    function ExtSettingsBlock({ toast }) {
+    function ExtSettingsBlock({ toast, part = 'all' }) {
+      /**
+       * 市场 / 已安装拆成两页（2026-11-12，与 aurabot 的「模块」组对齐）。
+       *
+       * 两页共用同一份 `/extensions.*` 数据加载——拆的是**渲染**，不是取数：
+       * 分成两个组件会让市场页和已安装页各拉一次清单，装完还得手动刷新另一页。
+       */
+      const showMarket = part !== 'installed'
+      const showInstalled = part !== 'market'
       const [data, setData] = useState(null)
       const [drafts, setDrafts] = useState({})
       const [saving, setSaving] = useState('')
@@ -8827,12 +8884,13 @@ select.roost-input{color-scheme:dark}
           f.hint ? h('span', { style: { ...labelStyle, marginTop: 2 } }, f.hint) : null)
       }
       return h(Sec, {
-        title: '扩展市场 / 已装扩展',
+        title: part === 'market' ? '扩展市场' : part === 'installed' ? '已装扩展' : '扩展市场 / 已装扩展',
         right: h('button', {
           type: 'button', className: 'roost-btn',
           onClick: () => { load(); loadMarket(true) },
         }, '刷新'),
       },
+        ...(showMarket ? [
         h('div', { className: 'roost-note' },
           data?.enabled
             ? '总开关：开 —— 扩展说明会进 QQ 会话提示词。'
@@ -8896,6 +8954,8 @@ select.roost-input{color-scheme:dark}
               )
             : (market ? h('div', { className: 'roost-empty' }, '市场里还没有扩展条目。') : null),
         ),
+        ] : []),
+        ...(showInstalled ? [
         h('div', { className: 'roost-diag-h', style: { marginTop: 12 } }, '已装扩展'),
         (data?.rows || []).length
           ? h('div', { className: 'roost-list' },
@@ -8975,6 +9035,7 @@ select.roost-input{color-scheme:dark}
             },
           }),
         ),
+        ] : []),
 
         /** 两个 ask 互斥：万一都非空，只显示停用确认，避免两层遮罩叠着误点「授权并安装」 */
         scopeAsk && !revokeAsk
@@ -9077,12 +9138,54 @@ select.roost-input{color-scheme:dark}
      * 扩展独立页（2026-11-11）：装扩展是一整条动线 —— 档位 → 说明 → 令牌，
      * 原先散在 能力 / 设置 / 接入 三页，也不该跟工具白名单挤在「能力」里。
      */
+    /**
+     * 表达：语音 + 表情包。
+     *
+     * 这两块原来是「设置」里的第 04、05 节，但它们跟「配置文件在哪」没有关系——
+     * 说的都是**她怎么出声、怎么发表情**。放在一起，找语音的人不用再滚配置全文。
+     */
+    function ExpressTab({ config, stickers, saveCfg, toast, reload }) {
+      return h('div', null,
+        h(TtsCard, { config, saveCfg, toast, reload }),
+        h(StickerDirsCard, { config, stickers, saveCfg, toast, reload }),
+      )
+    }
+
+    /** 模型：聊天用哪个、按聊天单独选、峰谷省钱。原来是「设置」里最上面那块。 */
+    function ModelTab({ toast, currentChatId }) {
+      return h(ModelBlock, { toast, currentChatId })
+    }
+
+    /** 更新：版本与更新说明 + 反馈群。属于「这台机器怎么维护」，不跟聊天设置混。 */
+    function UpdateTab({ toast }) {
+      return h('div', null,
+        h(UpdatesBlock, { toast }),
+        h(FeedbackCard, { toast }),
+      )
+    }
+
+    /**
+     * 扩展独立成一级分组（2026-11-12），下辖三页，和 aurabot 的「模块」组同构：
+     *   已安装 ext / 市场 ext-market / 接口 ext-api
+     *
+     * 为什么拆：原来一页里同时有「档位矩阵 + 市场列表 + 已装清单 + 令牌」，
+     * 装一个扩展要滚三次。拆完每页只回答一个问题。
+     */
     function ExtTab({ quick, toast }) {
       return h('div', null,
-        h(ExtSettingsBlock, { toast }),
+        h(ExtSettingsBlock, { toast, part: 'installed' }),
         h(ExtCapsBlock, { quick, toast }),
-        h(ExtClientsBlock, { toast }),
       )
+    }
+
+    /** 市场：能装什么、装 / 更新 / 停用 */
+    function ExtMarketTab({ toast }) {
+      return h(ExtSettingsBlock, { toast, part: 'market' })
+    }
+
+    /** 接口：给独立会话发 /v1 客户端令牌 */
+    function ExtApiTab({ toast }) {
+      return h(ExtClientsBlock, { toast })
     }
 
     function LogsTab({ logs }) {
@@ -9157,7 +9260,7 @@ select.roost-input{color-scheme:dark}
       const batches = gov.batches || []
 
       return h('div', { style: { marginTop: 8 } },
-        h(Sec, { n: '02', title: '正在用' },
+        h(Sec, { title: '正在用' },
           h('div', { className: 'roost-note', style: { marginTop: 4, color: gov.currentOk === false ? '#c0392b' : undefined } },
             `全局：${gov.currentLabel || gov.current}` + (gov.currentOk === false ? '（不存在，已回退 default）' : '')),
           (gov.refs || []).length
@@ -9169,7 +9272,7 @@ select.roost-input{color-scheme:dark}
             : h('div', { className: 'roost-note', style: { marginTop: 4 } }, '没有按会话指定的人格'),
         ),
 
-        h(Sec, { n: '03', title: '体检', right: h('button', {
+        h(Sec, { title: '体检', right: h('button', {
           type: 'button', className: 'roost-btn', disabled: busy,
           onClick: () => run(async () => {
             await load(true)
@@ -9285,24 +9388,59 @@ select.roost-input{color-scheme:dark}
      *
      * **隐藏页签仍可直接到达**：`chats / context / setup / account` 保留为可直接进入的页，
      * 老 `localStorage['roost.tab']` 存着它们时照常渲染原页，功能与位置都不丢。
-     * 分组标题试过独占一行、窄侧栏白占三行，已去掉；`is-primary` 只略微提亮高频项。
+     * 2026-11-12：这一排不再直接铺 8 个按钮，改成「一级分组 + 二级页面」两层
+     * （见下面的 `NAV_GROUPS`）。`TABS` 仍然是**唯一的页面清单**，两层只决定怎么分组、
+     * 不决定有哪些页面——新增一页先加到这里，再决定归哪个组。
      */
     const TABS = [
       ['overview', '概览'],
-      ['logs', '排障'],
+      /* 人设：她是谁、心情如何、什么时候开口、记得什么 */
       ['her', '人格'],
-      ['memory', '记忆'],
+      ['mood', '心情'],
       ['awake', '主动搭话'],
+      ['memory', '记忆'],
+      /* 能力：她能干什么 */
       ['caps', '权限'],
-      ['ext', '扩展'],
+      ['express', '表达'],
+      ['model', '模型'],
+      /* 扩展：独立成组，和 aurabot 的「模块」对齐 */
+      ['ext', '已安装'],
+      ['ext-market', '市场'],
+      ['ext-api', '接口'],
+      /* 系统：这台机器怎么跑 */
+      ['chats', '身份'],
+      ['logs', '排障'],
+      ['update', '更新'],
       ['config', '设置'],
     ]
-    const HIDDEN_TABS = ['chats', 'context', 'setup', 'account']
+    /**
+     * `chats` 原来是隐藏页，2026-11-12 提升成「身份」：它本来就是
+     * 「QQ 会话 ↔ DSH 会话」的映射表，不给入口只能从记忆页绕进去。
+     */
+    const HIDDEN_TABS = ['context', 'setup', 'account']
     const ALL_TABS = TABS.map(([id]) => id).concat(HIDDEN_TABS)
 
-    /** 每天扫一眼的页签，只用来略微提亮，不再渲染成标题 */
-    /** 每天都用的页签略微提亮；权限/设置这类低频页保持基础权重 */
-    const PRIMARY_TABS = ['overview', 'logs', 'memory', 'awake']
+    /**
+     * 两层导航：一级是分组（带图标），二级是组内页面。
+     *
+     * 为什么现在分：8 个页签平铺一排，窄侧栏里正好挤满一行，再加一页就只能换行，
+     * 变成两排一样重的按钮、分不清主次。分组之后一级只有 4 个，加页只影响组内。
+     *
+     * 分组参照 aurabot 的「概览 / 人设 / 表达 / 平台 / 系统」思路，按我们的页面裁剪：
+     * 概览单独成组（只有一页，不渲染二级行），其余按「人设 / 能力 / 系统」收。
+     * **tab 的 key 一个都不改**，老 `localStorage['roost.tab']` 照样落回原来那页，
+     * 隐藏页（chats/context/setup/account）不进口分组，仍靠 `roost-nav-current` 标记位置。
+     */
+    const NAV_GROUPS = [
+      { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview'] },
+      { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'mood', 'awake', 'memory'] },
+      { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'express', 'model'] },
+      { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
+      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'logs', 'update', 'config'] },
+    ]
+    /** 当前页属于哪一组；隐藏页不属于任何组，返回 null */
+    const navGroupOf = (id) => NAV_GROUPS.find((g) => g.tabs.includes(id)) || null
+    const navIcon = (d) => h('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true' }, h('path', { d }))
 
     /**
      * 渲染错误边界：**把黑屏变成一句话**。
@@ -9377,6 +9515,27 @@ select.roost-input{color-scheme:dark}
         setTabState(id)
         try { localStorage.setItem('roost.tab', id) } catch {}
       }, [])
+      /**
+       * 每组记住最后看的那页：点一级分组回到那页，而不是每次都跳组内第一页。
+       *
+       * 单独存一份、不塞进 `roost.tab`：全局的「上次停留」只有一个，
+       * 再拆一层才记得住「上次在能力组看的是扩展」。
+       */
+      const [navLast, setNavLast] = useState(() => {
+        try { return JSON.parse(localStorage.getItem('roost.navlast') || '{}') || {} } catch { return {} }
+      })
+      useEffect(() => {
+        const g = navGroupOf(tab)
+        if (!g || navLast[g.id] === tab) return
+        const next = { ...navLast, [g.id]: tab }
+        setNavLast(next)
+        try { localStorage.setItem('roost.navlast', JSON.stringify(next)) } catch {}
+      }, [tab, navLast])
+      /** 点分组：优先回该组上次那页；存着已下线的 key 时退回组内第一页 */
+      const openGroup = useCallback((g) => {
+        const want = navLast[g.id]
+        setTab(g.tabs.includes(want) ? want : g.tabs[0])
+      }, [navLast, setTab])
       /** 日志统一拉一次：概览显示最近 6 条，排障页显示全量，别两处各起一个轮询 */
       const [logs, setLogs] = useState(null)
       useEffect(() => {
@@ -9711,8 +9870,13 @@ select.roost-input{color-scheme:dark}
        * 长页面直接被切掉。仪表盘该有的样子正好相反：切换栏永远在，
        * 内容在它下面滚。
        */
+      /** 当前页所属分组；隐藏页不属于任何组，`curGroup` 为 null（一级不高亮、二级不显示） */
+      const curGroup = navGroupOf(tab)
+      const groupTabs = curGroup ? TABS.filter(([id]) => curGroup.tabs.includes(id)) : []
+
       return h('div', { className: 'roost-root' },
         h('div', { className: 'roost-head' },
+          h('div', { className: 'roost-head-inner' },
           h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
             h('div', { className: 'roost-title-lg' }, 'Roost'),
             st
@@ -9722,41 +9886,60 @@ select.roost-input{color-scheme:dark}
           ),
           h('div', { className: 'roost-note roost-sub' }, 'QQ 消息从这里交给 DSH 会话回答。'),
 
-          h('div', {
-            role: 'tablist',
-            'aria-label': 'Roost 各页',
-            /* flexWrap 必须留着：窄侧栏靠换行排布，不许出现拖不动的滚动条 */
-            style: {
-              display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap',
-              margin: '16px 0 0', paddingBottom: 8,
-              borderBottom: '1px solid var(--line-soft)',
+          h('div', { className: 'roost-nav' },
+            h('div', {
+              className: 'roost-nav-top',
+              role: 'tablist',
+              'aria-label': 'Roost 功能分组',
+              /* 行内再写一次 wrap：页签条的溢出行为是硬约束（见测试），
+                 不能只靠类名——将来有人改 CSS 时这一条还在 */
+              style: { display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', padding: '6px 0 0' },
             },
-          },
-            TABS.reduce((out, [id, label]) => {
-              const primary = PRIMARY_TABS.indexOf(id) >= 0
-              out.push(h('button', {
-                key: id, type: 'button',
-                className: 'roost-tab' + (primary ? ' is-primary' : ''),
-                role: 'tab',
-                'aria-selected': tab === id ? 'true' : 'false',
-                'data-on': tab === id ? '1' : '0',
-                onClick: () => setTab(id),
-              }, label))
-              return out
-            }, []),
+              NAV_GROUPS.map((g) => {
+                const on = curGroup && curGroup.id === g.id
+                /** 悬浮提示把组内页面列出来：只看「能力」猜不到里面有扩展 */
+                const names = g.tabs
+                  .map((id) => (TABS.find((row) => row[0] === id) || [, id])[1])
+                  .join(' · ')
+                return h('button', {
+                  key: g.id, type: 'button',
+                  className: 'roost-grp',
+                  role: 'tab',
+                  'aria-selected': on ? 'true' : 'false',
+                  'data-on': on ? '1' : '0',
+                  title: names,
+                  onClick: () => openGroup(g),
+                }, navIcon(g.icon), h('span', null, g.label))
+              }),
+            ),
+            /** 二级只在该组超过一页时出现：概览单独成组，不该留一条空的二级行。 */
+            groupTabs.length > 1
+              ? h('div', { className: 'roost-nav-sub', role: 'tablist', 'aria-label': curGroup.label },
+                  groupTabs.map(([id, label]) => h('button', {
+                    key: id, type: 'button',
+                    className: 'roost-tab',
+                    role: 'tab',
+                    'aria-selected': tab === id ? 'true' : 'false',
+                    'data-on': tab === id ? '1' : '0',
+                    onClick: () => setTab(id),
+                  }, label)))
+              : null,
+            /** 隐藏页标记放两个 tablist 外面：tablist 的 owned element 必须是 role=tab，
+                放外面既能保住 aria-current 的读屏语义，也不破坏 tablist 结构。 */
+            HIDDEN_TABS.includes(tab)
+              ? h('div', { className: 'roost-nav-sub' },
+                  h('span', { className: 'roost-nav-current', 'aria-current': 'page' },
+                    ({ context: '上下文', setup: '接入', account: '账号迁移' })[tab] || tab))
+              : null,
+            ),
           ),
-          /** 隐藏页标记放 tablist 外面：tablist 的 owned element 必须是 role=tab，
-              放外面既能保住 aria-current 的读屏语义，也不破坏 tablist 结构。 */
-          HIDDEN_TABS.includes(tab)
-            ? h('span', { className: 'roost-nav-current', 'aria-current': 'page' },
-                ({ chats: '会话', context: '上下文', setup: '接入', account: '账号迁移' })[tab] || tab)
-            : null,
         ),
 
         h('div', {
           className: 'roost-scroll-body roost-fade' + (pageModal ? ' is-locked' : ''),
           key: tab,
         },
+          h('div', { className: 'roost-body-inner' },
           tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta }) : null,
           tab === 'her'
@@ -9768,11 +9951,22 @@ select.roost-input{color-scheme:dark}
             : null,
           tab === 'caps' ? h(CapsTab, { caps, preview: capPreview, chats: capChats, feat: capFeat, retention: capRetention, quota: capQuota, toast, reload: loadCaps, quick, busy }) : null,
           tab === 'ext' ? h(ExtTab, { quick, toast }) : null,
+          tab === 'ext-market' ? h(ExtMarketTab, { toast }) : null,
+          tab === 'ext-api' ? h(ExtApiTab, { toast }) : null,
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat }) : null,
+          /** 2026-11-12 新增：心情从「主动搭话」拆出，表达/模型从「设置」拆出 */
+          tab === 'mood' ? h(MoodTab, { mood: her?.mood ?? null, reloadMood: loadHer, toast, quick }) : null,
+          tab === 'express'
+            ? h(ExpressTab, {
+                config, stickers: her?.stickers ?? null,
+                saveCfg, toast, reload: loadHer,
+              })
+            : null,
+          tab === 'model' ? h(ModelTab, { toast, currentChatId: mem?.chatId || '' }) : null,
+          tab === 'update' ? h(UpdateTab, { toast }) : null,
           tab === 'awake'
             ? h(AwakeTab, {
                 aw, mem, sp, chats,
-                mood: her?.mood ?? null, reloadMood: loadHer,
                 toast, reload: loadAwake, reloadSp: loadAwake, busy, quick,
               })
             : null,
@@ -9785,11 +9979,8 @@ select.roost-input{color-scheme:dark}
                   toast, reload: loadCtx, busy,
                 }))
             : null,
-          tab === 'chats'
-            ? h('div', { className: 'roost-diag-part' },
-                h('div', { className: 'roost-diag-h' }, '会话 · 手动刷新'),
-                h(ChatsTab, { chats, reload: loadChats, toast }))
-            : null,
+          /** 「身份」：QQ 会话 ↔ DSH 会话的映射，现在有自己的页签，不再套一层「手动刷新」 */
+          tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
           tab === 'account' ? h(AccountTab, { toast }) : null,
           tab === 'config'
             ? h('div', null,
@@ -9820,7 +10011,7 @@ select.roost-input{color-scheme:dark}
                     }, '清空扩展记忆…'),
                     h('button', {
                       type: 'button', className: 'roost-btn',
-                      onClick: () => { setTab('awake'); toast('已切到「主动搭话」，在「此刻情绪 · 变化记录」里') },
+                      onClick: () => { setTab('mood'); toast('已切到「心情」，清空在「02 变化记录」') },
                     }, '清空心情历史…'),
                   ),
                 ),
@@ -9835,11 +10026,13 @@ select.roost-input{color-scheme:dark}
                     ctxInfo, mind, usageInfo, stickers: her?.stickers ?? null,
                     toast, reload: loadCtx, busy,
                   })),
-                h('div', { className: 'roost-diag-part' },
-                  h('div', { className: 'roost-diag-h' }, '会话 · 手动刷新'),
-                  h(ChatsTab, { chats, reload: loadChats, toast })),
+                /**
+                 * 2026-11-12：「会话」那块拿掉了。它现在有独立的「身份」页，
+                 * 排障页再渲染一遍等于同一个清单两个入口——用户得先判断在哪页动手。
+                 */
               )
             : null,
+          ),
         ),
 
         /**
@@ -9909,6 +10102,11 @@ select.roost-input{color-scheme:dark}
     exports.planToolToggle = planToolToggle
     exports.matchPat = matchPat
     exports.AwakeTab = AwakeTab
+    /* 2026-11-12 细分出来的四页，测试直接渲染它们 */
+    exports.MoodTab = MoodTab
+    exports.ExpressTab = ExpressTab
+    exports.ModelTab = ModelTab
+    exports.UpdateTab = UpdateTab
     /**
      * 导出给测试盯住。这个函数出过一次「拿配置端口冒充实际端口」的事故——
      * 语法合法、渲染不炸、测试全绿，但面板在撒谎。纯函数才能被断言。
