@@ -2171,6 +2171,18 @@ select.roost-input{color-scheme:dark}
        */
       const [wsInfo, setWsInfo] = useState(null)
       const [wsBusy, setWsBusy] = useState(false)
+      /**
+       * 框架能力表：连上之后框架有多少方法、其中几个是插件新工具。
+       * 只在点按钮时拉（不进 useEffect），免得面板每开一次就多一次请求。
+       */
+      const [capsInfo, setCapsInfo] = useState(null)
+      const loadCaps = async () => {
+        try {
+          const r = await get('/roost/capabilities')
+          setCapsInfo(r && r.ok !== false ? r : null)
+          toast(`框架能力：${r?.count ?? 0} 个方法，插件工具 ${r?.pluginTools?.length ?? 0} 个${r?.error ? `（${r.error}）` : ''}`)
+        } catch (e) { toast(`读能力表失败：${e?.message ?? e}`) }
+      }
       const loadWsInfo = async () => {
         try {
           const r = await get('/roost/ws')
@@ -2651,6 +2663,17 @@ select.roost-input{color-scheme:dark}
                   ? h('button', {
                       type: 'button', className: 'roost-btn', disabled: wsBusy, onClick: doInstallWs,
                     }, wsBusy ? '装着…' : '给框架装 ws')
+                  : null,
+              ),
+              /** 能力协商：框架升级/插件启停会让方法表变化，面板上要能当场重拉 */
+              h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' } },
+                h('span', { className: 'roost-note', style: { margin: 0, fontWeight: 600 } }, '框架能力'),
+                h('div', { className: 'roost-pill' + (capsInfo?.count ? ' ok' : '') },
+                  capsInfo ? `${capsInfo.count} 个方法 · ${capsInfo.pluginTools?.length ?? 0} 个插件工具` : '未读取'),
+                h('button', { type: 'button', className: 'roost-btn', onClick: loadCaps }, '刷新能力表'),
+                capsInfo?.pluginTools?.length
+                  ? h('span', { className: 'roost-note', style: { margin: 0 } },
+                      capsInfo.pluginTools.slice(0, 4).map((x) => x.name.replace(/^tool\./, '')).join('、'))
                   : null,
               ),
               h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' } },

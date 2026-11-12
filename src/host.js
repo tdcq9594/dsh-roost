@@ -85,6 +85,8 @@ import { createMarkerApplier } from './apply-markers.js';
 import { createJournalBridge } from './journal-bridge.js';
 import { createRoostHostChannel, createChannelRegistry } from './channel.js';
 import { createActionRunner } from './outbound-actions.js';
+import { createCapabilityClient } from './roost-capabilities.js';
+import { registerRoostTools } from './roost-tools.js';
 import { createRoostHost } from './roost-host.js';
 import { createPayloadBuilder, buildRendered } from './roost-payload.js';
 import { createMerger } from './roost-merge.js';
@@ -1947,6 +1949,12 @@ export function apply(ctx) {
    * 事件回调引用的是下面定义的 `deliverFromRoost`——函数声明会提升，
    * 而且真正被调用是在 `start()` 之后，那时 `channels` 早就初始化好了。
    */
+  /** 先声明再赋值：onState 是回调，运行时才读，但别让 TDZ 有机会咬一口 */
+  let caps = null;
+  const refreshCaps = () => {
+    if (!caps) return;
+    caps.refresh().catch((e) => caps.noteError(e));
+  };
   const roost = createRoostHost({
     baseUrl: () => cfg.roostHost?.url || '',
     token: () => cfg.roostHost?.token || '',
@@ -1958,10 +1966,16 @@ export function apply(ctx) {
         log.warn(`外接消息入队失败（已吞）：${e?.message ?? e}`);
       }
     },
-    onNotice: (data) => deliverNoticeFromRoost(data),
+    onNotice: (data, frame) => {
+      /** 插件启停导致 tool.* 变化时，框架会推这条事件；立刻重拉能力表 */
+      if (frame?.event === 'capabilities.changed') refreshCaps();
+      deliverNoticeFromRoost(data);
+    },
     onGap: (frame) => log.warn(`外接协议补拉有缺口（seq ${frame?.seq ?? '?'}），这段消息收不到了`),
     onState: (state, detail) => {
       if (state === 'error') log.warn(`外接协议：${detail || state}`);
+      /** 连上之后拉一次能力表：框架版本不同，可用的方法不一样 */
+      if (state === 'online') refreshCaps();
     },
     log: (m) => log.warn(`[roost-host] ${m}`),
     /** 事件通道：auto = 装了 ws 就 WS、没装就 SSE；RPC 恒走 HTTP */
@@ -1984,6 +1998,17 @@ export function apply(ctx) {
       }
     },
   });
+
+  /**
+   * 能力协商：连上框架之后拉一次 `system.capabilities`，之后新增能力
+   * （尤其框架插件投影出来的 `tool.*`）都先问这张表。启动时先试一次，
+   * 没连上会被 `onState` 的 online 再补一次。
+   */
+  caps = createCapabilityClient({
+    rpc: (m, p) => roost.rpc(m, p),
+    log: (m) => log.warn(`[roost-capabilities] ${m}`),
+  });
+  refreshCaps();
 
   const buildFromRoost = createPayloadBuilder({
     rpc: (m, p, o) => roost.rpc(m, p, o),
@@ -3696,6 +3721,32 @@ export function apply(ctx) {
       log.warn('挂权限上下文失败：', e.message);
     }
 
+    /**
+     * 框架外接协议能力（方案 A 的宿主侧）。只在开了直连时挂：
+     * 没连框架的部署多四个永远报错的工具只会污染提示词。
+     *
+     * 工具清单执行时现读 `caps`，插件热重载不用重新注册。
+     */
+    if (cfg.roostHost?.enabled && caps) {
+      registerRoostTools({
+        agent,
+        caps,
+        callerOf: () => {
+          const sid = agent?.session?.id;
+          const s = sid ? speaker.get(sid) : null;
+          return { bucket: s?.bucket || '', chatId: chat.chatId || '' };
+        },
+        log: (m) => log.warn(m),
+      }).then((r) => {
+        if (!r?.ok) {
+          log.warn(`框架能力工具没挂上：${r?.reason ?? '未知原因'}`);
+          return;
+        }
+        log.info(`框架能力工具已挂载：${(r.names ?? []).join(', ')}`);
+        if (r.off) mountOffs.push(r.off);
+      }).catch((e) => log.warn(`框架能力工具挂载异常：${e?.message ?? e}`));
+    }
+
     mounted.add(agent);
     /**
      * **不能在这里调 `ctx.onTeardown`。**
@@ -4718,6 +4769,13 @@ export function apply(ctx) {
           today: usage.summary({ days: 1 }).total,
           /** 工具挂没挂上：对应 `unknown tool` 那类问题，不用再翻 tool-state.json */
           qqTools: qqToolRegistry.summary(),
+          /** 框架外接协议：拉到几个方法、其中几个是插件新工具、有没有刷新失败 */
+          roostCapabilities: {
+            count: caps?.list?.().length ?? 0,
+            pluginTools: caps?.dynamic?.().length ?? 0,
+            signature: caps?.signature?.() ?? '',
+            error: caps?.lastError?.() ?? '',
+          },
           /** 能力策略接管后 `cfg.permissions` 不再是实际判据，面板要另作标注 */
           capabilitiesEnabled: capStore.enabled(),
         }),
@@ -6831,6 +6889,26 @@ export function apply(ctx) {
         } catch (e) {
           return send(res, 200, { ok: false, mode: 'failed', message: e?.message ?? String(e) });
         }
+      }),
+
+      /**
+       * 能力协商结果。面板/排障用：这个接口只在手动点「刷新能力表」时调，
+       * 所以进来就重拉一次（不靠 query，exact 路由匹配不用赌它忽略查询串）。
+       * 框架没连上时返回上一次的清单（可能是空的）+ 错误原因，不抛 500。
+       */
+      route('/roost/capabilities', async (req, res) => {
+        if (caps) {
+          try { await caps.refresh(); } catch (e) { caps.noteError(e); }
+        }
+        return send(res, 200, {
+          ok: true,
+          count: caps?.list?.().length ?? 0,
+          builtin: caps?.available?.() ?? [],
+          pluginTools: caps?.dynamic?.() ?? [],
+          signature: caps?.signature?.() ?? '',
+          lastAt: caps?.lastAt?.() ?? 0,
+          error: caps?.lastError?.() ?? '',
+        });
       }),
 
       route('/roost/pair', (req, res) =>
