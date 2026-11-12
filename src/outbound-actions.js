@@ -186,9 +186,10 @@ export function parseOutboundActions(raw) {
  * @param {object} o
  * @param {() => object} o.channel   取当前通道（延迟取，热切换通道不会拿到旧的）
  * @param {object} [o.tts]          `createTts()` 实例，给 `<<say>>` 用
+ * @param {object} [o.quota]        `createQuota()` 实例，给 `<<say>>` 扣「语音条」额度
  * @param {(m:string)=>void} [o.log]
  */
-export function createActionRunner({ channel, tts = null, log = () => {} } = {}) {
+export function createActionRunner({ channel, tts = null, quota = null, log = () => {} } = {}) {
   /** chatId → { id, kind, at } */
   const lastSent = new Map();
   /** `chatId|type|value` → at */
@@ -212,7 +213,7 @@ export function createActionRunner({ channel, tts = null, log = () => {} } = {})
    */
   return async function run({
     text, extra = {}, scene = 'c2c', target = '', msgId = '', receivedAt = 0,
-    requestId = '', onSent = () => {},
+    requestId = '', senderId = '', onSent = () => {},
   } = {}) {
     const ch = channel();
     const { text: body0, actions, wantSkip } = parseOutboundActions(text);
@@ -289,6 +290,25 @@ export function createActionRunner({ channel, tts = null, log = () => {} } = {})
         } else if (a.type === 'voice' && typeof ch.sendVoice === 'function') {
           sent = await ch.sendVoice({ scene, target, path: a.value, msgId, receivedAt });
         } else if (a.type === 'say' && tts && typeof ch.sendVoice === 'function') {
+          /**
+           * 「语音条」次数配额。
+           *
+           * 以前扣在 ai-chat 侧，那边不传 openid，按人算不了，所以
+           * `QUOTA_WIRED.voice` 一直是 false、面板显示「暂不生效」。
+           * 直连之后 `<<say>>` 在这里执行，发送者身份是现成的（`who`）。
+           *
+           * **不通过就退化成文字**：这是「防刷屏」不是「不许说话」，
+           * 用户还能看到内容；静默丢弃会让她这一句凭空消失。
+           */
+          const q = quota && typeof quota.charge === 'function'
+            ? quota.charge({ feature: 'voice', per: 'person', id: String(senderId || target) })
+            : null;
+          if (q && q.ok === false) {
+            log(`语音条额度用完（${q.message}），这句改发文字`);
+            const rt = await ch.send({ scene, target, text: a.value, msgId, receivedAt });
+            if (rt?.ok) { mediaSent += 1; onSent(); }
+            continue;
+          }
           /** TTS 没启用时旧实现是「连请求都不发」，这里同样静默跳过 */
           const audio = await tts.synthesize(a.value);
           const buf = Buffer.from(audio?.audio ?? []);
@@ -301,6 +321,8 @@ export function createActionRunner({ channel, tts = null, log = () => {} } = {})
           } finally {
             await rm(file, { force: true }).catch(() => {});
           }
+          /** 合成成功但发失败了，把刚扣的额度退回去——那次语音并没有真的出去 */
+          if (sent && sent.ok === false && q?.undo) q.undo();
         }
         if (sent?.ok) { mediaSent += 1; onSent(); }
         else if (sent) log(`${a.type} 没发出去：${sent?.message ?? '未知原因'}`);

@@ -102,16 +102,26 @@ export const QUOTA_DEFAULTS = {
  * 接了新调用点就把这里改成 true，面板会自己变。
  */
 export const QUOTA_WIRED = {
-  /** `<<say:>>` 的合成在 ai-chat 侧发起，那边不传 openid，按人算不了 → 待接 */
-  voice: false,
+  /**
+   * `<<say:>>` 现在由 `outbound-actions.js` 执行（ai-chat 已移除），
+   * 那里能拿到发送者的 openid，按人算成立。额度用完时那句退化成文字，
+   * 不静默吞掉内容。
+   */
+  voice: true,
   /** host.js 的 fileOf：扣在占位之前、失败回退 */
   file: true,
   /** host.js 的 pickOf：按「每群每轮」计 */
   sticker: true,
   /** tools.guard 里的总闸 */
   tool: true,
-  /** memory_search 在 tools.js 里，拿不到 chatId → 待接 */
-  memory: false,
+  /**
+   * host.js 的 tools.guard：`memory_search` / `memory_note` 映射到这一项。
+   *
+   * 以前直接拿工具名查配额表，`table()['memory_search']` 不存在，
+   * 于是「翻记忆」配了也不生效。现在 guard 里做了映射，且 guard 拿得到
+   * 本轮的 chatId 与 senderId，按人算成立。
+   */
+  memory: true,
 };
 
 export const QUOTA_LABELS = {

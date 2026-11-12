@@ -110,6 +110,29 @@ import {
 } from './backup.js';
 
 /**
+ * 归到「翻记忆」这一项配额的工具名。
+ *
+ * 面板上给用户的是「她自己翻日记，一天最多几次」，不是让他去工具清单里找
+ * `memory_search`。所以这两个工具要映射到 `QUOTA_DEFAULTS.memory`，
+ * 否则 `table()['memory_search']` 查不到，`memory` 配额配了也不生效。
+ */
+const MEMORY_TOOLS = new Set(['memory_search', 'memory_note']);
+
+/**
+ * 工具名 → 配额项名。
+ *
+ * 抽成导出是为了能直接测：这段映射错了不会抛错，只会「配了额度不生效」，
+ * 面板上表现为一直标着「暂未生效」——只能靠断言锁住。
+ *
+ * @param {string} toolName
+ * @returns {string} 配额表里的 feature 名
+ */
+export function quotaFeatureOf(toolName) {
+  const n = String(toolName ?? '');
+  return MEMORY_TOOLS.has(n) ? 'memory' : n;
+}
+
+/**
  * 安全边界文案（`roost-guard`，order 910，注册一次、每轮现读）。
  *
  * 抽成模块级导出是为了让回归测试断言**运行时 `text()` 的返回值**。
@@ -803,8 +826,17 @@ export function apply(ctx) {
 
         const name = String(exec?.name || '');
         if (!name) return undefined;
-        // 只有用户真给这个工具配了次数才管
-        const spec = quota.table()[name];
+        /**
+         * 工具名 → 配额项。
+         *
+         * `memory_search` / `memory_note` 归到「翻记忆」那一项：面板上给用户的是
+         * 「她自己翻日记，一天最多几次」这个说法，而不是让他在一堆工具名里找
+         * `memory_search`。以前直接拿工具名查表，`table()['memory_search']` 不存在，
+         * 于是 `memory` 这一项配了也永远不会被查——面板只能标「暂未生效」。
+         */
+        const feature = quotaFeatureOf(name);
+        // 只有用户真给这个功能配了次数才管
+        const spec = quota.table()[feature];
         if (!spec) return undefined;
 
         const sid = String(exec?.agent?.session?.id || '');
@@ -837,7 +869,7 @@ export function apply(ctx) {
           return `${total.message}。这一轮别再调任何工具，直接告诉对方现在做不了。`;
         }
 
-        const r = quota.charge({ feature: name, key: callKey, ...who });
+        const r = quota.charge({ feature, key: callKey, ...who });
         if (r.ok) return undefined;
         /** 具体工具超了，把刚才预扣的总量退回去——那次调用不会真的发生 */
         total.undo?.();
@@ -2046,6 +2078,8 @@ export function apply(ctx) {
   const outActions = createActionRunner({
     channel: () => channels.active(),
     tts,
+    /** `<<say>>` 的语音条额度按人扣；以前扣在 ai-chat 侧、拿不到 openid，所以一直没接 */
+    quota,
     log: (m) => log.warn(m),
   });
 
@@ -2118,6 +2152,11 @@ export function apply(ctx) {
       msgId: String(last?.msgId ?? ''),
       receivedAt: Number(last?.at) || 0,
       requestId: String(extra?.requestId ?? ''),
+      /**
+       * 发送者是谁：`<<say>>` 的语音条额度要按人算。
+       * 以前这条链在 ai-chat 侧，那边不传 openid，配额只能标「暂未生效」。
+       */
+      senderId: String(last?.sender?.id ?? ''),
       /** 真的发出去了才记：没发出去也记的话，冷却会把下一句白吃掉 */
       onSent: () => roostDecider.noteReplied(chatId),
     });

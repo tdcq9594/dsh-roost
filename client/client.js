@@ -7912,6 +7912,16 @@ select.roost-input{color-scheme:dark}
        * 不能靠连续三次 put 再 save。
        */
       const save = async (override = null) => {
+        /**
+         * 配置还没读到就**不许保存**。
+         *
+         * 少了这一道：`config` 为 null 时 `draft` 是空对象，点保存提交的 `tts`
+         * 只剩 `timeoutSec / maxChars / speed` 三个默认值。patch 语义下
+         * `provider / voice / enabled` 能保住，但这仍然是在**空数据上操作**——
+         * 用户看到的是「语音合成：未启用」，实际可能开着。
+         * 页签预拉是第一道，这里是最后一道。
+         */
+        if (!config) return toast('配置还没读到，稍等一下再保存')
         setBusy(true)
         try {
           const src = override ? { ...(draft || {}), ...override } : draft
@@ -8419,6 +8429,11 @@ select.roost-input{color-scheme:dark}
       }
 
       const save = async () => {
+        /**
+         * 同理：`/stickers` 没读到时 `paths` 是空数组，保存会写入 `dir:''`，
+         * 等于把用户真实配的目录**清空恢复默认**。空列表和「读不到」必须分开看。
+         */
+        if (!stickers) return toast('表情包配置还没读到，稍等一下再保存')
         const list = clean()
         setBusy(true)
         const r = await saveCfg({
@@ -10290,6 +10305,28 @@ select.roost-input{color-scheme:dark}
           // 名字输入框读 config；「本群」下拉要 mem.chatId——都主动拉一次
           if (!config) once('config', loadConfig)
           if (!mem) once('memory', () => loadMemory())
+        }
+        /**
+         * 心情页的数据**全部**来自 `/mood`，而它挂在 `her` 上。
+         *
+         * 少了这一支：直接进「心情」页（或上次停在那一页、刷新后恢复）
+         * 一个数据请求都不发，页面永远停在「读不到情绪——插件刚起来时会空几秒」，
+         * 而且不会自愈，除非切到人格 / 主动搭话 / 设置 / 排障任意一页再回来。
+         * 拆分页签（a435957）时只加了渲染分支，忘了这里。
+         */
+        if (tab === 'mood') {
+          if (!her?.mood) once('her', loadHer)
+        }
+        /**
+         * 表达页：语音卡片读 `config.tts`、表情包卡片读 `/stickers`（挂在 `her` 上）。
+         *
+         * 更危险的是**写**：`config` 为 null 时 `TtsCard` 的草稿是空对象，
+         * 此时点保存提交的 `tts` 只含三个默认值，等于在空数据上覆盖真实配置。
+         * `TtsCard` 自己另有一道 `!config` 的硬拦（见 `save()`），这里是第一道。
+         */
+        if (tab === 'express') {
+          if (!config) once('config', loadConfig)
+          if (!her?.stickers) once('her', loadHer)
         }
         if (tab === 'awake') {
           // 授权状态在 /memory 里、chatId 列表在 /chats 里，这一页两样都要用

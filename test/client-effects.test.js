@@ -280,3 +280,31 @@ test('加载 effect：同一份数据在飞时，切页不会重复请求', asyn
   assert.equal(count(c, '/roost/api/personas'), 0, '人格数据已有，不该重拉');
   assert.equal(count(c, '/roost/api/config'), 0, '配置已有，不该重拉');
 });
+
+test('加载 effect：直接进「心情」页必须拉 /mood（拆分页签时漏过这一支）', async () => {
+  /**
+   * 「心情」页的数据**全部**来自 `/mood`，而它挂在 `her` 上。
+   *
+   * 拆分页签（a435957）时只加了渲染分支，忘了在预拉列表里补 `mood`，
+   * 于是直接进这一页（含刷新后从 localStorage 恢复）一个数据请求都不发，
+   * 页面永远停在「读不到情绪」，且不会自愈。
+   */
+  const s = session();
+  const { calls: c } = await s.visit('mood');
+
+  assert.equal(count(c, '/roost/api/mood'), 1, '直接进心情页必须拉 /mood');
+  assert.ok(count(c, '/roost/api/mood') > 0, '否则页面永远显示「读不到情绪」');
+});
+
+test('加载 effect：直接进「表达」页要拉 config 与 stickers（否则会在空数据上保存）', async () => {
+  /**
+   * 表达页的语音卡片读 `config.tts`、表情包卡片读 `/stickers`。
+   * 两样都没拉时：TTS 卡片显示「未启用」（实际可能开着），
+   * 且此时点保存提交的 `tts` 只含三个默认值 —— 等于在空数据上覆盖真实配置。
+   */
+  const s = session();
+  const { calls: c } = await s.visit('express');
+
+  assert.equal(count(c, '/roost/api/config'), 1, '表达页要拉 /config，否则 TTS 卡片读不到真实开关');
+  assert.equal(count(c, '/roost/api/stickers'), 1, '表达页要拉 /stickers，否则目录显示为空、保存会清空');
+});

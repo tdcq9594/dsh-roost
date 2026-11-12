@@ -218,3 +218,40 @@ test('通道：5xx / 网络错误不重发（可能已经送达，重发就是�
   assert.equal(r.ok, false);
   assert.equal(n, 1);
 });
+
+/* ---------------- 语音条配额（以前扣在 ai-chat 侧，拿不到 openid） ---------------- */
+
+test('配额：语音条额度用完时这句退化成文字，内容不丢', async () => {
+  const ch = fakeChannel();
+  const charged = [];
+  const quota = {
+    charge(p) {
+      charged.push(p);
+      return { ok: false, used: 3, max: 3, message: '语音条这次用完了（3/3）' };
+    },
+  };
+  const run = createActionRunner({ channel: () => ch, quota, tts: { synthesize: async () => ({ audio: Buffer.from('x') }) } });
+  await run({ text: '好的 <<say: 我想说的那句话>>', target: 'g1', senderId: 'u1' });
+
+  /** 扣的时候按人算，且 id 是发送者而不是群号 */
+  assert.equal(charged.length, 1);
+  assert.equal(charged[0].feature, 'voice');
+  assert.equal(charged[0].per, 'person');
+  assert.equal(charged[0].id, 'u1');
+
+  /** 不该发语音，但那句话要以文字发出去 */
+  assert.equal(ch.calls.filter((c) => c[0] === 'voice').length, 0);
+  const sent = ch.calls.filter((c) => c[0] === 'send').map((c) => c[1].text);
+  assert.ok(sent.some((t) => t.includes('我想说的那句话')), '额度用完不能把这句吞掉');
+});
+
+test('配额：语音发出失败要把额度退回去（那次语音没真的出去）', async () => {
+  const ch = fakeChannel({ async sendVoice() { return { ok: false, message: '上传失败' }; } });
+  let undone = 0;
+  const quota = {
+    charge() { return { ok: true, undo: () => { undone += 1; } }; },
+  };
+  const run = createActionRunner({ channel: () => ch, quota, tts: { synthesize: async () => ({ audio: Buffer.from('x'), contentType: 'audio/mpeg' }) } });
+  await run({ text: '<<say: 一句>>', target: 'g1', senderId: 'u1' });
+  assert.equal(undone, 1, '发送失败必须回退配额');
+});

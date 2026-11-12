@@ -259,3 +259,33 @@ test('quota：任意工具名都能当配额项，且默认按人按天', () => 
   assert.equal(row.window, 'day', '没写窗口默认每天');
   assert.equal(row.per, 'person', '没写单位默认每人');
 });
+
+test('quota：记忆工具映射到「翻记忆」这一项（否则配了额度也不生效）', async () => {
+  /**
+   * 以前 guard 直接拿工具名查配额表，`table()['memory_search']` 不存在 →
+   * `memory` 这一项配了也永远不会被查，面板只能一直标「暂未生效」。
+   */
+  const { quotaFeatureOf } = await import('../src/host.js');
+
+  assert.equal(quotaFeatureOf('memory_search'), 'memory', '翻记忆的检索要归到 memory 配额');
+  assert.equal(quotaFeatureOf('memory_note'), 'memory', '翻记忆的写入也要归到 memory 配额');
+  /** 别的工具不能被动归到某一项，必须原样返回（否则会给它们套上不属于自己的额度） */
+  assert.equal(quotaFeatureOf('web_search'), 'web_search');
+  assert.equal(quotaFeatureOf(''), '');
+});
+
+test('quota：接上的项必须真的拦得住（voice / memory 不再是「暂不生效」）', async () => {
+  const { QUOTA_WIRED } = await import('../src/quota.js');
+  assert.equal(QUOTA_WIRED.voice, true, '语音条已由 outbound-actions 扣，不该再标未接');
+  assert.equal(QUOTA_WIRED.memory, true, '翻记忆已由 tools.guard 映射，不该再标未接');
+
+  const q = createQuota({
+    dir: tmp(),
+    now: () => T(),
+    defaults: { voice: { max: 1 }, memory: { max: 1 } },
+  });
+  assert.equal(q.charge({ feature: 'voice', id: 'U1', key: 'v1' }).ok, true);
+  assert.equal(q.charge({ feature: 'voice', id: 'U1', key: 'v2' }).ok, false, '语音条第 2 次要被拦');
+  assert.equal(q.charge({ feature: 'memory', id: 'U1', key: 'm1' }).ok, true);
+  assert.equal(q.charge({ feature: 'memory', id: 'U1', key: 'm2' }).ok, false, '翻记忆第 2 次要被拦');
+});
