@@ -57,6 +57,7 @@ import { createExtApiHooks } from './ext-api-hooks.js';
 import { createExtPatch } from './ext-patch.js';
 import { createExtMarket } from './ext-market.js';
 import { pickModelFor, pickReasoningEffort } from './model-pick.js';
+import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { createClosing, shouldNotePending } from './closing.js';
 import { createAccount } from './account.js';
@@ -693,6 +694,17 @@ export function apply(ctx) {
    * 所以用 `defaults` 传的是**当前配置里的覆盖值**，而不是烤死的默认值。
    */
   const quota = createQuota({ dir: dataDir(), log, defaults: () => cfg.quota || {} });
+
+  /**
+   * DSH 的模型清单（面板「模型」页下拉的数据源）。
+   *
+   * `getLlm` 是**现取**的：插件激活早于宿主把 `llm` 注册进容器，
+   * 提前抓成常量会拿到 null，然后面板永远「宿主没暴露模型清单」。
+   */
+  const modelCatalog = createModelCatalog({
+    getLlm: () => ctx.get?.('llm'),
+    log: (m) => log.warn(m),
+  });
 
   /**
    * 工具次数守卫要**在激活阶段**挂，不能等到第一条消息。
@@ -2046,9 +2058,27 @@ export function apply(ctx) {
     rpc: (m, p, o) => roost.rpc(m, p, o),
     log: (m) => log.warn(`[roost-host] ${m}`),
     /** 热读：面板上关掉看图 / 改图片上限，下一轮就生效 */
-    vision: () => cfg.roostHost?.vision !== false,
+    vision: () => cfg.roostHost?.vision ?? true,
     maxImages: () => cfg.roostHost?.maxImages ?? 4,
     markdown: () => cfg.roostHost?.markdown !== false,
+    /**
+     * 「视觉能力 = 自动」时问一句：这个聊天最终用的模型能不能看图。
+     *
+     * 复用 `modelCatalog` 的能力缓存（10 分钟），所以一条消息只多一次内存查表；
+     * 拿不到（宿主没声明 / 没模型）返回 `null`，payload 那边按「照发」处理。
+     */
+    canSee: async ({ chatId: cid, kind: k } = {}) => {
+      const sel = pickModelFor({
+        byChat: cfg.model?.byChat,
+        byKind: cfg.model?.byKind,
+        defaultSel: cfg.model?.default,
+        chatId: String(cid || ''),
+        kind: String(k || ''),
+        globalSel: ctx.get?.('agentDefaultModel')?.currentSelection?.() || null,
+      });
+      if (!sel) return null;
+      return await modelCatalog.canSee(sel.provider, sel.model);
+    },
   });
 
   /**
@@ -2960,6 +2990,8 @@ export function apply(ctx) {
       const sel = pickModelFor({
         byChat: cfg.model?.byChat,
         byKind: cfg.model?.byKind,
+        /** 「所有聊天的默认模型」这一层，夹在 byKind 和 DSH 全局之间 */
+        defaultSel: cfg.model?.default,
         chatId,
         kind,
         globalSel: dm?.currentSelection?.(),
@@ -2970,7 +3002,15 @@ export function apply(ctx) {
         return;
       }
       const llm = ctx.get?.('llm');
-      const effort = await pickReasoningEffort(sel, llm?.resolveModelInfo?.bind(llm));
+      /**
+       * 思考强度：哪一级显式写了就用哪一级，没写才用「全局思考强度」。
+       *
+       * 两级都空 = 不传，让 adapter 自己用默认档（直连后的旧行为）。
+       * 真正的「这台机器上这个模型认不认这一档」还是由 `pickReasoningEffort`
+       * 去问宿主，不认就不传——否则整轮在 provider I/O 之前就失败。
+       */
+      const wantEffort = sel.reasoningEffort || String(cfg.model?.effort ?? '').trim();
+      const effort = await pickReasoningEffort({ ...sel, reasoningEffort: wantEffort }, llm?.resolveModelInfo?.bind(llm));
       const choice = {
         provider: sel.provider,
         model: sel.model,
@@ -5289,19 +5329,125 @@ export function apply(ctx) {
               const cid = String(arg?.chatId || chatId || '');
               const kind = String(arg?.kind || '');
               const dm = ctx.get?.('agentDefaultModel');
+              /**
+               * 这个聊天最终会用哪个模型。面板拿它判断「思考强度能不能选」
+               * （模型没公布档位时置灰）、以及「自动看图」到底会不会发图。
+               */
+              const effective = pickModelFor({
+                byChat: cfg.model?.byChat,
+                byKind: cfg.model?.byKind,
+                defaultSel: cfg.model?.default,
+                chatId: cid,
+                kind,
+                globalSel: dm?.currentSelection?.() || null,
+              });
               return send(res, 200, {
                 ok: true,
                 chatId: cid,
                 kind,
                 override: cid ? (cfg.model?.byChat?.[cid] || null) : null,
                 byKind: kind ? (cfg.model?.byKind?.[kind] || null) : null,
+                /**
+                 * 两张表整份给面板：它要列「单个 QQ / 群的例外」并支持移除，
+                 * 只回当前那一条的话，面板永远只能显示一行。
+                 */
+                byChat: cfg.model?.byChat || {},
+                byKindAll: {
+                  c2c: cfg.model?.byKind?.c2c || {},
+                  group: cfg.model?.byKind?.group || {},
+                },
+                /** 「所有聊天的默认模型」这一层（byKind 之上、DSH 全局之下） */
+                defaultSel: cfg.model?.default || null,
+                /** 全局思考强度：单个聊天没写 effort 时用它兜底 */
+                effort: String(cfg.model?.effort ?? ''),
                 global: dm?.currentSelection?.() || null,
+                effective: effective || null,
               });
             }
+            /**
+             * 模型清单：DSH 里能用哪些模型、各自支不支持思考强度 / 看图。
+             *
+             * 带缓存（10 分钟），`refresh: true` 强制重来——刚装了新模型或改完
+             * provider 配置时点面板上的「刷新」。
+             */
+            case 'model.list': {
+              try {
+                const r = await modelCatalog.list({ refresh: Boolean(arg?.refresh) });
+                return send(res, 200, { ok: true, list: r.list, at: r.at, cached: r.cached });
+              } catch (e) {
+                /** 列不出来不是故障：面板会退回手填 provider / model 那条路 */
+                return send(res, 200, { ok: false, message: e?.message ?? String(e), list: [] });
+              }
+            }
+            /** 测速：真问一次模型（花一点点额度），看它回一句话要多久 */
+            case 'model.ping': {
+              const provider = String(arg?.provider || '').trim();
+              const model = String(arg?.model || '').trim();
+              if (!provider || !model) return send(res, 400, { ok: false, message: '要 provider 和 model' });
+              try {
+                const r = await pingModel(() => ctx.get?.('llm'), { provider, model });
+                return send(res, 200, { ok: true, ms: r.ms, text: r.text });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: e?.message ?? String(e) });
+              }
+            }
             case 'model.set': {
+              /**
+               * 两件「不针对某个聊天」的事先处理掉，它们的键和下面两层不一样：
+               *
+               *   `{ effort }`  全局思考强度。单个聊天 / 单个类型**没写** effort 时
+               *                 用它兜底；写了就以写的为准（`applyDefaultModel` 里那个顺序）。
+               *   `{ default: {provider, model, reasoningEffort?} | {off:true} }`
+               *                 「所有聊天的默认模型」，夹在 `byKind` 和 DSH 全局默认之间。
+               *
+               * 不合并到下面两个分支，是因为那两个语义是「按聊天/按类型」，
+               * 混进去以后 `model.get` 回读的字段就没法区分是谁写的了。
+               */
+              if (arg && typeof arg === 'object' && Object.prototype.hasOwnProperty.call(arg, 'effort')) {
+                const effort = String(arg.effort ?? '').trim();
+                if (effort.length > 32) return send(res, 400, { ok: false, message: 'effort 太长' });
+                const curEffort = loadConfig();
+                curEffort.model = { ...(curEffort.model || {}), effort };
+                cfg = saveConfig(curEffort);
+                /** 所有会话下一轮重新套（effort 只有套模型那一刻才用得上） */
+                modelApplied.clear();
+                modelFailed.clear();
+                return send(res, 200, { ok: true, effort });
+              }
+              if (arg && typeof arg === 'object' && Object.prototype.hasOwnProperty.call(arg, 'default')) {
+                const d = arg.default;
+                const curDefault = loadConfig();
+                const next = { ...(curDefault.model || {}) };
+                if (!d || d.off) {
+                  next.default = {};
+                } else {
+                  const provider = String(d.provider || '').trim();
+                  const model = String(d.model || '').trim();
+                  if (!provider || !model) {
+                    return send(res, 400, { ok: false, message: '要 provider 和 model（或 off 清掉）' });
+                  }
+                  next.default = {
+                    provider,
+                    model,
+                    ...(d.reasoningEffort ? { reasoningEffort: String(d.reasoningEffort) } : {}),
+                  };
+                }
+                curDefault.model = next;
+                cfg = saveConfig(curDefault);
+                modelApplied.clear();
+                modelFailed.clear();
+                return send(res, 200, { ok: true, default: next.default || null });
+              }
               const kind = String(arg?.kind || '');
-              /** 带 kind = 改「所有私聊 / 所有群」的默认（byKind）；不带 = 改单个会话 */
-              if (kind) {
+              const cid0 = String(arg?.chatId || chatId || '');
+              /**
+               * 只有**没带 chatId** 时才按类型改（`byKind`）；带 chatId 一律按单个会话。
+               *
+               * 以前判的是「有没有 kind」，于是面板「给这个聊天选模型」传
+               * `{chatId, kind}` 时会掉进 byKind 分支，把**所有**私聊/群都改了——
+               * 面板上看起来是「只改了这一个」，实际影响一片。
+               */
+              if (kind && !cid0) {
                 if (!['c2c', 'group'].includes(kind)) {
                   return send(res, 400, { ok: false, message: 'kind 只认 c2c / group' });
                 }
@@ -5328,7 +5474,7 @@ export function apply(ctx) {
                 modelFailed.clear();
                 return send(res, 200, { ok: true, kind, byKind: byKind[kind] || null });
               }
-              const cid = String(arg?.chatId || chatId || '');
+              const cid = cid0;
               if (!cid) return send(res, 400, { ok: false, message: '缺 chatId' });
               const next = { ...(cfg.model?.byChat || {}) };
               if (arg?.off) {
@@ -5343,6 +5489,11 @@ export function apply(ctx) {
                   provider,
                   model,
                   ...(arg?.reasoningEffort ? { reasoningEffort: String(arg.reasoningEffort) } : {}),
+                  /**
+                   * 顺手把类型记下来：面板的「单个例外」要能标出「私聊」还是「群」。
+                   * 这一层只用来显示，`pickModelFor` 不看它（byChat 的键本身就唯一）。
+                   */
+                  ...(kind ? { kind } : {}),
                 };
               }
               /**

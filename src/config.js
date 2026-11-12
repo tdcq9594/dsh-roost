@@ -549,7 +549,16 @@ export const DEFAULTS = {
      * 不该由插件擅自拉起。打开后只在「配置了直连 + 当前没在跑」时才启动。
      */
     autoStart: false,
-    /** 这一轮要不要下载图片给模型看（注意：关掉之后模型只能看到「发来一张图」） */
+    /**
+     * 这一轮要不要下载图片给模型看（注意：关掉之后模型只能看到「发来一张图」）。
+     *
+     * 三态：
+     *   `true`   总是发（老行为，默认）
+     *   `false`  不发，只给一行文字提示
+     *   `'auto'` 问 DSH 这个模型能不能看图：**明确说看不了**才不发；
+     *            DSH 没声明（`inputModalities` 缺省）就照发——把「未知」当
+     *            「不支持」会把图白白丢掉，比降级更糟。
+     */
     vision: true,
     /**
      * 一次最多看几张图。旧 ai-chat 面板的 `maxImages`，直连后一度写死成 4，
@@ -659,10 +668,26 @@ export const DEFAULTS = {
     byChat: {},
     /**
      * 按会话类型默认（E6 补全）：`c2c` / `group` 各一份。
-     * 优先级：`byChat[chatId]` > `byKind[kind]` > DSH 全局默认。
+     * 优先级：`byChat[chatId]` > `byKind[kind]` > `default` > DSH 全局默认。
      * 给「所有私聊统一用 A 模型、所有群统一用 B 模型」用。
      */
     byKind: { c2c: {}, group: {} },
+    /**
+     * 所有聊天的默认模型（面板「聊天用的模型」那张卡）。
+     *
+     * 单独一层而不是直接写 byKind 的两个键：写 byKind 会让人以为
+     * 「私聊/群聊分别配过」，而这里表达的是「我用这一个，别的都别管」。
+     * 空对象 = 跟随 DSH 的全局默认。
+     */
+    default: {},
+    /**
+     * 全局思考强度（`low` / `high` / `max`，空 = 不传、让模型用自己的默认档）。
+     *
+     * 只在某一级**没有**显式写 `reasoningEffort` 时兜底。真正下传之前还会经
+     * `pickReasoningEffort` 问一次宿主认不认这一档——很多模型没有推理元数据，
+     * 硬塞会在 provider I/O 之前整轮失败。
+     */
+    effort: '',
   },
   persona: {
     /** 当前用哪个人格（对应 personas/<id>.md） */

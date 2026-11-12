@@ -1120,7 +1120,16 @@ test('后端缺口已接入：市场 / 模型 / 召回 / 心情历史 / 危险�
   /* 模型块已从设置页拆出（2026-11-12），这里跟着换到模型页验 */
   rt.reset()
   const modelTxt = textOf(expand(mod.ModelTab({ toast: () => {}, currentChatId: '' }), rt))
-  assert.ok(modelTxt.includes('设为该类型默认'), '模型页缺 model.set 控件')
+  /**
+   * 模型页 2026-11-13 改成「从 DSH 清单里选」：provider/model 手填降级成
+   * 清单拉不到时的退路，主路径变成三张卡。断言跟着换成这些必须出现的入口。
+   */
+  assert.ok(modelTxt.includes('聊天用的模型'), '模型页缺「聊天用的模型」卡')
+  assert.ok(modelTxt.includes('思考强度'), '模型页缺思考强度')
+  assert.ok(modelTxt.includes('视觉能力'), '模型页缺视觉能力')
+  assert.ok(modelTxt.includes('按聊天选模型'), '模型页缺按聊天选模型')
+  assert.ok(modelTxt.includes('单个 QQ / 群的例外'), '模型页缺单个聊天的例外入口')
+  assert.ok(modelTxt.includes('可用的模型'), '模型页缺可用模型清单')
   assert.ok(at('config').includes('危险操作'), '设置页缺危险操作总入口')
   assert.ok(at('memory').includes('召回记录'), '记忆页缺 recall.log 入口')
   assert.ok(at('mood').includes('清空心情历史'), '心情页缺 mood.history.clear 入口')

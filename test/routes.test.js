@@ -1055,3 +1055,72 @@ test('路由：更新说明取的是当前版本那一段', async () => {
     off?.();
   }
 });
+
+/* ---------------- 模型三层（2026-11-13：面板改成从 DSH 清单里选） ---------------- */
+
+const modelOp = (call, op, arg = {}) => call('/quick', {
+  method: 'POST',
+  body: { op, arg, chatId: '' },
+});
+
+test('路由：model.set 的四个入口各改各的，互不串台', async () => {
+  const { call, dir, off } = await bootHost();
+
+  /** ① 所有聊天的默认模型 */
+  let r = await modelOp(call, 'model.set', { default: { provider: 'p1', model: 'm1' } });
+  assert.equal(r.json.ok, true);
+  /** ② 全局思考强度 */
+  r = await modelOp(call, 'model.set', { effort: 'low' });
+  assert.equal(r.json.ok, true);
+  /** ③ 群聊类型默认 */
+  r = await modelOp(call, 'model.set', { kind: 'group', provider: 'p2', model: 'm2' });
+  assert.equal(r.json.ok, true);
+  /**
+   * ④ 单个聊天，**同时带 kind**。
+   *
+   * 面板「添加例外」就是这么发的（它知道这个聊天是私聊还是群）。
+   * 以前 `if (kind)` 会掉进 byKind 分支，把**所有**私聊都改成 p3——
+   * 面板上看起来只改了一个，实际影响一片。
+   */
+  r = await modelOp(call, 'model.set', { chatId: 'g1', kind: 'c2c', provider: 'p3', model: 'm3' });
+  assert.equal(r.json.ok, true);
+
+  const g = await modelOp(call, 'model.get', {});
+  assert.deepEqual(g.json.defaultSel, { provider: 'p1', model: 'm1' });
+  assert.equal(g.json.effort, 'low');
+  assert.equal(g.json.byKindAll.group.model, 'm2');
+  assert.deepEqual(g.json.byKindAll.c2c, {}, '带 chatId 时绝不能把所有私聊都改掉');
+  assert.equal(g.json.byChat.g1.model, 'm3');
+  assert.equal(g.json.byChat.g1.kind, 'c2c', '面板要用它标「私聊 / 群」');
+
+  /** 落到磁盘上的形状也要对：pruneTo 会把不在 DEFAULTS 里的键裁掉 */
+  const saved = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'));
+  assert.deepEqual(saved.model.default, { provider: 'p1', model: 'm1' });
+  assert.equal(saved.model.effort, 'low');
+  assert.equal(saved.model.byChat.g1.provider, 'p3');
+
+  /** 清掉 / 恢复：默认模型回 {}，单个聊天整条删掉 */
+  await modelOp(call, 'model.set', { default: { off: true } });
+  await modelOp(call, 'model.set', { chatId: 'g1', off: true });
+  const g2 = await modelOp(call, 'model.get', {});
+  assert.deepEqual(g2.json.defaultSel, {});
+  assert.equal(g2.json.byChat.g1, undefined, '删掉的键不能被深合并合回来');
+  off?.();
+});
+
+test('路由：宿主没有 ctx.llm 时清单给一句人话，不是 500', async () => {
+  const { call, off } = await bootHost();
+  const r = await modelOp(call, 'model.list', {});
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, false);
+  assert.match(String(r.json.message), /ctx\.llm|模型清单/);
+  assert.deepEqual(r.json.list, [], '面板要能拿着空清单退回手填');
+
+  const p = await modelOp(call, 'model.ping', { provider: 'p1', model: 'm1' });
+  assert.equal(p.json.ok, false);
+  assert.ok(String(p.json.message).length > 0, '测速失败也要有原因');
+
+  const bad = await modelOp(call, 'model.ping', {});
+  assert.equal(bad.status, 400, '缺 provider/model 直接 400');
+  off?.();
+});

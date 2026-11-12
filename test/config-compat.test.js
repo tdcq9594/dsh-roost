@@ -88,3 +88,47 @@ test('markdown 开关：关掉后 msg.send 不带 markdown（@ 与加粗会按�
   await on.send({ target: 'g1', text: '**加粗**' });
   assert.equal(calls[1][1].markdown.content, '**加粗**');
 });
+
+test('视觉能力三态：auto 才去问模型；「未知」和探测失败一律照发', async () => {
+  /**
+   * `vision: 'auto'` 是 2026-11-13 加的第三态（面板「视觉能力」的「自动」）。
+   *
+   * 这里要钉住的是**降级的方向**：只有宿主明确说「这个模型看不了图」才不发图。
+   * 未知（`inputModalities` 缺省）和探测失败都必须照发——把用户发的图悄悄丢掉，
+   * 比多带一张图糟得多，而且模型那边往往只是多几个 token。
+   */
+  const evt = {
+    chat: { kind: 'c2c', chatId: 'c1' }, sender: { openid: 'u1' },
+    content: '看图', attachments: [{ type: 'image', url: 'http://img.local/1.png' }],
+  };
+  const rpc = async () => ({ bucket: 'member' });
+  /** 下载必然失败：这样「发不发图」只看 vision 判定，不受网络影响 */
+  const fetchImpl = async () => ({ ok: false });
+  const asked = [];
+  const mk = (answer) => createPayloadBuilder({
+    rpc,
+    vision: () => 'auto',
+    canSee: async (o) => { asked.push(o); return answer(); },
+    fetchImpl,
+  });
+
+  const off = await mk(async () => false)(evt, { send: async () => ({}) });
+  assert.match(off.rendered, /这一轮没开看图/, '明确看不了图 → 只给文字提示');
+  assert.deepEqual(off.images, []);
+  assert.deepEqual(asked[0], { chatId: 'c1', kind: 'c2c' }, '要按这个聊天问');
+
+  for (const [label, answer] of [
+    ['未知', async () => null],
+    ['探测抛错', async () => { throw new Error('boom'); }],
+    ['能看', async () => true],
+  ]) {
+    const p = await mk(answer)(evt, { send: async () => ({}) });
+    assert.doesNotMatch(p.rendered, /这一轮没开看图/, `${label} 时必须照发`);
+  }
+
+  /** 老的两态不受影响：true 永远发、false 永远不发 */
+  const always = createPayloadBuilder({ rpc, vision: () => true, fetchImpl });
+  assert.doesNotMatch((await always(evt, { send: async () => ({}) })).rendered, /这一轮没开看图/);
+  const never = createPayloadBuilder({ rpc, vision: () => false, fetchImpl });
+  assert.match((await never(evt, { send: async () => ({}) })).rendered, /这一轮没开看图/);
+});

@@ -193,9 +193,15 @@ export function buildRendered(evt, text, { images = null } = {}) {
  * @param {(m:string,p?:object,opt?:object)=>Promise<any>} o.rpc
  * @param {(m:string)=>void} [o.log]
  * @param {typeof fetch} [o.fetchImpl]
- * @param {boolean} [o.vision] 这一轮要不要看图
+ * @param {boolean|'auto'|(()=>boolean|'auto')} [o.vision] 这一轮要不要看图
+ * @param {(o:{chatId:string,kind:string})=>Promise<boolean|null>} [o.canSee]
+ *        `vision === 'auto'` 时问一句「这个模型能不能看图」；
+ *        返回 `null` = 宿主没声明，按「照发」处理
  */
-export function createPayloadBuilder({ rpc, log = () => {}, fetchImpl = fetch, vision = true, maxImages = DEFAULT_MAX_IMAGES, markdown = true } = {}) {
+export function createPayloadBuilder({
+  rpc, log = () => {}, fetchImpl = fetch, vision = true,
+  maxImages = DEFAULT_MAX_IMAGES, markdown = true, canSee = null,
+} = {}) {
   /** 通道到底走不走 Markdown：@ 标签、图文同条、按钮都跟着它变 */
   const wantMarkdown = () => {
     const raw = typeof markdown === 'function' ? markdown() : markdown;
@@ -211,6 +217,29 @@ export function createPayloadBuilder({ rpc, log = () => {}, fetchImpl = fetch, v
   const imgDir = join(dataDir(), 'images');
   /** 配置热读：面板上关掉看图，下一轮就该生效，不用重启 */
   const wantVision = () => (typeof vision === 'function' ? vision() : vision);
+
+  /**
+   * 这一轮到底发不发图。
+   *
+   * `'auto'` 要问宿主「这个模型能不能看图」，所以是异步的；只有**明确说看不了**
+   * 才降级成文字提示。探测失败 / 宿主没声明 / 抛错，一律按「发」处理——
+   * 宁可多带一张图，也别因为问不到就把用户发的图丢掉。
+   */
+  async function visionOn(evt) {
+    const raw = wantVision();
+    if (raw !== 'auto') return raw !== false;
+    if (typeof canSee !== 'function') return true;
+    try {
+      const v = await canSee({
+        chatId: String(evt?.chat?.chatId ?? ''),
+        kind: evt?.chat?.kind === 'c2c' ? 'c2c' : 'group',
+      });
+      return v !== false;
+    } catch (e) {
+      log(`问「这个模型能不能看图」失败（按能看处理）：${e?.message ?? e}`);
+      return true;
+    }
+  }
 
   async function permissionOf(evt) {
     const userId = String(evt?.sender?.openid ?? '').trim();
@@ -236,7 +265,7 @@ export function createPayloadBuilder({ rpc, log = () => {}, fetchImpl = fetch, v
 
   /** 下载图片：不走 roost 的 media.fetch，直接抓 QQ 的 URL，和 ai-chat 行为一致 */
   async function collectImages(evt) {
-    if (!wantVision()) return 'off';
+    if (!(await visionOn(evt))) return 'off';
     const urls = (evt?.attachments ?? []).filter(isImageAttachment).map((a) => String(a.url)).slice(0, wantMaxImages());
     if (!urls.length) return [];
 

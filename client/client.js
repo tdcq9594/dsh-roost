@@ -7223,9 +7223,10 @@ select.roost-input{color-scheme:dark}
       ['closing', '收尾', '对话冷掉前自己补一句：多久算冷（coolMinutes）、盯几个会话（maxChats）、记录留几天（ttlDays）'],
       ['leakGuard', '防复读', 'enabled：她回复里整段复述了注入的记忆块，出站前删掉那几句。默认关，日常在「权限」页高级组里点'],
       ['bridge', '对外联动（实验）', 'enabled：让别的 DSH 插件通过 ctx.get("aurabot") 主动发消息、读状态；接口可能变，默认关'],
-      ['model', '模型', 'byChat：按会话指定 provider / model / reasoningEffort，没配就用 DSH 的全局默认模型'
-        + '（例：{"群openid":{"provider":"deepseek","model":"deepseek-chat"}}）。'
-        + '思考强度会先问 DSH 这个模型支持哪几档，不支持就不传，避免整轮直接报错'],
+      ['model', '模型', '三层回退：byChat[chatId] > byKind.c2c / byKind.group > default > DSH 全局默认模型。'
+        + 'default 是「所有聊天都用它」（面板「聊天用的模型」那张卡）。'
+        + 'effort 是全局思考强度（low / high / max，空 = 不传）：哪一级显式写了 reasoningEffort 就以它为准。'
+        + '真正下传前会先问 DSH 这个模型支持哪几档，不支持就不传，避免整轮直接报错'],
       ['persona', '人格', '当前用哪个人格、按群指定；换人格去「人格」页点「用这个」'
         + '（name / text 是 0.10.0 之前的旧字段，只在人格文件读不出正文时才兜底）'],
       ['stickers', '表情包', '图放哪、要不要注入'],
@@ -7238,7 +7239,8 @@ select.roost-input{color-scheme:dark}
       ['channel', '通道', '只保留 roost（框架外接协议直连）；老配置里的 qq 会自动归一'],
       ['roostHost', '直连 roost', 'enabled：要不要连框架的外接协议（地址和 token 在 roost 面板「外接」页，'
         + '端口是 6800+hash，每只鸟不一样）。url 形如 http://127.0.0.1:6801；'
-        + 'vision 关掉后模型只能看到「发来一张图」；maxImages 是一次最多看几张（0 关，上限 8）；'
+        + 'vision 三态：true 总是发图 / false 只给文字提示 / "auto" 按 DSH 声明的模型能力决定；'
+        + 'maxImages 是一次最多看几张（0 关，上限 8）；'
         + 'markdown 关掉后加粗列表和真 @ 都会退化成纯文字。'
         + '**发送要真正走这条，还得把上面 channel.current 改成 roost**（两个开关分开，'
         + '可以先只开 enabled 看连接状态）。'
@@ -8789,86 +8791,373 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    /** 模型：按会话 / 按私聊群聊指定 provider + model（后端 model.get / model.set） */
-    function ModelBlock({ toast, currentChatId }) {
+    /**
+     * 模型：聊天用哪个、按聊天单独选、清单里有什么。
+     *
+     * 以前这一页是「provider / model 两个输入框 + 四个按钮」：得先知道 DSH 里
+     * 它们分别叫什么，拼错一个字母就整轮报「找不到模型」，而报错点离面板很远，
+     * 用户根本联想不到是这里填错了。
+     *
+     * 现在改成从 DSH 的清单里选（`model.list`），并把能力一起显示出来：
+     * 思考强度不支持的模型选了也不会传下去，看图能力「未知」和「看不了」要能分清。
+     *
+     * **清单拿不到时退回手填**（宿主没暴露 `ctx.llm`、或者 provider 全没登录），
+     * 功能不因为清单没拉到就整页不能改。
+     */
+    function ModelBlock({ toast, currentChatId, config, saveCfg }) {
       const [info, setInfo] = useState(null)
-      const [kind, setKind] = useState('c2c')
-      const [chatId, setChatId] = useState('')
-      const [provider, setProvider] = useState('')
-      const [model, setModel] = useState('')
+      const [cat, setCat] = useState(null)
+      const [catErr, setCatErr] = useState('')
       const [busy, setBusy] = useState(false)
+      /** `provider::model` → 测速结果文案 */
+      const [ping, setPing] = useState({})
+      const [open, setOpen] = useState(false)
+      const [add, setAdd] = useState({ kind: 'c2c', id: '', sel: '' })
+      const [manual, setManual] = useState({ provider: '', model: '' })
+
       const call = async (op, arg) => {
-        const r = await post('/quick', { op, arg, chatId: '' })
-        if (r?.ok === false) toast(r.message || '操作失败')
+        const r = await post('/quick', { op, arg: arg || {}, chatId: '' })
+        if (r?.ok === false && r?.message) toast(r.message)
         return r
       }
-      /** 必须带 kind：后端只在带 kind / chatId 时才回 byKind / override，空参数永远 null */
-      const load = async () => setInfo(await call('model.get', { kind }))
-      useEffect(() => { load() }, [kind])
+      /** 测速失败不该弹提示条：它本来就有一列结果在下面，失败原因写在那里 */
+      const quiet = async (op, arg) => post('/quick', { op, arg: arg || {}, chatId: '' })
+
+      /**
+       * 一次把两张表拉齐：`model.get` 是「现在用的是什么」，`model.list` 是
+       * 「能选什么」。少一张，下拉里就是空值，用户会以为配置丢了。
+       */
+      const load = async (refresh) => {
+        setBusy(true)
+        try {
+          const [g, l] = await Promise.all([
+            quiet('model.get', {}),
+            quiet('model.list', { refresh: Boolean(refresh) }),
+          ])
+          if (g && g.ok !== false) setInfo(g)
+          if (l && l.ok !== false) {
+            setCat(l)
+            setCatErr('')
+          } else {
+            setCat({ list: [] })
+            setCatErr(String(l?.message || '读不到模型清单'))
+          }
+        } finally {
+          setBusy(false)
+        }
+      }
+      useEffect(() => { load(false) }, [])
+
       const apply = async (arg, okText) => {
         setBusy(true)
         try {
           const r = await call('model.set', arg)
-          toast(r?.ok ? okText : (r?.message || '没改成'))
-          await load()
-        } finally { setBusy(false) }
+          if (r?.ok) toast(okText)
+          await load(false)
+        } finally {
+          setBusy(false)
+        }
       }
-      const byKind = info?.byKind
-      const fmt = (v) => v ? [v.provider, v.model].filter(Boolean).join(' / ') : '跟随全局'
-      return h(Sec, {
-        n: '01',
-        title: '模型',
-        right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新'),
+
+      const list = Array.isArray(cat?.list) ? cat.list : []
+      const keyOf = (m) => (m && m.provider && m.model ? m.provider + '::' + m.model : '')
+      const valOf = (sel) => (sel && sel.provider && sel.model ? sel.provider + '::' + sel.model : '')
+      const split = (v) => {
+        const s = String(v || '')
+        if (!s) return null
+        const [p, ...rest] = s.split('::')
+        return { provider: p, model: rest.join('::') }
+      }
+      const labelOf = (v) => {
+        const hit = list.find((m) => keyOf(m) === v)
+        return hit ? hit.name : (split(v)?.model || '')
+      }
+
+      /** 「聊天用的模型」：自己设的默认优先，没设就是 DSH 的全局默认 */
+      const mine = valOf(info?.defaultSel)
+      const eff = info?.effective || info?.global || null
+      /** 宿主老版本回的是字符串（'provider / model'），新版本回对象，两种都得能显示 */
+      const effTxt = eff ? (typeof eff === 'string' ? eff : [eff.provider, eff.model].filter(Boolean).join(' / ')) : ''
+      const effCap = list.find((m) => keyOf(m) === keyOf(eff)) || null
+      /** 测速对象：设了自己的默认就测它，否则测 DSH 那个 */
+      const pingTarget = split(mine) || (eff && eff.provider && eff.model ? { provider: eff.provider, model: eff.model } : null)
+
+      /** 下拉选项：清单 + 「跟随 DSH 默认」。当前值不在清单里（模型被删）也要能看见 */
+      const optsOf = (cur, withNone = true, noneLabel = '跟随 DSH 默认') => {
+        const out = (withNone ? [{ value: '', label: noneLabel }] : [])
+          .concat(list.map((m) => ({ value: keyOf(m), label: m.name + (m.provider ? '｜' + m.provider : '') })))
+        if (cur && !out.some((o) => o.value === cur)) {
+          out.unshift({ value: cur, label: (split(cur)?.model || cur) + '（清单里没找到）' })
+        }
+        return out
+      }
+
+      const select = (value, opts, onChange, width) => h('select', {
+        className: 'roost-input',
+        style: { width: width || 260 },
+        value: value || '',
+        onChange: (e) => onChange(e.target.value),
+      }, opts.map((o) => h('option', { key: o.value || 'none', value: o.value }, o.label)))
+
+      /**
+       * 分段选择器。选中那段用主按钮色：原生的 radio 在这套深色皮里太小，
+       * 而两个按钮挨着放又看不出「这是一组、只能选一个」。
+       */
+      const seg = (value, opts, onChange, disabled) => h('div', {
+        style: { display: 'inline-flex', border: '1px solid var(--line)', borderRadius: 8, overflow: 'hidden' },
+      }, opts.map((o, i) => h('button', {
+        key: String(o.value),
+        type: 'button',
+        disabled: Boolean(disabled),
+        className: value === o.value ? 'roost-primary' : 'roost-btn',
+        style: {
+          borderRadius: 0, padding: '5px 13px',
+          border: 'none', borderLeft: i ? '1px solid var(--line)' : 'none',
+        },
+        onClick: () => onChange(o.value),
+      }, o.label)))
+
+      /** 一行：左边标签 + 说明，右边控件；窄侧栏自动折行 */
+      const row = (label, hint, control) => h('div', {
+        style: {
+          display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap',
+          padding: '10px 0', borderTop: '1px solid var(--line-soft)',
+        },
       },
-        h('div', { className: 'roost-note' },
-          '全局：' + (info?.global
-            ? (typeof info.global === 'string' ? info.global : [info.global.provider, info.global.model].filter(Boolean).join(' / ') || '已设置')
-            : '未设置')),
-        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' } },
-          h('input', {
-            className: 'roost-input', style: { width: 140 }, placeholder: 'provider',
-            value: provider, onChange: (e) => setProvider(e.target.value),
-          }),
-          h('input', {
-            className: 'roost-input', style: { width: 180 }, placeholder: 'model',
-            value: model, onChange: (e) => setModel(e.target.value),
-          }),
-          h('select', {
-            className: 'roost-input', style: { width: 110 },
-            value: kind, onChange: (e) => setKind(e.target.value),
-          },
-            h('option', { value: 'c2c' }, '私聊'),
-            h('option', { value: 'group' }, '群聊'),
-          ),
-        ),
-        h('div', { className: 'roost-note', style: { marginTop: 6 } }, '当前：' + fmt(byKind)),
-        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 6 } },
-          h('button', {
-            type: 'button', className: 'roost-primary', disabled: busy || !provider || !model,
-            onClick: () => apply({ kind, provider, model }, '已设为默认'),
-          }, '设为该类型默认'),
-          h('button', {
+        h('div', { style: { flex: '1 1 210px', minWidth: 150 } },
+          h('div', { style: { fontSize: 12.5, fontWeight: 650 } }, label),
+          hint ? h('div', { className: 'roost-note', style: { margin: '2px 0 0' } }, hint) : null),
+        h('div', { style: { flex: '0 0 auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } }, control),
+      )
+
+      const test = async (sel) => {
+        if (!sel?.provider || !sel?.model) return
+        const k = keyOf(sel)
+        setPing((p) => ({ ...p, [k]: '测速中…' }))
+        const r = await quiet('model.ping', { provider: sel.provider, model: sel.model })
+        setPing((p) => ({ ...p, [k]: r?.ok ? (Number(r.ms) / 1000).toFixed(1) + ' 秒' : '失败：' + (r?.message || '') }))
+      }
+
+      /**
+       * 思考强度：`''` = 不指定（让模型用自己的默认档）。
+       *
+       * 不给「不支持就别选」的硬拦——档位是 adapter 私有的不透明 id，
+       * 清单里没查到不等于一定不支持（宿主可能只是没公布）。所以只是把提示写清楚，
+       * 真传的时候 `pickReasoningEffort` 还会再校验一次，不认就不传。
+       */
+      const efforts = [
+        { value: '', label: '不指定' },
+        { value: 'low', label: '低' },
+        { value: 'high', label: '高' },
+        { value: 'max', label: '最高' },
+      ]
+      const noReasoning = Boolean(effCap && effCap.reasoning === null)
+      const effortHint = noReasoning
+        ? '这个模型没有公布思考强度，选了也不会传下去'
+        : effCap && effCap.reasoning
+          ? '这个模型支持：' + effCap.reasoning.efforts.join(' / ') + '；聊天建议「低」，回得快'
+          : '聊天建议「低」，回得快；模型认不认这一档由 DSH 兜底'
+
+      /** 视觉能力：true = 总是发，false = 不发，'auto' = 问 DSH 这个模型能不能看图 */
+      const rawVision = config ? (config.roostHost?.vision ?? true) : true
+      const vision = rawVision === 'auto' ? 'auto' : (rawVision === false ? 'off' : 'on')
+      const visionHint = vision === 'off'
+        ? '收到图片只给一行文字提示，不会把图发给模型'
+        : vision === 'on'
+          ? '总是把图发给模型；模型其实看不了的话，带图那一轮可能报错'
+          : effCap && effCap.vision === true
+            ? 'DSH 说这个模型能看图，照常发'
+            : effCap && effCap.vision === false
+              ? 'DSH 说这个模型看不了图，自动降级成文字提示'
+              : 'DSH 没声明，照样发；确实看不了就手动选「不发」'
+      const setVision = async (v) => {
+        if (typeof saveCfg !== 'function') return
+        const r = await saveCfg({ roostHost: { vision: v === 'auto' ? 'auto' : v === 'on' } })
+        toast(r?.ok === false ? (r.message || '没存上') : '视觉能力已改（下一轮生效）')
+      }
+
+      const kinds = info?.byKindAll || {}
+      const exceptions = Object.entries(info?.byChat || {})
+        .map(([id, sel]) => ({ id, sel }))
+        .filter((x) => x.sel && x.sel.provider && x.sel.model)
+
+      return h('div', null,
+        h(Sec, {
+          n: '01',
+          title: '聊天用的模型',
+          right: h('button', {
             type: 'button', className: 'roost-btn', disabled: busy,
-            onClick: () => apply({ kind, off: true }, '已恢复默认'),
-          }, '恢复该类型默认'),
+            onClick: () => load(true),
+          }, busy ? '读着…' : '刷新'),
+        },
+          h('div', { className: 'roost-note', style: { marginTop: 2 } },
+            '新建的 QQ 会话按这里的设置来；已有会话改完从那个聊天的下一轮消息起生效。'
+            + (effTxt ? 'DSH 全局：' + effTxt : 'DSH 还没有默认模型')),
+
+          row('思考强度', effortHint,
+            seg(info?.effort || '', efforts, (v) => apply({ effort: v }, v ? '思考强度已改' : '已改成跟随模型默认'), false)),
+
+          row('视觉能力', visionHint,
+            config
+              ? seg(vision, [
+                  { value: 'auto', label: '自动' },
+                  { value: 'on', label: '总是发' },
+                  { value: 'off', label: '不发' },
+                ], (v) => setVision(v))
+              : h('span', { className: 'roost-note', style: { margin: 0 } }, '读取配置…')),
+
+          row('模型', '选了就用它当所有聊天的默认；「跟随 DSH 默认」= 用你在 DSH 里平时那个',
+            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              select(mine, optsOf(mine), (v) => apply(
+                v ? { default: split(v) } : { default: { off: true } },
+                v ? '已设为默认模型' : '已改回跟随 DSH 默认',
+              )),
+              pingTarget ? h('button', {
+                type: 'button', className: 'roost-btn', disabled: busy,
+                onClick: () => test(pingTarget),
+              }, '测速') : null,
+              pingTarget && ping[keyOf(pingTarget)]
+                ? h('span', { className: 'roost-note', style: { margin: 0 } }, ping[keyOf(pingTarget)])
+                : null,
+            )),
+
+          /** 清单没拉到时的退路：仍然能手填（老面板就是这个操作方式） */
+          catErr
+            ? h('div', {
+                style: { marginTop: 12, padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 10 },
+              },
+                h('div', { className: 'roost-note', style: { margin: 0 } }, '没用上清单：' + catErr),
+                h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' } },
+                  h('input', {
+                    className: 'roost-input', style: { width: 150 }, placeholder: 'provider',
+                    value: manual.provider, onChange: (e) => setManual({ ...manual, provider: e.target.value }),
+                  }),
+                  h('input', {
+                    className: 'roost-input', style: { width: 190 }, placeholder: 'model',
+                    value: manual.model, onChange: (e) => setManual({ ...manual, model: e.target.value }),
+                  }),
+                  h('button', {
+                    type: 'button', className: 'roost-primary',
+                    disabled: busy || !manual.provider.trim() || !manual.model.trim(),
+                    onClick: () => apply(
+                      { default: { provider: manual.provider.trim(), model: manual.model.trim() } },
+                      '已设为默认模型',
+                    ),
+                  }, '手填并设为默认'),
+                ),
+              )
+            : null,
         ),
-        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' } },
-          h('input', {
-            className: 'roost-input', style: { width: 220 }, placeholder: '会话 ID（单独指定）',
-            value: chatId, onChange: (e) => setChatId(e.target.value),
-          }),
-          h('button', {
-            type: 'button', className: 'roost-btn', disabled: !currentChatId,
-            onClick: () => setChatId(String(currentChatId)),
-          }, '用当前会话'),
-          h('button', {
-            type: 'button', className: 'roost-btn', disabled: busy || !chatId.trim() || !provider || !model,
-            onClick: () => apply({ chatId: chatId.trim(), provider, model }, '已设为该会话模型'),
-          }, '应用到会话'),
-          h('button', {
-            type: 'button', className: 'roost-btn', disabled: busy || !chatId.trim(),
-            onClick: () => apply({ chatId: chatId.trim(), off: true }, '已恢复该会话默认'),
-          }, '恢复该会话'),
+
+        h(Sec, { n: '02', title: '按聊天选模型' },
+          h('div', { className: 'roost-note', style: { marginTop: 2 } },
+            '顺序：这个聊天 > 私聊 / 群聊默认 > 上面那个默认模型 > DSH 全局。'
+            + '没配的那一级自动往下用；选的模型在 DSH 里找不到时也自动退回。'
+            + '只有你能在这里改，聊天里的人换不了。'),
+
+          row('私聊默认', '所有私聊用它；单个 QQ 的例外在下面加',
+            select(valOf(kinds.c2c), optsOf(valOf(kinds.c2c), true, '跟随上一级'), (v) => {
+              const s = split(v)
+              return s
+                ? apply({ kind: 'c2c', ...s }, '已设为私聊默认')
+                : apply({ kind: 'c2c', off: true }, '私聊改回跟随上一级')
+            })),
+
+          row('群聊默认', '所有群用它；单个群的例外在下面加',
+            select(valOf(kinds.group), optsOf(valOf(kinds.group), true, '跟随上一级'), (v) => {
+              const s = split(v)
+              return s
+                ? apply({ kind: 'group', ...s }, '已设为群聊默认')
+                : apply({ kind: 'group', off: true }, '群聊改回跟随上一级')
+            })),
+
+          h('div', { style: { marginTop: 12 } },
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => setOpen(!open),
+            }, (open ? '收起' : '展开') + '单个 QQ / 群的例外（' + exceptions.length + '）')),
+
+          open
+            ? h('div', { style: { marginTop: 10 } },
+                exceptions.length === 0
+                  ? h('div', { className: 'roost-note', style: { margin: '0 0 10px' } }, '还没有单独设置的聊天。')
+                  : h('div', { className: 'roost-list' },
+                      exceptions.map((x) => h('div', { key: x.id, className: 'roost-item' },
+                        h('span', { className: 'd' }, x.sel.kind === 'group' ? '群' : x.sel.kind === 'c2c' ? '私聊' : '聊天'),
+                        h('span', { className: 't' }, String(x.id)),
+                        h('span', { className: 'd' }, labelOf(valOf(x.sel))),
+                        h('button', {
+                          type: 'button', className: 'roost-btn', disabled: busy,
+                          onClick: () => apply({ chatId: x.id, off: true }, '已恢复该聊天默认'),
+                        }, '移除'),
+                      ))),
+
+                h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 10 } },
+                  seg(add.kind, [{ value: 'c2c', label: '私聊' }, { value: 'group', label: '群' }],
+                    (v) => setAdd({ ...add, kind: v })),
+                  h('input', {
+                    className: 'roost-input', style: { width: 200 },
+                    placeholder: add.kind === 'c2c' ? '会话 id（私聊是 openid）' : '群 id',
+                    value: add.id, onChange: (e) => setAdd({ ...add, id: e.target.value.trim() }),
+                  }),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: !currentChatId,
+                    title: currentChatId ? '填当前聊天' : '先在「记忆」页选一个聊天',
+                    onClick: () => setAdd({ ...add, id: String(currentChatId) }),
+                  }, '用当前会话'),
+                  select(add.sel, optsOf(add.sel, false).length
+                    ? [{ value: '', label: '选模型' }].concat(optsOf(add.sel, false))
+                    : [{ value: '', label: '清单里没有可选的模型' }],
+                  (v) => setAdd({ ...add, sel: v }), 230),
+                  h('button', {
+                    type: 'button', className: 'roost-primary',
+                    disabled: busy || !add.id || !add.sel,
+                    onClick: () => {
+                      const s = split(add.sel)
+                      if (!s) return
+                      apply({ chatId: add.id, kind: add.kind, ...s }, '已设为该聊天模型')
+                      setAdd({ ...add, id: '' })
+                    },
+                  }, '添加'),
+                ),
+              )
+            : null,
+        ),
+
+        h(Sec, {
+          n: '03',
+          title: '可用的模型',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } },
+            list.length ? '共 ' + list.length + ' 个' : ''),
+        },
+          cat === null
+            ? h('div', { className: 'roost-empty' }, '读着…')
+            : list.length === 0
+              ? h('div', { className: 'roost-empty' }, catErr || 'DSH 没有列出模型')
+              : h('div', null,
+                  h('div', { className: 'roost-note', style: { marginTop: 2 } },
+                    '「测速」是真的问一次模型（花一点点额度），看它回一句话要多久。'),
+                  h('div', { className: 'roost-list' },
+                    list.map((m) => h('div', { key: keyOf(m), className: 'roost-item' },
+                      h('span', { className: 't' }, m.name + (m.provider ? '｜' + m.provider : '')),
+                      h('span', { className: 'd' },
+                        m.reasoning ? '思考 ' + m.reasoning.efforts.join('/') : '无思考档'),
+                      h('span', { className: 'd' },
+                        m.vision === true ? '能看图' : m.vision === false ? '看不了图' : '看图未知'),
+                      ping[keyOf(m)] ? h('span', { className: 'd' }, ping[keyOf(m)]) : null,
+                      h('button', {
+                        type: 'button', className: 'roost-btn', disabled: busy,
+                        onClick: () => test(m),
+                      }, '测速'),
+                      h('button', {
+                        type: 'button', className: 'roost-btn', disabled: busy,
+                        onClick: () => apply(
+                          { default: { provider: m.provider, model: m.model } },
+                          '已设为默认模型',
+                        ),
+                      }, '用这个'),
+                    ))),
+                ),
         ),
       )
     }
@@ -9714,9 +10003,9 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    /** 模型：聊天用哪个、按聊天单独选、峰谷省钱。原来是「设置」里最上面那块。 */
-    function ModelTab({ toast, currentChatId }) {
-      return h(ModelBlock, { toast, currentChatId })
+    /** 模型：聊天用哪个、按聊天单独选、清单里有什么。原来是「设置」里最上面那块。 */
+    function ModelTab({ toast, currentChatId, config, saveCfg }) {
+      return h(ModelBlock, { toast, currentChatId, config, saveCfg })
     }
 
     /** 更新：版本与更新说明 + 反馈群。属于「这台机器怎么维护」，不跟聊天设置混。 */
@@ -10328,6 +10617,13 @@ select.roost-input{color-scheme:dark}
           if (!config) once('config', loadConfig)
           if (!her?.stickers) once('her', loadHer)
         }
+        /**
+         * 模型页：「视觉能力」那一行读写 `config.roostHost.vision`。
+         * 没拉配置时那一行只能显示「读取配置…」，改不了——所以进页先拉一次。
+         * 清单（`model.list`）由卡片自己拉：它慢（要逐个 provider 问能力），
+         * 卡在这儿会连页签都切不动。
+         */
+        if (tab === 'model' && !config) once('config', loadConfig)
         if (tab === 'awake') {
           // 授权状态在 /memory 里、chatId 列表在 /chats 里，这一页两样都要用
           once('awake', loadAwake)
@@ -10564,7 +10860,10 @@ select.roost-input{color-scheme:dark}
                 saveCfg, toast, reload: loadHer,
               })
             : null,
-          tab === 'model' ? h(ModelTab, { toast, currentChatId: mem?.chatId || '' }) : null,
+          tab === 'model'
+            /** 视觉能力那一行要读写 config，所以把 config / saveCfg 一起给过去 */
+            ? h(ModelTab, { toast, currentChatId: mem?.chatId || '', config, saveCfg })
+            : null,
           tab === 'update' ? h(UpdateTab, { toast }) : null,
           tab === 'awake'
             ? h(AwakeTab, {

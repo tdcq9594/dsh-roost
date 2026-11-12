@@ -47,6 +47,19 @@ test('E6：会话类型默认夹在单会话与全局之间', () => {
   assert.equal(pickModelFor({ byKind: { c2c: {} }, chatId: 'g2', kind: 'c2c', globalSel }).provider, 'g', '空的类型默认回退全局');
 });
 
+test('E6：「所有聊天的默认模型」夹在类型默认与 DSH 全局之间', () => {
+  const globalSel = { provider: 'g', model: 'gm' };
+  const defaultSel = { provider: 'd', model: 'dm' };
+  const byKind = { c2c: { provider: 'c', model: 'cm' } };
+  const byChat = { g1: { provider: 'x', model: 'xm' } };
+
+  assert.equal(pickModelFor({ byChat, byKind, defaultSel, chatId: 'g1', kind: 'c2c', globalSel }).provider, 'x', '单个聊天最优先');
+  assert.equal(pickModelFor({ byKind, defaultSel, chatId: 'g2', kind: 'c2c', globalSel }).provider, 'c', '类型默认次之');
+  assert.equal(pickModelFor({ defaultSel, chatId: 'g2', kind: 'group', globalSel }).provider, 'd', '没有类型默认就用默认模型');
+  assert.equal(pickModelFor({ defaultSel, globalSel }).provider, 'd', '不指定聊天时也用默认模型');
+  assert.equal(pickModelFor({ defaultSel: {}, globalSel }).provider, 'g', '空默认模型 = 跳过这一层');
+  assert.equal(pickModelFor({ defaultSel: { provider: 'd' }, globalSel }).provider, 'g', '残缺的默认模型也要跳过');
+});
 test('E6：字段去空格，provider/model 必须都有', () => {
   const r = pickModelFor({ byChat: { g1: { provider: '  deepseek ', model: ' deepseek-chat ' } }, chatId: 'g1' });
   assert.deepEqual(r, { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: '' });
@@ -72,12 +85,17 @@ test('E8：effort 不支持就不传；未知（没公布档位）保持原值',
 test('接线：DEFAULTS 有 model.byChat；applyDefaultModel 用纯函数 + 官方 select 优先', () => {
   assert.deepEqual(DEFAULTS.model.byChat, {});
   assert.deepEqual(DEFAULTS.model.byKind, { c2c: {}, group: {} });
+  /** 2026-11-13 新增的两层：默认模型 + 全局思考强度 */
+  assert.deepEqual(DEFAULTS.model.default, {}, '没设默认模型 = 跟随 DSH 全局');
+  assert.equal(DEFAULTS.model.effort, '', '默认不传思考强度（保持直连后的旧行为）');
   const src = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   const at = src.indexOf('async function applyDefaultModel');
   assert.ok(at > 0);
   const block = src.slice(at, src.indexOf('async function agentFor', at));
   assert.match(block, /pickModelFor\(/, '要走回退顺序');
   assert.match(block, /pickReasoningEffort\(/, 'E8 必须先校验思考强度');
+  assert.match(block, /defaultSel: cfg\.model\?\.default/, '要读「所有聊天的默认模型」这一层');
+  assert.match(block, /cfg\.model\?\.effort/, '某一级没写 effort 时用全局思考强度兜底');
   assert.match(block, /agent\?\.model\?\.select/, '官方入口优先');
   assert.match(block, /remote\?\.selectModel/, '桌面版旧接口作回退');
   assert.match(src, /applyDefaultModel\(sid, chat\.chatId, chat\.kind\)/);

@@ -20,16 +20,18 @@
  */
 
 /**
- * 选这次要用的模型：单个聊天 > 会话类型默认 > 全局默认。
+ * 选这次要用的模型：单个聊天 > 会话类型默认 > 所有聊天的默认 > 全局默认。
  *
- * 三层顺序对齐 aurabot `chat-model.js` 的「单个私聊 / 单个群 > 私聊默认 /
- * 群默认 > 全局」：QQ 里私聊和群的 chatId 都唯一，所以前两层落到同一个
- * `byChat[chatId]` 键上；后两层是 `byKind[kind]`（`c2c` / `group`）。
+ * 四层顺序对齐 aurabot `chat-model.js` 的「单个私聊 / 单个群 > 私聊默认 /
+ * 群默认 > 全局」：QQ 里私聊和群的 chatId 都唯一，所以第一层落到同一个
+ * `byChat[chatId]` 键上；第二层是 `byKind[kind]`（`c2c` / `group`）；
+ * 第三层 `defaultSel` 是「所有聊天都用它」（`model.default`）；
+ * 最后才是 DSH 自己的全局默认模型。
  *
- * @param {{byChat?:object, byKind?:object, chatId?:string, kind?:string, globalSel?:object}} opts
+ * @param {{byChat?:object, byKind?:object, defaultSel?:object, chatId?:string, kind?:string, globalSel?:object}} opts
  * @returns {{provider:string, model:string, reasoningEffort:string}|null}
  */
-export function pickModelFor({ byChat, byKind, chatId = '', kind = '', globalSel } = {}) {
+export function pickModelFor({ byChat, byKind, defaultSel, chatId = '', kind = '', globalSel } = {}) {
   const pick = (o) => {
     if (!o || typeof o !== 'object') return null;
     const provider = String(o.provider ?? '').trim();
@@ -45,7 +47,7 @@ export function pickModelFor({ byChat, byKind, chatId = '', kind = '', globalSel
   const own = key && byChat && typeof byChat === 'object' ? byChat[key] : null;
   const k = String(kind ?? '').trim();
   const byType = k && byKind && typeof byKind === 'object' ? byKind[k] : null;
-  return pick(own) || pick(byType) || pick(globalSel);
+  return pick(own) || pick(byType) || pick(defaultSel) || pick(globalSel);
 }
 
 /**
