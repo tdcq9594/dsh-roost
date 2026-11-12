@@ -53,6 +53,62 @@ export interface ExtensionMemoryConfig {
   maxRows?: number;
 }
 
+/**
+ * 一个可调设置字段的声明。面板据此渲染控件，宿主负责存储与下发。
+ *
+ * 类型对齐 `src/ext-config.js` 的 `CONFIG_TYPES`：`string` / `number` /
+ * `boolean` / `select` / `array` / `object`。没有 `path` / `file`。
+ */
+export type ConfigField =
+  | {
+    type: 'string';
+    label?: string;
+    hint?: string;
+    default?: string;
+    required?: boolean;
+    /** 值不进 `config.json`，单独存 `secrets/<id>.config.json`；只能放在顶层。 */
+    secret?: boolean;
+    maxLength?: number;
+    placeholder?: string;
+  }
+  | {
+    type: 'number';
+    label?: string;
+    hint?: string;
+    default?: number;
+    required?: boolean;
+    min?: number;
+    max?: number;
+    /** `true` 时拒收小数。 */
+    integer?: boolean;
+  }
+  | { type: 'boolean'; label?: string; hint?: string; default?: boolean; required?: boolean }
+  | {
+    type: 'select';
+    label?: string;
+    hint?: string;
+    default?: string;
+    required?: boolean;
+    options: (string | { value: string; label?: string })[];
+  }
+  | {
+    type: 'array';
+    label?: string;
+    hint?: string;
+    default?: unknown[];
+    required?: boolean;
+    items?: { type: 'string' | 'number' | 'boolean' };
+    maxItems?: number;
+  }
+  | {
+    type: 'object';
+    label?: string;
+    hint?: string;
+    required?: boolean;
+    /** 子字段；嵌套最多 2 层，且不能标 `secret`。 */
+    properties: Record<string, ConfigField>;
+  };
+
 export interface ExtensionManifest {
   /** 固定 `1`。 */
   api?: 1;
@@ -75,6 +131,12 @@ export interface ExtensionManifest {
   /** 只管 QQ 会话的工具可见性；独立会话工具全见。 */
   mounts?: string[];
   memory?: ExtensionMemoryConfig;
+  /**
+   * 可调设置声明：字段名 → 声明。最多 32 个字段。
+   * 面板会画表单，值存宿主侧，启动时通过 `ROOST_EXT_CONFIG` /
+   * `ROOST_EXT_SECRET_<KEY>` 下发。
+   */
+  config?: Record<string, ConfigField>;
   /** 市场元数据：本地完整性校验用。 */
   sha256?: string | null;
   size?: number;

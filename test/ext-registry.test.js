@@ -108,6 +108,23 @@ test('install：原子落位 + .source.json + 可重复安装（幂等覆盖）'
   assert.deepEqual(reg.list().map((x) => x.id), ['bili']);
 });
 
+test('install：覆盖更新要保住用户在面板里填的 config.json', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  assert.equal(reg.install(src, { source: { repo: 'm', version: '0.1.0' } }).ok, true);
+
+  /**
+   * 配置是**用户数据**不是发布物：安装走的是「旧目录 rename 成 .old 再删」，
+   * 不显式抢救就等于「更新一次设置全丢」。
+   */
+  const cfgFile = join(extensionsDir(home), 'bili', 'config.json');
+  fs.writeFileSync(cfgFile, `${JSON.stringify({ defaultLimit: 3 }, null, 2)}\n`, 'utf8');
+
+  assert.equal(reg.install(src, { source: { repo: 'm', version: '0.1.1' } }).ok, true);
+  assert.equal(JSON.parse(fs.readFileSync(cfgFile, 'utf8')).defaultLimit, 3, '更新后设置应保留');
+  assert.equal(reg.sourceOf('bili').version, '0.1.1', '扩展本体仍是新版本');
+});
+
 test('foreign 保护：用户手写目录（无 .source.json）拒绝覆盖与卸载，不给 force 后门', (t) => {
   const { home, src } = staged(t, 'bili');
   const reg = createExtRegistry({ dir: home });

@@ -8357,6 +8357,19 @@ select.roost-input{color-scheme:dark}
       const [data, setData] = useState(null)
       const [drafts, setDrafts] = useState({})
       const [saving, setSaving] = useState('')
+      /**
+       * 扩展设置：`cfgFor` = 当前展开的那一个扩展的 id。
+       *
+       * `cfgSecrets` 里 **undefined = 不动**、`''` = 清除、有字符串 = 覆盖。
+       * 三者必须分开：只用空串会变成「想清除」和「没动」不可区分，
+       * 一保存就把用户辛苦填的密钥抹掉。
+       */
+      const [cfgFor, setCfgFor] = useState('')
+      const [cfgData, setCfgData] = useState(null)
+      const [cfgDraft, setCfgDraft] = useState({})
+      const [cfgSecrets, setCfgSecrets] = useState({})
+      const [cfgErr, setCfgErr] = useState('')
+      const [cfgBusy, setCfgBusy] = useState(false)
       /** 扩展索要敏感权限时先弹窗，绝不自动带 confirmScopes 重试 */
       const [scopeAsk, setScopeAsk] = useState(null)
       const [scopeBusy, setScopeBusy] = useState(false)
@@ -8443,6 +8456,136 @@ select.roost-input{color-scheme:dark}
           toast(`${r.message || (r.ok ? '已保存' : '保存失败')}${cut}`)
           await load()
         } finally { setSaving('') }
+      }
+
+      /**
+       * 扩展设置：读 / 写 / 递归渲染。
+       *
+       * 字段类型由扩展在 `plugin.json` 的 `config` 里声明，前端不猜：
+       * string / number / boolean / select / array / object（嵌套最多两层）。
+       * 敏感项（`secret: true`）永远拿不到明文，只显示「已设置 / 未设置」。
+       */
+      const openCfg = async (id) => {
+        /** 再点一次同一个 = 收起；一次只展开一个，避免长列表里挂十几份表单。 */
+        if (cfgFor === id) { setCfgFor(''); setCfgData(null); setCfgErr(''); return }
+        setCfgFor(id); setCfgData(null); setCfgDraft({}); setCfgSecrets({}); setCfgErr('')
+        const r = await EXT_POST('extensions.config.get', { id })
+        setCfgData(r)
+        setCfgDraft(r.values || {})
+        if (!r.ok) setCfgErr(r.message || '读不到设置')
+      }
+      const cfgGet = (path) => path.reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), cfgDraft)
+      const cfgSet = (path, v) => {
+        const next = { ...cfgDraft }
+        let cur = next
+        for (let i = 0; i < path.length - 1; i++) {
+          const k = path[i]
+          cur[k] = { ...(cur[k] && typeof cur[k] === 'object' && !Array.isArray(cur[k]) ? cur[k] : {}) }
+          cur = cur[k]
+        }
+        cur[path[path.length - 1]] = v
+        setCfgDraft(next)
+      }
+      const saveCfg = async (id) => {
+        setCfgBusy(true); setCfgErr('')
+        try {
+          /** `undefined` = 不动；`''` = 清除；字符串 = 覆盖。三者不能混。 */
+          const secrets = {}
+          for (const [k, v] of Object.entries(cfgSecrets)) if (v !== undefined) secrets[k] = v
+          const r = await EXT_POST('extensions.config.save', { id, values: cfgDraft, secrets })
+          if (!r.ok) { setCfgErr(r.message || '保存失败'); return }
+          toast(r.message || '已保存')
+          /** 存完重读：后端会把默认值补齐，界面要和盘上一致。 */
+          const fresh = await EXT_POST('extensions.config.get', { id })
+          setCfgData(fresh)
+          setCfgDraft(fresh.values || {})
+          setCfgSecrets({})
+        } finally { setCfgBusy(false) }
+      }
+      const labelStyle = { display: 'block', fontSize: 11, opacity: 0.7, marginBottom: 2 }
+      const fieldBox = { marginTop: 8 }
+      const renderCfgField = (f, parentPath = []) => {
+        const path = [...parentPath, f.key]
+        const k = path.join('.')
+        if (f.secret) {
+          const typed = cfgSecrets[f.key]
+          const isSet = Boolean(cfgData?.secretSet?.[f.key])
+          const state = typed === undefined ? (isSet ? '已设置（留空不改）' : '未设置')
+            : typed === '' ? '保存后清除' : '保存后覆盖'
+          return h('div', { key: k, style: fieldBox },
+            h('span', { style: labelStyle }, `${f.label}${f.required ? ' *' : ''}`),
+            h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+              h('input', {
+                className: 'roost-input', type: 'password', autoComplete: 'new-password',
+                placeholder: isSet ? '已设置，留空不改' : '未设置',
+                value: typed === undefined ? '' : typed,
+                onChange: (e) => setCfgSecrets({ ...cfgSecrets, [f.key]: e.target.value }),
+              }),
+              isSet && typed === undefined
+                ? h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: () => setCfgSecrets({ ...cfgSecrets, [f.key]: '' }),
+                  }, '清除')
+                : null,
+            ),
+            h('span', { style: { ...labelStyle, marginTop: 2 } }, state),
+          )
+        }
+        if (f.type === 'object') {
+          return h('fieldset', {
+            key: k,
+            style: { marginTop: 8, padding: '4px 8px 8px', border: '1px solid color-mix(in srgb, currentColor 18%, transparent)', borderRadius: 6 },
+          },
+            h('legend', { style: { fontSize: 11, opacity: 0.75, padding: '0 4px' } }, f.label),
+            (f.properties || []).map((c) => renderCfgField(c, path)))
+        }
+        const val = cfgGet(path)
+        let control = null
+        if (f.type === 'boolean') {
+          return h('label', { key: k, style: { ...fieldBox, display: 'flex', gap: 6, alignItems: 'center' } },
+            h('input', {
+              type: 'checkbox', checked: val === true,
+              onChange: (e) => cfgSet(path, e.target.checked),
+            }),
+            h('span', null, f.label))
+        }
+        if (f.type === 'select') {
+          const cur = val === undefined ? '' : String(val)
+          /** 没有值又没默认值时补一个占位项：否则浏览器默认显示第一项，看着像已经选了。 */
+          const known = (f.options || []).some((o) => o.value === cur)
+          control = h('select', {
+            className: 'roost-input', value: cur,
+            onChange: (e) => cfgSet(path, e.target.value),
+          },
+            known ? null : h('option', { key: '__unset', value: '' }, '（未设置）'),
+            (f.options || []).map((o) => h('option', { key: o.value, value: o.value }, o.label)))
+        } else if (f.type === 'number') {
+          control = h('input', {
+            className: 'roost-input', type: 'number',
+            min: f.min, max: f.max, step: f.integer ? 1 : 'any',
+            value: val === undefined ? '' : String(val),
+            onChange: (e) => cfgSet(path, e.target.value),
+          })
+        } else if (f.type === 'array') {
+          /** 逐行一项：用逗号会吃掉用户正在输入的逗号，换行不会。 */
+          control = h('textarea', {
+            className: 'roost-input', rows: 3, style: { width: '100%' },
+            placeholder: '每行一项',
+            value: Array.isArray(val) ? val.join('\n') : '',
+            onChange: (e) => cfgSet(path, e.target.value.split('\n')),
+          })
+        } else {
+          control = h('input', {
+            className: 'roost-input', type: 'text', maxLength: f.maxLength,
+            placeholder: f.placeholder || '',
+            value: val === undefined ? '' : String(val),
+            onChange: (e) => cfgSet(path, e.target.value),
+          })
+        }
+        return h('div', { key: k, style: fieldBox },
+          h('span', { style: labelStyle }, `${f.label}${f.required ? ' *' : ''}`),
+          control,
+          f.hint ? h('span', { style: { ...labelStyle, marginTop: 2 } }, f.hint) : null)
       }
       return h(Sec, {
         title: '扩展市场 / 已装扩展',
@@ -8534,10 +8677,45 @@ select.roost-input{color-scheme:dark}
                   value: drafts[x.id] ?? '', spellCheck: false, disabled: x.foreign,
                   onChange: (e) => setDrafts({ ...drafts, [x.id]: e.target.value }),
                 }),
-                h('button', {
-                  type: 'button', className: 'roost-btn', style: { marginTop: 6 },
-                  disabled: saving === x.id || x.foreign, onClick: () => save(x.id),
-                }, x.foreign ? '用户手写 · 只读' : '保存 usage'),
+                h('div', { style: { display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' } },
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: saving === x.id || x.foreign, onClick: () => save(x.id),
+                  }, x.foreign ? '用户手写 · 只读' : '保存 usage'),
+                  x.hasConfig && !x.foreign
+                    ? h('button', {
+                        type: 'button', className: 'roost-btn',
+                        disabled: cfgBusy, onClick: () => openCfg(x.id),
+                      }, cfgFor === x.id ? '收起设置' : '设置')
+                    : null,
+                ),
+                cfgFor === x.id && cfgData
+                  ? h('div', {
+                      style: {
+                        marginTop: 8, paddingTop: 8,
+                        borderTop: '1px dashed color-mix(in srgb, currentColor 20%, transparent)',
+                      },
+                    },
+                      h('div', { className: 'roost-diag-h' }, `设置 · ${x.id}`),
+                      cfgErr ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } }, cfgErr) : null,
+                      !cfgData.spec || !cfgData.spec.length
+                        ? h('div', { className: 'roost-empty' }, cfgData.message || '这个扩展没有声明设置项')
+                        : h('div', null,
+                            cfgData.spec.map((f) => renderCfgField(f)),
+                            h('div', { style: { marginTop: 10, display: 'flex', gap: 8, alignItems: 'center' } },
+                              h('button', {
+                                type: 'button', className: 'roost-btn',
+                                disabled: cfgBusy || !cfgData.canEdit,
+                                onClick: () => saveCfg(x.id),
+                              }, cfgBusy ? '保存中…' : '保存设置'),
+                              h('span', { className: 'roost-note' },
+                                cfgData.canEdit
+                                  ? '保存后需要重连（或重启 DSH）才生效'
+                                  : '用户手写的扩展只读'),
+                            ),
+                          ),
+                    )
+                  : null,
               )),
             )
           : h('div', { className: 'roost-empty' }, '扩展目录里还没有东西。'),

@@ -26,6 +26,7 @@ import { BUCKETS, resolvePolicy } from './capabilities.js';
 import { V1_SCOPES } from './api-v1.js';
 import { USAGE_CHAR_LIMIT } from './ext-usage.js';
 import { SOURCE_FILE, MANIFEST_FILE } from './ext-registry.js';
+import { createExtConfig, validateValues } from './ext-config.js';
 import { DEFAULT_EXT_ACL } from './ext-memory.js';
 import { QUOTA_WIRED } from './quota.js';
 
@@ -142,8 +143,11 @@ export function createExtPanel({
   dir = dataDir(), registry, clientStore, capStore = null, secrets = null,
   rejections = null, cfg = {}, quota = null, extAcl = DEFAULT_EXT_ACL,
   fallbackProbe = null, now = () => Date.now(), log = () => {},
+  config = null,
 } = {}) {
   if (!registry || !clientStore) throw new Error('createExtPanel 需要 registry 与 clientStore');
+  /** 配置读写落在 ext-config；没注入就自己建（同一个 dir，测试可传临时实例）。 */
+  const extCfg = config ?? createExtConfig({ dir, log });
 
   const manifestPath = (id) => join(registry.pathOf(id), MANIFEST_FILE);
   const sourcePath = (id) => join(registry.pathOf(id), SOURCE_FILE);
@@ -181,6 +185,11 @@ export function createExtPanel({
         sha256Valid: Boolean(e.manifest?.sha256 || e.source?.sha256) && !locallyModified,
         label: locallyModified ? LOCALLY_MODIFIED_LABEL : '',
         hasToken: secrets ? Boolean(secrets.read(e.id)?.token) : null,
+        /**
+         * 有没有可调设置。前端据此决定要不要画「设置」按钮 ——
+         * 每个扩展都挂一个点进去说「没有设置项」的按钮纯属添乱。
+         */
+        hasConfig: registry.configSpecOf(e.id).length > 0,
         /**
          * 这个扩展的令牌**实际**拿到哪些 scope。
          *
@@ -260,6 +269,100 @@ export function createExtPanel({
       truncated: cut, invalidated,
       label: invalidated ? LOCALLY_MODIFIED_LABEL : '',
       message: invalidated ? '已保存；这是市场装的扩展，校验和已失效并标注' : '已保存，下一条消息生效',
+    };
+  }
+
+  /**
+   * 扩展的可调设置（面板渲染用）。
+   *
+   * 只回**声明** + **非敏感值** + **敏感项是否已设置**；密钥明文永不出后端，
+   * 与令牌的处理口径一致（面板只读一次，之后只显示「已设置」）。
+   */
+  function configOf(id) {
+    const key = String(id ?? '');
+    if (!EXT_ID_RE.test(key)) return { ok: false, reason: 'bad_id', message: '扩展 id 不合法' };
+    /**
+     * 扩展不存在时不要假装「没有设置项」：那是两件事（没装 vs 装了但没声明）。
+     * `registry.read` 可缺省（测试夹具常只给 configSpecOf），缺了就不做这层判断。
+     */
+    if (typeof registry.read === 'function' && !registry.read(key)) {
+      return { ok: false, reason: 'not_found', message: `扩展 ${key} 不存在或清单读不到` };
+    }
+    const spec = registry.configSpecOf(key);
+    const secretsSet = new Set(extCfg.secretKeys(key));
+    return {
+      ok: true,
+      id: key,
+      spec,
+      values: extCfg.read(key),
+      /** `{fieldKey: true}` —— 前端只用来显示「已设置 / 未设置」。 */
+      secretSet: Object.fromEntries(spec.filter((f) => f.secret).map((f) => [f.key, secretsSet.has(f.key)])),
+      /**
+       * 用户手写目录只读：install/remove/saveUsage 都守这条，配置口也得守。
+       * 否则面板能改一份「用户自己写的」扩展的行为，而卸载时又拒绝碰它。
+       */
+      canEdit: !registry.isForeign(key),
+      message: spec.length ? '' : '这个扩展没有声明设置项',
+    };
+  }
+
+  /**
+   * 保存配置。
+   *
+   * @param {string} id
+   * @param {object} values 非敏感字段（表单原样提交，数字可能是字符串）
+   * @param {object} [secretPatch] 敏感字段：键出现即改，`''` 表示清除，不出现表示不动
+   */
+  function saveConfig(id, values, secretPatch = {}) {
+    const key = String(id ?? '');
+    if (!EXT_ID_RE.test(key)) return { ok: false, reason: 'bad_id', message: '扩展 id 不合法' };
+    if (registry.isForeign(key)) {
+      return { ok: false, reason: 'foreign_readonly', message: '用户手写的扩展只读，面板不改它的配置' };
+    }
+    const spec = registry.configSpecOf(key);
+    if (!spec.length) return { ok: false, reason: 'no_config', message: '这个扩展没有声明设置项' };
+
+    /**
+     * 只接受声明过的敏感键：前端传多一个键就等于凭配置接口写任意文件，
+     * 而密钥文件是 0600 的私有区。
+     */
+    const secretKeys = new Set(spec.filter((f) => f.secret).map((f) => f.key));
+    const patch = {};
+    if (secretPatch && typeof secretPatch === 'object') {
+      for (const [k, v] of Object.entries(secretPatch)) {
+        if (secretKeys.has(k)) patch[k] = v;
+      }
+    }
+
+    /**
+     * 必填判据要把**本次提交的密钥**算进去：只看磁盘上的旧值，第一次填密钥
+     * 会被自己的「必填」挡下来（「保存不了，因为还没保存」）。
+     */
+    const present = new Set(extCfg.secretKeys(key));
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === '' || v === null) present.delete(k);
+      else present.add(k);
+    }
+    const checked = validateValues(spec, values, { secretPresent: present });
+    if (!checked.ok) {
+      return { ok: false, reason: 'invalid', message: checked.errors.join('；'), errors: checked.errors };
+    }
+
+    const r = extCfg.save(key, spec, checked.values, patch);
+    if (!r.ok) return r;
+
+    return {
+      ok: true,
+      id: key,
+      values: r.values,
+      /**
+       * MCP server 是宿主 spawn 的独立进程，读到的是启动那一刻的 env；
+       * 改配置必须重建连接。**这条路不总是通**：受管块是静态挂载的实例，
+       * `mcpManager` 只治理它自己挂的那些（迁移到 register() 之后才会自动生效）。
+       * 所以这里如实标 `needsRestart`，由调用方尝试重连、失败就让用户重启 DSH。
+       */
+      needsRestart: true,
+      message: '已保存。需要重启这个扩展的连接才能生效',
     };
   }
 
@@ -527,6 +630,6 @@ export function createExtPanel({
 
   return {
     enabled, usageRows, saveUsage, clients, createClient, revokeClient,
-    status, effectiveBuckets, diagnose,
+    status, effectiveBuckets, diagnose, configOf, saveConfig,
   };
 }

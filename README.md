@@ -77,6 +77,7 @@ QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ dsh-roost ⇄ DSH �
 | 🧬 人格四段式                 | 性格 / 开场白 / 说话示例 / 世界书；世界书命中才注入，聊几十轮人设也不被冲淡                                                                |
 | 🔄 人格库一键更新               | 独立仓库 [dsh-roost-personas](https://github.com/tdcq9594/dsh-roost-personas) 推个 commit，面板点一下就拿到，不用发版；只覆盖没改过的 |
 | ⬆️ 本体自更新                 | 设置页查最新版一键装，失败回滚 `package.json` + lock；符号链接装的开发机自动禁用                                                       |
+| 🧩 扩展 + 可调设置             | 扩展是标准 MCP server；在 `plugin.json` 声明字段后，面板直接按声明画表单，值宿主代存、密钥单独存且不回显，改完重启生效                        |
 | 🎭 双人格 preset            | 私聊 `roost-private` / 群聊 `roost-social` 各一套提示词                                                             |
 | 🖼️ 表情包                  | 图丢进目录就能用，文件名或侧车 `.tags` 当标签；分类 + `sticker_pick` 按需取图，加图不冲提示词缓存                                            |
 | 🔊 语音合成（选装，默认关）          | 五种 provider，`tts.speed` 一份共用；不配就完全静默，配好模型才能用 `<<say: 内容>>`                                                |

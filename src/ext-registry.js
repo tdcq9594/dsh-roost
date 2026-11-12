@@ -19,6 +19,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { basename, join, resolve } from 'node:path';
 
 import { dataDir } from './config.js';
+import { normalizeConfigSpec } from './ext-config.js';
 
 /** 与方案 §3.1 一致：小写开头、2–32 字符、只含小写字母数字与短横线。 */
 export const EXT_ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
@@ -161,6 +162,15 @@ export function validateManifest(raw, { expectedId } = {}) {
   if (m.memory !== undefined && (typeof m.memory !== 'object' || m.memory === null || Array.isArray(m.memory))) {
     errors.push('memory 必须是对象');
   }
+  /**
+   * 配置声明：装的时候就校验，坏声明直接拒收而不是等面板渲染时才炸。
+   * 规范化后的 spec 不写回清单（那会让 `saveUsage` 的 spread 把派生数据
+   * 也落进 plugin.json），下游每次现算 —— 声明最多几十个字段，成本可忽略。
+   */
+  if (Object.hasOwn(m, 'config')) {
+    const cfg = normalizeConfigSpec(m.config);
+    if (!cfg.ok) errors.push(...cfg.errors);
+  }
 
   return {
     ok: errors.length === 0,
@@ -215,6 +225,18 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
     if (!EXT_ID_RE.test(id)) return null;
     const v = validateManifest(readJson(join(pathOf(id), MANIFEST_FILE)), { expectedId: id });
     return v.ok ? v.manifest : null;
+  }
+
+  /**
+   * 这个扩展声明的配置字段（规范化后的 spec）。
+   *
+   * 清单里读不到 / 声明非法时返回空数组 —— 调用方按「没有设置项」处理，
+   * 不把坏声明变成面板报错（装的时候 `validateManifest` 已经拦过一次）。
+   */
+  function configSpecOf(id) {
+    const m = read(id);
+    const r = normalizeConfigSpec(m?.config);
+    return r.ok ? r.spec : [];
   }
 
   /** 清单里 `usage?: string` 可选覆盖自动文案；自动文案由 name + description 生成。 */
@@ -333,7 +355,20 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       if (source) fs.writeFileSync(join(staging, SOURCE_FILE), JSON.stringify(source, null, 2) + '\n', 'utf8');
 
       const hadDest = exists(dest);
-      if (hadDest) fs.renameSync(dest, old);
+      if (hadDest) {
+        /**
+         * 更新时保住**用户设置**：`config.json` 不是扩展的发布物，是主人在面板里
+         * 填的值。整个目录被 rename 成 `.old` 再删掉，不抢救就等于「更新一次，
+         * 设置全丢」。密钥在 `secrets/` 外部，不受影响。
+         */
+        try {
+          const prevCfg = join(dest, 'config.json');
+          if (fs.existsSync(prevCfg)) fs.copyFileSync(prevCfg, join(staging, 'config.json'));
+        } catch (e) {
+          log.warn?.(`扩展 ${id} 的旧设置没能带到新版本（${e?.message ?? e}），更新后需要重填`);
+        }
+        fs.renameSync(dest, old);
+      }
       try {
         fs.renameSync(staging, dest);
       } catch (e) {
@@ -375,6 +410,13 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
     if (isForeign(id)) return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝卸载` };
     rmrf(dest);
     usageCache.delete(id);
+    /**
+     * 配置里的密钥存在**扩展目录之外**（`secrets/<id>.config.json`），
+     * `rmrf(dest)` 删不到它。不清就等于「卸载了扩展，密钥还躺在盘上」。
+     * 非敏感值在扩展目录里，随目录一起删。
+     */
+    try { fs.rmSync(join(secretsDir(dir), `${id}.config.json`), { force: true }); }
+    catch (e) { log.warn?.(`扩展 ${id} 的配置密钥清理失败：${e?.message ?? e}`); }
     // 删 api.clients 记录 + secrets 文件 = 吊销。删记录失败必须报出来，
     // 否则「扩展已卸载、旧令牌却还能 verify」是静默的权限残留。
     if (secrets) {
@@ -386,7 +428,10 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
     return { ok: true, id };
   }
 
-  return { dir, root, list, read, sourceOf, isForeign, install, remove, pathOf, liveUsage, refreshUsage };
+  return {
+    dir, root, list, read, sourceOf, isForeign, install, remove, pathOf,
+    liveUsage, refreshUsage, configSpecOf,
+  };
 }
 
 // ---------------------------------------------------------------------------

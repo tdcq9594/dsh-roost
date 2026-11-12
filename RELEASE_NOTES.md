@@ -1,3 +1,33 @@
+## v1.1.4：扩展可以有自己的设置了
+
+一句话：扩展能在 `plugin.json` 里声明可调字段，面板按声明画表单、宿主代存、启动时经环境变量下发；密钥单独存且永不回显。`bili` 与 `demo-ext` 已经用上。另外从这一版起声明 `engines.dsh`，**DSH 0.1.x 会被明确拒绝安装**（不再装上之后才崩）。
+
+### 新：扩展可调设置
+
+扩展是 MCP server，协议里没有 UI，所以设置只能是「宿主代画、代存、代下发」。三层约定：
+
+- **声明**：`plugin.json` 加 `config`，字段名 → 声明对象。类型支持 `string` / `number` / `boolean` / `select` / `array` / `object`（嵌套最多两层），最多 32 个字段（含子字段），键名 `[a-zA-Z][a-zA-Z0-9_]{0,31}`。
+- **存储**：非敏感值写 `<dataDir>/extensions/<id>/config.json`（0600）；`secret: true` 的值**不进这个文件**，单独写 `<dataDir>/secrets/<id>.config.json` —— 与令牌文件分开，令牌轮换不会覆盖它。
+- **下发**：`ext-launcher.mjs` 起扩展时注入 `ROOST_EXT_CONFIG`（非敏感项的 JSON，已补默认值）与 `ROOST_EXT_SECRET_<KEY>`（敏感项，键名由宿主从字段名生成）。缺值是**空串**而不是缺键。
+- **面板**：「扩展 → 已装扩展」里，声明了 `config` 的才会有「设置」按钮，点开就地展开表单。密钥项只显示「已设置 / 未设置」，明文面板永远读不回。
+
+安全边界三条：不支持 `path` / `file` 类型（配置里出现路径等于让面板能指定读写目标）；`secret` 只能用在顶层 `string`，且不许写 `default`（声明会原样回给面板）；扩展不能声明 `env`，变量名一律宿主生成。
+
+### 修
+
+- **覆盖更新扩展会删掉用户填的设置**：安装流程是「旧目录 rename 成 `.old` → 新目录上位 → 删 `.old`」，`config.json` 在扩展目录里，更新一次就没了。现在 rename 前先把它拷进新目录。
+- **`object` 的子字段不占字段上限**：顶层限了 32，一个 `object` 里塞一千个照样能把面板撑爆。
+- **`secret` 可以写 `default`**：默认值会随声明原样返回给面板，等于把密钥明文下发给浏览器。
+- **`configOf` 对不存在的扩展说「没有设置项」**：把「没装」和「装了但没声明」混成一句话，排查时误导。
+- **`select` 没值又没默认值时**，浏览器默认显示第一项，看着像已经选了。补一个「（未设置）」占位。
+
+### 说明
+
+- `engines.dsh: ">=0.2.0"`。DSH 的兼容检查是 `semver.satisfies(rt, range, { includePrerelease: true })`，所以 `0.2.1-rc.x` / `0.2.2-rc.x` 都在范围内；被拒的是 `0.1.x` 和最早的 `0.2.0-rc.1/rc.2`。
+- 改配置要重建这个扩展的 MCP 连接才生效。面板保存后会试一次 `mcpManager.restart()`，**当前大概率失败**（受管块是 `cordis.patch.yml` 里的静态行，`mcpManager` 只治理经 `register()` 挂的实例），失败时如实提示「重启 DSH 后生效」。
+- 文档同步：`docs/API.md` 新增 §3.1、`docs/extension.d.ts` 新增 `ConfigField` 与 `Manifest.config`、`docs/USER-MANUAL.md` 新增「扩展设置」。
+- 测试 1844 条：新增 `test/ext-config.test.js`（16）与 `test/ext-config-ui.test.js`（3，真跑 effect + mock fetch，覆盖「点设置 → 出表单 → 改密钥 → 提交」）。
+
 ## v1.1.3：扩展页不再「一字一行」，链接装法也判对了
 
 一句话：修两个 bug —— 扩展页两处排版被横排 flex 挤扁、Windows junction 装法被误判成 `unknown`。没有新接口、没有配置变化，升级即生效。

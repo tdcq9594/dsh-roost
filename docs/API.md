@@ -3,7 +3,7 @@
 > 本文件由 `scripts/build-ext-docs.mjs` **从源码生成**，不要手改。
 > 改端点 / scope / 清单字段后跑 `node scripts/build-ext-docs.mjs`，CI 用 `--check` 校验。
 >
-> 对应版本：`1.1.3`
+> 对应版本：`1.1.4`
 
 ## 1. 扩展是什么
 
@@ -32,10 +32,56 @@
 | `mounts` | **保留字段**：当前版本只做类型校验，尚未接到 `restrictTurnTools` |
 | `memory` | **保留字段**：`onClear` / `maxRows` 由 store 读取但安装时不会写入；`visibility` 未映射到 ACL |
 | `usage` | 可选，覆盖自动生成的能力说明（单条上限 **200 字**、全部合计 **2048 字节**） |
+| `config` | 可选，**可调设置**的声明（见 §3.1）。面板据此画表单，宿主负责存储与下发 |
 | `sha256` / `size` / `publishedAt` | 市场条目用于本地完整性校验；**编辑 usage 后 `sha256` 会被宿主置空并标注「已本地修改，不再参与更新校验」** |
 
 **清单不许自带 `env` 键**（方案 L：env 由 launcher 注入）。受管块里只允许这三个变量名：
 `ROOST_API_URL` / `ROOST_EXT_ID` / `ROOST_LAUNCHER_DIR`。
+
+### 3.1 可调设置（`config`）
+
+扩展是 MCP server，协议里没有 UI，所以设置只能**宿主代画、代存、代下发**。
+在清单里声明字段，面板会渲染表单，值保存在宿主侧，启动时通过环境变量给回扩展：
+
+```jsonc
+{
+  "config": {
+    "threshold": { "type": "number", "label": "阈值", "default": 3, "min": 1, "max": 100, "integer": true },
+    "region":    { "type": "select", "label": "分区", "options": ["热门", { "value": "anime", "label": "动画" }], "default": "热门" },
+    "enabled":   { "type": "boolean", "label": "启用", "default": true },
+    "keyword":   { "type": "string", "label": "关键词", "maxLength": 64, "hint": "留空表示不过滤" },
+    "apiKey":    { "type": "string", "label": "API Key", "secret": true, "required": true },
+    "tags":      { "type": "array", "label": "标签", "items": { "type": "string" }, "maxItems": 8 },
+    "advanced":  { "type": "object", "label": "高级", "properties": { "retries": { "type": "number", "default": 2 } } }
+  }
+}
+```
+
+| 字段键 | 说明 |
+|---|---|
+| `type` | `string` / `number` / `boolean` / `select` / `array` / `object`。**没有 `path` / `file`** —— 配置里出现路径等于让面板能指定读写目标 |
+| `label` / `hint` | 面板显示的文字；`label` 缺省用字段名 |
+| `default` | 缺省值，会按类型校验；保存时自动补齐缺的键 |
+| `required` | 必填。敏感项只在「从未设置过」时算不满足 |
+| `secret` | **只能用在顶层 `string`**：值不进 `config.json`，单独存 `secrets/<id>.config.json`（0600），面板永远拿不到明文。**不能写 `default`** —— 声明会原样回给面板，默认值等于明文下发 |
+| `min` / `max` / `integer` | `number` 的边界 |
+| `maxLength` / `placeholder` | `string` 的长度与占位符（上限 4096） |
+| `options` | `select` 的候选，`["a"]` 或 `[{value,label}]` 两种写法 |
+| `items` / `maxItems` | `array` 的元素类型（仅标量）与条数上限 |
+| `properties` | `object` 的子字段，**嵌套最多 2 层**，且子字段不能再标 `secret` |
+
+约束：最多 **32** 个字段（`object` 的子字段也计入这个上限）；字段名 `[a-zA-Z][a-zA-Z0-9_]{0,31}`；
+声明非法时**安装就会被拒**（不会等到面板渲染才发现）。更新扩展时 `config.json` 会原样保留，设置不会因为升级而丢。
+
+**扩展怎么读**：
+
+| 变量 | 内容 |
+|---|---|
+| `ROOST_EXT_CONFIG` | 非敏感项的 JSON 字符串（已补齐默认值；没有声明时是 `{}`） |
+| `ROOST_EXT_SECRET_<KEY>` | 敏感项，键名由宿主从字段名生成（`apiKey` → `ROOST_EXT_SECRET_APIKEY`）。未设置时是**空串**，不是缺键 |
+
+**生效方式**：配置在进程启动时读一次。面板保存后会尝试重建连接；当前受管块是静态挂载的实例，
+`mcpManager` 治理不到它，所以通常要**重启 DSH**。扩展机制迁到 `mcpManager.register()` 之后会自动变成热生效。
 
 ## 4. 认证
 

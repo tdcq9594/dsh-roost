@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { normalizeConfigSpec, envOf } from './ext-config.js';
 
 /**
  * 让 `node` / python 之类能启动的最小系统环境；不复制任何含 TOKEN/SECRET 的父变量。
@@ -74,6 +75,26 @@ export function planLaunch({ env = process.env, readJsonFn = readJson } = {}) {
   childEnv.ROOST_API_TOKEN = token;
   childEnv.ROOST_API_URL = apiUrl;
   childEnv.ROOST_EXT_ID = id;
+
+  /**
+   * 扩展配置：非敏感项拼成 `ROOST_EXT_CONFIG`（JSON 字符串），敏感项按
+   * `ROOST_EXT_SECRET_<KEY>` 单独注入 —— 键名由**宿主**从声明生成，扩展
+   * 不能声明任意 env，这条和「受管块里不写 env」是同一个边界。
+   *
+   * 声明非法时**不抛**：扩展仍要能起来。一个写错 `config` 的清单不该让扩展
+   * 变成「装不上」，它本来只是「没有可调设置」。读不到文件就给空对象，
+   * 扩展拿到 `{}` 自己走默认值。
+   */
+  const specR = normalizeConfigSpec(manifest.config);
+  if (!specR.ok) {
+    console.error(`[ext-launcher] 扩展 ${id} 的 config 声明非法，按无设置项启动：${specR.errors.join('；')}`);
+  } else if (specR.spec.length) {
+    Object.assign(childEnv, envOf(
+      specR.spec,
+      readJsonFn(join(extDir, 'config.json')) ?? {},
+      readJsonFn(join(launcherDir, 'secrets', `${id}.config.json`)) ?? {},
+    ));
+  }
 
   return {
     id, extDir, command: manifest.command, args, cwd, childEnv,

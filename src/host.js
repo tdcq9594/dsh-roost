@@ -1173,6 +1173,27 @@ export function apply(ctx) {
     },
   });
   /**
+   * 重建一个扩展的 MCP 连接（改完配置要重连才读到新 env）。
+   *
+   * **大概率会失败，这是已知的**：受管块是 `cordis.patch.yml` 里的静态
+   * `mcp-<id>` 行，`mcpManager` 只治理经 `register()` 挂上去的实例
+   * （rc.2 文档原话：静态实例只在名字冲突时现身）。所以这里 try 一下，
+   * 失败就如实说「重启 DSH 后生效」，不假装成功 —— 扩展机制的迁移
+   * （`ext-patch` → `mcpManager.register`）做完之后这条会自动变通。
+   */
+  async function restartExtServer(id) {
+    const mm = typeof ctx.get === 'function' ? ctx.get('mcpManager') : null;
+    if (!mm || typeof mm.restart !== 'function') {
+      return { ok: false, message: '这个 DSH 版本没有 mcpManager，重启 DSH 后生效' };
+    }
+    try {
+      await mm.restart(String(id));
+      return { ok: true, message: '连接已重建，新配置立即生效' };
+    } catch (e) {
+      return { ok: false, message: `重连失败（${e?.message ?? e}），重启 DSH 后生效` };
+    }
+  }
+  /**
    * 运行期**不用** `createExtUsage()` 聚合入口：它的 offs 是单个 Set，多 agent
    * 场景无法按会话撤销、关会话后还会留下条目。这里各模块自管 disposer ——
    * QQ usage 收进 `mount()` 的 offs，独立会话过滤收进 `agent-v1.js` 的
@@ -4542,6 +4563,19 @@ export function apply(ctx) {
             case 'extensions.usage.save': {
               const r = extPanel.saveUsage(arg?.id, arg?.usage);
               return send(res, r.ok ? 200 : 400, r);
+            }
+            /**
+             * 扩展设置：`config.get` 只读声明与当前值（敏感项只回「已设置」），
+             * `config.save` 写盘后试着重连；重连不通就告诉用户重启 DSH。
+             */
+            case 'extensions.config.get': {
+              return send(res, 200, extPanel.configOf(arg?.id));
+            }
+            case 'extensions.config.save': {
+              const r = extPanel.saveConfig(arg?.id, arg?.values, arg?.secrets);
+              if (!r.ok) return send(res, 400, r);
+              const re = await restartExtServer(arg?.id);
+              return send(res, 200, { ...r, restarted: re.ok, needsRestart: !re.ok, message: re.message });
             }
             case 'extensions.clients.list': {
               return send(res, 200, extPanel.clients());
