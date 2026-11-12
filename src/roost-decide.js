@@ -191,7 +191,8 @@ export function createDecider({ cfg, now = () => Date.now() } = {}) {
           s.engagedCount = 0;
         }
         s.engagedCount += 1;
-        const max = Number(c.engagedMaxTurns) || 3;
+        /** 默认 6，和旧 ai-chat 的 policyEngagedMaxTurns 一致（配置里可改） */
+        const max = Number(c.engagedMaxTurns) || 6;
         if (s.engagedCount > max) {
           return { go: false, reason: `已经连着接了 ${max} 次没人接，先停一下` };
         }

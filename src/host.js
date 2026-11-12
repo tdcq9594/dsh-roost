@@ -2013,8 +2013,10 @@ export function apply(ctx) {
   const buildFromRoost = createPayloadBuilder({
     rpc: (m, p, o) => roost.rpc(m, p, o),
     log: (m) => log.warn(`[roost-host] ${m}`),
-    /** 热读：面板上关掉看图，下一轮就生效 */
+    /** 热读：面板上关掉看图 / 改图片上限，下一轮就生效 */
     vision: () => cfg.roostHost?.vision !== false,
+    maxImages: () => cfg.roostHost?.maxImages ?? 4,
+    markdown: () => cfg.roostHost?.markdown !== false,
   });
 
   /**
@@ -2025,7 +2027,12 @@ export function apply(ctx) {
    */
   const channels = createChannelRegistry({
     impls: {
-      roost: createRoostHostChannel({ host: roost, log: (m) => log.warn(m) }),
+      roost: createRoostHostChannel({
+        host: roost,
+        log: (m) => log.warn(m),
+        /** 旧 ai-chat 面板的 markdown 开关，热读 */
+        markdownEnabled: () => cfg.roostHost?.markdown !== false,
+      }),
     },
     pick: () => 'roost',
     log: (m) => log.warn(m),

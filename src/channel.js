@@ -159,8 +159,10 @@ function fileTypeOfName(p) {
  * @param {object} o.host  `createRoostHost()` 的实例（要有 rpc）
  * @param {(m:string)=>void} [o.log]
  */
-export function createRoostHostChannel({ host, log = () => {} } = {}) {
+export function createRoostHostChannel({ host, log = () => {}, markdownEnabled = true } = {}) {
   if (!host?.rpc) throw new Error('roost 通道需要 createRoostHost 实例');
+  /** 旧 ai-chat 面板的 `markdown` 开关；热读，面板关掉下一轮就生效 */
+  const wantMarkdown = () => (typeof markdownEnabled === 'function' ? markdownEnabled() : markdownEnabled);
 
   return {
     name: 'roost',
@@ -219,7 +221,7 @@ export function createRoostHostChannel({ host, log = () => {} } = {}) {
        * `msg_type=2` 里生效。框架的 `buildSendPayload` 看到 `markdown` 会自己
        * 把 `content` 置空并改成 2，所以这里只管传，不去猜 msgType。
        */
-      const useMd = markdown !== false;
+      const useMd = markdown !== false && wantMarkdown() !== false;
       const okResult = (r, usedRid) => ({
         ok: true,
         scene,

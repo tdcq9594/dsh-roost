@@ -7238,12 +7238,13 @@ select.roost-input{color-scheme:dark}
       ['channel', '通道', '只保留 roost（框架外接协议直连）；老配置里的 qq 会自动归一'],
       ['roostHost', '直连 roost', 'enabled：要不要连框架的外接协议（地址和 token 在 roost 面板「外接」页，'
         + '端口是 6800+hash，每只鸟不一样）。url 形如 http://127.0.0.1:6801；'
-        + 'vision 关掉后模型只能看到「发来一张图」。'
+        + 'vision 关掉后模型只能看到「发来一张图」；maxImages 是一次最多看几张（0 关，上限 8）；'
+        + 'markdown 关掉后加粗列表和真 @ 都会退化成纯文字。'
         + '**发送要真正走这条，还得把上面 channel.current 改成 roost**（两个开关分开，'
         + '可以先只开 enabled 看连接状态）。'
         + 'merge：连发几句攒成一段再回（私聊和被 @ 不等）。'
         + 'decide：群里**没被 @** 时要不要接——mode 有 ai / mention（只在被 @ 时）/ '
-        + 'window（@ 后 N 分钟内）/ engaged（刚说过话算在聊）；'
+        + 'window（@ 后 N 分钟内）/ engaged（刚说过话算在聊，engagedMaxTurns 是最多接几次）；'
         + 'cooldownSec 冷却（期间的消息攒着不丢）、maxRepliesPerMin 每分钟条数、'
         + 'maxPerHour / burstMax / quietStartHour~quietEndHour / shortAskMustReply 是刹车，'
         + '数值 0 和起止相同都表示关。接话策略、防吵、冷却都在这里设'],

@@ -26,7 +26,8 @@ import { join } from 'node:path';
 import { textOf } from './roost-merge.js';
 
 /** 最多看几张。一张图几百到几千 token，不设上限能把上下文撑爆 */
-const MAX_IMAGES = 4;
+/** 没传配置时的兜底；真实上限由 `roostHost.maxImages` 热读 */
+const DEFAULT_MAX_IMAGES = 4;
 /** 单张上限。宁可看不见，也别把请求撑到几 MB */
 const MAX_BYTES = 2 * 1024 * 1024;
 /** 落盘的图留多久：它会出现在对话上下文里，删太早模型引用就断 */
@@ -194,7 +195,17 @@ export function buildRendered(evt, text, { images = null } = {}) {
  * @param {typeof fetch} [o.fetchImpl]
  * @param {boolean} [o.vision] 这一轮要不要看图
  */
-export function createPayloadBuilder({ rpc, log = () => {}, fetchImpl = fetch, vision = true } = {}) {
+export function createPayloadBuilder({ rpc, log = () => {}, fetchImpl = fetch, vision = true, maxImages = DEFAULT_MAX_IMAGES, markdown = true } = {}) {
+  /** 通道到底走不走 Markdown：@ 标签、图文同条、按钮都跟着它变 */
+  const wantMarkdown = () => {
+    const raw = typeof markdown === 'function' ? markdown() : markdown;
+    return raw !== false;
+  };
+  /** 配置热读：0 = 不看图，上限 8，和旧 ai-chat 的滑杆范围一致 */
+  const wantMaxImages = () => {
+    const raw = typeof maxImages === 'function' ? maxImages() : maxImages;
+    return Math.max(0, Math.min(8, Number(raw) || 0));
+  };
   /** key → { at, value } */
   const perms = new Map();
   const imgDir = join(dataDir(), 'images');
@@ -226,7 +237,7 @@ export function createPayloadBuilder({ rpc, log = () => {}, fetchImpl = fetch, v
   /** 下载图片：不走 roost 的 media.fetch，直接抓 QQ 的 URL，和 ai-chat 行为一致 */
   async function collectImages(evt) {
     if (!wantVision()) return 'off';
-    const urls = (evt?.attachments ?? []).filter(isImageAttachment).map((a) => String(a.url)).slice(0, MAX_IMAGES);
+    const urls = (evt?.attachments ?? []).filter(isImageAttachment).map((a) => String(a.url)).slice(0, wantMaxImages());
     if (!urls.length) return [];
 
     try {
@@ -329,7 +340,7 @@ export function createPayloadBuilder({ rpc, log = () => {}, fetchImpl = fetch, v
       },
       /** 人格归 dsh-roost 自己管，这里不塞 */
       system: '',
-      channel: { markdown: true, files: true },
+      channel: { markdown: wantMarkdown(), files: true },
       text,
       rendered: buildRendered(evt, text, { images }),
       quoted: String(evt?.quoted ?? ''),

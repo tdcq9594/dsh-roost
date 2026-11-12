@@ -551,6 +551,16 @@ export const DEFAULTS = {
     autoStart: false,
     /** 这一轮要不要下载图片给模型看（注意：关掉之后模型只能看到「发来一张图」） */
     vision: true,
+    /**
+     * 一次最多看几张图。旧 ai-chat 面板的 `maxImages`，直连后一度写死成 4，
+     * 这里恢复成可配（0 = 不看图；上限 8，防止一张图几百 token 撑爆上下文）。
+     */
+    maxImages: 4,
+    /**
+     * 回复走 Markdown 消息类型。旧 ai-chat 面板的 `markdown` 开关。
+     * 关掉后加粗列表不渲染、`<qqbot-at-user>` 真 @ 也会退化成纯文字。
+     */
+    markdown: true,
     /** 合并窗口：连着发的几句攒成一段再回。私聊 / 被 @ / 命令不受它影响 */
     merge: {
       waitSec: 1.5,
@@ -574,6 +584,8 @@ export const DEFAULTS = {
      */
     decide: {
       mode: 'ai',
+      /** 连聊最多接几次（旧 ai-chat `policyEngagedMaxTurns` 默认 6）。直连后曾在代码里硬编码成 3 */
+      engagedMaxTurns: 6,
       windowMin: 3,
       cooldownSec: 20,
       maxRepliesPerMin: 3,
