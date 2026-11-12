@@ -6,7 +6,7 @@
  * 生命周期不一样，混在一起升级和迁移都麻烦。
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, chmodSync, mkdirSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -20,9 +20,21 @@ export function dataDir() {
 
 const FILE = () => join(dataDir(), 'config.json');
 
+/**
+ * 首次接入向导的版本号。
+ *
+ * 参考 aurabot 的 `setupDone`，但用**递增版本**而不是布尔：这个版本移除了
+ * ai-chat、只留直连，老用户升级后必须重新接一遍，不能像 aurabot 那样
+ * 「老配置直接算完成」。以后再出破坏性迁移，把这个数 +1 即可让所有人重走。
+ *
+ * 配置里存的是「已经走到第几版」（`setup.wizardVersion`），低于它就弹向导。
+ * 新装 = 0，老配置没有这个字段 = 0，两种人都得走，正好符合要求。
+ */
+export const WIZARD_VERSION = 1;
+
 export const DEFAULTS = {
   server: {
-    /** ai-chat 的「DSH 地址」默认指向这个端口，两边要一致 */
+    /** 固定服务的端口（/v1 控制面、TTS、健康检查）。端口被占会自动顺延 */
     port: 17321,
     /** 共享密钥。请求要带 X-Roost-Token 头；留空表示不校验（只绑本机时可行） */
     token: '',
@@ -142,7 +154,7 @@ export const DEFAULTS = {
     },
   },
   chat: {
-    /** 一轮最多等多久（秒）。ai-chat 那边等 180 秒，这里要更短，才能赶在它之前回话 */
+    /** 一轮最多等多久（秒）：留余量给回话，别让用户干等 */
     turnTimeoutSec: 150,
     /**
      * 给不给她「翻聊天记录」的工具（`chat_look`）。
@@ -161,7 +173,7 @@ export const DEFAULTS = {
     /**
      * 轮到它时剩余时间不足这么多秒就不跑了。
      *
-     * ai-chat 只等 180 秒，跑一次模型 + 工具链常见十几秒；剩不到 30 秒还开跑，
+     * 一轮超过 180 秒体验就很差了，跑一次模型 + 工具链常见十几秒；剩不到 30 秒还开跑，
      * 大概率赶不上回话窗口，白烧一次调用。
      */
     queueMinBudgetSec: 30,
@@ -207,11 +219,11 @@ export const DEFAULTS = {
        * **整轮的总预算（秒）**。
        *
        * 每一次尝试各自有 `turnTimeoutSec`（150 秒）的超时，
-       * 补一次重试就变成 150+3+150=303 秒——而 ai-chat 那边只等 180 秒，
+       * 补一次重试就变成 150+3+150=303 秒——远超一轮可接受的总时长，
        * 超了它就报「宿主没回话」，群里那边也已经错过时机了。
        *
        * 所以留一个整体预算，重投前先看还剩多少，够才投。
-       * 默认 170 秒，比 ai-chat 的 180 留 10 秒余量。
+       * 默认 170 秒，留 10 秒余量给收尾回话。
        */
       budgetSec: 170,
     },
@@ -249,6 +261,13 @@ export const DEFAULTS = {
   setup: {
     /** 留空 = <数据目录>/roost */
     roostDir: '',
+    /**
+     * 首次接入向导已完成到第几版。低于 `WIZARD_VERSION` 时面板强制弹向导，
+     * 走完（直连自测通过）才写回当前版本。
+     */
+    wizardVersion: 0,
+    /** 本版「暂时跳过」过了没有：跳过不写 wizardVersion，概览页仍会催 */
+    wizardSkippedVersion: 0,
     /**
      * 一键装下载的框架版本 —— **现在只是兜底**。
      *
@@ -488,9 +507,85 @@ export const DEFAULTS = {
     /** 读不到用量时的兜底：聊到这么多轮就压 */
     maxTurns: 40,
   },
-  /** 通道：以后接别的平台时切这里 */
+  /** 通道：只保留框架外接协议直连。以后接别的平台时再往这里加 */
   channel: {
-    current: 'qq',
+    current: 'roost',
+  },
+  /**
+   * roost 外接协议（`roost-host/1`）—— 直连框架，不经过任何中间层。
+   *
+   * 默认关着，由「首次接入向导」或接入页的「一键直连」打开并写好 url / token。
+   * 通道恒为 `roost`，没有第二个开关要拨。
+   *
+   * 只在向导完成（真跑过一次直连自测）之后才算接好；没配对就开着，
+   * 会出现「面板显示已开启、事件一条都进不来」的半通状态，最难查。
+   *
+   * `url` 形如 `http://127.0.0.1:6801`，端口在 roost 面板「外接」页里看
+   * （`6800 + sha1(botId)%100`，每只鸟不一样）。
+   */
+  roostHost: {
+    enabled: false,
+    url: '',
+    /** 外接页里配的那个 token；两边必须一致，否则 401 */
+    token: '',
+    /**
+     * 事件通道用哪条。**RPC 永远走 HTTP（`POST /rpc`）**，这里只选事件流。
+     *
+     * 协议两条事件通道能力完全一样（同一套方法表、同一条事件流、同一个 seq
+     * 补拉语义），所以选哪条都不影响功能：
+     *   · `auto` —— 装了可选依赖 `ws` 就用 WS，没装就用 SSE（默认）
+     *   · `sse`  —— 只用 HTTP + SSE，零依赖
+     *   · `ws`   —— 只用 WS；对面没开 `/ws` 就报错，不回退
+     *
+     * 为什么默认 `auto` 而不是固定 SSE：装了 ws 的机器能拿到更低的延迟和
+     * 双向能力；没装的照旧零依赖。`auto` 下 WS 一旦连不上（对面版本老、
+     * 没装 ws、被反代挡），本进程内会记住并改用 SSE，不会每次重连都撞一遍。
+     */
+    transport: 'auto',
+    /**
+     * 启动 DSH（插件加载）时要不要顺手把 Roost 拉起来。
+     *
+     * 默认关：Roost 是个独立进程，有些人是手动管它的（或者跑在另一台机器上），
+     * 不该由插件擅自拉起。打开后只在「配置了直连 + 当前没在跑」时才启动。
+     */
+    autoStart: false,
+    /** 这一轮要不要下载图片给模型看（注意：关掉之后模型只能看到「发来一张图」） */
+    vision: true,
+    /** 合并窗口：连着发的几句攒成一段再回。私聊 / 被 @ / 命令不受它影响 */
+    merge: {
+      waitSec: 1.5,
+      maxSec: 6,
+    },
+    /**
+     * 接话策略。
+     *
+     * **以前这些全在 ai-chat 插件里**（`decide.js`），直连之后框架会把每条
+     * 群消息都推过来，没有这一层就等于群里每句话都触发一轮模型调用。
+     *
+     * 只对**群里没被 @ 的消息**生效：私聊、被 @、命令永远直接接。
+     *
+     *   mode: ai       —— 每条都看（默认）
+     *         mention  —— 只在被 @ 时回
+     *         window   —— @ 之后 windowMin 分钟内继续接
+     *         engaged  —— 在 ai 基础上，刚说过话的 3 分钟内算「在聊」接着聊
+     *
+     * 其余是刹车：冷却（冷却期内的消息攒着不丢）、每分钟/每小时条数、
+     * 静默时段、两分钟突发上限、短问必答。数值 0 / 起止相同 = 关闭。
+     */
+    decide: {
+      mode: 'ai',
+      windowMin: 3,
+      cooldownSec: 20,
+      maxRepliesPerMin: 3,
+      maxPerHour: 0,
+      burstMax: 0,
+      quietStartHour: 0,
+      quietEndHour: 0,
+      shortAskMustReply: false,
+      silent: false,
+      /** 这些词开头的不接：别的插件靠它们干活，别抢 */
+      ignoreWords: ['/'],
+    },
   },
   /**
    * 主动搭话：主人一阵子没找你，你主动在私聊里说句话。
@@ -704,6 +799,21 @@ export function configRevision() {
  *
  * 只在 `tts.speed` 还没写过时迁，用户自己设过就以他为准。
  */
+/**
+ * 移除 ai-chat 后，老配置里 `channel.current === 'qq'` 已经没有对应实现。
+ *
+ * 不迁移的后果很隐蔽：`active()` 返回 null，主动搭话、发测试消息、模型工具
+ * 发消息全都在 `channel.send` 处抛错，而面板看不出「为什么突然一个字都不回」。
+ * 归一成 `roost` 之后，至少通道是可用的；但老用户还没有 url / token，
+ * 所以向导仍会强制弹出来带他重新接一遍——迁移只保证「不崩」，不假装「已配好」。
+ */
+export function migrateChannel(saved) {
+  if (saved?.channel && String(saved.channel.current || '') === 'qq') {
+    saved.channel.current = 'roost';
+  }
+  return saved;
+}
+
 export function migrateTtsSpeed(saved) {
   const tts = saved?.tts;
   if (!tts || typeof tts !== 'object') return false;
@@ -743,6 +853,7 @@ export function loadConfig() {
   }
   migrateTtsSpeed(saved);
   migrateRetentionMode(saved);
+  migrateChannel(saved);
   return upgradeOldDefaults(merge(structuredClone(DEFAULTS), saved));
 }
 
@@ -773,6 +884,7 @@ function pruneTo(shape, value) {
 const SECRET_MASK = '******';
 const SECRET_PATHS = [
   ['server', 'token'],
+  ['roostHost', 'token'],
   ['memory', 'embedding', 'apiKey'],
   ['tts', 'apiKey'],
   ['tts', 'gptSovits', 'apiKey'],
@@ -865,6 +977,18 @@ export function saveConfig(next) {
   const merged = merge(structuredClone(DEFAULTS), safeNext);
   const cfg = coerceSecrets(pruneTo(DEFAULTS, merged));
   writeFileSync(FILE(), JSON.stringify(cfg, null, 2), 'utf8');
+  /**
+   * 权限收紧：这份文件里有 `roostHost.token`、`server.token`、几个 apiKey。
+   *
+   * 不收紧的话 Unix 上默认 0644 —— **同机其他用户能直接读到 token**。
+   * Windows 上 chmod 基本是 no-op（靠目录 ACL），所以失败一律吞：
+   * 「保存成功」比「权限没设上去」重要，不能因为后者把前者搞挂。
+   */
+  try {
+    chmodSync(FILE(), 0o600);
+  } catch {
+    /* Windows / 只读挂载 / 权限不足：忽略，配置已经写下去了 */
+  }
   return cfg;
 }
 

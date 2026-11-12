@@ -11,7 +11,7 @@ import { join } from 'node:path';
 
 import { renderInbound, chatOf } from '../src/inbound.js';
 import { createSessions } from '../src/sessions.js';
-import { createInboundServer, postReply } from '../src/server.js';
+import { createInboundServer } from '../src/server.js';
 import { createTurnRunner, textOf } from '../src/turn.js';
 import { DEFAULTS, publicConfig, saveConfig } from '../src/config.js';
 import { bucketOf, bucketOfLevel, modeFor, describeSpeaker, rulesFor } from '../src/permissions.js';
@@ -100,68 +100,29 @@ test('会话映射：能按会话 id 批量清', () => {
 
 /* ---------------- HTTP 契约 ---------------- */
 
-test('inbound：收到就立刻 200，不等处理完', async () => {
-  const got = [];
-  const srv = createInboundServer({
-    port: 17399,
-    onInbound: (p) => got.push(p), // 故意不同步等待
-    log: () => {},
-  });
-
+/**
+ * 移除 ai-chat 后 `/inbound` 不再存在：消息由框架外接协议事件流直接进 onInbound。
+ * 用真 HTTP 请求确认端点确实关了，而不是只断言源码里没有这个字符串。
+ */
+test('移除 ai-chat：/inbound 端点已关闭，其余固定服务仍在', async () => {
+  const srv = createInboundServer({ port: 17399, log: () => {} });
   try {
     const res = await fetch('http://127.0.0.1:17399/inbound', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'e1', chat: { chatId: 'g1' }, reply: { url: 'http://127.0.0.1:1/x' } }),
+      body: JSON.stringify({ id: 'e1', reply: { url: 'http://127.0.0.1:1/x' } }),
     });
-    assert.equal(res.status, 200);
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(got.length, 1);
-    assert.equal(got[0].id, 'e1');
-  } finally {
-    srv.close();
-  }
-});
-
-test('inbound：缺 id 或 reply.url 返回 400', async () => {
-  const srv = createInboundServer({ port: 17398, onInbound: () => {}, log: () => {} });
-  try {
-    const res = await fetch('http://127.0.0.1:17398/inbound', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'e1' }),
-    });
-    assert.equal(res.status, 400);
-  } finally {
-    srv.close();
-  }
-});
-
-test('inbound：配了密钥就必须带对', async () => {
-  const srv = createInboundServer({ port: 17397, token: 'k', onInbound: () => {}, log: () => {} });
-  try {
-    const body = JSON.stringify({ id: 'e1', chat: { chatId: 'g1' }, reply: { url: 'http://127.0.0.1:1/x' } });
-
-    const bad = await fetch('http://127.0.0.1:17397/inbound', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body,
-    });
-    assert.equal(bad.status, 401);
-
-    const good = await fetch('http://127.0.0.1:17397/inbound', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-roost-token': 'k' },
-      body,
-    });
-    assert.equal(good.status, 200);
+    assert.equal(res.status, 404, 'ai-chat 推消息的地址必须关掉');
+    const health = await fetch('http://127.0.0.1:17399/health');
+    assert.equal(health.status, 200, '/health 不能跟着一起没了');
+    assert.equal((await health.json()).plugin, 'dsh-roost');
   } finally {
     srv.close();
   }
 });
 
 test('健康检查', async () => {
-  const srv = createInboundServer({ port: 17396, onInbound: () => {}, log: () => {} });
+  const srv = createInboundServer({ port: 17396, log: () => {} });
   try {
     const res = await fetch('http://127.0.0.1:17396/health');
     assert.equal(res.status, 200);
@@ -174,7 +135,6 @@ test('健康检查', async () => {
 test('TTS HTTP：能力查询返回公开状态，成功响应为二进制音频', async () => {
   const srv = createInboundServer({
     port: 17395,
-    onInbound: () => {},
     onTts: async (text) => ({ audio: Buffer.from(`audio:${text}`), contentType: 'audio/mpeg' }),
     onTtsStatus: async () => ({ enabled: true, provider: 'openai', configured: true }),
     log: () => {},
@@ -198,7 +158,7 @@ test('TTS HTTP：能力查询返回公开状态，成功响应为二进制音频
 
 test('TTS HTTP：共享密钥保护 capabilities 与生成路由', async () => {
   const srv = createInboundServer({
-    port: 17394, token: 'secret-token', onInbound: () => {},
+    port: 17394, token: 'secret-token', 
     onTts: async () => ({ audio: Buffer.from('audio'), contentType: 'audio/mpeg' }),
     onTtsStatus: async () => ({ enabled: false, provider: 'openai', configured: false }),
     log: () => {},
@@ -215,62 +175,6 @@ test('TTS HTTP：共享密钥保护 capabilities 与生成路由', async () => {
   } finally {
     srv.close();
   }
-});
-
-test('回话：拒绝非本机地址（防 SSRF）', async () => {
-  await assert.rejects(
-    () => postReply({ id: 'e1', reply: { url: 'http://evil.example.com/reply', token: 't' } }, 'hi'),
-    /不在本机/,
-  );
-});
-
-test('回话：缺地址或令牌时说清楚', async () => {
-  await assert.rejects(() => postReply({ id: 'e1' }, 'hi'), /没有回话地址/);
-  await assert.rejects(() => postReply({ id: 'e1', reply: { url: 'http://127.0.0.1:1/x' } }, 'hi'), /没有回话令牌/);
-});
-
-/**
- * 这条是线上事故的回归测试。
- *
- * 曾经这里只把 `fetch` 的 `message`（永远是 `fetch failed`）抛出去，
- * 模型拿到「发送失败：fetch failed」只能瞎猜，实测它会跟用户说
- * 「网络没通，等会儿再试」——而真相是 ai-chat 的「面板地址」配错了、
- * 那个端口根本没人监听。用户等一辈子也不会好。
- *
- * 不能拿 1 号端口测：那在 fetch 的黑名单里，报的是 `bad port`，
- * 根本走不到连接这一步。要先占一个空闲端口再放掉，才是真的 ECONNREFUSED。
- */
-async function deadPort() {
-  const net = await import('node:net');
-  return new Promise((resolve, reject) => {
-    const s = net.createServer();
-    s.on('error', reject);
-    s.listen(0, '127.0.0.1', () => {
-      const p = s.address().port;
-      s.close(() => resolve(p));
-    });
-  });
-}
-
-test('回话：连不上时带出地址和 errno（不能只说 fetch failed）', async () => {
-  const port = await deadPort();
-  await assert.rejects(
-    () => postReply({ id: 'e1', reply: { url: `http://127.0.0.1:${port}/reply`, token: 't' } }, 'hi'),
-    (e) => {
-      assert.match(e.message, new RegExp(`回话通道连不上（127\\.0\\.0\\.1:${port}）`));
-      // 端口刚被放掉，正常一定是 ECONNREFUSED；别的 errno 也算连不上，不苛求
-      assert.match(e.message, /ECONNREFUSED|EACCES|ECONNRESET|ETIMEDOUT/);
-      assert.doesNotMatch(e.message, /：fetch failed$/, '不能把 fetch failed 当最终原因');
-      return true;
-    },
-  );
-});
-
-test('回话：端口被 fetch 禁用时说明白（1 号端口走不到连接）', async () => {
-  await assert.rejects(
-    () => postReply({ id: 'e1', reply: { url: 'http://127.0.0.1:1/reply', token: 't' } }, 'hi'),
-    /回话通道连不上（127\.0\.0\.1:1）.*端口被 fetch 规范禁用/,
-  );
 });
 
 /* ---------------- 一轮的状态机 ---------------- */
@@ -457,9 +361,10 @@ test('一键：空目录检测出「什么都没装」', async () => {
   assert.equal(st.installed, false);
   assert.equal(st.running, false);
   assert.equal(st.hasBot, false);
-  assert.equal(st.pluginInstalled, false);
-  assert.equal(st.pluginConfigured, false);
   assert.equal(st.ownersConfigured, false, '没装 Roost 就没有主人');
+  assert.equal('pluginInstalled' in st, false, 'detect 不再返回 ai-chat 插件状态');
+  assert.equal('pluginConfigured' in st, false);
+  assert.equal('pluginConfig' in st, false);
 });
 
 test('一键：bot 配置里写了 owners，检测就报主人已设', async () => {
@@ -1106,7 +1011,7 @@ test('服务: 包装对象的 listening 在真 server 上，不在自己身上',
    * 日志说「监听成功」、红条却说「端口没起来」，自相矛盾。
    */
   const port = 41000 + Math.floor(Math.random() * 2000);
-  const srv = createInboundServer({ port, onInbound: () => {}, log: () => {} });
+  const srv = createInboundServer({ port, log: () => {} });
   try {
     await new Promise((r) => setTimeout(r, 150));
 
@@ -1121,7 +1026,7 @@ test('服务: 包装对象的 listening 在真 server 上，不在自己身上',
 
 test('服务: 端口被占时自动顺延到下一个', async () => {
   const port = 43000 + Math.floor(Math.random() * 2000);
-  const first = createInboundServer({ port, onInbound: () => {}, log: () => {} });
+  const first = createInboundServer({ port, log: () => {} });
   try {
     await new Promise((r) => setTimeout(r, 150));
     assert.equal(first.actualPort(), port);
@@ -1130,7 +1035,6 @@ test('服务: 端口被占时自动顺延到下一个', async () => {
     const second = createInboundServer({
       port,
       ports: [port, port + 1, port + 2],
-      onInbound: () => {},
       log: () => {},
     });
     try {

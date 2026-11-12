@@ -34,10 +34,9 @@ import { acceptClose } from './closing.js';
 /**
  * `qq_send` 里**仍然要拦**的标记：`say` / `button` / `silence`。
  *
- * 为什么以前连 `image` / `voice` 也拦：注释里写的理由是「`/r/reply` 直发通道
- * 不做解析，标记会原样进群」。**这条理由不成立**——`sendOf` 走的是
- * `postReply()`，落点是 ai-chat 的 `POST /reply`，那边把 `parts` 拼成 text
- * 之后照样跑 `parseActions`，标记会被消费掉，不会漏给用户。
+ * 为什么以前连 `image` / `voice` 也拦：注释里写的理由是「直发通道不做解析，
+ * 标记会原样进群」。**这条理由不成立**——`sendOf` 走 `postReply()`，
+ * 最终仍会跑一遍动作标记解析，标记会被消费掉，不会漏给用户。
  *
  * 拦它们的真实代价（2026-11 外部实测）：DSH 模式下模型主要在 `qq_send` 里说话，
  * 而「调过 qq_send，回复正文就不会再发出去」——于是**图片和语音根本没有

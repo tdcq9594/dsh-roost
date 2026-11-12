@@ -239,7 +239,7 @@ export function createExtApiHooks({
         },
         sender: { bucket: 'member', level: '', name: str(body?.senderName, 40) || '扩展消息' },
         /**
-         * 扩展没有 ai-chat 的回话窗口，`reply` 留空；`postReply` 见到
+         * 扩展没有 HTTP 回话窗口，`reply` 留空；`postReply` 见到
          * `__channel.send` 就改走发送通道（`server.js` 的回退分支）。
          * 这里给的是**函数**而不是 URL —— 回话地址一旦外部可控就是 SSRF 面。
          */

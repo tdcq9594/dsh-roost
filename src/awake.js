@@ -886,7 +886,7 @@ export function createAwake({
         results.push({ ...cand, ok: false, why: v.why, kind: v.kind });
         continue;
       }
-      const r = await channelOf('qq').send({
+      const r = await channelOf().send({
         scene: 'group',
         target: cand.chatId,
         text: v.text,

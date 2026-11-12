@@ -250,13 +250,18 @@ test('守卫 4：postReply 无回话地址时走 __channel.send，不接受外�
   assert.equal(seen[0].meta.requestId, 'r-1');
   assert.equal(out.ok, true);
 
-  // 没有 __channel 也没有 reply.url → 明确报错，不能静默丢弃
-  await assert.rejects(() => postReply({ reply: null }, 'x'), /没有回话地址/);
-  // 即使给了外部 URL，只要不在回环白名单就拒（SSRF 面）
-  await assert.rejects(
-    () => postReply({ reply: { url: 'http://evil.example.com/x', token: 't' } }, 'x'),
-    /不在本机/,
+  // 没有 __channel → 明确报错，不能静默丢弃
+  await assert.rejects(() => postReply({ reply: null }, 'x'), /没有回话通道/);
+  /**
+   * 移除 ai-chat 后 reply.url 已不是回话方式：即使外部塞了 URL 也不能发请求。
+   * 只认 __channel.send 这个同进程函数，外部可控的 URL 一律当没有通道。
+   */
+  const evil = { reply: { url: 'http://evil.example.com/x', token: 't' } };
+  await assert.rejects(() => postReply(evil, 'x'), /没有回话通道/);
+  const r = await postReply(
+    { ...evil, __channel: { send: async (t) => ({ ok: true, t }) } }, 'x',
   );
+  assert.equal(r.t, 'x', '有 __channel 时走它，URL 字段被完全忽略');
 });
 
 // ---------------------------------------------------------------- 会话

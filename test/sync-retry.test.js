@@ -1,8 +1,8 @@
 // 重试调度的测试。
 //
-// 这段代码平时不说话——只在「Roost 起得比 dsh-roost 晚」时才起作用。
-// 也正因如此，写错了没人会发现：面板红字照样在，用户照样被支使去
-// 「接入」第 5 步手动写一次。所以这里用假定时器把节奏和边界全钉住。
+// 这段代码平时不说话——只在「对端比本进程晚起」时才起作用。
+// 也正因如此，写错了没人会发现：要么永远不重试，要么无限空转。
+// 所以这里用假定时器把节奏和边界全钉住。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -105,7 +105,7 @@ test('重试：超过上限就放弃，并且只说一次', () => {
   assert.equal(retry.schedule(17321), null, '超时后不该再排');
   assert.equal(retry.tries, 0, '放弃时要清干净');
   assert.equal(logs.length, 1, '只提醒一次，别每次失败都刷屏');
-  assert.match(logs[0], /手动写一次/);
+  assert.match(logs[0], /不再自动重试/, '放弃时要给上层一条明确交代');
 });
 
 test('重试：reset 能作废队列——端口重启后不能改回旧端口', () => {
@@ -115,7 +115,7 @@ test('重试：reset 能作废队列——端口重启后不能改回旧端口',
   assert.equal(retry.pending, false);
   assert.equal(retry.tries, 0);
   clock.advance(60_000);
-  assert.deepEqual(runs, [], '作废之后不该再跑（否则会把 ai-chat 改回没人听的端口）');
+  assert.deepEqual(runs, [], '作废之后不该再跑（否则会把 对端 改回没人听的端口）');
 });
 
 test('重试：成功后 reset 一次，之后还能为下一次端口变化重新开始', () => {

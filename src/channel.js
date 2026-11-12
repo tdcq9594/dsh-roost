@@ -1,9 +1,8 @@
 /**
  * 通道抽象：把「怎么把话说出去」和「说什么」分开。
  *
- * 为什么现在才抽：第 4 期之前只有一家（QQ 走 ai-chat 的 `/send`），
- * 直接 fetch 最省事。但从第 5 期起要开始"主动说话"（私聊 + 群），
- * 一旦有两处要发消息，散着写必然重复；再往后接别的平台更没边。
+ * 为什么抽这一层：主动说话、面板测试消息、扩展回话三处都要发消息，
+ * 散着写必然重复；能力表和降级链也只该维护一份。
  *
  * **capabilities 必须如实声明**，这是这层最重要的东西：
  * QQ 没有"拍一拍"、没有"合并转发"、没有历史消息接口。
@@ -107,135 +106,164 @@ export function downgrade(caps, intent, scene = 'c2c', fallbacks = QQ_FALLBACKS)
 }
 
 /**
- * QQ 通道：真正的发送动作在 ai-chat 那边（它持有 QQ 连接）。
+ * 按扩展名判 `fileType`（1 图 / 2 视频 / 3 语音 / 4 文件）。
  *
- * 为什么走 HTTP 而不是进程内调用：dsh-roost 和 ai-chat 分属两个进程
- * （DSH 插件 vs Roost 插件），中间只有 HTTP 这一条已有的通路。
- * 这也是为什么 `baseUrl` + `keyQuery` 要传进来——端口和密钥都归配置管。
+ * 协议默认是 1（图片），所以**判错会把 zip 当图片发**，官方回 40035001，
+ * 而报错点离调用处很远（要翻到协议侧才看得见）。这里一次判准。
+ *
+ * 语音只认 `silk` / `amr`：协议对 `fileType=3` 会走语音上传链路，
+ * 给个 mp3 会在转码那一步失败，不如当普通文件发出去（对方能听）。
+ */
+function fileTypeOfName(p) {
+  const path = String(p ?? '').toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|bmp)$/.test(path)) return 1;
+  if (/\.(mp4|mov|avi|mkv|flv)$/.test(path)) return 2;
+  if (/\.(silk|amr)$/.test(path)) return 3;
+  return 4;
+}
+
+/**
+ * 框架外接协议通道：直连 Roost，不经过任何中间层。
+ *
+ * 通道实现对外接口固定为 `send` / `delivery` / `ping` / `sendFile`，
+ * 上层（`awake` / `speakup` / 面板发测试消息 / 扩展回话）只认这一套。
+ * 能力表按官方接口如实声明——换的是入口不是能力。
  *
  * @param {object} o
- * @param {() => string} o.baseUrl  ai-chat 所在地址，每次现读（端口会变）
- * @param {() => string} [o.keyQuery] 例如 `?token=xxx`，空串表示不校验
+ * @param {object} o.host  `createRoostHost()` 的实例（要有 rpc）
  * @param {(m:string)=>void} [o.log]
- * @param {typeof fetch} [o.fetchImpl] 测试替换用
  */
-export function createQqChannel({ baseUrl, keyQuery = () => '', log = () => {}, fetchImpl = fetch } = {}) {
-  async function post(payload) {
-    const url = `${String(baseUrl() || '').replace(/\/+$/, '')}/api/plugins/ai-chat/r/send${keyQuery()}`;
-    const r = await fetchImpl(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15_000),
-    });
-    const body = await r.json().catch(() => null);
-    if (!body) return { ok: false, message: `ai-chat 没回 JSON（HTTP ${r.status}）` };
-    return body;
-  }
+export function createRoostHostChannel({ host, log = () => {} } = {}) {
+  if (!host?.rpc) throw new Error('roost 通道需要 createRoostHost 实例');
 
   return {
-    name: 'qq',
-    capabilities: QQ_CAPABILITIES,
-    /** 能力用不了时退成什么，和 capabilities 一起交给上层 */
+    name: 'roost',
+    capabilities: { ...QQ_CAPABILITIES },
     fallbacks: QQ_FALLBACKS,
 
     /**
-     * 主动发一条。
+     * 发一条。
      *
-     * 为什么把「群主动要先有 group_push 授权」写在这里而不是上层：
-     * 这是通道的硬前置（没授权官方直接拒），不是业务策略。
-     * 上层只管"我想说"，能不能说是这一层的事。
+     * `msgId` / `receivedAt` 是可选的**被动回复**参数：带上它们，框架会把这条
+     * 当成对某条消息的回复（不占主动额度）；不带就是主动消息。
+     * 是否被动回复显式传，不靠 payload 里的隐式字段，更好排查。
      *
-     * `silenceMs`：她在这条消息里要求安静一阵子（`<<silence:2h>>`）。
-     * 主动搭话的文本会先被 speakup 摘掉所有标记，所以时长只能单独传，
-     * 由 ai-chat 转成框架的会话静默。
-     *
-     * **每次新生成一个幂等键，不复用。** 这里以前根本不传 `requestId`，
-     * 于是主动消息完全不进框架的投递账本——`/r/delivery` 永远查不到，
-     * 审核（304023）之后就再也没人知道那条到底过没过。
-     * 生成的 id 随返回值交出去，调用方拿它去问终态。
-     *
-     * @returns {Promise<{ok:boolean, message?:string, scene?:string,
-     *   id?:string, pending?:boolean, requestId?:string}>}
+     * `silenceMs` 先设再发：她决定的是「别说话」，不是「发完这条再说」，
+     * 所以发送失败也该生效。
      */
-    async send({ scene = 'c2c', target, text, hasGroupAuthz = true, silenceMs = 0, requestId = '' } = {}) {
+    async send({
+      scene = 'c2c', target, text, hasGroupAuthz = true,
+      silenceMs = 0, requestId = '', msgId = '', receivedAt = 0,
+    } = {}) {
       const t = String(text ?? '').trim();
       if (!target) return { ok: false, message: '缺 target' };
       /**
        * 只有静默、没有正文是合法的——`<<silence:2h>>` 单独出现就是
-       * 「我要安静，没什么要说的」。这时候不该拦，也不该发空消息。
+       * 「我要安静，没什么要说的」。不该拦，也不该发一条空消息。
        */
       if (!t && !(Number(silenceMs) > 0)) return { ok: false, message: '没有内容可发' };
       if (scene === 'group' && !hasGroupAuthz) {
         return { ok: false, message: '这个群没有 group_push 授权，主动消息发不出去' };
       }
+
       /**
-       * 幂等键。前缀 `sp-`（speakup）和 `qs-`（`qq_send`）分开，
-       * 日志里一眼能看出这条是谁发的。
-       *
-       * 允许调用方传进来：重试同一条时应当复用同一个 id，
-       * 否则账本会记成两条，重发还会真的发两遍。
+       * 幂等键。前缀 `rh-`（roost host）和前两个通道分开，日志里一眼能看出谁发的。
+       * 允许调用方传进来：重试同一条要复用同一个 id，否则账本记成两条、还会真发两遍。
        */
       const rid = String(requestId || '').trim()
-        || `sp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        || `rh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+      if (Number(silenceMs) > 0) {
+        await host.rpc('gate.silence', { chatId: String(target), ms: Number(silenceMs) })
+          .catch((e) => log(`设静默失败（不影响这条发送）：${e?.message ?? e}`));
+      }
+      if (!t) return { ok: true, scene, target, id: '', pending: false, requestId: rid, silentOnly: true };
+
       try {
-        const r = await post({
-          scene: scene === 'group' ? 'group' : 'c2c',
-          target,
-          text: t,
+        const r = await host.rpc('msg.send', {
+          kind: scene === 'group' ? 'group' : 'c2c',
+          chatId: String(target),
+          content: t,
           requestId: rid,
-          ...(Number(silenceMs) > 0 ? { silenceMs: Number(silenceMs) } : {}),
+          ...(msgId ? { msgId: String(msgId) } : {}),
+          ...(receivedAt ? { receivedAt: Number(receivedAt) } : {}),
         });
-        if (!r?.ok) log(`通道发送失败：${r?.message ?? '未知原因'}`);
-        /**
-         * `requestId` 一律带回去（失败也带）：失败之后要查「到底是没发出去
-         * 还是不确定」，靠的就是这个 id。`pending` 是官方 304023 进了审核，
-         * 既不是成功也不是失败。
-         */
-        return { ...r, requestId: rid };
+        return {
+          ok: true,
+          scene,
+          target,
+          id: String(r?.id ?? ''),
+          pending: Boolean(r?.pending),
+          requestId: String(r?.requestId || rid),
+        };
       } catch (e) {
-        // 网络类错误单独包一层：上层据此区分"对方拒绝"和"根本没连上"
-        return { ok: false, message: `发不出去：${e?.message ?? e}`, network: true, requestId: rid };
+        const network = e?.code === 'NETWORK';
+        log(`roost 发送失败：${e?.message ?? e}`);
+        return { ok: false, message: e?.message ?? String(e), code: e?.code ?? '', network, requestId: rid };
       }
     },
 
     /**
-     * 问一条消息的投递终态（桥 3）。
-     *
-     * 为什么要有这一步：主动消息进审核时 `send` 只回 `pending: true`——
-     * 「待审核」既不是送到也不是没送到。审核结果的事件推到的是**框架侧**
-     * （`MESSAGE_AUDIT_PASS` / `REJECT`），dsh-roost 收不到推送，
-     * 只能过一阵子主动来问一次。
-     *
-     * 查不到（插件没开账本、框架太老、id 已过保留期）一律回
-     * `{ ok: false, gone: true }`，调用方据此**放弃跟踪**而不是永远重试。
-     *
-     * @param {string} requestId
-     * @returns {Promise<{ok:boolean, state?:string, parts?:number, code?:string,
-     *   msgId?:string, gone?:boolean, message?:string}>}
+     * 直接问框架的投递账本，且多分块会聚合（`parts` 是切片数）。
      */
     async delivery(requestId) {
       const rid = String(requestId ?? '').trim();
       if (!rid) return { ok: false, gone: true, message: '缺 requestId' };
       try {
-        const url = `${String(baseUrl() || '').replace(/\/+$/, '')}/api/plugins/ai-chat/r/delivery`
-          + `?requestId=${encodeURIComponent(rid)}${keyQuery() ? '&' + keyQuery().replace(/^\?/, '') : ''}`;
-        const r = await fetchImpl(url, { signal: AbortSignal.timeout(5000) });
-        const body = await r.json().catch(() => null);
-        if (!body) return { ok: false, message: `ai-chat 没回 JSON（HTTP ${r.status}）` };
-        return body;
+        return await host.rpc('delivery.get', { requestId: rid });
       } catch (e) {
-        return { ok: false, message: `查不了：${e?.message ?? e}`, network: true };
+        return { ok: false, message: `查不了：${e?.message ?? e}`, network: e?.code === 'NETWORK' };
       }
     },
 
-    /** 健康检查：ai-chat 在不在。用于面板显示，不参与发送决策 */
-    async ping() {
+    /**
+     * 发一个本地文件 / 图片 / 视频。
+     *
+     * 直连没有「轮末统一上传」的回调，所以直接调协议 `media.send`。
+     * 协议内部会 `uploadLocalFileSharded` → `outbound`，所以额度、账本、
+     * 被动窗口、审核识别照样参与——不是绕过调度器直发。
+     *
+     * `fileType` **必须传对**：协议默认按 1（图片）处理，把 `.zip` 当图片
+     * 上传会被官方拒（40035001），而且报错点离调用处很远。
+     *
+     * @param {object} o
+     * @param {string} o.path 框架本机路径（dsh-roost 与 roost 同机时才有意义）
+     */
+    async sendFile({ scene = 'c2c', target, path, fileName = '', msgId = '', receivedAt = 0, requestId = '' } = {}) {
+      const p = String(path ?? '').trim();
+      if (!target) return { ok: false, message: '缺 target' };
+      if (!p) return { ok: false, message: '缺 path' };
+      const rid = String(requestId || '').trim()
+        || `rf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       try {
-        const r = await fetchImpl(`${String(baseUrl() || '').replace(/\/+$/, '')}/api/plugins/ai-chat/r/status${keyQuery()}`, {
-          signal: AbortSignal.timeout(3000),
-        });
-        return { ok: r.ok, status: r.status };
+        const r = await host.rpc('media.send', {
+          scene: scene === 'group' ? 'group' : 'c2c',
+          target: String(target),
+          path: p,
+          fileType: fileTypeOfName(p),
+          ...(fileName ? { fileName: String(fileName) } : {}),
+          ...(msgId ? { msgId: String(msgId) } : {}),
+          ...(receivedAt ? { receivedAt: Number(receivedAt) } : {}),
+          requestId: rid,
+        }, { timeout: 120_000 });
+        return {
+          ok: true,
+          id: String(r?.id ?? ''),
+          pending: Boolean(r?.pending),
+          requestId: String(r?.requestId || rid),
+        };
+      } catch (e) {
+        log(`roost 发文件失败：${e?.message ?? e}`);
+        return { ok: false, message: e?.message ?? String(e), code: e?.code ?? '', requestId: rid };
+      }
+    },
+
+    /** 健康检查：问一句 `system.ping`。不参与发送决策，只给面板看 */
+    async ping() {
+      const t0 = Date.now();
+      try {
+        await host.rpc('system.ping', {}, { timeout: 3000 });
+        return { ok: true, status: 200, ms: Date.now() - t0 };
       } catch (e) {
         return { ok: false, message: e?.message ?? String(e) };
       }
@@ -284,7 +312,7 @@ export function createFakeChannel({ failWith = '', pending = false, states = {} 
 /**
  * 通道注册表：按名字存实现，按配置挑一个。
  *
- * 现在只有 `qq` 一个实现，看起来是多余的间接层。留它的理由是
+ * 现在只有 `roost` 一个实现，看起来是多余的间接层。留它的理由是
  * **以后加平台时上层不用改**：`awake` / `speakup` 只认 `registry.active()`，
  * 新平台注册进来即可，不必回头改调用点。
  *
@@ -292,15 +320,22 @@ export function createFakeChannel({ failWith = '', pending = false, states = {} 
  * @param {Record<string, object>} o.impls
  * @param {() => string} [o.pick] 当前用哪个（配置项）
  */
-export function createChannelRegistry({ impls = {}, pick = () => 'qq', log = () => {} } = {}) {
+export function createChannelRegistry({ impls = {}, pick = () => 'roost', log = () => {} } = {}) {
   function resolve(name) {
     const n = String(name || '') || pick();
-    const impl = impls[n];
-    if (!impl) {
-      log(`没有叫「${n}」的通道，可用的有：${Object.keys(impls).join('、') || '（空）'}`);
-      return null;
-    }
-    return impl;
+    if (impls[n]) return impls[n];
+    /**
+     * 只注册了一个实现时，配置里写着别的名字（例如老配置的 `qq`）也回退到它。
+     *
+     * 这不是为了兼容旧通道，而是为了**不让升级变成哑巴**：移除 ai-chat 之后
+     * 老配置仍可能带 `channel.current='qq'`，返回 null 会让主动搭话、面板测试
+     * 消息全在 `channel.send` 处抛错，而用户只看到「突然一个字都不回」。
+     * 配置层另有 `migrateChannel()` 负责把它改回 `roost`，这里是第二道兜底。
+     */
+    const keys = Object.keys(impls);
+    if (keys.length === 1) return impls[keys[0]];
+    log(`没有叫「${n}」的通道，可用的有：${keys.join('、') || '（空）'}`);
+    return null;
   }
   return {
     get: resolve,

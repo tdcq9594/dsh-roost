@@ -151,6 +151,24 @@ window.__ModuleLoader__.load({
   --bad:var(--dsw-alias-state-error-primary, #b42318);
   --accent:var(--dsw-alias-brand-primary, #2563eb);
 }
+/* 首次接入向导：全屏遮罩，窄侧栏里也要能滚、不能把按钮挤出屏幕 */
+/* 垂直也居中：卡片贴顶会在大屏上留下半屏空白，看着像没加载完 */
+.roost-wizard{display:flex;align-items:center;justify-content:center;width:100%;height:100%;overflow:auto;padding:20px;box-sizing:border-box}
+.roost-wizard-card{width:100%;max-width:720px;padding:24px 28px;border:1px solid var(--line);border-radius:14px;background:var(--surface);box-shadow:0 12px 40px color-mix(in srgb, currentColor 8%, transparent);box-sizing:border-box}
+.roost-wizard-card .roost-pill.on{border-color:var(--accent);color:var(--accent)}
+.roost-wiz-body{min-height:260px;margin-top:16px}
+/* 链路对比：旧版划掉、新版高亮，一眼看出少了哪一层 */
+.roost-wiz-chain{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:12px 14px;border:1px solid var(--line-soft);border-radius:10px;margin:10px 0;background:var(--field)}
+.roost-wiz-chain.old{opacity:.55}
+.roost-wiz-chain.now{border-color:var(--accent)}
+.roost-wiz-node{padding:4px 10px;border:1px solid var(--line);border-radius:7px;font-size:12px;white-space:nowrap}
+.roost-wiz-node.gone{text-decoration:line-through;color:var(--bad)}
+.roost-wiz-node.hot{border-color:var(--accent);color:var(--accent);font-weight:600}
+.roost-wiz-arrow{color:var(--muted, currentColor);opacity:.5;font-size:12px}
+.roost-wiz-todo{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.roost-wiz-todo-row{display:flex;align-items:center;gap:10px;font-size:12.5px}
+.roost-wiz-todo-num{flex:0 0 auto;width:20px;height:20px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:var(--field);border:1px solid var(--line);font-size:11px}
+@container (max-width: 420px){.roost-wizard{padding:8px;align-items:flex-start}.roost-wizard-card{padding:16px}.roost-wiz-body{min-height:0}}
 /* 页头：标题 + 通道 + 页签，永远在、不参与滚动 */
 .roost-head{flex:0 0 auto;width:100%;box-sizing:border-box;padding:0}
 /**
@@ -379,6 +397,20 @@ select.roost-input{color-scheme:dark}
 .roost-pill.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
 .roost-pill.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
 .roost-pill.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+/**
+ * 可点的 pill：和「纯状态标签」必须看得出区别。
+ *
+ * 之前两者共用同一个 roost-pill 类，一排下来全是灰底圆角，用户不知道哪个能点、
+ * 更看不出选中了哪个。现在：状态是平的（无 cursor），按钮有实边 + hover，
+ * 选中态用主色边框 + 淡主色底 + 加粗。
+ */
+.roost-pill.as-btn{cursor:pointer;background:var(--surface);border-color:var(--line);
+  padding:2px 10px;font-size:11.5px;transition:border-color .12s,color .12s,background .12s}
+.roost-pill.as-btn:hover{border-color:var(--accent);color:var(--accent)}
+.roost-pill.as-btn:disabled{opacity:.55;cursor:default;border-color:var(--line);color:inherit}
+.roost-pill.on{border-color:var(--accent);color:var(--accent);font-weight:600;
+  background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.roost-pill.on::before{content:'✓ ';font-weight:700}
 .roost-code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;
   background:var(--dsw-alias-markdown-code-block, var(--field));border-radius:6px;padding:2px 6px}
 .roost-pre{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;line-height:1.6;
@@ -1103,7 +1135,7 @@ select.roost-input{color-scheme:dark}
         return h('div', { className: 'roost-banner bad' },
           h('b', null, `宿主没在听（端口 ${st.port}）。`),
           h('i', null,
-            'ai-chat 推过来的消息会全部失败。'
+            '固定服务（/v1 控制面、TTS）没人听，扩展和语音会失败。'
             + (st.serverError ? `原因：${st.serverError}。` : '')
             + ' 常见是端口被占或上一轮没退干净——重启 DSH 让端口释放。'))
       }
@@ -1353,46 +1385,43 @@ select.roost-input{color-scheme:dark}
      * 拿配置值冒充「我们实际在听的端口」，就会给出一条**假红字**，
      * 用户照着它去改一个本来就对的值。所以这里宁可说「还不知道」。
      */
-    function portView(st, gotUrl) {
-      const actual = st?.actualPort || 0
-      const want = actual ? `http://127.0.0.1:${actual}` : ''
-      if (!want) {
-        const down = st?.listening === false
-        return {
-          kind: 'unknown',
-          cell: down ? '没在听' : '—',
-          text: down
-            ? 'dsh-roost 还没在听（端口没起来），等它起来再对。'
-            : '还没拿到实际端口，点右上「刷新」再看。',
-        }
+    /**
+     * 概览页「直连状态」那一格的结论全部在这里算，别在渲染层自己拼。
+     *
+     * 移除 ai-chat 之后只有一个通道，不再有「两端端口对不对得上」这回事——
+     * 消息由框架外接协议的事件流推进来，能不能收到全看连没连上 + seq 有没有推进。
+     */
+    function portView(st) {
+      const r = st?.roost || {}
+      const map = {
+        online: { kind: 'ok', text: '✓ 已连上外接协议，消息直接进来' },
+        /** 对端没启动：不是错误，别用红字吓人 */
+        waiting: { kind: 'unknown', text: 'Roost 没在运行，启动后会自动连上' },
+        connecting: { kind: 'unknown', text: '正在连 Roost…' },
+        reconnecting: { kind: 'unknown', text: '断了，正在重连（会从上次的 seq 补拉）' },
+        error: { kind: 'bad', text: `✗ 连不上：${r.lastError || '未知原因'}` },
+        stopped: { kind: 'unknown', text: '已停止（配置关了或插件已卸载）' },
       }
-      /**
-       * 只陈述事实（配置值 ≠ 实际值），**不断言原因**。
-       *
-       * 这里曾经直接写「被占了」，但面板没有能力知道原因：可能是 want 真被占，
-       * 也可能是 want 非法（<1024 / >65535）被候选列表过滤掉。把「没试过」
-       * 说成「试过失败了」，会让人去查一个根本不存在的占用进程。
-       */
-      const cell = st.wantPort && st.wantPort !== actual
-        ? `${actual}（配置 ${st.wantPort}，已顺延）`
-        : String(actual)
-      if (!gotUrl) {
-        return { kind: 'unset', cell, wantUrl: want, text: 'ai-chat 还没配好，消息推不过来 —— 去「接入」第 5 步。' }
-      }
-      if (gotUrl === want) return { kind: 'ok', cell, wantUrl: want, text: '✓ 两端一致，链路通' }
+      const it = map[r.state] || { kind: 'unknown', text: `状态：${r.state || '还没开始'}` }
       return {
-        kind: 'bad',
-        cell,
-        wantUrl: want,
-        // `action: 'sync'` 是给渲染层看的：这种情况配一个「现在就改过来」按钮
-        action: 'sync',
-        text: `✗ 对不上：ai-chat 指向 ${gotUrl}，我们监听 ${want}。消息会推到没人听的端口上。`,
+        kind: it.kind,
+        /** 停在同一个数字 = 事件没进来，比「指示灯绿着」更能说明问题 */
+        cell: r.seq ? `seq ${r.seq}` : '—',
+        text: it.text,
       }
     }
 
     function OverviewTab({ st, setupSt, toast, reload, busy, onGo, logs }) {
-      /** 「现在就改过来」按钮的忙碌态，和外面的 busy（自测）分开 */
-      const [syncing, setSyncing] = useState(false)
+      /** 「重新打开向导」按钮的忙碌态，和外面的 busy（自测）分开 */
+      const [wizardBusy, setWizardBusy] = useState(false)
+      const reopenWizard = async () => {
+        setWizardBusy(true)
+        try {
+          const r = await post('/setup/wizard/reopen', {})
+          toast(r?.ok === false ? (r.message || '没打开') : '向导已重新打开')
+          reload()
+        } finally { setWizardBusy(false) }
+      }
       /** 洞察区数据：/usage 按日历天补齐（56 天够画 7 天柱状图 + 8 周活跃度），
        *  /chats 是我们自己创建并持有的 QQ↔DSH 会话清单。
        *  两份都只读 dsh-roost 的账本，不会把宿主 DSH 里手动开的会话算进来。
@@ -1629,18 +1658,15 @@ select.roost-input{color-scheme:dark}
 
       /**
        * 接入进度用**真实字段**推，不再靠一个后端不存在的 `steps`。
-       * 五点全部来自 `/setup`：装好 → 有机器人 → 在跑 → 插件装了 → 已指向我们。
-       *
+       * 移除 ai-chat 后链路只剩四段：装好 → 有机器人凭证 → 在跑 → 外接协议连上。
        * **不包含「主人」**——主人是「谁能指挥她」，不是「链路通不通」。
-       * 没设主人也能正常聊天，所以它不进这个进度条，在「接入」页单独一步。
        */
       const s = setupSt || {}
       const checks = [
         ['Roost 装好', s.installed],
         ['机器人凭证', s.hasCreds],
         ['Roost 在跑', s.running],
-        ['ai-chat 插件', s.pluginInstalled],
-        ['已指向 dsh-roost', s.pluginConfigured],
+        ['外接协议已连上', st?.roost?.state === 'online'],
       ]
       const doneCount = checks.filter(([, v]) => v).length
       const allReady = doneCount === checks.length
@@ -1656,16 +1682,9 @@ select.roost-input{color-scheme:dark}
        * 端口那一段的结论全部来自 `portView`——这里不再自己拼「我们监听 …」，
        * 免得又出现「拿配置端口冒充实际端口」那种假红字。
        */
-      const pv = portView(st, s.pluginConfig?.dshUrl || '')
-
-      /** 红字旁边那个「现在就改过来」：只改 dshUrl 一行，不重刷插件配置 */
-      const fixUrl = async () => {
-        setSyncing(true)
-        const r = await post('/setup/sync', {})
-        setSyncing(false)
-        toast(r?.ok && !r.skipped ? (r.message || '已改过来') : (r?.message || '没改成功'))
-        reload()
-      }
+      const pv = portView(st)
+      /** 跳过了向导也要一直催：不重接就是哑的，不能让「暂时跳过」变成静默 */
+      const wizardPending = Boolean(st?.wizard && !st.wizard.completed)
 
       return h('div', null,
         h(Banner, { st, setupSt }),
@@ -1994,12 +2013,12 @@ select.roost-input{color-scheme:dark}
             '自测直接跑一轮 DSH 对话，验「会话建得起来、AI 回得来」；QQ 那一段不在里面。'),
         ),
 
-        h(Sec, { n: '05', title: '端口对得上吗' },
+        h(Sec, { n: '05', title: '直连状态' },
           h('div', { className: 'roost-list' },
             [
-              ['dsh-roost 实际监听', pv.cell || '—', 'ai-chat 要往这里推'],
-              ['Roost 面板', s.port || '—', 'Roost 自己的面板端口，和上面不是一回事'],
-              ['ai-chat 指向', s.pluginConfig?.dshUrl || '未配置', '它以为该推给谁'],
+              ['事件流 seq', pv.cell || '—', '停在同一个数字就是没在进消息'],
+              ['Roost 面板', s.port || '—', 'Roost 自己的面板端口，和这里不是一回事'],
+              ['通道', 'roost（框架外接协议）', '消息不经过任何中间层'],
             ].map(([k, v, why]) =>
               h('div', { key: k, className: 'roost-item' },
                 h('span', { className: 't' }, k, h('span', { className: 'd' }, ' ' + why)),
@@ -2014,16 +2033,13 @@ select.roost-input{color-scheme:dark}
             style: pv.kind === 'ok' ? { color: 'var(--ok)' } : pv.kind === 'bad' ? { color: 'var(--bad)' } : null,
           },
             pv.text,
-            // 对不上时给一个**立刻能点**的出口：这事它自己就能改，
-            // 没必要让用户跑去「接入」页重走一遍
-            pv.action === 'sync'
+            /** 跳过向导的人要一直看得见这条：不重接就是哑的 */
+            wizardPending
               ? h('button', {
-                  type: 'button',
-                  className: 'roost-btn',
+                  type: 'button', className: 'roost-btn',
                   style: { marginLeft: 8, flex: '0 0 auto' },
-                  disabled: syncing,
-                  onClick: fixUrl,
-                }, syncing ? '改着…' : '现在就改过来')
+                  disabled: wizardBusy, onClick: reopenWizard,
+                }, wizardBusy ? '打开中…' : '重新走接入向导')
               : null,
           ),
         ),
@@ -2054,7 +2070,7 @@ select.roost-input{color-scheme:dark}
     /* ---------------- 接入 ---------------- */
 
     /**
-     * 组件版本块（框架 / ai-chat）。
+     * 组件版本块（框架版本）。
      *
      * 抽成独立组件的原因：放在 SetupTab 里时它依赖内部 state，而假 React 不跑
      * effect，永远只能测到「读着…」——第一版就因此把 `d.framework`（未定义）
@@ -2087,17 +2103,12 @@ select.roost-input{color-scheme:dark}
           : info.error
             ? h('div', { className: 'roost-note' }, '查不到：' + info.error)
             : h('div', null,
-                row('framework', '框架'),
-                row('plugin', 'ai-chat 插件'),
+                row('framework', 'Roost 框架'),
                 info.framework?.hasUpdate
                   ? h('div', { className: 'roost-note' },
                       '框架有新版：下载 tar 包解压覆盖原目录（data/ 里的机器人配置和记忆不受影响），然后重启 Roost。')
                   : null,
-                info.plugin?.hasUpdate
-                  ? h('div', { className: 'roost-note' },
-                      '插件有新版：在 Roost 面板的「插件 → 市场」里点更新（那边有 sha 校验，装坏了能回滚）。')
-                  : null,
-                info.framework?.error || info.plugin?.error
+                info.framework?.error
                   ? h('div', { className: 'roost-note' },
                       '最新版查不到多半是网络或 GitHub 抖动，不影响使用；点「重新检查」再试一次。')
                   : null,
@@ -2124,7 +2135,7 @@ select.roost-input{color-scheme:dark}
       const [work, setWork] = useState('')
       const qrTimer = useRef(null)
       const mode = reg?.current || 'qr'
-      /** 框架 / ai-chat 的版本对照（/update/deps） */
+      /** 框架版本对照（/update/deps） */
       const [depsInfo, setDepsInfo] = useState(null)
       const [depsBusy, setDepsBusy] = useState(false)
       const loadDeps = async (force) => {
@@ -2140,6 +2151,123 @@ select.roost-input{color-scheme:dark}
       useEffect(() => { loadDeps(false) }, [])
       const s = st || {}
       const locked = Boolean(work) || Boolean(busy)
+
+      /**
+       * 一键直连（外接协议）。
+       *
+       * 状态、开、关、试全部由后端 `/roost/pair*` 处理——前端只负责显示和点。
+       * **端口和密钥都不让用户填**：密钥由插件生成并存进本插件配置（面板只显示
+       * 已设置/未设置），端口交给 Roost 按 botId 分配再读回来。手填这两项是
+       * 「配错了也不报错、只是消息进不来」的主要来源。
+       */
+      const [pair, setPair] = useState(null)
+      const [pairBusy, setPairBusy] = useState(false)
+      const [pairMsg, setPairMsg] = useState('')
+      /**
+       * 可选依赖 `ws` 与事件通道。
+       *
+       * `ws` 只影响「事件流走 WS 还是 SSE」，RPC 和发文件恒走 HTTP。
+       * 优先复用框架已装的那份；没装就走 SSE，功能一点不少。
+       */
+      const [wsInfo, setWsInfo] = useState(null)
+      const [wsBusy, setWsBusy] = useState(false)
+      const loadWsInfo = async () => {
+        try {
+          const r = await get('/roost/ws')
+          setWsInfo(r && r.ok !== false ? r : null)
+        } catch { setWsInfo(null) }
+      }
+      const doInstallWs = async () => {
+        setWsBusy(true)
+        try {
+          const r = await post('/roost/ws/install', {})
+          toast(r?.ok === false ? (r.message || '装不上') : (r.message || 'ws 已装好'))
+          await loadWsInfo()
+          await reload()
+        } finally { setWsBusy(false) }
+      }
+      const setTransport = async (t) => {
+        setWsBusy(true)
+        try {
+          const r = await post('/config?mode=patch', { roostHost: { transport: t } })
+          if (r?.ok === false) toast(r.message || '改不了')
+          else toast(`事件通道已设为 ${t}`)
+          await loadWsInfo()
+        } finally { setWsBusy(false) }
+      }
+      const loadPair = async () => {
+        try {
+          const r = await get('/roost/pair')
+          setPair(r && r.ok !== false ? r : null)
+        } catch {
+          setPair(null)
+        }
+      }
+      /** 步骤 2 的状态变了（Roost 起停）就要重查，否则会一直显示「没在跑」 */
+      useEffect(() => { loadPair() }, [s.running])
+      useEffect(() => { loadWsInfo() }, [])
+
+      /**
+       * @param {{rotate?:boolean}} [o]
+       *   rotate = 换一个新密钥（旧的立刻失效）。按钮上要走二次确认——
+       *   换完正在连的其它客户端会掉线，误点一次就得重新配。
+       */
+      const doPair = async ({ rotate = false } = {}) => {
+        setPairBusy(true)
+        setPairMsg('')
+        try {
+          const r = await post('/roost/pair/enable', { rotate })
+          if (r?.ok === false) {
+            setPairMsg(`✗ ${r.message || '没配成'}`)
+          } else if (rotate) {
+            setPairMsg(`✓ 已换新密钥（旧的立刻失效），已保存并重连 ${r.url}`)
+          } else {
+            setPairMsg(`✓ 已连上 ${r.url}（端口 ${r.port} 由 Roost 分配，密钥已由插件生成并保存）`)
+          }
+          toast(r?.ok === false ? (r.message || '没配成') : rotate ? '密钥已换新' : '已直连')
+          await loadPair()
+          await reload()
+        } catch (e) {
+          setPairMsg(`✗ ${e?.message ?? e}`)
+        } finally {
+          setPairBusy(false)
+        }
+      }
+
+      const doPairTest = async () => {
+        setPairBusy(true)
+        try {
+          const r = await post('/roost/pair/test', {})
+          setPairMsg(r?.ok === false ? `✗ ${r.message || '不通'}` : `✓ 通，往返 ${r.ms}ms`)
+        } catch (e) {
+          setPairMsg(`✗ ${e?.message ?? e}`)
+        } finally {
+          setPairBusy(false)
+        }
+      }
+
+      /**
+       * 关掉协议。**地址和密钥保留**：下次再开不用重新配对
+       *（token 还是原来那个，已经在连的客户端不会被踢下线）。
+       */
+      const doPairOff = async () => {
+        setPairBusy(true)
+        try {
+          const r = await post('/roost/pair/disable', {})
+          setPairMsg(r?.ok === false
+            ? `✗ ${r.message || '没关掉'}`
+            : `✓ 已关掉${r.warning ? `（${r.warning}）` : ''}，消息暂时收不到`)
+          await loadPair()
+          await reload()
+        } catch (e) {
+          setPairMsg(`✗ ${e?.message ?? e}`)
+        } finally {
+          setPairBusy(false)
+        }
+      }
+
+      const pairReady = pair?.step === 'ready'
+      const pairState = pairReady ? 'done' : s.running ? 'current' : 'todo'
 
       const stopQr = useCallback(() => {
         if (qrTimer.current) {
@@ -2239,9 +2367,9 @@ select.roost-input{color-scheme:dark}
           if (!(await step('写入凭证', '/setup/bot', { name: 'main', appId, appSecret: secret }))) return
         }
         if (!s0.running && !(await step('启动', '/setup/start'))) return
-        if (!s0.pluginInstalled && !(await step('安装插件', '/setup/plugin'))) return
-        if (!s0.pluginConfigured && !(await step('写配置', '/setup/configure'))) return
-        toast('链路就绪 —— 去群里说一句话试试')
+        if (!(await step('一键直连', '/roost/pair/enable', {}))) return
+        await loadPair()
+        toast('直连已配好 —— 去群里说一句话试试')
       }
 
       /**
@@ -2266,9 +2394,6 @@ select.roost-input{color-scheme:dark}
          */
         start: s.running ? 'done' : s.installed ? 'current' : 'todo',
         bot: hasCreds ? 'done' : s.running ? 'current' : 'todo',
-        plugin: s.pluginInstalled ? 'done' : s.running ? 'current' : 'todo',
-        configure: s.pluginConfigured ? 'done' : s.pluginInstalled ? 'current' : 'todo',
-        ready: s.pluginConfigured ? 'done' : 'todo',
         /**
          * 主人在 Roost 面板里设了没有。
          *
@@ -2302,18 +2427,18 @@ select.roost-input{color-scheme:dark}
 
       return h('div', null,
 
-        h('div', { className: 'roost-banner', style: s.pluginConfigured ? { borderColor: 'color-mix(in srgb, var(--ok) 40%, transparent)' } : null },
+        h('div', { className: 'roost-banner', style: pairReady ? { borderColor: 'color-mix(in srgb, var(--ok) 40%, transparent)' } : null },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
             h('div', { style: { flex: 1, minWidth: 0 } },
-              h('b', null, s.pluginConfigured ? '链路已就绪' : '还没配好'),
-              h('i', { style: { display: 'block' } }, s.pluginConfigured
+              h('b', null, pairReady ? '直连已就绪' : '还没接好'),
+              h('i', { style: { display: 'block' } }, pairReady
                 ? '群里说一句话试试。没反应看下面的「常见卡点」。'
-                : '点右边「一键就绪」，能自动做的都会做掉；做不了的会停在哪一步并说明原因。'),
+                : '点右边「一键就绪」：装 Roost、写凭证、启动、一键直连会自动做完。'),
             ),
             h('button', {
               type: 'button', className: 'roost-primary', disabled: locked,
-              onClick: s.pluginConfigured ? () => oneKey() : oneKey,
-            }, work ? work + '…' : s.pluginConfigured ? '重新检查一遍' : '一键就绪'),
+              onClick: oneKey,
+            }, work ? work + '…' : pairReady ? '重新检查一遍' : '一键就绪'),
           ),
         ),
 
@@ -2445,82 +2570,138 @@ select.roost-input{color-scheme:dark}
                         ),
                   ),
 
+          /**
+           * 一键直连：**推荐路径**。
+           *
+           * dsh-roost 直接连 Roost 的外接协议，
+           * 中间少一层，也就少一处会「静默断链」的地方。
+           *
+           * 端口和密钥都不给用户填：密钥自动生成后存进本插件配置（面板只显示
+           * 已设置/未设置），端口由 Roost 按 botId 分配再读回来。
+           */
           h(Step, {
-            n: 4, state: mark.plugin, title: '装 ai-chat 插件',
-            desc: s.pluginInstalled ? '已装 —— Roost 那边负责收发 QQ 消息的那个插件' : 'Roost 那边负责收发 QQ 消息的插件',
+            n: 4,
+            state: pairState,
+            title: '一键直连（推荐）',
+            desc: pair?.text || (s.running ? '点下面按钮，自动开协议、生成密钥、配对' : '先把 Roost 启动起来'),
           },
-            h('button', {
-              type: 'button', className: 'roost-btn', disabled: !s.running || locked,
-              onClick: () => step('安装插件', '/setup/plugin'),
-            }, s.pluginInstalled ? '重装 / 更新' : '安装'),
-          ),
-
-          h(Step, {
-            n: 5, state: mark.configure, title: '切到 DSH 适配器',
-            desc: s.pluginConfigured
-              ? `ai-chat 已指向 ${s.pluginConfig?.dshUrl || s.dshUrl}`
-              : '把 ai-chat 的「交给谁去想」改成 DSH，并填好回话地址',
-          },
-            /**
-             * 永远给个能点的按钮。
-             *
-             * 之前「已配置就隐藏、没装插件就禁用」，两种情况下点下去都毫无反应，
-             * 用户不知道发生了什么。现在一律可点，做不了就在提示里说清原因。
-             */
-            h('button', {
-              type: 'button', className: 'roost-btn', disabled: locked,
-              onClick: async () => {
-                if (!s.pluginInstalled) {
-                  setCfgMsg('✗ 还没装 ai-chat 插件，先走第 4 步')
-                  return toast('先装 ai-chat 插件（第 4 步）')
-                }
-                if (!s.running) {
-                  setCfgMsg(`✗ Roost 没在跑（${s.webui || '面板端口'} 连不上），先点第 3 步的「启动」`)
-                  return toast('Roost 没在跑，先启动（第 3 步）')
-                }
-                setCfgMsg('正在写…')
-                const r = await post('/setup/configure', {})
-                setCfgMsg(r.ok === false ? `✗ ${r.message || '没写成'}` : `✓ ${r.message || '已指向 dsh-roost'}`)
-                toast(r.ok === false ? r.message || '没写成' : r.message || '已切换')
-                await reload()
-              },
-            }, s.pluginConfigured ? '重新写一次' : '配置'),
-          ),
-            cfgMsg
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+              h('button', {
+                type: 'button',
+                className: pairReady ? 'roost-btn' : 'roost-primary',
+                disabled: locked || pairBusy || !s.running,
+                onClick: () => doPair(),
+              }, pairBusy ? '配着…' : pairReady ? '重新配对' : '一键直连'),
+              pairReady
+                ? h(ConfirmLink, {
+                    label: '重置密钥',
+                    confirmLabel: '确认换新？旧的会失效',
+                    disabled: locked || pairBusy,
+                    onConfirm: () => doPair({ rotate: true }),
+                  })
+                : null,
+              pairReady
+                ? h('button', {
+                    type: 'button', className: 'roost-btn', disabled: locked || pairBusy,
+                    onClick: doPairTest,
+                  }, '测一下')
+                : null,
+              pairReady
+                ? h('button', {
+                    type: 'button', className: 'roost-btn', disabled: locked || pairBusy,
+                    onClick: doPairOff,
+                  }, '关掉直连')
+                : null,
+            ),
+            h('div', { className: 'roost-note', style: { marginTop: 8, width: '100%' } },
+              '端口和密钥都由插件自动生成并保管：密钥写进本插件配置，面板上只显示「已设置」'
+              + '（要换就在设置页点重置），端口交给 Roost 按机器人分配后读回来。两者都不用你手填。'),
+            pairMsg
               ? h('div', {
                   className: 'roost-mono',
                   style: {
                     marginTop: 6,
-                    color: cfgMsg.startsWith('✗') ? 'var(--bad)' : cfgMsg.startsWith('✓') ? 'var(--ok)' : 'inherit',
+                    color: pairMsg.startsWith('✗') ? 'var(--bad)' : pairMsg.startsWith('✓') ? 'var(--ok)' : 'inherit',
                   },
-                }, cfgMsg)
+                }, pairMsg)
               : null,
+            /** 事件通道：WS 更快，SSE 零依赖；RPC 和文件传输恒走 HTTP */
+            h('div', { style: { marginTop: 12, width: '100%' } },
+              h('div', { className: 'roost-note', style: { fontWeight: 600, marginBottom: 6 } }, '事件通道'),
+              /**
+               * 一行只放**状态**（不可点），另一行放**操作**（按钮）。
+               * 混在一排时状态和按钮长得一样，用户不知道哪个能点。
+               */
+              h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+                (() => {
+                  const st = wsInfo?.roost || {}
+                  return h('div', { className: 'roost-pill' + (st.usable ? ' ok' : '') },
+                    st.usable
+                      ? `WS 可用（框架已装${st.version ? ` v${st.version}` : ''}）`
+                      : 'WS 不可用，事件走 SSE（功能一样）')
+                })(),
+                h('div', { className: 'roost-pill' + (wsInfo?.active === 'ws' ? ' ok' : '') },
+                  `当前走 ${wsInfo?.active === 'ws' ? 'WS' : 'SSE'}`),
+              ),
+              h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 8 } },
+                h('button', {
+                  type: 'button', className: 'roost-btn', disabled: wsBusy, onClick: loadWsInfo,
+                }, '刷新状态'),
+                wsInfo && !wsInfo.roost?.usable
+                  ? h('button', {
+                      type: 'button', className: 'roost-btn', disabled: wsBusy, onClick: doInstallWs,
+                    }, wsBusy ? '装着…' : '给框架装 ws')
+                  : null,
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' } },
+                h('span', { className: 'roost-note', style: { margin: 0 } }, '启动 DSH 时自动启动 Roost'),
+                h('span', { className: 'roost-pill' + (s.roostAutoStart ? ' ok' : '') },
+                  s.roostAutoStart ? '已开启' : '已关闭'),
+                h('button', {
+                  type: 'button', className: 'roost-btn', disabled: wsBusy,
+                  onClick: async () => {
+                    setWsBusy(true)
+                    try {
+                      const r = await post('/config?mode=patch', { roostHost: { autoStart: !s.roostAutoStart } })
+                      if (r?.ok === false) toast(r.message || '改不了')
+                      else toast(s.roostAutoStart ? '已关闭自动启动' : '已开启：下次启动 DSH 会自动拉起 Roost')
+                      await reload()
+                    } finally { setWsBusy(false) }
+                  },
+                }, s.roostAutoStart ? '关掉' : '开启'),
+              ),
+              h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' } },
+                h('span', { className: 'roost-note', style: { margin: 0 } }, '用哪条（当前生效的那条会打勾）：'),
+                ...[['auto', '自动（有 ws 用 ws）'], ['sse', '只用 SSE'], ['ws', '只用 WS']].map(([v, t]) =>
+                  h('button', {
+                    key: v, type: 'button',
+                    /** `as-btn` 才有「可点」的视觉；`on` 给当前生效的打勾高亮 */
+                    className: 'roost-pill as-btn' + ((wsInfo?.transport || 'auto') === v ? ' on' : ''),
+                    disabled: wsBusy,
+                    onClick: () => setTransport(v),
+                  }, t)),
+              ),
+              h('div', { className: 'roost-note', style: { marginTop: 6 } },
+                'ws 装在 Roost 框架那边（框架自己的 /ws 也要用），这边直接复用，不重复安装。'
+                + 'WS 只影响事件流；RPC 和大文件上传恒走 HTTP——发文件传的是本机路径，'
+                + '由框架自己读盘分片上传，字节不经过这条连接。'),
+            ),
+          ),
 
-          /**
-           * 密钥对不上 = 消息一条都推不进去，而且两边都不报错。
-           *
-           * 这是最容易被忽略的一种断链：用户在「服务」里设了共享密钥，
-           * ai-chat 那边没跟着改，表现只是「机器人突然不回话了」。
-           * 点上面那个「重新写一次」就会同步过去。
-           */
-          s.pluginConfigured && s.pluginConfig?.tokenSynced === false
-            ? h('div', { className: 'roost-note', style: { color: 'var(--bad)', marginTop: 4 } },
-                '⚠ ai-chat 的共享密钥和这里不一致 —— 消息会被宿主以 401 拒绝。点上面「重新写一次」同步过去。')
-            : null,
-
+          /** 第 5 步：直连配好之后，剩下两件是 QQ 开放平台上的手工操作 */
           h(Step, {
-            n: 6, state: mark.ready, title: '在群里说句话',
-            desc: s.pluginConfigured
+            n: 5, state: pairReady ? 'current' : 'todo', title: '在群里说句话',
+            desc: pairReady
               ? '还差两件手工的事：开放平台开「接收所有消息」，机器人先进群'
-              : '前面五步走完就能试了',
+              : '先把第 4 步的一键直连配好',
           },
-            s.pluginConfigured
+            pairReady
               ? h('button', { type: 'button', className: 'roost-btn', onClick: () => window.open('https://q.qq.com', '_blank', 'noopener') }, '开放平台')
               : null,
           ),
 
           /**
-           * 第七步：配置主人。**放在最后**——前面六步是「能跑起来」，
+           * 第 6 步：配置主人。**放在最后**——前面五步是「能跑起来」，
            * 这一步是「谁能指挥它」，是跑起来之后才需要定的事。
            *
            * 主人只能在 **Roost 面板**里设（面板有「主人与群组」那块），
@@ -2528,7 +2709,7 @@ select.roost-input{color-scheme:dark}
            * 主人是「谁能指挥这台机器」的根，不该由插件代写。
            */
           h(Step, {
-            n: 7, state: mark.owner, title: '配置主人',
+            n: 6, state: mark.owner, title: '配置主人',
             desc: s.ownersConfigured
               ? `已设 ${s.ownerCount || 1} 个主人 —— 群友的话她只当聊天，主人才能指挥她动工具`
               : '去 Roost 面板的「主人与群组」里把你自己设成主人，不然她只能聊天、不能动工具',
@@ -2544,13 +2725,13 @@ select.roost-input{color-scheme:dark}
 
         h(DepsBlock, { info: depsInfo, busy: depsBusy, onCheck: () => loadDeps(true) }),
 
-        /* 接入这几步用的是圆圈编号，这里就不再编号了 —— 混用两套编号会读成"第 8 步" */
+        /* 接入这几步用的是圆圈编号，这里就不再编号了 —— 混用两套编号容易读成别的步号 */
         h(Sec, { title: '常见卡点' },
           h('ul', { className: 'roost-note', style: { margin: 0, paddingLeft: 18 } },
             h('li', null, `启动后马上退出：多半是 AppID / AppSecret 填错了，或端口 ${s.port || ''} 被占`),
             h('li', null, '群里没反应：开放平台没开「接收所有消息」，或机器人不在群里'),
-            h('li', null, '有反应但答非所问：ai-chat 的「什么时候接话」被设成了「只在被 @ 时」'),
-            h('li', null, '面板上一切正常但消息全失败：看「概览 → 端口对得上吗」，八成是 ai-chat 指错端口'),
+            h('li', null, '群里不接话：检查「设置 → roostHost.decide」的接话模式和冷却是否在挡'),
+            h('li', null, '面板一切正常但消息全失败：看「概览 → 直连状态」，seq 不动就是事件没进来'),
             s.accessKeySet === false
               ? h('li', null, '访问密钥还没设过：Roost 面板默认只监听本机，够用；要远程访问再去设')
               : null,
@@ -3755,7 +3936,7 @@ select.roost-input{color-scheme:dark}
             return h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 8 } },
               ev.withIds
                 ? `出处：最近 ${ev.rows} 条日记里 ${ev.withIds} 条带着事件 id，能回查到原文。`
-                : `出处：最近 ${ev.rows} 条日记里一条事件 id 都没有 —— 出处只能记到时间，回查原文这条链是断的（ai-chat 那边没开事件账本，或者没把 eventIds 传过来）。`,
+                : `出处：最近 ${ev.rows} 条日记里一条事件 id 都没有 —— 出处只能记到时间（框架没开事件账本，或事件里没带 eventId）。`,
             )
           })(),
           h('div', { style: { marginBottom: 10 } },
@@ -4385,7 +4566,7 @@ select.roost-input{color-scheme:dark}
        * 待确认的主动消息（桥 3）。
        *
        * 挂载时只读（`GET /delivery` 是读文件，不花钱）；点「回查一次」才
-       * 真的去问 ai-chat（`POST`）。反过来做的话每次切到这个页签都会
+       * 真的回查一次（`POST`）。反过来做的话每次切到这个页签都会
        * 打一轮 HTTP，而结果本来就不急在这一分钟。
        */
       const [deliv, setDeliv] = useState(null)
@@ -4961,6 +5142,338 @@ select.roost-input{color-scheme:dark}
             h('button', { type: 'button', className: 'roost-btn', onClick: onClose }, '关闭'),
           ),
           h('div', { className: 'cap-modal-c' }, children),
+        ),
+      )
+    }
+
+    /**
+     * 首次接入向导（参考 aurabot 的 setupDone 全屏遮罩）。
+     *
+     * 新装和老用户升级都会弹：这一版移除了 ai-chat，老配置不重新接一遍就是哑的。
+     * 四步走完必须由**后端**真跑一次直连自测才允许完成（`/setup/wizard/done`），
+     * 前端点「完成」只是发个请求，不能自己宣布成功。
+     *
+     * 「暂时跳过」是给老版本 Roost 用户的逃生口：对面还没有外接协议时，
+     * 得让人进得了面板去升级，否则锁死在向导里什么都做不了。
+     */
+    const WIZ_STEPS = ['接入说明', '装好 Roost', '一键直连', '自测完成']
+
+    /** `initial*` 三个只给渲染测试注入状态用；生产不传，由 load() 拉真实值、从第 1 步开始 */
+    function SetupWizard({
+      st, toast, onDone, reload,
+      initialSetup = null, initialPair = null, initialStep = 0,
+    }) {
+      const [step, setStep] = useState(initialStep)
+      const [busy, setWizardBusy] = useState(false)
+      const [msg, setMsg] = useState('')
+      const [pair, setWizardPair] = useState(initialPair)
+      const [setupState, setSetupState] = useState(initialSetup)
+      const [tested, setTested] = useState(false)
+      /** 自己填的安装目录（绑定已有安装用），以及输入框展开开关 */
+      const [dirInput, setDirInput] = useState('')
+      const [dirOpen, setDirOpen] = useState(false)
+
+      const load = async () => {
+        try {
+          const [p, s] = await Promise.all([get('/roost/pair'), get('/setup')])
+          setWizardPair(p && p.ok !== false ? p : null)
+          setSetupState(s && s.ok !== false ? s : null)
+        } catch (e) {
+          setMsg(`读状态失败：${e?.message ?? e}`)
+        }
+      }
+      useEffect(() => { load() }, [])
+
+      const call = async (path, body) => {
+        setWizardBusy(true)
+        setMsg('')
+        try {
+          const r = await post(path, body || {})
+          await load()
+          return r
+        } catch (e) {
+          setMsg(`✗ ${e?.message ?? e}`)
+          return { ok: false, message: e?.message ?? String(e) }
+        } finally {
+          setWizardBusy(false)
+        }
+      }
+
+      const doEnable = async () => {
+        const r = await call('/roost/pair/enable', {})
+        /** 顺带装 ws 的结果：装上了就说一句，装不上也说明会走 SSE */
+        const wsNote = r?.ws
+          ? (r.ws.ok
+              ? `；${r.ws.mode === 'reuse' ? '框架已有 ws，直接复用' : '已给框架装好 ws'}`
+              : `；给框架装 ws 没成（${r.ws.message || '原因不明'}），事件走 SSE，功能一样`)
+          : ''
+        setMsg(r?.ok === false
+          ? `✗ ${r.message || '没配成'}${r.step === 'old-roost' ? '（这一步只能升级 Roost，不是网络问题）' : ''}`
+          : `✓ 已连上 ${r.url}，密钥和端口都由插件自动配好${wsNote}`)
+        setTested(false)
+      }
+
+      const doTest = async () => {
+        const r = await call('/roost/pair/test', {})
+        setTested(r?.ok !== false)
+        setMsg(r?.ok === false ? `✗ ${r.message || '不通'}` : `✓ 通，往返 ${r.ms}ms`)
+      }
+
+      /**
+       * 第 2 步的四个动作。**都在本页做完，不用跳去「系统 → 接入」**——
+       * 向导的本意就是一条路走到底，中途把人支使去别的页最容易走丢。
+       *
+       * 装和绑是两件不同的事，文案必须分清：
+       *   · 一键安装：下载到默认目录（`<数据目录>/roost`），不接收路径
+       *   · 绑定已有：把 `setup.roostDir` 指向一份**已经存在**的安装
+       * 混成一句「选择安装目录」，用户会填一个空目录然后报「这个目录不像 Roost」。
+       */
+      const doInstall = async () => {
+        setMsg('正在下载安装，可能要一两分钟…')
+        const r = await call('/setup/install', {})
+        if (r?.ok === false) { setMsg(`✗ ${r.message || '装不上'}`); return }
+        setMsg(`✓ ${r.message || '装好了'}，接着点「一键启动」`);
+      }
+
+      const doStart = async () => {
+        setMsg('正在启动…')
+        const r = await call('/setup/start', {})
+        if (r?.ok === false) { setMsg(`✗ ${r.message || '起不来'}`); return }
+        setMsg(`✓ ${r.message || '已启动'}`);
+      }
+
+      const doBindDir = async () => {
+        const d = dirInput.trim();
+        if (!d) return;
+        const r = await call('/setup/dir', { dir: d });
+        if (r?.ok === false) { setMsg(`✗ ${r.message || '绑定失败'}`); return }
+        setDirOpen(false);
+        setMsg(`✓ 已绑定 ${r.dir || d}`);
+      }
+
+      const doDone = async () => {
+        const r = await call('/setup/wizard/done', {})
+        if (r?.ok === false) {
+          setMsg(`✗ ${r.message || '还没通过'}`)
+          setTested(false)
+          return
+        }
+        toast('接入完成')
+        onDone?.()
+        reload?.()
+      }
+
+      const doSkip = async () => {
+        const r = await call('/setup/wizard/skip', {})
+        if (r?.ok === false) { setMsg(`✗ ${r.message || '没跳过'}`); return }
+        toast('先跳过，概览页会一直提示')
+        onDone?.()
+        reload?.()
+      }
+
+      const upgraded = Boolean(st?.wizard?.upgraded)
+      const pairStep = pair?.step || 'no-roost'
+      const roostReady = Boolean(setupState?.installed && setupState?.running)
+      const paired = pairStep === 'ready' || pairStep === 'other-channel'
+
+      /** 链路对比：把「少了哪一层」画出来，比一段文字好懂 */
+      const chain = (items, cls) => h('div', { className: 'roost-wiz-chain ' + cls },
+        items.flatMap((it, i) => [
+          i ? h('span', { key: 'a' + i, className: 'roost-wiz-arrow' }, '→') : null,
+          h('span', {
+            key: 'n' + i,
+            className: 'roost-wiz-node ' + (it.gone ? 'gone' : it.hot ? 'hot' : ''),
+          }, it.label),
+        ]),
+      )
+      const todo = (rows) => h('div', { className: 'roost-wiz-todo' },
+        rows.map((r, i) => h('div', { key: r, className: 'roost-wiz-todo-row' },
+          h('span', { className: 'roost-wiz-todo-num' }, String(i + 1)),
+          h('span', null, r),
+        )),
+      )
+
+      const body = [
+        // 0 接入说明
+        h('div', null,
+          h('p', { className: 'roost-note' },
+            upgraded
+              ? '你从旧版升级上来了。这一版彻底移除了 ai-chat 中间层，消息改由框架外接协议直连 —— 老配置里的接入方式已经不存在，必须重新接一次，否则机器人不会回话。'
+              : '欢迎使用。机器人不直接连 QQ：Roost 框架负责官方接口，这个插件负责思考和回话，两边通过框架外接协议直连。'),
+          h('div', { style: { marginTop: 14 } },
+            h('div', { className: 'roost-note', style: { fontSize: 12 } }, upgraded ? '旧版链路（已移除）' : '旧版链路（这一版不再使用）'),
+            chain([
+              { label: 'QQ' }, { label: 'Roost 框架' },
+              { label: 'ai-chat 插件', gone: true }, { label: 'dsh-roost' }, { label: 'DSH' },
+            ], 'old'),
+            h('div', { className: 'roost-note', style: { fontSize: 12, marginTop: 10 } }, '现在'),
+            chain([
+              { label: 'QQ' }, { label: 'Roost 框架' },
+              { label: '外接协议', hot: true }, { label: 'dsh-roost' }, { label: 'DSH' },
+            ], 'now'),
+          ),
+          h('div', { className: 'roost-note', style: { marginTop: 16, fontWeight: 600 } }, '接下来三步'),
+          todo([
+            '确认 Roost 装好并启动',
+            '一键直连 —— 密钥和端口自动生成，不用手填',
+            '自测通过后完成接入',
+          ]),
+          upgraded
+            ? h('div', { className: 'roost-banner', style: { marginTop: 16 } },
+                '你的人格、记忆、日记、权限设置都会保留；这一步只重连消息通道。')
+            : null,
+        ),
+        // 1 装好 Roost：装 / 绑 / 启动都在本页做完
+        h('div', null,
+          h('p', { className: 'roost-note' }, 'Roost 是消息进出的框架。装好、启动，就这一步能全部做完。'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 } },
+            h('div', { className: 'roost-pill' }, setupState?.installed ? `✓ 已装 v${setupState.version || '?'}` : '未安装'),
+            h('div', { className: 'roost-pill' }, setupState?.running ? '✓ 正在运行' : '未运行'),
+            h('div', { className: 'roost-pill' }, setupState?.hasCreds ? '✓ 机器人凭证' : '缺机器人凭证'),
+            h('div', { className: 'roost-pill' }, `面板端口 ${setupState?.port || '—'}`),
+          ),
+          /** 目录一行：让人知道自己装在哪、也让人能把已有安装指过来 */
+          setupState?.dir
+            ? h('div', { className: 'roost-note', style: { marginTop: 10, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                h('span', null, '安装位置'),
+                h('span', { className: 'roost-mono', style: { overflowWrap: 'anywhere' } }, String(setupState.dir)),
+                h('span', { style: { opacity: .7 } }, `（${setupState.dirHow || ''}）`),
+              )
+            : null,
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 } },
+            !setupState?.installed
+              ? h('button', {
+                  type: 'button', className: 'roost-primary', disabled: busy, onClick: doInstall,
+                }, busy ? '处理中…' : '一键安装 Roost')
+              : null,
+            setupState?.installed && !setupState?.running
+              ? h('button', {
+                  type: 'button', className: 'roost-primary', disabled: busy, onClick: doStart,
+                }, busy ? '处理中…' : '一键启动 Roost')
+              : null,
+            setupState?.installed && setupState?.running
+              ? h('div', { className: 'roost-pill' }, '✓ 已在运行，可以下一步了')
+              : null,
+            h('button', {
+              type: 'button', className: 'roost-btn', onClick: () => setDirOpen((v) => !v),
+            }, dirOpen ? '收起' : '已经装过？指定目录'),
+            setupState?.webui
+              ? h('button', {
+                  type: 'button', className: 'roost-btn',
+                  onClick: () => window.open(setupState.webui, '_blank', 'noopener'),
+                }, '打开 Roost 面板')
+              : null,
+          ),
+          /** 绑定已有安装：明确说「目录里必须已经有 src/main.js」，否则用户会填空目录 */
+          dirOpen
+            ? h('div', { style: { marginTop: 10 } },
+                h('div', { className: 'roost-note', style: { marginBottom: 6 } },
+                  '指向一份**已经解压好的** Roost（目录里要能看到 src/main.js）。'
+                  + '想装到别的位置就先把包解压过去，再来这里指定。'),
+                h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+                  h('input', {
+                    className: 'roost-input',
+                    placeholder: setupState?.dir || 'D:\\bots\\qq-bot-roost',
+                    value: dirInput,
+                    onChange: (e) => setDirInput(e.target.value),
+                    onKeyDown: (e) => { if (e.key === 'Enter') doBindDir() },
+                    style: { flex: 1, minWidth: 200 },
+                  }),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: !dirInput.trim() || busy, onClick: doBindDir,
+                  }, '用这个目录'),
+                ),
+              )
+            : null,
+          h('div', { className: 'roost-note', style: { marginTop: 12 } },
+            'Roost 是零依赖的 QQ 官方机器人框架：装好、填 AppID / AppSecret、启动就行。'
+            + '这一版开始它由自己的外接协议直接把消息推给本插件，不需要再装任何中间插件。'),
+          !roostReady
+            ? h('p', { className: 'roost-note', style: { marginTop: 10 } },
+                '还没检测到在跑的 Roost：点上面的「一键安装」或指定已有目录，再点「一键启动」。')
+            : null,
+        ),
+        // 2 一键直连
+        h('div', null,
+          h('p', { className: 'roost-note' },
+            '点下面按钮，插件会通过 Roost 自己的面板接口开启外接协议、生成密钥、读回真实端口。地址和密钥都不用手填。'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 } },
+            h('button', {
+              type: 'button', className: 'roost-primary', disabled: busy,
+              onClick: doEnable,
+            }, busy ? '处理中…' : paired ? '重新配对一次' : '一键直连'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy,
+              onClick: doTest,
+            }, '测试连接'),
+          ),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 } },
+            h('div', { className: 'roost-pill' }, pair?.host?.enabled ? '✓ 协议已开启' : '协议未开启'),
+            h('div', { className: 'roost-pill' }, pair?.self?.tokenSet ? '✓ 密钥已保存' : '密钥未保存'),
+            h('div', { className: 'roost-pill' }, pair?.self?.url ? '✓ 已配对' : '未配对'),
+          ),
+          pair?.text
+            ? h('div', { className: 'roost-note', style: { marginTop: 10 } }, pair.text)
+            : null,
+          pairStep === 'old-roost'
+            ? h('div', { className: 'roost-banner', style: { marginTop: 10 } },
+                'Roost 版本太老，还没有外接协议。这只能升级 Roost 解决，不是网络或端口问题。')
+            : null,
+        ),
+        // 3 自测完成
+        h('div', null,
+          h('p', { className: 'roost-note' },
+            '最后真发一次协议调用，确认事件能收到、消息能发出去。通过后向导才算走完。'),
+          h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            '「完成接入」会由服务端再自测一次，前端说了不算 —— 所以这里不会点到一半就假装配好了。'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 } },
+            h('div', { className: 'roost-pill' }, roostReady ? '✓ Roost 在跑' : '· Roost 没在跑'),
+            h('div', { className: 'roost-pill' }, paired ? '✓ 已配对' : '· 还没配对'),
+            h('div', { className: 'roost-pill' }, tested ? '✓ 自测通过' : '· 自测未通过'),
+          ),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 } },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy, onClick: doTest,
+            }, '再测一次'),
+            h('button', {
+              type: 'button', className: 'roost-primary', disabled: busy, onClick: doDone,
+            }, '完成接入'),
+          ),
+          tested ? h('div', { className: 'roost-note', style: { marginTop: 10 } }, '✓ 自测通过，可以点「完成接入」了。') : null,
+        ),
+      ][step]
+
+      return h('div', { className: 'roost-wizard', role: 'dialog', 'aria-label': '首次接入向导' },
+        h('div', { className: 'roost-wizard-card' },
+          h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
+            h('div', { className: 'roost-title-lg' }, '首次接入'),
+            h('span', { className: 'roost-note' }, `第 ${step + 1} / ${WIZ_STEPS.length} 步 · ${WIZ_STEPS[step]}`),
+          ),
+          h('div', { style: { display: 'flex', gap: 4, margin: '14px 0' } },
+            WIZ_STEPS.map((name, i) => h('button', {
+              key: name, type: 'button',
+              className: 'roost-pill' + (i === step ? ' on' : ''),
+              style: { flex: 1, cursor: i <= step ? 'pointer' : 'default', opacity: i <= step ? 1 : 0.5 },
+              onClick: () => i <= step && setStep(i),
+            }, `${i + 1} ${name}`)),
+          ),
+          h('div', { className: 'roost-wiz-body' }, body),
+          msg ? h('div', { className: 'roost-note', style: { marginTop: 10 } }, msg) : null,
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 18, alignItems: 'center', flexWrap: 'wrap' } },
+            step > 0
+              ? h('button', { type: 'button', className: 'roost-btn', onClick: () => setStep(step - 1) }, '上一步')
+              : null,
+            h('div', { style: { flex: 1 } }),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy, onClick: doSkip,
+            }, '暂时跳过'),
+            step < WIZ_STEPS.length - 1
+              ? h('button', {
+                  type: 'button', className: 'roost-primary', onClick: () => setStep(step + 1),
+                }, '下一步')
+              : null,
+          ),
         ),
       )
     }
@@ -5625,7 +6138,7 @@ select.roost-input{color-scheme:dark}
             '这些是「有没有这个功能」，和下面的「谁能用」是两层：这里关掉，谁的调不出来。'),
           /** 两页分属两个进程，用户调「她怎么聊天」最容易走错页（§16.4-1） */
           h('div', { className: 'roost-note' },
-            '接话策略、防吵、冷却在 Roost 面板「插件 → ai-chat → 配置」；这一页管记忆、心情、主动和扩展。'),
+            '接话策略、防吵、冷却在「设置 → roostHost.decide」；这一页管记忆、心情、主动和扩展。'),
           feat
             ? (feat.groups || []).map((g) => {
                 const items = (feat.features || []).filter((f) => (g.ids || []).includes(f.id))
@@ -6699,7 +7212,18 @@ select.roost-input{color-scheme:dark}
         + '这里只填要改的；日常用「权限」页调，这里是手改的口子'],
       ['sendFile', '发文件', '能发哪些文件：restrictPaths 默认关＝全盘都能发；'
         + '开了只允许 workspace / images / extraRoots 里的路径'],
-      ['channel', '通道', '当前用哪个通道'],
+      ['channel', '通道', '只保留 roost（框架外接协议直连）；老配置里的 qq 会自动归一'],
+      ['roostHost', '直连 roost', 'enabled：要不要连框架的外接协议（地址和 token 在 roost 面板「外接」页，'
+        + '端口是 6800+hash，每只鸟不一样）。url 形如 http://127.0.0.1:6801；'
+        + 'vision 关掉后模型只能看到「发来一张图」。'
+        + '**发送要真正走这条，还得把上面 channel.current 改成 roost**（两个开关分开，'
+        + '可以先只开 enabled 看连接状态）。'
+        + 'merge：连发几句攒成一段再回（私聊和被 @ 不等）。'
+        + 'decide：群里**没被 @** 时要不要接——mode 有 ai / mention（只在被 @ 时）/ '
+        + 'window（@ 后 N 分钟内）/ engaged（刚说过话算在聊）；'
+        + 'cooldownSec 冷却（期间的消息攒着不丢）、maxRepliesPerMin 每分钟条数、'
+        + 'maxPerHour / burstMax / quietStartHour~quietEndHour / shortAskMustReply 是刹车，'
+        + '数值 0 和起止相同都表示关。接话策略、防吵、冷却都在这里设'],
       ['chat', '会话', '一轮最多等多久；上游 502/429 时的补重试（attempts 是「补几次」，budgetSec 是整轮总预算）'],
       ['workspace', '工作区', '机器人会话挂哪个工作区：dir 留空单开、__default__ 用默认'],
       ['server', '服务', '端口与密钥'],
@@ -7451,7 +7975,7 @@ select.roost-input{color-scheme:dark}
       },
         h('div', { className: 'roost-note', style: { marginTop: 2 } },
           '默认关闭。开启后，模型可以用 <<say: 内容>> 让这句话变成语音条；'
-          + '合成在这里做，转成 QQ 要的 silk 和发送由 ai-chat 完成。'),
+          + '合成在这里做，转成 QQ 要的 silk 和发送由框架外接协议完成。'),
         dirty
           ? h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)' } },
               '有未保存的改动。')
@@ -8419,8 +8943,8 @@ select.roost-input{color-scheme:dark}
          * 用服务端的 message，不再写死。
          *
          * 以前成功分支固定 `'存好了（下一轮生效）'`，把服务端返回的
-         * 「已保存，服务已重载；但 ai-chat 没同步（原因）」整句丢掉了——
-         * 端口换了而 ai-chat 没跟上时，那正是唯一能看见的警告。
+         * 「已保存，服务已重载；但 xxx 没成功（原因）」整句丢掉了——
+         * 重载只做了一半时，那正是唯一能看见的警告。
          */
         toast(r.message || '存好了')
       }
@@ -9874,6 +10398,23 @@ select.roost-input{color-scheme:dark}
       const curGroup = navGroupOf(tab)
       const groupTabs = curGroup ? TABS.filter(([id]) => curGroup.tabs.includes(id)) : []
 
+      /**
+       * 首次接入向导：新装 / 升级后 `needed=true`，整棵面板树都不挂，
+       * 只留全屏向导（照 aurabot `showWizard ? h(Wizard) : null` 的做法）。
+       * 这样老配置在没重新接入前不会给人一种「一切正常」的错觉。
+       * 跳过后后端仍返回 needed=false，但概览页会把未接入状态一直显示着。
+       */
+      if (st?.wizard?.needed) {
+        return h('div', { className: 'roost-root' },
+          h(SetupWizard, {
+            st,
+            toast,
+            onDone: loadStatus,
+            reload: loadStatus,
+          }),
+        )
+      }
+
       return h('div', { className: 'roost-root' },
         h('div', { className: 'roost-head' },
           h('div', { className: 'roost-head-inner' },
@@ -10092,6 +10633,7 @@ select.roost-input{color-scheme:dark}
     exports.RoostIcon = RoostIcon
     exports.ConfigTab = ConfigTab
     exports.DepsBlock = DepsBlock
+    exports.SetupWizard = SetupWizard
     exports.HerTab = HerTab
     exports.CapsTab = CapsTab
     exports.ToolsModal = ToolsModal

@@ -4,6 +4,7 @@
 // 所以测试不只验形状，还要验**真的被调用、真的挡住了不该发的**。
 
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 
 import {
@@ -11,7 +12,6 @@ import {
   QQ_FALLBACKS,
   can,
   downgrade,
-  createQqChannel,
   createFakeChannel,
   createChannelRegistry,
 } from '../src/channel.js';
@@ -45,65 +45,25 @@ test('能力表：不存在的名字判 false，不抛错', () => {
 
 /* ---------------- 发送 ---------------- */
 
-/** 记下请求的假 fetch */
-function spyFetch({ ok = true, body = { ok: true }, status = 200 } = {}) {
-  const calls = [];
-  const impl = async (url, init) => {
-    calls.push({ url, init, payload: init?.body ? JSON.parse(init.body) : null });
-    return { ok, status, json: async () => body };
-  };
-  impl.calls = calls;
-  return impl;
-}
-
-test('通道：正常发送会打到 ai-chat 的 /send，并带上场景', async () => {
-  const f = spyFetch();
-  const ch = createQqChannel({ baseUrl: () => 'http://127.0.0.1:15207/', keyQuery: () => '?key=k', fetchImpl: f });
-  const r = await ch.send({ scene: 'c2c', target: 'u1', text: '在吗' });
-  assert.equal(r.ok, true);
-  assert.equal(f.calls.length, 1);
-  assert.match(f.calls[0].url, /\/api\/plugins\/ai-chat\/r\/send\?key=k$/);
-  assert.equal(f.calls[0].payload.scene, 'c2c');
-  assert.equal(f.calls[0].payload.target, 'u1');
+/**
+ * ai-chat 通道已整体移除。这里不用「测它不存在」这种空断言，
+ * 而是钉住两件事：
+ *   1. 通道模块只暴露直连实现（源码里不再有 ai-chat 的任何路由）；
+ *   2. 老配置残留 `qq` 时，注册表仍能拿到唯一实现——升级不会变哑巴。
+ */
+test('移除 ai-chat：通道源码里不再有中间层的 /r/* 路由', () => {
+  const src = readFileSync(new URL('../src/channel.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /api\/plugins\/ai-chat/);
+  assert.doesNotMatch(src, /createQqChannel/);
+  assert.doesNotMatch(src, /\/r\/(send|delivery|status|reply)/);
 });
 
-test('通道：缺 target 或空文本，本地就挡掉，不发请求', async () => {
-  const f = spyFetch();
-  const ch = createQqChannel({ baseUrl: () => 'http://x', fetchImpl: f });
-  assert.equal((await ch.send({ target: '', text: 'x' })).ok, false);
-  assert.equal((await ch.send({ target: 'u1', text: '   ' })).ok, false);
-  assert.equal(f.calls.length, 0);
-});
-
-test('通道：群里没有 group_push 授权就不发（官方硬前置）', async () => {
-  const f = spyFetch();
-  const ch = createQqChannel({ baseUrl: () => 'http://x', fetchImpl: f });
-  const r = await ch.send({ scene: 'group', target: 'g1', text: '你好', hasGroupAuthz: false });
-  assert.equal(r.ok, false);
-  assert.match(r.message, /授权/);
-  assert.equal(f.calls.length, 0, '没授权连请求都不该发出去');
-});
-
-test('通道：网络异常标记成 network，方便上层区分"对方拒绝"', async () => {
-  const ch = createQqChannel({
-    baseUrl: () => 'http://x',
-    fetchImpl: async () => {
-      throw new Error('ECONNREFUSED');
-    },
-  });
-  const r = await ch.send({ target: 'u1', text: '嗨' });
-  assert.equal(r.ok, false);
-  assert.equal(r.network, true);
-});
-
-test('通道：对方回了非 JSON 也要说清楚，不能静默', async () => {
-  const ch = createQqChannel({
-    baseUrl: () => 'http://x',
-    fetchImpl: async () => ({ ok: false, status: 500, json: async () => null }),
-  });
-  const r = await ch.send({ target: 'u1', text: '嗨' });
-  assert.equal(r.ok, false);
-  assert.match(r.message, /500/);
+test('移除 ai-chat：默认通道是 roost，老配置的 qq 会回退到唯一实现', () => {
+  const only = createFakeChannel();
+  const reg = createChannelRegistry({ impls: { roost: only } });
+  assert.equal(reg.active(), only, '不带 pick 时默认 roost');
+  assert.equal(reg.get('qq'), only, '老配置残留 qq 也不能返回 null');
+  assert.deepEqual(reg.names(), ['roost']);
 });
 
 test('假通道：把发出去的东西记下来（测试里一个字节都不出机器）', async () => {
@@ -113,13 +73,15 @@ test('假通道：把发出去的东西记下来（测试里一个字节都不�
   assert.equal(ch.sent[0].target, 'g1');
 });
 
-test('通道注册表：按配置选，选不到要说清楚', () => {
+test('通道注册表：按配置选；多实现时选不到要说清楚', () => {
   const a = createFakeChannel();
-  const reg = createChannelRegistry({ impls: { qq: a }, pick: () => 'qq' });
+  const b = createFakeChannel();
+  const reg = createChannelRegistry({ impls: { roost: a, other: b }, pick: () => 'roost' });
   assert.equal(reg.active(), a);
-  assert.deepEqual(reg.names(), ['qq']);
-  assert.equal(reg.get('不存在'), null);
-  assert.ok(reg.describe().qq.text);
+  assert.equal(reg.get('other'), b);
+  assert.deepEqual(reg.names(), ['roost', 'other']);
+  assert.equal(reg.get('不存在'), null, '两个以上实现时不能瞎猜');
+  assert.ok(reg.describe().roost.text);
 });
 
 /* ---------------- 注册方式 ---------------- */

@@ -321,7 +321,7 @@ test('前端渲染：她页人格列表显示名字/字数/标签', () => {
       mem: { chatId: 'g1', personaOverride: '', authz: null },
       mood: { valence: -0.3, energy: 0.2, sociability: 0.7, updatedAt: Date.now() },
       stickers: { dir: 'C:/x/stickers', items: [] },
-      setupSt: { pluginInstalled: true, pluginConfig: {} },
+      setupSt: { installed: true, running: true, hasCreds: true },
       quick: () => {},
       save: () => {},
       reload: () => {},
@@ -565,73 +565,59 @@ test('样式：条形不能依赖绝对定位（父规则一失效就会铺满�
   assert.equal(/position\s*:\s*absolute/.test(fill[1]), false, '填充条不许用绝对定位')
 })
 
-/* ---------------- 端口那一节：不许撒谎 ---------------- */
+/* ---------------- 直连状态那一节：不许撒谎 ---------------- */
 
 /**
- * 这一段出过一次「面板在撒谎」的事故。
- *
- * 旧代码 `const actual = st?.actualPort || st?.port`：actualPort 还是 0
- * （服务刚起、或重启那几百毫秒）时退回配置里的 17321，然后拿它去跟
- * ai-chat 的 17322 比，报出「我们监听 http://127.0.0.1:17321」——
- * 可我们根本没在 17321 上听。用户照着它改，反而把本来对的值改坏了。
- *
- * 教训：**不知道就说不知道**，别拿「意愿」冒充「现实」。
+ * 移除 ai-chat 之后不再有「两端端口对不对得上」这件事。
+ * 但「面板在撒谎」的教训仍然适用：不知道状态就说不知道，
+ * 不能拿配置值、默认值或一个绿灯冒充「真的连上了」。
  */
 const pvOf = () => {
   const rt = makeReact()
   return loadClient(rt.React).portView
 }
 
-test('端口：拿不到实际端口时不许报「我们监听 <配置端口>」', () => {
-  const portView = pvOf()
-  const pv = portView({ actualPort: 0, port: 17321, wantPort: 17321 }, 'http://127.0.0.1:17322')
+test('直连状态：还没上报状态时说不知道，不装成正常', () => {
+  const pv = pvOf()({})
   assert.equal(pv.kind, 'unknown')
-  assert.equal(
-    pv.text.includes('17321'), false,
-    `不知道实际端口就不该提 17321（那是配置值）：${pv.text}`,
-  )
-  assert.equal(pv.action, undefined, '不知道的时候不该给「改过来」按钮')
+  assert.match(pv.text, /还没开始|状态/)
+  assert.equal(pv.cell, '—')
 })
 
-test('端口：服务没起来时说「没在听」，不装成正常', () => {
-  const portView = pvOf()
-  const pv = portView({ actualPort: 0, listening: false, port: 17321 }, 'http://127.0.0.1:17322')
-  assert.equal(pv.kind, 'unknown')
-  assert.equal(pv.cell, '没在听')
-  assert.match(pv.text, /还没在听/)
+test('直连状态：online 才是绿的，并带出 seq', () => {
+  const pv = pvOf()({ roost: { state: 'online', seq: 42 } })
+  assert.equal(pv.kind, 'ok')
+  assert.equal(pv.cell, 'seq 42')
+  assert.match(pv.text, /已连上/)
 })
 
-test('端口：真对不上才报红，并给一键修复', () => {
-  const portView = pvOf()
-  const pv = portView({ actualPort: 17321, wantPort: 17321 }, 'http://127.0.0.1:17322')
+test('直连状态：报错要说清原因，不能只说「连不上」', () => {
+  const pv = pvOf()({ roost: { state: 'error', lastError: 'token 不对' } })
   assert.equal(pv.kind, 'bad')
-  assert.match(pv.text, /对不上/)
-  assert.equal(pv.wantUrl, 'http://127.0.0.1:17321')
-  assert.equal(pv.action, 'sync', '对不上必须给「现在就改过来」，别让用户跑去接入页重走一遍')
+  assert.match(pv.text, /token 不对/)
 })
 
-test('端口：对得上就是绿的，不给按钮', () => {
-  const portView = pvOf()
-  const pv = portView({ actualPort: 17322 }, 'http://127.0.0.1:17322')
-  assert.equal(pv.kind, 'ok')
-  assert.match(pv.text, /两端一致/)
+test('直连状态：重连中要说明会补拉，别让人以为消息丢了', () => {
+  const pv = pvOf()({ roost: { state: 'reconnecting' } })
+  assert.equal(pv.kind, 'unknown')
+  assert.match(pv.text, /补拉/)
+})
+
+test('直连状态：停了就直说停了，不给绿灯', () => {
+  const pv = pvOf()({ roost: { state: 'stopped' } })
+  assert.equal(pv.kind, 'unknown')
+  assert.match(pv.text, /已停止/)
+})
+
+test('移除 ai-chat：portView 不再接受对端 URL，也不再有 sync 动作', async () => {
+  const pv = pvOf()({ channel: { current: 'roost' }, roost: { state: 'online', seq: 1 } }, 'http://ignored')
+  assert.equal(pv.kind, 'ok', '第二个参数即使传了也必须被忽略')
   assert.equal(pv.action, undefined)
-})
-
-test('端口：被占顺延时要标出配置值，别让用户以为配错了', () => {
-  const portView = pvOf()
-  const pv = portView({ actualPort: 17322, wantPort: 17321 }, 'http://127.0.0.1:17322')
-  assert.equal(pv.kind, 'ok')
-  assert.match(pv.cell, /17322/)
-  assert.match(pv.cell, /配置 17321/)
-})
-
-test('端口：ai-chat 没配时不报红，指去接入第 5 步', () => {
-  const portView = pvOf()
-  const pv = portView({ actualPort: 17321 }, '')
-  assert.equal(pv.kind, 'unset')
-  assert.match(pv.text, /第 5 步/)
-  assert.equal(pv.action, undefined)
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const a = src.indexOf('function portView(')
+  const b = src.indexOf('function OverviewTab(', a)
+  assert.doesNotMatch(src.slice(a, b), /ai-chat|gotUrl|action: 'sync'/)
 })
 
 /**
@@ -905,7 +891,6 @@ test('前端渲染：组件版本块能显示「当前 → 最新」和更新提
         onCheck: () => {},
         info: {
           framework: { installed: '0.9.9', latest: '0.9.10', hasUpdate: true },
-          plugin: { installed: '4.3.22', latest: '4.3.22', hasUpdate: false },
         },
       }),
       rt,
@@ -914,9 +899,9 @@ test('前端渲染：组件版本块能显示「当前 → 最新」和更新提
 
   assert.ok(txt.includes('v0.9.9') && txt.includes('→ v0.9.10'), '框架要显示当前 → 最新')
   assert.ok(txt.includes('有更新'), '框架有新版要提示')
-  assert.ok(txt.includes('已是最新'), '插件已最新要写清楚')
   assert.ok(txt.includes('下载 tar 包解压覆盖'), '框架更新要给具体做法')
-  assert.ok(!txt.includes('插件有新版'), '插件没更新时不该出现插件的提示')
+  assert.ok(!txt.includes('ai-chat 插件'), '移除 ai-chat 后不该再有插件版本行')
+  assert.ok(!txt.includes('插件有新版'), '不该出现插件更新提示')
 })
 
 test('前端渲染：组件版本块查不到时不报错，只写「查不到最新版」', () => {
@@ -1442,4 +1427,123 @@ test('重设计：分节默认全展开，折叠不卸载任何功能元素', ()
   rt.reset()
   const overview = textOf(expand(mod.RoostPage(), rt))
   assert.ok(overview.includes('现在这样') && overview.includes('接入进度'), '概览页的分节内容没渲染出来')
+})
+
+/* ---------------- 首次接入向导 ---------------- */
+
+test('向导：新装与升级两种文案都渲染得出来，链路对比不炸', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  for (const upgraded of [false, true]) {
+    rt.reset()
+    const txt = textOf(expand(
+      h(mod.SetupWizard, {
+        st: { wizard: { needed: true, upgraded } },
+        toast: () => {}, onDone: () => {}, reload: () => {},
+      }), rt,
+    ))
+    assert.ok(txt.includes('首次接入'), '要有向导标题')
+    assert.ok(txt.includes('第 1 / 4 步'), '要显示步骤进度')
+    assert.ok(txt.includes('QQ') && txt.includes('Roost 框架') && txt.includes('外接协议'),
+      '链路对比图要把两端和新通道都画出来')
+    assert.ok(txt.includes('ai-chat 插件'), '旧链路里要标出被移除的中间层')
+    assert.ok(txt.includes('接下来三步'), '要有步骤清单')
+    assert.ok(txt.includes('暂时跳过'), '老版 Roost 用户必须有逃生口')
+    assert.ok(txt.includes('下一步'), '要能往下走')
+    if (upgraded) assert.ok(txt.includes('从旧版升级'), '升级用户要看到专门说明')
+    else assert.ok(txt.includes('欢迎使用'), '新装用户要看到欢迎语')
+  }
+})
+
+test('向导：遮罩条件只看后端 needed，源码里不许自己拼判断', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("if (st?.wizard?.needed)"), '缺全屏遮罩分支')
+  assert.ok(src.includes('h(SetupWizard,'), '遮罩必须挂向导组件')
+  // 遮罩分支里不能把整棵面板树一起挂回去
+  const a = src.indexOf("if (st?.wizard?.needed)")
+  const b = src.indexOf("return h('div', { className: 'roost-root' },", a)
+  const block = src.slice(a, b)
+  assert.ok(block.length < 500, '遮罩分支不该夹带面板正文')
+  assert.ok(!block.includes('roost-head'), '向导时不该渲染页头')
+  assert.ok(!block.includes('roost-scroll-body'), '向导时不该渲染正文滚动区')
+})
+
+test('接入页：可点选项有独立样式，选中态看得出（不能和状态标签同款）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const tag = 'const CSS = `'
+  const a = src.indexOf(tag) + tag.length
+  const css = src.slice(a, src.indexOf('`', a))
+
+  /** `.on` 必须是全局规则：之前只在 `.roost-wizard-card` 下定义，接入页选了看不出来 */
+  assert.match(css, /(^|\n)\.roost-pill\.on\{/, '缺全局 .roost-pill.on 选中态')
+  assert.match(css, /\.roost-pill\.on\{[^}]*border-color:var\(--accent\)/, '选中态要用主色边框')
+  assert.match(css, /\.roost-pill\.on\{[^}]*font-weight:600/, '选中态要加粗')
+  /** 可点与纯状态必须能区分 */
+  assert.match(css, /\.roost-pill\.as-btn\{/, '缺可点样式 .as-btn')
+  assert.match(css, /\.roost-pill\.as-btn\{[^}]*cursor:pointer/, '可点要有 pointer')
+
+  /** JSX 里三个通道选项必须带 as-btn，否则又变成看不出能点 */
+  const sel = src.slice(src.indexOf("['auto', '自动"), src.indexOf("['auto', '自动") + 600)
+  assert.ok(sel.includes('as-btn'), '通道选项要用 as-btn')
+  assert.ok(sel.includes("' on'"), '通道选项要有选中态')
+})
+
+test('向导：CSS 垂直居中且窄栏不裁掉按钮', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const css = src.slice(src.indexOf('const CSS = `') + 'const CSS = `'.length,
+    src.indexOf('`', src.indexOf('const CSS = `') + 'const CSS = `'.length))
+  assert.match(css, /\.roost-wizard\{[^}]*align-items:center/, '卡片要垂直居中，否则大屏下半屏空白')
+  assert.match(css, /\.roost-wizard\{[^}]*overflow:auto/, '内容超高要能滚')
+  assert.ok(css.includes('@container (max-width: 420px)'), '窄侧栏要有专门规则')
+  assert.ok(css.includes('.roost-wiz-chain'), '链路对比图要有样式')
+})
+
+test('向导第 2 步：装 / 启动 / 指定目录都在本页，不把人支去别的页', async () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  const render = (setup) => {
+    rt.reset()
+    return textOf(expand(
+      h(mod.SetupWizard, {
+        st: { wizard: { needed: true, upgraded: false } },
+        toast: () => {}, onDone: () => {}, reload: () => {},
+        initialSetup: setup, initialStep: 1,
+      }), rt,
+    ))
+  }
+
+  // ① 没装：只给「一键安装」，不给「一键启动」（装了才有东西可启）
+  const fresh = render({ installed: false, running: false, dir: '', dirHow: '' })
+  assert.ok(fresh.includes('一键安装 Roost'), '未安装时要有「一键安装」')
+  assert.ok(!fresh.includes('一键启动 Roost'), '没装就不该出现「一键启动」')
+  assert.ok(fresh.includes('已经装过？指定目录'), '要有绑定已有安装的入口')
+
+  // ② 已装未跑：给「一键启动」，不再提示安装
+  const stopped = render({ installed: true, version: '1.0.14', running: false, dir: 'D://bots//roost', dirHow: '自动找到', port: 15210 })
+  assert.ok(stopped.includes('一键启动 Roost'), '已装未跑必须能就地启动')
+  assert.ok(!stopped.includes('一键安装 Roost'), '已经装了就别再催安装')
+  assert.ok(stopped.includes('D://bots//roost'), '要显示装在哪，便于确认')
+  assert.ok(stopped.includes('自动找到'), '要说明目录是怎么来的')
+
+  // ③ 在跑：不再给启动按钮，直接告诉可以下一步
+  const running = render({ installed: true, version: '1.0.14', running: true, dir: 'D://bots//roost', dirHow: '自动找到', port: 15210 })
+  assert.ok(running.includes('已在运行'), '在跑时要明确说一句')
+  assert.ok(!running.includes('一键启动 Roost'), '在跑就不该再给启动按钮')
+  assert.ok(!running.includes('一键安装 Roost'))
+
+  // ④ 绑定目录的说明必须点明「目录里要已有 src/main.js」，否则用户会填空目录
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const a = src.indexOf('// 1 装好 Roost')
+  const b = src.indexOf('// 2 一键直连', a)
+  const block = src.slice(a, b)
+  assert.ok(block.includes('src/main.js'), '绑定目录必须说明目录里要有 src/main.js')
+  assert.ok(block.includes('/setup/install') === false, '第 2 步不该自己拼接口路径')
+  assert.ok(block.includes('doInstall') && block.includes('doStart') && block.includes('doBindDir'),
+    '三个动作都要挂上')
 })

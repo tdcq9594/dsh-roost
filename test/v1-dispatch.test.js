@@ -36,7 +36,7 @@ const post = async (port, path, body, headers = {}) => {
   return { status: r.status, body: await r.json().catch(() => ({})) };
 };
 
-test('G3-22 /v1 走在 auth() 之前；/inbound 与面板共享密钥原样回归', async (t) => {
+test('G3-22 /v1 走在 auth() 之前；移除 ai-chat 后 /inbound 已关闭', async (t) => {
   const dir = tmpHome(t);
   const store = createClientStore({ dir });
   const api = createApiV1({
@@ -46,13 +46,11 @@ test('G3-22 /v1 走在 auth() 之前；/inbound 与面板共享密钥原样回�
   const hash = createHash('sha256').update('abc').digest('hex');
   store.add({ id: 'panel-client', name: '测试客户端', hash, scopes: ['agent:write'], enabled: true });
 
-  let inboundCalls = 0;
   const port = 23000 + Math.floor(Math.random() * 9000);
   const inst = createInboundServer({
     port,
     ports: [port, port + 1, port + 2],
     token: 'panel-secret',
-    onInbound: () => { inboundCalls++; },
     onV1: (req, res, url, helpers) => api.handle(req, res, url, helpers),
     log: () => {},
   });
@@ -83,13 +81,15 @@ test('G3-22 /v1 走在 auth() 之前；/inbound 与面板共享密钥原样回�
   store.add({ id: 'weak', name: '只读', hash: weakHash, scopes: ['state:read'], enabled: true });
   assert.equal((await post(actual, '/v1/agent.new', {}, { authorization: 'Bearer weak' })).status, 403);
 
-  // ③ 既有 /inbound：缺面板密钥仍 401；带密钥 + 合法 payload 仍 200 且先回后跑。
+  // ③ 移除 ai-chat 后 /inbound 关掉：带不带面板密钥都是 404，绝不接消息。
+  //    消息现在只从外接协议事件流同进程进 onInbound，外部无法 POST 进来。
   const payload = { id: 'msg-1', reply: { url: 'http://127.0.0.1:1/reply' } };
-  assert.equal((await post(actual, '/inbound', payload)).status, 401);
-  const inbound = await post(actual, '/inbound', payload, { 'x-roost-token': 'panel-secret' });
-  assert.equal(inbound.status, 200);
-  assert.equal(inbound.body.ok, true);
-  assert.equal(inboundCalls, 1);
+  assert.equal((await post(actual, '/inbound', payload)).status, 404);
+  assert.equal(
+    (await post(actual, '/inbound', payload, { 'x-roost-token': 'panel-secret' })).status,
+    404,
+    'ai-chat 的入口必须彻底关掉，共享密钥也不能让它复活',
+  );
 
   // ④ /health 保持原样，不要求任何密钥。
   assert.equal((await get(actual, '/health')).body.plugin, 'dsh-roost');

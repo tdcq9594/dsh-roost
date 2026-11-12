@@ -166,7 +166,7 @@ export function createExtPatch({
   log = () => {},
 } = {}) {
   const file = join(profileDir, 'cordis.patch.yml');
-  // 端口不硬编码：与 ai-chat 的「DSH 地址」同源，取 config.json 的 server.port。
+  // 端口不硬编码：取 config.json 的 server.port（固定服务实际监听端口）。
   const cfgPort = port ?? (() => { try { return loadConfig()?.server?.port; } catch { return undefined; } })();
 
   /**

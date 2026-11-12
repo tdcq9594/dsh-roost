@@ -6,7 +6,7 @@
  *
  * ── 为什么需要 ──
  *
- * 官方对主动消息做内容审核。进审核时接口回的是 304023，ai-chat 把它翻成
+ * 官方对主动消息做内容审核。进审核时接口回的是 304023，框架把它翻成
  * `pending: true`——「待审核」既不是送到也不是没送到。而审核结果的事件
  * （`MESSAGE_AUDIT_PASS` / `MESSAGE_AUDIT_REJECT`）推给的是**框架侧**
  * （持有 QQ 连接的那个进程），dsh-roost 收不到任何推送。
@@ -212,7 +212,7 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
     const ch = channelOf?.() ?? null;
     if (!ch || typeof ch.delivery !== 'function') {
       /**
-       * 通道不支持查询（老版本 ai-chat）：不查，但也不结案。
+       * 通道不支持查询：不查，但也不结案。
        * 这些条目会一直留在 waiting 直到过期——面板上能看见，
        * 总比悄悄丢掉强。
        */
@@ -227,7 +227,7 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
      *
      * 串行的代价是线性的：一条 5 秒超时，10 条就是 50 秒——面板上点
      * 「回查一次」会转圈到人以为卡死，定时器那一轮也会拖住后面的活。
-     * 这些请求打到的是本机 ai-chat 的只读路由，并发几条没有任何压力。
+     * 这些请求走的是本机协议 RPC（只读），并发几条没有任何压力。
      *
      * 查询本身是纯读，结果统一收集后再改内存，所以并发不会写出半截状态。
      */

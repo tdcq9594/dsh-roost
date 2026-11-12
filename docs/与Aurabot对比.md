@@ -1,5 +1,11 @@
 # 和 Aurabot 的功能对比
 
+> **⚠️ 历史文档（2026-11-12）**：本文写于 ai-chat 中间层时代，文中的
+> `POST /inbound` / `/r/reply` / 插件适配器 / 端口同步等描述**已全部废弃**。
+> 现行链路是 Roost 框架外接协议 `roost-host/1` 直连，见
+> [接入说明](接入说明.md) 与 [使用手册](USER-MANUAL.md)。
+> 本文保留作为当时的设计记录，不要照着它配置。
+
 > 对照对象：[dsh-aurabot-qq](https://github.com/aureth-labs/dsh-aurabot-qq)（MIT）
 > 对照时间：2026-10-26，我们 = dsh-roost 0.3.5 + ai-chat 3.1.0
 

@@ -2,13 +2,13 @@
 //
 // 角色：**被 ai-chat 推消息的宿主**，不碰 QQ。
 //
-//   QQ ⇄ Roost 内核 ⇄ ai-chat 插件 ⇄ POST /inbound ⇄ 本插件 ⇄ DSH 会话
+//   QQ ⇄ Roost 内核 ⇄ 外接协议事件流 ⇄ 本插件 ⇄ DSH 会话
 //                                  ⇄ POST /reply  ⇄
 //
-// 收消息、整形、发消息、切段、防吵都在 ai-chat 那边；这边只做三件事：
-//   1. 起一个固定端口的 HTTP 服务，等 ai-chat 推消息
+// 框架负责收发 QQ 消息，人格、记忆、策略在这边：
+//   1. 起一个固定端口的 HTTP 服务（/v1 控制面、TTS、健康检查）
 //   2. 把消息喂给对应的 DSH 会话，等 AI 说完
-//   3. 把回复发回 ai-chat 给的地址
+//   3. 通过框架外接协议回复
 //
 // ⚠️ 权限按**每一条消息**判定：主人、管理员、普通成员拿到的工具不一样，
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
@@ -83,11 +83,17 @@ import { createUsage } from './usage.js';
 import { segmentsOf } from './timing.js';
 import { createMarkerApplier } from './apply-markers.js';
 import { createJournalBridge } from './journal-bridge.js';
-import { createQqChannel, createChannelRegistry } from './channel.js';
+import { createRoostHostChannel, createChannelRegistry } from './channel.js';
+import { createRoostHost } from './roost-host.js';
+import { createPayloadBuilder, buildRendered } from './roost-payload.js';
+import { createMerger } from './roost-merge.js';
+import { createDecider } from './roost-decide.js';
+import { createPairing } from './roost-pair.js';
+import { createSetupWizard } from './setup-wizard.js';
+import { createWsDeps } from './ws-deps.js';
 import { createDeliveryTrack } from './delivery.js';
 import { createQrRegistration, createManualRegistration, createRegistrationRegistry } from './registration.js';
 import { createLease, candidates } from './lease.js';
-import { createSyncRetry } from './sync-retry.js';
 import { fitBudget } from './budget.js';
 import { planRetentionAll, formatImpactAll, normalizeEntry, shouldAutoSweep } from './dry-run.js';
 import { sessionTitle, nextTitle } from './chat-name.js';
@@ -1110,11 +1116,20 @@ export function apply(ctx) {
     log: (m) => log.debug(m),
   });
 
+  /**
+   * 配置补丁的统一入口。
+   *
+   * 抽出来是因为**外接协议的一键配对也要写配置**。两处各写一份的话，
+   * 迟早出现「面板上改了生效、一键配对改了不生效」——而且这种不对称
+   * 只有真机点一次才发现。
+   */
+  const applyCfg = (patch) => (cfg = patchConfig(patch));
+
   const setup = createSetup({
     cfgOf: () => cfg,
     // 面板改配置时要同时更新这里的 cfg 引用，否则下次 detect 还是旧路径
     // 用 patchConfig：局部改一个键（如 setup.roostDir），不能把其它段冲回默认值
-    setCfg: (patch) => (cfg = patchConfig(patch)),
+    setCfg: applyCfg,
     /**
      * 传**函数**，不是 `dataDir()` 的返回值。
      *
@@ -1124,6 +1139,54 @@ export function apply(ctx) {
      * 一键装也跟着抛。本机因为手填了 roostDir 提前 return，一直没暴露。
      */
     dataDir,
+    log: (m) => log.info(m),
+  });
+
+  /**
+   * 一键直连 roost 外接协议。
+   *
+   * 全程走 roost 自己的面板 API（装依赖 → 开监听 → 读回真实端口），
+   * 不碰它的配置文件、不要求重启进程。理由见 `roost-pair.js` 头部。
+   */
+  /**
+   * 可选依赖 `ws`：**装在框架那边**，这边只查状态、加载、调框架接口去装。
+   * 不自动安装，也不在插件侧留第二份。
+   */
+  const wsDeps = createWsDeps({ log: (m) => log.info(m) });
+
+  /** 找框架安装目录：配置里填了就用，没填问 detect（它会自己猜） */
+  async function roostDirOf() {
+    const fromCfg = String(cfg.setup?.roostDir || '').trim();
+    if (fromCfg) return fromCfg;
+    try { return String((await setup.detect())?.dir || ''); } catch { return ''; }
+  }
+
+  /**
+   * 「一键直连」时顺带**给框架**装 `ws`（不是装到插件这边）。
+   *
+   * 框架已有就直接复用；没有就调框架的 `/api/onebot/deps/install`。
+   * 失败也不抛——SSE 是等价通道，功能一点不少，只是没有 WS 的低延迟。
+   */
+  async function ensureWsDeps() {
+    return await wsDeps.installToRoost({ api: setup.api, roostDir: await roostDirOf() });
+  }
+
+  const pairing = createPairing({
+    setup,
+    cfgOf: () => cfg,
+    setCfg: applyCfg,
+    log: (m) => log.info(m),
+    ensureWs: ensureWsDeps,
+  });
+
+  /**
+   * 首次接入向导。新装和老配置升级都会停在 wizardVersion=0，
+   * 完成必须真跑一次直连自测；详见 `setup-wizard.js`。
+   */
+  const wizard = createSetupWizard({
+    cfgOf: () => ({ ...cfg, __raw: readRawConfig() }),
+    setCfg: applyCfg,
+    pairing,
     log: (m) => log.info(m),
   });
 
@@ -1847,13 +1910,16 @@ export function apply(ctx) {
     const id = String(eventId ?? '').trim();
     if (!id) return null;
     try {
-      const base = String(setup.baseUrl() || '').replace(/\/+$/, '');
-      if (!base) return null;
-      const url =
-        `${base}/api/plugins/ai-chat/r/context?aroundId=${encodeURIComponent(id)}`
-        + `&before=${Number(before) || 0}&after=${Number(after) || 0}${setup.keyQuery()}`;
-      const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      const body = await r.json().catch(() => null);
+      /**
+       * 事件账本在框架侧，只能通过外接协议回查（参数名沿用 `aroundId`）。
+       * 找不到时协议返回 `ok:false, gone:true`，这里一律当 null——
+       * 少一点上下文不该让整轮检索失败。
+       */
+      const body = await roost.rpc('ledger.context', {
+        aroundId: id,
+        before: Number(before) || 0,
+        after: Number(after) || 0,
+      });
       return body?.ok ? body : null;
     } catch {
       return null;
@@ -1872,23 +1938,205 @@ export function apply(ctx) {
   /* ---------------- 通道 / 注册方式 / 觉醒 / 压缩 ---------------- */
 
   /**
-   * 通道注册表。
+   * roost 外接协议客户端。
    *
-   * 现在只有 QQ 一个实现（走 ai-chat 的 `/send`），抽这一层是为了
-   * 第 5 期的"主动说话"和面板的"发测试消息"共用一条路径，
-   * 而不是各自 fetch 一遍。以后接别的平台，注册进来即可。
+   * **只构造不启动**：真正 `start()` 在收消息服务起来之后（`startServer()` 附近），
+   * 这样面板打开时能看到真实连接状态，而不是「刚开始连」。
+   *
+   * 事件回调引用的是下面定义的 `deliverFromRoost`——函数声明会提升，
+   * 而且真正被调用是在 `start()` 之后，那时 `channels` 早就初始化好了。
+   */
+  const roost = createRoostHost({
+    baseUrl: () => cfg.roostHost?.url || '',
+    token: () => cfg.roostHost?.token || '',
+    onMessage: (evt) => {
+      /** 只入队，绝不在事件流里 await */
+      try {
+        deliverFromRoost(evt);
+      } catch (e) {
+        log.warn(`外接消息入队失败（已吞）：${e?.message ?? e}`);
+      }
+    },
+    onNotice: (data) => deliverNoticeFromRoost(data),
+    onGap: (frame) => log.warn(`外接协议补拉有缺口（seq ${frame?.seq ?? '?'}），这段消息收不到了`),
+    onState: (state, detail) => {
+      if (state === 'error') log.warn(`外接协议：${detail || state}`);
+    },
+    log: (m) => log.warn(`[roost-host] ${m}`),
+    /** 事件通道：auto = 装了 ws 就 WS、没装就 SSE；RPC 恒走 HTTP */
+    transport: cfg.roostHost?.transport || 'auto',
+    /**
+     * 找 ws 的顺序：**框架已装的** → 本插件自己装的 → 内置。
+     * 框架和本插件同机，用户为框架装过一次就够，不该让人装第二遍。
+     */
+    /** 只用框架那一份；框架没装就是 null，自动走 SSE */
+    loadWs: async () => wsDeps.load(await roostDirOf()),
+    /**
+     * 连之前先确认 Roost 在跑。没跑就挂 `waiting` 等着，不发请求——
+     * 否则面板上只会出现一屏「连不上（fetch failed）」，看不出真原因。
+     */
+    canConnect: async () => {
+      try {
+        return await setup.isRunning();
+      } catch {
+        return false;
+      }
+    },
+  });
+
+  const buildFromRoost = createPayloadBuilder({
+    rpc: (m, p, o) => roost.rpc(m, p, o),
+    log: (m) => log.warn(`[roost-host] ${m}`),
+    /** 热读：面板上关掉看图，下一轮就生效 */
+    vision: () => cfg.roostHost?.vision !== false,
+  });
+
+  /**
+   * 通道注册表：只有框架外接协议直连一个实现。
+   *
+   * 抽这一层是为了「主动说话」、面板「发测试消息」、扩展回话共用一条路径，
+   * 而不是各自 fetch 一遍；以后接别的平台也只需要往 `impls` 里注册。
    */
   const channels = createChannelRegistry({
     impls: {
-      qq: createQqChannel({
-        baseUrl: () => setup.baseUrl(),
-        keyQuery: () => setup.keyQuery(),
-        log: (m) => log.warn(m),
-      }),
+      roost: createRoostHostChannel({ host: roost, log: (m) => log.warn(m) }),
     },
-    pick: () => cfg.channel?.current || 'qq',
+    pick: () => 'roost',
     log: (m) => log.warn(m),
   });
+
+  /**
+   * 接话策略：这条群消息要不要理。
+   *
+   * 走 ai-chat 时是它拦的；直连之后框架把**每条群消息**都推过来，
+   * 没有这层就等于群里每句话都触发一轮模型调用。
+   */
+  const roostDecider = createDecider({ cfg: () => cfg });
+
+  /**
+   * 合并窗口：连着发的几句话攒成一段再回。
+   *
+   * 私聊 / 被 @ / 命令**不等待**（`force`）——那是在明确叫你，再等 1.5 秒
+   * 就是迟钝。其余情况停 `merge.waitSec` 秒算说完，从第一条算最多等 `maxSec`。
+   */
+  const roostMerger = createMerger({
+    waitSec: Number(cfg.roostHost?.merge?.waitSec) || 1.5,
+    maxSec: Number(cfg.roostHost?.merge?.maxSec) || 6,
+    onFlush: (_chatId, batch) => {
+      deliverBatch(batch).catch((e) => log.warn(`处理外接消息失败（已吞）：${e?.message ?? e}`));
+    },
+  });
+
+  /**
+   * 外接协议收到一条消息。**只入队，不阻塞事件流**——这里 await 一下，
+   * 后面所有消息都要跟着等。
+   */
+  function deliverFromRoost(evt) {
+    const verdict = roostDecider.check(evt);
+    if (!verdict.go) {
+      /** 不接的理由要看得到：用户开了策略没效果时，这里是唯一的证据 */
+      log.debug(`外接消息不接（${verdict.reason}）：${String(evt?.content ?? '').slice(0, 30)}`);
+      return;
+    }
+    roostMerger.add(evt, {
+      force: Boolean(verdict.force),
+      delayMs: Number(verdict.delayMs) || 0,
+    });
+  }
+
+  /**
+   * 一批消息 → 走**和 ai-chat 完全一样**的入站链路。
+   *
+   * 刻意不另开一条「直连专用」的处理路径：排队、预算、记忆、人格、动作标记
+   * 全在 `onInbound` 后面。绕过它等于把这些重新实现一遍，而且迟早走岔
+   * （那边改了这边忘了）。
+   *
+   * 唯一真正不同的地方是「怎么回话」：ai-chat 给的是 `reply.url`（HTTP 回调），
+   * 这里给 `__channel.send`（同进程通道）。`postReply` 已经有这个分支了
+   * （扩展投递 `/v1/message` 走的就是它），所以不用改它。
+   */
+  async function deliverBatch(batch) {
+    const last = batch?.msg;
+    const chatId = String(last?.chat?.chatId ?? '');
+    if (!chatId) return;
+    const chatKind = last?.chat?.kind === 'c2c' ? 'c2c' : 'group';
+    const channel = channels.active();
+    /**
+     * 回复通道。
+     *
+     * 带上 `msgId` / `receivedAt` 就是**被动回复**（不占主动额度）；
+     * 不带就是主动消息。**不传 `hasGroupAuthz`**：被动回复不受群推送授权限制，
+     * 而超窗降级成主动这件事由框架的 outbound 决定，这里提前拦反而会误伤。
+     */
+    const send = async (text, extra) => {
+      /**
+       * 这一轮要发的文件（`qq_send_file` 通过 `postReply(..., { files })` 带过来）。
+       *
+       * ai-chat 那条路是插件在轮末统一上传；直连没有那个回调，所以在这里补。
+       * **必须单独处理「只发文件不说话」**——那种情况下 `channel.send('')`
+       * 会以「没有内容可发」失败，但文件还是得发出去。
+       */
+      const files = Array.isArray(extra?.files) ? extra.files.map(String).filter(Boolean) : [];
+      let r = { ok: true };
+      if (String(text ?? '').trim()) {
+        r = await channel.send({
+          scene: chatKind,
+          target: chatId,
+          text: String(text ?? ''),
+          msgId: String(last?.msgId ?? ''),
+          receivedAt: Number(last?.at) || 0,
+          requestId: String(extra?.requestId ?? ''),
+        });
+        /** 真的发出去了才记：没发出去也记的话，冷却会把下一句白吃掉 */
+        if (r?.ok) roostDecider.noteReplied(chatId);
+      }
+      for (const f of files) {
+        /** 所有通道都应有 sendFile；没有时只发文字，文件单独跳过 */
+        if (typeof channel.sendFile !== 'function') break;
+        const rf = await channel.sendFile({
+          scene: chatKind,
+          target: chatId,
+          path: f,
+          msgId: String(last?.msgId ?? ''),
+          receivedAt: Number(last?.at) || 0,
+        }).catch((e) => ({ ok: false, message: e?.message ?? String(e) }));
+        if (!rf?.ok) log.warn(`发文件失败（${f}）：${rf?.message ?? '未知原因'}`);
+        else roostDecider.noteReplied(chatId);
+      }
+      return r;
+    };
+    /**
+     * 整批的附件 / 卡片合成一份。
+     *
+     * **不能只留最后一条的**：用户先发一张图、再补一句「这是啥」，
+     * 合并后如果只看最后一条，图就凭空消失了——模型只能回「你发的什么我看不到」。
+     * ai-chat 的注释里记着这个 bug（2026-11-03 反馈的「有时候收不到图」）。
+     */
+    const merged = { ...last, attachments: batch.attachments, elements: batch.elements };
+    const payload = await buildFromRoost(merged, { send });
+    if (batch.count > 1) {
+      payload.text = batch.text;
+      payload.rendered = buildRendered(merged, batch.text, { images: payload.images });
+      /** 多条批次里每条已经自带 `名字(openid)：`，上层不要再套统一标签 */
+      payload.batch = { count: batch.count, multi: batch.multi };
+    }
+    onInbound(payload);
+  }
+
+  /**
+   * 非消息事件（入群、审核通过/驳回…）。
+   *
+   * ai-chat 时代 dsh-roost **收不到**这些（它只推消息），所以这里只做记录：
+   * 真要用（比如审核驳回了就闭嘴）得先想清楚语义，不能顺手拿去做判断。
+   */
+  function deliverNoticeFromRoost(data) {
+    const name = String(data?.event ?? '');
+    if (!name) return;
+    /** 审核结果最有价值：它决定一条主动消息到底有没有出现在群里 */
+    if (/AUDIT/i.test(name)) {
+      log.info(`外接协议事件 ${name}：${JSON.stringify(data?.data ?? {}).slice(0, 200)}`);
+    }
+  }
 
   /**
    * 注册方式注册表（C4）。
@@ -2988,17 +3236,16 @@ export function apply(ctx) {
           /**
            * 传输层支不支持发文件，得**问对面**，不能假设。
            *
-           * 老版本 ai-chat 的 `/r/reply` 只读 `{id, token, text, done}`，
-           * 我们塞的 `files` 它直接忽略、照样回 200。那样这里的 `await`
-           * 会成功、工具会回 `ok:true`、模型会跟人说「发你了」——
-           * 而什么都没有发出去。按 `=== true` 判，缺了这个标记就当场拒绝，
+           * 通道没声明 `files` 能力时，硬塞进去会被静默忽略、照样回 ok，
+           * 模型会跟人说「发你了」而什么都没发出去。按 `=== true` 判，
+           * 缺了这个标记就当场拒绝，
            * 模型也好改口说「这个版本发不了文件」。
            */
           if (c.payload?.channel?.files !== true) {
             return {
               ok: false,
               reason: 'unsupported',
-              message: '当前 ai-chat 版本还不支持发文件（通道没打通），别答应对方，直接说发不了。',
+              message: '当前通道不支持发文件，别答应对方，直接说发不了。',
             };
           }
           const allowed = pathAllowed(abs, {
@@ -4141,9 +4388,6 @@ export function apply(ctx) {
 
   function startServer() {
     server?.close();
-    // 重启会重新 bind，端口可能又变；旧端口的重试队列必须作废，
-    // 否则它会把 ai-chat 改回一个已经没人听的端口
-    clearSyncRetry();
 
   /**
    * 同会话排队 + 入站薄壳。
@@ -4197,24 +4441,15 @@ export function apply(ctx) {
       port: want,
       ports: list,
       token: cfg.server.token,
-      onInbound,
       onTts: (text) => tts.synthesize(text),
       onTtsStatus: () => tts.status(),
       /** `/v1` 控制面：鉴权在 `api-v1.js` 内，不走这里的共享密钥 auth()。 */
       onV1: (req, res, url, helpers) => apiV1.handle(req, res, url, helpers),
       log: (m) => log.info(m),
-      /**
-       * bind 成功后：写租约 + 同步 ai-chat。
-       *
-       * ai-chat 在 Roost 进程里，它读不到租约，只能被主动通知——
-       * 不通知的话它还往旧端口推，connection refused，两边都不报错。
-       */
+      /** bind 成功后：写租约 + 刷新扩展受管块里的实际端口 */
       onListening: (actual) => {
         lease.claim('dsh', { want, actual });
-        if (actual !== want) log.warn(`dsh-roost 换到 ${actual}（${want} 被占），正在通知 ai-chat`);
-        // syncAdapterPort 自己会吞错并排队重试（Roost 可能还没起来），
-        // 这里不用再接 catch——接了只会多一条误导人的「通知失败」
-        void syncAdapterPort(actual);
+        if (actual !== want) log.warn(`dsh-roost 换到 ${actual}（${want} 被占）`);
         /**
          * 受管块里的 `ROOST_API_URL` 也要跟着实际端口走。
          *
@@ -4232,60 +4467,41 @@ export function apply(ctx) {
     });
   }
 
-  /**
-   * 同步 ai-chat 地址的重试队列。
-   *
-   * 为什么要重试：dsh-roost 常常比 Roost 先起，那一刻 `isRunning()` 是 false，
-   * `syncDshUrl` 只能跳过。以前跳过一次就再也不管了——于是端口换过、
-   * ai-chat 还指着旧地址，面板一直红着说「去第 5 步重新写一次」。
-   * 这件事它自己就能做完，没理由让用户跑一趟。
-   *
-   * 退避节奏和「不叠加 / 可作废」这些性质在 `sync-retry.js` 里，那边有测试。
-   */
-  const syncRetry = createSyncRetry({
-    log: (m) => log.warn(m),
-    run: (actual) => { void syncAdapterPort(actual); },
-  });
-
-  function clearSyncRetry() {
-    syncRetry.reset();
-  }
-
-  /**
-   * 把 ai-chat 的 dshUrl 指到实际端口。只在它已经配过 DSH 时改。
-   *
-   * `skipped + reason === 'roost-down'` 会自己排队再试，其它情况（没装、
-   * 没在用 DSH、已经是当前端口）就到此为止——那几种重试一万次也没用。
-   */
-  async function syncAdapterPort(actual) {
-    try {
-      const r = await setup.syncDshUrl(actual);
-      if (r?.skipped && r.reason === 'roost-down') {
-        syncRetry.schedule(actual);
-        return r;
-      }
-      if (r && !r.ok) {
-        log.warn(`ai-chat 的地址没同步：${r.message}`);
-        // Roost 起来了但 PUT 失败（比如插件正被重载），也值得再试几次
-        syncRetry.schedule(actual);
-        return r;
-      }
-      // 成功或「本来就不用改」，都不用再试了
-      clearSyncRetry();
-      return r;
-    } catch (e) {
-      log.warn(`ai-chat 的地址没同步：${e?.message ?? e}`);
-      syncRetry.schedule(actual);
-      return { ok: false, message: String(e?.message ?? e) };
-    }
-  }
-
   ctx.effect(() => {
     startServer();
+    /**
+     * 外接协议在收消息服务之后启动：先保证本地面板能开，再去连框架。
+     * 连不上会按退避重试，不影响插件本体（和 DSH 里其它能力一致）。
+     *
+     * `autoStart` 打开时顺手把 Roost 拉起来——但**只在它没跑的时候**：
+     * 已经在跑还去 start 会变成「重复拉起」检查，多一次无谓的探活。
+     * 启动失败不拦：`canConnect` 会让客户端挂 `waiting`，用户照样能在面板里手动启。
+     */
+    if (cfg.roostHost?.enabled) {
+      if (cfg.roostHost?.autoStart) {
+        void (async () => {
+          try {
+            if (await setup.isRunning()) return;
+            log.info('roostHost.autoStart 已开，正在启动 Roost…');
+            const r = await setup.start();
+            log.info(`自动启动 Roost：${r?.message || (r?.ok === false ? '失败' : '已启动')}`);
+          } catch (e) {
+            log.warn(`自动启动 Roost 失败（不影响插件）：${e?.message ?? e}`);
+          } finally {
+            /** 不管成没成都要让客户端去试：成了就直连，没成就 waiting */
+            roost.start();
+          }
+        })();
+      } else {
+        roost.start();
+      }
+    }
     return () => {
+      roost.stop();
+      /** 只清定时器不发送：插件都卸了，不该再往外说话 */
+      roostMerger.dispose();
       server?.close();
       server = null;
-      clearSyncRetry();
       /**
        * 先清队列再清 turns：队列里排着的任务会调 `handleTurn`，
        * 而 `handleTurn` 要 `turns.run`。反过来先 dispose turns 的话，
@@ -4500,6 +4716,17 @@ export function apply(ctx) {
           port: cfg.server.port,
           tokenSet: Boolean(cfg.server.token),
           chats: sessions.size,
+          /**
+           * 直连状态：消息进不进得来全看它，面板必须一眼可见。
+           * 移除 ai-chat 后只有一个通道，`current` 恒为 roost。
+           */
+          roost: roost.status(),
+          channel: {
+            current: 'roost',
+            active: channels.active()?.name || '',
+          },
+          /** 向导状态：前端只认 needed 一个字段决定要不要盖全屏遮罩 */
+          wizard: wizard.state(),
           waiting: turns.waiting,
           permissions: cfg.permissions,
           lastTurn,
@@ -6360,6 +6587,12 @@ export function apply(ctx) {
         const beforePort = cfg.server.port;
         const beforeToken = cfg.server.token;
         const beforeCurrent = cfg.persona.current;
+        /** 外接协议的三个连接参数，保存后要拿来比对（见下面的重连判断） */
+        const beforeRoost = {
+          enabled: Boolean(cfg.roostHost?.enabled),
+          url: String(cfg.roostHost?.url ?? ''),
+          token: String(cfg.roostHost?.token ?? ''),
+        };
         cfg = fullSave ? saveConfig(body) : patchConfig(body);
         if (cfg.persona.current !== beforeCurrent) {
           const hit = personas.list().find((p) => p.id === cfg.persona.current);
@@ -6377,23 +6610,24 @@ export function apply(ctx) {
         if (restarted) startServer();
 
         /**
-         * 端口变了必须回头改 ai-chat 的 DSH 地址。
+         * 外接协议的连接参数变了要重连。
          *
-         * 不改的话：我们监听新端口，ai-chat 还往旧端口推 —— connection refused，
-         * 而且两边都不报错，表现就是「突然不回话了」。这种静默断链最坑。
+         * 只改「看图」这种开关**不重连**——它是每轮现读的，重连反而会丢一段 seq。
+         * 地址 / token 变了就必须重连：不重连的话面板上显示「已连接」，实际上连的
+         * 还是旧地址，症状是「消息一条都不进来」。
          */
-        let syncNote = '';
-        if (cfg.server.port !== beforePort) {
-          const r = await setup.syncDshUrl();
-          syncNote = r?.ok
-            ? (r.skipped ? '' : '；' + r.message)
-            : '；但 ai-chat 没同步（' + (r?.message || '未知') + '）';
+        const roostChanged = Boolean(cfg.roostHost?.enabled) !== beforeRoost.enabled
+          || String(cfg.roostHost?.url ?? '') !== beforeRoost.url
+          || String(cfg.roostHost?.token ?? '') !== beforeRoost.token;
+        if (roostChanged) {
+          roost.stop();
+          if (cfg.roostHost?.enabled) roost.start();
         }
 
         return send(res, 200, {
           ok: true,
           config: publicConfig(cfg),
-          message: (restarted ? '已保存，服务已重载' : '已保存') + syncNote,
+          message: restarted ? '已保存，服务已重载' : '已保存',
           /** 成功也要回新版本号，否则客户端下次拿空串、冲突检测只生效一次 */
           revision: configRevision(),
         });
@@ -6456,7 +6690,8 @@ export function apply(ctx) {
       route('/channels', (req, res) =>
         send(res, 200, {
           ok: true,
-          current: cfg.channel?.current || 'qq',
+          /** 只有一个实现，current 恒为 roost（老配置由 migrateChannel 归一） */
+          current: 'roost',
           names: channels.names(),
           capabilities: channels.describe(),
           /** 能力用不了时退成什么——上层不该自己判"平台不支持怎么办" */
@@ -6568,28 +6803,98 @@ export function apply(ctx) {
 
       route('/setup/start', (req, res) => setup.start().then((r) => send(res, 200, r))),
       route('/setup/stop', (req, res) => setup.stop().then((r) => send(res, 200, r))),
-      route('/setup/plugin', (req, res) => setup.installPlugin().then((r) => send(res, 200, r))),
-      // 传实际监听的端口：端口被占会顺延，写配置值的话 ai-chat 会连到错的端口
-      route('/setup/configure', (req, res) =>
-        setup.configurePlugin(server?.actualPort?.() || undefined).then((r) => send(res, 200, r))),
+      route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
 
       /**
-       * 只改「ai-chat 的 DSH 地址」，别的都不动。
+       * 一键直连（外接协议）。
        *
-       * 和 `/setup/configure` 的区别：那个会把 adapter 也改成 dsh、顺便写
-       * publicUrl 和 decide，等于重新配一遍。用户在面板上看到地址对不上时，
-       * 想要的是「就改这一行」，不是「把插件配置重刷一遍」。
-       *
-       * 自动重试已经在跑了（`syncRetry.schedule`），这个路由是给人一个
-       * **立刻生效**的按钮——不用等退避，也不用跑去「接入」第 5 步。
+       * 四条路由对应面板上的「看状态 / 一键开 / 关掉 / 测一下」。
+       * `enable` / `disable` 之后**立刻重连自己那条长连接**——不重连的话
+       * 面板显示「已开启」但事件一条都进不来，这是最难查的一种半通状态。
        */
-      route('/setup/sync', async (req, res) => {
-        const r = await syncAdapterPort(server?.actualPort?.() || undefined);
-        if (r?.ok && !r.skipped) addLog('info', 'core', `ai-chat 的地址已对齐：${r.message}`);
-        return send(res, 200, r ?? { ok: false, message: '没有返回结果' });
+      /**
+       * 首次接入向导：状态 / 完成 / 暂时跳过 / 重新打开。
+       * `done` 由后端真跑一次直连自测，前端不能自己宣布完成。
+       */
+      route('/setup/wizard', (req, res) => send(res, 200, wizard.state())),
+      route('/setup/wizard/done', (req, res) =>
+        wizard.done().then((r) => send(res, 200, r))
+          .catch((e) => send(res, 200, { ok: false, message: e?.message ?? String(e) }))),
+      route('/setup/wizard/skip', (req, res) =>
+        Promise.resolve(wizard.skip()).then((r) => send(res, 200, r))
+          .catch((e) => send(res, 200, { ok: false, message: e?.message ?? String(e) }))),
+      route('/setup/wizard/reopen', (req, res) =>
+        Promise.resolve(wizard.reopen()).then((r) => send(res, 200, r))
+          .catch((e) => send(res, 200, { ok: false, message: e?.message ?? String(e) }))),
+
+      /**
+       * 可选依赖 `ws`：查状态 / 给框架一键装。
+       *
+       * 面板据此显示「框架已装 vX / 框架没装（走 SSE）」，
+       * 以及决定要不要露出「一键安装」按钮。装失败不影响任何功能。
+       */
+      route('/roost/ws', async (req, res) => {
+        const dir = await roostDirOf();
+        return send(res, 200, {
+          ok: true,
+          /** 框架那份：这是唯一的来源，插件侧不存第二份 */
+          roost: wsDeps.status(dir),
+          roostDir: dir,
+          transport: cfg.roostHost?.transport || 'auto',
+          active: roost.status().transport,
+        });
       }),
 
-      route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
+      route('/roost/ws/install', async (req, res) => {
+        try {
+          return send(res, 200, await wsDeps.installToRoost({
+            api: setup.api,
+            roostDir: await roostDirOf(),
+          }));
+        } catch (e) {
+          return send(res, 200, { ok: false, mode: 'failed', message: e?.message ?? String(e) });
+        }
+      }),
+
+      route('/roost/pair', (req, res) =>
+        pairing.inspect()
+          .then((r) => send(res, 200, r))
+          .catch((e) => send(res, 200, { ok: false, message: e?.message ?? String(e) }))),
+
+      route('/roost/pair/enable', async (req, res) => {
+        const b = await readBody(req).catch(() => ({}));
+        try {
+          const r = await pairing.enable({
+            rotate: b?.rotate === true,
+            scopes: Array.isArray(b?.scopes) ? b.scopes : undefined,
+            allowManage: b?.allowManage === true,
+          });
+          roost.stop();
+          roost.start();
+          return send(res, 200, r);
+        } catch (e) {
+          return send(res, 200, { ok: false, message: e?.message ?? String(e), step: e?.step ?? '' });
+        }
+      }),
+
+      route('/roost/pair/disable', async (req, res) => {
+        try {
+          const r = await pairing.disable();
+          roost.stop();
+          if (cfg.roostHost?.enabled) roost.start();
+          return send(res, 200, r);
+        } catch (e) {
+          return send(res, 200, { ok: false, message: e?.message ?? String(e) });
+        }
+      }),
+
+      route('/roost/pair/test', async (req, res) => {
+        try {
+          return send(res, 200, await pairing.test());
+        } catch (e) {
+          return send(res, 200, { ok: false, message: e?.message ?? String(e) });
+        }
+      }),
 
       /**
        * `ready` 是给面板判「立刻走一次」能不能点。

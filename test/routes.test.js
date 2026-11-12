@@ -152,11 +152,11 @@ test('路由：memory.enabled 开着时同一份数据会注入（对照组）',
   off?.();
 });
 
-test('路由：/channels 的能力表说清楚哪些平台没有', async () => {
+test('路由：/channels 的能力表如实声明（直连通道也不许虚报）', async () => {
   const { call, off } = await bootHost();
   const r = await call('/channels');
   assert.equal(r.json.ok, true);
-  const caps = r.json.capabilities.qq;
+  const caps = r.json.capabilities.roost ?? r.json.capabilities.qq;
   assert.equal(caps.poke, false);
   assert.equal(caps.stream, 'c2c');
   off?.();
@@ -498,24 +498,26 @@ test('字段：/logs 返回 entries，前端读的也是 entries', async () => {
   off?.();
 });
 
-test('字段：/setup 的五个判据都在且是布尔（前端靠它们推进度）', async () => {
+test('字段：/setup 的判据都在且是布尔，且不再探测 ai-chat', async () => {
   // 指一个不存在的目录：detect 就不会去连真实 Roost，测试与机器状态无关
   const { call, off } = await bootHost({ setup: { roostDir: join(tmpdir(), 'no-such-roost-xyz') } });
   const r = await call('/setup');
   assert.equal(r.status, 200, '/setup 不能 500');
-  for (const k of ['installed', 'hasBot', 'running', 'pluginInstalled', 'pluginConfigured']) {
+  for (const k of ['installed', 'hasBot', 'running', 'hasCreds', 'ownersConfigured']) {
     assert.equal(typeof r.json[k], 'boolean', `${k} 必须是布尔`);
   }
   assert.equal(r.json.installed, false);
-  // 目录填错时要能说清为什么，而不是只说"没装"
   assert.match(String(r.json.dirHow), /不是一份 Roost/);
+  /** 移除 ai-chat 后这三个字段不许再回来：前端会拿它们推进度，回来就是假绿灯 */
+  for (const k of ['pluginInstalled', 'pluginConfigured', 'pluginConfig']) {
+    assert.equal(k in r.json, false, `${k} 不该还在 /setup 响应里`);
+  }
 
   const { readFileSync } = await import('node:fs');
   const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
-  for (const k of ['installed', 'hasBot', 'pluginInstalled', 'pluginConfigured', 'dirHow']) {
+  for (const k of ['installed', 'hasBot', 'hasCreds', 'dirHow']) {
     assert.ok(client.includes(k), `前端应该用到 ${k}`);
   }
-  // 只禁"读这个字段"，不禁注释里提到它（注释正是在记录这个坑）
   assert.ok(!/setupSt\??\.steps/.test(client), '前端不许再读后端不存在的 setupSt.steps');
   off?.();
 });
@@ -587,23 +589,27 @@ test('记忆：老会话没有 kind 时，从 preset 反推（存量数据也能
 });
 
 /**
- * `/setup/sync`：面板红字旁边那个「现在就改过来」的后端。
+ * 移除 ai-chat 的守卫：三条改插件配置的路由必须从注册表里消失。
  *
- * 为什么单独测：这条路由**只改 dshUrl 一行**，和 `/setup/configure`
- * （会连 adapter / publicUrl / decide 一起重刷）不是一回事。混用会把用户
- * 手动调过的插件配置冲掉。这里盯住「路由在、能回话、不抛」。
+ * 用 bootHost 的 routes（真实路由表）而不是读源码字符串——
+ * 只有注册表能证明「请求打进来确实没人接」。
  */
-test('路由：/setup/sync 在，且没装 Roost 时也老实回话不抛', async () => {
+test('移除 ai-chat：/setup/plugin、/setup/configure、/setup/sync 三条路由已关闭', async () => {
   const { routes, call, off } = await bootHost();
-  assert.ok(routes.has('/roost/api/setup/sync'), '缺路由 /setup/sync');
-  const r = await call('/setup/sync', { method: 'POST', body: {} });
-  assert.equal(r.status, 200);
-  assert.equal(r.json.ok, true, '同步不上不算请求失败，别让面板弹红');
-  // 测试环境里没有真的 Roost 在跑，只可能落在这两种
-  assert.ok(
-    r.json.skipped === true || r.json.message,
-    `要给出原因，不能只说 ok：${JSON.stringify(r.json)}`,
+  for (const p of ['/setup/plugin', '/setup/configure', '/setup/sync']) {
+    assert.equal(routes.has('/roost/api' + p), false, `${p} 不该还在路由表里`);
+  }
+  /** bootHost 的 call() 遇到未注册路由会抛「路由没注册」，正好证明没人接 */
+  await assert.rejects(
+    () => call('/setup/sync', { method: 'POST', body: {} }),
+    /路由没注册/,
+    '旧地址必须没人接，不能静默当成成功',
   );
+  /** 直连与向导路由一个都不能少 */
+  for (const p of ['/roost/pair', '/roost/pair/enable', '/roost/pair/test',
+                   '/setup/wizard', '/setup/wizard/done', '/setup/wizard/skip', '/setup/wizard/reopen']) {
+    assert.ok(routes.has('/roost/api' + p), `缺路由 ${p}`);
+  }
   off?.();
 });
 
