@@ -791,6 +791,17 @@ select.roost-input{color-scheme:dark}
   border-radius:12px;border:1px solid var(--line-soft);background:var(--surface)}
 .roost-banner.bad{border-color:color-mix(in srgb,var(--bad) 45%,transparent);
   background:color-mix(in srgb,var(--bad) 9%,transparent)}
+/* 有新版是「建议动作」，不是故障：用 warn 色，别和 .bad 抢同一套红 */
+.roost-banner.warn{border-color:color-mix(in srgb,var(--warn) 42%,transparent);
+  background:color-mix(in srgb,var(--warn) 9%,transparent)}
+/* 横幅里的手动命令：一行等宽字 + 复制按钮，窄屏时按钮换到下一行 */
+.roost-cmd{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;margin-top:8px}
+.roost-cmd>code{flex:1 1 240px;min-width:0;margin:0;padding:6px 8px;border-radius:8px;
+  background:color-mix(in srgb,var(--line-soft) 55%,transparent);font-size:11px;
+  line-height:1.6;word-break:break-all;white-space:pre-wrap;
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+.roost-cmd>summary{flex:1 1 100%;cursor:pointer;font-size:11.5px;
+  color:var(--dsw-alias-label-tertiary,inherit)}
 .roost-banner b{font-size:13px;font-weight:600}
 .roost-banner i{font-style:normal;font-size:11.5px;line-height:1.6;
   color:var(--dsw-alias-label-tertiary,inherit)}
@@ -1073,6 +1084,178 @@ select.roost-input{color-scheme:dark}
           h('i', null, `${lt.error || '未知错误'} —— 细节看「排障」。`))
       }
       return null
+    }
+
+    /* ---------------- 更新横幅（概览页） ---------------- */
+
+    /** localStorage：这一版先不提醒 / 上次看到过的版本（用来判断「刚更新完」） */
+    const UPD_SKIP = 'roost.update.skip'
+    const UPD_SEEN = 'roost.update.seen'
+    const lsGet = (k) => { try { return localStorage.getItem(k) || '' } catch { return '' } }
+    const lsSet = (k, v) => { try { localStorage.setItem(k, v) } catch {} }
+
+    /** RELEASE_NOTES 一段太长：横幅里只放「一句话」那行，完整内容折进 details */
+    const notesBrief = (s) => {
+      const t = String(s || '')
+      const m = t.match(/^一句话[：:]\s*(.+)$/m)
+      if (m) return m[1].trim()
+      const line = t.split('\n').find((l) => l.trim() && !/^#/.test(l))
+      return line ? line.trim() : ''
+    }
+
+    /**
+     * 装不了时，为什么只能给命令（三种装法各有各的说法）。
+     *
+     * `link:` 装法**不能给 add 命令**：`dsh plugin add` 就是把参数转发给
+     * pnpm，`pnpm add dsh-roost@x` 会把 `"link:…"` 换成真实版本，
+     * 符号链接当场变目录、改源码不再生效。开发机的更新方式是 git pull。
+     */
+    const whyManual = (i) => i.linked || i.kind === 'linked'
+      ? '开发模式（link: 装法）：这是源码目录，更新请 git pull 后重启 DSH。别跑 plugin add——那会把符号链接换成真实目录，之后改源码就不再生效。'
+      : i.hasManager === false
+        ? '这个 DSH 版本没有 pluginManager：把下面这行粘到 PowerShell 里跑，跑完重启 DSH。'
+        : i.kind === 'unknown'
+          ? '找不到已安装的目录：确认下面命令里的 profile 名对不对，再跑。'
+          : 'DSH 不让面板自己装：把下面这行粘到 PowerShell 里跑，跑完重启 DSH。'
+
+    /**
+     * 概览页顶部的更新横幅。
+     *
+     * **自己不查更新**：只读 `/update/check` 的后台快照——插件启动 10 秒后查
+     * 一次、之后每 6 小时一次，结果存在服务端。没新版就返回空，一个像素不占；
+     * 也不会因为「用户打不打开面板」决定有没有人检查。
+     *
+     * 能自更新（真实目录 + 有 pluginManager）就直接给按钮，点一下装完；
+     * 装不了（开发模式 / 老 DSH / DSH 拒绝重装）才把手动命令顶上来。
+     */
+    function UpdateBanner({ toast }) {
+      const [info, setInfo] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [skip, setSkip] = useState(() => lsGet(UPD_SKIP))
+      /** 刚更新完：显示这一版改了什么（只在版本变过时出现一次） */
+      const [notes, setNotes] = useState(null)
+
+      const fetchInfo = async (force) => {
+        try {
+          const r = await get('/update/check' + (force ? '?force=1' : ''))
+          setInfo(r)
+          return r
+        } catch {
+          setInfo(null)
+          return null
+        }
+      }
+
+      /**
+       * `pending` = 后台还没查完（刚启动 10 秒内）：4 秒后再问一次。
+       *
+       * 最多重试 5 次就停：后台检查被环境变量关掉时（`DSH_ROOST_NO_UPDATE_WATCH=1`）
+       * 会永远 pending，无上限重试等于给首页挂了一个永不停机的定时器。
+       */
+      useEffect(() => {
+        let timer = null
+        let alive = true
+        let tries = 0
+        const tick = async () => {
+          const r = await fetchInfo(false)
+          if (!alive) return
+          if (r && r.pending && tries++ < 5) timer = setTimeout(tick, 4000)
+        }
+        tick()
+        return () => { alive = false; if (timer) clearTimeout(timer) }
+      }, [])
+
+      /** 版本变过才弹「这次改了什么」；第一次装（没记录）只记下版本，不弹 */
+      const own = info && info.own ? info.own : ''
+      useEffect(() => {
+        if (!own) return
+        const seen = lsGet(UPD_SEEN)
+        if (!seen) { lsSet(UPD_SEEN, own); return }
+        if (seen === own) return
+        get('/update/notes').then((r) => { if (r && r.notes) setNotes(r) }).catch(() => {})
+      }, [own])
+
+      const copy = async (text) => {
+        try {
+          await navigator.clipboard.writeText(text)
+          toast('命令复制好了，粘到 PowerShell 里跑')
+        } catch {
+          toast('复制失败，手动选中那行命令复制')
+        }
+      }
+
+      const doSelf = async () => {
+        setBusy(true)
+        try {
+          const r = await post('/update/self', {})
+          toast(r.message || (r.ok ? '装好了，重启 DSH 生效' : '没更新成'))
+          await fetchInfo(true)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const pending = Boolean(info && info.pending)
+      const restart = Boolean(info && info.ok !== false && info.pendingRestart && !info.hasUpdate)
+      /** 跳过的是**这一版**：出了下一版还会提示 */
+      const upd = Boolean(info && info.ok !== false && info.hasUpdate && info.latest
+        && !pending && skip !== info.latest)
+
+      return h('div', null,
+        notes
+          ? h('div', { className: 'roost-banner' },
+              h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' } },
+                h('b', null, `已更新到 v${notes.version || own}`),
+                h('span', { style: { flex: '1 1 auto' } }),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  onClick: () => { lsSet(UPD_SEEN, own); setNotes(null) },
+                }, '知道了')),
+              h('i', null, notesBrief(notes.notes)),
+              h('details', { className: 'roost-note', style: { marginTop: 6 } },
+                h('summary', { style: { cursor: 'pointer', fontSize: 11.5 } }, '这次改了什么'),
+                h('div', { style: { whiteSpace: 'pre-wrap', marginTop: 6, lineHeight: 1.7 } }, notes.notes)))
+          : null,
+
+        upd
+          ? h('div', { className: 'roost-banner warn' },
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                h('b', null, `有新版本 v${info.latest}`),
+                h('i', { style: { margin: 0 } }, `（现在是 v${info.own}）`),
+                h('span', { style: { flex: '1 1 auto' } }),
+                info.canSelf
+                  ? h('button', {
+                      type: 'button', className: 'roost-primary', disabled: busy, onClick: doSelf,
+                    }, busy ? '安装中…' : `更新到 v${info.latest}`)
+                  : null,
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  title: '这一版先不提醒；出了下一版还会提示',
+                  onClick: () => { lsSet(UPD_SKIP, info.latest); setSkip(info.latest) },
+                }, '这版先不提醒')),
+              h('i', null, info.canSelf
+                ? '装完重启 DSH 才生效；设置、人格、记忆、扩展都不动。'
+                : whyManual(info)),
+              /** `link:` 装法没有可用命令（服务端返回空串）：只留上面那句「git pull 后重启」 */
+              info.command
+                ? h(info.canSelf ? 'details' : 'div', { className: 'roost-cmd' },
+                    info.canSelf
+                      ? h('summary', null, '或者自己在 PowerShell 里跑（一行就够）')
+                      : null,
+                    h('code', null, info.command),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: () => copy(info.command),
+                    }, '复制'))
+                : null)
+          : null,
+
+        restart
+          ? h('div', { className: 'roost-banner' },
+              h('b', null, `v${info.installed} 已经装好，等重启`),
+              h('i', null, '重启 DSH 之后版本号和功能才会变；设置、人格、记忆、扩展都不受影响。'))
+          : null,
+      )
     }
 
     /** 分步：编号节点 + 竖线 + 标题说明 + 右侧动作 */
@@ -1445,6 +1628,12 @@ select.roost-input{color-scheme:dark}
 
       return h('div', null,
         h(Banner, { st, setupSt }),
+
+        /**
+         * 有新版就顶一条横幅（后台查到的，不在这里发请求）。
+         * 放在故障横幅下面、接入进度上面：故障先看，更新其次。
+         */
+        h(UpdateBanner, { toast }),
 
         /** 01 接入进度放最上面（主人 2026-11-11 指定），并把两个直达按钮放这里 */
         h(Sec, { n: '01', title: '接入进度',
@@ -6487,8 +6676,14 @@ select.roost-input{color-scheme:dark}
       /** 「成功但版本不对」也要留一块持久提示：降级是静默的，toast 一闪就没 */
       const [notice, setNotice] = useState(null)
 
-      const loadCheck = async () => {
-        const r = await get('/update/check')
+      /**
+       * 读检查结果。
+       *
+       * 默认只读**后台快照**（插件启动 10 秒后查一次、之后 6 小时一次），
+       * 所以进设置页不会卡在 registry 的 8 秒超时上；`force` 才是真的重查。
+       */
+      const loadCheck = async (force) => {
+        const r = await get('/update/check' + (force ? '?force=1' : ''))
         setInfo(r && r.ok !== false ? r : { ok: false, own: r?.own || '', error: r?.error || '查不到', canSelf: false })
         setAt(new Date().toLocaleTimeString())
       }
@@ -6516,7 +6711,8 @@ select.roost-input{color-scheme:dark}
           // 否则用户看到「已装新版」，重启后还是旧版
           setNotice(r && r.ok && (r.downgraded || r.unverified) ? r : null)
           toast(r.message || (r.ok ? '更新完成，重启 DSH 生效' : '没更新成'))
-          await loadCheck()
+          // 装完必须强刷：快照是装之前的，直接读回来还是「有新版」
+          await loadCheck(true)
         } finally {
           setBusy('')
         }
@@ -6546,7 +6742,7 @@ select.roost-input{color-scheme:dark}
 
       return h(Sec, {
         n: '01', title: '更新',
-        right: h('button', { type: 'button', className: 'roost-btn', onClick: () => { loadCheck(); loadRepo() } }, '重新检查'),
+        right: h('button', { type: 'button', className: 'roost-btn', onClick: () => { loadCheck(true); loadRepo() } }, '重新检查'),
       },
         /* ---- 本体 ---- */
         h('div', { className: 'roost-item' },
@@ -6566,19 +6762,23 @@ select.roost-input{color-scheme:dark}
              * 开发模式（符号链接）根本不该更新，会把源码链路搞断。
              */
             h('div', { className: 'roost-note', style: { marginTop: 2 } },
-              info?.kind === 'linked'
-                ? '开发模式（node_modules 里是符号链接）：自更新已禁用，改完源码重启 DSH 即可。'
-                : info?.pendingRestart
-                  // 装完没重启：磁盘上已经是新版，运行中的还是旧版。这句话不写清楚，
-                  // 用户会以为"更新失败"，然后再点一次
-                  ? `新版已经装到磁盘上了，重启 DSH 就会生效（面板上的版本号要重启后才变）。`
-                  : info?.kind === 'real'
-                    ? '装完要重启 DSH 才生效。'
-                    : info?.hasManager === false
-                      ? '这个 DSH 版本没有 pluginManager，请去 DSH 插件管理里手动更新。'
-                      : (info?.error
-                        ? `查不到最新版：${info.error}——不影响试装，pnpm 会自己解析 latest。`
-                        : '')),
+              info?.pending
+                // 后台还没查完：不能说「已是最新」，那是在编
+                ? '后台正在检查最新版（启动后 10 秒查一次，之后每 6 小时一次）；点「重新检查」可以立刻查。'
+                : info?.kind === 'linked'
+                  // link: 装法连命令都不给（见 updateCommand 注释）：add 会把链接换成真实目录
+                  ? '开发模式（link: 装法）：自更新已禁用，下面也没有可跑的命令。更新请 git pull 后重启 DSH。'
+                  : info?.pendingRestart
+                    // 装完没重启：磁盘上已经是新版，运行中的还是旧版。这句话不写清楚，
+                    // 用户会以为"更新失败"，然后再点一次
+                    ? `新版已经装到磁盘上了，重启 DSH 就会生效（面板上的版本号要重启后才变）。`
+                    : info?.kind === 'real'
+                      ? '装完要重启 DSH 才生效。'
+                      : info?.hasManager === false
+                        ? '这个 DSH 版本没有 pluginManager，请用下面那行命令手动更新。'
+                        : (info?.error
+                          ? `查不到最新版：${info.error}——不影响试装，pnpm 会自己解析 latest。`
+                          : '')),
             (info?.cooling || info?.coolingUnknown) && info?.hasUpdate
               ? h('div', { className: 'roost-note', style: { color: 'var(--warn)', marginTop: 2 } },
                   info?.cooling
@@ -6630,6 +6830,33 @@ select.roost-input{color-scheme:dark}
           ),
         ),
         /**
+         * 手动更新命令（兜底出口）。
+         *
+         * 三种装不了的情况（开发模式符号链接 / 没有 pluginManager /
+         * DSH 以 already-installed 拒绝重装）以前只能给一句
+         * 「去 DSH 插件管理里手动更新」——用户根本不知道要跑什么。
+         * 命令里的 profile 名是服务端从**真实安装目录**推出来的，
+         * 不是写死的 desktop（用 web / headless profile 的人不会装错地方）。
+         *
+         * 放在 `.roost-item` **外面**：那个容器是 `display:flex;align-items:baseline`，
+         * 塞进去会和标题、按钮挤成一行，命令被压到只剩几个字宽。
+         */
+        info?.command
+          ? h(info.canSelf ? 'details' : 'div', { className: 'roost-cmd' },
+              info.canSelf
+                ? h('summary', null, `也可以自己在 ${info.shell} 里跑（profile: ${info.profile}）`)
+                : h('div', { className: 'roost-note', style: { flex: '1 1 100%', margin: '0 0 2px' } },
+                    `在 ${info.shell} 里跑这一行，跑完重启 DSH（profile: ${info.profile}）：`),
+              h('code', null, info.command),
+              h('button', {
+                type: 'button', className: 'roost-btn',
+                onClick: async () => {
+                  try { await navigator.clipboard.writeText(info.command); toast('命令复制好了') }
+                  catch { toast('复制失败，手动选中那行复制') }
+                },
+              }, '复制'))
+          : null,
+        /**
          * 自更新失败的详情。
          *
          * toast 一闪就没了，而"为什么失败"恰恰是用户唯一的求助材料：
@@ -6660,6 +6887,18 @@ select.roost-input{color-scheme:dark}
                     lines.join('\n')),
                 )
               })(),
+              /** 装失败时把命令一起给出来：DSH 拒绝重装 / 权限问题，唯一的出路就是手动跑一行 */
+              fail.command
+                ? h('div', { className: 'roost-cmd', style: { flex: '1 1 100%' } },
+                    h('code', null, fail.command),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: async () => {
+                        try { await navigator.clipboard.writeText(fail.command); toast('命令复制好了') }
+                        catch { toast('复制失败，手动选中那行复制') }
+                      },
+                    }, '复制命令'))
+                : null,
               h('button', { type: 'button', className: 'roost-btn', onClick: () => setFail(null) }, '知道了'),
             )
           : null,

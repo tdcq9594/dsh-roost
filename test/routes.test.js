@@ -1013,3 +1013,39 @@ test('G5-19 /quick status：面板两个状态只由后端审计事件点亮', a
     assert.equal(s.hintRegenerated, '令牌已重新生成');
   } finally { off?.(); }
 });
+
+/* ---------------- 更新：默认只读后台快照 ---------------- */
+
+test('路由：更新检查默认只读快照，没查过时返回 pending（不冒充「已是最新」）', async () => {
+  const { call, off } = await bootHost();
+  try {
+    const r = await call('/update/check');
+    assert.equal(r.json.ok, true);
+    assert.equal(r.json.pending, true, '后台还没查完必须说 pending，不能返回 hasUpdate:false');
+    assert.ok(r.json.own, '当前版本要带上，面板才知道显示什么');
+  } finally {
+    off?.();
+  }
+});
+
+test('路由：force=1 才真的去查（测试里网络被掐死，如实报错）', async () => {
+  const { call, off } = await bootHost();
+  try {
+    const r = await call('/update/check?force=1');
+    assert.equal(r.json.ok, true, '查不到最新版也是 200，不能让整块变成错误页');
+    assert.match(String(r.json.error || ''), /ECONNREFUSED|connect/, '要把真实原因带出来，别吞掉');
+  } finally {
+    off?.();
+  }
+});
+
+test('路由：更新说明取的是当前版本那一段', async () => {
+  const { call, off } = await bootHost();
+  try {
+    const r = await call('/update/notes');
+    assert.equal(r.json.ok, true);
+    assert.match(r.json.notes, /一句话/, 'RELEASE_NOTES.md 里当前版本那段要被取出来');
+  } finally {
+    off?.();
+  }
+});

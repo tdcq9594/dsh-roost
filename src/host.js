@@ -63,7 +63,7 @@ import { createAccount } from './account.js';
 import { createRewriter } from './rewrite.js';
 import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand, trimPersonaBody, trimDemos, dupGroups } from './personas.js';
 import { createPersonaRepo, scanPersona } from './persona-repo.js';
-import { createUpdater } from './update.js';
+import { createUpdater, changelogSection } from './update.js';
 import { createDepsCheck } from './deps.js';
 import { pathAllowed, MAX_FILE_BYTES } from './send-file.js';
 import { createStickers } from './stickers.js';
@@ -944,6 +944,25 @@ export function apply(ctx) {
     registry: cfg.update?.registry,
     log: (m) => log.warn(m),
   });
+
+  /**
+   * 后台查更新：启动 10 秒后第一次，之后每 6 小时复查。
+   *
+   * **不在概览页里查。** 前端触发等于「用户打不打开面板决定有没有人检查」，
+   * 而且每次进首页都要打一次 registry（8 秒超时）。这里查完把结果留在
+   * `updater` 内存里，概览页只读快照，没新版就什么都不渲染。
+   *
+   * 测试环境跳过：`node --test` 的子进程会打真网络，把测试拖成十几秒，
+   * 断网时还会因为 8 秒超时把整轮测试卡住。
+   */
+  if (!process.env.NODE_TEST_CONTEXT && process.env.DSH_ROOST_NO_UPDATE_WATCH !== '1') {
+    // 交给 ctx.effect 管：插件重载 / 卸载时把定时器一起收掉，不会越叠越多
+    ctx.effect(() => updater.watch({
+      onResult: (r) => {
+        if (r.hasUpdate) addLog('info', 'update', `后台检查到新版本 v${r.latest}（当前 v${r.own}）`);
+      },
+    }));
+  }
 
   /** 表情包：只做「把清单写进提示词」，发图复用 <<image:>>（图文同条）/ <<image-alone:>>（单独一条） */
   const stickers = createStickers({ dataDir: dataDir(), log: (m) => log.warn(m) });
@@ -7209,11 +7228,47 @@ export function apply(ctx) {
         }
       }),
 
+      /**
+       * 检查更新。
+       *
+       * **默认只读后台快照**（`updater.watch()` 启动后 10 秒查一次，之后 6 小时一次）：
+       * 面板打开时一个网络请求都不发，概览页的横幅只是把这份结果画出来。
+       * `?force=1` 才是用户点「重新检查」，现场去问 registry。
+       *
+       * 没有快照（刚启动，后台还没查完）返回 `pending`。**不能**用「没新版」
+       * 冒充它——前端要据此显示「还在查」，而不是「已是最新」。
+       */
       route('/update/check', async (req, res) => {
+        const force = String(req.url || '').includes('force=1');
         try {
-          return send(res, 200, await updater.check());
+          if (force) return send(res, 200, await updater.check({ force: true }));
+          const snap = updater.snapshot();
+          if (snap) return send(res, 200, snap);
+          return send(res, 200, { ok: true, pending: true, own: updater.own() });
         } catch (e) {
           return send(res, 200, { ok: false, own: updater.own(), error: e.message, canSelf: false, hasUpdate: false });
+        }
+      }),
+
+      /**
+       * 「这次更新改了什么」：读 RELEASE_NOTES.md 里当前版本那一段。
+       *
+       * 刚重启完只看到版本号变了，还得自己去仓库翻——这条把那段直接端到面板上。
+       * 找不到对应版本就返回空串，不编内容（宁可不说，也不能说错的）。
+       */
+      route('/update/notes', async (req, res) => {
+        const version = updater.own();
+        try {
+          let notes = '';
+          for (const f of ['RELEASE_NOTES.md', 'CHANGELOG.md']) {
+            try {
+              notes = changelogSection(readFileSync(join(import.meta.dirname, '..', f), 'utf8'), version);
+            } catch {}
+            if (notes) break;
+          }
+          return send(res, 200, { ok: true, version, notes });
+        } catch (e) {
+          return send(res, 200, { ok: false, version, notes: '', message: e.message });
         }
       }),
 

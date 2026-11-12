@@ -17,6 +17,7 @@ import { join } from 'node:path';
 
 import {
   createUpdater, patchExclude, installKind, findProfileDir, humanFail, ageText, compareVersion, PKG,
+  updateCommand, changelogSection,
 } from '../src/update.js';
 
 const YAML = `# pnpm 的供应链保护配置
@@ -734,6 +735,184 @@ test('「不等 24 小时」：发布时间未知时也允许写豁免（否则�
     assert.equal(r.ok, true);
     assert.ok(r.exemption?.changed, '年龄未知也要能加豁免');
     assert.match(readFileSync(yaml, 'utf8'), /- dsh-roost@99\.0\.0/);
+  } finally {
+    done();
+  }
+});
+
+/* ---------------- 手动命令 / 更新说明 ---------------- */
+
+test('手动命令：profile 名从安装目录推，不写死 desktop', () => {
+  const win = updateCommand({
+    profileDir: 'C:/Users/x/.dsh/profiles/web', version: '1.1.6', platform: 'win32', exists: () => false, env: {},
+  });
+  assert.equal(win.profile, 'web');
+  assert.match(win.command, /plugin --profile web add dsh-roost@1\.1\.6/);
+  assert.match(win.command, /dsh\.cmd/, '哪儿都找不到时退回 dsh.cmd，交给 PATH');
+
+  const linux = updateCommand({
+    profileDir: '/home/x/.dsh/profiles/headless', version: '1.1.6', platform: 'linux', exists: () => false, env: {},
+  });
+  assert.equal(linux.profile, 'headless');
+  assert.equal(linux.command, 'dsh plugin --profile headless add dsh-roost@1.1.6');
+});
+
+test('手动命令：PATH 里有 dsh 就用命令名，不写死任何绝对路径', () => {
+  const r = updateCommand({
+    profileDir: 'C:/Users/x/.dsh/profiles/desktop', version: '1.1.6', platform: 'win32',
+    env: { PATH: 'C:\\Windows;C:\\tools' },
+    exists: (p) => p === 'C:\\tools\\dsh.cmd',
+  });
+  assert.equal(r.command, 'dsh plugin --profile desktop add dsh-roost@1.1.6');
+  assert.equal(r.via, 'path');
+});
+
+test('手动命令：PATH 没有时按 DSH 自己的 resourcesPath 推（装 D 盘也对）', () => {
+  const res = 'D:\\Apps\\DeepSeek Harness\\resources';
+  const cli = 'D:\\Apps\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd';
+  const r = updateCommand({
+    profileDir: 'C:/Users/x/.dsh/profiles/desktop', version: '1.1.6', platform: 'win32',
+    env: { PATH: '' }, resourcesPath: res,
+    exists: (p) => p === cli,
+  });
+  assert.equal(r.via, 'resources');
+  assert.match(r.command, /D:\\Apps\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh\.cmd/);
+});
+
+test('手动命令：装在 LOCALAPPDATA 下时用 $env: 写法，换用户也能粘', () => {
+  const la = 'C:\\Users\\alice\\AppData\\Local';
+  const cli = 'C:\\Users\\alice\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd';
+  const r = updateCommand({
+    profileDir: 'C:/Users/alice/.dsh/profiles/desktop', version: '1.1.6', platform: 'win32',
+    env: { PATH: '', LOCALAPPDATA: la }, resourcesPath: '',
+    exists: (p) => p === cli,
+  });
+  assert.equal(r.via, 'localappdata');
+  assert.match(r.command, /\$env:LOCALAPPDATA/, '要用环境变量，别把用户名写死');
+  assert.doesNotMatch(r.command, /alice/, '复制给另一个用户不能带着别人的用户名');
+});
+
+test('手动命令：没有版本号时不带 @，交给 pnpm 自己解析 latest', () => {
+  const r = updateCommand({ profileDir: '/p/desktop', platform: 'linux', env: {} });
+  assert.match(r.command, /add dsh-roost$/);
+});
+
+test('更新说明：只取当前版本那一段，不吃到下一版', () => {
+  const text = [
+    '## v1.1.6：新东西',
+    '',
+    '一句话：概览页加了更新横幅。',
+    '',
+    '### 修',
+    '',
+    '- 一条',
+    '',
+    '## v1.1.5：旧的',
+    '',
+    '- 旧的内容',
+  ].join('\n');
+  const s = changelogSection(text, '1.1.6');
+  assert.match(s, /概览页加了更新横幅/);
+  assert.doesNotMatch(s, /旧的内容/, '不能把下一版的内容也算进来');
+  assert.equal(changelogSection(text, '9.9.9'), '', '找不到就返回空串，不编内容');
+  assert.equal(changelogSection('', '1.1.6'), '');
+});
+
+/* ---------------- 缓存 / 后台快照 ---------------- */
+
+test('检查：6 小时内复用远端结果，force 才真的重查', async () => {
+  const { d, done } = tmp();
+  try {
+    let calls = 0;
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success' }) } }),
+      profileDir: profileReal(d),
+      fetchImpl: async (...a) => { calls++; return fakeFetch('99.0.0')(...a); },
+    });
+    await u.check();
+    await u.check();
+    assert.equal(calls, 1, '第二次应该命中 6 小时缓存，别再打一次 registry');
+    await u.check({ force: true });
+    assert.equal(calls, 2, 'force 必须真的去查');
+  } finally {
+    done();
+  }
+});
+
+test('检查：失败不写缓存，下次会真的重试（否则断网一次要干等六小时）', async () => {
+  const { d, done } = tmp();
+  try {
+    let calls = 0;
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: {} }),
+      profileDir: profileReal(d),
+      fetchImpl: async (...a) => {
+        calls++;
+        // 一次 check 会试两次（完整 packument → 简版元数据），两次都断才算这次查失败
+        if (calls <= 2) throw new Error('断网了');
+        return fakeFetch('99.0.0')(...a);
+      },
+    });
+    const a = await u.check();
+    assert.match(a.error, /断网了/);
+    assert.equal(a.latest, '', '查失败时不能编一个版本号');
+    const b = await u.check();
+    assert.equal(b.latest, '99.0.0', '第二次必须真的重查，不能返回缓存的错误');
+    assert.equal(calls, 3, '失败没写缓存：第二次真的去问了 registry');
+  } finally {
+    done();
+  }
+});
+
+test('后台检查：watch 查完把结果写进快照，概览页只读快照', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success' }) } }),
+      profileDir: profileReal(d),
+      fetchImpl: fakeFetch('99.0.0'),
+    });
+    assert.equal(u.snapshot(), null, '还没查过时不能假装有结果');
+    const stop = u.watch({ firstDelayMs: 5, everyMs: 60_000 });
+    await new Promise((r) => setTimeout(r, 120));
+    stop();
+    const snap = u.snapshot();
+    assert.ok(snap, '后台查完要有快照');
+    assert.equal(snap.latest, '99.0.0');
+    assert.equal(snap.hasUpdate, true);
+    assert.ok(snap.at, '快照要带时间戳');
+  } finally {
+    done();
+  }
+});
+
+test('手动命令：link 装法不给 add 命令（跑一次就把符号链接换成真实目录）', () => {
+  const r = updateCommand({ profileDir: '/p/desktop', version: '1.1.6', linked: true, platform: 'linux' });
+  assert.equal(r.command, '', '开发机不能拿到这条命令：pnpm add 会把 link: 换成真实版本');
+  assert.equal(r.linked, true);
+});
+
+test('检查：符号链接装法返回空命令，只留「git pull」的说法', async () => {
+  const { d, done } = tmp();
+  try {
+    const p = join(d, 'profile');
+    const src = join(d, 'src-pkg');
+    mkdirSync(join(p, 'node_modules'), { recursive: true });
+    mkdirSync(src, { recursive: true });
+    try {
+      symlinkSync(src, join(p, 'node_modules', PKG), 'junction');
+    } catch {
+      return;
+    }
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success' }) } }),
+      profileDir: p,
+      fetchImpl: fakeFetch('99.0.0'),
+    });
+    const r = await u.check();
+    assert.equal(r.kind, 'linked');
+    assert.equal(r.command, '', 'link 装法不能给 add 命令');
+    assert.equal(r.linked, true);
   } finally {
     done();
   }

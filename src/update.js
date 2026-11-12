@@ -16,7 +16,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, renameSync, lstatSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, win32 as wpath, posix as ppath } from 'node:path';
 import { homedir } from 'node:os';
 import { compareVersion } from './version.js';
 
@@ -33,6 +33,167 @@ const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
  * 这个常量只用来算"还差多久"和判断要不要提示。
  */
 const MIN_AGE_MS = 24 * 3600_000;
+
+/**
+ * 检查更新的缓存时长。
+ *
+ * 概览页顶部会挂一条「有新版本」的横幅，也就是**每次进首页都会问一次**。
+ * 不缓存的话，每次切回概览都要打一次 registry（8 秒超时），国内直连
+ * 直接把首页拖慢——用户看到的不是「有新版」，是「面板卡了」。
+ *
+ * 6 小时是抄 aurabot 的取值：发版是低频动作，半天延迟完全够用；
+ * 手动点「重新检查」会带 `force` 绕过缓存。
+ */
+const REMOTE_TTL_MS = 6 * 3600_000;
+
+/** PATH 里找 `dsh`。找到返回完整路径，找不到返回空串 */
+function findDshOnPath({ platform, exists, env }) {
+  const P = platform === 'win32' ? wpath : ppath;
+  const sep = platform === 'win32' ? ';' : ':';
+  const names = platform === 'win32' ? ['dsh.cmd', 'dsh.exe', 'dsh'] : ['dsh'];
+  // Windows 上这个键有时叫 PATH、有时叫 Path，两个都认
+  const dirs = String(env.PATH || env.Path || '').split(sep).map((d) => d.trim()).filter(Boolean);
+  for (const d of dirs) {
+    for (const n of names) {
+      const p = P.join(d, n);
+      if (exists(p)) return p;
+    }
+  }
+  return '';
+}
+
+/**
+ * 找 DSH 的 CLI（Windows 上是 `dsh.cmd`）。
+ *
+ * **不能写死 `%LOCALAPPDATA%\Programs\DeepSeek Harness\...`**：
+ * 用户可以把 DSH 装在 D 盘、装在 Program Files、或用便携版，
+ * 写死的路径复制过去就是一条跑不起来的命令。
+ *
+ * 按可靠性排序：
+ *   ① PATH 里有 dsh —— 最干净，命令直接写 `dsh`，换机器也能用
+ *   ② Electron 的 `process.resourcesPath` —— **任意安装盘符都指得对**
+ *   ③ LOCALAPPDATA / ProgramFiles 的默认位置 —— 标准安装器
+ * 都没有就返回空：调用方退回 `dsh`，至少不写死一条错路径。
+ */
+function findDshCmd({ exists, env, resourcesPath }) {
+  const onPath = findDshOnPath({ platform: 'win32', exists, env });
+  if (onPath) return { onPath: true, path: onPath, via: 'path' };
+  const cands = [];
+  if (resourcesPath) {
+    cands.push({ p: wpath.join(resourcesPath, 'runtime', 'cli', 'bin', 'dsh.cmd'), via: 'resources' });
+  }
+  if (env.LOCALAPPDATA) {
+    cands.push({
+      p: wpath.join(env.LOCALAPPDATA, 'Programs', 'DeepSeek Harness', 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'),
+      via: 'localappdata',
+    });
+  }
+  if (env.ProgramFiles) {
+    cands.push({
+      p: wpath.join(env.ProgramFiles, 'DeepSeek Harness', 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'),
+      via: 'programfiles',
+    });
+  }
+  for (const c of cands) if (exists(c.p)) return { onPath: false, path: c.p, via: c.via };
+  return { onPath: false, path: '', via: 'fallback' };
+}
+
+/**
+ * 把绝对路径换成 PowerShell 的环境变量写法。
+ *
+ * `"C:\Users\alice\AppData\Local\Programs\..."` 复制给另一个用户就废了；
+ * `"$env:LOCALAPPDATA\Programs\..."` 在谁机器上都能展开。
+ * 只对已知的环境变量根做替换，别的盘符（`D:\Apps\...`）原样保留——
+ * 那是用户自己的选择，没有可移植的写法。
+ */
+function portablePath(p, env) {
+  for (const name of ['LOCALAPPDATA', 'ProgramFiles', 'ProgramW6432']) {
+    const dir = env[name];
+    if (!dir) continue;
+    if (p.toLowerCase().startsWith(dir.toLowerCase())) {
+      return `"$env:${name}${p.slice(dir.length)}"`;
+    }
+  }
+  return `"${p}"`;
+}
+
+/**
+ * 手动更新的命令（一键自更新走不通时的兜底出口）。
+ *
+ * 以前这三种情况只能甩一句「去 DSH 插件管理里手动更新」：
+ *   · 开发模式（符号链接）——自更新会把源码链路搞断，必须挡住
+ *   · 老 DSH 没有 pluginManager
+ *   · DSH 以 `already-installed` 拒绝重装同一个包
+ * 用户拿到那句话根本不知道要跑什么。给一条能直接粘进终端的命令才是可行动的。
+ *
+ * `dsh plugin` 的实际行为是**把参数原样转发给 pnpm**（`dsh plugin --help`
+ * 原文：forwarding the remaining arguments to pnpm in the profile directory），
+ * 所以这条命令等价于在 profile 目录里 `pnpm add dsh-roost@<版本>`——
+ * **pnpm 改版本是直接替换，不需要先卸载**。`already-installed` 是 DSH
+ * 面板 API 自己的限制（热更新模式下拒绝重装同一个包），命令行正好绕过它。
+ *
+ * **profile 名从 profileDir 推导**（`~/.dsh/profiles/desktop` → `desktop`），
+ * 不写死。aurabot 硬编码 `--profile desktop`，用 web / headless profile
+ * 的人粘过去会装到另一个 profile 里，装完发现「怎么没生效」。
+ *
+ * **`link:` 装法（开发机）一律不给命令。** 那种情况下 `pnpm add` 会把
+ * `"dsh-roost": "link:…"` 换成真实版本，符号链接当场变目录，之后改源码
+ * 不再生效——给这条命令等于递刀。开发机的更新方式是 `git pull` 后重启。
+ */
+export function updateCommand({
+  profileDir, version = '', platform = process.platform, exists = existsSync,
+  linked = false, env = process.env, resourcesPath = process.resourcesPath,
+} = {}) {
+  const P = platform === 'win32' ? wpath : ppath;
+  const profile = P.basename(String(profileDir || '')) || 'desktop';
+  const spec = version ? `${PKG}@${version}` : PKG;
+  if (linked) return { command: '', shell: '', profile, spec, linked: true, via: 'linked' };
+
+  if (platform !== 'win32') {
+    const onPath = findDshOnPath({ platform, exists, env });
+    return {
+      command: `${onPath || 'dsh'} plugin --profile ${profile} add ${spec}`,
+      shell: '终端',
+      profile,
+      spec,
+      linked: false,
+      via: onPath ? 'path' : 'fallback',
+    };
+  }
+
+  const cli = findDshCmd({ exists, env, resourcesPath });
+  return {
+    // PATH 里有 dsh 就直接写命令名：最短、也最容易复制到别的机器
+    command: cli.onPath
+      ? `dsh plugin --profile ${profile} add ${spec}`
+      : `& ${cli.path ? portablePath(cli.path, env) : '"dsh.cmd"'} plugin --profile ${profile} add ${spec}`,
+    shell: 'PowerShell',
+    profile,
+    spec,
+    linked: false,
+    via: cli.via,
+  };
+}
+
+/**
+ * `RELEASE_NOTES.md` 里某个版本那一段（`## v1.1.5：…` 到下一个 `## `）。
+ *
+ * 用来在「刚更新完」时告诉用户这次改了什么——不然重启完只看到版本号变了，
+ * 还得自己去仓库翻。找不到这一段就返回空串（不编内容）。
+ */
+export function changelogSection(text, version) {
+  const v = String(version || '').replace(/^v/i, '');
+  if (!v) return '';
+  const lines = String(text || '').split(/\r?\n/);
+  const esc = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const start = lines.findIndex((l) => new RegExp(`^##\\s*v?${esc}(?![\\d.])`).test(l));
+  if (start < 0) return '';
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) { end = i; break; }
+  }
+  return lines.slice(start + 1, end).join('\n').trim();
+}
 
 /**
  * DSH 的 `ChangeResult.application` 取值。
@@ -245,6 +406,17 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
   const profile = () => profileDir ?? findProfileDir(import.meta.dirname);
   const kind = () => installKind(profile());
 
+  /** registry 的检查结果缓存（见 `remote()`）。null = 没查过 */
+  let remoteCache = null;
+
+  /**
+   * 后台最近一次检查的结果。
+   *
+   * 概览页的横幅**只读这份快照**，自己不发起请求：否则「有没有新版本」
+   * 就变成了「用户打不打开面板」，而且每次进首页都要打一次 registry。
+   */
+  let lastCheck = null;
+
   /**
    * 磁盘上**已经装着的**版本（≠ 正在运行的版本）。
    *
@@ -314,14 +486,22 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
   }
 
   /**
-   * 查最新版。
+   * 远端信息：registry 上的最新版 + 发布时间。
    *
    * 拉**整份 packument**而不是 `/latest`：`/latest` 只给版本号，而我们要
    * 顺手读 `time` 算「发布多久了」——24 小时冷却期内点更新是白点，得提前说。
    * 只查一次，两个信息都拿到。
+   *
+   * **只缓存成功拿到版本号的结果。** 把断网的 error 也缓存六小时，
+   * 用户点「重新检查」就不会真的重查，只能干等缓存过期——那比慢更糟。
+   * 缓存的键带 registry：用户换了源必须重查。
    */
-  async function check() {
+  async function remote({ force = false } = {}) {
     const reg = await registryUrl();
+    if (!force && remoteCache && remoteCache.registry === reg
+      && Date.now() - remoteCache.at < REMOTE_TTL_MS) {
+      return { ...remoteCache.value, registry: reg, cached: true };
+    }
     const url = `${reg}/${PKG}`;
     let latest = '';
     let publishedAt = 0;
@@ -363,6 +543,27 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       log(`查最新版失败（${url}）：${e.message}`);
     }
 
+    const value = { latest, publishedAt, error: err };
+    // 失败不写缓存：下次进来（或点「重新检查」）应该真的重试一次
+    if (latest) remoteCache = { at: Date.now(), registry: reg, value };
+    return { ...value, registry: reg, cached: false };
+  }
+
+  /**
+   * 组装「有没有新版 / 能不能自己装」的完整判断。
+   *
+   * 远端部分走 `remote()`（有 6 小时缓存），**本地部分每次现算**：
+   * 装法、磁盘上的版本、有没有 pluginManager 都可能在这六小时里变
+   * （用户刚重启完 DSH、刚换了安装方式）。缓存住会让横幅一直挂着一颗
+   * 点不动的按钮——那比不提示更让人困惑。
+   */
+  async function check({ force = false } = {}) {
+    const r = await remote({ force });
+    const reg = r.registry;
+    const latest = r.latest;
+    const publishedAt = r.publishedAt;
+    const err = r.error;
+
     const age = publishedAt ? Date.now() - publishedAt : NaN;
     const ageKnown = Number.isFinite(age);
     /** 拿不到发布时间 ≠ 不在冷却期：三态处理，别让「立即安装」出口凭空消失 */
@@ -376,7 +577,9 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     /** 磁盘上装着的版本；读不到就退回运行中版本（测试环境没有真实 node_modules） */
     const installed = installedVersion();
     const base = installed || own;
-    return {
+    /** 手动更新的命令：一键装走不通时，这条是用户唯一能真正执行的动作（link 装法下为空） */
+    const cmd = updateCommand({ profileDir: profile(), version: latest, linked: k === 'linked' });
+    const result = {
       ok: true,
       own,
       installed,
@@ -410,7 +613,68 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
         ? `还差 ${leftH} 小时${leftM ? ` ${leftM} 分钟` : ''}满 24 小时`
         : '',
       hasManager: typeof pm()?.installBundle === 'function',
+      /** 手动更新的命令（兜底出口）：一键装走不通时给这条，别只甩一句「去插件管理里手动更新」 */
+      command: cmd.command,
+      shell: cmd.shell,
+      profile: cmd.profile,
+      spec: cmd.spec,
+      /** `link:` 装法：没有可用的 add 命令，面板要改说「git pull 后重启」 */
+      linked: cmd.linked,
+      /** 命中 6 小时缓存（`force` 才能强刷）：面板据此把「重新检查」标成真的会重查 */
+      cached: Boolean(r.cached),
     };
+    lastCheck = { ...result, at: Date.now() };
+    return result;
+  }
+
+  /**
+   * 后台定时检查。
+   *
+   * 启动后先查一次，之后每 6 小时复查；结果留在内存里供概览页读。
+   * 这样「有没有新版本」不再依赖用户打开面板，首页也不用等 registry。
+   *
+   * 定时器一律 `unref()`：不能因为一个更新检查让 DSH 进程退不掉。
+   *
+   * @param {object} [opts]
+   * @param {number} [opts.firstDelayMs] 启动后多久查第一次（等宿主起来，别抢启动时的网络）
+   * @param {number} [opts.everyMs]      之后多久复查一次
+   * @param {(r:object)=>void} [opts.onResult]
+   * @returns {() => void} 停止函数
+   */
+  function watch({ firstDelayMs = 10_000, everyMs = REMOTE_TTL_MS, onResult } = {}) {
+    let stopped = false;
+    let first = null;
+    let timer = null;
+    const run = async () => {
+      if (stopped) return;
+      try {
+        const r = await check({ force: true });
+        if (r.hasUpdate || r.pendingRestart) {
+          log(`后台检查：有新版本 v${r.latest}（当前 v${r.own}）`);
+        }
+        onResult?.(r);
+      } catch (e) {
+        // 后台失败不打扰任何人：下次复查会再试，用户手动点「重新检查」也能立刻重查
+        log(`后台检查更新失败：${e.message}`);
+      }
+    };
+    first = setTimeout(() => {
+      first = null;
+      run();
+      timer = setInterval(run, everyMs);
+      timer.unref?.();
+    }, firstDelayMs);
+    first.unref?.();
+    return () => {
+      stopped = true;
+      if (first) clearTimeout(first);
+      if (timer) clearInterval(timer);
+    };
+  }
+
+  /** 后台快照；没查过返回 null（面板据此显示「还在查」，而不是「已是最新」） */
+  function snapshot() {
+    return lastCheck;
   }
 
   /**
@@ -443,23 +707,58 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
    */
   async function self({ fresh = false } = {}) {
     const k = kind();
+    /**
+     * 失败时把手动命令一起带回去。
+     *
+     * 「装不了」的三种情况（符号链接 / 没有 pluginManager / DSH 拒绝重装）
+     * 唯一的出路就是用户自己在终端跑一行。前端拿到 `command` 才能给出
+     * 一颗「复制命令」的按钮，而不是一句干巴巴的「去插件管理里手动更新」。
+     */
     if (k === 'linked') {
       return {
         ok: false,
         code: 'linked',
+        /**
+         * **不给 add 命令。**
+         *
+         * `dsh plugin add` 会把 `"dsh-roost": "link:…"` 换成真实版本，
+         * 符号链接当场变目录——给开发机递这把刀，比不给命令更糟。
+         */
+        command: '',
+        shell: '',
         message: '这台机器上 dsh-roost 是符号链接（开发模式），自更新会把链接换成真实目录、'
-          + '改源码就不再生效了。开发机请直接重启 DSH。',
+          + '改源码就不再生效了。开发机请 git pull 后重启 DSH。',
       };
     }
+    const cmd = updateCommand({ profileDir: profile() });
     if (k === 'unknown') {
-      return { ok: false, code: 'unknown', message: '找不到已安装的 dsh-roost 目录，无法自更新。' };
+      return {
+        ok: false,
+        code: 'unknown',
+        command: cmd.command,
+        shell: cmd.shell,
+        message: '找不到已安装的 dsh-roost 目录，无法自更新。',
+      };
     }
     const manager = pm();
     if (!manager?.installBundle) {
-      return { ok: false, code: 'no-manager', message: '这个 DSH 版本没有 pluginManager 服务，请在 DSH 插件管理里手动更新。' };
+      return {
+        ok: false,
+        code: 'no-manager',
+        command: cmd.command,
+        shell: cmd.shell,
+        message: '这个 DSH 版本没有 pluginManager 服务，请在 DSH 插件管理里手动更新。',
+      };
     }
 
-    const info = await check();
+    /**
+     * **强制重查**，不吃那 6 小时缓存。
+     *
+     * 用户点「更新」就是明确的「我现在要装最新」：拿六小时前的缓存判断
+     * 「已经是最新版」会把人挡在门外，而他明明刚看到发布公告。
+     * 查失败也没关系——下面有 `unknownLatest` 兜底，照样按 latest 标签装。
+     */
+    const info = await check({ force: true });
     /**
      * 查不到最新版**不再直接阻断**。
      *
@@ -508,7 +807,13 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     try {
       result = await manager.installBundle(spec, { saveExact: true, requestId });
     } catch (e) {
-      return { ok: false, code: 'throw', message: `更新失败：${e.message}（本地什么都没动）` };
+      return {
+        ok: false,
+        code: 'throw',
+        command: cmd.command,
+        shell: cmd.shell,
+        message: `更新失败：${e.message}（本地什么都没动）`,
+      };
     }
 
     /**
@@ -544,6 +849,8 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       return {
         ok: false,
         code: errCode || 'failed',
+        command: cmd.command,
+        shell: cmd.shell,
         message: humanFail(errCode, detail),
         detail,
         raw: result,
@@ -557,6 +864,8 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       return {
         ok: false,
         code: 'unexpected',
+        command: cmd.command,
+        shell: cmd.shell,
         message: '更新返回了看不懂的结果，本地可能没动。去 DSH 插件管理里看一眼版本。',
         detail,
         raw: result,
@@ -607,5 +916,8 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     };
   }
 
-  return { own: () => own, installedVersion, check, self, exempt, profileDir: profile, kind, registryUrl };
+  return {
+    own: () => own, installedVersion, check, self, exempt, watch, snapshot,
+    profileDir: profile, kind, registryUrl,
+  };
 }
