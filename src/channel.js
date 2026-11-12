@@ -106,6 +106,32 @@ export function downgrade(caps, intent, scene = 'c2c', fallbacks = QQ_FALLBACKS)
 }
 
 /**
+ * Markdown 被服务端明确拒（4xx 且非 429）时才降级纯文本。
+ *
+ * 5xx / 网络错误可能已经送达，重发就是重复消息——和框架 `replyMarkdown`
+ * 里那条规则保持一致。协议层的 `BAD_PARAMS` / `NO_SCOPE` 是参数或权限问题，
+ * 重发纯文本也不会成功，别白花一次调用。
+ */
+function isMarkdownRejection(e) {
+  if (['BAD_PARAMS', 'NO_SCOPE', 'NOT_FOUND', 'NOT_READY'].includes(String(e?.code ?? ''))) return false;
+  const status = Number(e?.http ?? 0);
+  if (status >= 400 && status < 500 && status !== 429) return true;
+  return /(40034008|304061|22006|40034\d{3}|markdown)/i.test(String(e?.message ?? e ?? ''));
+}
+
+/** 降级时把 Markdown 记号去掉，别把 `**加粗**` 原样发给用户 */
+function plainOf(s) {
+  return String(s ?? '')
+    .replace(/<qqbot-at-user\b[^>]*\/?>/gi, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/\*\*|__|`/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
  * 按扩展名判 `fileType`（1 图 / 2 视频 / 3 语音 / 4 文件）。
  *
  * 协议默认是 1（图片），所以**判错会把 zip 当图片发**，官方回 40035001，
@@ -154,6 +180,7 @@ export function createRoostHostChannel({ host, log = () => {} } = {}) {
     async send({
       scene = 'c2c', target, text, hasGroupAuthz = true,
       silenceMs = 0, requestId = '', msgId = '', receivedAt = 0,
+      markdown = true, keyboard = null,
     } = {}) {
       const t = String(text ?? '').trim();
       if (!target) return { ok: false, message: '缺 target' };
@@ -179,27 +206,112 @@ export function createRoostHostChannel({ host, log = () => {} } = {}) {
       }
       if (!t) return { ok: true, scene, target, id: '', pending: false, requestId: rid, silentOnly: true };
 
+      const base = {
+        kind: scene === 'group' ? 'group' : 'c2c',
+        chatId: String(target),
+        content: t,
+        requestId: rid,
+        ...(msgId ? { msgId: String(msgId) } : {}),
+        ...(receivedAt ? { receivedAt: Number(receivedAt) } : {}),
+      };
+      /**
+       * Markdown 是 ai-chat 时代的默认出口：`@` 标签、图文同条、按钮都只在
+       * `msg_type=2` 里生效。框架的 `buildSendPayload` 看到 `markdown` 会自己
+       * 把 `content` 置空并改成 2，所以这里只管传，不去猜 msgType。
+       */
+      const useMd = markdown !== false;
+      const okResult = (r, usedRid) => ({
+        ok: true,
+        scene,
+        target,
+        id: String(r?.id ?? ''),
+        pending: Boolean(r?.pending),
+        requestId: String(r?.requestId || usedRid),
+        markdown: useMd,
+      });
+
       try {
-        const r = await host.rpc('msg.send', {
-          kind: scene === 'group' ? 'group' : 'c2c',
-          chatId: String(target),
-          content: t,
-          requestId: rid,
-          ...(msgId ? { msgId: String(msgId) } : {}),
-          ...(receivedAt ? { receivedAt: Number(receivedAt) } : {}),
-        });
-        return {
-          ok: true,
-          scene,
-          target,
-          id: String(r?.id ?? ''),
-          pending: Boolean(r?.pending),
-          requestId: String(r?.requestId || rid),
-        };
+        const r = await host.rpc('msg.send', useMd
+          ? { ...base, markdown: { content: t }, ...(keyboard ? { keyboard } : {}) }
+          : base);
+        return okResult(r, rid);
       } catch (e) {
+        /**
+         * 4xx 且非 429 = 服务端明确拒了 markdown（官方 40034008 / 304061）。
+         * 降级成纯文本重发，**不带 keyboard**（框架那条规则也是这样）。
+         * 用派生幂等键：失败的那条可能已经进了投递账本，复用原键会被吞。
+         */
+        if (useMd && isMarkdownRejection(e)) {
+          const plain = plainOf(t);
+          if (plain) {
+            try {
+              const r = await host.rpc('msg.send', { ...base, content: plain, requestId: `${rid}:md` });
+              log('markdown 被拒，已降级纯文本重发');
+              return { ...okResult(r, `${rid}:md`), markdown: false };
+            } catch (e2) {
+              log(`降级纯文本也失败：${e2?.message ?? e2}`);
+            }
+          }
+        }
         const network = e?.code === 'NETWORK';
         log(`roost 发送失败：${e?.message ?? e}`);
         return { ok: false, message: e?.message ?? String(e), code: e?.code ?? '', network, requestId: rid };
+      }
+    },
+
+    /**
+     * 上传 Markdown 素材图，返回 `qqbot-media://` 引用。
+     *
+     * `retain:false` 是**必须的**：占位符是每轮现传现用，若登记成「保留素材」
+     * 会一直占官方 100 张配额，发几十张图就满了（旧 ai-chat 是发完立刻删）。
+     */
+    async uploadMarkdownImage({ scene = 'c2c', target, path: p, retain = false } = {}) {
+      if (!p) return { url: '' };
+      return await host.rpc('media.markdownImage', {
+        scene: scene === 'group' ? 'group' : 'c2c',
+        target: String(target || 'markdown'),
+        path: String(p),
+        retain: retain === true,
+      });
+    },
+
+    /**
+     * 发一条语音。`path` 是已经是 silk/amr 的本地文件；`dataBase64` 给 TTS
+     * 刚合成出来的 WAV/MP3，协议侧会转码成 silk（要可选的 silk-wasm）。
+     * 两条都走 `media.send` → `outbound`，额度、账本、被动窗口一样不缺。
+     */
+    async sendVoice({ scene = 'c2c', target, path: p = '', dataBase64 = '', fileName = '', msgId = '', receivedAt = 0 } = {}) {
+      if (!target || (!p && !dataBase64)) return { ok: false, message: '缺 target 或音频' };
+      try {
+        const r = await host.rpc('media.send', {
+          scene: scene === 'group' ? 'group' : 'c2c',
+          target: String(target),
+          ...(p ? { path: String(p) } : { dataBase64: String(dataBase64) }),
+          fileType: 3,
+          voice: true,
+          ...(fileName ? { fileName: String(fileName) } : {}),
+          ...(msgId ? { msgId: String(msgId) } : {}),
+          ...(receivedAt ? { receivedAt: Number(receivedAt) } : {}),
+        }, { timeout: 120_000 });
+        return { ok: true, id: String(r?.id ?? ''), pending: Boolean(r?.pending) };
+      } catch (e) {
+        log(`roost 发语音失败：${e?.message ?? e}`);
+        return { ok: false, message: e?.message ?? String(e) };
+      }
+    },
+
+    /** `<<retract>>`：撤回自己上一条（消息 id 由出站动作层记着） */
+    async retract({ chatId, msgId, kind = 'c2c' } = {}) {
+      if (!chatId || !msgId) return { ok: false, message: '缺 chatId 或 msgId' };
+      try {
+        await host.rpc('msg.retract', {
+          chatId: String(chatId), msgId: String(msgId),
+          kind: kind === 'group' ? 'group' : 'c2c',
+        });
+        return { ok: true };
+      } catch (e) {
+        log(`roost 撤回失败：${e?.message ?? e}`);
+        return { ok: false, message: e?.message ?? String(e) };
       }
     },
 

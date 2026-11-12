@@ -40,10 +40,10 @@ import { acceptClose } from './closing.js';
  *
  * 拦它们的真实代价（2026-11 外部实测）：DSH 模式下模型主要在 `qq_send` 里说话，
  * 而「调过 qq_send，回复正文就不会再发出去」——于是**图片和语音根本没有
- * 能到达 ai-chat 的通道**：写正文被丢弃，写 qq_send 被工具拒。用户那边是靠
+ * 能到达出站动作层的通道**：写正文被丢弃，写 qq_send 被工具拒。用户那边是靠
  * 改这里（放行 image/voice）绕过去的，属于在补我们的洞。
  *
- * 所以现在放行 `image` / `image-alone` / `voice`（都由 ai-chat 解析执行）。
+ * 所以现在放行 `image` / `image-alone` / `voice`（都由出站动作层解析执行）。
  * 剩下三个继续拦，理由各不相同：
  *   · `say`：本机 TTS 关掉时 ai-chat 会把它摘掉，有正文的情况下那句话
  *     会彻底消失（只留一行 warn）。宁可在工具这一层明确拒绝，让模型改用
@@ -142,7 +142,7 @@ export function buildAtPrefix({ at, kind, markdown = true, parts = 0, senderId =
   if (markdown === false) {
     const name = String(senderName ?? '').replace(/[\s@]/g, '').slice(0, 24);
     if (!name) return { prefix: '', note: 'markdown 关着，@ 发不出去（也没昵称可以退成纯文字）' };
-    return { prefix: `@${name} `, note: `markdown 关着，@ 退化成纯文字「@${name}」（要真 @ 到人得在 ai-chat 面板打开 markdown）` };
+    return { prefix: `@${name} `, note: `markdown 关着，@ 退化成纯文字「@${name}」（要真 @ 到人得走 markdown 出口）` };
   }
 
   return { prefix: `<qqbot-at-user id="${id}" />\n`, note: '' };
@@ -235,7 +235,7 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
        *
        * 以前这里写的是「只发文字，别写标记」——在 DSH 模式下的实际后果是
        * 图片永远发不出去：正文被丢弃（上一句刚承诺的），`qq_send` 又不让写。
-       * 标记由 ai-chat 解析，不会原样进群，所以这里放开 image/voice。
+       * 标记由出站动作层解析，不会原样进群，所以这里放开 image/voice。
        */
       + '这一段里可以带图片和语音标记：`<<image: 路径>>` 让图和这句话排在同一条，'
       + '`<<image-alone: 路径>>` 单独发一条图，`<<voice: 路径>>` 发语音条。'

@@ -26,18 +26,19 @@
 export const VALUE_MARKERS = ['remember-here', 'remember', 'replace', 'persona', 'mood', 'forget', 'close'];
 
 /**
- * 下游（ai-chat）负责执行的标记，宿主必须原样放行闭合写法。
+ * 出站动作层负责执行的标记，记忆标记清洗这一步必须原样放行闭合写法。
  *
- * 摘了它们，ai-chat 就发不出图 / 语音 / 按钮了（真实事故见 `stripUnknown`）。
- * 但**未闭合的必须摘**：它没有闭合位置，ai-chat 的正则也匹配不到，
- * 留着就是原样进群。反正缺 `>>` 的标记本来就执行不了。
+ * 移除 ai-chat 之前这些是放行给插件的；现在由 `src/outbound-actions.js`
+ * 在**真正发送前**摘掉并执行。记忆清洗（`applyMemoryMarkers`）仍旧不能碰它们：
+ * 就地插图的位置信息一丢，图就只能堆到消息末尾（真实事故见 `stripUnknown`）。
+ * 但**未闭合的必须摘**：它没有闭合位置，动作层也匹配不到，留着就是原样进群。
  *
  * 两个图片标记分工（2026-11-07 起模型侧只教这两种）：
  *   `<<image: 路径>>`        就地插图，图和文字同一条
  *   `<<image-alone: 路径>>`  单独发一条图
- * 两者都是 `<<>>` 标记，宿主**不能摘**——摘了 ai-chat 就拿不到位置/意图。
+ * `<<retract>>` 没有值，也在放行名单里（动作层认它，撤回自己上一条）。
  */
-export const DOWNSTREAM_MARKERS = ['image', 'image-alone', 'voice', 'button', 'say', 'silence'];
+export const DOWNSTREAM_MARKERS = ['image', 'image-alone', 'voice', 'button', 'say', 'silence', 'retract'];
 
 /**
  * 一个标记的匹配式。**半角冒号和全角冒号都认**。
@@ -89,11 +90,11 @@ export function parseReplace(value) {
 /**
  * 兜底：剩下的 `<<名字>>` / `<<名字: 值>>` 一律摘掉。
  *
- * 标记协议是**两个仓库各自实现**的（这里是这套，ai-chat 的 `parseActions`
- * 是另一套）。哪边加了新标记、另一边没跟上，标记就会原样进群。
+ * 标记协议分两层：这里只管记忆/人设类，出站动作类由 `outbound-actions.js`
+ * 在发送前再摘一次。哪边加了新标记、另一边没跟上，标记就会原样进群。
  *
- * 负向前瞻放行 `DOWNSTREAM_MARKERS`——那几个由 **ai-chat** 执行
- * （单独发图 / 语音 / 按钮 / 语音条 / 静默），宿主不认识也不该碰。
+ * 负向前瞻放行 `DOWNSTREAM_MARKERS`——那几个由**出站动作层**执行
+ * （单独发图 / 就地插图 / 语音 / 按钮 / 静默 / 撤回），这一层不认识也不该碰。
  * 名单从常量动态生成，别再手写一遍导致两边漂移。
  *
  * @param {string} text

@@ -84,6 +84,7 @@ import { segmentsOf } from './timing.js';
 import { createMarkerApplier } from './apply-markers.js';
 import { createJournalBridge } from './journal-bridge.js';
 import { createRoostHostChannel, createChannelRegistry } from './channel.js';
+import { createActionRunner } from './outbound-actions.js';
 import { createRoostHost } from './roost-host.js';
 import { createPayloadBuilder, buildRendered } from './roost-payload.js';
 import { createMerger } from './roost-merge.js';
@@ -2006,6 +2007,17 @@ export function apply(ctx) {
   });
 
   /**
+   * 出站动作层：模型写的 image / voice / say / button / silence / retract /
+   * `<skip>` 全在这里摘干净并执行。移除 ai-chat 之后这一层没有下游了，
+   * 必须在**发出去之前**收口，否则标记会原样进群。
+   */
+  const outActions = createActionRunner({
+    channel: () => channels.active(),
+    tts,
+    log: (m) => log.warn(m),
+  });
+
+  /**
    * 接话策略：这条群消息要不要理。
    *
    * 走 ai-chat 时是它拦的；直连之后框架把**每条群消息**都推过来，
@@ -2060,51 +2072,23 @@ export function apply(ctx) {
     const chatId = String(last?.chat?.chatId ?? '');
     if (!chatId) return;
     const chatKind = last?.chat?.kind === 'c2c' ? 'c2c' : 'group';
-    const channel = channels.active();
     /**
-     * 回复通道。
-     *
-     * 带上 `msgId` / `receivedAt` 就是**被动回复**（不占主动额度）；
-     * 不带就是主动消息。**不传 `hasGroupAuthz`**：被动回复不受群推送授权限制，
-     * 而超窗降级成主动这件事由框架的 outbound 决定，这里提前拦反而会误伤。
+     * 回复通道。带上 `msgId` / `receivedAt` 是**被动回复**（不占主动额度）；
+     * 不带就是主动消息。所有出站都过 `outActions`：动作标记在这里摘干净并执行，
+     * Markdown / @ 也在这里统一恢复，主回复、`qq_send` 分段、`/v1/message`
+     * 三条路径不会再各写一份。
      */
-    const send = async (text, extra) => {
-      /**
-       * 这一轮要发的文件（`qq_send_file` 通过 `postReply(..., { files })` 带过来）。
-       *
-       * ai-chat 那条路是插件在轮末统一上传；直连没有那个回调，所以在这里补。
-       * **必须单独处理「只发文件不说话」**——那种情况下 `channel.send('')`
-       * 会以「没有内容可发」失败，但文件还是得发出去。
-       */
-      const files = Array.isArray(extra?.files) ? extra.files.map(String).filter(Boolean) : [];
-      let r = { ok: true };
-      if (String(text ?? '').trim()) {
-        r = await channel.send({
-          scene: chatKind,
-          target: chatId,
-          text: String(text ?? ''),
-          msgId: String(last?.msgId ?? ''),
-          receivedAt: Number(last?.at) || 0,
-          requestId: String(extra?.requestId ?? ''),
-        });
-        /** 真的发出去了才记：没发出去也记的话，冷却会把下一句白吃掉 */
-        if (r?.ok) roostDecider.noteReplied(chatId);
-      }
-      for (const f of files) {
-        /** 所有通道都应有 sendFile；没有时只发文字，文件单独跳过 */
-        if (typeof channel.sendFile !== 'function') break;
-        const rf = await channel.sendFile({
-          scene: chatKind,
-          target: chatId,
-          path: f,
-          msgId: String(last?.msgId ?? ''),
-          receivedAt: Number(last?.at) || 0,
-        }).catch((e) => ({ ok: false, message: e?.message ?? String(e) }));
-        if (!rf?.ok) log.warn(`发文件失败（${f}）：${rf?.message ?? '未知原因'}`);
-        else roostDecider.noteReplied(chatId);
-      }
-      return r;
-    };
+    const send = async (text, extra) => outActions.run({
+      text: String(text ?? ''),
+      extra: extra ?? {},
+      scene: chatKind,
+      target: chatId,
+      msgId: String(last?.msgId ?? ''),
+      receivedAt: Number(last?.at) || 0,
+      requestId: String(extra?.requestId ?? ''),
+      /** 真的发出去了才记：没发出去也记的话，冷却会把下一句白吃掉 */
+      onSent: () => roostDecider.noteReplied(chatId),
+    });
     /**
      * 整批的附件 / 卡片合成一份。
      *
@@ -4187,8 +4171,8 @@ export function apply(ctx) {
       /**
        * 回话。
        *
-       * **模型走工具发过就不再发正文**：`qq_send` 已经把话送进 ai-chat 的
-       * parts 里了（`done:false` 累积），这里只需要用一个空文本 + `done:true`
+       * **模型走工具发过就不再发正文**：`qq_send` 已经把话逐段发出去了
+       *（每段都经过出站动作层），这里只需要用一个空文本 + `done:true`
        * 把事件收掉——否则同一句话会重复两遍。
        *
        * 空文本不会增加 part（`bridge.handleReply` 里 `if (text)` 才 push），
@@ -4206,17 +4190,10 @@ export function apply(ctx) {
         await postReply(payload, '', true);
       } else if (used?.closed && !reply) {
         /**
-         * 只收尾、不说话 —— 回 `<skip>` 让 ai-chat 安静结束。
-         *
-         * 为什么不能回空字符串：`adapter/host.js` 里 `if (!r?.text?.trim()) throw`
-         * 会把它当成「宿主回了空内容」，用户看到的是「出错了」，
-         * 而其实她只是把话说完就退场了——这是**正常结局**。
-         *
-         * `<skip>` 是 ai-chat 的私有约定（`decide.js` 的 `SKIP_MARK`），
-         * 这里硬编码是**设计内的耦合**：dsh-roost 本来就是 ai-chat 的宿主，
-         * 标记契约也一直由它经 system prompt 传下来。
-         *
-         * 这一支不写日记：她一个字都没说。
+         * 只收尾、不说话。ai-chat 时代回 `<skip>` 是为了躲开适配器的
+         * 「空回复报错」；直连之后没有那个约定，出站动作层会认 `<skip>`
+         * 并**什么都不发**。这里回空串即可——真把 `<skip>` 发出去，
+         * 用户看到的就是字面量 `<skip>`。
          */
         /**
          * 收尾这一支**只在她一个字没说时**才走到，所以以前一条日记都不写。
@@ -4224,7 +4201,7 @@ export function apply(ctx) {
          * 否则下一轮她完全不记得自己发过东西。
          */
         if (fileNote) journalAdd(payload, chat, fileNote, 'bot');
-        await postReply(payload, '<skip>', true);
+        await postReply(payload, '', true);
       } else {
         /**
          * 主回话要带 `requestId`——**不带就进不了投递账本的 settle，
