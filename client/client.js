@@ -13264,6 +13264,132 @@ select.roost-input{color-scheme:dark}
     }
 
     /** 更新：版本与更新说明 + 反馈群。属于「这台机器怎么维护」，不跟聊天设置混。 */
+    /**
+     * 5.7 模拟测试：假主人 / 假群友发一句，逐步显示每一层怎么处理。
+     *
+     * 这页**只读**——它调 `/simulate/run`，服务端跑纯函数、一条都不真发。
+     * 所以界面上不设「确认发送」之类的东西，文案也要把「不会真发」说在前面，
+     * 否则用户会以为自己在测试群里发了条消息。
+     *
+     * 为什么不做成弹窗：结果有 6 层，弹窗里滚起来很难看；而且改一句话再跑一次
+     * 是高频动作，整页留得住输入框和上一次结果。
+     */
+    const SIM_PERSONAS = [
+      { id: 'owner', label: '主人（私聊）', kind: 'c2c', bucket: 'owner', name: '主人', mentioned: false },
+      { id: 'member', label: '群友（@ 她）', kind: 'group', bucket: 'member', name: '群友', mentioned: true },
+      { id: 'stranger', label: '群友（没 @）', kind: 'group', bucket: 'member', name: '群友', mentioned: false },
+    ]
+
+    function SimTab({ toast }) {
+      const [text, setText] = useState('')
+      const [persona, setPersona] = useState('owner')
+      const [busy, setBusy] = useState(false)
+      const [res, setRes] = useState(null)
+
+      const run = async () => {
+        if (!text.trim()) return toast('先写一句要模拟的话')
+        const p = SIM_PERSONAS.find((x) => x.id === persona) || SIM_PERSONAS[0]
+        setBusy(true)
+        const r = await post('/simulate/run', {
+          text, kind: p.kind, mentioned: p.mentioned, bucket: p.bucket, name: p.name,
+        })
+        setBusy(false)
+        if (r.ok === false) return toast(r.message || '模拟失败')
+        setRes(r)
+      }
+
+      const mark = (ok) => (ok === true ? '✓' : ok === false ? '✗' : '·')
+      const tone = (ok) => (ok === true ? 'var(--ok)' : ok === false ? 'var(--bad)' : 'var(--muted, #888)')
+
+      /** 每层展开一行最关键的细节，其余不铺开——面板不是日志 */
+      const detailLine = (s) => {
+        const d = s.detail || {}
+        if (s.layer === 'inbound') return d.rendered ? `AI 看到的是：${d.rendered}` : ''
+        if (s.layer === 'model') {
+          if (!d.provider) return d.effort ? `思考强度：${d.effort}` : ''
+          return `${d.provider} / ${d.model}${d.effort ? ` · 强度 ${d.effort}` : ''}（${d.source}）`
+        }
+        if (s.layer === 'tools') {
+          if (!d.available) return ''
+          const cut = d.denied?.length ? `；收走：${d.denied.slice(0, 6).join('、')}${d.denied.length > 6 ? '…' : ''}` : ''
+          return `能用 ${d.available.length} / ${d.total} 个${cut}`
+        }
+        if (s.layer === 'decide') {
+          if (d.cooling) return `冷却中，会等 ${Math.ceil((d.delayMs || 0) / 1000)} 秒再把消息一起交出去`
+          return d.force ? '这句是「明确在叫她」，刹车策略不拦' : ''
+        }
+        return ''
+      }
+
+      return h('div', null,
+        h(Sec, {
+          n: '01', title: '发一句试试',
+          right: res
+            ? h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => {
+                const lines = [`【模拟结果】${res.summary}`]
+                for (const s of res.steps || []) lines.push(`${mark(s.ok)} ${s.title}：${s.reason}`)
+                lines.push('（本次是 dry run，一条消息都没真发）')
+                navigator.clipboard?.writeText(lines.join('\n')).then(
+                  () => toast('已复制'),
+                  () => toast('复制失败，手动选一下吧'),
+                )
+              },
+            }, '复制结果')
+            : null,
+        },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '假扮一个人发一句话，看框架会怎么处理。**不会真的发出去**，也不会写投递账本、不动冷却和配额。'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-start' } },
+            h('select', {
+              className: 'roost-input', style: { width: 'auto', minWidth: 140 },
+              value: persona, onChange: (e) => setPersona(e.target.value),
+            }, SIM_PERSONAS.map((p) => h('option', { key: p.id, value: p.id }, p.label))),
+            h('textarea', {
+              className: 'roost-input', rows: 3, value: text,
+              placeholder: '比如：在吗 / 今天好热 / /roll',
+              style: { flex: '1 1 320px', minWidth: 220, resize: 'vertical' },
+              onChange: (e) => setText(e.target.value),
+              onKeyDown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) run() },
+            }),
+            h('button', {
+              type: 'button', className: 'roost-btn roost-btn-primary',
+              disabled: busy, onClick: run,
+            }, busy ? '算着…' : '跑一次'),
+          ),
+        ),
+
+        res
+          ? h(Sec, { n: '02', title: '每一层怎么处理' },
+            h('div', {
+              className: 'roost-note',
+              style: {
+                marginBottom: 10, padding: '8px 10px', borderRadius: 8,
+                background: res.verdict === 'reply' ? 'rgba(0,160,90,.08)' : 'rgba(160,160,160,.10)',
+              },
+            }, res.summary),
+            h('div', { className: 'roost-list' },
+              (res.steps || []).map((s, i) =>
+                h('div', { key: i, className: 'roost-item', style: { alignItems: 'flex-start' } },
+                  h('span', { style: { flex: '0 0 14px', color: tone(s.ok), fontWeight: 700 } }, mark(s.ok)),
+                  h('span', { className: 't' },
+                    h('div', { style: { fontWeight: 600 } }, s.title),
+                    h('div', { className: 'roost-muted', style: { fontSize: 11.5 } }, s.reason),
+                    detailLine(s)
+                      ? h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 2, opacity: .8 } }, detailLine(s))
+                      : null,
+                  ),
+                ),
+              ),
+            ),
+            h('div', { className: 'roost-note', style: { marginTop: 10 } },
+              '出站内容取决于模型输出，模拟不跑模型（跑一次要花钱，结果也不可复现）——这里只算「会不会发、走哪条通道、要不要等」。'),
+          )
+          : null,
+      )
+    }
+
     function UpdateTab({ toast }) {
       return h('div', null,
         h(UpdatesBlock, { toast }),
@@ -13567,6 +13693,8 @@ select.roost-input{color-scheme:dark}
       ['chats', '会话'],
       /** 账号迁移：原先是隐藏页 + 弹窗（低频整页）；换机器人是真实高频需求，提成正式页签 */
       ['account', '账号迁移'],
+      /** 5.7 模拟测试：假身份发一句，看每层怎么处理（绝不真发） */
+      ['sim', '模拟测试'],
       ['logs', '排障'],
       ['update', '更新'],
       ['config', '设置'],
@@ -13616,6 +13744,7 @@ select.roost-input{color-scheme:dark}
       groupadmin: '群管 禁言 审批 群信息 入群',
       chats: '会话 身份 映射 上下文',
       account: '账号迁移 迁移 换号 绑定 旧 openid',
+      sim: '模拟 模拟测试 试跑 演练 dry run 会不会回 为什么没回',
       logs: '日志 排障 报错 排查',
       update: '更新 版本 升级 changelog',
       config: '配置 设置 json 高级',
@@ -13651,7 +13780,7 @@ select.roost-input{color-scheme:dark}
       { id: 'group', label: '群聊', icon: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM15.5 11a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5M3 19c.7-2.6 3-4 6-4s5.3 1.4 6 4M15 15.2c2 .2 3.5 1.4 4 3.3', tabs: ['groupchat', 'groupadmin'] },
       { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
-      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'account', 'logs', 'update', 'config', 'backup', 'about'] },
+      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'about'] },
     ]
     /** 当前页属于哪一组；隐藏页不属于任何组，返回 null */
     const navGroupOf = (id) => NAV_GROUPS.find((g) => g.tabs.includes(id)) || null
@@ -14300,6 +14429,8 @@ select.roost-input{color-scheme:dark}
             ? h(ModelTab, { toast, currentChatId: mem?.chatId || '', config, saveCfg })
             : null,
           tab === 'update' ? h(UpdateTab, { toast }) : null,
+          /** 5.7：模拟测试页——只调纯函数接口，一条都不真发 */
+          tab === 'sim' ? h(SimTab, { toast }) : null,
           tab === 'awake'
             ? h(AwakeTab, {
                 aw, mem, sp, chats,
@@ -14515,6 +14646,8 @@ select.roost-input{color-scheme:dark}
     exports.ExpressTab = ExpressTab
     exports.ModelTab = ModelTab
     exports.UpdateTab = UpdateTab
+    /** 5.7：模拟测试页，测试直接渲染它，盯住「一条都不真发」 */
+    exports.SimTab = SimTab
     /** 群聊策略页：只露已有配置，测试直接渲染它，盯住「一个算法都没新增」 */
     exports.GroupChatTab = GroupChatTab
     /** 2.3：人物 / 备份与记忆页，测试直接渲染，盯住「并列入口，不是搬家」 */

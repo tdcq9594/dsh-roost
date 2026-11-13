@@ -112,6 +112,7 @@ import { createTts, SHERPA_MODELS } from './tts.js';
 import { runPreview, PREVIEW_TEXT_LIMIT } from './tts-preview.js';
 import { workspaceTitleFor } from './workspace-title.js';
 import { splitPersonaText, joinPersonaText, joinPersonaBlocks } from './persona-sections.js';
+import { simulate, SIM_PERSONAS } from './simulate.js';
 import { createTtsInstaller } from './tts-install.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -8103,6 +8104,57 @@ export function apply(ctx) {
        *
        * 不写盘、不写 config、不记 quota、不进投递账本。
        */
+      /**
+       * 5.7 全链路模拟（dry run）：假主人 / 假群友发一句，逐步显示每层怎么处理。
+       *
+       * **绝不真发。** 计算全在 `simulate()`（纯函数，不 import 任何发送路径），
+       * 这里只做三件事：读配置、取工具池、把结果原样回给面板。
+       *
+       * 工具池用 `currentPool()`——和 `capabilities.preview` 同一个来源（上一轮
+       * 真实见过的清单），所以「模拟说会被收走的工具」= 真跑时真会被收走的。
+       * 没有活着的会话时 `currentPool()` 会退回磁盘里的 `seen.tools`，仍然可用；
+       * 两条都空就返回空池，`simulate()` 会把工具层标成「跳过」而不是瞎猜。
+       */
+      route('/simulate/run', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const text = String(body?.text ?? '');
+        if (text.length > 2000) {
+          return send(res, 413, { ok: false, error: 'text_too_long', message: '模拟最多 2000 字' });
+        }
+        const kind = body?.kind === 'c2c' ? 'c2c' : 'group';
+        const chatId = String(body?.chatId || (kind === 'c2c' ? 'sim:c2c' : 'sim:group'));
+        /** 档位决定工具层：私聊默认主人档，群里默认群友档，也可以显式传 */
+        const bucket = BUCKETS.includes(String(body?.bucket))
+          ? String(body.bucket)
+          : (kind === 'c2c' ? 'owner' : 'member');
+
+        let tools = null;
+        try {
+          const cur = currentPool();
+          if (Array.isArray(cur?.pool) && cur.pool.length) {
+            const policy = resolvePolicy({ pool: cur.pool, bucket, chatId, store: capStore.get() });
+            /** 算不出来（策略模块报错）就不传工具层，别拿半份数据骗人 */
+            if (policy.ok) tools = { pool: cur.pool, denied: policy.deny };
+          }
+        } catch (e) {
+          log.debug?.(`模拟：取工具池失败（${e?.message || e}），工具层跳过`);
+        }
+
+        const result = simulate({
+          input: {
+            text,
+            kind,
+            chatId,
+            mentioned: body?.mentioned === true,
+            name: String(body?.name ?? ''),
+            chatName: String(body?.chatName ?? ''),
+          },
+          cfg,
+          tools,
+        });
+        return send(res, 200, { ...result, bucket, personas: SIM_PERSONAS });
+      }),
+
       route('/tts/preview', async (req, res) => {
         const body = await readBody(req).catch(() => ({}));
         const text = String(body?.text ?? '').trim();

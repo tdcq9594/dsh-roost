@@ -1124,3 +1124,45 @@ test('路由：宿主没有 ctx.llm 时清单给一句人话，不是 500', asyn
   assert.equal(bad.status, 400, '缺 provider/model 直接 400');
   off?.();
 });
+
+/**
+ * 5.7 模拟测试：真打一次 `/simulate/run`。
+ *
+ * 纯函数测试（`simulate.test.js`）保证算法对，这里只保证「接上了、没真发」：
+ * 断言返回 6 层、私聊会回、群里没 @ 不回、响应里带假身份清单。
+ */
+test('路由：/simulate/run 跑通六层，私聊会回、群里没 @ 不回', async () => {
+  const { call, off } = await bootHost({ roostHost: { decide: { mode: 'mention' } } });
+
+  const c2c = await call('/simulate/run', { method: 'POST', body: { text: '在吗', kind: 'c2c' } });
+  assert.equal(c2c.status, 200);
+  assert.equal(c2c.json.ok, true);
+  assert.deepEqual(
+    c2c.json.steps.map((s) => s.layer),
+    ['inbound', 'decide', 'model', 'tools', 'outbound', 'ledger'],
+  );
+  assert.equal(c2c.json.verdict, 'reply');
+  assert.equal(c2c.json.ledger.dry, true, '模拟永远标 dry');
+  assert.equal(c2c.json.ledger.wouldWrite, true);
+  assert.ok(Array.isArray(c2c.json.personas) && c2c.json.personas.length >= 3, '面板要能拿到假身份清单');
+
+  const group = await call('/simulate/run', {
+    method: 'POST', body: { text: '今天好热', kind: 'group', mentioned: false },
+  });
+  assert.equal(group.status, 200);
+  assert.equal(group.json.verdict, 'silent');
+  const decide = group.json.steps.find((s) => s.layer === 'decide');
+  assert.match(decide.reason, /只在被 @ 时回复/);
+  assert.equal(group.json.outbound.willSend, false);
+  assert.equal(group.json.ledger.wouldWrite, false, '不发就不该记账');
+
+  off?.();
+});
+
+test('路由：/simulate/run 超长文本直接 413，不硬算', async () => {
+  const { call, off } = await bootHost();
+  const r = await call('/simulate/run', { method: 'POST', body: { text: 'x'.repeat(2001) } });
+  assert.equal(r.status, 413);
+  assert.equal(r.json.ok, false);
+  off?.();
+});
