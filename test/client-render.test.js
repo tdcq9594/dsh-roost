@@ -93,10 +93,10 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-/* 与 client.js 的 TABS 同序：2026-11-13 2.3 后 21 个可见页签 */
-const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'chats', 'logs', 'update', 'config', 'backup', 'about']
-/* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats 已提升为正式页） */
-const HIDDEN_TABS = ['context', 'setup', 'account']
+/* 与 client.js 的 TABS 同序：2026-11-13 账号迁移提成正式页签后 22 个可见页签 */
+const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'chats', 'account', 'logs', 'update', 'config', 'backup', 'about']
+/* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats / account 已提升为正式页） */
+const HIDDEN_TABS = ['context', 'setup']
 
 /**
  * 两层导航（2026-11-12）：一级分组 + 组内二级页面。
@@ -117,16 +117,16 @@ const NAV = {
   group: { label: '群聊', tabs: ['groupchat', 'groupadmin'] },
   power: { label: '能力', tabs: ['caps', 'model'] },
   mods: { label: '扩展', tabs: ['ext', 'ext-market', 'ext-api'] },
-  system: { label: '系统', tabs: ['chats', 'logs', 'update', 'config', 'backup', 'about'] },
+  system: { label: '系统', tabs: ['chats', 'account', 'logs', 'update', 'config', 'backup', 'about'] },
 }
 const TAB_LABEL = {
   overview: '概览', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆', people: '人物',
   caps: '权限', express: '语音', stickers: '表情包', model: '模型',
   ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
   groupchat: '群聊策略', groupadmin: '群管',
-  chats: '会话', logs: '排障', update: '更新', config: '设置', backup: '备份', about: '关于',
+  chats: '会话', account: '账号迁移', logs: '排障', update: '更新', config: '设置', backup: '备份', about: '关于',
 }
-const HIDDEN_LABEL = { context: '上下文', setup: '接入', account: '账号迁移' }
+const HIDDEN_LABEL = { context: '上下文', setup: '接入' }
 
 /** 收集渲染树里所有 role=tab 按钮的文字，以及 aria-current 标记 */
 function navTexts(tree) {
@@ -1270,6 +1270,59 @@ test('后端缺口已接入：市场 / 模型 / 召回 / 心情历史 / 危险�
   assert.ok(at('memory').includes('召回记录'), '记忆页缺 recall.log 入口')
   assert.ok(at('mood').includes('清空心情历史'), '心情页缺 mood.history.clear 入口')
   assert.ok(at('update').includes('交流反馈群'), '更新页缺反馈群')
+})
+
+/**
+ * 2026-11-13：账号迁移从「设置 → 危险操作」底部的弹窗提成正式页签。
+ *
+ * 换机器人（换 AppID）是真实高频需求，藏在弹窗里等于没有入口。这里钉三件事：
+ *   1. 页签栏里能点到「账号迁移」（不再靠隐藏页标记）
+ *   2. 内容渲染在正文里，**不在弹窗里**（弹窗形态已撤销）
+ *   3. 设置页那颗「账号迁移…」按钮还在，但改成跳页签而不是开弹窗
+ */
+test('账号迁移是正式页签：正文渲染，不走弹窗', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(!src.includes("setPageModal('account')"), '账号迁移还留着弹窗入口')
+  assert.ok(!HIDDEN_TABS.includes('account'), '账号迁移不该再是隐藏页')
+
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'account'
+  rt.reset()
+
+  /* 未展开的树上找组件：展开之后函数组件会被执行掉，元素本身就不在了 */
+  const raw = mod.RoostPage()
+  const body = raw.props.children.find((n) => String(n?.props?.className || '').includes('roost-scroll-body'))
+  assert.ok(findComponent(body, 'AccountTab'), '账号迁移页没渲染在正文滚动区里')
+
+  rt.reset()
+  const tree = expand(raw, rt)
+  const { tabs, current } = navTexts(tree)
+  assert.ok(tabs.includes('账号迁移'), '页签栏里找不到「账号迁移」')
+  assert.equal(current, null, '正式页签不该再走隐藏页标记')
+
+  let modal = false
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (String(n.props?.className || '').includes('cap-modal')) modal = true
+    walk(n.props?.children)
+  })(tree)
+  assert.equal(modal, false, '账号迁移还在弹窗里')
+
+  /* 设置页那颗按钮保留（老用户的肌肉记忆），文案不变、改成跳页签 */
+  store['roost.tab'] = 'config'
+  rt.reset()
+  const cfg = expand(mod.RoostPage(), rt)
+  let btn = null
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.type === 'button' && textOf(n) === '账号迁移…') btn = n
+    walk(n.props?.children)
+  })(cfg)
+  assert.ok(btn, '设置页缺「账号迁移…」入口')
+  assert.equal(typeof btn.props.onClick, 'function', '「账号迁移…」没有点击入口')
 })
 
 test('隐藏页有当前位置标记，页签栏不会看起来一个都没选', () => {

@@ -6030,7 +6030,7 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    /** 整页弹窗：把低频但很长的页（接入向导 / 账号迁移）从页签栏里挪出来。 */
+    /** 整页弹窗：把低频但很长的页（接入向导）从页签栏里挪出来。 */
     function PageModal({ title, onClose, children }) {
       return h('div', { className: 'cap-modal', onClick: onClose },
         h('div', {
@@ -11983,11 +11983,15 @@ select.roost-input{color-scheme:dark}
      *
      *  「排障」（原 logs）里同时放 日志 / 上下文 / 会话清理 —— 机器人不回消息
      *    时不用再跨 5 个页签找；
-     *  接入、账号迁移整页收进弹窗（概览「去接入」、设置页底部按钮打开）；
+     *  接入整页收进弹窗（概览「去接入」打开）；
      *  扩展独立成「扩展」页：档位 / 说明编辑 / 客户端令牌一处走完，
      *    不跟工具白名单挤在「能力」里，也不用跨三页。
      *
-     * **隐藏页签仍可直接到达**：`chats / context / setup / account` 保留为可直接进入的页，
+     * **2026-11-13 账号迁移提成正式页签**：原先它跟接入一样只在弹窗里，
+     * 换机器人（换 AppID）是真实高频需求，藏在「设置 → 危险操作」底部等于没有入口。
+     * 弹窗形态撤销，`tab key` 仍是 `account`（老 `localStorage['roost.tab']` 不受影响）。
+     *
+     * **隐藏页签仍可直接到达**：`context / setup` 保留为可直接进入的页，
      * 老 `localStorage['roost.tab']` 存着它们时照常渲染原页，功能与位置都不丢。
      * 2026-11-12：这一排不再直接铺 8 个按钮，改成「一级分组 + 二级页面」两层
      * （见下面的 `NAV_GROUPS`）。`TABS` 仍然是**唯一的页面清单**，两层只决定怎么分组、
@@ -12016,6 +12020,8 @@ select.roost-input{color-scheme:dark}
       ['groupadmin', '群管'],
       /* 系统：这台机器怎么跑 */
       ['chats', '会话'],
+      /** 账号迁移：原先是隐藏页 + 弹窗（低频整页）；换机器人是真实高频需求，提成正式页签 */
+      ['account', '账号迁移'],
       ['logs', '排障'],
       ['update', '更新'],
       ['config', '设置'],
@@ -12027,7 +12033,7 @@ select.roost-input{color-scheme:dark}
      * `chats` 原来是隐藏页，2026-11-12 提升成「身份」：它本来就是
      * 「QQ 会话 ↔ DSH 会话」的映射表，不给入口只能从记忆页绕进去。
      */
-    const HIDDEN_TABS = ['context', 'setup', 'account']
+    const HIDDEN_TABS = ['context', 'setup']
     const ALL_TABS = TABS.map(([id]) => id).concat(HIDDEN_TABS)
 
     /**
@@ -12039,7 +12045,7 @@ select.roost-input{color-scheme:dark}
      * 分组参照 aurabot 的「概览 / 人设 / 表达 / 平台 / 系统」思路，按我们的页面裁剪：
      * 概览单独成组（只有一页，不渲染二级行），其余按「人设 / 能力 / 系统」收。
      * **tab 的 key 一个都不改**，老 `localStorage['roost.tab']` 照样落回原来那页，
-     * 隐藏页（chats/context/setup/account）不进口分组，仍靠 `roost-nav-current` 标记位置。
+     * 隐藏页（context/setup）不进口分组，仍靠 `roost-nav-current` 标记位置。
      */
     const NAV_GROUPS = [
       { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview'] },
@@ -12053,7 +12059,7 @@ select.roost-input{color-scheme:dark}
       { id: 'group', label: '群聊', icon: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM15.5 11a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5M3 19c.7-2.6 3-4 6-4s5.3 1.4 6 4M15 15.2c2 .2 3.5 1.4 4 3.3', tabs: ['groupchat', 'groupadmin'] },
       { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
-      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'logs', 'update', 'config', 'backup', 'about'] },
+      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'account', 'logs', 'update', 'config', 'backup', 'about'] },
     ]
     /** 当前页属于哪一组；隐藏页不属于任何组，返回 null */
     const navGroupOf = (id) => NAV_GROUPS.find((g) => g.tabs.includes(id)) || null
@@ -12124,10 +12130,10 @@ select.roost-input{color-scheme:dark}
           return 'overview'
         }
       })
-      /** 接入 / 账号迁移是整页弹窗：不占页签，也不写「上次停留」 */
+      /** 接入是整页弹窗：不占页签，也不写「上次停留」 */
       const [pageModal, setPageModal] = useState(null)
       const setTab = useCallback((id) => {
-        if (id === 'setup' || id === 'account') { setPageModal(id); return }
+        if (id === 'setup') { setPageModal(id); return }
         setPageModal(null)
         setTabState(id)
         try { localStorage.setItem('roost.tab', id) } catch {}
@@ -12599,7 +12605,7 @@ select.roost-input{color-scheme:dark}
             HIDDEN_TABS.includes(tab)
               ? h('div', { className: 'roost-nav-sub' },
                   h('span', { className: 'roost-nav-current', 'aria-current': 'page' },
-                    ({ context: '上下文', setup: '接入', account: '账号迁移' })[tab] || tab))
+                    ({ context: '上下文', setup: '接入' })[tab] || tab))
               : null,
             ),
           ),
@@ -12693,7 +12699,7 @@ select.roost-input{color-scheme:dark}
                   h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 } },
                     h('button', {
                       type: 'button', className: 'roost-btn',
-                      onClick: () => setPageModal('account'),
+                      onClick: () => { setTab('account'); toast('已切到「账号迁移」，绑定与一键改写都在那一页') },
                     }, '账号迁移…'),
                     h('button', {
                       type: 'button', className: 'roost-btn',
@@ -12745,10 +12751,6 @@ select.roost-input{color-scheme:dark}
         pageModal === 'setup'
           ? h(PageModal, { title: '首次接入 / 组件版本', onClose: () => setPageModal(null) },
               h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }))
-          : null,
-        pageModal === 'account'
-          ? h(PageModal, { title: '账号迁移', onClose: () => setPageModal(null) },
-              h(AccountTab, { toast }))
           : null,
 
         toastMsg
