@@ -431,7 +431,12 @@ export function createMemory({ now = () => Date.now() } = {}) {
     }
 
     list.push(f);
-    metaMap[f] = { w: Number(opts.w) > 0 ? Number(opts.w) : 1, at: t, src };
+    /** 面板「加一颗」可以直接给重要度与层级（可选；老调用方不传，行为不变） */
+    metaMap[f] = {
+      w: Number(opts.w) > 0 ? Number(opts.w) : 1, at: t, src,
+      ...(opts.pin !== undefined ? { pin: clamp01(opts.pin) } : {}),
+      ...(FACT_TIERS.includes(opts.tier) ? { tier: opts.tier } : {}),
+    };
     supersede();
     if (list.length <= FACTS_MAX) return list;
 

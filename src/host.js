@@ -7069,18 +7069,27 @@ export function apply(ctx) {
 
       route('/memory/add', async (req, res) => {
         const body = await readBody(req);
-        const fact = String(body.fact ?? '').trim();
+        /**
+         * `text` 也认：星图的「加一颗」一直传的是 text，而后端只读 fact，
+         * 于是那个按钮长期返回「缺 fact」——点了没反应，还以为写进去了。
+         */
+        const fact = String(body.fact ?? body.text ?? '').trim();
         if (!fact) return send(res, 400, { ok: false, message: '缺 fact' });
+        const patch = {};
+        if (body.importance !== undefined || body.pin !== undefined) {
+          patch.pin = Number(body.importance ?? body.pin) || 0;
+        }
+        if (body.tier !== undefined) patch.tier = String(body.tier);
         // 面板上手动记的，等于人明确要求记住 → 高权重，别被后来的杂事挤掉
-        memory.add(
+        const ok = memory.add(
           String(body.chatId ?? lastScene?.chatId ?? ''),
           fact,
           body.scope === 'chat' ? 'chat' : 'global',
           // 手记没有消息来源，但要能和「她自己在聊天里记的」区分开——
           // 以后想清理「模型自作主张记的」时，这就是唯一的分界线
-          { w: W_EXPLICIT, src: { manual: true, by: 'owner', at: Date.now() } },
+          { w: W_EXPLICIT, src: { manual: true, by: 'owner', at: Date.now() }, ...patch },
         );
-        send(res, 200, { ok: true });
+        send(res, 200, { ok: Boolean(ok), text: fact });
       }),
 
       /**

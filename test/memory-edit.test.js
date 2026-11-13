@@ -137,3 +137,58 @@ test('弹窗按需渲染：关闭时不挂 StarMap，打开才挂', async () => 
   assert.ok(idxBtn > 0 && idxModal > idxBtn, '按钮要在弹窗之前');
   assert.ok(idxStar > idxModal, 'StarMap 必须只在弹窗分支里渲染');
 });
+
+
+test('加一颗：/memory/add 认 text，且能带重要度与层级（以前恒 400 缺 fact）', async () => {
+  boot();
+  const { createMemory } = await freshMemory();
+  const m = createMemory();
+  assert.equal(m.add('', '带重要度的事实', 'global', { w: 2, pin: 0.8, tier: 'core' }), true);
+  const row = m.listFull('', []).global.find((x) => x.text === '带重要度的事实');
+  assert.equal(row.pin, 0.8, '重要度要写进 meta');
+  assert.equal(row.tier, 'core', '层级要写进 meta');
+
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.ok(host.includes('body.fact ?? body.text'), '/memory/add 必须兼容前端传的 text');
+  assert.ok(host.includes('patch.pin = Number(body.importance'), '要接重要度');
+  const client = readFileSync(CLIENT, 'utf8');
+  assert.ok(client.includes('fact: text, text, scope: addScope'), '前端要同时传 fact 与 text');
+  assert.ok(client.includes("value: addImp"), '加一颗要有重要度输入');
+  assert.ok(client.includes("value: addTier"), '加一颗要有层级下拉');
+});
+
+test('星图筛选：层级只作用于事实，不把日记/人物一起筛掉', async () => {
+  const src = readFileSync(CLIENT, 'utf8');
+  let mod = null;
+  const rt = (() => {
+    const hooks = []; let i = 0;
+    return {
+      reset() { i = 0; hooks.length = 0; },
+      React: {
+        createElement: (t, p, ...c) => ({ type: t, props: { ...(p || {}), children: c } }),
+        useState: (v) => { const k = i++; if (!(k in hooks)) hooks[k] = typeof v === 'function' ? v() : v; return [hooks[k], () => {}]; },
+        useEffect: () => { i++; }, useCallback: (f) => { i++; return f; },
+        useRef: (v) => { const k = i++; if (!(k in hooks)) hooks[k] = { current: v }; return hooks[k]; },
+        Fragment: 'f',
+      },
+    };
+  })();
+  const win = { __ModuleLoader__: { load: (cfg) => { mod = cfg.factory((n) => (n === 'react' ? rt.React : {})); } } };
+  new Function('window', src)(win);
+  const stars = [
+    { id: 'a', kind: 'fact', tier: 'short', group: 'global', brightness: 0.9, text: '临时事实' },
+    { id: 'b', kind: 'fact', tier: 'core', group: 'global', brightness: 0.8, text: '永久事实' },
+    { id: 'c', kind: 'episode', group: 'episode', brightness: 0.7, text: '日记' },
+  ];
+  const core = mod.filterStars(stars, { tier: 'core' }).stars.map((x) => x.id);
+  assert.deepEqual(core, ['b'], '选永久只留永久事实');
+  const all = mod.filterStars(stars, {}).stars.length;
+  assert.equal(all, 3, '不选层级时全都留');
+});
+
+test('星图工具条：层级筛选 / 关系线三档 / 星星列表都在', async () => {
+  const src = readFileSync(CLIENT, 'utf8');
+  for (const must of ['全部层级', '只在选中时', '微光', '标准', '强度', '或从下面直接点一颗']) {
+    assert.ok(src.includes(must), `缺「${must}」`);
+  }
+});

@@ -5040,11 +5040,14 @@ select.roost-input{color-scheme:dark}
     }
 
     /** 星图筛选（纯函数，导出给测试）：搜索 / 星团 / 只看快忘了或最近 7 天 */
-    function filterStars(stars, { q = '', group = '', quick = '', now = Date.now() } = {}) {
+    function filterStars(stars, { q = '', group = '', quick = '', tier = '', now = Date.now() } = {}) {
       const kw = String(q || '').trim().toLowerCase()
       const out = []
       for (const s of stars || []) {
         if (group && s.group !== group) continue
+        /** 层级只作用于事实（日记/人物/档案没有层级），选了就只看这一档的事实 */
+        if (tier && s.kind === 'fact' && s.tier !== tier) continue
+        if (tier && s.kind !== 'fact') continue
         if (quick === 'dim' && s.brightness >= 0.35) continue
         if (quick === 'recent' && !(s.at && now - s.at <= 7 * STAR_DAY)) continue
         if (kw) {
@@ -5178,6 +5181,10 @@ select.roost-input{color-scheme:dark}
       const [q, setQ] = useState('')
       const [group, setGroup] = useState('')
       const [quickF, setQuickF] = useState('')
+      const [tierFilter, setTierFilter] = useState('')
+      /** 关系线三档 + 强度（aurabot 有，我们之前只有开关） */
+      const [edgeMode, setEdgeMode] = useState('normal')
+      const [edgeStrength, setEdgeStrength] = useState(0.5)
       const [zoom, setZoom] = useState(1)
       const [yaw, setYaw] = useState(0.45)
       const [pitch, setPitch] = useState(0.24)
@@ -5187,10 +5194,12 @@ select.roost-input{color-scheme:dark}
       const [tick, setTick] = useState(0)
       const [addText, setAddText] = useState('')
       const [addScope, setAddScope] = useState('global')
+      const [addImp, setAddImp] = useState(0.5)
+      const [addTier, setAddTier] = useState('long')
       const [addBusy, setAddBusy] = useState(false)
 
       const built = buildStarMap(mem)
-      const shown = filterStars(built.stars, { q, group, quick: quickF })
+      const shown = filterStars(built.stars, { q, group, quick: quickF, tier: tierFilter })
       const byId = new Map(shown.stars.map((s) => [s.id, s]))
       const sig = shown.stars.map((s) => s.id).join('|') + '#' + tick
       const H = 420
@@ -5295,8 +5304,12 @@ select.roost-input{color-scheme:dark}
             const a = pos.get(l.a), b = pos.get(l.b)
             if (!a || !b) continue
             const on = !sel && !hover ? true : [l.a, l.b].includes(sel) || [l.a, l.b].includes(hover)
+            /** 三档：focus 只画选中相关的；subtle 全部微光；normal 常规 */
+            if (edgeMode === 'focus' && !on) continue
+            const base = edgeMode === 'subtle' ? 0.18 : 0.42
+            const alpha = (on ? base : base * 0.28) * edgeStrength
             ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y)
-            ctx.strokeStyle = on ? 'rgba(140,190,255,.42)' : 'rgba(120,160,220,.1)'
+            ctx.strokeStyle = `rgba(140,190,255,${alpha.toFixed(3)})`
             ctx.lineWidth = on ? 1.2 : 0.8; ctx.stroke()
           }
         }
@@ -5346,7 +5359,7 @@ select.roost-input{color-scheme:dark}
         let best = null, bestD = Infinity
         for (const p of hits.current) {
           const d = (p.x - x) ** 2 + (p.y - y) ** 2
-          if (d < (p.r + 8) ** 2 && d < bestD) { best = p.star; bestD = d }
+          if (d < (p.r + 10) ** 2 && d < bestD) { best = p.star; bestD = d }
         }
         return best
       }
@@ -5363,10 +5376,18 @@ select.roost-input{color-scheme:dark}
         if (!text) return toast('先写点什么')
         setAddBusy(true)
         try {
-          const body = { text, scope: addScope }
+          /**
+           * 字段名必须是 `fact`：后端读的是它，而这里以前传 `text`，
+           * 于是「加上去」长期 400「缺 fact」——点了没反应。
+           */
+          const body = {
+            fact: text, text, scope: addScope,
+            importance: Number(addImp) || 0, tier: addTier,
+          }
           if (addScope === 'chat' && mem?.chatId) body.chatId = mem.chatId
           const r = await post('/memory/add', body)
-          toast(r?.ok === false ? (r.message || '没记上') : '记上了')
+          if (r?.ok === false) return toast(r.message || '没记上')
+          toast('记上了')
           setAddText('')
           if (reload) reload()
         } catch (e) { toast('没记上：' + e.message) } finally { setAddBusy(false) }
@@ -5424,6 +5445,16 @@ select.roost-input{color-scheme:dark}
             built.stats.groups.map((g) => h('option', { key: g.id, value: g.id }, `${g.label}（${g.count}）`)),
           ),
           h('select', {
+            className: 'roost-input', title: '按层级筛（只作用于事实）',
+            style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
+            value: tierFilter, onChange: (e) => setTierFilter(e.target.value),
+          },
+            h('option', { value: '' }, '全部层级'),
+            h('option', { value: 'short' }, '临时'),
+            h('option', { value: 'long' }, '长期'),
+            h('option', { value: 'core' }, '永久'),
+          ),
+          h('select', {
             className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
             value: quickF, onChange: (e) => setQuickF(e.target.value),
           },
@@ -5450,6 +5481,25 @@ select.roost-input{color-scheme:dark}
             h('input', { type: 'checkbox', checked: glow, onChange: toggle(setGlow, 'glow') }), '辉光'),
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
             h('input', { type: 'checkbox', checked: edgeOn, onChange: toggle(setEdgeOn, 'edgeOn') }), '关系线'),
+          edgeOn
+            ? h('select', {
+                className: 'roost-input', title: '关系线显示方式',
+                style: { width: 'auto', padding: '2px 6px', fontSize: 11 },
+                value: edgeMode, onChange: (e) => setEdgeMode(e.target.value),
+              },
+                h('option', { value: 'focus' }, '只在选中时'),
+                h('option', { value: 'subtle' }, '微光'),
+                h('option', { value: 'normal' }, '标准'))
+            : null,
+          edgeOn && edgeMode !== 'focus'
+            ? h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+                '强度',
+                h('input', {
+                  type: 'range', min: 0.05, max: 1, step: 0.05, value: edgeStrength,
+                  style: { width: 56 },
+                  onChange: (e) => setEdgeStrength(Number(e.target.value)),
+                }))
+            : null,
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
             h('input', { type: 'checkbox', checked: labels, onChange: toggle(setLabels, 'labels') }), '显示名字'),
         ),
@@ -5497,6 +5547,25 @@ select.roost-input{color-scheme:dark}
           built.stats.groups.map((g) => h('span', { key: g.id, style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
             h('span', { style: { width: 8, height: 8, borderRadius: 4, background: g.color, display: 'inline-block' } }),
             `${g.label} ${g.count}`))),
+        /**
+         * 没选中星时的引导 + 列表。
+         *
+         * 星密的时候直接点画布很难点中，用户会以为「弹窗里没有编辑」。
+         * 这里按亮度列前 12 颗，点一下等同于点中那颗星。
+         */
+        !detail && shown.stars.length
+          ? h('div', { style: { marginTop: 10 } },
+              h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginBottom: 6 } },
+                '点画布上的星，或从下面直接点一颗 —— 详情里可以编辑、复习、改层级、归档。'),
+              h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                [...shown.stars].sort((a, b) => b.brightness - a.brightness).slice(0, 12).map((st) => h('button', {
+                  key: st.id, type: 'button', className: 'roost-btn',
+                  style: { fontSize: 11.5, padding: '3px 8px', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                  title: st.text,
+                  onClick: () => setSel(st.id),
+                }, st.text.slice(0, 14)))),
+            )
+          : null,
         /* 点星后的详情：事实可以逐条编辑；其它来源只读，去对应分节操作 */
         detail
           ? h('div', { style: { marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 8 } },
@@ -5560,20 +5629,36 @@ select.roost-input{color-scheme:dark}
               h('button', { type: 'button', className: 'roost-btn', onClick: () => { setSel(null); setEdit(null) } }, '收起'),
             )
           : null,
-        /* 在星图上加一颗：复用 /memory/add（新增事实） */
-        h('div', { style: { marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
+        /* 在星图上加一颗：复用 /memory/add（新增事实，可带重要度与层级） */
+        h('div', { style: { marginTop: 12 } },
+          h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginBottom: 5 } }, '在星图上加一颗'),
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
           h('input', {
             className: 'roost-input', style: { flex: '1 1 180px', padding: '3px 8px', fontSize: 11.5 },
             placeholder: '加一条记忆…', value: addText,
             onChange: (e) => setAddText(e.target.value),
           }),
+          h('input', {
+            className: 'roost-input', type: 'number', min: 0, max: 1, step: 0.05,
+            title: '重要度 0–1（0 = 只用自动权重）',
+            style: { width: 74, padding: '3px 8px', fontSize: 11.5 },
+            value: addImp, onChange: (e) => setAddImp(e.target.value),
+          }),
           h('select', {
-            className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+            className: 'roost-input', title: '层级', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+            value: addTier, onChange: (e) => setAddTier(e.target.value),
+          },
+            h('option', { value: 'short' }, '临时'),
+            h('option', { value: 'long' }, '长期'),
+            h('option', { value: 'core' }, '永久')),
+          h('select', {
+            className: 'roost-input', title: '记到哪一层', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
             value: addScope, onChange: (e) => setAddScope(e.target.value),
           },
             h('option', { value: 'global' }, '跨群'),
             h('option', { value: 'chat' }, '本会话')),
           h('button', { type: 'button', className: 'roost-btn', disabled: addBusy, onClick: addStar }, addBusy ? '记…' : '加上去'),
+          ),
         ),
       )
     }
