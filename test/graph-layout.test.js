@@ -164,3 +164,42 @@ test('关系图组件仍然导出，且人物页 04 还在用它', () => {
   /** 上一版的死结构不能回来：每条边都写关系字 */
   assert.ok(!src.includes('ctx.fillText(l.rel ||'), '关系字又画回线上了')
 })
+
+test('关系图工具条：搜索 / 类型筛选 / 名字开关 / 重新布局 / 图例都在', () => {
+  const rt = makeReact()
+  const React = rt.React
+  const tree = mod.RelGraph({
+    edges: sampleEdges(),
+    onPick: () => {},
+  })
+  const flat = []
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    flat.push(n)
+    walk(n.props?.children)
+  })(tree)
+  const textOf = (n) => {
+    if (n == null || n === false) return ''
+    if (typeof n === 'string' || typeof n === 'number') return String(n)
+    if (Array.isArray(n)) return n.map(textOf).join('')
+    return textOf(n.props?.children)
+  }
+  const txt = textOf(tree)
+  assert.ok(txt.includes('显示名字'), '缺「显示名字」开关')
+  assert.ok(txt.includes('重新布局'), '缺「重新布局」按钮')
+  const canvas = flat.find((n) => n.type === 'canvas')
+  assert.ok(canvas, '没有画布')
+  assert.equal(canvas.props.style.height, 420, '画布高度必须是 420（上一版 220 是糊的主因）')
+  /** 画布上挂了缩放/平移/点选三类交互 */
+  for (const ev of ['onWheel', 'onMouseDown', 'onMouseMove', 'onMouseLeave']) {
+    assert.equal(typeof canvas.props[ev], 'function', `画布缺 ${ev}`)
+  }
+  const opts = flat.filter((n) => n.type === 'option').map((n) => textOf(n))
+  assert.ok(opts.includes('全部关系'), '类型下拉缺「全部关系」')
+  assert.ok(opts.includes('喜欢'), '类型下拉缺具体关系类型')
+  /** 图例文字版：每种关系类型一个色点 */
+  const rels = [...new Set(sampleEdges().map((e) => e.rel))]
+  for (const r of rels) assert.ok(txt.includes(r), `图例缺「${r}」`)
+  assert.ok(React, '替身 React 必须存在')
+})
