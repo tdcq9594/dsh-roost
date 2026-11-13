@@ -1,6 +1,6 @@
 {
   "name": "dsh-roost",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "把 QQ 开放平台的官方机器人接进 DeepSeek Harness：接入向导一键装好内核与对话插件，每个会话独立持久上下文，三层记忆（事实/日记/图谱），情绪状态影响主动搭话，按说话人分档收放本地工具，扩展以 MCP server 形式装载。",
   "license": "AGPL-3.0-only",
   "type": "module",

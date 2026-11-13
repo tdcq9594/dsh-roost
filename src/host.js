@@ -1117,10 +1117,11 @@ export function apply(ctx) {
   };
 
   /**
-   * 主动搭话：算好「该说话了」→ 跑一轮 DSH 生成一句 → 让 ai-chat 发出去。
+   * 主动搭话：算好「该说话了」→ 跑一轮 DSH 生成一句 → 交给通道层发出去。
    *
-   * 为什么发消息要绕一圈找 ai-chat：主动消息只能由持有 QQ 连接的一方发，
-   * dsh-roost 没有 api。所以 ai-chat 开了 `POST /send`，这里去调它。
+   * 主动消息只能由持有 QQ 连接的一方发，而连接在框架那边：这里不碰 API，
+   * 统一走 `sendOut()` → 通道层 → 外接协议 `msg.send`（框架侧负责被动/主动的
+   * 额度与审核）。所以这条路上没有「回话窗口」，`qq_send` 之类的工具会被收掉。
    */
   const speakUp = createSpeakUp({
     dataDir: dataDir(),

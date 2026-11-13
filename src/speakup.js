@@ -128,9 +128,9 @@ export function shouldFire(state, cfg, now) {
  * 从模型输出里取 `<<silence:2h>>` 的毫秒数。没有返回 0。
  *
  * 为什么在 dsh-roost 这边也要解析一遍：主动搭话的文本由她生成，走的是
- * `speakup → channel → /r/send`，中间没有 ai-chat 的 `parseActions` 参与；
- * 而 `fire()` 里那句 `raw.replace(/<<[^>]*>>/g, '')` 会把标记**全部**抹平，
- * 抹掉之后时长就找不回来了。所以必须**先提取，再摘掉**。
+ * `speakup → sendOut → 通道层 → 外接协议`，出站标记由 `outbound-actions.js`
+ * 统一执行；但 `fire()` 里那句 `raw.replace(/<<[^>]*>>/g, '')` 会把标记
+ * **全部**抹平，抹掉之后时长就找不回来了。所以必须**先提取，再摘掉**。
  *
  * 单位默认分钟（`<<silence:30>>` 比 `<<silence:30m>>` 更可能是人想写的），
  * 上限 30 天——`<<silence:9999h>>` 那种等于永久静默，恢复只能靠面板。
