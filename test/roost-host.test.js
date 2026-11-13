@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 
-import { createRoostHost } from '../src/roost-host.js';
+import { createRoostHost, protocolAlive } from '../src/roost-host.js';
 import { createRoostHostChannel } from '../src/channel.js';
 import { createMerger, textOf } from '../src/roost-merge.js';
 import {
@@ -566,6 +566,8 @@ function fakeWsClass({ failOnOpen = null, frames = [] } = {}) {
       this.url = url;
       this.opts = opts;
       this.handlers = {};
+      /** 客户端主动发出的帧（hello / ping…），用来验握手有没有补齐 */
+      this.sent = [];
       made.push(this);
       setTimeout(() => {
         if (failOnOpen) {
@@ -578,6 +580,8 @@ function fakeWsClass({ failOnOpen = null, frames = [] } = {}) {
     }
 
     on(ev, fn) { (this.handlers[ev] ||= []).push ? null : null; this.handlers[ev] = fn; }
+
+    send(data) { this.sent.push(String(data)); }
 
     close() { this.handlers.close?.(); }
   }
@@ -782,4 +786,95 @@ test('事件通道：transport=sse 时不加载 ws', async (t) => {
   await waitFor(() => host.connected);
   assert.equal(loaded, 0, '显式选 SSE 就不该去碰 ws');
   assert.equal(host.status().transport, 'sse');
+});
+
+/* ---------------- 连接前探活：先问外接协议，别绕面板 ---------------- */
+
+test('protocolAlive：外接协议 /health 通就返回 true，且尾斜杠不会拼出 //health', async () => {
+  const calls = [];
+  const fetchImpl = async (u) => { calls.push(String(u)); return { ok: true }; };
+  assert.equal(await protocolAlive({ url: 'http://127.0.0.1:6807/', fetchImpl }), true);
+  assert.deepEqual(calls, ['http://127.0.0.1:6807/health']);
+  /** 请求必须带超时：网络挂住时不能把连接循环永远拖在探活上 */
+  assert.ok(calls.length === 1);
+});
+
+test('protocolAlive：地址为空 / 非 200 / 网络异常都返回 false，绝不抛', async () => {
+  assert.equal(await protocolAlive({ url: '', fetchImpl: async () => { throw new Error('不该发请求'); } }), false);
+  assert.equal(await protocolAlive({ url: 'http://127.0.0.1:6807', fetchImpl: async () => ({ ok: false }) }), false);
+  assert.equal(await protocolAlive({ url: 'http://127.0.0.1:6807', fetchImpl: async () => { throw new Error('ECONNREFUSED'); } }), false);
+});
+
+test('接线：canConnect 先探外接协议 /health，6807 不通才退回面板探活', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const i = src.indexOf('canConnect: async () => {');
+  assert.ok(i > 0, 'host.js 里要有 canConnect');
+  const block = src.slice(i, i + 1400);
+  assert.match(block, /protocolAlive\(/, '必须先探外接协议自己的 /health');
+  assert.match(block, /setup\.isRunning\(\)/, '6807 不通时仍保留面板探活兜底');
+  /**
+   * 只认**代码行**：上面的说明注释里也提到了 `setup.isRunning()`，
+   * 用裸字符串比位置会被注释骗到。
+   */
+  const probe = block.indexOf('if (await protocolAlive(');
+  const fallback = block.indexOf('return await setup.isRunning();');
+  assert.ok(probe > 0, '要有「先探 6807」这条判断');
+  assert.ok(fallback > 0, '要有「再退回面板探活」这条兜底');
+  assert.ok(probe < fallback, '顺序不能反：面板探活失败不该挡住 6807 已就绪的连接');
+});
+
+/* ---------------- WS 握手：必须先发 hello 才会被服务端注册为订阅者 ---------------- */
+
+test('WS：连上后必须按协议先发 hello（否则服务端不 attach，事件一条都收不到）', async (t) => {
+  /**
+   * 框架的 `wss.on('connection')` 把 `attach()` + `sinks.set()` + 回 welcome
+   * 放在第一条 hello/req 里。以前客户端连上只把本地状态置成 online，
+   * TCP 是通的、订阅表里却没它 —— 症状是：面板显示已连接、测试连接也绿，
+   * 但 /health 的 connections 恒为 0，消息一条都推不过来。
+   */
+  const WS = fakeWsClass({ frames: [{ type: 'welcome', seq: 7, bot: { id: 'b1' } }] });
+  const host = createRoostHost({
+    baseUrl: () => 'http://127.0.0.1:6801',
+    token: () => 'tk',
+    transport: 'ws',
+    loadWs: async () => ({ WebSocket: WS }),
+    fetchImpl: async () => { throw new Error('不该走 HTTP'); },
+    onState: () => {},
+  });
+  t.after(() => host.stop());
+  host.start();
+  await waitFor(() => host.connected);
+  await waitFor(() => WS.made[0]?.sent.length > 0);
+
+  const hello = JSON.parse(WS.made[0].sent[0]);
+  assert.equal(hello.type, 'hello', '框架要收到 hello 才注册订阅者');
+  assert.equal(hello.protocol, 1);
+  assert.equal(hello.client, 'dsh-roost');
+  assert.equal(hello.since, 0, 'hello 的 since 要和 URL 上的一致');
+  assert.ok(WS.made[0].url.endsWith('/ws?since=0'));
+  assert.equal(WS.made[0].sent.length, 1, '连上只发一条 hello，不要夹带别的帧');
+});
+
+test('WS：断线重连时 hello 的 since 要带上已收到的最大 seq', async (t) => {
+  const WS = fakeWsClass({ frames: [{ type: 'welcome', seq: 7, bot: { id: 'b1' } }] });
+  const host = createRoostHost({
+    baseUrl: () => 'http://127.0.0.1:6801',
+    token: () => 'tk',
+    transport: 'ws',
+    loadWs: async () => ({ WebSocket: WS }),
+    fetchImpl: async () => { throw new Error('不该走 HTTP'); },
+    onState: () => {},
+  });
+  t.after(() => host.stop());
+  host.start();
+  await waitFor(() => host.status().seq === 7);
+
+  /** 服务端关掉连接 → pump 退避重连，这时必须拿新 seq 去补拉 */
+  WS.made[0].close();
+  await waitFor(() => WS.made.length >= 2 && WS.made[1].sent.length > 0);
+  const hello2 = JSON.parse(WS.made[1].sent[0]);
+  assert.equal(hello2.type, 'hello');
+  assert.equal(hello2.since, 7, '重连要补拉断线期间的事件，不能从 0 开始');
+  assert.ok(WS.made[1].url.endsWith('/ws?since=7'), 'URL 与 hello 里的 since 要一致');
 });

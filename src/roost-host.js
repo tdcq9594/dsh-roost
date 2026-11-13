@@ -41,6 +41,32 @@ function sleep(ms) {
 }
 
 /**
+ * 探「我们真正要连的对端」还在不在。
+ *
+ * 连接循环以前问的是 `setup.isRunning()`——那是 Roost **面板**（15210）的
+ * `/healthz`，只有 1.5 秒超时，还要先走一遍端口发现。可这条循环要连的其实是
+ * **外接协议**（6807）。面板探活一旦慢/失败，哪怕 6807 好好的，客户端也会一直
+ * 挂在 `waiting`，一条消息都收不到；而面板「测试连接」照样是绿的——它只打一次
+ * `/rpc`，不订阅事件流。这种「全都显示正常但消息不进来」的状态最难排查。
+ *
+ * 所以先问外接协议自己的 `/health`：免 token、本机、就是最终要连的那个地址。
+ * 不通才说明框架真没起来，调用方可以再退回去问面板，保留原来的 `waiting` 语义。
+ *
+ * @param {{url?:string, fetchImpl?:typeof fetch, timeoutMs?:number}} o
+ * @returns {Promise<boolean>}
+ */
+export async function protocolAlive({ url = '', fetchImpl = fetch, timeoutMs = 3000 } = {}) {
+  const base = String(url ?? '').trim().replace(/\/+$/, '');
+  if (!base) return false;
+  try {
+    const r = await fetchImpl(`${base}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    return Boolean(r?.ok);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 默认的 ws 加载器：**动态 import，装没装都不影响启动**。
  *
  * `ws` 是 `optionalDependencies`——npm 装失败也照常完成安装，
@@ -295,6 +321,23 @@ export function createRoostHost({
         attempt = 0;
         activeTransport = 'ws';
         wsRetryAt = 0;
+        /**
+         * 框架协议要求客户端连上后**先发 hello**（带 since）：服务端是在收到
+         * hello/req 时才 `attach()` + `sinks.set()` + 回 welcome 的（见框架
+         * `src/host/server.js` 的 `wss.on('connection')`）。
+         *
+         * 以前这里什么都不发，只把状态置成在线：TCP 连接确实建了，但服务端
+         * 的订阅表里根本没有这个客户端 —— 于是一条事件都收不到、`/health`
+         * 的 connections 恒为 0，而面板显示「已连接」、向导测试也绿。
+         * SSE 分支是连上就注册，所以只有走 WS 时会静默失联。
+         */
+        try {
+          ws.send(JSON.stringify({
+            type: 'hello', protocol: 1, client: 'dsh-roost', since: seq,
+          }));
+        } catch (e) {
+          log(`WS hello 发送失败：${e?.message ?? e}`);
+        }
         setState('online');
       });
       ws.on('message', (data) => {

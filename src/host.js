@@ -88,7 +88,7 @@ import { createRoostHostChannel, createChannelRegistry } from './channel.js';
 import { createActionRunner } from './outbound-actions.js';
 import { createCapabilityClient } from './roost-capabilities.js';
 import { registerRoostTools } from './roost-tools.js';
-import { createRoostHost } from './roost-host.js';
+import { createRoostHost, protocolAlive } from './roost-host.js';
 import { createPayloadBuilder, buildRendered } from './roost-payload.js';
 import { createMerger } from './roost-merge.js';
 import { createDecider } from './roost-decide.js';
@@ -2035,6 +2035,17 @@ export function apply(ctx) {
      * 否则面板上只会出现一屏「连不上（fetch failed）」，看不出真原因。
      */
     canConnect: async () => {
+      /**
+       * 先问**外接协议自己**的 `/health`（6807，就是下面 `/events` 要连的地址）。
+       *
+       * 以前只问 `setup.isRunning()`，那是 Roost 面板 15210 的 `/healthz`，
+       * 1.5 秒超时 + 端口发现。面板探活一旦慢或失败，客户端就一直挂 `waiting`，
+       * 哪怕 6807 完全正常也一条消息收不到——而「测试连接」只打一次 RPC，
+       * 照样显示绿的，症状就变成「全都正常但机器人不回话」。
+       *
+       * 6807 真没起来时才退回面板探活，保留「框架没启动就 waiting」的原语义。
+       */
+      if (await protocolAlive({ url: cfg.roostHost?.url })) return true;
       try {
         return await setup.isRunning();
       } catch {
