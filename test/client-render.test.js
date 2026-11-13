@@ -2067,3 +2067,33 @@ test('4.5：人格页把「旧记忆归谁」做成三个可选项，代码不�
   assert.equal(saveBtn.props.className, 'roost-btn', '配置卡里用次要按钮，别放一块黑色主按钮')
   assert.ok(!txt.includes('专属键里的内容仍在盘上不丢。只写归属标记'), '说明文字重复了两遍')
 })
+
+
+test('5.1 Alt+K 全局查找：页名与中文别名都能搜到', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  const TABS = [['overview', '概览'], ['memory', '记忆'], ['groupadmin', '群管'], ['context', '上下文']]
+  const GROUPS = [{ id: 'self', label: '人设', tabs: ['memory'] }, { id: 'sys', label: '系统', tabs: ['groupadmin'] }]
+
+  const byAlias = mod.matchTabs('日记', TABS, GROUPS)
+  assert.deepEqual(byAlias.map((x) => x.id), ['memory'], '搜「日记」要能找到记忆页');
+  assert.equal(byAlias[0].group, '人设');
+
+  const byLabel = mod.matchTabs('群管', TABS, GROUPS)
+  assert.deepEqual(byLabel.map((x) => x.id), ['groupadmin']);
+
+  const all = mod.matchTabs('', TABS, GROUPS)
+  assert.equal(all.length, TABS.length, '空查询给全部');
+  assert.equal(all.find((x) => x.id === 'context').group, '', '隐藏页没有分组');
+
+  assert.deepEqual(mod.matchTabs('不存在的东西', TABS, GROUPS), []);
+
+  /** 快捷键与面板都在 */
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("e.altKey && (e.key === 'k' || e.key === 'K')"), '要监听 Alt+K');
+  assert.ok(src.includes("e.key === 'Escape'"), 'Esc 要能关');
+  assert.ok(src.includes("e.key === 'Enter'"), '回车要能跳');
+  assert.ok(src.includes('搜页面：页名或别名'), '要有查找面板');
+  void h
+})

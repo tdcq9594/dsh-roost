@@ -13163,6 +13163,53 @@ select.roost-input{color-scheme:dark}
      * **tab 的 key 一个都不改**，老 `localStorage['roost.tab']` 照样落回原来那页，
      * 隐藏页（context/setup）不进口分组，仍靠 `roost-nav-current` 标记位置。
      */
+    /**
+     * Alt+K 全局查找：每个页签的中文别名。
+     *
+     * 只按页名搜不够用——用户想找「日记」时会想搜「日记」，而不是先记住它
+     * 在「记忆」页下面。别名表把常用叫法都收进来。
+     */
+    const TAB_ALIAS = {
+      overview: '概览 首页 总览 现在 状态 卡在哪',
+      her: '人格 人设 角色 名字 自称',
+      mood: '心情 情绪 状态 衰减',
+      awake: '主动搭话 主动 唤醒 互动召回 机会',
+      memory: '记忆 回忆 事实 日记 关系 星图 翻一翻 分层 遗忘 容量',
+      people: '人物 熟人 档案 印象 人物墙',
+      caps: '权限 能力 授权 工具 限额',
+      express: '语音 表达 声音 tts 念出来',
+      stickers: '表情包 表情 贴纸',
+      model: '模型 价格 用量 金额 花费',
+      ext: '扩展 已安装 插件',
+      'ext-market': '市场 扩展市场 插件市场 安装',
+      'ext-api': '接口 api 扩展接口 协议',
+      groupchat: '群聊 群聊策略 接话 连发 安全刹车',
+      groupadmin: '群管 禁言 审批 群信息 入群',
+      chats: '会话 身份 映射 上下文',
+      account: '账号迁移 迁移 换号 绑定 旧 openid',
+      logs: '日志 排障 报错 排查',
+      update: '更新 版本 升级 changelog',
+      config: '配置 设置 json 高级',
+      backup: '备份 恢复 导出 迁移',
+      about: '关于 版本 许可 鸣谢',
+      context: '上下文 提示词',
+      setup: '接入 安装 直连 自测',
+    }
+
+    /** 搜页签：页名或别名命中都算；空查询给全部（按导航顺序） */
+    function matchTabs(q, tabs, groups) {
+      const kw = String(q || '').trim().toLowerCase()
+      const out = []
+      for (const [id, label] of tabs) {
+        const alias = TAB_ALIAS[id] || ''
+        const hit = !kw || label.toLowerCase().includes(kw) || alias.toLowerCase().includes(kw)
+        if (!hit) continue
+        const g = groups.find((x) => x.tabs.includes(id))
+        out.push({ id, label, group: g ? g.label : '' })
+      }
+      return out
+    }
+
     const NAV_GROUPS = [
       { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview'] },
       { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'mood', 'awake', 'memory', 'people'] },
@@ -13258,12 +13305,45 @@ select.roost-input{color-scheme:dark}
       })
       /** 接入是整页弹窗：不占页签，也不写「上次停留」 */
       const [pageModal, setPageModal] = useState(null)
+      /** Alt+K 全局查找（5.1） */
+      const [palette, setPalette] = useState({ open: false, q: '', idx: 0 })
       const setTab = useCallback((id) => {
         if (id === 'setup') { setPageModal(id); return }
         setPageModal(null)
         setTabState(id)
         try { localStorage.setItem('roost.tab', id) } catch {}
       }, [])
+      /**
+       * Alt+K 打开全局查找；Esc 关；↑↓ 选择；回车跳转。
+       * 只在面板里监听（卸载即移除），不污染宿主页面。
+       */
+      useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+        const onKey = (e) => {
+          if (e.altKey && (e.key === 'k' || e.key === 'K')) {
+            e.preventDefault()
+            setPalette((p) => ({ open: !p.open, q: '', idx: 0 }))
+            return
+          }
+          if (!palette.open) return
+          if (e.key === 'Escape') { e.preventDefault(); setPalette({ open: false, q: '', idx: 0 }); return }
+          const list = matchTabs(palette.q, ALL_TABS.map((id) => [id, (TABS.find((t) => t[0] === id) || [id, id])[1]]), NAV_GROUPS)
+          if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            setPalette((p) => ({ ...p, idx: Math.min(p.idx + 1, Math.max(0, list.length - 1)) }))
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            setPalette((p) => ({ ...p, idx: Math.max(0, p.idx - 1) }))
+          } else if (e.key === 'Enter') {
+            e.preventDefault()
+            const pick = list[palette.idx]
+            if (pick) { setTab(pick.id); setPalette({ open: false, q: '', idx: 0 }) }
+          }
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [palette.open, palette.q, palette.idx, setTab])
+
       /**
        * 每组记住最后看的那页：点一级分组回到那页，而不是每次都跳组内第一页。
        *
@@ -13881,6 +13961,50 @@ select.roost-input{color-scheme:dark}
               h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }))
           : null,
 
+        /**
+         * Alt+K 查找面板。用 .cap-modal 那套遮罩（fixed + 点击关闭），
+         * z-index 压过普通弹窗、低于 toast。
+         */
+        palette.open
+          ? (() => {
+              const list = matchTabs(palette.q, ALL_TABS.map((id) => [id, (TABS.find((t) => t[0] === id) || [id, id])[1]]), NAV_GROUPS)
+              return h('div', {
+                className: 'cap-modal', style: { zIndex: 2147483100, alignItems: 'flex-start' },
+                onClick: () => setPalette({ open: false, q: '', idx: 0 }),
+              },
+                h('div', {
+                  className: 'cap-modal-b',
+                  style: { width: 'min(560px,100%)', marginTop: 90, padding: 14 },
+                  onClick: (e) => e.stopPropagation(),
+                },
+                  h('input', {
+                    className: 'roost-input', autoFocus: true,
+                    placeholder: '搜页面：页名或别名，比如「日记」「群管」（↑↓ 选择，回车打开）',
+                    value: palette.q,
+                    onChange: (e) => setPalette({ open: true, q: e.target.value, idx: 0 }),
+                  }),
+                  h('div', { style: { marginTop: 10, maxHeight: 320, overflow: 'auto' } },
+                    list.length === 0
+                      ? h('div', { className: 'roost-muted', style: { fontSize: 12, padding: '8px 4px' } }, '没找到这个页面')
+                      : list.map((x, i) => h('div', {
+                          key: x.id,
+                          role: 'button',
+                          onClick: () => { setTab(x.id); setPalette({ open: false, q: '', idx: 0 }) },
+                          style: {
+                            display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px',
+                            borderRadius: 8, cursor: 'pointer', fontSize: 12.5,
+                            background: i === palette.idx ? 'var(--hover)' : 'transparent',
+                          },
+                        },
+                          h('b', { style: { flex: '1 1 auto' } }, x.label),
+                          h('span', { className: 'roost-muted', style: { fontSize: 11 } }, x.group || '隐藏页'))),
+                  ),
+                  h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 8 } },
+                    'Alt+K 开关；Esc 关闭。'),
+                ))
+            })()
+          : null,
+
         toastMsg
           ? h('div', {
               style: {
@@ -13959,6 +14083,8 @@ select.roost-input{color-scheme:dark}
      * 数据构建、筛选、2D/3D 投影、缩放档位、标签避让都能单独断言，
      * 不用起浏览器；3D 透视的正确性尤其是"看代码看不出来"的那一类。
      */
+    /** 5.1：Alt+K 查找的匹配函数，导出给测试（搜别名能不能命中） */
+    exports.matchTabs = matchTabs
     exports.starScoreOf = starScoreOf
     exports.buildStarMap = buildStarMap
     exports.filterStars = filterStars
