@@ -181,6 +181,22 @@ export function createProfiles({
       return limit > 0 ? all.slice(0, limit) : all;
     },
 
+    /**
+     * 忘掉某一个人（面板星图详情「忘掉这个人」）。
+     * 只删这一行，不动别人；当场作废渲染缓存，下一轮注入就不再带他。
+     */
+    forget(key) {
+      const k = String(key ?? '').trim().toLowerCase();
+      if (!k) return false;
+      const cur = load();
+      const next = cur.filter((r) => String(r.key ?? '').trim().toLowerCase() !== k);
+      if (next.length === cur.length) return false;
+      rows = next;
+      renderCache = null;
+      save();
+      return true;
+    },
+
     /** 独立清空入口（契约 §3④）；隐私优先，当场作废渲染缓存 */
     clear() {
       rows = [];

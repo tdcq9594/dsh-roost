@@ -7067,6 +7067,37 @@ export function apply(ctx) {
         return send(res, r?.ok ? 200 : 400, r);
       }),
 
+      /**
+       * 星图里「非事实」那几类节点的真实操作。
+       *
+       * 以前详情只给一句「去对应分节操作」，用户点了一颗重要片段/人物/档案
+       * 发现什么都做不了。这里按类型接上它**真正支持**的写操作：
+       *   episode → journal.invalidate（作废，不删原文）
+       *   entity  → graph.removeEntity（删实体 + 它的边）
+       *   profile → profiles.forget（忘掉这个人）
+       * 日记原话不给「编辑」：改原话等于篡改历史，只能作废。
+       */
+      route('/memory/node', async (req, res) => {
+        const b = await readBody(req);
+        const kind = String(b?.kind ?? '');
+        const id = String(b?.id ?? '').trim();
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        const chatId = String(b?.chatId ?? lastScene?.chatId ?? '');
+        if (kind === 'episode') {
+          const n = Number(journal.invalidate([id], { supersededBy: 'panel' })) || 0;
+          return send(res, 200, { ok: n > 0, changed: n, message: n > 0 ? '这条日记已作废，不再注入' : '没找到这条日记' });
+        }
+        if (kind === 'entity') {
+          const r = graph.removeEntity(id, { chatId });
+          return send(res, r?.ok ? 200 : 400, r);
+        }
+        if (kind === 'profile') {
+          const ok = profiles.forget(id);
+          return send(res, ok ? 200 : 400, { ok, message: ok ? '忘掉这个人了' : '没找到这条档案' });
+        }
+        return send(res, 400, { ok: false, message: '这一类没有直接操作' });
+      }),
+
       route('/memory/add', async (req, res) => {
         const body = await readBody(req);
         /**

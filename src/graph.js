@@ -827,6 +827,27 @@ export function createGraph({ file, log = () => {} } = {}) {
     /** 屏蔽清单（面板用） */
     suppressed,
     ensureEntity,
+    /**
+     * 删掉一个实体及其所有关系边（面板星图详情「删掉这个实体」）。
+     * 只删当前会话（或全局）的痕迹，不碰别的群。
+     */
+    removeEntity(name, { chatId = '' } = {}) {
+      const d = open();
+      if (!d) return { ok: false, why: '图谱没打开' };
+      const raw = String(name ?? '').trim();
+      if (!raw) return { ok: false, why: '没给实体名' };
+      const key = normKey(raw);
+      const rows = d.prepare(
+        `SELECT id FROM entity WHERE (key = ? OR name = ?) AND (chat_id = ? OR chat_id = '')`,
+      ).all(key, raw, String(chatId || ''));
+      if (!rows.length) return { ok: false, why: '没找到这个实体' };
+      let edges = 0;
+      for (const r of rows) {
+        edges += Number(d.prepare('DELETE FROM edge WHERE src_id = ? OR dst_id = ?').run(r.id, r.id).changes || 0);
+        d.prepare('DELETE FROM entity WHERE id = ?').run(r.id);
+      }
+      return { ok: true, removed: rows.length, edges };
+    },
     nowEdges,
     edgesAsOf,
     endedEdges,

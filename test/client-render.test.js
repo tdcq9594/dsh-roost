@@ -1612,12 +1612,23 @@ test('重设计：分节默认全展开，折叠不卸载任何功能元素', ()
       if (cls.split(/\s+/).includes('roost-sec')) secs++
       if (cls.includes('roost-sec-fold')) {
         folds++
-        assert.equal(n.props['aria-expanded'], 'true', `${tab} 页有分节默认是收起的`)
+        /** 记忆页允许长分节默认收起（日记 / 关系 / 召回记录），别的页仍要全展开 */
+        const want = tab === 'memory' ? n.props['aria-expanded'] : 'true'
+        assert.ok(
+          n.props['aria-expanded'] === 'true' || (tab === 'memory' && n.props['aria-expanded'] === 'false'),
+          `${tab} 页分节默认状态不对：${n.props['aria-expanded']}`,
+        )
+        void want
       }
       if (cls.includes('is-folded')) folded++
       walk(n.props?.children)
     })(tree)
-    assert.equal(folded, 0, `${tab} 页不该有默认收起的分节`)
+    if (tab === 'memory') {
+      /** 主人要求：关系等容易太长的分节默认折叠，一进来别是一屏几千字 */
+      assert.ok(folded >= 3, `记忆页长分节应默认收起，实际 ${folded}`)
+    } else {
+      assert.equal(folded, 0, `${tab} 页不该有默认收起的分节`)
+    }
     assert.equal(folds, secs, `${tab} 页分节数 ${secs} 与折叠开关数 ${folds} 不一致`)
   }
   // 概览固定 6 节：保证上面不是「两边都是 0」的假通过

@@ -192,3 +192,56 @@ test('星图工具条：层级筛选 / 关系线三档 / 星星列表都在', as
     assert.ok(src.includes(must), `缺「${must}」`);
   }
 });
+
+
+test('非事实节点：档案单条删除、实体连同关系一起删', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-node-'));
+  mkdirSync(dir, { recursive: true });
+  process.env.DSH_ROOST_DATA = dir;
+  const { createProfiles } = await import('../src/profiles.js');
+  const { createGraph } = await import('../src/graph.js');
+
+  const pf = createProfiles({ file: join(dir, 'profiles.json'), log: () => {} });
+  pf.note({ who: '阿岚', openid: 'OPENID_A', impression: '爱发图' });
+  pf.note({ who: '大肥鱼', openid: 'OPENID_B', impression: '话少' });
+  assert.equal(pf.size, 2);
+  assert.equal(pf.forget('openid_a'), true, 'key 统一小写，要能命中');
+  assert.equal(pf.size, 1, '只删这一条');
+  assert.equal(pf.forget('不存在的人'), false);
+
+  const g = createGraph({ file: join(dir, 'graph.sqlite'), log: () => {} });
+  g.addEdge({ src: '阿岚', dst: '猫', rel: '喜欢', chatId: '' });
+  g.addEdge({ src: '猫', dst: '竹子', rel: '认识', chatId: '' });
+  assert.ok(g.entities({ chatId: '', limit: 20 }).length >= 3);
+  const r = g.removeEntity('阿岚', { chatId: '' });
+  assert.equal(r.ok, true);
+  assert.ok(r.edges >= 1, '连着的关系边要一起删');
+  const left = g.entities({ chatId: '', limit: 20 }).map((x) => x.name);
+  assert.equal(left.includes('阿岚'), false, '实体要删掉');
+  assert.equal(left.includes('猫'), true, '别的实体不能误删');
+  assert.equal(g.nowEdges({ chatId: '', limit: 20 }).length, 1, '只剩猫—竹子那条');
+  g.close();
+});
+
+test('路由 /memory/node 与星图非事实按钮都在', async () => {
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const client = readFileSync(CLIENT, 'utf8');
+  assert.ok(host.includes("route('/memory/node'"), '后端要有非事实节点路由');
+  for (const k of ["'episode'", "'entity'", "'profile'"]) {
+    assert.ok(host.includes(k), `路由要处理 ${k}`);
+  }
+  for (const must of ['作废这条日记', '删掉这个实体（连同关系）', '忘掉这个人']) {
+    assert.ok(client.includes(must), `星图详情缺「${must}」`);
+  }
+  assert.ok(client.includes("post('/memory/node'"), '前端要真的调它');
+});
+
+test('记忆页：长分节默认折叠 + 分层统计卡', async () => {
+  const client = readFileSync(CLIENT, 'utf8');
+  for (const must of ["title: '日记', defaultOpen: false", "title: '她知道的关系', defaultOpen: false", "title: '召回记录', defaultOpen: false"]) {
+    assert.ok(client.includes(must), `缺默认折叠：${must}`);
+  }
+  for (const must of ['分层与遗忘', '临时：15 天减半', '快忘了']) {
+    assert.ok(client.includes(must), `缺「${must}」`);
+  }
+});

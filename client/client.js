@@ -1052,9 +1052,14 @@ select.roost-input{color-scheme:dark}
      */
     const foldState = Object.create(null)
 
-    function Sec({ n, title, children, right }) {
+    function Sec({ n, title, children, right, defaultOpen = true }) {
       const key = String(n || '') + '|' + String(title || '')
-      const [open, setOpen] = useState(() => foldState[key] !== false)
+      /**
+       * 默认展开/折叠：`foldState` 里有记录就按用户的（他手动动过），
+       * 没有才用 defaultOpen。长分节（日记/关系/召回记录）默认收起，
+       * 否则一进记忆页就是一屏几千字，想找的那块得滚半天。
+       */
+      const [open, setOpen] = useState(() => (key in foldState ? foldState[key] !== false : defaultOpen))
       return h('div', { className: 'roost-sec' + (open ? '' : ' is-folded') },
         h('div', { className: 'roost-sec-h' },
           n ? h('span', { className: 'roost-sec-n' }, n) : null,
@@ -4221,6 +4226,33 @@ select.roost-input{color-scheme:dark}
               h(StarMap, { mem, toast, reload, quick, busy }))
           : null,
 
+        /**
+         * 分层记忆与遗忘（对齐 aurabot 记忆页的「分层记忆与遗忘」）。
+         * 规则写在上面，数字直接从 /memory 快照算，不新开接口。
+         */
+        h(Sec, { title: '分层与遗忘', defaultOpen: false },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '临时：15 天减半；长期：30 天；永久：不衰减。满 40 条时按「权重 × 时间」淘汰；',
+            '归档/被取代的不参与注入，但留在库里可恢复。复习会把衰减起点拉回来。'),
+          (() => {
+            const all = [...(mem?.factsDetail?.global || []), ...(mem?.factsDetail?.chat || [])]
+            const count = (pred) => all.filter(pred).length
+            const dim = count((f) => Number(f.brightness) > 0 && Number(f.brightness) < 0.35)
+            const rows = [
+              ['共', all.length],
+              ['临时', count((f) => f.tier === 'short')],
+              ['长期', count((f) => !f.tier || f.tier === 'long')],
+              ['永久', count((f) => f.tier === 'core')],
+              ['已归档/被取代', count((f) => f.until || f.archivedAt)],
+              ['快忘了', dim],
+            ]
+            return h('div', { style: { display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12 } },
+              rows.map(([k, v]) => h('span', { key: k },
+                h('span', { className: 'roost-muted' }, k + ' '),
+                h('b', null, String(v)))))
+          })(),
+        ),
+
         /* ── 第一层：事实 ── */
         h(Sec, { n: '01', title: '事实', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
@@ -4345,7 +4377,7 @@ select.roost-input{color-scheme:dark}
         ),
 
         /* ── 第二层：日记 ── */
-        h(Sec, { n: '02', title: '日记' },
+        h(Sec, { n: '02', title: '日记', defaultOpen: false },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             jr?.stats
               ? `共 ${jr.stats.total} 条 · 非常重要 ${jr.stats.critical} · 重要 ${jr.stats.important} · 普通 ${jr.stats.normal} · 已压缩 ${jr.stats.compressed}`
@@ -4443,7 +4475,7 @@ select.roost-input{color-scheme:dark}
         ),
 
         /* ── 第三层：图谱 ── */
-        h(Sec, { n: '03', title: '她知道的关系' },
+        h(Sec, { n: '03', title: '她知道的关系', defaultOpen: false },
           gp?.stats?.enabled === false
             ? h('div', { className: 'roost-empty' }, '图谱没启用（当前 Node 没有 node:sqlite）')
             : h('div', null,
@@ -4730,7 +4762,7 @@ select.roost-input{color-scheme:dark}
           ),
         ),
 
-        h(Sec, { n: '06', title: '召回记录', right: h('button', {
+        h(Sec, { n: '06', title: '召回记录', defaultOpen: false, right: h('button', {
           type: 'button', className: 'roost-btn', onClick: loadRecall,
         }, '刷新') },
           recallErr
@@ -4948,6 +4980,8 @@ select.roost-input{color-scheme:dark}
       for (const [i, t] of (Array.isArray(mem?.journal?.top) ? mem.journal.top : []).entries()) {
         push({
           id: `episode:${i}`,
+          /** 日记行 id：详情里「作废这条」要用它 */
+          journalId: String(t.id || ''),
           text: String(t.text || ''),
           group: 'episode',
           w: 1,
@@ -4960,6 +4994,7 @@ select.roost-input{color-scheme:dark}
       for (const [i, e] of (Array.isArray(mem?.graph?.entities) ? mem.graph.entities : []).entries()) {
         push({
           id: `entity:${i}`,
+          entityId: Number(e.id) || 0,
           text: String(e.name || ''),
           group: 'entity',
           w: 1,
@@ -4972,6 +5007,8 @@ select.roost-input{color-scheme:dark}
       for (const [i, p] of (Array.isArray(mem?.profiles) ? mem.profiles : []).entries()) {
         push({
           id: `profile:${i}`,
+          /** 档案的 key：详情里「忘掉这个人」要用它 */
+          profileKey: String(p.key || ''),
           text: `${String(p.name || '某个人')}${p.impression ? '：' + String(p.impression).slice(0, 40) : ''}`,
           group: 'profile',
           w: 1,
@@ -5398,6 +5435,21 @@ select.roost-input{color-scheme:dark}
       /** 逐条编辑：编辑文字 / 改重要度 / 复习 / 层级 / 归档恢复，共用一个路由 */
       const [edit, setEdit] = useState(null)
       const [factBusy, setFactBusy] = useState(false)
+      /** 非事实节点（日记/实体/档案）的操作中状态 */
+      const [nodeBusy, setNodeBusy] = useState(false)
+      const nodeAct = async (kind, id) => {
+        if (!id || nodeBusy) return
+        setNodeBusy(true)
+        try {
+          const r = await post('/memory/node', { kind, id, chatId: mem?.chatId || '' })
+          toast(r?.ok === false ? (r.message || '没做成') : (r.message || '已处理'))
+          if (r?.ok) { setSel(null); if (reload) reload() }
+        } catch (e) {
+          toast('没做成：' + e.message)
+        } finally {
+          setNodeBusy(false)
+        }
+      }
       const factAct = async (action, extra = {}) => {
         if (!detail || factBusy) return
         setFactBusy(true)
@@ -5604,8 +5656,32 @@ select.roost-input{color-scheme:dark}
                       onClick: () => forget(detail),
                     }, '忘掉这条'),
                   )
-                : h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginBottom: 6 } },
-                    '这一类不能直接改，去对应分节操作（关系 / 档案 / 日记）'),
+                : h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
+                    detail.kind === 'episode'
+                      ? h('button', {
+                          type: 'button', className: 'roost-btn', disabled: nodeBusy,
+                          onClick: () => nodeAct('episode', detail.journalId),
+                        }, '作废这条日记')
+                      : null,
+                    detail.kind === 'entity'
+                      ? h('button', {
+                          type: 'button', className: 'roost-btn', disabled: nodeBusy,
+                          onClick: () => nodeAct('entity', detail.text),
+                        }, '删掉这个实体（连同关系）')
+                      : null,
+                    detail.kind === 'profile'
+                      ? h('button', {
+                          type: 'button', className: 'roost-btn', disabled: nodeBusy,
+                          onClick: () => nodeAct('profile', detail.profileKey),
+                        }, '忘掉这个人')
+                      : null,
+                    h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
+                      detail.kind === 'episode'
+                        ? '日记原话不提供「编辑」——改原话等于篡改历史，只能作废。'
+                        : detail.kind === 'entity'
+                          ? '删掉后这条关系线也会消失，巩固时不会再抽回来。'
+                          : '只删这条档案，不动聊天记录。'),
+                  ),
               detail.kind === 'fact' && edit
                 ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
                     h('input', {
