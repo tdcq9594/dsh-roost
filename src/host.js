@@ -117,6 +117,7 @@ import { buildExtension, formatScaffold } from './ext-wizard.js';
 import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
 import { polishText, POLISH_PRESETS } from './persona-polish.js';
 import { createAutotelic } from './autotelic.js';
+import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
 import {
   pageOf, locate, readSidecar, writeSidecar, suggestTags, removeFiles,
   createTagJob, statsOf, PAGE_SIZE,
@@ -8269,6 +8270,56 @@ export function apply(ctx) {
           personaName: p?.label || p?.name || '',
         });
         return send(res, r.ok ? 200 : 400, r);
+      }),
+
+      /* ---------------- 6.1 扩展声明式界面 ----------------
+       *
+       * 扩展只能**声明**页面（`ui.nav` / `ui.view`），数据来自它自己目录里的
+       * JSON 文件。宿主只做三件事：读文件、按字段白名单挑值、把标量交给前端。
+       * **不执行扩展的任何代码、不调它的 MCP 工具**——那等于给面板开一个
+       * 「能触发工具调用」的入口，而扩展拿得到配置和令牌。
+       */
+      route('/extensions/ui', (req, res) => {
+        const pages = [];
+        for (const it of extRegistry.list() || []) {
+          const m = extRegistry.read(it.id);
+          if (!m?.ui) continue;
+          const spec = normalizeUiSpec(m.ui);
+          /** 装的时候校验过，这里再算一次：手改过 plugin.json 的人不少 */
+          if (!spec.ok) continue;
+          pages.push({
+            id: it.id,
+            name: m.name || it.id,
+            nav: spec.spec.nav,
+            view: spec.spec.view,
+          });
+        }
+        return send(res, 200, { ok: true, pages, kinds: UI_KINDS, groups: UI_GROUPS });
+      }),
+
+      route('/extensions/ui/data', (req, res) => {
+        const u = new URL(req.url || '/', 'http://local');
+        const id = String(u.searchParams.get('id') || '').trim();
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        const m = extRegistry.read(id);
+        if (!m) return send(res, 404, { ok: false, message: `没有「${id}」这个扩展` });
+        if (!m.ui) return send(res, 404, { ok: false, message: `「${id}」没有声明界面` });
+
+        const spec = normalizeUiSpec(m.ui);
+        if (!spec.ok) return send(res, 400, { ok: false, message: spec.errors.join('；') });
+
+        const r = readUiData({ dir: extRegistry.pathOf(id), spec: spec.spec });
+        return send(res, r.ok ? 200 : 200, {
+          ok: r.ok,
+          id,
+          name: m.name || id,
+          nav: spec.spec.nav,
+          view: spec.spec.view,
+          rows: r.rows,
+          updatedAt: r.updatedAt,
+          truncated: r.truncated,
+          message: r.ok ? '' : r.reason,
+        });
       }),
 
       /* ---------------- 自驱引擎（实验，默认关） ----------------

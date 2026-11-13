@@ -14131,6 +14131,165 @@ select.roost-input{color-scheme:dark}
     }
 
     /** 接口：给独立会话发 /v1 客户端令牌 */
+    /**
+     * 6.1 扩展声明的页面。
+     *
+     * 只渲染**数据**，不执行扩展的任何代码：宿主已经把字段按白名单挑好、
+     * 值也收敛成标量（字符串截断、url 只留 http/https），这里连 HTML 都不拼，
+     * 全部当文本子节点传进去。`javascript:` 那种值在服务端就被清空了。
+     *
+     * 三种 kind 的呈现差别只有排版：table 对齐成列、cards 一卡一条、
+     * log 一行一条。**不给扩展自定义样式的能力**——那等于让它控制面板外观，
+     * 而面板上还有主人的记忆和配置。
+     */
+    function ExtUiPage({ id, toast }) {
+      const [d, setD] = useState(null)
+
+      const load = useCallback(async () => {
+        const r = await get('/extensions/ui/data?id=' + encodeURIComponent(id))
+        setD(r || { ok: false, message: '没拿到数据' })
+      }, [id])
+      useEffect(() => { load() }, [load])
+
+      if (!d) return h('div', { className: 'roost-empty' }, '读着…')
+
+      const head = h(Sec, {
+        title: d.view?.title || d.name || id,
+        right: h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+          h('span', { className: 'roost-muted', style: { fontSize: 11 } },
+            d.updatedAt
+              ? `更新于 ${new Date(d.updatedAt).toLocaleString()}`
+              : '还没有更新时间'),
+          h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新')),
+      },
+        h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+          '这个页面由扩展声明、由面板按数据渲染——扩展不能往面板里放代码，只能提供数据和字段名。'),
+      )
+
+      if (d.ok === false) {
+        return h('div', null, head,
+          h('div', { className: 'roost-note', style: { color: 'var(--warn)' } },
+            d.message || '这个扩展还没产出数据'),
+          h('div', { className: 'roost-note' },
+            '扩展把数据写到它自己目录下的 JSON 文件里（清单的 ui.view.source.file），面板只读不执行。'
+            + '第一次装完通常要等它跑一次才有内容。'))
+      }
+
+      const fields = d.view?.fields || []
+      const rows = Array.isArray(d.rows) ? d.rows : []
+      if (!rows.length) {
+        return h('div', null, head, h('div', { className: 'roost-empty' }, '暂时没有内容'))
+      }
+
+      /**
+       * 按字段类型渲染一个值。
+       *
+       * 七种类型全部只是**排版**：服务端已经把值收敛成标量（字符串截断、
+       * url/image 只留 http(s)、progress 夹到 0–100、time 是毫秒数），
+       * 这里不做任何解析，也不拼 HTML——React 会把字符串当文本转义。
+       */
+      const cell = (f, row) => {
+        const v = row[f.key]
+        if (v === '' || v == null) return ''
+        if (f.type === 'url') {
+          return h('a', {
+            href: v, target: '_blank', rel: 'noreferrer noopener',
+            style: { color: 'var(--accent, inherit)', textDecoration: 'underline' },
+          }, String(v))
+        }
+        if (f.type === 'image') {
+          return h('img', {
+            src: v, alt: f.label, loading: 'lazy',
+            style: { maxHeight: 120, maxWidth: '100%', borderRadius: 6, display: 'block' },
+          })
+        }
+        if (f.type === 'tag') {
+          return h('span', {
+            style: {
+              display: 'inline-block', padding: '0 6px', borderRadius: 4, fontSize: 10.5,
+              background: 'rgba(128,128,128,.16)', marginRight: 4,
+            },
+          }, String(v))
+        }
+        if (f.type === 'progress') {
+          return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, width: '100%' } },
+            h('span', { style: { flex: 1, height: 6, borderRadius: 3, background: 'rgba(128,128,128,.2)' } },
+              h('span', {
+                style: { display: 'block', height: '100%', borderRadius: 3, width: `${v}%`, background: 'var(--ok, #2a9d5c)' },
+              })),
+            h('span', { style: { fontSize: 10.5, flex: '0 0 auto' } }, `${v}%`))
+        }
+        if (f.type === 'time') {
+          const t = Number(v)
+          return t > 0 ? new Date(t).toLocaleString() : ''
+        }
+        return String(v)
+      }
+
+      const kind = d.view?.kind || 'table'
+
+      /** list：一行一条，没有列头，最省地方 */
+      if (kind === 'list') {
+        const [first, ...rest] = fields
+        return h('div', null, head,
+          h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 520 } },
+            rows.map((r, i) => h('div', { key: i, className: 'roost-item' },
+              h('span', { className: 't', style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
+                first ? h('span', { style: { fontSize: 12 } }, cell(first, r)) : null,
+                rest.map((f) => (r[f.key] === '' || r[f.key] == null
+                  ? null
+                  : h('span', { key: f.key, className: 'roost-muted', style: { fontSize: 11 } },
+                    `${f.label} ${cell(f, r)}`))))))),
+          d.truncated ? h('div', { className: 'roost-note' }, '内容太多，只显示前一部分') : null)
+      }
+
+      if (kind === 'cards') {
+        const [first, ...rest] = fields
+        return h('div', null, head,
+          h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(240px,1fr))', gap: 8 } },
+            rows.map((r, i) => h('div', {
+              key: i,
+              style: { border: '1px solid var(--line-soft)', borderRadius: 8, padding: 10 },
+            },
+              h('div', { style: { fontWeight: 600, marginBottom: 4, fontSize: 12.5, lineHeight: 1.5 } },
+                first ? cell(first, r) : ''),
+              rest.map((f) => (r[f.key] === '' || r[f.key] == null
+                ? null
+                : h('div', { key: f.key, className: 'roost-muted', style: { fontSize: 11.5, lineHeight: 1.6 } },
+                  `${f.label}：`, cell(f, r)))))),
+          ),
+          d.truncated ? h('div', { className: 'roost-note' }, '内容太多，只显示前一部分') : null)
+      }
+
+      if (kind === 'log') {
+        return h('div', null, head,
+          h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 480 } },
+            rows.map((r, i) => h('div', { key: i, className: 'roost-item', style: { alignItems: 'flex-start' } },
+              h('span', { className: 't' },
+                fields.map((f, fi) => h('span', {
+                  key: f.key,
+                  style: fi === 0
+                    ? { marginRight: 8 }
+                    : { marginRight: 8, opacity: .8, fontSize: 11.5 },
+                }, cell(f, r))))))),
+          d.truncated ? h('div', { className: 'roost-note' }, '内容太多，只显示前一部分') : null)
+      }
+
+      /** table：列多、要比对时用它 */
+      return h('div', null, head,
+        h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 520 } },
+          h('div', {
+            className: 'roost-item',
+            style: { fontWeight: 600, position: 'sticky', top: 0, background: 'var(--surface, transparent)', fontSize: 11.5 },
+          }, fields.map((f) => h('span', { key: f.key, style: { flex: '1 1 0', minWidth: 0 } }, f.label))),
+          rows.map((r, i) => h('div', { key: i, className: 'roost-item' },
+            fields.map((f) => h('span', {
+              key: f.key,
+              style: { flex: '1 1 0', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5 },
+            }, cell(f, r)))))),
+        d.truncated ? h('div', { className: 'roost-note' }, '内容太多，只显示前一部分') : null)
+    }
+
     function ExtApiTab({ toast }) {
       return h(ExtClientsBlock, { toast })
     }
@@ -14496,8 +14655,23 @@ select.roost-input{color-scheme:dark}
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
       { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'about'] },
     ]
-    /** 当前页属于哪一组；隐藏页不属于任何组，返回 null */
-    const navGroupOf = (id) => NAV_GROUPS.find((g) => g.tabs.includes(id)) || null
+    /**
+     * 当前页属于哪一组；隐藏页不属于任何组，返回 null。
+     *
+     * `extPages` 是扩展声明的页面（6.1）。它们的 tab key 是 `ext:<id>`，
+     * 不属于静态 `TABS`，所以要看扩展自己声明的 `nav.group`——
+     * **扩展可以自己挑挂哪个一级菜单**，不强制都塞在「扩展」里。
+     */
+    const navGroupOf = (id, extPages = null) => {
+      const key = String(id ?? '')
+      if (key.startsWith('ext:')) {
+        const pid = key.slice(4)
+        const page = (extPages || []).find((x) => x.id === pid)
+        if (!page) return null
+        return NAV_GROUPS.find((g) => g.id === page.nav.group) || null
+      }
+      return NAV_GROUPS.find((g) => g.tabs.includes(id)) || null
+    }
     const navIcon = (d) => h('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true' }, h('path', { d }))
 
     /**
@@ -14622,11 +14796,29 @@ select.roost-input{color-scheme:dark}
        * 单独存一份、不塞进 `roost.tab`：全局的「上次停留」只有一个，
        * 再拆一层才记得住「上次在能力组看的是扩展」。
        */
+      /**
+       * 扩展声明的页面（6.1）。**面板不执行扩展的任何代码**——这里只拿到
+       * 页名、分组、字段白名单，数据另外单独拉 `/extensions/ui/data`。
+       */
+      const [extPages, setExtPages] = useState([])
+      useEffect(() => {
+        let alive = true
+        ;(async () => {
+          const r = await get('/extensions/ui')
+          if (alive && Array.isArray(r?.pages)) setExtPages(r.pages)
+        })()
+        return () => { alive = false }
+      }, [])
+      /** 静态页 + 扩展页。只用于渲染导航，不改 `TABS` 本身 */
+      const dynamicTabs = extPages.length
+        ? TABS.concat(extPages.map((p) => [`ext:${p.id}`, p.nav.label]))
+        : TABS
+
       const [navLast, setNavLast] = useState(() => {
         try { return JSON.parse(localStorage.getItem('roost.navlast') || '{}') || {} } catch { return {} }
       })
       useEffect(() => {
-        const g = navGroupOf(tab)
+        const g = navGroupOf(tab, extPages)
         if (!g || navLast[g.id] === tab) return
         const next = { ...navLast, [g.id]: tab }
         setNavLast(next)
@@ -14634,9 +14826,13 @@ select.roost-input{color-scheme:dark}
       }, [tab, navLast])
       /** 点分组：优先回该组上次那页；存着已下线的 key 时退回组内第一页 */
       const openGroup = useCallback((g) => {
+        /** 组内页面要算上扩展页：点「表达」时如果只有一个内置页 + 一个扩展页，也得能落到扩展页 */
+        const list = dynamicTabs
+          .filter(([id]) => (navGroupOf(id, extPages)?.id || '') === g.id)
+          .map(([id]) => id)
         const want = navLast[g.id]
-        setTab(g.tabs.includes(want) ? want : g.tabs[0])
-      }, [navLast, setTab])
+        setTab(list.includes(want) ? want : (list[0] || g.tabs[0]))
+      }, [navLast, setTab, extPages, dynamicTabs])
       /** 日志统一拉一次：概览显示最近 6 条，排障页显示全量，别两处各起一个轮询 */
       const [logs, setLogs] = useState(null)
       /** 5.2：自动刷新开关（存 localStorage，刷新页面也记得） */
@@ -15014,8 +15210,11 @@ select.roost-input{color-scheme:dark}
        * 内容在它下面滚。
        */
       /** 当前页所属分组；隐藏页不属于任何组，`curGroup` 为 null（一级不高亮、二级不显示） */
-      const curGroup = navGroupOf(tab)
-      const groupTabs = curGroup ? TABS.filter(([id]) => curGroup.tabs.includes(id)) : []
+      const curGroup = navGroupOf(tab, extPages)
+      /** 组内页面：按 `navGroupOf` 反查，扩展页才会被算进来 */
+      const groupTabs = curGroup
+        ? dynamicTabs.filter(([id]) => (navGroupOf(id, extPages)?.id || '') === curGroup.id)
+        : []
 
       /**
        * 首次接入向导：新装 / 升级后 `needed=true`，整棵面板树都不挂，
@@ -15058,8 +15257,9 @@ select.roost-input{color-scheme:dark}
               NAV_GROUPS.map((g) => {
                 const on = curGroup && curGroup.id === g.id
                 /** 悬浮提示把组内页面列出来：只看「能力」猜不到里面有扩展 */
-                const names = g.tabs
-                  .map((id) => (TABS.find((row) => row[0] === id) || [, id])[1])
+                const names = dynamicTabs
+                  .filter(([id]) => (navGroupOf(id, extPages)?.id || '') === g.id)
+                  .map(([, label]) => label)
                   .join(' · ')
                 return h('button', {
                   key: g.id, type: 'button',
@@ -15118,6 +15318,8 @@ select.roost-input{color-scheme:dark}
           tab === 'ext' ? h(ExtTab, { quick, toast }) : null,
           tab === 'ext-market' ? h(ExtMarketTab, { toast }) : null,
           tab === 'ext-api' ? h(ExtApiTab, { toast }) : null,
+          /** 6.1：扩展声明的页面。tab key 形如 `ext:<id>`，不在静态 TABS 里 */
+          String(tab).startsWith('ext:') ? h(ExtUiPage, { id: String(tab).slice(4), toast }) : null,
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat, setTab, config, saveCfg }) : null,
           /** 2.3：与记忆页并列的两个入口，同一份 mem，不复制状态 */
           tab === 'people' ? h(PeopleTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,

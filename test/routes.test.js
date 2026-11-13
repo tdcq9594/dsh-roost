@@ -1492,3 +1492,85 @@ test('路由：/autotelic/preview 只算不记账', async () => {
   assert.deepEqual(recent.json.rows, [], '预览不该写账本');
   off?.();
 });
+
+/* ---------------- 6.1 扩展声明式界面 ---------------- */
+
+/** 造一个带 ui 声明的扩展目录 */
+function seedUiExt(dir, id, { group = 'mods', rows = [], kind = 'cards' } = {}) {
+  const ext = join(dir, 'extensions', id);
+  mkdirSync(ext, { recursive: true });
+  writeFileSync(join(ext, 'plugin.json'), JSON.stringify({
+    api: 1, kind: 'dsh-extension', id, serverName: id,
+    name: `演示 ${id}`, description: '带界面的演示',
+    transport: 'stdio', command: 'node', args: ['server.mjs'],
+    ui: {
+      nav: { label: '演示页', group },
+      view: { kind, source: { file: 'ui-data.json' }, fields: ['title', { key: 'url', label: '链接', type: 'url' }] },
+    },
+  }), 'utf8');
+  if (rows) writeFileSync(join(ext, 'ui-data.json'), JSON.stringify({ updatedAt: 1700000000000, rows }), 'utf8');
+}
+
+test('路由：/extensions/ui 列出扩展页，group 归一成一级菜单 id', async () => {
+  const { call, off } = await bootHost((d) => {
+    seedUiExt(d, 'demo-ui', { group: '群聊' });
+    seedUiExt(d, 'demo-two', { group: 'express' });
+    return {};
+  });
+
+  const r = await call('/extensions/ui');
+  assert.equal(r.status, 200);
+  const ids = r.json.pages.map((p) => p.id).sort();
+  assert.deepEqual(ids, ['demo-two', 'demo-ui']);
+  assert.equal(r.json.pages.find((p) => p.id === 'demo-ui').nav.group, 'group', '中文「群聊」要归一成 group');
+  assert.equal(r.json.pages.find((p) => p.id === 'demo-two').nav.group, 'express');
+  off?.();
+});
+
+test('路由：/extensions/ui/data 按字段白名单挑值，多一个都不给', async () => {
+  const { call, off } = await bootHost((d) => {
+    seedUiExt(d, 'demo-ui', {
+      rows: [
+        { title: '视频 A', url: 'https://b23.tv/a', secret: '不该出现', nested: { x: 1 } },
+        { title: '视频 B', url: 'javascript:alert(1)' },
+      ],
+    });
+    return {};
+  });
+
+  const r = await call('/extensions/ui/data?id=demo-ui');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true, r.json.message);
+  assert.equal(r.json.rows.length, 2);
+  assert.deepEqual(Object.keys(r.json.rows[0]).sort(), ['title', 'url'], '未声明的字段不能漏出去');
+  assert.equal(r.json.rows[1].url, '', 'javascript: 在服务端就被清空');
+  assert.equal(r.json.updatedAt, 1700000000000);
+  off?.();
+});
+
+test('路由：/extensions/ui/data 没 ui / 没数据文件都给具体原因', async () => {
+  const { call, off } = await bootHost((d) => {
+    seedUiExt(d, 'no-data', { rows: null });
+    /** 一个完全没声明 ui 的扩展 */
+    const ext = join(d, 'extensions', 'plain-ext');
+    mkdirSync(ext, { recursive: true });
+    writeFileSync(join(ext, 'plugin.json'), JSON.stringify({
+      api: 1, kind: 'dsh-extension', id: 'plain-ext', serverName: 'plain-ext',
+      name: '无界面', description: 'x', transport: 'stdio', command: 'node',
+    }), 'utf8');
+    return {};
+  });
+
+  const noFile = await call('/extensions/ui/data?id=no-data');
+  assert.equal(noFile.status, 200);
+  assert.equal(noFile.json.ok, false);
+  assert.match(noFile.json.message, /还没有数据文件/);
+
+  const noUi = await call('/extensions/ui/data?id=plain-ext');
+  assert.equal(noUi.status, 404);
+  assert.match(noUi.json.message, /没有声明界面/);
+
+  const list = await call('/extensions/ui');
+  assert.equal(list.json.pages.some((p) => p.id === 'plain-ext'), false, '没 ui 的不该出现在页面清单里');
+  off?.();
+});

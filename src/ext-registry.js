@@ -19,6 +19,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { basename, join, resolve } from 'node:path';
 
 import { dataDir } from './config.js';
+import { normalizeUiSpec } from './ext-ui.js';
 import { normalizeConfigSpec } from './ext-config.js';
 
 /** 与方案 §3.1 一致：小写开头、2–32 字符、只含小写字母数字与短横线。 */
@@ -170,6 +171,17 @@ export function validateManifest(raw, { expectedId } = {}) {
   if (Object.hasOwn(m, 'config')) {
     const cfg = normalizeConfigSpec(m.config);
     if (!cfg.ok) errors.push(...cfg.errors);
+  }
+  /**
+   * 6.1 声明式界面：装的时候就校验，坏声明直接拒收。
+   *
+   * 这里只校验、**不把规范化结果写回清单**——和 config 同一个理由：
+   * 派生数据落进 `plugin.json` 之后，`saveUsage` 的 spread 会把它一起带走，
+   * 下次读到的就是「规范化过的规范化结果」。下游每次现算（字段最多 12 个）。
+   */
+  if (Object.hasOwn(m, 'ui')) {
+    const ui = normalizeUiSpec(m.ui);
+    if (!ui.ok) errors.push(...ui.errors);
   }
 
   return {
