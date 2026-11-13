@@ -831,22 +831,38 @@ export function createGraph({ file, log = () => {} } = {}) {
      * 删掉一个实体及其所有关系边（面板星图详情「删掉这个实体」）。
      * 只删当前会话（或全局）的痕迹，不碰别的群。
      */
-    removeEntity(name, { chatId = '' } = {}) {
+    removeEntity(ref, { chatId = '', aliases = [] } = {}) {
       const d = open();
-      if (!d) return { ok: false, why: '图谱没打开' };
-      const raw = String(name ?? '').trim();
-      if (!raw) return { ok: false, why: '没给实体名' };
-      const key = normKey(raw);
-      const rows = d.prepare(
-        `SELECT id FROM entity WHERE (key = ? OR name = ?) AND (chat_id = ? OR chat_id = '')`,
-      ).all(key, raw, String(chatId || ''));
-      if (!rows.length) return { ok: false, why: '没找到这个实体' };
+      if (!d) return { ok: false, message: '图谱没打开' };
+      const raw = String(ref ?? '').trim();
+      if (!raw) return { ok: false, message: '没给实体' };
+
+      /**
+       * **优先按 id 删**。星图里的实体可能来自别名会话（换机器人前的旧 openid），
+       * 按「当前 chatId + 名字」查会一条都匹配不上——表现就是点删除弹出
+       * 「没做成」但不说为什么。id 是实体行自己的主键，跨会话唯一。
+       */
+      const byId = Number(raw);
+      let rows = [];
+      if (Number.isInteger(byId) && byId > 0) {
+        rows = d.prepare('SELECT id FROM entity WHERE id = ?').all(byId);
+      }
+      if (!rows.length) {
+        const key = normKey(raw);
+        const scope = [String(chatId || ''), '', ...(Array.isArray(aliases) ? aliases.map(String) : [])]
+          .filter((v, i, a) => a.indexOf(v) === i);
+        const marks = scope.map(() => '?').join(',');
+        rows = d.prepare(
+          `SELECT id FROM entity WHERE (key = ? OR name = ?) AND chat_id IN (${marks})`,
+        ).all(key, raw, ...scope);
+      }
+      if (!rows.length) return { ok: false, message: '没找到这个实体（可能刚被删过）' };
       let edges = 0;
       for (const r of rows) {
         edges += Number(d.prepare('DELETE FROM edge WHERE src_id = ? OR dst_id = ?').run(r.id, r.id).changes || 0);
         d.prepare('DELETE FROM entity WHERE id = ?').run(r.id);
       }
-      return { ok: true, removed: rows.length, edges };
+      return { ok: true, removed: rows.length, edges, message: `删掉了 ${rows.length} 个实体、${edges} 条关系` };
     },
     nowEdges,
     edgesAsOf,

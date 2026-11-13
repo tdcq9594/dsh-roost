@@ -5578,7 +5578,8 @@ select.roost-input{color-scheme:dark}
         setNodeBusy(true)
         try {
           const r = await post('/memory/node', { kind, id, chatId: mem?.chatId || '' })
-          toast(r?.ok === false ? (r.message || '没做成') : (r.message || '已处理'))
+          /** 后端失败可能只给 why（旧字段），两个都读，别让用户只看到「没做成」 */
+          toast(r?.ok === false ? (r.message || r.why || '没做成') : (r.message || '已处理'))
           if (r?.ok) { setSel(null); if (reload) reload() }
         } catch (e) {
           toast('没做成：' + e.message)
@@ -5802,7 +5803,8 @@ select.roost-input{color-scheme:dark}
                     detail.kind === 'entity'
                       ? h('button', {
                           type: 'button', className: 'roost-btn', disabled: nodeBusy,
-                          onClick: () => nodeAct('entity', detail.text),
+                          /** 优先按实体 id 删：名字可能重名，也可能来自别名会话 */
+                          onClick: () => nodeAct('entity', detail.entityId || detail.text),
                         }, '删掉这个实体（连同关系）')
                       : null,
                     detail.kind === 'profile'

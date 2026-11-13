@@ -220,6 +220,25 @@ test('非事实节点：档案单条删除、实体连同关系一起删', async
   assert.equal(left.includes('阿岚'), false, '实体要删掉');
   assert.equal(left.includes('猫'), true, '别的实体不能误删');
   assert.equal(g.nowEdges({ chatId: '', limit: 20 }).length, 1, '只剩猫—竹子那条');
+
+  /**
+   * 截图里的「没做成」有两个原因：只按当前 chatId + 名字查（别名会话的实体
+   * 一条都匹配不上），以及失败只给 why、前端只读 message。
+   */
+  const cat = g.entities({ chatId: '', limit: 20 }).find((x) => x.name === '猫');
+  const byId = g.removeEntity(cat.id, { chatId: '' });
+  assert.equal(byId.ok, true, '按 id 删要能删掉');
+  assert.equal(byId.removed, 1);
+  assert.ok(byId.message, '成功也要有 message');
+
+  g.addEdge({ src: '竹子', dst: '雪', rel: '见过', chatId: 'OLD_OPENID' });
+  const viaAlias = g.removeEntity('竹子', { chatId: 'NEW_OPENID', aliases: ['OLD_OPENID'] });
+  assert.equal(viaAlias.ok, true, '别名会话里的实体也要能删');
+
+  const miss = g.removeEntity('不存在的东西', { chatId: '' });
+  assert.equal(miss.ok, false);
+  assert.ok(miss.message, '失败必须给 message（不能只给 why）');
+  assert.equal(miss.why, undefined, '统一用 message，前端不用再猜字段名');
   g.close();
 });
 
@@ -267,4 +286,13 @@ test('重排开关进了配置，默认关（升级前后召回顺序不变）',
   const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   assert.ok(host.includes('rerankHits(q, hits'), '召回入口要接重排');
   assert.ok(host.includes("rerank: rerankMode"), '召回日志要能看出走没走重排');
+});
+
+
+test('实体删除的前端调用：传 id 优先，错误原因两个字段都读', async () => {
+  const client = readFileSync(CLIENT, 'utf8');
+  assert.ok(client.includes('nodeAct(\'entity\', detail.entityId || detail.text)'), '要优先传实体 id');
+  assert.ok(client.includes('r.message || r.why'), '失败原因要兼容 why');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.ok(host.includes('aliases: aliasesOf(chatId)'), '删除要带别名会话');
 });

@@ -7159,8 +7159,10 @@ export function apply(ctx) {
           return send(res, 200, { ok: n > 0, changed: n, message: n > 0 ? '这条日记已作废，不再注入' : '没找到这条日记' });
         }
         if (kind === 'entity') {
-          const r = graph.removeEntity(id, { chatId });
-          return send(res, r?.ok ? 200 : 400, r);
+          const r = graph.removeEntity(id, { chatId, aliases: aliasesOf(chatId) });
+          return send(res, r?.ok ? 200 : 400, {
+            ...r, message: r?.message || r?.why || (r?.ok ? '删掉了' : '没删成'),
+          });
         }
         if (kind === 'profile') {
           const ok = profiles.forget(id);
