@@ -39,8 +39,7 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
 
-/** 回到中性的半衰期（毫秒）。4 小时：聊完一场，半天后基本平复 */
-const HALF_LIFE = 4 * 60 * 60 * 1000;
+/** 3.5：回中性的半衰期与衰减落点可调（`config.mood.halfLifeHours` / `baseline`），默认 4h / 0.5 */
 
 /** 衰减落点 / 面板「一般」那一档 */
 export const NEUTRAL = 0.5;
@@ -149,7 +148,27 @@ export function parseMoodMark(raw) {
   return out;
 }
 
-export function createMood() {
+/**
+ * 3.5：半衰期与衰减落点可调。
+ *
+ * 两条数学不变量必须守住，调参不许把它们调坏：
+ *   · 半衰期至少 0.5 小时——0 等于「聊完立刻归零」，情绪就成了噪声；
+ *   · 基线夹在 [0.45, 0.9]——**必须高于 LOW(0.4)**，否则「衰减只能拉回
+ *     中性、永远到不了低档」这条设计（见上）就被反过来打破了：
+ *     衰减会把 energy/sociability 直接拖进低档，「有点累」从事件分支
+ *     变成常态分支。0.45 留了半档余量，0.9 封顶防有人想让她「永远兴奋」。
+ */
+function paramsOf(cfgOf) {
+  const c = (typeof cfgOf === 'function' ? cfgOf() : cfgOf) || {};
+  const halfHours = Math.max(0.5, Number(c.halfLifeHours) || 4);
+  const rawBase = Number(c.baseline);
+  const baseline = Number.isFinite(rawBase) ? Math.min(0.9, Math.max(0.45, rawBase)) : NEUTRAL;
+  return { halfMs: halfHours * 3_600_000, baseline };
+}
+
+export function createMood(opts = null) {
+  /** 3.5：参数现读。两种传法都收：`createMood({ cfgOf })`（与其它模块一致）或直接传函数 */
+  const cfgOf = opts && typeof opts === 'object' ? opts.cfgOf : opts;
   const file = () => join(dataDir(), 'mood.json');
   let cache = null;
   /** 上一次真正吃到 `touched()` 的时间（不落盘，重启后从头算） */
@@ -157,12 +176,13 @@ export function createMood() {
 
   function load() {
     if (cache) return cache;
+    const base = paramsOf(cfgOf).baseline;
     try {
       const raw = JSON.parse(readFileSync(file(), 'utf8'));
       cache = {
         valence: clamp(Number(raw?.valence ?? 0), -1, 1),
-        energy: clamp(Number(raw?.energy ?? NEUTRAL), 0, 1),
-        sociability: clamp(Number(raw?.sociability ?? NEUTRAL), 0, 1),
+        energy: clamp(Number(raw?.energy ?? base), 0, 1),
+        sociability: clamp(Number(raw?.sociability ?? base), 0, 1),
         updatedAt: Number(raw?.updatedAt ?? Date.now()),
         /** 原因是什么时候写下的。老文件没有这个字段，当 0（= 已过期） */
         reasonAt: Number(raw?.reasonAt ?? 0),
@@ -171,8 +191,8 @@ export function createMood() {
     } catch {
       cache = {
         valence: 0,
-        energy: NEUTRAL,
-        sociability: NEUTRAL,
+        energy: paramsOf(cfgOf).baseline,
+        sociability: paramsOf(cfgOf).baseline,
         updatedAt: Date.now(),
         reasonAt: 0,
         reason: '',
@@ -205,11 +225,12 @@ export function createMood() {
     const m = load();
     const dt = Date.now() - m.updatedAt;
     if (dt < 60_000) return m; // 一分钟内不动，省得频繁写盘
-    const k = Math.pow(0.5, dt / HALF_LIFE);
-    // 往各自的中性值靠（valence→0，energy/sociability→NEUTRAL）
+    const { halfMs, baseline } = paramsOf(cfgOf);
+    const k = Math.pow(0.5, dt / halfMs);
+    // 往各自的中性值靠（valence→0，energy/sociability→基线）
     m.valence = m.valence * k;
-    m.energy = NEUTRAL + (m.energy - NEUTRAL) * k;
-    m.sociability = NEUTRAL + (m.sociability - NEUTRAL) * k;
+    m.energy = baseline + (m.energy - baseline) * k;
+    m.sociability = baseline + (m.sociability - baseline) * k;
     m.updatedAt = Date.now();
     save();
     return m;

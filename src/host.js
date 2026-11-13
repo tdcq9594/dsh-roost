@@ -45,7 +45,7 @@ import { createHistoryRing } from './history-ring.js';
 import { memoryLines } from './memory-line.js';
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
-import { offpeakState } from './offpeak.js';
+import { offpeakState, shouldDeferHeavy } from './offpeak.js';
 import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
 import { mountUsageSections, mountToolOutputBudget } from './ext-usage.js';
 import { createApiV1 } from './api-v1.js';
@@ -1621,7 +1621,7 @@ export function apply(ctx) {
   const MEMORY_DYN_MAX = 480;
 
   const memory = createMemory();
-  const mood = createMood();
+  const mood = createMood({ cfgOf: () => cfg.mood });
   /**
    * 两份行为日志（B4 / D3）。**不存消息正文**：心情历史只有数值和原因，
    * 召回日志只有 id / 分数 / 命中原因和检索词长度，面板展示了也不会变成第二份聊天记录。
@@ -1937,33 +1937,54 @@ export function apply(ctx) {
   const consolidateTick = async () => {
     if (cfg.memory?.enabled === false) return;
     /**
+     * 3.2：deferHeavy 开了以后，锁库/过期压缩这两件重活只在谷时跑。
+     * 默认关——升级后行为与之前逐字一致；开了的话非谷时直接跳过本轮，
+     * 十分钟一轮自然会等到谷时（ vacuum 的候选积压不丢，只是晚清）。
+     * **不 defer 按天巩固**：它有自己的凌晨调度（consolidateHour），
+     * 双重判据会出现“永远轮不到”的组合（比如 consolidateHour=10）。
+     */
+    const deferHeavy = cfg.offpeak?.deferHeavy === true
+      && shouldDeferHeavy(offpeakState({
+        now: Date.now(),
+        lastActiveAt,
+        startHour: cfg.offpeak?.startHour,
+        endHour: cfg.offpeak?.endHour,
+        quietMinutes: cfg.offpeak?.quietMinutes,
+        mode: cfg.offpeak?.mode,
+        holidays: cfg.offpeak?.holidays,
+      }));
+    /**
      * 压库：只有「彻底删过日记」之后才真做，平时一次判断就返回。
      *
      * 放在这个循环里是因为它要锁库几秒（`DatabaseSync` 是同步 API），
      * 只能在没人在聊的时候跑。十分钟一轮，删完最多等十分钟。
      */
-    try {
-      if (journal.vacuum()) log.info('日记库已压：彻底删除后的旧页清掉了');
-    } catch (e) {
-      log.warn(`压库失败：${e?.message ?? e}`);
+    if (!deferHeavy) {
+      try {
+        if (journal.vacuum()) log.info('日记库已压：彻底删除后的旧页清掉了');
+      } catch (e) {
+        log.warn(`压库失败：${e?.message ?? e}`);
+      }
     }
     /**
      * 过期压缩单独跑一轮（和按天巩固解耦）。
      *
-     * 不放 `run(day)` 里：那个的入口判据是"昨天有日记"，没人说话的日子
+     * 不放 `run(day)` 里：那个的入口判据是“昨天有日记”，没人说话的日子
      * 直接返回空，积压的过期条目就停在那儿没人压。压的是机械摘要，
      * 不调模型，所以每 10 分钟压几百条没有成本。
      */
-    try {
-      const r = await consolidate.compressDue({ limit: 500 });
-      if (r.compressed || r.remaining) {
-        log.info(
-          `过期压缩：压了 ${r.compressed} 条`
-            + (r.remaining ? `，还剩 ${r.remaining} 条待压（下一轮继续）` : ''),
-        );
+    if (!deferHeavy) {
+      try {
+        const r = await consolidate.compressDue({ limit: 500 });
+        if (r.compressed || r.remaining) {
+          log.info(
+            `过期压缩：压了 ${r.compressed} 条`
+              + (r.remaining ? `，还剩 ${r.remaining} 条待压（下一轮继续）` : ''),
+          );
+        }
+      } catch (e) {
+        log.warn(`过期压缩失败：${e?.message ?? e}`);
       }
-    } catch (e) {
-      log.warn(`过期压缩失败：${e?.message ?? e}`);
     }
     try {
       const hour = Number(cfg.memory?.consolidateHour) || 4;
@@ -6714,10 +6735,18 @@ export function apply(ctx) {
           memoryDynamicText: memoryDynamic(),
           memoryText: mtext,
           /**
-           * D10：当前是峰还是谷，给排障和阶段 7 的慢工具错峰用。
-           * 这里只是**观测**，不改变任何后台任务的调度（见 offpeak.js 头注）。
+           * D10 / 3.2：当前是峰还是谷，给排障和慢工具错峰用。
+           * 判据参数从配置现读：改 startHour / 换 mode 不用重启。
            */
-          offpeak: offpeakState({ now: Date.now(), lastActiveAt }),
+          offpeak: offpeakState({
+            now: Date.now(),
+            lastActiveAt,
+            startHour: cfg.offpeak?.startHour,
+            endHour: cfg.offpeak?.endHour,
+            quietMinutes: cfg.offpeak?.quietMinutes,
+            mode: cfg.offpeak?.mode,
+            holidays: cfg.offpeak?.holidays,
+          }),
         });
       }),
 

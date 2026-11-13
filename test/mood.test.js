@@ -362,3 +362,72 @@ test('C3：feedbackArgsOf 只认已知反馈，方向统一走 normalizeFeedback
   assert.equal(feedbackArgsOf('随便什么'), null, '认不出来别结算');
   assert.equal(feedbackArgsOf(''), null);
 });
+
+/* ---------------- 3.5：半衰期与基线可调 ---------------- */
+
+test('3.5：默认参数与写死时代一模一样（cfgOf 不传时）', async () => {
+  const { dir, done } = fresh();
+  const { createMood, NEUTRAL } = await import('../src/mood.js');
+  try {
+    const m = createMood();
+    m.touched();
+    const s0 = m.get().sociability; // touched 后的起点（渐近不是直达）
+    jump(4 * HOUR); // 恰好一个半衰期：应衰减一半
+    const s = m.get();
+    assert.ok(Math.abs(s.sociability - (NEUTRAL + (s0 - NEUTRAL) / 2)) < 0.01,
+      `4 小时应衰减一半：起点 ${s0} → 现在 ${s.sociability}`);
+  } finally {
+    restoreClock();
+    done();
+  }
+});
+
+test('3.5：halfLifeHours 调小衰减更快，调大更慢', async () => {
+  const { dir, done } = fresh();
+  const { createMood, NEUTRAL } = await import('../src/mood.js');
+  try {
+    const m1 = createMood({ cfgOf: () => ({ halfLifeHours: 1 }) });
+    m1.touched();
+    jump(4 * HOUR); // 4 个半衰期 → 只剩 1/16
+    const fast = m1.get().sociability;
+    assert.ok(fast < NEUTRAL + 0.02, `1h 半衰期 4 小时后应几乎回中性：${fast}`);
+
+    const m2 = createMood({ cfgOf: () => ({ halfLifeHours: 24 }) });
+    m2.touched();
+    jump(4 * HOUR); // 1/6 个半衰期 → 还剩 ~89%
+    const slow = m2.get().sociability;
+    assert.ok(slow > 0.56, `24h 半衰期 4 小时后应几乎没动：${slow}`);
+    assert.ok(slow < 0.58, '但也不是原地不动');
+  } finally {
+    restoreClock();
+    done();
+  }
+});
+
+test('3.5：baseline 改变衰减落点；非法值被夹回安全区间', async () => {
+  const { dir, done } = fresh();
+  const { createMood, LOW } = await import('../src/mood.js');
+  try {
+    const m1 = createMood({ cfgOf: () => ({ baseline: 0.7 }) });
+    m1.feedback('down'); // 社交意愿往下推
+    jump(48 * HOUR);
+    const s1 = m1.get();
+    assert.ok(Math.abs(s1.sociability - 0.7) < 0.05, `该回到 0.7：${s1.sociability}`);
+
+    /** 基线不许低于 0.45：低阈值 0.4 之上必须留一档余量 */
+    const m2 = createMood({ cfgOf: () => ({ baseline: 0.1 }) });
+    const s2 = m2.get();
+    assert.ok(s2.sociability >= 0.45, `非法基线要被夹到 0.45：${s2.sociability}`);
+    assert.ok(s2.sociability > LOW, '夹紧后仍然高于「低」阈值');
+    /** 半衰期也不许调到 0 */
+    const m3 = createMood({ cfgOf: () => ({ halfLifeHours: 0 }) });
+    m3.touched();
+    jump(HOUR);
+    const s3 = m3.get();
+    assert.ok(s3.sociability < 0.75, '0 会被夹成 0.5h，一小时后应明显衰减');
+    assert.ok(s3.sociability > 0.4, '但没有直接归零');
+  } finally {
+    restoreClock();
+    done();
+  }
+});

@@ -4813,7 +4813,19 @@ select.roost-input{color-scheme:dark}
      * 「她什么时候会来找你」是**排期**——两件事混在一页，想看一眼心情
      * 得先滚过整块「这一轮算出来的机会」。拆开之后两边都变短了。
      */
-    function MoodTab({ mood, reloadMood, toast, quick }) {
+    function MoodTab({ mood, reloadMood, toast, quick, config, saveCfg }) {
+      /** 3.5：半衰期与基线草稿。null = 跟随配置，失焦提交后清空 */
+      const [moodDraft, setMoodDraft] = useState(null)
+      const moodCfg = config?.mood || {}
+      const putMood = async (patch) => {
+        if (!saveCfg) return
+        const r = await saveCfg({ mood: patch })
+        toast(r?.ok === false ? (r.message || '没存上') : '已保存，下一轮衰减就生效')
+        setMoodDraft(null)
+      }
+      const dval = (k) => (moodDraft !== null && moodDraft[k] !== undefined
+        ? moodDraft[k]
+        : String(moodCfg[k] ?? ''))
       return h('div', null,
         h(Sec, { n: '01', title: '此刻情绪' },
           mood
@@ -4860,7 +4872,40 @@ select.roost-input{color-scheme:dark}
             : h('div', { className: 'roost-empty' }, '读不到情绪——插件刚起来时会空几秒'),
         ),
 
-        h(Sec, { n: '02', title: '变化记录' },
+        /** 3.5：衰减参数。不变量（半衰期≥0.5h、基线 0.45–0.9）由后端 paramsOf 夹紧，
+         *  这里只挡明显手滑（负数/超界就提示），真写了坏值后端也会救回来 */
+        h(Sec, { n: '02', title: '衰减与基线' },
+          h('div', { className: 'roost-note', style: { marginTop: 0 } },
+            '没人理她时，情绪按指数衰减回中性：半衰期越长，一次开心/生气影响得越久。'),
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' } },
+            h('label', { className: 'roost-note', style: { margin: 0 } }, '半衰期（小时，默认 4）：'),
+            h('input', {
+              type: 'number', min: 0.5, max: 168, step: 0.5, className: 'roost-input',
+              style: { width: 90 }, value: dval('halfLifeHours'),
+              onChange: (e) => setMoodDraft({ ...moodDraft, halfLifeHours: e.target.value }),
+            }),
+            h('label', { className: 'roost-note', style: { margin: 0 } }, '基线（0.45–0.9，默认 0.5）：'),
+            h('input', {
+              type: 'number', min: 0.45, max: 0.9, step: 0.05, className: 'roost-input',
+              style: { width: 90 }, value: dval('baseline'),
+              onChange: (e) => setMoodDraft({ ...moodDraft, baseline: e.target.value }),
+            }),
+            h('button', {
+              type: 'button', className: 'roost-primary', disabled: !saveCfg || moodDraft === null,
+              onClick: () => {
+                const half = Number(dval('halfLifeHours'))
+                const base = Number(dval('baseline'))
+                if (!(half > 0)) return toast('半衰期得是正数')
+                if (base < 0.45 || base > 0.9) return toast('基线要在 0.45–0.9 之间（必须高于低阈值 0.4）')
+                putMood({ halfLifeHours: half, baseline: base })
+              },
+            }, '保存'),
+          ),
+          h('div', { className: 'roost-note' },
+            '基线是衰减的落点，不是她「平时多开心」的开关：低于 0.45 会被后端夹回 0.45——衰减必须能停在低阈值之上，否则「有点累」会从事件变成常态。'),
+        ),
+
+        h(Sec, { n: '03', title: '变化记录' },
           (mood?.history || []).length
             ? h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 180 } },
                 mood.history.map((x, i) =>
@@ -8331,7 +8376,8 @@ select.roost-input{color-scheme:dark}
 
     const JSON_SECTIONS = [
       ['memory', '记忆', '日记寿命、注入条数、多少轮全量重注、记忆工具开关'],
-      ['mood', '心情', 'effects 打开后，聊天里被夸/被凶会带动心情，心情还会影响配图发语音的兴致；日常在「权限」页的高级组里点'],
+      ['mood', '心情', 'effects 打开后聊天里被夸/被凶会带动心情；halfLifeHours 是回中性半衰期、baseline 是衰减落点（心情页有控件）；日常在「权限」页的高级组里点'],
+      ['offpeak', '错峰', 'mode self=谷时窗口+安静期（默认）；official=官方峰时（工作日 9–12/14–18 高峰，节假日与周末全天空闲，和账单档位同一份判据）；deferHeavy 开了才把压库/过期压缩限到谷时跑；holidays 可覆盖节假日表'],
       ['events', '经历', 'enabled：记不记她主动做过的事（找过人、发过文件）。24 小时自动过期，只给主人私聊当素材；关着也能在「记忆」页查看和清空已有的'],
       ['profiles', '人物档案', 'enabled：要不要把对熟人的印象攒成一小段，聊天时带上。每天凌晨巩固时提炼、跨群共用，同一天里提示词不变；关着也能在「记忆」页查看和清空已有的'],
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
@@ -12082,7 +12128,7 @@ select.roost-input{color-scheme:dark}
           tab === 'people' ? h(PeopleTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,
           tab === 'backup' ? h(BackupTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,
           /** 2026-11-12 新增：心情从「主动搭话」拆出，表达/模型从「设置」拆出 */
-          tab === 'mood' ? h(MoodTab, { mood: her?.mood ?? null, reloadMood: loadHer, toast, quick }) : null,
+          tab === 'mood' ? h(MoodTab, { mood: her?.mood ?? null, reloadMood: loadHer, toast, quick, config, saveCfg }) : null,
           tab === 'express'
             ? h(ExpressTab, {
                 config, stickers: her?.stickers ?? null,

@@ -370,9 +370,30 @@ export const DEFAULTS = {
       appliedAt: 0,
     },
   },
-  /** 心情影响发送概率（调研报告 B2）。状态本身在 mood.json，这里只放开关 */
+  /** 心情影响发送概率（调研报告 B2）。状态本身在 mood.json，这里只放开关。
+   *  3.5：halfLifeHours=回中性半衰期（≥0.5）、baseline=衰减落点（夹在 0.45–0.9，
+   *  必须高于低阈值 0.4，否则「衰减到不了低档」这条设计被反过来打破） */
   mood: {
     effects: false,
+    halfLifeHours: 4,
+    baseline: 0.5,
+  },
+  /**
+   * 错峰（D10 / 3.2）。mode 两种：
+   *   · 'self'：原自定判据——谷时窗口 + 安静期（默认，升级前后一致）；
+   *   · 'official'：DeepSeek 官方峰时——北京时间工作日（不含法定节假日）
+   *     9–12 / 14–18 为高峰，其余空闲；与计价档位同一份判据。
+   * deferHeavy 开了才把锁库/过期压缩这类重活限到谷时跑（默认关，行为不变）。
+   * holidays 覆盖内置节假日表，结构同 offpeak.js 的 CN_HOLIDAY_TABLE
+   *（键是年份），只写要覆盖的年份。
+   */
+  offpeak: {
+    mode: 'self',
+    startHour: 0,
+    endHour: 6,
+    quietMinutes: 20,
+    deferHeavy: false,
+    holidays: null,
   },
   /** 人物小档案（D7）：数据落在 profiles.json，清除入口独立，不挂会话级清空 */
   profiles: {
