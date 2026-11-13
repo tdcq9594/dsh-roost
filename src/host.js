@@ -257,6 +257,35 @@ export function apply(ctx) {
     if (logs.length > 400) logs.shift();
   }
 
+  /**
+   * 消息链路上的错误：**留档 + 计数**，别只打一行 warn 就算了。
+   *
+   * 2026-11-13 一天之内踩了两次「全线绿但不回话」：`onInbound is not defined`
+   * 和 `outActions.run is not a function`。两次都只留下了一行
+   * `xxx 失败（已吞）：<message>`，没有 stack、没有计数、面板上看不见——
+   * 只能靠人肉盯着插件日志才发现。这两条路径的 catch 是故意吞掉异常的
+   * （单条消息失败不该把事件流带崩），但不能吞得**连痕迹都不留**。
+   *
+   * 所以统一走这里：进环形缓冲（最近 20 条，`/status` 与面板横幅都读它），
+   * 日志里带 stack 前两帧（`e.message` 往往只是一句「is not a function」，
+   * 看不出是哪一行），并把阶段名说清楚。
+   *
+   * @param {string} stage 哪个阶段：入队 / 处理消息 / 回话 / 丢弃消息
+   * @param {unknown} e
+   */
+  const pathErrors = [];
+  function notePathError(stage, e) {
+    const message = String(e?.message ?? e ?? '未知错误');
+    const stack = String(e?.stack ?? '')
+      .split('\n')
+      .slice(1, 3)
+      .map((l) => l.trim())
+      .join(' ← ');
+    pathErrors.push({ at: Date.now(), stage, message, stack });
+    if (pathErrors.length > 20) pathErrors.shift();
+    log.warn(`[链路] ${stage}失败：${message}${stack ? `（${stack}）` : ''}`);
+  }
+
   const raw = makeLogger(ctx);
 
   /**
@@ -2025,7 +2054,7 @@ export function apply(ctx) {
       try {
         deliverFromRoost(evt);
       } catch (e) {
-        log.warn(`外接消息入队失败（已吞）：${e?.message ?? e}`);
+        notePathError('入队', e);
       }
     },
     onNotice: (data, frame) => {
@@ -2160,7 +2189,7 @@ export function apply(ctx) {
     waitSec: Number(cfg.roostHost?.merge?.waitSec) || 1.5,
     maxSec: Number(cfg.roostHost?.merge?.maxSec) || 6,
     onFlush: (_chatId, batch) => {
-      deliverBatch(batch).catch((e) => log.warn(`处理外接消息失败（已吞）：${e?.message ?? e}`));
+      deliverBatch(batch).catch((e) => notePathError('处理消息', e));
     },
   });
 
@@ -2171,8 +2200,14 @@ export function apply(ctx) {
   function deliverFromRoost(evt) {
     const verdict = roostDecider.check(evt);
     if (!verdict.go) {
-      /** 不接的理由要看得到：用户开了策略没效果时，这里是唯一的证据 */
-      log.debug(`外接消息不接（${verdict.reason}）：${String(evt?.content ?? '').slice(0, 30)}`);
+      /**
+       * 不接的理由要看得到：用户开了策略没效果时，这里是唯一的证据。
+       *
+       * 以前是 `log.debug`——默认级别下**根本看不见**，注释却写着「唯一证据」。
+       * 2026-11-13 审计改成 info：这行每条不接的消息都会打一次，但它本来就该
+       * 一次一条（噪声上限就是消息量），换来的是「为什么她不理我」能当场回答。
+       */
+      log.info(`外接消息不接（${verdict.reason}）：${String(evt?.content ?? '').slice(0, 30)}`);
       return;
     }
     roostMerger.add(evt, {
@@ -2195,7 +2230,14 @@ export function apply(ctx) {
   async function deliverBatch(batch) {
     const last = batch?.msg;
     const chatId = String(last?.chat?.chatId ?? '');
-    if (!chatId) return;
+    /**
+     * 没有 chatId 就没法回话。**必须留痕**：静默 `return` 的话，消息就这么
+     * 消失了，日志里连一行都没有——2026-11-13 审计把这条列为「静默丢弃」。
+     */
+    if (!chatId) {
+      notePathError('丢弃消息', new Error(`事件里没有 chat.chatId（msgId=${String(last?.msgId ?? '')}）`));
+      return;
+    }
     const chatKind = last?.chat?.kind === 'c2c' ? 'c2c' : 'group';
     /**
      * 回复通道。带上 `msgId` / `receivedAt` 是**被动回复**（不占主动额度）；
@@ -2221,8 +2263,14 @@ export function apply(ctx) {
       /**
        * 发送者是谁：`<<say>>` 的语音条额度要按人算。
        * 以前这条链在 ai-chat 侧，那边不传 openid，配额只能标「暂未生效」。
+       *
+       * **字段叫 `openid`，不是 `id`。** `batch.msg` 是框架推来的**原始事件**
+       * （`bot/src/host/serialize.js` 里 `sender: { openid, uin, identityId, … }`），
+       * 只有内部 payload（`roost-payload.js` 造的）才把它拍平成 `sender.id`。
+       * 2026-11-13 审计抓到：这里写成 `sender.id` 恒为 `''`，`quota.charge()`
+       * 于是退回 `id || target` —— 「按人算」静默变成「按会话算」，不报任何错。
        */
-      senderId: String(last?.sender?.id ?? ''),
+      senderId: String(last?.sender?.openid ?? ''),
       /** 真的发出去了才记：没发出去也记的话，冷却会把下一句白吃掉 */
       onSent: () => roostDecider.noteReplied(chatId),
     });
@@ -4520,7 +4568,7 @@ export function apply(ctx) {
                 ? '模型服务那边暂时抽风了，等会儿再问我一次。'
                 : `这边出了点问题：${e?.message ?? e}`;
       await postReply(payload, friendly, true, { requestId: `${payload.id}:err` })
-        .catch((err) => log.warn(`回话失败：${err.message}`));
+        .catch((err) => notePathError('回话', err));
     } finally {
       // 工具权限和「谁在说话」都要还原，别串到下一轮
       try {
@@ -4889,6 +4937,15 @@ export function apply(ctx) {
           waiting: turns.waiting,
           permissions: cfg.permissions,
           lastTurn,
+          /**
+           * 消息链路上出过的错（最近 20 条，最新的在最后）。
+           *
+           * `lastTurn` 只覆盖「轮次跑起来了但失败」；收不到/处理不了消息、
+           * 回话发不出去这些**轮次根本没成型**的情况只会进这里。面板横幅与
+           * 「排障」页读它——以前这些错误只有一行 warn，翻日志才能看到。
+           */
+          pathErrors: pathErrors.slice(-5),
+          pathErrorCount: pathErrors.length,
           mood: mood.get(),
           /**
            * 概览页用：`turnQueue.stats()` 是排队层（pending / busy / lanes），

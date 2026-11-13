@@ -67,7 +67,15 @@ export const PINNED_KEEP = ['qq_send', 'qq_close'];
  *
  * 这张表只用于面板上标一个「🔒 建议」，不参与解析。
  */
-export const PINNED_SOFT = ['memory_search', 'memory_note', 'sticker_pick', 'roost_skill'];
+/**
+ * 注意：这里只许写**真实存在**的工具名。
+ *
+ * 2026-11-13 审计抓到 `roost_skill` —— 它从来不是本插件的工具（框架能力是
+ * `roost_tools` / `roost_tool` / `roost_status` / `roost_delivery`），写在表里
+ * 的后果是面板给一个不存在的工具标「🔒 建议保留」，而真正该提示的没提示。
+ * 改工具名时请连这张表和 `client/client.js` 的 SUGGESTED 一起改。
+ */
+export const PINNED_SOFT = ['memory_search', 'memory_note', 'sticker_pick'];
 
 /**
  * 不许开：DSH 原生的 `skill` 工具和我们自管的技能目录会打架
@@ -88,7 +96,6 @@ export const CHAT_ONLY = [
   'qq_send',
   'qq_close',
   'sticker_pick',
-  'roost_skill',
 ];
 
 /** 默认标签：面板上给人看的名字，解析时不用。 */

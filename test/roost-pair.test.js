@@ -249,6 +249,10 @@ test('测一下：地址能连上就报往返耗时', async () => {
   const { createServer } = await import('node:http');
   const srv = createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url === '/health') {
+      res.end(JSON.stringify({ app: 'roost-host', ok: true, connections: 1 }));
+      return;
+    }
     res.end(JSON.stringify({ id: 'pair-test', ok: true, data: { pong: Date.now() } }));
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
@@ -262,6 +266,63 @@ test('测一下：地址能连上就报往返耗时', async () => {
     const r = await p.test();
     assert.equal(r.ok, true);
     assert.ok(r.ms >= 0);
+    assert.deepEqual(r.stream, { ok: true, connections: 1 }, '订阅数要带出来，面板才知道事件流通没通');
+  } finally {
+    await new Promise((r) => srv.close(r));
+  }
+});
+
+/**
+ * 「向导全绿、消息进不来」的回归：RPC 通 ≠ 事件流订阅上了。
+ *
+ * `system.ping` 走 HTTP `/rpc`，消息走 `/events` / `/ws` 长连接，两条路完全独立。
+ * 2026-11-13 实机就卡在这里：ping 绿、`connections` 恒 0，测试却报通。
+ */
+test('测一下：ping 通但事件流没订阅（connections=0）要如实标出来', async () => {
+  const { createServer } = await import('node:http');
+  const srv = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url === '/health') {
+      res.end(JSON.stringify({ app: 'roost-host', ok: true, connections: 0 }));
+      return;
+    }
+    res.end(JSON.stringify({ id: 'pair-test', ok: true, data: { pong: 1 } }));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  try {
+    const p = createPairing({
+      setup: fakeSetup(),
+      cfgOf: () => ({ roostHost: { url: `http://127.0.0.1:${port}`, token: 'tk' } }),
+      setCfg: () => {},
+    });
+    const r = await p.test();
+    assert.equal(r.ok, true, 'RPC 确实通了，这一项不能判失败');
+    assert.deepEqual(r.stream, { ok: false, connections: 0 });
+  } finally {
+    await new Promise((r) => srv.close(r));
+  }
+});
+
+/** 老框架没有 `/health`：给 `null`（自检不了），不能假装通过、也不能报错 */
+test('测一下：没有 /health 的旧框架 → stream 为 null，不假装通过', async () => {
+  const { createServer } = await import('node:http');
+  const srv = createServer((req, res) => {
+    if (req.url === '/health') { res.writeHead(404).end('nope'); return; }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ id: 'pair-test', ok: true, data: { pong: 1 } }));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  try {
+    const p = createPairing({
+      setup: fakeSetup(),
+      cfgOf: () => ({ roostHost: { url: `http://127.0.0.1:${port}` } }),
+      setCfg: () => {},
+    });
+    const r = await p.test();
+    assert.equal(r.ok, true);
+    assert.equal(r.stream, null);
   } finally {
     await new Promise((r) => srv.close(r));
   }

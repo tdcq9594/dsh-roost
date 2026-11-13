@@ -26,6 +26,23 @@ import { createServer } from 'node:http';
  * @param {boolean} [done] 保留参数以兼容既有调用点，直连下不参与判断
  * @param {object} [extra]
  */
+/**
+ * 回一句话。
+ *
+ * `done` 是 ai-chat 时代的参数：那时回话走 `payload.reply.url` 的 HTTP 回调，
+ * `done:false` 表示「这条是分段，窗口别关」，宿主据此决定要不要继续收。
+ * 直连之后回话改走 `payload.__channel.send`（同进程通道，一句话就是一条消息），
+ * **没有「窗口」这个概念了**，所以这个参数现在被忽略——保留形参只为不改所有
+ * 调用点的签名（`qq_send` 还在传 `done:false`）。
+ *
+ * 2026-11-13 审计把它写在这里：代码里传了却不起作用的参数，比删掉更危险，
+ * 后来的人会以为「分段」这件事还有人在管。
+ *
+ * @param {object} payload 入站 payload（必须带 `__channel.send`）
+ * @param {string} text
+ * @param {boolean} [_done] 已废弃，忽略
+ * @param {object} [extra] 透传给发送通道（`requestId` / `files` 等）
+ */
 export async function postReply(payload, text, done = true, extra = {}) {
   const send = payload?.__channel?.send;
   if (typeof send !== 'function') {

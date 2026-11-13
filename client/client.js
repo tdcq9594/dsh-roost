@@ -1146,6 +1146,23 @@ select.roost-input{color-scheme:dark}
             '当前宿主没有 connection 服务，面板只剩「本机 + 同源」校验——'
             + '本机上的任何程序都能调这些接口。功能不受影响，但别在共用机器上长期这样跑。'))
       }
+      if (st.pathErrorCount) {
+        /**
+         * 链路错误：消息进来了但没处理成一轮，或者轮次成了但回话发不出去。
+         *
+         * 这类问题以前完全不可见——面板全绿、`lastTurn` 也是 ok，
+         * 只有插件日志里一行 `xxx 失败（已吞）`。2026-11-13 两次
+         * 「先全绿再不回话」就是这么耗掉的半天。
+         */
+        const last = (st.pathErrors || [])[st.pathErrors.length - 1] || {}
+        const ago = last.at ? Math.max(0, Math.round((Date.now() - last.at) / 1000)) : 0
+        return h('div', { className: 'roost-banner bad' },
+          h('b', null, `链路里有 ${st.pathErrorCount} 条错误。`),
+          h('i', null,
+            `${last.stage || '未知阶段'}：${last.message || '未知错误'}`
+            + (ago ? `（${ago < 60 ? `${ago} 秒前` : `${Math.round(ago / 60)} 分钟前`}）` : '')
+            + ' —— 细节看「日志」页（带 stack 前两帧），或重启 DSH 让代码回到干净状态。'))
+      }
       if (!st.chats) {
         return h('div', { className: 'roost-banner' },
           h('b', null, '还没有会话接进来。'),
@@ -5236,10 +5253,31 @@ select.roost-input{color-scheme:dark}
         setTested(false)
       }
 
+      /**
+       * 「测试连接」。
+       *
+       * 文案分两段：**RPC 通** 与 **事件流订阅**。以前只有前者——`system.ping`
+       * 打一次就报绿，可消息走的是 `/events` / `/ws` 那条长连接，订阅没建起来
+       * 一样收不到（2026-11-13 的「向导全绿但不回话」就是这么来的）。
+       */
       const doTest = async () => {
         const r = await call('/roost/pair/test', {})
-        setTested(r?.ok !== false)
-        setMsg(r?.ok === false ? `✗ ${r.message || '不通'}` : `✓ 通，往返 ${r.ms}ms`)
+        const rpc = r?.ms !== undefined ? `RPC 往返 ${r.ms}ms` : 'RPC 通'
+        if (r?.ok === false) { setTested(false); setMsg(`✗ ${r.message || '不通'}`); return }
+        /**
+         * `stream` 三态：`{ok:true}` 已订阅 / `{ok:false}` 没订阅 / `null` 这个
+         * 框架版本没有 `/health`，自检不了。**没订阅要算失败**，不然又是假绿。
+         */
+        const s = r?.stream
+        if (s && s.ok === false) {
+          setTested(false)
+          setMsg(`△ ${rpc}，但事件流没订阅上（connections=${s.connections}）——消息进不来，检查传输方式或重启插件`)
+          return
+        }
+        setTested(true)
+        setMsg(s
+          ? `✓ ${rpc}，事件流已订阅（connections=${s.connections}）`
+          : `✓ ${rpc}；这个框架版本没有 /health，事件流是否订阅无法自检`)
       }
 
       /**
@@ -5506,7 +5544,7 @@ select.roost-input{color-scheme:dark}
       edit: '改文件', write: '写文件', read: '读文件', read_image: '读图片',
       working_directory: '看工作目录', pwsh: '跑 PowerShell', bash: '跑命令',
       load_workspace_dependencies: '加载工作区依赖',
-      memory_search: '查记忆', memory_note: '记一笔', memory_clear: '清记忆',
+      memory_search: '查记忆', memory_note: '记一笔',
       qq_send: '发言出口', qq_close: '收尾出口', qq_send_file: '发文件',
       sticker_pick: '挑表情包',
       list_mcp_resources: 'MCP 资源列表',
@@ -6055,7 +6093,7 @@ select.roost-input{color-scheme:dark}
        * 建议保留：能勾掉，但标一下。记忆、表情、技能关掉都不会让机器人失声，
        * 只是"不记得你""语气变干"，那是主人的选择。
        */
-      const SUGGESTED = ['memory_search', 'memory_note', 'sticker_pick', 'roost_skill']
+      const SUGGESTED = ['memory_search', 'memory_note', 'sticker_pick']
 
       /** 危险标记**由服务端给**（`preview.danger`）——通配语义在 `capabilities.js` 里，前端再实现一遍必然漂 */
       const danger = (preview && preview.danger) || {}

@@ -298,9 +298,20 @@ export function createPairing({ setup, cfgOf, setCfg, log = () => {}, ensureWs =
     return { ok: true, warning, restartNeeded: true };
   }
 
-  /** 真连一次（`system.ping`）。面板上「测一下」用的，不依赖自己那套长连接 */
+  /**
+   * 真连一次（`system.ping` + `/health` 的订阅数）。面板上「测一下」用的，
+   * 不依赖自己那套长连接。
+   *
+   * **为什么要多探一次 `/health`**：`system.ping` 走的是 HTTP `/rpc`，
+   * 而消息走的是 `/events`（SSE）或 `/ws` 那条长连接。两者完全独立——
+   * RPC 通、事件流没订阅，照样一条消息都收不到。2026-11-13 的
+   * 「向导里链接都正常，就是不回话」正是这个形状：测试只打了一次 ping 就报绿。
+   *
+   * `/health` 免 token（框架如此设计），返回里 `connections` 就是当前订阅者数。
+   * 老版本框架没有这个端点 → `stream = null`，如实返回「自检不了」，不假装通过。
+   */
   async function test() {
-    const url = String(selfCfg().url ?? '').trim();
+    const url = String(selfCfg().url ?? '').trim().replace(/\/+$/, '');
     const token = String(selfCfg().token ?? '').trim();
     if (!url) throw new Error('还没配对（缺地址）');
     const t0 = Date.now();
@@ -323,7 +334,23 @@ export function createPairing({ setup, cfgOf, setCfg, log = () => {}, ensureWs =
       const hint = code === 'UNAUTHORIZED' ? '（token 对不上，重新点一次「一键配对」）' : '';
       throw new Error(`${body?.error?.message ?? '调用失败'}${hint}`);
     }
-    return { ok: true, ms: Date.now() - t0, pong: body?.data?.pong ?? 0 };
+    const ms = Date.now() - t0;
+    /**
+     * 订阅自检。失败（网络抖动 / 端点不存在）**不能**把整条测连接判成失败——
+     * RPC 确实通了，那部分结论是有效的；只是「事件流」这一项给不出答案。
+     */
+    let stream = null;
+    try {
+      const hr = await fetch(`${url}/health`, { signal: AbortSignal.timeout(3000) });
+      const hj = await hr.json().catch(() => null);
+      if (hj && typeof hj === 'object' && 'connections' in hj) {
+        const n = Number(hj.connections) || 0;
+        stream = { ok: n > 0, connections: n };
+      }
+    } catch {
+      /* 老版本没有 /health，或者刚好在重启：保持 null */
+    }
+    return { ok: true, ms, pong: body?.data?.pong ?? 0, stream };
   }
 
   return { inspect, enable, disable, test };

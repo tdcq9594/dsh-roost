@@ -69,3 +69,36 @@ test('调用形状：createActionRunner 的结果要直接调用，不能取 .ru
     '找不到 outActions({...}) 的调用点，发送链可能被改坏了',
   );
 });
+
+/**
+ * 字段名：框架推来的**原始事件**里发件人是 `sender.openid`，
+ * 只有内部 payload 才拍平成 `sender.id`（roost-payload.js 造的）。
+ *
+ * 2026-11-13 审计：`deliverBatch` 的 `senderId` 写成 `sender.id` 恒为 `''`，
+ * `quota.charge()` 于是退回 `id || target`——「语音条按人算」静默变成
+ * 「按会话算」，不报错、不看代码发现不了。
+ */
+test('字段名：原始事件的发件人要用 sender.openid（payload 才是 sender.id）', () => {
+  assert.ok(
+    /senderId:\s*String\(last\?\.sender\?\.openid/.test(SRC),
+    'deliverBatch 的 senderId 必须取 last.sender.openid',
+  );
+  assert.ok(
+    !/senderId:\s*String\(last\?\.sender\?\.id/.test(SRC),
+    '原始事件上没有 sender.id，取它只会得到空串',
+  );
+});
+
+/**
+ * 链路上的错误必须走 `notePathError()`（进环形缓冲 + 带 stack），
+ * 不能退回「只打一行 warn」——那正是两条「全绿但不回话」藏了半天的地方。
+ */
+test('链路错误：入队 / 处理消息 / 回话 / 丢弃 四个阶段都接错误环', () => {
+  for (const stage of ['入队', '处理消息', '回话', '丢弃消息']) {
+    assert.match(SRC, new RegExp(`notePathError\\('${stage}'`), `${stage} 阶段没接 notePathError`);
+  }
+  assert.ok(
+    /pathErrors\.slice\(-5\)/.test(SRC) && /pathErrorCount/.test(SRC),
+    '/status 要把 pathErrors 与 pathErrorCount 暴露出去，否则面板还是看不见',
+  );
+});
