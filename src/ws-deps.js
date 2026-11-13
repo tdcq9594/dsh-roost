@@ -8,18 +8,21 @@
  *
  * ## 装到**框架**那边，不装到这边
  *
- * `ws` 是 Roost 框架的依赖（它自己的 `/ws` 双向通道也要用），装在
- * `<roost>/data/deps/onebot/node_modules/ws`。dsh-roost 与它同机直连，
- * 所以：
+ * `ws` 是 Roost 框架的依赖（它自己的 `/ws` 双向通道也要用，OneBot 兼容层
+ * 也用同一份），装在 `<roost>/data/deps/ext/node_modules/ws`。dsh-roost 与它
+ * 同机直连，所以：
  *
- *   · 查/装都走**框架自己的面板接口**（`POST /api/onebot/deps/install`），
+ *   · 查/装都走**框架自己的面板接口**（`POST /api/ext/deps/install`；
+ *     老框架只有 `/api/onebot/deps/install`，会自动回退），
  *     装完它还会自动重配所有 host，框架的 `/ws` 立刻可用；
+ *   · 目录先看 `data/deps/ext`（1.0.15 起），没有再退回
+ *     `data/deps/onebot`（老的 OneBot 专用目录，升级时没搬过来的机器）；
  *   · 加载时直接 require 那一份，**不在插件侧再存一份**——两份各自升级会
  *     出现「版本不一致、行为对不上」的怪状态。
  *
  * 这也是「一键直连时顺带装」的实现：顺带装的是框架的依赖。
  *
- * ## 三条硬原则（与框架侧 `onebot/deps.js` 一致）
+ * ## 三条硬原则（与框架侧 `ext-deps.js` 一致）
  *
  *   1. **包名白名单**：只认 `ws`。面板传来的任意包名等于把弱口令升级成 RCE。
  *   2. **不自动装、不自动升级**：只在用户点「一键直连 / 一键安装」时动手。
@@ -40,9 +43,25 @@ export const WS_RANGE = '^8.18.0';
  * @param {(m:string)=>void} [o.log]
  */
 export function createWsDeps({ log = () => {} } = {}) {
-  /** 框架依赖目录：`<roost>/data/deps/onebot`（与框架 `depsDir()` 一致） */
-  const depsRoot = (roostDir) => join(String(roostDir || '').trim(), 'data', 'deps', 'onebot');
-  const pkgPath = (roostDir) => join(depsRoot(roostDir), 'node_modules', WS_PACKAGE, 'package.json');
+  /**
+   * 框架依赖目录。**两个候选**：
+   *   · `data/deps/ext`    —— 1.0.15 起，宿主协议与 OneBot 共用；
+   *   · `data/deps/onebot` —— 旧目录，只在老框架 / 还没迁移的机器上存在。
+   * 先看新目录，没有再回退旧的；两边都在时以新目录为准。
+   */
+  const depsRoots = (roostDir) => {
+    const base = join(String(roostDir || '').trim(), 'data', 'deps');
+    return [join(base, 'ext'), join(base, 'onebot')];
+  };
+  const pickRoot = (roostDir) => {
+    const [ext, legacy] = depsRoots(roostDir);
+    if (existsSync(ext)) return ext;
+    if (existsSync(legacy)) return legacy;
+    return ext;
+  };
+  const depsRoot = (roostDir) => pickRoot(roostDir);
+  const pkgPathIn = (root) => join(root, 'node_modules', WS_PACKAGE, 'package.json');
+  const pkgPath = (roostDir) => pkgPathIn(depsRoot(roostDir));
 
   /**
    * 框架那份装没装。**不抛错**——面板一打开就调它，没装也要如实回。
@@ -113,18 +132,29 @@ export function createWsDeps({ log = () => {} } = {}) {
       };
     }
 
+    const body = JSON.stringify({ packages: [WS_PACKAGE] });
     let r;
     try {
-      r = await api('/api/onebot/deps/install', {
-        method: 'POST',
-        body: JSON.stringify({ packages: [WS_PACKAGE] }),
-      });
+      r = await api('/api/ext/deps/install', { method: 'POST', body });
     } catch (e) {
-      return {
-        ok: false,
-        mode: 'failed',
-        message: `给框架装 ws 失败：${e?.message ?? e}（不影响使用，事件会走 SSE）`,
-      };
+      /**
+       * 老框架没有 `/api/ext/deps/*`（1.0.14 及之前叫 `/api/onebot/deps/*`）。
+       * 只在「404 / 没有这个地址」时回退，别的错误（400 白名单、装失败）
+       * 直接报出来，避免把真原因盖掉。
+       */
+      const msg = String(e?.message ?? e);
+      if (!/404|not_found|没有这个地址/i.test(msg)) {
+        return { ok: false, mode: 'failed', message: `给框架装 ws 失败：${msg}（不影响使用，事件会走 SSE）` };
+      }
+      try {
+        r = await api('/api/onebot/deps/install', { method: 'POST', body });
+      } catch (e2) {
+        return {
+          ok: false,
+          mode: 'failed',
+          message: `给框架装 ws 失败：${e2?.message ?? e2}（不影响使用，事件会走 SSE）`,
+        };
+      }
     }
 
     /**

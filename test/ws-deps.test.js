@@ -3,7 +3,7 @@
  *
  * 三个必须钉住的性质：
  *   1. 框架已有 → 直接复用，不去调安装接口（不重复下载）
- *   2. 框架没有 → 调框架的 `/api/onebot/deps/install`，且只传 ws
+ *   2. 框架没有 → 调框架的 `/api/ext/deps/install`（老框架回退旧路径），且只传 ws
  *   3. 装失败 / 目录没有 ws → 如实报失败，绝不谎报成功
  */
 
@@ -74,7 +74,7 @@ test('安装：框架没有就调框架接口，且只传 ws', async () => {
     roostDir: dir,
   });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0][0], '/api/onebot/deps/install');
+  assert.equal(calls[0][0], '/api/ext/deps/install');
   assert.deepEqual(JSON.parse(calls[0][1].body).packages, ['ws'], '白名单只放 ws');
   assert.equal(r.ok, true);
   assert.equal(r.mode, 'installed');
@@ -115,4 +115,28 @@ test('加载：框架没装返回 null（调用方走 SSE），装了能拿到 W
   assert.equal(d.load(fakeRoost()), null);
   const mod = d.load(fakeRoost({ wsVersion: '8.18.0' }));
   assert.equal(typeof mod?.WebSocket, 'function');
+});
+
+/**
+ * 老框架（1.0.14 及之前）只有 `/api/onebot/deps/install`。
+ * 新客户端先打新路径，404 再回退——不能因为改了个名字就让还在用老框架的人装不上。
+ */
+test('安装：新接口 404 时回退旧路径（老框架仍能装）', async () => {
+  const calls = [];
+  const dir = fakeRoost();
+  const d = createWsDeps({});
+  const r = await d.installToRoost({
+    api: async (p) => {
+      calls.push(p);
+      if (p === '/api/ext/deps/install') throw new Error('HTTP 404 not_found 没有这个地址');
+      const ws = join(dir, 'data', 'deps', 'onebot', 'node_modules', WS_PACKAGE);
+      mkdirSync(ws, { recursive: true });
+      writeFileSync(join(ws, 'package.json'), JSON.stringify({ version: '8.18.0' }), 'utf8');
+      return { ok: true };
+    },
+    roostDir: dir,
+  });
+  assert.deepEqual(calls, ['/api/ext/deps/install', '/api/onebot/deps/install']);
+  assert.equal(r.ok, true);
+  assert.equal(r.mode, 'installed');
 });
