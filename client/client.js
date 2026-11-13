@@ -10068,6 +10068,10 @@ select.roost-input{color-scheme:dark}
       const [fail, setFail] = useState(null)
       /** 「成功但版本不对」也要留一块持久提示：降级是静默的，toast 一闪就没 */
       const [notice, setNotice] = useState(null)
+      /** 5.8 测试版通道：改完立刻重查一次，否则要等 6 小时缓存 */
+      const [channel, setChannel] = useState(() => {
+        try { return localStorage.getItem('roost.update.channel') === 'next' ? 'next' : 'latest' } catch { return 'latest' }
+      })
 
       /**
        * 读检查结果。
@@ -10075,8 +10079,10 @@ select.roost-input{color-scheme:dark}
        * 默认只读**后台快照**（插件启动 10 秒后查一次、之后 6 小时一次），
        * 所以进设置页不会卡在 registry 的 8 秒超时上；`force` 才是真的重查。
        */
-      const loadCheck = async (force) => {
-        const r = await get('/update/check' + (force ? '?force=1' : ''))
+      const loadCheck = async (force, ch = channel) => {
+        /** 5.8：带上通道，后端据此比 latest 还是 next；force 时一并重查 */
+        const qs = `?channel=${encodeURIComponent(ch)}` + (force ? '&force=1' : '')
+        const r = await get('/update/check' + qs)
         setInfo(r && r.ok !== false ? r : { ok: false, own: r?.own || '', error: r?.error || '查不到', canSelf: false })
         setAt(new Date().toLocaleTimeString())
       }
@@ -10086,7 +10092,7 @@ select.roost-input{color-scheme:dark}
           if (r.ok !== false) setRepo(r)
         } catch {}
       }
-      useEffect(() => { loadCheck(); loadRepo() }, [])
+      useEffect(() => { loadCheck(false, channel); loadRepo() }, [])
 
       const doSelf = async (fresh) => {
         setBusy(fresh ? 'fresh' : 'self')
@@ -10135,7 +10141,26 @@ select.roost-input{color-scheme:dark}
 
       return h(Sec, {
         n: '01', title: '更新',
-        right: h('button', { type: 'button', className: 'roost-btn', onClick: () => { loadCheck(true); loadRepo() } }, '重新检查'),
+        right: h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+          /**
+           * 5.8 测试版通道：稳定版 / 尝鲜版（npm dist-tag `next`）。
+           * 切换只改「比哪个版本」，不改安装方式；存 localStorage 免得每次进来都要选。
+           */
+          h('select', {
+            className: 'roost-input', title: '更新通道：稳定版（latest）/ 测试版（next）',
+            style: { width: 'auto', padding: '2px 6px', fontSize: 11.5 },
+            value: channel,
+            onChange: (e) => {
+              const v = e.target.value === 'next' ? 'next' : 'latest'
+              setChannel(v)
+              try { localStorage.setItem('roost.update.channel', v) } catch {}
+              loadCheck(true, v)
+            },
+          },
+            h('option', { value: 'latest' }, '稳定版'),
+            h('option', { value: 'next' }, '测试版 next')),
+          h('button', { type: 'button', className: 'roost-btn', onClick: () => { loadCheck(true, channel); loadRepo() } }, '重新检查'),
+        ),
       },
         /* ---- 本体 ---- */
         h('div', { className: 'roost-item' },

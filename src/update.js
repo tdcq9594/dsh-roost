@@ -394,7 +394,20 @@ export function installKind(profileDir) {
  * @param {Function} [opts.fetchImpl]
  * @param {(m:string)=>void} [opts.log]
  */
-export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThis.fetch, log = () => {} }) {
+/**
+ * 5.8 按通道挑版本（纯函数，导出给测试）。
+ *
+ * `next` 没发布时回落 `latest`——否则开了测试通道却永远显示「已是最新」，
+ * 用户会以为通道坏了。
+ */
+export function pickChannel({ latest = '', next = '', publishedAt = 0, nextPublishedAt = 0, channel = 'latest' } = {}) {
+  if (channel === 'next' && next) {
+    return { version: next, publishedAt: nextPublishedAt || publishedAt, channel: 'next' };
+  }
+  return { version: latest, publishedAt, channel: 'latest' };
+}
+
+export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThis.fetch, log = () => {}, channelOf = null }) {
   const own = (() => {
     try {
       return JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')).version || '0.0.0';
@@ -504,7 +517,10 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     }
     const url = `${reg}/${PKG}`;
     let latest = '';
+    /** 5.8：尝鲜标签；没发布时是空串，`check()` 会回落 latest */
+    let next = '';
     let publishedAt = 0;
+    let nextPublishedAt = 0;
     let err = '';
     try {
       /**
@@ -535,15 +551,22 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
         j = await getPackument('application/vnd.npm.install-v1+json', 4000);
       }
       latest = String(j?.['dist-tags']?.latest ?? '');
+      /**
+       * 5.8 测试版通道：同一个包可以同时挂 `latest`（稳定）和 `next`（尝鲜）。
+       * 两个都读，由 `channelOf()` 决定这次比哪个。
+       */
+      next = String(j?.['dist-tags']?.next ?? '');
       const t = j?.time?.[latest];
       publishedAt = t ? Date.parse(t) || 0 : 0;
+      const tn = next ? j?.time?.[next] : '';
+      nextPublishedAt = tn ? Date.parse(tn) || 0 : 0;
     } catch (e) {
       // 更新是低频操作，失败就如实说，不闷头重试——重试只会让人多等十几秒
       err = e.message;
       log(`查最新版失败（${url}）：${e.message}`);
     }
 
-    const value = { latest, publishedAt, error: err };
+    const value = { latest, next, publishedAt, nextPublishedAt, error: err };
     // 失败不写缓存：下次进来（或点「重新检查」）应该真的重试一次
     if (latest) remoteCache = { at: Date.now(), registry: reg, value };
     return { ...value, registry: reg, cached: false };
@@ -557,11 +580,21 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
    * （用户刚重启完 DSH、刚换了安装方式）。缓存住会让横幅一直挂着一颗
    * 点不动的按钮——那比不提示更让人困惑。
    */
-  async function check({ force = false } = {}) {
+  async function check({ force = false, channel = '' } = {}) {
     const r = await remote({ force });
     const reg = r.registry;
-    const latest = r.latest;
-    const publishedAt = r.publishedAt;
+    /**
+     * 5.8：`latest` 看稳定版，`next` 看尝鲜版。next 没发布时回落 latest，
+     * 免得开了测试通道却永远显示「已是最新」。
+     */
+    const ch = (channel || (() => { try { return channelOf?.() || 'latest'; } catch { return 'latest'; } })()) === 'next' ? 'next' : 'latest';
+    const pick = pickChannel({
+      latest: r.latest, next: r.next,
+      publishedAt: r.publishedAt, nextPublishedAt: r.nextPublishedAt,
+      channel: ch,
+    });
+    const latest = pick.version;
+    const publishedAt = pick.publishedAt;
     const err = r.error;
 
     const age = publishedAt ? Date.now() - publishedAt : NaN;

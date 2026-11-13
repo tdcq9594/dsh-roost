@@ -909,6 +909,11 @@ export const DEFAULTS = {
    */
   update: {
     registry: '',
+    /**
+     * 5.8 测试版通道：`latest` = 稳定版，`next` = 尝鲜版（npm dist-tag）。
+     * 切通道只改比较目标，不改安装方式；`next` 没发布时自动回落 `latest`。
+     */
+    channel: 'latest',
   },
 };
 

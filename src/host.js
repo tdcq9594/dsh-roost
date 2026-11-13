@@ -1087,6 +1087,8 @@ export function apply(ctx) {
     ctx,
     registry: cfg.update?.registry,
     log: (m) => log.warn(m),
+    /** 5.8 测试版通道：check 时按这个选 latest / next */
+    channelOf: () => cfg.update?.channel || 'latest',
   });
 
   /**
@@ -8657,8 +8659,9 @@ export function apply(ctx) {
        */
       route('/update/check', async (req, res) => {
         const force = String(req.url || '').includes('force=1');
+        const ch = new URL(req.url || '/', 'http://localhost').searchParams.get('channel') || '';
         try {
-          if (force) return send(res, 200, await updater.check({ force: true }));
+          if (force) return send(res, 200, await updater.check({ force: true, channel: ch }));
           const snap = updater.snapshot();
           if (snap) return send(res, 200, snap);
           return send(res, 200, { ok: true, pending: true, own: updater.own() });
