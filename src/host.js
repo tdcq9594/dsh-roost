@@ -426,6 +426,24 @@ export function apply(ctx) {
       if (r.warnings?.length) log.info(`能力页：${r.warnings.join('；')}`);
       if (r.removed?.length) log.info(`能力页：配置里有 ${r.removed.length} 个工具已经不在了（${r.removed.slice(0, 5).join('、')}）`);
 
+      /**
+       * **一个配置里的名字都没落到池子里**：算不出来，别硬收。
+       *
+       * 池子（`tools.schemas()`）是「这一轮真挂上去的工具」，而插件是在会话绑定时
+       * 才注册 memory / qq / sticker 那几组（`registerQqTools` 等）。刚重启那几秒
+       * 如果先来了一轮对话，池子里可能只有 DSH 自带工具——2026-11-13 09:26:40
+       * 实机就报「配置里有 4 个工具已经不在了（memory_search、memory_note、
+       * qq_send、sticker_pick）」，紧接着表情工具那行才打印「已挂上」。
+       *
+       * 这时如果照常算下去：`finalAllow = allow ∩ pool = 空` → `deny = pool 全部`
+       * ——等于因为一次注册时序把这一轮的工具**全砍掉**。所以按「算不出来」返回
+       * `null`，调用方回退旧逻辑（和 `capabilities.json` 不存在时同一条安全阀）。
+       */
+      if (r.removed?.length && !r.allow.length && pool.length) {
+        log.info('能力页：配置里的工具一个都没在池子里（多半是插件还没注册完），这一轮按旧规则走');
+        return null;
+      }
+
       // 额外要收的（主动搭话的 qq 工具）叠加在策略之上，且只收池子里真有的
       const denySet = new Set(r.deny);
       const poolSet = new Set(pool);
@@ -2185,7 +2203,14 @@ export function apply(ctx) {
      * Markdown / @ 也在这里统一恢复，主回复、`qq_send` 分段、`/v1/message`
      * 三条路径不会再各写一份。
      */
-    const send = async (text, extra) => outActions.run({
+    /**
+     * `createActionRunner()` 返回的是**函数本身**（`return async function run`），
+     * 不是 `{ run }` 对象。以前这里写成 `outActions.run(...)`，于是
+     * 外接协议这条路的每一句回话都炸 `outActions.run is not a function`
+     * （2026-11-13 09:26 实机），而 `qq_send` / `/v1/message` 那两条路正常——
+     * 因为它们用的是别的调用点。
+     */
+    const send = async (text, extra) => outActions({
       text: String(text ?? ''),
       extra: extra ?? {},
       scene: chatKind,

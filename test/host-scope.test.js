@@ -50,3 +50,22 @@ test('作用域：inboundShell / turnQueue 也在 apply 作用域（不随 start
     `turnQueue 在第 ${queue + 1} 行、startServer 在第 ${startServer + 1} 行：同上`,
   );
 });
+
+/**
+ * 调用形状：`createActionRunner()` 返回的是**函数**，不是 `{ run }`。
+ *
+ * 2026-11-13 09:26 实机：外接协议那条路的每一句回话都炸
+ * `outActions.run is not a function`（发送链第一行就没过去），而 `qq_send` /
+ * `/v1/message` 两条路正常 —— 它们用的是别的调用点，所以只有「直连回话」全挂。
+ * 这类错 `node --check` 看不出来，静态钉一下比等着线上复现便宜。
+ */
+test('调用形状：createActionRunner 的结果要直接调用，不能取 .run', () => {
+  /** 注释里会写 `outActions.run(...)` 举反例，只看代码行 */
+  const code = lines.filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l));
+  const bad = code.findIndex((l) => /outActions\.run\s*\(/.test(l));
+  assert.equal(bad, -1, '写成了 outActions.run(...)，应直接 outActions(...)');
+  assert.ok(
+    code.some((l) => /outActions\(\{/.test(l)),
+    '找不到 outActions({...}) 的调用点，发送链可能被改坏了',
+  );
+});

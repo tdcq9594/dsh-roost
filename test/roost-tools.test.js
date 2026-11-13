@@ -111,3 +111,39 @@ test('注册：四个工具真的挂到 agent，off 能整组撤销；没有 reg
   assert.equal(no.ok, false);
   assert.match(no.reason, /没有 register/);
 });
+
+test('工具定义：每个都必须声明 output，render 返回内容块数组', () => {
+  const { map } = defs();
+  for (const [name, d] of map) {
+    assert.ok(d.output, `${name} 没有 output —— DSH 会直接拒注册`);
+    assert.equal(d.output.schema?.type, 'object', `${name}.output.schema 缺失`);
+    assert.equal(typeof d.output.render, 'function', `${name}.output.render 缺失`);
+    const blocks = d.output.render({}, { ok: true, n: 1 });
+    assert.ok(Array.isArray(blocks), `${name}.output.render 必须返回数组`);
+    assert.equal(blocks[0].type, 'text', `${name}.output.render 要给内容块，不能给字符串`);
+    assert.equal(blocks[0].text, '{"ok":true,"n":1}');
+  }
+});
+
+/**
+ * DSH 的真实行为：`register()` 对缺 `output` 的定义**抛错**。
+ * 2026-11-13 实机就是这么被挡的（`tool "roost_tools" must declare output
+ * { schema, render, presentationMeta? }`），四个工具一个都没挂上，
+ * 面板只留一行 warn。假 registry 不加这条校验的话，测试全绿也发现不了。
+ */
+test('注册：严格 registry（缺 output 就抛）下四个工具仍能全挂上', async () => {
+  const registered = [];
+  const registry = {
+    register(def) {
+      if (!def?.output?.schema || typeof def.output.render !== 'function') {
+        throw new Error(`tool "${def?.name}" must declare output { schema, render, presentationMeta? }`);
+      }
+      registered.push(def);
+      return () => {};
+    },
+  };
+  const r = await registerRoostTools({ agent: { ctx: { tools: registry } }, caps: fakeCaps() });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(registered.length, 4);
+  assert.deepEqual(r.names, ['roost_tools', 'roost_tool', 'roost_status', 'roost_delivery']);
+});

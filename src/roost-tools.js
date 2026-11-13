@@ -22,6 +22,22 @@ import { READONLY_METHODS, PRIVILEGED_METHODS } from './roost-capabilities.js';
 const PRIVILEGED = new Set(PRIVILEGED_METHODS);
 const BUCKET_OK = new Set(['owner', 'admin']);
 
+/**
+ * 每个工具都必须声明 `output`，缺了 DSH 直接拒绝注册。
+ *
+ * 2026-11-13 实机：`tool "roost_tools" must declare output { schema, render,
+ * presentationMeta? }` —— 四个 roost 工具全被挡在外面，框架能力整组没挂上，
+ * 面板里只留一行 warn。同仓 `tools.js` / `qq-tools.js` / `sticker-tools.js`
+ * 的工具早就带了这个字段，只有这里漏了，所以「别的工具能用、就这几个不能用」。
+ *
+ * `render` 必须返回**内容块数组**，不能返回字符串：DSH 会对 content 调
+ * `.some()`，字符串没有这个方法（`content.some is not a function`，0.9.x 踩过）。
+ */
+const OUTPUT = {
+  schema: { type: 'object', additionalProperties: true },
+  render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+};
+
 /** 纯函数，方便单测：不碰 DSH、不碰网络 */
 export function buildRoostToolDefs({ caps, callerOf = () => ({}) } = {}) {
   const caller = () => callerOf?.() || {};
@@ -53,6 +69,7 @@ export function buildRoostToolDefs({ caps, callerOf = () => ({}) } = {}) {
         description: '可选：按名字片段筛选，例如 "delivery" 或 "tool."',
       },
     },
+    output: OUTPUT,
     async execute({ filter = '' } = {}) {
       const { builtin, plugins } = summaryOf();
       const f = String(filter ?? '').trim().toLowerCase();
@@ -85,6 +102,7 @@ export function buildRoostToolDefs({ caps, callerOf = () => ({}) } = {}) {
         description: '参数对象；不需要参数就传空对象',
       },
     },
+    output: OUTPUT,
     async execute({ name = '', args = {} } = {}) {
       const key = String(name ?? '').trim();
       if (!key) return { ok: false, message: '要给能力名 name' };
@@ -106,6 +124,7 @@ export function buildRoostToolDefs({ caps, callerOf = () => ({}) } = {}) {
       '看机器人与框架外接协议现在的状态：在不在线、协议连接状态、当前事件通道、'
       + '暂停闸有没有开。排查「怎么没反应」时先调这个，比猜快。',
     parameters: {},
+    output: OUTPUT,
     async execute() {
       const out = {};
       for (const m of ['runtime.status', 'gate.get']) {
@@ -127,6 +146,7 @@ export function buildRoostToolDefs({ caps, callerOf = () => ({}) } = {}) {
         description: '看几条，默认 20',
       },
     },
+    output: OUTPUT,
     async execute({ limit = 20 } = {}) {
       try {
         const data = await caps.call('delivery.recent', { limit: Math.max(1, Math.min(200, Number(limit) || 20)) });
