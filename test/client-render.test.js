@@ -94,7 +94,7 @@ globalThis.localStorage = {
 }
 
 /* 与 client.js 的 TABS 同序：2026-11-12 细分后的 15 个可见页签 */
-const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'chats', 'groupadmin', 'logs', 'update', 'config', 'about']
+const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'chats', 'logs', 'update', 'config', 'about']
 /* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats 已提升为正式页） */
 const HIDDEN_TABS = ['context', 'setup', 'account']
 
@@ -106,22 +106,25 @@ const HIDDEN_TABS = ['context', 'setup', 'account']
  * 自动失效，如果不重写就会变成「测试通过但导航其实坏了」。
  *
  * **2026-11-13 结构改造**：表达从「能力」里独立成组（语音 / 表情包两页）、
- * 新增「群聊」组（群管）、系统组加「关于」。「身份」改名「会话」。
+ * 新增「群聊」组（群聊策略 + 群管两页，群管从系统组搬来）、系统组加「关于」。
+ * 「身份」改名「会话」。
  * 这里是特意抄的死结构：页签改动必须同步改这里，改不动就说明导航真坏了。
  */
 const NAV = {
   home: { label: '概览', tabs: ['overview'] },
   self: { label: '人设', tabs: ['her', 'mood', 'awake', 'memory'] },
   express: { label: '表达', tabs: ['express', 'stickers'] },
+  group: { label: '群聊', tabs: ['groupchat', 'groupadmin'] },
   power: { label: '能力', tabs: ['caps', 'model'] },
   mods: { label: '扩展', tabs: ['ext', 'ext-market', 'ext-api'] },
-  system: { label: '系统', tabs: ['chats', 'groupadmin', 'logs', 'update', 'config', 'about'] },
+  system: { label: '系统', tabs: ['chats', 'logs', 'update', 'config', 'about'] },
 }
 const TAB_LABEL = {
   overview: '概览', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆',
   caps: '权限', express: '语音', stickers: '表情包', model: '模型',
   ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
-  chats: '会话', groupadmin: '群管', logs: '排障', update: '更新', config: '设置', about: '关于',
+  groupchat: '群聊策略', groupadmin: '群管',
+  chats: '会话', logs: '排障', update: '更新', config: '设置', about: '关于',
 }
 const HIDDEN_LABEL = { context: '上下文', setup: '接入', account: '账号迁移' }
 
@@ -1112,6 +1115,59 @@ test('拆分后每页分节编号都从 01 起、连续', () => {
   assert.deepEqual(ns(expand(mod.MoodTab({
     mood: null, reloadMood: () => {}, toast: () => {}, quick: async () => ({}),
   }), rt)), ['01', '02'], '心情页编号应 01–02 连续')
+
+  /* 群聊策略页：五张卡，01 起连续 */
+  rt.reset()
+  assert.deepEqual(ns(expand(mod.GroupChatTab({
+    config: { roostHost: { decide: { mode: 'ai' }, merge: {} }, chat: {} },
+    saveCfg: () => {}, toast: () => {}, setTab: () => {},
+  }), rt)), ['01', '02', '03', '04', '05'], '群聊策略页编号应 01–05 连续')
+})
+
+test('群聊策略页：露的是已有配置键，配色走本项目令牌', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const cfg = {
+    roostHost: {
+      decide: {
+        mode: 'window', windowMin: 5, engagedMaxTurns: 6, cooldownSec: 20,
+        maxRepliesPerMin: 3, maxPerHour: 0, burstMax: 0,
+        quietStartHour: 22, quietEndHour: 7, shortAskMustReply: false,
+        silent: false, ignoreWords: ['/'],
+      },
+      merge: { waitSec: 1.5, maxSec: 6 },
+    },
+    chat: { turnTimeoutSec: 150 },
+  }
+  const tree = expand(mod.GroupChatTab({
+    config: cfg, saveCfg: () => {}, toast: () => {}, setTab: () => {},
+  }), rt)
+  const txt = textOf(tree)
+  for (const must of [
+    '什么时候接话', '连发合并', '安全刹车', '静默时段与忽略词', '一轮与队列',
+    '接话方式', '最多等多久', '两分钟内最多接几次', '去权限页', '去排障页',
+  ]) {
+    assert.ok(txt.includes(must), `群聊策略页缺少「${must}」`)
+  }
+  /* 形态借 aurabot 的 Card/Row，但类名和配色不能把它的 ab-* 蓝带进来 */
+  const cls = []
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.className) cls.push(String(n.props.className))
+    walk(n.props?.children)
+  })(tree)
+  const classTxt = cls.join(' ')
+  assert.ok(classTxt.includes('roost-g-card'), '卡片要走本项目样式类')
+  assert.ok(!classTxt.includes('ab-card') && !classTxt.includes('ab-sea'), '不该残留 aurabot 的配色/类名')
+
+  /* 配置没到时只给占位，绝不能在空对象上渲染控件（点了会把 roostHost 冲掉） */
+  rt.reset()
+  const empty = textOf(expand(mod.GroupChatTab({
+    config: null, saveCfg: () => {}, toast: () => {}, setTab: () => {},
+  }), rt))
+  assert.ok(empty.includes('读取配置'), '配置未到要有占位')
+  assert.ok(!empty.includes('接话方式'), '配置未到不该渲染可点的控件')
 })
 
 test('后端缺口已接入：市场 / 模型 / 召回 / 心情历史 / 危险操作', () => {

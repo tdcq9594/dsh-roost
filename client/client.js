@@ -969,6 +969,44 @@ select.roost-input{color-scheme:dark}
   .roost-stat{padding:6px}
   .roost-stat b{font-size:20px}
 }
+/* ── 群聊页卡片（2026-11-13）───────────────────────────────────
+ * 形态借 aurabot beta 的 Group 页：一张卡 = 一句说明 + 若干行，
+ * 每行左边「标题 + 小字解释」、右边控件，总开关挂在卡片右上。
+ *
+ * 配色不跟它的海蓝（--ab-sea #3d7fd6 / --ab-foam），这里全部走本项目
+ * 的主题令牌；唯一的 --g-tint 是 accent 的淡混合，深色主题会自动跟着变，
+ * 不会在某天主题切换后变成一块突兀的蓝。
+ */
+.roost-g-card{
+  --g-tint:color-mix(in srgb, var(--accent) 9%, transparent);
+  border:1px solid var(--line);border-left:2px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+  border-radius:12px;background:var(--surface);padding:2px 14px 14px;
+}
+.roost-g-desc{margin:0 0 10px;font-size:12px;line-height:1.6;
+  color:var(--dsw-alias-label-secondary, inherit);opacity:.92}
+.roost-g-row{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--line-soft)}
+.roost-g-desc + .roost-g-row{border-top:0}
+.roost-g-label{flex:1 1 45%;min-width:0}
+.roost-g-label b{display:block;font-size:12.5px;font-weight:600}
+.roost-g-label small{display:block;font-size:11.5px;line-height:1.5;margin-top:2px;
+  color:var(--dsw-alias-label-secondary, inherit);opacity:.85}
+.roost-g-ctl{flex:0 0 auto;display:flex;align-items:center;gap:6px;max-width:55%;flex-wrap:wrap;justify-content:flex-end}
+.roost-g-num{width:76px;box-sizing:border-box;padding:5px 8px;border:1px solid var(--line);border-radius:8px;
+  background:var(--field);color:inherit;font:inherit;font-size:12.5px;text-align:right}
+.roost-g-num:focus,.roost-g-sel:focus,.roost-g-area:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+.roost-g-sel{padding:5px 8px;border:1px solid var(--line);border-radius:8px;
+  background:var(--field);color:inherit;font:inherit;font-size:12.5px;max-width:100%}
+.roost-g-sel option{background:#1c1d22;color:#e9eaee}
+.roost-g-unit{font-size:11.5px;color:var(--dsw-alias-label-secondary, inherit);opacity:.85}
+.roost-g-area{width:100%;min-height:58px;padding:7px 9px;box-sizing:border-box;
+  border:1px solid var(--line);border-radius:8px;background:var(--field);
+  color:inherit;font:inherit;font-size:12.5px;resize:vertical}
+.roost-g-note{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--g-tint);
+  font-size:11.5px;line-height:1.55;color:var(--dsw-alias-label-secondary, inherit)}
+@container (max-width:520px){
+  .roost-g-row{flex-direction:column;align-items:stretch;gap:6px}
+  .roost-g-ctl{max-width:100%;justify-content:flex-start}
+}
 @media (prefers-reduced-motion:reduce){
   .roost-sec{animation:none}
   .roost-stat,.roost-btn,.roost-primary,.roost-tab,.roost-sec-fold,.roost-input{transition:none}
@@ -6596,6 +6634,194 @@ select.roost-input{color-scheme:dark}
      *
      * 群只能从「它待过的会话」里选：官方没有群列表接口，群是消息事件发现的。
      */
+    /* ── 群聊策略页的卡片骨架 ─────────────────────────────────────
+     *
+     * 形态借 aurabot beta 的 `Group` 页（client.js:2111）：一张卡 = 一句
+     * desc + 若干 Row，Row 左边「标题 + 小字解释」、右边控件，总开关挂卡片
+     * 右上。这里套我们的 `Sec` 外壳，编号、折叠、进入动画和别的页一致；
+     * 配色走 --accent / --surface / --line，不用它的海蓝 --ab-sea。
+     *
+     * 只露已经有、面板却看不见的配置键（config.js:574 merge / :594 decide
+     * / :156 chat），一个算法都不新增。真缺的插话概率、按群覆写留在 2.2b。
+     */
+    function GCard({ n, title, desc, right, children }) {
+      return h(Sec, { n, title, right },
+        h('div', { className: 'roost-g-card' },
+          desc ? h('p', { className: 'roost-g-desc' }, desc) : null,
+          children,
+        ))
+    }
+
+    function GRow({ label, hint, children }) {
+      return h('div', { className: 'roost-g-row' },
+        h('div', { className: 'roost-g-label' },
+          h('b', null, label),
+          hint ? h('small', null, hint) : null),
+        h('div', { className: 'roost-g-ctl' }, children))
+    }
+
+    /** 失焦 / 回车才写盘：每敲一个字符都保存，会把配置写成半截数字 */
+    function GNum({ value, onSave, min = 0, max = 99999, step = 1, unit, disabled }) {
+      return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+        h('input', {
+          type: 'number', className: 'roost-g-num',
+          min: String(min), max: String(max), step: String(step),
+          /** 后端回读后同步显示；否则保存成功界面还停在上一个值 */
+          key: 'v:' + String(value),
+          defaultValue: String(value ?? ''),
+          disabled: !!disabled,
+          onKeyDown: (e) => { if (e.key === 'Enter') e.target.blur() },
+          onBlur: (e) => {
+            const raw = String(e.target.value ?? '').trim()
+            const n = raw === '' ? min : Number(raw)
+            if (!Number.isFinite(n)) { e.target.value = String(value ?? ''); return }
+            const v = Math.min(max, Math.max(min, n))
+            if (v === Number(value)) { e.target.value = String(v); return }
+            onSave(v)
+          },
+        }),
+        unit ? h('span', { className: 'roost-g-unit' }, unit) : null)
+    }
+
+    const DECIDE_MODES = [
+      ['ai', '每条都看（默认）'],
+      ['mention', '只在被 @ 时回'],
+      ['window', '@ 之后接着聊一阵'],
+      ['engaged', '聊开了就接下去'],
+    ]
+
+    function GroupChatTab({ config, saveCfg, toast, setTab }) {
+      const decide = config?.roostHost?.decide || {}
+      const merge = config?.roostHost?.merge || {}
+      const chat = config?.chat || {}
+      const [busy, setBusy] = useState(false)
+      /** null = 跟随后端值；编辑中才有内容，失焦提交后清空 */
+      const [wordsDraft, setWordsDraft] = useState(null)
+
+      /**
+       * 配置没到不渲染控件：在空对象上点保存，会把 roostHost 的 token /
+       * url 一起冲掉（深合并只保证「没提交的键保留」，不保证提交的是全量）。
+       */
+      if (!config) return h('div', { className: 'roost-note' }, '读取配置…')
+
+      const put = async (patch) => {
+        if (!saveCfg || busy) return
+        setBusy(true)
+        try {
+          const r = await saveCfg(patch)
+          toast(r?.ok === false ? (r.message || '没存上') : '已保存，下一轮生效')
+        } finally { setBusy(false) }
+      }
+      const setDecide = (k, v) => put({ roostHost: { decide: { [k]: v } } })
+      const setMerge = (k, v) => put({ roostHost: { merge: { [k]: v } } })
+      const setChat = (k, v) => put({ chat: { [k]: v } })
+      const words = wordsDraft !== null
+        ? wordsDraft
+        : (Array.isArray(decide.ignoreWords) ? decide.ignoreWords.join('\n') : '/')
+
+      return h('div', null,
+        h(GCard, {
+          n: '01', title: '什么时候接话',
+          desc: '只对群里没被 @ 的消息生效。私聊、被 @、命令永远直接接——这些是明确在叫她，不该被策略拦。',
+        },
+          h(GRow, { label: '接话方式', hint: '选了之后她每条群消息都会先过这一道，再去问模型' },
+            h('select', {
+              className: 'roost-g-sel', value: decide.mode || 'ai', disabled: busy,
+              onChange: (e) => setDecide('mode', e.target.value),
+            }, DECIDE_MODES.map(([v, t]) => h('option', { key: v, value: v }, t)))),
+          h(GRow, { label: '@ 之后接着聊多久', hint: '只在「@ 之后接着聊一阵」模式下有用；窗口只由真 @ 打开，命令不算' },
+            h(GNum, { value: decide.windowMin ?? 3, min: 1, max: 60, unit: '分钟', disabled: busy,
+              onSave: (v) => setDecide('windowMin', v) })),
+          h(GRow, { label: '连聊最多接几次', hint: '聊开了之后，没人接话时最多再连着接几次就先停；默认 6' },
+            h(GNum, { value: decide.engagedMaxTurns ?? 6, min: 0, max: 30, unit: '次', disabled: busy,
+              onSave: (v) => setDecide('engagedMaxTurns', v) })),
+        ),
+
+        h(GCard, {
+          n: '02', title: '连发合并',
+          desc: '人常常一口气发好几句。等她说完再一起回，而不是一句一回，省调用也少刷屏。私聊、被 @、命令不等待。',
+        },
+          h(GRow, { label: '对方停顿多久算说完', hint: '从最后一条消息算起；太短会把一句话劈成两半' },
+            h(GNum, { value: merge.waitSec ?? 1.5, min: 0.5, max: 10, step: 0.5, unit: '秒', disabled: busy,
+              onSave: (v) => setMerge('waitSec', v) })),
+          h(GRow, { label: '最多等多久', hint: '对方一直在发，从第一条算也最多等这么久' },
+            h(GNum, { value: merge.maxSec ?? 6, min: 2, max: 30, unit: '秒', disabled: busy,
+              onSave: (v) => setMerge('maxSec', v) })),
+        ),
+
+        h(GCard, {
+          n: '03', title: '安全刹车',
+          desc: '只防失控（比如和别的机器人聊起来停不下）。被 @、引用她、喊名字不算主动接话，不会被刹车拦；平时碰不到。填 0 = 不限。',
+          right: h(Switch, {
+            on: decide.silent === true, label: '一键静默', disabled: busy,
+            onToggle: (v) => setDecide('silent', v),
+          }),
+        },
+          h(GRow, { label: '两次接话至少隔多久', hint: '冷却期里的消息攒着，不丢；0 = 不冷却' },
+            h(GNum, { value: decide.cooldownSec ?? 20, min: 0, max: 600, unit: '秒', disabled: busy,
+              onSave: (v) => setDecide('cooldownSec', v) })),
+          h(GRow, { label: '每分钟最多接几条', hint: '0 = 不限；默认 3' },
+            h(GNum, { value: decide.maxRepliesPerMin ?? 3, min: 0, max: 60, unit: '条', disabled: busy,
+              onSave: (v) => setDecide('maxRepliesPerMin', v) })),
+          h(GRow, { label: '每小时最多接几条', hint: '0 = 不限（默认）' },
+            h(GNum, { value: decide.maxPerHour ?? 0, min: 0, max: 500, unit: '条', disabled: busy,
+              onSave: (v) => setDecide('maxPerHour', v) })),
+          h(GRow, { label: '两分钟内最多接几次', hint: '突发上限，0 = 不限（默认）' },
+            h(GNum, { value: decide.burstMax ?? 0, min: 0, max: 50, unit: '次', disabled: busy,
+              onSave: (v) => setDecide('burstMax', v) })),
+          h(GRow, { label: '短问必答', hint: '「在吗」「人呢」这类短问，刹车也不拦' },
+            h(Switch, {
+              on: decide.shortAskMustReply === true, label: '短问必答', disabled: busy,
+              onToggle: (v) => setDecide('shortAskMustReply', v),
+            })),
+        ),
+
+        h(GCard, {
+          n: '04', title: '静默时段与忽略词',
+          desc: '静默时段里她不主动接话，但被叫到还是会回；起止填同一个数 = 关掉。忽略词是别的插件靠前缀干活的，别抢。',
+        },
+          h(GRow, { label: '每天几点到几点安静', hint: '跨零点也行，比如 22 点到 7 点；两个数相同 = 不设' },
+            h(GNum, { value: decide.quietStartHour ?? 0, min: 0, max: 23, unit: '点', disabled: busy,
+              onSave: (v) => setDecide('quietStartHour', v) }),
+            h('span', { className: 'roost-g-unit' }, '到'),
+            h(GNum, { value: decide.quietEndHour ?? 0, min: 0, max: 23, unit: '点', disabled: busy,
+              onSave: (v) => setDecide('quietEndHour', v) })),
+          h(GRow, { label: '忽略词', hint: '一行一个；以这些词开头的消息不接，也不会触发一轮模型调用' },
+            h('textarea', {
+              className: 'roost-g-area', value: words, disabled: busy,
+              onChange: (e) => setWordsDraft(e.target.value),
+              onBlur: () => {
+                if (wordsDraft === null) return
+                const arr = wordsDraft.split('\n').map((s) => s.trim()).filter(Boolean)
+                setWordsDraft(null)
+                setDecide('ignoreWords', arr)
+              },
+            })),
+        ),
+
+        h(GCard, {
+          n: '05', title: '一轮与队列',
+          desc: '模型或工具卡住时，超过一轮时限就强制放开，后面的消息正常开新一轮；不然会一直哑着。',
+        },
+          h(GRow, { label: '一轮最多等多久', hint: '从这一轮开始算；太短会打断正常的长回复' },
+            h(GNum, { value: chat.turnTimeoutSec ?? 150, min: 10, max: 900, unit: '秒', disabled: busy,
+              onSave: (v) => setChat('turnTimeoutSec', v) })),
+          h('div', { className: 'roost-g-note' },
+            '同时最多排几条（queueMax）、剩余时间不够就不开跑（queueMinBudgetSec）在「权限 → 她会做什么」里，两边改的是同一份配置。',
+            h('button', {
+              type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+              onClick: () => setTab && setTab('caps'),
+            }, '去权限页')),
+          h('div', { className: 'roost-g-note' },
+            '「她刚才为什么没理我」：每条不接的消息都会把原因写进日志（比如「当前是只在被 @ 时回复模式」「冷却中」），去「排障」页看。',
+            h('button', {
+              type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+              onClick: () => setTab && setTab('logs'),
+            }, '去排障页')),
+        ),
+      )
+    }
+
     function GroupAdminTab({ chats, toast }) {
       const groups = (chats || []).filter((c) => c.kind === 'group')
       const [gid, setGid] = useState('')
@@ -10552,9 +10778,11 @@ select.roost-input{color-scheme:dark}
       ['ext', '已安装'],
       ['ext-market', '市场'],
       ['ext-api', '接口'],
+      /* 群聊：策略在前、动手管人在后 */
+      ['groupchat', '群聊策略'],
+      ['groupadmin', '群管'],
       /* 系统：这台机器怎么跑 */
       ['chats', '会话'],
-      ['groupadmin', '群管'],
       ['logs', '排障'],
       ['update', '更新'],
       ['config', '设置'],
@@ -10584,15 +10812,13 @@ select.roost-input{color-scheme:dark}
       /* 表达：她怎么"出声"——说话（语音合成）与表情包。2026-11-13 从「能力」里独立出来 */
       { id: 'express', label: '表达', icon: 'M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.4A8 8 0 1 1 20.5 11.5zM9 13.2s1.1 1.5 3 1.5 3-1.5 3-1.5M9.5 9.6h.01M14.5 9.6h.01', tabs: ['express', 'stickers'] },
       /**
-       * 群管暂时挂在「系统」组里（2026-11-13）。
-       *
-       * 本来想单独开一个「群聊」组，但它现在只有一页——单页组不渲染二级行，
-       * 导航里看不到「群管」两个字，点进去才知道是什么，反而更迷惑。
-       * 等 2.2 的群聊策略页做出来（组里有两页）再独立成组。
+       * 群聊：两页都在才开组（单页组不渲染二级行，导航里看不到页名反而迷惑）。
+       * 2026-11-13 群聊策略页做出来后，群管从「系统」搬过来。
        */
+      { id: 'group', label: '群聊', icon: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM15.5 11a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5M3 19c.7-2.6 3-4 6-4s5.3 1.4 6 4M15 15.2c2 .2 3.5 1.4 4 3.3', tabs: ['groupchat', 'groupadmin'] },
       { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
-      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'groupadmin', 'logs', 'update', 'config', 'about'] },
+      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'logs', 'update', 'config', 'about'] },
     ]
     /** 当前页属于哪一组；隐藏页不属于任何组，返回 null */
     const navGroupOf = (id) => NAV_GROUPS.find((g) => g.tabs.includes(id)) || null
@@ -10927,6 +11153,8 @@ select.roost-input{color-scheme:dark}
          * 清单（`model.list`）由卡片自己拉：它慢（要逐个 provider 问能力），
          * 卡在这儿会连页签都切不动。
          */
+        /** 群聊策略页整页读写 config，进来先拉一次；没拉到时页面只显示「读取配置…」 */
+        if (tab === 'groupchat' && !config) once('config', loadConfig)
         if (tab === 'model' && !config) once('config', loadConfig)
         if (tab === 'awake') {
           // 授权状态在 /memory 里、chatId 列表在 /chats 里，这一页两样都要用
@@ -11194,6 +11422,10 @@ select.roost-input{color-scheme:dark}
             : null,
           /** 「身份」：QQ 会话 ↔ DSH 会话的映射，现在有自己的页签，不再套一层「手动刷新」 */
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
+          /** 群聊策略：露已有的 merge / decide / chat 参数，不新增算法 */
+          tab === 'groupchat'
+            ? h(GroupChatTab, { config, saveCfg, toast, setTab })
+            : null,
           /** 群管：禁言 / 踢人 / 入群审批。协议侧 group.* 是 message scope，装了就能用 */
           tab === 'groupadmin' ? h(GroupAdminTab, { chats, toast }) : null,
           tab === 'account' ? h(AccountTab, { toast }) : null,
@@ -11323,6 +11555,8 @@ select.roost-input{color-scheme:dark}
     exports.ExpressTab = ExpressTab
     exports.ModelTab = ModelTab
     exports.UpdateTab = UpdateTab
+    /** 群聊策略页：只露已有配置，测试直接渲染它，盯住「一个算法都没新增」 */
+    exports.GroupChatTab = GroupChatTab
     /**
      * 导出给测试盯住。这个函数出过一次「拿配置端口冒充实际端口」的事故——
      * 语法合法、渲染不炸、测试全绿，但面板在撒谎。纯函数才能被断言。
