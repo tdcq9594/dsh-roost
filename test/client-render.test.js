@@ -93,8 +93,8 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-/* 与 client.js 的 TABS 同序：2026-11-12 细分后的 15 个可见页签 */
-const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'chats', 'logs', 'update', 'config', 'about']
+/* 与 client.js 的 TABS 同序：2026-11-13 2.3 后 21 个可见页签 */
+const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'chats', 'logs', 'update', 'config', 'backup', 'about']
 /* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats 已提升为正式页） */
 const HIDDEN_TABS = ['context', 'setup', 'account']
 
@@ -112,19 +112,19 @@ const HIDDEN_TABS = ['context', 'setup', 'account']
  */
 const NAV = {
   home: { label: '概览', tabs: ['overview'] },
-  self: { label: '人设', tabs: ['her', 'mood', 'awake', 'memory'] },
+  self: { label: '人设', tabs: ['her', 'mood', 'awake', 'memory', 'people'] },
   express: { label: '表达', tabs: ['express', 'stickers'] },
   group: { label: '群聊', tabs: ['groupchat', 'groupadmin'] },
   power: { label: '能力', tabs: ['caps', 'model'] },
   mods: { label: '扩展', tabs: ['ext', 'ext-market', 'ext-api'] },
-  system: { label: '系统', tabs: ['chats', 'logs', 'update', 'config', 'about'] },
+  system: { label: '系统', tabs: ['chats', 'logs', 'update', 'config', 'backup', 'about'] },
 }
 const TAB_LABEL = {
-  overview: '概览', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆',
+  overview: '概览', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆', people: '人物',
   caps: '权限', express: '语音', stickers: '表情包', model: '模型',
   ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
   groupchat: '群聊策略', groupadmin: '群管',
-  chats: '会话', logs: '排障', update: '更新', config: '设置', about: '关于',
+  chats: '会话', logs: '排障', update: '更新', config: '设置', backup: '备份', about: '关于',
 }
 const HIDDEN_LABEL = { context: '上下文', setup: '接入', account: '账号迁移' }
 
@@ -1658,4 +1658,116 @@ test('向导第 2 步：装 / 启动 / 指定目录都在本页，不把人支�
   assert.ok(block.includes('/setup/install') === false, '第 2 步不该自己拼接口路径')
   assert.ok(block.includes('doInstall') && block.includes('doStart') && block.includes('doBindDir'),
     '三个动作都要挂上')
+})
+
+/* ---------------- 2.3 / 2.7：人物页、备份页、编号断层 ---------------- */
+
+/** 两页共用的假快照：字段形状照 /memory 返回 */
+const memFixture = {
+  chatId: 'G1',
+  profiles: [{ name: '阿岚', impression: '爱在半夜发图', tips: '别催她睡' }],
+  events: [{ at: Date.now(), where: '群 G1', label: '发了张图', count: 2 }],
+  graph: {
+    stats: { entities: 3, edges: 2, ended: 1, episodes: 9 },
+    edges: [{ id: 'e1', src: '阿岚', rel: '喜欢', dst: '猫', from: Date.now() }],
+    suppressed: [], ended: [],
+  },
+  backups: [{ at: Date.now(), label: '定时备份', bytes: 2048, kind: 'retention', name: 'pre-retention-a.json' }],
+  restorePending: null,
+  chats: [], scene: null,
+}
+
+const tabProps = (extra = {}) => ({
+  mem: memFixture, toast: () => {}, reload: () => {},
+  quick: async () => ({ ok: true }), busy: false, setTab: () => {},
+  ...extra,
+})
+const numsOf = (node) => sectionsOf(node).filter((s) => s.n).map((s) => s.n)
+
+test('2.3：人物页三节 01–03，档案 / 关系 / 经历都真渲染出来', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const tree = expand(mod.PeopleTab(tabProps()), rt)
+  assert.deepEqual(numsOf(tree), ['01', '02', '03'], '人物页编号应 01–03 连续')
+  const txt = textOf(tree)
+  for (const must of [
+    '熟人小档案（1）', '阿岚', '爱在半夜发图', '别催她睡',
+    '她知道的关系', '3 个实体', '阿岚 —喜欢→ 猫',
+    '她最近做过的事（1）', '发了张图', '去记忆页',
+    '清空人物档案', '清空这些经历',
+  ]) {
+    assert.ok(txt.includes(must), `人物页缺少「${must}」`)
+  }
+  assert.ok(!txt.includes('删掉这条关系'), '关系在人物页只读，写操作留在记忆页')
+})
+
+test('2.3：备份页四节 01–04，导出 / 待生效 / 清单 / 不带过去的都在', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const tree = expand(mod.BackupTab(tabProps()), rt)
+  assert.deepEqual(numsOf(tree), ['01', '02', '03', '04'], '备份页编号应 01–04 连续')
+  const txt = textOf(tree)
+  for (const must of [
+    '导出备份（zip）', 'config.json', '导入请用命令行',
+    '没有待生效的恢复', '定时备份', '还原这一份',
+    '不会带过去的', 'secrets/', '扩展长期令牌明文', 'zip 炸弹',
+  ]) {
+    assert.ok(txt.includes(must), `备份页缺少「${must}」`)
+  }
+})
+
+test('2.3：人物 / 备份两页没数据时给加载占位和重试，不炸', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  for (const [label, Comp, word] of [
+    ['人物', mod.PeopleTab, '读取人物数据'],
+    ['备份', mod.BackupTab, '读取备份状态'],
+  ]) {
+    const txt = textOf(expand(Comp(tabProps({ mem: null })), rt))
+    assert.ok(txt.includes(word), `${label}页缺加载占位`)
+    assert.ok(txt.includes('重试'), `${label}页缺重试入口`)
+    assert.ok(txt.includes('排障'), `${label}页要指明去哪查错`)
+  }
+})
+
+test('2.7：记忆页三块内容仍在同一个折叠入口里，编号 01–06 连续', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const tree = expand(mod.MemoryTab(tabProps({ onPickChat: () => {} })), rt)
+  assert.deepEqual(numsOf(tree), ['01', '02', '03', '04', '05', '06'], '记忆页编号不该再断')
+  const txt = textOf(tree)
+  for (const must of [
+    '仍保留原样', '去人物页', '去备份页',
+    '熟人小档案', '她最近做过的事', '备份与恢复',
+    '清空人物档案', '清空这些经历', '导出备份（zip）',
+  ]) {
+    assert.ok(txt.includes(must), `记忆页折叠后少了「${must}」`)
+  }
+  /** 三块要一起收进同一个 details，只折一块等于没修编号断层 */
+  let wrapped = false
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.type === 'details') {
+      const t = textOf(n)
+      if (t.includes('熟人小档案') && t.includes('她最近做过的事') && t.includes('备份与恢复')) wrapped = true
+    }
+    walk(n.props?.children)
+  })(tree)
+  assert.ok(wrapped, '三块要一起收进同一个 details')
+})
+
+test('2.7：排障页只剩一组编号，context 隐藏页仍保留 01–05', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'logs'
+  rt.reset()
+  const logs = expand(mod.RoostPage(), rt)
+  assert.deepEqual(numsOf(logs), ['01'], '排障页不该出现两组 01')
+  assert.ok(textOf(logs).includes('窗口占用'), '上下文分区的内容仍要在')
+
+  store['roost.tab'] = 'context'
+  rt.reset()
+  const ctx = expand(mod.RoostPage(), rt)
+  assert.deepEqual(numsOf(ctx), ['01', '02', '03', '04', '05'], '隐藏页单独进入时编号照旧')
 })

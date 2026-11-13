@@ -3779,7 +3779,7 @@ select.roost-input{color-scheme:dark}
 
     /* ---------------- 记忆（三层） ---------------- */
 
-    function MemoryTab({ mem, toast, reload, quick, busy, onPickChat }) {
+    function MemoryTab({ mem, toast, reload, quick, busy, onPickChat, setTab }) {
       /** 召回记录：后端每轮都在写，这里给个入口看「她刚才想起了什么」 */
       const [recallRows, setRecallRows] = useState(null)
       const [recallErr, setRecallErr] = useState('')
@@ -4339,6 +4339,30 @@ select.roost-input{color-scheme:dark}
           ),
         ),
 
+        /**
+         * 2.7：下面这三块（熟人档案 / 经历 / 备份）没有编号、也不是 Sec，
+         * 夹在「04 从旧版导入」和「05 召回记录」之间，看着像页面少渲染了一截。
+         * 现在收进**一行折叠入口**，2.3 的「人物」「备份」页是正门。
+         *
+         * 内容一块不删：details 的 children 照常渲染（和 Sec 的折叠一样，
+         * 只由浏览器收起），清单、按钮、清空操作、折叠状态全都在，
+         * 「只增不减」的控件计数也不变。
+         */
+        h('details', null,
+          h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer' } },
+            '熟人档案 / 经历 / 备份已经搬到「人物」「备份」页，这里仍保留原样（点开查看）'),
+          h('div', { className: 'roost-note', style: { margin: '8px 0' } },
+            '并列入口，不是搬家：两页看的是同一份数据，任一边改了都刷新同一处。',
+            h('button', {
+              type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+              onClick: () => { if (setTab) setTab('people') },
+            }, '去人物页'),
+            h('button', {
+              type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+              onClick: () => { if (setTab) setTab('backup') },
+            }, '去备份页'),
+          ),
+
         /* D7 人物小档案：只读 + 独立清空。跨群档案，不随「清空本会话记忆」抹掉 */
         h('div', { className: 'cap-group' },
           h('div', { className: 'cap-group-t' }, '熟人小档案'),
@@ -4404,25 +4428,8 @@ select.roost-input{color-scheme:dark}
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 } },
             h('button', {
               type: 'button', className: 'roost-primary',
-              onClick: async () => {
-                try {
-                  const res = await fetch(API + '/backup/export')
-                  if (!res.ok) throw new Error('HTTP ' + res.status)
-                  const blob = await res.blob()
-                  const url = URL.createObjectURL(blob)
-                  const a = document.createElement('a')
-                  a.href = url
-                  a.download = 'dsh-roost-backup.zip'
-                  document.body.appendChild(a)
-                  a.click()
-                  a.remove()
-                  setTimeout(() => { try { URL.revokeObjectURL(url) } catch {} }, 1000)
-                  toast('备份已导出')
-                  reload()
-                } catch (e) {
-                  toast('导出失败：' + e.message)
-                }
-              },
+              /** 和备份页共用一份，别让两处按钮走出两条逻辑 */
+              onClick: () => downloadBackupZip(toast, reload),
             }, '导出备份（zip）'),
           ),
           (mem?.backups || []).length
@@ -4446,6 +4453,7 @@ select.roost-input{color-scheme:dark}
                     : null,
                 )))
             : h('div', { className: 'roost-note', style: { margin: 0 } }, '还没有备份。'),
+        ),
         ),
 
         h(Sec, { n: '05', title: '召回记录', right: h('button', {
@@ -4541,6 +4549,241 @@ select.roost-input{color-scheme:dark}
           if (r.ok !== false) { setFact(''); reload() }
         })
       }
+    }
+
+    /* ---------------- 人物 / 备份（2.3） ---------------- */
+
+    /**
+     * 导出整包：记忆页与备份页共用一份，别让两处按钮走出两条逻辑。
+     * 浏览器只能靠 <a download> 落盘；失败要说清原因，
+     * 不能静默吞掉再弹「备份已导出」。
+     */
+    const downloadBackupZip = async (toast, reload) => {
+      try {
+        const res = await fetch(API + '/backup/export')
+        if (!res.ok) throw new Error('HTTP ' + res.status)
+        const blob = await res.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = 'dsh-roost-backup.zip'
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        setTimeout(() => { try { URL.revokeObjectURL(url) } catch {} }, 1000)
+        toast('备份已导出')
+        if (reload) reload()
+      } catch (e) {
+        toast('导出失败：' + e.message)
+      }
+    }
+
+    /**
+     * 人物页：记忆页里那三块（熟人档案 / 关系 / 经历）原先夹在
+     * 「04 从旧版导入」和「05 召回记录」中间，既没编号也不是 Sec，
+     * 一屏看过去像页面少渲染了一截。现在给它们一个正门。
+     *
+     * **记忆页那三块原地保留**（2.3 是并列入口，不是搬家）。
+     * 数据仍是同一份 /memory 快照，不新开接口、不复制状态：
+     * 两页看到的是同一批 profiles / graph / events，任一边改了都刷新同一处。
+     *
+     * 关系这里只做**只读概览**。删关系 / 撤销屏蔽 / 标结束仍在记忆页——
+     * 同一个写操作摆两个地方，用户得先判断在哪页动手才算数（§0.5 A10 的教训）。
+     */
+    function PeopleTab({ mem, toast, reload, quick, busy, setTab }) {
+      const profiles = mem?.profiles || []
+      const events = mem?.events || []
+      const gp = mem?.graph
+      const goMemory = () => { if (setTab) setTab('memory') }
+      const shortTime = (at) => new Date(at).toLocaleString('zh-CN', {
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+      })
+
+      if (!mem) return h('div', null,
+        h('div', { className: 'roost-empty' }, '读取人物数据…'),
+        h('div', { className: 'roost-note' }, '一直停在这儿的话，去「排障」页看看 /memory 有没有报错。'),
+        h('button', {
+          type: 'button', className: 'roost-btn',
+          onClick: () => { if (reload) reload() },
+        }, '重试'),
+      )
+
+      return h('div', null,
+        h(Sec, {
+          n: '01', title: `熟人小档案（${profiles.length}）`,
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: () => reload && reload() }, '刷新'),
+        },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '每天凌晨从聊天里攒一小段印象和相处建议，跨群共用；同一天里不改提示词。开关关着也能在这儿查看和清空已有的。'),
+          profiles.length
+            ? h('div', { style: { display: 'grid', gap: 4, marginBottom: 8 } },
+                profiles.map((p, i) => h('div', { key: i, className: 'roost-note' },
+                  '· ' + p.name + '：' + (p.impression || '') + (p.tips ? `（相处：${p.tips}）` : ''))))
+            : h('div', { className: 'roost-empty', style: { marginBottom: 8 } }, '还没写过人物档案。'),
+          h(ConfirmLink, {
+            label: '清空人物档案', confirmLabel: '确认清空档案', disabled: busy,
+            onConfirm: async () => {
+              const r = await quick('profiles.clear')
+              toast(r.message || '清了')
+              reload()
+            },
+          }),
+        ),
+
+        h(Sec, { n: '02', title: '她知道的关系' },
+          gp?.stats?.enabled === false
+            ? h('div', { className: 'roost-empty' }, '图谱没启用（当前 Node 没有 node:sqlite）')
+            : h('div', null,
+                gp?.stats
+                  ? h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 6 } },
+                      `${gp.stats.entities} 个实体 · ${gp.stats.edges} 条现在成立 · ${gp.stats.ended || 0} 条已结束 · ${gp.stats.episodes} 段原始记录`)
+                  : null,
+                (gp?.edges || []).length
+                  ? h('div', { className: 'roost-list' },
+                      gp.edges.slice(0, 12).map((e) => h('div', { key: e.id, className: 'roost-item' },
+                        h('span', { className: 't' }, `${e.src} —${e.rel}→ ${e.dst}`),
+                        h('span', { className: 'd' }, dayOf(e.from)),
+                      )))
+                  : h('div', { className: 'roost-empty' }, '还没有关系。聊得多了巩固时会自己抽出来。'),
+                (gp?.edges || []).length > 12
+                  ? h('div', { className: 'roost-note' }, `只列前 12 条，共 ${gp.edges.length} 条；完整清单在「记忆」页。`)
+                  : null,
+                h('div', { className: 'roost-note' },
+                  '这里只读。删关系、撤销「不要再记」、看以前成立过的，都在「记忆」页。',
+                  h('button', {
+                    type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+                    onClick: goMemory,
+                  }, '去记忆页管理')),
+              ),
+        ),
+
+        h(Sec, {
+          n: '03', title: `她最近做过的事（${events.length}）`,
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: () => reload && reload() }, '刷新'),
+        },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '只记动作、不记说过的话；24 小时后自动删。开关关着也能在这儿查看和清空已有的。'),
+          events.length
+            ? h('div', { style: { display: 'grid', gap: 4, marginBottom: 8 } },
+                events.map((e, i) => h('div', { key: i, className: 'roost-note' },
+                  '· ' + shortTime(e.at) + ' ' + e.where + ' ' + e.label + (e.count > 1 ? `（${e.count} 次）` : ''))))
+            : h('div', { className: 'roost-empty', style: { marginBottom: 8 } }, '最近没记下什么。'),
+          h(ConfirmLink, {
+            label: '清空这些经历', confirmLabel: '确认清空经历', disabled: busy,
+            onConfirm: async () => {
+              const r = await quick('events.clear')
+              toast(r.message || '清了')
+              reload()
+            },
+          }),
+        ),
+
+        /** 事实 / 日记 / 召回记录仍只在记忆页：那是「记了什么」，不是「记得谁」 */
+        h('div', { className: 'roost-note' },
+          '事实、日记、召回记录、导入旧版记忆和清空，都还在「记忆」页；这一页只放「她记得哪些人」。',
+          h('button', {
+            type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+            onClick: goMemory,
+          }, '去记忆页'),
+        ),
+      )
+    }
+
+    /**
+     * 备份页：E4 那块从记忆页里长出一个正门。
+     * 不做「面板导入」——整包恢复只暂存到 .restore/、下次启动才生效，
+     * 在面板放个按钮会让人以为点完就已经恢复了（记忆页那条注释写过这个坑）。
+     *
+     * 「不会带过去的」照 src/backup.js 的 SKIP / shouldSkip 实写，
+     * 不凭印象编：尤其 secrets/ 是扩展长期令牌明文，必须显式说清。
+     */
+    function BackupTab({ mem, toast, reload, quick, busy, setTab }) {
+      const backups = mem?.backups || []
+      const pending = mem?.restorePending
+      const shortTime = (at) => new Date(at).toLocaleString('zh-CN', {
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+      })
+
+      if (!mem) return h('div', null,
+        h('div', { className: 'roost-empty' }, '读取备份状态…'),
+        h('div', { className: 'roost-note' }, '一直停在这儿的话，去「排障」页看看 /memory 有没有报错。'),
+        h('button', {
+          type: 'button', className: 'roost-btn',
+          onClick: () => { if (reload) reload() },
+        }, '重试'),
+      )
+
+      return h('div', null,
+        h(Sec, { n: '01', title: '导出备份' },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '打包配置、记忆、日记、图谱、人格等；SQLite 用一致性快照，运行中导出也安全。'
+            + '⚠ 包里含 config.json（里面有密钥），别外传。'
+            + '导入请用命令行 node scripts/backup.mjs import <zip>：只暂存到 .restore/，下次启动 DSH 才生效，'
+            + '所以面板不放导入按钮。'),
+          h('button', {
+            type: 'button', className: 'roost-primary',
+            onClick: () => downloadBackupZip(toast, reload),
+          }, '导出备份（zip）'),
+        ),
+
+        h(Sec, { n: '02', title: '等着下次启动生效的恢复' },
+          pending
+            ? h('div', { className: 'roost-note' },
+                `有一份整包恢复等着下次启动生效（${pending.files} 个文件，${pending.createdAt || ''}）。`,
+                h('button', {
+                  type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+                  onClick: async () => {
+                    const r = await quick('backup.cancelRestore')
+                    toast(r.message || '已取消')
+                    reload()
+                  },
+                }, '取消这次恢复'))
+            : h('div', { className: 'roost-empty' }, '没有待生效的恢复。导入整包后这里会出现一条，可以反悔。'),
+        ),
+
+        h(Sec, {
+          n: '03', title: `备份清单（${backups.length}）`,
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: () => reload && reload() }, '刷新'),
+        },
+          backups.length
+            ? h('div', { style: { display: 'grid', gap: 4 } },
+                backups.slice(0, 20).map((b, i) => h('div', {
+                  key: i, className: 'roost-note',
+                  style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: 0 },
+                },
+                  '· ' + shortTime(b.at) + ' ' + b.label + ' · ' + (b.bytes / 1024).toFixed(1) + ' KB',
+                  b.kind === 'retention'
+                    ? h(ConfirmLink, {
+                        label: '还原这一份', confirmLabel: '确认还原这些原文', disabled: busy,
+                        onConfirm: async () => {
+                          const r = await quick('backup.restoreRetention', { name: b.name })
+                          toast(r.message || '还原了')
+                          reload()
+                        },
+                      })
+                    : null,
+                )))
+            : h('div', { className: 'roost-empty' }, '还没有备份。'),
+          backups.length > 20
+            ? h('div', { className: 'roost-note' }, `只列最近 20 份，共 ${backups.length} 份。`)
+            : null,
+        ),
+
+        h(Sec, { n: '04', title: '不会带过去的' },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '照打包规则实列。下面这些随时能重建、或者本来就不该复制出去：'),
+          h('div', { style: { display: 'grid', gap: 4 } }, [
+            ['backups/', '备份自身（例外：pre-retention-*.json 行级原文会带走）'],
+            ['.restore/ 与恢复标记', '整包恢复的暂存，换电脑不需要'],
+            ['logs/ · tmp/ · voice-cache/ · archive-cache/', '日志与缓存'],
+            ['secrets/', '扩展长期令牌明文，故意排除'],
+            ['.market-tmp/ · node_modules/', '安装暂存与依赖'],
+            ['.tmp · SQLite WAL/SHM · 单文件 >2GB', '临时文件与超大文件'],
+          ].map(([k, v], i) => h('div', { key: i, className: 'roost-note' }, '· ' + k + '：' + v))),
+          h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            '整包上限 4GB、解包总量上限 512MB（防 zip 炸弹）。云备份还没做，现在只有本地导出。'),
+        ),
+      )
     }
 
     /* ---------------- 主动搭话 ---------------- */
@@ -4919,7 +5162,12 @@ select.roost-input{color-scheme:dark}
 
     /* ---------------- 上下文（压缩 + 注入） ---------------- */
 
-    function ContextTab({ ctxInfo, mind, usageInfo, stickers, toast, reload, busy }) {
+    /**
+     * 2.7：单独进 `context` 隐藏页时保留 01–05 编号；拼进「排障」页时
+     * 传 `numbered: false`——那里 LogsTab 已经有一个 01，再来一组 01
+     * 会让人以为编号乱了。分区用 `.roost-diag-h` 标题区分，不靠编号。
+     */
+    function ContextTab({ ctxInfo, mind, usageInfo, stickers, toast, reload, busy, numbered = true }) {
       /** 计费 token = 三个互不重叠的桶之和（和 compact 的命中率同一口径） */
       const billedOf = (b) => Number((b?.uncached || 0) + (b?.cacheRead || 0) + (b?.cacheWrite || 0))
       const p = ctxInfo?.pressure || {}
@@ -4928,7 +5176,7 @@ select.roost-input{color-scheme:dark}
       const pct = p.percent
 
       return h('div', null,
-        h(Sec, { n: '01', title: '窗口占用', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
+        h(Sec, { n: numbered ? '01' : null, title: '窗口占用', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
           pct == null
             ? h('div', { className: 'roost-empty' },
                 '读不到占用。服务商还没回报过用量时会这样——这时按轮数兜底：聊到 ',
@@ -4949,7 +5197,7 @@ select.roost-input{color-scheme:dark}
             '省下的 token 赔不回变慢的那几步。真正的数字看下一节的「缓存命中」。'),
         ),
 
-        h(Sec, { n: '02', title: '压缩' },
+        h(Sec, { n: numbered ? '02' : null, title: '压缩' },
           ctxInfo?.last
             ? h('div', null,
                 h(Row, { k: '上次' }, `${ago(ctxInfo.last.at)} · 开场 ${ctxInfo.last.openingLen} 字`),
@@ -4992,7 +5240,7 @@ select.roost-input{color-scheme:dark}
             '换会话不等于删对话：旧会话原样留着，随时回去翻。新会话的第一句会带摘要 + 最近原话 + 没办完的约定。'),
         ),
 
-        h(Sec, { n: '03', title: '这一轮注入了什么' },
+        h(Sec, { n: numbered ? '03' : null, title: '这一轮注入了什么' },
           !mind
             ? h('div', { className: 'roost-empty' }, '还没聊过，读不到注入内容')
             : h('div', null,
@@ -5012,7 +5260,7 @@ select.roost-input{color-scheme:dark}
               ),
         ),
 
-        h(Sec, { n: '04', title: '记忆工具' },
+        h(Sec, { n: numbered ? '04' : null, title: '记忆工具' },
           mind?.tools
             ? h('div', null,
                 h(Row, { k: '状态' },
@@ -5030,7 +5278,7 @@ select.roost-input{color-scheme:dark}
          * 用量：回答用户真正会问的两个问题——这个群这个月花了多少、哪个群最费。
          * 上面那些是「调阈值用的实时数」，这里是「账单口径的累计数」，两回事。
          */
-        h(Sec, { n: '05', title: '用量' },
+        h(Sec, { n: numbered ? '05' : null, title: '用量' },
           !usageInfo
             ? h('div', { className: 'roost-empty' }, '还没有用量数据（要先聊过，且服务商回报过 usage）')
             : h('div', null,
@@ -10976,6 +11224,8 @@ select.roost-input{color-scheme:dark}
       ['mood', '心情'],
       ['awake', '主动搭话'],
       ['memory', '记忆'],
+      /* 2.3：人物是记忆页那三块（档案/关系/经历）的并列入口，不是搬家 */
+      ['people', '人物'],
       /* 能力：她能干什么 */
       ['caps', '权限'],
       ['express', '语音'],
@@ -10993,6 +11243,8 @@ select.roost-input{color-scheme:dark}
       ['logs', '排障'],
       ['update', '更新'],
       ['config', '设置'],
+      /* 2.3：备份从记忆页里长出一个正门，记忆页那块原地保留 */
+      ['backup', '备份'],
       ['about', '关于'],
     ]
     /**
@@ -11015,7 +11267,7 @@ select.roost-input{color-scheme:dark}
      */
     const NAV_GROUPS = [
       { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview'] },
-      { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'mood', 'awake', 'memory'] },
+      { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'mood', 'awake', 'memory', 'people'] },
       /* 表达：她怎么"出声"——说话（语音合成）与表情包。2026-11-13 从「能力」里独立出来 */
       { id: 'express', label: '表达', icon: 'M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.4A8 8 0 1 1 20.5 11.5zM9 13.2s1.1 1.5 3 1.5 3-1.5 3-1.5M9.5 9.6h.01M14.5 9.6h.01', tabs: ['express', 'stickers'] },
       /**
@@ -11025,7 +11277,7 @@ select.roost-input{color-scheme:dark}
       { id: 'group', label: '群聊', icon: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM15.5 11a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5M3 19c.7-2.6 3-4 6-4s5.3 1.4 6 4M15 15.2c2 .2 3.5 1.4 4 3.3', tabs: ['groupchat', 'groupadmin'] },
       { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
-      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'logs', 'update', 'config', 'about'] },
+      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'logs', 'update', 'config', 'backup', 'about'] },
     ]
     /** 当前页属于哪一组；隐藏页不属于任何组，返回 null */
     const navGroupOf = (id) => NAV_GROUPS.find((g) => g.tabs.includes(id)) || null
@@ -11325,7 +11577,8 @@ select.roost-input{color-scheme:dark}
         }
 
         if (tab === 'caps') once('caps', loadCaps)
-        if (tab === 'memory') once('memory', () => loadMemory())
+        /** 人物 / 备份共用 /memory 那一份快照；直接从这两页进也要拉一次 */
+        if (tab === 'memory' || tab === 'people' || tab === 'backup') once('memory', () => loadMemory())
         if (tab === 'her') {
           once('her', loadHer)
           // 名字输入框读 config；「本群」下拉要 mem.chatId——都主动拉一次
@@ -11590,7 +11843,10 @@ select.roost-input{color-scheme:dark}
           tab === 'ext' ? h(ExtTab, { quick, toast }) : null,
           tab === 'ext-market' ? h(ExtMarketTab, { toast }) : null,
           tab === 'ext-api' ? h(ExtApiTab, { toast }) : null,
-          tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat }) : null,
+          tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat, setTab }) : null,
+          /** 2.3：与记忆页并列的两个入口，同一份 mem，不复制状态 */
+          tab === 'people' ? h(PeopleTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,
+          tab === 'backup' ? h(BackupTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,
           /** 2026-11-12 新增：心情从「主动搭话」拆出，表达/模型从「设置」拆出 */
           tab === 'mood' ? h(MoodTab, { mood: her?.mood ?? null, reloadMood: loadHer, toast, quick }) : null,
           tab === 'express'
@@ -11678,7 +11934,7 @@ select.roost-input{color-scheme:dark}
                   h('div', { className: 'roost-diag-h' }, '上下文 · 手动刷新'),
                   h(ContextTab, {
                     ctxInfo, mind, usageInfo, stickers: her?.stickers ?? null,
-                    toast, reload: loadCtx, busy,
+                    toast, reload: loadCtx, busy, numbered: false,
                   })),
                 /**
                  * 2026-11-12：「会话」那块拿掉了。它现在有独立的「身份」页，
@@ -11764,6 +12020,10 @@ select.roost-input{color-scheme:dark}
     exports.UpdateTab = UpdateTab
     /** 群聊策略页：只露已有配置，测试直接渲染它，盯住「一个算法都没新增」 */
     exports.GroupChatTab = GroupChatTab
+    /** 2.3：人物 / 备份与记忆页，测试直接渲染，盯住「并列入口，不是搬家」 */
+    exports.PeopleTab = PeopleTab
+    exports.BackupTab = BackupTab
+    exports.MemoryTab = MemoryTab
     /**
      * 导出给测试盯住。这个函数出过一次「拿配置端口冒充实际端口」的事故——
      * 语法合法、渲染不炸、测试全绿，但面板在撒谎。纯函数才能被断言。
