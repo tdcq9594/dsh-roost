@@ -188,14 +188,26 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
       /** 4.6：互动召回（官方 is_wakeup）；和 eventId 一样只加字段，不改别的 */
       isWakeup = false,
       markdown = true, keyboard = null,
+      /**
+       * 官方图文卡片（`msg_type=8`，2026-10-28 官方新增，群聊/单聊都支持）。
+       *
+       * `{title, description, url, picUrl}` 四个字段都必填，框架的
+       * `buildSendPayload()` 会把它包成 `card: {type:'tuwen', content:{…}}`
+       * 并把 `msg_type` 置 8。**和 `markdown` 互斥**：一条消息只能有一种
+       * 富文本，同时给会被平台按其中一种渲染、另一种静默丢失，所以这里
+       * 有 card 就完全不发 markdown（`content` 也置空，照官方示例）。
+       */
+      card = null,
     } = {}) {
       const t = String(text ?? '').trim();
+      const hasCard = Boolean(card && typeof card === 'object');
       if (!target) return { ok: false, message: '缺 target' };
       /**
        * 只有静默、没有正文是合法的——`<<silence:2h>>` 单独出现就是
        * 「我要安静，没什么要说的」。不该拦，也不该发一条空消息。
+       * 卡片同理：它自带标题和描述，正文本来就是空的。
        */
-      if (!t && !(Number(silenceMs) > 0)) return { ok: false, message: '没有内容可发' };
+      if (!t && !hasCard && !(Number(silenceMs) > 0)) return { ok: false, message: '没有内容可发' };
       if (scene === 'group' && !hasGroupAuthz) {
         return { ok: false, message: '这个群没有 group_push 授权，主动消息发不出去' };
       }
@@ -216,7 +228,8 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
       const base = {
         kind: scene === 'group' ? 'group' : 'c2c',
         chatId: String(target),
-        content: t,
+        /** 卡片消息的正文必须是空的（官方示例里 `msg_type=8` 根本没有 content） */
+        content: hasCard ? '' : t,
         requestId: rid,
         ...(msgId ? { msgId: String(msgId) } : {}),
         /** 3.7：msgId 缺席时用 event_id 走被动——两条路框架都认（bot methods 已支持） */
@@ -229,7 +242,7 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
        * `msg_type=2` 里生效。框架的 `buildSendPayload` 看到 `markdown` 会自己
        * 把 `content` 置空并改成 2，所以这里只管传，不去猜 msgType。
        */
-      const useMd = markdown !== false && wantMarkdown() !== false;
+      const useMd = !hasCard && markdown !== false && wantMarkdown() !== false;
       const okResult = (r, usedRid) => ({
         ok: true,
         scene,
@@ -241,6 +254,11 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
       });
 
       try {
+        /** 卡片先走：它和 markdown 互斥，`msgType` 显式给 8 是为了让账本记对类型 */
+        if (hasCard) {
+          const r = await host.rpc('msg.send', { ...base, msgType: 8, card });
+          return { ...okResult(r, rid), card: true };
+        }
         const r = await host.rpc('msg.send', useMd
           ? { ...base, markdown: { content: t }, ...(keyboard ? { keyboard } : {}) }
           : base);

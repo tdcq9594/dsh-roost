@@ -12,6 +12,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { createExtApiHooks } from '../src/ext-api-hooks.js';
 import { postReply } from '../src/server.js';
@@ -19,7 +22,7 @@ import { renderInbound } from '../src/inbound.js';
 
 /** 造一套可控的假依赖，任何一处被意外调用都能从 `calls` 里看出来。 */
 function rig(over = {}) {
-  const calls = { send: [], add: [], hasAuthz: [], fire: 0, onInbound: [], agentFor: [] };
+  const calls = { send: [], add: [], hasAuthz: [], fire: 0, onInbound: [], agentFor: [], outActions: [] };
   const memory = {
     listRanked: over.listRanked ?? (() => ({ global: ['主人住杭州'], chat: ['这个群管阿离叫小离'] })),
     add: (...a) => { calls.add.push(a); },
@@ -46,6 +49,9 @@ function rig(over = {}) {
       fire: async () => { calls.fire += 1; return { ok: true, message: '说了一句' }; },
     }),
     agentFor: async (chat) => { calls.agentFor.push(chat); return { agent: { id: 'a1' } }; },
+    /** `/v1/send` 的两条依赖：发文件走 outActions，路径要卡在扩展目录里 */
+    outActionsOf: () => (over.outActions ?? (async (a) => { calls.outActions.push(a); return { ok: true }; })),
+    dataDirOf: () => over.dataDir ?? '',
     mount: () => {},
     onInbound: (p) => { calls.onInbound.push(p); },
     lastBucketOf: () => 'owner',
@@ -274,4 +280,122 @@ test('session.ensure：建/复用会话并挂工具，不跑模型', async () =>
   assert.equal(r.body.ready, true);
   assert.equal(calls.agentFor[0].chatId, 'g1');
   assert.equal(calls.agentFor[0].kind, 'c2c');
+});
+
+// ---------------------------------------------------------------- /v1/send
+
+/**
+ * `/v1/send` 是扩展**直接往会话投递**的唯一入口，所以重点测三件事：
+ * 卡片字段校验、文件越界、群授权。
+ */
+test('send：只发文本时走通道，返回 id', async () => {
+  const { hooks, calls } = rig();
+  const r = await hooks.send({ body: { target: 'u1', text: '  你好  ' }, client: {} });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.text.ok, true);
+  assert.equal(calls.send.length, 1);
+  assert.equal(calls.send[0].text, '你好');
+  assert.equal(calls.send[0].card, undefined, '纯文本不该带 card');
+});
+
+test('send：卡片发出去是独立的 card 参数，正文不跟着发', async () => {
+  const { hooks, calls } = rig();
+  const card = {
+    title: '【B站】这个视频有点意思',
+    description: '3 分钟看完，UP 主讲得很清楚',
+    url: 'https://www.bilibili.com/video/BV1xx411c7mD',
+    picUrl: 'https://i0.hdslb.com/bfs/archive/cover.jpg',
+  };
+  const r = await hooks.send({ body: { target: 'u1', text: '顺手也发一句', card }, client: {} });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.card.ok, true);
+  assert.equal(calls.send.length, 1, '卡片独占一条，不该再发一条正文');
+  assert.deepEqual(calls.send[0].card, card);
+  assert.equal(calls.send[0].text, undefined);
+});
+
+test('send：卡片四字段与 https 在发之前就挡，回具体原因', async () => {
+  const { hooks, calls } = rig();
+  const base = {
+    title: 't', description: 'd',
+    url: 'https://a.com/x', picUrl: 'https://a.com/p.png',
+  };
+
+  const noTitle = await hooks.send({ body: { target: 'u1', card: { ...base, title: ' ' } }, client: {} });
+  assert.equal(noTitle.status, 400);
+  assert.match(noTitle.body.message, /缺 title/);
+
+  const http = await hooks.send({ body: { target: 'u1', card: { ...base, picUrl: 'http://a.com/p.png' } }, client: {} });
+  assert.equal(http.status, 400);
+  assert.match(http.body.message, /picUrl 必须是 https/);
+
+  const long = await hooks.send({ body: { target: 'u1', card: { ...base, title: 'x'.repeat(51) } }, client: {} });
+  assert.equal(long.status, 400);
+  assert.match(long.body.message, /title 最多 50 字/);
+
+  assert.equal(calls.send.length, 0, '不合格的卡片一条都不该发出去');
+});
+
+test('send：文件只能发扩展自己目录里的，越界一律 400', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-v1send-'));
+  const extDir = join(dir, 'extensions', 'bili');
+  mkdirSync(extDir, { recursive: true });
+  writeFileSync(join(extDir, 'shot.png'), 'x');
+  /** 兄弟目录：前缀相同但不在 bili 下，`startsWith(root)` 会误判，必须挡住 */
+  mkdirSync(join(dir, 'extensions', 'bili-evil'), { recursive: true });
+  writeFileSync(join(dir, 'extensions', 'bili-evil', 'bad.png'), 'x');
+
+  try {
+    const ok = rig({ dataDir: dir });
+    const r = await ok.hooks.send({ body: { target: 'u1', files: ['shot.png'] }, client: { extId: 'bili' } });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(ok.calls.outActions.length, 1, '发文件要过 outActions（去重/账本都在那）');
+    assert.equal(ok.calls.outActions[0].extra.files.length, 1);
+
+    for (const bad of ['../bili-evil/bad.png', '../../memory.json', join(extDir, 'nope.png')]) {
+      const one = rig({ dataDir: dir });
+      const rb = await one.hooks.send({ body: { target: 'u1', files: [bad] }, client: { extId: 'bili' } });
+      assert.equal(rb.status, 400, `${bad} 应该被拒`);
+      assert.equal(one.calls.outActions.length, 0, `${bad} 不该发出去`);
+    }
+
+    /** 没绑 extId 的令牌不能发文件 */
+    const noExt = rig({ dataDir: dir });
+    const rn = await noExt.hooks.send({ body: { target: 'u1', files: ['shot.png'] }, client: {} });
+    assert.equal(rn.status, 403);
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* 系统回收 */ }
+  }
+});
+
+test('send：可执行文件不许发', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-v1send-'));
+  const extDir = join(dir, 'extensions', 'bili');
+  mkdirSync(extDir, { recursive: true });
+  writeFileSync(join(extDir, 'run.exe'), 'MZ');
+  try {
+    const { hooks, calls } = rig({ dataDir: dir });
+    const r = await hooks.send({ body: { target: 'u1', files: ['run.exe'] }, client: { extId: 'bili' } });
+    assert.equal(r.status, 400);
+    assert.match(r.body.message, /不许发可执行文件/);
+    assert.equal(calls.outActions.length, 0);
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* 系统回收 */ }
+  }
+});
+
+test('send：群里没 group_push 授权就 403，一条都不发', async () => {
+  const { hooks, calls } = rig({ authz: false });
+  const r = await hooks.send({ body: { scene: 'group', target: 'g1', text: 'hi' }, client: {} });
+  assert.equal(r.status, 403);
+  assert.match(r.body.message, /group_push/);
+  assert.equal(calls.send.length, 0);
+});
+
+test('send：三个内容都不给时明确拒绝', async () => {
+  const { hooks, calls } = rig();
+  const r = await hooks.send({ body: { target: 'u1' }, client: {} });
+  assert.equal(r.status, 400);
+  assert.match(r.body.message, /至少给一个/);
+  assert.equal(calls.send.length, 0);
 });

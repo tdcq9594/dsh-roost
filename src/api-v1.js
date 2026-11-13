@@ -41,6 +41,20 @@ export const MAX_BODY_BYTES = 1024 * 1024;
 export const V1_ROUTES = {
   'GET /v1/whoami': { scope: null, hook: null },
   'POST /v1/message': { scope: 'message:write', hook: 'message' },
+  /**
+   * 扩展**直接往会话发东西**：文本 / 文件 / 官方图文卡片，不跑模型。
+   *
+   * 为什么不复用 `/v1/message`：那条是「把一句话送进入站链路、跑完一轮模型」，
+   * 文件是这一轮的副产品；而扩展画完图、刷完 B 站要的是「把这张图/这张卡片
+   * 直接发出去」，不该为此再跑一轮对话（费钱、还可能被模型改写成别的话）。
+   *
+   * 也不复用 `/v1/say`：那个只能发文本，加 `files` / `card` 会让「说一句话」
+   * 这个语义变得含糊——发卡片时正文是空的，叫「say」名不副实。
+   *
+   * scope 复用 `message:write` 而不新开：它做的还是「往会话里送东西」，
+   * 新开 scope 只会让已装的扩展重新走一遍敏感授权确认，收益为零。
+   */
+  'POST /v1/send': { scope: 'message:write', hook: 'send' },
   'POST /v1/say': { scope: 'say:write', hook: 'say' },
   'GET /v1/state': { scope: 'state:read', hook: 'state' },
   'GET /v1/mood': { scope: 'state:read', hook: 'mood' },
@@ -70,7 +84,7 @@ export const V1_ROUTES = {
  */
 export const V1_IMPLEMENTED_HOOKS = Object.freeze([
   'agent', 'memory.ext.add',
-  'message', 'say', 'state', 'mood', 'context',
+  'message', 'send', 'say', 'state', 'mood', 'context',
   'memory.read', 'memory.write', 'proactive', 'session.ensure',
 ]);
 

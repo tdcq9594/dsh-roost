@@ -124,6 +124,7 @@
 | GET | `/v1/mood` | `state:read` | ✅ 可用 | 读当前心情 |
 | POST | `/v1/proactive` | `proactive:write` | ✅ 可用 | 排一条主动消息（受清醒时段与频次约束） |
 | POST | `/v1/say` | `say:write` | ✅ 可用 | 让机器人主动说一句；`pending` 表示进审核，不是已发出 |
+| POST | `/v1/send` | `message:write` | ✅ 可用 | 扩展直接把文本 / 文件 / 官方图文卡片发进会话，不跑模型 |
 | POST | `/v1/session.configure` | `prompt:write` | 🚫 设计不开放 | 改会话配置（模型、人格、工具开关） |
 | POST | `/v1/session.ensure` | `session:write` | ✅ 可用 | 确保会话存在 |
 | GET | `/v1/state` | `state:read` | ✅ 可用 | 读机器人与当前会话的状态（在线、绑定、档位） |

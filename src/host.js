@@ -1613,6 +1613,13 @@ export function apply(ctx) {
     journalOf: () => journal,
     aliasesOf: (chatId) => aliasesOf(chatId),
     channelOf: () => channels,
+    /**
+     * 5.x `/v1/send` 用：扩展发文件要走 `outActions`（去重 / 冷却 / 账本 requestId），
+     * 不能直连 `sendFile`；`dataDir()` 用来把文件路径卡在扩展自己的目录里。
+     * 两个都在本模块后面才初始化，所以只能传函数。
+     */
+    outActionsOf: () => outActions,
+    dataDirOf: () => dataDir(),
     speakUpOf: () => speakUp,
     agentFor: (chat) => agentFor(chat),
     mount: (agent, chat) => mount(agent, chat),

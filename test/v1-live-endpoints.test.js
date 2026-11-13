@@ -29,7 +29,7 @@ function tmpHome() {
   return d;
 }
 
-test('全部 16 条端点：已实现的不是 501，未实现/不开放的才是 501', async (t) => {
+test('全部端点：已实现的不是 501，未实现/不开放的才是 501', async (t) => {
   const dir = tmpHome();
   t.after(() => {
     try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch { /* 忽略 */ }
@@ -127,5 +127,11 @@ test('全部 16 条端点：已实现的不是 501，未实现/不开放的才�
     assert.equal(hit.status, 200, `${key} 应是 200，实际 ${hit.status} ${hit.error}`);
   }
 
-  assert.equal(not501.length, 15, `非 501 的端点数应为 15，实际 ${not501.length}`);
+  /**
+   * 不写死数字：端点会一直加，写死「15」的结果就是每加一条端点都要改一次
+   * 测试（而且改的人往往只是把数字 +1，并没有真的验过）。
+   * 判据改成「非 501 的数量 === 声明已实现的数量」，加端点自动跟上。
+   */
+  const implemented = Object.keys(V1_ROUTES).filter((k) => isRouteImplemented(k)).length;
+  assert.equal(not501.length, implemented, `非 501 的端点数应等于已实现数 ${implemented}，实际 ${not501.length}`);
 });
