@@ -102,3 +102,25 @@ test('链路错误：入队 / 处理消息 / 回话 / 丢弃 四个阶段都接�
     '/status 要把 pathErrors 与 pathErrorCount 暴露出去，否则面板还是看不见',
   );
 });
+
+/**
+ * 开火时机：能力表不能**开机预打**。
+ *
+ * 2026-11-13 10:10:26：DSH 刚重启，Roost 还在起，`caps = createCapabilityClient()`
+ * 后面紧跟的 `refreshCaps()` 一枪打在空端口上，面板留下一句「连不上 roost
+ * （那个端口没人监听）」——看着像配对坏了，其实几秒后 `onState('online')`
+ * 会自己补上。所以：构造时只给 `ready` 判据，第一次拉取交给 online。
+ */
+test('开火时机：能力表只由链路触发，构造完不许立刻 refreshCaps()', () => {
+  assert.match(
+    SRC,
+    /ready:\s*\(\)\s*=>\s*roostRef\?\.connected/,
+    'createCapabilityClient 必须拿到 ready 判据，否则链路没通也会去打 6807',
+  );
+  assert.ok(
+    !/caps\s*=\s*createCapabilityClient\(\{[\s\S]{0,500}?\}\);\s*\r?\n\s*refreshCaps\(\);/m.test(SRC),
+    'caps 构造完不能立刻 refreshCaps()：那一刻 Roost 往往还没监听 6807',
+  );
+  assert.match(SRC, /if \(state === 'online'\) refreshCaps\(\)/, 'online 进线时必须补拉一次');
+  assert.match(SRC, /caps\.refresh\(\{ force: true \}\)/, '面板手动刷新要走 force，否则离线时一律静默跳过');
+});

@@ -2042,6 +2042,13 @@ export function apply(ctx) {
    */
   /** 先声明再赋值：onState 是回调，运行时才读，但别让 TDZ 有机会咬一口 */
   let caps = null;
+  /** createRoostHost 的返回值。拉能力表前要先问它「链路通没通」 */
+  let roostRef = null;
+  /**
+   * 拉能力表。链路没通时 `caps.refresh()` 自己会跳过（返回 null，不记错误）——
+   * 开机那一枪必然打空，打了只会在面板上留一条「连不上 6807」的假告警。
+   * 真正的第一次拉取由 `onState('online')` 触发。
+   */
   const refreshCaps = () => {
     if (!caps) return;
     caps.refresh().catch((e) => caps.noteError(e));
@@ -2101,16 +2108,21 @@ export function apply(ctx) {
     },
   });
 
+  roostRef = roost;
+
   /**
    * 能力协商：连上框架之后拉一次 `system.capabilities`，之后新增能力
-   * （尤其框架插件投影出来的 `tool.*`）都先问这张表。启动时先试一次，
-   * 没连上会被 `onState` 的 online 再补一次。
+   * （尤其框架插件投影出来的 `tool.*`）都先问这张表。
+   *
+   * **只由链路触发，开机不预打**：`ready` 把「通没通」交给客户端判断，
+   * 没通时 `refresh()` 直接跳过、不记错误；第一次真正的拉取来自
+   * `onState('online')`（见上面 createRoostHost 的回调）。
    */
   caps = createCapabilityClient({
     rpc: (m, p) => roost.rpc(m, p),
+    ready: () => roostRef?.connected === true,
     log: (m) => log.warn(`[roost-capabilities] ${m}`),
   });
-  refreshCaps();
 
   const buildFromRoost = createPayloadBuilder({
     rpc: (m, p, o) => roost.rpc(m, p, o),
@@ -7197,7 +7209,8 @@ export function apply(ctx) {
        */
       route('/roost/capabilities', async (req, res) => {
         if (caps) {
-          try { await caps.refresh(); } catch (e) { caps.noteError(e); }
+          /** 手动点刷新：人来问的，通不通都打一枪，原因原样带回去 */
+          try { await caps.refresh({ force: true }); } catch (e) { caps.noteError(e); }
         }
         return send(res, 200, {
           ok: true,

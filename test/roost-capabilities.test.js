@@ -84,3 +84,49 @@ test('白名单：敏感只读方法单独标出来，供工具层按档位拦',
   assert.ok(READONLY_METHODS.length >= 20);
   assert.ok(READONLY_METHODS.every((m) => m.name && m.desc));
 });
+
+/**
+ * 开火时机：链路没通时不要打这一枪。
+ *
+ * 2026-11-13 10:10:26 实机日志：
+ *   `[roost-capabilities] 能力表刷新失败（保留旧清单）：连不上 roost
+ *    (http://127.0.0.1:6807)（那个端口没人监听：外接协议没开，或端口填错了）`
+ * 那会儿 DSH 刚重启、Roost 还在起（`autoStart=false`），这一枪是**开机预打**
+ * 打的空枪：看着像配对坏了，其实只是时序，几秒后 `online` 会自己补上。
+ *
+ * 跳过时**不能记成错误**，否则面板上还是会挂着一条假告警。
+ */
+test('开火时机：链路没通时 refresh 跳过、不发请求、不记错误', async () => {
+  let linked = false;
+  const calls = [];
+  const caps = createCapabilityClient({
+    rpc: async (m) => {
+      calls.push(m);
+      return CAPS;
+    },
+    ready: () => linked,
+  });
+
+  assert.equal(await caps.refresh(), null, '没通应当返回 null 而不是抛错或空清单');
+  assert.deepEqual(calls, [], '没通就不该发 system.capabilities');
+  assert.equal(caps.lastError(), '', '跳过不是失败，lastError 必须保持空');
+
+  linked = true;
+  const list = await caps.refresh();
+  assert.equal(list.length, 4, '通了之后第一次拉取就要拿到全表');
+  assert.deepEqual(calls, ['system.capabilities']);
+});
+
+test('开火时机：手动刷新（force）在链路没通时照样打一枪，把原因交给人看', async () => {
+  let calls = 0;
+  const caps = createCapabilityClient({
+    rpc: async () => {
+      calls += 1;
+      throw new Error('连不上 roost (http://127.0.0.1:6807)');
+    },
+    ready: () => false,
+  });
+
+  await assert.rejects(caps.refresh({ force: true }), /连不上 roost/);
+  assert.equal(calls, 1, '人明确点了刷新，就要真去打一枪');
+});

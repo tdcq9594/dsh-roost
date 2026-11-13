@@ -49,8 +49,9 @@ const READONLY_NAMES = new Set(READONLY_METHODS.map((m) => m.name));
  * @param {object} o
  * @param {(method:string, params:object)=>Promise<any>} o.rpc
  * @param {(m:string)=>void} [o.log]
+ * @param {()=>boolean} [o.ready] 链路通没通。默认恒 true（单测/无连接概念的场景）
  */
-export function createCapabilityClient({ rpc, log = () => {} } = {}) {
+export function createCapabilityClient({ rpc, log = () => {}, ready = () => true } = {}) {
   if (typeof rpc !== 'function') throw new Error('能力协商需要 rpc 函数');
 
   let methods = [];
@@ -59,8 +60,22 @@ export function createCapabilityClient({ rpc, log = () => {} } = {}) {
   let lastError = '';
   let lastAt = 0;
 
-  /** 拉一次能力表。框架没连上时抛错由调用方吞掉，保留上一次的清单 */
-  async function refresh() {
+  /**
+   * 拉一次能力表。
+   *
+   * **链路没通就直接跳过**（返回 `null`），不当成失败：DSH 开机时 Roost 往往
+   * 还没起来（`autoStart=false`），这一枪必然打空，只会在面板上留一条
+   * 「连不上 6807（那个端口没人监听）」的假告警 —— 看着像配对坏了，实际只是
+   * 时序。第一次真正的拉取由 `state === 'online'` 触发，之后
+   * `capabilities.changed` 再增量补。
+   *
+   * `force: true` 给面板上手动点「刷新能力表」用：那是人明确要看原因，
+   * 通不通都要打一枪，失败原因带回去给人看。
+   *
+   * @param {{force?: boolean}} [o]
+   */
+  async function refresh({ force = false } = {}) {
+    if (!force && !ready()) return null;
     const r = await rpc('system.capabilities', {});
     const list = Array.isArray(r) ? r : Array.isArray(r?.methods) ? r.methods : [];
     methods = list
