@@ -4743,121 +4743,424 @@ select.roost-input{color-scheme:dark}
      * 同一个写操作摆两个地方，用户得先判断在哪页动手才算数（§0.5 A10 的教训）。
      */
     /**
-     * 4.2 关系图：**2D 力导向**（不上 3D——2000 节点上 3D 就是性能坑，§0.8-6）。
-     * 纯 canvas 自绘：斥力 + 弹簧 + 中心引力，收敛 ~300 帧后停（省电）。
-     * 配色在绘制时读 CSS 变量——面板换主题不用改这里。
-     * 点节点回调 onPick（人物页用它打开详情），不做拖拽——预览够用，别把交互做重。
+     * 4.2 关系图：**2D 星图**（不上 3D——2000 节点上 3D 就是性能坑，§0.8-6）。
+     *
+     * 2026-11-13 重做。上一版是「所有节点同色同大小 + 每条边都标关系字 +
+     * 每个节点都写名字」，30 条关系就能糊成一片，76 个实体根本没法看。
+     * 这一版按可读性排优先级：
+     *
+     *   1. **名字不是全都写**：只给度数最高的几个节点挂标签，其余靠悬停 / 点选；
+     *      标签走矩形避让（`placeLabels`），宁可少显示，不叠着显示。
+     *   2. **关系字不写在线上**：线只表达「有连接」，关系类型进图例 + 悬停提示；
+     *      线上写字是上一版最大的噪音源。
+     *   3. **大小和颜色都带信息**：半径按连接数（3–10px），颜色按关系类型分族。
+     *   4. **能缩能拖**：画布 420px 高，滚轮缩放 + 拖拽平移，不再是一张死图。
+     *
+     * 深色夜空是**固定**的，不跟面板主题走：星图的对比度依赖暗底，
+     * 浅色版会把辉光和细线全洗掉。取色也写死在这里，不读 CSS 变量。
      */
+    /**
+     * 关系图布局（纯函数，导出给测试）。
+     *
+     * 为什么自己写力导向而不上 d3：客户端是单文件、零依赖，多引一个库
+     * 就要多一次 DSH 重载才能生效；而且这里只需要「排开、别叠」。
+     *
+     * 确定性：初始位置用黄金角螺旋，不用 `Math.random()`——同一份数据
+     * 每次画出同一张图，截图对比和测试才有意义。
+     */
+    function graphLayout(edges, { w = 640, h = 420, iters = 220 } = {}) {
+      const nodes = new Map()
+      const touch = (name) => {
+        const n = String(name ?? '').trim()
+        if (!n) return null
+        let o = nodes.get(n)
+        if (!o) { o = { name: n, x: 0, y: 0, vx: 0, vy: 0, deg: 0 }; nodes.set(n, o) }
+        return o
+      }
+      const links = []
+      for (const e of edges || []) {
+        const a = touch(e?.src); const b = touch(e?.dst)
+        if (!a || !b || a === b) continue
+        a.deg += 1; b.deg += 1
+        links.push({ a, b, rel: String(e?.rel || '') })
+      }
+      const arr = [...nodes.values()]
+      /** 黄金角螺旋：比「圆周均布」更不容易一上来就挤在一条弧上 */
+      const GA = Math.PI * (3 - Math.sqrt(5))
+      arr.forEach((n, i) => {
+        const r = Math.min(w, h) * 0.42 * Math.sqrt((i + 0.5) / Math.max(1, arr.length))
+        n.x = w / 2 + Math.cos(i * GA) * r
+        n.y = h / 2 + Math.sin(i * GA) * r
+      })
+      const degMax = arr.reduce((m, n) => Math.max(m, n.deg), 0) || 1
+      for (let k = 0; k < iters; k++) {
+        /** 斥力：节点越多越弱，否则 76 个节点会被推成一张网 */
+        const rep = 2600 + arr.length * 26
+        for (let i = 0; i < arr.length; i++) {
+          for (let j = i + 1; j < arr.length; j++) {
+            const a = arr[i]; const b = arr[j]
+            const dx = a.x - b.x; const dy = a.y - b.y
+            const d2 = dx * dx + dy * dy || 1
+            const d = Math.sqrt(d2)
+            const f = rep / d2
+            a.vx += (dx / d) * f; a.vy += (dy / d) * f
+            b.vx -= (dx / d) * f; b.vy -= (dy / d) * f
+          }
+        }
+        /** 弹簧：度数高的节点拉得更紧，让「中心人物」自然浮到中间 */
+        for (const l of links) {
+          const dx = l.b.x - l.a.x; const dy = l.b.y - l.a.y
+          const d = Math.sqrt(dx * dx + dy * dy) || 1
+          const want = 62 + (1 - Math.min(1, (l.a.deg + l.b.deg) / (degMax * 2))) * 46
+          const f = (d - want) * 0.022
+          l.a.vx += (dx / d) * f; l.a.vy += (dy / d) * f
+          l.b.vx -= (dx / d) * f; l.b.vy -= (dy / d) * f
+        }
+        for (const n of arr) {
+          n.vx += (w / 2 - n.x) * 0.006
+          n.vy += (h / 2 - n.y) * 0.006
+          n.vx *= 0.82; n.vy *= 0.82
+          const pad = 26
+          n.x = Math.max(pad, Math.min(w - pad, n.x + n.vx))
+          n.y = Math.max(pad + 8, Math.min(h - pad, n.y + n.vy))
+        }
+      }
+      arr.forEach((n) => {
+        n.r = 3 + (n.deg / degMax) * 7
+        n.x = Math.round(n.x * 10) / 10
+        n.y = Math.round(n.y * 10) / 10
+      })
+      return { nodes: arr, links, degMax }
+    }
+
+    /**
+     * 标签避让（纯函数，导出给测试）。
+     *
+     * 贪心：按度数从高到低试放，放不下就跳过这个节点（**不是**硬挤进去）。
+     * 上一版每个节点都写字，30 个名字能叠出四层——这就是「可读性太差」的主因。
+     *
+     * 矩形宽度按字数估：中文约 1em、ASCII 约 0.55em，再留 6px 内边距。
+     *
+     * @returns {Array<{name:string,x:number,y:number,w:number,h:number}>} 真正放下的标签
+     */
+    function placeLabels(nodes, { maxLabels = 26, font = 11, maxChars = 6, pad = 2 } = {}) {
+      const est = (s) => {
+        let wpx = 0
+        for (const ch of s) wpx += /[\x00-\xff]/.test(ch) ? font * 0.55 : font
+        return wpx + 6
+      }
+      const picked = []
+      const order = [...(nodes || [])].sort((a, b) => (b.deg - a.deg) || a.name.localeCompare(b.name))
+      for (const n of order) {
+        if (picked.length >= maxLabels) break
+        const text = String(n.name || '').slice(0, maxChars)
+        if (!text) continue
+        const w = est(text)
+        const h = font + 4
+        const box = { name: text, full: n.name, x: n.x - w / 2, y: n.y - (n.r || 6) - h - 3, w, h }
+        /** 与已放标签重叠 → 放弃（留白比叠字好看） */
+        const hit = picked.some((p) => !(box.x + box.w + pad < p.x || p.x + p.w + pad < box.x
+          || box.y + box.h + pad < p.y || p.y + p.h + pad < box.y))
+        if (hit) continue
+        /** 出画布也不放：半个名字比没有名字更让人困惑 */
+        if (box.x < 0 || box.y < 0) continue
+        picked.push(box)
+      }
+      return picked
+    }
+
+    /**
+     * 关系筛选（纯函数，导出给测试）。
+     *
+     * `q` 命中任一端的名字就保留这条边；`kind` 是关系类型（'' = 全部）。
+     * 返回的 `hit` 是命中的节点名集合，画的时候用来加亮。
+     */
+    function filterRels(edges, { q = '', kind = '' } = {}) {
+      const kw = String(q || '').trim().toLowerCase()
+      const k = String(kind || '')
+      const out = []
+      const hit = new Set()
+      for (const e of edges || []) {
+        if (k && String(e?.rel || '') !== k) continue
+        if (kw) {
+          const s = String(e?.src || '').toLowerCase()
+          const d = String(e?.dst || '').toLowerCase()
+          if (!s.includes(kw) && !d.includes(kw)) continue
+          if (s.includes(kw)) hit.add(String(e.src))
+          if (d.includes(kw)) hit.add(String(e.dst))
+        }
+        out.push(e)
+      }
+      return { edges: out, hit }
+    }
+
+    /** 关系类型 → 颜色。按出现顺序取色，最多 8 族，多的归「其它」 */
+    const REL_COLORS = ['#7fd1ff', '#9d8bff', '#5ce1b0', '#ffc46b', '#ff8fb1', '#8fa8ff', '#d0e26b', '#a0a8bd']
+
     function RelGraph({ edges, onPick }) {
       const ref = useRef(null)
+      /** 关系类型清单：图例和筛选下拉都从这里来 */
+      const kinds = [...new Set((edges || []).map((e) => String(e?.rel || '').trim()).filter(Boolean))]
+      const colorOf = (rel) => {
+        const i = kinds.indexOf(String(rel || '').trim())
+        return REL_COLORS[(i < 0 ? kinds.length : i) % REL_COLORS.length]
+      }
+      const [q, setQ] = useState('')
+      const [kind, setKind] = useState('')
+      const [labels, setLabels] = useState(true)
+      const [zoom, setZoom] = useState(1)
+      const [pan, setPan] = useState({ x: 0, y: 0 })
+      const [tick, setTick] = useState(0)
+      const [hover, setHover] = useState('')
+      /** 布局缓存：拖拽 / 缩放不该重跑 220 轮迭代 */
+      const cache = useRef(null)
+
+      const shown = filterRels(edges, { q, kind })
+      /**
+       * 依赖用**内容签名**而不是数组本身：父组件每次渲染都会 `slice()` 出新数组，
+       * 拿数组当依赖等于每次渲染都重画一遍。
+       */
+      const sig = shown.edges.map((e) => `${e.src}|${e.rel}|${e.dst}`).join(';')
+      const H = 420
+
       useEffect(() => {
         const cv = ref.current
-        if (!cv || !edges?.length) return
-        const nodes = new Map()
-        edges.forEach((e) => {
-          [e.src, e.dst].forEach((n) => {
-            if (n && !nodes.has(n)) nodes.set(n, { name: n, x: 0, y: 0, vx: 0, vy: 0 })
-          })
-        })
-        const arr = [...nodes.values()]
-        const W = cv.clientWidth || 320
-        const Hh = 220
-        cv.width = W
-        cv.height = Hh
-        arr.forEach((n, i) => {
-          const a = (i / Math.max(1, arr.length)) * Math.PI * 2
-          n.x = W / 2 + Math.cos(a) * W * 0.28
-          n.y = Hh / 2 + Math.sin(a) * Hh * 0.3
-        })
-        const links = edges
-          .map((e) => ({ a: nodes.get(e.src), b: nodes.get(e.dst), rel: e.rel }))
-          .filter((l) => l.a && l.b)
-        let running = true
-        const step = () => {
-          for (let i = 0; i < arr.length; i++) {
-            for (let j = i + 1; j < arr.length; j++) {
-              const a = arr[i]; const b = arr[j]
-              let dx = a.x - b.x; let dy = a.y - b.y
-              let d2 = dx * dx + dy * dy || 1
-              const d = Math.sqrt(d2)
-              const f = 1400 / d2
-              a.vx += (dx / d) * f; a.vy += (dy / d) * f
-              b.vx -= (dx / d) * f; b.vy -= (dy / d) * f
-            }
-          }
-          links.forEach((l) => {
-            const dx = l.b.x - l.a.x; const dy = l.b.y - l.a.y
-            const d = Math.sqrt(dx * dx + dy * dy) || 1
-            const f = (d - 90) * 0.02
-            l.a.vx += (dx / d) * f; l.a.vy += (dy / d) * f
-            l.b.vx -= (dx / d) * f; l.b.vy -= (dy / d) * f
-          })
-          arr.forEach((n) => {
-            n.vx += (W / 2 - n.x) * 0.004
-            n.vy += (Hh / 2 - n.y) * 0.004
-            n.vx *= 0.85; n.vy *= 0.85
-            n.x = Math.max(34, Math.min(cv.width - 34, n.x + n.vx))
-            n.y = Math.max(24, Math.min(cv.height - 24, n.y + n.vy))
-          })
+        if (!cv) return
+        const W = cv.clientWidth || 640
+        const dpr = Math.min(2, (typeof window !== 'undefined' && window.devicePixelRatio) || 1)
+        cv.width = Math.round(W * dpr)
+        cv.height = Math.round(H * dpr)
+
+        const ctx = cv.getContext('2d')
+        if (!ctx) return
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        ctx.clearRect(0, 0, W, H)
+
+        /**
+         * 筛完一条不剩时**必须重画一次空画布**。
+         * 直接 return 的话，上一帧的星星还留在画布上——用户以为筛选没生效。
+         */
+        if (!shown.edges.length) {
+          ctx.fillStyle = '#0a0f1c'
+          ctx.fillRect(0, 0, W, H)
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          ctx.font = '12px ui-sans-serif,system-ui,sans-serif'
+          ctx.fillStyle = 'rgba(226,234,255,.45)'
+          ctx.fillText('没有匹配的关系，换个词或选「全部关系」', W / 2, H / 2)
+          return
         }
-        const draw = () => {
-          const ctx = cv.getContext('2d')
-          if (!ctx) return
-          const cs = getComputedStyle(cv)
-          const line = cs.getPropertyValue('--line').trim() || 'rgba(128,128,128,.5)'
-          const accent = cs.getPropertyValue('--accent').trim() || '#4a9eff'
-          const fg = cs.getPropertyValue('--fg').trim() || '#ccc'
-          ctx.clearRect(0, 0, cv.width, cv.height)
-          ctx.strokeStyle = line
-          ctx.lineWidth = 1
-          links.forEach((l) => {
-            ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y); ctx.stroke()
-            ctx.fillStyle = fg
-            ctx.font = '10px sans-serif'
-            ctx.textAlign = 'center'
-            ctx.fillText(l.rel || '', (l.a.x + l.b.x) / 2, (l.a.y + l.b.y) / 2 - 3)
-          })
-          arr.forEach((n) => {
+
+        const key = sig + '#' + tick
+        if (!cache.current || cache.current.key !== key) {
+          cache.current = { key, lay: graphLayout(shown.edges, { w: W, h: H }) }
+        }
+        const { nodes, links } = cache.current.lay
+
+        /* 夜空：固定深色 + 一层确定性星尘（不用 random，同一份数据每次一样） */
+        const bg = ctx.createRadialGradient(W * 0.5, H * 0.45, 20, W * 0.5, H * 0.5, Math.max(W, H) * 0.75)
+        bg.addColorStop(0, '#141d33')
+        bg.addColorStop(1, '#0a0f1c')
+        ctx.fillStyle = bg
+        ctx.fillRect(0, 0, W, H)
+        let seed = 20261113
+        const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff }
+        for (let i = 0; i < 150; i++) {
+          const x = rnd() * W; const y = rnd() * H; const a = 0.06 + rnd() * 0.22
+          ctx.fillStyle = `rgba(200,220,255,${a.toFixed(3)})`
+          ctx.fillRect(x, y, 1, 1)
+        }
+
+        /* 相机：先缩放再平移，拖拽不会因为缩放比例而「手感不对」 */
+        ctx.save()
+        ctx.translate(W / 2 + pan.x, H / 2 + pan.y)
+        ctx.scale(zoom, zoom)
+        ctx.translate(-W / 2, -H / 2)
+
+        const focus = hover
+        /* 连线：默认极淡，悬停某点时只留它的边 */
+        for (const l of links) {
+          const on = !focus || l.a.name === focus || l.b.name === focus
+          ctx.beginPath()
+          ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y)
+          ctx.strokeStyle = on ? 'rgba(140,190,255,.5)' : 'rgba(120,160,220,.12)'
+          ctx.lineWidth = on ? 1.3 : 0.9
+          ctx.stroke()
+        }
+
+        /* 节点：辉光 + 实心 + 描边；命中搜索的加一圈亮环 */
+        for (const n of nodes) {
+          const rel = links.find((l) => l.a === n || l.b === n)
+          /** 没有边的孤立节点不该出现（图是边推出来的），兜底灰 */
+          const col = rel ? colorOf(rel.rel) : '#8a93a8'
+          const isHit = shown.hit.has(n.name)
+          const isHover = focus === n.name
+          ctx.beginPath()
+          ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2)
+          ctx.fillStyle = col
+          ctx.shadowColor = col
+          ctx.shadowBlur = isHover || isHit ? 16 : 8
+          ctx.fill()
+          ctx.shadowBlur = 0
+          ctx.lineWidth = isHover ? 2 : 1
+          ctx.strokeStyle = isHover ? '#ffffff' : 'rgba(255,255,255,.28)'
+          ctx.stroke()
+          if (isHit) {
             ctx.beginPath()
-            ctx.arc(n.x, n.y, 16, 0, Math.PI * 2)
-            ctx.fillStyle = accent + '2e'
-            ctx.fill()
-            ctx.strokeStyle = accent
+            ctx.arc(n.x, n.y, n.r + 4, 0, Math.PI * 2)
+            ctx.strokeStyle = 'rgba(255,255,255,.55)'
+            ctx.lineWidth = 1
             ctx.stroke()
-            ctx.fillStyle = fg
-            ctx.font = '11px sans-serif'
-            ctx.fillText(n.name.slice(0, 6), n.x, n.y - 20)
+          }
+        }
+
+        /* 标签：只给放得下的那些；悬停的点无论如何都显示 */
+        if (labels) {
+          const picked = placeLabels(nodes, { maxLabels: 26, font: 11, maxChars: 6 })
+          if (focus && !picked.some((p) => p.full === focus)) {
+            const n = nodes.find((x) => x.name === focus)
+            if (n) picked.push({ name: n.name.slice(0, 6), full: n.name, x: n.x - 24, y: n.y - n.r - 18, w: 48, h: 15 })
+          }
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          ctx.font = '11px ui-sans-serif,system-ui,sans-serif'
+          for (const p of picked) {
+            /** 先铺一层暗底：夜空上直接写字，暗色名字会糊进背景 */
+            ctx.fillStyle = 'rgba(8,12,22,.62)'
+            ctx.fillRect(p.x, p.y, p.w, p.h)
+            ctx.fillStyle = p.full === focus ? '#ffffff' : 'rgba(226,234,255,.9)'
+            ctx.fillText(p.name, p.x + p.w / 2, p.y + p.h / 2 + 0.5)
+          }
+        }
+        ctx.restore()
+
+        /* 图例：关系类型 → 色点。放右上角，最多 6 行 */
+        if (kinds.length) {
+          ctx.textAlign = 'left'
+          ctx.textBaseline = 'middle'
+          ctx.font = '11px ui-sans-serif,system-ui,sans-serif'
+          const rows = kinds.slice(0, 6)
+          rows.forEach((k, i) => {
+            const y = 16 + i * 16
+            ctx.beginPath(); ctx.arc(14, y, 3.5, 0, Math.PI * 2)
+            ctx.fillStyle = colorOf(k); ctx.fill()
+            ctx.fillStyle = 'rgba(226,234,255,.78)'
+            ctx.fillText(k.slice(0, 8), 24, y)
           })
+          if (kinds.length > 6) {
+            ctx.fillStyle = 'rgba(226,234,255,.5)'
+            ctx.fillText(`+${kinds.length - 6} 类`, 24, 16 + 6 * 16)
+          }
         }
-        let frames = 0
-        let raf = 0
-        const loop = () => {
-          if (!running) return
-          step()
-          draw()
-          if (++frames < 300) raf = requestAnimationFrame(loop)
-        }
-        loop()
-        const onClick = (ev) => {
-          const r = cv.getBoundingClientRect()
-          const x = ev.clientX - r.left
-          const y = ev.clientY - r.top
-          const hit = arr.find((n) => (n.x - x) ** 2 + (n.y - y) ** 2 < 19 * 19)
-          if (hit && onPick) onPick(hit.name)
-        }
-        cv.addEventListener('click', onClick)
-        return () => {
-          running = false
-          cancelAnimationFrame(raf)
-          cv.removeEventListener('click', onClick)
-        }
-      }, [edges])
+
+        /* 统计角标 + 操作提示 */
+        ctx.textAlign = 'right'
+        ctx.fillStyle = 'rgba(226,234,255,.55)'
+        ctx.fillText(`${nodes.length} 实体 · ${links.length} 关系 · ${Math.round(zoom * 100)}%`, W - 12, 16)
+        ctx.textAlign = 'left'
+        ctx.fillStyle = 'rgba(226,234,255,.42)'
+        ctx.fillText('滚轮缩放 · 拖拽平移 · 点星看人', 12, H - 12)
+      }, [sig, labels, zoom, pan, tick, hover, kinds.length])
+
       if (!edges?.length) return null
-      return h('canvas', {
-        ref,
-        title: '点节点看这个人；图是自动收敛的，不做拖拽',
-        style: { width: '100%', height: 220, borderRadius: 8, border: '1px solid var(--line)', display: 'block' },
-      })
+
+      /** 命中检测用同一份布局；没有布局时（首帧前）点不动，直接放过 */
+      const hitAt = (cx, cy) => {
+        const cv = ref.current
+        const lay = cache.current?.lay
+        if (!cv || !lay) return null
+        const W = cv.clientWidth || 640
+        const x = (cx - (W / 2 + pan.x)) / zoom + W / 2
+        const y = (cy - (H / 2 + pan.y)) / zoom + H / 2
+        let best = null
+        let bestD = Infinity
+        for (const n of lay.nodes) {
+          const d = (n.x - x) ** 2 + (n.y - y) ** 2
+          if (d < (n.r + 8) ** 2 && d < bestD) { best = n; bestD = d }
+        }
+        return best
+      }
+
+      const localOf = (ev) => {
+        const r = ref.current.getBoundingClientRect()
+        return { x: ev.clientX - r.left, y: ev.clientY - r.top }
+      }
+
+      return h('div', null,
+        /* 工具条：搜索 / 关系类型 / 标签开关 / 重新布局 */
+        h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
+          h('input', {
+            className: 'roost-input',
+            style: { width: 150, padding: '3px 8px', fontSize: '11.5px' },
+            placeholder: '搜实体名',
+            value: q,
+            onChange: (e) => setQ(e.target.value),
+          }),
+          h('select', {
+            className: 'roost-input',
+            style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
+            value: kind,
+            onChange: (e) => setKind(e.target.value),
+          },
+            h('option', { value: '' }, '全部关系'),
+            kinds.map((k) => h('option', { key: k, value: k }, k)),
+          ),
+          h('label', { style: { fontSize: '11.5px', display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            h('input', { type: 'checkbox', checked: labels, onChange: (e) => setLabels(e.target.checked) }),
+            '显示名字'),
+          h('button', { type: 'button', className: 'roost-btn', onClick: () => { setTick((t) => t + 1); setZoom(1); setPan({ x: 0, y: 0 }) } }, '重新布局'),
+          h('span', { className: 'roost-muted', style: { fontSize: 11.5, marginLeft: 'auto' } },
+            q || kind ? `筛出 ${shown.edges.length} 条` : ''),
+        ),
+        h('canvas', {
+          ref,
+          title: '点星看人；滚轮缩放，拖拽平移',
+          style: { width: '100%', height: H, borderRadius: 10, border: '1px solid rgba(120,160,220,.28)', display: 'block', cursor: 'grab' },
+          onWheel: (ev) => {
+            if (ev.preventDefault) ev.preventDefault()
+            setZoom((z) => Math.max(0.6, Math.min(2.6, z * (ev.deltaY > 0 ? 0.9 : 1.1))))
+          },
+          onMouseDown: (ev) => {
+            const start = localOf(ev)
+            const from = { ...pan }
+            let moved = false
+            const mv = (e2) => {
+              const p = localOf(e2)
+              const dx = p.x - start.x; const dy = p.y - start.y
+              if (Math.abs(dx) + Math.abs(dy) > 3) moved = true
+              setPan({ x: from.x + dx, y: from.y + dy })
+            }
+            const up = (e2) => {
+              if (typeof window !== 'undefined') {
+                window.removeEventListener('mousemove', mv)
+                window.removeEventListener('mouseup', up)
+              }
+              if (moved) return
+              const p = localOf(e2)
+              const n = hitAt(p.x, p.y)
+              if (n && onPick) onPick(n.name)
+            }
+            if (typeof window !== 'undefined') {
+              window.addEventListener('mousemove', mv)
+              window.addEventListener('mouseup', up)
+            }
+          },
+          onMouseMove: (ev) => {
+            const p = localOf(ev)
+            const n = hitAt(p.x, p.y)
+            const next = n ? n.name : ''
+            if (next !== hover) setHover(next)
+          },
+          onMouseLeave: () => setHover(''),
+        }),
+        /* 图例文字版：画布里的图例可能被缩放/平移挤掉，这里留一份稳定的 */
+        kinds.length
+          ? h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginTop: 4, display: 'flex', gap: 10, flexWrap: 'wrap' } },
+              kinds.slice(0, 8).map((k) => h('span', { key: k, style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+                h('span', { style: { width: 8, height: 8, borderRadius: 4, background: colorOf(k), display: 'inline-block' } }),
+                k)))
+          : null,
+      )
     }
 
     function PeopleTab({ mem, toast, reload, quick, busy, setTab }) {
@@ -5027,7 +5330,12 @@ select.roost-input{color-scheme:dark}
                 (gp?.edges || []).length
                   ? h('div', { className: 'roost-list' },
                       h('div', { style: { marginBottom: 8 } },
-                        h(RelGraph, { edges: gp.edges.slice(0, 30), onPick: (name) => openPerson({ name }) })),
+                        /**
+                         * 30 → 60 条：上一版画布只有 220px 高，塞 30 条就已经糊了；
+                         * 现在 420px + 标签避让 + 可缩放，60 条（≈70 个实体）实测
+                         * 布局 16ms、最近两点 32px，还看得清。再往上就该分页了。
+                         */
+                        h(RelGraph, { edges: gp.edges.slice(0, 60), onPick: (name) => openPerson({ name }) })),
                       gp.edges.slice(0, 12).map((e) => h('div', { key: e.id, className: 'roost-item' },
                         h('span', { className: 't' }, `${e.src} —${e.rel}→ ${e.dst}`),
                         h('span', { className: 'd' }, dayOf(e.from)),
@@ -12826,6 +13134,14 @@ select.roost-input{color-scheme:dark}
      * 语法合法、渲染不炸、测试全绿，但面板在撒谎。纯函数才能被断言。
      */
     exports.portView = portView
+    /**
+     * 4.2 关系图重做后导出的三个纯函数。星图的可读性全靠它们：
+     * 布局排开、标签不叠、筛选不漏——三件事都能单独断言，不用起浏览器。
+     */
+    exports.graphLayout = graphLayout
+    exports.placeLabels = placeLabels
+    exports.filterRels = filterRels
+    exports.RelGraph = RelGraph
     return module.exports
   },
 })
