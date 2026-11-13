@@ -2097,3 +2097,38 @@ test('5.1 Alt+K 全局查找：页名与中文别名都能搜到', () => {
   assert.ok(src.includes('搜页面：页名或别名'), '要有查找面板');
   void h
 })
+
+
+test('5.2 排障页：级别 / 模块筛选与自动刷新开关', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  const logs = [
+    { time: '10:00:00', level: 'error', area: 'update', text: '更新炸了' },
+    { time: '10:00:01', level: 'info', area: 'turn', text: '正常一轮' },
+  ]
+  rt.reset()
+  const txt = textOf(expand(h(mod.LogsTab, {
+    logs, auto: true, onToggleAuto: () => {}, onReload: () => {},
+  }), rt))
+  for (const must of ['全部级别', '调试', '信息', '警告', '错误', '全部模块', '自动刷新', '刷新',
+    '显示 2 / 2 条', '[update]', '[turn]']) {
+    assert.ok(txt.includes(must), `排障页缺「${must}」`)
+  }
+
+  /** 关掉自动刷新要有明确提示，不能让人以为还在刷 */
+  rt.reset()
+  const off = textOf(expand(h(mod.LogsTab, {
+    logs, auto: false, onToggleAuto: () => {}, onReload: () => {},
+  }), rt))
+  assert.ok(off.includes('自动刷新已关'), '关掉后要说明');
+
+  /** 空日志与「筛选后为空」要区分 */
+  rt.reset()
+  const empty = textOf(expand(h(mod.LogsTab, { logs: [], auto: true }), rt))
+  assert.ok(empty.includes('还没有日志'));
+
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("localStorage.setItem('roost.logs.auto'"), '开关要记住');
+  assert.ok(src.includes('if (!logAuto) return'), '关掉就不轮询');
+})

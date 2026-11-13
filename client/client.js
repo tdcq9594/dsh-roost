@@ -12930,20 +12930,59 @@ select.roost-input{color-scheme:dark}
       return h(ExtClientsBlock, { toast })
     }
 
-    function LogsTab({ logs }) {
-      const tone = (lv) => (lv === 'error' ? 'var(--bad)' : lv === 'warn' ? 'var(--warn)' : 'var(--ok)')
+    /**
+     * 排障页（5.2）：日志筛选 + 自动刷新开关。
+     *
+     * 以前只能一屏 400 条全看，出问题时真正的 error 埋在几十条 info 里。
+     * 级别与模块都在前端筛（日志最多 400 条，全量已在内存），不额外打接口。
+     */
+    function LogsTab({ logs, auto = true, onToggleAuto, onReload }) {
+      const [lv, setLv] = useState('')
+      const [area, setArea] = useState('')
+      const tone = (x) => (x === 'error' ? 'var(--bad)' : x === 'warn' ? 'var(--warn)' : 'var(--ok)')
+      const all = Array.isArray(logs) ? logs : []
+      const areas = [...new Set(all.map((e) => e.area).filter(Boolean))].sort()
+      const shown = all.filter((e) => (!lv || e.level === lv) && (!area || e.area === area))
 
-      return h(Sec, { n: '01', title: '最近的动静', right: h('span', { className: 'roost-note', style: { margin: 0 } }, '每 3 秒刷新') },
+      return h(Sec, {
+        n: '01', title: '最近的动静',
+        right: h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+          h('select', {
+            className: 'roost-input', title: '按级别筛', style: { width: 'auto', padding: '2px 6px', fontSize: 11.5 },
+            value: lv, onChange: (e) => setLv(e.target.value),
+          },
+            h('option', { value: '' }, '全部级别'),
+            h('option', { value: 'debug' }, '调试'),
+            h('option', { value: 'info' }, '信息'),
+            h('option', { value: 'warn' }, '警告'),
+            h('option', { value: 'error' }, '错误')),
+          h('select', {
+            className: 'roost-input', title: '按模块筛', style: { width: 'auto', padding: '2px 6px', fontSize: 11.5 },
+            value: area, onChange: (e) => setArea(e.target.value),
+          },
+            h('option', { value: '' }, '全部模块'),
+            areas.map((a) => h('option', { key: a, value: a }, a))),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5 } },
+            h('input', {
+              type: 'checkbox', checked: auto !== false,
+              onChange: (e) => onToggleAuto?.(Boolean(e.target.checked)),
+            }), '自动刷新'),
+          h('button', { type: 'button', className: 'roost-btn', onClick: () => onReload?.() }, '刷新')),
+      },
         logs === null
           ? h('div', { className: 'roost-empty' }, '读着…')
-          : logs.length === 0
-            ? h('div', { className: 'roost-empty' }, '还没有日志')
+          : shown.length === 0
+            ? h('div', { className: 'roost-empty' }, all.length ? '当前筛选下没有日志' : '还没有日志')
             : h('div', { className: 'roost-list roost-scroll' },
-                logs.slice().reverse().map((e, i) =>
+                h('div', { className: 'roost-note', style: { margin: '0 0 6px' } },
+                  `显示 ${shown.length} / ${all.length} 条` + (auto === false ? ' · 自动刷新已关' : ' · 每 3 秒刷新')),
+                shown.slice().reverse().map((e, i) =>
                   h('div', { key: i, className: 'roost-item' },
                     h('span', { className: 'd' }, e.time),
                     h('span', { style: { flex: '0 0 4px', height: 4, borderRadius: 2, background: tone(e.level), marginTop: 7 } }),
-                    h('span', { className: 't', style: { opacity: e.level === 'error' ? 1 : 0.86 } }, e.text),
+                    h('span', { className: 't', style: { opacity: e.level === 'error' ? 1 : 0.86 } },
+                      e.area ? h('span', { className: 'roost-muted', style: { fontSize: 10.5, marginRight: 6 } }, `[${e.area}]`) : null,
+                      e.text),
                   ),
                 ),
               ),
@@ -13392,6 +13431,10 @@ select.roost-input{color-scheme:dark}
       }, [navLast, setTab])
       /** 日志统一拉一次：概览显示最近 6 条，排障页显示全量，别两处各起一个轮询 */
       const [logs, setLogs] = useState(null)
+      /** 5.2：自动刷新开关（存 localStorage，刷新页面也记得） */
+      const [logAuto, setLogAuto] = useState(() => {
+        try { return localStorage.getItem('roost.logs.auto') !== '0' } catch { return true }
+      })
       useEffect(() => {
         /** 只在概览/排障常驻轮询：client-effects 测试会真的执行 effect，
             在别的页挂 setInterval 会让进程退不出去。切页时下面这行 load()
@@ -13403,9 +13446,11 @@ select.roost-input{color-scheme:dark}
           if (alive) setLogs(r.ok === false ? [] : r.entries || [])
         }
         load()
+        /** 关掉自动刷新只是不再轮询；进页仍会拉一次，手动「刷新」也还在 */
+        if (!logAuto) return () => { alive = false }
         const t = setInterval(load, 3000)
         return () => { alive = false; clearInterval(t) }
-      }, [tab])
+      }, [tab, logAuto])
 
       const [st, setSt] = useState(null)
       const [setupSt, setSetupSt] = useState(null)
@@ -13956,7 +14001,18 @@ select.roost-input{color-scheme:dark}
             : null,
           tab === 'logs'
             ? h('div', { className: 'roost-diag' },
-                h(LogsTab, { logs }),
+                h(LogsTab, {
+                logs,
+                auto: logAuto,
+                onToggleAuto: (v) => {
+                  setLogAuto(v)
+                  try { localStorage.setItem('roost.logs.auto', v ? '1' : '0') } catch {}
+                },
+                onReload: async () => {
+                  const r = await get('/logs')
+                  setLogs(r?.ok === false ? [] : (r?.entries || []))
+                },
+                }),
                 h('div', { className: 'roost-diag-part' },
                   h('div', { className: 'roost-diag-h' }, '上下文 · 手动刷新'),
                   /** 2.6 A10：排障页是正门；旧深链仍在，不删也不藏 */
@@ -14075,6 +14131,8 @@ select.roost-input{color-scheme:dark}
     exports.DepsBlock = DepsBlock
     exports.SetupWizard = SetupWizard
     exports.HerTab = HerTab
+    /** 5.2：排障页筛选的渲染测试要直接渲染它 */
+    exports.LogsTab = LogsTab
     exports.CapsTab = CapsTab
     exports.ToolsModal = ToolsModal
     /**
