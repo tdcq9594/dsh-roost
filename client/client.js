@@ -4640,7 +4640,7 @@ select.roost-input{color-scheme:dark}
               )
             : h('div', { className: 'roost-empty' },
                 cfg.enabled === false
-                  ? '主动说话关着（去「设置」打开 awake.enabled）'
+                  ? '主动说话关着（去「权限 → 她会做什么」打开「先想想要不要开口」）'
                   : '现在没有值得开口的理由 —— 这是正常的，不是坏了。'),
           h('div', { className: 'roost-note' },
             `清醒时段 ${cfg.awakeFrom ?? 8}–${cfg.awakeTo ?? 23} 点 · 沉默超过 ${cfg.missAfterHours ?? 6} 小时算「想你」 · 随性每天最多 ${cfg.casualPerDay ?? 1} 次`),
@@ -7291,7 +7291,7 @@ select.roost-input{color-scheme:dark}
       ['chat', '会话', '一轮最多等多久；上游 502/429 时的补重试（attempts 是「补几次」，budgetSec 是整轮总预算）'],
       ['workspace', '工作区', '机器人会话挂哪个工作区：dir 留空单开、__default__ 用默认'],
       ['server', '服务', '端口与密钥'],
-      ['tts', '语音合成', '默认关闭；上面的「语音合成」卡片就是改这一段（也可以在这里手改）'],
+      ['tts', '语音合成', '默认关闭；在「表达 → 语音合成」那张卡里改（也可以在这里手改）'],
       ['setup', '接入', '装在哪、用哪种接入方式'],
       ['update', '更新源', 'npm 源（registry）；留空用默认源'],
       ['extensions', '用户扩展', 'enabled：扩展说明要不要进 QQ 会话提示词。关着时清单还在、/v1 与已发令牌照常，只是不挂 usage section'],
@@ -10938,7 +10938,7 @@ select.roost-input{color-scheme:dark}
                     }, '账号迁移…'),
                     h('button', {
                       type: 'button', className: 'roost-btn',
-                      onClick: () => { setTab('memory'); toast('已切到「记忆」，清空在「07 清空」') },
+                      onClick: () => { setTab('memory'); toast('已切到「记忆」，清空在「06 清空」') },
                     }, '清空记忆…'),
                     h('button', {
                       type: 'button', className: 'roost-btn',
