@@ -14,6 +14,7 @@ import {
   downgrade,
   createFakeChannel,
   createChannelRegistry,
+  createRoostHostChannel,
 } from '../src/channel.js';
 import {
   normalizeStatus,
@@ -184,4 +185,38 @@ test('降级：退到底也没有可用能力时返回 null', () => {
 test('降级：降级链不会成环（自引用配置也不会卡死）', () => {
   const caps = {};
   assert.equal(downgrade(caps, 'a', 'c2c', { a: 'b', b: 'a' }), null);
+});
+
+/* ---------------- 3.7：事件被动回复（event_id） ---------------- */
+
+test('3.7：只有 event_id 的事件能走被动回复（不占主动额度）', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm1' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false });
+
+  await ch.send({ target: 'u9', text: '欢迎加入', eventId: 'evt_xxx' });
+  assert.equal(calls[0][0], 'msg.send');
+  assert.equal(calls[0][1].eventId, 'evt_xxx');
+  assert.equal(calls[0][1].msgId, undefined, '没有 msgId 就不该带');
+
+  /** 两个都有：msgId 优先（官方对消息事件的被动窗口更稳） */
+  await ch.send({ target: 'u9', text: '在', msgId: 'm_77', eventId: 'evt_xxx' });
+  assert.equal(calls[1][1].msgId, 'm_77');
+  assert.equal(calls[1][1].eventId, undefined);
+
+  /** 什么都没有 = 主动消息，不带被动参数 */
+  await ch.send({ target: 'u9', text: '主动说一句' });
+  assert.equal(calls[2][1].msgId, undefined);
+  assert.equal(calls[2][1].eventId, undefined);
+});
+
+test('3.7：media.send（语音/文件）同样支持 event_id', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm2' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false });
+  await ch.sendVoice({ target: 'u9', dataBase64: 'AAAA', eventId: 'evt_v' });
+  assert.equal(calls[0][0], 'media.send');
+  assert.equal(calls[0][1].eventId, 'evt_v');
+  await ch.sendFile({ target: 'u9', path: 'D:/tmp/a.png', eventId: 'evt_f' });
+  assert.equal(calls[1][1].eventId, 'evt_f');
 });

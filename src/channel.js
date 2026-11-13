@@ -182,6 +182,9 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
     async send({
       scene = 'c2c', target, text, hasGroupAuthz = true,
       silenceMs = 0, requestId = '', msgId = '', receivedAt = 0,
+      /** 3.7：事件被动回复（好友申请/入群审核等只有 event_id 的事件），
+       *  同样不占主动额度；msgId 与 eventId 二选一，都有时优先 msgId */
+      eventId = '',
       markdown = true, keyboard = null,
     } = {}) {
       const t = String(text ?? '').trim();
@@ -214,6 +217,8 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
         content: t,
         requestId: rid,
         ...(msgId ? { msgId: String(msgId) } : {}),
+        /** 3.7：msgId 缺席时用 event_id 走被动——两条路框架都认（bot methods 已支持） */
+        ...(eventId && !msgId ? { eventId: String(eventId) } : {}),
         ...(receivedAt ? { receivedAt: Number(receivedAt) } : {}),
       };
       /**
@@ -282,7 +287,7 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
      * 刚合成出来的 WAV/MP3，协议侧会转码成 silk（要可选的 silk-wasm）。
      * 两条都走 `media.send` → `outbound`，额度、账本、被动窗口一样不缺。
      */
-    async sendVoice({ scene = 'c2c', target, path: p = '', dataBase64 = '', fileName = '', msgId = '', receivedAt = 0 } = {}) {
+    async sendVoice({ scene = 'c2c', target, path: p = '', dataBase64 = '', fileName = '', msgId = '', receivedAt = 0, eventId = '' } = {}) {
       if (!target || (!p && !dataBase64)) return { ok: false, message: '缺 target 或音频' };
       try {
         const r = await host.rpc('media.send', {
@@ -293,6 +298,7 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
           voice: true,
           ...(fileName ? { fileName: String(fileName) } : {}),
           ...(msgId ? { msgId: String(msgId) } : {}),
+          ...(eventId && !msgId ? { eventId: String(eventId) } : {}),
           ...(receivedAt ? { receivedAt: Number(receivedAt) } : {}),
         }, { timeout: 120_000 });
         return { ok: true, id: String(r?.id ?? ''), pending: Boolean(r?.pending) };
@@ -343,7 +349,7 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
      * @param {object} o
      * @param {string} o.path 框架本机路径（dsh-roost 与 roost 同机时才有意义）
      */
-    async sendFile({ scene = 'c2c', target, path, fileName = '', msgId = '', receivedAt = 0, requestId = '' } = {}) {
+    async sendFile({ scene = 'c2c', target, path, fileName = '', msgId = '', receivedAt = 0, eventId = '', requestId = '' } = {}) {
       const p = String(path ?? '').trim();
       if (!target) return { ok: false, message: '缺 target' };
       if (!p) return { ok: false, message: '缺 path' };
@@ -357,6 +363,7 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
           fileType: fileTypeOfName(p),
           ...(fileName ? { fileName: String(fileName) } : {}),
           ...(msgId ? { msgId: String(msgId) } : {}),
+          ...(eventId && !msgId ? { eventId: String(eventId) } : {}),
           ...(receivedAt ? { receivedAt: Number(receivedAt) } : {}),
           requestId: rid,
         }, { timeout: 120_000 });

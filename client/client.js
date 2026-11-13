@@ -1836,6 +1836,28 @@ select.roost-input{color-scheme:dark}
                 hint: '命中率 = 缓存读取 ÷（未缓存输入 + 缓存读取 + 缓存写入），按宿主回报的用量算。',
               }),
               h(Stat, {
+                k: '她现在', n: (() => {
+                  const v = Number(st?.sheNow?.mood?.valence) || 0
+                  return v > 0.4 ? '心情不错' : v < -0.4 ? '有点烦' : '平静'
+                })(),
+                sub: (() => {
+                  const sn = st?.sheNow
+                  const total = sn?.journal?.total
+                  const persona = sn?.persona?.label || sn?.persona?.id || '默认'
+                  return `记忆 ${total ? fmtNum(total) : 0} 条 · 人格 ${persona}`
+                })(),
+                hint: (() => {
+                  const sn = st?.sheNow || {}
+                  const last = sn.lastSpeakUpAt ? `上次主动 ${ago(sn.lastSpeakUpAt)}` : '还没主动找过人'
+                  const pure = sn.pure?.enabled === false
+                    ? '全局记忆关着'
+                    : sn.pure?.offCount
+                      ? `${sn.pure.offCount} 个会话纯净模式`
+                      : '纯净模式没开（全都在记）'
+                  return `${last} · ${pure}`
+                })(),
+              }),
+              h(Stat, {
                 k: '最近一轮', n: lt && lt.ms != null ? `${lt.ms}ms` : '—',
                 sub: turnWord,
                 hint: lt

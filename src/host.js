@@ -2369,6 +2369,8 @@ export function apply(ctx) {
       target: chatId,
       msgId: String(last?.msgId ?? ''),
       receivedAt: Number(last?.at) || 0,
+      /** 3.7：事件只有 event_id 时走被动回复，不占主动额度（msgId 优先） */
+      eventId: String(last?.eventId ?? ''),
       requestId: String(extra?.requestId ?? ''),
       /**
        * 发送者是谁：`<<say>>` 的语音条额度要按人算。
@@ -5054,6 +5056,21 @@ export function apply(ctx) {
           pathErrors: pathErrors.slice(-5),
           pathErrorCount: pathErrors.length,
           mood: mood.get(),
+          /** 3.6：概览「她现在」卡的数据，一次拿齐（免得概览再拉 /memory、/her、/speakup 三个接口） */
+          sheNow: {
+            mood: mood.get(),
+            journal: journalStat(),
+            persona: {
+              id: cfg.persona?.current || 'default',
+              label: (personas.list?.() || [])
+                .find((p) => p.id === (cfg.persona?.current || 'default'))?.label || '',
+            },
+            lastSpeakUpAt: Number(speakUp.state().lastBotAt) || 0,
+            pure: {
+              enabled: cfg.memory?.enabled !== false,
+              offCount: Array.isArray(cfg.memory?.offChats) ? cfg.memory.offChats.length : 0,
+            },
+          },
           /**
            * 概览页用：`turnQueue.stats()` 是排队层（pending / busy / lanes），
            * 和上面的 `waiting`（turn runner 里等 DSH 事件的轮次）不是一回事，
