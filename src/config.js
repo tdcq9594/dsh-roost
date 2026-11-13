@@ -426,6 +426,24 @@ export const DEFAULTS = {
     /** 易变段（拼在用户消息里、每轮都发）预算，字（原写死 480） */
     dynMax: 480,
   },
+  /**
+   * 备份（4.3 定时 + 4.4 云备份）。
+   * schedule：每天到点自动导一份 zip 到本地 backups/（按最近一份完整备份
+   * 的落盘时间判断今天跑没跑过，重启不丢状态）；keep 留最近几份，超了删最旧。
+   * remote：先 AES-256-GCM 加密再推——passphrase 没配就拒推，不推明文；
+   * Gitee 推前硬校验 private===true（公开仓等于全量泄露）。
+   * maxBytes 是推送体积上限（不是本地导出上限），默认 200MB。
+   */
+  backup: {
+    schedule: { enabled: false, hour: 4, keep: 7 },
+    remote: {
+      kind: '',
+      gitee: { owner: '', repo: '', token: '', branch: 'master' },
+      webdav: { url: '', user: '', pass: '' },
+      passphrase: '',
+      maxBytes: 209_715_200,
+    },
+  },
   /** 人物小档案（D7）：数据落在 profiles.json，清除入口独立，不挂会话级清空 */
   profiles: {
     enabled: false,

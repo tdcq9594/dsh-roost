@@ -1745,16 +1745,18 @@ test('4.1：人物页五节 01–05，人物墙 + 详情四栏 + 原三节全保
   assert.ok(src.includes('function RelGraph'), '4.2 关系图组件要在')
 })
 
-test('2.3：备份页四节 01–04，导出 / 待生效 / 清单 / 不带过去的都在', () => {
+test('2.3/4.3：备份页五节 01–05，导出 / 待生效 / 清单 / 不带过去的 / 定时与云备份', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   const tree = expand(mod.BackupTab(tabProps()), rt)
-  assert.deepEqual(numsOf(tree), ['01', '02', '03', '04'], '备份页编号应 01–04 连续')
+  assert.deepEqual(numsOf(tree), ['01', '02', '03', '04', '05'], '备份页编号应 01–05 连续')
   const txt = textOf(tree)
   for (const must of [
     '导出备份（zip）', 'config.json', '导入请用命令行',
     '没有待生效的恢复', '定时备份', '还原这一份',
     '不会带过去的', 'secrets/', '扩展长期令牌明文', 'zip 炸弹',
+    /** 4.3/4.4 第五节 */
+    '每天自动备份', '留最近几份', '立即备份并推送', '口令没配就拒推', 'Gitee',
   ]) {
     assert.ok(txt.includes(must), `备份页缺少「${must}」`)
   }

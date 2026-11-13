@@ -5085,12 +5085,45 @@ select.roost-input{color-scheme:dark}
      * 「不会带过去的」照 src/backup.js 的 SKIP / shouldSkip 实写，
      * 不凭印象编：尤其 secrets/ 是扩展长期令牌明文，必须显式说清。
      */
-    function BackupTab({ mem, toast, reload, quick, busy, setTab }) {
+    function BackupTab({ mem, toast, reload, quick, busy, setTab, config, saveCfg }) {
       const backups = mem?.backups || []
       const pending = mem?.restorePending
       const shortTime = (at) => new Date(at).toLocaleString('zh-CN', {
         month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
       })
+
+      /** 4.3/4.4：定时与云备份。推送结果就地展示（reason 分类给不同指引） */
+      const [pushResult, setPushResult] = useState(null)
+      const [pushBusy, setPushBusy] = useState(false)
+      const [bkDraft, setBkDraft] = useState(null)
+      const sched = config?.backup?.schedule || {}
+      const remote = config?.backup?.remote || {}
+      const sval = (k, fallback) => (bkDraft !== null && bkDraft[k] !== undefined
+        ? bkDraft[k]
+        : String(sched[k] ?? fallback))
+      const putBackup = async (patch) => {
+        if (!saveCfg) return
+        const r = await saveCfg({ backup: patch })
+        toast(r?.ok === false ? (r.message || '没存上') : '已保存')
+        setBkDraft(null)
+      }
+      const runNow = async () => {
+        setPushBusy(true)
+        try {
+          const r = await post('/backup/run-now', { push: true })
+          if (r?.ok === false) setPushResult({ ok: false, message: r.message || '没跑成' })
+          else setPushResult({
+            ok: true,
+            name: r.name,
+            remote: r.remote || null,
+          })
+          reload()
+        } catch (e) {
+          setPushResult({ ok: false, message: e.message })
+        } finally {
+          setPushBusy(false)
+        }
+      }
 
       if (!mem) return h('div', null,
         h('div', { className: 'roost-empty' }, '读取备份状态…'),
@@ -5169,7 +5202,106 @@ select.roost-input{color-scheme:dark}
             ['.tmp · SQLite WAL/SHM · 单文件 >2GB', '临时文件与超大文件'],
           ].map(([k, v], i) => h('div', { key: i, className: 'roost-note' }, '· ' + k + '：' + v))),
           h('div', { className: 'roost-note', style: { marginTop: 8 } },
-            '整包上限 4GB、解包总量上限 512MB（防 zip 炸弹）。云备份还没做，现在只有本地导出。'),
+            '整包上限 4GB、解包总量上限 512MB（防 zip 炸弹）。往云端推是加密后的（第 05 节）。'),
+        ),
+
+        /** 4.3/4.4：定时备份 + 加密云备份。与定时 tick 同一个 runBackup */
+        h(Sec, { n: '05', title: '定时备份与云备份' },
+          h('div', { className: 'roost-note', style: { marginTop: 0 } },
+            '每天到点自动导一份 zip 到本地，留最近几份；配了远端就先 AES 加密再推——口令没配就拒推，不推明文。'),
+          h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' } },
+            h('label', { className: 'roost-note', style: { margin: 0, display: 'flex', gap: 6, alignItems: 'center' } },
+              h('input', {
+                type: 'checkbox', checked: bkDraft?.enabled !== undefined
+                  ? bkDraft.enabled
+                  : sched.enabled === true,
+                onChange: (e) => setBkDraft({ ...bkDraft, enabled: e.target.checked }),
+              }),
+              '每天自动备份'),
+            h('label', { className: 'roost-note', style: { margin: 0, display: 'flex', gap: 6, alignItems: 'center' } },
+              '点（0–23，默认 4）：',
+              h('input', {
+                type: 'number', min: 0, max: 23, className: 'roost-input', style: { width: 64 },
+                value: sval('hour', 4), onChange: (e) => setBkDraft({ ...bkDraft, hour: e.target.value }),
+              })),
+            h('label', { className: 'roost-note', style: { margin: 0, display: 'flex', gap: 6, alignItems: 'center' } },
+              '留最近几份：',
+              h('input', {
+                type: 'number', min: 1, max: 60, className: 'roost-input', style: { width: 64 },
+                value: sval('keep', 7), onChange: (e) => setBkDraft({ ...bkDraft, keep: e.target.value }),
+              })),
+            h('button', {
+              type: 'button', className: 'roost-primary', disabled: !saveCfg || bkDraft === null,
+              onClick: () => {
+                const hour = Number(sval('hour', 4))
+                const keep = Number(sval('keep', 7))
+                if (!(hour >= 0 && hour <= 23)) return toast('时刻得在 0–23')
+                if (!(keep >= 1)) return toast('至少留一份')
+                putBackup({ schedule: { enabled: bkDraft?.enabled === true, hour, keep } })
+              },
+            }, '保存定时'),
+          ),
+          h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' } },
+            h('label', { className: 'roost-note', style: { margin: 0, display: 'flex', gap: 6, alignItems: 'center' } },
+              '远端：',
+              h('select', {
+                className: 'roost-input', style: { width: 150 },
+                value: remote.kind || '',
+                onChange: (e) => saveCfg && putBackup({ remote: { ...remote, kind: e.target.value } }),
+              },
+                h('option', { value: '' }, '不推云端'),
+                h('option', { value: 'gitee' }, 'Gitee 私有仓'),
+                h('option', { value: 'webdav' }, 'WebDAV'))),
+            remote.kind === 'gitee'
+              ? ['owner', 'repo', 'token'].map((k) => h('input', {
+                  key: k, className: 'roost-input', style: { width: k === 'token' ? 220 : 120 },
+                  placeholder: k === 'token' ? '私人令牌' : k,
+                  value: String(remote.gitee?.[k] ?? ''),
+                  onChange: (e) => putBackup({ remote: { ...remote, gitee: { ...(remote.gitee || {}), [k]: e.target.value } } }),
+                }))
+              : null,
+            remote.kind === 'webdav'
+              ? ['url', 'user', 'pass'].map((k) => h('input', {
+                  key: k, className: 'roost-input', style: { width: k === 'url' ? 220 : 120 },
+                  placeholder: k === 'url' ? 'https://…/dav' : (k === 'pass' ? '密码' : k),
+                  type: k === 'pass' ? 'password' : 'text',
+                  value: String(remote.webdav?.[k] ?? ''),
+                  onChange: (e) => putBackup({ remote: { ...remote, webdav: { ...(remote.webdav || {}), [k]: e.target.value } } }),
+                }))
+              : null,
+            h('input', {
+              className: 'roost-input', style: { width: 180 }, type: 'password',
+              placeholder: '加密口令（必填才推）', value: String(remote.passphrase ?? ''),
+              onChange: (e) => saveCfg && putBackup({ remote: { ...remote, passphrase: e.target.value } }),
+            }),
+          ),
+          remote.kind === 'gitee'
+            ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
+              'Gitee 仓库必须设为私有——推送前会硬校验 private，公开仓直接拒绝（记忆里有隐私）。令牌要有该仓库的写权限。')
+            : null,
+          remote.kind === 'webdav'
+            ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
+              'WebDAV 目录不存在时多数服务器会自动创建；鉴权失败和网络失败会分开报，不是一句「备份失败」。')
+            : null,
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' } },
+            h('button', {
+              type: 'button', className: 'roost-primary', disabled: pushBusy || busy,
+              onClick: runNow,
+            }, pushBusy ? '备份中…' : '立即备份并推送'),
+            h('span', { className: 'roost-note', style: { margin: 0 } },
+              '没配远端时只做本地备份（等同第 01 节导出，多留一份在 backups/ 目录）。'),
+          ),
+          pushResult
+            ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+                pushResult.ok
+                  ? `本地已生成 ${pushResult.name || ''}`
+                    + (pushResult.remote
+                      ? (pushResult.remote.ok
+                        ? `；已加密推到 ${remote.kind === 'gitee' ? 'Gitee' : 'WebDAV'}`
+                        : `；但云备份没推成【${pushResult.remote.reason || 'unknown'}】：${pushResult.remote.message}`)
+                      : '')
+                  : `失败：${pushResult.message}`)
+            : null,
         ),
       )
     }
@@ -8750,6 +8882,7 @@ select.roost-input{color-scheme:dark}
       ['offpeak', '错峰', 'mode self=谷时窗口+安静期（默认）；official=官方峰时（工作日 9–12/14–18 高峰，节假日与周末全天空闲，和账单档位同一份判据）；deferHeavy 开了才把压库/过期压缩限到谷时跑；holidays 可覆盖节假日表'],
       ['usage', '用量金额', '概览的「今日花费」只折算 pricing 里有的模型（内置 DeepSeek 官方价）；键是模型名子串，值是 peak/idle 两档的 元/百万 tokens，价格会过期以官网为准'],
       ['recall', '召回参数', '每路取几条/实体上限/每实体联想几条/三个注入预算（字）；默认就是原写死值，调坏了在记忆页点「恢复默认」；没有「最低相关度」——RRF 名次融合没有跨路可比的分数，那个旋钮调了也没反应'],
+      ['backup', '备份', 'schedule：每天到点自动导 zip（hour 时刻、keep 留几份）；remote：先 AES-GCM 加密再推 Gitee 私有仓（推前硬校验 private）或 WebDAV，passphrase 没配拒推不推明文；maxBytes 是推送体积上限（备份页 05 有控件）'],
       ['events', '经历', 'enabled：记不记她主动做过的事（找过人、发过文件）。24 小时自动过期，只给主人私聊当素材；关着也能在「记忆」页查看和清空已有的'],
       ['profiles', '人物档案', 'enabled：要不要把对熟人的印象攒成一小段，聊天时带上。每天凌晨巩固时提炼、跨群共用，同一天里提示词不变；关着也能在「记忆」页查看和清空已有的'],
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
@@ -12498,7 +12631,7 @@ select.roost-input{color-scheme:dark}
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat, setTab, config, saveCfg }) : null,
           /** 2.3：与记忆页并列的两个入口，同一份 mem，不复制状态 */
           tab === 'people' ? h(PeopleTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,
-          tab === 'backup' ? h(BackupTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,
+          tab === 'backup' ? h(BackupTab, { mem, toast, reload: loadMemory, quick, busy, setTab, config, saveCfg }) : null,
           /** 2026-11-12 新增：心情从「主动搭话」拆出，表达/模型从「设置」拆出 */
           tab === 'mood' ? h(MoodTab, { mood: her?.mood ?? null, reloadMood: loadHer, toast, quick, config, saveCfg }) : null,
           tab === 'express'

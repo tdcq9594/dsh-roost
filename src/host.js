@@ -14,7 +14,7 @@
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
 import { basename, join, resolve, extname } from 'node:path';
-import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, readFileSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, readFileSync, rmSync } from 'node:fs';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets } from './config.js';
 import { redactText, redactValue, addSecretProvider } from './redact.js';
 import { createSessions } from './sessions.js';
@@ -111,6 +111,7 @@ import {
   applyPendingRestore, cancelRestore, createBackup, listBackups,
   pendingRestore, restoreRetentionRows,
 } from './backup.js';
+import { pushBackup, scheduleDue } from './backup-remote.js';
 
 /**
  * 归到「翻记忆」这一项配额的工具名。
@@ -2115,6 +2116,75 @@ export function apply(ctx) {
   consolidateBoot.unref?.();
   const consolidateTimer = setInterval(() => consolidateTick(), 10 * 60_000);
   consolidateTimer.unref?.();
+
+  /* ---------------- 4.3/4.4 定时备份 + 加密云备份 ---------------- */
+
+  /** 最近一份完整备份的落盘时间（scheduleDue / 面板 / runBackup 共用；文件 mtime，重启不丢） */
+  const lastFullBackupAt = () => {
+    const f = (listBackups(dataDir()) || []).find((x) => x.kind === 'full');
+    return f ? f.at : 0;
+  };
+
+  /**
+   * 备份一条龙：导 zip → 按 keep 删旧 → 配了远端就加密推送。
+   * 定时 tick 和面板「立即备份并推送」共用这一个函数——
+   * 两条路的结果必须一致，否则「手动好好的、定时老失败」没法排查。
+   *
+   * @param {{push?:boolean}} [o] push=false 时忽略远端，只做本地备份
+   * @returns {{ok:boolean, name?:string, local?:boolean, remote?:object}}
+   */
+  const runBackup = async ({ push = false } = {}) => {
+    let r;
+    try {
+      r = createBackup({ root: dataDir() });
+    } catch (e) {
+      return { ok: false, message: `备份没生成：${e?.message ?? e}` };
+    }
+    /**
+     * keep 只删**完整备份**（BACKUP_PREFIX 的 zip）；行级 pre-retention-*.json
+     * 是淡出的原文，不在「最近几份」的语义里，不碰。
+     */
+    try {
+      const keep = Math.max(1, Number(cfg.backup?.schedule?.keep) || 7);
+      const fulls = listBackups(dataDir()).filter((x) => x.kind === 'full');
+      for (const old of fulls.slice(keep)) {
+        rmSync(join(dataDir(), 'backups', old.name), { force: true });
+      }
+    } catch (e) {
+      log.warn(`清理旧备份失败（不影响本次备份）：${e?.message ?? e}`);
+    }
+    /**
+     * 配了远端就一起推（推送失败不撤销本地备份——本地那份是完整的，
+     * 扔掉等于白做；失败原因在 remote.reason，面板按 reason 给指引）。
+     */
+    if (push !== false && cfg.backup?.remote?.kind) {
+      const rm = await pushBackup({
+        buf: readFileSync(r.file),
+        name: r.name.replace(/\.zip$/, ''),
+        remote: cfg.backup.remote,
+        log: (m) => log.info(m),
+      });
+      return { ok: true, name: r.name, local: true, remote: rm, lastAt: lastFullBackupAt() };
+    }
+    return { ok: true, name: r.name, local: true, lastAt: lastFullBackupAt() };
+  };
+
+  const backupTick = async () => {
+    const s = cfg.backup?.schedule;
+    if (s?.enabled !== true) return;
+    if (!scheduleDue({ lastAt: lastFullBackupAt(), hour: s.hour })) return;
+    log.info('到点了，开始定时备份');
+    const r = await runBackup({ push: true }).catch((e) => ({ ok: false, message: e?.message ?? String(e) }));
+    if (r.ok) {
+      log.info(`定时备份完成：${r.name}${r.remote ? (r.remote.ok ? '，云备份已推' : `，但云备份没推成（${r.remote.reason}: ${r.remote.message}）`) : ''}`);
+    } else {
+      log.warn(`定时备份失败：${r.message}`);
+    }
+  };
+  const backupBoot = setTimeout(() => backupTick().catch(() => {}), 120_000);
+  backupBoot.unref?.();
+  const backupTimer = setInterval(() => backupTick().catch(() => {}), 10 * 60_000);
+  backupTimer.unref?.();
 
   /* ---------------- 通道 / 注册方式 / 觉醒 / 压缩 ---------------- */
 
@@ -7103,6 +7173,18 @@ export function apply(ctx) {
           log.warn(`备份已生成但下载没送出去（文件在 ${r.file}）：${e?.message ?? e}`);
         }
         return undefined;
+      }),
+
+      /**
+       * 4.3/4.4：立即备份并（可选）推送。与定时 tick 走同一个 runBackup——
+       * 「手动好好的、定时老失败」这种分裂在这里就被结构挡住。
+       * 返回体里 remote.reason 分类：auth/public/too_large/config/network/upstream。
+       */
+      route('/backup/run-now', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req).catch(() => ({}));
+        const r = await runBackup({ push: body?.push !== false });
+        return send(res, 200, r);
       }),
 
       /**
