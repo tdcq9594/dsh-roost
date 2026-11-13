@@ -1003,6 +1003,15 @@ select.roost-input{color-scheme:dark}
   color:inherit;font:inherit;font-size:12.5px;resize:vertical}
 .roost-g-note{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--g-tint);
   font-size:11.5px;line-height:1.55;color:var(--dsw-alias-label-secondary, inherit)}
+/* 2.2b：决策链 / 按群覆写列表。同样只用主题令牌，浅色主题下不会冒出黑底 */
+.roost-g-log{display:flex;flex-direction:column;gap:6px;margin-top:8px;max-height:260px;overflow:auto}
+.roost-g-log-row{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;
+  padding:6px 9px;border-radius:8px;background:var(--g-tint);font-size:11.5px;line-height:1.5}
+.roost-g-log-row b{flex:0 0 auto;font-variant-numeric:tabular-nums;font-weight:600}
+.roost-g-tag{flex:0 0 auto;padding:1px 6px;border:1px solid var(--line);border-radius:6px;font-size:11px}
+.roost-g-log-row span:last-child{flex:1 1 160px;min-width:0;word-break:break-all}
+.roost-g-ov{margin-top:8px;border-top:1px solid var(--line-soft);padding-top:8px;
+  display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11.5px}
 @container (max-width:520px){
   .roost-g-row{flex-direction:column;align-items:stretch;gap:6px}
   .roost-g-ctl{max-width:100%;justify-content:flex-start}
@@ -6690,13 +6699,76 @@ select.roost-input{color-scheme:dark}
       ['engaged', '聊开了就接下去'],
     ]
 
-    function GroupChatTab({ config, saveCfg, toast, setTab }) {
+    /**
+     * 按群覆写能改的字段。键名必须和 `roost-decide.js` 的 OVERRIDE_KEYS 对齐——
+     * 那边是白名单，这里写了个它不认的键，界面上改了也不会生效。
+     */
+    const OV_FIELDS = [
+      { key: 'mode', label: '接话方式', kind: 'select', options: DECIDE_MODES },
+      { key: 'interruptChance', label: '插话概率', kind: 'num', min: 0, max: 100, unit: '%' },
+      { key: 'cooldownSec', label: '两次至少隔', kind: 'num', min: 0, max: 600, unit: '秒' },
+      { key: 'maxRepliesPerMin', label: '每分钟最多', kind: 'num', min: 0, max: 60, unit: '条' },
+      { key: 'maxPerHour', label: '每小时最多', kind: 'num', min: 0, max: 500, unit: '条' },
+      { key: 'quietStartHour', label: '安静从', kind: 'num', min: 0, max: 23, unit: '点' },
+      { key: 'quietEndHour', label: '安静到', kind: 'num', min: 0, max: 23, unit: '点' },
+      { key: 'shortAskMustReply', label: '短问必答', kind: 'switch' },
+      { key: 'silent', label: '这个群一键静默', kind: 'switch' },
+    ]
+
+    /**
+     * 覆写专用数值框：和 GNum 的差别是**允许留空**。
+     * 空 = 这一项不覆写、跟全局；GNum 会把空串压成 min，那样永远删不掉覆写。
+     */
+    function GOvNum({ value, onSave, min = 0, max = 99999, unit, disabled }) {
+      return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+        h('input', {
+          type: 'number', className: 'roost-g-num',
+          min: String(min), max: String(max), step: '1',
+          key: 'ov:' + String(value ?? ''),
+          defaultValue: value === undefined || value === null ? '' : String(value),
+          disabled: !!disabled,
+          onKeyDown: (e) => { if (e.key === 'Enter') e.target.blur() },
+          onBlur: (e) => {
+            const raw = String(e.target.value ?? '').trim()
+            if (raw === '') { onSave(undefined); return }
+            const n = Number(raw)
+            if (!Number.isFinite(n)) {
+              e.target.value = value === undefined ? '' : String(value)
+              return
+            }
+            const v = Math.min(max, Math.max(min, n))
+            if (v === Number(value)) { e.target.value = String(v); return }
+            onSave(v)
+          },
+        }),
+        unit ? h('span', { className: 'roost-g-unit' }, unit) : null)
+    }
+
+    function GroupChatTab({ config, saveCfg, saveAll, toast, setTab, chats }) {
       const decide = config?.roostHost?.decide || {}
       const merge = config?.roostHost?.merge || {}
       const chat = config?.chat || {}
+      const groupCfg = config?.group || {}
+      const overrides = groupCfg.overrides || {}
+      const groups = (chats || []).filter((c) => c.kind === 'group')
       const [busy, setBusy] = useState(false)
       /** null = 跟随后端值；编辑中才有内容，失焦提交后清空 */
       const [wordsDraft, setWordsDraft] = useState(null)
+      /** 按群覆写：选中的群 + 编辑草稿（null = 用盘上的值） */
+      const [ovGid, setOvGid] = useState('')
+      const [ovDraft, setOvDraft] = useState(null)
+      /** 决策链：null = 还没读到，[] = 读到了但还没有判定 */
+      const [decisions, setDecisions] = useState(null)
+
+      const loadDecisions = useCallback(async () => {
+        try {
+          const r = await get('/group/decisions?limit=20')
+          setDecisions(Array.isArray(r?.items) ? r.items : [])
+        } catch { setDecisions([]) }
+      }, [])
+      useEffect(() => { loadDecisions() }, [loadDecisions])
+      /** 换群要丢掉上一个群的草稿，别把它写到新群头上 */
+      useEffect(() => { setOvDraft(null) }, [ovGid])
 
       /**
        * 配置没到不渲染控件：在空对象上点保存，会把 roostHost 的 token /
@@ -6715,6 +6787,42 @@ select.roost-input{color-scheme:dark}
       const setDecide = (k, v) => put({ roostHost: { decide: { [k]: v } } })
       const setMerge = (k, v) => put({ roostHost: { merge: { [k]: v } } })
       const setChat = (k, v) => put({ chat: { [k]: v } })
+      const setGroup = (k, v) => put({ group: { [k]: v } })
+
+      const pickOv = ovGid || groups[0]?.chatId || Object.keys(overrides)[0] || ''
+      const ov = ovDraft !== null ? ovDraft : { ...(overrides[pickOv] || {}) }
+      const setOv = (k, v) => {
+        const next = { ...ov }
+        if (v === undefined) delete next[k]
+        else next[k] = v
+        setOvDraft(next)
+      }
+      /**
+       * 覆写的增改删必须走**整份保存**（saveAll / ?mode=full）。
+       * 局部 patch 的 merge 只遍历提交的键，删掉一个键 / 一个群会静默失效：
+       * 盘上那份还在，界面显示「已恢复全局」，下一句却照样按覆写走。
+       */
+      const saveOverride = async (obj) => {
+        if (!saveAll || !pickOv || busy) return
+        setBusy(true)
+        try {
+          const rest = { ...overrides }
+          if (Object.keys(obj).length) rest[pickOv] = obj
+          else delete rest[pickOv]
+          const r = await saveAll({ ...config, group: { ...groupCfg, overrides: rest } })
+          toast(r?.ok === false ? (r.message || '没存上') : '已保存，下一句生效')
+          setOvDraft(null)
+        } finally { setBusy(false) }
+      }
+
+      const chatName = (id) => {
+        const g = groups.find((x) => x.chatId === id)
+        return g?.title || (id ? String(id).slice(0, 8) + '…' : '（未知会话）')
+      }
+      const hhmmss = (ms) => {
+        try { return new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) }
+        catch { return '' }
+      }
       const words = wordsDraft !== null
         ? wordsDraft
         : (Array.isArray(decide.ignoreWords) ? decide.ignoreWords.join('\n') : '/')
@@ -6813,11 +6921,105 @@ select.roost-input{color-scheme:dark}
               onClick: () => setTab && setTab('caps'),
             }, '去权限页')),
           h('div', { className: 'roost-g-note' },
-            '「她刚才为什么没理我」：每条不接的消息都会把原因写进日志（比如「当前是只在被 @ 时回复模式」「冷却中」），去「排障」页看。',
+            '「她刚才为什么没理我」：每条不接的消息都会把原因写进日志（比如「当前是只在被 @ 时回复模式」「冷却中」），去「排障」页看；本页最后一张卡也按时间列了最近 20 条。',
             h('button', {
               type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
               onClick: () => setTab && setTab('logs'),
             }, '去排障页')),
+        ),
+
+        h(GCard, {
+          n: '06', title: '插话概率',
+          desc: '只管「群里没人明确叫她」的普通一句：她有多大概率主动接。被 @、私聊、命令、喊「在吗」、已经聊开了，都不掷骰子。',
+        },
+          h(GRow, { label: '插话概率', hint: '100 = 句句都接（升级前的行为）；0 = 只在明确被叫到时才说话' },
+            h(GNum, {
+              value: groupCfg.interruptChance ?? 100, min: 0, max: 100, unit: '%', disabled: busy,
+              onSave: (v) => setGroup('interruptChance', v),
+            })),
+          h(GRow, { label: '群聊摘要回几条', hint: '主人在私聊里问「某群刚聊了什么」时最多带回几条时间线；只读，不记任何东西' },
+            h(GNum, {
+              value: groupCfg.briefMaxItems ?? 20, min: 1, max: 50, unit: '条', disabled: busy,
+              onSave: (v) => setGroup('briefMaxItems', v),
+            })),
+          h('div', { className: 'roost-g-note' },
+            '群聊摘要只在主人私聊里可用，且只能查群——群里的回复所有人都看得见；别人的私聊任何情况下都不查。'),
+        ),
+
+        h(GCard, {
+          n: '07', title: '按群覆写',
+          desc: '某个群想单独设（这个群安静点、那个群只在被 @ 时回），在这里给它一份例外。留空 = 跟上面的全局设置；没列的群一律不受影响。',
+        },
+          h(GRow, { label: '给哪个群设', hint: '群只能从它待过的会话里选；官方没有群列表接口' },
+            groups.length
+              ? h('select', {
+                  className: 'roost-g-sel', value: pickOv, disabled: busy,
+                  onChange: (e) => setOvGid(e.target.value),
+                }, groups.map((g) => h('option', {
+                  key: g.chatId, value: g.chatId,
+                }, g.title || String(g.chatId).slice(0, 10))))
+              : h('span', { className: 'roost-g-unit' }, '还没有群会话')),
+          ...OV_FIELDS.map((f) => h(GRow, {
+            key: f.key, label: f.label,
+            hint: f.kind === 'select' ? '选「跟全局」= 不覆写这一项' : '留空 / 不改 = 跟全局',
+          },
+            f.kind === 'num'
+              ? h(GOvNum, {
+                  value: ov[f.key], min: f.min, max: f.max, unit: f.unit, disabled: busy,
+                  onSave: (v) => setOv(f.key, v),
+                })
+              : f.kind === 'select'
+                ? h('select', {
+                    className: 'roost-g-sel', value: ov[f.key] || '', disabled: busy,
+                    onChange: (e) => setOv(f.key, e.target.value || undefined),
+                  }, [
+                    h('option', { key: '', value: '' }, '跟全局'),
+                    ...f.options.map(([v, t]) => h('option', { key: v, value: v }, t)),
+                  ])
+                : h(Switch, {
+                    on: ov[f.key] === true, label: f.label, disabled: busy,
+                    onToggle: (v) => setOv(f.key, v ? true : undefined),
+                  }))),
+          h('div', { className: 'roost-g-ov' },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy || !pickOv,
+              onClick: () => saveOverride(ov),
+            }, '保存这个群的例外'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy || !pickOv,
+              onClick: () => saveOverride({}),
+            }, '恢复成全局'),
+            h('span', { className: 'roost-g-unit' },
+              Object.keys(ov).length ? `这个群已覆写 ${Object.keys(ov).length} 项` : '这个群目前跟全局一致'),
+          ),
+          h('div', { className: 'roost-g-note' },
+            Object.keys(overrides).length
+              ? '已经设了例外的群：' + Object.keys(overrides)
+                  .map((id) => `${chatName(id)}（${Object.keys(overrides[id] || {}).length} 项）`).join('、')
+              : '目前没有群设了例外，所有群都用上面的全局设置。'),
+        ),
+
+        h(GCard, {
+          n: '08', title: '刚才为什么回 / 不回',
+          desc: '每条消息进来都会过一遍上面的规则，这里按时间列出最近 20 条的判定和原因。和排障页日志是同一份 reason，只是排好了队；只在内存里，不落盘。',
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: loadDecisions }, '刷新'),
+        },
+          h('div', { className: 'roost-g-log' },
+            !decisions
+              ? h('div', { className: 'roost-empty' }, '读取中…')
+              : !decisions.length
+                ? h('div', { className: 'roost-empty' }, '还没有消息进来。让它在群里说一句话，这里就会出现判定。')
+                : decisions.map((d, i) => h('div', {
+                    key: String(d.at) + ':' + i, className: 'roost-g-log-row',
+                  },
+                    h('b', null, hhmmss(d.at)),
+                    h('span', { className: 'roost-g-tag' }, d.kind === 'c2c' ? '私聊' : '群'),
+                    h('span', { className: 'roost-g-tag' }, d.go ? '接' : '不接'),
+                    h('span', null, d.reason || '（没写原因）'),
+                    h('span', { style: { opacity: 0.72 } },
+                      d.text ? '「' + d.text + '」' : chatName(d.chatId))))),
+          h('div', { className: 'roost-g-note' },
+            '看不到变化就点一下刷新；改了设置后，下一句消息才会按新规则判定。'),
         ),
       )
     }
@@ -7703,6 +7905,11 @@ select.roost-input{color-scheme:dark}
         + 'cooldownSec 冷却（期间的消息攒着不丢）、maxRepliesPerMin 每分钟条数、'
         + 'maxPerHour / burstMax / quietStartHour~quietEndHour / shortAskMustReply 是刹车，'
         + '数值 0 和起止相同都表示关。接话策略、防吵、冷却都在这里设'],
+      ['group', '群聊补充', 'interruptChance：群里没人明确叫她时的插话概率（100 = 句句都接，升级前的行为）；'
+        + 'briefMaxItems：主人私聊问「某群刚聊了什么」回几条；'
+        + 'overrides：按群 openid 覆写，可改 mode / 冷却 / 每分钟 / 每小时上限 / 静默时段 / 插话概率等'
+        + '（白名单在 roost-decide.js 的 OVERRIDE_KEYS，空对象当开放字典）。'
+        + '日常在「群聊 → 群聊策略」06、07 两张卡里改'],
       ['chat', '会话', '一轮最多等多久；上游 502/429 时的补重试（attempts 是「补几次」，budgetSec 是整轮总预算）'],
       ['workspace', '工作区', '机器人会话挂哪个工作区：dir 留空单开、__default__ 用默认'],
       ['server', '服务', '端口与密钥'],
@@ -11422,9 +11629,9 @@ select.roost-input{color-scheme:dark}
             : null,
           /** 「身份」：QQ 会话 ↔ DSH 会话的映射，现在有自己的页签，不再套一层「手动刷新」 */
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
-          /** 群聊策略：露已有的 merge / decide / chat 参数，不新增算法 */
+          /** 群聊策略：01–05 露已有参数，06–08 是 2.2b 的插话概率 / 按群覆写 / 决策链 */
           tab === 'groupchat'
-            ? h(GroupChatTab, { config, saveCfg, toast, setTab })
+            ? h(GroupChatTab, { config, saveCfg, saveAll, toast, setTab, chats })
             : null,
           /** 群管：禁言 / 踢人 / 入群审批。协议侧 group.* 是 message scope，装了就能用 */
           tab === 'groupadmin' ? h(GroupAdminTab, { chats, toast }) : null,

@@ -3343,6 +3343,13 @@ export function apply(ctx) {
          * 工具内部每次现取，连上之后同一套工具立刻可用，不用重注册。
          */
         groupOf: () => groupAdmin,
+        /**
+         * C5-1 主人私聊群聊摘要要读消息账本、查会话映射；
+         * 和 `registerMemoryTools` 用的是同一份 `ledgerRead` / `sessions`，
+         * 别在这里另开一个 reader（两个 reader 各记各的连接，迁移时会漂）。
+         */
+        ledgerOf: () => ledgerRead,
+        sessionOf: (id) => sessions.entry(id),
         callerOf: () => {
           const c = cur();
           return { ...c, hasPayload: Boolean(c.payload) };
@@ -6759,6 +6766,18 @@ export function apply(ctx) {
           reason: body?.reason,
           addToBlacklist: body?.addToBlacklist === true,
         }));
+      }),
+
+      /**
+       * 决策链（2.2b）：最近每条群消息「为什么回 / 为什么没回」。
+       *
+       * 只读、只在内存里、不落盘，也不带消息全文（只有前 40 字）。
+       * 排障最想看的恰恰是没接的那些，所以 `go:false` 一样要返回。
+       */
+      route('/group/decisions', (req, res) => {
+        const url = new URL(req.url || '/', 'http://localhost');
+        const limit = Number(url.searchParams.get('limit')) || 20;
+        return send(res, 200, { ok: true, items: roostDecider.recent(limit) });
       }),
 
       /* ---------------- 账号迁移 ---------------- */

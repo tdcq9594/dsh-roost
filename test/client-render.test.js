@@ -1116,12 +1116,12 @@ test('拆分后每页分节编号都从 01 起、连续', () => {
     mood: null, reloadMood: () => {}, toast: () => {}, quick: async () => ({}),
   }), rt)), ['01', '02'], '心情页编号应 01–02 连续')
 
-  /* 群聊策略页：五张卡，01 起连续 */
+  /* 群聊策略页：2.2a 五张 + 2.2b 三张，01 起连续 */
   rt.reset()
   assert.deepEqual(ns(expand(mod.GroupChatTab({
-    config: { roostHost: { decide: { mode: 'ai' }, merge: {} }, chat: {} },
+    config: { roostHost: { decide: { mode: 'ai' }, merge: {} }, chat: {}, group: {} },
     saveCfg: () => {}, toast: () => {}, setTab: () => {},
-  }), rt)), ['01', '02', '03', '04', '05'], '群聊策略页编号应 01–05 连续')
+  }), rt)), ['01', '02', '03', '04', '05', '06', '07', '08'], '群聊策略页编号应 01–08 连续')
 })
 
 test('群聊策略页：露的是已有配置键，配色走本项目令牌', () => {
@@ -1146,6 +1146,8 @@ test('群聊策略页：露的是已有配置键，配色走本项目令牌', ()
   for (const must of [
     '什么时候接话', '连发合并', '安全刹车', '静默时段与忽略词', '一轮与队列',
     '接话方式', '最多等多久', '两分钟内最多接几次', '去权限页', '去排障页',
+    /** 2.2b 三张卡；2.2a 的十项一个都不能被顺手删掉 */
+    '插话概率', '按群覆写', '刚才为什么回', '保存这个群的例外', '恢复成全局',
   ]) {
     assert.ok(txt.includes(must), `群聊策略页缺少「${must}」`)
   }
@@ -1168,6 +1170,46 @@ test('群聊策略页：露的是已有配置键，配色走本项目令牌', ()
   }), rt))
   assert.ok(empty.includes('读取配置'), '配置未到要有占位')
   assert.ok(!empty.includes('接话方式'), '配置未到不该渲染可点的控件')
+})
+
+test('群聊页 v2：按群覆写 / 决策链都在，配色仍走本项目令牌', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const cfg = {
+    roostHost: { decide: { mode: 'ai' }, merge: {} },
+    chat: {},
+    group: {
+      interruptChance: 60, briefMaxItems: 12,
+      overrides: { G_1: { mode: 'mention', maxPerHour: 3 } },
+    },
+  }
+  const tree = expand(mod.GroupChatTab({
+    config: cfg,
+    chats: [{ chatId: 'G_1', kind: 'group', title: 'QQ · 斗罗内测' }],
+    saveCfg: () => {}, saveAll: () => {}, toast: () => {}, setTab: () => {},
+  }), rt)
+  const txt = textOf(tree)
+  for (const must of [
+    '插话概率', '群聊摘要回几条', '按群覆写', '给哪个群设', '每小时最多',
+    '保存这个群的例外', '恢复成全局', '已经设了例外的群', '刚才为什么回 / 不回',
+  ]) {
+    assert.ok(txt.includes(must), `群聊页 v2 缺少「${must}」`)
+  }
+  assert.ok(txt.includes('读取中'), '决策链没读到数据时要有加载态')
+  /** 已经设了例外的群要显示群名与项数，别只显示一串 openid */
+  assert.ok(txt.includes('斗罗内测'), '覆写列表要用会话名，不是裸 openid')
+  assert.ok(txt.includes('2 项'), '覆写项数要跟着配置走')
+
+  const cls = []
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.className) cls.push(String(n.props.className))
+    walk(n.props?.children)
+  })(tree)
+  const classTxt = cls.join(' ')
+  assert.ok(classTxt.includes('roost-g-card') && classTxt.includes('roost-g-ov'))
+  assert.ok(!classTxt.includes('ab-card') && !classTxt.includes('ab-sea'), '不该残留 aurabot 的配色/类名')
 })
 
 test('后端缺口已接入：市场 / 模型 / 召回 / 心情历史 / 危险操作', () => {

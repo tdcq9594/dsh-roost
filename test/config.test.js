@@ -267,3 +267,27 @@ test('配置：阶段 2 单 mode 的老配置迁到双路，日记那路不许�
   assert.equal(legacy.memory.retention.journalMode, 'off');
   assert.equal(legacy.memory.retention.mode, undefined, '老字段要删，别留两份真相');
 });
+
+/**
+ * 2.2b：按群覆写是开放字典，`merge` 只遍历提交的键，所以「删掉某个群」
+ * 用局部 patch 会静默失效（盘上那份还在，界面却说已恢复全局）。
+ * 群聊页的「恢复成全局」因此必须走 saveAll / ?mode=full 整份保存。
+ */
+test('配置：按群覆写增改可用局部 patch，删除必须整份保存', () => {
+  const d = freshDir();
+  writeCfg(d, { group: { overrides: { G1: { mode: 'mention' }, G2: { maxPerHour: 5 } } } });
+  patchConfig({ group: { overrides: { G2: { maxPerHour: 7 } } } });
+  assert.deepEqual(loadConfig().group.overrides, {
+    G1: { mode: 'mention' }, G2: { maxPerHour: 7 },
+  }, '改一个群不该动别的群');
+
+  patchConfig({ group: { overrides: { G2: { maxPerHour: 7 } } } });
+  assert.ok(loadConfig().group.overrides.G1, '局部 patch 删不掉 G1，这正是要用整份保存的原因');
+
+  const full = loadConfig();
+  const rest = { ...full.group.overrides };
+  delete rest.G1;
+  saveConfig({ ...full, group: { ...full.group, overrides: rest } });
+  assert.equal(loadConfig().group.overrides.G1, undefined, '整份保存才真的删掉');
+  assert.deepEqual(loadConfig().group.overrides.G2, { maxPerHour: 7 });
+});

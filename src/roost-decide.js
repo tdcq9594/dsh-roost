@@ -17,11 +17,60 @@
  *     形同虚设（ai-chat 线上真实反馈过）。
  *
  * 判定顺序（和 ai-chat 一致，**顺序本身是语义**）：
- *   私聊 → 被 @ → 空消息 → 忽略词 → 模式收敛 → 免@窗口 → 冷却 → 每分钟配额 → 刹车策略
+ *   私聊 → 被 @ → 空消息 → 忽略词 → 模式收敛 → 免@窗口 → 冷却 → 每分钟配额 → 刹车策略 → 插话概率
+ *
+ * 2.2b 加的两层：**按群覆写**（`group.overrides[chatId]`，在入口把全局
+ * 判据换掉）和**插话概率**（`group.interruptChance`，最后一道，只管「群里
+ * 没人叫她的普通一句」）。两者默认都不生效，升级前后行为完全一致。
  */
 
 /** 默认忽略词：别的插件靠这些前缀干活，别抢 */
 export const DEFAULT_IGNORE = ['/'];
+
+/**
+ * 按群覆写允许改的键。
+ *
+ * 白名单而不是整份 spread：overrides 是用户手填的开放字典，把整个对象
+ * 铺进判据等于让一个错键（比如 `__proto__` 或者拼错的 `maxPerHr`）悄悄
+ * 影响她接不接话，而且面板上完全看不出来。只认这张表里的键。
+ */
+export const OVERRIDE_KEYS = Object.freeze([
+  'mode', 'engagedMaxTurns', 'windowMin', 'cooldownSec', 'maxRepliesPerMin',
+  'maxPerHour', 'burstMax', 'quietStartHour', 'quietEndHour',
+  'shortAskMustReply', 'silent', 'ignoreWords',
+  /** group 层自己的键也允许按群覆写 */
+  'interruptChance',
+]);
+
+/** 概率夹紧到 0–100；没配 / 配坏了都当 100（= 不拦，保持原行为） */
+function chanceOf(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 100;
+  return Math.min(100, Math.max(0, n));
+}
+
+/**
+ * 解析某个会话真正生效的接话配置。
+ *
+ * 导出给单测和面板共用：同一份「谁覆盖谁」的逻辑只写一遍，别在三个地方
+ * 各推一次。优先级：`group.overrides[chatId]` > `roostHost.decide` 全局。
+ * `interruptChance` 单独走 group 层（decide 里没有这个键）。
+ *
+ * @returns {{decide:object, chance:number, overridden:boolean}}
+ */
+export function resolveGroupPolicy(cfg, chatId = '') {
+  const decide = { ...(cfg?.roostHost?.decide ?? {}) };
+  const group = cfg?.group ?? {};
+  const raw = group.overrides?.[chatId];
+  const ov = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  for (const k of OVERRIDE_KEYS) {
+    if (k === 'interruptChance' || ov[k] === undefined) continue;
+    decide[k] = ov[k];
+  }
+  const chance = chanceOf(ov.interruptChance === undefined
+    ? group.interruptChance : ov.interruptChance);
+  return { decide, chance, overridden: Object.keys(ov).length > 0 };
+}
 
 /** 短问：明确在叫人，刹车不该拦它 */
 export function isShortAsk(text, on = false) {
@@ -53,14 +102,21 @@ function saidOf(evt) {
 
 /**
  * @param {object} o
- * @param {() => object} o.cfg 现读配置（`roostHost.decide`）
+ * @param {() => object} o.cfg 现读配置（`roostHost.decide` + `group`）
  * @param {() => number} [o.now]
+ * @param {() => number} [o.random] 0–1 的随机数，注入给单测用
  */
-export function createDecider({ cfg, now = () => Date.now() } = {}) {
+export function createDecider({ cfg, now = () => Date.now(), random = Math.random } = {}) {
   /** chatId → 每会话运行时状态 */
   const state = new Map();
+  /**
+   * 最近判定（决策链可视化，2.2b）。只存结构化数据，时间格式化交给面板。
+   * 环形上限 40 条：这是给人看的排障记录，不是账本，不该无限长。
+   */
+  const recent = [];
 
-  const conf = () => cfg()?.roostHost?.decide ?? {};
+  /** 现读 + 按群覆写：面板改了覆写，下一句就生效，不用重启 */
+  const conf = (chatId) => resolveGroupPolicy(cfg(), chatId);
 
   function stOf(chatId) {
     let s = state.get(chatId);
@@ -78,14 +134,18 @@ export function createDecider({ cfg, now = () => Date.now() } = {}) {
     return s;
   }
 
-  return {
-    /**
-     * @param {object} evt roost 的 message 事件 data
-     * @returns {{go:boolean, force?:boolean, cooling?:boolean, delayMs?:number, reason:string}}
-     */
-    check(evt) {
-      const c = conf();
+  /**
+   * 真正的判定收在 `impl.judge` 里，外面再包一层 `check` 只为记
+   * 「这条为什么回 / 不回」——这里有二十多个 return，挨个插日志必漏一处。
+   *
+   * @param {object} evt roost 的 message 事件 data
+   * @returns {{go:boolean, force?:boolean, cooling?:boolean, delayMs?:number, reason:string}}
+   */
+  const impl = {
+    judge(evt) {
       const chatId = String(evt?.chat?.chatId ?? '');
+      /** 按群覆写在这里生效；chance 是这一层的插话概率 */
+      const { decide: c, chance } = conf(chatId);
       const kind = evt?.chat?.kind === 'c2c' ? 'c2c' : 'group';
       const s = stOf(chatId);
       const t = now();
@@ -150,9 +210,13 @@ export function createDecider({ cfg, now = () => Date.now() } = {}) {
       }
 
       /** ---- 刹车策略 ---- */
+      /**
+       * 插话概率也算「策略开着」：不加这一项，`chance < 100` 时会在下面
+       * 提前 return「交给模型判断」，概率永远轮不到判（面板上改了没反应）。
+       */
       const policyOn = Number(c.burstMax) > 0 || Number(c.maxPerHour) > 0
         || Boolean(c.quietStartHour) || Boolean(c.quietEndHour)
-        || c.shortAskMustReply === true || c.silent === true;
+        || c.shortAskMustReply === true || c.silent === true || chance < 100;
       if (!policyOn) return { go: true, reason: '交给模型判断' };
 
       if (c.silent === true) return { go: false, reason: '主人设了静默' };
@@ -200,8 +264,48 @@ export function createDecider({ cfg, now = () => Date.now() } = {}) {
         return { go: true, reason: `连聊中（第 ${s.engagedCount} 次）` };
       }
 
+      /**
+       * 插话概率：走到这里的是「群里普普通通一句、没人叫她、也不在连聊中」。
+       *
+       * 私聊、被 @、命令、短问、纯附件、engaged 连聊都在上面各自 return 了——
+       * 那些是明确在叫她 / 已经聊开了，随机丢掉一句会很怪。概率只管「她
+       * 要不要主动插这句嘴」，这也是 aurabot 那个「插话」旋钮的本意。
+       *
+       * 没中时**不** push policyTimes：没接的话不该占掉刹车额度。
+       */
+      if (chance < 100 && random() * 100 >= chance) {
+        return { go: false, reason: `插话概率 ${chance}%，这次没中` };
+      }
       s.policyTimes.push(t);
       return { go: true, reason: '交给模型判断' };
+    },
+  };
+
+  return {
+    /**
+     * @param {object} evt roost 的 message 事件 data
+     * @returns {{go:boolean, force?:boolean, cooling?:boolean, delayMs?:number, reason:string}}
+     */
+    check(evt) {
+      const v = impl.judge(evt);
+      /** 决策链：每条都记，包括不接的那些（排障最想看的恰恰是「为什么没回」） */
+      recent.push({
+        at: now(),
+        chatId: String(evt?.chat?.chatId ?? ''),
+        kind: evt?.chat?.kind === 'c2c' ? 'c2c' : 'group',
+        text: saidOf(evt).slice(0, 40),
+        go: v.go === true,
+        reason: String(v.reason ?? ''),
+      });
+      if (recent.length > 40) recent.shift();
+      return v;
+    },
+
+    /** 最近判定（决策链可视化）：新的在前，只在内存里，不落盘 */
+    recent(limit = 20) {
+      const n = Number(limit);
+      const take = Number.isFinite(n) ? Math.min(Math.max(n, 1), 40) : 20;
+      return recent.slice(-take).reverse();
     },
 
     /** 真的发出去了才记——没发出去就记，冷却会白白吃掉下一句 */

@@ -609,6 +609,38 @@ export const DEFAULTS = {
     },
   },
   /**
+   * 群聊策略的补充层（2.2b）。
+   *
+   * **为什么不把静默时段 / 每小时上限再抄一份进来**：`roostHost.decide`
+   * 里早就有 `quietStartHour` / `quietEndHour` / `maxPerHour`，2.2a 也已经
+   * 在群聊页露出来了。同名参数放两处就是「两份真相」——用户改了上面那份、
+   * 下面这份没动，判据该听谁的永远说不清（tts.speed 那次就是这么踩的坑）。
+   * 所以这里**只放 decide 里真的没有的东西**：
+   *
+   *   · `interruptChance` —— 插话概率，真·新判据；
+   *   · `briefMaxItems`   —— 主人私聊问「某群刚聊了什么」时回几条（C5-1）；
+   *   · `overrides`       —— **按群覆写**，这才是 2.2b 新给的能力：
+   *                          静默时段、每小时上限、冷却、接话方式、插话概率
+   *                          都能给单个群单独设，全局值仍留在 decide（2.2a）。
+   *
+   * `overrides` 用**空对象当开放字典**（键是群 openid，形状不可知），
+   * `pruneTo` 见到空 shape 会整份保留；写成 `{ sample: … }` 反而会被裁掉。
+   * 形状：`{ "<群openid>": { mode?, cooldownSec?, maxPerHour?, …,
+   * interruptChance? } }`，只有白名单里的键生效（见 roost-decide.js）。
+   *
+   * **默认值必须等于升级前的行为**：`interruptChance = 100` = 句句都接，
+   * `overrides = {}` = 没有例外。老配置没这个段，读出来也是这两个值，
+   * 升级前后她接话的频率一模一样。
+   */
+  group: {
+    /** 群里没人明确叫她时，有多大概率接这句（0–100）。100 = 全接（原行为） */
+    interruptChance: 100,
+    /** 主人私聊问群聊摘要时，最多回几条时间线；上限 50（和 chat_look 一致） */
+    briefMaxItems: 20,
+    /** 按群覆写：{ [chatId]: { … } }。空 = 所有群都用同一套全局设置 */
+    overrides: {},
+  },
+  /**
    * 主动搭话：主人一阵子没找你，你主动在私聊里说句话。
    * **只在私聊，不在群里**；默认关着。
    */
