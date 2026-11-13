@@ -4742,6 +4742,124 @@ select.roost-input{color-scheme:dark}
      * 关系这里只做**只读概览**。删关系 / 撤销屏蔽 / 标结束仍在记忆页——
      * 同一个写操作摆两个地方，用户得先判断在哪页动手才算数（§0.5 A10 的教训）。
      */
+    /**
+     * 4.2 关系图：**2D 力导向**（不上 3D——2000 节点上 3D 就是性能坑，§0.8-6）。
+     * 纯 canvas 自绘：斥力 + 弹簧 + 中心引力，收敛 ~300 帧后停（省电）。
+     * 配色在绘制时读 CSS 变量——面板换主题不用改这里。
+     * 点节点回调 onPick（人物页用它打开详情），不做拖拽——预览够用，别把交互做重。
+     */
+    function RelGraph({ edges, onPick }) {
+      const ref = useRef(null)
+      useEffect(() => {
+        const cv = ref.current
+        if (!cv || !edges?.length) return
+        const nodes = new Map()
+        edges.forEach((e) => {
+          [e.src, e.dst].forEach((n) => {
+            if (n && !nodes.has(n)) nodes.set(n, { name: n, x: 0, y: 0, vx: 0, vy: 0 })
+          })
+        })
+        const arr = [...nodes.values()]
+        const W = cv.clientWidth || 320
+        const Hh = 220
+        cv.width = W
+        cv.height = Hh
+        arr.forEach((n, i) => {
+          const a = (i / Math.max(1, arr.length)) * Math.PI * 2
+          n.x = W / 2 + Math.cos(a) * W * 0.28
+          n.y = Hh / 2 + Math.sin(a) * Hh * 0.3
+        })
+        const links = edges
+          .map((e) => ({ a: nodes.get(e.src), b: nodes.get(e.dst), rel: e.rel }))
+          .filter((l) => l.a && l.b)
+        let running = true
+        const step = () => {
+          for (let i = 0; i < arr.length; i++) {
+            for (let j = i + 1; j < arr.length; j++) {
+              const a = arr[i]; const b = arr[j]
+              let dx = a.x - b.x; let dy = a.y - b.y
+              let d2 = dx * dx + dy * dy || 1
+              const d = Math.sqrt(d2)
+              const f = 1400 / d2
+              a.vx += (dx / d) * f; a.vy += (dy / d) * f
+              b.vx -= (dx / d) * f; b.vy -= (dy / d) * f
+            }
+          }
+          links.forEach((l) => {
+            const dx = l.b.x - l.a.x; const dy = l.b.y - l.a.y
+            const d = Math.sqrt(dx * dx + dy * dy) || 1
+            const f = (d - 90) * 0.02
+            l.a.vx += (dx / d) * f; l.a.vy += (dy / d) * f
+            l.b.vx -= (dx / d) * f; l.b.vy -= (dy / d) * f
+          })
+          arr.forEach((n) => {
+            n.vx += (W / 2 - n.x) * 0.004
+            n.vy += (Hh / 2 - n.y) * 0.004
+            n.vx *= 0.85; n.vy *= 0.85
+            n.x = Math.max(34, Math.min(cv.width - 34, n.x + n.vx))
+            n.y = Math.max(24, Math.min(cv.height - 24, n.y + n.vy))
+          })
+        }
+        const draw = () => {
+          const ctx = cv.getContext('2d')
+          if (!ctx) return
+          const cs = getComputedStyle(cv)
+          const line = cs.getPropertyValue('--line').trim() || 'rgba(128,128,128,.5)'
+          const accent = cs.getPropertyValue('--accent').trim() || '#4a9eff'
+          const fg = cs.getPropertyValue('--fg').trim() || '#ccc'
+          ctx.clearRect(0, 0, cv.width, cv.height)
+          ctx.strokeStyle = line
+          ctx.lineWidth = 1
+          links.forEach((l) => {
+            ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y); ctx.stroke()
+            ctx.fillStyle = fg
+            ctx.font = '10px sans-serif'
+            ctx.textAlign = 'center'
+            ctx.fillText(l.rel || '', (l.a.x + l.b.x) / 2, (l.a.y + l.b.y) / 2 - 3)
+          })
+          arr.forEach((n) => {
+            ctx.beginPath()
+            ctx.arc(n.x, n.y, 16, 0, Math.PI * 2)
+            ctx.fillStyle = accent + '2e'
+            ctx.fill()
+            ctx.strokeStyle = accent
+            ctx.stroke()
+            ctx.fillStyle = fg
+            ctx.font = '11px sans-serif'
+            ctx.fillText(n.name.slice(0, 6), n.x, n.y - 20)
+          })
+        }
+        let frames = 0
+        let raf = 0
+        const loop = () => {
+          if (!running) return
+          step()
+          draw()
+          if (++frames < 300) raf = requestAnimationFrame(loop)
+        }
+        loop()
+        const onClick = (ev) => {
+          const r = cv.getBoundingClientRect()
+          const x = ev.clientX - r.left
+          const y = ev.clientY - r.top
+          const hit = arr.find((n) => (n.x - x) ** 2 + (n.y - y) ** 2 < 19 * 19)
+          if (hit && onPick) onPick(hit.name)
+        }
+        cv.addEventListener('click', onClick)
+        return () => {
+          running = false
+          cancelAnimationFrame(raf)
+          cv.removeEventListener('click', onClick)
+        }
+      }, [edges])
+      if (!edges?.length) return null
+      return h('canvas', {
+        ref,
+        title: '点节点看这个人；图是自动收敛的，不做拖拽',
+        style: { width: '100%', height: 220, borderRadius: 8, border: '1px solid var(--line)', display: 'block' },
+      })
+    }
+
     function PeopleTab({ mem, toast, reload, quick, busy, setTab }) {
       const profiles = mem?.profiles || []
       const events = mem?.events || []
@@ -4750,6 +4868,42 @@ select.roost-input{color-scheme:dark}
       const shortTime = (at) => new Date(at).toLocaleString('zh-CN', {
         month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
       })
+
+      /** 4.1 人物墙：搜索 + 状态筛选。profiles 是跨群按 openid 归户的，没有群/标签维度，
+       *  不造假的筛选项——维度只有「最近有没有互动」（状态）和名字 */
+      const DAY = 86_400_000
+      const [wallQ, setWallQ] = useState('')
+      const [wallState, setWallState] = useState('all')
+      const [picked, setPicked] = useState(null)
+      const [detail, setDetail] = useState(null)
+      const [detailBusy, setDetailBusy] = useState(false)
+      const stateWordOf = (at) => {
+        if (!at) return '没记过时间'
+        const d = (Date.now() - at) / DAY
+        return d <= 7 ? '7 天内互动' : d <= 30 ? '30 天内互动' : '久未联系'
+      }
+      const wall = profiles
+        .filter((p) => !wallQ || String(p.name || '').toLowerCase().includes(wallQ.toLowerCase()))
+        .filter((p) => {
+          if (wallState === 'all') return true
+          const d = p.at ? (Date.now() - p.at) / DAY : Infinity
+          return wallState === 'idle' ? d > 30 : d <= Number(wallState)
+        })
+      const openPerson = async (p) => {
+        if (!p) return
+        setPicked(p)
+        setDetail(null)
+        setDetailBusy(true)
+        try {
+          const r = await get('/person?key=' + encodeURIComponent(p.key || p.name)
+            + '&chatId=' + encodeURIComponent(mem?.chatId || ''))
+          setDetail(r?.ok === false ? { err: r.message || '读不到详情' } : r)
+        } catch (e) {
+          setDetail({ err: e.message })
+        } finally {
+          setDetailBusy(false)
+        }
+      }
 
       if (!mem) return h('div', null,
         h('div', { className: 'roost-empty' }, '读取人物数据…'),
@@ -4761,8 +4915,88 @@ select.roost-input{color-scheme:dark}
       )
 
       return h('div', null,
+        /** 4.1 人物墙：点人看详情。原来的三节全保留，顺延到 03/04/05 */
         h(Sec, {
-          n: '01', title: `熟人小档案（${profiles.length}）`,
+          n: '01', title: `人物墙（${wall.length}）`,
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: () => reload && reload() }, '刷新'),
+        },
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 } },
+            h('input', {
+              className: 'roost-input', style: { flex: '1 1 200px' },
+              placeholder: '搜名字', value: wallQ,
+              onChange: (e) => setWallQ(e.target.value),
+            }),
+            [['all', '全部'], ['7', '7 天内'], ['30', '30 天内'], ['idle', '久未联系']].map(([v, label]) =>
+              h('button', {
+                key: v, type: 'button',
+                className: wallState === v ? 'roost-primary' : 'roost-btn',
+                onClick: () => setWallState(v),
+              }, label))),
+          wall.length
+            ? h('div', { style: { display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' } },
+                wall.map((p, i) => h('div', {
+                  key: i, className: 'roost-item',
+                  style: { cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch', gap: 2,
+                    borderColor: picked && picked.name === p.name ? 'var(--accent)' : undefined },
+                  onClick: () => openPerson(p),
+                },
+                  h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } },
+                    h('b', null, p.name || p.key || '(未命名)'),
+                    h('span', { className: 'd' }, stateWordOf(p.at))),
+                  h('span', { className: 't', style: { fontSize: 12 } },
+                    p.impression || p.tips || '还没有印象'),
+                )))
+            : h('div', { className: 'roost-empty' },
+                profiles.length ? '没有符合条件的人' : '还没写过人物档案。'),
+          h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            '档案是跨群按 openid 归户的，没有群/标签维度——筛选只按「最近有没有互动」，不造假维度。'),
+        ),
+
+        /** 4.1 详情四栏：档案 / 关系 / 经历 / 记忆，数据与记忆页同源只是按人过滤；只读 */
+        h(Sec, { n: '02', title: picked ? `详情：${picked.name || picked.key}` : '详情' },
+          !picked
+            ? h('div', { className: 'roost-empty' }, '在人物墙里点一个人，看档案 / 关系 / 经历 / 记忆四栏。')
+            : detailBusy
+              ? h('div', { className: 'roost-empty' }, '读取中…')
+              : detail?.err
+                ? h('div', { className: 'roost-empty', style: { color: 'var(--bad)' } }, detail.err)
+                : !detail
+                  ? null
+                  : h('div', null,
+                      h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+                        '写操作（删关系、撤销屏蔽、清档案）都在「记忆」页，这里只读。'),
+                      h('div', { style: { display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' } },
+                        h('div', null,
+                          h('div', { className: 'roost-diag-h' }, '档案'),
+                          detail.person?.impression || detail.person?.tips
+                            ? h('div', { className: 'roost-note' },
+                                (detail.person.impression || '（没有印象）')
+                                + (detail.person.tips ? `（相处：${detail.person.tips}）` : ''))
+                            : h('div', { className: 'roost-empty' }, '档案里还没写过这个人')),
+                        h('div', null,
+                          h('div', { className: 'roost-diag-h' }, '关系'),
+                          (detail.edges || []).length
+                            ? detail.edges.map((e, i) => h('div', { key: i, className: 'roost-note' },
+                                `· ${e.src} —${e.rel}→ ${e.dst}${e.chatId ? '（' + e.chatId + '）' : ''}`))
+                            : h('div', { className: 'roost-empty' }, '图谱里没有这个人参与的现在成立的关系')),
+                        h('div', null,
+                          h('div', { className: 'roost-diag-h' }, '经历（本会话说过的）'),
+                          (detail.said || []).length
+                            ? detail.said.map((s, i) => h('div', { key: i, className: 'roost-note' },
+                                '· ' + (s.at ? shortTime(s.at) : '') + ' ' + s.text))
+                            : h('div', { className: 'roost-empty' },
+                                '当前会话里没归到这个人名下的发言（跨会话聚合等数据模型支持了再补）')),
+                        h('div', null,
+                          h('div', { className: 'roost-diag-h' }, '记忆（提到这个人的日记）'),
+                          (detail.mentions || []).length
+                            ? detail.mentions.map((m, i) => h('div', { key: i, className: 'roost-note' },
+                                '· ' + (m.at ? shortTime(m.at) : '') + ` [${m.level || ''}] ` + m.text
+                                + (m.why ? `（${m.why}）` : '')))
+                            : h('div', { className: 'roost-empty' }, '没有提到这个人的日记')))),
+        ),
+
+        h(Sec, {
+          n: '03', title: `熟人小档案（${profiles.length}）`,
           right: h('button', { type: 'button', className: 'roost-btn', onClick: () => reload && reload() }, '刷新'),
         },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
@@ -4782,7 +5016,7 @@ select.roost-input{color-scheme:dark}
           }),
         ),
 
-        h(Sec, { n: '02', title: '她知道的关系' },
+        h(Sec, { n: '04', title: '她知道的关系' },
           gp?.stats?.enabled === false
             ? h('div', { className: 'roost-empty' }, '图谱没启用（当前 Node 没有 node:sqlite）')
             : h('div', null,
@@ -4792,6 +5026,8 @@ select.roost-input{color-scheme:dark}
                   : null,
                 (gp?.edges || []).length
                   ? h('div', { className: 'roost-list' },
+                      h('div', { style: { marginBottom: 8 } },
+                        h(RelGraph, { edges: gp.edges.slice(0, 30), onPick: (name) => openPerson({ name }) })),
                       gp.edges.slice(0, 12).map((e) => h('div', { key: e.id, className: 'roost-item' },
                         h('span', { className: 't' }, `${e.src} —${e.rel}→ ${e.dst}`),
                         h('span', { className: 'd' }, dayOf(e.from)),
@@ -4810,7 +5046,7 @@ select.roost-input{color-scheme:dark}
         ),
 
         h(Sec, {
-          n: '03', title: `她最近做过的事（${events.length}）`,
+          n: '05', title: `她最近做过的事（${events.length}）`,
           right: h('button', { type: 'button', className: 'roost-btn', onClick: () => reload && reload() }, '刷新'),
         },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },

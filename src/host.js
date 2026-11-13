@@ -6552,6 +6552,8 @@ export function apply(ctx) {
            * 只给印象/相处建议与名字，不把内部 openid 键铺到面板上。
            */
           profiles: profiles.recent(20).map((r) => ({
+            /** 4.1：key（openid 或归户名）随行返回，人物墙点详情要用 */
+            key: r.key || '',
             name: r.name || r.key,
             impression: r.impression || '',
             tips: r.tips || '',
@@ -6731,6 +6733,77 @@ export function apply(ctx) {
           });
         } catch (e) {
           send(res, 500, { ok: false, message: e.message });
+        }
+      }),
+
+      /**
+       * 4.1 人物详情：一个人四栏——档案 / 关系 / 经历 / 记忆。
+       * 数据和记忆页同源（profiles / graph / journal），只是按人过滤，
+       * 不新开存储。写操作（删关系、撤销屏蔽）仍在记忆页，这里只读。
+       *
+       * **「经历」栏的口径**：先按当前会话里这个人发过的消息归集——
+       * profiles 是跨群按 openid 归户的，没有群维度，硬按群聚合
+       * 等于造一个假筛选项；跨会话聚合等数据模型支持了再补。
+       */
+      route('/person', async (req, res) => {
+        const u = new URL(req.url || '/', 'http://x');
+        const key = String(u.searchParams.get('key') || '').trim();
+        const chatId = String(u.searchParams.get('chatId') || '').trim() || lastScene?.chatId || '';
+        if (!key) return send(res, 200, { ok: false, message: '缺 key（人物的 openid 或名字）' });
+        try {
+          /** 档案：profiles 按openid 归户，key 可能是 openid 也可能是兜底名字 */
+          const all = profiles.recent(0) || [];
+          const row = all.find((r) => r.key === key || r.openid === key || r.name === key) || null;
+          const name = row?.name || key;
+          const nameEq = (e) => e.src === name || e.dst === name;
+
+          /** 记忆栏：提到这个名字的日记（预演口径 touch:false，点开详情不算「被想起」） */
+          let mentions = [];
+          try {
+            mentions = (await journal.search(name, {
+              chatId, limit: 8, touch: false, aliases: aliasesOf(chatId),
+            })).map((h) => ({
+              at: h.at,
+              level: h.level,
+              why: h.why || '',
+              text: String(h.digest || h.text || '').slice(0, 140),
+            }));
+          } catch { /* 检索挂了不给这一栏，别的栏照常 */ }
+
+          /** 经历栏：这个人在当前会话发过的话（sender 对 openid 或名字） */
+          let said = [];
+          try {
+            said = journal
+              .listChat(chatId, 300, aliasesOf(chatId))
+              .filter((r) => r.role === 'user' && r.sender && (r.sender === key || r.sender === row?.openid))
+              .slice(0, 10)
+              .map((r) => ({ at: r.at, text: String(r.digest || r.text || '').slice(0, 140) }));
+          } catch { /* 同上，只缺一栏 */ }
+
+          const lastAt = Math.max(
+            Number(row?.at) || 0,
+            mentions[0]?.at || 0,
+            said[0]?.at || 0,
+          );
+          return send(res, 200, {
+            ok: true,
+            chatId,
+            person: {
+              key,
+              name,
+              openid: row?.openid || (row?.key !== name ? row?.key : '') || '',
+              impression: row?.impression || '',
+              tips: row?.tips || '',
+              at: Number(row?.at) || 0,
+              lastAt,
+            },
+            edges: graph.nowEdges({ chatId, limit: 100, aliases: aliasesOf(chatId) }).filter(nameEq),
+            ended: graph.endedEdges({ chatId, limit: 50, aliases: aliasesOf(chatId) }).filter(nameEq),
+            mentions,
+            said,
+          });
+        } catch (e) {
+          return send(res, 200, { ok: false, message: `人物详情读取失败：${e.message}` });
         }
       }),
 

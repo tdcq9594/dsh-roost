@@ -1717,13 +1717,19 @@ const tabProps = (extra = {}) => ({
 })
 const numsOf = (node) => sectionsOf(node).filter((s) => s.n).map((s) => s.n)
 
-test('2.3：人物页三节 01–03，档案 / 关系 / 经历都真渲染出来', () => {
+test('4.1：人物页五节 01–05，人物墙 + 详情四栏 + 原三节全保留', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   const tree = expand(mod.PeopleTab(tabProps()), rt)
-  assert.deepEqual(numsOf(tree), ['01', '02', '03'], '人物页编号应 01–03 连续')
+  /** 4.1 新增人物墙（01）与详情（02），原三节顺延 03/04/05 */
+  assert.deepEqual(numsOf(tree), ['01', '02', '03', '04', '05'], '人物页编号应 01–05 连续')
   const txt = textOf(tree)
   for (const must of [
+    /** 01 人物墙（「搜名字」是 placeholder 属性不进 textOf，用源码断言补在下面） */
+    '人物墙（1）', '全部', '7 天内', '久未联系', '不造假维度',
+    /** 02 详情（未选中时的空态） */
+    '点一个人，看档案', '只读',
+    /** 03/04/05 原三节一块不少 */
     '熟人小档案（1）', '阿岚', '爱在半夜发图', '别催她睡',
     '她知道的关系', '3 个实体', '阿岚 —喜欢→ 猫',
     '她最近做过的事（1）', '发了张图', '去记忆页',
@@ -1732,6 +1738,11 @@ test('2.3：人物页三节 01–03，档案 / 关系 / 经历都真渲染出来
     assert.ok(txt.includes(must), `人物页缺少「${must}」`)
   }
   assert.ok(!txt.includes('删掉这条关系'), '关系在人物页只读，写操作留在记忆页')
+
+  /** 搜名字输入框（placeholder 不进 textOf，查源码） */
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("placeholder: '搜名字'"), '人物墙要有搜索框')
+  assert.ok(src.includes('function RelGraph'), '4.2 关系图组件要在')
 })
 
 test('2.3：备份页四节 01–04，导出 / 待生效 / 清单 / 不带过去的都在', () => {
