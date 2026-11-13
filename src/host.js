@@ -59,6 +59,7 @@ import { createExtMarket } from './ext-market.js';
 import { pickModelFor, pickReasoningEffort } from './model-pick.js';
 import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
+import { rerankHits } from './rerank.js';
 import { createClosing, shouldNotePending } from './closing.js';
 import { createAccount } from './account.js';
 import { createRewriter } from './rewrite.js';
@@ -1939,12 +1940,26 @@ export function apply(ctx) {
     /** D4：短句连上一句补检索，按原分补位、不乘系数（见 recall.js） */
     const prev = dry ? '' : (recentUserText.get(chatId) || '');
     const rec = await searchWithShortContext(journal, q, opts, prev);
+    /**
+     * 重排候选（可选，默认关）。放在 RRF 融合之后、记召回日志之前：
+     * 日志要记「她最终先想起哪几条」，记重排前的顺序就是错的。
+     * 失败一律回落原顺序，不能让重排把整轮召回带崩。
+     */
+    let hits = rec.hits;
+    let rerankMode = 'off';
+    try {
+      const rr = await rerankHits(q, hits, { cfg, embedder, now: Date.now() });
+      hits = rr.hits;
+      rerankMode = rr.mode;
+    } catch (e) {
+      log.debug(`重排跳过：${e.message}`);
+    }
     if (!dry) {
       recentUserText.set(chatId, q);
       /** D3：召回日志只留结构化字段，连检索词都不落盘 */
-      recallLog.push(recallRow(chatId, q, rec.hits, rec));
+      recallLog.push(recallRow(chatId, q, hits, rec));
     }
-    return { hits: rec.hits, rec, entities };
+    return { hits, rec: { ...rec, rerank: rerankMode }, entities };
   };
 
 
@@ -7077,6 +7092,62 @@ export function apply(ctx) {
        *   profile → profiles.forget（忘掉这个人）
        * 日记原话不给「编辑」：改原话等于篡改历史，只能作废。
        */
+      /**
+       * 翻一翻：跨「事实 + 日记」的统一搜索列表（对齐 aurabot 记忆页的「翻一翻」）。
+       *
+       * 为什么不在前端拼：事实在 memory.json、日记在 sqlite，只有后端两边都读得到；
+       * 而且日记搜索要走 FTS，前端拿不到。
+       * 只读接口，编辑/删除仍走 /memory/fact 与 /memory/node。
+       */
+      route('/memory/browse', async (req, res) => {
+        const url = new URL(req.url || '/', 'http://localhost');
+        const q = String(url.searchParams.get('q') || '').trim();
+        const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 20));
+        const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+        const chatId = String(url.searchParams.get('chatId') || lastScene?.chatId || '');
+        const aliases = aliasesOf(chatId);
+        const kw = q.toLowerCase();
+        const items = [];
+
+        try {
+          const f = memory.listFull(chatId, aliases);
+          for (const [scope, arr] of [['global', f.global], ['chat', f.chat]]) {
+            for (const x of arr) {
+              if (kw && !String(x.text || '').toLowerCase().includes(kw)) continue;
+              items.push({
+                kind: 'fact', scope, id: x.id, text: x.text, at: x.at,
+                tier: x.tier, pin: x.pin, brightness: x.brightness,
+                archived: Boolean(x.until || x.archivedAt),
+              });
+            }
+          }
+        } catch (e) {
+          log.warn(`翻一翻读事实失败：${e.message}`);
+        }
+
+        try {
+          const need = limit + offset + 20;
+          const rows = q
+            ? await journal.search(q, { chatId, limit: need, aliases })
+            : journal.recent(chatId, need, 'chat', aliases);
+          for (const r of rows || []) {
+            items.push({
+              kind: 'journal', id: String(r.id || ''), text: String(r.text || ''),
+              at: Number(r.at) || 0, archived: Boolean(r.invalidAt),
+            });
+          }
+        } catch (e) {
+          log.warn(`翻一翻读日记失败：${e.message}`);
+        }
+
+        items.sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0));
+        const total = items.length;
+        return send(res, 200, {
+          ok: true, total, hasMore: offset + limit < total,
+          items: items.slice(offset, offset + limit),
+        });
+      }),
+
       route('/memory/node', async (req, res) => {
         const b = await readBody(req);
         const kind = String(b?.kind ?? '');

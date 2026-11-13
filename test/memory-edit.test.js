@@ -245,3 +245,26 @@ test('记忆页：长分节默认折叠 + 分层统计卡', async () => {
     assert.ok(client.includes(must), `缺「${must}」`);
   }
 });
+
+
+test('翻一翻：后端合并事实+日记，前端有搜索/分页/行内改删', async () => {
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const client = readFileSync(CLIENT, 'utf8');
+  assert.ok(host.includes("route('/memory/browse'"), '后端要有 /memory/browse');
+  for (const must of ['kind: \'fact\'', 'kind: \'journal\'', 'hasMore']) {
+    assert.ok(host.includes(must), `后端返回缺 ${must}`);
+  }
+  assert.ok(client.includes("get('/memory/browse'"), '前端要真的调它');
+  for (const must of ['翻一翻', '搜一条记忆', '加载更多', "action: 'update'", "action: 'archive'"]) {
+    assert.ok(client.includes(must), `翻一翻缺「${must}」`);
+  }
+});
+
+test('重排开关进了配置，默认关（升级前后召回顺序不变）', async () => {
+  const { DEFAULTS } = await import('../src/config.js');
+  assert.equal(DEFAULTS.recall?.rerank?.enabled, false, '默认必须关');
+  assert.equal(DEFAULTS.recall?.rerank?.weight, 0.6);
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.ok(host.includes('rerankHits(q, hits'), '召回入口要接重排');
+  assert.ok(host.includes("rerank: rerankMode"), '召回日志要能看出走没走重排');
+});

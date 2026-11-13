@@ -979,8 +979,10 @@ select.roost-input{color-scheme:dark}
  */
 .roost-g-card{
   --g-tint:color-mix(in srgb, var(--accent) 9%, transparent);
-  border:1px solid var(--line);border-left:2px solid color-mix(in srgb, var(--accent) 55%, var(--line));
-  border-radius:12px;background:var(--surface);padding:2px 14px 14px;
+  /* 2026-11-13 主人：卡片背景不好看，去掉。群聊页与其它页统一成
+     「分节标题 + 上边线分隔」，不再套一层带边框的灰底方块。
+     --g-tint 仍保留：下面的提示块/日志行还要用它。 */
+  border:0;border-radius:0;background:transparent;padding:0;
 }
 .roost-g-desc{margin:0 0 10px;font-size:12px;line-height:1.6;
   color:var(--dsw-alias-label-secondary, inherit);opacity:.92}
@@ -3989,6 +3991,31 @@ select.roost-input{color-scheme:dark}
       const [fact, setFact] = useState('')
       /** 星图改成按需弹窗：关掉就卸载，3D 自动旋转不会在后台空转 */
       const [starOpen, setStarOpen] = useState(false)
+      /** 翻一翻：跨事实/日记的统一列表 */
+      const [browse, setBrowse] = useState(null)
+      const [browseQ, setBrowseQ] = useState('')
+      const [browseBusy, setBrowseBusy] = useState(false)
+      const [browseEdit, setBrowseEdit] = useState(null)
+      const loadBrowse = async ({ append = false } = {}) => {
+        setBrowseBusy(true)
+        try {
+          const offset = append && browse ? browse.items.length : 0
+          const qs = '?limit=20&offset=' + offset
+            + '&q=' + encodeURIComponent(browseQ)
+            + (mem?.chatId ? '&chatId=' + encodeURIComponent(mem.chatId) : '')
+          const r = await get('/memory/browse' + qs)
+          if (r?.ok === false) { toast(r.message || '翻不动'); return }
+          setBrowse((cur) => ({
+            total: Number(r.total) || 0,
+            hasMore: Boolean(r.hasMore),
+            items: append && cur ? [...cur.items, ...(r.items || [])] : (r.items || []),
+          }))
+        } catch (e) {
+          toast('翻不动：' + e.message)
+        } finally {
+          setBrowseBusy(false)
+        }
+      }
       const [scope, setScope] = useState('global')
       /**
        * 正在确认要删的那条关系。
@@ -4251,6 +4278,93 @@ select.roost-input{color-scheme:dark}
                 h('span', { className: 'roost-muted' }, k + ' '),
                 h('b', null, String(v)))))
           })(),
+        ),
+
+        /**
+         * 翻一翻：跨「事实 + 日记」的统一搜索列表（对齐 aurabot 记忆页）。
+         * 后端 /memory/browse 两边一起读，前端只管展示与行内操作。
+         */
+        h(Sec, { title: '翻一翻', defaultOpen: false },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '跨「事实 + 日记」一起搜，搜到就能就地改、归档或作废。'),
+          h('div', { style: { display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' } },
+            h('input', {
+              className: 'roost-input',
+              style: { flex: '1 1 200px', padding: '4px 10px', fontSize: 12 },
+              placeholder: '搜一条记忆…（回车搜索）',
+              value: browseQ,
+              onChange: (e) => setBrowseQ(e.target.value),
+              onKeyDown: (e) => { if (e.key === 'Enter') loadBrowse() },
+            }),
+            h('button', { type: 'button', className: 'roost-btn', disabled: browseBusy, onClick: () => loadBrowse() },
+              browseBusy ? '翻…' : '搜索'),
+          ),
+          !browse
+            ? h('div', { className: 'roost-muted', style: { fontSize: 11.5 } }, '点「搜索」或回车开始；不填关键词就是最近 20 条。')
+            : browse.items.length === 0
+              ? h('div', { className: 'roost-empty' }, '没搜到')
+              : h('div', null,
+                  h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginBottom: 4 } }, `共 ${browse.total} 条`),
+                  browse.items.map((it) => h('div', {
+                    key: it.kind + ':' + it.id,
+                    style: { display: 'flex', gap: 8, alignItems: 'flex-start', padding: '6px 0', borderTop: '1px solid var(--line)' },
+                  },
+                    h('div', { style: { flex: '1 1 auto', minWidth: 0, fontSize: 12.5, lineHeight: 1.5 } },
+                      browseEdit && browseEdit.id === it.id
+                        ? h('input', {
+                            className: 'roost-input',
+                            style: { width: '100%', padding: '2px 8px', fontSize: 12 },
+                            value: browseEdit.text,
+                            onChange: (e) => setBrowseEdit({ ...browseEdit, text: e.target.value }),
+                          })
+                        : it.text,
+                      h('div', { className: 'roost-muted', style: { fontSize: 10.5, marginTop: 2 } },
+                        (it.kind === 'fact' ? (it.scope === 'chat' ? '本会话' : '跨群') : '日记')
+                        + (it.kind === 'fact' ? ' · ' + ({ short: '临时', long: '长期', core: '永久' }[it.tier] || '长期') : '')
+                        + (it.archived ? ' · 已失效' : '')
+                        + (it.at ? ' · ' + new Date(it.at).toLocaleDateString('zh-CN') : '')),
+                    ),
+                    h('div', { style: { display: 'flex', gap: 4, flexShrink: 0 } },
+                      browseEdit && browseEdit.id === it.id
+                        ? [
+                            h('button', {
+                              key: 'save', type: 'button', className: 'roost-btn', disabled: browseBusy,
+                              onClick: async () => {
+                                const r = await post('/memory/fact', {
+                                  action: 'update', id: it.id, scope: it.scope,
+                                  chatId: mem?.chatId || '', text: browseEdit.text,
+                                })
+                                toast(r?.ok === false ? (r.message || '没改上') : '改了')
+                                if (r?.ok) { setBrowseEdit(null); loadBrowse(); if (reload) reload() }
+                              },
+                            }, '存'),
+                            h('button', { key: 'cancel', type: 'button', className: 'roost-btn', onClick: () => setBrowseEdit(null) }, '消'),
+                          ]
+                        : [
+                            it.kind === 'fact'
+                              ? h('button', {
+                                  key: 'edit', type: 'button', className: 'roost-btn',
+                                  onClick: () => setBrowseEdit({ id: it.id, text: it.text }),
+                                }, '改')
+                              : null,
+                            h('button', {
+                              key: 'del', type: 'button', className: 'roost-btn', disabled: browseBusy,
+                              onClick: async () => {
+                                const r = it.kind === 'fact'
+                                  ? await post('/memory/fact', { action: 'archive', id: it.id, scope: it.scope, chatId: mem?.chatId || '' })
+                                  : await post('/memory/node', { kind: 'episode', id: it.id, chatId: mem?.chatId || '' })
+                                toast(r?.ok === false ? (r.message || '没删成') : (it.kind === 'fact' ? '已归档（可在星图恢复）' : '已作废'))
+                                if (r?.ok) { loadBrowse(); if (reload) reload() }
+                              },
+                            }, it.kind === 'fact' ? '归档' : '作废'),
+                          ],
+                    ),
+                  )),
+                  browse.hasMore
+                    ? h('button', { type: 'button', className: 'roost-btn', disabled: browseBusy, onClick: () => loadBrowse({ append: true }) },
+                        browseBusy ? '翻…' : '加载更多')
+                    : null,
+                ),
         ),
 
         /* ── 第一层：事实 ── */
@@ -4706,6 +4820,28 @@ select.roost-input{color-scheme:dark}
         h(Sec, { n: '05', title: '召回预览与参数' },
           h('div', { className: 'roost-note', style: { marginTop: 0 } },
             '输入一句话，看真实召回会命中什么、为什么命中。这是预演：不计入「被想起」，不影响排序。'),
+          /**
+           * 重排候选（Reranker）：默认关。配了向量就按语义相似度重排，
+           * 没配就按「关键词命中 + 新鲜度」确定性重排。开关放这里，
+           * 是因为它改的正是「召回顺序」。
+           */
+          h('label', {
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 8 },
+            title: '关着时召回顺序与升级前完全一致',
+          },
+            h('input', {
+              type: 'checkbox',
+              checked: config?.recall?.rerank?.enabled === true,
+              disabled: Boolean(busy) || !saveCfg,
+              onChange: async (e) => {
+                const on = Boolean(e.target.checked)
+                const r = await saveCfg({
+                  recall: { rerank: { ...(config?.recall?.rerank || {}), enabled: on } },
+                })
+                toast(r?.ok === false ? (r.message || '没存上') : (on ? '重排已开，下一轮生效' : '重排已关'))
+              },
+            }),
+            '重排候选（默认关：配了向量走向量，否则按关键词 + 新鲜度）'),
           h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
             h('input', {
               className: 'roost-input', style: { flex: '1 1 260px' },
