@@ -73,6 +73,7 @@ import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { registerStickerTools } from './sticker-tools.js';
 import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
+import { createWakeupLedger, wakeupPlan, wakeupCycleOf, WAKEUP_DEFAULTS, WAKEUP_WINDOWS } from './wakeup.js';
 import { createFence, PEER } from './fence.js';
 import { audit, peerSummary } from './audit.js';
 import { createGroupAdmin } from './group-admin.js';
@@ -1291,6 +1292,78 @@ export function apply(ctx) {
   /** 每分钟问一次「该说话了吗」。unref 是为了不拖住进程退出 */
   const speakTimer = setInterval(() => speakUp.tick().catch(() => {}), 60_000);
   speakTimer.unref?.();
+
+  /**
+   * 4.6 互动召回：与主动搭话**两本账**。
+   *
+   * 主动搭话按天算（每日 3 次）；互动召回按官方口径算：用户最后一次主动
+   * 对话后的 30 天内，当天 / 1–3 天 / 3–7 天 / 7–30 天四个窗口各 1 条。
+   * 这里只负责「该不该发 / 这个窗口发没发过」，生成一句话复用 `awake.compose`，
+   * 发送走同一个 `sendOut()`，多带一个 `isWakeup: true` 让框架侧在报文里
+   * 补 `is_wakeup`。
+   *
+   * `lastActiveAt` 是任意会话的最后消息，单聊召回只该看**主人私聊**那次；
+   * `speakUp.lastOwnerAt` 正是「主人最后一次在私聊说话」，优先用它。
+   */
+  const wakeLedger = createWakeupLedger({
+    file: join(dataDir(), 'wakeup.json'),
+    log: (m) => log.warn(m),
+  });
+  /** 本轮窗口的锚点：主人私聊最后一次说话的时间 */
+  const wakeAnchor = () => Number(speakUp.state?.().lastOwnerAt) || Number(lastActiveAt) || 0;
+  const wakeState = () => {
+    const c = { ...WAKEUP_DEFAULTS, ...(cfg.wakeup || {}) };
+    const plan = wakeupPlan({ now: Date.now(), lastActiveAt: wakeAnchor(), used: wakeLedger.used(), cfg: c });
+    return {
+      ...plan,
+      enabled: c.enabled === true,
+      owner: ownerId() || '',
+      idleHoursConfig: c.idleHours,
+      windows: WAKEUP_WINDOWS.map((w) => ({
+        ...w,
+        used: wakeLedger.used().some((x) => Number(x.anchor) === plan.anchor && Number(x.cycle) === w.id),
+      })),
+      used: wakeLedger.used().slice(-4),
+    };
+  };
+  let wakeRunning = false;
+  const runWakeup = async ({ force = false } = {}) => {
+    if (wakeRunning) return { ok: false, code: 'BUSY', message: '上一次召回还没结束' };
+    const c = { ...WAKEUP_DEFAULTS, ...(cfg.wakeup || {}) };
+    /**
+     * force 是面板「立刻走一次」，用来跳过开关和静默时长做人工验证，
+     * 但**不能绕过 30 天窗口和每窗口 1 条**：那是官方额度，绕过就是违规。
+     */
+    const plan = wakeupPlan({
+      now: Date.now(), lastActiveAt: wakeAnchor(),
+      used: wakeLedger.used(),
+      cfg: force ? { ...c, enabled: true, idleHours: 0, awakeFrom: 0, awakeTo: 24 } : c,
+    });
+    if (c.enabled !== true && !force) return { ok: false, message: '互动召回没开' };
+    if (!plan.fire) return { ok: false, message: plan.why };
+    const target = ownerId();
+    if (!target) return { ok: false, message: '不知道该发给谁：没配主人 openid' };
+
+    wakeRunning = true;
+    try {
+      /** 她自己决定不说就不发，也不占窗口额度（和主动搭话同一个口径） */
+      const v = await awake.compose({ kind: 'c2c', chatId: target, extraPrompt: '你们已经很久没说话了，如果想开口就说一句，不想说就回 <<skip>>。' });
+      const raw = String(v?.text ?? '');
+      const text = raw.replace(/<<[^>]*>>/g, '').trim();
+      if (!v?.speak || !text || /<<\s*skip\s*>>/i.test(raw)) {
+        return { ok: false, skipped: true, message: '她自己决定不说' };
+      }
+      const r = await sendOut({ scene: 'c2c', target, text, isWakeup: true });
+      if (!r?.ok) return { ok: false, message: r?.message || '没发出去', code: r?.code };
+      wakeLedger.mark(plan.anchor, plan.cycle, { target: String(target).slice(0, 12) });
+      return { ok: true, anchor: plan.anchor, cycle: plan.cycle, window: plan.label, message: `互动召回已发出（${plan.label}）` };
+    } finally {
+      wakeRunning = false;
+    }
+  };
+  /** 5 分钟看一次就够：窗口最短也是「当天」，没必要每分钟醒一次 */
+  const wakeTimer = setInterval(() => { runWakeup().catch(() => {}); }, 300_000);
+  wakeTimer.unref?.();
 
   /** 已经挂过人格/权限上下文的 agent，避免每轮重复挂 */
   /** 端口租约：跟 Roost 互通「实际在哪个端口」 */
@@ -7057,6 +7130,10 @@ export function apply(ctx) {
 
       /* ---------------- 账号迁移 ---------------- */
 
+      /** 4.6 互动召回：状态与手动走一次（手动也守 30 天 4 条额度） */
+      route('/wakeup/status', (req, res) => send(res, 200, { ok: true, ...wakeState() })),
+      route('/wakeup/run-now', async (req, res) => send(res, 200, await runWakeup({ force: true }))),
+
       /**
        * 扫描本机数据里「认不出号码」的键。
        *
@@ -8389,6 +8466,7 @@ export function apply(ctx) {
 
     return () => {
       clearInterval(speakTimer);
+      clearInterval(wakeTimer);
       clearInterval(groupTimer);
       clearTimeout(consolidateBoot);
       clearInterval(consolidateTimer);

@@ -5937,7 +5937,7 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    function AwakeTab({ aw, mem, sp, chats, toast, reload, reloadSp, busy, quick }) {
+    function AwakeTab({ aw, mem, sp, chats, toast, reload, reloadSp, busy, quick, config, saveCfg }) {
       const cfg = aw?.cfg || {}
       const opps = aw?.lastOpportunities || []
       const groups = aw?.groups || []
@@ -5984,7 +5984,59 @@ select.roost-input{color-scheme:dark}
       }, [toast])
       useEffect(() => { loadDeliv(false) }, [loadDeliv])
 
+      /**
+       * 4.6 互动召回（官方 is_wakeup）：和「私聊排期」两本账。
+       * 状态只读拉一次，点「立刻走一次」才真的发消息。
+       */
+      const [wk, setWk] = useState(null)
+      const loadWake = useCallback(async () => {
+        const r = await get('/wakeup/status')
+        setWk(r?.ok === false ? null : r)
+        return r
+      }, [])
+      useEffect(() => { loadWake() }, [loadWake])
+      const wakeCfg = { ...(config?.wakeup || {}) }
+      const wakeOn = wakeCfg.enabled === true
+      const runWakeNow = async () => {
+        const r = await post('/wakeup/run-now', {})
+        toast(r?.ok ? (r.message || '已发出') : (r?.message || '这次没发'))
+        await loadWake()
+      }
+
       return h('div', null,
+        h(Sec, {
+          title: '互动召回（is_wakeup）',
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: loadWake }, '刷新'),
+        },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '官方口径：用户主动说过话之后的 30 天内，当天 / 1–3 天 / 3–7 天 / 7–30 天四个窗口各 1 条，合计 4 条。',
+            '超过 30 天没有额度；用户再说一句会开启新一轮。和下面的「私聊排期」是两本账，互不占额度。'),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5 } },
+            h('input', {
+              type: 'checkbox', checked: wakeOn,
+              onChange: async (e) => {
+                const r = await saveCfg({ wakeup: { ...wakeCfg, enabled: Boolean(e.target.checked) } })
+                toast(r?.ok === false ? (r.message || '没存上') : (wakeOn ? '已关掉互动召回' : '已开启互动召回'))
+              },
+            }), '开启互动召回（默认关）'),
+          h('div', { style: { margin: '8px 0', display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            (wk?.windows || []).map((w) => h('span', {
+              key: w.id,
+              className: 'roost-muted',
+              style: {
+                fontSize: 11.5, padding: '2px 8px', borderRadius: 6,
+                border: '1px solid var(--line)',
+                opacity: w.used ? 0.55 : 1,
+              },
+              title: w.used ? '这一档已经发过' : '这一档还可以发 1 条',
+            }, `${w.label} · ${w.used ? '已用' : '可用'}`)),
+          ),
+          h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginBottom: 8 } },
+            wk
+              ? `${wk.enabled ? '开着' : '关着'} · ${wk.why || ''}${wk.owner ? ' · 收件人已识别' : ' · 还没认出主人 openid'}`
+              : '读取互动召回状态…'),
+          h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: runWakeNow }, '立刻走一次（仍守官方额度）'),
+        ),
         h(Sec, { n: '01', title: '这一轮算出来的机会', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '重算') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '不是"到点就发"，是"到点问她要不要说"。她自己可以选不说——那不算失败，也不占当天的额度。'),
@@ -9396,6 +9448,7 @@ select.roost-input{color-scheme:dark}
       ['profiles', '人物档案', 'enabled：要不要把对熟人的印象攒成一小段，聊天时带上。每天凌晨巩固时提炼、跨群共用，同一天里提示词不变；关着也能在「记忆」页查看和清空已有的'],
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
       ['awake', '主动说话', '清醒时段、机会分门槛、群白名单（开着时 speakUp.prompt 会当额外要求一起给）'],
+      ['wakeup', '互动召回', 'enabled 默认关。官方口径：用户主动说过话之后 30 天内，当天 / 1–3 天 / 3–7 天 / 7–30 天四个窗口各 1 条（共 4 条），超 30 天没额度；idleHours 是「多久没说话才召回」的额外门槛，默认 72 小时所以实际只命中后两档。和 speakUp 是两本账'],
       ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],
       ['closing', '收尾', '对话冷掉前自己补一句：多久算冷（coolMinutes）、盯几个会话（maxChats）、记录留几天（ttlDays）'],
       ['leakGuard', '防复读', 'enabled：她回复里整段复述了注入的记忆块，出站前删掉那几句。默认关，日常在「权限」页高级组里点'],
@@ -13172,6 +13225,8 @@ select.roost-input{color-scheme:dark}
             ? h(AwakeTab, {
                 aw, mem, sp, chats,
                 toast, reload: loadAwake, reloadSp: loadAwake, busy, quick,
+                /** 4.6 互动召回的开关要读写 config.wakeup */
+                config, saveCfg,
               })
             : null,
           tab === 'context'

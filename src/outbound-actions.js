@@ -227,6 +227,8 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
     text, extra = {}, scene = 'c2c', target = '', msgId = '', receivedAt = 0,
     /** 3.7：事件被动回复（只有 event_id 的事件）；msgId 优先 */
     eventId = '',
+    /** 4.6：互动召回，官方 is_wakeup 消息（不校验 msg_id/event_id 有效期） */
+    isWakeup = false,
     requestId = '', senderId = '', onSent = () => {},
   } = {}) {
     const ch = channel();
@@ -267,7 +269,7 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
     const skipOnly = wantSkip && !body.trim();
     if (!skipOnly && (body.trim() || silenceMs > 0)) {
       r = await ch.send({
-        scene, target, text: body, msgId, receivedAt, eventId, requestId,
+        scene, target, text: body, msgId, receivedAt, eventId, isWakeup, requestId,
         markdown: true, keyboard, silenceMs,
       });
       if (r?.ok) {
@@ -283,7 +285,7 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
     const files = Array.isArray(extra?.files) ? extra.files.map(String).filter(Boolean) : [];
     for (const f of files) {
       if (typeof ch.sendFile !== 'function') break;
-      const rf = await ch.sendFile({ scene, target, path: f, msgId, receivedAt, eventId, requestId: String(extra?.requestId ?? '') })
+      const rf = await ch.sendFile({ scene, target, path: f, msgId, receivedAt, eventId, isWakeup, requestId: String(extra?.requestId ?? '') })
         .catch((e) => ({ ok: false, message: e?.message ?? String(e) }));
       if (!rf?.ok) log(`发文件失败（${f}）：${rf?.message ?? '未知原因'}`);
       else onSent();
@@ -300,9 +302,9 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
       try {
         let sent = null;
         if (a.type === 'imageAlone' && typeof ch.sendFile === 'function') {
-          sent = await ch.sendFile({ scene, target, path: a.value, msgId, receivedAt, eventId });
+          sent = await ch.sendFile({ scene, target, path: a.value, msgId, receivedAt, eventId, isWakeup });
         } else if (a.type === 'voice' && typeof ch.sendVoice === 'function') {
-          sent = await ch.sendVoice({ scene, target, path: a.value, msgId, receivedAt, eventId });
+          sent = await ch.sendVoice({ scene, target, path: a.value, msgId, receivedAt, eventId, isWakeup });
         } else if (a.type === 'say' && tts && typeof ch.sendVoice === 'function') {
           /**
            * 「语音条」次数配额。
@@ -319,7 +321,7 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
             : null;
           if (q && q.ok === false) {
             log(`语音条额度用完（${q.message}），这句改发文字`);
-            const rt = await ch.send({ scene, target, text: a.value, msgId, receivedAt, eventId });
+            const rt = await ch.send({ scene, target, text: a.value, msgId, receivedAt, eventId, isWakeup });
             if (rt?.ok) { mediaSent += 1; onSent(); }
             continue;
           }
@@ -331,7 +333,7 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
           const file = path.join(os.tmpdir(), `roost-say-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
           try {
             await writeFile(file, buf);
-            sent = await ch.sendVoice({ scene, target, dataBase64: buf.toString('base64'), fileName: path.basename(file), msgId, receivedAt, eventId });
+            sent = await ch.sendVoice({ scene, target, dataBase64: buf.toString('base64'), fileName: path.basename(file), msgId, receivedAt, eventId, isWakeup });
           } finally {
             await rm(file, { force: true }).catch(() => {});
           }
