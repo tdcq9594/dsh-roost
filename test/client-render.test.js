@@ -1998,3 +1998,39 @@ test('2.6：排障页是正门，context 老链接仍可用，两颗打开面板
   assert.ok(src.includes('打开面板看启动状态'), '第 2 步那颗要写清是看启动')
   assert.ok(src.includes('打开「主人与群组」'), '第 6 步那颗要写清直达主人名单')
 })
+
+
+test('4.5：人格页把「旧记忆归谁」做成三个可选项，代码不代选', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  rt.reset()
+  const tree = expand(h(mod.HerTab, {
+    config: { persona: { current: 'default' } },
+    personas: {
+      ok: true, current: 'default', byChat: {}, usage: {},
+      personas: [{ id: 'default', label: '大肥鱼', tags: [], chars: 10 }],
+    },
+    mem: { chatId: 'g1', personaOverride: '' },
+    toast: () => {}, save: async () => ({ ok: true }), reload: async () => {}, quick: null,
+  }), rt)
+  const txt = textOf(tree)
+  for (const must of [
+    '人格隔离（4.5）', '开启人格隔离（默认关）', '保存选择',
+    'A 共享', 'B 归某一个人格', 'C 逐会话指定',
+    '只写归属标记', '不搬动旧数据',
+  ]) {
+    assert.ok(txt.includes(must), `人格页缺「${must}」`)
+  }
+  /** 三个策略必须是 radio，且没有一个被默认选中（选择权交回使用者） */
+  const radios = []
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.type === 'input' && n.props?.type === 'radio') radios.push(n.props)
+    walk(n.props?.children)
+  })(tree)
+  assert.equal(radios.length, 3, `应有三个策略单选项，实际 ${radios.length}`)
+  assert.deepEqual(radios.map((r) => r.value), ['shared', 'owner', 'perChat'])
+  assert.equal(radios.some((r) => r.checked), false, '不能替使用者预选一个')
+})

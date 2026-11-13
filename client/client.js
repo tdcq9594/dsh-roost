@@ -3134,7 +3134,94 @@ select.roost-input{color-scheme:dark}
         setDirty(false)
       }
 
+      /**
+       * 4.5 人格隔离：选择权必须在使用者手里。
+       * 这里只收集选择，后端校验「没选策略不许开」；旧数据一个字节不动。
+       */
+      const [scopeState, setScopeState] = useState(null)
+      const [scopeDraft, setScopeDraft] = useState(null)
+      const loadScope = useCallback(async () => {
+        const r = await get('/persona/scope')
+        setScopeState(r?.ok === false ? null : r)
+        setScopeDraft({
+          enabled: Boolean(r?.enabled), policy: String(r?.policy || ''),
+          owner: String(r?.owner || ''), byChat: { ...(r?.byChat || {}) },
+        })
+        return r
+      }, [])
+      useEffect(() => { loadScope() }, [loadScope])
+      const sd = scopeDraft || { enabled: false, policy: '', owner: '', byChat: {} }
+      const setSD = (patch) => setScopeDraft({ ...sd, ...patch })
+      const POLICY_LABELS = {
+        shared: 'A 共享：旧记忆所有人格都能读（零迁移）',
+        owner: 'B 归某一个人格：其他人格从空白开始',
+        perChat: 'C 逐会话指定：下面一个个人格指给旧会话',
+      }
+      const saveScope = async () => {
+        const r = await post('/persona/scope/save', sd)
+        toast(r?.ok === false ? (r.message || '没存上') : (sd.enabled ? '人格隔离已开启' : '已关掉人格隔离，回到原来的一锅记忆'))
+        await loadScope()
+      }
+
       return h('div', { className: 'pv-root' },
+        h(Sec, {
+          title: '人格隔离（4.5）',
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: loadScope }, '刷新'),
+        },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '开启后，新记忆 / 日记 / 关系 / 会话各写各的人格；旧记忆归谁由你选，代码不替你定。',
+            '只写归属标记，不搬动旧数据：关掉开关就回到原来的「一锅记忆」，专属键里的内容仍在盘上不丢。'),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5 } },
+            h('input', {
+              type: 'checkbox', checked: sd.enabled,
+              onChange: (e) => setSD({ enabled: Boolean(e.target.checked) }),
+            }), '开启人格隔离（默认关）'),
+          h('div', { style: { margin: '8px 0', display: 'flex', flexDirection: 'column', gap: 5 } },
+            Object.keys(POLICY_LABELS).map((id) => h('label', {
+              key: id, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 },
+            },
+              h('input', {
+                type: 'radio', name: 'persona-scope-policy', value: id,
+                checked: sd.policy === id, onChange: () => setSD({ policy: id }),
+              }), POLICY_LABELS[id]))),
+          sd.policy === 'owner'
+            ? h('div', { style: { marginBottom: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+                h('span', { className: 'roost-muted', style: { fontSize: 11.5 } }, '旧记忆归：'),
+                h('select', {
+                  className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+                  value: sd.owner, onChange: (e) => setSD({ owner: e.target.value }),
+                },
+                  h('option', { value: '' }, '选一个人格…'),
+                  (scopeState?.personas || []).map((x) => h('option', { key: x.id, value: x.id }, x.name))))
+            : null,
+          sd.policy === 'perChat'
+            ? h('div', { style: { marginBottom: 8 } },
+                h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginBottom: 4 } },
+                  `给每个旧会话指一个人格（共 ${(scopeState?.keys || []).length} 个；留空 = 不归任何人格）`),
+                (scopeState?.keys || []).slice(0, 40).map((k) => h('div', {
+                  key: k, style: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 3 },
+                },
+                  h('span', { className: 'roost-mono', style: { fontSize: 11, flex: '1 1 auto' } }, k.slice(0, 12) + '…'),
+                  h('select', {
+                    className: 'roost-input', style: { width: 130, padding: '2px 6px', fontSize: 11 },
+                    value: sd.byChat[k] || '',
+                    onChange: (e) => {
+                      const v = e.target.value;
+                      const next = { ...sd.byChat };
+                      /** 「不归属」要真的删键，留个空字符串会让账本里堆垃圾 */
+                      if (v) next[k] = v; else delete next[k];
+                      setSD({ byChat: next });
+                    },
+                  },
+                    h('option', { value: '' }, '不归属'),
+                    (scopeState?.personas || []).map((x) => h('option', { key: x.id, value: x.id }, x.name))))))
+            : null,
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+            h('button', { type: 'button', className: 'roost-primary', disabled: !scopeDraft, onClick: saveScope }, '保存选择'),
+            h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
+              scopeState ? (scopeState.note || '') : '读取人格隔离状态…')),
+        ),
+
         /**
          * 名字放在最上面：它决定「她是谁」，人格只决定「她怎么说话」。
          * 0.11 起名字全局生效——换人格不会改名。

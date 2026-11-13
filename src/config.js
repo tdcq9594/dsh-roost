@@ -812,6 +812,15 @@ export const DEFAULTS = {
     current: 'default',
     /** 按会话指定：{ "群openid": "personaId" }，留空就用 current */
     byChat: {},
+    scope: {
+      /**
+       * 4.5 人格隔离总开关，默认关（升级前后行为逐字一致）。
+       * 归属策略**不放在这里**：它由使用者在「人格」页显式选
+       * （A 共享 / B 归某个人格 / C 逐会话指定），单独存在
+       * persona-ownership.json。没选策略就不许开，见 persona-scope.js。
+       */
+      enabled: false,
+    },
     /**
      * **她的名字，全局唯一。**
      *

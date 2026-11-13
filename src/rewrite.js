@@ -44,6 +44,7 @@ import { randomUUID } from 'node:crypto';
 
 import { dataDir } from './config.js';
 import { isValidUin } from './account.js';
+import { unscopeKey } from './persona-scope.js';
 
 /** 二次确认词。公开路由能被直接 POST，光靠前端弹窗拦不住 */
 export const REWRITE_CONFIRM = '改写';
@@ -201,19 +202,33 @@ export function createRewriter({
       .filter((r) => !wanted.size || wanted.has(String(r.uin ?? r.groupUin ?? '')))
       .filter((r) => isValidUin(String(r.uin ?? r.groupUin ?? '')));
 
-    /** 各存储的条数，用来在界面上列清单、执行后核对 */
+    /**
+     * 各存储的条数，用来在界面上列清单、执行后核对。
+     * 4.5：键可能是 `xxx::p:<人格>`，先还原成逻辑 chatId 再合并取最大值——
+     * 一键改写的计划按 openid 列键，用物理键去查会整片显示 0 条。
+     */
+    const putMax = (m, raw, v) => {
+      const k = unscopeKey(raw);
+      if (k) m.set(k, Math.max(Number(m.get(k)) || 0, Number(v) || 0));
+    };
     const factsByKey = new Map();
     try {
-      for (const { chatId, facts } of memory?.scanKeys?.() ?? []) factsByKey.set(chatId, facts);
+      for (const { chatId, facts } of memory?.scanKeys?.() ?? []) putMax(factsByKey, chatId, facts);
     } catch {}
     const journalByKey = new Map();
     try {
-      for (const { chatId, journal: n } of journal?.scanChats?.() ?? []) journalByKey.set(chatId, n);
+      for (const { chatId, journal: n } of journal?.scanChats?.() ?? []) putMax(journalByKey, chatId, n);
     } catch {}
     const graphByKey = new Map();
     try {
       for (const { chatId, edges, episodes } of graph?.scanChats?.() ?? []) {
-        graphByKey.set(chatId, { edges, episodes });
+        const k = unscopeKey(chatId);
+        if (!k) continue;
+        const cur = graphByKey.get(k) || { edges: 0, episodes: 0 };
+        graphByKey.set(k, {
+          edges: Math.max(Number(cur.edges) || 0, Number(edges) || 0),
+          episodes: Math.max(Number(cur.episodes) || 0, Number(episodes) || 0),
+        });
       }
     } catch {}
 

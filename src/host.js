@@ -84,6 +84,7 @@ import { createBridge } from './bridge.js';
 import { createCompact } from './compact.js';
 import { createUsage } from './usage.js';
 import { priceTierOf } from './offpeak.js';
+import { createOwnership, createPersonaScope, unscopeKey, LEGACY_POLICIES, LEGACY_LABELS } from './persona-scope.js';
 import { segmentsOf } from './timing.js';
 import { createMarkerApplier } from './apply-markers.js';
 import { createJournalBridge } from './journal-bridge.js';
@@ -719,7 +720,42 @@ export function apply(ctx) {
    */
   setTimeout(() => { tts.warmup().catch(() => {}); }, 5000).unref?.();
 
-  const sessions = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
+  /**
+   * 4.5 人格隔离：只在 store 层把物理键按人格分开。
+   *
+   * `chat.chatId` 同时是 QQ 出站 target，绝不能在入口替换——消息会发不出去
+   * 还不报错。所以包装四个 store：写入走 `chatId::p:<人格>`，读取按
+   * 使用者选的归属策略决定要不要把共享旧键带进 aliases。
+   *
+   * 归属策略单独存一份文件、由面板显式选；没选策略时 `state().enabled`
+   * 恒为 false，包装层逐字透传，升级前后行为一模一样。
+   */
+  /**
+   * 4.5：这一轮每个会话用哪个人格，**按 chatId 存**，不是一个全局单值。
+   *
+   * 第一版用全局 `inTurn + currentPersonaId`，并发两轮会串味（A 群的数据
+   * 写到 B 群的人格键下），后台定时任务在轮次里执行也会被误隔离。
+   * 现在包装层直接按传进来的 chatId 查这张表：没有人格标记的后台会话
+   * （consolidate 等）不在表里 → 空人格 → 写共享键。主动搭话用的是主人
+   * 的真实 openid，会命中映射并归到那个会话当前的人格——那句话确实是
+   * 这个人格说的，属预期行为。
+   */
+  const personaByChat = new Map();
+  const PERSONA_MAP_MAX = 300;
+  const ownership = createOwnership({
+    file: join(dataDir(), 'persona-ownership.json'),
+    log: (m) => log.warn(m),
+  });
+  const personaScope = createPersonaScope({
+    cfgOf: () => cfg,
+    personaOf: (chatId) => personaByChat.get(String(chatId ?? '')) || '',
+    ownership,
+    log: (m) => log.warn(m),
+  });
+
+  const sessions = personaScope.wrapSessions(
+    createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) }),
+  );
   const turns = createTurnRunner({ ctx, log, timeoutSec: () => Number(cfg.chat?.turnTimeoutSec) || 150 });
   /**
    * 同会话排队。**先声明后赋值**：主动搭话/觉醒的回调在文件里位置更靠前，
@@ -1705,7 +1741,7 @@ export function apply(ctx) {
     dyn: Number(cfg.recall?.dynMax) || MEMORY_DYN_MAX,
   });
 
-  const memory = createMemory();
+  const memory = personaScope.wrapMemory(createMemory());
   const mood = createMood({ cfgOf: () => cfg.mood });
   /**
    * 两份行为日志（B4 / D3）。**不存消息正文**：心情历史只有数值和原因，
@@ -1746,11 +1782,11 @@ export function apply(ctx) {
    * 日记是"发生过什么"（成千条，要检索）。混在 memory.json 里，
    * 一个是文件会无限长，另一个是每轮读全量会拖慢。
    */
-  const journal = createJournal({
+  const journal = personaScope.wrapJournal(createJournal({
     file: join(dataDir(), 'journal.sqlite'),
     embed: embedder,
     log: (m) => log.warn(m),
-  });
+  }));
 
   /**
    * 账本只读视图（`chat_look` 的默认源）。
@@ -1769,10 +1805,10 @@ export function apply(ctx) {
    *
    * 抽错不怕——原始片段在 episode 表里，能重建。
    */
-  const graph = createGraph({
+  const graph = personaScope.wrapGraph(createGraph({
     file: join(dataDir(), 'graph.sqlite'),
     log: (m) => log.warn(m),
-  });
+  }));
 
   /**
    * 第五层：自我叙述。
@@ -4219,6 +4255,19 @@ export function apply(ctx) {
       log.warn('收到没有 chatId 的消息，忽略');
       return;
     }
+    /**
+     * 4.5：这一轮用哪个人格，决定新记忆写到哪个物理键。
+     * 用**逻辑 chatId** 解析（byChat 配置按 openid 查），不碰出站 target。
+     */
+    try {
+      const pid = String(personas.resolve(chat.chatId, personaCfgFor(chat))?.id || '');
+      personaByChat.set(chat.chatId, pid);
+      if (personaByChat.size > PERSONA_MAP_MAX) {
+        personaByChat.delete(personaByChat.keys().next().value);
+      }
+    } catch {
+      personaByChat.delete(chat.chatId);
+    }
 
     const started = Date.now();
     /** 这一句是谁说的、他能让 AI 干到什么程度 */
@@ -4866,6 +4915,7 @@ export function apply(ctx) {
     log: (m) => log.info(m),
   });
 
+  /** 人格按 chatId 查表，排队壳直接用原入口，不需要再包一层全局开关 */
   const inboundShell = createInboundShell({
     q: turnQueue,
     handleTurn,
@@ -6372,7 +6422,7 @@ export function apply(ctx) {
                * 等下一条消息来了才恢复——中间那一小段很难看。
                */
               {
-                const old = sessions.list().find((c) => c.chatId === chatId) || {};
+                const old = sessions.list().find((c) => unscopeKey(c.chatId) === chatId) || {};
                 sessions.set(chatId, '', { preset: old.preset || '', title: old.title || '', kind: old.kind || '' });
               }
               return send(res, 200, { ok: true, message: '上下文清了，下一条重新开始' });
@@ -6548,11 +6598,13 @@ export function apply(ctx) {
           evidence = { error: e.message };
         }
 
-        /** 会话清单：chatId + 能看懂的标题（群名 / 私聊昵称） */
+        /** 会话清单：chatId + 能看懂的标题（群名 / 私聊昵称）。
+         *  4.5：物理键 `xxx::p:<人格>` 统一还原成逻辑 chatId 再去重，
+         *  面板下拉不该冒出一串内部记号；排序后保留最新那条即可。 */
         const chats = sessions
           .list()
           .map((c) => ({
-            chatId: c.chatId,
+            chatId: unscopeKey(c.chatId),
             title: String(c.title || ''),
             preset: String(c.preset || ''),
             /**
@@ -6565,7 +6617,9 @@ export function apply(ctx) {
             kind: String(c.kind || kindFromPreset(c.preset)),
             at: c.at,
           }))
-          .sort((a, b) => (b.at || 0) - (a.at || 0));
+          .sort((a, b) => (b.at || 0) - (a.at || 0))
+          /** 同一逻辑会话在多个人格下各有一条物理记录，下拉里只留最新的一条 */
+          .filter((c, i, arr) => arr.findIndex((x) => x.chatId === c.chatId) === i);
 
         /**
          * 当前这个 chatId 是谁。
@@ -7069,7 +7123,19 @@ export function apply(ctx) {
         });
       }),
 
-      route('/chats', (req, res) => send(res, 200, { ok: true, chats: sessions.list() })),
+      /** 4.5：物理键统一还原成逻辑 chatId 再去重，面板不该看到 `::p:` */
+      route('/chats', (req, res) => {
+        const raw = sessions.list?.() || [];
+        const seen = new Set();
+        const chats = raw
+          .map((c) => ({ ...c, chatId: unscopeKey(c.chatId) }))
+          .filter((c) => {
+            if (!c.chatId || seen.has(c.chatId)) return false;
+            seen.add(c.chatId);
+            return true;
+          });
+        return send(res, 200, { ok: true, chats });
+      }),
 
       /* ---------------- 群管 ----------------
        *
@@ -7920,9 +7986,67 @@ export function apply(ctx) {
         return undefined;
       }),
 
+      /**
+       * 4.5 人格隔离：**选择权在使用者手里**。
+       *
+       * GET 列出可选策略、人格清单、以及能归属的旧会话键（物理键统一还原成
+       * 逻辑 chatId 再去重，面板不该出现 `xxx::p:default` 这种内部记号）。
+       * POST 只写两处：`config.persona.scope.enabled` 和归属账本，
+       * 旧数据一个字节不动，改主意不需要 rekey。
+       */
+      route('/persona/scope', (req, res) => {
+        const st = personaScope.state();
+        const seen = new Set();
+        const keys = [];
+        const addKey = (raw) => {
+          const k = unscopeKey(raw);
+          if (!k || seen.has(k)) return;
+          seen.add(k);
+          keys.push(k);
+        };
+        try { for (const r of memory.scanKeys?.() ?? []) addKey(r.chatId); } catch {}
+        try { for (const c of sessions.list?.() ?? []) addKey(c.chatId); } catch {}
+        return send(res, 200, {
+          ok: true,
+          enabled: st.enabled,
+          wanted: st.wanted,
+          policy: st.policy,
+          owner: st.owner,
+          byChat: st.byChat,
+          policies: LEGACY_POLICIES.map((id) => ({ id, label: LEGACY_LABELS[id] })),
+          personas: (() => {
+            try { return personas.list().map((x) => ({ id: x.id, name: x.name || x.label || x.id })); }
+            catch { return []; }
+          })(),
+          keys: keys.slice(0, 200),
+          note: '只写归属标记，不搬动旧数据；关掉开关就回到原来的「一锅记忆」，专属键里的内容仍在盘上不丢。',
+        });
+      }),
+
+      route('/persona/scope/save', async (req, res) => {
+        const b = await readBody(req);
+        const want = b?.enabled === true;
+        const policy = String(b?.policy ?? '').trim();
+        const owner = String(b?.owner ?? '').trim();
+        const byChat = b?.byChat && typeof b.byChat === 'object' && !Array.isArray(b.byChat) ? b.byChat : {};
+        /**
+         * 没选策略就不许开：这是「给用户自己选择的机会」的硬约束，
+         * 代码不能替使用者默认 A 共享，否则等于替他做了数据归属决策。
+         */
+        if (want && !LEGACY_POLICIES.includes(policy)) {
+          return send(res, 400, { ok: false, message: '先选一个「旧记忆归谁」的方式，才能开启人格隔离' });
+        }
+        if (want && policy === 'owner' && !owner) {
+          return send(res, 400, { ok: false, message: '选了「归某一个人格」，还要指定是哪个人格' });
+        }
+        const saved = ownership.save({ policy, owner, byChat });
+        if (saved?.ok === false) return send(res, 500, { ok: false, message: saved.error || '归属没存上' });
+        cfg = patchConfig({ persona: { scope: { enabled: want } } });
+        return send(res, 200, { ok: true, enabled: personaScope.state().enabled, policy, owner });
+      }),
+
       route('/personas', (req, res) => {
         const list = personas.list();
-
         /**
          * 疑似重复：**同名 + 同字数**。
          *

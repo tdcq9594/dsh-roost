@@ -33,6 +33,8 @@
  * 只能各存一份）。两边判定不同会出现「这边认为没绑定、那边认为已绑定」的
  * 鬼打墙：列表里一直有它，点绑定又报冲突。改一边就要改另一边。
  */
+import { unscopeKey } from './persona-scope.js';
+
 const UIN_RE = /^[1-9]\d{4,11}$/;
 
 /**
@@ -76,8 +78,13 @@ export function createAccount({ memory, journal, graph, sessions, setup, log = (
    */
   function collect() {
     const acc = new Map();
+    /**
+     * 4.5：物理键 `xxx::p:<人格>` 是内部记号，账号迁移只认逻辑 openid。
+     * 同一逻辑会话在多个人格下各有一条记录时**合并取最大值**，不能相加
+     * （共享旧记忆会被每个人格都读到，相加等于重复计数）。
+     */
     const touch = (k) => {
-      const key = String(k || '');
+      const key = unscopeKey(String(k || ''));
       if (!key) return null;
       let e = acc.get(key);
       if (!e) {
@@ -86,11 +93,12 @@ export function createAccount({ memory, journal, graph, sessions, setup, log = (
       }
       return e;
     };
+    const maxOf = (cur, next) => Math.max(Number(cur) || 0, Number(next) || 0);
 
     try {
       for (const { chatId, facts } of memory?.scanKeys?.() ?? []) {
         const e = touch(chatId);
-        if (e) e.facts = Number(facts) || 0;
+        if (e) e.facts = maxOf(e.facts, facts);
       }
     } catch (e) {
       log(`扫描 memory 失败：${e.message}`);
@@ -99,7 +107,7 @@ export function createAccount({ memory, journal, graph, sessions, setup, log = (
     try {
       for (const { chatId, journal: n } of journal?.scanChats?.() ?? []) {
         const e = touch(chatId);
-        if (e) e.journal = Number(n) || 0;
+        if (e) e.journal = maxOf(e.journal, n);
       }
     } catch (e) {
       log(`扫描 journal 失败：${e.message}`);
@@ -109,8 +117,8 @@ export function createAccount({ memory, journal, graph, sessions, setup, log = (
       for (const { chatId, edges, episodes } of graph?.scanChats?.() ?? []) {
         const e = touch(chatId);
         if (!e) continue;
-        e.edges = Number(edges) || 0;
-        e.episodes = Number(episodes) || 0;
+        e.edges = maxOf(e.edges, edges);
+        e.episodes = maxOf(e.episodes, episodes);
       }
     } catch (e) {
       log(`扫描 graph 失败：${e.message}`);
