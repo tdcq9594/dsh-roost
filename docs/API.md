@@ -3,7 +3,7 @@
 > 本文件由 `scripts/build-ext-docs.mjs` **从源码生成**，不要手改。
 > 改端点 / scope / 清单字段后跑 `node scripts/build-ext-docs.mjs`，CI 用 `--check` 校验。
 >
-> 对应版本：`1.1.6`
+> 对应版本：`1.2.0`
 
 ## 1. 扩展是什么
 
