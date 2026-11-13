@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import { dataDir } from './config.js';
 import { EXT_ID_RE, MANIFEST_FILE, sensitiveScopesOf } from './ext-registry.js';
 import { hashDir, extractTarGz, pickSubtree, writeFiles, rmrfSync } from './ext-bundle.js';
+import { normalizeTags, categoryOf, filterMarketRows, facetsOf, phaseView } from './market-browse.js';
 
 /** 读一份 JSON：读不到返回 null（清单损坏时按「没有 scope 声明」处理，不崩）。 */
 function readJson(file) {
@@ -161,6 +162,16 @@ export function createExtMarket({
   const tmpRoot = join(dir, '.market-tmp');
   let cache = null;
 
+  /**
+   * 5.6 安装进度：下载 + 校验是几秒到几十秒的黑盒，面板要能说清「到哪一步了」。
+   * 进度存在进程内存里，面板轮询 `progress()`；不落盘、不进日志、不影响安装结果。
+   */
+  let progressState = phaseView(null);
+  const setPhase = (phase, message = '', id = '') => {
+    progressState = phaseView({ phase, message, id, at: now() });
+  };
+  const progress = () => ({ ok: true, ...progressState });
+
   async function index({ refresh = false } = {}) {
     const t = now();
     if (!refresh && cache && t - cache.at < ttlMs) return cache.value;
@@ -179,8 +190,9 @@ export function createExtMarket({
 
   const localById = () => new Map(registry.list().map((e) => [e.id, e]));
 
-  /** 市场列表：把索引与本地状态并成一行一扩展，面板直接用。 */
-  async function list({ refresh = false } = {}) {
+  /** 市场列表：把索引与本地状态并成一行一扩展，面板直接用。
+   * 5.6：搜索 / 分类 / 标签都在这一层筛，面板不再自己写一份筛选规则。 */
+  async function list({ refresh = false, q = '', category = '', tag = '' } = {}) {
     const idx = await index({ refresh });
     const local = localById();
     /**
@@ -205,6 +217,11 @@ export function createExtMarket({
         path: e.path ? String(e.path) : '',
         transport: e.transport === 'streamable-http' ? 'streamable-http' : 'stdio',
         author: e.author ? String(e.author) : '',
+        /** 5.6：分类取首个标签（索引将来有 category 就听它的），标签全量带回去 */
+        tags: normalizeTags(e),
+        category: categoryOf(e),
+        commands: Array.isArray(e.commands) ? e.commands.map(String).slice(0, 12) : [],
+        runtime: e.runtime ? String(e.runtime) : '',
         verified: e.verified ? String(e.verified) : '',
         installed: Boolean(mine),
         foreign: Boolean(mine?.foreign),
@@ -213,20 +230,43 @@ export function createExtMarket({
         label: isRevoked(idx, e) ? '已撤回，拒绝安装' : '',
       };
     });
-    return { ok: true, rows, repo: idx.repo ?? '', branch: idx.branch ?? 'main' };
+    return {
+      ok: true,
+      rows: filterMarketRows(rows, { q, category, tag }),
+      /** 筛选前的总数与可选值，面板才有得写「显示 N / M 条」和下拉 */
+      total: rows.length,
+      facets: facetsOf(rows),
+      repo: idx.repo ?? '', branch: idx.branch ?? 'main',
+    };
   }
 
   /**
    * 安装一条。顺序固定：撤回 → foreign → 下载 → 哈希 → 落位 → 权限 → 受管块。
    * 后两步失败不回滚扩展本体（已经装好了，删掉反而更糟），以 `warnings` 返回。
    */
-  async function install(id, { confirmScopes = false } = {}) {
+  /**
+   * 5.6：包一层统一收尾。installInner 里失败分支很多（索引失败 / 已撤回 /
+   * foreign / 哈希不符 / 要确认权限…），在外面统一设终态，进度条不会卡在
+   * 「下载中」不动。
+   */
+  async function install(id, opts = {}) {
+    const key = String(id ?? '');
+    setPhase('index', '正在准备安装', key);
+    const r = await installInner(key, opts);
+    if (r?.ok) setPhase('done', r.message || '已安装', key);
+    else if (r?.reason === 'needs_scope_confirm') setPhase('confirm', r.message || '等待确认权限', key);
+    else setPhase('failed', r?.message || '安装失败', key);
+    return r;
+  }
+
+  async function installInner(id, { confirmScopes = false } = {}) {
     const key = String(id ?? '');
     if (!EXT_ID_RE.test(key)) return { ok: false, reason: 'bad_id', message: '扩展 id 不合法' };
 
     let idx;
     try { idx = await index({ refresh: true }); }
     catch (e) { return { ok: false, reason: 'index_failed', message: `索引拉取失败：${e?.message ?? e}` }; }
+    setPhase('download', '正在下载扩展包', key);
 
     const entry = pickExtensions(idx).find((e) => e.id === key);
     if (!entry) return { ok: false, reason: 'not_found', message: `索引里没有扩展 ${key}` };
@@ -250,6 +290,7 @@ export function createExtMarket({
       const want = String(entry.sha256 ?? '').toLowerCase();
       if (!/^[0-9a-f]{64}$/.test(want)) throw new Error('索引条目缺 sha256，拒绝安装（无法校验内容）');
       await download(entry, staging, { repo: idx.repo, branch: idx.branch ?? 'main' });
+      setPhase('verify', '正在校验目录哈希', key);
       const got = await hashDir(staging);
       if (got !== want) {
         throw new Error(`目录哈希与索引不一致（索引 ${want.slice(0, 12)}…，实际 ${got.slice(0, 12)}…）`);
@@ -261,6 +302,7 @@ export function createExtMarket({
        * 「装上后能以机器人身份往外说话」。一键装不能顺带把授权也点了 ——
        * 这里在落位前拦一道，把要授什么原样报给面板。
        */
+      setPhase('scopes', '正在检查权限声明', key);
       const staged = readJson(join(staging, MANIFEST_FILE));
       const sens = sensitiveScopesOf(staged);
       if (sens.length && confirmScopes !== true) {
@@ -272,6 +314,7 @@ export function createExtMarket({
         };
       }
 
+      setPhase('install', '正在落位', key);
       const r = registry.install(staging, {
         source: {
           repo: idx.repo ?? '',
@@ -283,6 +326,7 @@ export function createExtMarket({
       });
       if (!r.ok) throw new Error(r.reason || '落位失败');
 
+      setPhase('finalize', '正在写权限组与受管块', key);
       const warnings = [];
       if (extGroups) {
         try { extGroups.add(key, { label: entry.name ?? key, capStore }); }
@@ -393,5 +437,8 @@ export function createExtMarket({
   /** 索引缓存的旁路清理，测试与面板「强制刷新」用。 */
   function clearCache() { cache = null; }
 
-  return { dir, tmpRoot, indexUrl, index, list, install, remove, detectUpdates, revoke, syncBlock, clearCache };
+  return {
+    dir, tmpRoot, indexUrl, index, list, install, progress,
+    remove, detectUpdates, revoke, syncBlock, clearCache,
+  };
 }

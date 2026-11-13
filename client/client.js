@@ -12624,16 +12624,39 @@ select.roost-input{color-scheme:dark}
       const [revokeAsk, setRevokeAsk] = useState(null)
       const [market, setMarket] = useState(null)
       const [marketBusy, setMarketBusy] = useState('')
-      const loadMarket = async (refresh = false) => {
+      /** 5.6：搜索 / 分类 / 标签都在服务端筛，这里只存条件 */
+      const [marketQuery, setMarketQuery] = useState('')
+      const [marketCategory, setMarketCategory] = useState('')
+      const [marketTag, setMarketTag] = useState('')
+      const [marketProgress, setMarketProgress] = useState(null)
+      const progressTimer = useRef(null)
+      const marketFilters = () => ({ q: marketQuery, category: marketCategory, tag: marketTag })
+      const stopProgress = () => {
+        if (progressTimer.current) { clearInterval(progressTimer.current); progressTimer.current = null }
+      }
+      /** 安装是单个 POST，中途拿不到响应体；用另一个只读 op 轮询阶段 */
+      const startProgress = () => {
+        stopProgress()
+        progressTimer.current = setInterval(async () => {
+          try {
+            const r = await EXT_POST('extensions.market.progress', {})
+            if (r?.ok !== false) setMarketProgress(r)
+          } catch {}
+        }, 400)
+      }
+      const loadMarket = async (refresh = false, filters = null) => {
         setMarketBusy('list')
         try {
-          const r = await EXT_POST('extensions.market.list', { refresh })
+          const r = await EXT_POST('extensions.market.list', {
+            refresh, ...(filters || marketFilters()),
+          })
           setMarket(r)
           if (!r.ok) toast(r.message || '市场索引拉取失败')
         } finally { setMarketBusy('') }
       }
       const marketAct = async (op, id) => {
         setMarketBusy(id)
+        if (op === 'extensions.market.install') startProgress()
         try {
           let r = await EXT_POST(op, { id })
           /**
@@ -12648,19 +12671,26 @@ select.roost-input{color-scheme:dark}
           }
           toast(r.message || (r.ok ? '完成' : '失败'))
           await load()
-          if (market) await loadMarket(true)
-        } finally { setMarketBusy('') }
+          if (market) await loadMarket(true, marketFilters())
+        } finally {
+          stopProgress()
+          setTimeout(() => setMarketProgress(null), 3000)
+          setMarketBusy('')
+        }
       }
       const confirmScopeAct = async () => {
         const ask = scopeAsk
         if (!ask) return
         setScopeBusy(true)
+        startProgress()
         try {
           const r = await EXT_POST(ask.op, { id: ask.id, confirmScopes: true })
           toast(r.message || (r.ok ? '完成' : '失败'))
           await load()
-          if (market) await loadMarket(true)
+          if (market) await loadMarket(true, marketFilters())
         } finally {
+          stopProgress()
+          setTimeout(() => setMarketProgress(null), 3000)
           setScopeBusy(false)
           setScopeAsk(null)
         }
@@ -12671,7 +12701,7 @@ select.roost-input{color-scheme:dark}
           const r = await EXT_POST('extensions.market.updates', {})
           const rows = r?.rows || []
           toast(rows.length ? `${rows.length} 个扩展有新版` : (r?.ok === false ? (r.message || '检查失败') : '都是最新版'))
-          await loadMarket(true)
+          await loadMarket(true, marketFilters())
         } finally { setMarketBusy('') }
       }
       const revokeMarket = async (id) => {
@@ -12680,7 +12710,7 @@ select.roost-input{color-scheme:dark}
           const r = await EXT_POST('extensions.market.revoke', { id, reason: 'panel' })
           toast(r.message || (r.ok ? '已停用' : '停用失败'))
           await load()
-          await loadMarket(true)
+          await loadMarket(true, marketFilters())
         } finally {
           setMarketBusy('')
           setRevokeAsk(null)
@@ -12694,7 +12724,14 @@ select.roost-input{color-scheme:dark}
         setDrafts(d)
       }
       /** 进扩展页就把市场拉出来，别让用户自己找「加载市场」按钮 */
-      useEffect(() => { load(); loadMarket() }, [])
+      useEffect(() => { load() }, [])
+      /** 5.6：筛选条件变了重查（250ms 防抖），别每敲一个字都打一次索引 */
+      useEffect(() => {
+        const t = setTimeout(() => loadMarket(false, {
+          q: marketQuery, category: marketCategory, tag: marketTag,
+        }), 250)
+        return () => clearTimeout(t)
+      }, [marketQuery, marketCategory, marketTag])
       const save = async (id) => {
         setSaving(id)
         try {
@@ -12839,7 +12876,7 @@ select.roost-input{color-scheme:dark}
         title: part === 'market' ? '扩展市场' : part === 'installed' ? '已装扩展' : '扩展市场 / 已装扩展',
         right: h('button', {
           type: 'button', className: 'roost-btn',
-          onClick: () => { load(); loadMarket(true) },
+          onClick: () => { load(); loadMarket(true, marketFilters()) },
         }, '刷新'),
       },
         ...(showMarket ? [
@@ -12860,7 +12897,7 @@ select.roost-input{color-scheme:dark}
           h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
             h('button', {
               type: 'button', className: 'roost-btn', disabled: marketBusy === 'list',
-              onClick: () => loadMarket(true),
+              onClick: () => loadMarket(true, marketFilters()),
             }, marketBusy === 'list' ? '拉取中…' : '刷新市场'),
             h('button', {
               type: 'button', className: 'roost-btn', disabled: !!marketBusy,
@@ -12868,6 +12905,47 @@ select.roost-input{color-scheme:dark}
             }, marketBusy === 'updates' ? '检查中…' : '检查更新'),
             market?.repo ? h('span', { className: 'roost-code' }, `${market.repo}@${market.branch}`) : null,
           ),
+          /** 5.6：搜索 / 分类 / 标签，条件交给服务端筛 */
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' } },
+            h('input', {
+              className: 'roost-input', style: { flex: '1 1 200px' },
+              placeholder: '搜名字 / id / 描述 / 标签 / 作者',
+              value: marketQuery, onChange: (e) => setMarketQuery(e.target.value),
+            }),
+            h('select', {
+              className: 'roost-input', style: { flex: '0 1 170px' },
+              value: marketCategory, onChange: (e) => setMarketCategory(e.target.value),
+            },
+              h('option', { value: '' }, `全部分类${market?.total ? `（${market.total}）` : ''}`),
+              (market?.facets?.categories || []).map((c) =>
+                h('option', { key: c.value, value: c.value }, `${c.value}（${c.count}）`))),
+            marketTag
+              ? h('button', {
+                  type: 'button', className: 'roost-btn',
+                  onClick: () => setMarketTag(''),
+                }, `标签：${marketTag} ×`)
+              : null,
+            h('span', { className: 'roost-note', style: { margin: 0 } },
+              market ? `显示 ${(market.rows || []).length} / ${market.total ?? 0} 条` : ''),
+          ),
+          /** 5.6：下载 / 校验 / 落位分阶段显示，不再只是一个转圈 */
+          marketProgress && marketProgress.phase !== 'idle'
+            ? h('div', { style: { marginTop: 8 } },
+                h('div', { className: 'roost-note' },
+                  `${marketProgress.label || marketProgress.phase} · ${marketProgress.message || marketProgress.id}`),
+                h('div', {
+                  style: {
+                    height: 6, marginTop: 4, borderRadius: 3, overflow: 'hidden',
+                    background: 'var(--line, rgba(128,128,128,.3))',
+                  },
+                }, h('div', {
+                  style: {
+                    width: `${Number(marketProgress.percent) || 0}%`, height: '100%',
+                    background: 'var(--good, #3b82f6)', transition: 'width .3s',
+                  },
+                })),
+              )
+            : null,
           market && !market.ok
             ? h('div', { style: { color: 'var(--bad)', marginTop: 4 } }, market.message || '索引拉取失败')
             : null,
@@ -12876,11 +12954,26 @@ select.roost-input{color-scheme:dark}
                 market.rows.map((x) => h('div', { key: x.id, className: 'ext-row' },
                   h('span', { className: 't' },
                     `${x.name} · ${x.id}`,
-                    h('span', { className: 'd' }, ` · ${x.transport}${x.author ? ` · ${x.author}` : ''}`),
+                    h('span', { className: 'd' }, ` · ${x.category || '其它'} · ${x.transport}${x.author ? ` · ${x.author}` : ''}`),
                     x.revoked ? h('span', { className: 'd', style: { color: 'var(--bad)' } }, ' · 已撤回') : null,
                     x.updateAvailable ? h('span', { className: 'd', style: { color: 'var(--warn)' } }, ' · 有更新') : null,
                   ),
                   x.description ? h('span', { className: 'd' }, x.description) : null,
+                  /** 能力标签：点一下就只看这个标签，再点一下取消 */
+                  (x.tags || []).length
+                    ? h('span', {
+                        className: 'd',
+                        style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 },
+                      }, x.tags.map((t) => h('button', {
+                        key: t, type: 'button', className: 'roost-btn',
+                        style: {
+                          padding: '1px 6px', fontSize: 10.5,
+                          ...(marketTag === t ? { fontWeight: 650, borderColor: 'var(--accent, #3b82f6)' } : {}),
+                        },
+                        title: `只看「${t}」标签`,
+                        onClick: () => setMarketTag(marketTag === t ? '' : t),
+                      }, t)))
+                    : null,
                   x.revoked
                     ? h('span', { className: 'd' }, '拒绝安装')
                     : h('button', {
@@ -12904,7 +12997,10 @@ select.roost-input{color-scheme:dark}
                     : null,
                 )),
               )
-            : (market ? h('div', { className: 'roost-empty' }, '市场里还没有扩展条目。') : null),
+            : (market ? h('div', { className: 'roost-empty' },
+                (marketQuery || marketCategory || marketTag)
+                  ? '当前筛选下没有条目，换个词或清掉筛选。'
+                  : '市场里还没有扩展条目。') : null),
         ),
         ] : []),
         ...(showInstalled ? [

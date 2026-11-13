@@ -5502,8 +5502,18 @@ export function apply(ctx) {
              * 全部走 `extMarket` 编排；安装/卸载真要联网与写盘，因此只有面板显式点击才会到这里。
              */
             case 'extensions.market.list': {
-              const r = await extMarket.list({ refresh: arg?.refresh === true });
+              /** 5.6：搜索 / 分类 / 标签在服务端筛，面板只传条件 */
+              const r = await extMarket.list({
+                refresh: arg?.refresh === true,
+                q: String(arg?.q ?? ''),
+                category: String(arg?.category ?? ''),
+                tag: String(arg?.tag ?? ''),
+              });
               return send(res, 200, r);
+            }
+            case 'extensions.market.progress': {
+              /** 只读、不触发安装；面板装的时候按 400ms 轮询 */
+              return send(res, 200, extMarket.progress());
             }
             case 'extensions.market.install': {
               // 清单索要敏感 scope 时返回 needs_scope_confirm，面板确认后再带 true 重试。
