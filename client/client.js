@@ -14253,10 +14253,15 @@ select.roost-input{color-scheme:dark}
             },
               h('div', { style: { fontWeight: 600, marginBottom: 4, fontSize: 12.5, lineHeight: 1.5 } },
                 first ? cell(first, r) : ''),
-              rest.map((f) => (r[f.key] === '' || r[f.key] == null
-                ? null
-                : h('div', { key: f.key, className: 'roost-muted', style: { fontSize: 11.5, lineHeight: 1.6 } },
-                  `${f.label}：`, cell(f, r)))))),
+              rest.map((f) => {
+                if (r[f.key] === '' || r[f.key] == null) return null
+                /** 图片整宽放在卡片里，不写「封面：」——图本身就是内容 */
+                if (f.type === 'image') {
+                  return h('div', { key: f.key, style: { margin: '4px 0 6px' } }, cell(f, r))
+                }
+                return h('div', { key: f.key, className: 'roost-muted', style: { fontSize: 11.5, lineHeight: 1.6 } },
+                  `${f.label}：`, cell(f, r))
+              }))),
           ),
           d.truncated ? h('div', { className: 'roost-note' }, '内容太多，只显示前一部分') : null)
       }
