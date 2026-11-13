@@ -68,7 +68,13 @@ test('时长/按钮/路径工具与旧 ai-chat 语义一致', () => {
   assert.equal(parseDurationMs('随便'), 0);
   assert.deepEqual(parseButton('再来|/again'), { label: '再来', data: '/again' });
   const kb = buildKeyboard([{ label: 'A', data: 'a' }]);
-  assert.equal(kb.rows[0].buttons[0].action.permission.type, 2);
+  /**
+   * 官方结构是 `{ content: { rows } }`。少包一层 `content` 腾讯不报错，
+   * 只是把整个 keyboard 丢掉——消息能发、按钮没了、日志一片绿。
+   */
+  assert.ok(kb.content, '必须包一层 content：{ content: { rows } }');
+  assert.deepEqual(Object.keys(kb), ['content']);
+  assert.equal(kb.content.rows[0].buttons[0].action.permission.type, 2);
   assert.equal(looksLikeSource('C:/a.png'), true);
   assert.equal(looksLikeSource('图片路径'), false);
   assert.equal(normalizeSource('file:///C:/a%20b.png'), 'C:/a b.png');
@@ -118,7 +124,7 @@ test('执行：默认走 Markdown，@ 标签与按钮都还在', async () => {
   const p = ch.calls.find((c) => c[0] === 'send')[1];
   assert.equal(p.markdown, true);
   assert.match(p.text, /<qqbot-at-user/);
-  assert.equal(p.keyboard.rows[0].buttons[0].action.data, '/again');
+  assert.equal(p.keyboard.content.rows[0].buttons[0].action.data, '/again');
 });
 
 test('执行：就地插图先上传再换引用，路径绝不进正文', async () => {
@@ -194,7 +200,7 @@ test('通道：默认发 markdown（msg_type=2 由框架判定），4xx 才降�
     },
   };
   const ch = createRoostHostChannel({ host });
-  const r = await ch.send({ target: 'g1', text: '**加粗** <qqbot-at-user id="ABCD1234"/>', keyboard: { rows: [] } });
+  const r = await ch.send({ target: 'g1', text: '**加粗** <qqbot-at-user id="ABCD1234"/>', keyboard: { content: { rows: [] } } });
   assert.equal(r.ok, true);
   assert.equal(r.markdown, false);
   assert.equal(seen[0].p.markdown.content, '**加粗** <qqbot-at-user id="ABCD1234"/>');

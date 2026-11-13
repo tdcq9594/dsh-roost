@@ -91,6 +91,18 @@ export function parseButton(value) {
   return label ? { label, data } : null;
 }
 
+/**
+ * `<<button: 标签|指令>>`，最多 4 个、每行 2 个。
+ *
+ * **形状必须是 `{ content: { rows } }`**，不是 `{ rows }`。
+ *
+ * 官方把按钮挂在 Markdown 消息的 `keyboard` 字段上，这个字段是二选一：
+ * `{ "id": "模板 id" }` 或者 `{ "content": { "rows": [...] } }`（自定义按钮）。
+ * 少包一层 `content` 的时候腾讯不会报错，**只会把整个 keyboard 当没看见**——
+ * 消息正常发出去、图也在、就是没有按钮，日志里一个字都不留（2026-11-13 实机：
+ * 「按钮怎么没了」）。同仓 `bot/src/message.js` 的 `replyCard` 注释里写的就是
+ * `keyboard: { content: { rows: [...] } }`。
+ */
 export function buildKeyboard(buttons, { max = 4, perRow = 2 } = {}) {
   const list = (buttons ?? []).filter((b) => b && b.label).slice(0, max);
   if (!list.length) return null;
@@ -104,7 +116,7 @@ export function buildKeyboard(buttons, { max = 4, perRow = 2 } = {}) {
       })),
     });
   }
-  return { rows };
+  return { content: { rows } };
 }
 
 /**
