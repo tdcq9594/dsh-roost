@@ -1682,6 +1682,24 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     },
 
     /**
+     * 按会话取最近 N 条原文（只读）。
+     *
+     * 给 5.10「说话方式提炼」用：要统计主人的句式与口头禅，得看**原始句子**——
+     * `top()` 只给 critical / important（日常闲聊全被滤掉），`digests()` 又被
+     * 压成一行摘要（句式信息已经没了），两个都不够。
+     *
+     * 抹掉的占位行不返回：它们不是主人说的话，混进去会把「（已清空）」
+     * 统计成口头禅。
+     */
+    recentChat(chatId, { limit = 400, aliases = [] } = {}) {
+      const n = Number(limit);
+      const take = Number.isFinite(n) && n > 0 ? Math.min(n, 2000) : 400;
+      return get()
+        .listChat(String(chatId || ''), take, aliases)
+        .filter((r) => r.text !== ERASED && r.text !== CLEARED);
+    },
+
+    /**
      * 每日摘要（巩固产出的那种一行一条）。
      *
      * 被 `forget` / `clearChat` 抹掉的不返回：行还在库里（时间线连续），

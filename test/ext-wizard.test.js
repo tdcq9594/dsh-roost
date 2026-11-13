@@ -16,6 +16,21 @@ function materialize(result) {
   return dir;
 }
 
+
+/**
+ * 清临时目录。**失败不许影响测试结果**：
+ * Windows 上刚 kill 的子进程句柄要过一会儿才释放，`rmSync` 会抛 EBUSY。
+ * 断言早就跑完了，为了一个临时目录把测试判红是本末倒置——留在系统 temp 里
+ * 由系统自己回收即可。
+ */
+function cleanup(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 120 });
+  } catch {
+    /* 句柄还没释放，留给系统回收 */
+  }
+}
+
 /** 起一个 stdio server，发一条 JSON-RPC，收一行响应 */
 function rpcOnce(dir, msg, { timeout = 15000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -156,7 +171,7 @@ test('生成的 stdio server 真能跑：initialize / tools/list / tools/call', 
     const unknown = await rpcOnce(dir, { jsonrpc: '2.0', id: 5, method: 'nope/nope' });
     assert.equal(unknown.error.code, -32601);
   } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 120 });
+    cleanup(dir);
   }
 });
 
@@ -179,6 +194,6 @@ test('生成的 http server 语法正确（起得来就说明能解析）', asyn
     assert.equal(code.code, 0, `server.mjs 语法错误：${code.err.slice(0, 300)}`);
     assert.match(r.files[1].content, /127\.0\.0\.1/, '只监听回环，别往 0.0.0.0 上开');
   } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 120 });
+    cleanup(dir);
   }
 });

@@ -3052,6 +3052,90 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /**
+     * 5.10 说话方式提炼：只统计主人私聊，产出一段能校准语气的描述。
+     *
+     * 界面上刻意**不给选会话**：语料固定是主人私聊（服务端定），给了下拉反而
+     * 让人以为能选群聊——那正是这个功能要避免的跑偏。
+     */
+    function SpeechStyleBlock({ toast }) {
+      const [open, setOpen] = useState(false)
+      const [busy, setBusy] = useState(false)
+      const [res, setRes] = useState(null)
+      const [saved, setSaved] = useState('')
+
+      const run = async () => {
+        setBusy(true)
+        const r = await get('/speech-style')
+        setBusy(false)
+        setRes(r)
+        if (r.ok === false) toast(r.message || '提炼不出来')
+      }
+
+      const save = async () => {
+        setBusy(true)
+        const r = await post('/speech-style/save', {})
+        setBusy(false)
+        toast(r.message || (r.ok ? '已记下' : '没存上'))
+        if (r.ok) setSaved(r.text || '')
+      }
+
+      const pct = (v) => `${Math.round((Number(v) || 0) * 100)}%`
+
+      return h(Sec, {
+        title: '说话方式',
+        right: h('button', {
+          type: 'button', className: 'roost-btn',
+          onClick: () => { setOpen((v) => !v); if (open) setRes(null) },
+        }, open ? '收起' : '从私聊里提炼'),
+      },
+        h('div', { className: 'roost-note', style: { marginBottom: open ? 10 : 0 } },
+          open
+            ? '只统计**你本人的私聊**：群聊语料一律不进来，免得把群友的口头禅学成她的口音。提炼结果不会自动生效，你点了「记进记忆」才算。'
+            : '她说话像不像你，取决于句长、标点、口头禅这些细节。可以从你的私聊里统计出来，校准语气。'),
+        open
+          ? h('div', null,
+            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              h('button', {
+                type: 'button', className: 'roost-btn roost-btn-primary',
+                disabled: busy, onClick: run,
+              }, busy ? '算着…' : '开始提炼'),
+              res?.ok === true
+                ? h('button', {
+                  type: 'button', className: 'roost-btn', disabled: busy, onClick: save,
+                }, '记进记忆')
+                : null),
+
+            res?.ok === false
+              ? h('div', { className: 'roost-note', style: { marginTop: 8, color: 'var(--warn)' } }, res.message)
+              : null,
+
+            res?.ok === true
+              ? h('div', { style: { marginTop: 10 } },
+                h('div', { className: 'roost-note', style: { marginBottom: 6 } },
+                  `样本 ${res.samples} 条（会话里共 ${res.totalRows} 条）· 平均 ${res.avgLen} 字 · 短句 ${pct(res.shortRatio)}`,
+                  res.ownerFrom ? ` · 主人身份来源：${res.ownerFrom === 'config' ? '面板填写' : res.ownerFrom === 'roost' ? '框架配置' : '从消息学到'}` : ''),
+                (res.warnings || []).length
+                  ? h('div', { style: { fontSize: 11.5, color: 'var(--warn)', marginBottom: 6 } }, res.warnings.join('；'))
+                  : null,
+                h('div', {
+                  className: 'roost-note',
+                  style: { padding: '8px 10px', borderRadius: 8, background: 'rgba(120,120,255,.08)', lineHeight: 1.7 },
+                }, res.styleText),
+                h('div', { style: { display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8, fontSize: 11.5 } },
+                  h('span', null, `口头禅：${(res.particles || []).map((x) => `${x.w}(${x.n})`).join('、') || '—'}`),
+                  h('span', null, `句号 ${pct(res.punct?.periodRatio)} · 波浪号 ${pct(res.punct?.tildeRatio)} · 省略号 ${pct(res.punct?.ellipsisRatio)}`),
+                  h('span', null, `表情：${(res.emoji || []).map((x) => x.e).join(' ') || '—'}`)),
+                saved
+                  ? h('div', { className: 'roost-note', style: { marginTop: 8, fontSize: 11.5 } }, `已写入记忆：${saved}`)
+                  : null,
+              )
+              : null,
+          )
+          : null,
+      )
+    }
+
     function HerTab({ config, personas, mem, toast, save, reload, quick, repoSeed }) {
       /** 编辑区正在打开的人格 id */
       const [editId, setEditId] = useState('')
@@ -3335,6 +3419,8 @@ select.roost-input{color-scheme:dark}
       }
 
       return h('div', { className: 'pv-root' },
+        /** 5.10：说话方式提炼（只学主人私聊），放在人格隔离之前——它调的是语气，不是归属 */
+        h(SpeechStyleBlock, { toast }),
         h(Sec, {
           title: '人格隔离',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadScope }, '刷新'),

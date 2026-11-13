@@ -114,6 +114,7 @@ import { workspaceTitleFor } from './workspace-title.js';
 import { splitPersonaText, joinPersonaText, joinPersonaBlocks } from './persona-sections.js';
 import { simulate, SIM_PERSONAS } from './simulate.js';
 import { buildExtension, formatScaffold } from './ext-wizard.js';
+import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
 import { createTtsInstaller } from './tts-install.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -8228,6 +8229,49 @@ export function apply(ctx) {
           next: built.transport === 'stdio'
             ? ['去「已安装」页点重载 / 重启 DSH，宿主会拉起 server.mjs', '改 server.mjs 里 tools/call 的 TODO 换成真实现']
             : [`自己起服务：node ${join(dest, 'server.mjs')}`, '确认端口没被占用，再回「已安装」页重载'],
+        });
+      }),
+
+      /**
+       * 5.10 说话方式提炼：只从**主人私聊**里统计。
+       *
+       * 边界在这里，不在 `speech-style.js`：那个模块只吃 `rows`，拿不到
+       * 「这个 chatId 是群还是私聊」。硬边界写在这里——语料固定取
+       * `ownerId()`（主人私聊的 chatId），**不接受前端传 chatId**。
+       * 群聊语料一律进不来，也就没有「学串口音」这回事。
+       */
+      route('/speech-style', (req, res) => {
+        const owner = String(ownerId() || '').trim();
+        if (!owner) {
+          return send(res, 200, {
+            ok: false,
+            message: '还没认出你的私聊。先在私聊里跟她说一句话（或去「主动搭话」页填 chatId），再回来提炼。',
+          });
+        }
+        const rows = journal.recentChat(owner, { limit: 1200 });
+        const r = analyzeStyle(rows);
+        return send(res, 200, { ...r, chatId: owner, ownerFrom: ownerFrom(), totalRows: rows.length });
+      }),
+
+      /**
+       * 存进记忆。
+       *
+       * **服务端重算，不接收前端回传的文本**：这个接口写的是 `w=2` 的高权重
+       * 记忆，如果让前端传正文，等于给面板开了一个「往记忆里塞任意内容」的口子。
+       * 前端只能决定「存」或「不存」。
+       */
+      route('/speech-style/save', async (req, res) => {
+        const owner = String(ownerId() || '').trim();
+        if (!owner) return send(res, 400, { ok: false, message: '还没认出你的私聊，没东西可提炼' });
+        const r = analyzeStyle(journal.recentChat(owner, { limit: 1200 }));
+        if (!r.ok) return send(res, 400, { ok: false, message: r.reason });
+
+        const entry = styleMemoryEntry(r, { chatId: owner });
+        const ok = memory.add(owner, entry.text, 'global', { w: entry.w, src: entry.src });
+        return send(res, 200, {
+          ok: Boolean(ok),
+          text: entry.text,
+          message: ok ? '已记下。下一轮开始，她会照这个校准长度和语气。' : '写记忆失败',
         });
       }),
 

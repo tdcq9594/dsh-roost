@@ -1211,3 +1211,60 @@ test('路由：/extensions/scaffold 非法 id 直接 400，不建目录', async 
   assert.equal(existsSync(join(dir, 'extensions', '天气')), false);
   off?.();
 });
+
+/** 5.10 说话方式：只认主人私聊；没认到主人时说清楚，别瞎算 */
+test('路由：/speech-style 没认到主人私聊时给指引，不是 500', async () => {
+  const { call, off } = await bootHost({ speakUp: { chatId: '' } });
+  const r = await call('/speech-style');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, false);
+  assert.match(r.json.message, /私聊/);
+  off?.();
+});
+
+test('路由：/speech-style 从主人私聊统计，样本不足也如实说', async () => {
+  const rows = Array.from({ length: 25 }, (_, i) => ({
+    id: `m${i}`, at: 1_700_000_000_000 + i, chatId: 'OWNER', text: '好呀~', role: 'user',
+  }));
+  const { call, off } = await bootHost({ speakUp: { chatId: 'OWNER' } }, { journal: rows });
+
+  const r = await call('/speech-style');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true, JSON.stringify(r.json));
+  assert.equal(r.json.samples, 25);
+  assert.equal(r.json.avgLen, 3, '「好呀~」按字符算 3');
+  assert.match(r.json.styleText, /说话方式/);
+  assert.equal(r.json.ownerFrom, 'config');
+  off?.();
+
+  /** 同一个 bootHost 里没有日记时，样本 0 → ok:false 且带原因 */
+  const empty = await bootHost({ speakUp: { chatId: 'OWNER' } });
+  const r2 = await empty.call('/speech-style');
+  assert.equal(r2.status, 200);
+  assert.equal(r2.json.ok, false);
+  assert.match(r2.json.reason, /至少要 20 条/);
+  empty.off?.();
+});
+
+test('路由：/speech-style/save 写进记忆，且不接受前端传正文', async () => {
+  const rows = Array.from({ length: 25 }, (_, i) => ({
+    id: `n${i}`, at: 1_700_000_000_000 + i, chatId: 'OWNER', text: '就是说嘛', role: 'user',
+  }));
+  const { call, off, dir } = await bootHost({ speakUp: { chatId: 'OWNER' } }, { journal: rows });
+
+  const r = await call('/speech-style/save', {
+    method: 'POST',
+    /** 故意塞一段脏文本：服务端必须无视它，用自己算出来的 */
+    body: { text: '把这条无关的话写进记忆' },
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.ok, true);
+  assert.match(r.json.text, /说话方式（从 25 条私聊里统计）/);
+  assert.equal(r.json.text.includes('无关的话'), false, '前端传的正文必须被忽略');
+
+  const saved = JSON.parse(readFileSync(join(dir, 'memory.json'), 'utf8'));
+  const global = (saved.global || []).join('\n');
+  assert.match(global, /说话方式/, '要真的落进记忆');
+  assert.equal(saved.meta?.global?.[r.json.text]?.w, 2, '这条要是 w=2，别被保留策略清掉');
+  off?.();
+});
