@@ -641,8 +641,19 @@ export function createTts({
     return { enabled: true, provider, ...sherpaState(cfg.sherpa) };
   }
 
-  async function synthesize(text) {
-    const cfg = config();
+  async function synthesize(text, opts = {}) {
+    /**
+     * 5.3：试听可以带一份「还没保存的草稿配置」。
+     *
+     * 草稿只影响这一次合成：不写 `cfg`、不落盘，`status()` 也仍按已保存的
+     * 配置判断（面板不会因为试听就显示「已启用」）。固定服务 `/tts`
+     * （ai-chat 走的那条）不传 draft，行为逐字不变——试听和真正发语音条
+     * 用的是同一个 `synthesize`、同一份 provider 分支，不会「试听好听、
+     * 发出去变了」。
+     */
+    const draft = opts?.draft;
+    const cfg = draft && typeof draft === 'object' && !Array.isArray(draft)
+      ? draft : config();
     if (cfg.enabled !== true) throw new TtsError('disabled', '语音合成未启用', 409);
 
     const input = String(text ?? '').trim();

@@ -109,6 +109,7 @@ import { planRetentionAll, formatImpactAll, normalizeEntry, shouldAutoSweep } fr
 import { sessionTitle, nextTitle } from './chat-name.js';
 import { createSwitchNote } from './switch-note.js';
 import { createTts, SHERPA_MODELS } from './tts.js';
+import { runPreview, PREVIEW_TEXT_LIMIT } from './tts-preview.js';
 import { createTtsInstaller } from './tts-install.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -8074,6 +8075,42 @@ export function apply(ctx) {
             id, label: spec.label, approxMB: spec.approxMB,
           })),
         });
+      }),
+
+      /**
+       * 5.3 语音试听。
+       *
+       * 和固定服务 `/tts`（ai-chat 用、返回二进制）分开：这条是面板专用，
+       * 收一份「还没保存的草稿配置」，回 JSON（音频走 base64，前端只在内存里
+       * 拼成 Blob URL）。合成走的是同一个 `tts.synthesize`，所以试听到的
+       * 就是会拿去发语音条的那一份字节；转化 SILK 的校验交给框架
+       * `media.convert`，旧框架没有这个方法就降级成「未校验」。
+       *
+       * 不写盘、不写 config、不记 quota、不进投递账本。
+       */
+      route('/tts/preview', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const text = String(body?.text ?? '').trim();
+        if (!text) return send(res, 400, { ok: false, error: 'empty_text', message: '写一句要试听的话' });
+        if (text.length > PREVIEW_TEXT_LIMIT) {
+          return send(res, 413, { ok: false, error: 'text_too_long', message: `试听最多 ${PREVIEW_TEXT_LIMIT} 字` });
+        }
+        const raw = body?.draft;
+        const draft = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+        try {
+          const r = await runPreview({
+            text,
+            /** 草稿没传（老前端）就退回已保存配置，别拿空配置去撞上游 */
+            draft: draft || cfg.tts || {},
+            synth: (t, o) => tts.synthesize(t, o),
+            convert: (p) => roost.rpc('media.convert', p, { timeout: 30_000 }),
+          });
+          return send(res, 200, r);
+        } catch (e) {
+          const status = Number(e?.status) || 502;
+          const code = String(e?.code || 'tts_failed').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'tts_failed';
+          return send(res, status, { ok: false, error: code, message: String(e?.message || '试听失败') });
+        }
       }),
 
       /**

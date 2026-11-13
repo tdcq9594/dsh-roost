@@ -10726,6 +10726,43 @@ select.roost-input{color-scheme:dark}
       }
 
       /**
+       * 5.3 试听：整份草稿（含未保存改动）直接交给后端，不用先点保存。
+       * 音频只在浏览器内存里拼成 Blob URL，不写盘、不占次数；换一段试听
+       * 时把上一个 URL 回收，免得几十段音频一直占着内存。
+       */
+      const [pvText, setPvText] = useState('你好，这是一条语音试听。')
+      const [pvBusy, setPvBusy] = useState(false)
+      const [pvAudio, setPvAudio] = useState(null)
+      const pvUrl = useRef('')
+      useEffect(() => () => {
+        if (pvUrl.current) URL.revokeObjectURL(pvUrl.current)
+      }, [])
+      const previewVoice = async () => {
+        const t = String(pvText || '').trim()
+        if (!t) return toast('写一句要试听的话')
+        setPvBusy(true)
+        try {
+          const r = await post('/tts/preview', { text: t, draft: draft || {} })
+          if (r?.ok === false) return toast(r.message || '试听失败')
+          const bin = atob(String(r.audio || ''))
+          const bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+          if (pvUrl.current) URL.revokeObjectURL(pvUrl.current)
+          const url = URL.createObjectURL(new Blob([bytes], { type: r.contentType || 'audio/mpeg' }))
+          pvUrl.current = url
+          setPvAudio({
+            url, bytes: Number(r.bytes) || bytes.length,
+            provider: String(r.provider || ''),
+            silk: r.silk || { ok: false, reason: 'unchecked' },
+          })
+        } catch (e) {
+          toast('试听失败：' + (e?.message || e))
+        } finally {
+          setPvBusy(false)
+        }
+      }
+
+      /**
        * 保存。`override` 给「一键配好」用：按钮要一次写入多个字段，
        * 而 `put()` 走的是 setState，紧接着读 `draft` 还是旧值——
        * 不能靠连续三次 put 再 save。
@@ -11170,6 +11207,47 @@ select.roost-input{color-scheme:dark}
         ),
         h('div', { className: 'roost-note' },
           '最多字数要配合 QQ 语音条时长：太长的会被截断，不如直接发文字。'),
+
+        /** 5.3 试听：不另起一张卡片（主人不要卡片背景），用一条分隔线接在本节末尾 */
+        h('div', {
+          style: { borderTop: '1px solid var(--line-soft)', marginTop: 12, paddingTop: 10 },
+        },
+          h('div', { style: { fontWeight: 650, fontSize: 13 } }, '试听'),
+          h('div', { className: 'roost-note', style: { marginTop: 4 } },
+            '走和 QQ 语音条同一条合成链路，音频只在内存里，不落盘、不占次数；'
+            + '改了配置不用先保存，点试听就按当前草稿来。'),
+          h('div', {
+            style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' },
+          },
+            h('input', {
+              className: 'roost-input', style: { flex: '1 1 260px', minWidth: 180 },
+              value: pvText, maxLength: 500, placeholder: '写一句要试听的话',
+              onChange: (e) => setPvText(e.target.value),
+            }),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: pvBusy,
+              onClick: previewVoice,
+            }, pvBusy ? '合成中…' : '试听'),
+          ),
+          dirty
+            ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
+                '当前用的是未保存的草稿配置。')
+            : null,
+          pvAudio
+            ? h('div', { style: { marginTop: 8 } },
+                h('audio', {
+                  controls: true, autoPlay: true, src: pvAudio.url,
+                  style: { width: '100%', maxWidth: 420 },
+                }),
+                h('div', { className: 'roost-note', style: { marginTop: 4 } },
+                  `已合成 ${(pvAudio.bytes / 1024).toFixed(0)} KB`
+                  + (pvAudio.provider ? ` · ${pvAudio.provider}` : '')
+                  + (pvAudio.silk.ok
+                      ? ` · SILK 校验通过${pvAudio.silk.size ? `（${pvAudio.silk.size} B）` : ''}`
+                      : ` · SILK 未校验：${pvAudio.silk.message || pvAudio.silk.reason}`)),
+              )
+            : null,
+        ),
 
         confirmUninstall
           ? h(ConfirmModal, {
