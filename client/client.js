@@ -2901,12 +2901,165 @@ select.roost-input{color-scheme:dark}
      * 测试环境的 useEffect 不跑（要避免真打网络），没有这个口子就没法断言
      * 「未安装的行长什么样」——而这正是合并清单最关键的一段。
      */
+    /** 5.5：四段定义与后端 src/persona-sections.js 的 PERSONA_SECTIONS 对齐 */
+    const PERSONA_SECTIONS = [
+      { key: 'body', label: '性格与设定', hint: '正文骨架、小节标题都留在这里；不用写「## 性格」。' },
+      { key: 'firstMes', label: '开场白', hint: '主动搭话时直接用的第一句。' },
+      { key: 'demos', label: '说话示例', hint: '两三轮真实对话，校准长度、语气词和标点习惯。' },
+      { key: 'lore', label: '世界书', hint: '一行一条：触发词1, 触发词2 | 内容（命中才注入）。' },
+    ]
+
+    /**
+     * 5.5 分节编辑器：四个文本框 + 本地草稿恢复。
+     *
+     * 草稿写 localStorage 而不是内存 state：弹窗一关、面板一刷新，state 就没了，
+     * 而人格正文是用户手敲的，丢一次就不想再写第二遍。只在「草稿与服务端
+     * 内容不同」时才问要不要恢复，免得每次打开都弹一条。
+     */
+    function SectionEditor({ id, toast, onSaved }) {
+      const DRAFT_KEY = 'roost.persona.draft.' + id
+      const [blocks, setBlocks] = useState(null)
+      const [dirty, setDirty] = useState(false)
+      const [busy, setBusy] = useState(false)
+      const [pendingDraft, setPendingDraft] = useState(null)
+      const [err, setErr] = useState('')
+
+      const clearDraft = () => { try { localStorage.removeItem(DRAFT_KEY) } catch {} }
+      const load = useCallback(async () => {
+        setErr('')
+        const r = await get('/personas/sections?id=' + encodeURIComponent(id))
+        if (r?.ok === false) { setErr(r.message || '读不到分节'); return }
+        /** 段名与内容由服务端自动识别，前端只负责改 / 加 / 删 */
+        const fresh = r?.blocks || []
+        setBlocks(fresh)
+        setDirty(false)
+        try {
+          const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null')
+          if (d && Array.isArray(d.blocks) && JSON.stringify(d.blocks) !== JSON.stringify(fresh)) {
+            setPendingDraft(d)
+          }
+        } catch {}
+      }, [id])
+      useEffect(() => { load() }, [load])
+
+      const apply = (next) => {
+        setBlocks(next)
+        setDirty(true)
+        try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ at: Date.now(), blocks: next })) } catch {}
+      }
+      const put = (i, field, value) => {
+        apply((blocks || []).map((b, j) => j === i ? { ...b, [field]: value } : b))
+      }
+      const removeBlock = (i) => apply((blocks || []).filter((_, j) => j !== i))
+      const addBlock = () => apply([...(blocks || []), {
+        key: 'custom:' + Date.now(), title: '', titleLine: '', text: '', builtin: false, custom: true,
+      }])
+      const save = async () => {
+        if (!blocks) return
+        setBusy(true)
+        try {
+          const r = await post('/personas/sections/save', { id, blocks })
+          if (r?.ok === false) return toast(r.message || '没存上')
+          clearDraft()
+          setPendingDraft(null)
+          setDirty(false)
+          toast('分节已存好')
+          onSaved?.()
+          await load()
+        } finally { setBusy(false) }
+      }
+      const discard = async () => {
+        clearDraft()
+        setPendingDraft(null)
+        await load()
+      }
+
+      return h('div', null,
+        h('div', { className: 'roost-note', style: { marginTop: 0 } },
+          '段名和内容从原文自动识别，--- 头部原样保留；段名留空 = 无标题正文，'
+          + '改名或新增的段写成 ## 段名。段数不限，可任意加删。'),
+        pendingDraft
+          ? h('div', { className: 'pv-warn', style: { marginTop: 8 } },
+              h('span', null, `这份有一份没保存的草稿（${new Date(pendingDraft.at || 0).toLocaleString()}）。`),
+              h('button', {
+                type: 'button', className: 'roost-btn',
+                onClick: () => { setBlocks(pendingDraft.blocks || []); setDirty(true); setPendingDraft(null) },
+              }, '恢复草稿'),
+              h('button', {
+                type: 'button', className: 'roost-btn',
+                onClick: () => { clearDraft(); setPendingDraft(null) },
+              }, '删掉草稿'),
+            )
+          : null,
+        err ? h('div', { className: 'roost-note', style: { color: 'var(--bad)', marginTop: 8 } }, err) : null,
+        blocks
+          ? h('div', null,
+              h('div', { className: 'roost-note', style: { marginTop: 6 } },
+                `自动识别出 ${blocks.length} 段；段名和内容都能改，也能加新的段。`),
+              blocks.map((b, i) => {
+                const spec = PERSONA_SECTIONS.find((x) => x.key === b.key)
+                return h('div', {
+                  key: b.key || i,
+                  style: { borderTop: '1px solid var(--line-soft)', marginTop: 10, paddingTop: 8 },
+                },
+                  h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                    h('span', {
+                      className: 'roost-note',
+                      style: { margin: 0, minWidth: 88, flex: '0 0 auto' },
+                    }, spec ? spec.label : '自定义段'),
+                    h('input', {
+                      className: 'roost-input', style: { flex: '1 1 190px' },
+                      placeholder: '段名（留空 = 无标题正文）',
+                      value: b.title || '',
+                      onChange: (e) => put(i, 'title', e.target.value),
+                    }),
+                    h('button', {
+                      type: 'button', className: 'roost-btn', title: '删掉这一段',
+                      onClick: () => removeBlock(i),
+                    }, '删掉这段'),
+                  ),
+                  spec?.hint
+                    ? h('div', { className: 'roost-note', style: { marginTop: 2 } }, spec.hint)
+                    : null,
+                  h('textarea', {
+                    className: 'roost-input', spellCheck: false,
+                    style: {
+                      width: '100%', minHeight: b.key === 'body' ? 200 : 90, marginTop: 4,
+                      fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 12,
+                      lineHeight: 1.7, resize: 'vertical',
+                    },
+                    value: b.text || '',
+                    onChange: (e) => put(i, 'text', e.target.value),
+                  }),
+                )
+              }),
+              h('button', {
+                type: 'button', className: 'roost-btn', style: { marginTop: 10 },
+                onClick: addBlock,
+              }, '加一段'),
+            )
+          : h('div', { className: 'roost-note', style: { marginTop: 8 } }, '读着…'),
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' } },
+          h('button', {
+            type: 'button', className: 'roost-primary', disabled: busy || !dirty || !blocks, onClick: save,
+          }, busy ? '保存中…' : dirty ? '保存分节（有未保存改动）' : '保存分节'),
+          h('button', {
+            type: 'button', className: 'roost-btn', disabled: !dirty && !pendingDraft, onClick: discard,
+          }, '放弃改动'),
+          h('span', { className: 'roost-note', style: { margin: 0 } },
+            dirty ? '改动已自动存成本地草稿，刷新或关掉弹窗也不会丢。' : '改动会自动存成本地草稿。'),
+        ),
+      )
+    }
+
     function HerTab({ config, personas, mem, toast, save, reload, quick, repoSeed }) {
       /** 编辑区正在打开的人格 id */
       const [editId, setEditId] = useState('')
       const [raw, setRaw] = useState('')
       const [newId, setNewId] = useState('')
       const [dirty, setDirty] = useState(false)
+      /** 5.5：整份编辑仍是默认，分节编辑是新增的第二个入口（原来的一个不删） */
+      const [editMode, setEditMode] = useState('raw')
       const [showNew, setShowNew] = useState(false)
       /**
        * 全局名字（0.11：名字是账号身份，不再写在人格里）。
@@ -3141,6 +3294,15 @@ select.roost-input{color-scheme:dark}
         setEditId(id)
         setRaw(r.raw || '')
         setDirty(false)
+        setEditMode('raw')
+      }
+
+      /** 5.5：分节保存成功后把整份编辑的 raw 也刷新，切回去不会看到旧正文 */
+      const onSectionsSaved = async () => {
+        await reload?.()
+        await loadRepo?.(true)
+        const r = await get('/personas/read?id=' + encodeURIComponent(editId))
+        if (r?.ok !== false) { setRaw(r.raw || ''); setDirty(false) }
       }
 
       /**
@@ -3888,14 +4050,34 @@ select.roost-input{color-scheme:dark}
                       }),
                     )
                   : null,
+                /** 5.5：两种编辑方式并列，整份编辑是原来的那个，一个控件没删 */
+                h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 } },
+                  h('span', { className: 'roost-note', style: { margin: 0 } }, '编辑方式'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    style: editMode === 'raw' ? { fontWeight: 650, borderColor: 'var(--accent, #3b82f6)' } : undefined,
+                    onClick: () => setEditMode('raw'),
+                  }, '整份编辑'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    style: editMode === 'sections' ? { fontWeight: 650, borderColor: 'var(--accent, #3b82f6)' } : undefined,
+                    onClick: () => {
+                      if (dirty) return toast('整份编辑有未保存改动，先保存或放弃')
+                      setEditMode('sections')
+                    },
+                  }, '分节编辑'),
+                ),
                 h('textarea', {
                   className: 'roost-input',
-                  style: { minHeight: 380, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 12, lineHeight: 1.7, resize: 'vertical' },
+                  style: {
+                    minHeight: 380, display: editMode === 'raw' ? undefined : 'none',
+                    fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 12, lineHeight: 1.7, resize: 'vertical',
+                  },
                   value: raw,
                   spellCheck: false,
                   onChange: (e) => { setRaw(e.target.value); setDirty(true) },
                 }),
-                h('div', { style: { display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                h('div', { style: { display: editMode === 'raw' ? 'flex' : 'none', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' } },
                   h('button', {
                     type: 'button', className: 'roost-primary',
                     disabled: !dirty,
@@ -3929,8 +4111,12 @@ select.roost-input{color-scheme:dark}
                     },
                   }, '复制这份'),
                   h('span', { className: 'roost-note', style: { margin: 0 } },
-                    '--- 之间是 name/tags；正文可分四段：性格（默认）、## 开场白、## 世界书、## 说话示例'),
+                    '--- 之间是 name/tags；正文可分四段：性格（默认）、## 开场白、## 世界书、## 说话示例。'
+                    + '不想手写标题就切到「分节编辑」。'),
                 ),
+                editMode === 'sections'
+                  ? h(SectionEditor, { id: editId, toast, onSaved: onSectionsSaved })
+                  : null,
               ),
             ),
           )

@@ -111,6 +111,7 @@ import { createSwitchNote } from './switch-note.js';
 import { createTts, SHERPA_MODELS } from './tts.js';
 import { runPreview, PREVIEW_TEXT_LIMIT } from './tts-preview.js';
 import { workspaceTitleFor } from './workspace-title.js';
+import { splitPersonaText, joinPersonaText, joinPersonaBlocks } from './persona-sections.js';
 import { createTtsInstaller } from './tts-install.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -8366,6 +8367,28 @@ export function apply(ctx) {
       }),
 
       /**
+       * 5.5 分节编辑：把一份 .md 切成四段交给面板。
+       *
+       * 切分规则（三种标题格式、frontmatter、未命名标题段）只在服务端一份，
+       * 前端不抄；否则它和 `parsePersona` 必然漂移。
+       */
+      route('/personas/sections', (req, res) => {
+        const u = new URL(req.url || '/', 'http://x');
+        const id = String(u.searchParams.get('id') || '').trim();
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        const p = personas.read(id);
+        if (!p) return send(res, 404, { ok: false, message: `没有「${id}」这个人格` });
+        const snap = splitPersonaText(p.raw);
+        return send(res, 200, {
+          ok: true, id, label: p.label || p.name,
+          front: snap.front, sections: snap.sections, titles: snap.titles, order: snap.order,
+          /** 5.5：逐段视图，段名和内容都从原文自动识别；前端可以任意加删改名 */
+          blocks: snap.blocks,
+          rawLength: String(p.raw ?? '').length,
+        });
+      }),
+
+      /**
        * 选人格：不给 `chatId` 就改全局，给了就只给那个会话指定。
        *
        * 为什么用 `saveConfig(整份)` 而不是 `patchConfig`：`merge` 对对象是**深合并**，
@@ -8489,6 +8512,33 @@ export function apply(ctx) {
           return send(res, 400, { ok: false, message: e.message });
         }
         return send(res, 200, { ok: true, message: '已保存', id: b.id });
+      }),
+
+      /**
+       * 5.5 分节保存：**用服务端当前文件当骨架**，只把四段换进去。
+       * 不让前端回传 frontmatter/titles/order：那会让一份旧快照把别人刚改的
+       * 头部盖回去。清空某一段就是删掉那一段。
+       */
+      route('/personas/sections/save', async (req, res) => {
+        const b = await readBody(req);
+        const id = String(b?.id || '').trim();
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        const blocks = Array.isArray(b?.blocks) ? b.blocks : null;
+        const sections = b?.sections;
+        if (!blocks && (!sections || typeof sections !== 'object' || Array.isArray(sections))) {
+          return send(res, 400, { ok: false, message: '缺 sections / blocks' });
+        }
+        const p = personas.read(id);
+        if (!p) return send(res, 404, { ok: false, message: `没有「${id}」这个人格` });
+        try {
+          /** blocks 是新的「任意段数」路径；sections 是四段兼容路径，两个都留着 */
+          const snap = splitPersonaText(p.raw);
+          const raw = blocks ? joinPersonaBlocks(snap, blocks) : joinPersonaText(snap, sections);
+          personas.save(id, raw);
+          return send(res, 200, { ok: true, id, message: '已保存', chars: raw.length });
+        } catch (e) {
+          return send(res, 400, { ok: false, message: e.message });
+        }
       }),
 
       route('/personas/remove', async (req, res) => {
