@@ -75,6 +75,7 @@ import { registerStickerTools } from './sticker-tools.js';
 import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
 import { createFence, PEER } from './fence.js';
 import { audit, peerSummary } from './audit.js';
+import { createGroupAdmin } from './group-admin.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { wakeContext } from './wake-context.js';
 import { stripLeak } from './leak-guard.js';
@@ -2123,6 +2124,16 @@ export function apply(ctx) {
     rpc: (m, p) => roost.rpc(m, p),
     ready: () => roostRef?.connected === true,
     log: (m) => log.warn(`[roost-capabilities] ${m}`),
+  });
+
+  /**
+   * 群管：面板这一半。协议侧是 bot 的 group.info/mute/kick/join（scope=message，
+   * 装了就能用）。这里只做参数收窄、原因翻译、审计与每日计数——业务都别重写。
+   */
+  const groupAdmin = createGroupAdmin({
+    rpc: (m, p) => roost.rpc(m, p),
+    audit,
+    log: (m) => log.warn(m),
   });
 
   const buildFromRoost = createPayloadBuilder({
@@ -6697,6 +6708,51 @@ export function apply(ctx) {
       }),
 
       route('/chats', (req, res) => send(res, 200, { ok: true, chats: sessions.list() })),
+
+      /* ---------------- 群管 ----------------
+       *
+       * 目标群就是会话里的 groupOpenid，面板直接把 chatId 传过来即可。
+       * 失败一律 200 + ok:false：面板靠 ok 判断，靠 reason 给指引
+       * （need_invite / not_admin / daily_limit），不要只回一句「失败」。
+       */
+      route('/group/info', async (req, res) => {
+        const url = new URL(req.url || '/', 'http://localhost');
+        const gid = url.searchParams.get('groupId') || '';
+        return send(res, 200, await groupAdmin.info(gid));
+      }),
+
+      route('/group/mute', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        return send(res, 200, await groupAdmin.mute({
+          groupId: body?.groupId,
+          targets: body?.targets,
+          seconds: body?.seconds,
+        }));
+      }),
+
+      route('/group/kick', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        return send(res, 200, await groupAdmin.kick({
+          groupId: body?.groupId,
+          targets: body?.targets,
+          addToBlacklist: body?.addToBlacklist === true,
+        }));
+      }),
+
+      route('/group/join', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        return send(res, 200, await groupAdmin.join({
+          groupId: body?.groupId,
+          action: body?.action,
+          memberOpenid: body?.memberOpenid,
+          joinRequestId: body?.joinRequestId,
+          reason: body?.reason,
+          addToBlacklist: body?.addToBlacklist === true,
+        }));
+      }),
 
       /* ---------------- 账号迁移 ---------------- */
 

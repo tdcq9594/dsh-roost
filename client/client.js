@@ -6584,6 +6584,195 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /* ---------------- 群管 ---------------- */
+
+    /**
+     * 群管：禁言 / 解禁、踢人、入群审批。
+     *
+     * 和「身份」页不重复：那边是「QQ 会话 ↔ DSH 会话」的映射，这边是**对群动手**。
+     * 协议侧 `group.*` 的 scope 是 `message`（装了就能用），所以这里没有
+     * 「先去开权限」这一步；真管不了只有两种——机器人不是管理员、踢人缺
+     * 群管内邀。两种情况后端都把 reason 翻成了人话，页面上照着显示。
+     *
+     * 群只能从「它待过的会话」里选：官方没有群列表接口，群是消息事件发现的。
+     */
+    function GroupAdminTab({ chats, toast }) {
+      const groups = (chats || []).filter((c) => c.kind === 'group')
+      const [gid, setGid] = useState('')
+      const [info, setInfo] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [targets, setTargets] = useState('')
+      const [seconds, setSeconds] = useState(600)
+      const [black, setBlack] = useState(false)
+      const [reqs, setReqs] = useState(null)
+      const [note, setNote] = useState('')
+
+      const pick = gid || groups[0]?.chatId || ''
+      const who = targets.split(/[\s,，、;]+/).map((s) => s.trim()).filter(Boolean)
+
+      const load = useCallback(async (id) => {
+        if (!id) { setInfo(null); setReqs(null); return }
+        setBusy(true)
+        try {
+          const r = await get('/group/info?groupId=' + encodeURIComponent(id))
+          setInfo(r)
+          if (r && r.ok && r.canManage) {
+            const j = await post('/group/join', { groupId: id, action: 'list' })
+            setReqs(j && j.ok ? (j.requests || []) : [])
+          } else {
+            setReqs(null)
+          }
+        } catch (e) {
+          setNote('读不到群状态：' + (e.message || e))
+        } finally {
+          setBusy(false)
+        }
+      }, [])
+
+      useEffect(() => { load(pick) }, [pick, load])
+
+      const act = async (path, body, okText) => {
+        setBusy(true)
+        setNote('')
+        try {
+          const r = await post(path, body)
+          const msg = r && r.ok ? okText : (r?.message || '没成功')
+          setNote(msg)
+          toast?.(msg)
+          await load(pick)
+        } catch (e) {
+          setNote('失败：' + (e.message || e))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      if (!groups.length) {
+        return h(Sec, { n: '01', title: '群' },
+          h('div', { className: 'roost-empty' }, '还没有群会话。让它在群里说一句话，这里就会出现那个群。'),
+          h('div', { className: 'roost-note' },
+            '官方没有「群列表」接口，群只能从消息事件里发现 —— 所以这里列的是它待过、说过话的群。'),
+        )
+      }
+
+      const roleText = { owner: '群主', admin: '管理员', member: '普通成员' }
+      const picker = h('select', {
+        value: pick,
+        onChange: (e) => setGid(e.target.value),
+        className: 'roost-btn',
+        style: { minWidth: 200 },
+      }, groups.map((g) => h('option', { key: g.chatId, value: g.chatId }, g.title || g.chatId.slice(0, 10))))
+
+      return h('div', null,
+        h(Sec, {
+          n: '01', title: '这个群现在什么状态',
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: () => load(pick), disabled: busy }, '刷新'),
+        },
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 } },
+            picker,
+            h('span', { className: 'd' }, busy ? '读着…' : ''),
+          ),
+          !info
+            ? h('div', { className: 'roost-empty' }, busy ? '读着…' : '选一个群看看')
+            : !info.ok
+              ? h('div', { className: 'roost-empty' }, info.message || '读不到（外接协议没连上？）')
+              : h('div', null,
+                  h('div', { style: { display: 'flex', gap: 14, flexWrap: 'wrap' } },
+                    h('span', null, '群名 ', h('b', null, info.name || '（没读到）')),
+                    h('span', null, '我的角色 ', h('b', null, roleText[info.role] || info.role || '未知')),
+                    h('span', null, '能不能管 ', h('b', null, info.canManage ? '能' : '不能')),
+                    h('span', null, '群管内邀 ', h('b', null, info.invited ? '已开' : '没开')),
+                  ),
+                  !info.canManage && info.manageReason
+                    ? h('div', { className: 'roost-note' }, '管不了的原因：' + info.manageReason)
+                    : null,
+                  info.used
+                    ? h('div', { className: 'roost-note' },
+                        `今天已用：禁言 ${info.used.mute} 次、踢人 ${info.used.kick} 次、审批 ${info.used.join} 次`)
+                    : null,
+                ),
+          note ? h('div', { className: 'roost-note' }, note) : null,
+        ),
+
+        h(Sec, { n: '02', title: '禁言 / 解禁' },
+          h('div', { className: 'roost-note' },
+            '目标填 openid，多个用逗号或换行分开（最多 20 人）。时长选 0 就是解禁。'),
+          h('textarea', {
+            value: targets,
+            onChange: (e) => setTargets(e.target.value),
+            rows: 2,
+            placeholder: '成员的 openid，一行一个',
+            className: 'roost-input',
+            style: { width: '100%', marginTop: 6, marginBottom: 8 },
+          }),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+            h('select', {
+              value: String(seconds),
+              onChange: (e) => setSeconds(Number(e.target.value)),
+              className: 'roost-btn',
+            },
+              [['600', '10 分钟'], ['3600', '1 小时'], ['86400', '1 天'], ['0', '解禁']]
+                .map(([v, t]) => h('option', { key: v, value: v }, t))),
+            h(ConfirmLink, {
+              label: seconds ? '禁言' : '解禁',
+              confirmLabel: '确认执行',
+              onConfirm: () => act('/group/mute', { groupId: pick, targets: who, seconds }, seconds ? '已禁言' : '已解禁'),
+            }),
+            h('span', { className: 'd' }, who.length ? `已填 ${who.length} 人` : '还没填目标'),
+          ),
+        ),
+
+        h(Sec, { n: '03', title: '踢人' },
+          !info || !info.invited
+            ? h('div', null,
+                h('div', { className: 'roost-empty' }, '踢人需要「群管内邀」白名单，现在没开。'),
+                h('div', { className: 'roost-note' },
+                  '去开放平台申请通过后，在 Roost 面板（浏览器打开的那个）「配置 → 群管能力」打开。禁言不需要这个。'),
+              )
+            : h('div', null,
+                h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 8 } },
+                  h('input', { type: 'checkbox', checked: black, onChange: (e) => setBlack(e.target.checked) }),
+                  h('span', null, '踢出去的同时拉黑（以后不能再进）'),
+                ),
+                h(ConfirmLink, {
+                  label: '踢出',
+                  confirmLabel: '确认踢出',
+                  onConfirm: () => act('/group/kick', { groupId: pick, targets: who, addToBlacklist: black }, '已踢出'),
+                }),
+                h('div', { className: 'roost-note' }, '目标沿用上面「禁言」那一栏填的 openid。'),
+              ),
+        ),
+
+        h(Sec, { n: '04', title: '入群申请', right: h('button', { type: 'button', className: 'roost-btn', onClick: () => load(pick) }, '刷新') },
+          reqs === null
+            ? h('div', { className: 'roost-empty' }, info && info.canManage ? '读着…' : '机器人不是管理员时没有审批入口')
+            : !reqs.length
+              ? h('div', { className: 'roost-empty' }, '现在没有待处理的申请。')
+              : h('div', { className: 'roost-list roost-scroll' },
+                  reqs.map((r, i) => {
+                    const who2 = r.member_openid || r.openid || ''
+                    const rid = r.join_request_id || r.joinRequestId || ''
+                    return h('div', { key: rid || who2 || i, className: 'roost-item' },
+                      h('span', { className: 't' }, r.nick || r.nickname || who2.slice(0, 12) || '（没拿到昵称）',
+                        h('span', { className: 'd' }, r.apply_at || r.at ? ' · ' + ago(r.apply_at || r.at) : '')),
+                      h('span', { className: 'd' }, r.apply_text || r.applyText || ''),
+                      h('span', { style: { display: 'flex', gap: 6 } },
+                        h(ConfirmLink, {
+                          label: '通过', confirmLabel: '确认通过',
+                          onConfirm: () => act('/group/join', { groupId: pick, action: 'approve', memberOpenid: who2, joinRequestId: rid }, '已通过'),
+                        }),
+                        h(ConfirmLink, {
+                          label: '拒绝', confirmLabel: '确认拒绝',
+                          onConfirm: () => act('/group/join', { groupId: pick, action: 'decline', memberOpenid: who2, joinRequestId: rid }, '已拒绝'),
+                        }),
+                      ),
+                    )
+                  }),
+                ),
+        ),
+      )
+    }
+
     function ChatsTab({ chats, reload, toast }) {
       return h('div', null,
         h(Sec, { n: '01', title: 'QQ 会话 → DSH 会话', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
@@ -10299,6 +10488,7 @@ select.roost-input{color-scheme:dark}
       ['ext-api', '接口'],
       /* 系统：这台机器怎么跑 */
       ['chats', '身份'],
+      ['groupadmin', '群管'],
       ['logs', '排障'],
       ['update', '更新'],
       ['config', '设置'],
@@ -10326,7 +10516,7 @@ select.roost-input{color-scheme:dark}
       { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'mood', 'awake', 'memory'] },
       { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'express', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
-      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'logs', 'update', 'config'] },
+      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'groupadmin', 'logs', 'update', 'config'] },
     ]
     /** 当前页属于哪一组；隐藏页不属于任何组，返回 null */
     const navGroupOf = (id) => NAV_GROUPS.find((g) => g.tabs.includes(id)) || null
@@ -10920,6 +11110,8 @@ select.roost-input{color-scheme:dark}
             : null,
           /** 「身份」：QQ 会话 ↔ DSH 会话的映射，现在有自己的页签，不再套一层「手动刷新」 */
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
+          /** 群管：禁言 / 踢人 / 入群审批。协议侧 group.* 是 message scope，装了就能用 */
+          tab === 'groupadmin' ? h(GroupAdminTab, { chats, toast }) : null,
           tab === 'account' ? h(AccountTab, { toast }) : null,
           tab === 'config'
             ? h('div', null,
