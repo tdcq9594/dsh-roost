@@ -1941,6 +1941,15 @@ select.roost-input{color-scheme:dark}
             卡片尺寸与读法照对方 .lc-ov-session，指标换成四类 Token 与 DSH 会话号。 */
         h(Sec, { n: '03', title: '会话',
           right: h('span', { className: 'ov-count' }, String(filteredChats.length)) },
+          /**
+           * 2.6：整张表加一层折叠。
+           * 不许压成「一行摘要」——搜索、时间范围、排序、分类、分页一个不少；
+           * details 的 children 常驻 DOM，收起时筛选条件和页码都还在，
+           * 展开回来还是刚才那一页。Sec 右上那个「−」是收起整节，两码事。
+           */
+          h('details', { open: true },
+            h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer', marginBottom: 8 } },
+              '折叠 / 展开整张表（搜索、时间范围、排序、分类、分页都在里面，收起后条件不丢）'),
           h('div', { className: 'ov-filter' },
             h('input', {
               className: 'roost-input ov-search', type: 'search',
@@ -2055,6 +2064,7 @@ select.roost-input{color-scheme:dark}
                 }, '›'),
               )
             : null,
+          ),
         ),
 
         h(Sec, { n: '04', title: '快捷',
@@ -2583,7 +2593,7 @@ select.roost-input{color-scheme:dark}
               : `启动后它的面板在本机 ${s.webui || ':' + (s.port || '')}`,
           },
             s.running
-              ? h('button', { type: 'button', className: 'roost-btn', onClick: () => window.open(s.webui, '_blank', 'noopener') }, '打开面板')
+              ? h('button', { type: 'button', className: 'roost-btn', onClick: () => window.open(s.webui, '_blank', 'noopener') }, '打开面板看启动状态')
               : h('button', {
                   type: 'button', className: 'roost-btn', disabled: locked,
                   onClick: () => step('启动', '/setup/start'),
@@ -2806,7 +2816,8 @@ select.roost-input{color-scheme:dark}
               className: 'roost-btn',
               disabled: !s.webui,
               onClick: () => window.open(`${s.webui || ''}#groups`, '_blank', 'noopener'),
-            }, s.ownersConfigured ? '打开面板看看' : '打开 Roost 面板设置'),
+            /** 2.6：和第 2 步那颗不是同一件事——这颗带 #groups，直达主人名单 */
+            }, s.ownersConfigured ? '打开「主人与群组」' : '去框架面板设主人'),
           ),
         ),
 
@@ -5987,7 +5998,83 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    function CapsTab({ caps, preview, chats, feat, retention, quota, toast, reload, quick, busy }) {
+    /**
+     * 2.8：批量添加群白名单之前的**预演**（纯函数，不写盘）。
+     *
+     * 批量输入框最容易变成「点完不知道加了什么」：重复的不说、手滑粘进来的
+     * 私聊号也塞进群白名单、格式错的静默丢掉。面板要当场报
+     * 「新增 / 重复 / 跳过主人 / 格式错」四个数，这类统计必须可测。
+     *
+     * 「跳过主人」在我们这套里的准确含义：**这个 id 在会话表里是私聊**。
+     * 主人 openid 存在框架的 config/bots/<id>.json，dsh-roost 读不到全量名单，
+     * 所以不假装做了精确比对；私聊对象一律归框架的「主人与群组」管，
+     * 塞进群白名单既不生效也会误导。aurabot 能精确跳过是因为名单在它自己手里。
+     *
+     * 分隔符用换行 / 逗号 / 分号；每行允许 `chatId 备注名`，名字里可以有空格。
+     * `next` 是合并后的**整份**数组（保留原有 enabled），交给 saveCfg 整份覆盖——
+     * patchConfig 对数组是直接替换，不会像字典那样局部合并。
+     */
+    function planGroupWhitelist(raw, opts) {
+      const groups = (opts && opts.groups) || []
+      const chats = (opts && opts.chats) || []
+      const have = new Map()
+      for (const g of (Array.isArray(groups) ? groups : [])) {
+        const chatId = String((g && g.chatId) || '').trim()
+        if (!chatId) continue
+        have.set(chatId, {
+          chatId,
+          name: String((g && g.name) || ''),
+          enabled: g.enabled !== false,
+        })
+      }
+      const kindById = new Map()
+      for (const c of (Array.isArray(chats) ? chats : [])) {
+        const chatId = String((c && c.chatId) || '').trim()
+        if (chatId) kindById.set(chatId, String((c && c.kind) || ''))
+      }
+      const stats = { added: 0, duplicate: 0, skippedOwner: 0, invalid: 0 }
+      const items = []
+      const notes = []
+      for (const line of String(raw == null ? '' : raw).split(/[\r\n,;，；]+/)) {
+        const text = line.trim()
+        if (!text) continue
+        const parts = text.split(/\s+/)
+        const chatId = String(parts[0] || '').trim()
+        /** 官方 openid / 群号都是这串字符；挡住粘进来的 URL、@、中文句子 */
+        if (!/^[A-Za-z0-9_-]{4,128}$/.test(chatId)) {
+          stats.invalid += 1
+          notes.push('格式不对：' + text.slice(0, 40))
+          continue
+        }
+        if (have.has(chatId)) {
+          stats.duplicate += 1
+          notes.push('已经在名单里：' + chatId)
+          continue
+        }
+        if (kindById.get(chatId) === 'c2c') {
+          stats.skippedOwner += 1
+          notes.push('私聊对象，归框架「主人与群组」管：' + chatId)
+          continue
+        }
+        const name = parts.slice(1).join(' ').trim() || chatId.slice(0, 12)
+        const row = { chatId, name, enabled: true }
+        have.set(chatId, row)
+        items.push(row)
+        stats.added += 1
+      }
+      return { items, stats, notes, next: Array.from(have.values()) }
+    }
+
+    /** 「从最近会话导入」：只取群，且已经在名单里的不带进输入框 */
+    function suggestGroupWhitelist(chats, groups) {
+      const have = new Set((Array.isArray(groups) ? groups : []).map((g) => String((g && g.chatId) || '')))
+      return (Array.isArray(chats) ? chats : [])
+        .filter((c) => c && c.kind === 'group' && String(c.chatId || '') && !have.has(String(c.chatId)))
+        .map((c) => (c.chatId + ' ' + String(c.title || '').replace(/\s+/g, ' ').trim()).trim())
+    }
+
+    function CapsTab({ caps, preview, chats, feat, retention, quota, toast, reload, quick, busy,
+      config, saveCfg, setupSt, setTab }) {
       /**
        * 工具面板是**弹窗**，不是页面上的一节。
        *
@@ -6022,6 +6109,8 @@ select.roost-input{color-scheme:dark}
        * 它唯一的作用是把那一行的空输入框显示出来。
        */
       const [addingTools, setAddingTools] = useState([])
+      /** 2.8 授权名单：批量输入草稿。只是本页草稿，点「加进名单」才写配置 */
+      const [wlDraft, setWlDraft] = useState('')
       const BUCKET = CAP_BUCKETS
 
       /** 按来源前缀分组；认不出的归「其他」 */
@@ -6036,6 +6125,17 @@ select.roost-input{color-scheme:dark}
       }
 
       if (!caps) return h('div', { className: 'roost-empty' }, '正在读工具清单…')
+
+      /** 2.8：名单来自 config.awake.groups；chats 用来认出「这个 id 其实是私聊」 */
+      const wlGroups = Array.isArray(config?.awake?.groups) ? config.awake.groups : []
+      const wlPlan = planGroupWhitelist(wlDraft, { groups: wlGroups, chats: chats || [] })
+      const saveGroups = async (next, okMsg) => {
+        if (!saveCfg) return toast('配置还没读到，等一下再试')
+        const r = await saveCfg({ awake: { groups: next } })
+        toast(r?.ok === false ? (r.message || '没存上') : okMsg)
+        setWlDraft('')
+        reload()
+      }
 
       const enable = async () => {
         const r = await quick('capabilities.init')
@@ -6875,6 +6975,113 @@ select.roost-input{color-scheme:dark}
             '工具次数是**真的当场拦**（DSH 的 tools.guard）：超了这一次调用直接失败，模型会被告知「别再试」。'),
           h('div', { className: 'roost-note' },
             '想给主人单独放宽：把上面的下拉切到「主人」，填一个更大的数——那一档会单独存一份，不影响别人。'),
+        ),
+
+        /**
+         * 2.8 授权名单：aurabot 的「私聊用户 / 群白名单 / 主人」三张表。
+         * 我们的主人名单在框架侧（config/bots/<id>.json），这里只读 + 指路，
+         * 绝不放一个改了不生效的编辑框；群白名单是自己的 awake.groups，
+         * 才做批量添加与实时统计。
+         */
+        h(Sec, { n: '07', title: '授权名单',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } },
+            '群归这里管 · 主人归框架面板') },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '五档管「能做什么」，名单管「在哪儿能用」。群白名单是「允许她在这些群主动说话」，默认全关；'
+            + '主人 openid 存在 Roost 框架的 config/bots/<id>.json，由框架面板的「主人与群组」管，'
+            + '这一页只读展示，不提供一个改了不生效的输入框。'),
+
+          h('div', { className: 'cap-group' },
+            h('div', { className: 'cap-group-t' }, '主人 / 私聊对象（框架管）'),
+            h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+              setupSt?.ownersConfigured
+                ? `框架里已设 ${setupSt.ownerCount || 0} 个主人，分布在 ${(setupSt.bots || []).length} 个机器人里。`
+                : '框架里还没配主人。没设主人时她只能聊天、不能动工具。'),
+            (setupSt?.bots || []).length
+              ? h('div', { style: { display: 'grid', gap: 4, marginBottom: 8 } },
+                  setupSt.bots.map((b, i) => h('div', { key: i, className: 'roost-note' },
+                    '· ' + (b.name || b.id || '未命名') + ' · 主人 ' + (b.ownerCount ?? 0) + ' 个'
+                    + (b.appId ? '' : '（没填 AppID）'))))
+              : h('div', { className: 'roost-empty', style: { marginBottom: 8 } }, '还读不到机器人清单。'),
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+              h('button', {
+                type: 'button', className: 'roost-btn',
+                onClick: () => { if (setTab) setTab('setup') },
+              }, '去接入页第 6 步'),
+              setupSt?.webui
+                ? h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: () => window.open(String(setupSt.webui) + '#groups', '_blank', 'noopener'),
+                  }, '打开框架面板的「主人与群组」')
+                : null,
+            ),
+          ),
+
+          h('div', { className: 'cap-group' },
+            h('div', { className: 'cap-group-t' }, `群白名单（${wlGroups.length}）`),
+            h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+              '一行一个，可以写「群 chatId 备注名」，也可以用逗号 / 分号分隔；'
+              + '从「会话」页复制 chatId，或点「从最近会话导入」把见过的群列进草稿先看一眼。'),
+            h('textarea', {
+              className: 'roost-input', rows: 4,
+              style: { width: '100%', minHeight: 76, resize: 'vertical' },
+              placeholder: 'GROUP_OPENID_1 测试群\nGROUP_OPENID_2',
+              value: wlDraft,
+              onChange: (e) => setWlDraft(e.target.value),
+            }),
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', margin: '8px 0' } },
+              h('button', {
+                type: 'button', className: 'roost-btn',
+                onClick: () => {
+                  const rows = suggestGroupWhitelist(chats, wlGroups)
+                  if (!rows.length) return toast('最近会话里没有新群')
+                  setWlDraft((wlDraft ? wlDraft.trim() + '\n' : '') + rows.join('\n'))
+                },
+              }, '从最近会话导入'),
+              h('button', {
+                type: 'button', className: 'roost-primary',
+                disabled: busy || wlPlan.stats.added === 0 || !saveCfg,
+                onClick: () => saveGroups(wlPlan.next, `加了 ${wlPlan.stats.added} 个群`),
+              }, `把 ${wlPlan.stats.added} 条加进名单`),
+            ),
+            /** 四项统计每次渲染都重算：纯函数、不写盘、不发请求 */
+            h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+              `新增 ${wlPlan.stats.added} · 重复 ${wlPlan.stats.duplicate} · 跳过主人/私聊 ${wlPlan.stats.skippedOwner} · 格式错 ${wlPlan.stats.invalid}`),
+            wlPlan.notes.length
+              ? h('details', null,
+                  h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer' } },
+                    `逐条说明（${wlPlan.notes.length}）`),
+                  h('div', { style: { display: 'grid', gap: 4, marginTop: 6 } },
+                    wlPlan.notes.slice(0, 12).map((n, i) => h('div', { key: i, className: 'roost-note' }, '· ' + n))))
+              : null,
+            wlGroups.length
+              ? h('div', { style: { display: 'grid', gap: 4, marginTop: 8 } },
+                  wlGroups.map((g, i) => h('div', {
+                    key: g.chatId || i, className: 'roost-note',
+                    style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: 0 },
+                  },
+                    h('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center' } },
+                      h('input', {
+                        type: 'checkbox', checked: g.enabled !== false,
+                        onChange: () => saveGroups(
+                          wlGroups.map((x) => x.chatId === g.chatId
+                            ? { ...x, enabled: x.enabled === false } : x),
+                          '已更新',
+                        ),
+                      }),
+                      g.enabled === false ? '关' : '开'),
+                    h('span', { className: 't' }, g.name || g.chatId),
+                    h('span', { className: 'roost-code' }, g.chatId),
+                    h('button', {
+                      type: 'button', className: 'roost-btn danger',
+                      onClick: () => saveGroups(wlGroups.filter((x) => x.chatId !== g.chatId), '已移出名单'),
+                    }, '移出'),
+                  )))
+              : h('div', { className: 'roost-empty', style: { marginTop: 8 } },
+                  '名单是空的 —— 一个群都不会主动说话。'),
+            h('div', { className: 'roost-note', style: { marginTop: 8 } },
+              '光在白名单里还不够：群主动另需一条 group_push 授权（官方硬前置），在「主动搭话」页记。'),
+          ),
         ),
       )
     }
@@ -11576,7 +11783,11 @@ select.roost-input{color-scheme:dark}
             })
         }
 
-        if (tab === 'caps') once('caps', loadCaps)
+        if (tab === 'caps') {
+          once('caps', loadCaps)
+          /** 2.8 名单节读 config；直接停在权限页刷新也要拉一次 */
+          if (!config) once('config', loadConfig)
+        }
         /** 人物 / 备份共用 /memory 那一份快照；直接从这两页进也要拉一次 */
         if (tab === 'memory' || tab === 'people' || tab === 'backup') once('memory', () => loadMemory())
         if (tab === 'her') {
@@ -11839,7 +12050,12 @@ select.roost-input{color-scheme:dark}
                 mem, toast, save: saveCfg, reload: loadHer, quick,
               })
             : null,
-          tab === 'caps' ? h(CapsTab, { caps, preview: capPreview, chats: capChats, feat: capFeat, retention: capRetention, quota: capQuota, toast, reload: loadCaps, quick, busy }) : null,
+          tab === 'caps' ? h(CapsTab, {
+            caps, preview: capPreview, chats: capChats, feat: capFeat,
+            retention: capRetention, quota: capQuota, toast, reload: loadCaps, quick, busy,
+            /** 2.8 名单要读 config.awake.groups / 写回整份，还要展示框架侧主人状态 */
+            config, saveCfg, setupSt, setTab,
+          }) : null,
           tab === 'ext' ? h(ExtTab, { quick, toast }) : null,
           tab === 'ext-market' ? h(ExtMarketTab, { toast }) : null,
           tab === 'ext-api' ? h(ExtApiTab, { toast }) : null,
@@ -11878,6 +12094,9 @@ select.roost-input{color-scheme:dark}
             /** 老 key 单独进来时复用排障页的分区外观，别出现「同一块两套皮」 */
             ? h('div', { className: 'roost-diag-part' },
                 h('div', { className: 'roost-diag-h' }, '上下文 · 手动刷新'),
+                /** 2.6 A10：两处都留着，只把「谁正门」说清，别让人猜该在哪页动手 */
+                h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+                  '这页是老链接 ?tab=context 的落脚点，内容一直保留。日常查问题请去「排障」页——那边连日志一起看；这里只单看上下文。'),
                 h(ContextTab, {
                   ctxInfo, mind, usageInfo, stickers: her?.stickers ?? null,
                   toast, reload: loadCtx, busy,
@@ -11932,6 +12151,9 @@ select.roost-input{color-scheme:dark}
                 h(LogsTab, { logs }),
                 h('div', { className: 'roost-diag-part' },
                   h('div', { className: 'roost-diag-h' }, '上下文 · 手动刷新'),
+                  /** 2.6 A10：排障页是正门；旧深链仍在，不删也不藏 */
+                  h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+                    '这一页是查问题的正门：先看日志，再看上下文。老链接 ?tab=context 仍能单独打开上下文，两边内容一模一样。'),
                   h(ContextTab, {
                     ctxInfo, mind, usageInfo, stickers: her?.stickers ?? null,
                     toast, reload: loadCtx, busy, numbered: false,
@@ -12012,6 +12234,9 @@ select.roost-input{color-scheme:dark}
      */
     exports.planToolToggle = planToolToggle
     exports.matchPat = matchPat
+    /** 2.8 名单预演：纯函数，测试直接调，盯住四类统计不串味 */
+    exports.planGroupWhitelist = planGroupWhitelist
+    exports.suggestGroupWhitelist = suggestGroupWhitelist
     exports.AwakeTab = AwakeTab
     /* 2026-11-12 细分出来的四页，测试直接渲染它们 */
     exports.MoodTab = MoodTab

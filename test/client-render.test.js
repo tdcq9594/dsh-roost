@@ -1771,3 +1771,124 @@ test('2.7：排障页只剩一组编号，context 隐藏页仍保留 01–05', (
   const ctx = expand(mod.RoostPage(), rt)
   assert.deepEqual(numsOf(ctx), ['01', '02', '03', '04', '05'], '隐藏页单独进入时编号照旧')
 })
+
+/* ---------------- 2.8 授权名单 / 2.6 双入口 ---------------- */
+
+test('2.8：名单预演四类统计各归各位，老条目的启用状态不被冲掉', () => {
+  const mod = loadClient(makeReact().React)
+  const r = mod.planGroupWhitelist(
+    ['GROUP_A 测试群', 'GROUP_A', 'OWNER_C2C', 'GROUP_B', '不是 id', '', 'GROUP_C 名字带空格 也行'].join('\n'),
+    {
+      groups: [{ chatId: 'GROUP_B', name: '老群', enabled: false }],
+      chats: [{ chatId: 'OWNER_C2C', kind: 'c2c' }],
+    },
+  )
+  assert.deepEqual(r.stats, { added: 2, duplicate: 2, skippedOwner: 1, invalid: 1 })
+  assert.deepEqual(r.items.map((x) => x.chatId), ['GROUP_A', 'GROUP_C'])
+  assert.equal(r.items[1].name, '名字带空格 也行', '备注名允许空格')
+  assert.equal(r.next.length, 3, 'next 是合并后的整份名单（老 1 + 新 2）')
+  assert.equal(r.next.find((x) => x.chatId === 'GROUP_B').enabled, false)
+  assert.ok(r.notes.some((n) => n.includes('主人与群组')), '跳过原因要说清归谁管')
+})
+
+test('2.8：混排分隔符、格式错与空输入都不炸', () => {
+  const mod = loadClient(makeReact().React)
+  const a = mod.planGroupWhitelist('  GROUP_A , GROUP_B；GROUP_C; GROUP_D  ')
+  assert.equal(a.stats.added, 4)
+  assert.equal(a.stats.invalid, 0)
+  const b = mod.planGroupWhitelist(['https://example.com/x', '<@12345>', 'a'.repeat(200), 'GROUP_OK'].join('\n'))
+  assert.equal(b.stats.invalid, 3, 'URL / @ / 超长串都要挡掉')
+  assert.equal(b.stats.added, 1)
+  assert.deepEqual(mod.planGroupWhitelist(null, { groups: null, chats: null }).next, [])
+})
+
+test('2.8：从最近会话导入只带群、不带私聊和名单里已有的', () => {
+  const mod = loadClient(makeReact().React)
+  const chats = [
+    { chatId: 'G1', kind: 'group', title: '一群' },
+    { chatId: 'P1', kind: 'c2c', title: '主人' },
+    { chatId: 'G2', kind: 'group', title: '二 群' },
+  ]
+  assert.deepEqual(mod.suggestGroupWhitelist(chats, [{ chatId: 'G1' }]), ['G2 二 群'])
+  assert.deepEqual(mod.suggestGroupWhitelist(null, null), [])
+})
+
+test('2.8：权限页多出 07 授权名单，主人只读、群名单可批量添加', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const props = {
+    caps: { tools: [] }, preview: null, chats: [{ chatId: 'G1', kind: 'group', title: '一群' }],
+    feat: null, retention: null, quota: null,
+    toast: () => {}, reload: () => {}, quick: async () => ({ ok: true }), busy: false,
+    config: { awake: { groups: [] } }, saveCfg: async () => ({ ok: true }),
+    setupSt: { ownersConfigured: true, ownerCount: 1, bots: [{ id: 'b1', name: '小鸟', ownerCount: 1, appId: 'x' }] },
+    setTab: () => {},
+  }
+  let tree
+  assert.doesNotThrow(() => { tree = expand(mod.CapsTab(props), rt) }, '权限页带名单数据时不能炸')
+  assert.ok(numsOf(tree).includes('07'), '权限页要有 07 授权名单')
+  const txt = textOf(tree)
+  for (const must of [
+    '授权名单', '主人 / 私聊对象（框架管）', '框架里已设 1 个主人',
+    '去接入页第 6 步', '群白名单（0）', '从最近会话导入',
+    '新增 0 · 重复 0 · 跳过主人/私聊 0 · 格式错 0',
+    '名单是空的', 'group_push',
+  ]) {
+    assert.ok(txt.includes(must), `权限页名单节缺少「${must}」`)
+  }
+  assert.ok(txt.includes('config/bots/<id>.json'), '要说清主人名单存在框架侧，不是本页配置')
+})
+
+test('2.6：概览会话表收进 details，搜索 / 筛选 / 排序 / 分类一个不少', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'overview'
+  rt.reset()
+  const tree = expand(mod.RoostPage(), rt)
+  let box = null
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.type === 'details' && textOf(n).includes('折叠 / 展开整张表')) box = n
+    walk(n.props?.children)
+  })(tree)
+  assert.ok(box, '会话表要有一层 details 折叠')
+  /** placeholder 是 prop 不是 children，textOf 收不到，按节点找 */
+  const found = new Set()
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    const cls = String(n.props?.className || '')
+    if (String(n.props?.placeholder || '').includes('搜名称')) found.add('搜索框')
+    if (cls.includes('ov-cover')) found.add('时间范围')
+    if (cls.includes('ov-gran')) found.add('排序')
+    if (cls.includes('ov-groups')) found.add('群/私聊分类')
+    if (cls.includes('ov-sessions')) found.add('会话表')
+    walk(n.props?.children)
+  })(box)
+  for (const k of ['搜索框', '时间范围', '排序', '群/私聊分类', '会话表']) {
+    assert.ok(found.has(k), `折叠后少了「${k}」`)
+  }
+  const t = textOf(box)
+  for (const must of ['全部时间', '最近更新', 'Token 用量', '全部']) {
+    assert.ok(t.includes(must), `折叠后少了「${must}」`)
+  }
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes('ov-pager'), '分页控件不许被压成一行摘要')
+})
+
+test('2.6：排障页是正门，context 老链接仍可用，两颗打开面板按钮各标用途', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const at = (t) => { store['roost.tab'] = t; rt.reset(); return textOf(expand(mod.RoostPage(), rt)) }
+  const logs = at('logs')
+  assert.ok(logs.includes('这一页是查问题的正门'), '排障页没写明自己是正门')
+  assert.ok(logs.includes('?tab=context'), '排障页要提到老链接仍在')
+  const ctx = at('context')
+  assert.ok(ctx.includes('老链接 ?tab=context 的落脚点'), 'context 页没说清自己是老链接')
+  assert.ok(ctx.includes('去「排障」页'), 'context 页要指回正门')
+
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes('打开面板看启动状态'), '第 2 步那颗要写清是看启动')
+  assert.ok(src.includes('打开「主人与群组」'), '第 6 步那颗要写清直达主人名单')
+})
