@@ -82,6 +82,7 @@ import { stripLeak } from './leak-guard.js';
 import { createBridge } from './bridge.js';
 import { createCompact } from './compact.js';
 import { createUsage } from './usage.js';
+import { priceTierOf } from './offpeak.js';
 import { segmentsOf } from './timing.js';
 import { createMarkerApplier } from './apply-markers.js';
 import { createJournalBridge } from './journal-bridge.js';
@@ -2618,7 +2619,12 @@ export function apply(ctx) {
    * 用量记账：按「天 × 会话」累计 token，面板上回答「这个群这个月花了多少」。
    * 只记数字，不记内容。
    */
-  const usage = createUsage({ file: join(dataDir(), 'usage.json'), log });
+  const usage = createUsage({
+    file: join(dataDir(), 'usage.json'),
+    log,
+    /** 3.1：这轮 token 在峰还是谷（现评，按记录时刻算，跨午夜不记错档） */
+    tierOf: (t) => priceTierOf({ now: Number(t) || Date.now(), holidays: cfg.offpeak?.holidays }),
+  });
 
   const compact = createCompact({
     controllerOf: () => controller(),
@@ -4519,9 +4525,18 @@ export function apply(ctx) {
       compact.noteTurn(chat.chatId);
       try {
         const cp = await compact.maybe(chat.chatId, chat);
-        // 顺带记账：cp.usage 是整份读数，usage.record 自己算增量
+        // 顺带记账：cp.usage 是整份读数，usage.record 自己算增量；
+        // 3.1：带模型名，分模型计价用（价目表按子串匹配）
         try {
-          usage.record({ chatId: chat.chatId, usage: cp.usage });
+          const msel = pickModelFor({
+            byChat: cfg.model?.byChat,
+            byKind: cfg.model?.byKind,
+            defaultSel: cfg.model?.default,
+            chatId: chat.chatId,
+            kind: chat.kind,
+            globalSel: ctx.get?.('agentDefaultModel')?.currentSelection?.() || null,
+          });
+          usage.record({ chatId: chat.chatId, usage: cp.usage, model: msel?.model || '' });
         } catch (e) {
           log.debug(`用量记账失败（不影响对话）：${e?.message ?? e}`);
         }
@@ -4956,7 +4971,7 @@ export function apply(ctx) {
       route('/usage', (req, res) => {
         const u = new URL(req.url ?? '/', 'http://x');
         const days = Math.min(Math.max(Number(u.searchParams.get('days')) || 7, 1), 90);
-        return send(res, 200, { ok: true, ...usage.summary({ days }) });
+        return send(res, 200, { ok: true, ...usage.summary({ days, pricing: cfg.usage?.pricing }) });
       }),
 
       route('/status', (req, res) =>

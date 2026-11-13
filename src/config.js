@@ -395,6 +395,15 @@ export const DEFAULTS = {
     deferHeavy: false,
     holidays: null,
   },
+  /**
+   * 用量金额（3.1）。pricing 覆盖内置价目：键是「模型名含这个子串」（小写），
+   * 值是 `{ label?, peak: {uncached, cacheRead, cacheWrite, output}, idle: {...} }`，
+   * 元 / 百万 tokens。内置只放核过官方页的 DeepSeek 两档（见 src/pricing.js）；
+   * 其它厂商标「未定价」不猜折扣。价格会过期，面板注明「以官网为准」。
+   */
+  usage: {
+    pricing: {},
+  },
   /** 人物小档案（D7）：数据落在 profiles.json，清除入口独立，不挂会话级清空 */
   profiles: {
     enabled: false,

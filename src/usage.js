@@ -19,6 +19,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { costOfModels } from './pricing.js';
 
 /** 一天一个桶，桶里按会话再分 */
 const EMPTY = () => ({ uncached: 0, cacheRead: 0, cacheWrite: 0, output: 0, turns: 0 });
@@ -40,9 +41,12 @@ function addInto(bucket, delta) {
 }
 
 /**
- * @param {{file:string, log?:(m:string)=>void, keepDays?:number}} o
+ * @param {{file:string, log?:(m:string)=>void, keepDays?:number,
+ *          tierOf?:(at:number)=>'peak'|'idle'}} o
+ *   `tierOf`（3.1）：这轮 token 发生在峰还是谷。host 传 `priceTierOf` 包装；
+ *   不传按空闲档记 —— 只影响金额拆分，不影响 token 记数。
  */
-export function createUsage({ file, log = () => {}, keepDays = 400 } = {}) {
+export function createUsage({ file, log = () => {}, keepDays = 400, tierOf = null } = {}) {
   let cache = null;
   /** 每个会话上一次的读数，用来算增量 */
   const last = new Map();
@@ -81,11 +85,13 @@ export function createUsage({ file, log = () => {}, keepDays = 400 } = {}) {
   /**
    * 记一轮。
    *
-   * @param {{chatId:string, at?:number, usage:{uncached?:number|null, cacheRead?:number|null,
+   * @param {{chatId:string, at?:number, model?:string,
+   *          usage:{uncached?:number|null, cacheRead?:number|null,
    *          cacheWrite?:number|null, output?:number|null}}} o
+   *   `model`（3.1）：这轮用的模型名，供分模型计价；不传进空键（按未定价处理）。
    * @returns {boolean} 有没有真的记上
    */
-  function record({ chatId, at = Date.now(), usage } = {}) {
+  function record({ chatId, at = Date.now(), model = '', usage } = {}) {
     if (!chatId || !usage) return false;
     const num = (x) => (Number.isFinite(Number(x)) && Number(x) >= 0 ? Number(x) : 0);
     const cur = {
@@ -132,6 +138,17 @@ export function createUsage({ file, log = () => {}, keepDays = 400 } = {}) {
     const cb = (bucket.chats[chatId] = bucket.chats[chatId] || EMPTY());
     addInto(cb, delta);
 
+    /**
+     * 3.1：同一份 delta 再记进「分模型 × 分档」桶，供金额折算。
+     * 只增不改：total / chats 的结构与升级前逐字一致，旧文件照读。
+     * tier 现评（用这轮的 at，不是当前时刻）——凌晨跨档的轮次才不会记错档。
+     */
+    const tier = typeof tierOf === 'function' && tierOf(at) === 'peak' ? 'peak' : 'idle';
+    const models = (bucket.models = bucket.models || {});
+    const tiers = (models[String(model || '')] = models[String(model || '')] || {});
+    const tb = (tiers[tier] = tiers[tier] || EMPTY());
+    addInto(tb, delta);
+
     prune(m, at);
     save();
     return true;
@@ -146,9 +163,10 @@ export function createUsage({ file, log = () => {}, keepDays = 400 } = {}) {
 
   /**
    * 汇总。
-   * @param {{days?:number, now?:number}} [o]
+   * @param {{days?:number, now?:number, pricing?:object|null}} [o]
+   *   `pricing`（3.1）：config.usage.pricing 覆盖表，透传给金额折算。
    */
-  function summary({ days = 7, now = Date.now() } = {}) {
+  function summary({ days = 7, now = Date.now(), pricing = null } = {}) {
     const m = load();
     /**
      * 按**日历天**往回数，不是"最近 N 个有数据的天"。
@@ -162,7 +180,13 @@ export function createUsage({ file, log = () => {}, keepDays = 400 } = {}) {
     const out = {
       days: keys.map((d) => {
         const b = m.days[d];
-        return b ? { day: d, ...b.total } : { day: d, ...EMPTY() };
+        if (!b) return { day: d, ...EMPTY(), cost: costOfModels(null, pricing) };
+        /**
+         * 升级前的旧数据没有分模型分档：按空模型名进「未定价」桶，
+         * token 数如实报，不猜价 —— 宁可少一个数字，不给假的。
+         */
+        const models = b.models || { '': { idle: b.total } };
+        return { day: d, ...b.total, cost: costOfModels(models, pricing) };
       }),
       /** 区间内按会话合计（谁最费） */
       chats: {},
@@ -180,6 +204,28 @@ export function createUsage({ file, log = () => {}, keepDays = 400 } = {}) {
     /** 命中率：和 compact.readUsage 同一口径（三个计费桶之和做分母） */
     const billed = out.total.uncached + out.total.cacheRead + out.total.cacheWrite;
     out.total.cacheHit = billed ? Number(((out.total.cacheRead / billed) * 100).toFixed(1)) : null;
+    /**
+     * 3.1：区间金额。汇总用各天的分桶（按峰/谷分别折价），
+     * 而不是拿区间总量乘单一档位 —— 那会抹掉峰谷差，等于白做两档。
+     */
+    out.cost = (() => {
+      const acc = { yuan: 0, priced: false, unpricedTokens: 0, byModel: {} };
+      for (const d of out.days) {
+        const c = d.cost;
+        if (!c) continue;
+        acc.yuan += c.yuan;
+        acc.priced = acc.priced || c.priced;
+        acc.unpricedTokens += c.unpricedTokens;
+        for (const [mk, mv] of Object.entries(c.byModel || {})) {
+          const bm = (acc.byModel[mk] = acc.byModel[mk] || { yuan: 0, tokens: 0 });
+          bm.yuan += mv.yuan;
+          bm.tokens += mv.tokens;
+        }
+      }
+      acc.yuan = Number(acc.yuan.toFixed(2));
+      for (const bm of Object.values(acc.byModel)) bm.yuan = Number(bm.yuan.toFixed(2));
+      return acc;
+    })();
     return out;
   }
 

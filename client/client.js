@@ -1537,6 +1537,13 @@ select.roost-input{color-scheme:dark}
       const usageDays = Array.isArray(usage?.days) ? usage.days : []
       const last7 = usageDays.slice(-7)
       const heatDays = usageDays.slice(-56)
+      /** 3.1：金额。后端已经按峰/谷分别折价；未定价的 token 如实报数量不猜价 */
+      const costToday = usageDays.length ? usageDays[usageDays.length - 1]?.cost : null
+      const cost7 = last7.reduce((a, d) => a + (Number(d?.cost?.yuan) || 0), 0)
+      const unpriced7 = last7.reduce((a, d) => a + (Number(d?.cost?.unpricedTokens) || 0), 0)
+      const costText = costToday?.priced ? `¥${Number(costToday.yuan).toFixed(2)}` : null
+      const cost7Text = cost7 > 0 ? `近 7 天 ¥${cost7.toFixed(2)}` : ''
+      const unpricedText = unpriced7 > 0 ? `未定价 ${fmtNum(unpriced7)} tokens` : ''
       /** 最近一轮的结论：ok 字段缺失是「没读到」，不能当成「失败」报红 */
       const turnWord = !lt ? '本次启动暂无记录'
         : lt.ok === false ? '最近一轮失败'
@@ -1807,6 +1814,15 @@ select.roost-input{color-scheme:dark}
                 sub: today
                   ? `${today.turns ?? 0} 轮 · 输出 ${fmtNum(today.output)}`
                   : '今日暂无用量',
+              }),
+              h(Stat, {
+                k: '今日花费', n: costText ?? '未定价',
+                sub: costText
+                  ? [cost7Text, unpricedText].filter(Boolean).join(' · ') || '按峰/谷价分别折算'
+                  : '没有能折算的模型',
+                hint: '只折算价目表里的模型（内置 DeepSeek，官方价已核；其余标未定价不猜折扣）。'
+                  + '价格会过期，以官网为准；要换价目改设置里的 usage.pricing。'
+                  + '升级前的历史没分峰/谷档，不计入金额，token 数在「未定价」里如实报。',
               }),
               h(Stat, {
                 k: '排队并发', n: q.pending ?? 0,
@@ -8378,6 +8394,7 @@ select.roost-input{color-scheme:dark}
       ['memory', '记忆', '日记寿命、注入条数、多少轮全量重注、记忆工具开关'],
       ['mood', '心情', 'effects 打开后聊天里被夸/被凶会带动心情；halfLifeHours 是回中性半衰期、baseline 是衰减落点（心情页有控件）；日常在「权限」页的高级组里点'],
       ['offpeak', '错峰', 'mode self=谷时窗口+安静期（默认）；official=官方峰时（工作日 9–12/14–18 高峰，节假日与周末全天空闲，和账单档位同一份判据）；deferHeavy 开了才把压库/过期压缩限到谷时跑；holidays 可覆盖节假日表'],
+      ['usage', '用量金额', '概览的「今日花费」只折算 pricing 里有的模型（内置 DeepSeek 官方价）；键是模型名子串，值是 peak/idle 两档的 元/百万 tokens，价格会过期以官网为准'],
       ['events', '经历', 'enabled：记不记她主动做过的事（找过人、发过文件）。24 小时自动过期，只给主人私聊当素材；关着也能在「记忆」页查看和清空已有的'],
       ['profiles', '人物档案', 'enabled：要不要把对熟人的印象攒成一小段，聊天时带上。每天凌晨巩固时提炼、跨群共用，同一天里提示词不变；关着也能在「记忆」页查看和清空已有的'],
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
