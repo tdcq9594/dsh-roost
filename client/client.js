@@ -13404,10 +13404,135 @@ select.roost-input{color-scheme:dark}
      * 为什么拆：原来一页里同时有「档位矩阵 + 市场列表 + 已装清单 + 令牌」，
      * 装一个扩展要滚三次。拆完每页只回答一个问题。
      */
+    /**
+     * 5.9 新建扩展向导：填几个字段，生成一份能直接跑的骨架。
+     *
+     * 默认收起——绝大多数人打开「已安装」是来看/改已装的东西，不是要写扩展。
+     * 展开后一次只问必需项，工具声明用「一行一个 `名字|说明`」的纯文本，
+     * 不做动态行编辑器：写三五个工具时敲文本比点十次「加一行」快。
+     *
+     * 生成成功后**不自动重载**：stdio 扩展要宿主重新拉进程，中途重载会让
+     * 正在跑的对话断掉。所以只把目录和下一步摊出来，让人自己挑时机。
+     */
+    function ExtWizardBlock({ toast }) {
+      const [open, setOpen] = useState(false)
+      const [f, setF] = useState({
+        id: '', name: '', description: '',
+        transport: 'stdio', port: '',
+        tools: 'ping|测试一下通不通',
+      })
+      const [busy, setBusy] = useState(false)
+      const [res, setRes] = useState(null)
+      const set = (k, v) => setF((x) => ({ ...x, [k]: v }))
+
+      const gen = async () => {
+        /** `名字|说明` 拆开；只写名字也认（说明留空由服务端兜底成名字） */
+        const tools = String(f.tools || '')
+          .split('\n')
+          .map((line) => {
+            const [name, ...rest] = line.split('|')
+            return { name: String(name ?? '').trim(), description: rest.join('|').trim() }
+          })
+          .filter((t) => t.name || t.description)
+
+        setBusy(true)
+        const r = await post('/extensions/scaffold', {
+          id: f.id, name: f.name, description: f.description,
+          transport: f.transport,
+          port: Number(f.port) || undefined,
+          tools,
+        })
+        setBusy(false)
+        setRes(r)
+        toast(r.ok === false ? (r.message || '生成失败') : (r.message || '已生成'))
+      }
+
+      return h(Sec, {
+        n: '01', title: '新建扩展',
+        right: h('button', {
+          type: 'button', className: 'roost-btn',
+          onClick: () => { setOpen((v) => !v); if (open) setRes(null) },
+        }, open ? '收起' : '写一个'),
+      },
+        h('div', { className: 'roost-note', style: { marginBottom: open ? 10 : 0 } },
+          open
+            ? '生成的是一份**能直接跑**的零依赖骨架：stdio 形态由宿主拉起子进程，http 形态自己起端口。同名目录已存在时不会覆盖。'
+            : '想自己写扩展？填几个字段就能拿到可运行的骨架，不用先读协议文档。'),
+        open
+          ? h('div', null,
+            h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 8, marginBottom: 8 } },
+              h('label', { style: { fontSize: 11.5 } }, '扩展 id（英文，如 weather-lite）',
+                h('input', {
+                  className: 'roost-input', value: f.id, placeholder: 'weather-lite',
+                  onChange: (e) => set('id', e.target.value),
+                })),
+              h('label', { style: { fontSize: 11.5 } }, '显示名',
+                h('input', {
+                  className: 'roost-input', value: f.name, placeholder: '天气',
+                  onChange: (e) => set('name', e.target.value),
+                })),
+              h('label', { style: { fontSize: 11.5 } }, '一句话说明（给模型看）',
+                h('input', {
+                  className: 'roost-input', value: f.description, placeholder: '查天气',
+                  onChange: (e) => set('description', e.target.value),
+                })),
+              h('label', { style: { fontSize: 11.5 } }, '形态',
+                h('select', {
+                  className: 'roost-input', value: f.transport,
+                  onChange: (e) => set('transport', e.target.value),
+                },
+                  h('option', { value: 'stdio' }, 'stdio（宿主拉起）'),
+                  h('option', { value: 'streamable-http' }, 'streamable-http（自己起端口）'))),
+              f.transport === 'streamable-http'
+                ? h('label', { style: { fontSize: 11.5 } }, '端口（1024–65535，默认 18080）',
+                  h('input', {
+                    className: 'roost-input', value: f.port, placeholder: '18080',
+                    onChange: (e) => set('port', e.target.value),
+                  }))
+                : null,
+            ),
+            h('label', { style: { fontSize: 11.5, display: 'block' } },
+              '工具（一行一个：名字|说明，名字只能用字母数字下划线横线）',
+              h('textarea', {
+                className: 'roost-input', rows: 4, value: f.tools,
+                style: { width: '100%', resize: 'vertical', fontFamily: 'ui-monospace,monospace' },
+                onChange: (e) => set('tools', e.target.value),
+              })),
+            h('div', { style: { display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' } },
+              h('button', {
+                type: 'button', className: 'roost-btn roost-btn-primary',
+                disabled: busy, onClick: gen,
+              }, busy ? '生成中…' : '生成骨架'),
+              res?.ok === false
+                ? h('span', { style: { fontSize: 11.5, color: 'var(--bad)' } }, res.message)
+                : null),
+
+            res?.ok === true
+              ? h('div', {
+                className: 'roost-note',
+                style: { marginTop: 10, padding: '8px 10px', borderRadius: 8, background: 'rgba(0,160,90,.08)' },
+              },
+                h('div', null, `已生成到：${res.dir}`),
+                h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginTop: 2 } },
+                  `文件：${(res.files || []).join('、')}`),
+                (res.warnings || []).length
+                  ? h('div', { style: { fontSize: 11.5, color: 'var(--warn)', marginTop: 4 } }, res.warnings.join('；'))
+                  : null,
+                h('div', { style: { fontSize: 11.5, marginTop: 6 } }, '下一步：'),
+                h('ol', { style: { margin: '2px 0 0 16px', fontSize: 11.5, lineHeight: 1.7 } },
+                  (res.next || []).map((s, i) => h('li', { key: i }, s))),
+              )
+              : null,
+          )
+          : null,
+      )
+    }
+
     function ExtTab({ quick, toast }) {
       return h('div', null,
         h(ExtSettingsBlock, { toast, part: 'installed' }),
         h(ExtCapsBlock, { quick, toast }),
+        h(ExtWizardBlock, { toast }),
       )
     }
 

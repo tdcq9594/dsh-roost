@@ -1166,3 +1166,48 @@ test('路由：/simulate/run 超长文本直接 413，不硬算', async () => {
   assert.equal(r.json.ok, false);
   off?.();
 });
+
+/** 5.9 扩展向导：生成 → 真能读回 → 同名不覆盖 */
+test('路由：/extensions/scaffold 生成骨架，同名再生成 409 不覆盖', async () => {
+  const { call, off } = await bootHost();
+
+  const r = await call('/extensions/scaffold', {
+    method: 'POST',
+    body: {
+      id: 'wizard-demo', name: '向导演示', description: '演示用',
+      transport: 'stdio', tools: [{ name: 'ping', description: '测试一下' }],
+    },
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.id, 'wizard-demo');
+  assert.deepEqual(r.json.files, ['plugin.json', 'server.mjs']);
+  assert.ok(existsSync(join(r.json.dir, 'plugin.json')), '清单要真的落盘');
+  assert.ok(existsSync(join(r.json.dir, 'server.mjs')), 'stdio 形态要带可跑的 server');
+  assert.equal(existsSync(join(r.json.dir, '.source.json')), false, '不能标成市场装的');
+  assert.ok(Array.isArray(r.json.next) && r.json.next.length, '要给出下一步动作');
+
+  /** 再来一次：目录已存在 → 409，且不覆盖原文件 */
+  const again = await call('/extensions/scaffold', {
+    method: 'POST',
+    body: { id: 'wizard-demo', name: '改个名', tools: [{ name: 'ping' }] },
+  });
+  assert.equal(again.status, 409);
+  assert.match(again.json.message, /已经有/);
+  const kept = JSON.parse(readFileSync(join(r.json.dir, 'plugin.json'), 'utf8'));
+  assert.equal(kept.name, '向导演示', '原清单不能被第二次请求改掉');
+
+  off?.();
+});
+
+test('路由：/extensions/scaffold 非法 id 直接 400，不建目录', async () => {
+  const { call, off, dir } = await bootHost();
+  const r = await call('/extensions/scaffold', {
+    method: 'POST', body: { id: '天气', tools: [{ name: 'x' }] },
+  });
+  assert.equal(r.status, 400);
+  assert.equal(r.json.ok, false);
+  assert.match(r.json.message, /扩展 id/);
+  assert.equal(existsSync(join(dir, 'extensions', '天气')), false);
+  off?.();
+});

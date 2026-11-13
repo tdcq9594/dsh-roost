@@ -750,8 +750,12 @@ test('事件通道：降级 SSE 是暂时的——WS 恢复后会切回去', asy
     token: () => 'tk',
     transport: 'auto',
     loadWs: async () => ({ WebSocket: FlakyWS }),
-    /** 把 5 分钟冷却压到 60ms，否则这条测试要等 5 分钟 */
-    wsRetryCooldownMs: 60,
+    /**
+     * 把 5 分钟冷却压到 400ms，否则这条测试要等 5 分钟。
+     * 别压到几十毫秒：全量跑时测试文件是并发调度的，冷却在 SSE 建立之前
+     * 就过去的话，WS 会先重连成功，`sseHits` 永远是 0（2026-11-14 实测偶发）。
+     */
+    wsRetryCooldownMs: 400,
     onState: () => {},
     log: () => {},
   });

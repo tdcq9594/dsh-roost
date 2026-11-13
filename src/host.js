@@ -113,6 +113,7 @@ import { runPreview, PREVIEW_TEXT_LIMIT } from './tts-preview.js';
 import { workspaceTitleFor } from './workspace-title.js';
 import { splitPersonaText, joinPersonaText, joinPersonaBlocks } from './persona-sections.js';
 import { simulate, SIM_PERSONAS } from './simulate.js';
+import { buildExtension, formatScaffold } from './ext-wizard.js';
 import { createTtsInstaller } from './tts-install.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -8153,6 +8154,81 @@ export function apply(ctx) {
           tools,
         });
         return send(res, 200, { ...result, bucket, personas: SIM_PERSONAS });
+      }),
+
+      /**
+       * 5.9 新建扩展向导：填名字 / 入口 / 工具声明，生成一份能直接跑的骨架。
+       *
+       * 三条边界：
+       *   · **同名不覆盖**——目录已存在就 409，让人先去删或换个 id。向导不是安装器，
+       *     悄悄盖掉用户手写的扩展是最坏的结果（市场安装那边也守着同一条）。
+       *   · **生成后立刻校验**：`buildExtension` 已保证字段合法，这里再从磁盘读回
+       *     一遍交给 `extRegistry.read()`，等于「装得上」的实证，不留到重启才发现。
+       *   · **不写 `.source.json`**：那是「市场装的」标记，写了会让将来的市场更新
+       *     拒绝覆盖（把用户自己的扩展当成市场资产）。
+       */
+      route('/extensions/scaffold', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const spec = {
+          id: String(body?.id ?? ''),
+          name: String(body?.name ?? ''),
+          description: String(body?.description ?? ''),
+          usage: String(body?.usage ?? ''),
+          transport: String(body?.transport ?? 'stdio'),
+          port: Number(body?.port) || undefined,
+          tools: Array.isArray(body?.tools) ? body.tools : [],
+        };
+
+        const built = buildExtension(spec);
+        if (!built.ok) {
+          return send(res, 400, {
+            ok: false, error: 'invalid_spec', message: built.errors.join('；'), errors: built.errors,
+          });
+        }
+
+        const dest = extRegistry.pathOf(built.id);
+        if (existsSync(dest)) {
+          return send(res, 409, {
+            ok: false, error: 'exists',
+            message: `已经有「${built.id}」这个扩展了（${dest}）。换个 id，或先把它删掉再生成。`,
+          });
+        }
+
+        try {
+          mkdirSync(dest, { recursive: true });
+          for (const f of built.files) writeFileSync(join(dest, f.path), f.content, 'utf8');
+        } catch (e) {
+          /** 半份骨架比没有更糟：写失败就把刚建的目录清掉，别留个「有 plugin.json 没 server.mjs」的坑 */
+          try { rmSync(dest, { recursive: true, force: true }); } catch { /* 清不掉就让它留着，下面报错里带路径 */ }
+          return send(res, 500, {
+            ok: false, error: 'write_failed',
+            message: `写文件失败：${e?.message || e}（目录 ${dest}）`,
+          });
+        }
+
+        /** 读回来校验一遍：这一步过了才算「装上能用」 */
+        const saved = extRegistry.read(built.id);
+        if (!saved) {
+          return send(res, 500, {
+            ok: false, error: 'manifest_invalid',
+            message: `骨架写好了但清单没过校验，检查 ${join(dest, 'plugin.json')}`,
+          });
+        }
+
+        log.info(`扩展向导：生成 ${built.id}（${built.transport}，${built.files.length} 个文件）→ ${dest}`);
+        return send(res, 200, {
+          ok: true,
+          id: built.id,
+          dir: dest,
+          transport: built.transport,
+          files: built.files.map((f) => f.path),
+          warnings: built.warnings,
+          message: formatScaffold(built),
+          /** 下一步给具体动作，别只说「重启试试」 */
+          next: built.transport === 'stdio'
+            ? ['去「已安装」页点重载 / 重启 DSH，宿主会拉起 server.mjs', '改 server.mjs 里 tools/call 的 TODO 换成真实现']
+            : [`自己起服务：node ${join(dest, 'server.mjs')}`, '确认端口没被占用，再回「已安装」页重载'],
+        });
       }),
 
       route('/tts/preview', async (req, res) => {
