@@ -4099,6 +4099,18 @@ select.roost-input{color-scheme:dark}
           ),
         ),
 
+        /**
+         * 记忆星图：无编号，放在最上面当整页的"一眼看全"。
+         * 它复用同一份 `/memory` 快照，不新开接口；人物页的独立关系图
+         * 已撤掉，实体与关系连线都并进这里（2026-11-13）。
+         */
+        h(Sec, {
+          title: '记忆星图',
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新'),
+        },
+          h(StarMap, { mem, toast, reload, quick, busy }),
+        ),
+
         /* ── 第一层：事实 ── */
         h(Sec, { n: '01', title: '事实', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
@@ -4742,106 +4754,249 @@ select.roost-input{color-scheme:dark}
      * 关系这里只做**只读概览**。删关系 / 撤销屏蔽 / 标结束仍在记忆页——
      * 同一个写操作摆两个地方，用户得先判断在哪页动手才算数（§0.5 A10 的教训）。
      */
+    /* ---------------- 记忆星图（2D / 3D） ---------------- */
+
     /**
-     * 4.2 关系图：**2D 星图**（不上 3D——2000 节点上 3D 就是性能坑，§0.8-6）。
+     * 2026-11-13：关系图不再单独做，全部并进这一张记忆星图。
      *
-     * 2026-11-13 重做。上一版是「所有节点同色同大小 + 每条边都标关系字 +
-     * 每个节点都写名字」，30 条关系就能糊成一片，76 个实体根本没法看。
-     * 这一版按可读性排优先级：
+     * 参照 aurabot-beta `client.js:5137 smDraw` 的 3D 透视投影
+     * （yaw/pitch 旋转 → 透视除法 → depth 裁剪 → 近大远小），
+     * 但**数据全用我们 `/memory` 快照里真实有的字段**：
      *
-     *   1. **名字不是全都写**：只给度数最高的几个节点挂标签，其余靠悬停 / 点选；
-     *      标签走矩形避让（`placeLabels`），宁可少显示，不叠着显示。
-     *   2. **关系字不写在线上**：线只表达「有连接」，关系类型进图例 + 悬停提示；
-     *      线上写字是上一版最大的噪音源。
-     *   3. **大小和颜色都带信息**：半径按连接数（3–10px），颜色按关系类型分族。
-     *   4. **能缩能拖**：画布 420px 高，滚轮缩放 + 拖拽平移，不再是一张死图。
+     *   · 跨群事实 / 本会话事实 / 已被取代的事实（factsDetail）
+     *   · 重要日记片段（journal.top）
+     *   · 人物与实体（graph.entities）+ 关系连线（graph.edges）
+     *   · 熟人档案（profiles）
      *
-     * 深色夜空是**固定**的，不跟面板主题走：星图的对比度依赖暗底，
-     * 浅色版会把辉光和细线全洗掉。取色也写死在这里，不读 CSS 变量。
+     * 不造 aurabot 那套 tier / cluster / importance / brightness 字段——
+     * 我们没有层级、没有手动重要度，凭空生成就是"面板在撒谎"。
+     * 亮度只由**真实存在的**权重 × 时间衰减算出来（和 memory.js 的
+     * `scoreOfFact` 同一条公式：w × 0.5^(age/40天)），位置按上面六种
+     * 真实来源分星团。
+     *
+     * 2D / 3D 是同一批星、同一份筛选，只是投影函数不同：
+     *   · 3D：透视 + 自动旋转 + 拖拽转视角 + 景深（功能完整版）
+     *   · 2D：正交 + 拖拽平移 + 标签避让（轻量版，低配机器也不卡）
+     * 自动旋转、景深、星团光环这些**只在 3D 有意义**的开关，就在 2D
+     * 下禁用并写明原因，不做个假动画糊弄。
      */
-    /**
-     * 关系图布局（纯函数，导出给测试）。
-     *
-     * 为什么自己写力导向而不上 d3：客户端是单文件、零依赖，多引一个库
-     * 就要多一次 DSH 重载才能生效；而且这里只需要「排开、别叠」。
-     *
-     * 确定性：初始位置用黄金角螺旋，不用 `Math.random()`——同一份数据
-     * 每次画出同一张图，截图对比和测试才有意义。
-     */
-    function graphLayout(edges, { w = 640, h = 420, iters = 220 } = {}) {
-      const nodes = new Map()
-      const touch = (name) => {
-        const n = String(name ?? '').trim()
-        if (!n) return null
-        let o = nodes.get(n)
-        if (!o) { o = { name: n, x: 0, y: 0, vx: 0, vy: 0, deg: 0 }; nodes.set(n, o) }
-        return o
-      }
-      const links = []
-      for (const e of edges || []) {
-        const a = touch(e?.src); const b = touch(e?.dst)
-        if (!a || !b || a === b) continue
-        a.deg += 1; b.deg += 1
-        links.push({ a, b, rel: String(e?.rel || '') })
-      }
-      const arr = [...nodes.values()]
-      /** 黄金角螺旋：比「圆周均布」更不容易一上来就挤在一条弧上 */
-      const GA = Math.PI * (3 - Math.sqrt(5))
-      arr.forEach((n, i) => {
-        const r = Math.min(w, h) * 0.42 * Math.sqrt((i + 0.5) / Math.max(1, arr.length))
-        n.x = w / 2 + Math.cos(i * GA) * r
-        n.y = h / 2 + Math.sin(i * GA) * r
-      })
-      const degMax = arr.reduce((m, n) => Math.max(m, n.deg), 0) || 1
-      for (let k = 0; k < iters; k++) {
-        /** 斥力：节点越多越弱，否则 76 个节点会被推成一张网 */
-        const rep = 2600 + arr.length * 26
-        for (let i = 0; i < arr.length; i++) {
-          for (let j = i + 1; j < arr.length; j++) {
-            const a = arr[i]; const b = arr[j]
-            const dx = a.x - b.x; const dy = a.y - b.y
-            const d2 = dx * dx + dy * dy || 1
-            const d = Math.sqrt(d2)
-            const f = rep / d2
-            a.vx += (dx / d) * f; a.vy += (dy / d) * f
-            b.vx -= (dx / d) * f; b.vy -= (dy / d) * f
-          }
-        }
-        /** 弹簧：度数高的节点拉得更紧，让「中心人物」自然浮到中间 */
-        for (const l of links) {
-          const dx = l.b.x - l.a.x; const dy = l.b.y - l.a.y
-          const d = Math.sqrt(dx * dx + dy * dy) || 1
-          const want = 62 + (1 - Math.min(1, (l.a.deg + l.b.deg) / (degMax * 2))) * 46
-          const f = (d - want) * 0.022
-          l.a.vx += (dx / d) * f; l.a.vy += (dy / d) * f
-          l.b.vx -= (dx / d) * f; l.b.vy -= (dy / d) * f
-        }
-        for (const n of arr) {
-          n.vx += (w / 2 - n.x) * 0.006
-          n.vy += (h / 2 - n.y) * 0.006
-          n.vx *= 0.82; n.vy *= 0.82
-          const pad = 26
-          n.x = Math.max(pad, Math.min(w - pad, n.x + n.vx))
-          n.y = Math.max(pad + 8, Math.min(h - pad, n.y + n.vy))
-        }
-      }
-      arr.forEach((n) => {
-        n.r = 3 + (n.deg / degMax) * 7
-        n.x = Math.round(n.x * 10) / 10
-        n.y = Math.round(n.y * 10) / 10
-      })
-      return { nodes: arr, links, degMax }
+    const STAR_GROUPS = [
+      { id: 'global', label: '跨群事实', color: '#7fd1ff' },
+      { id: 'chat', label: '本会话', color: '#9d8bff' },
+      { id: 'entity', label: '人物与实体', color: '#5ce1b0' },
+      { id: 'episode', label: '重要片段', color: '#ffc46b' },
+      { id: 'profile', label: '熟人档案', color: '#ff8fb1' },
+      { id: 'history', label: '已被取代', color: '#8a93a8' },
+    ]
+    const STAR_DAY = 86_400_000
+    const STAR_HALF_LIFE = 40
+    const STAR_R = 240
+
+    /** 和 src/memory.js:64 scoreOfFact 同一条公式；前端只用来画亮度，不参与淘汰 */
+    function starScoreOf({ w = 1, at = 0, until = 0, score } = {}, now = Date.now()) {
+      if (Number.isFinite(score)) return Math.max(0.01, Number(score))
+      const days = at ? Math.max(0, (now - at) / STAR_DAY) : 0
+      const base = (Number(w) > 0 ? Number(w) : 1) * 0.5 ** (days / STAR_HALF_LIFE)
+      return until ? base * 0.35 : base
     }
 
     /**
-     * 标签避让（纯函数，导出给测试）。
+     * `/memory` 快照 → 星图数据（纯函数，导出给测试）。
      *
-     * 贪心：按度数从高到低试放，放不下就跳过这个节点（**不是**硬挤进去）。
-     * 上一版每个节点都写字，30 个名字能叠出四层——这就是「可读性太差」的主因。
+     * 坐标是确定性的：星团中心按圆周均布，团内用黄金角球面撒点，
+     * 不用 Math.random —— 同一份数据每次画出同一片星空。
+     */
+    function buildStarMap(mem, { now = Date.now(), radius = STAR_R } = {}) {
+      const raw = []
+      const push = (o) => { if (o && String(o.text || '').trim()) raw.push(o) }
+      const factsOf = (scope) => (Array.isArray(mem?.factsDetail?.[scope]) ? mem.factsDetail[scope] : [])
+      for (const [scope, group] of [['global', 'global'], ['chat', 'chat']]) {
+        factsOf(scope).forEach((f, i) => push({
+          id: `${group}:${i}`,
+          text: String(f.text || ''),
+          group: Number(f.until) > 0 ? 'history' : group,
+          w: Number(f.w) || 1,
+          at: Number(f.at) || 0,
+          until: Number(f.until) || 0,
+          src: f.src || null,
+          kind: 'fact',
+        }))
+      }
+      for (const [i, t] of (Array.isArray(mem?.journal?.top) ? mem.journal.top : []).entries()) {
+        push({
+          id: `episode:${i}`,
+          text: String(t.text || ''),
+          group: 'episode',
+          w: 1,
+          at: Number(t.at) || 0,
+          score: Number(t.score) || 0,
+          accessed: Number(t.accessed) || 0,
+          kind: 'episode',
+        })
+      }
+      for (const [i, e] of (Array.isArray(mem?.graph?.entities) ? mem.graph.entities : []).entries()) {
+        push({
+          id: `entity:${i}`,
+          text: String(e.name || ''),
+          group: 'entity',
+          w: 1,
+          at: Number(e.lastSeen) || 0,
+          kind: 'entity',
+          /** 关系连线要用名字找星，见下面的 links */
+          name: String(e.name || ''),
+        })
+      }
+      for (const [i, p] of (Array.isArray(mem?.profiles) ? mem.profiles : []).entries()) {
+        push({
+          id: `profile:${i}`,
+          text: `${String(p.name || '某个人')}${p.impression ? '：' + String(p.impression).slice(0, 40) : ''}`,
+          group: 'profile',
+          w: 1,
+          at: Number(p.at) || 0,
+          kind: 'profile',
+        })
+      }
+
+      /** 亮度：按本组最大值归一化，别让「重要片段」的 score 把事实全压暗 */
+      const scored = raw.map((s) => ({ ...s, score: starScoreOf(s, now) }))
+      const maxOf = {}
+      for (const s of scored) maxOf[s.group] = Math.max(maxOf[s.group] || 0.01, s.score)
+      scored.forEach((s) => {
+        s.brightness = Math.max(0.14, Math.min(1, s.score / maxOf[s.group]))
+      })
+
+      /** 星团中心：圆周均布，稍微错开高度，3D 转起来才看得出是分层的 */
+      const byGroup = new Map()
+      for (const g of STAR_GROUPS) byGroup.set(g.id, [])
+      for (const s of scored) byGroup.get(s.group)?.push(s)
+      const used = STAR_GROUPS.filter((g) => byGroup.get(g.id).length)
+      const GA = Math.PI * (3 - Math.sqrt(5))
+      const stars = []
+      used.forEach((g, gi) => {
+        const a = (gi / used.length) * Math.PI * 2
+        /** X/Z 摊得开、Y 压得扁：画布是宽屏（1000×420），纵向撑满会裁掉星星 */
+        const cx = Math.cos(a) * radius * 0.8
+        const cz = Math.sin(a) * radius * 0.8
+        const cy = (gi % 2 ? 1 : -1) * radius * 0.12
+        const arr = byGroup.get(g.id)
+        arr.forEach((s, j) => {
+          const phi = Math.acos(1 - 2 * (j + 0.5) / arr.length)
+          const th = GA * j
+          const r = radius * (0.18 + 0.22 * Math.sqrt((j + 1) / arr.length))
+          stars.push({
+            ...s,
+            groupLabel: g.label,
+            color: g.color,
+            x: cx + r * Math.sin(phi) * Math.cos(th),
+            y: cy + r * Math.cos(phi) * 0.55,
+            z: cz + r * Math.sin(phi) * Math.sin(th),
+            /** 归档的不参与注入，画成暗星 */
+            archived: s.group === 'history',
+          })
+        })
+      })
+
+      /** 关系连线并入星图：端点按实体名找，找不到就不画（不造假节点） */
+      const atName = new Map(stars.filter((s) => s.kind === 'entity').map((s) => [s.name, s.id]))
+      const links = (Array.isArray(mem?.graph?.edges) ? mem.graph.edges : [])
+        .map((e) => ({ a: atName.get(String(e.src || '')), b: atName.get(String(e.dst || '')), rel: String(e.rel || '') }))
+        .filter((l) => l.a && l.b && l.a !== l.b)
+
+      const stats = {
+        total: stars.length,
+        live: stars.filter((s) => !s.archived).length,
+        archived: stars.filter((s) => s.archived).length,
+        bright: stars.filter((s) => s.brightness >= 0.7).length,
+        dim: stars.filter((s) => s.brightness < 0.35).length,
+        groups: used.map((g) => ({ id: g.id, label: g.label, color: g.color, count: byGroup.get(g.id).length })),
+      }
+      return { stars, links, stats, radius }
+    }
+
+    /** 星图筛选（纯函数，导出给测试）：搜索 / 星团 / 只看快忘了或最近 7 天 */
+    function filterStars(stars, { q = '', group = '', quick = '', now = Date.now() } = {}) {
+      const kw = String(q || '').trim().toLowerCase()
+      const out = []
+      for (const s of stars || []) {
+        if (group && s.group !== group) continue
+        if (quick === 'dim' && s.brightness >= 0.35) continue
+        if (quick === 'recent' && !(s.at && now - s.at <= 7 * STAR_DAY)) continue
+        if (kw) {
+          const hit = String(s.text || '').toLowerCase().includes(kw)
+            || String(s.groupLabel || '').toLowerCase().includes(kw)
+          if (!hit) continue
+        }
+        out.push(s)
+      }
+      return { stars: out, matched: new Set(out.map((s) => s.id)) }
+    }
+
+    /**
+     * 投影（纯函数，导出给测试）。
      *
-     * 矩形宽度按字数估：中文约 1em、ASCII 约 0.55em，再留 6px 内边距。
-     *
-     * @returns {Array<{name:string,x:number,y:number,w:number,h:number}>} 真正放下的标签
+     * 3D 用 aurabot `smDraw` 的那套：先绕 Y 轴转 yaw，再绕 X 轴转 pitch，
+     * 透视除法 k = focal × zoom / (camZ - z2)，depth < 60 直接丢（相机背后）。
+     * 2D 是同一批 (x,y,z) 的正交投影：忽略透视、忽略近大远小，只留 z 做
+     * 前后绘制顺序——所以两版的星的相对位置是对得上的，切模式不会"跳一下"。
+     */
+    function projectStars(stars, view = {}, { W = 640, H = 420, mode = '3d', radius = STAR_R } = {}) {
+      const yaw = Number(view.yaw) || 0
+      const pitch = Number(view.pitch) || 0
+      const zoom = Number(view.zoom) > 0 ? Number(view.zoom) : 1
+      const pan = view.pan || { x: 0, y: 0 }
+      const cam = view.cam || { x: 0, y: 0, z: 0 }
+      const cyw = Math.cos(yaw), syw = Math.sin(yaw)
+      const cp = Math.cos(pitch), sp = Math.sin(pitch)
+      const camZ = radius * 3
+      /** 视场按短边算，但别让它超过画布宽度——窄侧栏里星星不能被推出画面 */
+      const focal = Math.min(W, H * 2.1)
+      /** 2D 正交同样随宽度自适应：面板窄时不硬撑同一个倍率 */
+      const flat = Math.min(1.25, W / 800) * zoom
+      const out = []
+      for (const star of stars || []) {
+        if (mode === '2d') {
+          out.push({
+            star,
+            x: W / 2 + (star.x - cam.x) * flat + pan.x,
+            /** 星团在 Y 上压得扁，正交投影纵向拉开一点，别挤成中间一条 */
+            y: H / 2 - (star.y - cam.y) * flat * 1.35 + pan.y,
+            k: flat,
+            depth: 1 + (star.z || 0) / (radius * 8),
+            t: Math.max(0, Math.min(1, ((star.z || 0) / radius + 1) / 2)),
+          })
+          continue
+        }
+        const wx = star.x - cam.x, wy = star.y - cam.y, wz = star.z - cam.z
+        const x1 = wx * cyw + wz * syw
+        const z1 = -wx * syw + wz * cyw
+        const y2 = wy * cp - z1 * sp
+        const z2 = wy * sp + z1 * cp
+        const depth = camZ - z2
+        if (depth < 60) continue
+        const k = focal * zoom / depth
+        out.push({
+          star,
+          x: W / 2 + x1 * k + pan.x,
+          y: H / 2 - y2 * k + pan.y,
+          k,
+          depth,
+          t: Math.max(0, Math.min(1, (z2 / radius + 1) / 2)),
+        })
+      }
+      /** 远的先画，近的盖在上面；2D 用 z 当深度，顺序也不乱 */
+      return out.sort((a, b) => b.depth - a.depth)
+    }
+
+    /** 滚轮缩放档位（纯函数）。原生 passive:false 监听调用，见组件里 */
+    function wheelZoom(cur, deltaY, { min = 0.6, max = 2.6 } = {}) {
+      const z = Number(cur) > 0 ? Number(cur) : 1
+      const next = z * (Number(deltaY) > 0 ? 0.9 : 1.1)
+      return Math.max(min, Math.min(max, Math.round(next * 1000) / 1000))
+    }
+
+    /**
+     * 标签避让（纯函数，导出给测试）。2D 模式用；3D 只给选中/悬停的星标字。
+     * 贪心：按亮度从高到低试放，放不下就跳过，宁可留白不叠字。
      */
     function placeLabels(nodes, { maxLabels = 26, font = 11, maxChars = 6, pad = 2 } = {}) {
       const est = (s) => {
@@ -4850,78 +5005,101 @@ select.roost-input{color-scheme:dark}
         return wpx + 6
       }
       const picked = []
-      const order = [...(nodes || [])].sort((a, b) => (b.deg - a.deg) || a.name.localeCompare(b.name))
+      const order = [...(nodes || [])].sort((a, b) => ((b.brightness ?? b.deg ?? 0) - (a.brightness ?? a.deg ?? 0)) || String(a.name || '').localeCompare(String(b.name || '')))
       for (const n of order) {
         if (picked.length >= maxLabels) break
-        const text = String(n.name || '').slice(0, maxChars)
+        const text = String(n.name || n.text || '').slice(0, maxChars)
         if (!text) continue
         const w = est(text)
         const h = font + 4
-        const box = { name: text, full: n.name, x: n.x - w / 2, y: n.y - (n.r || 6) - h - 3, w, h }
-        /** 与已放标签重叠 → 放弃（留白比叠字好看） */
+        const box = { name: text, full: n.full || n.name || n.text, x: n.x - w / 2, y: n.y - (n.r || 6) - h - 3, w, h }
         const hit = picked.some((p) => !(box.x + box.w + pad < p.x || p.x + p.w + pad < box.x
           || box.y + box.h + pad < p.y || p.y + p.h + pad < box.y))
-        if (hit) continue
-        /** 出画布也不放：半个名字比没有名字更让人困惑 */
-        if (box.x < 0 || box.y < 0) continue
+        if (hit || box.x < 0 || box.y < 0) continue
         picked.push(box)
       }
       return picked
     }
 
-    /**
-     * 关系筛选（纯函数，导出给测试）。
-     *
-     * `q` 命中任一端的名字就保留这条边；`kind` 是关系类型（'' = 全部）。
-     * 返回的 `hit` 是命中的节点名集合，画的时候用来加亮。
-     */
-    function filterRels(edges, { q = '', kind = '' } = {}) {
-      const kw = String(q || '').trim().toLowerCase()
-      const k = String(kind || '')
-      const out = []
-      const hit = new Set()
-      for (const e of edges || []) {
-        if (k && String(e?.rel || '') !== k) continue
-        if (kw) {
-          const s = String(e?.src || '').toLowerCase()
-          const d = String(e?.dst || '').toLowerCase()
-          if (!s.includes(kw) && !d.includes(kw)) continue
-          if (s.includes(kw)) hit.add(String(e.src))
-          if (d.includes(kw)) hit.add(String(e.dst))
-        }
-        out.push(e)
-      }
-      return { edges: out, hit }
+    /** 面板偏好：存本地，切页回来不重置；localStorage 不可用就静默用默认 */
+    function starPref(key, fallback) {
+      try {
+        const v = localStorage.getItem('roost.star.' + key)
+        return v === null ? fallback : JSON.parse(v)
+      } catch { return fallback }
+    }
+    function saveStarPref(key, value) {
+      try { localStorage.setItem('roost.star.' + key, JSON.stringify(value)) } catch {}
     }
 
-    /** 关系类型 → 颜色。按出现顺序取色，最多 8 族，多的归「其它」 */
-    const REL_COLORS = ['#7fd1ff', '#9d8bff', '#5ce1b0', '#ffc46b', '#ff8fb1', '#8fa8ff', '#d0e26b', '#a0a8bd']
-
-    function RelGraph({ edges, onPick }) {
+    /**
+     * 记忆星图组件。数据来自记忆页同一份 `/memory` 快照，不新开路由。
+     * 点星出详情；写操作只调**已经存在**的 `memory.remove` / `/memory/add`，
+     * 不新造后端能力（编辑文字 / 改重要度 / 复习 / 层级这些我们没有，见文档）。
+     */
+    function StarMap({ mem, toast, reload, quick, busy }) {
       const ref = useRef(null)
-      /** 关系类型清单：图例和筛选下拉都从这里来 */
-      const kinds = [...new Set((edges || []).map((e) => String(e?.rel || '').trim()).filter(Boolean))]
-      const colorOf = (rel) => {
-        const i = kinds.indexOf(String(rel || '').trim())
-        return REL_COLORS[(i < 0 ? kinds.length : i) % REL_COLORS.length]
-      }
+      const hits = useRef([])
+      const [mode, setMode] = useState(() => starPref('mode', '3d') === '2d' ? '2d' : '3d')
+      const [spin, setSpin] = useState(() => starPref('spin', true) !== false)
+      const [glow, setGlow] = useState(() => starPref('glow', true) !== false)
+      const [edgeOn, setEdgeOn] = useState(() => starPref('edgeOn', true) !== false)
+      const [labels, setLabels] = useState(() => starPref('labels', true) !== false)
       const [q, setQ] = useState('')
-      const [kind, setKind] = useState('')
-      const [labels, setLabels] = useState(true)
+      const [group, setGroup] = useState('')
+      const [quickF, setQuickF] = useState('')
       const [zoom, setZoom] = useState(1)
+      const [yaw, setYaw] = useState(0.45)
+      const [pitch, setPitch] = useState(0.24)
       const [pan, setPan] = useState({ x: 0, y: 0 })
-      const [tick, setTick] = useState(0)
+      const [sel, setSel] = useState(null)
       const [hover, setHover] = useState('')
-      /** 布局缓存：拖拽 / 缩放不该重跑 220 轮迭代 */
-      const cache = useRef(null)
+      const [tick, setTick] = useState(0)
+      const [addText, setAddText] = useState('')
+      const [addScope, setAddScope] = useState('global')
+      const [addBusy, setAddBusy] = useState(false)
 
-      const shown = filterRels(edges, { q, kind })
-      /**
-       * 依赖用**内容签名**而不是数组本身：父组件每次渲染都会 `slice()` 出新数组，
-       * 拿数组当依赖等于每次渲染都重画一遍。
-       */
-      const sig = shown.edges.map((e) => `${e.src}|${e.rel}|${e.dst}`).join(';')
+      const built = buildStarMap(mem)
+      const shown = filterStars(built.stars, { q, group, quick: quickF })
+      const byId = new Map(shown.stars.map((s) => [s.id, s]))
+      const sig = shown.stars.map((s) => s.id).join('|') + '#' + tick
       const H = 420
+      const is3d = mode === '3d'
+
+      const setModeAndSave = (v) => { setMode(v); saveStarPref('mode', v) }
+      const toggle = (setter, key) => (e) => {
+        const v = Boolean(e.target.checked)
+        setter(v); saveStarPref(key, v)
+      }
+
+      /**
+       * 滚轮：原生 passive:false。React 的 onWheel 是 passive，
+       * preventDefault 拦不住，缩图时整页会跟着滚。
+       */
+      useEffect(() => {
+        const cv = ref.current
+        if (!cv || typeof cv.addEventListener !== 'function') return
+        const onWheel = (ev) => {
+          if (typeof ev.preventDefault === 'function') ev.preventDefault()
+          setZoom((z) => wheelZoom(z, ev.deltaY))
+        }
+        try { cv.addEventListener('wheel', onWheel, { passive: false }) } catch { return }
+        return () => { try { cv.removeEventListener('wheel', onWheel) } catch {} }
+      }, [])
+
+      /** 自动旋转只在 3D 有意义；选中星星时停下，方便读详情 */
+      useEffect(() => {
+        if (!is3d || !spin || sel) return
+        let raf = 0
+        let alive = true
+        const step = () => {
+          if (!alive) return
+          setYaw((v) => v + 0.0025)
+          raf = requestAnimationFrame(step)
+        }
+        raf = requestAnimationFrame(step)
+        return () => { alive = false; cancelAnimationFrame(raf) }
+      }, [is3d, spin, Boolean(sel)])
 
       useEffect(() => {
         const cv = ref.current
@@ -4930,205 +5108,199 @@ select.roost-input{color-scheme:dark}
         const dpr = Math.min(2, (typeof window !== 'undefined' && window.devicePixelRatio) || 1)
         cv.width = Math.round(W * dpr)
         cv.height = Math.round(H * dpr)
-
         const ctx = cv.getContext('2d')
         if (!ctx) return
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
         ctx.clearRect(0, 0, W, H)
 
-        /**
-         * 筛完一条不剩时**必须重画一次空画布**。
-         * 直接 return 的话，上一帧的星星还留在画布上——用户以为筛选没生效。
-         */
-        if (!shown.edges.length) {
-          ctx.fillStyle = '#0a0f1c'
-          ctx.fillRect(0, 0, W, H)
-          ctx.textAlign = 'center'
-          ctx.textBaseline = 'middle'
+        const bg = ctx.createRadialGradient(W * 0.5, H * 0.45, 20, W * 0.5, H * 0.5, Math.max(W, H) * 0.75)
+        bg.addColorStop(0, '#141d33'); bg.addColorStop(1, '#0a0f1c')
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H)
+        let seed = 20261113
+        const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff }
+        for (let i = 0; i < 170; i++) {
+          ctx.fillStyle = `rgba(200,220,255,${(0.05 + rnd() * 0.2).toFixed(3)})`
+          ctx.fillRect(rnd() * W, rnd() * H, 1, 1)
+        }
+
+        const projected = projectStars(shown.stars, { yaw, pitch, zoom, pan }, { W, H, mode, radius: built.radius })
+        hits.current = projected
+        const pos = new Map(projected.map((p) => [p.star.id, p]))
+
+        if (!projected.length) {
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
           ctx.font = '12px ui-sans-serif,system-ui,sans-serif'
           ctx.fillStyle = 'rgba(226,234,255,.45)'
-          ctx.fillText('没有匹配的关系，换个词或选「全部关系」', W / 2, H / 2)
+          ctx.fillText('这里还没有记忆，或筛选后一颗都不剩', W / 2, H / 2)
           return
         }
 
-        const key = sig + '#' + tick
-        if (!cache.current || cache.current.key !== key) {
-          cache.current = { key, lay: graphLayout(shown.edges, { w: W, h: H }) }
-        }
-        const { nodes, links } = cache.current.lay
-
-        /* 夜空：固定深色 + 一层确定性星尘（不用 random，同一份数据每次一样） */
-        const bg = ctx.createRadialGradient(W * 0.5, H * 0.45, 20, W * 0.5, H * 0.5, Math.max(W, H) * 0.75)
-        bg.addColorStop(0, '#141d33')
-        bg.addColorStop(1, '#0a0f1c')
-        ctx.fillStyle = bg
-        ctx.fillRect(0, 0, W, H)
-        let seed = 20261113
-        const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff }
-        for (let i = 0; i < 150; i++) {
-          const x = rnd() * W; const y = rnd() * H; const a = 0.06 + rnd() * 0.22
-          ctx.fillStyle = `rgba(200,220,255,${a.toFixed(3)})`
-          ctx.fillRect(x, y, 1, 1)
-        }
-
-        /* 相机：先缩放再平移，拖拽不会因为缩放比例而「手感不对」 */
-        ctx.save()
-        ctx.translate(W / 2 + pan.x, H / 2 + pan.y)
-        ctx.scale(zoom, zoom)
-        ctx.translate(-W / 2, -H / 2)
-
-        const focus = hover
-        /* 连线：默认极淡，悬停某点时只留它的边 */
-        for (const l of links) {
-          const on = !focus || l.a.name === focus || l.b.name === focus
-          ctx.beginPath()
-          ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y)
-          ctx.strokeStyle = on ? 'rgba(140,190,255,.5)' : 'rgba(120,160,220,.12)'
-          ctx.lineWidth = on ? 1.3 : 0.9
-          ctx.stroke()
-        }
-
-        /* 节点：辉光 + 实心 + 描边；命中搜索的加一圈亮环 */
-        for (const n of nodes) {
-          const rel = links.find((l) => l.a === n || l.b === n)
-          /** 没有边的孤立节点不该出现（图是边推出来的），兜底灰 */
-          const col = rel ? colorOf(rel.rel) : '#8a93a8'
-          const isHit = shown.hit.has(n.name)
-          const isHover = focus === n.name
-          ctx.beginPath()
-          ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2)
-          ctx.fillStyle = col
-          ctx.shadowColor = col
-          ctx.shadowBlur = isHover || isHit ? 16 : 8
-          ctx.fill()
-          ctx.shadowBlur = 0
-          ctx.lineWidth = isHover ? 2 : 1
-          ctx.strokeStyle = isHover ? '#ffffff' : 'rgba(255,255,255,.28)'
-          ctx.stroke()
-          if (isHit) {
-            ctx.beginPath()
-            ctx.arc(n.x, n.y, n.r + 4, 0, Math.PI * 2)
-            ctx.strokeStyle = 'rgba(255,255,255,.55)'
-            ctx.lineWidth = 1
-            ctx.stroke()
+        /** 星团光环：3D 专属（2D 正交下画圈会变成一堆套圈，反而乱） */
+        if (is3d) {
+          for (const g of built.stats.groups) {
+            const pts = projected.filter((p) => p.star.group === g.id)
+            if (!pts.length) continue
+            const cx = pts.reduce((a, p) => a + p.x, 0) / pts.length
+            const cy = pts.reduce((a, p) => a + p.y, 0) / pts.length
+            const rr = Math.max(28, Math.sqrt(pts.reduce((a, p) => a + (p.x - cx) ** 2 + (p.y - cy) ** 2, 0) / pts.length) * 1.5)
+            ctx.beginPath(); ctx.arc(cx, cy, Math.min(rr, 180), 0, Math.PI * 2)
+            ctx.strokeStyle = g.color + '1f'; ctx.lineWidth = 1; ctx.stroke()
           }
         }
 
-        /* 标签：只给放得下的那些；悬停的点无论如何都显示 */
+        /** 关系线：只在两端都画得出来时连；3D 里按深度淡出 */
+        if (edgeOn) {
+          for (const l of built.links) {
+            const a = pos.get(l.a), b = pos.get(l.b)
+            if (!a || !b) continue
+            const on = !sel && !hover ? true : [l.a, l.b].includes(sel) || [l.a, l.b].includes(hover)
+            ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y)
+            ctx.strokeStyle = on ? 'rgba(140,190,255,.42)' : 'rgba(120,160,220,.1)'
+            ctx.lineWidth = on ? 1.2 : 0.8; ctx.stroke()
+          }
+        }
+
+        for (const p of projected) {
+          const s = p.star
+          const focus = sel === s.id || hover === s.id
+          const dim = (sel && sel !== s.id) || (q && !shown.matched.has(s.id))
+          const r = Math.max(1.6, Math.min(11, (2.2 + s.brightness * 5.2) * (is3d ? p.k * 1.5 : 1)))
+          ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2)
+          ctx.fillStyle = s.color
+          ctx.globalAlpha = dim ? 0.22 : 0.35 + 0.65 * s.brightness
+          if (glow) { ctx.shadowColor = s.color; ctx.shadowBlur = focus ? 20 : 9 }
+          ctx.fill(); ctx.shadowBlur = 0; ctx.globalAlpha = 1
+          if (focus) {
+            ctx.beginPath(); ctx.arc(p.x, p.y, r + 4, 0, Math.PI * 2)
+            ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.4; ctx.stroke()
+          }
+          p.r = r
+        }
+
+        /** 标签：两版都用矩形避让；3D 少放几个，避免旋转时名字跟着飘成一片 */
+        const labelNodes = projected.map((p) => ({ ...p, name: p.star.text, brightness: p.star.brightness, r: p.r }))
         if (labels) {
-          const picked = placeLabels(nodes, { maxLabels: 26, font: 11, maxChars: 6 })
-          if (focus && !picked.some((p) => p.full === focus)) {
-            const n = nodes.find((x) => x.name === focus)
-            if (n) picked.push({ name: n.name.slice(0, 6), full: n.name, x: n.x - 24, y: n.y - n.r - 18, w: 48, h: 15 })
-          }
-          ctx.textAlign = 'center'
-          ctx.textBaseline = 'middle'
+          const picked = placeLabels(labelNodes, { maxLabels: is3d ? 14 : 22, font: 11, maxChars: 7 })
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
           ctx.font = '11px ui-sans-serif,system-ui,sans-serif'
-          for (const p of picked) {
-            /** 先铺一层暗底：夜空上直接写字，暗色名字会糊进背景 */
-            ctx.fillStyle = 'rgba(8,12,22,.62)'
-            ctx.fillRect(p.x, p.y, p.w, p.h)
-            ctx.fillStyle = p.full === focus ? '#ffffff' : 'rgba(226,234,255,.9)'
-            ctx.fillText(p.name, p.x + p.w / 2, p.y + p.h / 2 + 0.5)
-          }
-        }
-        ctx.restore()
-
-        /* 图例：关系类型 → 色点。放右上角，最多 6 行 */
-        if (kinds.length) {
-          ctx.textAlign = 'left'
-          ctx.textBaseline = 'middle'
-          ctx.font = '11px ui-sans-serif,system-ui,sans-serif'
-          const rows = kinds.slice(0, 6)
-          rows.forEach((k, i) => {
-            const y = 16 + i * 16
-            ctx.beginPath(); ctx.arc(14, y, 3.5, 0, Math.PI * 2)
-            ctx.fillStyle = colorOf(k); ctx.fill()
-            ctx.fillStyle = 'rgba(226,234,255,.78)'
-            ctx.fillText(k.slice(0, 8), 24, y)
-          })
-          if (kinds.length > 6) {
-            ctx.fillStyle = 'rgba(226,234,255,.5)'
-            ctx.fillText(`+${kinds.length - 6} 类`, 24, 16 + 6 * 16)
+          for (const b of picked) {
+            ctx.fillStyle = 'rgba(8,12,22,.7)'; ctx.fillRect(b.x, b.y, b.w, b.h)
+            ctx.fillStyle = 'rgba(232,240,255,.94)'
+            ctx.fillText(b.name, b.x + b.w / 2, b.y + b.h / 2 + 0.5)
           }
         }
 
-        /* 统计角标 + 操作提示 */
-        ctx.textAlign = 'right'
-        ctx.fillStyle = 'rgba(226,234,255,.55)'
-        ctx.fillText(`${nodes.length} 实体 · ${links.length} 关系 · ${Math.round(zoom * 100)}%`, W - 12, 16)
-        ctx.textAlign = 'left'
-        ctx.fillStyle = 'rgba(226,234,255,.42)'
-        ctx.fillText('滚轮缩放 · 拖拽平移 · 点星看人', 12, H - 12)
-      }, [sig, labels, zoom, pan, tick, hover, kinds.length])
-
-      if (!edges?.length) return null
-
-      /** 命中检测用同一份布局；没有布局时（首帧前）点不动，直接放过 */
-      const hitAt = (cx, cy) => {
-        const cv = ref.current
-        const lay = cache.current?.lay
-        if (!cv || !lay) return null
-        const W = cv.clientWidth || 640
-        const x = (cx - (W / 2 + pan.x)) / zoom + W / 2
-        const y = (cy - (H / 2 + pan.y)) / zoom + H / 2
-        let best = null
-        let bestD = Infinity
-        for (const n of lay.nodes) {
-          const d = (n.x - x) ** 2 + (n.y - y) ** 2
-          if (d < (n.r + 8) ** 2 && d < bestD) { best = n; bestD = d }
-        }
-        return best
-      }
+        /** 角标：统计 + 视角 + 3D/2D 标记 */
+        ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(226,234,255,.58)'
+        ctx.fillText(`${shown.stars.length} 颗星 · ${built.links.length} 条关系 · ${Math.round(zoom * 100)}% · ${is3d ? '3D' : '2D'}`, W - 12, 16)
+        ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(226,234,255,.42)'
+        ctx.fillText(is3d ? '拖拽转视角 · 滚轮缩放 · 点星看详情' : '拖拽平移 · 滚轮缩放 · 点星看详情', 12, H - 12)
+      }, [sig, mode, zoom, yaw, pitch, pan, labels, glow, edgeOn, hover, sel, q, is3d])
 
       const localOf = (ev) => {
         const r = ref.current.getBoundingClientRect()
         return { x: ev.clientX - r.left, y: ev.clientY - r.top }
       }
+      const hitAt = (x, y) => {
+        let best = null, bestD = Infinity
+        for (const p of hits.current) {
+          const d = (p.x - x) ** 2 + (p.y - y) ** 2
+          if (d < (p.r + 8) ** 2 && d < bestD) { best = p.star; bestD = d }
+        }
+        return best
+      }
+
+      const forget = async (star) => {
+        if (!star || star.kind !== 'fact') return toast('这条不是事实，不能在这儿删')
+        const r = await quick('memory.remove', star.text)
+        toast(r?.ok === false ? (r.message || '没删掉') : (r.message || '删了'))
+        setSel(null)
+        if (reload) reload()
+      }
+      const addStar = async () => {
+        const text = addText.trim()
+        if (!text) return toast('先写点什么')
+        setAddBusy(true)
+        try {
+          const body = { text, scope: addScope }
+          if (addScope === 'chat' && mem?.chatId) body.chatId = mem.chatId
+          const r = await post('/memory/add', body)
+          toast(r?.ok === false ? (r.message || '没记上') : '记上了')
+          setAddText('')
+          if (reload) reload()
+        } catch (e) { toast('没记上：' + e.message) } finally { setAddBusy(false) }
+      }
+
+      const detail = sel ? byId.get(sel) : null
+      const fmt = (at) => at ? new Date(at).toLocaleDateString('zh-CN') : '没记时间'
 
       return h('div', null,
-        /* 工具条：搜索 / 关系类型 / 标签开关 / 重新布局 */
+        h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+          '把记忆画成星空：越亮记得越牢（亮度 = 权重 × 时间衰减，和淘汰用的是同一条公式）。位置按真实来源分星团：跨群事实 / 本会话 / 人物与实体 / 重要片段 / 熟人档案 / 已被取代。',
+          is3d ? '3D 下可拖拽转视角、自动旋转、看景深与星团光环。' : '2D 是正交投影：没有旋转和景深，但标签不叠、低配机器也不卡。'),
+        /* 第一行：模式 + 搜索 + 筛选 */
         h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
+          h('div', { style: { display: 'inline-flex', gap: 2, padding: 2, border: '1px solid var(--line)', borderRadius: 8 } },
+            ['2d', '3d'].map((m) => h('button', {
+              key: m, type: 'button', className: 'roost-btn',
+              'data-on': mode === m ? '1' : '0',
+              style: { padding: '2px 10px', background: mode === m ? 'var(--accent)' : 'transparent', color: mode === m ? '#fff' : 'inherit' },
+              onClick: () => setModeAndSave(m),
+            }, m.toUpperCase()))),
           h('input', {
-            className: 'roost-input',
-            style: { width: 150, padding: '3px 8px', fontSize: '11.5px' },
-            placeholder: '搜实体名',
-            value: q,
+            className: 'roost-input', style: { width: 150, padding: '3px 8px', fontSize: '11.5px' },
+            placeholder: '搜星星：内容 / 分类', value: q,
             onChange: (e) => setQ(e.target.value),
           }),
           h('select', {
-            className: 'roost-input',
-            style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
-            value: kind,
-            onChange: (e) => setKind(e.target.value),
+            className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
+            value: group, onChange: (e) => setGroup(e.target.value),
           },
-            h('option', { value: '' }, '全部关系'),
-            kinds.map((k) => h('option', { key: k, value: k }, k)),
+            h('option', { value: '' }, '全部区域'),
+            built.stats.groups.map((g) => h('option', { key: g.id, value: g.id }, `${g.label}（${g.count}）`)),
           ),
-          h('label', { style: { fontSize: '11.5px', display: 'inline-flex', alignItems: 'center', gap: 4 } },
-            h('input', { type: 'checkbox', checked: labels, onChange: (e) => setLabels(e.target.checked) }),
-            '显示名字'),
-          h('button', { type: 'button', className: 'roost-btn', onClick: () => { setTick((t) => t + 1); setZoom(1); setPan({ x: 0, y: 0 }) } }, '重新布局'),
+          h('select', {
+            className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
+            value: quickF, onChange: (e) => setQuickF(e.target.value),
+          },
+            h('option', { value: '' }, '不筛选'),
+            h('option', { value: 'dim' }, '只看快忘了'),
+            h('option', { value: 'recent' }, '只看最近 7 天'),
+          ),
+          h('button', {
+            type: 'button', className: 'roost-btn',
+            onClick: () => { setZoom(1); setYaw(0.45); setPitch(0.24); setPan({ x: 0, y: 0 }); setTick((t) => t + 1) },
+          }, '重置视角'),
           h('span', { className: 'roost-muted', style: { fontSize: 11.5, marginLeft: 'auto' } },
-            q || kind ? `筛出 ${shown.edges.length} 条` : ''),
+            `共 ${built.stats.total} 颗 · 清晰 ${built.stats.bright} · 快忘了 ${built.stats.dim} · 已被取代 ${built.stats.archived}`),
+        ),
+        /* 第二行：显示开关。3D 专属的在 2D 下禁用并说明 */
+        h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', fontSize: 11.5, marginBottom: 6 } },
+          h('label', { title: is3d ? '' : '自动旋转只在 3D 有意义', style: { opacity: is3d ? 1 : 0.45, display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            h('input', { type: 'checkbox', checked: is3d && spin, disabled: !is3d, onChange: toggle(setSpin, 'spin') }),
+            '自动旋转（仅 3D）'),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            h('input', { type: 'checkbox', checked: glow, onChange: toggle(setGlow, 'glow') }), '辉光'),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            h('input', { type: 'checkbox', checked: edgeOn, onChange: toggle(setEdgeOn, 'edgeOn') }), '关系线'),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            h('input', { type: 'checkbox', checked: labels, onChange: toggle(setLabels, 'labels') }), '显示名字'),
         ),
         h('canvas', {
           ref,
-          title: '点星看人；滚轮缩放，拖拽平移',
-          style: { width: '100%', height: H, borderRadius: 10, border: '1px solid rgba(120,160,220,.28)', display: 'block', cursor: 'grab' },
-          onWheel: (ev) => {
-            if (ev.preventDefault) ev.preventDefault()
-            setZoom((z) => Math.max(0.6, Math.min(2.6, z * (ev.deltaY > 0 ? 0.9 : 1.1))))
-          },
+          title: is3d ? '拖拽转视角 · 滚轮缩放 · 点星看详情' : '拖拽平移 · 滚轮缩放 · 点星看详情',
+          style: { width: '100%', height: H, borderRadius: 10, border: '1px solid rgba(120,160,220,.28)', display: 'block', cursor: 'grab', touchAction: 'none', overscrollBehavior: 'contain' },
+          /* wheel 由原生 passive:false 监听处理，这里不挂 onWheel */
           onMouseDown: (ev) => {
             const start = localOf(ev)
-            const from = { ...pan }
+            const from = { pan: { ...pan }, yaw, pitch }
             let moved = false
             const mv = (e2) => {
               const p = localOf(e2)
-              const dx = p.x - start.x; const dy = p.y - start.y
+              const dx = p.x - start.x, dy = p.y - start.y
               if (Math.abs(dx) + Math.abs(dy) > 3) moved = true
-              setPan({ x: from.x + dx, y: from.y + dy })
+              if (is3d) { setYaw(from.yaw + dx * 0.006); setPitch(Math.max(-1.2, Math.min(1.2, from.pitch - dy * 0.005))) }
+              else setPan({ x: from.pan.x + dx, y: from.pan.y + dy })
             }
             const up = (e2) => {
               if (typeof window !== 'undefined') {
@@ -5137,8 +5309,8 @@ select.roost-input{color-scheme:dark}
               }
               if (moved) return
               const p = localOf(e2)
-              const n = hitAt(p.x, p.y)
-              if (n && onPick) onPick(n.name)
+              const s = hitAt(p.x, p.y)
+              setSel(s ? s.id : null)
             }
             if (typeof window !== 'undefined') {
               window.addEventListener('mousemove', mv)
@@ -5147,22 +5319,53 @@ select.roost-input{color-scheme:dark}
           },
           onMouseMove: (ev) => {
             const p = localOf(ev)
-            const n = hitAt(p.x, p.y)
-            const next = n ? n.name : ''
+            const s = hitAt(p.x, p.y)
+            const next = s ? s.id : ''
             if (next !== hover) setHover(next)
           },
           onMouseLeave: () => setHover(''),
         }),
-        /* 图例文字版：画布里的图例可能被缩放/平移挤掉，这里留一份稳定的 */
-        kinds.length
-          ? h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginTop: 4, display: 'flex', gap: 10, flexWrap: 'wrap' } },
-              kinds.slice(0, 8).map((k) => h('span', { key: k, style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
-                h('span', { style: { width: 8, height: 8, borderRadius: 4, background: colorOf(k), display: 'inline-block' } }),
-                k)))
+        /* 图例：色点 + 数量，画布缩放/旋转也不会把它弄丢 */
+        h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginTop: 5, display: 'flex', gap: 10, flexWrap: 'wrap' } },
+          built.stats.groups.map((g) => h('span', { key: g.id, style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            h('span', { style: { width: 8, height: 8, borderRadius: 4, background: g.color, display: 'inline-block' } }),
+            `${g.label} ${g.count}`))),
+        /* 点星后的详情：只挂已经存在的写操作，不假装有编辑/复习/层级 */
+        detail
+          ? h('div', { style: { marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 8 } },
+              h('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 4 } }, detail.text),
+              h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginBottom: 8 } },
+                `${detail.groupLabel} · 亮度 ${Math.round(detail.brightness * 100)}% · 权重 ×${detail.w || 1} · ${fmt(detail.at)}`
+                + (detail.archived ? ' · 已被取代，不参与注入' : '')),
+              h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                detail.kind === 'fact'
+                  ? h('button', {
+                      type: 'button', className: 'roost-btn', disabled: Boolean(busy),
+                      onClick: () => forget(detail),
+                    }, '忘掉这条')
+                  : h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
+                      '这一类不能直接删，去对应分节操作（关系 / 档案 / 日记）'),
+                h('button', { type: 'button', className: 'roost-btn', onClick: () => setSel(null) }, '收起'),
+              ),
+            )
           : null,
+        /* 在星图上加一颗：复用 /memory/add（新增事实） */
+        h('div', { style: { marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
+          h('input', {
+            className: 'roost-input', style: { flex: '1 1 180px', padding: '3px 8px', fontSize: 11.5 },
+            placeholder: '加一条记忆…', value: addText,
+            onChange: (e) => setAddText(e.target.value),
+          }),
+          h('select', {
+            className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+            value: addScope, onChange: (e) => setAddScope(e.target.value),
+          },
+            h('option', { value: 'global' }, '跨群'),
+            h('option', { value: 'chat' }, '本会话')),
+          h('button', { type: 'button', className: 'roost-btn', disabled: addBusy, onClick: addStar }, addBusy ? '记…' : '加上去'),
+        ),
       )
     }
-
     function PeopleTab({ mem, toast, reload, quick, busy, setTab }) {
       const profiles = mem?.profiles || []
       const events = mem?.events || []
@@ -5329,13 +5532,11 @@ select.roost-input{color-scheme:dark}
                   : null,
                 (gp?.edges || []).length
                   ? h('div', { className: 'roost-list' },
-                      h('div', { style: { marginBottom: 8 } },
-                        /**
-                         * 30 → 60 条：上一版画布只有 220px 高，塞 30 条就已经糊了；
-                         * 现在 420px + 标签避让 + 可缩放，60 条（≈70 个实体）实测
-                         * 布局 16ms、最近两点 32px，还看得清。再往上就该分页了。
-                         */
-                        h(RelGraph, { edges: gp.edges.slice(0, 60), onPick: (name) => openPerson({ name }) })),
+                      /**
+                       * 2026-11-13：关系图不再单独画。人物 / 实体 / 关系连线
+                       * 都并进「记忆」页那张记忆星图了，这里只保留文字清单——
+                       * 同一个关系画两遍，用户得先判断在哪页看才算数。
+                       */
                       gp.edges.slice(0, 12).map((e) => h('div', { key: e.id, className: 'roost-item' },
                         h('span', { className: 't' }, `${e.src} —${e.rel}→ ${e.dst}`),
                         h('span', { className: 'd' }, dayOf(e.from)),
@@ -13135,13 +13336,17 @@ select.roost-input{color-scheme:dark}
      */
     exports.portView = portView
     /**
-     * 4.2 关系图重做后导出的三个纯函数。星图的可读性全靠它们：
-     * 布局排开、标签不叠、筛选不漏——三件事都能单独断言，不用起浏览器。
+     * 记忆星图的纯函数（2026-11-13 替换掉独立关系图）。
+     * 数据构建、筛选、2D/3D 投影、缩放档位、标签避让都能单独断言，
+     * 不用起浏览器；3D 透视的正确性尤其是"看代码看不出来"的那一类。
      */
-    exports.graphLayout = graphLayout
+    exports.starScoreOf = starScoreOf
+    exports.buildStarMap = buildStarMap
+    exports.filterStars = filterStars
+    exports.projectStars = projectStars
+    exports.wheelZoom = wheelZoom
     exports.placeLabels = placeLabels
-    exports.filterRels = filterRels
-    exports.RelGraph = RelGraph
+    exports.StarMap = StarMap
     return module.exports
   },
 })

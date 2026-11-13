@@ -1795,7 +1795,13 @@ test('4.1：人物页五节 01–05，人物墙 + 详情四栏 + 原三节全保
   /** 搜名字输入框（placeholder 不进 textOf，查源码） */
   const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
   assert.ok(src.includes("placeholder: '搜名字'"), '人物墙要有搜索框')
-  assert.ok(src.includes('function RelGraph'), '4.2 关系图组件要在')
+  /**
+   * 2026-11-13：独立关系图撤掉，人物/实体/关系连线全部并进「记忆」页的
+   * 记忆星图。人物页只留文字清单，别再出现第二个可视化入口。
+   */
+  assert.ok(src.includes('function StarMap'), '记忆星图组件要在')
+  assert.ok(!src.includes('function RelGraph'), '独立关系图不该再存在')
+  assert.ok(src.includes('h(StarMap, {'), '记忆页要挂记忆星图')
 })
 
 test('2.3/4.3：备份页五节 01–05，导出 / 待生效 / 清单 / 不带过去的 / 定时与云备份', () => {

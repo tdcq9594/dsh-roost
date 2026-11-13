@@ -1,19 +1,17 @@
-// 4.2 关系图重做（2026-11-13）的三个纯函数。
+// 记忆星图（2026-11-13 替换掉独立关系图）的纯函数测试。
 //
-// 为什么要单独测：星图的可读性全压在这三件事上——节点排开、标签不叠、
-// 筛选不漏。上一版「所有节点都写字 + 每条边都标关系」糊成一片，
-// 但 canvas 绘制在 Node 里跑不了，只能把决策部分抽成纯函数钉住。
+// 星图里最容易"看代码看不出来"的三件事：3D 透视投影对不对、2D/3D 是不是
+// 同一批星、亮度是不是真按权重算。全抽成纯函数，不起浏览器就能断言。
+// 画布本身用无头 Chrome 另看一眼成图（不进测试）。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-/** 够用的 React 替身：只占 hook 位，不执行副作用 */
 function makeReact() {
   const hooks = []
   let i = 0
   return {
-    reset() { i = 0; hooks.length = 0 },
     React: {
       createElement: (type, props, ...children) => ({ type, props: { ...(props || {}), children } }),
       useState: (init) => {
@@ -39,139 +37,165 @@ function loadClient() {
 }
 
 const mod = loadClient()
+const NOW = Date.UTC(2026, 10, 13)
+const DAY = 86_400_000
 
-/** 造一份边表：10 个实体、30 条关系，形状和 /memory 的 graph.edges 一致 */
-function sampleEdges() {
-  const names = ['大肥鱼', '阿岚', '猫', '主人', '小栖', '机器猫', '竹子', 'QQ', '群友A', '群友B']
-  const rels = ['喜欢', '讨厌', '认识', '约定']
-  const out = []
-  for (let i = 0; i < 30; i++) {
-    out.push({ id: `e${i}`, src: names[i % names.length], dst: names[(i * 3 + 1) % names.length], rel: rels[i % rels.length], from: 1_700_000_000_000 })
+/** 一份形状与 /memory 快照一致的夹具 */
+function sampleMem() {
+  return {
+    chatId: 'abcdef0123456789abcdef0123456789',
+    factsDetail: {
+      global: [
+        { text: '主人住在杭州', w: 3, at: NOW - DAY, src: { manual: true } },
+        { text: '主人怕花生', w: 1, at: NOW - 40 * DAY },
+        { text: '旧说法：主人住上海', w: 2, at: NOW - 300 * DAY, until: NOW - 200 * DAY },
+      ],
+      chat: [{ text: '这个群爱发猫图', w: 2, at: NOW - 2 * DAY }],
+    },
+    journal: {
+      top: [{ id: 'j1', text: '昨天一起看了雪', score: 0.9, at: NOW - DAY, accessed: 4 }],
+    },
+    graph: {
+      entities: [
+        { name: '大肥鱼', lastSeen: NOW - DAY },
+        { name: '猫', lastSeen: NOW - 3 * DAY },
+        { name: '竹子', lastSeen: NOW - 10 * DAY },
+      ],
+      edges: [
+        { src: '大肥鱼', dst: '猫', rel: '喜欢' },
+        { src: '猫', dst: '不存在的人', rel: '认识' },
+      ],
+    },
+    profiles: [{ name: '阿岚', impression: '爱在半夜发图', at: NOW - DAY }],
   }
-  return out
 }
 
-test('关系图布局：节点去重、度数计数、自环与空名丢掉', () => {
-  const lay = mod.graphLayout([
-    { src: '阿岚', dst: '猫', rel: '喜欢' },
-    { src: '阿岚', dst: '猫', rel: '认识' },
-    { src: '阿岚', dst: '阿岚', rel: '自恋' },
-    { src: '', dst: '猫', rel: '空名' },
-    { src: '猫', dst: '主人', rel: '认识' },
-  ], { w: 400, h: 300 })
-  assert.deepEqual(lay.nodes.map((n) => n.name).sort(), ['主人', '猫', '阿岚'].sort())
-  const a = lay.nodes.find((n) => n.name === '阿岚')
-  /** 两条边都指向猫，度数各算一次；自环不算 */
-  assert.equal(a.deg, 2)
-  assert.equal(lay.links.length, 3)
-  assert.equal(lay.degMax, 3)
+test('亮度公式：权重 × 40 天半衰期，被取代的打折，重要片段用现成分数', () => {
+  const fresh = mod.starScoreOf({ w: 2, at: NOW }, NOW)
+  const half = mod.starScoreOf({ w: 2, at: NOW - 40 * DAY }, NOW)
+  assert.ok(Math.abs(half - fresh / 2) < 1e-9, `40 天该衰减一半：${fresh} → ${half}`)
+  const hist = mod.starScoreOf({ w: 2, at: NOW, until: NOW }, NOW)
+  assert.ok(hist < fresh, '被取代的说法要更暗')
+  assert.equal(mod.starScoreOf({ score: 0.9 }, NOW), 0.9, '重要片段直接用 journal.top 的分数')
 })
 
-test('关系图布局：坐标有限、不出画布、同一份数据画两次完全一样', () => {
-  const edges = sampleEdges()
-  const one = mod.graphLayout(edges, { w: 640, h: 420 })
-  const two = mod.graphLayout(edges, { w: 640, h: 420 })
-  for (const n of one.nodes) {
-    assert.ok(Number.isFinite(n.x) && Number.isFinite(n.y), `${n.name} 坐标不是有限数`)
-    assert.ok(n.x >= 0 && n.x <= 640, `${n.name} 跑出画布：x=${n.x}`)
-    assert.ok(n.y >= 0 && n.y <= 420, `${n.name} 跑出画布：y=${n.y}`)
+test('建星图：六种真实来源都进星，空快照不炸', () => {
+  const built = mod.buildStarMap(sampleMem(), { now: NOW })
+  const groups = new Set(built.stars.map((s) => s.group))
+  for (const g of ['global', 'chat', 'history', 'episode', 'entity', 'profile']) {
+    assert.ok(groups.has(g), `缺「${g}」这一类星`)
   }
-  /** 确定性：初始位置用黄金角螺旋而不是 Math.random */
-  assert.deepEqual(one.nodes.map((n) => [n.name, n.x, n.y]), two.nodes.map((n) => [n.name, n.x, n.y]))
-})
-
-test('关系图布局：节点不叠在一起（上一版最大的问题）', () => {
-  const lay = mod.graphLayout(sampleEdges(), { w: 640, h: 420 })
-  let min = Infinity
-  for (let i = 0; i < lay.nodes.length; i++) {
-    for (let j = i + 1; j < lay.nodes.length; j++) {
-      const a = lay.nodes[i]; const b = lay.nodes[j]
-      min = Math.min(min, Math.hypot(a.x - b.x, a.y - b.y))
-    }
+  assert.equal(built.stats.total, built.stars.length)
+  assert.equal(built.stats.archived, 1, '被取代的事实算归档')
+  assert.equal(built.stats.live, built.stars.length - 1)
+  for (const s of built.stars) {
+    assert.ok(Number.isFinite(s.x) && Number.isFinite(s.y) && Number.isFinite(s.z), `${s.id} 坐标不是有限数`)
+    assert.ok(s.brightness >= 0.14 && s.brightness <= 1, `${s.id} 亮度越界：${s.brightness}`)
   }
-  /** 节点半径最大 10，两圆心 24 以内就一定叠 */
-  assert.ok(min > 24, `最近两个节点只差 ${min.toFixed(1)}px，会叠在一起`)
+  /** 空快照：不能抛，也得给一份能渲染的空星图 */
+  const empty = mod.buildStarMap(null, { now: NOW })
+  assert.equal(empty.stars.length, 0)
+  assert.equal(empty.stats.total, 0)
 })
 
-test('关系图布局：70 个实体也不炸、不挤', () => {
-  const edges = []
-  for (let i = 0; i < 70; i++) edges.push({ src: `实体${i}`, dst: `实体${(i * 7 + 3) % 70}`, rel: ['喜欢', '认识', '约定'][i % 3] })
-  const t0 = Date.now()
-  const lay = mod.graphLayout(edges, { w: 900, h: 420 })
-  const dt = Date.now() - t0
-  assert.equal(lay.nodes.length, 70)
-  /** 220 轮迭代在 70 节点上必须远低于一帧预算；超过 500ms 就是算法退化了 */
-  assert.ok(dt < 500, `布局耗时 ${dt}ms，太慢`)
-  let min = Infinity
-  for (let i = 0; i < lay.nodes.length; i++) {
-    for (let j = i + 1; j < lay.nodes.length; j++) {
-      min = Math.min(min, Math.hypot(lay.nodes[i].x - lay.nodes[j].x, lay.nodes[i].y - lay.nodes[j].y))
-    }
-  }
-  assert.ok(min > 16, `70 个实体时最近两点只差 ${min.toFixed(1)}px`)
+test('建星图：确定性（黄金角球面，不用 random）+ 关系线不造假端点', () => {
+  const mem = sampleMem()
+  const a = mod.buildStarMap(mem, { now: NOW })
+  const b = mod.buildStarMap(mem, { now: NOW })
+  assert.deepEqual(a.stars.map((s) => [s.id, s.x, s.y, s.z]), b.stars.map((s) => [s.id, s.x, s.y, s.z]))
+  assert.equal(a.links.length, 1, '只有两端都是实体的关系才连')
+  assert.equal(a.links[0].rel, '喜欢')
 })
 
-test('标签避让：数量封顶、两两不重叠、优先高度数节点', () => {
-  const lay = mod.graphLayout(sampleEdges(), { w: 640, h: 420 })
-  const picked = mod.placeLabels(lay.nodes, { maxLabels: 6, font: 11, maxChars: 6 })
-  assert.ok(picked.length <= 6, `超过 maxLabels：${picked.length}`)
+test('筛选：搜索 / 星团 / 只看快忘了 / 最近 7 天可叠加', () => {
+  const { stars } = mod.buildStarMap(sampleMem(), { now: NOW })
+  assert.equal(mod.filterStars(stars, {}, { now: NOW }).stars.length, stars.length)
+  const q = mod.filterStars(stars, { q: '花生' }, { now: NOW })
+  assert.equal(q.stars.length, 1)
+  assert.ok(q.matched.has(q.stars[0].id))
+
+  const g = mod.filterStars(stars, { group: 'entity' }, { now: NOW })
+  assert.ok(g.stars.length >= 3)
+  for (const s of g.stars) assert.equal(s.group, 'entity')
+
+  const dim = mod.filterStars(stars, { quick: 'dim' }, { now: NOW })
+  for (const s of dim.stars) assert.ok(s.brightness < 0.35)
+
+  const recent = mod.filterStars(stars, { quick: 'recent' }, { now: NOW })
+  assert.ok(recent.stars.length > 0)
+  for (const s of recent.stars) assert.ok(s.at && NOW - s.at <= 7 * DAY)
+
+  const both = mod.filterStars(stars, { group: 'entity', quick: 'recent' }, { now: NOW })
+  for (const s of both.stars) assert.equal(s.group, 'entity')
+})
+
+test('3D 投影：透视除法、深度裁剪、yaw 转得动，且都是有限数', () => {
+  const stars = [{ id: 'a', x: 0, y: 0, z: 0, brightness: 1 }, { id: 'b', x: 120, y: 60, z: 200, brightness: 1 }]
+  const base = { yaw: 0, pitch: 0, zoom: 1, pan: { x: 0, y: 0 }, cam: { x: 0, y: 0, z: 0 } }
+  const p = mod.projectStars(stars, base, { W: 640, H: 420, mode: '3d', radius: 240 })
+  assert.equal(p.length, 2)
+  for (const v of p) assert.ok(Number.isFinite(v.x) && Number.isFinite(v.y) && v.k > 0)
+  /** 近的点 k 更大（近大远小） */
+  const near = p.find((v) => v.star.id === 'b')
+  const far = p.find((v) => v.star.id === 'a')
+  assert.ok(near.k > far.k, `近星该更大：${near.k} vs ${far.k}`)
+  /** yaw 变化要真的改变横坐标 */
+  const turned = mod.projectStars(stars, { ...base, yaw: 1.2 }, { W: 640, H: 420, mode: '3d', radius: 240 })
+  assert.notEqual(Math.round(turned.find((v) => v.star.id === 'b').x), Math.round(near.x))
+  /** 相机背后的点必须丢掉，否则会画到画布外 */
+  const behind = mod.projectStars([{ id: 'x', x: 0, y: 0, z: 240 * 3 - 10 }], base, { W: 640, H: 420, mode: '3d', radius: 240 })
+  assert.equal(behind.length, 0, 'depth < 60 的点必须被裁掉')
+  /** 远的先画：返回按 depth 降序 */
+  assert.ok(p[0].depth >= p[1].depth)
+})
+
+test('2D 投影：正交、不受 yaw/pitch 影响、与 3D 是同一批星', () => {
+  const stars = [{ id: 'a', x: 100, y: 40, z: 0 }, { id: 'b', x: -80, y: -30, z: 200 }]
+  const base = { yaw: 0.9, pitch: 0.5, zoom: 1, pan: { x: 0, y: 0 } }
+  const a = mod.projectStars(stars, base, { W: 640, H: 420, mode: '2d' })
+  const b = mod.projectStars(stars, { ...base, yaw: 0, pitch: 0 }, { W: 640, H: 420, mode: '2d' })
+  assert.deepEqual(a.map((v) => [v.star.id, v.x, v.y]), b.map((v) => [v.star.id, v.x, v.y]), '2D 不该受旋转影响')
+  const c = mod.projectStars(stars, base, { W: 640, H: 420, mode: '3d' })
+  assert.deepEqual(a.map((v) => v.star.id).sort(), c.map((v) => v.star.id).sort(), '两版必须是同一批星')
+  /** pan 要真的平移 */
+  const moved = mod.projectStars(stars, { ...base, pan: { x: 30, y: -10 } }, { W: 640, H: 420, mode: '2d' })
+  assert.equal(moved.find((v) => v.star.id === 'a').x - a.find((v) => v.star.id === 'a').x, 30)
+})
+
+test('滚轮缩放：上下方向正确、边界夹紧，且只用原生 passive:false 监听', () => {
+  assert.ok(mod.wheelZoom(1, -100) > 1, '向上滚放大')
+  assert.ok(mod.wheelZoom(1, 100) < 1, '向下滚缩小')
+  assert.equal(mod.wheelZoom(2.6, -100), 2.6, '不能越过上限')
+  assert.equal(mod.wheelZoom(0.6, 100), 0.6, '不能越过下限')
+  assert.equal(mod.wheelZoom(0, -100), 1.1, '非法当前值退回 1 再算')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("addEventListener('wheel', onWheel, { passive: false })"), '必须原生非被动监听，否则拦不住页面滚动')
+  assert.ok(!src.includes('onWheel: (ev)'), '不能再挂 React onWheel（会缩放两次，且拦不住滚动）')
+})
+
+test('标签避让：数量封顶、两两不重叠、优先亮星', () => {
+  const nodes = Array.from({ length: 40 }, (_, i) => ({
+    name: `星星${i}`, x: 40 + (i % 8) * 70, y: 40 + Math.floor(i / 8) * 80,
+    brightness: (40 - i) / 40, r: 4 + (40 - i) / 10,
+  }))
+  const picked = mod.placeLabels(nodes, { maxLabels: 18, font: 11, maxChars: 7 })
+  assert.ok(picked.length <= 18)
+  assert.ok(picked.length >= 1)
   for (let i = 0; i < picked.length; i++) {
     for (let j = i + 1; j < picked.length; j++) {
-      const a = picked[i]; const b = picked[j]
-      const overlap = !(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y)
-      assert.equal(overlap, false, `「${a.name}」和「${b.name}」的标签叠了`)
+      const a = picked[i], b = picked[j]
+      assert.equal(!(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y), false, '标签重叠了')
     }
   }
-  /** 度数最高的那个必须在，否则等于把「中心人物」藏起来 */
-  const top = [...lay.nodes].sort((a, b) => b.deg - a.deg)[0]
-  assert.ok(picked.some((p) => p.full === top.name), `度数最高的「${top.name}」没拿到标签`)
-  /** 名字按 maxChars 截断（画布上放不下全名） */
-  for (const p of picked) assert.ok([...p.name].length <= 6, `「${p.name}」超过 6 个字`)
+  assert.ok(picked.some((p) => p.full === '星星0'), '最亮的星必须拿到标签')
+  /** 全挤在一起时宁可少放，也不硬叠 */
+  const dense = Array.from({ length: 30 }, (_, i) => ({ name: `人${i}`, x: 20 + (i % 3) * 8, y: 20 + Math.floor(i / 3) * 3, brightness: 1, r: 4 }))
+  assert.ok(mod.placeLabels(dense, { maxLabels: 30 }).length < 30)
 })
 
-test('标签避让：放不下就跳过，不硬挤', () => {
-  /** 30 个节点全挤在 40×40 里，能放下的标签必然远少于 30 */
-  const nodes = Array.from({ length: 30 }, (_, i) => ({ name: `人${i}`, x: 20 + (i % 3) * 8, y: 20 + Math.floor(i / 3) * 3, deg: 30 - i, r: 4 }))
-  const picked = mod.placeLabels(nodes, { maxLabels: 30 })
-  assert.ok(picked.length < 30, '挤在一起还能全放下，说明避让没生效')
-  assert.ok(picked.length >= 1, '至少放得下一个')
-})
-
-test('关系筛选：关键字命中任一端、类型精确匹配、空条件返回全部', () => {
-  const edges = sampleEdges()
-  const all = mod.filterRels(edges, {})
-  assert.equal(all.edges.length, edges.length)
-  assert.equal(all.hit.size, 0, '没搜索词时不该有命中集合')
-
-  const byName = mod.filterRels(edges, { q: '阿岚' })
-  assert.ok(byName.edges.length > 0)
-  for (const e of byName.edges) assert.ok(e.src === '阿岚' || e.dst === '阿岚')
-  assert.deepEqual([...byName.hit], ['阿岚'])
-
-  const byRel = mod.filterRels(edges, { kind: '喜欢' })
-  assert.ok(byRel.edges.length > 0)
-  for (const e of byRel.edges) assert.equal(e.rel, '喜欢')
-
-  /** 大小写不敏感：实体名里可能有英文 */
-  const upper = mod.filterRels([{ src: 'QQ', dst: '猫', rel: '认识' }], { q: 'qq' })
-  assert.equal(upper.edges.length, 1)
-})
-
-test('关系图组件仍然导出，且人物页 04 还在用它', () => {
-  assert.equal(typeof mod.RelGraph, 'function')
-  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
-  assert.ok(src.includes('h(RelGraph, {'), '人物页没挂关系图')
-  /** 上一版的死结构不能回来：每条边都写关系字 */
-  assert.ok(!src.includes('ctx.fillText(l.rel ||'), '关系字又画回线上了')
-})
-
-test('关系图工具条：搜索 / 类型筛选 / 名字开关 / 重新布局 / 图例都在', () => {
-  const rt = makeReact()
-  const React = rt.React
-  const tree = mod.RelGraph({
-    edges: sampleEdges(),
-    onPick: () => {},
-  })
+test('星图组件：2D/3D 开关、3D 专属开关、420px 画布、交互都在', () => {
+  assert.equal(typeof mod.StarMap, 'function')
+  const tree = mod.StarMap({ mem: sampleMem(), toast: () => {}, reload: () => {}, quick: async () => ({ ok: true }), busy: false })
   const flat = []
   ;(function walk(n) {
     if (!n || typeof n !== 'object') return
@@ -186,20 +210,23 @@ test('关系图工具条：搜索 / 类型筛选 / 名字开关 / 重新布局 /
     return textOf(n.props?.children)
   }
   const txt = textOf(tree)
-  assert.ok(txt.includes('显示名字'), '缺「显示名字」开关')
-  assert.ok(txt.includes('重新布局'), '缺「重新布局」按钮')
+  for (const must of ['2D', '3D', '全部区域', '只看快忘了', '只看最近 7 天', '重置视角', '自动旋转（仅 3D）', '辉光', '关系线', '显示名字', '加上去']) {
+    assert.ok(txt.includes(must), `缺「${must}」`)
+  }
   const canvas = flat.find((n) => n.type === 'canvas')
-  assert.ok(canvas, '没有画布')
-  assert.equal(canvas.props.style.height, 420, '画布高度必须是 420（上一版 220 是糊的主因）')
-  /** 画布上挂了缩放/平移/点选三类交互 */
-  for (const ev of ['onWheel', 'onMouseDown', 'onMouseMove', 'onMouseLeave']) {
+  assert.ok(canvas)
+  assert.equal(canvas.props.style.height, 420)
+  for (const ev of ['onMouseDown', 'onMouseMove', 'onMouseLeave']) {
     assert.equal(typeof canvas.props[ev], 'function', `画布缺 ${ev}`)
   }
-  const opts = flat.filter((n) => n.type === 'option').map((n) => textOf(n))
-  assert.ok(opts.includes('全部关系'), '类型下拉缺「全部关系」')
-  assert.ok(opts.includes('喜欢'), '类型下拉缺具体关系类型')
-  /** 图例文字版：每种关系类型一个色点 */
-  const rels = [...new Set(sampleEdges().map((e) => e.rel))]
-  for (const r of rels) assert.ok(txt.includes(r), `图例缺「${r}」`)
-  assert.ok(React, '替身 React 必须存在')
+  assert.equal(canvas.props.onWheel, undefined, '滚轮必须走原生监听')
+  /** 3D 专属功能要标明只在 3D，不能在 2D 假装能用 */
+  assert.ok(txt.includes('仅 3D'))
+})
+
+test('记忆页挂了星图，人物页不再挂独立关系图', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes('h(StarMap, {'), '记忆页没挂星图')
+  assert.ok(!src.includes('h(RelGraph, {'), '人物页还挂着独立关系图')
+  assert.ok(!src.includes('function RelGraph'), '关系图组件没撤干净')
 })
