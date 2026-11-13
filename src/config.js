@@ -828,6 +828,11 @@ export const DEFAULTS = {
      */
     byKind: { c2c: {}, group: {} },
     /**
+     * 5.4：没单独配时按会话类型给推荐强度（私聊 high / 群聊 low）。
+     * 显式设了 `byChat` / `byKind` / `effort` 的都优先；关掉就完全回落原行为。
+     */
+    effortByKind: true,
+    /**
      * 所有聊天的默认模型（面板「聊天用的模型」那张卡）。
      *
      * 单独一层而不是直接写 byKind 的两个键：写 byKind 会让人以为

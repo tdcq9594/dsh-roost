@@ -56,7 +56,7 @@ import { createExtPanel, createRejectionLog } from './ext-panel.js';
 import { createExtApiHooks } from './ext-api-hooks.js';
 import { createExtPatch } from './ext-patch.js';
 import { createExtMarket } from './ext-market.js';
-import { pickModelFor, pickReasoningEffort } from './model-pick.js';
+import { pickModelFor, pickReasoningEffort, pickEffortFor } from './model-pick.js';
 import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { rerankHits } from './rerank.js';
@@ -3441,13 +3441,19 @@ export function apply(ctx) {
       }
       const llm = ctx.get?.('llm');
       /**
-       * 思考强度：哪一级显式写了就用哪一级，没写才用「全局思考强度」。
-       *
-       * 两级都空 = 不传，让 adapter 自己用默认档（直连后的旧行为）。
+       * 思考强度（5.4）：本会话 > 会话类型 > 全局 > 按类型推荐 > 模型自带。
+       * 「推荐」只在三处显式配置都空时生效（私聊 high / 群聊 low），
+       * 配置 `model.effortByKind: false` 可整层关掉。
+       * 全空才不传，让 adapter 自己用默认档。
        * 真正的「这台机器上这个模型认不认这一档」还是由 `pickReasoningEffort`
        * 去问宿主，不认就不传——否则整轮在 provider I/O 之前就失败。
        */
-      const wantEffort = sel.reasoningEffort || String(cfg.model?.effort ?? '').trim();
+      const wantEffort = pickEffortFor({
+        byChat: cfg.model?.byChat, byKind: cfg.model?.byKind,
+        globalEffort: cfg.model?.effort, modelEffort: sel.reasoningEffort,
+        chatId, kind,
+        recommendByKind: cfg.model?.effortByKind !== false,
+      });
       const effort = await pickReasoningEffort({ ...sel, reasoningEffort: wantEffort }, llm?.resolveModelInfo?.bind(llm));
       const choice = {
         provider: sel.provider,

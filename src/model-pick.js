@@ -51,6 +51,33 @@ export function pickModelFor({ byChat, byKind, defaultSel, chatId = '', kind = '
 }
 
 /**
+ * 5.4：按聊天取思考强度（群低 / 私聊高，也能按会话单独覆盖）。
+ *
+ * 优先级：本会话 > 会话类型 > 全局 > 按类型推荐 > 模型自带。
+ * 单独抽一层而不是塞进 pickModelFor：`pick()` 要求 provider+model 齐全，
+ * 只给 effort 的补丁层会被整层丢掉。
+ *
+ * `recommendByKind` 是「没任何显式配置时」的推荐（私聊 high / 群聊 low），
+ * 只作兜底：显式写过的 `byChat` / `byKind` / `effort` 一律优先；关掉开关
+ * 则这一层完全不参与，回落到「显式配置 > 模型自带」。
+ * 注意它默认开，所以**未配置的会话升级后会拿到推荐档**——这是 5.4 的
+ * 功能本身；如果要逐字保持旧行为，把 `model.effortByKind` 设为 false，
+ * 并且别写 `model.effort`（写了就比模型自带优先）。
+ */
+export function pickEffortFor({
+  byChat = {}, byKind = {}, globalEffort = '', modelEffort = '',
+  chatId = '', kind = '', recommendByKind = true,
+} = {}) {
+  const s = (v) => String(v ?? '').trim();
+  const k = s(kind);
+  const own = s(chatId) ? byChat?.[s(chatId)]?.reasoningEffort : '';
+  const byType = k ? byKind?.[k]?.reasoningEffort : '';
+  /** 推荐只作兜底：用户显式写过的全局 effort 优先，关掉开关则完全不参与 */
+  const recommend = recommendByKind ? (k === 'c2c' ? 'high' : k === 'group' ? 'low' : '') : '';
+  return s(own) || s(byType) || s(globalEffort) || recommend || s(modelEffort);
+}
+
+/**
  * E8：这个模型支不支持当前配的思考强度。
  *
  * @param {{provider:string, model:string, reasoningEffort?:string}} sel

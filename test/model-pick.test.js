@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { pickModelFor, pickReasoningEffort } from '../src/model-pick.js';
+import { pickModelFor, pickReasoningEffort, pickEffortFor } from '../src/model-pick.js';
 import { DEFAULTS } from '../src/config.js';
 
 test('E6：单个聊天覆盖优先，没配才用全局默认', () => {
@@ -109,4 +109,35 @@ test('E10：quick 有 model.get / model.set，写 byChat 用整体替换并清�
   /** 必须是整体替换：patchConfig 是深合并，删掉的 chatId 会被合回来 */
   assert.match(src, /cur\.model = \{ \.\.\.\(cur\.model \|\| \{\}\), byChat: next \}/);
   assert.match(src, /modelApplied\.delete\(sid\)/, '改完要让已存在的会话重新套模型');
+});
+
+
+test('5.4 pickEffortFor：本会话 > 类型 > 全局 > 推荐 > 模型自带', () => {
+  const base = { byKind: { c2c: { reasoningEffort: 'medium' } }, globalEffort: '', modelEffort: '' };
+  /** 没配任何东西时按类型给推荐：私聊 high、群聊 low */
+  assert.equal(pickEffortFor({ kind: 'c2c' }), 'high');
+  assert.equal(pickEffortFor({ kind: 'group' }), 'low');
+  assert.equal(pickEffortFor({ kind: '' }), '');
+  /** 关掉推荐开关就完全回落 */
+  assert.equal(pickEffortFor({ kind: 'c2c', recommendByKind: false }), '');
+  /** 显式全局 effort 优先于推荐 */
+  assert.equal(pickEffortFor({ kind: 'group', globalEffort: 'high' }), 'high');
+  /** 类型配置优先于全局与推荐 */
+  assert.equal(pickEffortFor({ ...base, kind: 'c2c', globalEffort: 'low' }), 'medium');
+  /** 本会话覆盖一切 */
+  assert.equal(pickEffortFor({
+    ...base, kind: 'c2c', chatId: 'G1', globalEffort: 'low',
+    byChat: { G1: { reasoningEffort: 'minimal' } },
+  }), 'minimal');
+  /** 模型自带是最后兜底 */
+  assert.equal(pickEffortFor({ kind: '', modelEffort: 'medium', recommendByKind: false }), 'medium');
+});
+
+test('5.4 配置与接线：推荐开关默认开，applyDefaultModel 用纯函数', async () => {
+  const { DEFAULTS } = await import('../src/config.js');
+  assert.equal(DEFAULTS.model?.effortByKind, true);
+  assert.deepEqual(DEFAULTS.model.byKind, { c2c: {}, group: {} }, '不偷偷改既有默认值');
+  const src = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.ok(src.includes('pickEffortFor({'), 'applyDefaultModel 要走纯函数');
+  assert.ok(src.includes('recommendByKind: cfg.model?.effortByKind'), '开关要接上');
 });
