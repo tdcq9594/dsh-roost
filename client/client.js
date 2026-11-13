@@ -2923,6 +2923,17 @@ select.roost-input{color-scheme:dark}
       const [busy, setBusy] = useState(false)
       const [pendingDraft, setPendingDraft] = useState(null)
       const [err, setErr] = useState('')
+      /**
+       * 5.5 可选：AI 润色。`polishFor` 是当前展开的那一段的 key（不是索引——
+       * 删段之后索引会错位，key 不会）。`polishDraft` 是**待用户确认**的改写，
+       * 点「采用」才写进 blocks，绝不自动替换。
+       */
+      const [polishPresets, setPolishPresets] = useState([])
+      const [polishFor, setPolishFor] = useState('')
+      const [polishPreset, setPolishPreset] = useState('concise')
+      const [polishNote, setPolishNote] = useState('')
+      const [polishBusy, setPolishBusy] = useState(false)
+      const [polishDraft, setPolishDraft] = useState(null)
 
       const clearDraft = () => { try { localStorage.removeItem(DRAFT_KEY) } catch {} }
       const load = useCallback(async () => {
@@ -2932,6 +2943,8 @@ select.roost-input{color-scheme:dark}
         /** 段名与内容由服务端自动识别，前端只负责改 / 加 / 删 */
         const fresh = r?.blocks || []
         setBlocks(fresh)
+        /** 预设清单只有服务端一份，别在前端另抄 */
+        setPolishPresets(Array.isArray(r?.polishPresets) ? r.polishPresets : [])
         setDirty(false)
         try {
           const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null')
@@ -2954,6 +2967,26 @@ select.roost-input{color-scheme:dark}
       const addBlock = () => apply([...(blocks || []), {
         key: 'custom:' + Date.now(), title: '', titleLine: '', text: '', builtin: false, custom: true,
       }])
+      /**
+       * 跑一次润色。**只发这一段正文**，服务端也不写盘——拼回去是这里的事。
+       * 失败只 toast，不动 blocks：润色是锦上添花，不能因为它坏了编辑。
+       */
+      const runPolish = async (b) => {
+        const text = String(b?.text || '').trim()
+        if (!text) return toast('这段是空的，没什么可改')
+        setPolishBusy(true)
+        const r = await post('/personas/polish', {
+          id,
+          text,
+          preset: polishPreset,
+          instruction: polishNote,
+          section: b.title || '',
+        })
+        setPolishBusy(false)
+        if (r?.ok === false) return toast(r.reason || r.message || '润色失败')
+        setPolishDraft({ key: b.key, text: r.text, warnings: r.warnings || [] })
+      }
+
       const save = async () => {
         if (!blocks) return
         setBusy(true)
@@ -3031,6 +3064,71 @@ select.roost-input{color-scheme:dark}
                     value: b.text || '',
                     onChange: (e) => put(i, 'text', e.target.value),
                   }),
+
+                  /**
+                   * 5.5 可选：AI 润色。默认收起——多数时候人是自己写的，
+                   * 按钮常驻会让人以为「不点一下就写不好」。
+                   * 改写结果只做对比展示，点「采用」才替换正文。
+                   */
+                  h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 4, flexWrap: 'wrap' } },
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      disabled: polishBusy || !String(b.text || '').trim(),
+                      onClick: () => {
+                        setPolishFor(polishFor === b.key ? '' : b.key)
+                        setPolishDraft(null)
+                      },
+                    }, polishFor === b.key ? '收起润色' : '润色'),
+                    polishFor === b.key && polishPresets.length
+                      ? h('select', {
+                        className: 'roost-input', style: { width: 'auto' },
+                        value: polishPreset, onChange: (e) => setPolishPreset(e.target.value),
+                      }, polishPresets.map((x) => h('option', { key: x.id, value: x.id }, x.label)))
+                      : null,
+                    polishFor === b.key
+                      ? h('input', {
+                        className: 'roost-input', style: { flex: '1 1 180px' },
+                        placeholder: '额外要求（可不填），如「别用感叹号」',
+                        value: polishNote, onChange: (e) => setPolishNote(e.target.value),
+                        onKeyDown: (e) => { if (e.key === 'Enter') runPolish(b) },
+                      })
+                      : null,
+                    polishFor === b.key
+                      ? h('button', {
+                        type: 'button', className: 'roost-btn', disabled: polishBusy,
+                        onClick: () => runPolish(b),
+                      }, polishBusy ? '改着…' : '开始润色')
+                      : null),
+
+                  polishFor === b.key && polishDraft && polishDraft.key === b.key
+                    ? h('div', {
+                      className: 'roost-note',
+                      style: { marginTop: 6, padding: '8px 10px', borderRadius: 8, background: 'rgba(120,120,255,.08)' },
+                    },
+                      (polishDraft.warnings || []).map((w, wi) =>
+                        h('div', { key: wi, style: { color: 'var(--warn)', fontSize: 11.5, marginBottom: 4 } }, w)),
+                      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: 8 } },
+                        h('div', null,
+                          h('div', { className: 'roost-muted', style: { fontSize: 10.5 } }, '原文'),
+                          h('div', { style: { fontSize: 11.5, lineHeight: 1.7, whiteSpace: 'pre-wrap', opacity: .75 } }, b.text)),
+                        h('div', null,
+                          h('div', { className: 'roost-muted', style: { fontSize: 10.5 } }, '改写'),
+                          h('div', { style: { fontSize: 11.5, lineHeight: 1.7, whiteSpace: 'pre-wrap' } }, polishDraft.text))),
+                      h('div', { style: { display: 'flex', gap: 6, marginTop: 8 } },
+                        h('button', {
+                          type: 'button', className: 'roost-btn roost-primary',
+                          onClick: () => {
+                            put(i, 'text', polishDraft.text)
+                            setPolishDraft(null)
+                            setPolishFor('')
+                            toast('已采用改写（还没保存，记得点下面的「保存分节」）')
+                          },
+                        }, '采用改写'),
+                        h('button', {
+                          type: 'button', className: 'roost-btn',
+                          onClick: () => setPolishDraft(null),
+                        }, '扔掉')))
+                    : null,
                 )
               }),
               h('button', {

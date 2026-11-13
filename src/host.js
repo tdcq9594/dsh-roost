@@ -115,6 +115,7 @@ import { splitPersonaText, joinPersonaText, joinPersonaBlocks } from './persona-
 import { simulate, SIM_PERSONAS } from './simulate.js';
 import { buildExtension, formatScaffold } from './ext-wizard.js';
 import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
+import { polishText, POLISH_PRESETS } from './persona-polish.js';
 import {
   pageOf, locate, readSidecar, writeSidecar, suggestTags, removeFiles,
   createTagJob, statsOf, PAGE_SIZE,
@@ -8171,6 +8172,45 @@ export function apply(ctx) {
       }),
 
       /**
+       * 5.5 可选：AI 润色某一段人格正文。
+       *
+       * **只改传进来的那段文本**，不碰 frontmatter、不碰段名、不碰其它段——
+       * 拼回去由前端做，服务端不写任何文件。这样「润色不满意就重来」
+       * 不会有人格被改坏的风险。
+       *
+       * 模型选择跟聊天一致（`model.byChat` > `byKind` > 默认 > 宿主全局），
+       * 所以用户为某个会话挑的模型，在润色这里也生效，不用另配一套。
+       */
+      route('/personas/polish', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const text = String(body?.text ?? '');
+        if (!text.trim()) return send(res, 400, { ok: false, reason: '这段是空的，没什么可改' });
+
+        const id = String(body?.id ?? '').trim();
+        const p = id ? personas.read(id) : null;
+
+        const sel = pickModelFor({
+          byChat: cfg.model?.byChat,
+          byKind: cfg.model?.byKind,
+          defaultSel: cfg.model?.default,
+          chatId: String(body?.chatId || ''),
+          kind: String(body?.kind || ''),
+          globalSel: ctx.get?.('agentDefaultModel')?.currentSelection?.() || null,
+        });
+
+        const r = await polishText({
+          getLlm: () => ctx.get?.('llm'),
+          sel: sel || {},
+          text,
+          preset: String(body?.preset || 'concise'),
+          instruction: String(body?.instruction || ''),
+          section: String(body?.section || ''),
+          personaName: p?.label || p?.name || '',
+        });
+        return send(res, r.ok ? 200 : 400, r);
+      }),
+
+      /**
        * 5.9 新建扩展向导：填名字 / 入口 / 工具声明，生成一份能直接跑的骨架。
        *
        * 三条边界：
@@ -8795,6 +8835,8 @@ export function apply(ctx) {
           front: snap.front, sections: snap.sections, titles: snap.titles, order: snap.order,
           /** 5.5：逐段视图，段名和内容都从原文自动识别；前端可以任意加删改名 */
           blocks: snap.blocks,
+          /** 5.5 可选项：润色预设只有一份（在 `persona-polish.js`），前端别另抄 */
+          polishPresets: POLISH_PRESETS.map((x) => ({ id: x.id, label: x.label })),
           rawLength: String(p.raw ?? '').length,
         });
       }),
