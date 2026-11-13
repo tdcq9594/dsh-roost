@@ -10259,7 +10259,7 @@ select.roost-input{color-scheme:dark}
       const [notice, setNotice] = useState(null)
       /** 5.8 测试版通道：改完立刻重查一次，否则要等 6 小时缓存 */
       const [channel, setChannel] = useState(() => {
-        try { return localStorage.getItem('roost.update.channel') === 'next' ? 'next' : 'latest' } catch { return 'latest' }
+        try { return localStorage.getItem('roost.update.channel') === 'beta' ? 'beta' : 'latest' } catch { return 'latest' }
       })
 
       /**
@@ -10332,22 +10332,22 @@ select.roost-input{color-scheme:dark}
         n: '01', title: '更新',
         right: h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
           /**
-           * 5.8 测试版通道：稳定版 / 尝鲜版（npm dist-tag `next`）。
+           * 5.8 测试版通道：稳定版 / 测试版（npm dist-tag `beta`）。
            * 切换只改「比哪个版本」，不改安装方式；存 localStorage 免得每次进来都要选。
            */
           h('select', {
-            className: 'roost-input', title: '更新通道：稳定版（latest）/ 测试版（next）',
+            className: 'roost-input', title: '更新通道：稳定版（latest）/ 测试版（beta）',
             style: { width: 'auto', padding: '2px 6px', fontSize: 11.5 },
             value: channel,
             onChange: (e) => {
-              const v = e.target.value === 'next' ? 'next' : 'latest'
+              const v = e.target.value === 'beta' ? 'beta' : 'latest'
               setChannel(v)
               try { localStorage.setItem('roost.update.channel', v) } catch {}
               loadCheck(true, v)
             },
           },
             h('option', { value: 'latest' }, '稳定版'),
-            h('option', { value: 'next' }, '测试版 next')),
+            h('option', { value: 'beta' }, '测试版 beta')),
           h('button', { type: 'button', className: 'roost-btn', onClick: () => { loadCheck(true, channel); loadRepo() } }, '重新检查'),
         ),
       },
