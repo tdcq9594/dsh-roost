@@ -1848,6 +1848,8 @@ export function apply(ctx) {
     graph,
     sessions,
     boundList: () => account.boundList(),
+    /** 改写会动 config.json 里按 chatId 存的键，写完必须让内存里的 cfg 重新读盘 */
+    onReload: () => { cfg = loadConfig(); },
     log: (m) => log.warn(m),
   });
 
@@ -2650,6 +2652,8 @@ export function apply(ctx) {
         scene: payload?.scene,
         target: payload?.target,
         text: payload?.text,
+        /** 4.5 流水层：只加统计标记，幂等键不动 */
+        personaId: personaByChat.get(String(payload?.target ?? '')) || '',
       });
       log.info(`主动消息进审核，登记等确认（${r.requestId}）`);
     }
@@ -2714,7 +2718,8 @@ export function apply(ctx) {
        *   · `state.closedAt`  → 刚说完晚安别又冒出来（冷却）
        *   · `closing`         → 主动搭话能接上「上次聊到哪儿」
        */
-      const closed = closing.get(cid);
+      /** 绑定后没改写时，收尾记录也在旧 openid 键下（审计 §3 P3） */
+      const closed = closing.get(cid, aliasesOf(cid));
       return {
         chatId: cid,
         name: kind === 'group' ? cfg.awake?.groups?.find?.((g) => g.chatId === chatId)?.name || '' : '',
@@ -3419,7 +3424,8 @@ export function apply(ctx) {
   }
 
   async function agentFor(chat) {
-    const sid = sessions.get(chat.chatId);
+    /** 绑定了号码但没做一键改写时，也靠别名接回旧会话上下文（审计 §3 P2） */
+    const sid = sessions.get(chat.chatId, chat.aliases);
 
     if (sid) {
       try {
@@ -4763,7 +4769,8 @@ export function apply(ctx) {
             kind: chat.kind,
             globalSel: ctx.get?.('agentDefaultModel')?.currentSelection?.() || null,
           });
-          usage.record({ chatId: chat.chatId, usage: cp.usage, model: msel?.model || '' });
+          /** 4.5 流水层：用量按人格再记一桶，原 total/chats 结构不动 */
+          usage.record({ chatId: chat.chatId, usage: cp.usage, model: msel?.model || '', personaId: personaByChat.get(chat.chatId) || '' });
         } catch (e) {
           log.debug(`用量记账失败（不影响对话）：${e?.message ?? e}`);
         }
@@ -7022,6 +7029,42 @@ export function apply(ctx) {
         const body = await readBody(req);
         const r = await consolidate.run({ day: String(body?.day || ''), dry: Boolean(body?.dry) });
         return send(res, 200, r);
+      }),
+
+      /**
+       * 记忆逐条编辑（数据扩展后补齐 aurabot 那套能力）。
+       *
+       * 只按完全相等的正文或派生 id 定位，不做关键词模糊匹配；
+       * 所有动作共用 memory.editFact 一个写入口，改正文时连 meta
+       * 一起搬，权重与出处不会丢。
+       */
+      route('/memory/fact', async (req, res) => {
+        const b = await readBody(req);
+        const action = String(b?.action ?? '').trim();
+        const scope = b?.scope === 'chat' ? 'chat' : 'global';
+        const chatId = String(b?.chatId ?? lastScene?.chatId ?? '');
+        const patch = {};
+        switch (action) {
+          case 'update':
+            patch.text = b?.text ?? '';
+            if (b?.pin !== undefined) patch.pin = b.pin;
+            if (b?.tier !== undefined) patch.tier = b.tier;
+            break;
+          case 'meta':
+            if (b?.pin !== undefined) patch.pin = b.pin;
+            if (b?.tier !== undefined) patch.tier = b.tier;
+            break;
+          case 'review': patch.reviewedAt = Date.now(); break;
+          case 'tier': patch.tier = b?.tier; break;
+          case 'archive': patch.archivedAt = Date.now(); break;
+          case 'restore': patch.archivedAt = 0; break;
+          default:
+            return send(res, 400, { ok: false, message: '不认识的编辑动作' });
+        }
+        /** update 时 text 是**新正文**，不能拿它定位；必须给 id 或 key */
+        const idOrText = String(b?.id ?? b?.key ?? (action === 'update' ? '' : b?.text) ?? '').trim();
+        const r = memory.editFact(chatId, scope, idOrText, patch, aliasesOf(chatId));
+        return send(res, r?.ok ? 200 : 400, r);
       }),
 
       route('/memory/add', async (req, res) => {

@@ -1,0 +1,139 @@
+// 记忆数据扩展 + 逐条编辑：老库逐字不变、编辑不丢元数据、归档/复习/层级生效。
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const CLIENT = new URL('../client/client.js', import.meta.url);
+
+function boot({ seed = null } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-mem-edit-'));
+  mkdirSync(dir, { recursive: true });
+  if (seed) writeFileSync(join(dir, 'memory.json'), JSON.stringify(seed), 'utf8');
+  process.env.DSH_ROOST_DATA = dir;
+  return { dir };
+}
+
+/** 每次重新 import，让 dataDir 的缓存跟着新的 DSH_ROOST_DATA 走 */
+async function freshMemory() {
+  const url = new URL('../src/memory.js', import.meta.url);
+  url.searchParams.set('t', String(Date.now()) + Math.random());
+  return import(url.href);
+}
+
+test('老库逐字不变：没有扩展字段时 scoreOfFact 与扩展前一致', async () => {
+  const { scoreOfFact } = await freshMemory();
+  const now = Date.UTC(2026, 10, 13);
+  const cases = [
+    [{ w: 1, at: now }, 1],
+    [{ w: 3, at: now }, 3],
+    [{ w: 2, at: now - 30 * 86400000 }, 1],          // 30 天半衰期
+    [{ w: 4, at: now - 60 * 86400000 }, 1],
+    [{ w: 2, at: now - 30 * 86400000, until: now }, 0.5],
+    [{}, 1],                                          // 无元数据也不衰减
+  ];
+  for (const [meta, want] of cases) {
+    assert.ok(Math.abs(scoreOfFact(meta, now) - want) < 1e-9,
+      `scoreOfFact(${JSON.stringify(meta)}) 应是 ${want}，实际 ${scoreOfFact(meta, now)}`);
+  }
+});
+
+test('扩展字段生效：pin / tier / 复习 / 归档都改变分数与亮度', async () => {
+  const { scoreOfFact, brightnessOf, factIdOf, FACT_TIERS } = await freshMemory();
+  const now = Date.UTC(2026, 10, 13);
+  const old = { w: 1, at: now - 30 * 86400000 };
+  const base = scoreOfFact(old, now);
+  assert.ok(scoreOfFact({ ...old, pin: 1 }, now) > base, '重要度高的排前面');
+  assert.ok(scoreOfFact({ ...old, tier: 'core' }, now) > base, '永久不衰减');
+  assert.ok(scoreOfFact({ ...old, tier: 'short' }, now) < base, '临时衰减更快');
+  assert.ok(scoreOfFact({ ...old, reviewedAt: now }, now) > base, '复习把衰减起点拉回来');
+  assert.ok(scoreOfFact({ ...old, archivedAt: now }, now) < base, '归档打折');
+  assert.ok(brightnessOf({ ...old, pin: 1, reviewedAt: now }, now) > brightnessOf(old, now));
+  assert.ok(brightnessOf({}, now) >= 0.15 && brightnessOf({}, now) <= 1);
+  assert.deepEqual(FACT_TIERS, ['short', 'long', 'core']);
+  assert.equal(factIdOf('主人住在杭州'), factIdOf('主人住在杭州'));
+  assert.notEqual(factIdOf('主人住在杭州'), factIdOf('主人住在上海'));
+});
+
+test('editFact：改正文时 w/at/src/until 全部保留，id 换新', async () => {
+  boot();
+  const { createMemory, factIdOf } = await freshMemory();
+  const m = createMemory();
+  const at = Date.now() - 10 * 86400000;
+  m.add('CHAT_A', '主人住在杭州', 'chat', { w: 3, src: { manual: true, at } });
+  const before = m.listFull('CHAT_A', []).chat.find((x) => x.text === '主人住在杭州');
+  assert.equal(before.w, 3);
+  assert.equal(before.src.manual, true);
+
+  const r = m.editFact('CHAT_A', 'chat', factIdOf('主人住在杭州'), { text: '主人搬到上海了' }, []);
+  assert.equal(r.ok, true);
+  assert.equal(r.text, '主人搬到上海了');
+  const after = m.listFull('CHAT_A', []).chat.find((x) => x.text === '主人搬到上海了');
+  assert.equal(after.w, 3, '权重不能丢');
+  assert.equal(after.src.manual, true, '出处不能丢');
+  assert.equal(after.at, before.at, '时间不能丢');
+  assert.equal(m.list('CHAT_A', []).chat.includes('主人住在杭州'), false, '旧正文要换掉');
+  assert.equal(m.list('CHAT_A', []).chat.includes('主人搬到上海了'), true);
+  assert.notEqual(after.id, factIdOf('主人住在杭州'), '编辑后 id 自然换新');
+});
+
+test('editFact：复习 / 层级 / 归档 / 恢复，且归档不进注入', async () => {
+  boot();
+  const { createMemory } = await freshMemory();
+  const m = createMemory();
+  m.add('', '猫怕黄瓜', 'global', { w: 2 });
+  const key = '猫怕黄瓜';
+
+  assert.equal(m.editFact('', 'global', key, { reviewedAt: Date.now() }, []).ok, true);
+  assert.ok(m.listFull('', []).global[0].reviewedAt > 0);
+
+  assert.equal(m.editFact('', 'global', key, { tier: 'core' }, []).ok, true);
+  assert.equal(m.listFull('', []).global[0].tier, 'core');
+  assert.equal(m.editFact('', 'global', key, { tier: '乱写' }, []).ok, false, '非法层级要拒');
+
+  assert.equal(m.editFact('', 'global', key, { archivedAt: Date.now() }, []).ok, true);
+  assert.ok(m.listFull('', []).global[0].archivedAt > 0);
+  assert.equal(m.list('', []).global.includes(key), false, '归档的不注入');
+  assert.equal(m.listRanked('', []).global.includes(key), false, '排序里也不能出现');
+
+  assert.equal(m.editFact('', 'global', key, { archivedAt: 0 }, []).ok, true);
+  assert.equal(m.listFull('', []).global[0].archivedAt, null, '恢复要清掉归档标记');
+  assert.equal(m.list('', []).global.includes(key), true, '恢复后重新注入');
+});
+
+test('editFact：定位只认精确正文或 id，绝不模糊匹配', async () => {
+  boot();
+  const { createMemory } = await freshMemory();
+  const m = createMemory();
+  m.add('', '约定：A', 'global');
+  m.add('', '约定：A 补充', 'global');
+  assert.equal(m.editFact('', 'global', '约定', { tier: 'core' }, []).ok, false, '关键词不能命中');
+  assert.equal(m.editFact('', 'global', '不存在的一句', { tier: 'core' }, []).ok, false);
+  assert.equal(m.editFact('', 'global', '约定：A', { text: '' }, []).ok, false, '空正文要拒');
+  assert.equal(m.editFact('', 'global', '约定：A', { text: '约定：A 补充' }, []).ok, false, '改成已有句子要拒');
+});
+
+test('路由 /memory/fact 已注册，前端确实调用它', async () => {
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const client = readFileSync(CLIENT, 'utf8');
+  assert.ok(host.includes("route('/memory/fact'"), '后端路由要注册');
+  assert.ok(client.includes("'/memory/fact'"), '前端要有入口');
+  assert.ok(client.includes('打开记忆星图'), '原位置要有入口按钮');
+  assert.ok(client.includes('h(PageModal, { title: \'记忆星图\''), '星图要在弹窗里');
+  assert.ok(client.includes("action: 'update'") || client.includes("factAct('update'"), '要有编辑动作');
+  assert.ok(client.includes("factAct('review'"), '要有复习动作');
+  assert.ok(client.includes("factAct('tier'") || client.includes("{ tier: 'core' }"), '要有层级');
+});
+
+test('弹窗按需渲染：关闭时不挂 StarMap，打开才挂', async () => {
+  const { readFileSync } = await import('node:fs');
+  const client = readFileSync(CLIENT, 'utf8');
+  /** starOpen 为 false 时条件渲染为 null，StarMap 只能出现在弹窗分支里 */
+  const idxBtn = client.indexOf('打开记忆星图');
+  const idxModal = client.indexOf('h(PageModal, { title: \'记忆星图\'');
+  const idxStar = client.indexOf('h(StarMap, {');
+  assert.ok(idxBtn > 0 && idxModal > idxBtn, '按钮要在弹窗之前');
+  assert.ok(idxStar > idxModal, 'StarMap 必须只在弹窗分支里渲染');
+});

@@ -219,11 +219,14 @@ export function createClosing(cfg = {}) {
     },
 
     /** 拿一条（过期的不算） */
-    get(chatId) {
+    get(chatId, aliases = []) {
       const db = load();
-      const rec = db.chats[chatId];
-      if (!alive(rec)) return null;
-      return { ...rec };
+      const keys = [chatId, ...(Array.isArray(aliases) ? aliases : [])];
+      for (const k of keys) {
+        const rec = db.chats[k];
+        if (alive(rec)) return { ...rec };
+      }
+      return null;
     },
 
     /** 主动清掉（对方又聊起来了、或者用户要求别记） */

@@ -137,7 +137,7 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
    * @param {{requestId:string, scene?:string, target?:string, chatId?:string, text?:string}} p
    * @returns {boolean} 有没有真的登记（缺 id 就不登）
    */
-  function note({ requestId, scene = 'c2c', target = '', chatId = '', text = '' } = {}) {
+  function note({ requestId, scene = 'c2c', target = '', chatId = '', text = '', personaId = '' } = {}) {
     const id = String(requestId ?? '').trim();
     if (!id) return false;
     const m = load();
@@ -157,6 +157,8 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
       scene: scene === 'group' ? 'group' : 'c2c',
       target: String(target ?? ''),
       chatId: String(chatId ?? target ?? ''),
+      /** 4.5 流水层：只加一个统计标记，requestId 幂等键与 chatId 都不动 */
+      personaId: String(personaId || ''),
       text: String(text ?? '').slice(0, TEXT_MAX),
       at: now(),
       state: 'waiting',

@@ -46,13 +46,20 @@ export function dayKey(ts = Date.now()) {
  * @param {string} who  openid 优先；调用方拿到显示名时也可以传显示名兜底
  * @param {string[]} aliases  会话别名表（aliasesOf(chatId)），第 0 个是主 openid
  */
-export function canonicalKey(who, aliases = []) {
+export function canonicalKey(who, aliases = [], current = '') {
   const norm = (x) => String(x ?? '').trim().toLowerCase().replace(/^@+/, '');
   const w = norm(who);
   if (!w) return '';
   const list = (Array.isArray(aliases) ? aliases : []).map(norm).filter(Boolean);
-  /** 命中任一别名（或本来就是主 openid）→ 归到主 openid，换号不裂成两个人 */
-  if (list.length && (list.includes(w) || list[0] === w)) return clipChars(list[0], 64);
+  /**
+   * `current` 是**当前会话的 chatId**。私聊里说话人的 openid 就是 chatId，
+   * 而 aliasesOf(chatId) 按设计不含当前 chatId（否则记忆会重复读同一键），
+   * 于是换机器人后新 openid 归不到号码，人物档案裂成两条。
+   * 只对「who === 当前会话」放行；群里成员 openid ≠ chatId，保持原样，
+   * 不会把一整个群合并成一个人。
+   */
+  const isCurrent = Boolean(current) && norm(current) === w;
+  if (list.length && (list.includes(w) || list[0] === w || isCurrent)) return clipChars(list[0], 64);
   return clipChars(w, 64);
 }
 
@@ -135,8 +142,8 @@ export function createProfiles({
      * 记一笔。`openid` 优先于显示名当键；`aliases` 传 aliasesOf(chatId)。
      * 开关关着时由调用方决定不调这里——本模块不偷偷读配置（单一真相在 config）。
      */
-    note({ who = '', openid = '', impression = '', tips = '', aliases = [] } = {}) {
-      const key = canonicalKey(openid || who, aliases);
+    note({ who = '', openid = '', impression = '', tips = '', aliases = [], current = '' } = {}) {
+      const key = canonicalKey(openid || who, aliases, current);
       if (!key) return 0;
       const all = load();
       const imp = accumulate('', impression, IMPRESSION_MAX);

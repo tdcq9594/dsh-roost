@@ -45,9 +45,15 @@ export function createSessions({ dataDir, log = () => {} }) {
     reload: load,
 
     /** 取这个会话的 DSH 会话 id；没有就返回空串 */
-    get(chatId) {
+    get(chatId, aliases = []) {
       const e = map.chats[chatId];
-      return e?.sessionId ?? '';
+      if (e?.sessionId) return e.sessionId;
+      /** 只绑定不改写时，旧会话还在旧 openid 键下面 */
+      for (const k of Array.isArray(aliases) ? aliases : []) {
+        const old = map.chats[k];
+        if (old?.sessionId) return old.sessionId;
+      }
+      return '';
     },
 
     /** 整条记录（title/kind/preset），给「名字变了要改标题」用 */

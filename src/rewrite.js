@@ -70,6 +70,10 @@ const BACKUP_FILES = [
   'graph.sqlite',
   'graph.sqlite-wal',
   'graph.sqlite-shm',
+  /** 审计 §3 的 P1/P2/P3：配置里按 chatId 存的键、人物档案、对话收尾 */
+  'config.json',
+  'profiles.json',
+  'closing.json',
 ];
 
 /** 原子写：先写 .tmp 再 rename，断电/异常时不会留下半个 JSON */
@@ -109,7 +113,7 @@ export function claimsOf(record) {
  * 生产不传，永远用 `BACKUP_ROOT`。
  */
 export function createRewriter({
-  memory, journal, graph, sessions, boundList,
+  memory, journal, graph, sessions, boundList, onReload,
   backupRoot = BACKUP_ROOT,
   log = () => {},
 } = {}) {
@@ -172,6 +176,8 @@ export function createRewriter({
   function reloadCaches() {
     try { memory?.reload?.(); } catch {}
     try { sessions?.reload?.(); } catch {}
+    /** config.json 被改写后 host 里的 cfg 还是旧的，必须重新读盘 */
+    try { onReload?.(); } catch {}
     closeHandles();
   }
 
@@ -375,6 +381,86 @@ export function createRewriter({
   }
 
   /**
+   * 审计 §3 补缺：一键改写时把**非记忆本体**的三处也一起合键。
+   *
+   * 以前这五处按 chatId 存的键、人物档案、收尾记录都不在改写链路里，
+   * 换机器人后静默失效（按群覆写 / 群主动白名单 / 单聊模型 / 人格绑定 /
+   * 主动搭话目标退回默认），或者同一人裂成两条档案。
+   *
+   * 目标键已有值就**不覆盖**（用户手动重选过的值优先）。
+   */
+  function rewriteExtraFiles(items) {
+    const out = { config: 0, profiles: 0, closing: 0 };
+
+    /* config.json：三张按 chatId 索引的表 + 两个标量/数组字段 */
+    const cf = join(dataDir(), 'config.json');
+    const c = readJson(cf);
+    for (const { uin, keys } of items) {
+      for (const { key } of keys) {
+        for (const [seg, field] of [['model', 'byChat'], ['persona', 'byChat'], ['group', 'overrides']]) {
+          const t = c?.[seg]?.[field];
+          if (!t || typeof t !== 'object' || !Object.prototype.hasOwnProperty.call(t, key)) continue;
+          if (t[uin] === undefined) t[uin] = t[key];
+          delete t[key];
+          out.config += 1;
+        }
+        if (String(c?.speakUp?.chatId ?? '') === key) {
+          c.speakUp.chatId = uin;
+          out.config += 1;
+        }
+        if (Array.isArray(c?.awake?.groups)) {
+          for (const g of c.awake.groups) {
+            if (g && String(g.chatId ?? '') === key) { g.chatId = uin; out.config += 1; }
+          }
+        }
+      }
+    }
+    if (out.config) writeJsonAtomic(cf, c);
+
+    /* profiles.json：数组或 { people: [] }，按 key 合并 */
+    const pf = join(dataDir(), 'profiles.json');
+    let praw;
+    try { praw = JSON.parse(readFileSync(pf, 'utf8')); } catch { praw = null; }
+    if (praw) {
+      const arr = Array.isArray(praw) ? praw : (Array.isArray(praw?.people) ? praw.people : null);
+      if (arr) {
+        for (const { uin, keys } of items) {
+          for (const { key } of keys) {
+            const row = arr.find((r) => r && String(r.key ?? '') === key);
+            if (!row) continue;
+            const target = arr.find((r) => r && String(r.key ?? '') === uin);
+            if (target) {
+              /** 两条都留着没意义：把旧行的印象/建议接过去，再删旧行 */
+              target.impression = [target.impression, row.impression].filter(Boolean).join('；').slice(0, 400);
+              target.tips = [target.tips, row.tips].filter(Boolean).join('；').slice(0, 400);
+              arr.splice(arr.indexOf(row), 1);
+            } else {
+              row.key = uin;
+            }
+            out.profiles += 1;
+          }
+        }
+        writeJsonAtomic(pf, praw);
+      }
+    }
+
+    /* closing.json：{ chats: { chatId: rec } } */
+    const lf = join(dataDir(), 'closing.json');
+    const l = readJson(lf);
+    const chats = l.chats && typeof l.chats === 'object' ? l.chats : {};
+    for (const { uin, keys } of items) {
+      for (const { key } of keys) {
+        if (!chats[key]) continue;
+        if (!chats[uin]) chats[uin] = chats[key];
+        delete chats[key];
+        out.closing += 1;
+      }
+    }
+    if (out.closing) { l.chats = chats; writeJsonAtomic(lf, l); }
+    return out;
+  }
+
+  /**
    * 执行。任何一步失败都自动回退到刚做的备份。
    */
   /**
@@ -415,6 +501,7 @@ export function createRewriter({
       closeHandles();
       const memoryMoved = rewriteMemory(p.items);
       const sessionsMoved = rewriteSessions(p.items);
+      const extraMoved = rewriteExtraFiles(p.items);
 
       let journalMoved = 0;
       let graphMoved = { entities: 0, edges: 0, episodes: 0, suppress: 0, mergedEntities: 0 };
@@ -435,6 +522,10 @@ export function createRewriter({
         sessions: sessionsMoved,
         journal: journalMoved,
         graph: graphMoved,
+        /** 配置里按 chatId 存的键 / 人物档案 / 收尾记录 */
+        config: extraMoved.config,
+        profiles: extraMoved.profiles,
+        closing: extraMoved.closing,
       };
       log(`一键改写完成：${JSON.stringify(changed)}，备份 ${bak.dir}`);
       return {

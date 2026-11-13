@@ -62,11 +62,18 @@ const DAY_MS = 86_400_000;
  * 名额。不打折的话，一条 w=2 的旧说法会长期压着新事实，把活的名额挤掉。
  */
 export function scoreOfFact(meta, now = Date.now()) {
-  const w = Number(meta?.w) > 0 ? Number(meta.w) : 1;
-  const at = Number(meta?.at) || 0;
-  const days = at ? Math.max(0, (now - at) / DAY_MS) : 0;
-  const base = w * 0.5 ** (days / HALF_LIFE_DAYS);
-  return meta?.until ? base * HISTORY_WEIGHT : base;
+  /** 自动权重（被反复提到）与手动重要度取大者；pin=0 时就是原来的 w */
+  const autoW = Number(meta?.w) > 0 ? Number(meta.w) : 1;
+  const pin = clamp01(meta?.pin);
+  const w = Math.max(autoW, pin > 0 ? 1 + pin * (W_MAX - 1) : 0);
+  /** 复习把衰减起点拉回 reviewedAt；老数据没有这个字段时 start === at */
+  const start = Math.max(Number(meta?.at) || 0, Number(meta?.reviewedAt) || 0);
+  const days = start ? Math.max(0, (now - start) / DAY_MS) : 0;
+  const tier = FACT_TIERS.includes(meta?.tier) ? meta.tier : 'long';
+  const base = tier === 'core' ? w : w * 0.5 ** (days / (HALF_LIFE_DAYS * (TIER_DECAY[tier] || 1)));
+  let score = meta?.until ? base * HISTORY_WEIGHT : base;
+  if (meta?.archivedAt) score *= ARCHIVE_WEIGHT;
+  return score;
 }
 
 /**
@@ -85,6 +92,45 @@ const SUPERSEDE_SIM = 0.75;
 const SUPERSEDE_MIN_LEN = 4;
 /** 已取代（历史）的分数折扣，见 `scoreOfFact` */
 const HISTORY_WEIGHT = 0.5;
+
+/* ---------------- 记忆数据扩展（2026-11-13） ----------------
+ * 主人要求「记忆的数据能扩展就扩展」：给每条事实加可选元数据，让编辑文字 /
+ * 改重要度 / 复习 / 层级 / 归档恢复都能真正落地，而不是因为数据模型不同
+ * 就只做加删。
+ *
+ * 三条硬约束：
+ *   1. 老库逐字不变：所有新字段都是可选，没有它们时 scoreOfFact 的结果
+ *      、注入顺序、淘汰顺序与扩展前完全一致（有对照测试）。
+ *   2. 稳定 id 由正文派生，不写进内存盘格式 —— 加事实那条路径一个字节
+ *      都不改，也不会破坏已有的深等于断言。
+ *   3. 自动权重 w（被反复提到）与手动重要度 pin 分开，不混成一个数。
+ */
+export const FACT_TIERS = Object.freeze(['short', 'long', 'core']);
+/** short 衰减更快、core 不衰减；long 就是原来的 30 天 */
+export const TIER_DECAY = Object.freeze({ short: 0.5, long: 1, core: 0 });
+/** 归档的条目不注入，但留在库里可恢复；和 until 一样占名额时打折 */
+export const ARCHIVE_WEIGHT = 0.25;
+
+/** 正文 → 稳定短 id（djb2）；同一句话永远同一个 id，编辑后自然换新 id */
+export function factIdOf(text) {
+  let h = 5381;
+  const str = String(text ?? '');
+  for (let i = 0; i < str.length; i += 1) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return `f${(h >>> 0).toString(36)}`;
+}
+
+const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+
+/** 面板星图用的清晰度：0.15–1，复习会把衰减起点拉回来 */
+export function brightnessOf(meta, now = Date.now()) {
+  const w = Math.max(1, Number(meta?.w) || 1, 1 + (clamp01(meta?.pin) * (W_MAX - 1)));
+  const start = Math.max(Number(meta?.at) || 0, Number(meta?.reviewedAt) || 0);
+  const days = start ? Math.max(0, (now - start) / DAY_MS) : 0;
+  const tier = FACT_TIERS.includes(meta?.tier) ? meta.tier : 'long';
+  const decay = tier === 'core' ? 1 : 0.5 ** (days / (HALF_LIFE_DAYS * (TIER_DECAY[tier] || 1)));
+  const b = 0.15 + 0.85 * Math.min(1, w / W_MAX) * decay;
+  return Math.round(b * 1000) / 1000;
+}
 
 /**
  * 字符二元组。
@@ -453,7 +499,7 @@ export function createMemory({ now = () => Date.now() } = {}) {
       const m = load();
       const c = collectChat(m, chatId, aliases);
       const alive = (arr, mm) =>
-        (Array.isArray(arr) ? arr : []).filter((text) => !mm?.[text]?.until);
+        (Array.isArray(arr) ? arr : []).filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt);
       return {
         global: alive(m.global, m.meta.global),
         chat: alive(c.list, c.meta),
@@ -495,7 +541,7 @@ export function createMemory({ now = () => Date.now() } = {}) {
        */
       const rank = (list, mm, noDecay) =>
         (Array.isArray(list) ? list : [])
-          .filter((text) => !mm?.[text]?.until)
+          .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt)
           .map((text, i) => {
             const meta = mm?.[text];
             const alias = Boolean(noDecay?.has(text));
@@ -526,10 +572,17 @@ export function createMemory({ now = () => Date.now() } = {}) {
           const x = mm?.[text] || {};
           return {
             text,
+            id: factIdOf(text),
             w: Number(x.w) > 0 ? Number(x.w) : 1,
             at: Number(x.at) || 0,
             src: x.src || null,
             until: Number(x.until) > 0 ? Number(x.until) : null,
+            /** 以下都是可选扩展字段，老库没有时给默认，不写回磁盘 */
+            tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
+            pin: clamp01(x.pin),
+            archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : null,
+            reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : null,
+            brightness: brightnessOf(x, Date.now()),
           };
         });
       const c = collectChat(m, chatId, aliases);
@@ -692,6 +745,69 @@ export function createMemory({ now = () => Date.now() } = {}) {
       m.global = [];
       m.meta.global = {};
       save();
+    },
+
+    /**
+     * 编辑一条事实（唯一的写入口，供面板 /memory/fact 用）。
+     *
+     * 定位只认**完全相等**的正文或它派生出的 id，不做关键词模糊匹配 ——
+     * D11 retention 那条踩过坑：用正文当 needle 去 `includes` 会误伤
+     * 「约定：A」与「约定：A 补充」。
+     *
+     * `patch` 白名单：text / pin / tier / reviewedAt / archivedAt。
+     * 改正文时把 meta 键一起搬过去（w、at、src、until、pin、tier
+     * 一个不丢），否则编辑一次就把权重和出处洗掉了。
+     */
+    editFact(chatId, scope, key, patch = {}, aliases = []) {
+      const m = load();
+      const k = String(key ?? '').trim();
+      if (!k) return { ok: false, message: '没给要改哪条事实' };
+      const pairs = scope === 'global'
+        ? [[m.global, m.meta.global, 'global']]
+        : (chatId ? [chatId, ...(Array.isArray(aliases) ? aliases : [])] : [])
+            .map((c) => [m.chats[c], m.meta.chats[c], c]);
+      let hit = null;
+      for (const [list, mm, c] of pairs) {
+        if (!Array.isArray(list) || !mm) continue;
+        const text = list.find((t) => t === k || factIdOf(t) === k);
+        if (text) { hit = { list, mm, text, chatId: c }; break; }
+      }
+      if (!hit) return { ok: false, message: '没找到这条事实（可能已删或换了会话）' };
+      const { list, mm, text } = hit;
+      let nextText = text;
+      if (patch.text !== undefined) {
+        nextText = String(patch.text ?? '').trim();
+        if (!nextText) return { ok: false, message: '内容不能为空' };
+        if (nextText !== text && list.includes(nextText)) return { ok: false, message: '已经有一模一样的一句了' };
+      }
+      if (patch.tier !== undefined && !FACT_TIERS.includes(patch.tier)) {
+        return { ok: false, message: '层级只能是 short / long / core' };
+      }
+      const meta = { ...(mm[text] || {}) };
+      if (patch.pin !== undefined) meta.pin = clamp01(patch.pin);
+      if (patch.tier !== undefined) meta.tier = patch.tier;
+      if (patch.reviewedAt !== undefined) {
+        meta.reviewedAt = Number(patch.reviewedAt) > 0 ? Number(patch.reviewedAt) : Date.now();
+      }
+      if (patch.archivedAt !== undefined) {
+        const v = Number(patch.archivedAt);
+        if (v > 0) meta.archivedAt = v;
+        else delete meta.archivedAt;
+      }
+      if (nextText !== text) {
+        list[list.indexOf(text)] = nextText;
+        delete mm[text];
+        mm[nextText] = meta;
+      } else {
+        mm[text] = meta;
+      }
+      save();
+      return {
+        ok: true, text: nextText, id: factIdOf(nextText),
+        tier: meta.tier || 'long', pin: meta.pin || 0,
+        archivedAt: meta.archivedAt || null,
+        brightness: brightnessOf(meta),
+      };
     },
 
     /**

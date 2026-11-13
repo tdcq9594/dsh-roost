@@ -825,6 +825,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
             tips: String(p?.tips ?? ''),
             /** 换机器人后 openid 变了，归到同一条档案（报告 §15.1-D） */
             aliases: aliasesOf(chatId),
+            /** 私聊里说话人 openid === chatId，靠它把新 openid 也归户 */
+            current: chatId,
           });
           out.profiles += 1;
         } catch (e) {

@@ -3982,6 +3982,8 @@ select.roost-input{color-scheme:dark}
       const [q, setQ] = useState('')
       const [hits, setHits] = useState(null)
       const [fact, setFact] = useState('')
+      /** 星图改成按需弹窗：关掉就卸载，3D 自动旋转不会在后台空转 */
+      const [starOpen, setStarOpen] = useState(false)
       const [scope, setScope] = useState('global')
       /**
        * 正在确认要删的那条关系。
@@ -4198,16 +4200,26 @@ select.roost-input{color-scheme:dark}
         ),
 
         /**
-         * 记忆星图：无编号，放在最上面当整页的"一眼看全"。
-         * 它复用同一份 `/memory` 快照，不新开接口；人物页的独立关系图
-         * 已撤掉，实体与关系连线都并进这里（2026-11-13）。
+         * 记忆星图：原位置只留一个入口按钮，点了才在弹窗里渲染星图。
+         * 关掉弹窗即卸载组件 —— 自动旋转 / 星尘动画不再后台空转，
+         * 记忆页本身也回到「先看事实再看图」的顺序，不被 420px 画布顶开。
+         * 数据仍是同一份 /memory 快照，不新开接口。
          */
-        h(Sec, {
-          title: '记忆星图',
-          right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新'),
-        },
-          h(StarMap, { mem, toast, reload, quick, busy }),
+        h(Sec, { title: '记忆星图' },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '把事实、日记、人物与关系画成一片星空，可切 2D / 3D，点星能看详情和编辑。',
+            '点下面的按钮才打开 —— 没打开时这里不渲染画布，也不跑动画。'),
+          h('button', {
+            /** 次要按钮：上次「保存选择」那块黑主按钮被说突兀，入口统一用这个 */
+            type: 'button', className: 'roost-btn', onClick: () => setStarOpen(true),
+          }, '打开记忆星图'),
+          h('span', { className: 'roost-muted', style: { fontSize: 11.5, marginLeft: 10 } },
+            `跨群 ${(mem?.global || []).length} 条 · 本会话 ${(mem?.chat || []).length} 条`),
         ),
+        starOpen
+          ? h(PageModal, { title: '记忆星图', onClose: () => setStarOpen(false) },
+              h(StarMap, { mem, toast, reload, quick, busy }))
+          : null,
 
         /* ── 第一层：事实 ── */
         h(Sec, { n: '01', title: '事实', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
@@ -4909,16 +4921,29 @@ select.roost-input{color-scheme:dark}
       const push = (o) => { if (o && String(o.text || '').trim()) raw.push(o) }
       const factsOf = (scope) => (Array.isArray(mem?.factsDetail?.[scope]) ? mem.factsDetail[scope] : [])
       for (const [scope, group] of [['global', 'global'], ['chat', 'chat']]) {
-        factsOf(scope).forEach((f, i) => push({
-          id: `${group}:${i}`,
-          text: String(f.text || ''),
-          group: Number(f.until) > 0 ? 'history' : group,
-          w: Number(f.w) || 1,
-          at: Number(f.at) || 0,
-          until: Number(f.until) || 0,
-          src: f.src || null,
-          kind: 'fact',
-        }))
+        factsOf(scope).forEach((f, i) => {
+          /** 被取代（until）和主动归档（archivedAt）都算「已被取代」那一团 */
+          const archived = Number(f.until) > 0 || Number(f.archivedAt) > 0;
+          push({
+            id: `${group}:${i}`,
+            factId: String(f.id || ''),
+            scope,
+            text: String(f.text || ''),
+            group: archived ? 'history' : group,
+            w: Number(f.w) || 1,
+            at: Number(f.at) || 0,
+            until: Number(f.until) || 0,
+            src: f.src || null,
+            kind: 'fact',
+            /** 数据扩展后的真实字段；老库没有就给默认 */
+            tier: String(f.tier || 'long'),
+            pin: Number(f.pin) || 0,
+            archivedAt: Number(f.archivedAt) || 0,
+            reviewedAt: Number(f.reviewedAt) || 0,
+            /** 亮度直接用后端算好的（w×30 天半衰期 + pin + 复习 + 层级），不再前端另算一套 */
+            trueBrightness: Number(f.brightness) > 0 ? Number(f.brightness) : 0,
+          });
+        })
       }
       for (const [i, t] of (Array.isArray(mem?.journal?.top) ? mem.journal.top : []).entries()) {
         push({
@@ -4956,11 +4981,14 @@ select.roost-input{color-scheme:dark}
       }
 
       /** 亮度：按本组最大值归一化，别让「重要片段」的 score 把事实全压暗 */
-      const scored = raw.map((s) => ({ ...s, score: starScoreOf(s, now) }))
+      const scored = raw.map((s) => ({ ...s, score: s.trueBrightness > 0 ? s.trueBrightness : starScoreOf(s, now) }))
       const maxOf = {}
       for (const s of scored) maxOf[s.group] = Math.max(maxOf[s.group] || 0.01, s.score)
       scored.forEach((s) => {
-        s.brightness = Math.max(0.14, Math.min(1, s.score / maxOf[s.group]))
+        /** 事实有后端算好的真实亮度，别再按组内最大值归一化（那会把它压成相对值） */
+        s.brightness = s.trueBrightness > 0
+          ? Math.max(0.14, Math.min(1, s.trueBrightness))
+          : Math.max(0.14, Math.min(1, s.score / maxOf[s.group]))
       })
 
       /** 星团中心：圆周均布，稍微错开高度，3D 转起来才看得出是分层的 */
@@ -5140,6 +5168,10 @@ select.roost-input{color-scheme:dark}
       const hits = useRef([])
       const [mode, setMode] = useState(() => starPref('mode', '3d') === '2d' ? '2d' : '3d')
       const [spin, setSpin] = useState(() => starPref('spin', true) !== false)
+      /** 流动星尘只在 3D 成立（透视才有前后漂移），2D 下禁用 */
+      const [motion, setMotion] = useState(() => starPref('motion', true) !== false)
+      /** motion 单独开、spin 关时也要触发重绘 */
+      const [frame, setFrame] = useState(0)
       const [glow, setGlow] = useState(() => starPref('glow', true) !== false)
       const [edgeOn, setEdgeOn] = useState(() => starPref('edgeOn', true) !== false)
       const [labels, setLabels] = useState(() => starPref('labels', true) !== false)
@@ -5185,19 +5217,24 @@ select.roost-input{color-scheme:dark}
         return () => { try { cv.removeEventListener('wheel', onWheel) } catch {} }
       }, [])
 
-      /** 自动旋转只在 3D 有意义；选中星星时停下，方便读详情 */
+      /**
+       * 自动旋转与流动星尘都只在 3D 有意义；选中星星时停下，方便读详情。
+       * spin 开着时 setYaw 每帧就会触发重绘；spin 关但 motion 开时靠
+       * setFrame 触发。弹窗关闭 → 组件卸载 → rAF 一并取消，不后台空转。
+       */
       useEffect(() => {
-        if (!is3d || !spin || sel) return
+        if (!is3d || (!spin && !motion) || sel) return
         let raf = 0
         let alive = true
         const step = () => {
           if (!alive) return
-          setYaw((v) => v + 0.0025)
+          if (spin) setYaw((v) => v + 0.0025)
+          else setFrame((f) => f + 1)
           raf = requestAnimationFrame(step)
         }
         raf = requestAnimationFrame(step)
         return () => { alive = false; cancelAnimationFrame(raf) }
-      }, [is3d, spin, Boolean(sel)])
+      }, [is3d, spin, motion, Boolean(sel)])
 
       useEffect(() => {
         const cv = ref.current
@@ -5216,9 +5253,15 @@ select.roost-input{color-scheme:dark}
         ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H)
         let seed = 20261113
         const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff }
+        /** 3D 才让星尘慢慢漂；关掉时用固定 seed 画静止星空，不跑动画 */
+        const drift = motion && is3d ? Date.now() * 0.001 : 0
         for (let i = 0; i < 170; i++) {
-          ctx.fillStyle = `rgba(200,220,255,${(0.05 + rnd() * 0.2).toFixed(3)})`
-          ctx.fillRect(rnd() * W, rnd() * H, 1, 1)
+          const a = 0.05 + rnd() * 0.2
+          const speed = 0.3 + rnd()
+          const x = (rnd() * W + (drift ? Math.sin(drift * 0.2 + i) * 2 : 0)) % W
+          const y = (rnd() * H + (drift ? (drift * 4 * speed) % H : 0)) % H
+          ctx.fillStyle = `rgba(200,220,255,${a.toFixed(3)})`
+          ctx.fillRect(x, y, 1, 1)
         }
 
         const projected = projectStars(shown.stars, { yaw, pitch, zoom, pan }, { W, H, mode, radius: built.radius })
@@ -5293,7 +5336,7 @@ select.roost-input{color-scheme:dark}
         ctx.fillText(`${shown.stars.length} 颗星 · ${built.links.length} 条关系 · ${Math.round(zoom * 100)}% · ${is3d ? '3D' : '2D'}`, W - 12, 16)
         ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(226,234,255,.42)'
         ctx.fillText(is3d ? '拖拽转视角 · 滚轮缩放 · 点星看详情' : '拖拽平移 · 滚轮缩放 · 点星看详情', 12, H - 12)
-      }, [sig, mode, zoom, yaw, pitch, pan, labels, glow, edgeOn, hover, sel, q, is3d])
+      }, [sig, mode, zoom, yaw, pitch, pan, labels, glow, edgeOn, hover, sel, q, is3d, motion, frame])
 
       const localOf = (ev) => {
         const r = ref.current.getBoundingClientRect()
@@ -5331,6 +5374,29 @@ select.roost-input{color-scheme:dark}
 
       const detail = sel ? byId.get(sel) : null
       const fmt = (at) => at ? new Date(at).toLocaleDateString('zh-CN') : '没记时间'
+      /** 逐条编辑：编辑文字 / 改重要度 / 复习 / 层级 / 归档恢复，共用一个路由 */
+      const [edit, setEdit] = useState(null)
+      const [factBusy, setFactBusy] = useState(false)
+      const factAct = async (action, extra = {}) => {
+        if (!detail || factBusy) return
+        setFactBusy(true)
+        try {
+          const r = await post('/memory/fact', {
+            action,
+            id: detail.factId || detail.text,
+            scope: detail.scope || 'global',
+            chatId: mem?.chatId || '',
+            ...extra,
+          })
+          toast(r?.ok === false ? (r.message || '没改上') : '已更新')
+          setEdit(null)
+          if (r?.ok && reload) reload()
+        } catch (e) {
+          toast('没改上：' + e.message)
+        } finally {
+          setFactBusy(false)
+        }
+      }
 
       return h('div', null,
         h('div', { className: 'roost-note', style: { marginBottom: 8 } },
@@ -5377,6 +5443,9 @@ select.roost-input{color-scheme:dark}
           h('label', { title: is3d ? '' : '自动旋转只在 3D 有意义', style: { opacity: is3d ? 1 : 0.45, display: 'inline-flex', alignItems: 'center', gap: 4 } },
             h('input', { type: 'checkbox', checked: is3d && spin, disabled: !is3d, onChange: toggle(setSpin, 'spin') }),
             '自动旋转（仅 3D）'),
+          h('label', { title: is3d ? '' : '流动星尘只在 3D 有意义', style: { opacity: is3d ? 1 : 0.45, display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            h('input', { type: 'checkbox', checked: is3d && motion, disabled: !is3d, onChange: toggle(setMotion, 'motion') }),
+            '流动星尘（仅 3D）'),
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
             h('input', { type: 'checkbox', checked: glow, onChange: toggle(setGlow, 'glow') }), '辉光'),
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
@@ -5428,23 +5497,67 @@ select.roost-input{color-scheme:dark}
           built.stats.groups.map((g) => h('span', { key: g.id, style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
             h('span', { style: { width: 8, height: 8, borderRadius: 4, background: g.color, display: 'inline-block' } }),
             `${g.label} ${g.count}`))),
-        /* 点星后的详情：只挂已经存在的写操作，不假装有编辑/复习/层级 */
+        /* 点星后的详情：事实可以逐条编辑；其它来源只读，去对应分节操作 */
         detail
           ? h('div', { style: { marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 8 } },
               h('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 4 } }, detail.text),
               h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginBottom: 8 } },
                 `${detail.groupLabel} · 亮度 ${Math.round(detail.brightness * 100)}% · 权重 ×${detail.w || 1} · ${fmt(detail.at)}`
-                + (detail.archived ? ' · 已被取代，不参与注入' : '')),
-              h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                detail.kind === 'fact'
-                  ? h('button', {
-                      type: 'button', className: 'roost-btn', disabled: Boolean(busy),
+                + (detail.kind === 'fact' ? ` · 层级 ${({ short: '临时', long: '长期', core: '永久' })[detail.tier] || '长期'}` : '')
+                + (detail.kind === 'fact' && detail.pin > 0 ? ` · 重要度 ${Math.round(detail.pin * 100)}%` : '')
+                + (detail.reviewedAt ? ` · 复习于 ${fmt(detail.reviewedAt)}` : '')
+                + (detail.archived ? ' · 已归档/被取代，不参与注入' : '')),
+              detail.kind === 'fact'
+                ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
+                    h('button', {
+                      type: 'button', className: 'roost-btn', disabled: factBusy,
+                      onClick: () => factAct('review'),
+                    }, '还记得（复习）'),
+                    h('select', {
+                      className: 'roost-input', title: '改层级', disabled: factBusy,
+                      style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+                      value: detail.tier || 'long',
+                      onChange: (e) => factAct('tier', { tier: e.target.value }),
+                    },
+                      h('option', { value: 'short' }, '临时'),
+                      h('option', { value: 'long' }, '长期'),
+                      h('option', { value: 'core' }, '永久')),
+                    h('button', {
+                      type: 'button', className: 'roost-btn', disabled: factBusy,
+                      onClick: () => factAct(detail.archivedAt ? 'restore' : 'archive'),
+                    }, detail.archivedAt ? '恢复' : '归档'),
+                    h('button', {
+                      type: 'button', className: 'roost-btn', disabled: factBusy,
+                      onClick: () => setEdit({ text: detail.text, pin: detail.pin || 0, tier: detail.tier || 'long' }),
+                    }, '编辑'),
+                    h('button', {
+                      type: 'button', className: 'roost-btn', disabled: Boolean(busy) || factBusy,
                       onClick: () => forget(detail),
-                    }, '忘掉这条')
-                  : h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
-                      '这一类不能直接删，去对应分节操作（关系 / 档案 / 日记）'),
-                h('button', { type: 'button', className: 'roost-btn', onClick: () => setSel(null) }, '收起'),
-              ),
+                    }, '忘掉这条'),
+                  )
+                : h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginBottom: 6 } },
+                    '这一类不能直接改，去对应分节操作（关系 / 档案 / 日记）'),
+              detail.kind === 'fact' && edit
+                ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
+                    h('input', {
+                      className: 'roost-input', style: { flex: '1 1 220px', padding: '3px 8px', fontSize: 11.5 },
+                      value: edit.text, onChange: (e) => setEdit({ ...edit, text: e.target.value }),
+                    }),
+                    h('input', {
+                      className: 'roost-input', type: 'number', min: 0, max: 1, step: 0.05,
+                      title: '重要度 0–1（0 表示只用自动权重）',
+                      style: { width: 78, padding: '3px 8px', fontSize: 11.5 },
+                      value: edit.pin,
+                      onChange: (e) => setEdit({ ...edit, pin: e.target.value }),
+                    }),
+                    h('button', {
+                      type: 'button', className: 'roost-btn', disabled: factBusy,
+                      onClick: () => factAct('update', { text: edit.text, pin: Number(edit.pin) || 0, tier: edit.tier }),
+                    }, '保存'),
+                    h('button', { type: 'button', className: 'roost-btn', onClick: () => setEdit(null) }, '取消'),
+                  )
+                : null,
+              h('button', { type: 'button', className: 'roost-btn', onClick: () => { setSel(null); setEdit(null) } }, '收起'),
             )
           : null,
         /* 在星图上加一颗：复用 /memory/add（新增事实） */
@@ -12782,6 +12895,16 @@ select.roost-input{color-scheme:dark}
        */
       const [tab, setTabState] = useState(() => {
         try {
+          /**
+           * 深链：`?tab=memory` 直达。界面上两句说明早就写着「老链接
+           * ?tab=context 仍能单独打开」，但代码从来没有解析 location.search
+           * —— 文案在撒谎。现在真的解析，且**优先于 localStorage**：
+           * 点了一个深链，期望是去那一页，而不是回到上次停留。
+           */
+          const want = typeof location !== 'undefined'
+            ? String(new URLSearchParams(location.search || '').get('tab') || '').trim()
+            : ''
+          if (want && ALL_TABS.includes(want)) return want
           const last = localStorage.getItem('roost.tab')
           /** 老用户存着 'market'：并进「人格」了，别让他打开就是概览 */
           const alias = last === 'market' ? 'her' : last

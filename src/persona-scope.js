@@ -139,6 +139,7 @@ export const PLAN = {
     add: [0, null, 'write'], supersede: [0, null, 'write'],
     setPersonaOverride: [0, null, 'write'], setAuthz: [0, null, 'write'],
     remove: [0, null, 'write'], clearChat: [0, null, 'write'],
+    editFact: [0, null, 'write'],
   },
   journal: {
     /** 对外写方法是 add；insert / searchTerms / withVec 是底层内部方法，不暴露，不用包 */

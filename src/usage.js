@@ -91,7 +91,7 @@ export function createUsage({ file, log = () => {}, keepDays = 400, tierOf = nul
    *   `model`（3.1）：这轮用的模型名，供分模型计价；不传进空键（按未定价处理）。
    * @returns {boolean} 有没有真的记上
    */
-  function record({ chatId, at = Date.now(), model = '', usage } = {}) {
+  function record({ chatId, at = Date.now(), model = '', usage, personaId = '' } = {}) {
     if (!chatId || !usage) return false;
     const num = (x) => (Number.isFinite(Number(x)) && Number(x) >= 0 ? Number(x) : 0);
     const cur = {
@@ -137,6 +137,17 @@ export function createUsage({ file, log = () => {}, keepDays = 400, tierOf = nul
     addInto(bucket.total, delta);
     const cb = (bucket.chats[chatId] = bucket.chats[chatId] || EMPTY());
     addInto(cb, delta);
+    /**
+     * 4.5 流水层：按人格再分一桶（只增字段）。
+     * 主键仍是逻辑 chatId —— 投递回查、主动搭话冷却都按它找，改成物理键
+     * 会把幂等键和调度状态一起拆散。这里只加统计维度，不动功能键。
+     */
+    const pid = String(personaId || '').trim();
+    if (pid) {
+      const personas = (bucket.personas = bucket.personas || {});
+      const pb = (personas[pid] = personas[pid] || EMPTY());
+      addInto(pb, delta);
+    }
 
     /**
      * 3.1：同一份 delta 再记进「分模型 × 分档」桶，供金额折算。
