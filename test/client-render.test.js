@@ -1124,6 +1124,39 @@ test('拆分后每页分节编号都从 01 起、连续', () => {
   }), rt)), ['01', '02', '03', '04', '05', '06', '07', '08'], '群聊策略页编号应 01–08 连续')
 })
 
+test('2.7 工作区挪进首次设置：设置页留链接，卡片本体控件一个不少', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+
+  /* 设置页：01 工作区只剩一行链接，没有编辑框；02/03 照旧 */
+  rt.reset()
+  const tree = expand(mod.ConfigTab({
+    config: {}, save: () => {}, saveCfg: () => {}, toast: () => {},
+    stickers: null, setupSt: null, reload: () => {}, setTab: () => {},
+  }), rt)
+  const txt = textOf(tree)
+  assert.ok(txt.includes('去首次设置页改'), '设置页要留一行跳转链接')
+  assert.ok(txt.includes('首次设置'), '链接文案要说清去哪')
+  assert.ok(!txt.includes('目录（留空=数据目录'), '设置页不该再有工作区编辑框')
+
+  /* 卡片本体：在首次设置页不带编号徽标（那页的 1–6 是接入步骤圆圈号） */
+  rt.reset()
+  const card = expand(mod.WorkspaceCard({
+    saveCfg: () => {}, toast: () => {}, numbered: false,
+  }), rt)
+  const secs = sectionsOf(card).filter((s) => s.n).map((s) => s.n)
+  assert.deepEqual(secs, [], 'numbered=false 时不该有编号徽标')
+  const ctxt = textOf(card)
+  for (const must of ['工作区', '保存', '改名', '换目录只影响之后新建的会话']) {
+    assert.ok(ctxt.includes(must), `工作区卡片少了「${must}」`)
+  }
+
+  /* 带编号时仍是 01：旧用法不被顺手改坏 */
+  rt.reset()
+  const numbered = expand(mod.WorkspaceCard({ saveCfg: () => {}, toast: () => {} }), rt)
+  assert.deepEqual(sectionsOf(numbered).filter((s) => s.n).map((s) => s.n), ['01'])
+})
+
 test('群聊策略页：露的是已有配置键，配色走本项目令牌', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)

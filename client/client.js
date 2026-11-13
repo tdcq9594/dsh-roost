@@ -2190,7 +2190,7 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    function SetupTab({ st, reload, toast, busy, run, reg, onSaved }) {
+    function SetupTab({ st, reload, toast, busy, run, reg, onSaved, saveCfg }) {
       const [qrSvg, setQrSvg] = useState('')
       const [qrTip, setQrTip] = useState('')
       const [appId, setAppId] = useState('')
@@ -2822,6 +2822,13 @@ select.roost-input{color-scheme:dark}
         ),
 
         h(DepsBlock, { info: depsInfo, busy: depsBusy, onCheck: () => loadDeps(true) }),
+
+        /**
+         * 2.7：工作区卡片从「设置」挪到这里（本体，控件一个没少）。
+         * 不带编号徽标——这页的 1–6 是接入步骤的圆圈号，再排一个 01
+         * 会被读成第 7 步；跟「常见卡点」一样只留标题。
+         */
+        h(WorkspaceCard, { saveCfg, toast, numbered: false }),
 
         /* 接入这几步用的是圆圈编号，这里就不再编号了 —— 混用两套编号容易读成别的步号 */
         h(Sec, { title: '常见卡点' },
@@ -8690,8 +8697,10 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    /** 工作区：当前挂在哪个目录 + 改名 / 换目录 */
-    function WorkspaceCard({ saveCfg, toast }) {
+    /** 工作区：当前挂在哪个目录 + 改名 / 换目录。
+     * 2.7：本体挪进「首次设置」，设置页只留一行链接——
+     * 工作区属于「装机时定一次」的事，跟配置全文不是一个使用频率。 */
+    function WorkspaceCard({ saveCfg, toast, numbered = true }) {
       const [ws, setWs] = useState(null)
       const [dir, setDir] = useState('')
       const [name, setName] = useState('')
@@ -8712,7 +8721,7 @@ select.roost-input{color-scheme:dark}
       }
 
       return h(Sec, {
-        n: '01',
+        n: numbered ? '01' : null,
         title: '工作区',
         right: h('span', { className: 'roost-note', style: { margin: 0 } }, ws?.current?.title || ''),
       },
@@ -10283,7 +10292,7 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    function ConfigTab({ config, save, saveCfg, toast, stickers, setupSt, reload, currentChatId }) {
+    function ConfigTab({ config, save, saveCfg, toast, stickers, setupSt, reload, currentChatId, setTab }) {
       const cfgJson = JSON.stringify(config, null, 2)
       const [draft, setDraft] = useState(cfgJson)
       const [err, setErr] = useState('')
@@ -10401,9 +10410,18 @@ select.roost-input{color-scheme:dark}
       return h('div', null,
         /**
          * 2026-11-12：模型 / 更新 / 反馈 / 语音 / 表情包各自独立成页，
-         * 这里只剩「这台机器怎么配」——工作区位置、配置全文、各段说明。
+         * 这里只剩「这台机器怎么配」——配置全文、各段说明。
+         * 2.7：工作区卡片挪进「首次设置」，这里按原位置留一行链接（只增不减）。
          */
-        h(WorkspaceCard, { saveCfg, toast }),
+        h(Sec, { n: '01', title: '工作区',
+          right: h('button', {
+            type: 'button', className: 'roost-btn',
+            onClick: () => setTab && setTab('setup'),
+          }, '去首次设置页改'),
+        },
+          h('div', { className: 'roost-note', style: { margin: 0 } },
+            '工作区目录和名字在「首次设置」页里改——那是装机时定一次的事，跟本页的配置全文不是一个使用频率。改完要重启会话才挂上新工作区。'),
+        ),
 
         h(Sec, { n: '02', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
           h('button', { type: 'button', className: 'roost-btn', onClick: reloadDraft }, '还原'),
@@ -12042,7 +12060,7 @@ select.roost-input{color-scheme:dark}
         },
           h('div', { className: 'roost-body-inner' },
           tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
-          tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta }) : null,
+          tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }) : null,
           tab === 'her'
             ? h(HerTab, {
                 config,
@@ -12117,7 +12135,7 @@ select.roost-input{color-scheme:dark}
                   ? h(ConfigTab, {
                       config, save: saveAll, saveCfg, toast,
                       stickers: her?.stickers ?? null, setupSt, reload: loadHer,
-                      currentChatId: mem?.chatId || '',
+                      currentChatId: mem?.chatId || '', setTab,
                     })
                   : h('div', { className: 'roost-empty' }, '读取配置…'),
                 h(Sec, { title: '危险操作' },
@@ -12175,7 +12193,7 @@ select.roost-input{color-scheme:dark}
          */
         pageModal === 'setup'
           ? h(PageModal, { title: '首次接入 / 组件版本', onClose: () => setPageModal(null) },
-              h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta }))
+              h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }))
           : null,
         pageModal === 'account'
           ? h(PageModal, { title: '账号迁移', onClose: () => setPageModal(null) },
@@ -12223,6 +12241,7 @@ select.roost-input{color-scheme:dark}
     exports.RoostPage = RoostPage
     exports.RoostIcon = RoostIcon
     exports.ConfigTab = ConfigTab
+    exports.WorkspaceCard = WorkspaceCard
     exports.DepsBlock = DepsBlock
     exports.SetupWizard = SetupWizard
     exports.HerTab = HerTab
