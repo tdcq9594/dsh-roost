@@ -8605,7 +8605,13 @@ select.roost-input{color-scheme:dark}
      * ② **保存形态按数量还原**：0 个 → `''`（回落默认），1 个 → 字符串，多个 → 数组。
      *    单一目录仍写字符串，是因为没必要因为支持了数组就把所有人的 config.json 都改成数组。
      */
-    function StickerDirsCard({ config, stickers, saveCfg, toast, reload }) {
+    /**
+     * 表情包目录。
+     *
+     * `n` 是分节编号：留在「表达」页时它是 02（排在语音后面）；
+     * 2026-11-13 拆成独立页之后它是 01（一页就这一节）。
+     */
+    function StickerDirsCard({ config, stickers, saveCfg, toast, reload, n = '02' }) {
       /** 服务端 → 编辑态。老服务端只回 `dir` 一个字符串，也要能显示 */
       const fromServer = (s) => {
         const list = Array.isArray(s?.dirs) && s.dirs.length ? s.dirs : (s?.dir ? [s.dir] : [])
@@ -8686,7 +8692,7 @@ select.roost-input{color-scheme:dark}
 
       return h('div', null,
         h(Sec, {
-        n: '02',
+        n,
         title: '表情包',
         right: h('div', { style: { display: 'flex', gap: 10, alignItems: 'center' } },
           h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
@@ -10223,10 +10229,69 @@ select.roost-input{color-scheme:dark}
      * 这两块原来是「设置」里的第 04、05 节，但它们跟「配置文件在哪」没有关系——
      * 说的都是**她怎么出声、怎么发表情**。放在一起，找语音的人不用再滚配置全文。
      */
-    function ExpressTab({ config, stickers, saveCfg, toast, reload }) {
+    /**
+     * 表达：语音与表情包**分成两页**（2026-11-13），但共用这一个组件。
+     *
+     * `part` 决定渲染哪半边：
+     *   · `'voice'`  只有语音合成（TTS 那套，也是「说话」这一侧）
+     *   · `'sticker'` 只有表情包目录
+     *   · 不传 = 两块都渲染（老入口/单测走这条，行为与拆分前一致）
+     *
+     * 为什么拆：一页塞两块互不相干的东西，找语音要往下滚过表情目录。
+     * tab key `express` 保持不变，老 `localStorage['roost.tab']` 照样落在语音这页。
+     */
+    function ExpressTab({ config, stickers, saveCfg, toast, reload, part = 'all' }) {
       return h('div', null,
-        h(TtsCard, { config, saveCfg, toast, reload }),
-        h(StickerDirsCard, { config, stickers, saveCfg, toast, reload }),
+        part === 'sticker' ? null : h(TtsCard, { config, saveCfg, toast, reload }),
+        /** 独立成页时它是这一页的第 01 节；留在表达页时仍是 02（排在语音后面） */
+        part === 'voice' ? null : h(StickerDirsCard, {
+          config, stickers, saveCfg, toast, reload,
+          n: part === 'sticker' ? '01' : '02',
+        }),
+        part === 'voice'
+          ? h('div', { className: 'roost-note' }, '表情包在「表达 → 表情包」那一页。')
+          : null,
+      )
+    }
+
+    /**
+     * 关于：版本、仓库、许可、反馈群。
+     *
+     * 以前这些散在「更新」页和 README 里——用户想知道「我装的是哪个版本、
+     * 这个项目能不能商用」，得翻三处。单独一页成本极低。
+     */
+    function AboutTab({ toast }) {
+      const [ver, setVer] = useState(null)
+      useEffect(() => {
+        get('/update/check').then((r) => setVer(r && r.ok !== false ? r : null)).catch(() => setVer(null))
+      }, [])
+      const copy = (t) => {
+        try { navigator.clipboard?.writeText(t) } catch {}
+        toast?.('已复制')
+      }
+      const row = (k, v) => h('div', { style: { display: 'flex', gap: 10, padding: '3px 0' } },
+        h('span', { style: { minWidth: 88, opacity: 0.72 } }, k),
+        h('span', null, v),
+      )
+      return h('div', null,
+        h(Sec, { n: '01', title: '版本' },
+          row('当前版本', ver?.current || ver?.version || '（没读到，稍后刷新）'),
+          ver?.latest ? row('最新版本', ver.latest + (ver.hasUpdate ? '（有新版，去「更新」页装）' : '（已是最新）')) : null,
+        ),
+        h(Sec, { n: '02', title: '仓库与许可' },
+          row('GitHub', h('a', { href: 'https://github.com/tdcq9594/dsh-roost', target: '_blank', rel: 'noreferrer' }, 'tdcq9594/dsh-roost')),
+          row('Gitee', h('a', { href: 'https://gitee.com/tdcq9594/dsh-roost', target: '_blank', rel: 'noreferrer' }, 'tdcq9594/dsh-roost')),
+          h('div', { className: 'roost-note' },
+            '永久免费，禁止收费与商业使用（自写协议 v2.0，非 OSI 许可）。'
+            + '框架本体是 qq-bot-roost，这一层是把它接进 DSH 的插件。'),
+        ),
+        h(Sec, { n: '03', title: '交流反馈群' },
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+            h('span', null, 'QQ 群 1130901545'),
+            h('button', { type: 'button', className: 'roost-btn', onClick: () => copy('1130901545') }, '复制群号'),
+          ),
+          h('div', { className: 'roost-note' }, '出问题先看「排障」页的日志，再来群里问。'),
+        ),
       )
     }
 
@@ -10480,18 +10545,20 @@ select.roost-input{color-scheme:dark}
       ['memory', '记忆'],
       /* 能力：她能干什么 */
       ['caps', '权限'],
-      ['express', '表达'],
+      ['express', '语音'],
+      ['stickers', '表情包'],
       ['model', '模型'],
       /* 扩展：独立成组，和 aurabot 的「模块」对齐 */
       ['ext', '已安装'],
       ['ext-market', '市场'],
       ['ext-api', '接口'],
       /* 系统：这台机器怎么跑 */
-      ['chats', '身份'],
+      ['chats', '会话'],
       ['groupadmin', '群管'],
       ['logs', '排障'],
       ['update', '更新'],
       ['config', '设置'],
+      ['about', '关于'],
     ]
     /**
      * `chats` 原来是隐藏页，2026-11-12 提升成「身份」：它本来就是
@@ -10514,9 +10581,18 @@ select.roost-input{color-scheme:dark}
     const NAV_GROUPS = [
       { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview'] },
       { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'mood', 'awake', 'memory'] },
-      { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'express', 'model'] },
+      /* 表达：她怎么"出声"——说话（语音合成）与表情包。2026-11-13 从「能力」里独立出来 */
+      { id: 'express', label: '表达', icon: 'M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.4A8 8 0 1 1 20.5 11.5zM9 13.2s1.1 1.5 3 1.5 3-1.5 3-1.5M9.5 9.6h.01M14.5 9.6h.01', tabs: ['express', 'stickers'] },
+      /**
+       * 群管暂时挂在「系统」组里（2026-11-13）。
+       *
+       * 本来想单独开一个「群聊」组，但它现在只有一页——单页组不渲染二级行，
+       * 导航里看不到「群管」两个字，点进去才知道是什么，反而更迷惑。
+       * 等 2.2 的群聊策略页做出来（组里有两页）再独立成组。
+       */
+      { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
-      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'groupadmin', 'logs', 'update', 'config'] },
+      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'groupadmin', 'logs', 'update', 'config', 'about'] },
     ]
     /** 当前页属于哪一组；隐藏页不属于任何组，返回 null */
     const navGroupOf = (id) => NAV_GROUPS.find((g) => g.tabs.includes(id)) || null
@@ -10841,7 +10917,7 @@ select.roost-input{color-scheme:dark}
          * 此时点保存提交的 `tts` 只含三个默认值，等于在空数据上覆盖真实配置。
          * `TtsCard` 自己另有一道 `!config` 的硬拦（见 `save()`），这里是第一道。
          */
-        if (tab === 'express') {
+        if (tab === 'express' || tab === 'stickers') {
           if (!config) once('config', loadConfig)
           if (!her?.stickers) once('her', loadHer)
         }
@@ -11085,9 +11161,17 @@ select.roost-input{color-scheme:dark}
           tab === 'express'
             ? h(ExpressTab, {
                 config, stickers: her?.stickers ?? null,
-                saveCfg, toast, reload: loadHer,
+                saveCfg, toast, reload: loadHer, part: 'voice',
               })
             : null,
+          /** 表情包：从「表达」里拆出来的那一半（2026-11-13），tab key 新增，不动老的 */
+          tab === 'stickers'
+            ? h(ExpressTab, {
+                config, stickers: her?.stickers ?? null,
+                saveCfg, toast, reload: loadHer, part: 'sticker',
+              })
+            : null,
+          tab === 'about' ? h(AboutTab, { toast }) : null,
           tab === 'model'
             /** 视觉能力那一行要读写 config，所以把 config / saveCfg 一起给过去 */
             ? h(ModelTab, { toast, currentChatId: mem?.chatId || '', config, saveCfg })

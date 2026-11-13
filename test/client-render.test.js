@@ -94,7 +94,7 @@ globalThis.localStorage = {
 }
 
 /* 与 client.js 的 TABS 同序：2026-11-12 细分后的 15 个可见页签 */
-const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'caps', 'express', 'model', 'ext', 'ext-market', 'ext-api', 'chats', 'logs', 'update', 'config']
+const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'chats', 'groupadmin', 'logs', 'update', 'config', 'about']
 /* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats 已提升为正式页） */
 const HIDDEN_TABS = ['context', 'setup', 'account']
 
@@ -104,19 +104,24 @@ const HIDDEN_TABS = ['context', 'setup', 'account']
  * 这里把结构抄一份，是为了在「页签改成两层」时**测试先红**——
  * 以前那版断言的是「8 个 label 同时出现在一行里」，两层之后这条
  * 自动失效，如果不重写就会变成「测试通过但导航其实坏了」。
+ *
+ * **2026-11-13 结构改造**：表达从「能力」里独立成组（语音 / 表情包两页）、
+ * 新增「群聊」组（群管）、系统组加「关于」。「身份」改名「会话」。
+ * 这里是特意抄的死结构：页签改动必须同步改这里，改不动就说明导航真坏了。
  */
 const NAV = {
   home: { label: '概览', tabs: ['overview'] },
   self: { label: '人设', tabs: ['her', 'mood', 'awake', 'memory'] },
-  power: { label: '能力', tabs: ['caps', 'express', 'model'] },
+  express: { label: '表达', tabs: ['express', 'stickers'] },
+  power: { label: '能力', tabs: ['caps', 'model'] },
   mods: { label: '扩展', tabs: ['ext', 'ext-market', 'ext-api'] },
-  system: { label: '系统', tabs: ['chats', 'logs', 'update', 'config'] },
+  system: { label: '系统', tabs: ['chats', 'groupadmin', 'logs', 'update', 'config', 'about'] },
 }
 const TAB_LABEL = {
   overview: '概览', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆',
-  caps: '权限', express: '表达', model: '模型',
+  caps: '权限', express: '语音', stickers: '表情包', model: '模型',
   ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
-  chats: '身份', logs: '排障', update: '更新', config: '设置',
+  chats: '会话', groupadmin: '群管', logs: '排障', update: '更新', config: '设置', about: '关于',
 }
 const HIDDEN_LABEL = { context: '上下文', setup: '接入', account: '账号迁移' }
 
