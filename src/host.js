@@ -742,6 +742,9 @@ export function apply(ctx) {
    * 这个人格说的，属预期行为。
    */
   const personaByChat = new Map();
+  /** 5.13：「正在输入」每会话 60 秒最多发一次，别把提示刷成噪音 */
+  const typingAt = new Map();
+  const TYPING_EVERY_MS = 60_000;
   const PERSONA_MAP_MAX = 300;
   const ownership = createOwnership({
     file: join(dataDir(), 'persona-ownership.json'),
@@ -4280,6 +4283,21 @@ export function apply(ctx) {
      * 4.5：这一轮用哪个人格，决定新记忆写到哪个物理键。
      * 用**逻辑 chatId** 解析（byChat 配置按 openid 查），不碰出站 target。
      */
+    /**
+     * 5.13 单聊「正在输入」：一轮可能几十秒，先给个「在打字」的信号。
+     * 失败静默（提示发不出去不能影响回复）；群聊没有这个语义。
+     */
+    if (chat.kind === 'c2c' && cfg.chat?.typing !== false) {
+      const at = typingAt.get(chat.chatId) || 0;
+      if (Date.now() - at > TYPING_EVERY_MS) {
+        typingAt.set(chat.chatId, Date.now());
+        if (typingAt.size > 300) typingAt.delete(typingAt.keys().next().value);
+        try {
+          channels.active()?.sendTyping?.({ scene: 'c2c', target: chat.chatId })?.catch?.(() => {});
+        } catch { /* 没有这个能力就算了 */ }
+      }
+    }
+
     try {
       const pid = String(personas.resolve(chat.chatId, personaCfgFor(chat))?.id || '');
       personaByChat.set(chat.chatId, pid);

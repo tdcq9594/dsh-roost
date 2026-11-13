@@ -286,6 +286,23 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
     },
 
     /**
+     * 5.13 单聊「正在输入」（`msg_type=6`）。
+     *
+     * 只对私聊有意义：群里没有这个语义，官方也不支持。
+     * 直连协议侧、**不走 outbound**——它不是消息，不该占主动额度、
+     * 也不该进投递账本（进了会让幂等和「待确认」判断错乱）。
+     */
+    async sendTyping({ scene = 'c2c', target } = {}) {
+      if (scene === 'group') return { ok: false, message: '群聊没有「正在输入」' };
+      if (!target) return { ok: false, message: '缺 target' };
+      try {
+        return await host.rpc('msg.typing', { chatId: String(target) });
+      } catch (e) {
+        return { ok: false, message: String(e?.message || e) };
+      }
+    },
+
+    /**
      * 发一条语音。`path` 是已经是 silk/amr 的本地文件；`dataBase64` 给 TTS
      * 刚合成出来的 WAV/MP3，协议侧会转码成 silk（要可选的 silk-wasm）。
      * 两条都走 `media.send` → `outbound`，额度、账本、被动窗口一样不缺。
