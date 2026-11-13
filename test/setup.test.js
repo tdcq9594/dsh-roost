@@ -228,3 +228,61 @@ test('启动: 端口被占漂到 +1 时，探活要能找到（不能判成没�
     },
   );
 });
+
+/**
+ * 启动时机器人已经 `error`：立刻返回，别空转到 20 秒。
+ *
+ * 2026-11-13 实机：宿主重启后旧 Roost 留下一条**残留心跳**（进程已死、
+ * 心跳文件还在 30 秒租约内），新进程认领 AppID 被拦住 → `main` 直接 error。
+ * 面板 1 秒就起来了，可 `startVerdict` 只认「至少一只 online」，于是一路空转
+ * 到第 40 次轮询，20 秒后才给一句「去面板看日志里的报错」——原因明明就在
+ * `/healthz` 里（框架从那天起会把 `error` 字段带出来）。
+ *
+ * 这里钉两件事：① 带原因立刻返回 ② 耗时远小于 20 秒。
+ */
+test('启动: 机器人报错时立刻返回并带上真实原因（不再空转 20 秒）', async () => {
+  const dir = makeRoost();
+  // 真起一个不退出的子进程，冒充「面板起来了、机器人连不上」的 Roost
+  writeFileSync(join(dir, 'src', 'main.js'), 'setInterval(() => {}, 1000);\n', 'utf8');
+  const setup = makeSetup(dir);
+
+  const reason = 'AppID 102056878 已被PID 28256占用';
+  const errored = {
+    ok: false,
+    status: 503,
+    text: async () =>
+      JSON.stringify({
+        ok: false,
+        bots: [{ id: 'main', state: 'error', error: reason }],
+        online: 0,
+        total: 1,
+      }),
+  };
+
+  const started = Date.now();
+  /**
+   * 第一次探活要「没人应答」（等价于真实现场：面板还没起来就 spawn 了），
+   * 之后才应答成「面板在、机器人 error」。全应答 503 的话 `isRunning()` 会先
+   * 认定「已经在跑」直接返回，走不到启动轮询这条路径。
+   */
+  let probes = 0;
+  try {
+    await withFetch(
+      async () => {
+        probes += 1;
+        if (probes <= 2) throw new Error('ECONNREFUSED');
+        return errored;
+      },
+      async () => {
+        const r = await setup.start();
+        const spent = Date.now() - started;
+        assert.equal(r.ok, false, '机器人没上线，不能报成功');
+        assert.match(r.message, /102056878/, '要把 /healthz 带回的原因说出来');
+        assert.match(r.message, /占用/, '原因要原样带出来，别只说「去面板看日志」');
+        assert.ok(spent < 8000, `空转了 ${spent}ms，应当立刻返回（旧实现要等满 20 秒）`);
+      },
+    );
+  } finally {
+    await setup.stop().catch(() => {});
+  }
+});

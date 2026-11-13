@@ -488,6 +488,27 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
   function startVerdict(h) {
     if (!h.total) return { done: true, message: `起来了：${webuiUrl()}（还没配机器人）` };
     if (h.online > 0) return { done: true, message: `起来了：${webuiUrl()}（${h.online}/${h.total} 已上线）` };
+    /**
+     * 一只都没上线。分两种，别混成一句「去面板看日志」：
+     *
+     *   · 有机器人已经 `error` → 它不会再自愈（框架里 error 是终止态，
+     *     没有自动重连），再等也是空等。把 `/healthz` 带回来的原因直接说出去
+     *     （比如「AppID 102056878 已被 PID 28256 占用」）。
+     *   · 还在 `starting` → 只是慢，继续轮询到 20 秒上限。
+     */
+    const dead = (Array.isArray(h.bots) ? h.bots : []).filter((b) => b?.state === 'error');
+    if (dead.length) {
+      const why = [...new Set(dead.map((b) => String(b?.error ?? '').trim()).filter(Boolean))]
+        .slice(0, 2)
+        .join('；');
+      return {
+        done: false,
+        fail: true,
+        message: why
+          ? `面板起来了（${webuiUrl()}），但机器人没连上：${why}`
+          : `面板起来了（${webuiUrl()}），但 ${dead.length} 只机器人报错退出——去面板看日志`,
+      };
+    }
     return {
       done: false,
       message: `面板起来了（${webuiUrl()}），但 ${h.total} 只机器人一只都没连上——去面板看日志里的报错`,
@@ -837,6 +858,16 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       if (!panel) continue;
       const verdict = startVerdict(panel);
       if (verdict.done) return { ok: true, message: verdict.message };
+      /**
+       * 机器人已经 `error` 就**立刻返回**，不要等满 20 秒。
+       *
+       * 框架里 `error` 是终止态（没有自动重连），等下去只是空转：面板显示
+       * 「起来了」，用户却要盯着转圈 20 秒才收到一句「去面板看日志」。
+       * 2026-11-13 实机：实例锁被上一条残留记录占着，spawn 后 6 秒就 error，
+       * 却硬等到第 40 次轮询才报错。现在把原因（`/healthz` 的 `error` 字段）
+       * 一起带出来，用户能直接看到「AppID 被 PID xxx 占用」。
+       */
+      if (verdict.fail) return { ok: false, message: verdict.message };
     }
 
     if (!panel) {

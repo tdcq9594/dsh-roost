@@ -4511,11 +4511,17 @@ export function apply(ctx) {
 
   /* ---------------- 起停 ---------------- */
 
-  function startServer() {
-    server?.close();
-
   /**
    * 同会话排队 + 入站薄壳。
+   *
+   * **必须建在这里（apply 作用域），不能建在 `startServer()` 里。**
+   * 2026-11-13 实机踩到：`onInbound` 曾是 `startServer` 的局部函数，而
+   * `deliverBatch()`（外接协议收消息那条路）在 apply 作用域里调它 ——
+   * 于是每条消息都抛 `onInbound is not defined`，被 `roostMerger.onFlush`
+   * 的 catch 吞成一行 warn：面板全绿、消息也进来了，就是一句话都不回。
+   *
+   * 顺带修掉另一个错位：`startServer()` 每次重启（改配置会触发）都重建一遍
+   * 队列，正在排的 turn 凭空丢掉。队列是进程级的组件，跟监听端口不是一回事。
    *
    * 为什么 key 要钉住、为什么队列满不能伪造 `busy` 异常，
    * 都写在 `turnqueue.js` / `inbound-shell.js` 的文件头里，这里只负责接线。
@@ -4552,6 +4558,9 @@ export function apply(ctx) {
     lastActiveAt = Date.now();
     return inboundShell.onInbound(payload);
   }
+
+  function startServer() {
+    server?.close();
 
     /**
      * 候选端口：配置里的 → 上次实际用的 → 往后 +1 一直到 +20。
