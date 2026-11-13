@@ -3165,7 +3165,7 @@ select.roost-input{color-scheme:dark}
 
       return h('div', { className: 'pv-root' },
         h(Sec, {
-          title: '人格隔离（4.5）',
+          title: '人格隔离',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadScope }, '刷新'),
         },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
@@ -3216,10 +3216,21 @@ select.roost-input{color-scheme:dark}
                     h('option', { value: '' }, '不归属'),
                     (scopeState?.personas || []).map((x) => h('option', { key: x.id, value: x.id }, x.name))))))
             : null,
-          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-            h('button', { type: 'button', className: 'roost-primary', disabled: !scopeDraft, onClick: saveScope }, '保存选择'),
+          /**
+           * 按钮行只放按钮 + 一句**短状态**。
+           * 上一版把后端返回的整段 note 塞进同一个 flex 行，结果长文字和
+           * 按钮挤成一行、还和卡片顶部那段说明逐字重复（截图里那块黑按钮
+           * 右边拖着一长串字就是这么来的）。说明只在顶部出现一次。
+           */
+          h('div', {
+            style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 10, marginBottom: 6 },
+          },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: !scopeDraft, onClick: saveScope,
+            }, '保存选择'),
             h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
-              scopeState ? (scopeState.note || '') : '读取人格隔离状态…')),
+              !scopeState ? '读取状态…' : (scopeState.enabled ? '当前：已开启' : '当前：已关闭')),
+          ),
         ),
 
         /**
@@ -6092,7 +6103,7 @@ select.roost-input{color-scheme:dark}
 
       return h('div', null,
         h(Sec, {
-          title: '互动召回（is_wakeup）',
+          title: '互动召回',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadWake }, '刷新'),
         },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },

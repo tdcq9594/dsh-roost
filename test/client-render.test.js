@@ -2016,7 +2016,7 @@ test('4.5：人格页把「旧记忆归谁」做成三个可选项，代码不�
   }), rt)
   const txt = textOf(tree)
   for (const must of [
-    '人格隔离（4.5）', '开启人格隔离（默认关）', '保存选择',
+    '人格隔离', '开启人格隔离（默认关）', '保存选择',
     'A 共享', 'B 归某一个人格', 'C 逐会话指定',
     '只写归属标记', '不搬动旧数据',
   ]) {
@@ -2033,4 +2033,26 @@ test('4.5：人格页把「旧记忆归谁」做成三个可选项，代码不�
   assert.equal(radios.length, 3, `应有三个策略单选项，实际 ${radios.length}`)
   assert.deepEqual(radios.map((r) => r.value), ['shared', 'owner', 'perChat'])
   assert.equal(radios.some((r) => r.checked), false, '不能替使用者预选一个')
+
+  /**
+   * 面板文案不许出现内部记号：路线图的批次号（4.5）、官方字段名
+   * （is_wakeup）、store 物理键（::p:）。截图里「人格隔离（4.5）」就是
+   * 照着内部任务号写进 UI 的，用户看不懂也不该看到。
+   */
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(!/title: '[^']*（\d+\.\d+）/.test(src), '面板标题带了路线图批次编号')
+  assert.ok(!/title: '[^']*is_wakeup/.test(src), '面板标题带了官方字段名')
+  assert.ok(!/title: '[^']*::p:/.test(src), '面板标题带了内部物理键记号')
+
+  /** 保存按钮：次要按钮、独占一行，旁边不能再拖一长串重复说明 */
+  let saveBtn = null
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.type === 'button' && textOf(n) === '保存选择') saveBtn = n
+    walk(n.props?.children)
+  })(tree)
+  assert.ok(saveBtn, '缺保存选择按钮')
+  assert.equal(saveBtn.props.className, 'roost-btn', '配置卡里用次要按钮，别放一块黑色主按钮')
+  assert.ok(!txt.includes('专属键里的内容仍在盘上不丢。只写归属标记'), '说明文字重复了两遍')
 })
