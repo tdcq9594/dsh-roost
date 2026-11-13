@@ -162,7 +162,14 @@ export function defaultStore() {
       chats: {},
     },
     /** 危险动作：只用于 UI 标红 + 二次确认，不参与解析 */
-    danger: ['edit', 'write', 'pwsh', 'ops_bash', 'qq_send_file', 'mcp__*__*_exec', 'mcp__*__*_edit'],
+    /**
+     * 危险级：关掉就是整层收走，不是逐次提示。
+     *
+     * 群管两件（`qq_mute` / `qq_join_request`）和发文件同级——它们都会对**别人**
+     * 产生后果，且模型是自己在群里决定用，没有一个"主人按下确认"的时刻。
+     * `qq_group_info` 不在里面：只读，谁问都不改变什么。
+     */
+    danger: ['edit', 'write', 'pwsh', 'ops_bash', 'qq_send_file', 'qq_mute', 'qq_join_request', 'mcp__*__*_exec', 'mcp__*__*_edit'],
     /** 上次看到的 pool，用来算「新增 / 失效」 */
     seen: { tools: {}, skills: {}, lastScan: 0 },
     /**

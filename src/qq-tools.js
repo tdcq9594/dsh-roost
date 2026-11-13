@@ -30,6 +30,7 @@
 
 import { loadDefineTool, shapeTool } from './tools.js';
 import { acceptClose } from './closing.js';
+import { buildGroupToolDefs } from './group-tools.js';
 
 /**
  * `qq_send` 里**仍然要拦**的标记：`say` / `button` / `silence`。
@@ -219,7 +220,7 @@ function buildSendFileDef({ caller, fileOf }) {
  * @param {() => object} o.cfgOf
  * @param {() => {parts:number}} o.stateOf 本轮已发段数
  */
-export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf }) {
+export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf }) {
   const caller = () => callerOf?.() || { chatId: '', kind: '', said: '', hasPayload: false, bucket: '' };
   const maxParts = () => maxPartsOf(cfgOf?.(), caller().kind);
 
@@ -399,6 +400,8 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
      * 必然失败的操作」——那种一轮模型调用直接白花。
      */
     ...(typeof fileOf === 'function' ? [buildSendFileDef({ caller, fileOf })] : []),
+    /** 群管：和发言工具一起挂，但实现放在 group-tools.js（语义不同，也都依赖外接协议） */
+    ...(typeof groupOf === 'function' ? buildGroupToolDefs({ groupOf, callerOf }) : []),
   ];
 }
 
@@ -410,8 +413,8 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
  *
  * @returns {Promise<{ok:boolean, names:string[], reason?:string, mode?:string, off?:Function}>}
  */
-export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, log = () => {} }) {
-  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf });
+export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, log = () => {} }) {
+  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf });
   const registry = agent?.ctx?.tools;
   if (!registry?.register) {
     /**

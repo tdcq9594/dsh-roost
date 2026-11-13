@@ -3336,6 +3336,12 @@ export function apply(ctx) {
 
       qqToolRegistry.setReady(agent, registerQqTools({
         agent,
+        /**
+         * 群管工具（`qq_group_info` / `qq_mute` / `qq_join_request`）。
+         * 传函数而不是实例：`groupAdmin` 依赖外接协议，可能这一刻还没连上，
+         * 工具内部每次现取，连上之后同一套工具立刻可用，不用重注册。
+         */
+        groupOf: () => groupAdmin,
         callerOf: () => {
           const c = cur();
           return { ...c, hasPayload: Boolean(c.payload) };
