@@ -8564,9 +8564,16 @@ export function apply(ctx) {
         const root = String(snap.roots?.[0] || '');
         if (!root) return send(res, 400, { ok: false, message: '还没配表情目录，先在设置里填一个' });
 
-        /** 分类可空 = 放根目录。分类名同样要防穿越 */
-        const cat = basename(String(body?.category ?? '').replace(/\\/g, '/')) || '';
-        const dir = cat && cat !== '.' && cat !== '..' ? join(root, cat) : root;
+        /**
+         * 分类可空 = 放根目录。分类名同样要防穿越。
+         *
+         * `未分类` 一律当根目录：它既是「根目录的图」的显示名，也是老版
+         * 「同步缓存图」在库里建的真目录名，两处在下拉里是合并显示的。
+         * 用户选「未分类」的意思是「不分类」，不该再往那个历史目录里塞。
+         */
+        const rawCat = basename(String(body?.category ?? '').replace(/\\/g, '/')) || '';
+        const cat = rawCat && rawCat !== '未分类' && rawCat !== '.' && rawCat !== '..' ? rawCat : '';
+        const dir = cat ? join(root, cat) : root;
         if (!dir.startsWith(root)) return send(res, 400, { ok: false, message: '分类名不合法' });
 
         try {

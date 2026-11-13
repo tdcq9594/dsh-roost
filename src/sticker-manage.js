@@ -72,14 +72,25 @@ export function locate(dirs, file) {
   const name = basename(parts[parts.length - 1]);
   if (!name || name !== parts[parts.length - 1]) return null;
 
-  const category = parts.length === 2 ? parts[0] : UNCATEGORIZED;
+  /**
+   * 有没有**真实的分类子目录**：看路径有几段，**绝不能看分类名叫什么**。
+   *
+   * 2026-11-14 真机 bug：「同步缓存图」会在库里建一个真名叫 `未分类` 的子目录，
+   * 而 `未分类` 同时是「根目录的图」的显示名。以前这里写
+   * `category === UNCATEGORIZED ? '' : category`，于是 `未分类/缓存.jpg`
+   * 被拼成 `<root>/缓存.jpg` —— 文件明明在，`existsSync` 却为假，
+   * 表现为「列表里看得见、缩略图是破图、删也删不掉」。
+   * 显示名和目录名是两件事，别拿一个去判另一个。
+   */
+  const hasCat = parts.length === 2;
+  const category = hasCat ? parts[0] : UNCATEGORIZED;
   for (const root of Array.isArray(dirs) ? dirs : []) {
     const r = resolvePath(String(root || ''));
-    const abs = resolvePath(join(r, category === UNCATEGORIZED ? '' : category, name));
+    const abs = resolvePath(join(r, hasCat ? parts[0] : '', name));
     /** 关键：`startsWith(r + sep)` 而不是 `startsWith(r)`——后者会把 `/a/bc` 认成在 `/a/b` 下 */
     if (!abs.startsWith(r.endsWith(sep) ? r : r + sep)) continue;
     if (!existsSync(abs)) continue;
-    return { root: r, rel: category === UNCATEGORIZED ? name : `${category}/${name}`, abs, category, name };
+    return { root: r, rel: hasCat ? `${parts[0]}/${name}` : name, abs, category, name };
   }
   return null;
 }

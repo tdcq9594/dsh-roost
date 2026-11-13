@@ -1389,3 +1389,35 @@ test('路由：/stickers/tags/fill 起任务并跑到完成', async () => {
   assert.match(side, /开心/);
   off?.();
 });
+
+/**
+ * 真机 bug 回归（2026-11-14）：「同步缓存图」在库里建了真名叫 `未分类` 的子目录，
+ * 而 `未分类` 又是根目录图的显示名，于是这类图「列表里有、缩略图破、删不掉」。
+ */
+test('路由：/stickers/delete 能删「未分类」子目录里的图（显示名 ≠ 目录名）', async () => {
+  const { call, off, dir } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(join(s, '未分类'), { recursive: true });
+    writeFileSync(join(s, '未分类', '缓存.jpg'), 'x');
+    writeFileSync(join(s, '海妖.png'), 'y');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  /** 列表要能看到它，且 rel 带分类前缀 */
+  const list = await call('/stickers/manage');
+  const row = list.json.items.find((it) => it.file === '缓存.jpg');
+  assert.ok(row, '列表里应该有这张');
+  assert.equal(row.rel, '未分类/缓存.jpg');
+  assert.equal(row.category, '未分类');
+
+  const r = await call('/stickers/delete', {
+    method: 'POST', body: { files: ['未分类/缓存.jpg'], confirm: true },
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(r.json.removed, ['未分类/缓存.jpg'], '以前这里会报「不在表情库里」');
+  assert.equal(existsSync(join(dir, 'stickers', '未分类', '缓存.jpg')), false);
+
+  /** 根目录那张不能被连带删掉 */
+  assert.equal(existsSync(join(dir, 'stickers', '海妖.png')), true);
+  off?.();
+});

@@ -211,3 +211,40 @@ test('统计：总数 / 已打标签 / 未打标签 / 分类分布', () => {
   assert.equal(s.bytes, 300);
   assert.deepEqual(s.categories[0], { name: '开心', count: 2 });
 });
+
+test('locate：真名叫「未分类」的子目录也要能命中（显示名不是目录名）', () => {
+  /**
+   * 真机 bug（2026-11-14）：老版「同步缓存图」会在库里建一个真叫 `未分类`
+   * 的子目录，而 `未分类` 又是「根目录的图」的显示名。以前拿名字判「是不是
+   * 子目录」，于是 `未分类/缓存.jpg` 被拼到根目录去找——文件明明在却
+   * existsSync 为假，表现为「列表里有、缩略图破、删不掉」。
+   */
+  const root = mkdtempSync(join(tmpdir(), 'roost-sticker-'));
+  try {
+    mkdirSync(join(root, '未分类'), { recursive: true });
+    writeFileSync(join(root, '未分类', '缓存.jpg'), 'a');
+    writeFileSync(join(root, '海妖.png'), 'b');
+
+    const sub = locate([root], '未分类/缓存.jpg');
+    assert.ok(sub, '「未分类」是真实子目录，必须命中');
+    assert.equal(sub.rel, '未分类/缓存.jpg');
+    assert.ok(sub.abs.endsWith(join('未分类', '缓存.jpg')), `拼错路径了：${sub.abs}`);
+
+    /** 根目录那张不能被误认成子目录里的 */
+    const top = locate([root], '海妖.png');
+    assert.equal(top.rel, '海妖.png');
+    assert.equal(top.category, '未分类', '显示上它仍归「未分类」');
+    assert.equal(top.abs, join(root, '海妖.png'));
+  } finally { cleanup(root); }
+});
+
+test('批删：能删掉「未分类」子目录里的图', () => {
+  const root = mkdtempSync(join(tmpdir(), 'roost-sticker-'));
+  try {
+    mkdirSync(join(root, '未分类'), { recursive: true });
+    writeFileSync(join(root, '未分类', '缓存.jpg'), 'a');
+    const r = removeFiles([root], ['未分类/缓存.jpg'], { confirm: true });
+    assert.deepEqual(r.removed, ['未分类/缓存.jpg']);
+    assert.equal(existsSync(join(root, '未分类', '缓存.jpg')), false);
+  } finally { cleanup(root); }
+});
