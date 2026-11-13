@@ -217,6 +217,23 @@ test('跑一轮：拿到 assistant/message 的文本', async () => {
   runner.dispose();
 });
 
+test('跑一轮：时限支持现读函数（面板改了不用重启）', async () => {
+  const { ctx, emit } = fakeDsh();
+  const seen = [];
+  const runner = createTurnRunner({ ctx, timeoutSec: () => { seen.push(150); return 150; } });
+  const session = { id: 's1' };
+  const agent = { session, followup: async () => {} };
+
+  const p = runner.run(agent, '你好');
+  await new Promise((r) => setTimeout(r, 10));
+  emit(session, { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '在呢' }] } } });
+  emit(session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
+
+  assert.equal(await p, '在呢');
+  assert.ok(seen.length >= 1, '传函数时要现读，不能构造时定死');
+  runner.dispose();
+});
+
 test('跑一轮：多段 assistant/message 取最后一次', async () => {
   const { ctx, emit } = fakeDsh();
   const runner = createTurnRunner({ ctx, timeoutSec: 5 });

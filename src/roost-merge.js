@@ -65,14 +65,29 @@ function lineOf(evt) {
 
 /**
  * @param {object} o
- * @param {number} [o.waitSec]
- * @param {number} [o.maxSec]
+ * @param {number|(()=>number)} [o.waitSec]
+ * @param {number|(()=>number)} [o.maxSec]
  * @param {(chatId:string, batch:object)=>void} o.onFlush
  * @param {()=>number} [o.now]
  */
 export function createMerger({ waitSec = 1.5, maxSec = 6, onFlush = () => {}, now = () => Date.now() } = {}) {
   /** chatId → { items, waitTimer, maxTimer, firstAt } */
   const pending = new Map();
+
+  /**
+   * 两个窗口都允许传函数：host 传的是「现读 cfg 的箭头函数」。
+   *
+   * 为什么不是构造时读一次：面板把 `roostHost.merge.*` 露出来之后，用户改了
+   * 「停顿多久算说完」却要重启才生效，那个输入框就是假的。decider 本来就是
+   * `cfg: () => cfg` 现读，合并器跟它对齐；每来一条消息读一次，开销可忽略。
+   * 传数字的老调用方（和它的测试）行为不变。
+   */
+  const secOf = (v, dflt) => {
+    const n = Number(typeof v === 'function' ? v() : v);
+    return Number.isFinite(n) && n > 0 ? n : dflt;
+  };
+  const waitMs = () => secOf(waitSec, 1.5) * 1000;
+  const maxMs = () => secOf(maxSec, 6) * 1000;
 
   function flush(chatId) {
     const b = pending.get(chatId);
@@ -136,11 +151,11 @@ export function createMerger({ waitSec = 1.5, maxSec = 6, onFlush = () => {}, no
 
       /** 每来一条重新计时：说到一半就别急着回 */
       clearTimeout(b.waitTimer);
-      b.waitTimer = setTimeout(() => flush(chatId), Math.max(0, waitSec * 1000, untilNotBefore));
+      b.waitTimer = setTimeout(() => flush(chatId), Math.max(0, waitMs(), untilNotBefore));
       b.waitTimer.unref?.();
       /** 从第一条算的最长等待，只设一次（但也不能早于冷却结束） */
       if (!b.maxTimer) {
-        const left = Math.max(0, maxSec * 1000 - (now() - b.firstAt));
+        const left = Math.max(0, maxMs() - (now() - b.firstAt));
         b.maxTimer = setTimeout(() => flush(chatId), Math.max(left, untilNotBefore));
         b.maxTimer.unref?.();
       }

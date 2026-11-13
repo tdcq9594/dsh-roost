@@ -397,6 +397,27 @@ test('合并：连发两句只触发一轮，附件跨条合并', async () => {
   assert.equal(flushed[0].msg.msgId, 'M-问你个事', '回复要挂最后一条，被动窗口最稳');
 });
 
+test('合并：窗口参数现读，面板改了不用重启 DSH', async () => {
+  const flushed = [];
+  let waitSec = 0.02;
+  const m = createMerger({
+    waitSec: () => waitSec, maxSec: 1,
+    onFlush: (_id, b) => flushed.push(b),
+  });
+  m.add(mkEvt('第一批'));
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(flushed.length, 1, '20ms 的窗口该先放行');
+
+  /** 如果是构造时读一次，这里改了也没用，80ms 就会放行 */
+  waitSec = 0.25;
+  m.add(mkEvt('第二批'));
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(flushed.length, 1, '改成 250ms 后，80ms 时不该放行');
+  await new Promise((r) => setTimeout(r, 220));
+  assert.equal(flushed.length, 2, '250ms 后第二批放行');
+  m.dispose();
+});
+
 test('合并：私聊 / 被 @ 立刻放行，不等那 1.5 秒', () => {
   const flushed = [];
   const m = createMerger({ waitSec: 5, maxSec: 5, onFlush: (_id, b) => flushed.push(b) });

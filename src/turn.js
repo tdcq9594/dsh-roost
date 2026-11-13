@@ -97,6 +97,15 @@ export function statusOf(reason) {
 
 export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstreamRetry = null }) {
   /**
+   * 一轮时限允许传函数：host 传的是「现读 cfg 的箭头函数」。
+   * 面板把 `chat.turnTimeoutSec` 露出来之后，只在插件启动时读一次的话，
+   * 改了要重启才生效；传数字的老调用方（和它的测试）行为不变。
+   */
+  const timeoutMsOf = () => {
+    const n = Number(typeof timeoutSec === 'function' ? timeoutSec() : timeoutSec);
+    return (Number.isFinite(n) && n > 0 ? n : 150) * 1000;
+  };
+  /**
    * 日志对象规整。
    *
    * 默认值是 `() => {}`（一个函数），但代码里用的是 `log.warn(...)`——
@@ -213,7 +222,7 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
      * 传一个更小的值——**只查「剩余 31 秒」就放进去跑 150 秒，等于没查**。
      * 注意这是**每次 attempt** 的上限，重试仍按 `retryCfg` 走。
      */
-    const attemptMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : timeoutSec * 1000;
+    const attemptMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : timeoutMsOf();
     /**
      * 投一次，等它说完。
      *

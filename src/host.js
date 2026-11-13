@@ -717,7 +717,7 @@ export function apply(ctx) {
   setTimeout(() => { tts.warmup().catch(() => {}); }, 5000).unref?.();
 
   const sessions = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
-  const turns = createTurnRunner({ ctx, log, timeoutSec: cfg.chat.turnTimeoutSec });
+  const turns = createTurnRunner({ ctx, log, timeoutSec: () => Number(cfg.chat?.turnTimeoutSec) || 150 });
   /**
    * 同会话排队。**先声明后赋值**：主动搭话/觉醒的回调在文件里位置更靠前，
    * 但它们要等 apply() 跑完才可能触发，那时这里已经赋好值了。
@@ -2210,8 +2210,9 @@ export function apply(ctx) {
    * 就是迟钝。其余情况停 `merge.waitSec` 秒算说完，从第一条算最多等 `maxSec`。
    */
   const roostMerger = createMerger({
-    waitSec: Number(cfg.roostHost?.merge?.waitSec) || 1.5,
-    maxSec: Number(cfg.roostHost?.merge?.maxSec) || 6,
+    /** 现读：面板改了「停顿多久算说完」下一批就生效，不用重启 DSH */
+    waitSec: () => Number(cfg.roostHost?.merge?.waitSec) || 1.5,
+    maxSec: () => Number(cfg.roostHost?.merge?.maxSec) || 6,
     onFlush: (_chatId, batch) => {
       deliverBatch(batch).catch((e) => notePathError('处理消息', e));
     },
