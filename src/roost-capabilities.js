@@ -27,6 +27,7 @@ export const READONLY_METHODS = Object.freeze([
   { name: 'identity.list', desc: '身份绑定清单' },
   { name: 'reach.get', desc: '群/私聊可达性与主动消息授权' },
   { name: 'roles.resolve', desc: '算某个发送者的权限档位' },
+  { name: 'group.info', desc: '群信息 + 机器人在群里的角色 + 能不能管（没内邀也能读公开信息）' },
   { name: 'msg.get', desc: '按 msgId 取账本记录' },
   { name: 'plugin.list', desc: '框架插件清单' },
   { name: 'plugin.dashboard', desc: '插件运行数据（仅主人/管理员）' },
