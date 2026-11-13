@@ -779,6 +779,34 @@ export const DEFAULTS = {
     awakeTo: 22,
   },
   /**
+   * 自驱引擎（实验，**默认全关**）。
+   *
+   * 这是唯一「没人叫她、她自己决定要做事」的模块。和「授权分级」铁律的冲突点
+   * 很具体：无人值守时的工具调用，出事没有人在场喊停。所以四个开关全是关的：
+   * `enabled` 关 → 一行代码都不跑；`allowAct` 关 → 只让她想、不让她动手；
+   * `heartbeatMin` 为 0 → 不自动心跳，只能从面板手动点；
+   * `seeds` 空 → 没东西可琢磨。
+   *
+   * 详见 `src/autotelic.js` 与 `src/autotelic-ledger.js`（哈希链账本）。
+   */
+  autotelic: {
+    enabled: false,
+    allowAct: false,
+    /** 一天最多推进几次（立项不算次数） */
+    maxPerDay: 2,
+    /** 连续失败几次自动卡住 */
+    failLimit: 2,
+    /** 卡住多久（小时） */
+    stuckHours: 12,
+    /** 心跳间隔（分钟）。0 = 不自动跑 */
+    heartbeatMin: 0,
+    quietStartHour: 0,
+    quietEndHour: 0,
+    maxOutputChars: 1200,
+    /** 她想琢磨的方向。空数组 = 不立项 */
+    seeds: [],
+  },
+  /**
    * 表情包库：往目录里丢图就行，文件名当标签（`开心_猫.png` → 开心、猫）。
    * 插件把清单写进提示词，模型在正文里写 `<<image: 完整路径>>` 发图
    * （图文同条，按位置排版）；写 `<<image-alone: 路径>>` 则是「单独发一条图」。

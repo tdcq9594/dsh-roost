@@ -1421,3 +1421,74 @@ test('路由：/stickers/delete 能删「未分类」子目录里的图（显示
   assert.equal(existsSync(join(dir, 'stickers', '海妖.png')), true);
   off?.();
 });
+
+/* ---------------- 自驱引擎（实验，默认关） ---------------- */
+
+test('路由：/autotelic/status 默认关着，think 被拒且留痕', async () => {
+  const { call, off, dir } = await bootHost({});
+
+  const s = await call('/autotelic/status');
+  assert.equal(s.status, 200);
+  assert.equal(s.json.enabled, false, '默认必须关');
+  assert.equal(s.json.ledger.chain.ok, true, '空账本也算链完整');
+  assert.equal(s.json.cfg.seeds.length, 0);
+
+  const t = await call('/autotelic/think', { method: 'POST', body: {} });
+  assert.equal(t.status, 409, '状态不允许用 409，不是 400');
+  assert.match(t.json.reason, /没开/);
+
+  /** 拒绝也要进账本：不然「为什么她什么都不做」查不出来 */
+  const recent = await call('/autotelic/recent');
+  assert.equal(recent.json.rows[0].kind, 'deny');
+  off?.();
+});
+
+test('路由：/autotelic/seeds 存种子并落盘', async () => {
+  const { call, off, dir } = await bootHost({});
+  const r = await call('/autotelic/seeds', {
+    method: 'POST', body: { seeds: ['  想想怎么说话  ', '', 'A'.repeat(300)] },
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.seeds, ['想想怎么说话', 'A'.repeat(200)], '去空、夹到 200 字');
+
+  const saved = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'));
+  assert.deepEqual(saved.autotelic.seeds, r.json.seeds);
+  off?.();
+});
+
+test('路由：开了之后立项成功，账本链可验；推进失败会计数', async () => {
+  const { call, off, dir } = await bootHost({ autotelic: { enabled: true, seeds: ['想想怎么把话说明白'] } });
+
+  const t = await call('/autotelic/think', { method: 'POST', body: {} });
+  assert.equal(t.status, 200, JSON.stringify(t.json));
+  assert.equal(t.json.project.text, '想想怎么把话说明白');
+
+  const s1 = await call('/autotelic/status');
+  assert.equal(s1.json.today.projects, 1);
+  assert.equal(s1.json.ledger.chain.ok, true);
+  assert.equal(s1.json.project.text, '想想怎么把话说明白');
+
+  /**
+   * 假 ctx 的 agent 没有 prompt()/run()，所以推进必然失败——
+   * 正好验「失败要记进账本 + 计数」，而不是静默吞掉。
+   */
+  const step = await call('/autotelic/step', { method: 'POST', body: {} });
+  assert.equal(step.status, 409);
+  assert.match(step.json.reason, /失败/);
+
+  const s2 = await call('/autotelic/status');
+  assert.equal(s2.json.failures, 1);
+  assert.equal(s2.json.ledger.chain.ok, true, '失败记录也要接得上链');
+  off?.();
+});
+
+test('路由：/autotelic/preview 只算不记账', async () => {
+  const { call, off, dir } = await bootHost({ autotelic: { enabled: true, seeds: ['A', 'B'] } });
+  const p = await call('/autotelic/preview');
+  assert.equal(p.status, 200);
+  assert.ok(['A', 'B'].includes(p.json.project.text));
+
+  const recent = await call('/autotelic/recent');
+  assert.deepEqual(recent.json.rows, [], '预览不该写账本');
+  off?.();
+});

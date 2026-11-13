@@ -6863,6 +6863,157 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /**
+     * 自驱引擎（实验，默认关）。
+     *
+     * 这一页刻意**不把「开始」做成大按钮**：它是唯一「没人叫她、她自己做事」的
+     * 功能，误触的代价是花钱 + 无人值守的动作。所以顺序是「先看候选 → 再立项 →
+     * 再推进」，每一步都要人点。
+     *
+     * 账本那栏是重点：它显示链是否完整、断在第几条。她可以骗人，但不能骗账本。
+     */
+    function AutotelicCard({ toast, config, saveCfg }) {
+      const [st, setSt] = useState(null)
+      const [busy, setBusy] = useState('')
+      const [seeds, setSeeds] = useState('')
+      const [seedsDirty, setSeedsDirty] = useState(false)
+      const [preview, setPreview] = useState(null)
+      const [ledger, setLedger] = useState(null)
+      const [review, setReview] = useState('')
+
+      const load = useCallback(async () => {
+        const r = await get('/autotelic/status')
+        if (r?.ok === false) return
+        setSt(r)
+        if (!seedsDirty) setSeeds((r.cfg?.seeds || []).join('\n'))
+      }, [seedsDirty])
+      useEffect(() => { load() }, [load])
+
+      const patch = async (p) => {
+        const r = await saveCfg({ autotelic: p })
+        if (r?.ok === false) return toast(r.message || '没存上')
+        await load()
+      }
+
+      const saveSeeds = async () => {
+        const list = seeds.split('\n').map((x) => x.trim()).filter(Boolean)
+        const r = await post('/autotelic/seeds', { seeds: list })
+        setSeedsDirty(false)
+        toast(r.message || '已保存')
+        await load()
+      }
+
+      const run = async (what) => {
+        setBusy(what)
+        /** 逐条写死路径：动态拼 `/autotelic/` + what 会让「路由对齐」检查找不到入口 */
+        const r = what === 'review'
+          ? await post('/autotelic/review', {})
+          : what === 'preview'
+            ? await get('/autotelic/preview')
+            : what === 'think'
+              ? await post('/autotelic/think', {})
+              : await post('/autotelic/step', {})
+        setBusy('')
+        if (r?.ok === false) return toast(r.reason || r.message || '没成')
+        if (what === 'preview') { setPreview(r); return }
+        if (what === 'review') { setReview(r.text || ''); await load(); return }
+        if (what === 'think') toast(`立项：${r.project?.text || ''}`)
+        if (what === 'step') toast('推进了一步')
+        await load()
+      }
+
+      const showLedger = async () => {
+        const r = await get('/autotelic/recent?limit=20')
+        setLedger(ledger ? null : (r?.rows || []))
+      }
+
+      const c = config?.autotelic || {}
+      const t = st?.today
+      const chain = st?.ledger?.chain
+
+      return h(Sec, {
+        title: '自驱引擎（实验）',
+        right: h('button', {
+          type: 'button', className: 'roost-btn',
+          onClick: () => patch({ enabled: c.enabled !== true }),
+        }, c.enabled ? '关掉' : '打开'),
+      },
+        h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+          '给她一点自己的时间：自己挑一件事琢磨、记进哈希链账本。**默认全关**——'
+          + '不开就一行代码都不跑；开了也默认只能想、不能动手，产物只进账本和这里，不会发到 QQ。'),
+
+        h('div', { style: { display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, marginBottom: 8 } },
+          h('span', null, c.enabled ? '● 已开' : '○ 关着'),
+          h('span', null, `今天：立项 ${t?.projects ?? 0} · 推进 ${t?.steps ?? 0} · 被拦 ${t?.denies ?? 0}`),
+          h('span', { style: { color: chain?.ok ? 'var(--ok)' : 'var(--bad)' } },
+            chain?.ok ? `账本 ${st?.ledger?.total ?? 0} 条，链完整` : `账本断在第 ${st?.ledger?.brokenAt} 条`),
+          st?.stuck ? h('span', { style: { color: 'var(--warn)' } }, '连续失败后卡住了') : null),
+
+        st?.project
+          ? h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            `当前在想：${st.project.text}（已推进 ${st.project.steps ?? 0} 次）`)
+          : null,
+
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 } },
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+            h('input', {
+              type: 'checkbox', checked: c.allowAct === true,
+              onChange: (e) => patch({ allowAct: Boolean(e.target.checked) }),
+            }), '允许动手（关着只能想）'),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+            '一天最多',
+            h('input', {
+              className: 'roost-input', type: 'number', min: 0, max: 24,
+              style: { width: 60 }, value: c.maxPerDay ?? 2,
+              onChange: (e) => patch({ maxPerDay: Number(e.target.value) }),
+            }), '次')),
+
+        h('div', { style: { fontSize: 11.5, marginBottom: 6 } }, '她想琢磨的方向（一行一个，空着就不立项）：'),
+        h('textarea', {
+          className: 'roost-input', rows: 3, value: seeds,
+          placeholder: '比如：怎么把话说得更像人 / 群里冷场时该说什么',
+          style: { width: '100%', resize: 'vertical', fontSize: 12 },
+          onChange: (e) => { setSeeds(e.target.value); setSeedsDirty(true) },
+        }),
+        h('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
+          h('button', { type: 'button', className: 'roost-btn', disabled: !seedsDirty, onClick: saveSeeds }, '保存种子'),
+          h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: () => run('preview') },
+            busy === 'preview' ? '算着…' : '看会选哪个'),
+          h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: () => run('think') },
+            busy === 'think' ? '想…' : '立项（想一轮）'),
+          h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: () => run('step') },
+            busy === 'step' ? '推进中…' : '推进一步'),
+          h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: () => run('review') }, '今日复盘'),
+          h('button', { type: 'button', className: 'roost-btn', onClick: showLedger }, ledger ? '收起账本' : '看账本')),
+
+        preview
+          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            preview.ok
+              ? `会选：${preview.project.text}（分 ${preview.project.score}）`
+              : `选不出来：${preview.reason}`,
+            (preview.rejected || []).length
+              ? h('div', { style: { fontSize: 11, marginTop: 4 } },
+                '先放着：' + preview.rejected.map((x) => `${x.text}（${x.reason}）`).join('；'))
+              : null)
+          : null,
+
+        review
+          ? h('div', { className: 'roost-note', style: { marginTop: 8, whiteSpace: 'pre-wrap' } }, review)
+          : null,
+
+        ledger
+          ? h('div', { className: 'roost-list roost-scroll', style: { marginTop: 8, maxHeight: 220 } },
+            ledger.length === 0
+              ? h('div', { className: 'roost-empty' }, '还没有记录')
+              : ledger.map((r) => h('div', { key: r.seq, className: 'roost-item' },
+                h('span', { className: 'd' }, `#${r.seq}`),
+                h('span', { className: 't' },
+                  h('span', { className: 'roost-muted', style: { fontSize: 10.5, marginRight: 6 } }, r.kind),
+                  String(r.note || '').slice(0, 120)))))
+          : null,
+      )
+    }
+
     function AwakeTab({ aw, mem, sp, chats, toast, reload, reloadSp, busy, quick, config, saveCfg }) {
       const cfg = aw?.cfg || {}
       const opps = aw?.lastOpportunities || []
@@ -7209,6 +7360,8 @@ select.roost-input{color-scheme:dark}
                 + '「不确定」不会自动重发——重发可能让对方收到两条，得你自己去 QQ 里看一眼。'
               : ''),
         ),
+        /** 07：自驱引擎（实验，默认关）。放在这一页最后——它不是日常操作 */
+        h(AutotelicCard, { toast, config, saveCfg }),
       )
     }
 
@@ -10380,6 +10533,10 @@ select.roost-input{color-scheme:dark}
       ['closing', '收尾', '对话冷掉前自己补一句：多久算冷（coolMinutes）、盯几个会话（maxChats）、记录留几天（ttlDays）'],
       ['leakGuard', '防复读', 'enabled：她回复里整段复述了注入的记忆块，出站前删掉那几句。默认关，日常在「权限」页高级组里点'],
       ['bridge', '对外联动（实验）', 'enabled：让别的 DSH 插件通过 ctx.get("aurabot") 主动发消息、读状态；接口可能变，默认关'],
+      ['autotelic', '自驱引擎（实验）', '默认全关。enabled 开了她才会有自己的时间；allowAct 决定能不能动手（关着只能想）；'
+        + 'maxPerDay 一天最多推进几次、failLimit 连续失败几次自动卡住、stuckHours 卡多久；'
+        + 'heartbeatMin 是自动心跳间隔（0 = 只能手动点）；seeds 是她可以琢磨的方向，空就不立项。'
+        + '所有动作都进 autotelic-ledger.jsonl 的哈希链账本，面板能看链完整性和断在第几条'],
       ['model', '模型', '三层回退：byChat[chatId] > byKind.c2c / byKind.group > default > DSH 全局默认模型。'
         + 'default 是「所有聊天都用它」（面板「聊天用的模型」那张卡）。'
         + 'effort 是全局思考强度（low / high / max，空 = 不传）：哪一级显式写了 reasoningEffort 就以它为准。'

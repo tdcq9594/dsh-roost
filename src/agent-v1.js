@@ -235,6 +235,19 @@ export function createAgentV1({
   return {
     handleHook,
     createOne,
+    /**
+     * 在已建好的独立会话里跑一轮，返回收集到的文本。
+     *
+     * 给自驱引擎用（`src/autotelic.js` 的 `run`）：它需要「建会话 → 跑一轮」
+     * 但不需要 HTTP/SSE 那套。会话不存在时抛错，由调用方决定要不要先 createOne。
+     */
+    async prompt(sessionId, text, onChunk = () => {}) {
+      const rec = sessions.get(String(sessionId ?? ''));
+      if (!rec || rec.closed) throw new Error(`会话不存在：${sessionId}`);
+      const chunks = [];
+      await promptFn(rec.handle, String(text ?? ''), (c) => { chunks.push(c); onChunk(c); });
+      return chunks.join('');
+    },
     closeOne,
     list: () => [...sessions.values()].filter((s) => !s.closed).map((s) => ({ sessionId: s.sessionId, clientId: s.clientId })),
     snapshot,

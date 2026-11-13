@@ -116,6 +116,7 @@ import { simulate, SIM_PERSONAS } from './simulate.js';
 import { buildExtension, formatScaffold } from './ext-wizard.js';
 import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
 import { polishText, POLISH_PRESETS } from './persona-polish.js';
+import { createAutotelic } from './autotelic.js';
 import {
   pageOf, locate, readSidecar, writeSidecar, suggestTags, removeFiles,
   createTagJob, statsOf, PAGE_SIZE,
@@ -1548,6 +1549,42 @@ export function apply(ctx) {
    * `rec.offs`，工具输出预算收进 mountOffs，撤销路径各自唯一。
    */
   const agentV1 = createAgentV1({ dir: dataDir(), ctx, log });
+
+  /**
+   * 自驱引擎（实验，默认关）。
+   *
+   * `run` 走独立会话：会话 id 固定 `autotelic-main`，与 QQ 会话、`/v1` 客户端
+   * 会话都不相交。**产物只进账本与面板，绝不往主人私聊推**——那件事仍归
+   * 「主动搭话」，那边有人工开关。
+   *
+   * 会话按需创建（第一次推进时才建），没开引擎就永远不会建。
+   */
+  const autotelic = createAutotelic({
+    dir: dataDir(),
+    cfgOf: () => cfg.autotelic || {},
+    log: (m) => log.info(`自驱：${m}`),
+    run: async (prompt, { sessionId }) => {
+      const sid = String(sessionId || 'autotelic-main');
+      if (!agentV1.list().some((x) => x.sessionId === sid)) {
+        await agentV1.createOne({
+          sessionId: sid,
+          clientId: 'autotelic',
+          persist: true,
+          sections: [{
+            name: 'autotelic-self',
+            order: 901,
+            /**
+             * 这段只在这个会话里生效。写的是「你有自己的时间」，
+             * 不是「你是助手」——她在 QQ 里那套人格不该把这里也填满。
+             */
+            text: () => '这是你自己的时间，没人在跟你说话。你可以琢磨自己感兴趣的事，'
+              + '想清楚就说清楚；不要客套，不要汇报自己在做什么，也不要提到「用户」或「主人」。',
+          }],
+        });
+      }
+      return await agentV1.prompt(sid, prompt);
+    },
+  });
   /**
    * 阶段 4：每扩展一个 `ext-memory/<extId>.json`，不碰 `memory.json`（§5.1）。
    * `installedIds` 从清单实时取，ACL 的可见集跟着已装扩展走。
@@ -5099,6 +5136,30 @@ export function apply(ctx) {
     });
   }
 
+  /**
+   * 自驱引擎的心跳。
+   *
+   * **每分钟醒一次，但只在 `heartbeatMin > 0` 时真的干活**——默认 0，所以
+   * 装完插件她不会自己在后台跑。`unref()` 是必须的：否则这个定时器会把
+   * DSH 进程（以及测试进程）一直吊着不退。
+   *
+   * 用「每分钟醒一次 + 内部判间隔」而不是直接 `setInterval(heartbeatMin)`：
+   * 后者在用户改配置之后不会重排，得重启才生效。
+   */
+  ctx.effect(() => {
+    const t = setInterval(() => {
+      try {
+        const c = cfg.autotelic || {};
+        if (c.enabled !== true || Number(c.heartbeatMin) <= 0) return;
+        autotelic.tick().catch((e) => log.warn(`自驱心跳失败：${e?.message || e}`));
+      } catch (e) {
+        log.warn(`自驱心跳异常：${e?.message || e}`);
+      }
+    }, 60_000);
+    t.unref?.();
+    return () => clearInterval(t);
+  });
+
   ctx.effect(() => {
     startServer();
     /**
@@ -8208,6 +8269,52 @@ export function apply(ctx) {
           personaName: p?.label || p?.name || '',
         });
         return send(res, r.ok ? 200 : 400, r);
+      }),
+
+      /* ---------------- 自驱引擎（实验，默认关） ----------------
+       *
+       * 全部只读 + 两个手动触发。**没有「立刻自动跑」的接口**：自动心跳由
+       * `heartbeatMin` 控制，默认 0（不跑），只能从面板点「推进一步」。
+       *
+       * 被闸门拦下时返回 409 而不是 400：这不是请求错了，是状态不允许，
+       * 而且原因要原样带给面板（「今天到上限了」和「卡住了」要能区分）。
+       */
+      route('/autotelic/status', (req, res) => send(res, 200, autotelic.status())),
+
+      route('/autotelic/preview', (req, res) => send(res, 200, autotelic.preview())),
+
+      route('/autotelic/recent', (req, res) => {
+        const u = new URL(req.url || '/', 'http://local');
+        return send(res, 200, autotelic.recent(Number(u.searchParams.get('limit')) || 30));
+      }),
+
+      route('/autotelic/think', async (req, res) => {
+        const r = autotelic.think({ manual: true });
+        return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      route('/autotelic/step', async (req, res) => {
+        const r = await autotelic.step({ manual: true });
+        return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      route('/autotelic/review', (req, res) => send(res, 200, autotelic.review())),
+
+      /**
+       * 存种子。
+       *
+       * 只接受字符串数组，夹到 20 条 / 每条 200 字：这些会原样进 prompt，
+       * 太长会把别的上下文挤掉。写回配置用 `applyCfg`（深合并），
+       * 不动同段里的其它键。
+       */
+      route('/autotelic/seeds', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const seeds = (Array.isArray(body?.seeds) ? body.seeds : [])
+          .map((x) => String(x ?? '').trim().slice(0, 200))
+          .filter(Boolean)
+          .slice(0, 20);
+        applyCfg({ autotelic: { seeds } });
+        return send(res, 200, { ok: true, seeds, message: `存了 ${seeds.length} 个种子` });
       }),
 
       /**
