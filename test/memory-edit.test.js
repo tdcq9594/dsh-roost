@@ -296,3 +296,38 @@ test('实体删除的前端调用：传 id 优先，错误原因两个字段都�
   const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   assert.ok(host.includes('aliases: aliasesOf(chatId)'), '删除要带别名会话');
 });
+
+
+test('容量可配：默认 40 不变，总数与每层配额都生效', async () => {
+  boot();
+  const { createMemory } = await freshMemory();
+  /** 不传 capacityOf：与升级前写死的 40 一致 */
+  const plain = createMemory();
+  for (let i = 0; i < 45; i += 1) plain.add('', `事实${i}`, 'global');
+  assert.equal(plain.listFull('', []).global.length, 40, '默认仍是 40');
+
+  boot();
+  const small = createMemory({ capacityOf: () => ({ total: 3 }) });
+  for (let i = 0; i < 6; i += 1) small.add('', `小${i}`, 'global');
+  assert.equal(small.listFull('', []).global.length, 3, '总数设 3 就只留 3');
+
+  boot();
+  const tiered = createMemory({ capacityOf: () => ({ total: 40, perTier: { short: 1 } }) });
+  tiered.add('', '短1', 'global', { tier: 'short' });
+  tiered.add('', '短2', 'global', { tier: 'short' });
+  tiered.add('', '长期1', 'global', { tier: 'long' });
+  const all = tiered.listFull('', []).global;
+  assert.equal(all.filter((x) => x.tier === 'short').length, 1, '临时层只留 1 条');
+  assert.equal(all.filter((x) => x.tier === 'long').length, 1, '长期层不受影响');
+});
+
+test('容量面板：配置段存在，记忆页有总数与三层输入', async () => {
+  const { DEFAULTS } = await import('../src/config.js');
+  assert.equal(DEFAULTS.memory?.capacity?.total, 40);
+  const client = readFileSync(CLIENT, 'utf8');
+  for (const must of ['保存容量', "'总数'", "num('short'", "num('long'", "num('core'"]) {
+    assert.ok(client.includes(must), `容量面板缺「${must}」`);
+  }
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.ok(host.includes('capacityOf: () => cfg.memory?.capacity'), '要接到配置');
+});

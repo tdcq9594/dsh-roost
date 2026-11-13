@@ -1742,7 +1742,7 @@ export function apply(ctx) {
     dyn: Number(cfg.recall?.dynMax) || MEMORY_DYN_MAX,
   });
 
-  const memory = personaScope.wrapMemory(createMemory());
+  const memory = personaScope.wrapMemory(createMemory({ capacityOf: () => cfg.memory?.capacity }));
   const mood = createMood({ cfgOf: () => cfg.mood });
   /**
    * 两份行为日志（B4 / D3）。**不存消息正文**：心情历史只有数值和原因，

@@ -307,7 +307,7 @@ function scoreOfAliasFact(meta, now = Date.now()) {
   return scoreOfFact({ ...meta, at: now - capped * DAY_MS }, now);
 }
 
-export function createMemory({ now = () => Date.now() } = {}) {
+export function createMemory({ now = () => Date.now(), capacityOf = null } = {}) {
   const file = () => join(dataDir(), 'memory.json');
   let cache = null;
 
@@ -438,7 +438,32 @@ export function createMemory({ now = () => Date.now() } = {}) {
       ...(FACT_TIERS.includes(opts.tier) ? { tier: opts.tier } : {}),
     };
     supersede();
-    if (list.length <= FACTS_MAX) return list;
+
+    /**
+     * 容量（面板「记忆库」可调）。
+     *
+     * `total` 是总条数上限（默认还是 40，与升级前一致）；
+     * `perTier` 是每层额外配额（short/long/core），0 或不填 = 不限。
+     * 先按层裁超额的，再按总数裁——这样「临时」那层不会把长期的全挤掉。
+     */
+    let cap = {};
+    try { cap = capacityOf?.() || {}; } catch { cap = {}; }
+    const total = Number(cap.total) > 0 ? Math.max(1, Math.floor(Number(cap.total))) : FACTS_MAX;
+    const perTier = cap.perTier && typeof cap.perTier === 'object' ? cap.perTier : {};
+    let kept = list;
+    for (const [tier, quota] of Object.entries(perTier)) {
+      const q = Math.floor(Number(quota)) || 0;
+      if (q <= 0) continue;
+      const inTier = kept.filter((x) => (FACT_TIERS.includes(metaMap[x]?.tier) ? metaMap[x].tier : 'long') === tier);
+      if (inTier.length <= q) continue;
+      const ranked = inTier
+        .map((x, i) => ({ x, i, s: scoreOfFact(metaMap[x], t) }))
+        .sort((a, b) => b.s - a.s || b.i - a.i);
+      const drop = new Set(ranked.slice(q).map((r) => r.x));
+      for (const x of drop) delete metaMap[x];
+      kept = kept.filter((x) => !drop.has(x));
+    }
+    if (kept.length <= total) return kept;
 
     /**
      * 超了：按分数留前 40 条，同分时**新的优先**。
@@ -446,12 +471,12 @@ export function createMemory({ now = () => Date.now() } = {}) {
      * 同分新的优先，是为了让没有元数据的老库表现跟以前（FIFO）一模一样——
      * 升级不该顺手把人家存了很久的事换一批。
      */
-    const scored = list
+    const scored = kept
       .map((text, i) => ({ text, i, s: scoreOfFact(metaMap[text], t) }))
       .sort((a, b) => b.s - a.s || b.i - a.i);
-    const keep = new Set(scored.slice(0, FACTS_MAX).map((x) => x.text));
-    for (const text of list) if (!keep.has(text)) delete metaMap[text];
-    return list.filter((text) => keep.has(text));
+    const keep = new Set(scored.slice(0, total).map((x) => x.text));
+    for (const text of kept) if (!keep.has(text)) delete metaMap[text];
+    return kept.filter((text) => keep.has(text));
   }
 
   /**

@@ -3996,6 +3996,8 @@ select.roost-input{color-scheme:dark}
       const [browseQ, setBrowseQ] = useState('')
       const [browseBusy, setBrowseBusy] = useState(false)
       const [browseEdit, setBrowseEdit] = useState(null)
+      /** 容量编辑态：null = 跟着 config 显示，改过才用本地值 */
+      const [capEdit, setCapEdit] = useState(null)
       const loadBrowse = async ({ append = false } = {}) => {
         setBrowseBusy(true)
         try {
@@ -4277,6 +4279,48 @@ select.roost-input{color-scheme:dark}
               rows.map(([k, v]) => h('span', { key: k },
                 h('span', { className: 'roost-muted' }, k + ' '),
                 h('b', null, String(v)))))
+          })(),
+          /**
+           * 记忆库容量（对齐 aurabot「记忆库」的容量分配）。
+           * 默认总数 40 与升级前写死的值一致；每层配额 0 = 不限。
+           */
+          (() => {
+            const cur = config?.memory?.capacity || {}
+            const d = capEdit || { total: Number(cur.total) || 40, perTier: { ...(cur.perTier || {}) } }
+            const setD = (patch) => setCapEdit({ ...d, ...patch })
+            const saveCap = async () => {
+              const r = await saveCfg({
+                memory: {
+                  capacity: {
+                    total: Math.max(1, Math.floor(Number(d.total) || 40)),
+                    perTier: {
+                      short: Math.max(0, Math.floor(Number(d.perTier.short) || 0)),
+                      long: Math.max(0, Math.floor(Number(d.perTier.long) || 0)),
+                      core: Math.max(0, Math.floor(Number(d.perTier.core) || 0)),
+                    },
+                  },
+                },
+              })
+              toast(r?.ok === false ? (r.message || '没存上') : '容量已保存，下次记新事时生效')
+              setCapEdit(null)
+            }
+            const num = (key, label) => h('label', { key, style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+              label,
+              h('input', {
+                className: 'roost-input', type: 'number', min: 0, max: 500,
+                style: { width: 68, padding: '2px 6px', fontSize: 12 },
+                value: key === 'total' ? d.total : (d.perTier[key] ?? 0),
+                onChange: (e) => (key === 'total'
+                  ? setD({ total: e.target.value })
+                  : setD({ perTier: { ...d.perTier, [key]: e.target.value } })),
+              }))
+            return h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginTop: 10, fontSize: 12 } },
+              num('total', '总数'),
+              num('short', '临时'),
+              num('long', '长期'),
+              num('core', '永久'),
+              h('span', { className: 'roost-muted', style: { fontSize: 11 } }, '每层 0 = 不限；超了先按层裁、再按总数裁'),
+              h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy) || !saveCfg, onClick: saveCap }, '保存容量'))
           })(),
         ),
 
