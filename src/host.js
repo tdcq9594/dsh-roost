@@ -110,6 +110,7 @@ import { sessionTitle, nextTitle } from './chat-name.js';
 import { createSwitchNote } from './switch-note.js';
 import { createTts, SHERPA_MODELS } from './tts.js';
 import { runPreview, PREVIEW_TEXT_LIMIT } from './tts-preview.js';
+import { workspaceTitleFor } from './workspace-title.js';
 import { createTtsInstaller } from './tts-install.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -3360,10 +3361,13 @@ export function apply(ctx) {
           if (id) {
             const title = String(r?.workspace?.title || '');
             /**
-             * 工作区名字由 DSH 按目录名取。历史版本把它建成了「QQ」，和目录 workspace 对不上；
-             * 只在「默认目录 + 名字还是 QQ」时纠正一次，不碰用户自己改过的名字。
+             * 名字：DSH 新建时按目录名取（默认就是 `workspace`），主人要它叫
+             * `Roost·QQ`。只在「还带着自动名」时给一次默认名；用户后来改过的
+             * 名字一个字都不碰（纯函数里判，详见 workspace-title.js）。
              */
-            const target = wantName || (title === 'QQ' && basename(dir) === 'workspace' ? 'workspace' : '');
+            const target = workspaceTitleFor({
+              configuredName: wantName, currentTitle: title, dirName: basename(dir),
+            });
             if (target && target !== title && typeof wc.rename === 'function') {
               try { await wc.rename({ workspaceId: id, title: target }); } catch {}
             }

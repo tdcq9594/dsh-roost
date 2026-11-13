@@ -34,6 +34,8 @@ window.__ModuleLoader__.load({
     const inject = ['slots']
     const PANEL_ID = 'roost'
     const API = '/roost/api'
+    /** 首次创建工作区的默认名字；只影响「还叫目录名」的那些，用户改过的不动 */
+    const DEFAULT_WORKSPACE_TITLE = 'Roost·QQ'
 
     /* ---------------- 请求 ---------------- */
 
@@ -10404,7 +10406,8 @@ select.roost-input{color-scheme:dark}
         if (r.ok === false) return toast(r.message || '读不到工作区')
         setWs(r)
         setDir(r.configured?.dir || '')
-        setName(r.configured?.name || '')
+        /** 没保存过名字时，向导里预填默认名；点保存才写进配置 */
+        setName(r.configured?.name || DEFAULT_WORKSPACE_TITLE)
       }
       useEffect(() => { load() }, [])
 
@@ -10430,7 +10433,7 @@ select.roost-input{color-scheme:dark}
             onChange: (e) => setDir(e.target.value),
           }),
           h('input', {
-            className: 'roost-input', value: name, placeholder: '名字（留空=跟目录名）',
+            className: 'roost-input', value: name, placeholder: `名字（留空=${DEFAULT_WORKSPACE_TITLE}）`,
             style: { flex: '0 1 180px' },
             onChange: (e) => setName(e.target.value),
           }),
@@ -10448,7 +10451,7 @@ select.roost-input{color-scheme:dark}
           h('button', {
             type: 'button', className: 'roost-btn', disabled: busy || !ws?.current,
             onClick: () => run(async () => {
-              const r = await post('/workspace/rename', { title: name.trim() || 'workspace' })
+              const r = await post('/workspace/rename', { title: name.trim() || DEFAULT_WORKSPACE_TITLE })
               if (r.ok === false) return toast(r.message || '没改成')
               toast('工作区已改名')
               await load()
@@ -10456,7 +10459,8 @@ select.roost-input{color-scheme:dark}
           }, '改名'),
         ),
         h('div', { className: 'roost-note', style: { marginTop: 6 } },
-          '换目录只影响之后新建的会话；已经在跑的会话仍挂在旧工作区。'),
+          `第一次创建时默认叫「${DEFAULT_WORKSPACE_TITLE}」；之后你自己改过的名字不会被覆盖。`
+          + '换目录只影响之后新建的会话；已经在跑的会话仍挂在旧工作区。'),
       )
     }
 
