@@ -34,7 +34,12 @@ globalThis.fetch = () => Promise.reject(
 async function bootHost(cfgPatch = {}, seed = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'roost-routes-'));
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'config.json'), JSON.stringify(cfgPatch), 'utf8');
+  /**
+   * `cfgPatch` 也接受函数：有些配置项要写**绝对路径**（表情库目录），
+   * 而临时目录是这里才建出来的，调用方事先不知道。
+   */
+  const patch = typeof cfgPatch === 'function' ? cfgPatch(dir) : cfgPatch;
+  writeFileSync(join(dir, 'config.json'), JSON.stringify(patch), 'utf8');
   // 塞几条真实事实，才能区分"关掉了"和"本来就是空的"
   if (seed.memory) {
     writeFileSync(join(dir, 'memory.json'), JSON.stringify(seed.memory), 'utf8');
@@ -1266,5 +1271,121 @@ test('路由：/speech-style/save 写进记忆，且不接受前端传正文', a
   const global = (saved.global || []).join('\n');
   assert.match(global, /说话方式/, '要真的落进记忆');
   assert.equal(saved.meta?.global?.[r.json.text]?.w, 2, '这条要是 w=2，别被保留策略清掉');
+  off?.();
+});
+
+/** 5.12 表情库管理：分页 / 改标签 / 批删 / 上传 / 补标签任务 */
+test('路由：/stickers/manage 分页与统计', async () => {
+  const { call, off } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(join(s, '开心'), { recursive: true });
+    writeFileSync(join(s, '开心', '猫.png'), 'x');
+    writeFileSync(join(s, '熊猫.png'), 'y');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const r = await call('/stickers/manage?page=1&size=12');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.total, 2);
+  assert.equal(r.json.stats.total, 2);
+  assert.ok(r.json.items.every((it) => it.category), '每行都要带 category 给前端直接用');
+
+  const one = await call('/stickers/manage?category=' + encodeURIComponent('开心'));
+  assert.equal(one.json.total, 1);
+  off?.();
+});
+
+test('路由：/stickers/tags 改标签写侧车，越界路径 404', async () => {
+  const { call, off, dir } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, '猫.png'), 'x');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const r = await call('/stickers/tags', { method: 'POST', body: { file: '猫.png', tags: ['开心', '猫'], note: '装可爱时' } });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(r.json.tags, ['开心', '猫']);
+  assert.equal(
+    readFileSync(join(dir, 'stickers', '猫.png.tags'), 'utf8').trim(),
+    '开心, 猫; 装可爱时',
+  );
+
+  const bad = await call('/stickers/tags', { method: 'POST', body: { file: '../../memory.json', tags: ['x'] } });
+  assert.equal(bad.status, 404, '越界路径必须被 locate() 挡住');
+  off?.();
+});
+
+test('路由：/stickers/delete 要 confirm，删完图与侧车都不在', async () => {
+  const { call, off, dir } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, '猫.png'), 'x');
+    writeFileSync(join(s, '猫.png.tags'), '猫');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const no = await call('/stickers/delete', { method: 'POST', body: { files: ['猫.png'] } });
+  assert.equal(no.status, 400);
+  assert.equal(existsSync(join(dir, 'stickers', '猫.png')), true);
+
+  const yes = await call('/stickers/delete', { method: 'POST', body: { files: ['猫.png'], confirm: true } });
+  assert.equal(yes.status, 200, JSON.stringify(yes.json));
+  assert.deepEqual(yes.json.removed, ['猫.png']);
+  assert.equal(existsSync(join(dir, 'stickers', '猫.png')), false);
+  assert.equal(existsSync(join(dir, 'stickers', '猫.png.tags')), false);
+  off?.();
+});
+
+test('路由：/stickers/upload 收 base64，重名加序号不覆盖', async () => {
+  const { call, off, dir } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, '猫.png'), 'old');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const data = Buffer.from('new-image').toString('base64');
+  const r = await call('/stickers/upload', { method: 'POST', body: { name: '猫.png', data } });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.file, '猫-1.png', '同名要加序号，不能盖掉已有的');
+  assert.equal(readFileSync(join(dir, 'stickers', '猫.png'), 'utf8'), 'old', '原文件一个字都不能动');
+  assert.equal(readFileSync(join(dir, 'stickers', '猫-1.png'), 'utf8'), 'new-image');
+
+  const bad = await call('/stickers/upload', { method: 'POST', body: { name: 'x.exe', data } });
+  assert.equal(bad.status, 400, '只收图片扩展名');
+  off?.();
+});
+
+test('路由：/stickers/tags/fill 起任务并跑到完成', async () => {
+  const { call, off, dir } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(join(s, '开心'), { recursive: true });
+    writeFileSync(join(s, '开心', '熊猫.png'), 'x');
+    writeFileSync(join(s, '开心', '猫.png'), 'y');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const start = await call('/stickers/tags/fill', { method: 'POST', body: { all: false } });
+  assert.equal(start.status, 200, JSON.stringify(start.json));
+  assert.equal(start.json.total, 2);
+
+  /** 任务每 60ms 跑一片，轮询等它结束 */
+  let job = null;
+  for (let i = 0; i < 40; i += 1) {
+    const p = await call('/stickers/tags/job');
+    job = p.json.job;
+    if (job && !job.running) break;
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  assert.ok(job, '要能查到任务进度');
+  assert.equal(job.done, 2);
+  assert.equal(job.failed, 0);
+  assert.equal(job.percent, 100);
+
+  /** 侧车写出来了，且标签里带分类名 */
+  const side = readFileSync(join(dir, 'stickers', '开心', '猫.png.tags'), 'utf8');
+  assert.match(side, /开心/);
   off?.();
 });

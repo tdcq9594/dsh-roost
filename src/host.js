@@ -115,6 +115,10 @@ import { splitPersonaText, joinPersonaText, joinPersonaBlocks } from './persona-
 import { simulate, SIM_PERSONAS } from './simulate.js';
 import { buildExtension, formatScaffold } from './ext-wizard.js';
 import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
+import {
+  pageOf, locate, readSidecar, writeSidecar, suggestTags, removeFiles,
+  createTagJob, statsOf, PAGE_SIZE,
+} from './sticker-manage.js';
 import { createTtsInstaller } from './tts-install.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -1466,6 +1470,15 @@ export function apply(ctx) {
   const extClientStore = createClientStore({ dir: dataDir(), log });
   const extSecrets = createExtSecrets({ dir: dataDir(), log });
   const extRegistry = createExtRegistry({ dir: dataDir(), log, secrets: extSecrets, clientStore: extClientStore });
+
+  /**
+   * 5.12 补标签任务：**只放内存**。
+   *
+   * 落盘会留下「上次那个任务到底跑完没有」的悬案——重启后没人接着跑，
+   * 状态却是 running，面板永远显示一个不动的进度条。丢了最多重点一次。
+   */
+  let stickerTagJob = null;
+  let stickerTagTimer = null;
   /** 阶段 5：拒绝事件日志 + 面板聚合。两者都是旁路，写失败不影响扩展本体。 */
   extRejections = createRejectionLog({ dir: dataDir(), log });
   const onReject = (entry) => extRejections.record(entry);
@@ -8393,6 +8406,215 @@ export function apply(ctx) {
           /** 注入到提示词里的那段有多长：上下文页要显示它吃了多少预算 */
           chars: stickers.prompt(cfg.stickers).length,
         });
+      }),
+
+      /**
+       * 5.12 表情库管理：分页 + 统计。
+       *
+       * 用 `snapshot()` 而不是 `list()`：后者只给前 40 张（那是喂给提示词的上限），
+       * 分页要全量。快照本身有 3 秒缓存，翻页不会把目录重扫一遍。
+       */
+      route('/stickers/manage', (req, res) => {
+        const u = new URL(req.url || '/', 'http://local');
+        const snap = stickers.snapshot(cfg.stickers);
+        const page = pageOf(snap.items, {
+          page: Number(u.searchParams.get('page')) || 1,
+          size: Number(u.searchParams.get('size')) || PAGE_SIZE,
+          category: String(u.searchParams.get('category') || ''),
+          q: String(u.searchParams.get('q') || ''),
+        });
+        return send(res, 200, {
+          ok: true,
+          ...page,
+          /** 每行补上绝对路径不存在时的提示用不到，但分类名统一成 category 供前端直接用 */
+          items: page.items.map((it) => ({ ...it, category: it.cat || it.category || '未分类' })),
+          stats: statsOf(snap.items),
+          categories: snap.cats || [],
+          roots: snap.roots || [],
+          missing: snap.missing || [],
+        });
+      }),
+
+      /** 改一张图的标签（写侧车）。标签清空且没说明时，侧车文件会被删掉 */
+      route('/stickers/tags', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const hit = locate(cfg.stickers?.dir ? stickers.snapshot(cfg.stickers).roots : [], body?.file);
+        if (!hit) return send(res, 404, { ok: false, message: '这张图不在表情库里（可能已移动或删除）' });
+        const r = writeSidecar(hit.abs, body?.tags, body?.note);
+        /** 侧车变了要让下次扫描重新读，否则提示词里还是旧标签 */
+        stickers.invalidate?.();
+        return send(res, 200, { ok: true, file: hit.rel, ...r });
+      }),
+
+      /**
+       * 补标签：后台分片跑，前端轮询进度。
+       *
+       * 规则补全（分类名 + 文件名），**不调模型**——理由写在 `sticker-manage.js`
+       * 顶部：能确定的信息用规则算更准更快，模型只能补「图里画了什么」，
+       * 那需要视觉能力且一张一次调用。
+       */
+      route('/stickers/tags/fill', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        if (stickerTagJob?.progress?.().running) {
+          return send(res, 409, { ok: false, message: '上一轮补标签还在跑，等它跑完或先取消' });
+        }
+        const snap = stickers.snapshot(cfg.stickers);
+        const roots = snap.roots || [];
+        /**
+         * 「还没标签」的判据是**侧车文件不存在**，不是 `tags` 为空。
+         *
+         * `tags` 在没侧车时会退回文件名拆出来的词（`熊猫_笑.png` → 熊猫、笑），
+         * 所以按 `tags.length` 判断会把绝大多数图当成「已有标签」，补标签功能
+         * 看起来永远「都补过了」。而侧车才是用户能编辑、能加场合说明的那份，
+         * 没有它 = 这张图还没被整理过。
+         */
+        const needsSidecar = (it) => {
+          const hit = locate(roots, it.rel || it.file);
+          return Boolean(hit) && !existsSync(`${hit.abs}.tags`);
+        };
+        const all = body?.all === true;
+        const targets = snap.items.filter((it) => (all ? true : needsSidecar(it)));
+        if (!targets.length) {
+          return send(res, 200, { ok: true, message: '每张图都已经有标签文件了', total: 0 });
+        }
+
+        stickerTagJob = createTagJob({          items: targets.map((it) => ({ file: it.rel, category: it.cat, existing: it.tags || [] })),
+          worker: (it) => {
+            const hit = locate(roots, it.file);
+            if (!hit) throw new Error('文件不在了');
+            const { tags } = suggestTags({ file: it.file, category: it.category, existing: it.existing });
+            writeSidecar(hit.abs, tags, readSidecar(hit.abs).note);
+          },
+          log: (m) => log.warn(m),
+        });
+
+        /** 每 60ms 跑一片：太快会和消息处理抢事件循环，太慢用户看着像卡住 */
+        const timer = setInterval(() => {
+          const p = stickerTagJob.tick();
+          if (!p.running) {
+            clearInterval(timer);
+            stickerTagTimer = null;
+            stickers.invalidate?.();
+            log.info(`表情补标签完成：${p.done} 张，失败 ${p.failed} 张`);
+          }
+        }, 60);
+        stickerTagTimer = timer;
+
+        return send(res, 200, { ok: true, jobId: stickerTagJob.id, total: targets.length });
+      }),
+
+      route('/stickers/tags/job', (req, res) => {
+        if (!stickerTagJob) return send(res, 200, { ok: true, job: null });
+        return send(res, 200, { ok: true, job: stickerTagJob.progress() });
+      }),
+
+      route('/stickers/tags/cancel', (req, res) => {
+        if (!stickerTagJob) return send(res, 200, { ok: true, message: '没有在跑的任务' });
+        if (stickerTagTimer) {
+          clearInterval(stickerTagTimer);
+          stickerTagTimer = null;
+        }
+        const p = stickerTagJob.cancel();
+        stickers.invalidate?.();
+        return send(res, 200, { ok: true, job: p, message: `已停在 ${p.done} / ${p.total}` });
+      }),
+
+      /**
+       * 批删。**真删，没有回收站。**
+       *
+       * `confirm` 必须显式为 true：这个接口删的是用户攒的图，误触一次就是
+       * 几十张没了。前端弹窗负责让人看清清单，服务端只认这个布尔。
+       */
+      route('/stickers/delete', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const snap = stickers.snapshot(cfg.stickers);
+        const r = removeFiles(snap.roots || [], body?.files, { confirm: body?.confirm === true });
+        if (r.removed.length) stickers.invalidate?.();
+        return send(res, r.error ? 400 : 200, r);
+      }),
+
+      /**
+       * 上传一张图。
+       *
+       * 收 base64 而不是 multipart：面板这边只有 `fetch`，用 FormData 也能做，
+       * 但服务端没有现成的 multipart 解析（零依赖项目不引 busboy），手写解析
+       * 边界（分片、超长行、编码）风险比收益大。base64 多 33% 体积，
+       * 上限 10MB 足够放一张表情。
+       */
+      route('/stickers/upload', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const name = basename(String(body?.name ?? '').replace(/\\/g, '/'));
+        if (!name || !/\.(png|jpe?g|gif|webp|bmp)$/i.test(name)) {
+          return send(res, 400, { ok: false, message: '只收 png / jpg / gif / webp / bmp' });
+        }
+        const raw = String(body?.data ?? '');
+        const b64 = raw.includes(',') ? raw.slice(raw.indexOf(',') + 1) : raw;
+        let buf;
+        try {
+          buf = Buffer.from(b64, 'base64');
+        } catch {
+          return send(res, 400, { ok: false, message: '图片数据解不开' });
+        }
+        if (!buf.length) return send(res, 400, { ok: false, message: '图片是空的' });
+        if (buf.length > 10 * 1024 * 1024) {
+          return send(res, 413, { ok: false, message: '单张最多 10MB' });
+        }
+
+        const snap = stickers.snapshot(cfg.stickers);
+        const root = String(snap.roots?.[0] || '');
+        if (!root) return send(res, 400, { ok: false, message: '还没配表情目录，先在设置里填一个' });
+
+        /** 分类可空 = 放根目录。分类名同样要防穿越 */
+        const cat = basename(String(body?.category ?? '').replace(/\\/g, '/')) || '';
+        const dir = cat && cat !== '.' && cat !== '..' ? join(root, cat) : root;
+        if (!dir.startsWith(root)) return send(res, 400, { ok: false, message: '分类名不合法' });
+
+        try {
+          mkdirSync(dir, { recursive: true });
+          /** 重名不覆盖：加序号。覆盖掉用户已有的同名图是不可接受的 */
+          let target = join(dir, name);
+          let i = 1;
+          while (existsSync(target)) {
+            const dot = name.lastIndexOf('.');
+            target = join(dir, `${name.slice(0, dot)}-${i}${name.slice(dot)}`);
+            i += 1;
+            if (i > 999) throw new Error('同名文件太多');
+          }
+          writeFileSync(target, buf);
+          stickers.invalidate?.();
+          return send(res, 200, {
+            ok: true,
+            file: cat ? `${cat}/${basename(target)}` : basename(target),
+            bytes: buf.length,
+            message: '已收进表情库',
+          });
+        } catch (e) {
+          return send(res, 500, { ok: false, message: `存不进去：${e?.message || e}` });
+        }
+      }),
+
+      /**
+       * 表情库里的图本身（面板网格预览用）。
+       *
+       * 和 `/stickers/thumb` 的区别：那个只服务 `images/` 缓存目录（框架同步来的），
+       * 这个服务用户自己的表情目录。**校验必须走 `locate()`**——它做了
+       * `basename` + 解析后仍在 root 下的双重检查，`../` 一律进不来。
+       */
+      route('/stickers/file', (req, res) => {
+        const q = new URL(req.url || '/', 'http://local').searchParams;
+        const snap = stickers.snapshot(cfg.stickers);
+        const hit = locate(snap.roots || [], q.get('path'));
+        if (!hit) return send(res, 404, { ok: false, message: '没有这张图' });
+        const MIME = {
+          '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+          '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+        };
+        res.writeHead(200, {
+          'Content-Type': MIME[extname(hit.abs).toLowerCase()] || 'application/octet-stream',
+          /** 短缓存：换图/删图后不该一直看到旧内容 */
+          'Cache-Control': 'private, max-age=60',
+        });
+        createReadStream(hit.abs).pipe(res);
       }),
 
       /**

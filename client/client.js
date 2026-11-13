@@ -13289,6 +13289,252 @@ select.roost-input{color-scheme:dark}
      * 为什么拆：一页塞两块互不相干的东西，找语音要往下滚过表情目录。
      * tab key `express` 保持不变，老 `localStorage['roost.tab']` 照样落在语音这页。
      */
+    /**
+     * 5.12 表情库管理：分页浏览、改标签、规则补标签、多选批删、上传。
+     *
+     * 为什么单独一张卡而不是塞进 `StickerDirsCard`：那张卡回答「图从哪来」，
+     * 这张回答「库里都有什么、怎么整理」。混在一起会让「改个路径」和
+     * 「删二十张图」挤在同一屏，误触成本太高。
+     *
+     * 删除是本页唯一不可逆的动作，所以：勾选 → 二次确认弹窗列清单 →
+     * 才发请求。没有「一键清空」这种按钮。
+     */
+    function StickerManageCard({ toast, n = '02' }) {
+      const [data, setData] = useState(null)
+      const [page, setPage] = useState(1)
+      const [size, setSize] = useState(24)
+      const [cat, setCat] = useState('')
+      const [q, setQ] = useState('')
+      const [picked, setPicked] = useState([])
+      const [busy, setBusy] = useState(false)
+      const [job, setJob] = useState(null)
+      const [tagFor, setTagFor] = useState('')
+      const [tagDraft, setTagDraft] = useState('')
+
+      const load = useCallback(async (p = page) => {
+        const qs = new URLSearchParams({ page: String(p), size: String(size) })
+        if (cat) qs.set('category', cat)
+        if (q.trim()) qs.set('q', q.trim())
+        const r = await get('/stickers/manage?' + qs.toString())
+        if (r.ok === false) return toast(r.message || '读不到表情库')
+        setData(r)
+        setPicked([])
+      }, [page, size, cat, q])
+
+      useEffect(() => { load(page) }, [page, size, cat])
+
+      /** 补标签进度：任务在跑时每 400ms 问一次，跑完停 */
+      useEffect(() => {
+        if (!job?.running) return undefined
+        const t = setInterval(async () => {
+          const r = await get('/stickers/tags/job')
+          if (r?.job) {
+            setJob(r.job)
+            if (!r.job.running) {
+              toast(`补标签完成：${r.job.done} 张，失败 ${r.job.failed} 张`)
+              load(1)
+            }
+          }
+        }, 400)
+        return () => clearInterval(t)
+      }, [job?.running])
+
+      const fill = async (all) => {
+        setBusy(true)
+        const r = await post('/stickers/tags/fill', { all })
+        setBusy(false)
+        if (r.ok === false) return toast(r.message || '启动失败')
+        if (!r.total) return toast(r.message || '都已有标签')
+        setJob({ running: true, total: r.total, done: 0, percent: 0, failed: 0 })
+        toast(`开始补 ${r.total} 张`)
+      }
+
+      const cancelJob = async () => {
+        const r = await post('/stickers/tags/cancel', {})
+        setJob(r.job || null)
+        toast(r.message || '已取消')
+        load(page)
+      }
+
+      const saveTags = async (file) => {
+        const tags = tagDraft.split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean)
+        const r = await post('/stickers/tags', { file, tags })
+        if (r.ok === false) return toast(r.message || '没存上')
+        setTagFor('')
+        toast('标签已更新')
+        load(page)
+      }
+
+      const remove = async () => {
+        if (!picked.length) return toast('先勾几张')
+        /** 不可逆动作：说清张数再确认，别只问「确定吗」 */
+        if (!window.confirm(`要删除 ${picked.length} 张图吗？\n\n这会直接删掉文件（连同 .tags 标签文件），没有回收站。`)) return
+        setBusy(true)
+        const r = await post('/stickers/delete', { files: picked, confirm: true })
+        setBusy(false)
+        toast(r.message || (r.ok ? '已删除' : '没删成'))
+        load(1)
+      }
+
+      const upload = async (fileList) => {
+        const f = fileList?.[0]
+        if (!f) return
+        if (f.size > 10 * 1024 * 1024) return toast('单张最多 10MB')
+        setBusy(true)
+        const data64 = await new Promise((resolve, reject) => {
+          const fr = new FileReader()
+          fr.onload = () => resolve(String(fr.result || ''))
+          fr.onerror = () => reject(new Error('读不了这个文件'))
+          fr.readAsDataURL(f)
+        }).catch((e) => { toast(e.message); return '' })
+        if (!data64) { setBusy(false); return }
+        const r = await post('/stickers/upload', { name: f.name, data: data64, category: cat })
+        setBusy(false)
+        toast(r.message || (r.ok ? '已上传' : '没传上去'))
+        if (r.ok) load(1)
+      }
+
+      const toggle = (rel) => setPicked((cur) => (cur.includes(rel) ? cur.filter((x) => x !== rel) : [...cur, rel]))
+      const fmt = (n) => {
+        const v = Number(n) || 0
+        if (v < 1024) return `${v} B`
+        if (v < 1024 * 1024) return `${(v / 1024).toFixed(0)} KB`
+        return `${(v / 1024 / 1024).toFixed(1)} MB`
+      }
+
+      const stats = data?.stats
+      return h(Sec, {
+        n, title: '表情库',
+        right: h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+          h('label', { className: 'roost-btn', style: { cursor: 'pointer' } },
+            busy ? '处理中…' : '上传一张',
+            h('input', {
+              type: 'file', accept: 'image/*', style: { display: 'none' },
+              onChange: (e) => { upload(e.target.files); e.target.value = '' },
+            })),
+          h('button', {
+            type: 'button', className: 'roost-btn', disabled: busy || job?.running,
+            onClick: () => fill(false),
+          }, '补标签'),
+          h('button', {
+            type: 'button', className: 'roost-btn', disabled: busy || !picked.length,
+            onClick: remove,
+          }, picked.length ? `删除 ${picked.length} 张` : '删除')),
+      },
+        !data
+          ? h('div', { className: 'roost-empty' }, '读着…')
+          : h('div', null,
+            h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+              `共 ${stats.total} 张（${fmt(stats.bytes)}）· 已打标签 ${stats.tagged} · 未打 ${stats.untagged}`,
+              (data.missing || []).length ? ` · ${data.missing.length} 个目录打不开` : ''),
+
+            job?.running
+              ? h('div', { style: { marginBottom: 8 } },
+                h('div', { className: 'roost-note', style: { fontSize: 11.5, marginBottom: 4 } },
+                  `补标签中 ${job.done} / ${job.total}（${job.percent}%）`),
+                h('div', { style: { height: 6, borderRadius: 3, background: 'rgba(128,128,128,.2)' } },
+                  h('div', {
+                    style: {
+                      height: '100%', borderRadius: 3, width: `${job.percent}%`,
+                      background: 'var(--ok, #2a9d5c)', transition: 'width .3s',
+                    },
+                  })),
+                h('button', { type: 'button', className: 'roost-btn', style: { marginTop: 6 }, onClick: cancelJob }, '停下'))
+              : null,
+
+            h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' } },
+              h('select', {
+                className: 'roost-input', style: { width: 'auto' }, value: cat,
+                onChange: (e) => { setCat(e.target.value); setPage(1) },
+              },
+                h('option', { value: '' }, '全部分类'),
+                (data.categories || []).map((c) => h('option', { key: c.name, value: c.name }, `${c.name}（${c.count}）`))),
+              h('input', {
+                className: 'roost-input', style: { width: 160 }, placeholder: '搜文件名 / 标签', value: q,
+                onChange: (e) => setQ(e.target.value),
+                onKeyDown: (e) => { if (e.key === 'Enter') { setPage(1); load(1) } },
+              }),
+              h('button', { type: 'button', className: 'roost-btn', onClick: () => { setPage(1); load(1) } }, '搜'),
+              h('select', {
+                className: 'roost-input', style: { width: 'auto' }, value: size,
+                onChange: (e) => { setSize(Number(e.target.value)); setPage(1) },
+              }, [12, 24, 48, 96].map((v) => h('option', { key: v, value: v }, `每页 ${v}`))),
+              h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
+                `第 ${data.page} / ${data.pages} 页 · 显示 ${data.items.length} / ${data.total}`)),
+
+            data.items.length === 0
+              ? h('div', { className: 'roost-empty' }, '这个筛选下没有图')
+              : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(120px,1fr))', gap: 8 } },
+                data.items.map((it) => {
+                  const rel = it.rel || it.file
+                  const on = picked.includes(rel)
+                  return h('div', {
+                    key: rel,
+                    style: {
+                      border: `1px solid ${on ? 'var(--ok, #2a9d5c)' : 'rgba(128,128,128,.25)'}`,
+                      borderRadius: 8, padding: 6, fontSize: 11,
+                      background: on ? 'rgba(42,157,92,.08)' : 'transparent',
+                    },
+                  },
+                    h('div', { style: { position: 'relative' } },
+                      h('img', {
+                        /** 走 API 前缀 + 相对路径：`locate()` 会在服务端再校验一次越界 */
+                        src: API + '/stickers/file?path=' + encodeURIComponent(rel),
+                        alt: it.file, loading: 'lazy',
+                        style: { width: '100%', height: 80, objectFit: 'contain', borderRadius: 4, background: 'rgba(128,128,128,.08)' },
+                      }),
+                      h('input', {
+                        type: 'checkbox', checked: on, onChange: () => toggle(rel),
+                        style: { position: 'absolute', top: 2, left: 2 },
+                      })),
+                    h('div', {
+                      title: it.file,
+                      style: { marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                    }, it.file),
+                    h('div', { className: 'roost-muted', style: { fontSize: 10.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                      (it.tags || []).join(' / ') || '没标签'),
+                    h('div', { style: { display: 'flex', gap: 4, marginTop: 4 } },
+                      h('button', {
+                        type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
+                        onClick: () => { setTagFor(tagFor === rel ? '' : rel); setTagDraft((it.tags || []).join(', ')) },
+                      }, tagFor === rel ? '取消' : '改标签'),
+                      h('span', { className: 'roost-muted', style: { fontSize: 10, marginLeft: 'auto' } }, fmt(it.size))),
+                    tagFor === rel
+                      ? h('div', { style: { marginTop: 4 } },
+                        h('input', {
+                          className: 'roost-input', value: tagDraft, placeholder: '开心, 猫',
+                          style: { fontSize: 11, padding: '2px 4px' },
+                          onChange: (e) => setTagDraft(e.target.value),
+                          onKeyDown: (e) => { if (e.key === 'Enter') saveTags(rel) },
+                        }),
+                        h('button', {
+                          type: 'button', className: 'roost-btn roost-btn-primary',
+                          style: { fontSize: 10.5, marginTop: 3, padding: '1px 6px' },
+                          onClick: () => saveTags(rel),
+                        }, '存'))
+                      : null,
+                  )
+                })),
+
+            h('div', { style: { display: 'flex', gap: 6, marginTop: 10, alignItems: 'center' } },
+              h('button', {
+                type: 'button', className: 'roost-btn', disabled: data.page <= 1,
+                onClick: () => setPage(data.page - 1),
+              }, '上一页'),
+              h('button', {
+                type: 'button', className: 'roost-btn', disabled: data.page >= data.pages,
+                onClick: () => setPage(data.page + 1),
+              }, '下一页'),
+              data.items.length
+                ? h('button', {
+                  type: 'button', className: 'roost-btn', style: { marginLeft: 'auto' },
+                  onClick: () => setPicked(picked.length === data.items.length ? [] : data.items.map((x) => x.rel || x.file)),
+                }, picked.length === data.items.length ? '取消全选' : '全选本页')
+                : null),
+          ),
+      )
+    }
+
     function ExpressTab({ config, stickers, saveCfg, toast, reload, part = 'all' }) {
       return h('div', null,
         part === 'sticker' ? null : h(TtsCard, { config, saveCfg, toast, reload }),
@@ -13297,6 +13543,8 @@ select.roost-input{color-scheme:dark}
           config, stickers, saveCfg, toast, reload,
           n: part === 'sticker' ? '01' : '02',
         }),
+        /** 5.12：库管理只出现在独立的「表情包」页，别把表达页撑成两屏 */
+        part === 'sticker' ? h(StickerManageCard, { toast, n: '02' }) : null,
         part === 'voice'
           ? h('div', { className: 'roost-note' }, '表情包在「表达 → 表情包」那一页。')
           : null,
