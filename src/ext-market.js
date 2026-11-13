@@ -17,6 +17,7 @@
  *      **不接受扩展仓下发的任何 `env` / `!!js` / YAML tag**（§8.2 第 3 条）。
  */
 import fs from 'node:fs';
+import { assertSafeUrl } from './ssrf.js';
 import { join } from 'node:path';
 
 import { dataDir } from './config.js';
@@ -91,6 +92,12 @@ export function assertSafeTarballUrl(raw) {
 }
 
 async function defaultFetchText(url) {
+  /**
+   * 5.11：主机白名单只挡了「字面地址」，挡不住域名解析到 127.0.0.1 /
+   * 169.254.169.254（DNS rebinding）。出站前逐 IP 再校一次。
+   * 索引允许本机回环 http（自建镜像），与 assertSafeIndexUrl 口径一致。
+   */
+  await assertSafeUrl(url, { allowLoopback: true });
   const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) });
   if (!res.ok) throw new Error(`拉索引失败：HTTP ${res.status}`);
   return await res.text();
@@ -101,6 +108,7 @@ async function defaultDownload(entry, dest, { repo, branch } = {}) {
   const raw = entry.tarball || (repo ? tarballUrl(repo, branch) : '');
   if (!raw) throw new Error('索引条目缺 tarball，且索引里没有 repo 可拼下载地址');
   const url = assertSafeTarballUrl(raw);
+  await assertSafeUrl(url);
   const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(60_000) });
   if (!res.ok) throw new Error(`下载分发包失败：HTTP ${res.status}`);
   /**

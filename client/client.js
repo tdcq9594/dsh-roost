@@ -9993,6 +9993,7 @@ select.roost-input{color-scheme:dark}
 
     const JSON_SECTIONS = [
       ['memory', '记忆', '日记寿命、注入条数、多少轮全量重注、记忆工具开关'],
+      ['security', '安全防护', 'dangerousConfirm：删根目录/格式化/关机/下载后执行这类命令先在 QQ 里问一句「确认」，只放一次；ssrf：出站 URL 逐 IP 校验（默认拒内网），自建服务用 allowPrivate 或 allowHosts 显式放开'],
       ['mood', '心情', 'effects 打开后聊天里被夸/被凶会带动心情；halfLifeHours 是回中性半衰期、baseline 是衰减落点（心情页有控件）；日常在「权限」页的高级组里点'],
       ['offpeak', '错峰', 'mode self=谷时窗口+安静期（默认）；official=官方峰时（工作日 9–12/14–18 高峰，节假日与周末全天空闲，和账单档位同一份判据）；deferHeavy 开了才把压库/过期压缩限到谷时跑；holidays 可覆盖节假日表'],
       ['usage', '用量金额', '概览的「今日花费」只折算 pricing 里有的模型（内置 DeepSeek 官方价）；键是模型名子串，值是 peak/idle 两档的 元/百万 tokens，价格会过期以官网为准'],

@@ -153,6 +153,18 @@ export const DEFAULTS = {
       numThreads: 2,
     },
   },
+  /**
+   * 5.11 安全防护：危险命令二次确认 + 出站 URL 的 SSRF 校验。
+   * 两项都默认开；`allowPrivate` 是给自建内网服务留的显式开关，
+   * 不是「看起来像本机就放行」。
+   */
+  security: {
+    dangerousConfirm: true,
+    ssrf: {
+      allowPrivate: false,
+      allowHosts: [],
+    },
+  },
   chat: {
     /**
      * 5.13 单聊「正在输入」：回合开始前先告诉对方在打字（官方 msg_type=6）。

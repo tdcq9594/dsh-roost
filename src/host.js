@@ -60,6 +60,7 @@ import { pickModelFor, pickReasoningEffort } from './model-pick.js';
 import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { rerankHits } from './rerank.js';
+import { isDangerousCommand, createConfirmGate } from './safety.js';
 import { createClosing, shouldNotePending } from './closing.js';
 import { createAccount } from './account.js';
 import { createRewriter } from './rewrite.js';
@@ -744,6 +745,20 @@ export function apply(ctx) {
   const personaByChat = new Map();
   /** 5.13：「正在输入」每会话 60 秒最多发一次，别把提示刷成噪音 */
   const typingAt = new Map();
+  /**
+   * 5.11：危险命令的一次性确认闸门。
+   * `sendOut` 在下面定义（const），但这里只是闭包，真正调用时早已初始化。
+   */
+  const confirmGate = createConfirmGate({
+    send: (chatId, text) => {
+      try {
+        Promise.resolve(sendOut({ scene: 'c2c', target: chatId, text }))
+          .catch((e) => log.warn(`确认提示没发出去：${e.message}`));
+      } catch (e) {
+        log.warn(`确认提示没发出去：${e.message}`);
+      }
+    },
+  });
   const TYPING_EVERY_MS = 60_000;
   const PERSONA_MAP_MAX = 300;
   const ownership = createOwnership({
@@ -929,6 +944,24 @@ export function apply(ctx) {
 
         const name = String(exec?.name || '');
         if (!name) return undefined;
+        /**
+         * 5.11：危险命令一次性确认。放在配额之前——没配配额也得拦，
+         * 且不依赖下面那段配额逻辑的 sid/chatId（用独立变量名，避免重复声明）。
+         */
+        if (cfg.security?.dangerousConfirm !== false) {
+          const dSid = String(exec?.agent?.session?.id || '');
+          const dMine = dSid ? (sessions.list?.() || []).find((x) => x?.sessionId === dSid) : null;
+          const dSp = dSid ? speaker.get(dSid) : null;
+          const dChat = String(dMine?.chatId || dSp?.payload?.chat?.chatId || '');
+          if (dChat) {
+            const danger = isDangerousCommand(name, exec?.args ?? exec?.input);
+            if (danger.dangerous) {
+              if (confirmGate.consume(dChat, danger.key)) return undefined;
+              confirmGate.ask(dChat, danger);
+              return `需要确认：${danger.reason}。已在 QQ 里问你，回复「确认」后这条命令才执行。`;
+            }
+          }
+        }
         /**
          * 工具名 → 配额项。
          *
@@ -4297,6 +4330,25 @@ export function apply(ctx) {
         try {
           channels.active()?.sendTyping?.({ scene: 'c2c', target: chat.chatId })?.catch?.(() => {});
         } catch { /* 没有这个能力就算了 */ }
+      }
+    }
+
+    /**
+     * 5.11：有待确认的危险命令时，用户回「确认」就只批准下一次同类调用，
+     * 不把这轮喂给模型（否则模型可能顺手又发起别的操作）。
+     * 不是确认词就照常进模型，pending 仍在。
+     */
+    if (confirmGate.hasPending(chat.chatId)) {
+      const said = String(payload?.text ?? '');
+      if (confirmGate.onMessage(chat.chatId, said)) {
+        try {
+          sendOut({
+            scene: chat.kind === 'group' ? 'group' : 'c2c',
+            target: chat.chatId,
+            text: '好，下一条同类命令我执行。',
+          })?.catch?.(() => {});
+        } catch { /* 回执发不出去也不影响批准 */ }
+        return;
       }
     }
 
