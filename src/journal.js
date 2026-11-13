@@ -1717,15 +1717,22 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      *
      * @returns {Promise<Array>} 按相关度排序的日记（带 score/why）
      */
-    async search(query, { chatId = '', limit = 5, crossCritical = true, entityJournalIds = [], aliases = [] } = {}) {
+    async search(query, { chatId = '', limit = 5, crossCritical = true, entityJournalIds = [], aliases = [],
+      /** 3.3：每路（关键词/向量）取多少条进融合，原写死 40 */
+      perPath = 40,
+      /** 3.4：预览/dry-run 传 false —— 不写 access_count，不把「试一下」当成「被想起」 */
+      touch = true,
+      /** 3.4：Map<journalId, 实体名>，命中原因里标「从谁联想来」 */
+      entityNames = null } = {}) {
       const terms = queryTerms(query);
       const entIds = [...new Set((entityJournalIds || []).filter(Boolean))];
       // 有实体路也能搜（查询词为空但提到了某个人）
       if (!terms.length && !entIds.length) return [];
       const s = get();
 
+      const per = Math.max(1, Number(perPath) || 40);
       const kw = terms.length
-        ? s.searchTerms(terms, { chatId, limit: 40, crossCritical, aliases }).filter((r) => passesCoverage(terms, indexTerms(r.text)))
+        ? s.searchTerms(terms, { chatId, limit: per, crossCritical, aliases }).filter((r) => passesCoverage(terms, indexTerms(r.text)))
         : [];
       const ranks = new Map();
       /**
@@ -1770,7 +1777,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
               if (cos >= (embed.minScore?.() ?? 0.35)) scored.push({ r, cos });
             }
             scored.sort((a, b) => b.cos - a.cos);
-            vecHits = scored.slice(0, 40);
+            vecHits = scored.slice(0, per);
             vecHits.forEach(({ r }, i) => {
               bump(r.id, i);
               if (!byId.has(r.id)) byId.set(r.id, r);
@@ -1791,7 +1798,12 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
           return {
             ...r,
             score,
-            why: [vecRank.has(id) ? `向量#${vecRank.get(id) + 1}` : '', kw.some((k) => k.id === id) ? '关键词' : '']
+            why: [
+              vecRank.has(id) ? `向量#${vecRank.get(id) + 1}` : '',
+              kw.some((k) => k.id === id) ? '关键词' : '',
+              /** 3.4：实体路命中的标出「从谁联想来」，预览和决策链都能看懂 */
+              entityNames?.get?.(id) ? `经「${entityNames.get(id)}」联想` : '',
+            ]
               .filter(Boolean)
               .join('+'),
             coverage: coverage(terms, indexTerms(r.text)),
@@ -1801,7 +1813,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         .sort((a, b) => b.score - a.score)
         .slice(0, limit);
 
-      if (out.length) touchIds(out.map((r) => r.id));
+      /** 3.4：预览不计入「被想起」——检索命中才算访问，试一下不算 */
+      if (touch !== false && out.length) touchIds(out.map((r) => r.id));
       return out;
     },
 

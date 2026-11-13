@@ -1763,11 +1763,12 @@ test('2.3：人物 / 备份两页没数据时给加载占位和重试，不炸',
   }
 })
 
-test('2.7：记忆页三块内容仍在同一个折叠入口里，编号 01–06 连续', () => {
+test('2.7：记忆页三块内容仍在同一个折叠入口里，编号 01–07 连续', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   const tree = expand(mod.MemoryTab(tabProps({ onPickChat: () => {} })), rt)
-  assert.deepEqual(numsOf(tree), ['01', '02', '03', '04', '05', '06'], '记忆页编号不该再断')
+  /** 3.3/3.4 新增 05 召回预览与参数，原 05/06 顺延为 06/07 */
+  assert.deepEqual(numsOf(tree), ['01', '02', '03', '04', '05', '06', '07'], '记忆页编号不该再断')
   const txt = textOf(tree)
   for (const must of [
     '仍保留原样', '去人物页', '去备份页',

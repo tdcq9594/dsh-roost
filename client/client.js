@@ -3813,7 +3813,42 @@ select.roost-input{color-scheme:dark}
 
     /* ---------------- 记忆（三层） ---------------- */
 
-    function MemoryTab({ mem, toast, reload, quick, busy, onPickChat, setTab }) {
+    function MemoryTab({ mem, toast, reload, quick, busy, onPickChat, setTab, config, saveCfg }) {
+      /** 3.4 召回预览：输入一句话，走真实召回（dry），看命中与原因 */
+      const [pvText, setPvText] = useState('')
+      const [pvResult, setPvResult] = useState(null)
+      const [pvBusy, setPvBusy] = useState(false)
+      const runPreview = async () => {
+        const t = pvText.trim()
+        if (!t) return toast('先输入一句话')
+        setPvBusy(true)
+        try {
+          const r = await post('/memory/recall-preview', { text: t, chatId: mem?.chatId || '' })
+          setPvResult(r?.ok === false ? { err: r.message || '预览失败' } : r)
+        } catch (e) {
+          setPvResult({ err: e.message })
+        } finally {
+          setPvBusy(false)
+        }
+      }
+      /** 3.3 召回参数草稿：null = 跟随配置；保存走整段提交，恢复默认就是写回默认值 */
+      const [rcDraft, setRcDraft] = useState(null)
+      const RECALL_DEFAULTS = { perPath: 40, entityLimit: 40, linkLimit: 5, residentMax: 600, deepMax: 1200, dynMax: 480 }
+      const rcCfg = config?.recall || {}
+      const rcVal = (k) => (rcDraft !== null && rcDraft[k] !== undefined ? rcDraft[k] : String(rcCfg[k] ?? ''))
+      const putRecall = async (patch) => {
+        if (!saveCfg) return
+        const r = await saveCfg({ recall: patch })
+        toast(r?.ok === false ? (r.message || '没存上') : '已保存，下一轮召回生效')
+        setRcDraft(null)
+      }
+      const rcRow = (k, label, hint) => h('label', { key: k, style: { display: 'flex', gap: 6, alignItems: 'center' } },
+        h('span', { className: 'roost-note', style: { margin: 0 } }, label),
+        h('input', {
+          type: 'number', min: 1, className: 'roost-input', style: { width: 84 },
+          title: hint, value: rcVal(k),
+          onChange: (e) => setRcDraft({ ...rcDraft, [k]: e.target.value }),
+        }))
       /** 召回记录：后端每轮都在写，这里给个入口看「她刚才想起了什么」 */
       const [recallRows, setRecallRows] = useState(null)
       const [recallErr, setRecallErr] = useState('')
@@ -4490,7 +4525,68 @@ select.roost-input{color-scheme:dark}
         ),
         ),
 
-        h(Sec, { n: '05', title: '召回记录', right: h('button', {
+        /** 3.3/3.4：召回预览 + 参数。检索路径和轮次注入是同一个（host 的 recallFor），
+         *  预览不写召回日志、不计 access_count —— 试一下不等于被想起 */
+        h(Sec, { n: '05', title: '召回预览与参数' },
+          h('div', { className: 'roost-note', style: { marginTop: 0 } },
+            '输入一句话，看真实召回会命中什么、为什么命中。这是预演：不计入「被想起」，不影响排序。'),
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+            h('input', {
+              className: 'roost-input', style: { flex: '1 1 260px' },
+              placeholder: `比如「上次说的那个约定」${mem?.chatId ? '（在本会话里试）' : ''}`,
+              value: pvText, onChange: (e) => setPvText(e.target.value),
+              onKeyDown: (e) => { if (e.key === 'Enter') runPreview() },
+            }),
+            h('button', { type: 'button', className: 'roost-primary', disabled: pvBusy || busy, onClick: runPreview },
+              pvBusy ? '检索中…' : '试一句'),
+          ),
+          pvResult?.err
+            ? h('div', { className: 'roost-empty', style: { color: 'var(--bad)', marginTop: 8 } }, pvResult.err)
+            : pvResult
+              ? h('div', { style: { marginTop: 8 } },
+                  pvResult.note ? h('div', { className: 'roost-note' }, pvResult.note) : null,
+                  (pvResult.entities || []).length
+                    ? h('div', { className: 'roost-note' }, '这一句点到的实体：' + pvResult.entities.join('、'))
+                    : null,
+                  (pvResult.hits || []).length
+                    ? pvResult.hits.map((x) => h('div', { key: x.rank, className: 'roost-item' },
+                        h('span', { className: 'd' }, `#${x.rank} · ${x.when || '—'} · ${x.level || ''}`),
+                        h('span', { className: 't' }, x.text || '—'),
+                        h('span', { className: 'd' }, (x.why || '未标原因') + (Number.isFinite(x.score) ? ` · 分 ${x.score.toFixed(4)}` : ''))))
+                    : h('div', { className: 'roost-empty' }, '没命中。换个说法再试，或检查下面的参数。'),
+                )
+              : null,
+          h('div', { className: 'roost-note', style: { marginTop: 12 } },
+            '召回参数（默认就是原来的写死值；调坏了点「恢复默认」就回去）：'),
+          h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6 } },
+            rcRow('perPath', '每路取几条', '关键词/向量各取多少条进 RRF 融合'),
+            rcRow('entityLimit', '实体上限', '参与联想的实体最多几个'),
+            rcRow('linkLimit', '每实体联想几条', '一个实体最多拉几条相关日记'),
+            rcRow('residentMax', '平时预算(字)', '非深度重注时的记忆注入上限'),
+            rcRow('deepMax', '深度预算(字)', '每 N 轮全量重注的上限'),
+            rcRow('dynMax', '易变段预算(字)', '拼在用户消息里的动态段上限'),
+          ),
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+            h('button', {
+              type: 'button', className: 'roost-primary', disabled: !saveCfg || rcDraft === null,
+              onClick: () => {
+                const patch = {}
+                for (const k of Object.keys(RECALL_DEFAULTS)) {
+                  const v = Number(rcVal(k))
+                  if (!(v > 0)) return toast('参数得是正数')
+                  patch[k] = v
+                }
+                putRecall(patch)
+              },
+            }, '保存'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: !saveCfg,
+              onClick: () => putRecall({ ...RECALL_DEFAULTS }),
+            }, '恢复默认'),
+          ),
+        ),
+
+        h(Sec, { n: '06', title: '召回记录', right: h('button', {
           type: 'button', className: 'roost-btn', onClick: loadRecall,
         }, '刷新') },
           recallErr
@@ -4510,7 +4606,7 @@ select.roost-input{color-scheme:dark}
         ),
 
         /* 危险区放最后 */
-        h(Sec, { n: '06', title: '清空' },
+        h(Sec, { n: '07', title: '清空' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '「清空」抹掉事实和日记正文，行还留着（时间线不断）；'
             + '「彻底删除」连行一起删，磁盘上的旧页十分钟内自动压掉。两者都不可恢复。'),
@@ -8395,6 +8491,7 @@ select.roost-input{color-scheme:dark}
       ['mood', '心情', 'effects 打开后聊天里被夸/被凶会带动心情；halfLifeHours 是回中性半衰期、baseline 是衰减落点（心情页有控件）；日常在「权限」页的高级组里点'],
       ['offpeak', '错峰', 'mode self=谷时窗口+安静期（默认）；official=官方峰时（工作日 9–12/14–18 高峰，节假日与周末全天空闲，和账单档位同一份判据）；deferHeavy 开了才把压库/过期压缩限到谷时跑；holidays 可覆盖节假日表'],
       ['usage', '用量金额', '概览的「今日花费」只折算 pricing 里有的模型（内置 DeepSeek 官方价）；键是模型名子串，值是 peak/idle 两档的 元/百万 tokens，价格会过期以官网为准'],
+      ['recall', '召回参数', '每路取几条/实体上限/每实体联想几条/三个注入预算（字）；默认就是原写死值，调坏了在记忆页点「恢复默认」；没有「最低相关度」——RRF 名次融合没有跨路可比的分数，那个旋钮调了也没反应'],
       ['events', '经历', 'enabled：记不记她主动做过的事（找过人、发过文件）。24 小时自动过期，只给主人私聊当素材；关着也能在「记忆」页查看和清空已有的'],
       ['profiles', '人物档案', 'enabled：要不要把对熟人的印象攒成一小段，聊天时带上。每天凌晨巩固时提炼、跨群共用，同一天里提示词不变；关着也能在「记忆」页查看和清空已有的'],
       ['compact', '上下文压缩', '两个场景的阈值、开场带几条原话'],
@@ -12140,7 +12237,7 @@ select.roost-input{color-scheme:dark}
           tab === 'ext' ? h(ExtTab, { quick, toast }) : null,
           tab === 'ext-market' ? h(ExtMarketTab, { toast }) : null,
           tab === 'ext-api' ? h(ExtApiTab, { toast }) : null,
-          tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat, setTab }) : null,
+          tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat, setTab, config, saveCfg }) : null,
           /** 2.3：与记忆页并列的两个入口，同一份 mem，不复制状态 */
           tab === 'people' ? h(PeopleTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,
           tab === 'backup' ? h(BackupTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,

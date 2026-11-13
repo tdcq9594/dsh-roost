@@ -1621,6 +1621,16 @@ export function apply(ctx) {
    */
   const MEMORY_DYN_MAX = 480;
 
+  /**
+   * 3.3：三个预算改配置现读（`config.recall.*`），默认 = 原写死值。
+   * 面板改完下一轮生效，不用重启；调坏了把键删掉就回默认。
+   */
+  const recallBudgets = () => ({
+    res: Number(cfg.recall?.residentMax) || MEMORY_MAX,
+    deep: Number(cfg.recall?.deepMax) || MEMORY_DEEP_MAX,
+    dyn: Number(cfg.recall?.dynMax) || MEMORY_DYN_MAX,
+  });
+
   const memory = createMemory();
   const mood = createMood({ cfgOf: () => cfg.mood });
   /**
@@ -1771,6 +1781,59 @@ export function apply(ctx) {
 
   /** 写日记拆到 `journal-bridge.js`（阶段 8） */
   const journalAdd = createJournalBridge({ journal, memoryOff, log }).add;
+
+  /**
+   * 3.3/3.4：召回走**同一个函数**——轮次注入和面板预览不允许各走各的，
+   * 否则「预览显示的」和「实际注入的」会是两套结果，预览就成了摆设。
+   *
+   * @param {string} chatId
+   * @param {string} text 这一句的用户原话
+   * @param {{dry?:boolean}} [o] dry=true：不写召回日志、不更新「上一句」、
+   *   不记 access_count（检索命中才算被想起，试一下不算）
+   * @returns {{hits:Array, rec:object, entities:string[]}} entities=这一句点到的实体名
+   */
+  const recallFor = async (chatId, text, { dry = false } = {}) => {
+    const q = String(text ?? '');
+    /** 第三路（M3）：查询里提到的实体，把相关日记拉进来。 */
+    const entityNames = new Map();
+    const entities = [];
+    try {
+      const named = graph
+        .entities({ chatId, limit: Number(cfg.recall?.entityLimit) || 40, aliases: aliasesOf(chatId) })
+        .filter((e) => e.name && e.name.length >= 2 && q.includes(e.name));
+      for (const e of named) {
+        entities.push(e.name);
+        const ids = graph.linkedJournalIds(e.name, {
+          chatId,
+          limit: Number(cfg.recall?.linkLimit) || 5,
+          aliases: aliasesOf(chatId),
+        });
+        for (const id of ids) if (!entityNames.has(id)) entityNames.set(id, e.name);
+      }
+    } catch (e) {
+      log.debug(`实体路跳过：${e.message}`);
+    }
+    const opts = {
+      chatId,
+      limit: Number(cfg.memory?.hits) || 3,
+      entityJournalIds: [...entityNames.keys()],
+      entityNames,
+      // 换过机器人时旧日记在旧 openid 下面，别名一起查
+      aliases: aliasesOf(chatId),
+      /** 3.3：每路取几条，原写死 40 */
+      perPath: Number(cfg.recall?.perPath) || 40,
+      touch: !dry,
+    };
+    /** D4：短句连上一句补检索，按原分补位、不乘系数（见 recall.js） */
+    const prev = dry ? '' : (recentUserText.get(chatId) || '');
+    const rec = await searchWithShortContext(journal, q, opts, prev);
+    if (!dry) {
+      recentUserText.set(chatId, q);
+      /** D3：召回日志只留结构化字段，连检索词都不落盘 */
+      recallLog.push(recallRow(chatId, q, rec.hits, rec));
+    }
+    return { hits: rec.hits, rec, entities };
+  };
 
 
   /**
@@ -2866,7 +2929,7 @@ export function apply(ctx) {
       ? [rules, factsGlobal, factsChat, selfSec, profilesSec, digestSec, topSec, graphSec]
       : [rules, factsGlobal, factsChat, profilesSec];
 
-    const body = fitBudget(sections, deep ? MEMORY_DEEP_MAX : MEMORY_MAX);
+    const body = fitBudget(sections, deep ? recallBudgets().deep : recallBudgets().res);
     // 一句都没有（新装的、什么都没聊过）就别占地方
     return body.replace(rules, '').trim() ? body : '';
   }
@@ -2928,7 +2991,7 @@ export function apply(ctx) {
 
     // 优先级：指代 > 命中 > 经历 > 索引。前两块缺了会直接影响这一轮说得对不对，
     // 经历只是「她最近忙了什么」的背景，索引最不疼
-    return fitBudget([recentSec, hitSec, eventsSec, idxSec], MEMORY_DYN_MAX, '\n');
+    return fitBudget([recentSec, hitSec, eventsSec, idxSec], recallBudgets().dyn, '\n');
   }
 
   /** 两段拼起来（调试接口和面板用；真正注入是分开走的，别在这里合并回去） */
@@ -4296,41 +4359,11 @@ export function apply(ctx) {
       if (!memoryOff(chat.chatId)) {
         try {
           /**
-           * 第三路（M3）：查询里提到的实体，把相关日记拉进来。
-           *
-           * 为什么只在关键词之外再补这一路：问"张三最近在忙什么"时，
-           * 字面命中经常很差（日记里写的是"他"），但图谱里
-           * "张三—工作在→某公司"是现成的。实体路只给 0.5 权重，
-           * 不会盖过关键词命中。
+           * 3.3/3.4：召回收在 `recallFor` 一处（实体路 + 短句补检索 + 日志）。
+           * 面板「召回预览」走的是同一个函数（dry 模式），两边结果必然一致。
            */
-          let entIds = [];
-          try {
-            const named = graph
-              .entities({ chatId: chat.chatId, limit: 40, aliases: aliasesOf(chat.chatId) })
-              .filter((e) => e.name && e.name.length >= 2 && text.includes(e.name));
-            entIds = named.flatMap((e) =>
-              graph.linkedJournalIds(e.name, { chatId: chat.chatId, limit: 5, aliases: aliasesOf(chat.chatId) }),
-            );
-          } catch (e) {
-            log.debug(`实体路跳过：${e.message}`);
-          }
-          const limit = Number(cfg.memory?.hits) || 3;
-          const opts = {
-            chatId: chat.chatId,
-            limit,
-            entityJournalIds: entIds,
-            // 换过机器人时旧日记在旧 openid 下面，别名一起查
-            aliases: aliasesOf(chat.chatId),
-          };
-          const q = String(text ?? '');
-          /** D4：短句连上一句补检索，按原分补位、不乘系数（见 recall.js） */
-          const prev = recentUserText.get(chat.chatId) || '';
-          const rec = await searchWithShortContext(journal, q, opts, prev);
-          hits = rec.hits;
-          recentUserText.set(chat.chatId, q);
-
-          /** D3：召回日志只留结构化字段，连检索词都不落盘 */
-          recallLog.push(recallRow(chat.chatId, q, hits, rec));
+          const r = await recallFor(chat.chatId, text);
+          hits = r.hits;
         } catch (e) {
           log.warn(`日记检索失败（不影响这轮）：${e.message}`);
         }
@@ -6261,6 +6294,44 @@ export function apply(ctx) {
        * 三层都给是为了**能查**：串场、记错、忘不掉，这三类问题
        * 光看 facts 是判断不了的，得能看见日记和图。
        */
+      /**
+       * 3.4 召回预览：输一句话走**真实召回**（和轮次注入同一个 recallFor），
+       * dry 模式不写召回日志、不更新「上一句」、不记 access_count——
+       * 试一下不等于被想起。显示命中 / 命中原因（含「经某实体联想」）。
+       */
+      route('/memory/recall-preview', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        const text = String(body?.text ?? '').trim();
+        const chatId = String(body?.chatId ?? '').trim();
+        if (!text) return send(res, 200, { ok: false, message: '先输入一句话' });
+        if (memoryOff(chatId)) return send(res, 200, { ok: true, dry: true, hits: [], entities: [], note: '这个会话记忆关着（纯净模式），不会注入' });
+        try {
+          const r = await recallFor(chatId, text, { dry: true });
+          return send(res, 200, {
+            ok: true,
+            dry: true,
+            entities: r.entities,
+            hits: (r.hits || []).map((h, i) => ({
+              rank: i + 1,
+              score: h.score,
+              why: h.why || '',
+              when: h.at ? new Date(h.at).toISOString().slice(0, 10) : '',
+              level: h.level || '',
+              text: String(h.digest || h.text || '').slice(0, 120),
+            })),
+            params: {
+              perPath: Number(cfg.recall?.perPath) || 40,
+              entityLimit: Number(cfg.recall?.entityLimit) || 40,
+              linkLimit: Number(cfg.recall?.linkLimit) || 5,
+              hits: Number(cfg.memory?.hits) || 3,
+            },
+          });
+        } catch (e) {
+          return send(res, 200, { ok: false, message: `预览失败：${e.message}` });
+        }
+      }),
+
       route('/memory', (req, res) => {
         /**
          * 「本群」到底指哪个群，必须能指定、也必须能显示出来。
@@ -6717,7 +6788,7 @@ export function apply(ctx) {
           budgets: {
             scene: { max: SCENE_MAX, len: text.length },
             memory: {
-              max: deep ? MEMORY_DEEP_MAX : MEMORY_MAX,
+              max: deep ? recallBudgets().deep : recallBudgets().res,
               len: mtext.length,
               /**
                * 拆开看：`static` 进 system prompt（稳定，可缓存）；

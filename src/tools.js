@@ -178,6 +178,10 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
         enum: ['chat', 'global'],
         description: 'chat=只查当前会话（默认）；global=连跨群的身份事实一起查（只有主人/管理员可用）',
       },
+      dryRun: {
+        type: 'boolean',
+        description: 'true=预演：走真实检索但不算访问次数、不影响排序（3.4 召回预览）',
+      },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -189,14 +193,15 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
        */
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },
-    async execute({ query, scope } = {}) {
+    async execute({ query, scope, dryRun } = {}) {
       const q = String(query || '').trim();
       if (!q) return { ok: false, message: '要查什么？给个关键词' };
       if (cfgOf?.()?.memory?.enabled === false) return { ok: false, message: '记忆功能关着' };
       const { chatId, bucket, aliases } = caller();
       const cross = scope === 'global' && canCrossGroup();
+      const dry = dryRun === true;
       try {
-        const rows = await journal.search(q, { chatId, limit: 5, crossCritical: cross, aliases });
+        const rows = await journal.search(q, { chatId, limit: 5, crossCritical: cross, aliases, touch: !dry });
         /**
          * 场景片段（阶段 4）：命中之后把**原文和前后文**也带出来。
          *
@@ -241,7 +246,8 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
           ok: true,
           count: rows.length,
           results,
-          hint: rows.length ? '' : '没查到。可以换个说法，或者直接说不记得。',
+          ...(dry ? { dryRun: true } : {}),
+          hint: rows.length ? (dry ? '（预演：这条检索没算访问次数）' : '') : '没查到。可以换个说法，或者直接说不记得。',
         };
       } catch (e) {
         return { ok: false, message: `检索失败：${e.message}` };
