@@ -1523,7 +1523,17 @@ export function apply(ctx) {
      */
     extPatch = createExtPatch({
       dir: dataDir(), log,
-      getPort: () => server?.actualPort || undefined,
+      /**
+       * `server.actualPort` 在 `src/server.js` 里挂的是**函数**
+       * （`actualPort: () => server.actualPort`），忘了调用就会把函数源码
+       * 插值进 YAML——受管块里会出现 `http://127.0.0.1:() => server.actualPort/v1`，
+       * 扩展拿着这个非法地址请求宿主，于是「点了没反应」。
+       */
+      getPort: () => {
+        const p = server?.actualPort;
+        const live = typeof p === 'function' ? p() : p;
+        return live || undefined;
+      },
     });
   } catch (e) {
     log.warn?.(`受管块模块不可用（市场安装将不写 cordis.patch.yml）：${e?.message ?? e}`);
