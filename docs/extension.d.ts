@@ -133,7 +133,7 @@ export interface ExtensionManifest {
   mounts?: string[];
   memory?: ExtensionMemoryConfig;
   /**
-   * 可调设置声明：字段名 → 声明。最多 32 个字段。
+   * 可调设置声明：字段名 → 声明。最多 64 个字段。
    * 面板会画表单，值存宿主侧，启动时通过 `ROOST_EXT_CONFIG` /
    * `ROOST_EXT_SECRET_<KEY>` 下发。
    */

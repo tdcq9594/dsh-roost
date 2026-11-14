@@ -32,8 +32,15 @@ export const CONFIG_TYPES = Object.freeze(['string', 'number', 'boolean', 'selec
 /** 键名规范：与 env 变量名对齐（大写化后仍合法），也防止 `__proto__` 之类。 */
 export const CONFIG_KEY_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,31}$/;
 
-/** 一个扩展最多声明多少字段、嵌套多深。不是性能限制，是防止面板被一份清单撑爆。 */
-export const MAX_FIELDS = 32;
+/**
+ * 一个扩展最多声明多少字段、嵌套多深。
+ *
+ * 不是性能限制，是防止面板被一份清单撑爆。最初定 32 是按「常见扩展 10~20 项」
+ * 留了一倍余量；但 B 站这种把「怎么刷 / 评论分享 / 看画面 / 写动作」都做成可调项
+ * 的扩展会顶到边，32 逼着把不相关的东西硬合并。放到 64 仍然是一屏放得下的量级
+ * （面板按卡片分组，不是平铺），再往上就该考虑拆扩展了。
+ */
+export const MAX_FIELDS = 64;
 export const MAX_DEPTH = 2;
 
 const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);

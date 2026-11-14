@@ -83,7 +83,7 @@ test('声明：字段数上限', () => {
   for (let i = 0; i < MAX_FIELDS + 1; i++) many[`f${i}`] = { type: 'string' };
   const r = normalizeConfigSpec(many);
   assert.equal(r.ok, false);
-  assert.match(r.errors.join(''), /最多 32 个字段/);
+  assert.match(r.errors.join(''), new RegExp(`最多 ${MAX_FIELDS} 个字段`), '文案里的数字要跟着常量走');
 });
 
 test('声明：object 子字段也限量，secret 不许写 default', () => {
@@ -91,7 +91,7 @@ test('声明：object 子字段也限量，secret 不许写 default', () => {
   for (let i = 0; i < MAX_FIELDS + 1; i++) props[`f${i}`] = { type: 'string' };
   const r = normalizeConfigSpec({ o: { type: 'object', properties: props } });
   assert.equal(r.ok, false);
-  assert.match(r.errors.join(''), /properties 最多 32 个字段/);
+  assert.match(r.errors.join(''), new RegExp(`properties 最多 ${MAX_FIELDS} 个字段`));
 
   /** 声明会原样回给面板，secret 的 default 等于把密钥明文下发 */
   const d = normalizeConfigSpec({ k: { type: 'string', secret: true, default: 'sk-live' } });

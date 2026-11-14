@@ -230,9 +230,9 @@ test('problems()：目录在、清单无效时给出原因；list() 仍然跳过
   const home = tmpHome(t);
   const extRoot = join(home, 'extensions');
   fs.mkdirSync(join(extRoot, 'bili'), { recursive: true });
-  /** 32 个配置字段是硬上限，造一个超限的清单 */
+  /** 配置字段有硬上限（`MAX_FIELDS`），造一个刚好超限的清单 */
   const cfg = {};
-  for (let i = 0; i < 33; i += 1) cfg[`k${i}`] = { type: 'boolean', label: `第${i}项` };
+  for (let i = 0; i < 65; i += 1) cfg[`k${i}`] = { type: 'boolean', label: `第${i}项` };
   fs.writeFileSync(join(extRoot, 'bili', 'plugin.json'), JSON.stringify(manifest('bili', { config: cfg }), null, 2));
 
   const r = createExtRegistry({ dir: home, log: () => {} });
@@ -240,7 +240,7 @@ test('problems()：目录在、清单无效时给出原因；list() 仍然跳过
   const p = r.problems();
   assert.equal(p.length, 1);
   assert.equal(p[0].id, 'bili');
-  assert.match(p[0].errors.join(' '), /最多 32 个字段/);
+  assert.match(p[0].errors.join(' '), /最多 64 个字段/);
 });
 
 test('problems()：清单正常时为空', (t) => {
