@@ -273,12 +273,22 @@ export function createSpeakUp({ dataDir, cfgOf, ownerOf, generate, send, log = (
         return { ok: false, skipped: true, why: raw ? '她自己决定不说' : 'AI 没说话' };
       }
 
-      /**
-       * 静默标记要**先提取再摘掉**——下一行的 replace 会把所有 `<<...>>`
-       * 一起抹平，抹掉之后再想拿时长就没处找了。
-       */
       const silenceMs = silenceMsOf(raw);
-      const text = raw.replace(/<<[^>]*>>/g, '').trim();
+      /**
+       * **只摘掉宿主自己消费的标记**（`<<silence:>>` / `<<skip>>`），其余原样往下传。
+       *
+       * 以前这里是 `replace(/<<[^>]*>>/g, '')` —— 一刀把所有标记抹平，于是主动轮次
+       * **永远发不出卡片、图片、语音**：`<<card:>>` / `<<image-alone:>>` 还没到
+       * `outbound-actions.js` 就被吃掉了，看起来像「主动消息不支持富文本」，
+       * 实际是这一行干的。被动回复那条链路没这行，所以聊天里能发。
+       *
+       * 下游标记交给 `outbound-actions.js` 解析：它认得 card / image-alone / voice /
+       * say / button，并且「正文为空但只有卡片」时只发卡片、不发一条空消息。
+       */
+      const text = raw
+        .replace(/<<\s*silence[:：][\s\S]*?>>/gi, '')
+        .replace(/<<\s*skip\s*>>/gi, '')
+        .trim();
       if (!text && silenceMs <= 0) {
         state.nextAt = scheduleNext(cfg);
         save();
