@@ -93,6 +93,9 @@ export function createExtApiHooks({
   onInbound = null,
   lastBucketOf = () => '',
   setupOf = () => ({}),
+  /** 扩展主动消息通道（0.4）。由 host.js 注入，延迟取值避开 TDZ。 */
+  proactiveQueueOf = null,
+  proactiveDispatcherOf = null,
   log = () => {},
 } = {}) {
   /**
@@ -466,6 +469,47 @@ export function createExtApiHooks({
           accepted: true,
           target,
           note: '已入队；这一轮结束后回复会发到同一目标（异步，不在本响应里返回正文）',
+        },
+      };
+    },
+
+    /**
+     * 扩展主动消息素材通道（0.4）。
+     *
+     * 扩展只投递「有什么值得说」；排队、门闸、群授权、措辞、结算全在宿主。
+     * 扩展拿不到 target 也能主动推，因为目标是宿主按 owner / 群配置解析的，
+     * 不是扩展自报的会话。返回 200 只表示**收下了**，发没发出去看 delivery。
+     */
+    async 'proactive.submit'({ body, client }) {
+      if (typeof proactiveQueueOf !== 'function' || typeof proactiveDispatcherOf !== 'function') {
+        return bad('扩展主动消息通道不可用', 500, 'internal');
+      }
+      /** 来源只信令牌：body 里写 extId / scene 一律忽略并留日志 */
+      const extId = String(client?.extId ?? '').trim();
+      if (!extId) return bad('这个令牌没有绑定扩展，不能投递素材', 403, 'forbidden');
+      if (Object.hasOwn(body, 'extId') || Object.hasOwn(body, 'scene')) {
+        log.warn?.('proactive.submit：extId / scene 由宿主决定，忽略请求体里的自报值');
+      }
+      const r = proactiveQueueOf().submit({
+        extId,
+        cause: str(body?.cause, 60),
+        key: str(body?.key, 160),
+        text: str(body?.text, 4000),
+        target: str(body?.target, 60),
+        approve: body?.approve === true,
+        note: str(body?.note, 200),
+      });
+      if (!r.ok) return bad(r.why, r.duplicate ? 409 : 400, r.duplicate ? 'conflict' : 'bad_request');
+      let d = { sent: 0, why: '排队中' };
+      try { d = await proactiveDispatcherOf().drain(); }
+      catch (e) { log.warn?.(`素材通道消费失败（条目已入队，下次 tick 会再试）：${e?.message ?? e}`); }
+      return {
+        status: 200,
+        body: {
+          ok: true, id: r.id, state: r.state, queued: r.queued,
+          delivery: { sent: d.sent ?? 0, why: d.why ?? '', awaiting: d.awaiting ?? 0 },
+          /** 门闸没过 ≠ 投递失败，扩展据此决定要不要退避重试 */
+          retry: Boolean(d.retry),
         },
       };
     },

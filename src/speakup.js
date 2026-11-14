@@ -222,8 +222,17 @@ export function createSpeakUp({ dataDir, cfgOf, ownerOf, generate, send, log = (
     save();
   }
 
-  async function fire(reason = '定时') {
+  async function fire(reason = '定时', opts = {}) {
     const cfg = cfgNow();
+    /**
+     * 扩展素材通道（0.4）会带 `material` 进来：把外部素材拼在原有 prompt 后面，
+     * 让**模型**自己决定说不说、怎么说。不带 material 时行为和以前完全一致，
+     * 所以冷场搭话那条路一个字都不用改。
+     *
+     * 素材也会记进这本主动开口账（todayCount / nextAt）——和 Aurabot 的
+     * 「共享预算域」同口径：不管是谁让她开口，一天里主动找人的总次数都在
+     * 同一本账上，才不会出现两条线各说 3 次、加起来 6 条刷屏。
+     */
 
     /**
      * 没配主人 openid 就**什么都不做**：不建会话、不跑模型、不排期。
@@ -238,12 +247,13 @@ export function createSpeakUp({ dataDir, cfgOf, ownerOf, generate, send, log = (
      *   4. 最后才在发送那一步报「缺 target」
      * 顺序整个是反的：该在第一行拦住的事，拖到最后一行才报。
      */
-    if (!cfg.chatId) {
+    if (!cfg.chatId && !opts.target) {
       return { ok: false, why: '不知道该发给谁：Roost 没配主人（owners），DSH 也没填 chatId' };
     }
 
     try {
-      const raw = String((await generate(cfg.prompt)) ?? '').trim();
+      const prompt = opts.material ? `${cfg.prompt}\n\n${opts.material}` : cfg.prompt;
+      const raw = String((await generate(prompt)) ?? '').trim();
 
       /**
        * **她自己决定不说** —— 这是正常结局，不是失败。
@@ -275,7 +285,13 @@ export function createSpeakUp({ dataDir, cfgOf, ownerOf, generate, send, log = (
         return { ok: false, skipped: true, why: '去掉标记后没内容' };
       }
 
-      const r = await send({ scene: 'c2c', target: cfg.chatId, text, silenceMs });
+      const r = await send({
+        scene: opts.scene === 'group' ? 'group' : 'c2c',
+        target: opts.target || cfg.chatId,
+        text, silenceMs,
+        /** 群主动的硬前置由通道层真算好再传，channel.send 的默认值是 true */
+        ...(opts.scene === 'group' ? { hasGroupAuthz: Boolean(opts.hasGroupAuthz) } : {}),
+      });
 
       /**
        * 只要求安静、没有要说的话：这不是「说了一次」，不能占今日额度，

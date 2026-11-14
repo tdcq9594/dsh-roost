@@ -63,6 +63,12 @@ export const V1_ROUTES = {
   'POST /v1/memory': { scope: 'memory:write', hook: 'memory.write' },
   'POST /v1/memory/ext.add': { scope: 'memory:write', hook: 'memory.ext.add' },
   'POST /v1/proactive': { scope: 'proactive:write', hook: 'proactive' },
+  /**
+   * 扩展投递一条**素材**，由宿主排队、过门闸、让模型组织语言后主动发出。
+   * 不新开 scope：`proactive:write` 本来就是「主动开口」的敏感权限，装扩展时
+   * 主人已经确认过；再开一个只会让所有存量扩展重新走一遍授权，收益为零。
+   */
+  'POST /v1/proactive/submit': { scope: 'proactive:write', hook: 'proactive.submit' },
   'POST /v1/session.ensure': { scope: 'session:write', hook: 'session.ensure' },
   'POST /v1/session.configure': { scope: 'prompt:write', hook: 'session.configure' },
   'POST /v1/agent.new': { scope: 'agent:write', hook: 'agent' },
@@ -85,7 +91,7 @@ export const V1_ROUTES = {
 export const V1_IMPLEMENTED_HOOKS = Object.freeze([
   'agent', 'memory.ext.add',
   'message', 'send', 'say', 'state', 'mood', 'context',
-  'memory.read', 'memory.write', 'proactive', 'session.ensure',
+  'memory.read', 'memory.write', 'proactive', 'proactive.submit', 'session.ensure',
 ]);
 
 /**

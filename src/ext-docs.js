@@ -43,6 +43,7 @@ const ROUTE_NOTES = {
   'POST /v1/memory': '往**当前会话**的记忆里写一条；**不能写 global**（会影响所有会话），要记自己的东西用 /v1/memory/ext.add',
   'POST /v1/memory/ext.add': '往**扩展自己的命名空间**写一条（extId 由令牌决定，body 自报无效）',
   'POST /v1/proactive': '排一条主动消息（受清醒时段与频次约束）',
+  'POST /v1/proactive/submit': '扩展投递一条素材；宿主过门闸后让模型自己组织语言主动发出',
   'POST /v1/session.ensure': '确保会话存在',
   'POST /v1/session.configure': '改会话配置（模型、人格、工具开关）',
   'POST /v1/agent.new': '开一个独立 Agent 会话（游戏裁判这类无 QQ 身份的场景）',

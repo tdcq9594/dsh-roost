@@ -74,7 +74,8 @@ import { createStickerSync } from './sticker-sync.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { registerStickerTools } from './sticker-tools.js';
-import { createSpeakUp, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
+import { createSpeakUp, shouldFire, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
+import { createProactiveQueue, createProactiveDispatcher } from './ext-proactive.js';
 import { createWakeupLedger, wakeupPlan, wakeupCycleOf, WAKEUP_DEFAULTS, WAKEUP_WINDOWS } from './wakeup.js';
 import { createFence, PEER } from './fence.js';
 import { audit, peerSummary } from './audit.js';
@@ -1626,6 +1627,29 @@ export function apply(ctx) {
    * 都声明在本行之后，直接传值会在创建时求值、撞 TDZ；hook 是运行期才调用的，
    * 闭包求值时它们已经就绪。
    */
+  /**
+   * 扩展主动消息通道（0.4）。
+   *
+   * 队列落在宿主 dataDir，不落扩展目录（市场索引按整个插件目录算 sha256，
+   * 扩展自己写运行时文件会让 `build-index --check` 变脏）。
+   * `channels` / `memory` / `aliasesOf` 都声明在后面，所以一律传函数。
+   */
+  const proactiveQueue = createProactiveQueue({
+    dir: dataDir(), cfgOf: () => cfg, log: (m) => log.info(m),
+  });
+  const proactiveDispatcher = createProactiveDispatcher({
+    queue: proactiveQueue,
+    speakUp,
+    shouldFire,
+    DEFAULTS: SPEAKUP_DEFAULTS,
+    cfgOf: () => cfg,
+    ownerOf: ownerId,
+    channelOf: () => channels,
+    memoryOf: () => memory,
+    aliasesOf: (t) => aliasesOf(t),
+    log: (m) => log.info(m),
+  });
+
   const extApiHooks = createExtApiHooks({
     cfgOf: () => cfg,
     moodOf: () => mood.get(),
@@ -1647,6 +1671,8 @@ export function apply(ctx) {
     onInbound: (p) => onInbound(p),
     lastBucketOf: () => lastBucket,
     setupOf: () => setup,
+    proactiveQueueOf: () => proactiveQueue,
+    proactiveDispatcherOf: () => proactiveDispatcher,
     log,
   });
 
@@ -1662,6 +1688,12 @@ export function apply(ctx) {
       ...extApiHooks,
     },
   });
+  /** 队列自己每分钟消费一次：提交那一刻门闸没过，过点了要能补上 */
+  const proactiveTimer = setInterval(() => {
+    void proactiveDispatcher.drain().catch(() => {});
+  }, 60_000);
+  proactiveTimer.unref?.();
+
   /**
    * persist 快照恢复（§6.3「恢复后按 id 拉回并重新注册 section」）。
    * `ctx.agents` 是延迟激活的服务（P2 探针约 3.5s 后才可用），所以排到后面；
@@ -5125,6 +5157,21 @@ export function apply(ctx) {
   function onInbound(payload) {
     /** D10：只记时间戳，不在这条热链路上做任何判断 */
     lastActiveAt = Date.now();
+    /**
+     * 扩展素材审批：主人私聊回「发 1 / 不发」。只有队列里真有待批才会命中，
+     * 别的文本一律原样交回聊天链路，不会把日常对话吞掉。
+     */
+    const rawText = payload?.text ?? payload?.message?.text ?? payload?.content
+      ?? payload?.raw_message ?? (typeof payload?.message === 'string' ? payload.message : '');
+    const reply = proactiveQueue.handleOwnerReply({
+      text: typeof rawText === 'string' ? rawText : '',
+      isOwner: Boolean(String(chatOf(payload) || '')) && String(chatOf(payload)) === String(ownerId() || ''),
+    });
+    if (reply.handled) {
+      log.info(`扩展素材审批：${reply.action} ${reply.count} 条`);
+      void proactiveDispatcher.drain().catch(() => {});
+      return;
+    }
     return inboundShell.onInbound(payload);
   }
 
@@ -8163,6 +8210,17 @@ export function apply(ctx) {
        */
       route('/speakup/fire', async (req, res) => send(res, 200, await speakUp.fire('手动'))),
 
+      /** 扩展素材队列：面板看得到待批、能点批准，不用非得在 QQ 里回「发 1」 */
+      route('/ext-proactive/state', (req, res) => send(res, 200, proactiveQueue.state())),
+      route('/ext-proactive/drain', async (req, res) => send(res, 200, await proactiveDispatcher.drain())),
+      route('/ext-proactive/decide', (req, res) => {
+        const q = new URL(String(req?.url || '/'), 'http://127.0.0.1').searchParams;
+        const idx = (q.get('index') || '').split(/[\s,]+/).filter(Boolean).map(Number);
+        const r = proactiveQueue.approve(idx, q.get('action') === 'reject');
+        if (r.ok && r.action === 'approve') void proactiveDispatcher.drain().catch(() => {});
+        return send(res, 200, r);
+      }),
+
       /**
        * 语音合成的状态（面板用）。
        *
@@ -9560,6 +9618,7 @@ export function apply(ctx) {
 
     return () => {
       clearInterval(speakTimer);
+      clearInterval(proactiveTimer);
       clearInterval(wakeTimer);
       clearInterval(groupTimer);
       clearTimeout(consolidateBoot);

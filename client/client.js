@@ -7031,6 +7031,12 @@ select.roost-input{color-scheme:dark}
        */
       const spReady = sp?.ready !== false
       const spWhy = sp?.why || '不知道发给谁'
+      /** 扩展素材队列：装了扩展才会有人往里投，所以默认 null（还没读到）也算正常 */
+      const [extQ, setExtQ] = useState(null)
+      const reloadExtQ = async () => {
+        try { setExtQ(await get('/ext-proactive/state')) } catch { /* 面板读不到不影响别的卡片 */ }
+      }
+      useEffect(() => { reloadExtQ() }, [])
       /**
        * 收件人从哪来的。
        *
@@ -7195,13 +7201,57 @@ select.roost-input{color-scheme:dark}
         ),
 
         /**
+         * 扩展主动消息（0.4）：扩展只投素材，措辞由模型写、门闸与审批在宿主。
+         * 放这一页是因为它和「私聊排期」共用同一本主动开口账，拆到别处会让人
+         * 以为两条线互不干扰，结果一天里被找了两次都不知道去哪调。
+         */
+        h(Sec, { n: '03', title: '扩展主动消息', right: h('button', { type: 'button', className: 'roost-btn', onClick: reloadExtQ }, '刷新') },
+          h(Row, { k: '通道' }, extQ ? (extQ.enabled ? '开着' : '关着') : '读取中…'),
+          h(Row, { k: '今天' }, extQ ? `${extQ.sentToday} / ${extQ.maxPerDay} 条` : '—'),
+          h(Row, { k: '排队 / 待批' }, extQ ? `${extQ.queued} / ${extQ.awaiting}` : '—'),
+          (extQ?.items || []).filter((x) => x.state === 'awaiting').slice(0, 5).map((x, i) =>
+            h('div', { key: x.id, style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
+              h('span', { className: 'roost-muted', style: { fontSize: 11.5, flex: 1 } }, `${i + 1}. ${x.cause} · ${x.text}`),
+              h('button', {
+                type: 'button', className: 'roost-btn',
+                onClick: async () => {
+                  await get('/ext-proactive/decide?index=' + (i + 1) + '&action=approve')
+                  toast('已批准，正在走门闸')
+                  reloadExtQ()
+                },
+              }, '发'),
+              h('button', {
+                type: 'button', className: 'roost-btn',
+                onClick: async () => {
+                  await get('/ext-proactive/decide?index=' + (i + 1) + '&action=reject')
+                  toast('已放弃这条')
+                  reloadExtQ()
+                },
+              }, '不发'),
+            ),
+          ),
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: async () => {
+                const r = await get('/ext-proactive/drain')
+                toast(r?.sent ? '发出去了：' + (r.text || '') : (r?.why || '这次没发'))
+                reloadExtQ()
+              },
+            }, '立刻跑一次队列'),
+          ),
+          h('div', { className: 'roost-note' },
+            '扩展只交「有什么值得说」，由她自己决定说不说、怎么说。免打扰时段和她要求安静时会自动排队等下一次；发群还要 group_push 授权。'),
+        ),
+
+        /**
          * 对话收尾（2026-11-12 从「记忆」页搬来）。
          *
          * 它决定的是「这段聊完了没有、什么时候可以再开口」，属于**开口时机**，
          * 不是「记住了什么」。放回主动搭话这一页之后，记忆页只剩纯数据。
          */
         h(Sec, {
-          n: '03',
+          n: '04',
           title: '对话收尾',
           right: mem?.closing?.stat
             ? h(Pill, null, `${mem.closing.stat.total} 个会话`)
@@ -7236,7 +7286,7 @@ select.roost-input{color-scheme:dark}
               ),
         ),
 
-        h(Sec, { n: '04', title: '群聊主动（默认全关）' },
+        h(Sec, { n: '05', title: '群聊主动（默认全关）' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '群里主动说话极易被踢。四道门全过才会说：白名单显式开 → 有 group_push 授权 → 不在静默时段 → 当天没到上限且真冷场。'),
           groups.length
@@ -7298,7 +7348,7 @@ select.roost-input{color-scheme:dark}
           ),
         ),
 
-        h(Sec, { n: '05', title: '现在试一次' },
+        h(Sec, { n: '06', title: '现在试一次' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '私聊直接问一次要不要说；群里跑一遍四道门。真发出去会出现在 QQ 上。'),
           h('div', { style: { display: 'flex', gap: 8 } },
@@ -7326,7 +7376,7 @@ select.roost-input{color-scheme:dark}
             }, '跑一遍群白名单'),
           ),
         ),
-        h(Sec, { n: '06', title: '待确认的主动消息', right: h('button', { type: 'button', className: 'roost-btn', onClick: () => loadDeliv(true) }, '回查一次') },
+        h(Sec, { n: '07', title: '待确认的主动消息', right: h('button', { type: 'button', className: 'roost-btn', onClick: () => loadDeliv(true) }, '回查一次') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '主动消息要过内容审核。进审核时接口只回「待审核」——既不是送到也不是没送到，'
             + '而审核结果推给的是 Roost 那边（持有 QQ 连接那个进程），这边收不到。'
@@ -10530,6 +10580,7 @@ select.roost-input{color-scheme:dark}
       ['awake', '主动说话', '清醒时段、机会分门槛、群白名单（开着时 speakUp.prompt 会当额外要求一起给）'],
       ['wakeup', '互动召回', 'enabled 默认关。官方口径：用户主动说过话之后 30 天内，当天 / 1–3 天 / 3–7 天 / 7–30 天四个窗口各 1 条（共 4 条），超 30 天没额度；idleHours 是「多久没说话才召回」的额外门槛，默认 72 小时所以实际只命中后两档。和 speakUp 是两本账'],
       ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],
+      ['extProactive', '扩展主动消息', '扩展只投递素材，措辞、门闸、额度、审批都在宿主。enabled 默认开；maxPerDay 是这条通道自己的每日额度（和 speakUp 两本账）；approval 开了群分享要主人回「发 1」或去面板点批准；allowGroup 关掉后素材只能发私聊'],
       ['closing', '收尾', '对话冷掉前自己补一句：多久算冷（coolMinutes）、盯几个会话（maxChats）、记录留几天（ttlDays）'],
       ['leakGuard', '防复读', 'enabled：她回复里整段复述了注入的记忆块，出站前删掉那几句。默认关，日常在「权限」页高级组里点'],
       ['bridge', '对外联动（实验）', 'enabled：让别的 DSH 插件通过 ctx.get("aurabot") 主动发消息、读状态；接口可能变，默认关'],
