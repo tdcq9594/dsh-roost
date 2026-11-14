@@ -14350,18 +14350,22 @@ select.roost-input{color-scheme:dark}
        * 同源（`/ext-pages` 是面板自己的路由），所以页面里可以直接
        * `fetch('/roost/api/quick')` 读写设置、点按钮。宿主不再限制它能画什么。
        */
+      /**
+       * 自带页面：**整页交给扩展**，面板不再包标题、说明、表单。
+       *
+       * 早先的写法是 `h('div', null, head, iframe)`，结果旧 head（标题 + 说明 +
+       * 表单）和扩展页面上下叠在一起，看着像两个页面。扩展页面自己就有标题，
+       * 外层再画一遍纯属重复。
+       */
       if (d.page) {
-        return h('div', null, head,
-          h('iframe', {
-            /** `API` 是 `/roost/api`：`route()` 注册时会拼上这个前缀，别写成 `/ext-pages` */
-            src: API + '/ext-pages?id=' + encodeURIComponent(id) + '&file=' + encodeURIComponent(d.page),
-            title: d.nav?.label || id,
-            style: {
-              width: '100%', height: 'calc(100vh - 230px)', minHeight: 460,
-              border: '1px solid var(--line-soft)', borderRadius: 8,
-              background: '#fff', display: 'block',
-            },
-          }))
+        return h('iframe', {
+          src: API + '/ext-pages?id=' + encodeURIComponent(id) + '&file=' + encodeURIComponent(d.page),
+          title: d.nav?.label || id,
+          style: {
+            width: '100%', height: 'calc(100vh - 136px)', minHeight: 480,
+            border: 0, display: 'block', background: 'transparent',
+          },
+        })
       }
 
       if (d.ok === false) {
