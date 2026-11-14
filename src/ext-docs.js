@@ -51,12 +51,13 @@ const ROUTE_NOTES = {
   'POST /v1/agent.prompt': '给独立会话发一轮；默认 SSE 流式',
   'POST /v1/agent.close': '关独立会话并撤销它的注册',
   'GET /v1/agent.list': '列出当前开着的独立会话',
+  'POST /v1/llm.vision': '把 1–4 张 base64 图 + 一段提示词交给当前模型，换回一段文字（图要先经附件服务登记，所以只能在宿主做）',
   'GET /v1/whoami': '回显令牌身份（不含 hash / 明文）',
 };
 
 const errCodeRows = [
   ['401 `unauthorized`', '令牌无效、已吊销，或扩展的 `secrets/<id>.json` 缺失（宿主已记 `ext.auth_failed`）'],
-  ['403 `forbidden`', 'scope 不足；或扩展令牌调了 `agent.*` / `say` 这类不属于它的端点'],
+  ['403 `forbidden`', 'scope 不足；或扩展令牌调了没有授权的端点（`agent.*` / `llm.vision` 要 `agent:write`）'],
   ['404 `not_found`', '没有这个 `/v1` 端点'],
   ['413 `request_too_large`', '请求体超过 1 MB'],
   ['429 `rate_limited`', '每客户端每分钟 120 次（响应带 `retry-after`）'],

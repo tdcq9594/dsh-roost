@@ -21,8 +21,11 @@ export const V1_SCOPES = [
   'message:write', 'say:write', 'state:read', 'context:read',
   'memory:read', 'memory:write', 'proactive:write', 'session:write', 'prompt:write',
   // §7 表格没给 agent.* 定 scope，但「只要令牌有效就能开独立会话」会把
-  // 最小授权架空（独立会话还不受 quota / 能力页拦截）。这里补一个专用 scope，
-  // 由阶段 5.2 面板发放客户端令牌时授予；扩展令牌一律拿不到。
+  // 最小授权架空（独立会话还不受 quota / 能力页拦截）。这里补一个专用 scope。
+  //
+  // 6.x 起它**可以发给扩展**（面板装扩展时勾选）：`llm.vision` 也用它——
+  // 都是「让模型跑一次，消耗你的额度」。边界由端点自己收窄：
+  // agent.* 只开不带工具的干净会话，llm.vision 只把一批图换一段文字。
   'agent:write',
 ];
 
@@ -81,6 +84,13 @@ export const V1_ROUTES = {
   'POST /v1/agent.new': { scope: 'agent:write', hook: 'agent' },
   'POST /v1/agent.prompt': { scope: 'agent:write', hook: 'agent' },
   'POST /v1/agent.close': { scope: 'agent:write', hook: 'agent' },
+  /**
+   * 看一眼外部图片（扩展抽的视频帧）换一段文字。
+   *
+   * scope 复用 `agent:write`：对用户来说都是「让模型干活、烧额度」，
+   * 新开一个 scope 只会让已装的扩展多一次敏感授权确认，收益为零。
+   */
+  'POST /v1/llm.vision': { scope: 'agent:write', hook: 'llm.vision' },
   'GET /v1/agent.list': { scope: 'agent:write', hook: 'agent' },
 };
 
@@ -96,7 +106,7 @@ export const V1_ROUTES = {
  * 并同步 `test/api-v1.test.js` 的 501 清单快照 —— 漏一处测试会红。
  */
 export const V1_IMPLEMENTED_HOOKS = Object.freeze([
-  'agent', 'memory.ext.add',
+  'agent', 'memory.ext.add', 'llm.vision',
   'message', 'send', 'say', 'state', 'mood', 'context',
   'memory.read', 'memory.write', 'proactive', 'proactive.submit', 'session.ensure',
   'ext-ui.actions',

@@ -123,6 +123,7 @@ import { createUiActionQueue } from './ext-ui-actions.js';
 import { runInProcessAction } from './ext-inprocess.js';
 import * as sharedDeps from './shared-deps.js';
 import { mergeGroupCandidates } from './group-list.js';
+import { createLlmVision } from './ext-llm.js';
 import {
   pageOf, locate, readSidecar, writeSidecar, suggestTags, removeFiles,
   createTagJob, statsOf, PAGE_SIZE,
@@ -1703,10 +1704,22 @@ export function apply(ctx) {
     log,
   });
 
+  /** 扩展看图：DSH 的图片必须先经附件服务登记，只能在宿主这边做 */
+  const llmVision = createLlmVision({
+    getCtx: () => ctx,
+    cfgOf: () => cfg,
+    modelCatalog,
+    log,
+  });
+
   const apiV1 = createApiV1({
     dir: dataDir(), log, clientStore: extClientStore, onReject,
     hooks: {
       agent: (a) => agentV1.handleHook(a),
+      'llm.vision': async ({ body }) => {
+        const r = await llmVision(body);
+        return { status: r.ok ? 200 : 400, body: r };
+      },
       /** 后台写：extId 已由 api-v1 从令牌读出并覆盖 body，这里不再自报。 */
       'memory.ext.add': async ({ body }) => ({
         status: 200,

@@ -125,6 +125,7 @@
 | POST | `/v1/agent.prompt` | `agent:write` | ✅ 可用 | 给独立会话发一轮；默认 SSE 流式 |
 | GET | `/v1/context` | `context:read` | ✅ 可用 | 读当前会话的上下文摘要（条数、窗口占用） |
 | GET | `/v1/ext-ui/actions` | `state:read` | ✅ 可用 | 取走面板上点过的按钮动作（读即消费，只返回本扩展的） |
+| POST | `/v1/llm.vision` | `agent:write` | ✅ 可用 | 把 1–4 张 base64 图 + 一段提示词交给当前模型，换回一段文字（图要先经附件服务登记，所以只能在宿主做） |
 | GET | `/v1/memory` | `memory:read` | ✅ 可用 | 读当前会话的记忆（列表形态）；scope:global 会带上全局那层 |
 | POST | `/v1/memory` | `memory:write` | ✅ 可用 | 往**当前会话**的记忆里写一条；**不能写 global**（会影响所有会话），要记自己的东西用 /v1/memory/ext.add |
 | POST | `/v1/memory/ext.add` | `memory:write` | ✅ 可用 | 往**扩展自己的命名空间**写一条（extId 由令牌决定，body 自报无效） |
@@ -170,7 +171,7 @@
 | 错误 | 含义 |
 |---|---|
 | 401 `unauthorized` | 令牌无效、已吊销，或扩展的 `secrets/<id>.json` 缺失（宿主已记 `ext.auth_failed`） |
-| 403 `forbidden` | scope 不足；或扩展令牌调了 `agent.*` / `say` 这类不属于它的端点 |
+| 403 `forbidden` | scope 不足；或扩展令牌调了没有授权的端点（`agent.*` / `llm.vision` 要 `agent:write`） |
 | 404 `not_found` | 没有这个 `/v1` 端点 |
 | 413 `request_too_large` | 请求体超过 1 MB |
 | 429 `rate_limited` | 每客户端每分钟 120 次（响应带 `retry-after`） |

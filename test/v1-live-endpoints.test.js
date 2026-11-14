@@ -68,9 +68,11 @@ test('全部端点：已实现的不是 501，未实现/不开放的才是 501',
   const api = createApiV1({
     dir, clientStore: store, auditFn: () => {},
     hooks: {
-      // 真实宿主里这两个由 agentV1 / extMemory 提供，这里给占位
+      // 真实宿主里这三个由 agentV1 / extMemory / ext-llm 提供，这里给占位
       agent: async () => ({ status: 200, body: { ok: true, sessions: [] } }),
       'memory.ext.add': async () => ({ status: 200, body: { ok: true } }),
+      /** 看图：参数不合法时给 400，重点是「不是 501」 */
+      'llm.vision': async () => ({ status: 400, body: { ok: false, message: '没有可用的图片' } }),
       ...hooks,
     },
   });
