@@ -5692,7 +5692,8 @@ export function apply(ctx) {
                     action,
                     payload: arg?.payload ?? null,
                     config: extPanel.configOf(id)?.values ?? {},
-                    log,
+                    /** 扩展侧按函数用；宿主内部是对象，这一层必须换掉 */
+                    log: (m) => log.warn?.(m),
                   });
                   if (run.handled) {
                     const out = run.result && typeof run.result === 'object' ? run.result : {};

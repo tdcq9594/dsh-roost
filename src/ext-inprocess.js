@@ -56,6 +56,24 @@ async function loadModule({ id, root, entry }) {
 }
 
 /**
+ * 把日志适配成**函数**再交给扩展。
+ *
+ * 宿主内部的 `log` 是对象（`{ info, warn, debug }`），但扩展作者看到
+ * `createActions({ log })` 只会当函数用（`log('xxx')`）。这个边界两侧的
+ * 约定不一致，2026-11-14 因此连犯两次同样的错：动作一提交就
+ * `log is not a function`，面板显示「没提交上」。
+ *
+ * 与其在每个调用点记得包一层，不如在**唯一的入口**处适配一次——
+ * 扩展永远拿到函数，宿主内部继续用对象。
+ */
+function asLog(v) {
+  if (typeof v === 'function') return v;
+  if (v && typeof v.warn === 'function') return (m) => v.warn(m);
+  if (v && typeof v.info === 'function') return (m) => v.info(m);
+  return () => {};
+}
+
+/**
  * 跑一个动作。
  *
  * @returns {Promise<{handled:boolean, result?:any, reason?:string}>}
@@ -73,7 +91,7 @@ export async function runInProcessAction({
   /** actions 也按 mtime 缓存：每次点击都重建 api 客户端会重复握手 */
   let actions = hit && hit.actionsMtime === mtime ? hit.actions : null;
   if (!actions) {
-    actions = await factory({ config: config || {}, log, id });
+    actions = await factory({ config: config || {}, log: asLog(log), id });
     if (!actions || typeof actions !== 'object') return { handled: false, reason: 'createActions 没返回对象' };
   }
   cache.set(id, { mtime, mod, actions, actionsMtime: mtime });
