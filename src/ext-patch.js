@@ -25,7 +25,14 @@ import { redactText } from './redact.js';
 export const BLOCK_BEGIN = '# >>> dsh-roost managed extensions (do not edit) >>>';
 export const BLOCK_END = '# <<< dsh-roost managed extensions <<<';
 
-export const ALLOWED_ENV_KEYS = ['ROOST_API_URL', 'ROOST_EXT_ID', 'ROOST_LAUNCHER_DIR'];
+/**
+ * 受管块里允许出现的 env 键。
+ *
+ * `ROOST_DEPS_DIR` 是宿主级的共享依赖目录（`<dataDir>/deps`）：扩展能直接
+ * 看到 ffmpeg 在不在，不必为「问一句有没有」多发一次 HTTP。装和校验仍然
+ * 归宿主（面板 op `sharedDeps.install`），扩展只读这个路径。
+ */
+export const ALLOWED_ENV_KEYS = ['ROOST_API_URL', 'ROOST_EXT_ID', 'ROOST_LAUNCHER_DIR', 'ROOST_DEPS_DIR'];
 export const MCP_CLIENT_PKG = '@deepseek-ai/dsh-mcp-client';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
@@ -46,7 +53,7 @@ function q(v) {
  * 生成一条 MCP 条目。只吃宿主侧的 id 与路径，扩展清单里的 `command` / `args`
  * **一概不读** —— 扩展仓永远不能指定被 spawn 的可执行文件。
  */
-export function renderEntry(id, { apiUrl, dir, roostDir = ROOST_DIR } = {}) {
+export function renderEntry(id, { apiUrl, dir, roostDir = ROOST_DIR, depsDir } = {}) {
   if (!/^[a-z][a-z0-9-]{1,31}$/.test(id)) throw new Error(`扩展 id 不合法：${id}`);
   // 路径统一正斜杠：Windows 的 fs / Node 都认，且与方案 §3.2 的
   // `<roost>/src/ext-launcher.mjs` 写法一致，避免 YAML 里出现反斜杠歧义。
@@ -64,6 +71,7 @@ export function renderEntry(id, { apiUrl, dir, roostDir = ROOST_DIR } = {}) {
     `          ROOST_API_URL: ${q(apiUrl)}`,
     `          ROOST_EXT_ID: ${q(id)}`,
     `          ROOST_LAUNCHER_DIR: ${q(norm(dir))}`,
+    `          ROOST_DEPS_DIR: ${q(norm(depsDir))}`,
     `        failOnStartupError: false`,
   ];
   return lines.join('\n');
@@ -163,6 +171,8 @@ export function createExtPatch({
   /** 返回**当前实际监听端口**。运行期求值，不能在创建时算死。 */
   getPort = null,
   roostDir = ROOST_DIR,
+  /** 共享依赖目录（默认 `<dataDir>/deps`）；扩展只看不装 */
+  depsDir = null,
   log = () => {},
 } = {}) {
   const file = join(profileDir, 'cordis.patch.yml');
@@ -189,7 +199,7 @@ export function createExtPatch({
     } catch { /* 取不到就退回配置值，不因此让安装失败 */ }
     return `http://127.0.0.1:${p || 17321}/v1`;
   };
-  const opts = { dir, roostDir };
+  const opts = { dir, roostDir, depsDir: depsDir || join(dir, 'deps') };
 
   /** 默认不写盘：`render()` 返回片段，面板给「一键复制」。 */
   function render(ids, { apply = false } = {}) {

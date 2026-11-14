@@ -121,6 +121,7 @@ import { createAutotelic } from './autotelic.js';
 import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
 import { createUiActionQueue } from './ext-ui-actions.js';
 import { runInProcessAction } from './ext-inprocess.js';
+import * as sharedDeps from './shared-deps.js';
 import {
   pageOf, locate, readSidecar, writeSidecar, suggestTags, removeFiles,
   createTagJob, statsOf, PAGE_SIZE,
@@ -5756,6 +5757,21 @@ export function apply(ctx) {
                 groups,
                 message: groups.length ? '' : '还没有配置过群（在「群聊 → 唤醒」里加一个）',
               });
+            }
+            /**
+             * 共享依赖：装在宿主数据目录的 `deps/` 里，所有扩展复用。
+             *
+             * 放在面板 op 而不是扩展 API 里，是因为它是**框架级**资源：
+             * 扩展只该「问有没有、请求装一份」，装的动作和校验归宿主。
+             * 也不占扩展 scope——否则存量扩展得为装个 ffmpeg 重新授权一遍。
+             */
+            case 'sharedDeps.status': {
+              return send(res, 200, { ok: true, ...sharedDeps.status() });
+            }
+            case 'sharedDeps.install': {
+              const r = await sharedDeps.install(String(arg?.name ?? '').trim() || undefined, { log: (m) => log.info?.(m) });
+              log.info(`共享依赖安装${r.ok ? '完成' : '失败'}：${r.name} ${r.message}`);
+              return send(res, r.ok ? 200 : 500, r);
             }
             /**
              * 阶段 6 市场：索引 → 下载校验 → 原子落位 → 权限组 → 受管块。

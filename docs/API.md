@@ -35,8 +35,15 @@
 | `config` | 可选，**可调设置**的声明（见 §3.1）。面板据此画表单，宿主负责存储与下发 |
 | `sha256` / `size` / `publishedAt` | 市场条目用于本地完整性校验；**编辑 usage 后 `sha256` 会被宿主置空并标注「已本地修改，不再参与更新校验」** |
 
-**清单不许自带 `env` 键**（方案 L：env 由 launcher 注入）。受管块里只允许这三个变量名：
-`ROOST_API_URL` / `ROOST_EXT_ID` / `ROOST_LAUNCHER_DIR`。
+**清单不许自带 `env` 键**（方案 L：env 由 launcher 注入）。受管块里只允许下面这几个变量名
+（个数会随宿主能力增加，以这行为准）：
+`ROOST_API_URL` / `ROOST_EXT_ID` / `ROOST_LAUNCHER_DIR` / `ROOST_DEPS_DIR`。
+
+其中 `ROOST_DEPS_DIR` 是**宿主级共享依赖目录**（数据目录下的 `deps/`）。
+`ffmpeg` 这类体积大、多个扩展都要用的东西装在这里，一份装了全部复用。
+**扩展只读它，不要往里写**：安装与校验由宿主的面板接口 `sharedDeps.install` 负责，
+这样升级/卸载扩展都不会把依赖带走，也不会因为两个扩展各装一份而白占几百 MB。
+判定可用性时以**可执行文件在不在**为准（主包可能只是几十 KB 的胶水代码）。
 
 ### 3.1 可调设置（`config`）
 

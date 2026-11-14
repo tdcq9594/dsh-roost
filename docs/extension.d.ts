@@ -40,7 +40,8 @@ export type RejectionLayer =
 export type ManagedEnvKey =
   | 'ROOST_API_URL'
   | 'ROOST_EXT_ID'
-  | 'ROOST_LAUNCHER_DIR';
+  | 'ROOST_LAUNCHER_DIR'
+  | 'ROOST_DEPS_DIR';
 
 export interface ExtensionMemoryConfig {
   /** 写入目标命名空间，形如 `ext:<id>`。 */
