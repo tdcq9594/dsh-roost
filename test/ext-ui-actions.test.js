@@ -97,6 +97,24 @@ test('动作参数太大或不是对象，直接拒', () => {
   assert.equal(q.push('bili', 'x', { big: 'a'.repeat(3000) }).ok, false);
 });
 
+test('长轮询：动作一入队就唤醒，不等满超时', async () => {
+  const { q } = queueAt();
+  const t0 = Date.now();
+  const p = q.wait('bili', 5000);
+  setTimeout(() => q.push('bili', 'feed_now'), 30);
+  await p;
+  assert.ok(Date.now() - t0 < 1500, '有动作时应当立刻返回，而不是等到超时');
+  assert.equal(q.take('bili').actions.length, 1);
+});
+
+test('长轮询超时也会返回，不把人吊死', async () => {
+  const { q } = queueAt();
+  const t0 = Date.now();
+  await q.wait('bili', 120);
+  assert.ok(Date.now() - t0 >= 100, '没动作时要等满超时才返回');
+  assert.equal(q.take('bili').actions.length, 0);
+});
+
 test('peek 不消费，clear 能一次清掉', () => {
   const { q } = queueAt();
   q.push('bili', 'feed_now');

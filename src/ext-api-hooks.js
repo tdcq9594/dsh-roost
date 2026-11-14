@@ -491,11 +491,21 @@ export function createExtApiHooks({
      * 动作名本身不在这里校验：入队时已经比对过清单里的 `ui.actions`，
      * 这里再查一次只会让「扩展改了清单、宿主没重载」这种情况变得难以解释。
      */
-    async 'ext-ui.actions'({ client }) {
+    async 'ext-ui.actions'({ client, query }) {
       if (typeof uiActionsOf !== 'function') return bad('扩展动作通道不可用', 500, 'internal');
       const extId = String(client?.extId ?? '').trim();
       if (!extId) return bad('这个令牌没有绑定扩展，不能取动作', 403, 'forbidden');
-      return { status: 200, body: uiActionsOf().take(extId) };
+      const q = uiActionsOf();
+      const first = q.take(extId);
+      if (first.actions.length) return { status: 200, body: first };
+      /**
+       * 带 `wait` 就挂住这个请求，动作一入队立刻返回（长轮询）。
+       * 扩展没带 `wait`（老版本 / 手动 curl）时立刻返回空，行为不变。
+       */
+      const waitMs = Math.max(0, Math.min(30_000, Number(query?.wait) || 0));
+      if (!waitMs) return { status: 200, body: first };
+      await q.wait(extId, waitMs);
+      return { status: 200, body: q.take(extId) };
     },
 
     async 'proactive.submit'({ body, client }) {

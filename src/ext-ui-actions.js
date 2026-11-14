@@ -35,6 +35,15 @@ export function createUiActionQueue({
 } = {}) {
   /** extId -> [{ action, nonce, at }] */
   const store = new Map();
+  /**
+   * 长轮询的等待者：extId -> Set<唤醒函数>。
+   *
+   * 扩展是 stdio 子进程，宿主没有它的 stdin 句柄（那条管道属于 DSH 的 MCP
+   * 客户端），所以「直接推一条消息过去」在协议上做不到。替代方案是**长轮询**：
+   * 扩展发一个请求过来，宿主把它挂住，动作一入队就立刻返回——对用户来说
+   * 就是实时的，代价只是一个空闲的本机连接。
+   */
+  const waiters = new Map();
 
   const alive = (it, t) => it && t - it.at <= ttlMs;
   const prune = (t) => {
@@ -92,6 +101,10 @@ export function createUiActionQueue({
     }
     const item = { action: act, nonce: randomUUID(), at: t, payload: body };
     store.set(key, [...list, item]);
+    /** 有人挂着长轮询就立刻唤醒，别让它等满 25 秒 */
+    for (const wake of [...(waiters.get(key) || [])]) {
+      try { wake(); } catch { /* 单个等待者出错不影响别人 */ }
+    }
     log(`扩展 ${key} 的动作已排队：${act}`);
     return { ok: true, nonce: item.nonce, pending: list.length + 1, message: '已交给扩展，几秒后刷新看结果' };
   }
@@ -119,6 +132,37 @@ export function createUiActionQueue({
     return { ok: true, pending: list.length, actions: list.map((it) => it.action) };
   }
 
+  /**
+   * 等到「这个扩展有动作」或超时。
+   *
+   * 超时不是错误：长轮询本来就会空手回去，扩展紧接着再发一个即可。
+   */
+  function wait(extId, timeoutMs = 25_000) {
+    const key = String(extId ?? '').trim();
+    if (!key) return Promise.resolve();
+    return new Promise((resolve) => {
+      let timer = null;
+      const done = () => {
+        if (timer) clearTimeout(timer);
+        const set = waiters.get(key);
+        if (set) {
+          set.delete(done);
+          if (!set.size) waiters.delete(key);
+        }
+        resolve();
+      };
+      /**
+       * **不要 unref**：这个定时器就是「把请求挂住」本身。unref 之后事件循环
+       * 一看没别的活就直接退出，Promise 永远不 resolve（测试里表现为
+       * `cancelledByParent`，真实宿主里表现为长轮询偶尔不返回）。
+       */
+      timer = setTimeout(done, Math.max(0, Math.min(60_000, Number(timeoutMs) || 0)));
+      const set = waiters.get(key) || new Set();
+      set.add(done);
+      waiters.set(key, set);
+    });
+  }
+
   function clear(extId) {
     const key = String(extId ?? '').trim();
     const had = store.get(key)?.length ?? 0;
@@ -126,5 +170,5 @@ export function createUiActionQueue({
     return { ok: true, cleared: had };
   }
 
-  return { push, take, peek, clear, prune, total, sizeOf: (extId) => (store.get(String(extId ?? '').trim()) || []).length };
+  return { push, take, peek, wait, clear, prune, total, sizeOf: (extId) => (store.get(String(extId ?? '').trim()) || []).length };
 }
