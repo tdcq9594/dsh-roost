@@ -122,6 +122,7 @@ import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
 import { createUiActionQueue } from './ext-ui-actions.js';
 import { runInProcessAction } from './ext-inprocess.js';
 import * as sharedDeps from './shared-deps.js';
+import { mergeGroupCandidates } from './group-list.js';
 import {
   pageOf, locate, readSidecar, writeSidecar, suggestTags, removeFiles,
   createTagJob, statsOf, PAGE_SIZE,
@@ -5783,14 +5784,27 @@ export function apply(ctx) {
              * 没有配置过群时返回空数组，前端退化成输入框。
              */
             case 'groups.list': {
-              const list = Array.isArray(cfg?.awake?.groups) ? cfg.awake.groups : [];
-              const groups = list
-                .map((g) => ({ chatId: String(g?.chatId ?? '').trim(), name: String(g?.name ?? '').trim() }))
-                .filter((g) => g.chatId);
+              /**
+               * 候选 = 已配置的唤醒群 + 框架里**收到过消息的群**。
+               *
+               * QQ 官方只给群 openid（32 位），人记不住，所以绝不让人手填：
+               * 框架的 identity 接口里就见过哪些群（名字是从群消息里学的），
+               * 拿来当候选即可。合并规则在 `group-list.js`（单独可测）。
+               */
+              const configured = Array.isArray(cfg?.awake?.groups) ? cfg.awake.groups : [];
+              let seen = [];
+              try {
+                const ppl = await account.people();
+                seen = Array.isArray(ppl?.groups) ? ppl.groups : [];
+              } catch (e) {
+                /** 框架没起来也要能选已配置的群，这里只降级不报错 */
+                log.warn?.(`列「收到过消息的群」失败，只用已配置的：${e?.message ?? e}`);
+              }
+              const groups = mergeGroupCandidates(configured, seen);
               return send(res, 200, {
                 ok: true,
                 groups,
-                message: groups.length ? '' : '还没有配置过群（在「群聊 → 唤醒」里加一个）',
+                message: groups.length ? '' : '还没收到过群消息：群里有个人说一句话，这里就会出现那个群',
               });
             }
             /**
