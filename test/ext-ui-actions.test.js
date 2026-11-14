@@ -78,6 +78,25 @@ test('空 id / 空动作直接拒，不产生半个条目', () => {
   assert.equal(q.total(), 0);
 });
 
+test('动作可以带一小段参数（弹幕表单），取值原样带回', () => {
+  const { q } = queueAt();
+  const r = q.push('bili', 'danmaku_send', { bvid: 'BV1xx411c7mD', text: '好看', seconds: 12 });
+  assert.equal(r.ok, true);
+  const a = q.take('bili');
+  assert.deepEqual(a.actions[0].payload, { bvid: 'BV1xx411c7mD', text: '好看', seconds: 12 });
+
+  /** 没参数时显式给 null，别让扩展拿到 undefined 和老版本不兼容 */
+  q.push('bili', 'feed_now');
+  assert.equal(q.take('bili').actions[0].payload, null);
+});
+
+test('动作参数太大或不是对象，直接拒', () => {
+  const { q } = queueAt();
+  assert.equal(q.push('bili', 'x', 'abc').ok, false);
+  assert.equal(q.push('bili', 'x', [1, 2]).ok, false);
+  assert.equal(q.push('bili', 'x', { big: 'a'.repeat(3000) }).ok, false);
+});
+
 test('peek 不消费，clear 能一次清掉', () => {
   const { q } = queueAt();
   q.push('bili', 'feed_now');

@@ -57,10 +57,26 @@ export function createUiActionQueue({
    * 入队。`action` 必须是清单里声明过的 id（校验在路由层做，这里只做形状校验，
    * 因为队列不该知道某个扩展声明了什么）。
    */
-  function push(extId, action) {
+  function push(extId, action, payload = null) {
     const key = String(extId ?? '').trim();
     const act = String(action ?? '').trim();
     if (!key || !act) return { ok: false, reason: 'bad_request', message: '缺扩展 id 或动作名' };
+    /**
+     * 动作可以带一小段参数（弹幕表单这类），但必须是很小的普通对象：
+     * 队列在宿主内存里，塞大对象等于让面板能占宿主的堆。
+     */
+    let body = null;
+    if (payload !== null && payload !== undefined) {
+      if (typeof payload !== 'object' || Array.isArray(payload)) {
+        return { ok: false, reason: 'bad_request', message: '动作参数必须是一个对象' };
+      }
+      let json = '';
+      try { json = JSON.stringify(payload); } catch { json = ''; }
+      if (!json || json.length > 2000) {
+        return { ok: false, reason: 'bad_request', message: '动作参数太大或无法序列化（上限 2000 字符）' };
+      }
+      body = JSON.parse(json);
+    }
     const t = now();
     prune(t);
     if (total() >= max) {
@@ -70,11 +86,11 @@ export function createUiActionQueue({
     if (list.length >= maxPerExt) {
       return { ok: false, reason: 'busy', message: '这个扩展还有没处理完的点击，稍等几秒' };
     }
-    /** 同一个动作连点只留一条：用户手抖点三下不该刷三轮 */
-    if (list.some((it) => it.action === act)) {
+    /** 同一个动作连点只留一条：用户手抖点三下不该刷三轮（带参数的动作不合并） */
+    if (!body && list.some((it) => it.action === act)) {
       return { ok: true, deduped: true, pending: list.length, message: '这个动作已经在排队了' };
     }
-    const item = { action: act, nonce: randomUUID(), at: t };
+    const item = { action: act, nonce: randomUUID(), at: t, payload: body };
     store.set(key, [...list, item]);
     log(`扩展 ${key} 的动作已排队：${act}`);
     return { ok: true, nonce: item.nonce, pending: list.length + 1, message: '已交给扩展，几秒后刷新看结果' };
@@ -90,7 +106,7 @@ export function createUiActionQueue({
     store.delete(key);
     return {
       ok: true,
-      actions: actions.map((it) => ({ action: it.action, nonce: it.nonce, at: it.at })),
+      actions: actions.map((it) => ({ action: it.action, nonce: it.nonce, at: it.at, payload: it.payload ?? null })),
       dropped: list.length - actions.length,
     };
   }

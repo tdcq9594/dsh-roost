@@ -427,9 +427,28 @@ export function readUiData({ dir, spec, maxBytes = MAX_UI_BYTES } = {}) {
     return { ok: false, rows: [], updatedAt: 0, truncated: false, reason: '数据文件里既不是数组，也没有 rows 数组' };
   }
   const rows = projectRows(rawRows, spec?.view?.fields || []);
+  /**
+   * 附带的运行状态（今日刷了几轮、上次错误、推送额度……）。
+   *
+   * 只透传一层标量对象，不做递归：页面是扩展自己写的，宿主没必要替它
+   * 做数据整形；但也别把整棵大树原样丢给前端，那等于绕开字段白名单。
+   */
+  const meta = parsed?.meta && typeof parsed.meta === 'object' && !Array.isArray(parsed.meta)
+    ? Object.fromEntries(Object.entries(parsed.meta).slice(0, 40).map(([k, v]) => {
+      if (v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return [k, v];
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        return [k, Object.fromEntries(Object.entries(v).slice(0, 20).map(([k2, v2]) => [
+          k2,
+          (v2 === null || typeof v2 === 'string' || typeof v2 === 'number' || typeof v2 === 'boolean') ? v2 : String(v2),
+        ]))];
+      }
+      return [k, String(v)];
+    }))
+    : null;
   return {
     ok: true,
     rows,
+    meta,
     updatedAt: Number(parsed?.updatedAt) || stat.mtimeMs || 0,
     truncated: rawRows.length > rows.length,
   };

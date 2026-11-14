@@ -5662,7 +5662,7 @@ export function apply(ctx) {
               if (!spec.spec.actions.some((a) => a.id === action)) {
                 return send(res, 400, { ok: false, message: `「${id}」没有声明动作「${action}」` });
               }
-              const r = uiActions.push(id, action);
+              const r = uiActions.push(id, action, arg?.payload ?? null);
               return send(res, r.ok ? 200 : 429, r);
             }
             case 'extensions.clients.list': {
@@ -8456,6 +8456,7 @@ export function apply(ctx) {
           actions: spec.spec.actions,
           config: cfg,
           pendingActions: uiActions.peek(id).actions,
+          meta: r.meta ?? null,
           rows: r.rows,
           updatedAt: r.updatedAt,
           truncated: r.truncated,
