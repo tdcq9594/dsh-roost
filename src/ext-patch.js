@@ -53,7 +53,7 @@ function q(v) {
  * 生成一条 MCP 条目。只吃宿主侧的 id 与路径，扩展清单里的 `command` / `args`
  * **一概不读** —— 扩展仓永远不能指定被 spawn 的可执行文件。
  */
-export function renderEntry(id, { apiUrl, dir, roostDir = ROOST_DIR, depsDir } = {}) {
+export function renderEntry(id, { apiUrl, dir, roostDir = ROOST_DIR, depsDir = null } = {}) {
   if (!/^[a-z][a-z0-9-]{1,31}$/.test(id)) throw new Error(`扩展 id 不合法：${id}`);
   // 路径统一正斜杠：Windows 的 fs / Node 都认，且与方案 §3.2 的
   // `<roost>/src/ext-launcher.mjs` 写法一致，避免 YAML 里出现反斜杠歧义。
@@ -71,7 +71,7 @@ export function renderEntry(id, { apiUrl, dir, roostDir = ROOST_DIR, depsDir } =
     `          ROOST_API_URL: ${q(apiUrl)}`,
     `          ROOST_EXT_ID: ${q(id)}`,
     `          ROOST_LAUNCHER_DIR: ${q(norm(dir))}`,
-    `          ROOST_DEPS_DIR: ${q(norm(depsDir))}`,
+    `          ROOST_DEPS_DIR: ${q(norm(depsDir || join(dir, 'deps')))}`,
     `        failOnStartupError: false`,
   ];
   return lines.join('\n');
