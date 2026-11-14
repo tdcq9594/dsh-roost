@@ -93,8 +93,8 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-/* 与 client.js 的 TABS 同序：2026-11-13 账号迁移提成正式页签后 22 个可见页签 */
-const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'chats', 'account', 'logs', 'update', 'config', 'backup', 'about']
+/* 与 client.js 的 TABS 同序：2026-11-15 接入 / 安全防护提成正式页签后 25 个可见页签（sim 是补历史欠账） */
+const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'about', 'connect', 'security']
 /* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats / account 已提升为正式页） */
 const HIDDEN_TABS = ['context', 'setup']
 
@@ -117,14 +117,15 @@ const NAV = {
   group: { label: '群聊', tabs: ['groupchat', 'groupadmin'] },
   power: { label: '能力', tabs: ['caps', 'model'] },
   mods: { label: '扩展', tabs: ['ext', 'ext-market', 'ext-api'] },
-  system: { label: '系统', tabs: ['chats', 'account', 'logs', 'update', 'config', 'backup', 'about'] },
+  system: { label: '系统', tabs: ['connect', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
 }
 const TAB_LABEL = {
   overview: '概览', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆', people: '人物',
   caps: '权限', express: '语音', stickers: '表情包', model: '模型',
   ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
   groupchat: '群聊策略', groupadmin: '群管',
-  chats: '会话', account: '账号迁移', logs: '排障', update: '更新', config: '设置', backup: '备份', about: '关于',
+  chats: '会话', account: '账号迁移', sim: '模拟测试', logs: '排障', update: '更新', config: '设置', backup: '备份', about: '关于',
+  connect: '接入', security: '安全防护',
 }
 const HIDDEN_LABEL = { context: '上下文', setup: '接入' }
 

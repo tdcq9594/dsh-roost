@@ -2131,7 +2131,8 @@ select.roost-input{color-scheme:dark}
             }, '打开 Roost 面板 ↗'),
           ),
           h('div', { className: 'roost-note' },
-            '自测直接跑一轮 DSH 对话，验「会话建得起来、AI 回得来」；QQ 那一段不在里面。'),
+            '自测直接跑一轮 DSH 对话，验「会话建得起来、AI 回得来」；QQ 那一段不在里面。'
+            + '上面「01 接入进度」里也有一颗「打开 Roost 面板 ↗」，两颗开的是同一个面板，这里是顺手的快捷入口。'),
         ),
 
         h(Sec, { n: '05', title: '直连状态' },
@@ -4611,6 +4612,9 @@ select.roost-input{color-scheme:dark}
          * 记忆页本身也回到「先看事实再看图」的顺序，不被 420px 画布顶开。
          * 数据仍是同一份 /memory 快照，不新开接口。
          */
+        /** A7：页首这几张是「总览入口」，不参与 01–07 的编号；说清就不会像漏页 */
+        h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+          '下面三张（记忆星图 / 分层与遗忘 / 翻一翻）是总览入口，不参与编号；从「01 事实」起才是主流程。'),
         h(Sec, { title: '记忆星图' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '把事实、日记、人物与关系画成一片星空，可切 2D / 3D，点星能看详情和编辑。',
@@ -8846,6 +8850,32 @@ select.roost-input{color-scheme:dark}
           /** 两页分属两个进程，用户调「她怎么聊天」最容易走错页（§16.4-1） */
           h('div', { className: 'roost-note' },
             '接话策略、防吵、冷却在「设置 → roostHost.decide」；这一页管记忆、心情、主动和扩展。'),
+          /**
+           * A10（第二轮对照）：开关全留在本页，另加一层「按功能分组 → 细调页」的导航。
+           * 只增不减：权限页仍是这批开关的正门，细调页是并列入口，不是搬家。
+           * 只给有明确对应页的组做按钮；「干不干活 / 高级」就在本页调，不乱指路。
+           */
+          h('div', { className: 'cap-group' },
+            h('div', { className: 'cap-group-t' }, '按功能分组 · 去对应页细调'),
+            h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+              '下面的开关在这一页就能改，不用跑别处；这里只是给「想细调」的人一个直达入口。'
+              + '怎么说话 → 表达（语音 / 表情包），记不记得 → 记忆，消息来不及回 → 群聊策略，会不会主动找你 → 主动搭话。'),
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+              ...[
+                ['语音', 'express'],
+                ['表情包', 'stickers'],
+                ['记忆', 'memory'],
+                ['群聊策略', 'groupchat'],
+                ['主动搭话', 'awake'],
+              ].map(([label, to]) => h('button', {
+                key: to, type: 'button', className: 'roost-btn',
+                onClick: () => {
+                  if (setTab) setTab(to)
+                  toast(`已切到「${label}」；开关仍留在权限页，改完随时回来`)
+                },
+              }, `细调：${label} ↗`)),
+            ),
+          ),
           feat
             ? (feat.groups || []).map((g) => {
                 const items = (feat.features || []).filter((f) => (g.ids || []).includes(f.id))
@@ -9135,6 +9165,14 @@ select.roost-input{color-scheme:dark}
         },
           h('div', { className: 'roost-note' },
             '默认按档位。这里只配例外——**没有列出来的群，一律走上面的默认**。'),
+          /** A2：同一份「按群」设置两个入口，把「谁管哪一半」和跳转写清楚 */
+          h('div', { className: 'roost-note' },
+            '这半页只管「谁能用」（跟随默认 / 只能聊天）。接话频率、静默时段、插话概率这类细调在「群聊策略 → 按群覆写」，两边改的是同一份配置。',
+            h('button', {
+              type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+              onClick: () => { if (setTab) setTab('groupchat') },
+            }, '去按群覆写 ↗'),
+          ),
           (chats || []).length
             ? h('div', { className: 'roost-list roost-scroll' },
                 (chats || []).map((c) => {
@@ -9656,6 +9694,14 @@ select.roost-input{color-scheme:dark}
           n: '07', title: '按群覆写',
           desc: '某个群想单独设（这个群安静点、那个群只在被 @ 时回），在这里给它一份例外。留空 = 跟上面的全局设置；没列的群一律不受影响。',
         },
+          /** A2：这半页管「她怎么接话」，「谁能用」在权限页；双向都有入口 */
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '这里管接话行为；「权限 → 分群例外」管谁能用（跟随默认 / 只能聊天），两边是同一份配置的两个入口。',
+            h('button', {
+              type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+              onClick: () => { if (setTab) setTab('caps') },
+            }, '去分群例外 ↗'),
+          ),
           h(GRow, { label: '给哪个群设', hint: '群只能从它待过的会话里选；官方没有群列表接口' },
             groups.length
               ? h('select', {
@@ -9933,6 +9979,12 @@ select.roost-input{color-scheme:dark}
             : h('div', { className: 'roost-empty' }, '还没有会话。QQ 上跟它说一句话就会有一条。'),
           h('div', { className: 'roost-note' },
             '解绑只是断开映射，下一条消息会开新会话；旧会话在 DSH 里还留着，能回去翻。'),
+        ),
+        /** A4：这一页原来只有一张卡，补一张只读说明，别让「清上下文」孤零零的 */
+        h(Sec, { n: '02', title: '清上下文会怎样' },
+          h('div', { className: 'roost-note' },
+            '只断这一条 QQ 会话 ↔ DSH 会话的映射：下条消息重新开会话，旧会话在 DSH 里仍可回翻；'
+            + '记忆、日记、人格、配置都不动。想连记忆一起清，去「记忆 → 清空」；想换机器人，去「账号迁移」。'),
         ),
       )
     }
@@ -11797,8 +11849,12 @@ select.roost-input{color-scheme:dark}
         h('div', { className: 'roost-note' },
           '最多字数要配合 QQ 语音条时长：太长的会被截断，不如直接发文字。'),
 
-        /** 5.3 试听：不另起一张卡片（主人不要卡片背景），用一条分隔线接在本节末尾 */
+        /**
+         * 5.3 试听：不另起一张卡片（主人不要卡片背景），用一条分隔线接在本节末尾。
+         * A3 保留这个形态，只补一个锚点，让「试听」能被找到、能被跳过来。
+         */
         h('div', {
+          id: 'roost-tts-preview',
           style: { borderTop: '1px solid var(--line-soft)', marginTop: 12, paddingTop: 10 },
         },
           h('div', { style: { fontWeight: 650, fontSize: 13 } }, '试听'),
@@ -13617,7 +13673,9 @@ select.roost-input{color-scheme:dark}
         await load()
       }
       const toggle = (s) => setScopes(scopes.includes(s) ? scopes.filter((x) => x !== s) : [...scopes, s])
-      return h(Sec, { title: '扩展 /v1 客户端令牌' },
+      /** A4：原来一页一张卡，「发令牌」和「管令牌」挤在一起；拆成两张，控件一个不少 */
+      return h('div', null,
+        h(Sec, { n: '01', title: '扩展 /v1 客户端令牌' },
         h('div', { className: 'roost-note' },
           '独立会话的 agent.* 需要 agent:write。默认最小授权（不给任何 scope）；勾高权限 scope 还要再勾一次「我确认授予」。令牌只存 hash，明文只显示一次；扩展令牌由安装/卸载自动管理，不在这里发。'),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
@@ -13643,19 +13701,24 @@ select.roost-input{color-scheme:dark}
               h('br'),
               '把它填到扩展的启动环境里；刷新页面后就再也读不出来了。')
           : null,
-        (data?.rows || []).length
-          ? h('div', { className: 'roost-list' },
-              data.rows.map((c) => h('div', { key: c.id, className: 'roost-item' },
-                h('span', { className: 't' },
-                  `${c.name} · ${c.id}`,
-                  h('span', { className: 'd' }, ` · ${c.kind === 'ext' ? '扩展自动管理' : '面板发放'} · ${(c.scopes || []).join('、') || '无 scope'}`),
-                ),
-                c.kind === 'panel'
-                  ? h(ConfirmLink, { label: '吊销', confirmLabel: '确认吊销', onConfirm: () => revoke(c.id) })
-                  : null,
-              )),
-            )
-          : h('div', { className: 'roost-empty' }, '还没有客户端。'),
+        ),
+        h(Sec, { n: '02', title: '已经发出去的令牌' },
+          h('div', { className: 'roost-note' },
+            '明文只在生成时显示一次，服务端只存 hash。这里能吊销的是面板发放的令牌；扩展自己的由安装 / 卸载自动管理，不在这里发。'),
+          (data?.rows || []).length
+            ? h('div', { className: 'roost-list' },
+                data.rows.map((c) => h('div', { key: c.id, className: 'roost-item' },
+                  h('span', { className: 't' },
+                    `${c.name} · ${c.id}`,
+                    h('span', { className: 'd' }, ` · ${c.kind === 'ext' ? '扩展自动管理' : '面板发放'} · ${(c.scopes || []).join('、') || '无 scope'}`),
+                  ),
+                  c.kind === 'panel'
+                    ? h(ConfirmLink, { label: '吊销', confirmLabel: '确认吊销', onConfirm: () => revoke(c.id) })
+                    : null,
+                )),
+              )
+            : h('div', { className: 'roost-empty' }, '还没有客户端。'),
+        ),
       )
     }
 
@@ -13928,9 +13991,81 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /**
+     * A3（第二轮对照）：「听」这一条腿终于有面板了。
+     * 官方 Bot API 直接把语音转成文字（asrText），不用配 ASR、不用 Key；
+     * 以前只能从提示词里猜「她听没听清」，现在排障能看见刚才转成了什么。
+     * 数据来自 /asr/recent：内存里最近 20 条、正文截断 120 字、不落盘不进记忆。
+     */
+    function AsrCard({ toast }) {
+      const [rows, setRows] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const load = useCallback(async () => {
+        setBusy(true)
+        try {
+          const r = await get('/asr/recent')
+          /** 元素也要过滤：接口契约漂了（null / 数字 / 缺 text）时不能让整张卡渲染崩 */
+          setRows(Array.isArray(r?.items)
+            ? r.items.filter((x) => x && typeof x === 'object' && !Array.isArray(x))
+            : [])
+        } catch {
+          setRows([])
+          if (toast) toast('读不到语音转写记录')
+        } finally { setBusy(false) }
+      }, [])
+      useEffect(() => { load() }, [load])
+      const goPreview = () => {
+        /** 试听那一节保留主人定的分隔线形态，这里只给一个跳过去的入口 */
+        try {
+          document.getElementById('roost-tts-preview')
+            ?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+        } catch {}
+      }
+      /** 每行按最坏情况取值：Symbol / 抛 valueOf / 缺字段都不许把这一页渲染崩 */
+      const str = (v) => { try { return String(v ?? '') } catch { return '' } }
+      const num = (v) => { try { return Number(v) } catch { return NaN } }
+      const renderRow = (r, i) => {
+        const text = str(r.text)
+        const at = num(r.at)
+        const when = Number.isFinite(at) && at > 0
+          ? new Date(at).toLocaleTimeString('zh-CN') : '时间未知'
+        const chars = num(r.chars) || 0
+        return h('div', { key: str(r.at ?? i) + ':' + i, className: 'roost-item' },
+          h('span', { className: 't' }, r.ok ? text : '（没转出文字）',
+            h('span', { className: 'd' },
+              ' · ' + (r.chatId ? '会话 ' + str(r.chatId).slice(-10) : '未标会话')
+              + ' · ' + when
+              + (chars > text.length ? ` · 原长 ${chars} 字` : ''))),
+          h('span', { className: 'd' }, r.ok ? '已转写' : '没听清'),
+        )
+      }
+      return h(Sec, {
+        n: '02', title: '听语音（官方转写）',
+        right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: busy, onClick: load,
+        }, busy ? '读取中…' : '刷新'),
+      },
+        h('div', { className: 'roost-note' },
+          '语音由官方直接转成文字给她，这里不用配识别服务。下面是最近 20 条转写读数：只在内存里，重启就没了，不写盘、不进记忆，正文只留前 120 字。'),
+        h('div', { className: 'roost-note' },
+          '想看「这一轮到底注入了什么」，去「排障 → 上下文」；想听她怎么说，点下面这颗去 01 卡末尾的试听。',
+          h('button', {
+            type: 'button', className: 'roost-btn', style: { marginLeft: 8 }, onClick: goPreview,
+          }, '去试听 ↘'),
+        ),
+        rows === null
+          ? h('div', { className: 'roost-empty' }, '读取中…')
+          : rows.length
+            ? h('div', { className: 'roost-list roost-scroll' }, rows.map(renderRow))
+            : h('div', { className: 'roost-empty' }, '还没有语音。发一条语音给她，这里就会出现转写。'),
+      )
+    }
+
     function ExpressTab({ config, stickers, saveCfg, toast, reload, part = 'all' }) {
       return h('div', null,
         part === 'sticker' ? null : h(TtsCard, { config, saveCfg, toast, reload }),
+        /** A3：听语音只在独立的「语音」页出现；老入口 part='all' 行为不变 */
+        part === 'voice' ? h(AsrCard, { toast }) : null,
         /** 独立成页时它是这一页的第 01 节；留在表达页时仍是 02（排在语音后面） */
         part === 'voice' ? null : h(StickerDirsCard, {
           config, stickers, saveCfg, toast, reload,
@@ -13941,6 +14076,52 @@ select.roost-input{color-scheme:dark}
         part === 'voice'
           ? h('div', { className: 'roost-note' }, '表情包在「表达 → 表情包」那一页。')
           : null,
+      )
+    }
+
+    /**
+     * A6（第二轮对照）：安全防护独立页。
+     * 后端 5.11 的两道闸一直开着，面板却只有设置页一段说明 + 几个跳转按钮，
+     * 用户看不见「现在到底是开是关」。这里只读展示 config.security，
+     * 不在面板再造一份草稿（改仍走「设置 → 配置全文」，避免两份真相）。
+     */
+    function SecurityTab({ config, setTab }) {
+      const s = config?.security || {}
+      const ssrf = s.ssrf || {}
+      const hosts = Array.isArray(ssrf.allowHosts) ? ssrf.allowHosts : []
+      const row = (label, on, hint) => h('div', { className: 'roost-item' },
+        h('span', { className: 't' }, label,
+          h('span', { className: 'd' }, ' · ' + (on ? '已开启' : '已关闭'))),
+        h('span', { className: 'd' }, hint))
+      return h('div', null,
+        h(Sec, { n: '01', title: '危险命令确认' },
+          row('执行前先在 QQ 里问一句「确认」', s.dangerousConfirm !== false,
+            '删根目录 / 格式化 / 关机 / 下载后执行；60 秒不回就拦下。'),
+          h('div', { className: 'roost-note' },
+            '对应 config.security.dangerousConfirm。这是工具层的硬闸，不靠模型自觉；关掉等于把这些动作直接放行。'),
+        ),
+        h(Sec, { n: '02', title: '出站 URL 防护（SSRF）' },
+          row('默认拒绝内网地址', !ssrf.allowPrivate, '协议 / 端口 / DNS 解析后的逐 IP 都校验。'),
+          h('div', { className: 'roost-note' },
+            `显式放行的域名：${hosts.length} 个`
+            + (hosts.length ? '（' + hosts.slice(0, 5).join('、') + '）' : '')
+            + '。生图、TTS、云端 ASR、备份远端这些填 URL 的地方共用同一道校验。'),
+        ),
+        h(Sec, { n: '03', title: '在哪儿改 / 去哪儿看' },
+          config ? null : h('div', { className: 'roost-empty' }, '配置还没读到，上面的状态按默认值显示。'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => { if (setTab) setTab('config') },
+            }, '去设置改配置 ↗'),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => { if (setTab) setTab('logs') },
+            }, '去排障看日志 ↗'),
+          ),
+          h('div', { className: 'roost-note' },
+            '这一页只读：开关在「设置 → 配置全文」的 security 段改，避免面板草稿与服务端配置变成两份真相。'),
+        ),
       )
     }
 
@@ -14255,9 +14436,35 @@ select.roost-input{color-scheme:dark}
       )
     }
 
-    function ExtTab({ quick, toast }) {
+    /**
+     * A5（第二轮对照）：扩展可以自己声明页签、还能挑一级菜单，
+     * 结果是「扩展」组不再是扩展内容的全集。这张索引卡把散在各组的扩展页收在一处。
+     */
+    function ExtPagesIndexCard({ extPages, setTab }) {
+      const pages = Array.isArray(extPages) ? extPages : []
+      const groupLabel = (id) => (NAV_GROUPS.find((g) => g.id === id)?.label) || id || '未指定组'
+      return h(Sec, { title: '扩展自己的页面' },
+        h('div', { className: 'roost-note' },
+          '扩展可以声明自己的页签，挂到任意一级菜单；这一页是总索引，免得在几个组之间来回找。点了只是切页，不改动扩展。'),
+        pages.length
+          ? h('div', { className: 'roost-list' },
+              pages.map((p) => h('div', { key: p.id, className: 'roost-item' },
+                h('span', { className: 't' }, p.nav?.label || p.id,
+                  h('span', { className: 'd' }, ' · 挂在「' + groupLabel(p.nav?.group) + '」组')),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  onClick: () => { if (setTab) setTab('ext:' + p.id) },
+                }, '打开 ↗'),
+              )),
+            )
+          : h('div', { className: 'roost-empty' }, '还没有扩展声明页面。装一个带界面的扩展，这里就会列出来。'),
+      )
+    }
+
+    function ExtTab({ quick, toast, extPages, setTab }) {
       return h('div', null,
         h(ExtSettingsBlock, { toast, part: 'installed' }),
+        h(ExtPagesIndexCard, { extPages, setTab }),
         h(ExtCapsBlock, { quick, toast }),
         h(ExtWizardBlock, { toast }),
       )
@@ -14868,6 +15075,9 @@ select.roost-input{color-scheme:dark}
       /* 2.3：备份从记忆页里长出一个正门，记忆页那块原地保留 */
       ['backup', '备份'],
       ['about', '关于'],
+      /** A6：接入与安全防护提成正式页签；setup 隐藏页、老深链、概览按钮一个不删 */
+      ['connect', '接入'],
+      ['security', '安全防护'],
     ]
     /**
      * `chats` 原来是隐藏页，2026-11-12 提升成「身份」：它本来就是
@@ -14901,7 +15111,7 @@ select.roost-input{color-scheme:dark}
       memory: '记忆 回忆 事实 日记 关系 星图 翻一翻 分层 遗忘 容量',
       people: '人物 熟人 档案 印象 人物墙',
       caps: '权限 能力 授权 工具 限额',
-      express: '语音 表达 声音 tts 念出来',
+      express: '语音 表达 声音 tts 念出来 试听 预览',
       stickers: '表情包 表情 贴纸',
       model: '模型 价格 用量 金额 花费',
       ext: '扩展 已安装 插件',
@@ -14917,8 +15127,11 @@ select.roost-input{color-scheme:dark}
       config: '配置 设置 json 高级',
       backup: '备份 恢复 导出 迁移',
       about: '关于 版本 许可 鸣谢',
+      connect: '接入 安装 直连 凭证 二维码 组件版本 首次设置',
+      security: '安全 防护 危险命令 确认 ssrf 白名单 内网 出站',
       context: '上下文 提示词',
-      setup: '接入 安装 直连 自测',
+      /** 隐藏页只在深链/老 localStorage 里出现，别名别和正式「接入」页撞词 */
+      setup: '向导 老链接 自测',
     }
 
     /** 搜页签：页名或别名命中都算；空查询给全部（按导航顺序） */
@@ -14947,8 +15160,13 @@ select.roost-input{color-scheme:dark}
       { id: 'group', label: '群聊', icon: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM15.5 11a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5M3 19c.7-2.6 3-4 6-4s5.3 1.4 6 4M15 15.2c2 .2 3.5 1.4 4 3.3', tabs: ['groupchat', 'groupadmin'] },
       { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
-      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'about'] },
+      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['connect', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
     ]
+    /**
+     * A1：系统组页最多，混了「接入与身份 / 诊断 / 运维 / 关于」四类。
+     * 不拆组、不删页、不改 key，只在二级页签上给段首留一道分隔与悬浮说明。
+     */
+    const SYSTEM_SEG = { sim: '诊断', update: '运维', security: '安全', about: '关于' }
     /**
      * 当前页属于哪一组；隐藏页不属于任何组，返回 null。
      *
@@ -15013,7 +15231,13 @@ select.roost-input{color-scheme:dark}
             )
           }
         }
-      : ({ children }) => children
+      /**
+       * 假 React（渲染测试）里没有 Component：降级成直通。
+       * 返回**单个**孩子而不是 children 数组——假 React 的 createElement
+       * 把 children 收成数组，直接返回会让展开后的树多套一层数组，
+       * 「页头 / 滚动区是 RoostPage 直接孩子」这类结构断言就找不到了。
+       */
+      : ({ children }) => (Array.isArray(children) ? children[0] : children) ?? null
 
     function RoostPage() {
       useStyle()
@@ -15575,6 +15799,12 @@ select.roost-input{color-scheme:dark}
                     role: 'tab',
                     'aria-selected': tab === id ? 'true' : 'false',
                     'data-on': tab === id ? '1' : '0',
+                    ...(curGroup.id === 'system' && SYSTEM_SEG[id]
+                      ? {
+                          style: { marginLeft: 10, paddingLeft: 10, borderLeft: '1px solid var(--line-soft)' },
+                          title: '这一段：' + SYSTEM_SEG[id],
+                        }
+                      : {}),
                     onClick: () => setTab(id),
                   }, label)))
               : null,
@@ -15589,13 +15819,29 @@ select.roost-input{color-scheme:dark}
           ),
         ),
 
+        /**
+         * A11（第二轮对照）：面板级边界之外，再给正文包一层「按页」的边界。
+         * key 带 tab —— 上一页崩过，切到别的页会重新挂载，不会卡在报错块里。
+         * 只包正文：侧栏导航留着，单页渲染异常时还能点去别的页。
+         * 假 React（渲染测试）下 RenderBoundary 降级成直通，结构不变。
+         */
         h('div', {
           className: 'roost-scroll-body roost-fade' + (pageModal ? ' is-locked' : ''),
           key: tab,
         },
-          h('div', { className: 'roost-body-inner' },
-          tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
+          h(RenderBoundary, { key: 'tab:' + tab },
+            h('div', { className: 'roost-body-inner' },
+            tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }) : null,
+          /** A6：接入提成正门；隐藏页 setup 与 ?tab=setup 深链原样保留，两边同一份内容 */
+          tab === 'connect'
+            ? h('div', null,
+                h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+                  '这页是接入的正门：装没装、凭证、在不在跑、组件版本都在这儿。老链接 ?tab=setup 打开的是同一份内容，两边都留着。'),
+                h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }))
+            : null,
+          /** A6：安全防护独立页，只读 config.security，不新增配置草稿 */
+          tab === 'security' ? h(SecurityTab, { config, setTab }) : null,
           tab === 'her'
             ? h(HerTab, {
                 config,
@@ -15609,7 +15855,7 @@ select.roost-input{color-scheme:dark}
             /** 2.8 名单要读 config.awake.groups / 写回整份，还要展示框架侧主人状态 */
             config, saveCfg, setupSt, setTab,
           }) : null,
-          tab === 'ext' ? h(ExtTab, { quick, toast }) : null,
+          tab === 'ext' ? h(ExtTab, { quick, toast, extPages, setTab }) : null,
           tab === 'ext-market' ? h(ExtMarketTab, { toast }) : null,
           tab === 'ext-api' ? h(ExtApiTab, { toast }) : null,
           /** 6.1：扩展声明的页面。tab key 形如 `ext:<id>`，不在静态 TABS 里 */
@@ -15687,7 +15933,8 @@ select.roost-input{color-scheme:dark}
                     }, '账号迁移…'),
                     h('button', {
                       type: 'button', className: 'roost-btn',
-                      onClick: () => { setTab('memory'); toast('已切到「记忆」，清空在「06 清空」') },
+                      /** A8：不写编号。插卡后编号会漂，写了就又变成「指错路」 */
+                      onClick: () => { setTab('memory'); toast('已切到「记忆」，清空在最后一张「清空」卡') },
                     }, '清空记忆…'),
                     h('button', {
                       type: 'button', className: 'roost-btn',
@@ -15699,7 +15946,7 @@ select.roost-input{color-scheme:dark}
                     }, '清空扩展记忆…'),
                     h('button', {
                       type: 'button', className: 'roost-btn',
-                      onClick: () => { setTab('mood'); toast('已切到「心情」，清空在「02 变化记录」') },
+                      onClick: () => { setTab('mood'); toast('已切到「心情」，清空历史在「变化记录」那张卡') },
                     }, '清空心情历史…'),
                   ),
                 ),
@@ -15734,6 +15981,7 @@ select.roost-input{color-scheme:dark}
                  */
               )
             : null,
+          ),
           ),
         ),
 

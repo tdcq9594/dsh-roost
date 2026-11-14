@@ -23,6 +23,7 @@ import { createTurnQueue } from './turnqueue.js';
 import { createInboundShell } from './inbound-shell.js';
 import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf, speakerTag } from './inbound.js';
+import { createAsrRecent } from './asr-recent.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools } from './permissions.js';
 import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
 import { resolvePolicy, dangerOf, BUCKETS, defaultStore } from './capabilities.js';
@@ -298,6 +299,9 @@ export function apply(ctx) {
    * 内存环形缓冲就够：用户要看的是「刚才那条为什么没回」，
    * 不是三个月前的审计记录。完整日志还在 DSH 自己的日志里。
    */
+  /** A3：最近几条语音转写，只在内存里，供面板「听语音」卡读（见 asr-recent.js） */
+  const asrRecent = createAsrRecent();
+
   const logs = [];
   function addLog(level, area, text) {
     /** E7：所有面板日志在这一层统一脱敏，调用点不用各自记着 */
@@ -5523,6 +5527,14 @@ export function apply(ctx) {
     /** D10：只记时间戳，不在这条热链路上做任何判断 */
     lastActiveAt = Date.now();
     /**
+     * A3：语音转写读数。只扫附件、只进内存，不做判断也不改消息。
+     * 纯净模式（不记也不读）的会话不进读数——和日记 / 注入 / 检索同一口径。
+     * 双保险：读数只是排障用途，任何异常都不许影响消息链路（note 内部也逐字段兜了）。
+     */
+    try {
+      if (!memoryOff(chatOf(payload)?.chatId)) asrRecent.note(payload);
+    } catch {}
+    /**
      * 扩展素材审批：主人私聊回「发 1 / 不发」。只有队列里真有待批才会命中，
      * 别的文本一律原样交回聊天链路，不会把日常对话吞掉。
      */
@@ -5869,6 +5881,10 @@ export function apply(ctx) {
         const days = Math.min(Math.max(Number(u.searchParams.get('days')) || 7, 1), 90);
         return send(res, 200, { ok: true, ...usage.summary({ days, pricing: cfg.usage?.pricing }) });
       }),
+
+      /** A3：面板「听语音」卡的只读数据来源；不落盘、不进记忆 */
+      route('/asr/recent', (req, res) =>
+        send(res, 200, { ok: true, items: asrRecent.list() })),
 
       route('/status', (req, res) =>
         send(res, 200, {
