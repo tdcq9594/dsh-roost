@@ -1561,7 +1561,12 @@ export function apply(ctx) {
    * 面板点按钮 → 入队；扩展轮询 `/v1/ext-ui/actions` 取走自己执行。
    * 宿主不替扩展执行任何业务，也不把动作写进扩展目录（那边按整目录算 sha256）。
    */
-  const uiActions = createUiActionQueue({ log });
+  /**
+   * 注意 `log` 的形态：本模块的 `log` 是**对象**（`log.warn` / `log.info`），
+   * 而队列要的是函数。直接传对象会在点按钮时抛 `log is not a function`，
+   * 表现是「动作没提交上」。
+   */
+  const uiActions = createUiActionQueue({ log: (m) => log.warn?.(m) });
   /**
    * 重建一个扩展的 MCP 连接（改完配置要重连才读到新 env）。
    *
