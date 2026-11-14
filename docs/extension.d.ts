@@ -19,14 +19,18 @@ export type V1Scope =
   | 'proactive:write'
   | 'session:write'
   | 'prompt:write'
+  | 'core:write'
   | 'agent:write';
 
 /** 需要单独确认的敏感 scope。 */
 export type SensitiveScope =
-  | 'agent:write'
+  | 'message:write'
   | 'say:write'
+  | 'proactive:write'
+  | 'session:write'
   | 'prompt:write'
-  | 'proactive:write';
+  | 'agent:write'
+  | 'core:write';
 
 /** 拒绝诊断的五层来源。 */
 export type RejectionLayer =

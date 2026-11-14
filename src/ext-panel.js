@@ -25,7 +25,8 @@ import { dataDir } from './config.js';
 import { BUCKETS, resolvePolicy } from './capabilities.js';
 import { V1_SCOPES } from './api-v1.js';
 import { USAGE_CHAR_LIMIT } from './ext-usage.js';
-import { SOURCE_FILE, MANIFEST_FILE } from './ext-registry.js';
+import { SOURCE_FILE, MANIFEST_FILE, EXT_SENSITIVE_SCOPES } from './ext-registry.js';
+import { deriveTier, riskLines } from './ext-tier.js';
 import { createExtConfig, validateValues } from './ext-config.js';
 import { DEFAULT_EXT_ACL } from './ext-memory.js';
 import { QUOTA_WIRED } from './quota.js';
@@ -43,8 +44,14 @@ export const REJECTION_LAYERS = Object.freeze({
 
 export const LOCALLY_MODIFIED_LABEL = '已本地修改，不再参与更新校验';
 
-/** §7「最小授权」+ §12：这几个 scope 要单独授权，不能顺手全勾上。 */
-export const SENSITIVE_SCOPES = Object.freeze(['agent:write', 'say:write', 'prompt:write', 'proactive:write']);
+/**
+ * §7「最小授权」+ §12：这几个 scope 要单独授权，不能顺手全勾上。
+ *
+ * 2026-11-14 统一口径：以前这里手写 4 个、`ext-registry` 里 6 个，
+ * `message:write` / `session:write` 在「市场安装确认」算敏感、在「面板发
+ * 客户端」却不算。两处直接共用同一份常量，以后加 scope 不会再漏。
+ */
+export const SENSITIVE_SCOPES = EXT_SENSITIVE_SCOPES;
 
 function sha256(s) {
   return createHash('sha256').update(String(s)).digest('hex');
@@ -200,6 +207,22 @@ export function createExtPanel({
         scopes: (() => {
           const rec = clientStore?.get?.(`ext:${e.id}`);
           return Array.isArray(rec?.scopes) ? [...rec.scopes] : null;
+        })(),
+        /**
+         * 已装页也要看得见等级与风险（主人 2026-11-14 要求）。
+         *
+         * 这里按**实际授予**的 scope 算，不是清单声明的 —— 装的时候主人
+         * 可能没确认高权限，或清单后来改了。用户关心的是「它现在能干什么」。
+         */
+        tier: (() => {
+          const rec = clientStore?.get?.(`ext:${e.id}`);
+          const granted = Array.isArray(rec?.scopes) ? rec.scopes : [];
+          const t = deriveTier({
+            scopes: granted,
+            overrides: Array.isArray(e.manifest?.overrides) ? e.manifest.overrides : [],
+            form: e.manifest?.form,
+          });
+          return { id: t.id, label: t.label, color: t.color, summary: t.summary, risks: riskLines(t) };
         })(),
       };
     });

@@ -85,9 +85,14 @@ test('G3-1 401：无 Bearer / 错令牌 / 已禁用客户端，且记 ext.auth_f
   assert.equal((await call(f.api, 'GET', '/v1/whoami', { token: f.issued.token })).status, 401);
 });
 
-test('G3-2 403：scope 不足 / 扩展令牌调 agent.* 与 say 被硬隔离', async (t) => {
+test('G3-2 403：scope 不足 / 扩展令牌调 /v1/say 仍被硬隔离', async (t) => {
   const f = fixture(t);
   assert.equal((await call(f.api, 'POST', '/v1/say', { token: f.issued.token })).status, 403);
+  /**
+   * 2026-11-14 起 `agent.*` 不再被 EXT_ONLY_DENY 一刀切挡下，改由
+   * `agent:write` scope 把关。fixture 的默认 scopes 只有
+   * `memory:write / state:read`，所以这里仍是 403 —— 但原因是缺 scope。
+   */
   assert.equal((await call(f.api, 'POST', '/v1/agent.new', { token: f.issued.token })).status, 403);
   /**
    * 阶段 8 起扩展令牌默认带 `state:read`（读状态心情是安全能力），
@@ -119,12 +124,33 @@ test('G3-2b agent.* 必须 agent:write：零 scope 客户端被挡，授权客�
   f.store.add({ id: 'weak', name: '只读客户端', hash: createHash('sha256').update(weak).digest('hex'), scopes: ['state:read'], enabled: true });
   assert.equal((await call(f.api, 'POST', '/v1/agent.new', { token: weak })).status, 403);
   assert.equal((await call(f.api, 'GET', '/v1/agent.list', { token: weak })).status, 403);
-  assert.equal((await call(f.api, 'POST', '/v1/agent.new', { token: f.issued.token })).status, 403, '扩展令牌纵深防御');
-
   const strong = 'agent-client-token';
   f.store.add({ id: 'agent-client', name: '裁判客户端', hash: createHash('sha256').update(strong).digest('hex'), scopes: ['agent:write'], enabled: true });
   const api = createApiV1ForAgent(f);
   assert.equal((await call(api, 'POST', '/v1/agent.new', { token: strong, body: { clientId: 'game' } })).status, 200);
+
+  /**
+   * 2026-11-14 主人授权放宽的回归守门：扩展令牌只要显式拿到
+   * `agent:write`，也要能开独立会话（bili 手动刷走的就是这条）。
+   * 少了这条，以后有人把 EXT_ONLY_DENY 加回去会静默变回「点了没反应」。
+   */
+  const ext = f.store.get('ext:bili');
+  f.store.add({ ...ext, scopes: [...(ext.scopes || []), 'agent:write'] });
+  assert.equal(
+    (await call(api, 'POST', '/v1/agent.new', { token: f.issued.token, body: { clientId: 'bili' } })).status,
+    200,
+    '拿到 agent:write 的扩展令牌必须能开独立会话',
+  );
+
+  /**
+   * 全放开守门：以前 `/v1/say` 因为「是扩展令牌」被 EXT_ONLY_DENY 一刀切
+   * 挡下，现在只要有 `say:write` 就该进 hook（fixture hooks 为空 → 501，
+   * 关键是**不能是 403**）。防止以后有人把硬隔离加回来而没人发现。
+   */
+  const ext2 = f.store.get('ext:bili');
+  f.store.add({ ...ext2, scopes: [...(ext2.scopes || []), 'say:write'] });
+  const say = await call(f.api, 'POST', '/v1/say', { token: f.issued.token });
+  assert.notEqual(say.status, 403, '扩展令牌不该再被身份硬隔离挡下');
 });
 
 test('G3-4 requestId 幂等：重复请求不重复执行 hook，返回首次结果', async (t) => {
@@ -146,7 +172,8 @@ test('G3-5 whoami 不回显 hash / 明文；未知路径 404；未接线 hook �
   assert.ok(!JSON.stringify(ok.body).includes(f.issued.token));
   assert.equal((await call(f.api, 'GET', '/v1/nope', { token: f.issued.token })).status, 404);
   assert.equal((await call(f.api, 'GET', '/v1/memory', { token: f.issued.token })).status, 403, '缺 memory:read');
-  assert.equal(V1_SCOPES.length, 10, '§七 表格 9 个 + agent:write（独立会话专用授权）');
+  assert.equal(V1_SCOPES.length, 11, '§七 表格 9 个 + agent:write + core:write（2026-11-14 全放开）');
+  assert.ok(V1_SCOPES.includes('core:write'), '最高等级能力要在 scope 表里才能被清单声明');
   assert.ok(V1_ROUTES['POST /v1/message']);
 });
 
@@ -230,13 +257,13 @@ test('自查：未接线端点清单是硬快照（只剩设计上不开放的 s
     'POST /v1/session.configure',
   ], '接线一条就更新这份快照，并重跑 build-ext-docs');
 
-  // 「未接线」与「设计不开放」必须分开：后者不会随版本变可用，不该被当成待办
-  assert.deepEqual([...V1_DESIGNED_OFF], ['POST /v1/session.configure']);
-  for (const key of V1_DESIGNED_OFF) {
-    assert.ok(key in V1_ROUTES, `V1_DESIGNED_OFF 里的「${key}」不在路由表`);
-    assert.equal(isRouteDesignedOff(key), true);
-    assert.equal(isRouteImplemented(key), false, '设计不开放的不能同时算已实现');
-  }
+  /**
+   * 2026-11-14 全放开：不再有「设计上永久不开放」的端点。安全边界改由
+   * 清单静态声明 + 安装时分级告知（ext-tier.js L0–L3）。
+   * `session.configure` 仍留在 notReady 快照里，那只是「还没接线」，不是被封禁。
+   */
+  assert.deepEqual([...V1_DESIGNED_OFF], []);
+  assert.equal(isRouteDesignedOff('POST /v1/session.configure'), false);
 
   // 已实现的 hook 必须真在路由表里被用到，不能是死名单
   for (const name of V1_IMPLEMENTED_HOOKS) {

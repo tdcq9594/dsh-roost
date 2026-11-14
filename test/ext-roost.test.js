@@ -204,9 +204,24 @@ test('roost.call 转 msg.send：owner 由宿主解析，危险参数被丢掉', 
     params: { target: 'owner', content: '刷到一个好视频', msgId: 'steal', requestId: 'fake' },
   } });
   assert.equal(r.status, 200);
-  assert.deepEqual(calls.rpc[0], ['msg.send', {
-    kind: 'c2c', chatId: 'owner-openid', content: '刷到一个好视频',
-  }]);
+  const [method, params] = calls.rpc[0];
+  assert.equal(method, 'msg.send');
+  assert.equal(params.kind, 'c2c');
+  assert.equal(params.chatId, 'owner-openid');
+  assert.equal(params.content, '刷到一个好视频');
+  assert.match(params.requestId, /^ext-.+-[0-9a-f]{8}-[0-9a-f]{4}-/, '宿主代生成幂等键，扩展不许自报');
+});
+
+test('roost.call 的幂等键由宿主生成，扩展自报的不算数', async () => {
+  const { hooks, calls } = rig();
+  const r = await hooks['roost.call']({ body: {
+    method: 'msg.send',
+    params: { target: 'owner', content: 'hi', requestId: 'fake-fixed-id' },
+  }, client: { extId: 'bili' } });
+  assert.equal(r.status, 200);
+  const params = calls.rpc[0][1];
+  assert.notEqual(params.requestId, 'fake-fixed-id', '不能让扩展顶掉投递账本的键');
+  assert.match(params.requestId, /^ext-bili-[0-9a-f]{8}-/);
 });
 
 test('roost.call 的卡片也要过 tuwen 校验，不能靠协议直通绕过去', async () => {

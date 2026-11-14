@@ -20,6 +20,8 @@ import { createClientStore } from './ext-registry.js';
 export const V1_SCOPES = [
   'message:write', 'say:write', 'state:read', 'context:read',
   'memory:read', 'memory:write', 'proactive:write', 'session:write', 'prompt:write',
+  /** 最高等级：接管/关闭内置功能。本轮只做声明与分级告知，实际替换随内置功能解离落地。 */
+  'core:write',
   // §7 表格没给 agent.* 定 scope，但「只要令牌有效就能开独立会话」会把
   // 最小授权架空（独立会话还不受 quota / 能力页拦截）。这里补一个专用 scope。
   //
@@ -126,13 +128,18 @@ export const V1_IMPLEMENTED_HOOKS = Object.freeze([
 ]);
 
 /**
- * **设计上不开放**给扩展的端点（不是「还没做」）。
+ * 「设计上不开放」清单 —— 2026-11-14 主人决定**全放开**后已清空。
  *
- * `session.configure` 能改人格与模型 —— 等于让扩展改机器人的行为方式。
- * 收益（扩展替用户省一次点击）与风险（人格被改写、模型被换掉）不成比例，
- * 所以明确不开放，面板与文档都按「设计不开放」展示，避免被当成待办。
+ * 以前 `session.configure`（改人格/模型）被永久关掉，理由是风险大。
+ * 现在安全边界换了位置：不再由平台替主人决定「扩展不许碰什么」，
+ * 而是【清单静态声明 → 自动分级 → 安装时人话告知 → 主人点头】。
+ * 见 `src/ext-tier.js`（L0–L3）与 `ext-market.js` 的分级确认。
+ *
+ * 保留导出与 `isRouteDesignedOff()` 是为了文档生成和旧测试不破；
+ * 空数组 = 没有任何端点被永久封禁。注意「已放开」不等于「已接线」：
+ * 仍恒 501 的端点看 `V1_IMPLEMENTED_HOOKS`，那是可用能力清单不是权限清单。
  */
-export const V1_DESIGNED_OFF = Object.freeze(['POST /v1/session.configure']);
+export const V1_DESIGNED_OFF = Object.freeze([]);
 
 /** 不依赖 hook、在 `handle()` 里内联实现的端点。 */
 export const V1_BUILTIN_ROUTES = Object.freeze(['GET /v1/whoami']);
@@ -149,12 +156,6 @@ export function isRouteImplemented(key) {
 export function isRouteDesignedOff(key) {
   return V1_DESIGNED_OFF.includes(key);
 }
-
-/** `agent.*` 不能被扩展令牌调用：scope 硬隔离（§5.4）。 */
-const EXT_ONLY_DENY = new Set([
-  'POST /v1/agent.new', 'POST /v1/agent.prompt',
-  'POST /v1/agent.close', 'GET /v1/agent.list', 'POST /v1/say',
-]);
 
 function bearerOf(req) {
   const raw = req?.headers?.authorization;
@@ -242,11 +243,12 @@ export function createApiV1({
       reject({ tool: key, bucket: 'unknown', rule: 'Bearer 令牌无效或已吊销（401）' });
       return send(401, { ok: false, error: 'unauthorized', message: '客户端令牌无效或已吊销' });
     }
-    if (client.extId && EXT_ONLY_DENY.has(key)) {
-      note('forbidden', key);
-      reject({ tool: key, bucket: 'ext', rule: `扩展令牌被 EXT_ONLY_DENY 挡下（403）：${key}` });
-      return send(403, { ok: false, error: 'forbidden', message: '扩展令牌不能调用该端点' });
-    }
+    /**
+     * 2026-11-14 全放开：删掉「client.extId 就一律拒绝 agent.* / say」的
+     * 硬隔离。现在只按 scope 判定 —— 权限是扩展在清单里静态声明、主人
+     * 安装时看着人话风险点头的，不该再由平台偷偷封一层。
+     * 分级与告知见 `ext-tier.js` / `ext-market.js`。
+     */
     if (route.scope && !client.scopes?.includes(route.scope)) {
       note('forbidden', key);
       reject({ tool: key, bucket: client.id, rule: `缺少 scope：${route.scope}（403）` });

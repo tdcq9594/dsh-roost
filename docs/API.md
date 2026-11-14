@@ -99,15 +99,16 @@
 
 ## 5. scope
 
-- `message:write`
+- `message:write`（**敏感**：面板发放要二次确认）
 - `say:write`（**敏感**：面板发放要二次确认）
 - `state:read`
 - `context:read`
 - `memory:read`
 - `memory:write`
 - `proactive:write`（**敏感**：面板发放要二次确认）
-- `session:write`
+- `session:write`（**敏感**：面板发放要二次确认）
 - `prompt:write`（**敏感**：面板发放要二次确认）
+- `core:write`（**敏感**：面板发放要二次确认）
 - `agent:write`（**敏感**：面板发放要二次确认）
 
 最小授权默认 `message:write` + `state:read`；敏感 scope 需要单独勾选确认。
@@ -137,12 +138,12 @@
 | GET | `/v1/roost.capabilities` | `state:read` | ✅ 可用 | 列框架直连协议（roost-host/1）里可扩展调用的能力：只读方法、框架插件注册的 `tool.*`、发消息；`?filter=` 可按名字筛 |
 | POST | `/v1/say` | `say:write` | ✅ 可用 | 让机器人主动说一句；`pending` 表示进审核，不是已发出 |
 | POST | `/v1/send` | `message:write` | ✅ 可用 | 扩展直接把文本 / 文件 / 官方图文卡片发进会话，不跑模型；`target` 可填 `owner` 由宿主解析主人，或 `recent` 挑最近说过话且有授权的群 |
-| POST | `/v1/session.configure` | `prompt:write` | 🚫 设计不开放 | 改会话配置（模型、人格、工具开关） |
+| POST | `/v1/session.configure` | `prompt:write` | ⛔ 501 未接线 | 改会话配置（模型、人格、工具开关） |
 | POST | `/v1/session.ensure` | `session:write` | ✅ 可用 | 确保会话存在 |
 | GET | `/v1/state` | `state:read` | ✅ 可用 | 读机器人与当前会话的状态（在线、绑定、档位） |
 | GET | `/v1/whoami` | （任意有效令牌） | ✅ 可用 | 回显令牌身份（不含 hash / 明文） |
 
-> 未接线的 0 条端点已预留路由与鉴权（scope 校验、限频、幂等都在生效），
+> 未接线的 1 条端点已预留路由与鉴权（scope 校验、限频、幂等都在生效），
 > 只差业务实现。第三方可以先按此契约开发，但**不要**把它们当成已可用能力。
 
 ### 幂等与限频
@@ -173,7 +174,7 @@
 | 错误 | 含义 |
 |---|---|
 | 401 `unauthorized` | 令牌无效、已吊销，或扩展的 `secrets/<id>.json` 缺失（宿主已记 `ext.auth_failed`） |
-| 403 `forbidden` | scope 不足；或扩展令牌调了没有授权的端点（`agent.*` / `llm.vision` 要 `agent:write`） |
+| 403 `forbidden` | scope 不足（每条端点要的 scope 见端点表）。2026-11-14 起已取消「扩展令牌一律不许调某些端点」的硬隔离，改由清单声明 + 安装时分级告知 |
 | 404 `not_found` | 没有这个 `/v1` 端点 |
 | 413 `request_too_large` | 请求体超过 1 MB |
 | 429 `rate_limited` | 每客户端每分钟 120 次（响应带 `retry-after`） |

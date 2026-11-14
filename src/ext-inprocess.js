@@ -104,6 +104,8 @@ function asLog(v) {
 export async function runInProcessAction({
   id, root, entry, action, payload = null,
   config = {}, secrets = {}, env = {}, log = () => {}, timeoutMs = 30_000,
+  /** 宿主内部「系统会话轮次」：让进程内扩展像 aurabot 那样直接跑一轮模型 */
+  systemTurn = null,
 } = {}) {
   if (!id || !root || !entry) return { handled: false, reason: '缺参数' };
   const { mod, mtime } = await loadModule({ id, root, entry });
@@ -137,6 +139,7 @@ export async function runInProcessAction({
       env: rec.ctx.env,
       log: asLog(log),
       id,
+      systemTurn,
     });
     if (!actions || typeof actions !== 'object') return { handled: false, reason: 'createActions 没返回对象' };
   }

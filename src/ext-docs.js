@@ -59,7 +59,7 @@ const ROUTE_NOTES = {
 
 const errCodeRows = [
   ['401 `unauthorized`', '令牌无效、已吊销，或扩展的 `secrets/<id>.json` 缺失（宿主已记 `ext.auth_failed`）'],
-  ['403 `forbidden`', 'scope 不足；或扩展令牌调了没有授权的端点（`agent.*` / `llm.vision` 要 `agent:write`）'],
+  ['403 `forbidden`', 'scope 不足（每条端点要的 scope 见端点表）。2026-11-14 起已取消「扩展令牌一律不许调某些端点」的硬隔离，改由清单声明 + 安装时分级告知'],
   ['404 `not_found`', '没有这个 `/v1` 端点'],
   ['413 `request_too_large`', '请求体超过 1 MB'],
   ['429 `rate_limited`', '每客户端每分钟 120 次（响应带 `retry-after`）'],

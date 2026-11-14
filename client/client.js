@@ -7689,7 +7689,7 @@ select.roost-input{color-scheme:dark}
     }
 
     /** 统一确认弹窗：替掉 window.confirm（原生框和面板是两套皮，webview 里还常受限）。 */
-    function ConfirmModal({ title, message, confirmText, danger, busy, onConfirm, onClose }) {
+    function ConfirmModal({ title, message, confirmText, danger, busy, onConfirm, onClose, extra }) {
       return h('div', { className: 'cap-modal', onClick: onClose },
         h('div', {
           className: 'cap-modal-b', style: { width: 'min(460px,100%)' },
@@ -7703,6 +7703,8 @@ select.roost-input{color-scheme:dark}
             className: 'cap-modal-c',
             style: { whiteSpace: 'pre-wrap', fontSize: 12.5, lineHeight: 1.7 },
           }, message),
+          /** 可选的表单区：L3 扩展要手打 id 二次确认，其余调用方不受影响 */
+          extra || null,
           h('div', {
             className: 'cap-modal-s',
             style: {
@@ -8120,6 +8122,11 @@ select.roost-input{color-scheme:dark}
     }
     const scopeNote = (s) => (SCOPE_LABEL[s] ? `（${SCOPE_LABEL[s]}）` : '')
     const scopesText = (arr) => (arr || []).map((s) => s + scopeNote(s)).join('、')
+    /** ext-tier.js 给的是语义色名，映射到面板现有的主题变量，亮/暗主题都看得清 */
+    const tierColorOf = (c) => ({
+      green: 'var(--good, #16a34a)', blue: 'var(--accent, #3b82f6)',
+      orange: 'var(--warn, #d97706)', red: 'var(--bad, #dc2626)',
+    }[c] || 'var(--dsw-alias-label-secondary, #8a93a6)')
 
     const toolNote = (n) => {
       if (n.startsWith('mcp__')) {
@@ -13013,6 +13020,8 @@ select.roost-input{color-scheme:dark}
       /** 扩展索要敏感权限时先弹窗，绝不自动带 confirmScopes 重试 */
       const [scopeAsk, setScopeAsk] = useState(null)
       const [scopeBusy, setScopeBusy] = useState(false)
+      /** L3（核心接管）按 ext-tier 的 type-name 口径手打扩展 id */
+      const [tierTyped, setTierTyped] = useState('')
       const [revokeAsk, setRevokeAsk] = useState(null)
       const [market, setMarket] = useState(null)
       const [marketBusy, setMarketBusy] = useState('')
@@ -13056,9 +13065,19 @@ select.roost-input{color-scheme:dark}
            * 直接装，回 `needs_scope_confirm`。这里必须把「要授什么」摆出来让用户
            * 点第二次，绝不自动带 `confirmScopes:true` 重试 —— 那样等于一键装顺带授权。
            */
-          if (r?.reason === 'needs_scope_confirm') {
-            /** 把「要授什么」摆出来等用户点第二次，绝不在这里自动重试 */
-            setScopeAsk({ op, id, scopes: r.scopes || [] })
+          /**
+           * 后端按 L0–L3 现算等级、逐条给人话后果（ext-tier.js）。
+           * 这里把等级 / 风险 / 确认方式一起收进弹窗，绝不自动带
+           * confirmScopes:true 重试 —— 那等于一键装顺带授权。
+           */
+          if (r?.reason === 'needs_scope_confirm' || r?.reason === 'needs_tier_confirm') {
+            setTierTyped('')
+            setScopeAsk({
+              op, id,
+              scopes: r.scopes || [],
+              tier: r.tier || '', tierLabel: r.tierLabel || '', tierColor: r.tierColor || '',
+              confirm: r.confirm || '', risks: r.risks || [], message: r.message || '',
+            })
             return
           }
           toast(r.message || (r.ok ? '完成' : '失败'))
@@ -13073,10 +13092,18 @@ select.roost-input{color-scheme:dark}
       const confirmScopeAct = async () => {
         const ask = scopeAsk
         if (!ask) return
+        /** L3 要手打扩展 id；没打对就不发请求，连 confirmScopes 都不给 */
+        if (ask.confirm === 'type-name' && String(tierTyped || '').trim() !== ask.id) {
+          toast(`请输入扩展 id「${ask.id}」以确认接管风险`)
+          return
+        }
         setScopeBusy(true)
         startProgress()
         try {
-          const r = await EXT_POST(ask.op, { id: ask.id, confirmScopes: true })
+          const r = await EXT_POST(ask.op, {
+            id: ask.id, confirmScopes: true,
+            ...(ask.tier ? { confirmTier: ask.tier } : {}),
+          })
           toast(r.message || (r.ok ? '完成' : '失败'))
           await load()
           if (market) await loadMarket(true, marketFilters())
@@ -13085,6 +13112,7 @@ select.roost-input{color-scheme:dark}
           setTimeout(() => setMarketProgress(null), 3000)
           setScopeBusy(false)
           setScopeAsk(null)
+          setTierTyped('')
         }
       }
       const checkUpdates = async () => {
@@ -13349,8 +13377,26 @@ select.roost-input{color-scheme:dark}
                     h('span', { className: 'd' }, ` · ${x.category || '其它'} · ${x.transport}${x.author ? ` · ${x.author}` : ''}`),
                     x.revoked ? h('span', { className: 'd', style: { color: 'var(--bad)' } }, ' · 已撤回') : null,
                     x.updateAvailable ? h('span', { className: 'd', style: { color: 'var(--warn)' } }, ' · 有更新') : null,
+                    /** 等级徽章：装之前就能看出这个扩展会碰到什么（ext-tier.js 现算，作者虚标不了） */
+                    x.tierLabel
+                      ? h('span', {
+                          className: 'd',
+                          style: {
+                            color: tierColorOf(x.tierColor),
+                            border: '1px solid currentColor', borderRadius: 4,
+                            padding: '0 5px', fontSize: 10.5, lineHeight: '16px',
+                          },
+                          title: x.tierSummary || `权限等级 ${x.tier}`,
+                        }, `权限 ${x.tier} · ${x.tierLabel}`)
+                      : null,
                   ),
                   x.description ? h('span', { className: 'd' }, x.description) : null,
+                  /** 逐条人话后果，不只是英文 scope 名；最多摆 3 条，全量在确认弹窗 */
+                  (x.risks || []).length
+                    ? h('span', { className: 'd', style: { display: 'block', marginTop: 3, color: tierColorOf(x.tierColor) } },
+                        `⚠ ${x.risks.slice(0, 3).map((r) => r.text).join('；')}`
+                        + (x.risks.length > 3 ? ` 等 ${x.risks.length} 项` : ''))
+                    : null,
                   /** 能力标签：点一下就只看这个标签，再点一下取消 */
                   (x.tags || []).length
                     ? h('span', {
@@ -13420,6 +13466,18 @@ select.roost-input{color-scheme:dark}
                   h('span', { className: 'd' }, x.scopes
                     ? ` · 权限：${x.scopes.length ? scopesText(x.scopes) : '（无）'}`
                     : ' · 权限：尚未发令牌'),
+                  /** 已装页按实际授予的 scopes 现算等级，不是看清单上写什么 */
+                  x.tier?.label
+                    ? h('span', {
+                        className: 'd',
+                        style: {
+                          color: tierColorOf(x.tier.color),
+                          border: '1px solid currentColor', borderRadius: 4,
+                          padding: '0 5px', fontSize: 10.5, lineHeight: '16px',
+                        },
+                        title: x.tier.summary || '',
+                      }, `${x.tier.id} · ${x.tier.label}`)
+                    : null,
                 ),
                 h('textarea', {
                   className: 'roost-input', rows: 2, style: { width: '100%', marginTop: 6 },
@@ -13490,13 +13548,32 @@ select.roost-input{color-scheme:dark}
         /** 两个 ask 互斥：万一都非空，只显示停用确认，避免两层遮罩叠着误点「授权并安装」 */
         scopeAsk && !revokeAsk
           ? h(ConfirmModal, {
-              title: '扩展索要敏感权限',
-              message: `扩展「${scopeAsk.id}」索要：\n\n${scopesText(scopeAsk.scopes)}`
-                + '\n\n授权后它能以机器人身份执行对应动作（发消息 / 主动发言等）。确认安装？',
-              confirmText: '授权并安装', danger: true, busy: scopeBusy,
+              title: scopeAsk.tierLabel
+                ? `扩展权限 · ${scopeAsk.tier} ${scopeAsk.tierLabel}`
+                : '扩展索要敏感权限',
+              /** 后端 installNotice() 的人话风险全文优先，英文 scope 只作附录 */
+              message: (scopeAsk.message
+                || `扩展「${scopeAsk.id}」索要：\n\n${scopesText(scopeAsk.scopes)}`)
+                + (scopeAsk.scopes?.length ? `\n\n申请的 scope：${scopesText(scopeAsk.scopes)}` : '')
+                + (scopeAsk.confirm === 'type-name'
+                  ? '' : '\n\n确认授权并安装？'),
+              /** L3 核心接管：必须手打扩展 id，不给「点一下就授权」 */
+              extra: scopeAsk.confirm === 'type-name'
+                ? h('div', { style: { padding: '0 12px 12px' } },
+                    h('span', { style: { display: 'block', fontSize: 11, opacity: 0.75, marginBottom: 4 } },
+                      `请输入扩展 id「${scopeAsk.id}」确认接管风险：`),
+                    h('input', {
+                      className: 'roost-input', value: tierTyped, spellCheck: false,
+                      placeholder: scopeAsk.id,
+                      onChange: (e) => setTierTyped(e.target.value),
+                    }))
+                : null,
+              confirmText: scopeAsk.confirm === 'type-name' ? '我已确认，授权并安装' : '授权并安装',
+              danger: true, busy: scopeBusy,
               onClose: () => {
                 if (scopeBusy) return
                 setScopeAsk(null)
+                setTierTyped('')
                 toast('已取消安装（未授权）')
               },
               onConfirm: confirmScopeAct,

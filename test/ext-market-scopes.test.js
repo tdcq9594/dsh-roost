@@ -77,7 +77,15 @@ test('M-S1 索要敏感 scope 时拒绝安装并报出要授什么', async () =>
   assert.equal(out.ok, false);
   assert.equal(out.reason, 'needs_scope_confirm');
   assert.deepEqual(out.scopes, ['say:write']);
-  assert.match(out.message, /say:write/);
+  /**
+   * 2026-11-14 分级告知：message 不再只甩一串英文 scope 名，而是
+   * 「等级 + 人话后果」（Chrome 权限警告那套）。scope 名仍在 out.scopes /
+   * out.risks 里完整保留，旧前端和审计都不丢信息。
+   */
+  assert.match(out.message, /权限等级 L2/);
+  assert.match(out.message, /让机器人主动开口说话/, '风险要写成用户看得懂的后果');
+  assert.equal(out.tier, 'L2');
+  assert.ok((out.risks || []).some((x) => /主动开口/.test(x.text)));
   // 关键：没确认就**一个文件都没落**
   assert.equal(r.registry.read('bili'), null);
   assert.equal(r.clientStore.get('ext:bili'), null);

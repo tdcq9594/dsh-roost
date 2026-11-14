@@ -53,6 +53,7 @@ import { createAgentV1 } from './agent-v1.js';
 import { createExtMemoryStore } from './ext-memory-store.js';
 import { createExtMemory } from './ext-memory.js';
 import { createExtPanel, createRejectionLog } from './ext-panel.js';
+import { createFormRegistry } from './ext-forms.js';
 import { createExtApiHooks } from './ext-api-hooks.js';
 import { createExtPatch } from './ext-patch.js';
 import { createExtMarket } from './ext-market.js';
@@ -1506,6 +1507,17 @@ export function apply(ctx) {
   const extClientStore = createClientStore({ dir: dataDir(), log });
   const extSecrets = createExtSecrets({ dir: dataDir(), log });
   const extRegistry = createExtRegistry({ dir: dataDir(), log, secrets: extSecrets, clientStore: extClientStore });
+  /**
+   * 四形态统一注册表（2026-11-14）：把内建能力与已装扩展聚合成一份视图。
+   *
+   * 本轮只做登记与展示：不拆内置代码、不改任何加载链路、不暴露启停
+   * （停用还没接加载闸门，现在给按钮只会让人以为关掉了其实没关）。
+   * 后续把某个内置能力解离成核心扩展时，从这里挪进 `core` 形态即可。
+   */
+  const formRegistry = createFormRegistry({
+    listInstalled: () => extRegistry.list(),
+    log: (m) => log.info(m),
+  });
 
   /**
    * 5.12 补标签任务：**只放内存**。
@@ -1604,7 +1616,68 @@ export function apply(ctx) {
    * QQ usage 收进 `mount()` 的 offs，独立会话过滤收进 `agent-v1.js` 的
    * `rec.offs`，工具输出预算收进 mountOffs，撤销路径各自唯一。
    */
-  const agentV1 = createAgentV1({ dir: dataDir(), ctx, log });
+  const agentV1 = createAgentV1({
+    dir: dataDir(), ctx, log,
+    /**
+     * 独立会话没有 chatId，`agentDefaultModel` 兜不到它。不给它一个显式模型，
+     * `dsh-agent-loop` 第一轮就抛 `has no provider/model`，错误再经
+     * session/event observer 冒泡成 `fatal load failure` 把宿主带崩。
+     * 取「所有聊天的默认模型」→ DSH 全局默认，和 QQ 会话用的是同一套
+     * `pickModelFor`；不传思考强度，让 adapter 自己用默认档。
+     */
+    modelOf: () => pickModelFor({
+      byChat: cfg.model?.byChat,
+      byKind: cfg.model?.byKind,
+      defaultSel: cfg.model?.default,
+      chatId: '', kind: 'agent',
+      globalSel: ctx.get?.('agentDefaultModel')?.currentSelection?.() || null,
+    }),
+    /** DSH 侧残留会话（already exists）时，用宿主最完整的路径把它恢复成活 agent */
+    resolveAgentOf: (sid) => resolveAgent(sid),
+    /**
+     * 独立会话也走宿主那套「会话窗口」调用器（turn.js），和主人私聊同一条路：
+     * `agent.followup()` 把材料投进窗口 → 订阅 session/event 收 assistant/message
+     * → turn/end 判完成，再拿回文本。
+     *
+     * 为什么不能留 `agent-v1.js` 的默认实现：它找 `agent.prompt()/run()`，而
+     * 运行时 `ctx.agents.create()` 给的 handle 只提供 `followup()`，于是
+     * `/v1/agent.prompt` 恒 502「DSH agent 未提供 prompt()/run()」——表现就是
+     * 扩展点了「现在刷一轮」只建了个空会话、模型一次都没跑。
+     *
+     * 复用 `turns` 而不是另抄一份事件订阅：错误分类、上游重试、总预算、
+     * 超时、并发保护、空输出兜底都已经在里面，独立会话白拿同一套保障。
+     */
+    promptFn: async (handle, text, onChunk, meta = {}) => {
+      const sid = String(meta?.sessionId ?? '');
+      let agent = handle?.agent ?? handle;
+      /**
+       * `agents.create()` 返回的是创建句柄，DSH 里真正活着的 agent 要从
+       * `ctx.agents.get(sid)` 拿（宿主其它六处 turns.run 都是这么传的）。
+       * 直接拿创建句柄会撞上「flush on a closed handle」。
+       */
+      if (sid) {
+        /**
+         * 残留会话（崩过 / 重启过之后 DSH 里还在）可能压根没有模型选择，
+         * 第一轮就 `has no provider/model` 并把宿主带崩。这里每轮补一次，
+         * `applyDefaultModel` 自带「套过就跳过」的缓存，不会重复写。
+         */
+        try { await applyDefaultModel(sid, '', 'agent'); }
+        catch (e) { log.warn?.(`独立会话 ${sid} 套模型失败：${e?.message ?? e}`); }
+        try {
+          const live = await resolveAgent(sid);
+          if (live) agent = live;
+        } catch (e) {
+          log.warn?.(`独立会话 ${sid} 拿不到活 agent，退回创建句柄：${e?.message ?? e}`);
+        }
+      }
+      const out = await turns.run(agent, text, {
+        source: { kind: 'roost-ext-agent', speaker: { role: 'none' } },
+        flush: false,
+      });
+      onChunk(out);
+      return out;
+    },
+  });
 
   /**
    * 自驱引擎（实验，默认关）。
@@ -2993,6 +3066,7 @@ export function apply(ctx) {
         config: rc.config,
         secrets: rc.secrets,
         env: { ROOST_DEPS_DIR: sharedDeps.depsDir(), ...inprocessApiEnv(extId) },
+        systemTurn,
         log: (m) => log.warn(`[ext:${extId}] ${m}`),
       });
       if (!run?.handled) return void await done(false, null, run?.reason || '这个动作没有实现');
@@ -3878,6 +3952,36 @@ export function apply(ctx) {
     log.info(`为 ${chat.chatId} 新建 DSH 会话 ${newSid.slice(-8)}（${chat.preset}）`);
     await applyDefaultModel(newSid, chat.chatId, chat.kind);
     return { agent: await resolveAgent(newSid), sessionId: newSid };
+  }
+
+  /**
+   * 宿主内部「系统会话轮次」—— aurabot `hub.runSystemTurn()` 的对等实现。
+   *
+   * 2026-11-14：扩展的「现在刷一轮」以前走 `/v1/agent.new → prompt → close`
+   * 三步 API，那条链路的会话**不写 sessions.json**（与 QQ 会话完全隔离），
+   * 侧栏根本看不到窗口；还接连撞上硬隔离、prompt()/run() 接口不符、
+   * closed handle、no provider/model 把宿主带崩……前后修了五轮。
+   *
+   * 这里换成宿主自己那条验证过的路：`agentFor()` 先查会话映射、有就复用、
+   * 没有才建（顺手写 sessions.json + 套默认模型），`turns.run()` 负责投递与
+   * 收文本。会话窗口天然出现在侧栏，模型/超时/重试全都白拿。
+   *
+   * 由 `runInProcessAction` 注入给 `ui.runtime:"inprocess"` 的扩展；MCP 子进程
+   * 拿不到它，仍走原来的 HTTP 路径。
+   */
+  async function systemTurn(name, text, { timeoutMs = 180_000, windowName = '' } = {}) {
+    const key = String(name ?? '').trim();
+    if (!key) throw new Error('systemTurn 缺 name');
+    /**
+     * `sessionTitle()` 读的是 `chat.name`（见 chat-name.js），不是 `title`。
+     * 传错字段窗口会显示成「QQ · 群 m:bili」这种占位符。
+     */
+    const chat = { chatId: `system:${key}`, kind: 'system', name: String(windowName || `刷 ${key}`) };
+    const { agent } = await agentFor(chat);
+    return turns.run(agent, String(text ?? ''), {
+      source: { kind: 'roost-ext-system', speaker: { role: 'none' } },
+      timeoutMs,
+    });
   }
 
   /** 记忆工具的注册结果（面板要能看见"装上了没"，别静默失败） */
@@ -5977,6 +6081,8 @@ export function apply(ctx) {
                      * 仍用 ext-inprocess.js 的默认 30 秒。
                      */
                     timeoutMs: 150_000,
+                    /** aurabot 式系统会话：扩展点「现在刷一轮」直接跑宿主内部一轮 */
+                    systemTurn,
                     /** 扩展侧按函数用；宿主内部是对象，这一层必须换掉 */
                     log: (m) => log.warn?.(m),
                   });
@@ -6026,6 +6132,10 @@ export function apply(ctx) {
             }
             case 'extensions.status': {
               return send(res, 200, extPanel.status());
+            }
+            /** 四形态总览：内建 / 进程内 / 外部 / 核心（预留）+ 各自的权限等级。只读。 */
+            case 'extensions.forms': {
+              return send(res, 200, { ok: true, rows: formRegistry.snapshot() });
             }
             /**
              * 已知群列表：扩展设置里「推送到哪个群」不该让人手抄群号。
@@ -6086,8 +6196,15 @@ export function apply(ctx) {
               return send(res, 200, extMarket.progress());
             }
             case 'extensions.market.install': {
-              // 清单索要敏感 scope 时返回 needs_scope_confirm，面板确认后再带 true 重试。
-              const r = await extMarket.install(arg?.id, { confirmScopes: arg?.confirmScopes === true });
+              /**
+               * 清单索要敏感 scope 时返回 needs_scope_confirm，面板确认后再带 true 重试。
+               * `confirmTier` 给新前端用：L3 扩展要额外确认到具体等级；旧前端不传
+               * 这个字段时行为与以前完全一致，不会因为升级而装不上。
+               */
+              const r = await extMarket.install(arg?.id, {
+                confirmScopes: arg?.confirmScopes === true,
+                ...(arg?.confirmTier !== undefined ? { confirmTier: arg.confirmTier } : {}),
+              });
               return send(res, r.ok ? 200 : 400, r);
             }
             case 'extensions.market.remove': {

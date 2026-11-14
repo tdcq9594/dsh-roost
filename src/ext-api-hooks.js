@@ -509,7 +509,20 @@ export function createExtApiHooks({
           const why = tuwenProblem(narrowed.params.card);
           if (why) return bad(`图文卡片不合格：${why}`);
         }
-        params = narrowed.params;
+        /**
+         * 幂等键由**宿主**生成，扩展不许自报（`narrowMsgSend` 会把自报的丢掉）。
+         *
+         * 以前这里压根没给，于是扩展直发的消息在框架 `outbound.send()` 里
+         * 走「没有 requestId」那条分支：只进消息账本、不进 deliveries 表，
+         * 面板「投递」里查不到，审核结果也没人跟踪终态。
+         *
+         * 每次调用给一个新 UUID：既不会把「连点两次」误判成重复，
+         * 又让每条直发都有可查的终态。
+         */
+        params = {
+          ...narrowed.params,
+          requestId: `ext-${String(client?.extId ?? 'ext').slice(0, 40)}-${randomUUID()}`,
+        };
       } else if (verdict.kind === 'tool') {
         /** 协议约定：插件工具的参数统一包成 `{ args }` */
         params = { args: input };

@@ -177,29 +177,47 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
   }
 
   const off = ctx.on('session/event', (session, event) => {
-    const sid = session?.id;
-    if (!sid || !waiters.has(sid) || !event) return;
+    /**
+     * 这个回调是 Cordis 的 session observer：里面抛出去的任何东西都会经
+     * `Session.commit → ReactLoopAgent.turn` 冒泡成 DSH 的
+     * `fatal load failure`，**把整个宿主进程干掉**。一轮模型报错就该只是
+     * 这一轮失败，绝不能连带崩宿主。所以整段包住，异常只记日志 + 解掉
+     * 等待者，不往外抛。
+     */
+    try {
+      const sid = session?.id;
+      if (!sid || !waiters.has(sid) || !event) return;
 
-    if (event.type === 'assistant/message') {
-      const d = event.data || {};
-      // 被打断的那条不算数
-      if (d.interrupted) return;
-      const t = textOf(d.message);
-      if (!t) return;
-      const w = waiters.get(sid);
-      if (!w) return;
-      w.turn = d.turn;
-      w.text = t;
-      return;
-    }
+      if (event.type === 'assistant/message') {
+        const d = event.data || {};
+        // 被打断的那条不算数
+        if (d.interrupted) return;
+        const t = textOf(d.message);
+        if (!t) return;
+        const w = waiters.get(sid);
+        if (!w) return;
+        w.turn = d.turn;
+        w.text = t;
+        return;
+      }
 
-    if (event.type === 'turn/end') {
-      const d = event.data || {};
-      const w = waiters.get(sid);
-      if (!w) return;
-      // 只认「这一轮」的文本，上一轮残留的不要
-      const text = w.turn === d.turn ? w.text : '';
-      finish(sid, d.reason?.kind === 'completed', text, d.reason);
+      if (event.type === 'turn/end') {
+        const d = event.data || {};
+        const w = waiters.get(sid);
+        if (!w) return;
+        // 只认「这一轮」的文本，上一轮残留的不要
+        const text = w.turn === d.turn ? w.text : '';
+        finish(sid, d.reason?.kind === 'completed', text, d.reason);
+      }
+    } catch (e) {
+      logger.warn(`session/event 回调异常（已吞掉，不让它冒泡成 fatal）：${e?.message ?? e}`);
+      const sid = session?.id;
+      const w = sid ? waiters.get(sid) : null;
+      if (w) {
+        waiters.delete(sid);
+        if (w.timer) clearTimeout(w.timer);
+        try { w.reject(e); } catch { /* 已经解过就算了 */ }
+      }
     }
   });
 
@@ -214,7 +232,7 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
    *   模型这才「看得见」图，否则它只看到一行「（发了一张图）」。
    * @returns {Promise<string>} AI 的最终文本
    */
-  async function run(agent, text, { source = { kind: 'roost' }, images = [], timeoutMs = 0 } = {}) {
+  async function run(agent, text, { source = { kind: 'roost' }, images = [], timeoutMs = 0, flush = true } = {}) {
     /**
      * 单次尝试的超时。
      *
@@ -246,6 +264,13 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
       timer.unref?.();
       waiters.set(sid, { turn: -1, text: '', resolve, reject, timer });
     });
+    /**
+     * 2026-11-14：一轮失败的 rejection 在被 `await` 接住之前，DSH 会把它当
+     * 未处理异常并判 `fatal load failure`（宿主进程直接退出）。挂一个空
+     * handler 只是告诉 Node「这个 rejection 有人管」，不改变原 promise 的
+     * 状态——`run()` 里 `await promise` 照样拿得到错误。
+     */
+    promise.catch(() => {});
 
     // 先挂上等待，再投递——反过来的话可能「AI 秒回」而我们还没开始等
     try {
@@ -295,7 +320,14 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
         content,
         source,
       });
-      await ctx.sessions?.flush?.(agent.session);
+      /**
+       * `flush` 只对「宿主自己维护的 QQ 会话」有意义。独立会话（/v1/agent.*）
+       * 拿到的 `agents.create()` handle 在 DSH 里可能已经是 closed，硬 flush 会抛
+       * `session "xxx": flush on a closed handle`，整轮直接 502。aurabot 的
+       * `runSystemTurn` 也只 followup、不 flush —— 事件驱动的一轮不需要它。
+       * 默认 true，QQ 私聊那六个调用点行为不变。
+       */
+      if (flush) await ctx.sessions?.flush?.(agent.session);
     } catch (e) {
       finish(sid, false, '', { kind: 'send-failed' });
       throw e;

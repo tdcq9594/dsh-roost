@@ -182,7 +182,7 @@ test('G3-20 persist 快照：写 agent-sessions.json、restore 重新注册、cl
   await b.dispose();
 });
 
-test('G3-21 坏输入：重复 sessionId / section 缺 name / agents 服务不可用', async (t) => {
+test('G3-21 坏输入：section 缺 name / agents 服务不可用；重复 sessionId 走 ensure 复用', async (t) => {
   const dir = tmpHome(t);
   const { svc } = fakeAgents();
   const a = createAgentV1({ dir, agents: svc });
@@ -192,7 +192,13 @@ test('G3-21 坏输入：重复 sessionId / section 缺 name / agents 服务不�
   const one = await a.handleHook({ key: 'POST /v1/agent.new', body: { sessionId: 'dup' }, req: { url: '/' } });
   assert.equal(one.status, 200);
   const dup = await a.handleHook({ key: 'POST /v1/agent.new', body: { sessionId: 'dup' }, req: { url: '/' } });
-  assert.equal(dup.status, 400);
+  /**
+   * 2026-11-14：`/v1/agent.new` 改成 aurabot `agentFor()` 那样的 ensure 语义。
+   * 扩展每轮都拿固定 `bili-duty` 调它，重复 id 不该 400 —— 以前一报 400，
+   * 扩展把 already exists 吞成成功，接着 /agent.prompt 就 404「没起会话」。
+   */
+  assert.equal(dup.status, 200);
+  assert.equal(dup.body.reused, true);
   const none = createAgentV1({ dir, agents: null, ctx: null });
   const noSvc = await none.handleHook({ key: 'POST /v1/agent.new', body: {}, req: { url: '/' } });
   assert.equal(noSvc.status, 400);

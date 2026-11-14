@@ -347,7 +347,12 @@ test('G5-13 接线：api-v1 的 401 / 403 落到 fence 层，且 401 写 ext.aut
   assert.equal((await callV1(api, 'GET', '/v1/agent.list', { token: 'tok' })).status, 403);
   const s = r.rejections.summary();
   assert.equal(s.byLayer.fence.count, 2);
-  assert.ok(s.byLayer.fence.last.rule.includes('EXT_ONLY_DENY') || s.byLayer.fence.last.rule.includes('401'));
+  /**
+   * 2026-11-14 放宽 `agent.*` 后：ext:x 的 scopes 是空的，拒绝理由从
+   * 「扩展令牌被硬隔离」变成「缺少 scope：agent:write」。两种都要认，
+   * 关键是 fence 层确实记下了这次拒绝。
+   */
+  assert.ok(/缺少 scope|EXT_ONLY_DENY|401/.test(s.byLayer.fence.last.rule));
 });
 
 test('G5-14 接线：ext-memory 的 ACL / quota 两层各自落到对应层', async () => {

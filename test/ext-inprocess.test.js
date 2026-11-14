@@ -180,3 +180,31 @@ export function createActions({ env }) {
     cleanup(ext.root);
   }
 });
+
+/**
+ * 2026-11-14：宿主把 `systemTurn`（aurabot runSystemTurn 的对等实现）注入
+ * 进程内扩展，让「现在刷一轮」直接跑宿主系统会话，不再走 /v1/agent.* 三步。
+ * 这条守住注入链，避免以后有人只改了 host.js 却漏了这层。
+ */
+test('systemTurn 能透传进 createActions 并被调用', async () => {
+  const ext = makeExt(`
+export function createActions({ systemTurn }) {
+  return { async ping() { return { ok: true, message: await systemTurn('bili', '材料', { windowName: '刷B站' }) }; } };
+}
+`);
+  try {
+    clearInProcessCache(ext.id);
+    const calls = [];
+    const r = await runInProcessAction({
+      ...ext,
+      action: 'ping',
+      systemTurn: async (...args) => { calls.push(args); return `ok:${args[0]}:${args[1]}`; },
+    });
+    assert.equal(r.result.message, 'ok:bili:材料');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][2].windowName, '刷B站');
+  } finally {
+    clearInProcessCache(ext.id);
+    cleanup(ext.root);
+  }
+});

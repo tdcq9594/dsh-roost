@@ -24,6 +24,7 @@ import { dataDir } from './config.js';
 import { EXT_ID_RE, MANIFEST_FILE, sensitiveScopesOf } from './ext-registry.js';
 import { hashDir, extractTarGz, pickSubtree, writeFiles, rmrfSync } from './ext-bundle.js';
 import { normalizeTags, categoryOf, filterMarketRows, facetsOf, phaseView } from './market-browse.js';
+import { deriveTier, riskLines, installNotice } from './ext-tier.js';
 
 /** 读一份 JSON：读不到返回 null（清单损坏时按「没有 scope 声明」处理，不崩）。 */
 function readJson(file) {
@@ -208,6 +209,8 @@ export function createExtMarket({
     const rows = pickExtensions(idx).map((e) => {
       const mine = local.get(e.id);
       const installedHash = mine?.source?.sha256 ?? '';
+      /** 等级由索引里的原始声明现算：作者不能在清单里自填等级 */
+      const tier = deriveTier(e);
       return {
         id: e.id,
         name: e.name ?? e.id,
@@ -228,6 +231,11 @@ export function createExtMarket({
         updateAvailable: Boolean(mine && e.sha256 && installedHash && installedHash !== e.sha256),
         revoked: isRevoked(idx, e),
         label: isRevoked(idx, e) ? '已撤回，拒绝安装' : '',
+        /** 市场卡片徽章 + 风险明细（主人 2026-11-14 要求「按权限等级明确告知风险」） */
+        tier: tier.id, tierLabel: tier.label, tierColor: tier.color,
+        tierSummary: tier.summary, risks: riskLines(tier),
+        scopes: tier.scopes, overrides: tier.overrides,
+        form: tier.form, formLabel: tier.formLabel,
       };
     });
     return {
@@ -254,12 +262,12 @@ export function createExtMarket({
     setPhase('index', '正在准备安装', key);
     const r = await installInner(key, opts);
     if (r?.ok) setPhase('done', r.message || '已安装', key);
-    else if (r?.reason === 'needs_scope_confirm') setPhase('confirm', r.message || '等待确认权限', key);
+    else if (r?.reason === 'needs_scope_confirm' || r?.reason === 'needs_tier_confirm') setPhase('confirm', r.message || '等待确认权限', key);
     else setPhase('failed', r?.message || '安装失败', key);
     return r;
   }
 
-  async function installInner(id, { confirmScopes = false } = {}) {
+  async function installInner(id, { confirmScopes = false, confirmTier } = {}) {
     const key = String(id ?? '');
     if (!EXT_ID_RE.test(key)) return { ok: false, reason: 'bad_id', message: '扩展 id 不合法' };
 
@@ -296,21 +304,34 @@ export function createExtMarket({
         throw new Error(`目录哈希与索引不一致（索引 ${want.slice(0, 12)}…，实际 ${got.slice(0, 12)}…）`);
       }
       /**
-       * 敏感 scope 必须主人确认。
+       * 分级确认（2026-11-14 全放开配套）。
        *
-       * 清单是扩展作者写的，索要 `say:write` / `proactive:write` 就等于
-       * 「装上后能以机器人身份往外说话」。一键装不能顺带把授权也点了 ——
-       * 这里在落位前拦一道，把要授什么原样报给面板。
+       * 以前只把「敏感 scope 的英文名字」列出来，主人根本看不出
+       * `agent:write` 意味着「会烧模型额度」。现在按 L0–L3 现算等级，
+       * 逐条给人话后果（Chrome 权限警告那套），L3 额外说明「停用才能恢复」。
+       *
+       * 兼容：`confirmScopes:true` 仍是唯一必填确认，旧前端零改动可用；
+       * 前端若传 `confirmTier`，L3 会再要求明确确认到该等级。
        */
       setPhase('scopes', '正在检查权限声明', key);
       const staged = readJson(join(staging, MANIFEST_FILE));
       const sens = sensitiveScopesOf(staged);
-      if (sens.length && confirmScopes !== true) {
+      const derived = deriveTier(staged);
+      if ((derived.level >= 2 || sens.length) && confirmScopes !== true) {
         return {
           ok: false,
           reason: 'needs_scope_confirm',
           scopes: sens,
-          message: `扩展「${key}」索要这些权限：${sens.join('、')}；确认后才安装`,
+          tier: derived.id, tierLabel: derived.label, tierColor: derived.color,
+          confirm: derived.confirm, risks: riskLines(derived),
+          overrides: derived.overrides, form: derived.form,
+          message: installNotice(derived, { name: entry.name ?? key }),
+        };
+      }
+      if (confirmTier !== undefined && derived.level >= 3 && String(confirmTier) !== derived.id) {
+        return {
+          ok: false, reason: 'needs_tier_confirm', tier: derived.id,
+          message: `扩展「${key}」是 ${derived.id}（${derived.label}）等级，需要明确确认后才能安装。${derived.summary}`,
         };
       }
 

@@ -43,12 +43,13 @@ export const EXT_DEFAULT_SCOPES = Object.freeze(['memory:write', 'state:read']);
 export const EXT_ALLOWED_SCOPES = Object.freeze([
   'message:write', 'say:write', 'state:read', 'context:read',
   'memory:read', 'memory:write', 'proactive:write', 'session:write',
-  'prompt:write', 'agent:write',
+  'prompt:write', 'agent:write', 'core:write',
 ]);
 
 /** 会对外产生可见动作（说话 / 刷屏 / 改人格 / 开会话）的 scope，安装时必须主人点头。 */
 export const EXT_SENSITIVE_SCOPES = Object.freeze([
   'message:write', 'say:write', 'proactive:write', 'session:write', 'prompt:write', 'agent:write',
+  'core:write',
 ]);
 
 /** 去重 + 过滤未知项；结果为空时退回默认（绝不返回「无 scope 但令牌有效」这种半吊子态）。 */
@@ -156,6 +157,15 @@ export function validateManifest(raw, { expectedId } = {}) {
       const bad = m.scopes.filter((x) => !EXT_ALLOWED_SCOPES.includes(x));
       if (bad.length) errors.push(`scopes 含未知项：${bad.join('、')}（允许：${EXT_ALLOWED_SCOPES.join('、')}）`);
     }
+  }
+  /**
+   * 四形态与「接管内置能力」声明（2026-11-14 全放开配套）。
+   * 不在这里拦未知值：`ext-tier.js` 会把未知形态/未知能力按 L3 最保守处理，
+   * 安装时明说「无法确认它会改什么」，比直接拒收更适合一个开放生态。
+   */
+  if (m.form !== undefined && typeof m.form !== 'string') errors.push('form 必须是字符串');
+  if (m.overrides !== undefined && (!Array.isArray(m.overrides) || m.overrides.some((x) => typeof x !== 'string'))) {
+    errors.push('overrides 必须是字符串数组（要接管的内置能力名）');
   }
   if (m.mounts !== undefined && (!Array.isArray(m.mounts) || m.mounts.some((x) => typeof x !== 'string'))) {
     errors.push('mounts 必须是字符串数组');
