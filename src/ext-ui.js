@@ -166,6 +166,31 @@ export function normalizeUiSpec(raw) {
     }
   }
 
+  /**
+   * 页面动作的运行方式。
+   *
+   *   · `mcp`（默认）—— 扩展是独立的 MCP 子进程，宿主把动作放进队列，
+   *     扩展自己来取（长轮询）。跨进程，必然有这一跳。
+   *   · `inprocess` —— 扩展提供一个 `.mjs`，宿主 `import()` 进来直接调函数。
+   *     零 IPC、返回值直接回给面板，代价是这个模块跑在宿主进程里，
+   *     和宿主共享一切（上架审核来兜）。
+   *
+   * 两种可以并存：`inprocess` 里没实现的动作仍然回落到 `mcp` 队列。
+   */
+  const runtimeRaw = String(raw.runtime ?? '').trim().toLowerCase();
+  const runtime = runtimeRaw === 'inprocess' ? 'inprocess' : 'mcp';
+  if (runtimeRaw && runtimeRaw !== 'inprocess' && runtimeRaw !== 'mcp') {
+    errors.push('ui.runtime 只能是 inprocess / mcp（不写就是 mcp）');
+  }
+  const entry = String(raw.entry ?? '').trim();
+  if (runtime === 'inprocess') {
+    if (!entry) errors.push('ui.runtime=inprocess 时 ui.entry 必填（入口 .mjs）');
+    else if (!/\.m?js$/i.test(entry)) errors.push('ui.entry 要指向 .js / .mjs');
+    else if (entry.startsWith('/') || entry.startsWith('\\') || /^[A-Za-z]:/.test(entry) || entry.split(/[\\/]/).includes('..')) {
+      errors.push('ui.entry 必须是扩展目录内的相对路径（不许绝对路径或 ..）');
+    }
+  }
+
   const view = raw.view && typeof raw.view === 'object' && !Array.isArray(raw.view) ? raw.view : null;
   if (!view && !page) errors.push('ui.view 必填（或者用 ui.page 指向自己的页面）');
   const kind = String(view?.kind ?? '');
@@ -199,6 +224,9 @@ export function normalizeUiSpec(raw) {
       nav: { label, group: group || DEFAULT_GROUP },
       /** 扩展自带的页面（iframe 入口）；空串 = 走下面的声明式 view */
       page,
+      /** 页面动作怎么跑：`inprocess` 直接 import 调函数，`mcp` 走队列 */
+      runtime,
+      entry,
       view: view ? {
         kind,
         title: String(view.title ?? '').trim().slice(0, 30) || label,

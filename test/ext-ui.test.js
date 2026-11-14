@@ -227,6 +227,20 @@ test('表单声明：true / 数组 / 对象三种写法，保留字与空 key �
   assert.equal(normalizeUiSpec({ ...base }).spec.form.enabled, false, '没写就是关');
 });
 
+test('进程内运行时：必须给 .mjs 入口，路径卡在扩展目录内', () => {
+  const base = { nav: { label: 'x' }, page: 'ui/index.html' };
+  const ok = normalizeUiSpec({ ...base, runtime: 'inprocess', entry: 'ui/main.mjs' });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.spec.runtime, 'inprocess');
+  assert.equal(ok.spec.entry, 'ui/main.mjs');
+  assert.equal(normalizeUiSpec(base).spec.runtime, 'mcp', '不写默认走队列');
+
+  assert.equal(normalizeUiSpec({ ...base, runtime: 'inprocess' }).ok, false, '缺 entry');
+  assert.equal(normalizeUiSpec({ ...base, runtime: 'inprocess', entry: 'ui/main.txt' }).ok, false);
+  assert.equal(normalizeUiSpec({ ...base, runtime: 'inprocess', entry: '../x.mjs' }).ok, false);
+  assert.equal(normalizeUiSpec({ ...base, runtime: 'magic' }).ok, false);
+});
+
 test('按钮声明：只认 {id,label}，重复与超长都拒', () => {
   const base = { nav: { label: 'x' }, page: 'ui/index.html' };
   const ok = normalizeUiSpec({

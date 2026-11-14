@@ -120,6 +120,7 @@ import { polishText, POLISH_PRESETS } from './persona-polish.js';
 import { createAutotelic } from './autotelic.js';
 import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
 import { createUiActionQueue } from './ext-ui-actions.js';
+import { runInProcessAction } from './ext-inprocess.js';
 import {
   pageOf, locate, readSidecar, writeSidecar, suggestTags, removeFiles,
   createTagJob, statsOf, PAGE_SIZE,
@@ -5676,6 +5677,37 @@ export function apply(ctx) {
               if (!spec.ok) return send(res, 400, { ok: false, message: spec.errors.join('；') });
               if (!spec.spec.actions.some((a) => a.id === action)) {
                 return send(res, 400, { ok: false, message: `「${id}」没有声明动作「${action}」` });
+              }
+              /**
+               * 进程内扩展：直接 import 调函数，点了立刻有结果，不走队列。
+               * 模块没实现这个动作时回落下面的队列（两种形态可以混用）。
+               */
+              if (spec.spec.runtime === 'inprocess') {
+                try {
+                  const run = await runInProcessAction({
+                    id,
+                    root: extRegistry.pathOf(id),
+                    entry: spec.spec.entry,
+                    action,
+                    payload: arg?.payload ?? null,
+                    config: extPanel.configOf(id)?.values ?? {},
+                    log,
+                  });
+                  if (run.handled) {
+                    const out = run.result && typeof run.result === 'object' ? run.result : {};
+                    return send(res, 200, {
+                      ok: out.ok !== false,
+                      mode: 'inprocess',
+                      message: String(out.message ?? ''),
+                      data: out.data ?? null,
+                    });
+                  }
+                } catch (e) {
+                  return send(res, 500, {
+                    ok: false, mode: 'inprocess',
+                    message: String(e?.message ?? e).slice(0, 300),
+                  });
+                }
               }
               const r = uiActions.push(id, action, arg?.payload ?? null);
               return send(res, r.ok ? 200 : 429, r);
