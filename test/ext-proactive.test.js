@@ -21,8 +21,19 @@ function withDir(fn) {
   finally { try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* 系统回收 */ } }
 }
 
-/** 固定成白天 10 点，免打扰那道闸默认放行 */
-const T = new Date('2026-11-14T10:00:00+08:00').getTime();
+/**
+ * 固定成白天 10 点，免打扰那道闸默认放行。
+ *
+ * 必须**按宿主本地时区构造**，不能写 `'2026-11-14T10:00:00+08:00'`：
+ * `shouldFire()` 用 `new Date(now()).getHours()` 判时段，那个值是本地小时。
+ * GitHub Actions 跑在 UTC，带 +08:00 的字面量在那里是凌晨 2 点，
+ * 于是整排 drain 用例从「放行」翻成「免打扰」，CI 必红（2026-11-14 踩过：
+ * 20 个用例里 8 个挂，本地 GMT+8 全绿，TZ=UTC 可完整复现）。
+ */
+const T = new Date(2026, 10, 14, 10, 0, 0).getTime();
+test('时间基准：不管 CI 在哪个时区，都必须是宿主本地的上午 10 点', () => {
+  assert.equal(new Date(T).getHours(), 10);
+});
 const cfgOf = (patch = {}) => () => ({ extProactive: { enabled: true, maxPerDay: 50, approval: false, allowGroup: true, ...patch } });
 const q = (dir, patch, now = () => T) => createProactiveQueue({ dir, cfgOf: cfgOf(patch), now });
 
@@ -211,7 +222,8 @@ test('drain：把素材拼进 prompt，让模型写措辞；真发出去才结�
 }));
 
 test('drain：免打扰 / 她要求安静时留队，说明原因让扩展退避', async () => withDir(async (dir) => {
-  const night = new Date('2026-11-14T03:00:00+08:00').getTime();
+  /** 同样按本地时区构造凌晨 3 点，UTC 的 CI 上才真的落在免打扰时段 */
+  const night = new Date(2026, 10, 14, 3, 0, 0).getTime();
   const queue = createProactiveQueue({ dir, cfgOf: cfgOf(), now: () => night });
   queue.submit(item());
   const { d, sp } = makeDispatcher(queue);
