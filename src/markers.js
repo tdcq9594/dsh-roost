@@ -36,9 +36,13 @@ export const VALUE_MARKERS = ['remember-here', 'remember', 'replace', 'persona',
  * 两个图片标记分工（2026-11-07 起模型侧只教这两种）：
  *   `<<image: 路径>>`        就地插图，图和文字同一条
  *   `<<image-alone: 路径>>`  单独发一条图
+ * `<<card: 标题|描述|链接|图>>` 是官方图文卡片，独占一条消息（2026-11-14 加）。
  * `<<retract>>` 没有值，也在放行名单里（动作层认它，撤回自己上一条）。
+ *
+ * 名单是**两层共用的**（`stripUnknown` 与 `stripUnclosed` 都从它生成正则）：
+ * 加新动作标记时只改这一处，漏改任何一层都会让标记原样进群。
  */
-export const DOWNSTREAM_MARKERS = ['image', 'image-alone', 'voice', 'button', 'say', 'silence', 'retract'];
+export const DOWNSTREAM_MARKERS = ['image', 'image-alone', 'card', 'voice', 'button', 'say', 'silence', 'retract'];
 
 /**
  * 一个标记的匹配式。**半角冒号和全角冒号都认**。

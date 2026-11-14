@@ -173,6 +173,15 @@ test('qq_send：放行 image / image-alone / voice，只拦 button / silence', a
   assert.equal(box.sent.length, allowed.length, '被拦的标记一个都不该发出去');
 });
 
+test('qq_send：卡片也放行（它是独立一条消息，不占 markdown 分段）', async () => {
+  /** 另造一套：上面那个 box 已经把 3 段额度用满了 */
+  const { send, box } = make();
+  const text = '<<card: 标题|描述|https://a.com/x|https://a.com/p.png>>';
+  const r = await send.execute({ text });
+  assert.equal(r.ok, true, 'card 不在 SEND_BLOCKED 里，应该交给出站动作层');
+  assert.deepEqual(box.sent, [text], '标记原样传下去，路径/链接不能在这里被改写');
+});
+
 test('qq_send：正文里的普通尖括号不误伤', async () => {
   const { send, box } = make();
   const r = await send.execute({ text: '这个 <<不是标记>> 只是打字' });

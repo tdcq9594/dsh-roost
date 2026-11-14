@@ -45,6 +45,8 @@ import { buildGroupToolDefs } from './group-tools.js';
  * 改这里（放行 image/voice）绕过去的，属于在补我们的洞。
  *
  * 所以现在放行 `image` / `image-alone` / `voice`（都由出站动作层解析执行）。
+ * `<<card:>>` 一并放行：它是**独立一条消息**（`channel.send({ card })`），
+ * 不依赖分段里的 markdown / keyboard，不存在上面那三个的未验证行为。
  * 剩下三个继续拦，理由各不相同：
  *   · `say`：本机 TTS 关掉时 ai-chat 会把它摘掉，有正文的情况下那句话
  *     会彻底消失（只留一行 warn）。宁可在工具这一层明确拒绝，让模型改用
@@ -240,6 +242,8 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
        */
       + '这一段里可以带图片和语音标记：`<<image: 路径>>` 让图和这句话排在同一条，'
       + '`<<image-alone: 路径>>` 单独发一条图，`<<voice: 路径>>` 发语音条。'
+      + '分享视频 / 文章时写 `<<card: 标题|描述|https://链接|https://图片地址>>`：'
+      + '卡片单独占一条消息，四项都要有、链接和图片地址必须是 https，一轮最多一张。'
       + '但 `<<say: …>>` 不要写在这里——宿主 TTS 关着时它会被丢掉，'
       + '改用 setsuna-tts 合成后拿路径写 `<<voice: …>>`。',
     /** 扁平参数表（DSH defineTool 原生形状），普通注册时由 `shapeTool` 转换 */

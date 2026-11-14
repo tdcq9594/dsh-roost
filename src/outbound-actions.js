@@ -18,6 +18,9 @@
  *   · `<<voice: 路径>>`      单独发一条语音
  *   · `<<say: 文本>>`        宿主 TTS 合成后发语音条（没开语音就静默跳过）
  *   · `<<button: 标签|指令>>` 挂到本条 Markdown 的 keyboard
+ *   · `<<card: 标题|描述|https://链接|https://图片>>`
+ *                            官方图文卡片（`msg_type=8`），**独占一条消息**：
+ *                            正文先发、卡片后发，一轮最多一张
  *   · `<<silence: 2h>>`      走框架闸 `gate.silence`
  *   · `<<retract>>`          撤回这一轮之前自己发的最后一条
  *   · `<skip>`               永不外发；正文只剩它时不发这条消息
@@ -32,12 +35,16 @@ import { writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { parseCardValue, tuwenProblem } from './tuwen.js';
+
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)(?:[?#].*)?$/i;
 const VOICE_EXT = /\.(silk|amr|mp3|wav|ogg|m4a)(?:[?#].*)?$/i;
 const SOURCE_PREFIX = /^(?:[a-z][a-z0-9+.-]*:\/\/|\\\\|\/|[a-z]:[\\/]|\.{1,2}[\\/])/i;
 
 /** 单轮最多发几个独立媒体，和旧 ai-chat 的 MAX_MEDIA 一致 */
 export const MAX_MEDIA = 3;
+/** 单轮最多几张官方图文卡片：一张占一整屏，多来几张就是刷屏 */
+export const MAX_CARDS = 1;
 /** 同一轮里多段直发可能重复带同一个标记，按 type+value 去重 */
 const DEDUPE_MS = 60_000;
 
@@ -147,6 +154,28 @@ export function parseOutboundActions(raw) {
   take(/<<button[:：]\s*([\s\S]*?)>>/gi, 'button');
   take(/<<say[:：]\s*([\s\S]*?)>>/gi, 'say');
   take(/<<voice[:：]\s*([\s\S]*?)>>/gi, 'voice');
+
+  /**
+   * `<<card: 标题|描述|https://链接|https://图片>>`：官方图文卡片。
+   *
+   * 和 `/v1/send { card }` 用同一份校验（`tuwen.js`）。不合格的**只摘掉**，
+   * 并留一条 `cardInvalid` 动作让执行器记日志：平台对坏卡片只回一个
+   * 笼统的 `304061`，日志里得有「title 最多 50 字」这种能照着改的原因。
+   * 绝不能把半截参数发成一条空白卡片，那比不发更糟。
+   *
+   * 值里不许出现 `<` / `>`：URL 里没有，模型举例时写的「<链接>」也不该
+   * 被当成真卡片。
+   */
+  {
+    const ranges = codeRanges(out);
+    out = out.replace(/<<card[:：]\s*([^<>]*?)>>/gi, (m, v, offset) => {
+      if (inCode(offset, ranges)) return m;
+      const card = parseCardValue(v);
+      const why = card ? tuwenProblem(card) : '要写成「标题|描述|https://链接|https://图片」';
+      actions.push(why ? { type: 'cardInvalid', value: why } : { type: 'card', card });
+      return '';
+    });
+  }
 
   /** `<<image-alone: 路径>>`：单图单独发；值不像路径就只摘掉，别把占位词留群里 */
   {
@@ -289,6 +318,42 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
         .catch((e) => ({ ok: false, message: e?.message ?? String(e) }));
       if (!rf?.ok) log(`发文件失败（${f}）：${rf?.message ?? '未知原因'}`);
       else onSent();
+    }
+
+    /**
+     * 4.5 官方图文卡片：正文之后独占一条。
+     *
+     * 为什么不是「有 card 就不发正文」（`/v1/send` 是这么做的）：那是**一次
+     * API 调用**里的互斥（一条消息只能有一种富文本），不是一轮回复只能发
+     * 一条消息。模型说「这个视频挺好看 <<card:…>>」时，那句话和卡片都该在，
+     * 所以发两条消息，顺序与 `/v1/send` 的 text→files→card 保持一致。
+     * 只想发卡片就写 `<skip>` + `<<card:>>`：`<skip>` 管的是正文那一条。
+     *
+     * 卡片不写进 `lastSent`：和 `imageAlone` / `voice` 一样，`<<retract>>`
+     * 撤的仍是「这一轮之前自己发的最后一条正文」。让它撤到卡片上会
+     * 出现「撤回没反应」（卡片消息有的场景撤不了）。
+     */
+    const cards = actions.filter((a) => a.type === 'card');
+    for (const a of actions.filter((x) => x.type === 'cardInvalid')) {
+      log(`图文卡片没发（已跳过）：${a.value}`);
+    }
+    if (cards.length > MAX_CARDS) log(`这一轮有 ${cards.length} 张卡片，只发第一张`);
+    for (const a of cards.slice(0, MAX_CARDS)) {
+      /** 解析时已验过一次，这里再兜一次：动作数组也可能从别处进来 */
+      const why = tuwenProblem(a.card);
+      if (why) { log(`图文卡片没发（已跳过）：${why}`); continue; }
+      if (seen(target, 'card', a.card.url)) continue;
+      try {
+        const rc = await ch.send({
+          scene, target, card: a.card, markdown: false,
+          msgId, receivedAt, eventId, isWakeup,
+        });
+        if (rc?.ok) onSent();
+        else log(`图文卡片没发出去：${rc?.message ?? '未知原因'}`);
+      } catch (e) {
+        /** 卡片发失败不能把这一轮带崩，正文已经发出去了 */
+        log(`图文卡片执行失败（已跳过）：${e?.message ?? e}`);
+      }
     }
 
     /** 5. 正文之后的独立媒体：图 / 语音 / 念出来的话 */

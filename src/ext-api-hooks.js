@@ -26,6 +26,10 @@ import { extname, join, resolve, sep } from 'node:path';
 
 import { shouldFire } from './speakup.js';
 import { chatOf } from './inbound.js';
+import { tuwenProblem } from './tuwen.js';
+
+/** 规则本体搬到 `tuwen.js`（模型侧的 `<<card:>>` 也用同一份），这里继续对外导出。 */
+export { tuwenProblem };
 
 const MAX_TEXT = 4000;
 const MAX_FACT = 500;
@@ -58,36 +62,7 @@ const sceneOf = (body) => (body?.scene === 'group' ? 'group' : 'c2c');
 /** 目标优先 `target`，退回 `chatId`（两个名字都收，减少扩展写错的概率）。 */
 const targetOf = (body, query) => String(body?.target ?? body?.chatId ?? query?.target ?? query?.chatId ?? '').trim();
 
-/**
- * 官方图文卡片（`msg_type=8`）的字段校验。
- *
- * 平台侧对卡片参数不合格只会回一句笼统的 `304061`，从错误码看不出是
- * 标题超了还是链接不是 https。所以在这里逐条挡，把具体原因回给扩展——
- * 扩展的作者看到「title 最多 50 字」才知道怎么改。
- *
- * 四个字段全必填是官方口径（`msg.replyTuwen` 的注释也写着），少一个
- * 发出去就是一条空白卡片，比不发更糟。
- *
- * @returns {string} 空串 = 没问题
- */
-export function tuwenProblem(card) {
-  const t = String(card?.title ?? '').trim();
-  const d = String(card?.description ?? '').trim();
-  const u = String(card?.url ?? '').trim();
-  /** `picUrl` 是扩展写的，`pic_url` 是官方字段名，两个都认 */
-  const p = String(card?.picUrl ?? card?.pic_url ?? '').trim();
-  if (!t) return '缺 title';
-  if (!d) return '缺 description';
-  if (!u) return '缺 url';
-  if (!p) return '缺 picUrl';
-  if ([...t].length > 50) return `title 最多 50 字（现在 ${[...t].length} 字）`;
-  if ([...d].length > 200) return `description 最多 200 字（现在 ${[...d].length} 字）`;
-  for (const [name, v] of [['url', u], ['picUrl', p]]) {
-    if (!/^https:\/\//i.test(v)) return `${name} 必须是 https 地址`;
-    if (v.length > 1024) return `${name} 最多 1024 字符`;
-  }
-  return '';
-}
+/** 卡片的字段校验见 `tuwen.js`，这里只负责把它用在 `/v1/send` 上。 */
 
 /**
  * @param {object} deps 全部是**函数**，在调用时才求值 ——

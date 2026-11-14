@@ -64,9 +64,9 @@ export function isPoliteRevocation(text) {
  * 两个图片标记都要认：`<<image: 路径>>`（图文同条）与 `<<image-alone: 路径>>`
  * （单独一条）。它们都是标记、要摘，摘完补一条「发了图片」的占位。
  */
-const RE_ACTION = /<<\s*(image-alone|image|voice|say|button|silence|remember)\s*(?::|：)\s*((?:(?!<<)[\s\S])*?)>>/gi;
+const RE_ACTION = /<<\s*(image-alone|image|card|voice|say|button|silence|remember)\s*(?::|：)\s*((?:(?!<<)[\s\S])*?)>>/gi;
 /** 兜底只认已知动作名，避免 `a << b >> c` 这类正文被误伤 */
-const RE_ANY_MARK = /<<\s*(?:image|voice|say|button|silence|remember|forget|mood)\s*(?::|：)?(?:(?!<<)[\s\S])*?>>/gi;
+const RE_ANY_MARK = /<<\s*(?:image|card|voice|say|button|silence|remember|forget|mood)\s*(?::|：)?(?:(?!<<)[\s\S])*?>>/gi;
 /**
  * 半截标记只摘到**第一个句末标点或换行**为止。
  *
@@ -74,7 +74,7 @@ const RE_ANY_MARK = /<<\s*(?:image|voice|say|button|silence|remember|forget|mood
  * （「你好<<say: 断了，后面还有正常正文」→「你好」）。宁可留个逗号，
  * 也不能把她说过的话静默删掉。同样不许跨过下一个 `<<`。
  */
-const RE_UNCLOSED = /<<\s*(?:image|voice|say|button|silence|remember|forget|mood)\s*(?::|：)?(?:(?!<<)[^，。！？\n])*/gi;
+const RE_UNCLOSED = /<<\s*(?:image|card|voice|say|button|silence|remember|forget|mood)\s*(?::|：)?(?:(?!<<)[^，。！？\n])*/gi;
 
 /**
  * 引用文本（L1 的输入）。
@@ -164,6 +164,12 @@ export function cleanBotText(text) {
       if (k === 'image' || k === 'image-alone') { images += 1; return ''; }
       if (k === 'voice') { voices += 1; return ''; }
       if (k === 'say') return v;
+      /**
+       * 卡片只留标题。整段值是「标题|描述|https://链接|https://图」，
+       * 全留会把两个 URL 塞进日记（下一轮模型会当成自己发过的约定），
+       * 全丢又会连「分享过什么」都不记得——标题正好是那件事的名字。
+       */
+      if (k === 'card') return v.split(/\s*[|｜]\s*/)[0].trim();
       // button / silence / remember 都是指令，不是正文
       return '';
     });

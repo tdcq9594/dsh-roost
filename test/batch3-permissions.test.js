@@ -123,6 +123,10 @@ test('guard 真的挂到 systemPrompt.context：name / order / text 都是运行
     assert.equal(text.split('\n').length, 7);
     assert.ok(text.split('\n').at(-1).startsWith('例外只有 chat_look'));
     assert.ok(registered.some((c) => c.name === 'roost-near' && c.order === 908), '908 < 910');
+    /** 光有导出函数不算数：card 写法必须真出现在运行时 text() 的返回值里 */
+    const pluginPrompt = registered.find((c) => c.name === 'roost-plugin-prompt');
+    assert.ok(pluginPrompt, '插件契约没挂上');
+    assert.match(pluginPrompt.text(), /<<card: 标题\|描述\|https:\/\/链接\|https:\/\/图片地址>>/);
   } finally {
     for (const c of cleanups) { try { c(); } catch {} }
     if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;

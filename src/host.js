@@ -214,6 +214,27 @@ export function roostGuardText() {
   ].join('\n');
 }
 
+/**
+ * 出站能力补充：跟在 DSH 插件那份系统提示（`roost-plugin-prompt`）后面。
+ *
+ * 为什么必须宿主自己补：`image` / `image-alone` / `voice` / `button` 的契约
+ * 写在**插件**的 system 文本里，宿主新加的标记它不会自动知道。模型看不见
+ * 写法，能力就等于不存在（2026-11-14 补 `<<card:>>` 时发现的：扩展能发卡片、
+ * 模型却一个字都不会写）。
+ *
+ * 只讲新标记怎么写，不重复插件已经教过的那些——重复两遍反而容易让模型
+ * 在「哪份才算数」上犹豫。
+ */
+export function roostCardHintText() {
+  return [
+    '想分享一个视频 / 网页 / 作品时，可以在回复里写官方图文卡片：',
+    '<<card: 标题|描述|https://链接|https://图片地址>>',
+    '四项都要有，链接和图片地址必须是 https 开头；标题不超过 50 字、描述不超过 200 字。',
+    '卡片会单独占一条消息，你说的那句话照常发；一轮最多一张，别连着发好几张。',
+    '没有真实的 https 链接和图片地址就不要写它——拿占位词拼出来的卡片发不出去。',
+  ].join('\n');
+}
+
 export const name = 'roost';
 
 /** agents / sessions 拿会话；systemPrompt 注人格；webServer 给面板接口 */
@@ -4213,6 +4234,10 @@ export function apply(ctx) {
      * 宿主自己另写一份人格就等于让这些标记全部失效。
      * 之前就是这个 bug——DSH 模式下模型完全不知道有标记可用。
      *
+     * 插件那份文本里没有宿主后来加的 `<<card:>>`，所以紧跟在后面补一段
+     * `roostCardHintText()`。挂在同一个 context 里（不另开 order）是为了
+     * 让模型把两段连着读：先看协议全貌，再看新能力。
+     *
      * order 900：排在人格（905）前面，先立规矩再谈性格。
      */
     const sid0 = agent?.session?.id;
@@ -4223,7 +4248,8 @@ export function apply(ctx) {
           order: 900,
           text: () => {
             const cur = sid0 ? speaker.get(sid0) : null;
-            return cur?.system ? String(cur.system) : '';
+            const base = cur?.system ? String(cur.system) : '';
+            return [base, roostCardHintText()].filter(Boolean).join('\n');
           },
         }),
       );
