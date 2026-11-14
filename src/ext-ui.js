@@ -23,7 +23,7 @@
  *   · `log`   —— 时间序列，一行一条，最新在上（运行记录、抓取日志）。
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, realpathSync } from 'node:fs';
 import { join, resolve as resolvePath, sep } from 'node:path';
 
 /**
@@ -431,6 +431,22 @@ export function readUiData({ dir, spec, maxBytes = MAX_UI_BYTES } = {}) {
   }
   if (!existsSync(abs)) {
     return { ok: false, rows: [], updatedAt: 0, truncated: false, reason: `还没有数据文件（${file}）` };
+  }
+  /**
+   * 第二道：解符号链接。只比字符串路径的话，扩展可以在自己目录里放一个
+   * 指向 `config.json` 的软链，把宿主配置当界面数据读出来。
+   * 与 `ext-api-hooks.js` 的 `checkExtFile()` / `host.js` 的 /ext-pages 同口径。
+   * 放在 existsSync 之后：文件还没生成时要保持「还没有数据文件」这句提示。
+   */
+  let realRoot, realAbs;
+  try {
+    realRoot = realpathSync(root).toLowerCase();
+    realAbs = realpathSync(abs).toLowerCase();
+  } catch (e) {
+    return { ok: false, rows: [], updatedAt: 0, truncated: false, reason: `数据文件读不到：${e?.message ?? e}` };
+  }
+  if (realAbs !== realRoot && !realAbs.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep)) {
+    return { ok: false, rows: [], updatedAt: 0, truncated: false, reason: '数据文件跑到扩展目录外面了（符号链接）' };
   }
 
   let stat;

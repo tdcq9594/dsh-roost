@@ -20,6 +20,35 @@ import { lookup } from 'node:dns/promises';
 
 const DEFAULT_PORTS = [80, 443, 8080, 8443];
 
+/**
+ * 把 IPv4-mapped IPv6 还原成点分 IPv4；不是映射地址返回 ''。
+ *
+ * `new URL` 会把 `http://[::ffff:127.0.0.1]/` 规范成 `::ffff:7f00:1`
+ *（点分 → 十六进制组），所以两种写法都得认。2026-11-14 对抗测试实测
+ * `::ffff:7f00:1` / `::ffff:a9fe:a9fe`（云元数据 169.254.169.254）/
+ * `::ffff:a00:1`（10.0.0.1）三种都能绕过旧版校验。
+ */
+function mappedV4(ip) {
+  const s = String(ip ?? '').toLowerCase();
+  const m = /^::ffff:(.+)$/.exec(s);
+  if (!m) return '';
+  const rest = m[1];
+  if (isIP(rest) === 4) return rest;
+  const parts = rest.split(':').filter(Boolean);
+  if (parts.length === 2 && parts.every((p) => /^[0-9a-f]{1,4}$/i.test(p))) {
+    const hi = parseInt(parts[0], 16);
+    const lo = parseInt(parts[1], 16);
+    return `${(hi >>> 8) & 255}.${hi & 255}.${(lo >>> 8) & 255}.${lo & 255}`;
+  }
+  return '';
+}
+
+/** 含 IPv4-mapped 形式的回环判定，给 allowLoopback 用 */
+function loopbackIp(ip) {
+  const s = String(ip ?? '').toLowerCase();
+  return s === '127.0.0.1' || s === '::1' || mappedV4(s) === '127.0.0.1';
+}
+
 /** IPv4 / IPv6 的私有、回环、链路本地、保留、组播地址 */
 export function isPrivateIp(ip) {
   const s = String(ip ?? '').toLowerCase().split('%')[0];
@@ -37,10 +66,15 @@ export function isPrivateIp(ip) {
       || a >= 224;                                // 组播 + 保留
   }
   if (isIP(s) === 6) {
-    if (s === '::' || s === '::1' || s.startsWith('::ffff:127.')) return true;
-    /** ::ffff:a.b.c.d 形式的内网 IPv4 映射 */
-    const v4 = s.startsWith('::ffff:') ? s.slice(7) : '';
-    if (v4 && isIP(v4) === 4) return isPrivateIp(v4);
+    if (s === '::' || s === '::1') return true;
+    /**
+     * IPv4-mapped IPv6：点分与十六进制组都还原成 IPv4 再判。
+     * 认不出来的 `::ffff:` 一律按私有处理（fail-closed），别再放行。
+     */
+    if (s.startsWith('::ffff:')) {
+      const v4 = mappedV4(s);
+      return v4 ? isPrivateIp(v4) : true;
+    }
     const head = s.split(':')[0];
     if (/^f[cd]/.test(head)) return true;          // fc00::/7 唯一本地
     if (/^fe[89ab]/.test(head)) return true;       // fe80::/10 链路本地
@@ -51,7 +85,7 @@ export function isPrivateIp(ip) {
 
 export function isLoopbackHost(host) {
   const h = String(host ?? '').toLowerCase().replace(/^\[|\]$/g, '');
-  return h === 'localhost' || h.endsWith('.localhost') || h === '::1' || h === '127.0.0.1';
+  return h === 'localhost' || h.endsWith('.localhost') || loopbackIp(h);
 }
 
 /**
@@ -72,7 +106,7 @@ export function checkUrlSync(raw, { allowLoopback = false, allowHosts = [], allo
   const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (allowHosts.some((h) => String(h).toLowerCase() === host)) return u;
   if (isIP(host)) {
-    if (isPrivateIp(host) && !(allowLoopback && (host === '127.0.0.1' || host === '::1'))) {
+    if (isPrivateIp(host) && !(allowLoopback && loopbackIp(host))) {
       throw new Error('不许访问内网 / 回环地址');
     }
   } else if (isLoopbackHost(host) && !allowLoopback) {
@@ -85,8 +119,19 @@ export function checkUrlSync(raw, { allowLoopback = false, allowHosts = [], allo
 export async function assertSafeUrl(raw, opts = {}) {
   const u = checkUrlSync(raw, opts);
   const host = u.hostname.replace(/^\[|\]$/g, '');
-  if (isIP(host)) return u.href;
+  /** 显式 allowHosts 是主人自己列的白名单，优先级最高 */
   if ((opts.allowHosts || []).some((h) => String(h).toLowerCase() === host.toLowerCase())) return u.href;
+  /**
+   * 纵深防御：字面 IP 再判一次私有，不把安全全押在 checkUrlSync 一处。
+   * 以前这里是 `if (isIP(host)) return u.href` 直接放行，同步校验一旦
+   * 有漏网（如 ::ffff: 十六进制组）就整个失守。
+   */
+  if (isIP(host)) {
+    if (isPrivateIp(host) && !(opts.allowLoopback && loopbackIp(host))) {
+      throw new Error('不许访问内网 / 回环地址');
+    }
+    return u.href;
+  }
   let addrs;
   try {
     addrs = await lookup(host, { all: true, verbatim: true });

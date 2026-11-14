@@ -9850,7 +9850,7 @@ select.roost-input{color-scheme:dark}
             h(ConfirmLink, {
               label: seconds ? '禁言' : '解禁',
               confirmLabel: '确认执行',
-              onConfirm: () => act('/group/mute', { groupId: pick, targets: who, seconds }, seconds ? '已禁言' : '已解禁'),
+              onConfirm: () => act('/group/mute', { groupId: pick, targets: who, seconds, confirm: true }, seconds ? '已禁言' : '已解禁'),
             }),
             h('span', { className: 'd' }, who.length ? `已填 ${who.length} 人` : '还没填目标'),
           ),
@@ -9871,7 +9871,7 @@ select.roost-input{color-scheme:dark}
                 h(ConfirmLink, {
                   label: '踢出',
                   confirmLabel: '确认踢出',
-                  onConfirm: () => act('/group/kick', { groupId: pick, targets: who, addToBlacklist: black }, '已踢出'),
+                  onConfirm: () => act('/group/kick', { groupId: pick, targets: who, addToBlacklist: black, confirm: true }, '已踢出'),
                 }),
                 h('div', { className: 'roost-note' }, '目标沿用上面「禁言」那一栏填的 openid。'),
               ),
@@ -9893,11 +9893,11 @@ select.roost-input{color-scheme:dark}
                       h('span', { style: { display: 'flex', gap: 6 } },
                         h(ConfirmLink, {
                           label: '通过', confirmLabel: '确认通过',
-                          onConfirm: () => act('/group/join', { groupId: pick, action: 'approve', memberOpenid: who2, joinRequestId: rid }, '已通过'),
+                          onConfirm: () => act('/group/join', { groupId: pick, action: 'approve', memberOpenid: who2, joinRequestId: rid, confirm: true }, '已通过'),
                         }),
                         h(ConfirmLink, {
                           label: '拒绝', confirmLabel: '确认拒绝',
-                          onConfirm: () => act('/group/join', { groupId: pick, action: 'decline', memberOpenid: who2, joinRequestId: rid }, '已拒绝'),
+                          onConfirm: () => act('/group/join', { groupId: pick, action: 'decline', memberOpenid: who2, joinRequestId: rid, confirm: true }, '已拒绝'),
                         }),
                       ),
                     )

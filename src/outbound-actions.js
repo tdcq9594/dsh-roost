@@ -176,6 +176,22 @@ export function parseOutboundActions(raw) {
       return '';
     });
   }
+  {
+    /**
+     * 兜底：值里写了 `<` / `>`（模型常把示例写成 `<链接>`）时，上面那条
+     * `[^<>]*?` 根本不匹配，旧版会整段 `<<card: …>>` 原样发到群里。
+     * 这里全部摘掉，并留一条能照着改的原因。
+     */
+    const ranges = codeRanges(out);
+    out = out.replace(/<<card[:：]([\s\S]*?)>>/gi, (m, v, offset) => {
+      if (inCode(offset, ranges)) return m;
+      actions.push({
+        type: 'cardInvalid',
+        value: '卡片参数里不能出现 < 或 >，要写成「标题|描述|https://链接|https://图片」',
+      });
+      return '';
+    });
+  }
 
   /** `<<image-alone: 路径>>`：单图单独发；值不像路径就只摘掉，别把占位词留群里 */
   {
@@ -270,7 +286,16 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
 
     /** 1. 就地插图：上传成 Markdown 素材，占位符换成安全引用 */
     const uploaded = [];
+    /** 整轮媒体预算：就地插图 + 后面的独立图 / 语音 / 念出来的话 合计不超 MAX_MEDIA */
+    let inlineUsed = 0;
     for (const a of actions.filter((x) => x.type === 'inlineImage')) {
+      if (inlineUsed >= MAX_MEDIA) {
+        /** 超预算的占位符直接删掉，绝不能把本地路径留在正文里 */
+        body = body.split(a.key).join('');
+        log('就地插图超过单轮上限（已跳过）');
+        continue;
+      }
+      inlineUsed += 1;
       try {
         const r = await ch.uploadMarkdownImage({ scene, target, path: a.value, retain: false });
         const url = String(r?.url ?? '').trim();
@@ -360,7 +385,7 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
     let mediaSent = 0;
     const media = actions.filter((a) => ['imageAlone', 'voice', 'say'].includes(a.type));
     for (const a of media) {
-      if (mediaSent >= MAX_MEDIA) break;
+      if (inlineUsed + mediaSent >= MAX_MEDIA) break;
       if (a.type === 'imageAlone' && !IMAGE_EXT.test(a.value.split(/[?#]/)[0])) continue;
       if (a.type === 'voice' && !VOICE_EXT.test(a.value.split(/[?#]/)[0])) continue;
       if (seen(target, a.type, a.value)) continue;

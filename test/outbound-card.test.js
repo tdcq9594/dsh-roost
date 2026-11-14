@@ -86,6 +86,21 @@ test('解析：不合格的只摘掉，留一条能照着改的原因', () => {
   }
 });
 
+test('坏卡片：值里带尖括号也要摘掉并记原因，不能原样进群', () => {
+  /** 清单 §4 P3-2：`[^<>]` 不匹配，旧版整段 `<<card: …>>` 会原样发出去 */
+  const a = parseOutboundActions('给 <<card: 标题|描述|<链接>|https://a.com/p.png>>');
+  assert.equal(a.text, '给', '标记不能漏到正文里');
+  assert.equal(a.actions.filter((x) => x.type === 'card').length, 0);
+  const bad = a.actions.find((x) => x.type === 'cardInvalid');
+  assert.ok(bad, '要留下能照着改的原因');
+  assert.match(bad.value, /< 或 >/);
+
+  /** 末尾多一个 `>` 也不能留下半个标记 */
+  const b = parseOutboundActions('给 <<card: 标题|描述|https://a.com/x|<图片>>>');
+  assert.equal(b.text.includes('<<card'), false);
+  assert.ok(b.actions.some((x) => x.type === 'cardInvalid'));
+});
+
 test('语法层：card 放行给动作层，未闭合的仍要清', () => {
   assert.ok(DOWNSTREAM_MARKERS.includes('card'));
   const raw = `<<card: ${GOOD}>>`;

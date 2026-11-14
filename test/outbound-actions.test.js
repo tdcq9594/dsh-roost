@@ -144,6 +144,18 @@ test('执行：上传失败只删占位符，不把本地路径发出去', async
   assert.doesNotMatch(p.text, /C:\/pic|<<image/);
 });
 
+test('执行：整轮媒体合计不超 MAX_MEDIA，超出的占位符删干净', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch });
+  const text = Array.from({ length: 5 }, (_, i) => `图${i} <<image: C:/p/${i}.png>>`).join(' ')
+    + ' 单图 <<image-alone: C:/p/x.png>>';
+  await run({ text, target: 'g1' });
+  assert.equal(ch.calls.filter((c) => c[0] === 'upload').length, 3, '就地插图最多 3 张');
+  assert.equal(ch.calls.filter((c) => c[0] === 'file').length, 0, '预算用完后独立媒体不再发');
+  const p = ch.calls.find((c) => c[0] === 'send')[1];
+  assert.doesNotMatch(p.text, /<<image|C:\/p\//, '超预算的占位符不能把本地路径留在正文');
+});
+
 test('执行：正文先发、单图后发；同一标记在一轮里只发一次', async () => {
   const ch = fakeChannel();
   const run = createActionRunner({ channel: () => ch });

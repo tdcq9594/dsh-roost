@@ -33,8 +33,14 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
   return function applyMemoryMarkers(text, chatId, said = '', kind = 'group', src = null, caller = 'owner') {
     const bucket = typeof caller === 'string' ? caller : (caller?.bucket ?? 'owner');
     const canWriteFacts = bucket === 'owner';
+    /**
+     * 拒绝也要留信号：旧版只把 `<<remember:>>` 从正文摘掉、返回里什么都没有，
+     * 宿主无从知道「模型替群友写事实被拦了」，排查时只看到一句突然消失的话。
+     */
+    const rejected = [];
     const denyFact = (name) => {
-      log.debug(`${name} 已忽略：这一轮是 ${bucket}，只有主人能写事实`);
+      log.debug(`${name} 已忽略：这一轮是 ${bucket}，只有主人能写事实 / 改心情`);
+      rejected.push(`${name}(${bucket})`);
       return '';
     };
     const aliases = aliasesOf(chatId);
@@ -122,6 +128,12 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
     });
 
     out = out.replace(markerRe('mood'), (_, v) => {
+      /**
+       * 清单 §5 P3-1：心情是**全局态**，群友写一句 `<<mood: valence=-1>>`
+       * 会影响所有会话里她的语气。和写事实同一条边界，只摘不执行。
+       * 宿主内部 systemTurn 不走 onInbound，不受影响。
+       */
+      if (!canWriteFacts) return denyFact('mood');
       /**
        * 解析交给 `parseMoodMark`，别在这里自己按逗号切。
        *
@@ -235,6 +247,6 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
      */
     out = stripUnclosed(out);
 
-    return { text: out.trim(), touched };
+    return { text: out.trim(), touched, rejected };
   };
 }

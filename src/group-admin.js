@@ -26,6 +26,7 @@ const REASON_TEXT = Object.freeze({
   need_invite: '踢人/成员列表要「群管内邀」白名单，去开放平台申请；禁言不需要',
   not_admin: '机器人得先是这个群的管理员（群设置 → 群机器人 → 管理员）',
   protected: '对方是群主或管理员，官方不允许动',
+  protected_owner: '主人（或机器人自己）不能被这个面板禁言 / 踢出',
   rate_limited: '太频繁了，等一会儿再试',
   too_many: `一次最多 ${MAX_BATCH} 人`,
   too_long: '禁言最长 30 天',
@@ -53,8 +54,22 @@ export function normalizeTargets(v) {
  * @param {(m:string)=>void} [p.log]
  * @param {()=>number} [p.now]                        注入时钟，测试用
  */
-export function createGroupAdmin({ rpc, audit = () => {}, log = () => {}, now = () => Date.now() } = {}) {
+export function createGroupAdmin({
+  rpc, audit = () => {}, log = () => {}, now = () => Date.now(),
+  /** 本地保护名单（主人 / 机器人自己）；不注入就不启用，测试与协议侧不受影响 */
+  protectedTargets = () => [],
+} = {}) {
   if (typeof rpc !== 'function') throw new Error('群管需要 rpc 函数');
+
+  /**
+   * 清单 P3-1：`REASON_TEXT.protected` 以前只是一句文案，真要动主人只能等
+   * 官方回错。面板本身没有理由允许这种操作，本地先挡一道。
+   */
+  const protectedHit = (list) => {
+    const raw = typeof protectedTargets === 'function' ? protectedTargets() : protectedTargets;
+    const set = new Set((Array.isArray(raw) ? raw : []).map((x) => String(x ?? '').trim()).filter(Boolean));
+    return set.size ? list.find((x) => set.has(String(x))) : '';
+  };
 
   /** `${YYYY-MM-DD}:${action}` → 次数 */
   const used = new Map();
@@ -93,6 +108,7 @@ export function createGroupAdmin({ rpc, audit = () => {}, log = () => {}, now = 
     if (!gid) return { ok: false, reason: 'bad_params', message: '缺群号（groupId）' };
     if (!list.length) return { ok: false, reason: 'bad_params', message: '先选一个要禁言的人' };
     if (list.length > MAX_BATCH) return fail('too_many');
+    if (protectedHit(list)) return fail('protected_owner');
     const sec = Math.max(0, Math.floor(Number(seconds) || 0));
     if (sec > MAX_MUTE_SEC) return fail('too_long');
     if (usedOf('mute') >= DAILY_LIMITS.mute) return fail('daily_limit');
@@ -119,6 +135,7 @@ export function createGroupAdmin({ rpc, audit = () => {}, log = () => {}, now = 
     if (!gid) return { ok: false, reason: 'bad_params', message: '缺群号（groupId）' };
     if (!list.length) return { ok: false, reason: 'bad_params', message: '先选一个要踢的人' };
     if (list.length > MAX_BATCH) return fail('too_many');
+    if (protectedHit(list)) return fail('protected_owner');
     if (usedOf('kick') >= DAILY_LIMITS.kick) return fail('daily_limit');
 
     try {

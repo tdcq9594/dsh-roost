@@ -14,7 +14,7 @@
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
 import { basename, join, resolve, extname, relative, sep } from 'node:path';
-import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, readFileSync, rmSync, realpathSync } from 'node:fs';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets } from './config.js';
 import { redactText, redactValue, addSecretProvider } from './redact.js';
 import { createSessions } from './sessions.js';
@@ -61,7 +61,7 @@ import { pickModelFor, pickReasoningEffort, pickEffortFor } from './model-pick.j
 import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { rerankHits } from './rerank.js';
-import { isDangerousCommand, createConfirmGate } from './safety.js';
+import { isDangerousCommand, createConfirmGate, dangerScanArgs } from './safety.js';
 import { createClosing, shouldNotePending } from './closing.js';
 import { createAccount } from './account.js';
 import { createRewriter } from './rewrite.js';
@@ -994,13 +994,27 @@ export function apply(ctx) {
           const dMine = dSid ? (sessions.list?.() || []).find((x) => x?.sessionId === dSid) : null;
           const dSp = dSid ? speaker.get(dSid) : null;
           const dChat = String(dMine?.chatId || dSp?.payload?.chat?.chatId || '');
-          if (dChat) {
-            const danger = isDangerousCommand(name, exec?.args ?? exec?.input);
-            if (danger.dangerous) {
-              if (confirmGate.consume(dChat, danger.key)) return undefined;
-              confirmGate.ask(dChat, danger);
-              return `需要确认：${danger.reason}。已在 QQ 里问你，回复「确认」后这条命令才执行。`;
+          /** 全字段扫：命令落在 script / query / payload 里也不能绕过（旧版只看 args/input） */
+          const danger = isDangerousCommand(name, dangerScanArgs(exec));
+          if (danger.dangerous) {
+            /**
+             * 三段式，别全局 fail-closed（2026-11-14 兼容性核查）：
+             *   · 非危险  → 放行，autotelic / 旧 agent.prompt / 扩展 systemTurn
+             *               用这些伪地址跑正常工具，全拦会把「现在刷一轮」打断；
+             *   · 危险 + 真实 QQ 地址 → 走一次性确认；
+             *   · 危险 + 空 / `system:*` / `consolidate` 伪地址 → **直接拒绝且不 ask**。
+             *     ask 会把确认提示发往不存在的窗口，pending 永远消费不掉，
+             *     之后每条危险命令都卡在「需要确认」。
+             */
+            const askable = Boolean(dChat) && !/^(?:system:|consolidate)/i.test(dChat);
+            if (!askable) {
+              log.warn(`危险命令已拒绝（${danger.key}）：会话 ${dChat || '(无)'} 没有可回确认的 QQ 窗口`);
+              return `已拒绝：${danger.reason}。这类命令需要主人在 QQ 里确认，当前会话没有确认窗口。`;
             }
+            /** 批准与命令目标绑定：确认删临时目录不能顺带放行 rm -rf / */
+            if (confirmGate.consume(dChat, danger.key, danger.fingerprint)) return undefined;
+            confirmGate.ask(dChat, danger);
+            return `需要确认：${danger.reason}。已在 QQ 里问你，回复「确认」后这条命令才执行。`;
           }
         }
         /**
@@ -1878,8 +1892,14 @@ export function apply(ctx) {
     dir: dataDir(), log, clientStore: extClientStore, onReject,
     hooks: {
       agent: (a) => agentV1.handleHook(a),
-      'llm.vision': async ({ body }) => {
-        const r = await llmVision(body);
+      'llm.vision': async ({ body, client }) => {
+        /**
+         * `ext-llm.js` 拿 extId 当视觉会话 id。以前直接用请求体里的
+         * `body.extId`，而 api-v1 只给 memory/ext.add 覆盖过 extId ——
+         * 全放开 scope 之后这就是外部可控的跨扩展会话串扰。
+         * 这里从令牌读，扩展自报的一律顶掉。
+         */
+        const r = await llmVision({ ...body, extId: String(client?.extId ?? '') });
         return { status: r.ok ? 200 : 400, body: r };
       },
       /** 后台写：extId 已由 api-v1 从令牌读出并覆盖 body，这里不再自报。 */
@@ -2786,6 +2806,8 @@ export function apply(ctx) {
     rpc: (m, p) => roost.rpc(m, p),
     audit,
     log: (m) => log.warn(m),
+    /** 本地先拦：主人不能被这个面板禁言 / 踢出，不用等官方回 protected */
+    protectedTargets: () => [ownerId()].filter(Boolean),
   });
 
   const buildFromRoost = createPayloadBuilder({
@@ -4166,8 +4188,9 @@ export function apply(ctx) {
            * 复用同一个函数而不是另写一份清理：标记的语义不该因为
            * 它出现在正文还是工具参数里而不同。
            */
-          const { text, touched } = applyMemoryMarkers(raw, c.chatId, c.said, c.kind, srcOf(c.payload), bucketOf(c.payload));
+          const { text, touched, rejected } = applyMemoryMarkers(raw, c.chatId, c.said, c.kind, srcOf(c.payload), bucketOf(c.payload));
           if (touched) log.info(`工具发言里的标记已执行：${touched}`);
+          if (rejected?.length) log.warn(`工具发言里的标记被拒：${rejected.join('、')}`);
           if (!text) {
             /**
              * 整段都是标记，没有可发的内容。
@@ -4807,7 +4830,13 @@ export function apply(ctx) {
      */
     if (confirmGate.hasPending(chat.chatId)) {
       const said = String(payload?.text ?? '');
-      if (confirmGate.onMessage(chat.chatId, said)) {
+      /**
+       * 扩展 `/v1/message` 的 id 一律 `api-<ext>-…`。它不是真人在 QQ 里回的
+       * 确认：全放开 scope 之后，拿到 message:write 的扩展本就能自己发一句
+       * 「确认」把自己刚发起的危险命令放行，这里必须把来源卡死。
+       */
+      const fromApi = /^api-/i.test(String(payload?.id ?? ''));
+      if (!fromApi && confirmGate.onMessage(chat.chatId, said)) {
         try {
           sendOut({
             scene: chat.kind === 'group' ? 'group' : 'c2c',
@@ -5200,7 +5229,7 @@ export function apply(ctx) {
        * 所以「模型说记住了什么」也该由这边落盘，然后把标记从回复里摘掉，
        * 发到群里的就是干净的一句话。
        */
-      const { text: reply, touched } = applyMemoryMarkers(
+      const { text: reply, touched, rejected } = applyMemoryMarkers(
         rawReply,
         chat.chatId,
         String(payload?.text ?? ''),
@@ -5209,6 +5238,7 @@ export function apply(ctx) {
         bucketOf(payload),
       );
       if (touched) log.info(`记忆：${touched}`);
+      if (rejected?.length) log.warn(`记忆标记被拒：${rejected.join('、')}`);
 
       /** 这一轮模型自己发了几段（用 `qq_send` 的话） */
       const used = sidTurn ? qqTurn.get(sidTurn) : null;
@@ -8089,6 +8119,10 @@ export function apply(ctx) {
       route('/group/mute', async (req, res) => {
         if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
         const body = await readBody(req);
+        /** 破坏性动作要服务端强确认，光靠前端弹窗挡不住脚本 / 误触 */
+        if (body?.confirm !== true) {
+          return send(res, 200, { ok: false, reason: 'need_confirm', message: '禁言需要显式确认' });
+        }
         return send(res, 200, await groupAdmin.mute({
           groupId: body?.groupId,
           targets: body?.targets,
@@ -8099,6 +8133,9 @@ export function apply(ctx) {
       route('/group/kick', async (req, res) => {
         if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
         const body = await readBody(req);
+        if (body?.confirm !== true) {
+          return send(res, 200, { ok: false, reason: 'need_confirm', message: '踢人需要显式确认' });
+        }
         return send(res, 200, await groupAdmin.kick({
           groupId: body?.groupId,
           targets: body?.targets,
@@ -8109,6 +8146,10 @@ export function apply(ctx) {
       route('/group/join', async (req, res) => {
         if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
         const body = await readBody(req);
+        /** `action:'list'`（也是 `groupAdmin.join()` 的默认值）是只读，别让它也要确认 */
+        if (String(body?.action || 'list') !== 'list' && body?.confirm !== true) {
+          return send(res, 200, { ok: false, reason: 'need_confirm', message: '审批入群申请需要显式确认' });
+        }
         return send(res, 200, await groupAdmin.join({
           groupId: body?.groupId,
           action: body?.action,
@@ -8979,12 +9020,28 @@ export function apply(ctx) {
         if (!back || back === '..' || back.startsWith(`..${sep}`)) {
           return send(res, 403, { ok: false, message: '只能取扩展目录里的文件' });
         }
+        /**
+         * 第二道：解符号链接。`relative()` 只看字符串，扩展目录里放一个
+         * 指向宿主配置文件的软链就能把目录外的文件当页面发出去。
+         * 与 `ext-api-hooks.js` 的 `checkExtFile()` 保持同一套口径。
+         */
+        let realRoot, realAbs;
+        try {
+          realRoot = realpathSync(root);
+          realAbs = realpathSync(abs);
+        } catch {
+          return send(res, 404, { ok: false, message: `读不到 ${rel}` });
+        }
+        const realBack = relative(realRoot, realAbs);
+        if (realBack === '..' || realBack.startsWith(`..${sep}`)) {
+          return send(res, 403, { ok: false, message: '只能取扩展目录里的文件' });
+        }
         let buf;
         try {
-          const st = statSync(abs);
+          const st = statSync(realAbs);
           if (!st.isFile()) return send(res, 404, { ok: false, message: `${rel} 不是文件` });
           if (st.size > 4 * 1024 * 1024) return send(res, 413, { ok: false, message: '页面文件超过 4 MB' });
-          buf = readFileSync(abs);
+          buf = readFileSync(realAbs);
         } catch {
           return send(res, 404, { ok: false, message: `读不到 ${rel}` });
         }

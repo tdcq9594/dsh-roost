@@ -169,6 +169,23 @@ test('非 owner 的 remember-here / replace 同样不写', () => {
   assert.ok(!names().includes('memory.supersede'));
 });
 
+test('非 owner 的 mood：全局心情不能被群友改，且返回 rejected 信号', () => {
+  const { apply, names } = rig();
+  const r = apply('今天不开心 <<mood: valence=-1>>', 'g1', '', 'group', null, 'member');
+  assert.equal(r.text, '今天不开心', '标记要摘干净');
+  assert.ok(!names().includes('mood.set'), '心情是全局态，群友不该能动');
+  assert.deepEqual(r.rejected, ['mood(member)']);
+});
+
+test('被拒的事实标记要在返回里留信号，宿主能记日志', () => {
+  const { apply } = rig();
+  const r = apply('<<remember: 规则>> <<remember-here: 群规>>', 'g1', '', 'group', null, 'member');
+  assert.equal(r.rejected.length, 2);
+  assert.match(r.rejected.join(','), /remember/);
+  const ok = apply('<<remember: 主人说的>>', 'g1');
+  assert.deepEqual(ok.rejected, [], 'owner 正常写时不该有拒绝信号');
+});
+
 test('unknown 档位也不放行（拿不到权限不等于主人）', () => {
   const { apply, names } = rig();
   apply('<<remember: 规则>>', 'g1', '', 'group', null, 'unknown');

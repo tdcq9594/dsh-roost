@@ -97,8 +97,12 @@ export function createLlmVision({
         }],
         maxTokens: Math.max(200, Math.min(1200, Number(body?.maxTokens) || 600)),
         temperature: 0.3,
-        /** 后台调用没有会话，得自带一个：opencode 那条路由要求请求头，不带就 400 */
-        sessionId: `ext-vision-${String(body?.extId ?? 'unknown').slice(0, 32)}`,
+        /**
+         * 后台调用没有会话，得自带一个：opencode 那条路由要求请求头，不带就 400。
+         * `extId` **只能由宿主从令牌注入**（见 host.js 的 llm.vision hook），
+         * 不许扩展自报——否则能冒用别的扩展的会话 id 造成串扰。
+         */
+        sessionId: `ext-vision-${String(body?.extId || 'unknown').slice(0, 32)}`,
       });
       for await (const chunk of stream) {
         if (!chunk) continue;

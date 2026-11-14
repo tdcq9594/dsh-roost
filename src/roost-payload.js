@@ -30,6 +30,18 @@ import { textOf } from './roost-merge.js';
 const DEFAULT_MAX_IMAGES = 4;
 /** 单张上限。宁可看不见，也别把请求撑到几 MB */
 const MAX_BYTES = 2 * 1024 * 1024;
+/**
+ * 下载重试：QQ 图片 CDN 偶发抖动 / 连接被重置时，一次失败不该让整轮
+ * 消息变成「发来一张图，但没取到——可以让对方重发」。
+ *
+ * 只对**可恢复**的失败重试：网络异常、超时、408/425/429/5xx。
+ * 404 / 403（链接过期、防盗链）、超大文件、非图片格式都是确定性失败，
+ * 重试只会白等，直接跳过。每次尝试单独超时，最多 3 次 + 两段短退避。
+ */
+const IMAGE_TRIES = 3;
+const IMAGE_RETRY_MS = [180, 450];
+const IMAGE_ATTEMPT_TIMEOUT_MS = 8_000;
+const RETRY_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 /** 落盘的图留多久：它会出现在对话上下文里，删太早模型引用就断 */
 const KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 /** 清理节流：一小时最多扫一次目录 */
@@ -197,10 +209,12 @@ export function buildRendered(evt, text, { images = null } = {}) {
  * @param {(o:{chatId:string,kind:string})=>Promise<boolean|null>} [o.canSee]
  *        `vision === 'auto'` 时问一句「这个模型能不能看图」；
  *        返回 `null` = 宿主没声明，按「照发」处理
+ * @param {(attempt:number)=>number} [o.retryDelayMs] 重试退避毫秒；测试传 `() => 0`
  */
 export function createPayloadBuilder({
   rpc, log = () => {}, fetchImpl = fetch, vision = true,
   maxImages = DEFAULT_MAX_IMAGES, markdown = true, canSee = null,
+  retryDelayMs = null,
 } = {}) {
   /** 通道到底走不走 Markdown：@ 标签、图文同条、按钮都跟着它变 */
   const wantMarkdown = () => {
@@ -277,41 +291,66 @@ export function createPayloadBuilder({
     }
 
     const out = [];
+    let failed = 0;
     for (let i = 0; i < urls.length; i++) {
-      try {
-        const res = await fetchImpl(urls[i], { signal: AbortSignal.timeout(15_000) });
-        if (!res.ok) {
-          log(`图片下载失败（HTTP ${res.status}）`);
-          continue;
-        }
-        const buf = Buffer.from(await res.arrayBuffer());
-        if (buf.length > MAX_BYTES) {
-          log(`图片太大（${Math.round(buf.length / 1024)}KB），跳过`);
-          continue;
-        }
-        const mime = guessMime(buf, res.headers.get('content-type') || '');
-        if (!mime) {
-          log('不是认识的图片格式，跳过');
-          continue;
-        }
-        /**
-         * 文件名只用「消息 id + 序号」。不拿 URL 里的东西拼——那串是外部输入，
-         * 带 `../` 或盘符就能写到目录外面去。
-         */
-        const safeId = String(evt?.msgId || evt?.eventId || 'img').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40) || 'img';
-        const name = `qq-${safeId}-${i + 1}${extOf(mime)}`;
-        let path = '';
+      let saved = false;
+      for (let attempt = 1; attempt <= IMAGE_TRIES && !saved; attempt += 1) {
+        const again = () => attempt < IMAGE_TRIES;
+        const wait = () => {
+          const ms = typeof retryDelayMs === 'function'
+            ? retryDelayMs(attempt)
+            : (IMAGE_RETRY_MS[attempt - 1] ?? 0);
+          return Number(ms) > 0 ? new Promise((r) => setTimeout(r, Number(ms))) : Promise.resolve();
+        };
         try {
-          path = join(imgDir, name);
-          writeFileSync(path, buf);
+          const res = await fetchImpl(urls[i], {
+            signal: AbortSignal.timeout(IMAGE_ATTEMPT_TIMEOUT_MS),
+          });
+          if (!res.ok) {
+            const status = Number(res.status);
+            const retry = again() && RETRY_STATUS.has(status);
+            log(`图片下载失败（HTTP ${status}，第 ${attempt}/${IMAGE_TRIES} 次）${retry ? '，稍后重试' : ''}`);
+            if (!retry) break;
+            await wait();
+            continue;
+          }
+          const buf = Buffer.from(await res.arrayBuffer());
+          if (buf.length > MAX_BYTES) {
+            log(`图片太大（${Math.round(buf.length / 1024)}KB），跳过`);
+            break;
+          }
+          const mime = guessMime(buf, res.headers.get('content-type') || '');
+          if (!mime) {
+            log('不是认识的图片格式，跳过');
+            break;
+          }
+          /**
+           * 文件名只用「消息 id + 序号」。不拿 URL 里的东西拼——那串是外部输入，
+           * 带 `../` 或盘符就能写到目录外面去。
+           */
+          const safeId = String(evt?.msgId || evt?.eventId || 'img').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40) || 'img';
+          const name = `qq-${safeId}-${i + 1}${extOf(mime)}`;
+          let path = '';
+          try {
+            path = join(imgDir, name);
+            writeFileSync(path, buf);
+          } catch (e) {
+            log(`图片落盘失败（${e?.message ?? e}），这一轮只走内存`);
+            path = '';
+          }
+          out.push({ data: buf.toString('base64'), mediaType: mime, name, path, index: i });
+          saved = true;
         } catch (e) {
-          log(`图片落盘失败（${e?.message ?? e}），这一轮只走内存`);
-          path = '';
+          /** fetch 抛错 / arrayBuffer 中途断流，都算可恢复的网络问题 */
+          log(`图片下载出错（第 ${attempt}/${IMAGE_TRIES} 次）：${e?.message ?? e}${again() ? '，稍后重试' : ''}`);
+          if (!again()) break;
+          await wait();
         }
-        out.push({ data: buf.toString('base64'), mediaType: mime, name, path, index: i });
-      } catch (e) {
-        log(`图片下载出错：${e?.message ?? e}`);
       }
+      if (!saved) failed += 1;
+    }
+    if (failed) {
+      log(`这一轮 ${failed}/${urls.length} 张图没取到（已重试 ${IMAGE_TRIES} 次），模型只看到文字提示`);
     }
     return out;
   }

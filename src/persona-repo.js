@@ -30,6 +30,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { compareVersion } from './version.js';
+import { checkUrlSync, isPrivateIp } from './ssrf.js';
 // 哈希规则只能有一个定义处：这里、catalog、构建脚本必须算出一模一样的 sha256，
 // 否则 Windows 检出（CRLF）会被判成「改过」，一键更新永远跳过用户文件。
 import { hashText } from './catalog.js';
@@ -207,6 +208,9 @@ export function createPersonaRepo({
   const inflight = new Map();
 
   function assertSafeUrl(raw) {
+    /**
+     * 白名单是业务约束，先判，保留原有的错误文案（面板和测试都认它）。
+     */
     let u;
     try {
       u = new URL(String(raw));
@@ -217,6 +221,15 @@ export function createPersonaRepo({
     if (!hosts.has(u.hostname)) {
       throw new Error(`只允许从 ${[...hosts].join(' / ')} 拉人格，不接受「${u.hostname}」`);
     }
+    /**
+     * 2026-11-14 清单 P2：白名单过了还要走 `ssrf.js` 的统一纵深校验
+     * （凭据 / 端口 / 字面内网 / IPv4-mapped IPv6）。以前这里只有上面三行，
+     * 规则会跟 `ext-market.js` 各自漂移；现在安全裁决只有一处。
+     */
+    checkUrlSync(raw, { allowHosts: [...hosts] });
+    /** allowHosts 命中会跳过字面 IP 检查，这里补一道：白名单也不许列内网地址 */
+    const host = u.hostname.replace(/^\[|\]$/g, '');
+    if (isPrivateIp(host)) throw new Error(`不许把内网地址列进人格源白名单（${host}）`);
     return u;
   }
 
