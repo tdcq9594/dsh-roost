@@ -284,6 +284,35 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
   }
 
   /**
+   * 目录里**有东西但装不上**的扩展：清单无效 / 读不出来。
+   *
+   * `list()` 遇到坏清单会静默跳过（这是对的，一个坏扩展不该拖垮整张列表），
+   * 但跳过之后面板上就只剩「扩展目录里还没有东西」——用户完全看不出
+   * 「我的扩展怎么没了」。0.11.0 就撞过：清单 35 个配置字段超过 32 上限，
+   * 面板空、侧边栏入口也没了，只能靠日志里的 warn 找原因。
+   *
+   * 这里把原因捞出来交给面板显示，**不参与** `list()` 的判断。
+   *
+   * @returns {{id: string, errors: string[]}[]}
+   */
+  function problems() {
+    let names;
+    try {
+      names = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const out = [];
+    for (const ent of names) {
+      if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
+      if (!EXT_ID_RE.test(ent.name)) continue;
+      const v = validateManifest(readJson(join(root, ent.name, MANIFEST_FILE)), { expectedId: ent.name });
+      if (!v.ok) out.push({ id: ent.name, errors: v.errors.map(String) });
+    }
+    return out;
+  }
+
+  /**
    * §3.5 ① 的失效钩子：面板保存 usage / 安装 / 更新 / 卸载 / 启动加载清单后调用。
    * 这里读一次盘，把结果放进内存；`liveUsage()` 之后完全不碰文件。
    */
@@ -479,7 +508,7 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
   }
 
   return {
-    dir, root, list, read, sourceOf, isForeign, install, remove, pathOf,
+    dir, root, list, problems, read, sourceOf, isForeign, install, remove, pathOf,
     liveUsage, refreshUsage, configSpecOf,
   };
 }

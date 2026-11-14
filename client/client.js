@@ -13397,6 +13397,16 @@ select.roost-input{color-scheme:dark}
         ] : []),
         ...(showInstalled ? [
         h('div', { className: 'roost-diag-h', style: { marginTop: 12 } }, '已装扩展'),
+        /**
+         * 有目录、但清单不合格的扩展：`list()` 会静默跳过，面板就只剩一句
+         * 「还没有东西」，用户根本不知道自己的扩展怎么了。把原因直接摆出来。
+         */
+        (data?.problems || []).length
+          ? h('div', { className: 'roost-note', style: { color: 'var(--bad)', marginTop: 4 } },
+              `⚠ ${data.problems.length} 个扩展在目录里但清单不合格，已从列表与导航隐藏：`
+              + data.problems.map((x) => `${x.id}（${(x.errors || []).join('；')}）`).join('；')
+              + '。修好它的 plugin.json 再刷新即可。')
+          : null,
         (data?.rows || []).length
           ? h('div', { className: 'roost-list' },
               data.rows.map((x) => h('div', { key: x.id, className: 'ext-row' },
@@ -13457,7 +13467,7 @@ select.roost-input{color-scheme:dark}
                   : null,
               )),
             )
-          : h('div', { className: 'roost-empty' }, '扩展目录里还没有东西。'),
+          : h('div', { className: 'roost-empty' }, '还没有扩展写过记忆（装好的扩展会出现在左侧导航；这里只列它们进提示词的说明）。'),
         h('div', {
           className: 'roost-note',
           /** 合计预算 2048 字节（与 `ext-usage.js` 的 USAGE_TOTAL_BYTE_LIMIT 对齐）。超了进提示词会被截，必须当场说。 */

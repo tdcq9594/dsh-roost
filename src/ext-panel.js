@@ -203,7 +203,18 @@ export function createExtPanel({
         })(),
       };
     });
-    return { ok: true, enabled: enabled(), rows: out, totalBytes: out.reduce((n, r) => n + r.bytes, 0) };
+    /**
+     * `problems`：目录里有、但清单坏了装不上的扩展。
+     * 没有它的话，一个写坏的 plugin.json 会让面板显示「扩展目录里还没有东西」，
+     * 用户以为扩展被删了（0.11.0 的 32 字段上限就这么坑过一次）。
+     */
+    return {
+      ok: true,
+      enabled: enabled(),
+      rows: out,
+      totalBytes: out.reduce((n, r) => n + r.bytes, 0),
+      problems: typeof registry.problems === 'function' ? registry.problems() : [],
+    };
   }
 
   /**

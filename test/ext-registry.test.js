@@ -223,3 +223,32 @@ test('目录派生：extensions / secrets 都在注入的 dataDir 下，不依�
   assert.equal(reg.root, join(home, 'extensions'));
   assert.deepEqual(reg.list(), []);
 });
+
+/* ---------------- 坏清单不能「静默消失」 ---------------- */
+
+test('problems()：目录在、清单无效时给出原因；list() 仍然跳过它', (t) => {
+  const home = tmpHome(t);
+  const extRoot = join(home, 'extensions');
+  fs.mkdirSync(join(extRoot, 'bili'), { recursive: true });
+  /** 32 个配置字段是硬上限，造一个超限的清单 */
+  const cfg = {};
+  for (let i = 0; i < 33; i += 1) cfg[`k${i}`] = { type: 'boolean', label: `第${i}项` };
+  fs.writeFileSync(join(extRoot, 'bili', 'plugin.json'), JSON.stringify(manifest('bili', { config: cfg }), null, 2));
+
+  const r = createExtRegistry({ dir: home, log: () => {} });
+  assert.deepEqual(r.list(), [], '清单无效不该进已装列表');
+  const p = r.problems();
+  assert.equal(p.length, 1);
+  assert.equal(p[0].id, 'bili');
+  assert.match(p[0].errors.join(' '), /最多 32 个字段/);
+});
+
+test('problems()：清单正常时为空', (t) => {
+  const { home } = staged(t, 'bili');
+  const extRoot = join(home, 'extensions');
+  fs.mkdirSync(extRoot, { recursive: true });
+  fs.cpSync(join(home, 'bili'), join(extRoot, 'bili'), { recursive: true });
+  const r = createExtRegistry({ dir: home, log: () => {} });
+  assert.equal(r.list().length, 1);
+  assert.deepEqual(r.problems(), []);
+});

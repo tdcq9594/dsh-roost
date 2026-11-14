@@ -89,3 +89,23 @@ test('平台二进制就位 → 判定可用，并给出绝对路径', sandbox(a
   assert.equal(s.packages['@ffmpeg-installer/ffmpeg'].available, true);
   assert.equal(d.hasFfmpeg(), true);
 }));
+
+test('用户自定义数据目录时，装的位置与受管块注入的值一致', sandbox(async (dir) => {
+  const d = await fresh();
+  const { renderEntry } = await import('../src/ext-patch.js');
+
+  /** 1. 装的位置跟着 dataDir 走 */
+  assert.equal(d.depsDir(), join(dir, 'deps'));
+
+  /**
+   * 2. 受管块注入的 `ROOST_DEPS_DIR` 必须**同一个值**。
+   *
+   * 这两处一旦漂移，扩展就会去一个空目录里找 ffmpeg，表现是
+   * 「面板上装好了、扩展说没装」。`createExtPatch` 的默认值是
+   * `join(dir, 'deps')`，而 `dir` 传的就是 `dataDir()`。
+   */
+  const block = renderEntry('demo', { apiUrl: 'http://127.0.0.1:1/v1', dir });
+  const m = block.match(/ROOST_DEPS_DIR: '([^']+)'/);
+  assert.ok(m, '受管块里必须有 ROOST_DEPS_DIR');
+  assert.equal(m[1].replace(/\\/g, '/'), join(dir, 'deps').replace(/\\/g, '/'));
+}));
