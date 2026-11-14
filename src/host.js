@@ -5694,6 +5694,23 @@ export function apply(ctx) {
               return send(res, 200, extPanel.status());
             }
             /**
+             * 已知群列表：扩展设置里「推送到哪个群」不该让人手抄群号。
+             *
+             * 只读 `cfg.awake.groups`（面板里配置过的那份），不回显任何消息内容；
+             * 没有配置过群时返回空数组，前端退化成输入框。
+             */
+            case 'groups.list': {
+              const list = Array.isArray(cfg?.awake?.groups) ? cfg.awake.groups : [];
+              const groups = list
+                .map((g) => ({ chatId: String(g?.chatId ?? '').trim(), name: String(g?.name ?? '').trim() }))
+                .filter((g) => g.chatId);
+              return send(res, 200, {
+                ok: true,
+                groups,
+                message: groups.length ? '' : '还没有配置过群（在「群聊 → 唤醒」里加一个）',
+              });
+            }
+            /**
              * 阶段 6 市场：索引 → 下载校验 → 原子落位 → 权限组 → 受管块。
              * 全部走 `extMarket` 编排；安装/卸载真要联网与写盘，因此只有面板显式点击才会到这里。
              */
