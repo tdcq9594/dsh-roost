@@ -220,3 +220,38 @@ test('3.7：media.send（语音/文件）同样支持 event_id', async () => {
   await ch.sendFile({ target: 'u9', path: 'D:/tmp/a.png', eventId: 'evt_f' });
   assert.equal(calls[1][1].eventId, 'evt_f');
 });
+
+/* ---------------- 超长正文：主动通道没有分段，只能截断 ---------------- */
+
+test('超长正文会被截断（平台单条上限内，不整条发出去被拒）', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm3' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false, log: () => {} });
+
+  /** 2000 字，中间有句号：应该在句号处切，不留半句话 */
+  const long = `${'这是一句话。'.repeat(300)}`;  /** 1800 字，超过 1500 */
+  const r = await ch.send({ target: 'u9', text: long });
+  assert.equal(r.ok, true);
+  const sent = calls[0][1].content;
+  assert.ok(sent.length <= 1501, `截断后应 ≤1501（含省略号），实际 ${sent.length}`);
+  assert.ok(sent.endsWith('…'), '截断要有省略号，让人知道不是讲完了');
+  assert.ok(sent.startsWith('这是一句话。'), '开头不能被切掉');
+});
+
+test('刚好在上限内不截断，也不加省略号', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm4' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false, log: () => {} });
+  const exact = 'a'.repeat(1500);
+  await ch.send({ target: 'u9', text: exact });
+  assert.equal(calls[0][1].content.length, 1500);
+  assert.ok(!calls[0][1].content.endsWith('…'));
+});
+
+test('没有句子边界时退回硬切，长度仍然受控', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm5' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false, log: () => {} });
+  await ch.send({ target: 'u9', text: 'x'.repeat(5000) });
+  assert.ok(calls[0][1].content.length <= 1501, '硬切也要落在上限内');
+});

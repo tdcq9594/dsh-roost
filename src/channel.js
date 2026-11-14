@@ -119,6 +119,39 @@ function isMarkdownRejection(e) {
   return /(40034008|304061|22006|40034\d{3}|markdown)/i.test(String(e?.message ?? e ?? ''));
 }
 
+/**
+ * 单条主动消息的正文上限。
+ *
+ * 取 1500 与框架 `message.js` 的 `MAX_CHUNK` 对齐：那条路径是**分段**发完，
+ * 而 `msg.send` 没有分段能力，只能截断。两边同一个阈值，行为可预期。
+ */
+const MAX_OUTBOUND_TEXT = 1500;
+
+/**
+ * 超长正文截断，切点尽量落在句子/段落边界。
+ *
+ * 为什么不是直接 `slice(0, N)`：模型写长回答时经常在句子中间断开，
+ * 「……所以我觉」这种结尾比少说两句更糟。优先在换行、句号处切；
+ * 边界太靠前（不到一半）才退回硬切，避免只剩一句话。
+ *
+ * @param {string} s
+ * @returns {{text: string, cut: boolean}}
+ */
+function clampOutbound(s) {
+  const str = String(s ?? '');
+  if (str.length <= MAX_OUTBOUND_TEXT) return { text: str, cut: false };
+  const head = str.slice(0, MAX_OUTBOUND_TEXT);
+  const at = Math.max(
+    head.lastIndexOf('\n'),
+    head.lastIndexOf('。'),
+    head.lastIndexOf('！'),
+    head.lastIndexOf('？'),
+    head.lastIndexOf('；'),
+  );
+  const end = at > MAX_OUTBOUND_TEXT * 0.5 ? at + 1 : MAX_OUTBOUND_TEXT;
+  return { text: `${str.slice(0, end).trimEnd()}…`, cut: true };
+}
+
 /** 降级时把 Markdown 记号去掉，别把 `**加粗**` 原样发给用户 */
 function plainOf(s) {
   return String(s ?? '')
@@ -199,7 +232,22 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
        */
       card = null,
     } = {}) {
-      const t = String(text ?? '').trim();
+      const raw = String(text ?? '').trim();
+      /**
+       * 单条正文上限。
+       *
+       * 框架对**被动回复**有 1500 字分段（`message.js` 的 `MAX_CHUNK`），但
+       * `msg.send` 这条主动通道没有——正文一口气发出去，超平台单条上限就被拒，
+       * 用户看到的是「一个字都没回」，日志里只有一条 400。
+       *
+       * 这里选择**截断而不是分段**：主动消息本来就该短，分三条连发比截断更吵。
+       * 切点尽量落在句子/段落边界，别把一句话砍成两半。
+       */
+      const clamped = clampOutbound(raw);
+      const t = clamped.text;
+      if (clamped.cut) {
+        log(`正文 ${raw.length} 字超过单条上限 ${MAX_OUTBOUND_TEXT}，已截断到 ${t.length} 字`);
+      }
       const hasCard = Boolean(card && typeof card === 'object');
       if (!target) return { ok: false, message: '缺 target' };
       /**
