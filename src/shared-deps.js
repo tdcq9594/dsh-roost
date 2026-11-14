@@ -42,6 +42,18 @@ export const WHITELIST = Object.freeze({
     size: '~62MB',
     desc: '视频抽帧、音频转码',
   },
+  /**
+   * 二维码生成（B 站扫码登录用）。纯 JS、无安装脚本，`--ignore-scripts`
+   * 装得上；用的是 `create()` 只取位矩阵，不碰它画图那部分。
+   *
+   * 扩展那边是「装了就优先用、没装就用内置兜底」，所以这个包缺失不会
+   * 让扫码不可用，只是版本上限低一些。
+   */
+  qrcode: {
+    range: '^1.5.4',
+    size: '~1.6MB（含传递依赖）',
+    desc: '生成二维码（扫码登录）',
+  },
 });
 
 const FFMPEG = '@ffmpeg-installer/ffmpeg';
