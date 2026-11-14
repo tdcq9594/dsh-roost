@@ -14353,7 +14353,8 @@ select.roost-input{color-scheme:dark}
       if (d.page) {
         return h('div', null, head,
           h('iframe', {
-            src: '/ext-pages?id=' + encodeURIComponent(id) + '&file=' + encodeURIComponent(d.page),
+            /** `API` 是 `/roost/api`：`route()` 注册时会拼上这个前缀，别写成 `/ext-pages` */
+            src: API + '/ext-pages?id=' + encodeURIComponent(id) + '&file=' + encodeURIComponent(d.page),
             title: d.nav?.label || id,
             style: {
               width: '100%', height: 'calc(100vh - 230px)', minHeight: 460,
