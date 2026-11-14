@@ -253,7 +253,14 @@ export function createSpeakUp({ dataDir, cfgOf, ownerOf, generate, send, log = (
 
     try {
       const prompt = opts.material ? `${cfg.prompt}\n\n${opts.material}` : cfg.prompt;
-      const raw = String((await generate(prompt)) ?? '').trim();
+      /**
+       * 素材要**单独**再传一份：宿主的 `generate` 在「主动搭话」分支里不直接用
+       * 这个 prompt（`awake.compose()` 会另拼一套带记忆/惦记的模板），只把
+       * `opts.material` 作为独立段落插进去。以前没传，结果模型根本没看到
+       * 扩展投来的视频，自然只会回 `<<skip>>` —— 表现就是「投了素材、
+       * 花了一次模型调用、什么都没发出去」。
+       */
+      const raw = String((await generate(prompt, { material: opts.material ?? '' })) ?? '').trim();
 
       /**
        * **她自己决定不说** —— 这是正常结局，不是失败。

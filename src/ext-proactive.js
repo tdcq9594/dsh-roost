@@ -39,11 +39,27 @@ const FILE = 'ext-proactive.json';
 const dayOf = (t) => new Date(t).toDateString();
 const clip = (v, n) => String(v ?? '').slice(0, n);
 
-/** 目标只认两种：主人私聊（'owner'），或显式群号（'group:数字'）。 */
+/**
+ * 目标解析。
+ *
+ * 三种形态：
+ *   · `owner` / `private` / 空 → 私聊主人；
+ *   · `group:<openid>` → 指定的群；
+ *   · `recent` / `group:recent` → **最近说过话的群**，由宿主在真正发送前
+ *     现查（见 `drain`）。扩展不该知道群 openid——那是一长串平台发的
+ *     字符串，写死在配置里既难认、换机器人就失效。
+ *
+ * 群号字符集放开到 `[A-Za-z0-9_-]`：QQ 官方的群 openid 不是数字群号，
+ * 只认 `\d{5,20}` 会把官方群全部拒掉（表现为「推群永远发不出去，
+ * 报『target 只能填 owner 或 group:群号』」）。
+ */
 export function normalizeTarget(v) {
   const s = String(v ?? '').trim();
   if (!s || s === 'owner' || s === 'private') return { scene: 'c2c', target: '' };
-  const m = s.match(/^(?:group:)?(\d{5,20})$/);
+  if (s === 'recent' || s === 'recent-group' || s === 'group:recent') {
+    return { scene: 'group', target: '', recent: true };
+  }
+  const m = s.match(/^(?:group:)?([A-Za-z0-9_-]{5,64})$/);
   if (m) return { scene: 'group', target: m[1] };
   return null;
 }
@@ -163,6 +179,8 @@ export function createProactiveQueue({ dir = '', cfgOf = () => ({}), now = () =>
     const item = {
       id, extId, cause: clip(input.cause, LIMITS.MAX_CAUSE) || extId,
       key, text, scene: t.scene, target: t.target,
+      /** 推给「最近说话的群」：真正发送时才解析成具体 openid */
+      recent: Boolean(t.recent),
       at, expiresAt: at + LIMITS.TTL_MS, attempts: 0,
       /**
        * 审批按「条目要 + 面板开了」两道取或：扩展单条要求审批时绝不因为
@@ -260,6 +278,8 @@ export function createProactiveQueue({ dir = '', cfgOf = () => ({}), now = () =>
       items: st.items.map((x) => ({
         id: x.id, extId: x.extId, cause: x.cause, at: x.at,
         scene: x.scene, target: x.target, state: x.state, text: clip(x.text, 120),
+        /** 推给「最近说话的群」：面板上要能看出这条没指定目标 */
+        recent: Boolean(x.recent),
       })),
       history: st.history.slice(0, 10),
     };
@@ -283,6 +303,8 @@ export function createProactiveQueue({ dir = '', cfgOf = () => ({}), now = () =>
 export function createProactiveDispatcher({
   queue, speakUp, shouldFire, DEFAULTS, cfgOf = () => ({}), ownerOf = () => '',
   channelOf = () => null, memoryOf = () => null, aliasesOf = () => [],
+  /** 解析「最近说话的群」→ openid；拿不到返回空串（宿主注入，见 host.js） */
+  resolveRecentGroup = null,
   now = () => Date.now(), log = () => {}, notify = true,
 } = {}) {
   let askedAt = 0;
@@ -352,17 +374,42 @@ export function createProactiveDispatcher({
     const d = gate();
     if (!d.fire) return { ok: false, sent: 0, why: `门闸没过：${d.why}`, retry: true };
 
+    const item = queue.take(head.id);
+    if (!item) return { ok: false, sent: 0, why: '这条刚被别的轮次取走' };
+
+    /**
+     * 「最近说话的群」：扩展只说了「发群」，没说发给哪个。
+     *
+     * **必须在 `take()` 之后解析**：`take()` 内部会 `load()` 重读磁盘，
+     * 之前拿到的 `head` 已经是孤儿对象，改它的 `target` 不会带到发送那一步
+     * （表现是「配置里选了自动，发出去却还是空 target」）。
+     *
+     * 也是真到要发的时候才解析：提交那一刻的「最近」和十分钟后可能不是
+     * 同一个群。解析不出就丢——猜一个群发出去比不发更糟。
+     */
+    if (item.scene === 'group' && item.recent) {
+      let g = '';
+      try {
+        g = String((await resolveRecentGroup?.()) || '');
+      } catch (e) {
+        log(`找「最近说话的群」失败：${e?.message ?? e}`);
+      }
+      if (!g) {
+        queue.settle(item.id, 'drop', '没有可发的群：最近没有群说过话，或者都没有 group_push 授权');
+        return { ok: false, sent: 0, why: '没有可发的群：最近没有群说过话，或者都没有 group_push 授权' };
+      }
+      item.target = g;
+    }
+
     let hasGroupAuthz = true;
-    if (head.scene === 'group') {
-      hasGroupAuthz = groupAuthz(head.target);
+    if (item.scene === 'group') {
+      hasGroupAuthz = groupAuthz(item.target);
       if (!hasGroupAuthz) {
-        queue.settle(head.id, 'drop', '这个群没有 group_push 授权');
+        queue.settle(item.id, 'drop', '这个群没有 group_push 授权');
         return { ok: false, sent: 0, why: '群没有 group_push 授权（这条已丢，别一直撞）' };
       }
     }
 
-    const item = queue.take(head.id);
-    if (!item) return { ok: false, sent: 0, why: '这条刚被别的轮次取走' };
     const owner = String(ownerOf() || '').trim();
     if (!owner && item.scene === 'c2c') {
       queue.settle(item.id, 'failed', '没配主人');

@@ -8,7 +8,7 @@ import { join } from 'node:path';
 
 import {
   normalizeUiSpec, normalizeFields, projectRow, projectRows, readUiData,
-  UI_KINDS, UI_GROUPS, MAX_ROWS, MAX_UI_BYTES,
+  UI_KINDS, UI_GROUPS, MAX_ROWS, MAX_UI_BYTES, MAX_UI_ACTIONS,
 } from '../src/ext-ui.js';
 import { validateManifest } from '../src/ext-registry.js';
 
@@ -256,4 +256,20 @@ test('按钮声明：只认 {id,label}，重复与超长都拒', () => {
   assert.equal(normalizeUiSpec({ ...base, actions: [{ id: 'a b', label: 'x' }] }).ok, false);
   assert.equal(normalizeUiSpec({ ...base, actions: 'feed_now' }).ok, false);
   assert.deepEqual(normalizeUiSpec(base).spec.actions, [], '没写就是没有按钮');
+});
+
+test('按钮上限翻倍到 16：9 个动作的扩展不该被判清单不合格', () => {
+  const base = { nav: { label: 'x' }, page: 'ui/index.html' };
+  const mk = (n) => Array.from({ length: n }, (_, i) => ({ id: `a${i}`, label: `按钮${i}` }));
+
+  assert.equal(MAX_UI_ACTIONS, 16, '8 → 16（主人：「也翻倍吧」）');
+  /** B 站插件现在正好 9 个动作，原来 8 的上限会把整个扩展从导航里藏掉 */
+  const nine = normalizeUiSpec({ ...base, actions: mk(9) });
+  assert.equal(nine.ok, true, '9 个动作必须过');
+  assert.equal(nine.spec.actions.length, 9);
+  assert.equal(normalizeUiSpec({ ...base, actions: mk(16) }).ok, true, '正好 16 个也过');
+
+  const over = normalizeUiSpec({ ...base, actions: mk(17) });
+  assert.equal(over.ok, false, '17 个还是要拦');
+  assert.match(over.errors.join(' '), /ui.actions 最多 16 个/);
 });

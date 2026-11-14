@@ -108,6 +108,20 @@ function installedVersion(name) {
 }
 
 /**
+ * 当前正在装的那个包。
+ *
+ * **为什么放在模块里而不是让面板自己算时间**：`install()` 是一次
+ * 几十秒到几分钟的 npm 调用，面板那边只能靠「点了之后过了多久」猜。
+ * 用户在装到一半时刷新页面、或者干脆去点别的卡片再回来，前端那个
+ * 计时器就没了——于是「明明在装，界面却写着没装」，再点一次等于
+ * 排进第二次安装。状态放这里，谁问都答同一个真相。
+ *
+ * `step` 由 npm 的 stdout 推进一步（下载 / 解包 / 完成），目前只是
+ * 大致阶段，够让用户看出「在动」。
+ */
+let current = null;
+
+/**
  * 当前状态。**同步**：只读文件，面板可以随便问。
  *
  * `ready` 只由**必需项**决定；目前白名单里全是可选（用到才装），
@@ -132,7 +146,15 @@ export function status() {
       desc: meta.desc,
     };
   }
-  return { dir: depsDir(), ffmpeg: ffmpegBinary(), packages };
+  return {
+    dir: depsDir(),
+    ffmpeg: ffmpegBinary(),
+    packages,
+    /** 正在装：`{ name, startedAt, elapsedMs, step }`；没在装就是 null */
+    installing: current
+      ? { ...current, elapsedMs: Math.max(0, Date.now() - current.startedAt) }
+      : null,
+  };
 }
 
 /** 安装串行化：连点「一键安装」不该起两个 npm 互相踩目录 */
@@ -188,8 +210,16 @@ export function install(name = FFMPEG, { log = () => {}, timeoutMs = 300_000 } =
 
     const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     log(`开始安装共享依赖 ${pkg}（${WHITELIST[pkg].size}）→ ${dir}`);
+    /**
+     * 心跳：面板靠 `status().installing` 显示「已等待 N 秒」。
+     *
+     * npm 在这里几乎没有可读的阶段输出（`--loglevel=error`），所以
+     * 「进度」只能是**时间 + 一行最后输出**。这不精确，但足以区分
+     * 「在装」和「没动」——用户要的就是这个。
+     */
+    current = { name: pkg, startedAt: Date.now(), step: '' };
     return await new Promise((resolve) => {
-      execFile(
+      const child = execFile(
         npm,
         /**
          * `--ignore-scripts`：安装期不许执行任何包自带的脚本。
@@ -210,6 +240,7 @@ export function install(name = FFMPEG, { log = () => {}, timeoutMs = 300_000 } =
           shell: process.platform === 'win32',
         },
         (err, _stdout, stderr) => {
+          current = null;
           if (err) {
             const why = String(stderr || err.message || '').replace(/\s+/g, ' ').trim().slice(0, 400);
             log(`共享依赖安装失败：${why}`);
@@ -226,6 +257,13 @@ export function install(name = FFMPEG, { log = () => {}, timeoutMs = 300_000 } =
           resolve({ ok: true, name: pkg, path: bin, message: '装好了' });
         },
       );
+      /** 只留最后一行非空输出给面板看；`current` 可能已被上面的回调清掉 */
+      const keep = (buf) => {
+        const last = String(buf || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean).pop();
+        if (last && current && current.name === pkg) current.step = last.slice(0, 120);
+      };
+      child?.stdout?.on?.('data', keep);
+      child?.stderr?.on?.('data', keep);
     });
   };
 

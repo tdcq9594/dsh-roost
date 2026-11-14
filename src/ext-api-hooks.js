@@ -27,6 +27,7 @@ import { extname, join, resolve, sep } from 'node:path';
 import { shouldFire } from './speakup.js';
 import { chatOf } from './inbound.js';
 import { tuwenProblem } from './tuwen.js';
+import { classifyRoostCall, resolveExtTarget, narrowMsgSend, EXT_ROOST_READONLY, EXT_ROOST_SEND } from './ext-roost.js';
 
 /** 规则本体搬到 `tuwen.js`（模型侧的 `<<card:>>` 也用同一份），这里继续对外导出。 */
 export { tuwenProblem };
@@ -98,6 +99,16 @@ export function createExtApiHooks({
   proactiveDispatcherOf = null,
   /** 扩展页面按钮的动作队列。宿主只排队，扩展自己来取，宿主不替它执行业务。 */
   uiActionsOf = null,
+  /**
+   * 直连协议（`roost-host/1`）转发。**必须是函数**：`roost` / `caps` 在
+   * `host.js` 里比 `createExtApiHooks()` 晚一千多行才创建，直接传值会撞 TDZ。
+   * 返回 `{ rpc, caps }`；没连上时 `caps` 可能为 null，hook 会如实回 503。
+   */
+  roostOf = null,
+  /** 主人 openid：扩展用 `target:"owner"` 时由宿主补，扩展自己拿不到 */
+  ownerOf = () => '',
+  /** 「最近说话的群」解析（可选，仅 `target:"recent"` 时用） */
+  resolveRecentGroupOf = null,
   log = () => {},
 } = {}) {
   /**
@@ -311,9 +322,27 @@ export function createExtApiHooks({
      * 能造成「往外投递任意文件」的口子，必须卡死在扩展自己的地盘里。
      */
     async send({ body, client }) {
-      const scene = sceneOf(body);
-      const target = targetOf(body);
-      if (!target) return bad('缺 target / chatId');
+      const rawTarget = targetOf(body);
+      /**
+       * `target:"owner"`：扩展不该知道主人的 openid，由宿主在这里补上。
+       * 没写别名时行为与以前完全一致（空 target 照样报错）。
+       */
+      const resolved = resolveExtTarget(rawTarget, {
+        scene: sceneOf(body),
+        ownerOf,
+        resolveRecentGroup: typeof resolveRecentGroupOf === 'function' ? resolveRecentGroupOf : null,
+      });
+      if (!resolved.ok) return bad(resolved.why);
+      let scene = resolved.scene;
+      let target = resolved.target;
+      if (resolved.recent) {
+        try {
+          target = String((await resolveRecentGroupOf()) || '').trim();
+        } catch (e) {
+          return bad(`找「最近说话的群」失败：${e?.message ?? e}`);
+        }
+        if (!target) return bad('没有可发的群：最近没有群说过话，或者都没有 group_push 授权');
+      }
 
       const text = str(body?.text, MAX_TEXT).trim();
       const card = body?.card && typeof body.card === 'object' && !Array.isArray(body.card) ? body.card : null;
@@ -393,6 +422,105 @@ export function createExtApiHooks({
       }
 
       return { status: out.ok ? 200 : 400, body: out };
+    },
+
+    /**
+     * 列直连协议能力表。
+     *
+     * 扩展要知道框架现在挂了哪些插件工具（`tool.*`）才能调用；能力表是连上
+     * 之后从框架拉的，插件热重载后框架会推 `capabilities.changed` 让它刷新。
+     * 这里只报「可扩展调用」的那一半，写/管理面仍不出现在清单里。
+     */
+    'roost.capabilities'({ query }) {
+      const link = typeof roostOf === 'function' ? roostOf() : null;
+      const caps = link?.caps ?? null;
+      if (!caps) {
+        return bad('还没连上 roost 外接协议，拿不到能力表', 503, 'internal');
+      }
+      const all = caps.list();
+      const filter = String(query?.filter ?? '').trim().toLowerCase();
+      const match = (n) => !filter || n.toLowerCase().includes(filter);
+      const tools = all.filter((m) => m.name.startsWith('tool.') && match(m.name));
+      const readonly = EXT_ROOST_READONLY.filter((n) => caps.has(n) && match(n))
+        .map((n) => ({ name: n, scope: 'read', desc: (all.find((m) => m.name === n)?.desc ?? '') }));
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          connected: Boolean(link?.connected),
+          updatedAt: caps.lastAt(),
+          tools: tools.map((m) => ({ name: m.name, scope: m.scope, desc: m.desc, parameters: m.parameters })),
+          readonly,
+          send: EXT_ROOST_SEND.slice(),
+          note: '用 POST /v1/roost.call 调用；写 / 管理面不对扩展开放',
+        },
+      };
+    },
+
+    /**
+     * 代扩展调一个直连协议方法。
+     *
+     * 框架地址和令牌只在宿主手里；扩展拿到的永远是这份受白名单约束的转发。
+     * `msg.send` 额外走参数收窄（目标 / 被动窗口 / 账本键都不许自报）。
+     */
+    async 'roost.call'({ body, client }) {
+      const link = typeof roostOf === 'function' ? roostOf() : null;
+      if (!link || typeof link.rpc !== 'function') {
+        return bad('还没连上 roost 外接协议', 503, 'internal');
+      }
+      const method = String(body?.method ?? '').trim();
+      const verdict = classifyRoostCall(method, link.caps ?? null);
+      if (!verdict.ok) return bad(verdict.why, 403, 'forbidden');
+
+      const input = body?.params && typeof body.params === 'object' && !Array.isArray(body.params)
+        ? body.params : {};
+      let params = input;
+
+      if (verdict.kind === 'send') {
+        const resolved = resolveExtTarget(input.target ?? input.chatId ?? '', {
+          scene: input.scene ?? input.kind,
+          ownerOf,
+          allowEmpty: true,
+          resolveRecentGroup: typeof resolveRecentGroupOf === 'function' ? resolveRecentGroupOf : null,
+        });
+        if (!resolved.ok) return bad(resolved.why);
+        let target = resolved.target;
+        if (resolved.recent) {
+          try {
+            target = String((await resolveRecentGroupOf()) || '').trim();
+          } catch (e) {
+            return bad(`找「最近说话的群」失败：${e?.message ?? e}`);
+          }
+          if (!target) return bad('没有可发的群：最近没有群说过话，或者都没有 group_push 授权');
+        }
+        if (resolved.scene === 'group') {
+          let ok = false;
+          try {
+            ok = Boolean(memory().hasAuthz(target, 'group_push', aliasesOf(target)));
+          } catch (e) {
+            return bad(`查群授权失败：${e?.message ?? e}`, 500, 'internal');
+          }
+          if (!ok) return bad('这个群没有 group_push 授权，主动消息发不出去', 403, 'forbidden');
+        }
+        const narrowed = narrowMsgSend(input, { ...resolved, target });
+        if (!narrowed.ok) return bad(narrowed.why);
+        /** 协议直通也不能绕过 `/v1/send` 那份卡片校验：字段不合格平台会静默拒 */
+        if (narrowed.params.card) {
+          const why = tuwenProblem(narrowed.params.card);
+          if (why) return bad(`图文卡片不合格：${why}`);
+        }
+        params = narrowed.params;
+      } else if (verdict.kind === 'tool') {
+        /** 协议约定：插件工具的参数统一包成 `{ args }` */
+        params = { args: input };
+      }
+
+      try {
+        const data = await link.rpc(method, params);
+        return { status: 200, body: { ok: true, method, data: data ?? null } };
+      } catch (e) {
+        return bad(`协议调用失败（${method}）：${String(e?.message ?? e).slice(0, 180)}`, 502, 'internal');
+      }
     },
 
     /**

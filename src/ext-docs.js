@@ -34,8 +34,10 @@ export const DTS_DOC = 'extension.d.ts';
  */
 const ROUTE_NOTES = {
   'POST /v1/message': '把一条消息送进 QQ（复用现有入站链路，不另写一条）',
-  'POST /v1/send': '扩展直接把文本 / 文件 / 官方图文卡片发进会话，不跑模型',
+  'POST /v1/send': '扩展直接把文本 / 文件 / 官方图文卡片发进会话，不跑模型；`target` 可填 `owner` 由宿主解析主人，或 `recent` 挑最近说过话且有授权的群',
   'POST /v1/say': '让机器人主动说一句；`pending` 表示进审核，不是已发出',
+  'GET /v1/roost.capabilities': '列框架直连协议（roost-host/1）里可扩展调用的能力：只读方法、框架插件注册的 `tool.*`、发消息；`?filter=` 可按名字筛',
+  'POST /v1/roost.call': '由宿主代转一次直连协议调用（只读能力 / 插件工具 / `msg.send`）；框架地址与令牌不出宿主，写与管理面不开放',
   'GET /v1/state': '读机器人与当前会话的状态（在线、绑定、档位）',
   'GET /v1/mood': '读当前心情',
   'GET /v1/context': '读当前会话的上下文摘要（条数、窗口占用）',

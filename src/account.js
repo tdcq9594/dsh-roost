@@ -372,6 +372,12 @@ export function createAccount({ memory, journal, graph, sessions, setup, log = (
         const groups = arr(r?.unresolved?.groups).map((g) => ({
           openid: String(g.groupOpenid || ''),
           name: String(g.name || g.groupName || ''),
+          /**
+           * 最后一次说话的毫秒时间。面板上拿它排「最近活跃的群」，
+           * 也是「推送不指定群 → 挑最近说话的那个」的排序依据。
+           * 旧版 roost 没有这个字段，缺省 0（当作最旧，不会挤掉新的）。
+           */
+          lastSeenAt: Number(g.lastActiveAt || g.lastSeenAt || 0) || 0,
         })).filter((g) => g.openid);
         return {
           ok: true,

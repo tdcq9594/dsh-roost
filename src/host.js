@@ -122,7 +122,7 @@ import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
 import { createUiActionQueue } from './ext-ui-actions.js';
 import { runInProcessAction } from './ext-inprocess.js';
 import * as sharedDeps from './shared-deps.js';
-import { mergeGroupCandidates } from './group-list.js';
+import { mergeGroupCandidates, localGroupCandidates, mergeSeenGroups } from './group-list.js';
 import { createLlmVision } from './ext-llm.js';
 import {
   pageOf, locate, readSidecar, writeSidecar, suggestTags, removeFiles,
@@ -1259,9 +1259,11 @@ export function apply(ctx) {
      * 返回 `<<skip>>` 就是她的答案：不想说。`speakup.js` 认得这个标记，
      * 会当作正常结局重新排期、不占今日额度（`awake.enabled=false` 时退回老行为）。
      */
-    generate: async (prompt) => {
+    generate: async (prompt, opts = {}) => {
       const a = { ...(cfg.awake ?? {}) };
       const owner = ownerId();
+      /** 扩展素材：主动搭话分支自己拼模板，得把这份材料显式带进去 */
+      const material = String(opts?.material ?? '');
 
       /**
        * 让路：真人正在跟她说话时不要插话。
@@ -1313,7 +1315,11 @@ export function apply(ctx) {
           } catch {}
         }
       }
-      const v = await awake.compose({ kind: 'c2c', chatId: owner, extraPrompt: speakUpExtra() });
+      const v = await awake.compose({
+        kind: 'c2c', chatId: owner,
+        extraPrompt: speakUpExtra(),
+        material,
+      });
       return v.speak ? v.text : '<<skip>>';
     },
     /** 发送统一走通道层，不再各处自己 fetch。`sendOut` 会顺手登记审核中的消息 */
@@ -1661,9 +1667,80 @@ export function apply(ctx) {
    * 扩展自己写运行时文件会让 `build-index --check` 变脏）。
    * `channels` / `memory` / `aliasesOf` 都声明在后面，所以一律传函数。
    */
+  /**
+   * 「收到过消息的群」：以宿主自己的会话表为主，框架 identity 只做补充。
+   *
+   * 原来两处（面板 `groups.list`、`resolveRecentGroup`）都只问
+   * `account.people()`，它有两个硬前提：Roost 正在跑、且群**没被绑定过**
+   * （`unresolved.groups` 按定义只列未绑定的）。框架一关、或用户正常把群
+   * 绑了，下拉和「自动挑群」就一起哑火 —— 表现是「选群没看到选项」。
+   *
+   * `sessions.json` 是宿主每收到一条消息就写的，框架在不在线都在，而且
+   * 明确带 `kind: 'group'` 和群名。`awake.groupState()` 给最近活跃时间。
+   *
+   * 写成函数声明（hoist）：下面 `resolveRecentGroup` 和面板 op 都要用；
+   * `awake` / `account` 声明得更晚，但都是运行时才求值，不撞 TDZ。
+   */
+  async function seenGroups() {
+    let local = [];
+    try {
+      local = localGroupCandidates(sessions.list?.() || [], (id) => awake.groupState(id));
+    } catch (e) {
+      log.warn?.(`读本地群清单失败：${e?.message ?? e}`);
+    }
+    /**
+     * 框架在线时能补更准的名字和活跃时间；连不上不是错误，不该拖垮本地候选。
+     *
+     * `account.people()` 内部是 15 秒超时，框架端口漂了 / 卡住时面板会干等
+     * 这么久才出下拉。本地候选本来就够了，所以给远端这一步单独设 1.5 秒上限；
+     * `finally` 里清掉定时器，别让它拖住进程退出。
+     */
+    let remote = [];
+    let timer = null;
+    try {
+      const ppl = await Promise.race([
+        account.people(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('框架没响应')), 1500);
+        }),
+      ]);
+      remote = Array.isArray(ppl?.groups) ? ppl.groups : [];
+    } catch { /* 框架没起 / 超时都是常态，本地候选照用 */ }
+    finally { if (timer) clearTimeout(timer); }
+    /** 最近说过话的排前面：下拉和「自动挑群」看到的是同一份顺序 */
+    return mergeSeenGroups(local, remote).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  }
+
   const proactiveQueue = createProactiveQueue({
     dir: dataDir(), cfgOf: () => cfg, log: (m) => log.info(m),
   });
+
+  /**
+   * 「发群，但不指定哪个」→ 挑最近说过话、且**有 group_push 授权**的群。
+   *
+   * 抽成具名函数：扩展的 `/v1/send` / `/v1/roost.call` 也要用同一个解析，
+   * 复制一份迟早会分叉（一处改了排序、另一处没改，表现就是「素材通道发到
+   * A 群、直发到 B 群」）。
+   *
+   * 为什么这个解析必须由宿主做：群 openid 是平台发给这只机器人的一长串
+   * 字符串，扩展那边根本拿不到（也不该拿）。让用户在面板里手抄，既
+   * 认不出来，换机器人之后还全部失效。
+   */
+  const resolveRecentGroup = async () => {
+    /** 走 `seenGroups()`：本地会话表为主，框架没开也挑得出来 */
+    const groups = await seenGroups();
+    const ranked = groups
+      .map((g) => ({ id: String(g?.openid || ''), at: Number(g?.lastSeenAt) || 0 }))
+      .filter((g) => g.id)
+      .sort((a, b) => b.at - a.at);
+    for (const g of ranked) {
+      try {
+        if (memory.hasAuthz(g.id, 'group_push', aliasesOf(g.id))) return g.id;
+      } catch { /* 单个群查失败就试下一个 */ }
+    }
+    return '';
+  };
+
   const proactiveDispatcher = createProactiveDispatcher({
     queue: proactiveQueue,
     speakUp,
@@ -1674,6 +1751,7 @@ export function apply(ctx) {
     channelOf: () => channels,
     memoryOf: () => memory,
     aliasesOf: (t) => aliasesOf(t),
+    resolveRecentGroup,
     log: (m) => log.info(m),
   });
 
@@ -1701,6 +1779,17 @@ export function apply(ctx) {
     proactiveQueueOf: () => proactiveQueue,
     proactiveDispatcherOf: () => proactiveDispatcher,
     uiActionsOf: () => uiActions,
+    /**
+     * 直连协议转发。**整包传函数**：`roost` / `caps` 在下面第 2600 行附近才
+     * 创建，这里直接取值会撞 TDZ；而且链路会重连，每次调用都该读当前实例。
+     */
+    roostOf: () => ({
+      rpc: (m, p) => roost.rpc(m, p),
+      caps,
+      connected: roostRef?.connected === true,
+    }),
+    ownerOf: ownerId,
+    resolveRecentGroupOf: resolveRecentGroup,
     log,
   });
 
@@ -2546,13 +2635,26 @@ export function apply(ctx) {
     onNotice: (data, frame) => {
       /** 插件启停导致 tool.* 变化时，框架会推这条事件；立刻重拉能力表 */
       if (frame?.event === 'capabilities.changed') refreshCaps();
+      /**
+       * 框架插件调扩展：只入队，绝不在 SSE 事件流里 await（会堵住补拉）。
+       * 执行完用 RPC `ext.call.reply` 把结果送回去。
+       */
+      if (frame?.event === 'ext.call.request') {
+        void handleExtCallRequest(data).catch((e) => log.warn(`扩展反向调用失败：${e?.message ?? e}`));
+      }
       deliverNoticeFromRoost(data);
     },
     onGap: (frame) => log.warn(`外接协议补拉有缺口（seq ${frame?.seq ?? '?'}），这段消息收不到了`),
     onState: (state, detail) => {
       if (state === 'error') log.warn(`外接协议：${detail || state}`);
-      /** 连上之后拉一次能力表：框架版本不同，可用的方法不一样 */
-      if (state === 'online') refreshCaps();
+      /**
+       * 连上之后拉一次能力表（框架版本不同，可用的方法不一样），并把
+       * 「我装了哪些扩展」报给框架，让框架插件能反向调过来。
+       */
+      if (state === 'online') {
+        refreshCaps();
+        void reportExtCatalog().catch(() => {});
+      }
     },
     log: (m) => log.warn(`[roost-host] ${m}`),
     /** 事件通道：auto = 装了 ws 就 WS、没装就 SSE；RPC 恒走 HTTP */
@@ -2808,6 +2910,95 @@ export function apply(ctx) {
     /** 审核结果最有价值：它决定一条主动消息到底有没有出现在群里 */
     if (/AUDIT/i.test(name)) {
       log.info(`外接协议事件 ${name}：${JSON.stringify(data?.data ?? {}).slice(0, 200)}`);
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 反向联动：框架插件 → DSH 扩展                                       */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 上报「我这边装了哪些扩展、各自能被调哪些动作」。
+   *
+   * 能力清单直接复用 `plugin.json` 的 `ui.actions`，不新造声明格式：
+   * 扩展作者已经在那里声明了面板按钮，框架插件能调的就是同一批动作。
+   * 只有 `ui.runtime: "inprocess"` 的扩展能被同步调用——MCP 子进程的
+   * stdin 管道不属于宿主，反向调用拿不到句柄，硬排队会挂死请求。
+   */
+  function extCatalog() {
+    const out = [];
+    for (const m of extRegistry.list()) {
+      const spec = normalizeUiSpec(m.manifest?.ui);
+      if (!spec.ok || spec.spec?.runtime !== 'inprocess') continue;
+      out.push({
+        id: m.id,
+        actions: (spec.spec.actions ?? []).map((a) => ({ id: a.id, label: a.label })),
+      });
+    }
+    return out;
+  }
+
+  async function reportExtCatalog() {
+    try {
+      const r = await roost.rpc('ext.register', { extensions: extCatalog() });
+      if (r?.ok === false) log.warn(`上报扩展能力清单被框架拒了：${r?.message ?? ''}`);
+    } catch (e) {
+      /** 老框架没有 ext.register：不算故障，反向联动这一版不可用而已 */
+      log.warn(`上报扩展能力清单失败（框架可能较旧）：${e?.message ?? e}`);
+    }
+  }
+
+  /**
+   * 处理框架插件发来的 `ext.call.request`。
+   *
+   * 从 SSE 事件流进来，只入队不阻塞；执行完用 RPC 把结果送回框架，框架侧
+   * 的 pending Promise 据此 resolve。**无论成功失败都要回执**，否则调用方
+   * 会一直挂到超时。
+   */
+  async function handleExtCallRequest(data) {
+    const requestId = String(data?.requestId ?? '').trim();
+    const extId = String(data?.extId ?? '').trim();
+    const action = String(data?.action ?? '').trim();
+    if (!requestId) return;
+
+    const done = async (ok, result, error) => {
+      try {
+        await roost.rpc('ext.call.reply', { requestId, ok, result: result ?? null, error: String(error ?? '').slice(0, 300) });
+      } catch (e) {
+        log.warn(`扩展调用回执送不回去（${requestId}）：${e?.message ?? e}`);
+      }
+    };
+
+    const one = extRegistry.list().find((m) => m.id === extId);
+    if (!one) return void await done(false, null, `没有装扩展 ${extId}`);
+    const spec = normalizeUiSpec(one.manifest?.ui);
+    if (!spec.ok || spec.spec?.runtime !== 'inprocess') {
+      return void await done(false, null, `扩展 ${extId} 不支持进程内调用`);
+    }
+    /** 白名单：只认清单里声明过的动作，别让框架插件凭空调一个内部函数 */
+    if (!spec.spec.actions.some((a) => a.id === action)) {
+      return void await done(false, null, `扩展 ${extId} 没有声明动作 ${action}`);
+    }
+
+    try {
+      const rc = typeof extPanel.runtimeOf === 'function'
+        ? extPanel.runtimeOf(extId)
+        : { config: {}, secrets: {} };
+      const run = await runInProcessAction({
+        id: extId,
+        root: extRegistry.pathOf(extId),
+        entry: spec.spec.entry,
+        action,
+        payload: data?.payload ?? null,
+        config: rc.config,
+        secrets: rc.secrets,
+        env: { ROOST_DEPS_DIR: sharedDeps.depsDir(), ...inprocessApiEnv(extId) },
+        log: (m) => log.warn(`[ext:${extId}] ${m}`),
+      });
+      if (!run?.handled) return void await done(false, null, run?.reason || '这个动作没有实现');
+      return void await done(true, run.result ?? null, '');
+    } catch (e) {
+      return void await done(false, null, e?.message ?? e);
     }
   }
 
@@ -5502,6 +5693,36 @@ export function apply(ctx) {
       }
     };
 
+    /**
+     * 进程内动作要用的 `/v1` 地址与令牌。
+     *
+     * **为什么把令牌给进程内扩展**：`ui.runtime: "inprocess"` 的扩展代码是
+     * 宿主自己 import 进来的（`ext-inprocess.js`），本来就跑在同一个进程、
+     * 同一个权限里——它想读 `secrets/<id>.json` 只需 `fs.readFileSync`，
+     * 拦是拦不住的（host.js 自己在传 `secrets` 明文时已经认了这一点）。
+     * 不给令牌的后果不是「更安全」，而是「扩展只能走队列」：面板上点
+     * 「现在刷一轮」拿不到 `agent.*`，于是同一件事有两套实现，
+     * 手动刷那一套没有模型参与、没有感想，面板上看起来像没刷。
+     *
+     * 令牌仍然是**这个扩展自己的**（`ext:<id>`），scope 由 api.clients 决定，
+     * 不是宿主万能钥匙。
+     *
+     * 端口取运行期 `server.actualPort`：被占时会往后漂，算死就会连到旧端口
+     * 得到 connection refused（和受管块那个坑同源）。
+     */
+    const inprocessApiEnv = (id) => {
+      let port = 0;
+      try {
+        const p = server?.actualPort;
+        port = Number(typeof p === 'function' ? p() : p) || 0;
+      } catch { /* 宿主还没开始监听：地址留空，扩展自己判不可用 */ }
+      return {
+        ROOST_API_URL: port ? `http://127.0.0.1:${port}/v1` : '',
+        ROOST_API_TOKEN: String(extSecrets?.read?.(id)?.token || ''),
+        ROOST_EXT_ID: String(id || ''),
+      };
+    };
+
     const offs = [
       /**
        * 用量汇总：按天 + 按会话。
@@ -5738,8 +5959,24 @@ export function apply(ctx) {
                     /**
                      * 共享依赖路径只有宿主知道：`ROOST_DEPS_DIR` 是注入给
                      * MCP 子进程的，宿主自己的 `process.env` 里没有。
+                     *
+                     * `/v1` 的地址与令牌一起给（见 `inprocessApiEnv`）：
+                     * 进程内动作也要能建独立会话，否则「手动刷一轮」和
+                     * 「定时刷」会是两套行为。
                      */
-                    env: { ROOST_DEPS_DIR: sharedDeps.depsDir() },
+                    env: { ROOST_DEPS_DIR: sharedDeps.depsDir(), ...inprocessApiEnv(id) },
+                    /**
+                     * 面板上的「现在刷一轮」要真开一个独立会话等模型输出
+                     * （`/v1/agent.prompt?wait=1`，扩展那边单次 HTTP 就给了
+                     * 90 秒）。沿用 30 秒默认值的话，宿主的 Promise.race 会先
+                     * 判超时回 500，而底层函数并没被取消、会话其实已经建了
+                     * —— 表现就是「点了报错，但回头看她又确实刷过」。
+                     *
+                     * 留到 150 秒是给「查回复 + 看画面抽帧 + 模型 + 写动作」
+                     * 整条链路的余量；只对面板按钮这一处放宽，其它调用方
+                     * 仍用 ext-inprocess.js 的默认 30 秒。
+                     */
+                    timeoutMs: 150_000,
                     /** 扩展侧按函数用；宿主内部是对象，这一层必须换掉 */
                     log: (m) => log.warn?.(m),
                   });
@@ -5798,26 +6035,21 @@ export function apply(ctx) {
              */
             case 'groups.list': {
               /**
-               * 候选 = 已配置的唤醒群 + 框架里**收到过消息的群**。
+               * 候选 = 已配置的唤醒群 + **宿主自己收到过消息的群**。
                *
-               * QQ 官方只给群 openid（32 位），人记不住，所以绝不让人手填：
-               * 框架的 identity 接口里就见过哪些群（名字是从群消息里学的），
-               * 拿来当候选即可。合并规则在 `group-list.js`（单独可测）。
+               * QQ 官方只给群 openid（32 位），人记不住，所以绝不让人手填。
+               * 以前只问框架 identity，框架没开（或群已绑定、不再出现在
+               * `unresolved.groups`）时这里就是空的 —— 用户看到的是
+               * 「选群没看到选项」。现在走 `seenGroups()`：以本地会话表为准，
+               * 框架在线时再补名字/时间。合并规则在 `group-list.js`（可测）。
                */
               const configured = Array.isArray(cfg?.awake?.groups) ? cfg.awake.groups : [];
-              let seen = [];
-              try {
-                const ppl = await account.people();
-                seen = Array.isArray(ppl?.groups) ? ppl.groups : [];
-              } catch (e) {
-                /** 框架没起来也要能选已配置的群，这里只降级不报错 */
-                log.warn?.(`列「收到过消息的群」失败，只用已配置的：${e?.message ?? e}`);
-              }
+              const seen = await seenGroups();
               const groups = mergeGroupCandidates(configured, seen);
               return send(res, 200, {
                 ok: true,
                 groups,
-                message: groups.length ? '' : '还没收到过群消息：群里有个人说一句话，这里就会出现那个群',
+                message: groups.length ? '' : '还没收到过群消息：群里有人说一句话，这里就会出现那个群',
               });
             }
             /**

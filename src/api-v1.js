@@ -59,6 +59,19 @@ export const V1_ROUTES = {
    */
   'POST /v1/send': { scope: 'message:write', hook: 'send' },
   'POST /v1/say': { scope: 'say:write', hook: 'say' },
+  /**
+   * 扩展 ↔ 框架直连协议（`roost-host/1`）互通。
+   *
+   * 宿主是协议客户端，框架是服务端；扩展拿不到框架的地址和令牌，只能由
+   * 宿主代转。转发**不是把整张方法表交出去**：`config.set` / `plugin.install` /
+   * `qq.call` 这类写/管理面仍在宿主的白名单里挡着，扩展只能调只读能力、
+   * 框架插件投影出来的 `tool.*`，以及目标受收窄的 `msg.send`。
+   *
+   * scope 复用 `state:read` / `message:write`：新开 scope 会让所有存量扩展
+   * 重走一遍敏感授权确认，而这两件事本来就归它们管（读状态 / 往会话发东西）。
+   */
+  'GET /v1/roost.capabilities': { scope: 'state:read', hook: 'roost.capabilities' },
+  'POST /v1/roost.call': { scope: 'message:write', hook: 'roost.call' },
   'GET /v1/state': { scope: 'state:read', hook: 'state' },
   'GET /v1/mood': { scope: 'state:read', hook: 'mood' },
   'GET /v1/context': { scope: 'context:read', hook: 'context' },
@@ -109,7 +122,7 @@ export const V1_IMPLEMENTED_HOOKS = Object.freeze([
   'agent', 'memory.ext.add', 'llm.vision',
   'message', 'send', 'say', 'state', 'mood', 'context',
   'memory.read', 'memory.write', 'proactive', 'proactive.submit', 'session.ensure',
-  'ext-ui.actions',
+  'ext-ui.actions', 'roost.capabilities', 'roost.call',
 ]);
 
 /**

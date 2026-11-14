@@ -32,7 +32,7 @@ const item = (over = {}) => ({
   target: 'owner', ...over,
 });
 
-test('normalizeTarget：只认主人私聊或纯数字群号，别让扩展自报任意会话', () => {
+test('normalizeTarget：主人私聊 / 指定群 / 最近活跃的群，别让扩展自报任意会话', () => {
   assert.deepEqual(normalizeTarget(''), { scene: 'c2c', target: '' });
   assert.deepEqual(normalizeTarget('owner'), { scene: 'c2c', target: '' });
   assert.deepEqual(normalizeTarget('private'), { scene: 'c2c', target: '' });
@@ -40,6 +40,23 @@ test('normalizeTarget：只认主人私聊或纯数字群号，别让扩展自�
   assert.deepEqual(normalizeTarget('123456789'), { scene: 'group', target: '123456789' });
   for (const bad of ['https://evil.test/x', '../../etc', 'group:abc', 'c2c:12345']) {
     assert.equal(normalizeTarget(bad), null, `${bad} 不该被当成目标`);
+  }
+});
+
+test('normalizeTarget：QQ 官方群的 openid 不是数字，必须能过', () => {
+  /**
+   * 只认 `\d{5,20}` 时官方群全被拒，表现是「推群永远发不出去」。
+   * 真实 openid 长这样：32 位十六进制 / 带下划线连字符的串。
+   */
+  for (const id of ['A1B2C3D4E5F60718293A4B5C6D7E8F90', 'abc_def-123', 'a'.repeat(64)]) {
+    assert.deepEqual(normalizeTarget(`group:${id}`), { scene: 'group', target: id });
+  }
+  assert.equal(normalizeTarget(`group:${'a'.repeat(65)}`), null, '超长不是合法 id');
+});
+
+test('normalizeTarget：recent 三种写法都表示「最近说话的群」', () => {
+  for (const s of ['recent', 'recent-group', 'group:recent']) {
+    assert.deepEqual(normalizeTarget(s), { scene: 'group', target: '', recent: true }, s);
   }
 });
 
@@ -172,6 +189,7 @@ function makeDispatcher(queue, over = {}) {
     channelOf: () => ({ get: () => ({ send: async () => ({ ok: true }) }) }),
     memoryOf: () => ({ hasAuthz: () => over.groupAuthz !== false }),
     aliasesOf: () => [],
+    resolveRecentGroup: over.resolveRecentGroup,
     now: () => T, notify: false,
   });
   return { d, sp };
@@ -240,4 +258,61 @@ test('drain：有待批时只排队不发送，也不跑模型', async () => wit
   assert.match(r.why, /等主人批准/);
   assert.equal(r.awaiting, 1);
   assert.equal(sp.calls.length, 0);
+}));
+
+/* --------------------------- 最近活跃的群 --------------------------- */
+
+test('submit：recent 的条目带 recent 标记，target 留空', () => withDir((dir) => {
+  const queue = q(dir);
+  const r = queue.submit(item({ target: 'recent', key: 'recent-1' }));
+  assert.equal(r.ok, true);
+  const [it] = queue.state().items;
+  assert.equal(it.scene, 'group');
+  assert.equal(it.recent, true);
+  assert.equal(it.target, '', '具体发给哪个群由宿主发送时现查');
+}));
+
+test('drain：recent 的条目发到宿主解析出的那个群', () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item({ target: 'recent', key: 'recent-2' }));
+  const { d, sp } = makeDispatcher(queue, { resolveRecentGroup: async () => 'GROUP-OPENID-1' });
+  const r = await d.drain();
+  assert.equal(r.ok, true);
+  assert.equal(sp.calls.length, 1);
+  assert.equal(sp.calls[0].opts.scene, 'group');
+  assert.equal(sp.calls[0].opts.target, 'GROUP-OPENID-1', '必须用解析出来的 openid');
+  assert.equal(sp.calls[0].opts.hasGroupAuthz, true);
+}));
+
+test('drain：解析不出群就丢掉这条，不会发给空 target', async () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item({ target: 'recent', key: 'recent-3' }));
+  const { d, sp } = makeDispatcher(queue, { resolveRecentGroup: async () => '' });
+  const r = await d.drain();
+  assert.equal(r.ok, false);
+  assert.match(r.why, /没有可发的群/);
+  assert.equal(sp.calls.length, 0, '一条都不该发出去');
+  assert.equal(queue.state().items.length, 0, '失败即弃，不留着重试');
+  assert.match(queue.state().history[0].reason, /没有可发的群/);
+}));
+
+test('drain：解析出的群没有 group_push 授权 → 丢掉并说明', async () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item({ target: 'recent', key: 'recent-4' }));
+  const { d } = makeDispatcher(queue, {
+    resolveRecentGroup: async () => 'GROUP-NOAUTH',
+    groupAuthz: false,
+  });
+  const r = await d.drain();
+  assert.equal(r.ok, false);
+  assert.match(r.why, /group_push/);
+}));
+
+test('drain：指定的群仍然按原样走，不会被 recent 逻辑改掉', async () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item({ target: 'group:123456789', key: 'explicit-1' }));
+  const { d, sp } = makeDispatcher(queue);
+  const r = await d.drain();
+  assert.equal(r.ok, true);
+  assert.equal(sp.calls[0].opts.target, '123456789');
 }));

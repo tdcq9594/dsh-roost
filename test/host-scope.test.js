@@ -121,6 +121,12 @@ test('开火时机：能力表只由链路触发，构造完不许立刻 refresh
     !/caps\s*=\s*createCapabilityClient\(\{[\s\S]{0,500}?\}\);\s*\r?\n\s*refreshCaps\(\);/m.test(SRC),
     'caps 构造完不能立刻 refreshCaps()：那一刻 Roost 往往还没监听 6807',
   );
-  assert.match(SRC, /if \(state === 'online'\) refreshCaps\(\)/, 'online 进线时必须补拉一次');
+  assert.match(
+    SRC,
+    /** online 分支里除了补拉能力表，还会上报扩展清单，所以按块匹配 */
+    /if \(state === 'online'\)[\s\S]{0,400}?refreshCaps\(\)/,
+    'online 进线时必须补拉一次',
+  );
+  assert.match(SRC, /reportExtCatalog\(\)/, 'online 时还要把扩展能力清单报给框架（反向联动）');
   assert.match(SRC, /caps\.refresh\(\{ force: true \}\)/, '面板手动刷新要走 force，否则离线时一律静默跳过');
 });
