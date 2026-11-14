@@ -147,8 +147,27 @@ export function normalizeUiSpec(raw) {
     errors.push(`ui.nav.group 只能是 ${UI_GROUPS.join(' / ')}（也可以写中文：人设 / 表达 / 群聊 / 能力 / 扩展 / 系统）`);
   }
 
+  /**
+   * 自带页面：扩展写一份 HTML，面板用 iframe 加载。
+   *
+   * 2026-11-14 放宽（主人拍板：「市场上架要我们审核，不能让扩展缺功能」）。
+   * 声明式 `view` 只能排版，做不了登录框、扫码、运行记录这类界面；
+   * 允许扩展提供自己的页面后，UI 能力不再受宿主限制。
+   *
+   * 路径仍然卡在扩展目录内：这不是安全策略（审核过的扩展可以信任），
+   * 而是防止 `../../` 把宿主自己的文件当扩展页发出去。
+   */
+  const page = String(raw.page ?? '').trim();
+  if (page) {
+    if (page.startsWith('/') || page.startsWith('\\') || /^[A-Za-z]:/.test(page) || page.split(/[\\/]/).includes('..')) {
+      errors.push('ui.page 必须是扩展目录内的相对路径（不许绝对路径或 ..）');
+    } else if (!/\.html?$/i.test(page)) {
+      errors.push('ui.page 要指向一个 .html / .htm 文件');
+    }
+  }
+
   const view = raw.view && typeof raw.view === 'object' && !Array.isArray(raw.view) ? raw.view : null;
-  if (!view) errors.push('ui.view 必填');
+  if (!view && !page) errors.push('ui.view 必填（或者用 ui.page 指向自己的页面）');
   const kind = String(view?.kind ?? '');
   if (view && !UI_KINDS.includes(kind)) errors.push(`ui.view.kind 只能是 ${UI_KINDS.join(' / ')}`);
 
@@ -169,22 +188,127 @@ export function normalizeUiSpec(raw) {
   const fields = normalizeFields(view?.fields);
   errors.push(...fields.errors);
 
+  const form = normalizeForm(raw.form, errors);
+  const actions = normalizeActions(raw.actions, errors);
+
   if (errors.length) return { ok: false, errors, spec: null };
   return {
     ok: true,
     errors: [],
     spec: {
       nav: { label, group: group || DEFAULT_GROUP },
-      view: {
+      /** 扩展自带的页面（iframe 入口）；空串 = 走下面的声明式 view */
+      page,
+      view: view ? {
         kind,
         title: String(view.title ?? '').trim().slice(0, 30) || label,
         /** 多久算「旧」：面板据此把更新时间标灰（秒）。0 = 不提示 */
         staleSec: Math.max(0, Math.min(86400, Number(view.staleSec) || 3600)),
         source: { file },
         fields: fields.fields,
-      },
+      } : null,
+      /**
+       * 表单与按钮都是**声明**，不是能力：
+       * `form` 只是说「这一页要显示哪些设置项」，真正读写走宿主已有的
+       * `extensions.config.get/save`（secret 仍然不回显）；
+       * `actions` 只是说「这一页有哪几个按钮」，点了进 `ext-ui-actions` 队列，
+       * 由扩展自己来取，宿主不替它执行。
+       */
+      form,
+      actions,
     },
   };
+}
+
+/** 一页最多几个按钮：再多就成工具栏了，谁也不知道该点哪个 */
+export const MAX_UI_ACTIONS = 8;
+/** 表单一次最多列多少项（扩展的全部设置可能更多，前端按 keys 挑） */
+export const MAX_FORM_KEYS = 40;
+
+const FORM_KEY_RE = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/;
+const RESERVED_KEYS = ['__proto__', 'constructor', 'prototype'];
+
+/**
+ * 表单声明。
+ *
+ * 三种写法：
+ *   · `true`                —— 显示清单 `config` 里的全部设置项；
+ *   · `['cookie','pushOwner']` —— 只显示这几项（按清单里的顺序，不按这里）；
+ *   · `{ keys:[...], title:'B 站设置' }` —— 带小标题。
+ *
+ * **不校验 key 是否真的在 `config` 里**：那份清单是宿主自己读的，多写一个
+ * 不存在的 key 只是不显示，不值得让整个界面校验失败。
+ */
+function normalizeForm(raw, errors) {
+  const off = { enabled: false, keys: [], title: '' };
+  if (raw === undefined || raw === null || raw === false) return off;
+  let keys = null;
+  let title = '';
+  if (raw === true) {
+    keys = [];
+  } else if (Array.isArray(raw)) {
+    keys = raw;
+  } else if (typeof raw === 'object') {
+    keys = Array.isArray(raw.keys) ? raw.keys : [];
+    title = String(raw.title ?? '').trim().slice(0, 20);
+  } else {
+    errors.push('ui.form 只能是 true / 设置项名数组 / { keys, title }');
+    return off;
+  }
+  const out = [];
+  for (const [i, k] of keys.entries()) {
+    const key = String(k ?? '').trim();
+    if (!key) {
+      errors.push(`form.keys[${i}] 是空的`);
+      continue;
+    }
+    if (RESERVED_KEYS.includes(key) || !FORM_KEY_RE.test(key)) {
+      errors.push(`form.keys[${i}] 的「${key}」不合法（字母开头，只含字母数字 _ . -，最多 64 位）`);
+      continue;
+    }
+    if (!out.includes(key)) out.push(key);
+  }
+  if (out.length > MAX_FORM_KEYS) errors.push(`form.keys 最多 ${MAX_FORM_KEYS} 个`);
+  return { enabled: true, keys: out.slice(0, MAX_FORM_KEYS), title };
+}
+
+/**
+ * 按钮声明。
+ *
+ * 只认 `{ id, label, confirm? }`；`id` 是扩展自己约定的动作名，宿主**只负责
+ * 校验「这个 id 在清单里写过」再入队**，不理解它的含义。
+ */
+function normalizeActions(raw, errors) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    errors.push('ui.actions 必须是数组');
+    return [];
+  }
+  const out = [];
+  for (const [i, a] of raw.entries()) {
+    const one = typeof a === 'string' ? { id: a } : (a && typeof a === 'object' ? a : null);
+    if (!one) {
+      errors.push(`actions[${i}] 既不是字符串也不是对象`);
+      continue;
+    }
+    const id = String(one.id ?? '').trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(id)) {
+      errors.push(`actions[${i}] 的 id「${id}」不合法（字母开头，只含字母数字 _ -，最多 32 位）`);
+      continue;
+    }
+    if (out.some((x) => x.id === id)) {
+      errors.push(`actions[${i}] 的 id「${id}」重复了`);
+      continue;
+    }
+    const label = String(one.label ?? '').trim();
+    if (!label || label.length > 12) {
+      errors.push(`actions[${i}] 的 label 必填且不超过 12 字`);
+      continue;
+    }
+    out.push({ id, label, confirm: one.confirm === true });
+  }
+  if (out.length > MAX_UI_ACTIONS) errors.push(`ui.actions 最多 ${MAX_UI_ACTIONS} 个`);
+  return out.slice(0, MAX_UI_ACTIONS);
 }
 
 /**

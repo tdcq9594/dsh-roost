@@ -69,6 +69,13 @@ export const V1_ROUTES = {
    * 主人已经确认过；再开一个只会让所有存量扩展重新走一遍授权，收益为零。
    */
   'POST /v1/proactive/submit': { scope: 'proactive:write', hook: 'proactive.submit' },
+  /**
+   * 扩展页面按钮的动作队列。
+   *
+   * 复用 `state:read`：读动作不改变任何宿主状态，真正做事的是扩展自己；
+   * 新开 scope 会让所有存量扩展重走一遍授权，收益为零（与 proactive 同理）。
+   */
+  'GET /v1/ext-ui/actions': { scope: 'state:read', hook: 'ext-ui.actions' },
   'POST /v1/session.ensure': { scope: 'session:write', hook: 'session.ensure' },
   'POST /v1/session.configure': { scope: 'prompt:write', hook: 'session.configure' },
   'POST /v1/agent.new': { scope: 'agent:write', hook: 'agent' },
@@ -92,6 +99,7 @@ export const V1_IMPLEMENTED_HOOKS = Object.freeze([
   'agent', 'memory.ext.add',
   'message', 'send', 'say', 'state', 'mood', 'context',
   'memory.read', 'memory.write', 'proactive', 'proactive.submit', 'session.ensure',
+  'ext-ui.actions',
 ]);
 
 /**

@@ -96,6 +96,8 @@ export function createExtApiHooks({
   /** 扩展主动消息通道（0.4）。由 host.js 注入，延迟取值避开 TDZ。 */
   proactiveQueueOf = null,
   proactiveDispatcherOf = null,
+  /** 扩展页面按钮的动作队列。宿主只排队，扩展自己来取，宿主不替它执行业务。 */
+  uiActionsOf = null,
   log = () => {},
 } = {}) {
   /**
@@ -480,6 +482,22 @@ export function createExtApiHooks({
      * 扩展拿不到 target 也能主动推，因为目标是宿主按 owner / 群配置解析的，
      * 不是扩展自报的会话。返回 200 只表示**收下了**，发没发出去看 delivery。
      */
+    /**
+     * 取走面板上点过的按钮动作。
+     *
+     * **读即消费**：扩展取走之后队列清空，否则它每轮轮询都会重复执行同一个
+     * 点击。`extId` 只信令牌 —— 扩展读不到别的扩展的动作。
+     *
+     * 动作名本身不在这里校验：入队时已经比对过清单里的 `ui.actions`，
+     * 这里再查一次只会让「扩展改了清单、宿主没重载」这种情况变得难以解释。
+     */
+    async 'ext-ui.actions'({ client }) {
+      if (typeof uiActionsOf !== 'function') return bad('扩展动作通道不可用', 500, 'internal');
+      const extId = String(client?.extId ?? '').trim();
+      if (!extId) return bad('这个令牌没有绑定扩展，不能取动作', 403, 'forbidden');
+      return { status: 200, body: uiActionsOf().take(extId) };
+    },
+
     async 'proactive.submit'({ body, client }) {
       if (typeof proactiveQueueOf !== 'function' || typeof proactiveDispatcherOf !== 'function') {
         return bad('扩展主动消息通道不可用', 500, 'internal');

@@ -13,7 +13,7 @@
 // ⚠️ 权限按**每一条消息**判定：主人、管理员、普通成员拿到的工具不一样，
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
-import { basename, join, resolve, extname } from 'node:path';
+import { basename, join, resolve, extname, relative, sep } from 'node:path';
 import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, readFileSync, rmSync } from 'node:fs';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets } from './config.js';
 import { redactText, redactValue, addSecretProvider } from './redact.js';
@@ -119,6 +119,7 @@ import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
 import { polishText, POLISH_PRESETS } from './persona-polish.js';
 import { createAutotelic } from './autotelic.js';
 import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
+import { createUiActionQueue } from './ext-ui-actions.js';
 import {
   pageOf, locate, readSidecar, writeSidecar, suggestTags, removeFiles,
   createTagJob, statsOf, PAGE_SIZE,
@@ -1545,6 +1546,13 @@ export function apply(ctx) {
     },
   });
   /**
+   * 扩展页面按钮的投递队列。
+   *
+   * 面板点按钮 → 入队；扩展轮询 `/v1/ext-ui/actions` 取走自己执行。
+   * 宿主不替扩展执行任何业务，也不把动作写进扩展目录（那边按整目录算 sha256）。
+   */
+  const uiActions = createUiActionQueue({ log });
+  /**
    * 重建一个扩展的 MCP 连接（改完配置要重连才读到新 env）。
    *
    * **大概率会失败，这是已知的**：受管块是 `cordis.patch.yml` 里的静态
@@ -1673,6 +1681,7 @@ export function apply(ctx) {
     setupOf: () => setup,
     proactiveQueueOf: () => proactiveQueue,
     proactiveDispatcherOf: () => proactiveDispatcher,
+    uiActionsOf: () => uiActions,
     log,
   });
 
@@ -5423,7 +5432,13 @@ export function apply(ctx) {
       log: (m) => log.warn(m),
     });
 
-    const route = (path, handler) => {
+    /**
+     * 注册一条面板 API。
+     *
+     * `skipFence` 只给扩展自带的静态页面用：iframe 导航请求带不了自定义头，
+     * 过栅栏会被 403。其它接口一律不准关。
+     */
+    const route = (path, handler, { skipFence = false } = {}) => {
       try {
         return ctx.webServer.register({
           kind: 'exact',
@@ -5436,14 +5451,16 @@ export function apply(ctx) {
              * 读和写一样是隐私。宿主自己的 API 也是这么做的。
              */
             let bad = null;
-            try {
-              bad = fence(req);
-            } catch (e) {
-              bad = { status: 403, why: `请求栅栏异常：${e?.message ?? e}` };
-            }
-            if (bad) {
-              log.warn(`面板 API 拒绝 ${path}：${bad.why}`);
-              return send(res, bad.status, { ok: false, message: bad.why });
+            if (!skipFence) {
+              try {
+                bad = fence(req);
+              } catch (e) {
+                bad = { status: 403, why: `请求栅栏异常：${e?.message ?? e}` };
+              }
+              if (bad) {
+                log.warn(`面板 API 拒绝 ${path}：${bad.why}`);
+                return send(res, bad.status, { ok: false, message: bad.why });
+              }
             }
             return Promise.resolve(handler(req, res)).catch((e) => send(res, 500, { ok: false, message: e.message }));
           },
@@ -5627,6 +5644,26 @@ export function apply(ctx) {
               if (!r.ok) return send(res, 400, r);
               const re = await restartExtServer(arg?.id);
               return send(res, 200, { ...r, restarted: re.ok, needsRestart: !re.ok, message: re.message });
+            }
+            /**
+             * 扩展页面上的动作按钮。
+             *
+             * 只接受清单 `ui.actions` 里**声明过**的 id：前端传什么就执行什么，
+             * 等于把扩展页变成任意动作入口。动作也不由宿主执行——入队，扩展
+             * 自己轮询 `/v1/ext-ui/actions` 取走，宿主不认识它的业务。
+             */
+            case 'extensions.ui.action': {
+              const id = String(arg?.id ?? '').trim();
+              const action = String(arg?.action ?? '').trim();
+              const m = extRegistry.read(id);
+              if (!m) return send(res, 404, { ok: false, message: `没有「${id}」这个扩展` });
+              const spec = normalizeUiSpec(m.ui);
+              if (!spec.ok) return send(res, 400, { ok: false, message: spec.errors.join('；') });
+              if (!spec.spec.actions.some((a) => a.id === action)) {
+                return send(res, 400, { ok: false, message: `「${id}」没有声明动作「${action}」` });
+              }
+              const r = uiActions.push(id, action);
+              return send(res, r.ok ? 200 : 429, r);
             }
             case 'extensions.clients.list': {
               return send(res, 200, extPanel.clients());
@@ -8400,18 +8437,85 @@ export function apply(ctx) {
         if (!spec.ok) return send(res, 400, { ok: false, message: spec.errors.join('；') });
 
         const r = readUiData({ dir: extRegistry.pathOf(id), spec: spec.spec });
+        /**
+         * 表单：把宿主已有的配置读接口原样带给前端。
+         *
+         * 这不是新通道——`extensions.config.get` 本来就在，secret 只回
+         * 「已设置 / 未设置」；放在这里只是让扩展页不用再跳一次「已安装 → 设置」。
+         */
+        const cfg = spec.spec.form?.enabled ? extPanel.configOf(id) : null;
         return send(res, r.ok ? 200 : 200, {
           ok: r.ok,
           id,
           name: m.name || id,
           nav: spec.spec.nav,
           view: spec.spec.view,
+          /** 扩展自带页面入口；有它就前端用 iframe，不再渲染声明式视图 */
+          page: spec.spec.page,
+          form: spec.spec.form,
+          actions: spec.spec.actions,
+          config: cfg,
+          pendingActions: uiActions.peek(id).actions,
           rows: r.rows,
           updatedAt: r.updatedAt,
           truncated: r.truncated,
           message: r.ok ? '' : r.reason,
         });
       }),
+
+      /**
+       * 扩展自带页面（iframe 入口）。
+       *
+       * 2026-11-14 放宽：扩展可以写自己的 HTML/CSS/JS，面板只负责把文件按
+       * 正确 MIME 发出去。路径卡在扩展目录内不是安全策略（上架要审核），
+       * 是防止 `../` 把宿主的文件当扩展页发出去。
+       */
+      route('/ext-pages', (req, res) => {
+        const u = new URL(req.url || '/', 'http://local');
+        const id = String(u.searchParams.get('id') || '').trim();
+        const rel = String(u.searchParams.get('file') || '').trim();
+        if (!id || !rel) return send(res, 400, { ok: false, message: '缺 id / file' });
+        const m = extRegistry.read(id);
+        if (!m) return send(res, 404, { ok: false, message: `没有「${id}」这个扩展` });
+        const spec = normalizeUiSpec(m.ui);
+        if (!spec.ok || !spec.spec.page) {
+          return send(res, 404, { ok: false, message: '这个扩展没有声明页面' });
+        }
+        const root = resolve(extRegistry.pathOf(id));
+        const abs = resolve(root, rel);
+        const back = relative(root, abs);
+        if (!back || back === '..' || back.startsWith(`..${sep}`)) {
+          return send(res, 403, { ok: false, message: '只能取扩展目录里的文件' });
+        }
+        let buf;
+        try {
+          const st = statSync(abs);
+          if (!st.isFile()) return send(res, 404, { ok: false, message: `${rel} 不是文件` });
+          if (st.size > 4 * 1024 * 1024) return send(res, 413, { ok: false, message: '页面文件超过 4 MB' });
+          buf = readFileSync(abs);
+        } catch {
+          return send(res, 404, { ok: false, message: `读不到 ${rel}` });
+        }
+        const TYPE = {
+          '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
+          '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+          '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+          '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+          '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+          '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.woff': 'font/woff',
+        };
+        res.writeHead(200, {
+          'content-type': TYPE[extname(abs).toLowerCase()] || 'application/octet-stream',
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        });
+        res.end(buf);
+      /**
+       * **不过 fence**：iframe 导航请求带不了自定义头，过栅栏会被 403。
+       * 这里发的是扩展目录里、清单声明过的 HTML，本身就是给面板画的页面；
+       * 路径已经卡在扩展目录内，读不到宿主的任何文件。
+       */
+      }, { skipFence: true }),
 
       /* ---------------- 自驱引擎（实验，默认关） ----------------
        *

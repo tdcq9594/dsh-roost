@@ -14195,6 +14195,11 @@ select.roost-input{color-scheme:dark}
      */
     function ExtUiPage({ id, toast }) {
       const [d, setD] = useState(null)
+      /** 设置表单：`null` = 还没改过，直接用服务端返回的当前值 */
+      const [cfgDraft, setCfgDraft] = useState(null)
+      const [cfgSecrets, setCfgSecrets] = useState({})
+      const [cfgBusy, setCfgBusy] = useState(false)
+      const [cfgErr, setCfgErr] = useState('')
 
       const load = useCallback(async () => {
         const r = await get('/extensions/ui/data?id=' + encodeURIComponent(id))
@@ -14204,18 +14209,159 @@ select.roost-input{color-scheme:dark}
 
       if (!d) return h('div', { className: 'roost-empty' }, '读着…')
 
-      const head = h(Sec, {
-        title: d.view?.title || d.name || id,
-        right: h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-          h('span', { className: 'roost-muted', style: { fontSize: 11 } },
-            d.updatedAt
-              ? `更新于 ${new Date(d.updatedAt).toLocaleString()}`
-              : '还没有更新时间'),
-          h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新')),
-      },
-        h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-          '这个页面由扩展声明、由面板按数据渲染——扩展不能往面板里放代码，只能提供数据和字段名。'),
+      /**
+       * 表单与动作按钮。
+       *
+       * 都是**声明式**的：扩展在清单里写「显示哪些设置项」「有哪些按钮」，
+       * 这里只负责画控件。设置读写走宿主已有的 `extensions.config.get/save`
+       * （secret 仍然只显示「已设置 / 未设置」）；按钮只把动作名交给宿主
+       * 入队，由扩展自己取走执行 —— 面板里不执行扩展代码。
+       */
+      const cfg = d.config && d.config.ok ? d.config : null
+      const formKeys = d.form?.keys || []
+      const cfgSpec = (cfg?.spec || []).filter((f) => {
+        if (!d.form?.enabled) return false
+        return formKeys.length ? formKeys.includes(f.key) : true
+      })
+      const val = (f) => (cfgDraft && Object.hasOwn(cfgDraft, f.key) ? cfgDraft[f.key] : cfg?.values?.[f.key])
+      const setVal = (key, v) => setCfgDraft((prev) => ({ ...(prev || cfg?.values || {}), [key]: v }))
+      const inputStyle = {
+        width: '100%', boxSizing: 'border-box', padding: '5px 8px', borderRadius: 6,
+        border: '1px solid var(--line-soft)', background: 'transparent',
+        color: 'inherit', fontSize: 12, fontFamily: 'inherit',
+      }
+      const saveCfg = async () => {
+        setCfgBusy(true); setCfgErr('')
+        try {
+          const values = { ...(cfgDraft || cfg?.values || {}) }
+          const secrets = {}
+          for (const [k, v] of Object.entries(cfgSecrets)) if (v !== undefined) secrets[k] = v
+          const r = await EXT_POST('extensions.config.save', { id, values, secrets })
+          if (!r.ok) { setCfgErr(r.message || '保存失败'); return }
+          toast(r.message || '已保存')
+          setCfgSecrets({}); setCfgDraft(null)
+          await load()
+        } finally { setCfgBusy(false) }
+      }
+      const fieldRow = (f) => {
+        const k = f.key
+        const label = h('div', { style: { fontSize: 11.5, marginBottom: 3 } },
+          f.label,
+          f.hint ? h('span', { className: 'roost-muted' }, ' · ' + f.hint) : null)
+        if (f.secret) {
+          const typed = cfgSecrets[k]
+          const isSet = Boolean(cfg?.secretSet?.[k])
+          const ph = typed === undefined
+            ? (isSet ? '已设置（留空不改）' : '未设置')
+            : (typed === '' ? '保存后清除' : '保存后覆盖')
+          return h('div', { key: k, style: { marginTop: 10 } }, label,
+            h('input', {
+              type: 'password', autoComplete: 'off', spellCheck: false, style: inputStyle,
+              placeholder: ph, value: typed || '',
+              onChange: (e) => setCfgSecrets({ ...cfgSecrets, [k]: e.target.value }),
+            }))
+        }
+        if (f.type === 'boolean') {
+          return h('label', {
+            key: k, style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, cursor: 'pointer' },
+          },
+            h('input', { type: 'checkbox', checked: val(f) === true, onChange: (e) => setVal(k, e.target.checked) }),
+            h('span', { style: { fontSize: 12 } }, f.label),
+            f.hint ? h('span', { className: 'roost-muted', style: { fontSize: 11 } }, f.hint) : null)
+        }
+        if (f.type === 'select') {
+          return h('div', { key: k, style: { marginTop: 10 } }, label,
+            h('select', {
+              style: inputStyle, value: val(f) ?? '',
+              onChange: (e) => setVal(k, e.target.value),
+            }, (f.options || []).map((o) => {
+              const ov = typeof o === 'object' ? o.value : o
+              const ol = typeof o === 'object' ? (o.label ?? o.value) : o
+              return h('option', { key: String(ov), value: String(ov) }, String(ol))
+            })))
+        }
+        const type = f.type === 'number' ? 'number' : 'text'
+        return h('div', { key: k, style: { marginTop: 10 } }, label,
+          h('input', {
+            type, style: inputStyle,
+            placeholder: f.placeholder || '',
+            min: f.min, max: f.max,
+            value: val(f) ?? '',
+            onChange: (e) => {
+              const raw = e.target.value
+              setVal(k, type === 'number' ? (raw === '' ? '' : Number(raw)) : raw)
+            },
+          }))
+      }
+      const pending = new Set(d.pendingActions || [])
+      const actionsRow = (d.actions || []).length
+        ? h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 } },
+          d.actions.map((a) => h('button', {
+            key: a.id, type: 'button', className: 'roost-btn',
+            title: '交给扩展执行，几秒后刷新看结果',
+            onClick: async () => {
+              if (a.confirm && !window.confirm(`确定执行「${a.label}」？`)) return
+              const r = await EXT_POST('extensions.ui.action', { id, action: a.id })
+              toast(r.message || (r.ok ? '已交给扩展' : '没交上'))
+              await load()
+            },
+          }, pending.has(a.id) ? `${a.label} · 排队中` : a.label)))
+        : null
+      const formBlock = cfgSpec.length
+        ? h('div', {
+          style: {
+            border: '1px solid var(--line-soft)', borderRadius: 8,
+            padding: '10px 12px', marginBottom: 10,
+          },
+        },
+          h('div', { style: { fontWeight: 600, fontSize: 12.5, marginBottom: 2 } },
+            d.form?.title || '设置'),
+          h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 4 } },
+            '改完点「保存」；标着 secret 的项只存宿主，不回显明文。'),
+          cfgSpec.map(fieldRow),
+          cfgErr ? h('div', { className: 'roost-note', style: { color: 'var(--warn)' } }, cfgErr) : null,
+          h('div', { style: { marginTop: 10 } },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: cfgBusy,
+              onClick: saveCfg,
+            }, cfgBusy ? '保存中…' : '保存')))
+        : null
+
+      const head = h('div', null,
+        h(Sec, {
+          title: d.view?.title || d.name || id,
+          right: h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+            h('span', { className: 'roost-muted', style: { fontSize: 11 } },
+              d.updatedAt
+                ? `更新于 ${new Date(d.updatedAt).toLocaleString()}`
+                : '还没有更新时间'),
+            h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新')),
+        },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '这个页面由扩展声明、由面板按数据渲染——扩展不能往面板里放代码，只能提供数据、设置项和按钮名。'),
+        ),
+        actionsRow,
+        formBlock,
       )
+
+      /**
+       * 自带页面：扩展写自己的 HTML，面板用 iframe 装进来。
+       *
+       * 同源（`/ext-pages` 是面板自己的路由），所以页面里可以直接
+       * `fetch('/roost/api/quick')` 读写设置、点按钮。宿主不再限制它能画什么。
+       */
+      if (d.page) {
+        return h('div', null, head,
+          h('iframe', {
+            src: '/ext-pages?id=' + encodeURIComponent(id) + '&file=' + encodeURIComponent(d.page),
+            title: d.nav?.label || id,
+            style: {
+              width: '100%', height: 'calc(100vh - 230px)', minHeight: 460,
+              border: '1px solid var(--line-soft)', borderRadius: 8,
+              background: '#fff', display: 'block',
+            },
+          }))
+      }
 
       if (d.ok === false) {
         return h('div', null, head,

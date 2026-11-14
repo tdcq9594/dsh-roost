@@ -1,4 +1,5 @@
-// 6.1 扩展声明式界面：边界只有一条——扩展不许把代码送进面板。
+// 扩展界面：声明式视图（6.1）+ 自带页面 / 表单 / 按钮（2026-11-14 放宽）。
+// 自带页面走 iframe，路径仍卡在扩展目录内；表单与按钮都是声明，不是能力。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
@@ -201,4 +202,44 @@ test('放宽：tag / image / progress / time 四种新类型', () => {
   assert.equal(projectRow({ img: 'file:///c:/x.png' }, [{ key: 'img', type: 'image' }]).img, '',
     'file:// 也要清掉');
   assert.equal(projectRow({ p: 'abc' }, [{ key: 'p', type: 'progress' }]).p, null);
+});
+
+test('自带页面：ui.page 可以替代 view，路径必须落在扩展目录内', () => {
+  const ok = normalizeUiSpec({ nav: { label: '刷 B 站' }, page: 'ui/index.html' });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.spec.page, 'ui/index.html');
+  assert.equal(ok.spec.view, null, '没有 view 时不能给个空壳对象');
+
+  for (const bad of ['../x.html', '/etc/x.html', 'C:/x.html', 'ui/x.js', 'a/../b.html']) {
+    assert.equal(normalizeUiSpec({ nav: { label: 'x' }, page: bad }).ok, false, `${bad} 应被拒`);
+  }
+  assert.equal(normalizeUiSpec({ nav: { label: 'x' } }).ok, false, 'view 和 page 一个都没有');
+});
+
+test('表单声明：true / 数组 / 对象三种写法，保留字与空 key 拒', () => {
+  const base = { nav: { label: 'x' }, page: 'ui/index.html' };
+  assert.equal(normalizeUiSpec({ ...base, form: true }).spec.form.enabled, true);
+  assert.deepEqual(normalizeUiSpec({ ...base, form: ['cookie', 'pushOwner'] }).spec.form.keys, ['cookie', 'pushOwner']);
+  const obj = normalizeUiSpec({ ...base, form: { title: '设置', keys: ['cookie'] } });
+  assert.equal(obj.spec.form.title, '设置');
+  assert.equal(normalizeUiSpec({ ...base, form: ['__proto__'] }).ok, false);
+  assert.equal(normalizeUiSpec({ ...base, form: 'yes' }).ok, false);
+  assert.equal(normalizeUiSpec({ ...base }).spec.form.enabled, false, '没写就是关');
+});
+
+test('按钮声明：只认 {id,label}，重复与超长都拒', () => {
+  const base = { nav: { label: 'x' }, page: 'ui/index.html' };
+  const ok = normalizeUiSpec({
+    ...base,
+    actions: [{ id: 'feed_now', label: '现在刷一轮' }, { id: 'refresh_hot', label: '刷新热门', confirm: true }],
+  });
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.spec.actions.map((a) => a.id), ['feed_now', 'refresh_hot']);
+  assert.equal(ok.spec.actions[1].confirm, true);
+
+  assert.equal(normalizeUiSpec({ ...base, actions: [{ id: 'a', label: 'x' }, { id: 'a', label: 'y' }] }).ok, false);
+  assert.equal(normalizeUiSpec({ ...base, actions: [{ id: 'a', label: '这个标签实在是太长放不下了' }] }).ok, false);
+  assert.equal(normalizeUiSpec({ ...base, actions: [{ id: 'a b', label: 'x' }] }).ok, false);
+  assert.equal(normalizeUiSpec({ ...base, actions: 'feed_now' }).ok, false);
+  assert.deepEqual(normalizeUiSpec(base).spec.actions, [], '没写就是没有按钮');
 });
