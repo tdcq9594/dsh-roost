@@ -127,3 +127,56 @@ export function createActions() {
     cleanup(ext.root);
   }
 });
+
+test('配置是活引用：改了 config 下一次调用就是新值', async () => {
+  const ext = makeExt(`
+export function createActions({ config }) {
+  return { async read() { return { ok: true, message: String(config.limit ?? '') }; } };
+}
+`);
+  try {
+    clearInProcessCache(ext.id);
+    const first = await runInProcessAction({ ...ext, action: 'read', config: { limit: 5 } });
+    assert.equal(first.result.message, '5');
+
+    /** 面板上把设置改成 9：不用重建模块，下一次点击就该读到 9 */
+    const second = await runInProcessAction({ ...ext, action: 'read', config: { limit: 9 } });
+    assert.equal(second.result.message, '9', '配置必须原地更新，不能只用创建时那份');
+  } finally {
+    clearInProcessCache(ext.id);
+    cleanup(ext.root);
+  }
+});
+
+test('配置里删掉的键也要跟着消失（不能留旧值）', async () => {
+  const ext = makeExt(`
+export function createActions({ config }) {
+  return { async keys() { return { ok: true, message: Object.keys(config).sort().join(',') }; } };
+}
+`);
+  try {
+    clearInProcessCache(ext.id);
+    await runInProcessAction({ ...ext, action: 'keys', config: { a: 1, b: 2 } });
+    const r = await runInProcessAction({ ...ext, action: 'keys', config: { a: 1 } });
+    assert.equal(r.result.message, 'a', 'b 被取消勾选后不该还留在配置里');
+  } finally {
+    clearInProcessCache(ext.id);
+    cleanup(ext.root);
+  }
+});
+
+test('宿主侧 env 会传进去（共享依赖目录只有宿主知道）', async () => {
+  const ext = makeExt(`
+export function createActions({ env }) {
+  return { async deps() { return { ok: true, message: String(env.ROOST_DEPS_DIR ?? '') }; } };
+}
+`);
+  try {
+    clearInProcessCache(ext.id);
+    const r = await runInProcessAction({ ...ext, action: 'deps', env: { ROOST_DEPS_DIR: 'C:/deps' } });
+    assert.equal(r.result.message, 'C:/deps');
+  } finally {
+    clearInProcessCache(ext.id);
+    cleanup(ext.root);
+  }
+});

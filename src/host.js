@@ -5659,8 +5659,24 @@ export function apply(ctx) {
             case 'extensions.config.save': {
               const r = extPanel.saveConfig(arg?.id, arg?.values, arg?.secrets);
               if (!r.ok) return send(res, 400, r);
+              /**
+               * 先试一次重连（能成最好），但**不要**把「不成」说成
+               * 「重启 DSH 后生效」——那是最让人以为设置没保存的说法。
+               *
+               * 实际生效靠两条：
+               *   · 进程内动作每次点击都重新取配置（见 `extensions.ui.action`）；
+               *   · 扩展自己读宿主保存的文件（`lib/live-config.mjs`）。
+               * 两条都不依赖这个 restart。
+               */
               const re = await restartExtServer(arg?.id);
-              return send(res, 200, { ...r, restarted: re.ok, needsRestart: !re.ok, message: re.message });
+              return send(res, 200, {
+                ...r,
+                restarted: re.ok,
+                needsRestart: false,
+                message: re.ok
+                  ? '已保存，连接已重建'
+                  : '已保存，下一次动作就用新设置（不用重启）',
+              });
             }
             /**
              * 扩展页面上的动作按钮。
@@ -5685,13 +5701,31 @@ export function apply(ctx) {
                */
               if (spec.spec.runtime === 'inprocess') {
                 try {
+                  /**
+                   * 配置**每次点击都重新取**，并且是原地写进模块持有的那个引用
+                   * （见 `ext-inprocess` 的 `ctxOf`）：这样面板上刚改的设置，
+                   * 下一次点按钮就是新值，不需要重启扩展。
+                   *
+                   * `secrets` 是明文，只在这个进程内边界用——模块本来就能读
+                   * `ext-config` 的存储文件，不给它反而会让「面板里粘的 Cookie」
+                   * 和「进程内动作读的 cookie.txt」对不上。
+                   */
+                  const rc = typeof extPanel.runtimeOf === 'function'
+                    ? extPanel.runtimeOf(id)
+                    : { config: {}, secrets: {} };
                   const run = await runInProcessAction({
                     id,
                     root: extRegistry.pathOf(id),
                     entry: spec.spec.entry,
                     action,
                     payload: arg?.payload ?? null,
-                    config: extPanel.configOf(id)?.values ?? {},
+                    config: rc.config,
+                    secrets: rc.secrets,
+                    /**
+                     * 共享依赖路径只有宿主知道：`ROOST_DEPS_DIR` 是注入给
+                     * MCP 子进程的，宿主自己的 `process.env` 里没有。
+                     */
+                    env: { ROOST_DEPS_DIR: sharedDeps.depsDir() },
                     /** 扩展侧按函数用；宿主内部是对象，这一层必须换掉 */
                     log: (m) => log.warn?.(m),
                   });

@@ -307,6 +307,25 @@ export function createExtPanel({
   }
 
   /**
+   * **只给宿主内部用**的配置快照：包含明文密钥。
+   *
+   * `configOf` 是给面板的，密钥只回「已设置 / 未设置」；进程内扩展模块
+   * 跑在宿主进程里，本来就读得到 `ext-config` 的两个文件，不给明文反而
+   * 会让它「用 cookie.txt 那套」跟面板里粘贴的 Cookie 对不上。
+   *
+   * **绝不能**接到任何 HTTP 路由上。
+   */
+  function runtimeOf(id) {
+    const key = String(id ?? '');
+    if (!EXT_ID_RE.test(key)) return { config: {}, secrets: {} };
+    try {
+      return { config: extCfg.read(key), secrets: extCfg.readSecret(key) };
+    } catch {
+      return { config: {}, secrets: {} };
+    }
+  }
+
+  /**
    * 保存配置。
    *
    * @param {string} id
@@ -631,5 +650,7 @@ export function createExtPanel({
   return {
     enabled, usageRows, saveUsage, clients, createClient, revokeClient,
     status, effectiveBuckets, diagnose, configOf, saveConfig,
+    /** 明文密钥，仅供宿主进程内的扩展模块使用，不能挂到路由上 */
+    runtimeOf,
   };
 }

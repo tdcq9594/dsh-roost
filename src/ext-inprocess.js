@@ -21,12 +21,33 @@ import { statSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-/** id -> { mtime, mod, actions, actionsMtime } */
+/** id -> { mtime, mod, actions, actionsMtime, ctx } */
 const cache = new Map();
 
 export function clearInProcessCache(id) {
   if (id) cache.delete(id);
   else cache.clear();
+}
+
+/**
+ * 每个扩展一份**活对象**：配置与密钥都写进同一个引用里。
+ *
+ * 为什么不能每次新建：`createActions()` 只在文件 mtime 变化时调用一次
+ * （重建 api 客户端要重新握手，不能每点一次按钮就建一遍）。如果工厂
+ * 拿的是「创建那一刻的 config」，面板上改了设置，按钮用的还是旧值——
+ * 表现就是「设置改了没反应，得重启」。
+ *
+ * 所以工厂拿到的是引用，之后每次调用前原地更新内容。扩展代码里
+ * 只要写 `config.xxx`（而不是在创建时把值抠出来存成局部变量），
+ * 读到的就永远是最新值。
+ */
+function ctxOf(id) {
+  let c = cache.get(id);
+  if (!c) {
+    c = { mtime: 0, mod: null, actions: null, actionsMtime: 0, ctx: { config: {}, secrets: {}, env: {} } };
+    cache.set(id, c);
+  }
+  return c;
 }
 
 function safeJoin(root, entry) {
@@ -81,20 +102,48 @@ function asLog(v) {
  *   调用方应当回落到 MCP 队列 —— 两种形态可以混着用。
  */
 export async function runInProcessAction({
-  id, root, entry, action, payload = null, config = {}, log = () => {}, timeoutMs = 30_000,
+  id, root, entry, action, payload = null,
+  config = {}, secrets = {}, env = {}, log = () => {}, timeoutMs = 30_000,
 } = {}) {
   if (!id || !root || !entry) return { handled: false, reason: '缺参数' };
-  const { mod, mtime, hit } = await loadModule({ id, root, entry });
+  const { mod, mtime } = await loadModule({ id, root, entry });
   const factory = mod?.createActions ?? mod?.default?.createActions;
   if (typeof factory !== 'function') return { handled: false, reason: '入口没有导出 createActions' };
 
+  const rec = ctxOf(id);
+  /**
+   * **原地更新**，不是替换引用：工厂可能持有 `config` 这个对象，
+   * 换引用等于它手里那个还是旧的。先清空再赋值，删掉的键也能同步消失
+   * （否则「取消勾选某个项」之后旧值会一直留着）。
+   */
+  for (const k of Object.keys(rec.ctx.config)) delete rec.ctx.config[k];
+  Object.assign(rec.ctx.config, config || {});
+  for (const k of Object.keys(rec.ctx.secrets)) delete rec.ctx.secrets[k];
+  Object.assign(rec.ctx.secrets, secrets || {});
+  /**
+   * 一小撮宿主侧信息：模块跑在宿主进程里，拿不到注入给 MCP 子进程的那份
+   * env（`ROOST_DEPS_DIR` 就是典型——共享依赖路径只有宿主自己知道）。
+   */
+  for (const k of Object.keys(rec.ctx.env)) delete rec.ctx.env[k];
+  Object.assign(rec.ctx.env, env || {});
+
   /** actions 也按 mtime 缓存：每次点击都重建 api 客户端会重复握手 */
-  let actions = hit && hit.actionsMtime === mtime ? hit.actions : null;
+  let actions = rec.actionsMtime === mtime ? rec.actions : null;
   if (!actions) {
-    actions = await factory({ config: config || {}, log: asLog(log), id });
+    actions = await factory({
+      config: rec.ctx.config,
+      /** 明文密钥只在这个边界内出现：模块跑在宿主进程里，本来就读得到存储文件 */
+      secrets: rec.ctx.secrets,
+      env: rec.ctx.env,
+      log: asLog(log),
+      id,
+    });
     if (!actions || typeof actions !== 'object') return { handled: false, reason: 'createActions 没返回对象' };
   }
-  cache.set(id, { mtime, mod, actions, actionsMtime: mtime });
+  rec.mtime = mtime;
+  rec.mod = mod;
+  rec.actions = actions;
+  rec.actionsMtime = mtime;
 
   const fn = actions[action];
   if (typeof fn !== 'function') return { handled: false };
