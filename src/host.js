@@ -100,6 +100,7 @@ import { registerRoostTools } from './roost-tools.js';
 import { createRoostHost, protocolAlive } from './roost-host.js';
 import { createPayloadBuilder, buildRendered } from './roost-payload.js';
 import { interactionRouter } from './roost-interaction.js';
+import { createPickChannel } from './pick-channel.js';
 
 /**
  * 频道 qq 方法表缓存（模块级；dsh-roost 单实例）。
@@ -2919,11 +2920,24 @@ export function apply(ctx) {
    * `<skip>` 全在这里摘干净并执行。移除 ai-chat 之后这一层没有下游了，
    * 必须在**发出去之前**收口，否则标记会原样进群。
    */
+  /**
+   * 回调型按钮通道。注册到交互路由之后，`<<pick:>>` 才有地方结算；
+   * 这里不给 `onPick` 接业务动作（审批等）——现有 `ext-tier` / `ext-proactive`
+   * 的批准入口在面板、按序号批量，没有 nonce 字段，硬接会变成第二套真相。
+   * 先留通道 + 注入点，将来接审批时把 `onPick` 指到同一个 approve 动作即可。
+   */
+  const pickChannel = createPickChannel({
+    log: (m) => log.warn(m),
+    debug: (m) => log.debug(m),
+  });
+  interactionRouter.register((parsed) => pickChannel.handle(parsed));
+
   const outActions = createActionRunner({
     channel: () => channels.active(),
     tts,
     /** `<<say>>` 的语音条额度按人扣；以前扣在 ai-chat 侧、拿不到 openid，所以一直没接 */
     quota,
+    picks: pickChannel,
     log: (m) => log.warn(m),
   });
 

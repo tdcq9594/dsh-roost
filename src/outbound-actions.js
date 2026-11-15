@@ -17,7 +17,8 @@
  *   · `<<image-alone: 路径>>` 单独发一条图（正文先发、图后发）
  *   · `<<voice: 路径>>`      单独发一条语音
  *   · `<<say: 文本>>`        宿主 TTS 合成后发语音条（没开语音就静默跳过）
- *   · `<<button: 标签|指令>>` 挂到本条 Markdown 的 keyboard
+ *   · `<<button: 标签|指令>>` 挂到本条 Markdown 的 keyboard（type:2 指令型）
+ *   · `<<pick: 标签|值>>`    回调型按钮（type:1），同组点一个其余变灰
  *   · `<<card: 标题|描述|https://链接|https://图片>>`
  *                            官方图文卡片（`msg_type=8`），**独占一条消息**：
  *                            正文先发、卡片后发，一轮最多一张
@@ -36,6 +37,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { parseCardValue, tuwenProblem } from './tuwen.js';
+import { encodeButtonData } from './roost-interaction.js';
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)(?:[?#].*)?$/i;
 const VOICE_EXT = /\.(silk|amr|mp3|wav|ogg|m4a)(?:[?#].*)?$/i;
@@ -127,6 +129,79 @@ export function buildKeyboard(buttons, { max = 4, perRow = 2 } = {}) {
 }
 
 /**
+ * `<<pick: 标签|值>>`：回调型按钮的选项。
+ *
+ * 与 `parseButton` 刻意分开：按钮点击后的去向完全不同（一个是当作用户消息
+ * 发出、一个是回传发起方），共用一套解析迟早会把两者混起来。
+ */
+export function parsePick(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  const parts = raw.split(/\s*[|｜]\s*/);
+  const label = String(parts[0] ?? '').trim().slice(0, 12);
+  const val = String(parts[1] ?? label).trim().slice(0, 100);
+  return label ? { label, value: val } : null;
+}
+
+/**
+ * 把若干 `{content:{rows}}` 键盘合成一个，并重新编号所有按钮 id。
+ *
+ * 一条消息只能挂一个 keyboard。`<<button:>>` 和 `<<pick:>>` 同时出现时不能
+ * 丢掉任何一方，但两处各自从 1 编号会撞 id，所以合并后统一重排。
+ */
+export function combineKeyboards(list) {
+  const rows = [];
+  for (const kb of list) {
+    for (const row of kb?.content?.rows ?? []) {
+      if (Array.isArray(row?.buttons) && row.buttons.length) rows.push(row);
+    }
+  }
+  if (!rows.length) return null;
+  let n = 0;
+  return {
+    content: {
+      rows: rows.map((row) => ({
+        buttons: row.buttons.map((b) => ({ ...b, id: String(++n) })),
+      })),
+    },
+  };
+}
+
+/**
+ * 回调型按钮键盘（`action.type: 1`）。
+ *
+ * 三个字段是「点一个其余变灰」的全部秘密，都是 QQ 原生能力，插件不维护状态：
+ *   · `group_id`     同一组选项共享 → 组内互斥
+ *   · `click_limit`  每人只能点一次
+ *   · `visited_label` 点过之后显示的文案
+ *
+ * `data` 用 `{t,n,v}`：顶层 `t` 供交互路由判别通道，`n` 是本组 nonce
+ * （旧卡片/重复点击靠它失效），`v` 是这一项回传的值。
+ */
+export function buildPickKeyboard(picks, nonce, { max = 4, perRow = 2 } = {}) {
+  const list = (picks ?? []).filter((p) => p && p.label).slice(0, max);
+  if (!list.length || !nonce) return null;
+  const groupId = `pick-${nonce}`;
+  const rows = [];
+  for (let i = 0; i < list.length; i += perRow) {
+    rows.push({
+      buttons: list.slice(i, i + perRow).map((p, j) => ({
+        id: String(i + j + 1),
+        render_data: { label: p.label, visited_label: '✓ 已选', style: 1 },
+        action: {
+          type: 1,
+          permission: { type: 2 },
+          click_limit: 1,
+          data: encodeButtonData({ t: 'pick', n: nonce, v: p.value }),
+        },
+        group_id: groupId,
+      })),
+    });
+  }
+  return { content: { rows } };
+}
+
+/**
  * 解析正文里的动作标记。
  *
  * @returns {{text:string, actions:Array<{type:string,value?:string}>, wantSkip:boolean}}
@@ -152,6 +227,8 @@ export function parseOutboundActions(raw) {
   take(/<<retract>>/gi, 'retract', false);
   take(/<<silence[:：]\s*([\s\S]*?)>>/gi, 'silence');
   take(/<<button[:：]\s*([\s\S]*?)>>/gi, 'button');
+  /** pick 必须在通用兜底之前摘掉，否则会被 `<<[a-z]…>>` 那条整段吃掉 */
+  take(/<<pick[:：]\s*([\s\S]*?)>>/gi, 'pick');
   take(/<<say[:：]\s*([\s\S]*?)>>/gi, 'say');
   take(/<<voice[:：]\s*([\s\S]*?)>>/gi, 'voice');
 
@@ -244,9 +321,11 @@ export function parseOutboundActions(raw) {
  * @param {() => object} o.channel   取当前通道（延迟取，热切换通道不会拿到旧的）
  * @param {object} [o.tts]          `createTts()` 实例，给 `<<say>>` 用
  * @param {object} [o.quota]        `createQuota()` 实例，给 `<<say>>` 扣「语音条」额度
+ * @param {object} [o.picks]        `createPickChannel()` 实例，给 `<<pick:>>` 登记 nonce。
+ *                                  没注入时 `<<pick:>>` 只摘掉不发按钮——纯加法，不产生孤儿回调
  * @param {(m:string)=>void} [o.log]
  */
-export function createActionRunner({ channel, tts = null, quota = null, log = () => {} } = {}) {
+export function createActionRunner({ channel, tts = null, quota = null, picks = null, onPick = null, log = () => {} } = {}) {
   /** chatId → { id, kind, at } */
   const lastSent = new Map();
   /** `chatId|type|value` → at */
@@ -312,7 +391,26 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
 
     /** 2. 按钮 / 静默 */
     const buttons = actions.filter((a) => a.type === 'button').map((a) => parseButton(a.value)).filter(Boolean);
-    const keyboard = buildKeyboard(buttons);
+    /**
+     * `pick` 单独分组，**绝不能混进 `buttons`**：`buildKeyboard` 里
+     * `action.type: 2` 是硬编码的，混进去所有回调按钮都会退化成指令型，
+     * 点了不产生 INTERACTION，整条通道就白做了。
+     */
+    const pickList = actions.filter((a) => a.type === 'pick').map((a) => parsePick(a.value)).filter(Boolean);
+    let pickKeyboard = null;
+    if (pickList.length && picks && typeof picks.arm === 'function') {
+      const armed = picks.arm({
+        values: pickList.map((p) => p.value),
+        chatId: target,
+        scene,
+        /** 没注入业务回调时只留一条可见日志，不静默吞掉点击 */
+        onPick: typeof onPick === 'function' ? onPick : (r) => log(`回调按钮已选：${r.value}`),
+      });
+      pickKeyboard = buildPickKeyboard(pickList, armed.nonce);
+    } else if (pickList.length) {
+      log('本轮有 <<pick:>> 但没接回调通道，已摘掉不发按钮');
+    }
+    const keyboard = combineKeyboards([buildKeyboard(buttons), pickKeyboard]);
     const silenceMs = Math.max(
       0,
       ...actions.filter((a) => a.type === 'silence').map((a) => parseDurationMs(a.value)),
