@@ -67,15 +67,26 @@ function extOf(mime) {
   return '.jpg';
 }
 
-function guessMime(buf, declared = '') {
+/**
+ * 判图片真实类型：**先看文件头，再看声明**。
+ *
+ * 顺序反了等于没做。QQ 网关把发上来的图片**统一标成 `image/png`**，
+ * `content_type` 不可信（dsh-qqbot 的 `transport/attachment.ts` 也专门点了这个坑）。
+ * 老实现先信声明、嗅头部只当兜底，于是兜底永远走不到：一张 GIF 被标成 png，
+ * 就按 `.png` 落盘、`mediaType` 也报错，模型读图那一步直接失败。
+ *
+ * 太短的 buffer（< 12 字节）没法嗅，这时才退回声明——极小的图几乎不存在，
+ * 真遇到也至少别误杀。
+ */
+export function guessMime(buf, declared = '') {
+  if (buf && buf.length >= 12) {
+    if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
+    if (buf[0] === 0x89 && buf.toString('latin1', 1, 4) === 'PNG') return 'image/png';
+    if (buf.toString('latin1', 0, 3) === 'GIF') return 'image/gif';
+    if (buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP') return 'image/webp';
+  }
   const d = String(declared).split(';')[0].trim().toLowerCase();
-  if (OK_MIME.test(d)) return d;
-  if (!buf || buf.length < 12) return '';
-  if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
-  if (buf[0] === 0x89 && buf.toString('latin1', 1, 4) === 'PNG') return 'image/png';
-  if (buf.toString('latin1', 0, 3) === 'GIF') return 'image/gif';
-  if (buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP') return 'image/webp';
-  return '';
+  return OK_MIME.test(d) ? d : '';
 }
 
 /** 这个附件能不能当图看 */
