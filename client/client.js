@@ -9810,12 +9810,10 @@ select.roost-input{color-scheme:dark}
               '默认关。关着时只在 dsh-roost 入口丢弃频道事件，不改框架的 intents 订阅——'
               + '框架照常收、照常推给别的插件，这边只是不处理。'),
             h(GRow, { label: '启用频道', hint: '开启前请确认框架侧已订阅频道事件' },
-              h('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center' } },
-                h('input', {
-                  type: 'checkbox', checked: on, disabled: busy,
-                  onChange: (e) => put({ guild: { enabled: e.target.checked } }),
-                }),
-                h('span', null, on ? '开' : '关'))),
+              h(Switch, {
+                on, label: '启用频道', disabled: busy,
+                onToggle: (v) => put({ guild: { enabled: v } }),
+              })),
             h(GRow, { label: '会话粒度', hint: 'guild = 一个频道一个会话；channel = 一个子频道一个' },
               h('select', {
                 className: 'roost-g-num', value: g.sessionMode || 'guild', disabled: busy || !on,
@@ -10058,6 +10056,7 @@ select.roost-input{color-scheme:dark}
      */
     function ChannelApiTab({ title, groups, note }) {
       const [idx, setIdx] = useState(null)
+      const [fallback, setFallback] = useState(false)
       const [sel, setSel] = useState('')
       const [params, setParams] = useState('{}')
       const [out, setOut] = useState(null)
@@ -10066,6 +10065,7 @@ select.roost-input{color-scheme:dark}
         try {
           const r = await get('/channel/methods')
           setIdx(r?.methods && typeof r.methods === 'object' ? r.methods : {})
+          setFallback(r?.fallback === true)
         } catch { setIdx({}) }
       }, [])
       useEffect(() => { load() }, [load])
@@ -10105,6 +10105,11 @@ select.roost-input{color-scheme:dark}
         },
           h('div', { className: 'roost-g-card' },
             note ? h('p', { className: 'roost-g-desc' }, note) : null,
+            fallback
+              ? h('p', { className: 'roost-note' },
+                  '框架的 qq.methods 没带 group（版本较旧，或运行副本没同步本轮改动），'
+                  + '当前用本地兜底名单。同步并重启框架后会自动切回按 group 过滤。')
+              : null,
             list.length
               ? h(GRow, { label: '接口', hint: '只列频道相关方法；GET 只读，其余要二次确认' },
                   h('select', {

@@ -107,6 +107,42 @@ import { createPayloadBuilder, buildRendered } from './roost-payload.js';
  * 路由对象里 —— 路由参数是**对象字面量**，里面不能写 `let`（语法错误）。
  */
 let channelQqIndex = null;
+
+/**
+ * 频道方法名兜底名单。
+ *
+ * 只有**框架的 `qq.methods` 没带 `group`** 时才用（旧框架 / 运行副本没同步）。
+ * 有 group 就按 group 过滤，名单不参与——所以它漂移了也不会带错，
+ * 最坏是旧框架下漏列几个新方法。同步并重启框架后自动切回 group 判据。
+ */
+const CHANNEL_QQ_FALLBACK = new Set([
+  /* 频道与子频道 */
+  'getChannel', 'updateChannel', 'deleteChannel', 'getGuild', 'getGuildChannels', 'createGuildChannel',
+  /* 消息与私信 */
+  'sendChannelMessage', 'retractChannelMessage', 'createDms', 'sendDmMessage', 'retractDmMessage',
+  /* 表情表态 */
+  'putReaction', 'deleteReaction', 'getReactionUsers',
+  /* 公告 */
+  'postGuildAnnounces', 'deleteGuildAnnounces', 'postChannelAnnounces', 'deleteChannelAnnounces',
+  /* 论坛 */
+  'getThreadsList', 'getThread', 'putThread', 'deleteThread',
+  /* 精华 */
+  'getPinsMessage', 'putPinsMessage', 'deletePinsMessage',
+  /* 日程 */
+  'getSchedules', 'getSchedule', 'postSchedule', 'patchSchedule', 'deleteSchedule',
+  /* 身份组 */
+  'getGuildRoles', 'postGuildRole', 'patchGuildRole', 'deleteGuildRole',
+  'putGuildMemberRole', 'deleteGuildMemberRole', 'getRoleMembers',
+  /* 子频道权限 */
+  'getChannelPermissions', 'putChannelPermissions',
+  'getChannelRolesPermissions', 'putChannelRolesPermissions',
+  /* 成员 */
+  'getGuildMembers', 'getGuildMember', 'getOnlineNums',
+  /* API 权限 */
+  'getGuildApiPermission', 'postGuildApiPermissionDemand',
+  /* 音频 */
+  'audioControl', 'putMic', 'deleteMic',
+]);
 import { createMerger } from './roost-merge.js';
 import { createDecider } from './roost-decide.js';
 import { createPairing } from './roost-pair.js';
@@ -8267,10 +8303,20 @@ export function apply(ctx) {
             const r = await roost.rpc('qq.methods', {});
             channelQqIndex = r?.risks && typeof r.risks === 'object' ? r.risks : {};
           }
-          const methods = Object.fromEntries(
-            Object.entries(channelQqIndex).filter(([, v]) => String(v?.group || '').startsWith('频道')),
-          );
-          send(res, 200, { ok: true, methods });
+          const entries = Object.entries(channelQqIndex);
+          /**
+           * 框架带 group 就按 group 筛；不带（旧框架 / 运行副本没同步）就用
+           * 本地兜底名单，并回 `fallback:true` 让面板说明白。
+           */
+          const hasGroup = entries.some(([, v]) => String(v?.group || '').trim());
+          const methods = hasGroup
+            ? Object.fromEntries(entries.filter(([, v]) => String(v?.group || '').startsWith('频道')))
+            : Object.fromEntries(
+                entries
+                  .filter(([k]) => CHANNEL_QQ_FALLBACK.has(k))
+                  .map(([k, v]) => [k, { ...v, group: '频道（本地兜底）' }]),
+              );
+          send(res, 200, { ok: true, methods, fallback: !hasGroup });
         } catch (e) {
           send(res, 200, { ok: false, message: String(e?.message || e), methods: {} });
         }
@@ -8298,7 +8344,12 @@ export function apply(ctx) {
           return send(res, 200, { ok: false, message: `拿不到方法表：${e?.message || e}` });
         }
         const meta = channelQqIndex[method];
-        if (!meta || !String(meta.group || '').startsWith('频道')) {
+        /** 与 `/channel/methods` 同口径：有 group 按 group，没有就按兜底名单 */
+        const hasGroup = Object.values(channelQqIndex).some((v) => String(v?.group || '').trim());
+        const isChannel = hasGroup
+          ? Boolean(meta && String(meta.group || '').startsWith('频道'))
+          : Boolean(meta && CHANNEL_QQ_FALLBACK.has(method));
+        if (!isChannel) {
           return send(res, 403, { ok: false, message: `不是频道相关方法：${method || '(空)'}` });
         }
         const risk = String(meta.risk || 'write');
