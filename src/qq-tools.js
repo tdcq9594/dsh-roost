@@ -80,7 +80,8 @@ export const MAX_PARTS = 3;
  * @returns {number}
  */
 export function maxPartsOf(cfg, kind = 'group') {
-  const hardMax = kind === 'c2c' ? 4 : 5;
+  /** 一对一场景（c2c / 频道私信）按 4 段保守处理；guild 与群聊同档 */
+  const hardMax = (kind === 'c2c' || kind === 'dm') ? 4 : 5;
   const n = Number(cfg?.qqTools?.maxParts);
   return Number.isFinite(n) && n > 0 ? Math.min(n, hardMax) : Math.min(MAX_PARTS, hardMax);
 }

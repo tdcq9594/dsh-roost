@@ -146,7 +146,9 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
       const chatId = String(evt?.chat?.chatId ?? '');
       /** 按群覆写在这里生效；chance 是这一层的插话概率 */
       const { decide: c, chance } = conf(chatId);
-      const kind = evt?.chat?.kind === 'c2c' ? 'c2c' : 'group';
+      /** 四态投影：频道私信（dm）和普通单聊一样是「专门点开来跟你说话」 */
+      const k = evt?.chat?.kind;
+      const kind = (k === 'c2c' || k === 'dm') ? 'c2c' : 'group';
       const s = stOf(chatId);
       const t = now();
 
@@ -292,7 +294,7 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
       recent.push({
         at: now(),
         chatId: String(evt?.chat?.chatId ?? ''),
-        kind: evt?.chat?.kind === 'c2c' ? 'c2c' : 'group',
+        kind: (evt?.chat?.kind === 'c2c' || evt?.chat?.kind === 'dm') ? 'c2c' : 'group',
         text: saidOf(evt).slice(0, 40),
         go: v.go === true,
         reason: String(v.reason ?? ''),

@@ -21,7 +21,7 @@
  * 流水线。少一层会让人以为漏了，多一层会让人以为真链路里还有别的步骤。
  */
 
-import { renderInbound, speakerTag, chatOf } from './inbound.js';
+import { renderInbound, speakerTag, chatOf, normalizeKind, isPrivateKind } from './inbound.js';
 import { createDecider } from './roost-decide.js';
 import { pickModelFor, pickEffortFor } from './model-pick.js';
 
@@ -50,11 +50,17 @@ export const SIM_PERSONAS = [
 ];
 
 /** 把面板上的选择 + 一句话，拼成一个「像真的」事件 */
+/** 模拟面板也要能试频道场景：四态归一，一对一/多人用统一判据 */
+function kindLabel(k) {
+  return k === 'c2c' ? '私聊' : k === 'dm' ? '频道私信' : k === 'guild' ? '子频道' : '群聊';
+}
+
 export function buildFakeEvent(input = {}) {
-  const kind = input.kind === 'c2c' ? 'c2c' : 'group';
-  const chatId = String(input.chatId ?? '').trim() || (kind === 'c2c' ? 'sim:c2c' : 'sim:group');
-  const name = String(input.name ?? '').trim() || (kind === 'c2c' ? '主人' : '群友');
-  const openid = String(input.openid ?? '').trim() || (kind === 'c2c' ? 'SIM_OWNER' : 'SIM_MEMBER');
+  const kind = normalizeKind(input.kind);
+  const priv = isPrivateKind(kind);
+  const chatId = String(input.chatId ?? '').trim() || (priv ? 'sim:c2c' : 'sim:group');
+  const name = String(input.name ?? '').trim() || (priv ? '主人' : '群友');
+  const openid = String(input.openid ?? '').trim() || (priv ? 'SIM_OWNER' : 'SIM_MEMBER');
   const uin = String(input.uin ?? '').replace(/\D/g, '');
   const text = String(input.text ?? '');
 
@@ -158,7 +164,7 @@ export function simulate({ input = {}, cfg = {}, tools = null, now = Date.now(),
   const modelSource = !sel
     ? '没配模型，用 DSH 当前选择'
     : (m.byChat?.[evt.chat.chatId] ? '按这个会话单独配的'
-      : (m.byKind?.[evt.chat.kind] ? `按${evt.chat.kind === 'c2c' ? '私聊' : '群聊'}默认`
+      : (m.byKind?.[evt.chat.kind] ? `按${kindLabel(evt.chat.kind)}默认`
         : '按全局默认'));
   steps.push(step(
     'model',
@@ -241,7 +247,7 @@ export function simulate({ input = {}, cfg = {}, tools = null, now = Date.now(),
 
 /** 一句话结论，面板顶栏用 */
 function summarize(verdict, evt) {
-  const who = evt.chat.kind === 'c2c' ? '私聊' : '群聊';
+  const who = kindLabel(evt.chat.kind);
   if (verdict.go !== true) return `${who}这句不会回：${verdict.reason}`;
   if (verdict.cooling) return `${who}会回，但要等 ${Math.ceil((Number(verdict.delayMs) || 0) / 1000)} 秒（冷却中，消息攒着）`;
   return `${who}这句会回：${verdict.reason}`;

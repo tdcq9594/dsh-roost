@@ -47,7 +47,10 @@ export function realChatName(chat) {
 export function sessionTitle(chat) {
   const name = realChatName(chat);
   if (name) return `QQ · ${name}`;
-  return `QQ · ${chat?.kind === 'c2c' ? '私聊' : '群'} ${String(chat?.chatId || '').slice(-6)}`;
+  const label = chat?.kind === 'c2c' ? '私聊'
+    : chat?.kind === 'dm' ? '频道私信'
+      : chat?.kind === 'guild' ? '子频道' : '群';
+  return `QQ · ${label} ${String(chat?.chatId || '').slice(-6)}`;
 }
 
 /**

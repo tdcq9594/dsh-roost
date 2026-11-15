@@ -25,7 +25,7 @@ import { existsSync, realpathSync, statSync } from 'node:fs';
 import { extname, join, resolve, sep } from 'node:path';
 
 import { shouldFire } from './speakup.js';
-import { chatOf } from './inbound.js';
+import { chatOf, normalizeKind } from './inbound.js';
 import { tuwenProblem } from './tuwen.js';
 import { classifyRoostCall, resolveExtTarget, narrowMsgSend, EXT_ROOST_READONLY, EXT_ROOST_SEND } from './ext-roost.js';
 
@@ -734,7 +734,7 @@ export function createExtApiHooks({
       const chat = chatOf({
         chat: {
           chatId,
-          kind: body?.kind === 'c2c' ? 'c2c' : 'group',
+          kind: normalizeKind(body?.kind),
           name: str(body?.name, 60),
         },
       });

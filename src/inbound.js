@@ -6,6 +6,35 @@
  * 老版本插件没有这个字段时，这里兜底自己拼。
  */
 
+/**
+ * 会话类型契约（2026-11-15 加频道能力时统一）
+ * ==========================================
+ *
+ * 框架 `chat.kind` 有四种：`group` / `c2c` / `guild` / `dm`。
+ * 但 dsh-roost 内部大量逻辑只分「多人场景 / 私聊场景」（scene），
+ * 以前到处写 `c2c ? ... : group`，频道消息一进来就会被当群聊。
+ *
+ * 统一在这里定义映射，别再各自二分：
+ *   · `guild`（文字子频道，多人）→ scene `group`、人设 social、需要说话人标签
+ *   · `dm`（频道私信，一对一）  → scene `c2c`、人设 private、不需要说话人标签
+ */
+export const CHAT_KINDS = Object.freeze(['group', 'c2c', 'guild', 'dm']);
+export function normalizeKind(k) {
+  return CHAT_KINDS.includes(k) ? k : 'group';
+}
+/** 一对一场景：c2c 与频道私信 */
+export function isPrivateKind(k) {
+  return k === 'c2c' || k === 'dm';
+}
+/** 多人场景：普通群与文字子频道 */
+export function sceneOfKind(k) {
+  return k === 'group' || k === 'guild' ? 'group' : 'c2c';
+}
+/** 人设档位 */
+export function presetOfKind(k) {
+  return isPrivateKind(k) ? 'roost-private' : 'roost-social';
+}
+
 export function renderInbound(p) {
   if (typeof p?.rendered === 'string' && p.rendered.trim()) return p.rendered;
 
@@ -57,9 +86,9 @@ export function renderInbound(p) {
  * 昵称和 id 都要清洗：`]` `(` `)` 会把标签结构搞坏，换行会把一条消息劈成两行。
  */
 export function speakerTag(payload, chat) {
-  const kind = chat?.kind === 'c2c' ? 'c2c' : 'group';
-  // 私聊只有一个人，给 id 没有意义，反而白占 token
-  if (kind !== 'group') return '';
+  const kind = normalizeKind(chat?.kind);
+  // 一对一场景（c2c / 频道私信）只有一个人，给 id 没有意义，反而白占 token
+  if (isPrivateKind(kind)) return '';
 
   /**
    * 多人批次（连着几句攒成一批）不套外层标签。
@@ -92,7 +121,9 @@ export function speakerTag(payload, chat) {
 /** 会话标识：群和私聊要分开，同一个 openid 在两种场景下不是一回事 */
 export function chatOf(payload) {
   const chatId = String(payload?.chat?.chatId ?? '');
-  const kind = payload?.chat?.kind === 'c2c' ? 'c2c' : 'group';
+  const kind = normalizeKind(payload?.chat?.kind);
+  /** 下游大量逻辑仍按 group/c2c 两态选人设、@ 标签、上限，统一从这里给映射值 */
+  const scene = sceneOfKind(kind);
 
   /**
    * 身份：QQ号 / 群号 + 读旧记忆的备用键。
@@ -113,13 +144,22 @@ export function chatOf(payload) {
 
   return {
     kind,
+    /** 两态投影：guild→group、dm→c2c，给只认 scene 的下游用 */
+    scene,
     chatId,
     groupId: String(payload?.chat?.groupId ?? ''),
+    /** 频道维度：频道 ID / 子频道 ID（群、单聊为空串） */
+    guildId: String(payload?.chat?.guildId ?? ''),
+    channelId: String(payload?.chat?.channelId ?? ''),
     name: String(payload?.chat?.name ?? ''),
-    preset: kind === 'c2c' ? 'roost-private' : 'roost-social',
+    preset: presetOfKind(kind),
     uin,
     groupUin,
     aliases,
-    identityId: kind === 'c2c' ? (uin ? `u:${uin}` : '') : groupUin ? `g:${groupUin}` : '',
+    /**
+     * 频道没有 QQ 号 / 群号可绑，identityId 会是空串——空串不等于「同一个人」，
+     * 别拿它当键。频道会话的隔离靠 chatId（guild 是 channel_id、dm 是会话 id）。
+     */
+    identityId: isPrivateKind(kind) ? (uin ? `u:${uin}` : '') : groupUin ? `g:${groupUin}` : '',
   };
 }

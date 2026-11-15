@@ -22,7 +22,7 @@ import { createTurnRunner } from './turn.js';
 import { createTurnQueue } from './turnqueue.js';
 import { createInboundShell } from './inbound-shell.js';
 import { createInboundServer, postReply } from './server.js';
-import { renderInbound, chatOf, speakerTag } from './inbound.js';
+import { renderInbound, chatOf, speakerTag, normalizeKind, sceneOfKind, isPrivateKind } from './inbound.js';
 import { createAsrRecent } from './asr-recent.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools } from './permissions.js';
 import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
@@ -2941,7 +2941,9 @@ export function apply(ctx) {
       notePathError('丢弃消息', new Error(`事件里没有 chat.chatId（msgId=${String(last?.msgId ?? '')}）`));
       return;
     }
-    const chatKind = last?.chat?.kind === 'c2c' ? 'c2c' : 'group';
+    /** 四态 kind 决定打到哪个官方接口；两态 scene 给只认 group/c2c 的下游 */
+    const chatKind = normalizeKind(last?.chat?.kind);
+    const chatScene = sceneOfKind(chatKind);
     /**
      * 回复通道。带上 `msgId` / `receivedAt` 是**被动回复**（不占主动额度）；
      * 不带就是主动消息。所有出站都过 `outActions`：动作标记在这里摘干净并执行，
@@ -2958,7 +2960,9 @@ export function apply(ctx) {
     const send = async (text, extra) => outActions({
       text: String(text ?? ''),
       extra: extra ?? {},
-      scene: chatKind,
+      scene: chatScene,
+      /** 频道消息要靠这个四态值打到 /channels/{id}/messages 或 /dms/{id}/messages */
+      kind: chatKind,
       target: chatId,
       msgId: String(last?.msgId ?? ''),
       receivedAt: Number(last?.at) || 0,
@@ -4460,7 +4464,7 @@ export function apply(ctx) {
             const persona = personas.resolve(chat.chatId, personaCfgFor(chat));
             // 按群覆盖优先（模型用 <<persona:>> 写的），没有才用文件里那个人格
             const override = memory.getPersonaOverride(chat.chatId, aliasesOf(chat.chatId));
-            const extra = chat.kind === 'c2c' ? p.rulesPrivate : p.rulesSocial;
+            const extra = isPrivateKind(chat.kind) ? p.rulesPrivate : p.rulesSocial;
 
             /**
              * 世界书：**命中关键词才注入**。
@@ -4816,6 +4820,11 @@ export function apply(ctx) {
      * 5.13 单聊「正在输入」：一轮可能几十秒，先给个「在打字」的信号。
      * 失败静默（提示发不出去不能影响回复）；群聊没有这个语义。
      */
+    /**
+     * 注意这里**只认 c2c**：官方 `msg_type=6` 走 `/v2/users/{openid}/messages`，
+     * 频道私信 `dm` 是另一套接口，没有「正在输入」语义，不能因为它是
+     * 一对一场景就一起发（会打到单聊端点）。其余私聊专属逻辑才用 isPrivateKind。
+     */
     if (chat.kind === 'c2c' && cfg.chat?.typing !== false) {
       const at = typingAt.get(chat.chatId) || 0;
       if (Date.now() - at > TYPING_EVERY_MS) {
@@ -4843,7 +4852,8 @@ export function apply(ctx) {
       if (!fromApi && confirmGate.onMessage(chat.chatId, said)) {
         try {
           sendOut({
-            scene: chat.kind === 'group' ? 'group' : 'c2c',
+            scene: chat.scene,
+            kind: chat.kind,
             target: chat.chatId,
             text: '好，下一条同类命令我执行。',
           })?.catch?.(() => {});
@@ -4886,7 +4896,7 @@ export function apply(ctx) {
       await qqToolRegistry.waitFor(agent);
 
       // 主人自己说话了 → 主动搭话重新排期
-      if (chat.kind === 'c2c') speakUp.noteOwner(chat.chatId);
+      if (isPrivateKind(chat.kind)) speakUp.noteOwner(chat.chatId);
       /**
        * 顺手记住「主人的私聊是哪个」。
        *
@@ -4894,7 +4904,7 @@ export function apply(ctx) {
        * 判据是**消息自己的 bucket**（插件给的），不猜——群里的 owner
        * 不算，必须是一对一私聊，否则可能把主动消息发到群里。
        */
-      if (chat.kind === 'c2c' && bucket === 'owner') learnedOwner = chat.chatId;
+      if (isPrivateKind(chat.kind) && bucket === 'owner') learnedOwner = chat.chatId;
 
       // 告诉 AI 谁在说话（软提醒，每轮现读）
       speaker.set(sid, { payload, bucket, system: payload.system || '' });
@@ -4986,7 +4996,7 @@ export function apply(ctx) {
        */
       awake.noteUser(chat.chatId, chat.kind);
       /** C2：主人回话了，那句没被回的问句就翻篇（只清 pending，不动收尾记录） */
-      if (chat.kind === 'c2c') closing.clearPending(chat.chatId);
+      if (isPrivateKind(chat.kind)) closing.clearPending(chat.chatId);
 
       /**
        * 链路 id：框架进站时生成，ai-chat 透传过来。
@@ -5015,7 +5025,7 @@ export function apply(ctx) {
        * C3：主人私聊回复按态度调主动权重（正/负 ±0.05，中性只算「有回音」）。
        * 群里的发言不参与——反馈闭环等的是主人本人。
        */
-      if (chat.kind === 'c2c') awake.noteOwnerReply(said);
+      if (isPrivateKind(chat.kind)) awake.noteOwnerReply(said);
 
       /**
        * B1：聊天内容轻轻带动心情。默认关（mood.effects），打开后只在
@@ -5330,7 +5340,7 @@ export function apply(ctx) {
       if (cfg.events?.enabled === true && used?.fileNames?.length) {
         events.push({
           kind: 'file',
-          scene: chat.kind === 'group' ? 'group' : 'c2c',
+          scene: chat.scene,
           chatId: chat.chatId,
           count: used.fileNames.length,
         });
@@ -8875,8 +8885,8 @@ export function apply(ctx) {
         if (text.length > 2000) {
           return send(res, 413, { ok: false, error: 'text_too_long', message: '模拟最多 2000 字' });
         }
-        const kind = body?.kind === 'c2c' ? 'c2c' : 'group';
-        const chatId = String(body?.chatId || (kind === 'c2c' ? 'sim:c2c' : 'sim:group'));
+        const kind = normalizeKind(body?.kind);
+        const chatId = String(body?.chatId || (isPrivateKind(kind) ? 'sim:c2c' : 'sim:group'));
         /** 档位决定工具层：私聊默认主人档，群里默认群友档，也可以显式传 */
         const bucket = BUCKETS.includes(String(body?.bucket))
           ? String(body.bucket)

@@ -269,7 +269,8 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
    * @returns {Promise<{ok:boolean, sent:boolean, ...}>} 发送结果，供调用方记日记/冷却
    */
   return async function run({
-    text, extra = {}, scene = 'c2c', target = '', msgId = '', receivedAt = 0,
+    /** kind 是框架四态（group/c2c/guild/dm），scene 仍是两态投影 */
+    text, extra = {}, scene = 'c2c', kind = '', target = '', msgId = '', receivedAt = 0,
     /** 3.7：事件被动回复（只有 event_id 的事件）；msgId 优先 */
     eventId = '',
     /** 4.6：互动召回，官方 is_wakeup 消息（不校验 msg_id/event_id 有效期） */
@@ -323,12 +324,13 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
     const skipOnly = wantSkip && !body.trim();
     if (!skipOnly && (body.trim() || silenceMs > 0)) {
       r = await ch.send({
-        scene, target, text: body, msgId, receivedAt, eventId, isWakeup, requestId,
+        scene, kind, target, text: body, msgId, receivedAt, eventId, isWakeup, requestId,
         markdown: true, keyboard, silenceMs,
       });
       if (r?.ok) {
         r.sent = true;
-        if (r.id) lastSent.set(target, { id: String(r.id), kind: scene, at: Date.now() });
+        /** 存四态 kind：撤回频道消息要带 guild/dm，否则会打到群/单聊撤回端点 */
+        if (r.id) lastSent.set(target, { id: String(r.id), kind: kind || scene, at: Date.now() });
         onSent();
       }
     } else if (skipOnly) {
@@ -370,7 +372,7 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
       if (seen(target, 'card', a.card.url)) continue;
       try {
         const rc = await ch.send({
-          scene, target, card: a.card, markdown: false,
+          scene, kind, target, card: a.card, markdown: false,
           msgId, receivedAt, eventId, isWakeup,
         });
         if (rc?.ok) onSent();
@@ -411,7 +413,7 @@ export function createActionRunner({ channel, tts = null, quota = null, log = ()
             : null;
           if (q && q.ok === false) {
             log(`语音条额度用完（${q.message}），这句改发文字`);
-            const rt = await ch.send({ scene, target, text: a.value, msgId, receivedAt, eventId, isWakeup });
+            const rt = await ch.send({ scene, kind, target, text: a.value, msgId, receivedAt, eventId, isWakeup });
             if (rt?.ok) { mediaSent += 1; onSent(); }
             continue;
           }

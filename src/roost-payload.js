@@ -246,7 +246,8 @@ export function createPayloadBuilder({
     try {
       const v = await canSee({
         chatId: String(evt?.chat?.chatId ?? ''),
-        kind: evt?.chat?.kind === 'c2c' ? 'c2c' : 'group',
+        /** 四态投影：dm 与 c2c 同属一对一 */
+        kind: (evt?.chat?.kind === 'c2c' || evt?.chat?.kind === 'dm') ? 'c2c' : 'group',
       });
       return v !== false;
     } catch (e) {
@@ -258,7 +259,9 @@ export function createPayloadBuilder({
   async function permissionOf(evt) {
     const userId = String(evt?.sender?.openid ?? '').trim();
     if (!userId) return null;
-    const kind = evt?.chat?.kind === 'c2c' ? 'c2c' : 'group';
+    /** 保留四态：宿主协议 roles.resolve 现在认 guild/dm，频道权限走 channel:${groupId} scope */
+    const k = evt?.chat?.kind;
+    const kind = ['group', 'c2c', 'guild', 'dm'].includes(k) ? k : 'group';
     const key = `${kind}:${evt?.chat?.chatId ?? ''}:${userId}`;
     const hit = perms.get(key);
     if (hit && Date.now() - hit.at < PERM_TTL_MS) return hit.value;
@@ -363,7 +366,8 @@ export function createPayloadBuilder({
    * @param {(text:string, extra?:object)=>Promise<any>} o.send 回复通道
    */
   return async function build(evt, { send } = {}) {
-    const kind = evt?.chat?.kind === 'c2c' ? 'c2c' : 'group';
+    const k = evt?.chat?.kind;
+    const kind = ['group', 'c2c', 'guild', 'dm'].includes(k) ? k : 'group';
     /**
      * 用 `textOf` 而不是 `evt.content`：纯语音 / 纯图片消息的 content 是空串，
      * 内容在 attachments 里（语音看官方给的 `asrText`）。直接读 content 的话，

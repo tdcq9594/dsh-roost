@@ -8,7 +8,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { speakerTag, chatOf } from '../src/inbound.js';
+import {
+  speakerTag, chatOf, normalizeKind, isPrivateKind, sceneOfKind, presetOfKind,
+} from '../src/inbound.js';
 
 const OPENID = 'A1B2C3D4E5F60718293A4B5C6D7E8F90';
 
@@ -67,6 +69,49 @@ test('标签：多人批次不套外层标签（每条已自带 id）', () => {
     batch: { multi: true, count: 2 },
   };
   assert.equal(speakerTag(payload, { kind: 'group' }), '');
+});
+
+/* ---------------- QQ 频道四态（2026-11-15） ---------------- */
+
+test('四态映射：guild 归多人、dm 归一对一，人设不串场', () => {
+  assert.equal(normalizeKind('guild'), 'guild');
+  assert.equal(normalizeKind('dm'), 'dm');
+  assert.equal(sceneOfKind('guild'), 'group');
+  assert.equal(presetOfKind('guild'), 'roost-social');
+  assert.equal(sceneOfKind('dm'), 'c2c');
+  assert.equal(presetOfKind('dm'), 'roost-private');
+  assert.equal(isPrivateKind('dm'), true);
+  assert.equal(isPrivateKind('guild'), false);
+  /** 未知值仍按群聊兜底，老事件不受影响 */
+  assert.equal(normalizeKind(undefined), 'group');
+  assert.equal(normalizeKind('group'), 'group');
+  assert.equal(normalizeKind('c2c'), 'c2c');
+});
+
+test('chatOf：子频道事件带频道维度，私信会话的 group 不当频道 ID', () => {
+  const g = chatOf({
+    chat: { chatId: 'CH1', kind: 'guild', groupId: 'CH1', guildId: 'G1', channelId: 'CH1' },
+  });
+  assert.equal(g.kind, 'guild');
+  assert.equal(g.scene, 'group');
+  assert.equal(g.guildId, 'G1');
+  assert.equal(g.channelId, 'CH1');
+  assert.equal(g.preset, 'roost-social');
+
+  const d = chatOf({
+    chat: { chatId: 'DM9', kind: 'dm', groupId: 'DM9', channelId: 'CH9' },
+  });
+  assert.equal(d.kind, 'dm');
+  assert.equal(d.scene, 'c2c');
+  assert.equal(d.preset, 'roost-private');
+  assert.equal(d.guildId, '', 'dm 的 group 是私信会话 id，不是真正的频道 ID');
+  assert.equal(d.channelId, 'CH9');
+});
+
+test('说话人标签：子频道要给 openid，频道私信不给', () => {
+  const payload = { sender: { id: OPENID, name: '小明' } };
+  assert.ok(speakerTag(payload, { kind: 'guild' }).startsWith('[小明 '));
+  assert.equal(speakerTag(payload, { kind: 'dm' }), '');
 });
 
 test('标签：单条批次仍然要标签（batch 存在但 multi 是假）', () => {

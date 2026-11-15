@@ -21,6 +21,9 @@
  *   stream: 'c2c'   —— 流式消息只支持单聊（50 QPS），群聊没有
  *   retract: '2min' —— 群聊撤回限 2 分钟，单聊也有限制
  */
+/** 框架协议认可的四种会话类型（与 bot/src/host/dispatch.js 的 CHAT_KINDS 一致） */
+const SEND_KINDS = new Set(['group', 'c2c', 'guild', 'dm']);
+
 export const QQ_CAPABILITIES = Object.freeze({
   text: true,
   image: true,
@@ -213,7 +216,12 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
      * 所以发送失败也该生效。
      */
     async send({
-      scene = 'c2c', target, text, hasGroupAuthz = true,
+      /**
+       * `scene` 仍是 group/c2c 两态（选人设、@ 标签、额度口径用）；
+       * `kind` 是框架的四态会话类型，直接决定消息打到哪个官方接口。
+       * 频道消息必须传 `kind:'guild'` / `'dm'`，否则会被当成群/单聊发错端点。
+       */
+      scene = 'c2c', kind = '', target, text, hasGroupAuthz = true,
       silenceMs = 0, requestId = '', msgId = '', receivedAt = 0,
       /** 3.7：事件被动回复（好友申请/入群审核等只有 event_id 的事件），
        *  同样不占主动额度；msgId 与 eventId 二选一，都有时优先 msgId */
@@ -274,7 +282,7 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
       if (!t) return { ok: true, scene, target, id: '', pending: false, requestId: rid, silentOnly: true };
 
       const base = {
-        kind: scene === 'group' ? 'group' : 'c2c',
+        kind: SEND_KINDS.has(kind) ? kind : (scene === 'group' ? 'group' : 'c2c'),
         chatId: String(target),
         /** 卡片消息的正文必须是空的（官方示例里 `msg_type=8` 根本没有 content） */
         content: hasCard ? '' : t,
@@ -401,7 +409,7 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
       try {
         await host.rpc('msg.retract', {
           chatId: String(chatId), msgId: String(msgId),
-          kind: kind === 'group' ? 'group' : 'c2c',
+          kind: SEND_KINDS.has(kind) ? kind : (kind === 'group' ? 'group' : 'c2c'),
         });
         return { ok: true };
       } catch (e) {

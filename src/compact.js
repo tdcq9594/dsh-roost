@@ -480,7 +480,8 @@ export function createCompact({
         percent: p.percent, cacheHit: p.usage.cacheHit, usage: p.usage,
       };
     }
-    const scene = chat.kind === 'group' ? 'group' : 'c2c';
+    /** 四态投影：guild 归群聊、dm 归私聊（契约见 src/inbound.js 的 sceneOfKind） */
+    const scene = chat.scene || (chat.kind === 'group' || chat.kind === 'guild' ? 'group' : 'c2c');
     const p = await pressure(chatId);
     const d = shouldCompact({ percent: p.percent, turnsSince: turns.get(chatId) || 0, cfg: c, scene });
     if (!d.compact) {
