@@ -1,3 +1,70 @@
+## v1.3.2：QQ 频道接入 + 面板收口 + 安全补洞
+
+> `latest` 从 **1.3.1** 升到 **1.3.2**。从 1.3.1 升级不用重走接入向导，数据目录一个字节不动。
+
+一句话：频道这套东西从「有接口」做到「能开、能配、能排障」；1.3.1 上线后被真机打回来的三处问题（代理用户插件市场整个打不开、会话映射被后写者抹掉、网关把所有图片标成 png）一并修掉。
+
+### QQ 频道（P0–P4 全流程）
+
+- **入口与粒度**：新增配置段 `guild`（`enabled` 默认 false）。键名用 `guild` 不用 `channel`——`channel` 已被「通道」占用（`DEFAULTS.channel.current`），会互相覆盖。`sessionMode` 支持「一个频道一个会话」/「一个子频道一个」。
+- **入站四态**：`normalizeKind / isPrivateKind / sceneOfKind / presetOfKind` 集中成契约，`chatOf()` 返回 `scene / guildId / channelId`；guild 归多人、dm 归一对一，typing 仍只认 c2c。
+- **按频道聚合**：`sessionKey` 让群聊 / 单聊保持原 `chatId`（老会话不丢），频道按 `guild:<id>` 聚合、频道私信 `dm:<id>` 独立；同一频道下不同子频道共用一个会话时，靠 `speakerTag` 的 `[子频道 <id>]` 前缀让 AI 分辨来源。出站 target 仍用 `chatId`。
+- **补透传**：`roost-payload` 造内部 payload 时把框架给的 `chat.guildId / channelId` 丢了，导致聚合实际没生效、`[子频道 ?]`、事件过滤双保险恒不命中——已从 `evt.chat` 透传。
+- **入口过滤闸**：`onInbound` 最前面拦频道事件（早于 lastActiveAt / ASR / 扩展审批），`onNotice` 只丢频道事件；关着时不动框架 intents、不重连、不退订。
+- **面板 7 页**：总览（接入体检的 intents 位清单 / 今日额度 `guild:`、`dm:` 分别计 / 审核与投递）、策略（会话粒度 / 按频道覆写 / 接话节奏 / 连发分段 / 富媒体）、四个接口页（频道 / 消息 / 内容 / 成员）、排障（方法表 / 投递终态 / 失联会话 / 错误码速查）。`/channel/qq` 三道闸：只放行 group 以「频道」开头的方法、非只读必须 `confirm:true`、manage scope 由框架 `effectiveScopes` 把关。
+- **失联会话与兜底**：`/channel/orphans` 直读 `sessions.json` 的原始键（绕过 persona 包装层的 `::p:` 物理后缀），按当前 sessionMode 反选不再命中的频道会话；旧框架的 `qq.methods` 没有 `group` 字段时用 49 条 `CHANNEL_QQ_FALLBACK` 名单筛，并回 `fallback:true` 让面板说明白。
+
+### 交互：回调型按钮有了落点
+
+- **通知通道放行 `INTERACTION_CREATE`**：`deliverNoticeFromRoost` 以前只对 `/AUDIT/i` 打日志、其余全丢——按钮回调根本到不了扩展，写多少 `type:1` 按钮都收不到点击。新增 `roost-interaction.js` 按完整链路剥层（`button_data` 在 `notice.data.data.resolved`，少剥一层就收不到），模块级单例路由；处理器抛错被吞掉，不会顺着 SSE 事件流往上冒。
+- **`<<pick: 标签|值>>`**：`type:1` 回调 + 同组 `group_id` + `click_limit:1`，靠 QQ 原生互斥实现「点一个其余变灰」，不自维护状态；`data` 用 `{t,n,v}`（`t` 供路由判别、`n` 防旧卡片、`v` 是回传值）。`pick` 单独分组，绝不会混进 `buttons`——`buildKeyboard` 硬编码 `type:2`，混进去整条通道白做。
+
+### 安全（1.3.1 打回来的三件事）
+
+- **fake-ip 代理误杀**：Clash / mihomo 的 fake-ip 把域名解析到 `198.18.0.0/16`，而 RFC 2544 保留段被硬拒 → 索引与分发包全中招，插件市场整个打不开。`allowPrivate` 改成只放开局域网段（10/8、172.16/12、192.168/16、100.64/10、fc00::/7），回环、169.254 元数据、198.18 等保留段照旧拦。
+- **`config.security.ssrf` 是死配置**：写进磁盘后无人读，面板上「显式放行的域名：N 个」读的是没人用的字段。`host.js` 建市场时把 getter 传下去，面板改完即时生效。
+- **两道绕过口**：`allowHosts` 不再豁免字面内网 IP（1.3.1 里 `allowHosts:['127.0.0.1']` 能整道绕过）；新增 `trustedHosts`，让代码里写死的供应链主机跳过 DNS 逐 IP（协议 / 端口 / 字面 IP 仍判）。
+- **安全防护页**：从只读改真开关（关危险命令走二次确认、白名单可编辑）；进页面先拉配置，不再出现「输入框点不动、状态字却说已开启」。
+
+### 数据可靠性
+
+- **会话映射原子写**：原来 `writeFileSync` 整份覆盖，与「一键改写 / 回退」（`rewrite.js` 直写整份）撞上时后写者抹掉前者；`load` 的 catch 还把「文件损坏」当成「没有」，下一次写盘把能抢救的文件覆盖成空，用户只看到上下文突然断了、日志一个字都没有。现在写前重读合并（磁盘打底 / 内存覆盖 / 墓碑排除）、随机 tmp + rename 原子替换、损坏先备份 `.corrupted.<ts>` 再降级（只留 3 份）。
+- **投递账本**：固定 `.tmp` 改成 `.<pid>.<rand4>.tmp`，两个写者不再互相覆盖。
+
+### 上下文与媒体
+
+- **引用正文 500 → 2000**，带尾部省略号；不做全文注入（那等于把上下文预算交给对方那张嘴）。两条渲染路径共用 `clipQuote`，输出逐字一致。
+- **引用媒体摘要**：官方 quote 带 attachments 时给模型一句「引用里有图」，只描述有什么、不谎称能看到，图仍不下载。
+- **图片类型文件头优先**：QQ 网关把发上来的图一律标 `image/png`，老实现先信声明、嗅探只当兜底 → GIF / JPEG 都按 `.png` 落盘，读图那步直接失败。
+- **BMP 分层**：`sniffImageType` 认 5 种（含 bmp）只用于落盘扩展名，`guessMime` 仍只认模型收得下的 4 种；bmp 按 `.bmp` 落盘、给模型一句「这个格式看不了，请转 PNG/JPG 重发」。
+
+### 依赖与网络
+
+- **npm 镜像源**：共享依赖（ffmpeg / qrcode）与语音引擎下载都吃 `update.registry`（override > `npm_config_registry` > `.npmrc` > 官方源）；官方源时不额外传 `--registry`，命令与以前一致。
+- **复用系统已有依赖**：PATH 里有 ffmpeg 时如实报出来，但默认仍装共享目录（扩展只认 `ROOST_DEPS_DIR`，跳过会变成「面板说装好了、扩展说没装」），显式 `preferSystem` 才跳 62MB 下载；DSH 自带的 ws 可以白捡 WS 通道。
+- **qrcode 安装预检**：以前每次点都白跑一遍 npm。
+- **子进程环境**：装依赖时摘掉 `QQ_*` / `ROOST_SECRET*` / `ROOST_TOKEN*` / `ROOST_PANEL*`。
+
+### 扩展市场
+
+- **更新先摘受管块再落位**：Windows 上扩展子进程把 `extensions/<id>` 当 cwd，原子 rename 会 EBUSY；先临时摘掉 `mcp-<id>` 条目让 DSH 自己 dispose 放开目录，按真实错误码（EBUSY / EPERM / EACCES）重试，超时回 `ext_busy` 且保留原扩展，`finally` 幂等写回，不留离线状态。
+- **幂等**：索引 sha 与 `.source.json` 一致时直接回「已是最新版」，`force` 是唯一绕过口（面板「重装」二次确认后透传）。
+- **换令牌 401**：更新改用 `secrets.sync` 复用旧令牌并同步 scopes，旧进程不再被打成 401；`secret / api-clients / hash` 任一不一致时退回 issue 自愈。
+- **下载进度**：按 256KB 回报字节进度，新增 pause / resume 阶段与文案。
+
+### 面板
+
+- 第二轮对照批次 A1–A11 全落地：权限页「按功能分组 → 细调页」导航、群聊 07 与权限 05 双向互跳、正文区按 tab 的错误边界（面板级那个保留）、新增「接入」「安全防护」正式页签、扩展页页面总索引卡、会话页与接口页补卡、新增《听语音（官方转写）》卡与试听锚点、Alt+K 别名补齐。
+- 新增「自身设置」页：按方法名白名单放行 `getMe` + 菜单 2 项 + 面板 6 项（不用分组字符串），走 `qq.call` 的 args 数组契约，非只读需二次确认。**AI 仍不能自主改设置。**
+- `/asr/recent`：内存环形 20 条、正文截 120 字、chatId 只留后 10 位、不落盘不进记忆；纯净模式会话不记。
+- 频道总开关换成项目已有的 Switch 组件（走 `--accent`，不另设配色）。
+
+### 兼容与升级
+
+- 老页签 key、setup 隐藏页、老深链、权限页全部开关一律保留（只增不减）；老路由一个没删，新增频道 / 自身设置 / asr 三类。
+- **升级后必须重启 Roost 进程**：本版新增 `asr-recent.js` / `roost-interaction.js` / `npm-registry.js` 三个子模块，只重载入口不重启 = 新入口 + 旧子模块，静默不生效。
+- 全量测试 **2682 项**通过，`ext-docs:check` 一致。
+
 ## v1.3.1：扩展体系收口 + 安全加固（稳定版）
 
 > `1.3.0` 的测试版内容一并转正：`latest` 从 **1.2.0** 升到 **1.3.1**。
