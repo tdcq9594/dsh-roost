@@ -290,6 +290,21 @@ test('前端渲染：安全防护页要有能点的开关，不是两行只读�
   assert.ok(!textOf(tree).includes('这一页只读'), '不能再是只读页')
 })
 
+test('接线：进安全防护页要先拉 config，否则开关和输入框全是 disabled', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  /**
+   * 面板按需拉配置，`security` 一开始不在名单里：开关与白名单框都挂着
+   * `disabled: !config`，于是用户看到的是「点了没反应、填不进去」，
+   * 而状态字仍按默认值写着「已开启」——像是页面坏了。
+   */
+  assert.ok(
+    src.includes("if (tab === 'security' && !config) once('config', loadConfig)"),
+    'security 页必须在按需拉配置的列表里',
+  )
+  /** 顶到页首的提示：说清为什么点不动，而不是只在第 03 段提一句 */
+  assert.ok(src.includes('配置还在读（开关暂时点不动）'), 'config 为空时要有显眼提示')
+})
+
 test('前端渲染：默认页签是概览，不是上次的残留', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)

@@ -14880,6 +14880,12 @@ select.roost-input{color-scheme:dark}
           }) : null))
 
       return h('div', null,
+        /**
+         * config 没拉到时开关是禁用的。上一版把提示只放在第 03 段，用户看到的是
+         * 「输入框点了没反应」——现在这条顶到最上面，先说清为什么点不动。
+         */
+        config ? null : h('div', { className: 'roost-empty', style: { marginBottom: 8 } },
+          '配置还在读（开关暂时点不动）。一直这样的话点下面「去配置全文核一遍」看看 /config 接口。'),
         h(Sec, { n: '01', title: '危险命令确认' },
           row('执行前先在 QQ 里问一句「确认」', s.dangerousConfirm !== false,
             '删根目录 / 格式化 / 关机 / 下载后执行；60 秒不回就拦下。',
@@ -14914,7 +14920,7 @@ select.roost-input{color-scheme:dark}
                 type: 'button', className: 'roost-primary',
                 disabled: saving || !config || !touched,
                 onClick: saveHosts,
-              }, touched ? '保存白名单' : '白名单已保存'),
+              }, '保存白名单'),
               h('span', { className: 'd' }, '生图、TTS、云端 ASR、备份远端这些填 URL 的地方共用同一道校验。'),
             ),
           ),
@@ -16491,6 +16497,12 @@ select.roost-input{color-scheme:dark}
         /** 群聊策略页整页读写 config，进来先拉一次；没拉到时页面只显示「读取配置…」 */
         if (tab === 'groupchat' && !config) once('config', loadConfig)
         if (tab === 'model' && !config) once('config', loadConfig)
+        /**
+         * 安全防护页整页读写 `config.security`。漏了这一步的后果不是「显示读不到」，
+         * 而是**开关和输入框全被 disabled**（`!config` 那道闸），页面看起来像坏了：
+         * 用户点白名单框没反应、开关点不动，只有状态字按默认值写着「已开启」。
+         */
+        if (tab === 'security' && !config) once('config', loadConfig)
         if (tab === 'awake') {
           // 授权状态在 /memory 里、chatId 列表在 /chats 里，这一页两样都要用
           once('awake', loadAwake)
