@@ -84,11 +84,16 @@ const RE_UNCLOSED = /<<\s*(?:image|card|voice|say|button|silence|remember|forget
  * 在文本里（§7 2.2 原本就写了这个兜底）。两条路都认，L1 才不会恒空。
  */
 export function quotedOf(payload, text) {
+  /**
+   * 这里截 500 是为了「定位」，不是给模型看的正文——正文长度由
+   * `inbound.js` 的 `QUOTE_MAX_CHARS` 统一管，两处别混。
+   */
   const direct = String(payload?.quoted ?? '').trim();
   if (direct) return direct.slice(0, 500);
   /** 「）」后必须接换行或结束：引用内容里出现全角右括号时不会被提前截断 */
   const m = String(text ?? '').match(/（引用了这句：([\s\S]*?)）\s*(?:\n|$)/);
-  return m ? String(m[1]).trim().slice(0, 500) : '';
+  /** 反解出来的末尾可能带 `clipQuote` 加的截断省略号，定位用不上，剥掉 */
+  return m ? String(m[1]).replace(/…$/, '').trim().slice(0, 500) : '';
 }
 
 /** 中文单字集合（去掉空白与标点） */

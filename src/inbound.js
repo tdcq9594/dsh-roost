@@ -1,10 +1,28 @@
 /**
  * 把 inbound payload 变成「给 AI 看的一段话」。
  *
- * 优先用 ai-chat 给的 `rendered`——它那边已经做过整形（语音 ASR、引用、
- * 合并转发、卡片都拼好了），宿主不该再写一遍。
- * 老版本插件没有这个字段时，这里兜底自己拼。
+ * 优先用上游给的 `rendered`——`roost-payload.js` 的 `buildRendered` 已经做过整形
+ * （语音 ASR、引用、合并转发、卡片都拼好了），这里不该再写一遍。
+ * 没有这个字段时（老版本 / 模拟器）才兜底自己拼。
  */
+
+/**
+ * 引用正文最多带多少字。
+ *
+ * 500 字对长引用（一整段话、一小段帖子）不够用，模型只看到开头就得猜后半句说了什么。
+ * 2000 字覆盖绝大多数引用，又不至于把每轮 token 顶上去——openclaw 是全文注入，
+ * 我们不跟：那等于把上下文预算交给对方那张嘴。
+ *
+ * **定义在这个文件而不是 `roost-payload.js`**：`inbound.js` 是零 import 的纯函数模块，
+ * 反向依赖会把 `fs/os/path` 拖进它的依赖链。方向定成 `roost-payload → inbound`。
+ */
+export const QUOTE_MAX_CHARS = 2000;
+
+/** 引用正文截断。两个调用点（这里和 `buildRendered`）必须同一口径，所以抽出来共用 */
+export function clipQuote(s) {
+  const t = String(s ?? '');
+  return t.length > QUOTE_MAX_CHARS ? `${t.slice(0, QUOTE_MAX_CHARS)}…` : t;
+}
 
 /**
  * 会话类型契约（2026-11-15 加频道能力时统一）
@@ -42,7 +60,7 @@ export function renderInbound(p) {
   const said = String(p?.text ?? '').trim();
   if (said) parts.push(said);
 
-  if (p?.quoted) parts.push(`（引用了这句：${String(p.quoted).slice(0, 500)}）`);
+  if (p?.quoted) parts.push(`（引用了这句：${clipQuote(p.quoted)}）`);
 
   for (const a of p?.attachments ?? []) {
     if (a?.type === 'voice') {

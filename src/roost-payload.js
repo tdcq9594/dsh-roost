@@ -24,6 +24,7 @@ import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'nod
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { textOf } from './roost-merge.js';
+import { clipQuote } from './inbound.js';
 
 /** 最多看几张。一张图几百到几千 token，不设上限能把上下文撑爆 */
 /** 没传配置时的兜底；真实上限由 `roostHost.maxImages` 热读 */
@@ -202,7 +203,7 @@ export function buildRendered(evt, text, { images = null } = {}) {
   const parts = [];
   const said = String(text ?? '').trim();
   if (said) parts.push(said);
-  if (evt?.quoted) parts.push(`（引用了这句：${String(evt.quoted).slice(0, 500)}）`);
+  if (evt?.quoted) parts.push(`（引用了这句：${clipQuote(evt.quoted)}）`);
   parts.push(...describeAttachments(evt, images));
   parts.push(...describeElements(evt));
   parts.push(...describeArk(evt));
