@@ -397,6 +397,16 @@ export function createPayloadBuilder({
          */
         name: kind === 'c2c' ? String(evt?.sender?.name ?? '') : String(evt?.chat?.name ?? ''),
         groupId: String(evt?.chat?.groupId ?? ''),
+        /**
+         * 频道维度**必须透传**：框架 `bot/src/host/serialize.js` 已经给了
+         * `chat.guildId` / `chat.channelId`，这里以前丢了，导致下游全拿不到：
+         *   · `chatOf().sessionKey` 的 `guildId` 恒空 → 退化成按子频道分会话；
+         *   · `speakerTag` 的 `[子频道 <id>]` 只剩 `?`；
+         *   · 频道事件过滤的双保险（guildId/channelId 非空）恒不命中。
+         * 2026-11-15 核查抓到，属已上线 bug。
+         */
+        guildId: String(evt?.chat?.guildId ?? ''),
+        channelId: String(evt?.chat?.channelId ?? ''),
         uin: String(evt?.sender?.uin ?? ''),
         groupUin: String(evt?.chat?.groupUin ?? ''),
         /** 人和群分开两组：混用会让群会话读到私聊记忆 */

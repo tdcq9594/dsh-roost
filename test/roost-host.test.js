@@ -18,6 +18,7 @@ import { createMerger, textOf } from '../src/roost-merge.js';
 import {
   buildRendered, describeAttachments, isImageAttachment, createPayloadBuilder,
 } from '../src/roost-payload.js';
+import { chatOf, speakerTag } from '../src/inbound.js';
 
 /* ------------------------------------------------------------------ */
 /* 小工具                                                              */
@@ -139,6 +140,37 @@ test('payload：私聊时 chat.name 用昵称，不拿群名兜底', async () =>
   }, { send: () => {} });
   assert.equal(p.chat.name, '小明');
   assert.deepEqual(p.chat.aliases, ['UA'], '私聊读人的别名');
+});
+
+/**
+ * 频道维度透传（2026-11-15 补）。
+ *
+ * 框架 `serialize.js` 给了 `chat.guildId/channelId`，但 `roost-payload.js`
+ * 造内部 payload 时曾经把它们丢了，导致：
+ *   · `sessionKey` 的 guildId 恒空 → 会话退化成按子频道分；
+ *   · `speakerTag` 的 `[子频道 <id>]` 只剩 `?`。
+ * 这条测试盯住「透传 + 下游真的能用到」。
+ */
+test('payload：频道维度 guildId/channelId 必须透传，会话按 guild 聚合', async () => {
+  const build = createPayloadBuilder({ rpc: async () => null, vision: false });
+  const p = await build({
+    eventId: 'E', msgId: 'M', content: 'hi',
+    chat: {
+      kind: 'guild', chatId: 'CH1', guildId: 'G1', channelId: 'CH1', name: '技术交流',
+    },
+    sender: { openid: 'U1', name: '小明', uin: '' },
+    attachments: [], elements: [],
+  }, { send: () => {} });
+
+  assert.equal(p.chat.guildId, 'G1');
+  assert.equal(p.chat.channelId, 'CH1');
+
+  const chat = chatOf(p);
+  assert.equal(chat.sessionKey, 'guild:G1', '按 guild 聚合，不是按子频道');
+  assert.ok(
+    speakerTag(p, chat).startsWith('[子频道 CH1]'),
+    '子频道标识不能只剩问号',
+  );
 });
 
 test('payload：权限查不到就不带 bucket（按身份不明，比错报成普通成员安全）', async () => {

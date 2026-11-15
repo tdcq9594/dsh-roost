@@ -37,6 +37,8 @@ export const READONLY_METHODS = Object.freeze([
   { name: 'gate.get', desc: '暂停闸快照' },
   { name: 'config.get', desc: '脱敏后的运行时配置（仅主人/管理员）' },
   { name: 'qq.methods', desc: '官方 API 方法名与风险档' },
+  { name: 'quota.get', desc: '主动消息额度快照（按会话键）与各场景上限' },
+  { name: 'system.events', desc: '事件表与 intents 位（事件名 → intent / 会话类型）' },
 ]);
 
 /** 这些即使只读也只给主人/管理员：日志、运行数据、配置里可能带内部信息 */
