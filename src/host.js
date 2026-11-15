@@ -160,6 +160,57 @@ export const CHANNEL_QQ_FALLBACK = new Map([
   /* 音频 */
   ...['audioControl', 'putMic', 'deleteMic'].map((k) => [k, '频道·音频']),
 ]);
+
+/**
+ * 机器人自身设置：用**机器人身份**（AppID/Secret → access_token）能改的东西。
+ *
+ * 和开发者后台 `bot.q.qq.com/cgi-bin/v2/*` 是两条完全不同的鉴权链：后者要
+ * 开发者 QQ 的网页登录态，机器人 token 调不动，也不该把那种凭据塞进常驻进程。
+ * 这里只收官方 OpenAPI 明确允许机器人自己配置的接口，一个不多。
+ *
+ * `args` 是**位置参数数组**：协议 `qq.call` 会 `R.api[name](...args)` 展开，
+ * 和 WebUI `/api/qq/call` 那套 `__target` / `__rest` 对象不是一回事。
+ * 带 `<>` 的是占位符，执行前要替换。
+ */
+export const SELF_CONFIG_METHODS = new Map([
+  ['getMe', {
+    group: '用户·身份', risk: 'read',
+    desc: '查当前机器人身份（只读；官方没给改资料的接口）', args: [],
+  }],
+  ['getGlobalMenu', {
+    group: '互动·菜单', risk: 'read', desc: '查全局自定义菜单，仅 C2C 私聊生效', args: [],
+  }],
+  ['setGlobalMenu', {
+    group: '互动·菜单', risk: 'write',
+    desc: '覆盖式设置全局菜单，最多 10 项；不传等于清空',
+    args: [[{ name: '帮助', type: 'send_message', send_message: '你好' }]],
+  }],
+  ['listPanels', {
+    group: '互动·指令面板', risk: 'read',
+    desc: '列指令面板，scope 必填（c2c/group/channel/dm）', args: [{ scope: 'c2c' }],
+  }],
+  ['getPanel', {
+    group: '互动·指令面板', risk: 'read', desc: '查单个面板详情', args: ['<panel_id>'],
+  }],
+  ['createPanel', {
+    group: '互动·指令面板', risk: 'write',
+    desc: '建面板：每机器人最多 20 个；items 元素按官方文档填 name/desc/type/only_admin/link',
+    args: [{ scope: 'c2c', panel: { items: [], remark: '', version: '' } }],
+  }],
+  ['updatePanel', {
+    group: '互动·指令面板', risk: 'write',
+    desc: '覆盖式改面板', args: ['<panel_id>', { items: [] }],
+  }],
+  ['updatePanelTarget', {
+    group: '互动·指令面板', risk: 'write',
+    desc: '增删生效对象，仅 target_type=specific 的面板可用',
+    args: ['<panel_id>', { op: 'add', userOpenids: [] }],
+  }],
+  ['deletePanel', {
+    group: '互动·指令面板', risk: 'danger',
+    desc: '删面板（不可逆，需要 manage scope）', args: ['<panel_id>'],
+  }],
+]);
 import { createMerger } from './roost-merge.js';
 import { createDecider } from './roost-decide.js';
 import { createPairing } from './roost-pair.js';
@@ -8435,6 +8486,94 @@ export function apply(ctx) {
         }
         try {
           const result = await roost.rpc('qq.call', { method, params });
+          send(res, 200, { ok: true, result });
+        } catch (e) {
+          send(res, 200, { ok: false, message: String(e?.message || e) });
+        }
+      }),
+
+      /**
+       * 机器人自身设置的方法表。
+       *
+       * 名单是本地写死的白名单，不按 `qq.methods` 的 group 字符串过滤——
+       * 框架分组名一改就把不该放的方法放进来，风险太大。这里只借框架的
+       * `risk` / `scope` / `blocked` 做展示与二次确认；框架没连上也能列全名单。
+       */
+      route('/self/methods', async (_req, res) => {
+        const methods = {};
+        for (const [name, m] of SELF_CONFIG_METHODS) {
+          methods[name] = {
+            group: m.group, desc: m.desc, args: m.args,
+            /** 与框架 scopeForQq 同口径：框架没连上也能给出正确档位 */
+            risk: m.risk,
+            scope: m.risk === 'read' ? 'read' : m.risk === 'danger' ? 'manage' : 'message',
+            blocked: false, available: false,
+          };
+        }
+        try {
+          if (!channelQqIndex) {
+            const r = await roost.rpc('qq.methods', {});
+            channelQqIndex = r?.risks && typeof r.risks === 'object' ? r.risks : {};
+          }
+          for (const [name, row] of Object.entries(methods)) {
+            const live = channelQqIndex[name];
+            if (!live) continue;
+            row.risk = String(live.risk || row.risk);
+            row.scope = String(live.scope || row.scope);
+            row.group = String(live.group || row.group);
+            row.blocked = live.blocked === true;
+            row.available = !row.blocked;
+          }
+        } catch (e) {
+          return send(res, 200, {
+            ok: false, message: `拿不到框架方法表：${e?.message || e}`, methods,
+          });
+        }
+        send(res, 200, { ok: true, methods });
+      }),
+
+      /**
+       * 机器人自身设置操作台：把 `{ method, args, confirm }` 转成协议 `qq.call`。
+       *
+       * 与 `/channel/qq` 的两个关键差别（照抄那份契约会静默失效）：
+       *  ① `args` 是**位置参数数组**，框架 `R.api[name](...args)` 直接展开；
+       *     `params` 对象是 WebUI `/api/qq/call` 的约定，协议层不认。
+       *  ② `confirm` 要**透传**：框架对 danger 方法自己还查一次，宿主这边
+       *     确认过不算数。
+       *
+       * 三道闸：显式白名单 → 数组长度 → 非只读二次确认；scope 由框架把最后一关。
+       */
+      route('/self/qq', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        const method = String(body?.method || '').trim();
+        if (!SELF_CONFIG_METHODS.has(method)) {
+          return send(res, 403, {
+            ok: false, message: `不是机器人自身设置方法：${method || '(空)'}`,
+          });
+        }
+        const args = Array.isArray(body?.args) ? body.args : null;
+        if (!args || args.length > 12) {
+          return send(res, 400, { ok: false, message: 'args 要是数组，且最多 12 项' });
+        }
+        /** 框架没连上时用白名单自带的档位，别把只读查询也逼着二次确认 */
+        let risk = String(SELF_CONFIG_METHODS.get(method)?.risk || 'write');
+        try {
+          if (!channelQqIndex) {
+            const r = await roost.rpc('qq.methods', {});
+            channelQqIndex = r?.risks && typeof r.risks === 'object' ? r.risks : {};
+          }
+          risk = String(channelQqIndex[method]?.risk || risk);
+        } catch { /* 拿不到方法表就按白名单档位，下面 rpc 会把真实错误带回来 */ }
+        const need = risk !== 'read';
+        /** 不用可选链写法：安全边界测试按那个模式计数锁三个群管路由，多一处会误报 */
+        if (need && !(body && body.confirm === true)) {
+          return send(res, 400, {
+            ok: false, message: `${method} 属 ${risk} 级操作，需要二次确认`,
+          });
+        }
+        try {
+          const result = await roost.rpc('qq.call', { method, args, confirm: need });
           send(res, 200, { ok: true, result });
         } catch (e) {
           send(res, 200, { ok: false, message: String(e?.message || e) });

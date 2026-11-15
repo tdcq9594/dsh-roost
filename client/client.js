@@ -10305,6 +10305,118 @@ select.roost-input{color-scheme:dark}
     }
 
     /**
+     * 机器人自身设置：只用机器人 token 就能改的那部分。
+     *
+     * 开发者后台里的资料 / 头像 / 回调 / 白名单 / AppSecret 属于**开发者身份**，
+     * 要网页登录态，不在这条链上，这里也不给入口。
+     *
+     * 参数是 `args` 数组（位置参数），协议会展开成 `QQApi[name](...args)`；
+     * 和 WebUI `/api/qq/call` 那套 `__target` / `__rest` 对象不是一回事。
+     */
+    function SelfConfigTab({ toast }) {
+      const [idx, setIdx] = useState({})
+      const [notice, setNotice] = useState('')
+      const [sel, setSel] = useState('getMe')
+      const [args, setArgs] = useState('[]')
+      const [out, setOut] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const load = useCallback(async () => {
+        try {
+          const r = await get('/self/methods')
+          const m = r?.methods && typeof r.methods === 'object' ? r.methods : {}
+          setIdx(m)
+          setNotice(r?.ok === false ? String(r.message || '框架方法表没读到，下面按默认风险档显示') : '')
+          setArgs(JSON.stringify(m?.getMe?.args ?? [], null, 2))
+        } catch (e) {
+          setIdx({})
+          setNotice(String(e?.message || e))
+        }
+      }, [])
+      useEffect(() => { load() }, [load])
+      const names = Object.keys(idx)
+      const cur = names.includes(sel) ? sel : (names[0] || '')
+      const meta = cur ? idx[cur] : null
+      const pick = (name) => {
+        setSel(name)
+        setArgs(JSON.stringify(idx[name]?.args ?? [], null, 2))
+        setOut(null)
+      }
+      const run = async () => {
+        if (!cur || busy) return
+        let a
+        try { a = JSON.parse(args || '[]') } catch { toast('args 不是合法 JSON'); return }
+        if (!Array.isArray(a)) { toast('args 要是数组（位置参数）'); return }
+        const risk = String(meta?.risk || 'write')
+        const need = risk !== 'read'
+        if (need && !window.confirm(`${cur} 属 ${risk} 级操作，确定执行？`)) return
+        setBusy(true)
+        try {
+          const r = await post('/self/qq', { method: cur, args: a, confirm: need })
+          setOut(r)
+          toast(r?.ok === false ? (r.message || '调用失败') : '已执行')
+        } catch (e) {
+          toast('调用失败：' + String(e?.message || e))
+        } finally { setBusy(false) }
+      }
+      return h('div', null,
+        h(Sec, {
+          n: '01', title: '机器人自身设置',
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新方法表'),
+        },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '这一页走机器人身份（AppID/Secret → access_token）：查身份、改全局菜单与指令面板。'
+              + '昵称、头像、回调、白名单、AppSecret 属于开发者后台，需要开发者登录态，这里不提供。'),
+            notice ? h('p', { className: 'roost-note' }, notice) : null,
+            names.length
+              ? h(GRow, { label: '接口', hint: '非只读要二次确认；带 <> 的参数是占位符' },
+                  h('select', {
+                    className: 'roost-g-sel', value: cur, disabled: busy,
+                    onChange: (e) => pick(e.target.value),
+                  },
+                    names.map((k) => h('option', { key: k, value: k },
+                      `${k}（${idx[k]?.group || '—'} / ${idx[k]?.risk || '—'}）`))))
+              : h('p', { className: 'roost-note' }, '方法表没读到。检查外接协议是否连上、框架是否提供 qq.methods。'),
+            cur
+              ? h('div', null,
+                  h('p', { className: 'roost-note', style: { marginTop: 8 } },
+                    `${meta?.desc || ''} · 风险 ${meta?.risk || '—'} · scope ${meta?.scope || '—'}`
+                    + (meta?.blocked ? ' · 框架标为禁止外部调用' : '')),
+                  h('p', { className: 'roost-note' },
+                    'args 是位置参数数组，会直接展开成 QQApi 的实参；不是 WebUI 那套 __target/__rest 对象。'),
+                  h('textarea', {
+                    className: 'roost-g-num',
+                    style: { width: '100%', minHeight: 120, marginTop: 6, fontFamily: 'monospace' },
+                    value: args, disabled: busy, spellCheck: false,
+                    onChange: (e) => setArgs(e.target.value),
+                    placeholder: '[]',
+                  }),
+                  h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      disabled: busy || meta?.blocked, onClick: () => run(),
+                    }, busy ? '执行中…' : '执行')),
+                  out
+                    ? h('pre', {
+                        className: 'roost-note',
+                        style: { marginTop: 10, whiteSpace: 'pre-wrap', maxHeight: 320, overflow: 'auto' },
+                      }, JSON.stringify(out, null, 2))
+                    : null)
+              : null)),
+        h(Sec, { n: '02', title: '权限与限制' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '只读接口（getMe / getGlobalMenu / listPanels / getPanel）只要 read scope；'
+              + '写接口要 message scope；deletePanel 是 danger，还要 manage scope，框架拒绝时错误会原样显示。'),
+            h('p', { className: 'roost-note' },
+              '菜单写 5 QPM、面板写 10 QPM；菜单覆盖式 ≤10 项且仅 C2C，面板每机器人 ≤20 个、每个 ≤20 元素。'
+              + 'updatePanelTarget 只对 target_type=specific 的面板有效。'),
+            h('p', { className: 'roost-note' },
+              'AI 工具仍不能调 qq.call：这里只给人从面板点，扩展能力白名单没放开。')))
+      )
+    }
+
+    /**
      * 频道排障（P4）。四块只读：方法表 / 投递终态 / 失联会话 / 错误码速查。
      *
      * 「最近频道事件」放在这里而不是总览——`ledger.recent` 要按 chatId 查，
@@ -15790,6 +15902,8 @@ select.roost-input{color-scheme:dark}
       ['ch-policy', '频道策略'],
       ['ch-api', '频道接口'],
       ['ch-diag', '频道排障'],
+      /** 机器人身份能改的自身设置（菜单 / 指令面板）；开发者后台那套不在这条链上 */
+      ['bot-self', '自身设置'],
       /* 系统：这台机器怎么跑 */
       ['chats', '会话'],
       /** 账号迁移：原先是隐藏页 + 弹窗（低频整页）；换机器人是真实高频需求，提成正式页签 */
@@ -15865,6 +15979,7 @@ select.roost-input{color-scheme:dark}
       /* 四个老页签并进来之后，原来各自的词都收在这一条里，搜哪个都还能到 */
       'ch-api': '频道接口 子频道 频道结构 创建 改名 删除 权限 频道消息 私信 撤回 表态 精华 dms 论坛 帖子 公告 日程 音频 上麦 频道成员 身份组 角色 在线人数 api权限',
       'ch-diag': '频道排障 事件 账本 投递 错误码',
+      'bot-self': '自身设置 机器人身份 菜单 指令面板 全局菜单 panels 改资料',
       chats: '会话 身份 映射 上下文',
       account: '账号迁移 迁移 换号 绑定 旧 openid',
       sim: '模拟 模拟测试 试跑 演练 dry run 会不会回 为什么没回',
@@ -15911,7 +16026,7 @@ select.roost-input{color-scheme:dark}
       { id: 'channel', label: '频道', icon: 'M4 6.5h16M4 12h10M4 17.5h7M17.5 15.5l3 2-3 2', tabs: ['ch-home', 'ch-policy', 'ch-api', 'ch-diag'] },
       { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
-      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['connect', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
+      { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
     ]
     /**
      * A1：系统组页最多，混了「接入与身份 / 诊断 / 运维 / 关于」四类。
@@ -16712,6 +16827,8 @@ select.roost-input{color-scheme:dark}
               })
             : null,
           tab === 'ch-diag' ? h(ChannelDiagTab, {}) : null,
+          /** 机器人身份：菜单 / 指令面板这条合规链，和开发者后台那套分开 */
+          tab === 'bot-self' ? h(SelfConfigTab, { toast }) : null,
           tab === 'account' ? h(AccountTab, { toast }) : null,
           tab === 'config'
             ? h('div', null,
