@@ -110,8 +110,29 @@ test('chatOf：子频道事件带频道维度，私信会话的 group 不当频�
 
 test('说话人标签：子频道要给 openid，频道私信不给', () => {
   const payload = { sender: { id: OPENID, name: '小明' } };
-  assert.ok(speakerTag(payload, { kind: 'guild' }).startsWith('[小明 '));
+  /** 频道要多带一层子频道标识（同一 guild 共用一个会话，AI 得能分辨版块） */
+  assert.ok(speakerTag(payload, { kind: 'guild', channelId: 'CH1' }).startsWith('[子频道 CH1] [小明 '));
   assert.equal(speakerTag(payload, { kind: 'dm' }), '');
+  /** 没 openid / 多人批次也别把子频道标识丢了 */
+  assert.equal(speakerTag({ sender: {} }, { kind: 'guild', channelId: 'CH1' }), '[子频道 CH1] ');
+  assert.equal(speakerTag({ batch: { multi: true }, sender: {} }, { kind: 'guild', channelId: 'CH1' }), '[子频道 CH1] ');
+});
+
+/* ---------------- 会话归属：一个频道一个会话 ---------------- */
+
+test('sessionKey：同频道不同子频道共用一个会话，群聊/单聊保持原键', () => {
+  const base = (chatId, channelId, kind = 'guild', guildId = 'G1') => chatOf({
+    chat: { chatId, channelId, kind, guildId, groupId: chatId },
+  });
+  assert.equal(base('CH1', 'CH1').sessionKey, 'guild:G1');
+  assert.equal(base('CH2', 'CH2').sessionKey, 'guild:G1', '同频道不同子频道要合并');
+  assert.equal(base('CH1', 'CH1', 'guild', 'G2').sessionKey, 'guild:G2', '不同频道要分开');
+  assert.equal(chatOf({ chat: { chatId: 'G1', kind: 'group' } }).sessionKey, 'G1', '老群聊会话一条不丢');
+  assert.equal(chatOf({ chat: { chatId: 'U1', kind: 'c2c' } }).sessionKey, 'U1', '老单聊会话一条不丢');
+  assert.equal(chatOf({ chat: { chatId: 'DM9', kind: 'dm' } }).sessionKey, 'dm:DM9', '频道私信独立');
+  /** 出站 target 绝不能被改 */
+  assert.equal(base('CH1', 'CH1').chatId, 'CH1');
+  assert.equal(base('CH2', 'CH2').channelId, 'CH2');
 });
 
 test('标签：单条批次仍然要标签（batch 存在但 multi 是假）', () => {

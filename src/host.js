@@ -3940,7 +3940,8 @@ export function apply(ctx) {
 
   async function agentFor(chat) {
     /** 绑定了号码但没做一键改写时，也靠别名接回旧会话上下文（审计 §3 P2） */
-    const sid = sessions.get(chat.chatId, chat.aliases);
+    /** 频道会话按 guild 聚合，且不要接群/单聊的旧别名，避免读回别的会话 */
+    const sid = sessions.get(chat.sessionKey, chat.sessionKey === chat.chatId ? chat.aliases : []);
 
     if (sid) {
       try {
@@ -3951,12 +3952,12 @@ export function apply(ctx) {
          *
          * 判定在 ./chat-name.js 的 nextTitle 里（纯函数，有真值表测试）。
          */
-        const old = sessions.entry(chat.chatId)?.title || '';
+        const old = sessions.entry(chat.sessionKey)?.title || '';
         const { want, rename } = nextTitle(chat, old);
         if (rename) {
           try {
             await controller().rename({ sessionId: sid, title: want });
-            sessions.set(chat.chatId, sid, { preset: chat.preset, title: want, kind: chat.kind });
+            sessions.set(chat.sessionKey, sid, { preset: chat.preset, title: want, kind: chat.kind });
           } catch {}
         }
         /**
@@ -3968,7 +3969,7 @@ export function apply(ctx) {
         return { agent, sessionId: sid };
       } catch (e) {
         log.warn(`${chat.chatId}：旧会话 ${sid.slice(-8)} 拉不起来了（${e.message}），重建`);
-        sessions.remove(chat.chatId);
+        sessions.remove(chat.sessionKey);
       }
     }
 
@@ -3978,7 +3979,7 @@ export function apply(ctx) {
     try {
       await controller().rename({ sessionId: newSid, title });
     } catch {}
-    sessions.set(chat.chatId, newSid, { preset: chat.preset, title, kind: chat.kind });
+    sessions.set(chat.sessionKey, newSid, { preset: chat.preset, title, kind: chat.kind });
     log.info(`为 ${chat.chatId} 新建 DSH 会话 ${newSid.slice(-8)}（${chat.preset}）`);
     await applyDefaultModel(newSid, chat.chatId, chat.kind);
     return { agent: await resolveAgent(newSid), sessionId: newSid };
@@ -4864,12 +4865,12 @@ export function apply(ctx) {
 
     try {
       const pid = String(personas.resolve(chat.chatId, personaCfgFor(chat))?.id || '');
-      personaByChat.set(chat.chatId, pid);
+      personaByChat.set(chat.sessionKey, pid);
       if (personaByChat.size > PERSONA_MAP_MAX) {
         personaByChat.delete(personaByChat.keys().next().value);
       }
     } catch {
-      personaByChat.delete(chat.chatId);
+      personaByChat.delete(chat.sessionKey);
     }
 
     const started = Date.now();
@@ -4918,7 +4919,7 @@ export function apply(ctx) {
        * openid 短码（私聊最明显——群还有群名兜着，私聊就只剩一串乱码）。
        * 这里不新建映射、不改 sessionId，只把空字段补上。
        */
-      sessions.patch(chat.chatId, { title: chat.name, kind: chat.kind, preset: chat.preset });
+      sessions.patch(chat.sessionKey, { title: chat.name, kind: chat.kind, preset: chat.preset });
 
       // 场景快照：roost-scene 和 /mind 都读它
       lastScene = {
@@ -5448,7 +5449,7 @@ export function apply(ctx) {
        */
       if (e?.kind === 'blocked') {
         try {
-          sessions.set(chat.chatId, '', { preset: chat.preset, title: chat.name, kind: chat.kind });
+          sessions.set(chat.sessionKey, '', { preset: chat.preset, title: chat.name, kind: chat.kind });
           log.warn(`会话被归档或需要人工处理，已解绑 ${chat.chatId.slice(0, 8)}，下一条开新会话`);
         } catch {}
       }

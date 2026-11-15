@@ -91,15 +91,25 @@ export function speakerTag(payload, chat) {
   if (isPrivateKind(kind)) return '';
 
   /**
+   * 同一个频道的文字子频道 / 论坛 / 公告等**共用一个会话**
+   * （sessionKey 按 guild_id 聚合），所以每条消息都要带上子频道标识，
+   * 否则 AI 会把不同版块的话当成同一处连着读，分不清是谁在哪说的。
+   */
+  const channelTag = kind === 'guild'
+    ? `[子频道 ${String(chat?.channelId || chat?.chatId || '?').trim().slice(0, 32)}] `
+    : '';
+
+  /**
    * 多人批次（连着几句攒成一批）不套外层标签。
    *
    * ai-chat 那边已经把每条拼成 `昵称(openid)：正文` 了，这里再套一层
    * `[最后那个人 (id)]` 会让人以为整段都是他说的——而批次里明明有别人。
+   * 频道批次仍要保留子频道标识。
    */
-  if (payload?.batch?.multi) return '';
+  if (payload?.batch?.multi) return channelTag;
 
   const id = String(payload?.sender?.id ?? '').trim();
-  if (!id) return '';
+  if (!id) return channelTag;
 
   const name = String(payload?.sender?.name ?? '')
     .replace(/[[\]()\r\n]/g, ' ')
@@ -115,7 +125,7 @@ export function speakerTag(payload, chat) {
    * openid 仍然保留（@ 人只认它，见上面的注释）。
    */
   const uin = String(payload?.sender?.uin ?? '').replace(/\D/g, '');
-  return `[${name} (${uin ? `QQ ${uin} / ${id}` : id})] `;
+  return channelTag + `[${name} (${uin ? `QQ ${uin} / ${id}` : id})] `;
 }
 
 /** 会话标识：群和私聊要分开，同一个 openid 在两种场景下不是一回事 */
@@ -142,14 +152,29 @@ export function chatOf(payload) {
     .map((x) => String(x ?? '').trim())
     .filter((x) => x && x !== chatId);
 
+  /**
+   * 会话归属（主人 2026-11-15 定）：
+   * · 群聊 / 单聊保持原 chatId —— 老会话一条都不能丢；
+   * · 频道按 **guild_id 聚合**：同一个频道的文字子频道、论坛、公告等
+   *   共用一个会话；不同频道之间分开，也不与群聊 / 单聊共用；
+   * · 频道私信按会话 id 独立（一对一上下文不和公开频道混）。
+   * 只换会话 / 人格映射的键，**出站 target 仍用 chatId**。
+   */
+  const guildId = String(payload?.chat?.guildId ?? '');
+  const sessionKey = kind === 'guild' ? `guild:${guildId || chatId}`
+    : kind === 'dm' ? `dm:${chatId}`
+      : chatId;
+
   return {
     kind,
     /** 两态投影：guild→group、dm→c2c，给只认 scene 的下游用 */
     scene,
     chatId,
+    /** 会话 / 人格映射用的键；出站 target 仍用 chatId */
+    sessionKey,
     groupId: String(payload?.chat?.groupId ?? ''),
     /** 频道维度：频道 ID / 子频道 ID（群、单聊为空串） */
-    guildId: String(payload?.chat?.guildId ?? ''),
+    guildId,
     channelId: String(payload?.chat?.channelId ?? ''),
     name: String(payload?.chat?.name ?? ''),
     preset: presetOfKind(kind),
