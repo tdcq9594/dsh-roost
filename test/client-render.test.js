@@ -93,8 +93,8 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-/* 与 client.js 的 TABS 同序：2026-11-15 接入 / 安全防护提成正式页签后 25 个可见页签（sim 是补历史欠账） */
-const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'about', 'connect', 'security']
+/* 与 client.js 的 TABS 同序：2026-11-15 频道 7 页收成 4 页（接口台合并）后 29 个可见页签 */
+const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'about', 'connect', 'security']
 /* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats / account 已提升为正式页） */
 const HIDDEN_TABS = ['context', 'setup']
 
@@ -115,6 +115,8 @@ const NAV = {
   self: { label: '人设', tabs: ['her', 'mood', 'awake', 'memory', 'people'] },
   express: { label: '表达', tabs: ['express', 'stickers'] },
   group: { label: '群聊', tabs: ['groupchat', 'groupadmin'] },
+  /* 2026-11-15：频道从 7 页收成 4 页（四个接口页并成一页 ch-api） */
+  channel: { label: '频道', tabs: ['ch-home', 'ch-policy', 'ch-api', 'ch-diag'] },
   power: { label: '能力', tabs: ['caps', 'model'] },
   mods: { label: '扩展', tabs: ['ext', 'ext-market', 'ext-api'] },
   system: { label: '系统', tabs: ['connect', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
@@ -124,6 +126,7 @@ const TAB_LABEL = {
   caps: '权限', express: '语音', stickers: '表情包', model: '模型',
   ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
   groupchat: '群聊策略', groupadmin: '群管',
+  'ch-home': '频道总览', 'ch-policy': '频道策略', 'ch-api': '频道接口', 'ch-diag': '频道排障',
   chats: '会话', account: '账号迁移', sim: '模拟测试', logs: '排障', update: '更新', config: '设置', backup: '备份', about: '关于',
   connect: '接入', security: '安全防护',
 }
@@ -141,6 +144,24 @@ function navTexts(tree) {
     walk(n.props?.children)
   })(tree)
   return { tabs, current }
+}
+
+/**
+ * 只收集**二级**页签（`.roost-tab`）的文字，保留渲染顺序。
+ *
+ * `navTexts` 把一级分组按钮和二级页签混在一起（两者都是 role=tab），
+ * 断言「顺序」时必须分开——一级的顺序由 `NAV_GROUPS` 数组定，
+ * 二级的顺序由组内 `tabs` 声明定，这是两件不同的事。
+ */
+function subTabTexts(tree) {
+  const out = []
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.className === 'roost-tab') out.push(textOf(n))
+    walk(n.props?.children)
+  })(tree)
+  return out
 }
 
 /**
@@ -195,6 +216,33 @@ for (const tab of TABS.concat(HIDDEN_TABS)) {
     }
   })
 }
+
+/**
+ * A1（第三轮报告）：组内页签的顺序要听 `NAV_GROUPS[x].tabs`，不是 `TABS`。
+ *
+ * 症状：`groupTabs` 原来是「拿 `dynamicTabs`（= `TABS` 顺序）过滤一遍」，
+ * 于是 `TABS` 的书写顺序覆盖了分组声明——`NAV_GROUPS.system` 把 `connect`
+ * 排首位，实际渲染成**倒数第二**，「关于」跑到中间，`SYSTEM_SEG` 的分段
+ * 标记也跟着错位（「安全防护」落到「关于」后面）。
+ *
+ * 为什么值得一条测试：这类错**不会报错、不会白屏**，只是顺序不对，
+ * 肉眼要逐个数才发现；而下次谁往 `TABS` 里插一行就可能再错一次。
+ */
+test('导航：组内页签顺序听分组声明，不听 TABS 书写顺序（A1）', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'connect'
+  rt.reset()
+  const sub = subTabTexts(expand(mod.RoostPage(), rt))
+
+  const want = NAV.system.tabs.map((id) => TAB_LABEL[id])
+  assert.deepEqual(sub, want, '系统组二级页签顺序与 NAV_GROUPS.system 声明不一致')
+  assert.equal(sub[0], '接入', '「接入」不在首位——组内顺序又被 TABS 书写顺序覆盖了')
+  assert.ok(
+    sub.indexOf('安全防护') < sub.indexOf('关于'),
+    '「安全防护」应排在「关于」之前（分段：接入/身份 → 诊断 → 运维 → 安全 → 关于）',
+  )
+})
 
 test('前端渲染：人格页的分节要把并列的多块内容都渲染出来', () => {
   const rt = makeReact()

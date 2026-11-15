@@ -141,7 +141,13 @@ test('4.5 流水层：用量按人格分桶，原 total/chats 结构不变', asy
 test('深链 ?tab=xxx 真的能直达（以前只有文案）', async () => {
   const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
   assert.ok(src.includes("URLSearchParams(location.search"), '要真的解析 location.search');
-  assert.ok(/if \(want && ALL_TABS\.includes\(want\)\) return want/.test(src), '命中合法页签才直达');
+  /**
+   * 2026-11-15：校验源从 `ALL_TABS` 换成 `KNOWN_TABS`——频道四个接口页并成
+   * `ch-api` 之后，老 key（ch-message 等）仍要能打开对应段，不能当成无效值退回概览。
+   */
+  assert.ok(/if \(want && KNOWN_TABS\.includes\(want\)\) return want/.test(src), '命中合法页签才直达');
+  assert.ok(/const KNOWN_TABS = ALL_TABS\.concat\(Object\.keys\(LEGACY_CH_TABS\)\)/.test(src),
+    'KNOWN_TABS 要把老频道 key 也算进来');
 
   /** 真渲染：把 location 指到 ?tab=memory，首屏应该是记忆页 */
   const store = {};
@@ -154,6 +160,25 @@ test('深链 ?tab=xxx 真的能直达（以前只有文案）', async () => {
   const tree = expand(mod.RoostPage(), rt);
   const txt = textOf(tree);
   assert.ok(txt.includes('记忆星图'), `深链没落到记忆页：${txt.slice(0, 80)}`);
+  delete globalThis.location;
+});
+
+test('老频道深链 ?tab=ch-message 落到合并后的接口页，不退回概览', async () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  /* 路由侧：老 key 归一化成 ch-api，并把对应段带进去 */
+  assert.ok(/const activeTab = LEGACY_CH_TABS\[tab\] \? 'ch-api' : tab/.test(src), '老 key 要归一化');
+  assert.ok(/initialSection: LEGACY_CH_TABS\[tab\] \|\| 'channels'/.test(src), '要把老 key 映射成段');
+
+  const store = {};
+  globalThis.localStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } };
+  globalThis.location = { search: '?tab=ch-message' };
+  globalThis.window = { devicePixelRatio: 1, addEventListener() {}, removeEventListener() {} };
+  const rt = makeReact();
+  const mod = loadClient(rt.React, src);
+  rt.reset();
+  const txt = textOf(expand(mod.RoostPage(), rt));
+  assert.ok(!txt.includes('现在这样'), '老深链不该退回概览页');
+  assert.ok(txt.includes('读取频道方法表'), `没落到接口页：${txt.slice(0, 80)}`);
   delete globalThis.location;
 });
 

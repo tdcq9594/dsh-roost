@@ -111,39 +111,54 @@ import { createPickChannel } from './pick-channel.js';
 let channelQqIndex = null;
 
 /**
- * 频道方法名兜底名单。
+ * 频道方法名兜底名单：方法名 → 分组。
  *
  * 只有**框架的 `qq.methods` 没带 `group`** 时才用（旧框架 / 运行副本没同步）。
  * 有 group 就按 group 过滤，名单不参与——所以它漂移了也不会带错，
  * 最坏是旧框架下漏列几个新方法。同步并重启框架后自动切回 group 判据。
+ *
+ * **2026-11-15 从 `Set` 改成 `Map`**：原来兜底时把 49 个方法统一盖成
+ * `group: '频道（本地兜底）'`，而面板按 `group === '频道'` / `startsWith('频道·')`
+ * 过滤，两边都对不上 —— 四个接口页全空，还误报「框架没提供频道方法」。
+ * 现在兜底也回真实分组，面板不需要为兜底单独写一套判定。
  */
-const CHANNEL_QQ_FALLBACK = new Set([
+export const CHANNEL_QQ_FALLBACK = new Map([
   /* 频道与子频道 */
-  'getChannel', 'updateChannel', 'deleteChannel', 'getGuild', 'getGuildChannels', 'createGuildChannel',
+  ...[
+    'getChannel', 'updateChannel', 'deleteChannel', 'getGuild', 'getGuildChannels', 'createGuildChannel',
+  ].map((k) => [k, '频道']),
   /* 消息与私信 */
-  'sendChannelMessage', 'retractChannelMessage', 'createDms', 'sendDmMessage', 'retractDmMessage',
+  ...['sendChannelMessage', 'retractChannelMessage'].map((k) => [k, '频道·消息']),
+  ...['createDms', 'sendDmMessage', 'retractDmMessage'].map((k) => [k, '频道·私信']),
   /* 表情表态 */
-  'putReaction', 'deleteReaction', 'getReactionUsers',
+  ...['putReaction', 'deleteReaction', 'getReactionUsers'].map((k) => [k, '频道·表情']),
   /* 公告 */
-  'postGuildAnnounces', 'deleteGuildAnnounces', 'postChannelAnnounces', 'deleteChannelAnnounces',
+  ...[
+    'postGuildAnnounces', 'deleteGuildAnnounces', 'postChannelAnnounces', 'deleteChannelAnnounces',
+  ].map((k) => [k, '频道·公告']),
   /* 论坛 */
-  'getThreadsList', 'getThread', 'putThread', 'deleteThread',
+  ...['getThreadsList', 'getThread', 'putThread', 'deleteThread'].map((k) => [k, '频道·论坛']),
   /* 精华 */
-  'getPinsMessage', 'putPinsMessage', 'deletePinsMessage',
+  ...['getPinsMessage', 'putPinsMessage', 'deletePinsMessage'].map((k) => [k, '频道·精华']),
   /* 日程 */
-  'getSchedules', 'getSchedule', 'postSchedule', 'patchSchedule', 'deleteSchedule',
+  ...['getSchedules', 'getSchedule', 'postSchedule', 'patchSchedule', 'deleteSchedule']
+    .map((k) => [k, '频道·日程']),
   /* 身份组 */
-  'getGuildRoles', 'postGuildRole', 'patchGuildRole', 'deleteGuildRole',
-  'putGuildMemberRole', 'deleteGuildMemberRole', 'getRoleMembers',
+  ...[
+    'getGuildRoles', 'postGuildRole', 'patchGuildRole', 'deleteGuildRole',
+    'putGuildMemberRole', 'deleteGuildMemberRole', 'getRoleMembers',
+  ].map((k) => [k, '频道·身份组']),
   /* 子频道权限 */
-  'getChannelPermissions', 'putChannelPermissions',
-  'getChannelRolesPermissions', 'putChannelRolesPermissions',
+  ...[
+    'getChannelPermissions', 'putChannelPermissions',
+    'getChannelRolesPermissions', 'putChannelRolesPermissions',
+  ].map((k) => [k, '频道·权限']),
   /* 成员 */
-  'getGuildMembers', 'getGuildMember', 'getOnlineNums',
+  ...['getGuildMembers', 'getGuildMember', 'getOnlineNums'].map((k) => [k, '频道·成员']),
   /* API 权限 */
-  'getGuildApiPermission', 'postGuildApiPermissionDemand',
+  ...['getGuildApiPermission', 'postGuildApiPermissionDemand'].map((k) => [k, '频道·API权限']),
   /* 音频 */
-  'audioControl', 'putMic', 'deleteMic',
+  ...['audioControl', 'putMic', 'deleteMic'].map((k) => [k, '频道·音频']),
 ]);
 import { createMerger } from './roost-merge.js';
 import { createDecider } from './roost-decide.js';
@@ -8308,10 +8323,20 @@ export function apply(ctx) {
         const tryRpc = async (m, p) => {
           try { return await roost.rpc(m, p); } catch { return null; }
         };
+        /**
+         * `intents` 只有这一个来源：框架 `config.get` 里的那份（Identify 时提交的）。
+         * `runtime.status` 不含它——面板以前读的 `st.gatewayIntents` 根本不存在，
+         * 于是订阅位表按 0 判、全显示「未订阅」。宁可回 null 让面板说「读不到」，
+         * 也不要给一个看起来正常的 0。
+         */
+        const frameCfg = await tryRpc('config.get', {});
+        const mask = Number(frameCfg?.intents);
         send(res, 200, {
           ok: true,
           enabled: cfg.guild?.enabled === true,
           sessionMode: cfg.guild?.sessionMode || 'guild',
+          /** 框架配置的 intents 掩码；拿不到就是 null（面板据此不判断已订/未订） */
+          intents: Number.isFinite(mask) ? mask : null,
           status: await tryRpc('runtime.status', {}),
           quota: await tryRpc('quota.get', {}),
           events: await tryRpc('system.events', {}),
@@ -8343,7 +8368,7 @@ export function apply(ctx) {
             : Object.fromEntries(
                 entries
                   .filter(([k]) => CHANNEL_QQ_FALLBACK.has(k))
-                  .map(([k, v]) => [k, { ...v, group: '频道（本地兜底）' }]),
+                  .map(([k, v]) => [k, { ...v, group: CHANNEL_QQ_FALLBACK.get(k) || '频道' }]),
               );
           send(res, 200, { ok: true, methods, fallback: !hasGroup });
         } catch (e) {

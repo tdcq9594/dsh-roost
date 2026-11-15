@@ -9777,12 +9777,13 @@ select.roost-input{color-scheme:dark}
     }
 
     /**
-     * 频道总览（P0 骨架，4 张卡）。
+     * 频道总览（4 张卡）。
      *
-     * 只做「总开关 / 接入体检 / 今日额度 / 会话归属」——这四块是开频道
-     * 之前必须先看清楚的。其余六页按方案 P1–P4 分批上，先占位。
+     * 按「开频道之前必须看清」的顺序排：能不能开 → 订阅对不对 → 额度够不够
+     * → 现在有哪些频道会话。原来那张「会话归属」只有说明没有数据，2026-11-15
+     * 换成了真的频道会话清单（数据来自会话映射，不额外打接口）。
      */
-    function ChannelHomeTab({ config, saveCfg, toast }) {
+    function ChannelHomeTab({ config, saveCfg, toast, chats, setTab }) {
       const g = config?.guild || {}
       const [busy, setBusy] = useState(false)
       const [st, setSt] = useState(null)
@@ -9801,10 +9802,22 @@ select.roost-input{color-scheme:dark}
         } finally { setBusy(false) }
       }
       const on = g.enabled === true
-      const gi = Number(st?.gatewayIntents) || 0
-      const ci = Number(st?.intents) || 0
+      /**
+       * 订阅掩码只有一个真来源：框架 `config.get().intents`（Identify 时提交的那份）。
+       *
+       * 这里以前读的是 `st.gatewayIntents` —— 后端**从来没有这个字段**，于是
+       * 两个值永远是 0，整张订阅位表按 `0 & bit` 全判成「未订阅」。比留白更糟：
+       * 用户会以为频道事件没订阅，跑去改 intents 重连。
+       */
+      const mask = Number(st?.intents)
+      const hasMask = Number.isFinite(mask) && mask > 0
+      /** 频道会话：一个频道一个 / 一个子频道一个都算，私信单独标出来 */
+      const guildChats = (chats || []).filter((c) => c.kind === 'guild' || c.kind === 'dm')
       return h('div', null,
-        h(Sec, { n: '00', title: '频道总开关', right: on ? '已开启' : '已关闭' },
+        h(Sec, {
+          n: '01', title: '总开关与粒度',
+          right: on ? '已开启' : '已关闭',
+        },
           h('div', { className: 'roost-g-card' },
             h('p', { className: 'roost-g-desc' },
               '默认关。关着时只在 dsh-roost 入口丢弃频道事件，不改框架的 intents 订阅——'
@@ -9821,39 +9834,52 @@ select.roost-input{color-scheme:dark}
               },
                 h('option', { value: 'guild' }, '一个频道一个'),
                 h('option', { value: 'channel' }, '一个子频道一个'))),
+            h('p', { className: 'roost-note', style: { marginTop: 10 } },
+              '会话键：一个频道一个 = guild:<频道ID>；一个子频道一个 = guild:<频道ID>:ch:<子频道ID>；'
+              + '频道私信固定 dm:<用户ID>（一人一个，不随私信会话 id 变）。'),
+            h('p', { className: 'roost-note' },
+              '切换粒度不会迁移已有会话：旧会话保留在 DSH 里，但不再接回。'),
+            setTab
+              ? h('button', {
+                  type: 'button', className: 'roost-btn', style: { marginTop: 8 },
+                  onClick: () => { setTab('ch-diag'); toast('已切到「频道排障」，失联会话在 03 卡') },
+                }, '看有没有失联会话 ↗')
+              : null,
           )),
         h(Sec, {
-          n: '01', title: '接入体检',
+          n: '02', title: '接入体检',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadSt }, '刷新'),
         },
           h('div', { className: 'roost-g-card' },
-            h(GRow, { label: '当前连接 intents', hint: 'Gateway 构造时的快照，线上真正在用的' },
-              h('code', null, gi ? String(gi) : '—')),
-            h(GRow, { label: '配置 intents', hint: '改完要重建 Gateway 才生效' },
-              h('code', null, ci ? String(ci) : '—')),
-            gi && ci && gi !== ci
+            h(GRow, { label: '框架配置的 intents', hint: 'Identify 时提交的就是这个值' },
+              h('code', null, hasMask ? String(mask) : '—')),
+            h('p', { className: 'roost-note' },
+              '改完 intents 要重建 Gateway 才生效：面板「上下线」点一次（下线 → 上线），或重启机器人。'),
+            !hasMask
               ? h('p', { className: 'roost-note' },
-                  '两者不一致：配置已改，但线上仍是旧订阅。需面板「上下线」或重启 Roost 才生效。')
+                  '读不到框架配置（config.get 没通），下面只列订阅位、不判断已订未订。')
               : null,
             st?.events?.meta
               ? h('div', { style: { marginTop: 10 } },
-                  h('p', { className: 'roost-note' }, '订阅位（「已订阅」按当前连接的 intents 算）：'),
+                  h('p', { className: 'roost-note' },
+                    hasMask ? '订阅位（按上面这个 intents 算）：' : '订阅位（只有位定义，没有掩码）：'),
                   Object.entries(st.events.meta).map(([name, m]) => {
-                    const has = (gi & (1 << Number(m.bit))) !== 0
+                    const has = hasMask ? (mask & (1 << Number(m.bit))) !== 0 : null
                     return h('div', {
                       key: name,
                       style: {
                         display: 'flex', gap: 8, fontSize: 12,
-                        opacity: has ? 1 : 0.45, padding: '2px 0',
+                        opacity: has === false ? 0.45 : 1, padding: '2px 0',
                       },
                     },
                       h('code', { style: { minWidth: 200 } }, `${name}  1<<${m.bit}`),
                       h('span', null, m.name || ''),
-                      h('span', { style: { marginLeft: 'auto' } }, has ? '已订阅' : '未订阅'))
+                      h('span', { style: { marginLeft: 'auto' } },
+                        has === null ? '' : (has ? '已订阅' : '未订阅')))
                   }))
               : null)),
         h(Sec, {
-          n: '02', title: '今日额度',
+          n: '03', title: '额度与投递',
           right: st?.quota?.day ? `统计日 ${st.quota.day}` : null,
         },
           h('div', { className: 'roost-g-card' },
@@ -9876,21 +9902,11 @@ select.roost-input{color-scheme:dark}
                         : `上限 ${st.quota.limits?.dm ?? 2} 条/天·用户`,
                     }, h('code', null, String(v))))
                   })())
-              : h('p', { className: 'roost-note' }, '框架未提供 quota.get（需要带该方法的框架版本）'))),
-        h(Sec, { n: '03', title: '会话归属' },
-          h('div', { className: 'roost-g-card' },
-            h('p', { className: 'roost-g-desc' },
-              '一个频道一个 = guild:<guildId>；一个子频道一个 = guild:<guildId>:ch:<channelId>；'
-              + '频道私信固定 dm:<用户ID>（一人一个，不随私信会话 id 变）。'),
-            h('p', { className: 'roost-note' },
-              '切换粒度不会迁移已有会话：旧会话保留在 DSH 里，但不再接回。'))),
-        h(Sec, { n: '04', title: '审核与投递' },
-          h('div', { className: 'roost-g-card' },
-            h('p', { className: 'roost-g-desc' },
-              '频道消息可能进审核：发送返回 304023 / 304024 时状态是「审核中」，'
-              + '结果通过 MESSAGE_AUDIT_PASS / REJECT 事件回来。这两条是事件，'
-              + '和 HTTP 响应里的 pending 不是一回事——关掉总开关只影响事件是否进这边，'
-              + '不影响群聊/单聊的投递终态。'),
+              : h('p', { className: 'roost-note' }, '框架未提供 quota.get（需要带该方法的框架版本）'),
+            h('p', { className: 'roost-note', style: { marginTop: 12 } },
+              '投递：频道消息可能进审核（304023 / 304024 → 状态「审核中」，结果由 '
+              + 'MESSAGE_AUDIT_PASS / REJECT 事件回来）。关掉总开关只影响事件是否进这边，'
+              + '不影响群聊 / 单聊的投递终态。'),
             (() => {
               const items = Array.isArray(st?.delivery?.items) ? st.delivery.items : []
               const ch = items.filter((x) => String(x.target || x.chatId || '').includes(':')
@@ -9903,8 +9919,27 @@ select.roost-input{color-scheme:dark}
                 hint: String(x.state || ''),
               }, h('code', null, String(x.code || x.state || ''))))
             })())),
-        h('p', { className: 'roost-note', style: { marginTop: 12 } },
-          '其余六页（策略 / 频道与子频道 / 消息与私信 / 内容与互动 / 成员与权限 / 排障）按方案 P1–P4 分批上线。'),
+        h(Sec, {
+          n: '04', title: '频道会话',
+          right: chats === null ? '读取中…' : `${guildChats.length} 个`,
+        },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '会话映射里属于频道的那些（一个频道 / 一个子频道 / 频道私信）。'
+              + '这里只是看一眼；要按频道单独调策略，去「频道策略 → 按频道覆写」。'),
+            chats === null
+              ? h('p', { className: 'roost-note' }, '会话映射还没读完…')
+              : guildChats.length
+                ? guildChats.slice(0, 20).map((c) => h(GRow, {
+                    key: c.chatId,
+                    label: c.title || String(c.chatId).slice(0, 24),
+                    hint: (c.kind === 'dm' ? '频道私信' : '频道')
+                      + (String(c.chatId).includes(':ch:') ? ' · 子频道' : '')
+                      + (c.at ? ' · ' + new Date(c.at).toLocaleString('zh-CN') : ''),
+                  }, h('code', null, String(c.chatId).slice(-12))))
+                : h('p', { className: 'roost-note' },
+                    '还没有频道会话。先在 QQ 里给频道发一条消息，这里就会长出来。'),
+          )),
       )
     }
 
@@ -9954,20 +9989,7 @@ select.roost-input{color-scheme:dark}
       }
 
       return h('div', null,
-        h(Sec, { n: '01', title: '会话粒度', right: g.sessionMode === 'channel' ? '一个子频道一个' : '一个频道一个' },
-          h('div', { className: 'roost-g-card' },
-            h('p', { className: 'roost-g-desc' },
-              '频道私信固定一人一个，不受这里影响。切换粒度不会迁移已有会话——'
-              + '旧会话保留在 DSH 里，但不再接回。'),
-            h(GRow, { label: '会话粒度', hint: 'guild = 同频道的子频道/论坛/公告共用一个会话；channel = 一个子频道一个' },
-              h('select', {
-                className: 'roost-g-sel', value: g.sessionMode || 'guild', disabled: busy,
-                onChange: (e) => put({ guild: { sessionMode: e.target.value } }),
-              },
-                h('option', { value: 'guild' }, '一个频道一个'),
-                h('option', { value: 'channel' }, '一个子频道一个'))))),
-
-        h(Sec, { n: '02', title: '按频道覆写', right: draft !== null
+        h(Sec, { n: '01', title: '按频道覆写', right: draft !== null
           ? h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: saveOv }, '保存覆写')
           : null },
           h('div', { className: 'roost-g-card' },
@@ -9998,7 +10020,7 @@ select.roost-input{color-scheme:dark}
                       })))
               : null)),
 
-        h(Sec, { n: '03', title: '接话与节奏（全局）', right: h('button', {
+        h(Sec, { n: '02', title: '接话与节奏（全局）', right: h('button', {
           type: 'button', className: 'roost-btn',
           onClick: () => { setTab('groupchat'); toast('已切到「群聊策略」，那边的 01–03 卡改的是同一份配置') },
         }, '去群聊策略改') },
@@ -10011,7 +10033,7 @@ select.roost-input{color-scheme:dark}
             h(GRow, { label: '冷却 / 每分钟上限', hint: 'roostHost.decide' },
               h('code', null, `${decide.cooldownSec ?? 20}s / ${decide.maxRepliesPerMin ?? 3} 条`)))),
 
-        h(Sec, { n: '04', title: '连发与分段' },
+        h(Sec, { n: '03', title: '连发与分段' },
           h('div', { className: 'roost-g-card' },
             h('p', { className: 'roost-g-desc' },
               '频道没有群聊「每秒 5 条」那条限制（那是文字子频道的发送侧限制，'
@@ -10022,7 +10044,19 @@ select.roost-input{color-scheme:dark}
                 onSave: (v) => put({ qqTools: { maxParts: v } }),
               })))),
 
-        h(Sec, { n: '05', title: '富媒体与内嵌格式' },
+        /**
+         * 04：把「富媒体限制」和「事件订阅」并成一张参考卡。
+         *
+         * 两块原来各占一张卡、各只有一段说明，页面上一半的卡读完了什么都不能做。
+         * 合并后默认收起：需要查语法的人展开，不需要的人不被挡路。
+         */
+        h(Sec, {
+          n: '04', title: '频道的限制与订阅', defaultOpen: false,
+          right: h('button', {
+            type: 'button', className: 'roost-btn',
+            onClick: () => { setTab('ch-home'); toast('已切到「频道总览」，订阅位清单在「接入体检」卡里') },
+          }, '去总览看订阅位'),
+        },
           h('div', { className: 'roost-g-card' },
             h('p', { className: 'roost-g-desc' },
               '频道**只支持图片**：`image` 传公网 URL（平台转存）、`file_image` 走 multipart 直传；'
@@ -10030,37 +10064,63 @@ select.roost-input{color-scheme:dark}
               + '另有 `embed` / `ark` / `markdown` 三种结构化消息。'),
             h('p', { className: 'roost-note' },
               '内嵌格式用频道自己的语法：`<@用户id>` 提到人、`<#子频道id>` 提到子频道、'
-              + '`<emoji:表情id>` 发表情——**不要套群聊的 `<qqbot-at-user>`**，频道不认。'))),
-
-        h(Sec, { n: '06', title: '事件订阅', right: h('button', {
-          type: 'button', className: 'roost-btn',
-          onClick: () => { setTab('ch-home'); toast('已切到「频道总览」，订阅位清单在「接入体检」卡里') },
-        }, '去总览看订阅位') },
-          h('div', { className: 'roost-g-card' },
-            h('p', { className: 'roost-g-desc' },
+              + '`<emoji:表情id>` 发表情——**不要套群聊的 `<qqbot-at-user>`**，频道不认。'),
+            h('p', { className: 'roost-note', style: { marginTop: 10 } },
               '订阅只靠 intents 掩码，在 Identify 时一次性提交，**没有运行时动态增删**。'
-              + '改完必须让框架重建 Gateway（面板「上下线」或重启 Roost）才生效。'),
-            h('p', { className: 'roost-note' },
-              '关掉总开关时不会退订——框架照常收、照常推给别的插件，这边只在入口丢弃频道事件。'))),
+              + '改完必须让框架重建 Gateway（面板「上下线」或重启 Roost）才生效；'
+              + '关掉总开关不会退订——框架照常收、照常推给别的插件，这边只在入口丢弃频道事件。'))),
       )
     }
 
     /**
-     * 频道接口操作台（P3）。
+     * 频道接口台的四个段（2026-11-15）。
      *
-     * 四个页面（频道与子频道 / 消息与私信 / 内容与互动 / 成员与权限）共用这一个
-     * 组件，只是过滤的 group 不同 —— 不为 35 个端点各写一套表。
+     * 这四个段原来各是一个页签，但它们是**同一个组件、同一张卡**的四个过滤器——
+     * 拆成四个一级可达的页签等于「导航层级比内容还重」，而且四页长得一模一样。
+     * 现在收成一页，段内仍是「选接口 → 填参数 → 执行 → 看结果」。
+     *
+     * `groups` 与框架 `qq.methods[].group` 对齐（都以「频道」开头）。
+     */
+    const CH_SECTIONS = [
+      {
+        id: 'channels', label: '频道与子频道', groups: ['频道', '频道·子频道'],
+        note: '频道与子频道的列表 / 详情、创建·改名·删除。删除子频道不可恢复。',
+      },
+      {
+        id: 'messages', label: '消息与私信', groups: ['频道·消息', '频道·私信', '频道·表情'],
+        note: '发频道消息 / 私信、撤回、创建私信会话。带 msg_id 或 event_id 才是被动回复（不占主动额度）。',
+      },
+      {
+        id: 'content', label: '内容与互动',
+        groups: ['频道·公告', '频道·论坛', '频道·精华', '频道·日程', '频道·音频'],
+        note: '公告、论坛帖子、精华消息、日程、音频子频道。论坛仅私域；音频接口仅音频类机器人可用。',
+      },
+      {
+        id: 'member', label: '成员与权限',
+        groups: ['频道·成员', '频道·身份组', '频道·权限', '频道·API权限'],
+        note: '成员列表 / 详情 / 在线人数、身份组增删改、成员角色增删、子频道权限、API 权限申请。',
+      },
+    ]
+
+    /**
+     * 频道接口操作台。
      *
      * 安全：非只读操作点「执行」先弹 confirm，确认后才带 `confirm: true`；
      * 后端还会再校验一次（只放行 group 以「频道」开头的方法）。
+     *
+     * `initialSection` 来自老深链（`?tab=ch-message` 之类），决定进来先落哪一段。
      */
-    function ChannelApiTab({ title, groups, note }) {
+    function ChannelApiTab({ toast, chats, initialSection = 'channels' }) {
+      const [section, setSection] = useState(initialSection)
       const [idx, setIdx] = useState(null)
       const [fallback, setFallback] = useState(false)
       const [sel, setSel] = useState('')
       const [params, setParams] = useState('{}')
       const [out, setOut] = useState(null)
       const [busy, setBusy] = useState(false)
+      const [readOnly, setReadOnly] = useState(false)
+      /** 最近调用只在本页内存里，刷新即清——和 /asr/recent 同口径，不落盘、不进记忆 */
+      const [recent, setRecent] = useState([])
       const load = useCallback(async () => {
         try {
           const r = await get('/channel/methods')
@@ -10070,48 +10130,103 @@ select.roost-input{color-scheme:dark}
       }, [])
       useEffect(() => { load() }, [load])
 
-      /** 精确匹配「频道」但不匹配「频道·消息」这类子分组，靠 `·` 分隔 */
-      const inGroup = (g) => {
-        const s = String(g || '')
-        return groups.some((p) => s === p || s.startsWith(`${p}·`))
+      const curSec = CH_SECTIONS.find((s) => s.id === section) || CH_SECTIONS[0]
+      /**
+       * 方法属于哪一段：**最长前缀优先**。
+       *
+       * 不能只写 `startsWith('频道·')`——那样「频道」这一段会把「频道·消息」
+       * 也一起吞进来。原来四个页签就靠这个判定，于是第一页列了全部方法、
+       * 后面三页重复列了一遍，谁都没发现。最长前缀同时兜住框架将来加的
+       * 更深分组（`频道·消息·xx` → 仍归到消息段）。
+       */
+      const sectionOf = (group) => {
+        const s = String(group || '')
+        let best = null
+        for (const sec of CH_SECTIONS) {
+          for (const p of sec.groups) {
+            if (s === p || s.startsWith(`${p}·`)) {
+              if (!best || p.length > best.len) best = { sec, len: p.length }
+            }
+          }
+        }
+        return best ? best.sec : null
       }
-      const list = Object.entries(idx || {})
-        .filter(([, v]) => inGroup(v?.group))
+      const methodsOf = (sec) => Object.entries(idx || {})
+        .filter(([, v]) => sectionOf(v?.group)?.id === sec.id)
+      /** 每段有多少个方法：切段之前就知道值不值得点 */
+      const countOf = (sec) => methodsOf(sec).length
+      const list = methodsOf(curSec)
+        .filter(([, v]) => !readOnly || String(v?.risk || '') === 'read')
         .sort((a, b) => String(a[1].group).localeCompare(String(b[1].group))
           || String(a[0]).localeCompare(String(b[0])))
-      const cur = sel || (list[0] ? list[0][0] : '')
+      const cur = list.some(([k]) => k === sel) ? sel : (list[0] ? list[0][0] : '')
       const meta = cur ? idx?.[cur] : null
 
-      const run = async () => {
-        if (!cur || busy) return
+      /** 频道会话 → 参数骨架。手抄 guild_id / channel_id 是这一步最痛的地方 */
+      const chList = (chats || []).filter((c) => c.kind === 'guild' || c.kind === 'dm')
+      const fillFrom = (chatId) => {
+        const s = String(chatId || '')
+        if (s.startsWith('dm:')) {
+          const m = s.match(/^dm:([^:]+)/)
+          setParams(JSON.stringify({ guild_id: '', user_id: m ? m[1] : '' }, null, 2))
+          return
+        }
+        const m = s.match(/^guild:([^:]+)(?::ch:(.+))?$/)
+        if (!m) { toast('这个会话键不是频道格式'); return }
+        setParams(JSON.stringify({ guild_id: m[1], channel_id: m[2] || '' }, null, 2))
+      }
+
+      const run = async (method = cur, raw = params) => {
+        if (!method || busy) return
         let p = {}
-        try { p = JSON.parse(params || '{}') } catch { toast('参数不是合法 JSON'); return }
-        const risk = String(meta?.risk || 'write')
+        try { p = JSON.parse(raw || '{}') } catch { toast('参数不是合法 JSON'); return }
+        const risk = String(idx?.[method]?.risk || 'write')
         const need = risk !== 'read'
-        if (need && !window.confirm(`${cur} 属 ${risk} 级操作，确定执行？`)) return
+        if (need && !window.confirm(`${method} 属 ${risk} 级操作，确定执行？`)) return
         setBusy(true)
+        const startedAt = Date.now()
+        const push = (ok, msg) => setRecent((rows) => [{
+          at: Date.now(), method, ok, ms: Date.now() - startedAt, msg, params: raw,
+        }].concat(rows).slice(0, 5))
         try {
-          const r = await post('/channel/qq', { method: cur, params: p, confirm: need })
+          const r = await post('/channel/qq', { method, params: p, confirm: need })
           setOut(r)
+          push(r?.ok !== false, r?.ok === false ? String(r.message || '失败') : '')
           toast(r?.ok === false ? (r.message || '调用失败') : '已执行')
+        } catch (e) {
+          push(false, String(e?.message || e))
+          toast('调用失败：' + String(e?.message || e))
         } finally { setBusy(false) }
       }
 
       if (idx === null) return h('div', { className: 'roost-note' }, '读取频道方法表…')
       return h('div', null,
         h(Sec, {
-          n: '01', title,
+          n: '01', title: '接口操作台',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新方法表'),
         },
           h('div', { className: 'roost-g-card' },
-            note ? h('p', { className: 'roost-g-desc' }, note) : null,
+            /* 段切换：这四段就是原来的四个页签，现在不再占导航 */
+            h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 } },
+              CH_SECTIONS.map((s) => h('button', {
+                key: s.id, type: 'button', className: 'roost-chip',
+                'data-on': section === s.id ? '1' : '0',
+                onClick: () => { setSection(s.id); setSel(''); setOut(null) },
+              }, `${s.label} ${countOf(s)}`)),
+              h('button', {
+                type: 'button', className: 'roost-chip',
+                'data-on': readOnly ? '1' : '0',
+                title: '只列不会改数据的方法',
+                onClick: () => { setReadOnly((v) => !v); setSel('') },
+              }, '只看只读')),
+            h('p', { className: 'roost-g-desc' }, curSec.note),
             fallback
               ? h('p', { className: 'roost-note' },
                   '框架的 qq.methods 没带 group（版本较旧，或运行副本没同步本轮改动），'
-                  + '当前用本地兜底名单。同步并重启框架后会自动切回按 group 过滤。')
+                  + '当前用本地兜底名单，分组按本地表推。同步并重启框架后自动切回框架的分组。')
               : null,
             list.length
-              ? h(GRow, { label: '接口', hint: '只列频道相关方法；GET 只读，其余要二次确认' },
+              ? h(GRow, { label: '接口', hint: '只列本段的方法；非只读要二次确认' },
                   h('select', {
                     className: 'roost-g-sel', value: cur, disabled: busy,
                     onChange: (e) => { setSel(e.target.value); setOut(null) },
@@ -10119,9 +10234,24 @@ select.roost-input{color-scheme:dark}
                     list.map(([k, v]) => h('option', { key: k, value: k },
                       `${k}（${v.group || '—'} / ${v.risk || '—'}）`))))
               : h('p', { className: 'roost-note' },
-                  '框架没提供频道方法。检查外接协议是否连上、框架版本是否带 qq.methods.group。'),
+                  readOnly
+                    ? '本段没有只读方法，取消「只看只读」再看看。'
+                    : '本段没有方法。检查外接协议是否连上、框架版本是否带 qq.methods.group。'),
             cur
               ? h('div', null,
+                  chList.length
+                    ? h(GRow, {
+                        label: '填入已知频道',
+                        hint: '从会话映射里挑一个，自动填 guild_id / channel_id 骨架',
+                      },
+                        h('select', {
+                          className: 'roost-g-sel', value: '', disabled: busy,
+                          onChange: (e) => { if (e.target.value) fillFrom(e.target.value) },
+                        },
+                          h('option', { value: '' }, '选一个…'),
+                          chList.slice(0, 20).map((c) => h('option', { key: c.chatId, value: c.chatId },
+                            `${c.title || String(c.chatId).slice(0, 20)}${c.kind === 'dm' ? '（私信）' : ''}`))))
+                    : null,
                   h('p', { className: 'roost-note', style: { marginTop: 8 } },
                     meta?.blocked
                       ? '这个方法被框架标为禁止外部调用。'
@@ -10136,7 +10266,7 @@ select.roost-input{color-scheme:dark}
                   h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
                     h('button', {
                       type: 'button', className: 'roost-btn',
-                      disabled: busy || meta?.blocked, onClick: run,
+                      disabled: busy || meta?.blocked, onClick: () => run(),
                     }, busy ? '执行中…' : '执行')),
                   out
                     ? h('pre', {
@@ -10148,6 +10278,29 @@ select.roost-input{color-scheme:dark}
                       }, JSON.stringify(out, null, 2))
                     : null)
               : null)),
+
+        recent.length
+          ? h(Sec, { n: '02', title: '最近调用', right: `${recent.length} 条 · 刷新即清` },
+              h('div', { className: 'roost-g-card' },
+                h('p', { className: 'roost-g-desc' },
+                  '只在本页内存里，不落盘、不进记忆。点「重跑」把它填回上面，连调同一个接口时不用反复选。'),
+                recent.map((r, i) => h(GRow, {
+                  key: String(r.at) + ':' + i,
+                  label: r.method,
+                  hint: (r.ok ? '成功' : '失败') + ' · ' + r.ms + 'ms · '
+                    + new Date(r.at).toLocaleTimeString('zh-CN')
+                    + (r.msg ? ' · ' + r.msg : ''),
+                }, h('button', {
+                  type: 'button', className: 'roost-chip',
+                  onClick: () => {
+                    const hit = sectionOf(idx?.[r.method]?.group)
+                    if (hit) setSection(hit.id)
+                    setSel(r.method)
+                    setParams(r.params || '{}')
+                    setOut(null)
+                  },
+                }, '重跑')))))
+          : null,
       )
     }
 
@@ -10245,12 +10398,6 @@ select.roost-input{color-scheme:dark}
               ['4013 / 4014', 'intents 参数无效或无权限；4014 要去管理端申请频道能力'],
             ].map(([k, v]) => h(GRow, { key: k, label: k }, h('span', { className: 'roost-note' }, v))))),
       )
-    }
-
-    /** 频道其余页的占位：P1–P4 逐个替换成真页面 */
-    function ChannelStubTab({ title, note }) {
-      return h(Sec, { n: '01', title },
-        h('div', { className: 'roost-g-card' }, h('p', { className: 'roost-g-desc' }, note)))
     }
 
     function GroupAdminTab({ chats, toast }) {
@@ -15543,13 +15690,17 @@ select.roost-input{color-scheme:dark}
       /* 群聊：策略在前、动手管人在后 */
       ['groupchat', '群聊策略'],
       ['groupadmin', '群管'],
-      /* 频道：7 个二级页，按「看状态 / 调策略 / 管结构 / 发消息 / 做内容 / 管人 / 排障」拆 */
+      /**
+       * 频道：4 个二级页 —— 看状态 / 调策略 / 调接口 / 排障。
+       *
+       * 2026-11-15 收敛：原来「频道与子频道 / 消息与私信 / 内容与互动 / 成员与权限」
+       * 是**同一个接口台的四个过滤器**（同一个组件、同一张卡，只有 group 不同），
+       * 拆成四个页签等于「导航层级比内容还重」。现在并成一页「频道接口」，
+       * 页内用分段切换；四个老 key 仍能深链打开对应段（见 LEGACY_CH_TABS）。
+       */
       ['ch-home', '频道总览'],
       ['ch-policy', '频道策略'],
-      ['ch-channels', '频道与子频道'],
-      ['ch-message', '消息与私信'],
-      ['ch-content', '内容与互动'],
-      ['ch-member', '成员与权限'],
+      ['ch-api', '频道接口'],
       ['ch-diag', '频道排障'],
       /* 系统：这台机器怎么跑 */
       ['chats', '会话'],
@@ -15572,7 +15723,21 @@ select.roost-input{color-scheme:dark}
      * 「QQ 会话 ↔ DSH 会话」的映射表，不给入口只能从记忆页绕进去。
      */
     const HIDDEN_TABS = ['context', 'setup']
+    /**
+     * 频道接口台的四个老页签 key（2026-11-15 合并前各自是一页）。
+     *
+     * 只用来**接住老深链与老 localStorage**：打开时落到 `ch-api` 并选中对应段。
+     * 它们不进导航、不进 Alt+K（`ALL_TABS` 里没有），否则页签又会变回四个。
+     */
+    const LEGACY_CH_TABS = {
+      'ch-channels': 'channels',
+      'ch-message': 'messages',
+      'ch-content': 'content',
+      'ch-member': 'member',
+    }
     const ALL_TABS = TABS.map(([id]) => id).concat(HIDDEN_TABS)
+    /** 深链校验用：老 key 也放行，否则老书签会被当成无效值、静默退回概览 */
+    const KNOWN_TABS = ALL_TABS.concat(Object.keys(LEGACY_CH_TABS))
 
     /**
      * 两层导航：一级是分组（带图标），二级是组内页面。
@@ -15609,10 +15774,8 @@ select.roost-input{color-scheme:dark}
       groupadmin: '群管 禁言 审批 群信息 入群',
       'ch-home': '频道 频道总览 总开关 订阅 intents 额度 会话 审核',
       'ch-policy': '频道策略 会话粒度 子频道 接话 覆写 富媒体',
-      'ch-channels': '子频道 频道结构 创建 改名 删除 权限',
-      'ch-message': '频道消息 私信 撤回 表态 精华 dms',
-      'ch-content': '论坛 帖子 公告 日程 音频 上麦',
-      'ch-member': '频道成员 身份组 角色 在线人数 api权限',
+      /* 四个老页签并进来之后，原来各自的词都收在这一条里，搜哪个都还能到 */
+      'ch-api': '频道接口 子频道 频道结构 创建 改名 删除 权限 频道消息 私信 撤回 表态 精华 dms 论坛 帖子 公告 日程 音频 上麦 频道成员 身份组 角色 在线人数 api权限',
       'ch-diag': '频道排障 事件 账本 投递 错误码',
       chats: '会话 身份 映射 上下文',
       account: '账号迁移 迁移 换号 绑定 旧 openid',
@@ -15654,10 +15817,10 @@ select.roost-input{color-scheme:dark}
        */
       { id: 'group', label: '群聊', icon: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM15.5 11a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5M3 19c.7-2.6 3-4 6-4s5.3 1.4 6 4M15 15.2c2 .2 3.5 1.4 4 3.3', tabs: ['groupchat', 'groupadmin'] },
       /**
-       * 频道：功能比群聊多得多，所以拆 7 个二级页，每页 4–7 张卡。
-       * 只读诊断在首尾（总览/排障），配置在策略，调官方接口的写操作在中间四页。
+       * 频道：四个二级页，按「看状态 / 调策略 / 调接口 / 排障」分工。
+       * 只读诊断在首尾（总览 / 排障），配置在策略，动官方接口的写操作在接口页。
        */
-      { id: 'channel', label: '频道', icon: 'M4 6.5h16M4 12h10M4 17.5h7M17.5 15.5l3 2-3 2', tabs: ['ch-home', 'ch-policy', 'ch-channels', 'ch-message', 'ch-content', 'ch-member', 'ch-diag'] },
+      { id: 'channel', label: '频道', icon: 'M4 6.5h16M4 12h10M4 17.5h7M17.5 15.5l3 2-3 2', tabs: ['ch-home', 'ch-policy', 'ch-api', 'ch-diag'] },
       { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
       { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['connect', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
@@ -15758,11 +15921,11 @@ select.roost-input{color-scheme:dark}
           const want = typeof location !== 'undefined'
             ? String(new URLSearchParams(location.search || '').get('tab') || '').trim()
             : ''
-          if (want && ALL_TABS.includes(want)) return want
+          if (want && KNOWN_TABS.includes(want)) return want
           const last = localStorage.getItem('roost.tab')
           /** 老用户存着 'market'：并进「人格」了，别让他打开就是概览 */
           const alias = last === 'market' ? 'her' : last
-          return ALL_TABS.includes(alias) ? alias : 'overview'
+          return KNOWN_TABS.includes(alias) ? alias : 'overview'
         } catch {
           return 'overview'
         }
@@ -15773,9 +15936,11 @@ select.roost-input{color-scheme:dark}
       const [palette, setPalette] = useState({ open: false, q: '', idx: 0 })
       const setTab = useCallback((id) => {
         if (id === 'setup') { setPageModal(id); return }
+        /** 老频道 key 一律归一到 ch-api：state 与 localStorage 只存正式页签 */
+        const next = LEGACY_CH_TABS[id] ? 'ch-api' : id
         setPageModal(null)
-        setTabState(id)
-        try { localStorage.setItem('roost.tab', id) } catch {}
+        setTabState(next)
+        try { localStorage.setItem('roost.tab', next) } catch {}
       }, [])
       /**
        * Alt+K 打开全局查找；Esc 关；↑↓ 选择；回车跳转。
@@ -15832,6 +15997,27 @@ select.roost-input{color-scheme:dark}
         ? TABS.concat(extPages.map((p) => [`ext:${p.id}`, p.nav.label]))
         : TABS
 
+      /**
+       * 某个一级分组里的页面，**按 `NAV_GROUPS[x].tabs` 声明的顺序**排。
+       *
+       * 为什么不能直接用 `dynamicTabs` 过滤：`TABS` 是「有哪些页」的清单，
+       * 它的书写顺序只服务于 Alt+K 全站遍历；组内的主次是 `NAV_GROUPS`
+       * 说了算。之前拿 `TABS` 顺序当组内顺序，等于让清单覆盖了声明——
+       * `NAV_GROUPS.system` 把 `connect` 排在首位，实际渲染成倒数第二，
+       * `SYSTEM_SEG` 的分段标记跟着错位（第三轮 A1）。
+       *
+       * 扩展页（`ext:*`）不在静态声明里，按 `extPages` 顺序接在组内末尾。
+       */
+      const tabsOfGroup = (g) => {
+        if (!g) return []
+        const declared = g.tabs
+          .map((id) => dynamicTabs.find(([tid]) => tid === id))
+          .filter(Boolean)
+        const ext = dynamicTabs.filter(([id]) =>
+          id.startsWith('ext:') && (navGroupOf(id, extPages)?.id || '') === g.id)
+        return declared.concat(ext)
+      }
+
       const [navLast, setNavLast] = useState(() => {
         try { return JSON.parse(localStorage.getItem('roost.navlast') || '{}') || {} } catch { return {} }
       })
@@ -15844,13 +16030,15 @@ select.roost-input{color-scheme:dark}
       }, [tab, navLast])
       /** 点分组：优先回该组上次那页；存着已下线的 key 时退回组内第一页 */
       const openGroup = useCallback((g) => {
-        /** 组内页面要算上扩展页：点「表达」时如果只有一个内置页 + 一个扩展页，也得能落到扩展页 */
-        const list = dynamicTabs
-          .filter(([id]) => (navGroupOf(id, extPages)?.id || '') === g.id)
-          .map(([id]) => id)
+        /**
+         * 组内页面要算上扩展页：点「表达」时如果只有一个内置页 + 一个扩展页，也得能落到扩展页。
+         * 顺序走 `tabsOfGroup`（= 分组声明顺序），这样「点一级分组」的默认落点
+         * 和二级行第一个页签永远是同一页，不会指东落西。
+         */
+        const list = tabsOfGroup(g).map(([id]) => id)
         const want = navLast[g.id]
         setTab(list.includes(want) ? want : (list[0] || g.tabs[0]))
-      }, [navLast, setTab, extPages, dynamicTabs])
+      }, [navLast, setTab, extPages, dynamicTabs, tabsOfGroup])
       /** 日志统一拉一次：概览显示最近 6 条，排障页显示全量，别两处各起一个轮询 */
       const [logs, setLogs] = useState(null)
       /** 5.2：自动刷新开关（存 localStorage，刷新页面也记得） */
@@ -16227,12 +16415,18 @@ select.roost-input{color-scheme:dark}
        * 长页面直接被切掉。仪表盘该有的样子正好相反：切换栏永远在，
        * 内容在它下面滚。
        */
+      /**
+       * 归一化后的当前页：老频道 key（`ch-message` 等）落到 `ch-api`。
+       *
+       * 深链和 localStorage 可能还存着老 key，state 里就让它留着（这样
+       * `ChannelApiTab` 能据此选中对应段），但**导航高亮、二级页签、路由
+       * 判定都按 `activeTab` 走**，否则一级组不高亮、二级行整条消失。
+       */
+      const activeTab = LEGACY_CH_TABS[tab] ? 'ch-api' : tab
       /** 当前页所属分组；隐藏页不属于任何组，`curGroup` 为 null（一级不高亮、二级不显示） */
-      const curGroup = navGroupOf(tab, extPages)
-      /** 组内页面：按 `navGroupOf` 反查，扩展页才会被算进来 */
-      const groupTabs = curGroup
-        ? dynamicTabs.filter(([id]) => (navGroupOf(id, extPages)?.id || '') === curGroup.id)
-        : []
+      const curGroup = navGroupOf(activeTab, extPages)
+      /** 组内页面：按分组声明顺序（见 `tabsOfGroup`），扩展页接在后面 */
+      const groupTabs = tabsOfGroup(curGroup)
 
       /**
        * 首次接入向导：新装 / 升级后 `needed=true`，整棵面板树都不挂，
@@ -16274,9 +16468,9 @@ select.roost-input{color-scheme:dark}
             },
               NAV_GROUPS.map((g) => {
                 const on = curGroup && curGroup.id === g.id
-                /** 悬浮提示把组内页面列出来：只看「能力」猜不到里面有扩展 */
-                const names = dynamicTabs
-                  .filter(([id]) => (navGroupOf(id, extPages)?.id || '') === g.id)
+                /** 悬浮提示把组内页面列出来：只看「能力」猜不到里面有扩展。
+                    顺序与点进去后二级行一致，否则提示里看到的和实际的不一样 */
+                const names = tabsOfGroup(g)
                   .map(([, label]) => label)
                   .join(' · ')
                 return h('button', {
@@ -16297,15 +16491,17 @@ select.roost-input{color-scheme:dark}
                     key: id, type: 'button',
                     className: 'roost-tab',
                     role: 'tab',
-                    'aria-selected': tab === id ? 'true' : 'false',
-                    'data-on': tab === id ? '1' : '0',
+                    'aria-selected': activeTab === id ? 'true' : 'false',
+                    'data-on': activeTab === id ? '1' : '0',
                     ...(curGroup.id === 'system' && SYSTEM_SEG[id]
                       ? {
                           style: { marginLeft: 10, paddingLeft: 10, borderLeft: '1px solid var(--line-soft)' },
                           title: '这一段：' + SYSTEM_SEG[id],
                         }
                       : {}),
-                    onClick: () => setTab(id),
+                    /** 已经是这一页就别再点一次：老深链（ch-message）归一化后
+                        高亮的是 ch-api，重复点击会重挂组件、把段重置回第一段 */
+                    onClick: () => { if (activeTab !== id) setTab(id) },
                   }, label)))
               : null,
             /** 隐藏页标记放两个 tablist 外面：tablist 的 owned element 必须是 role=tab，
@@ -16415,37 +16611,16 @@ select.roost-input{color-scheme:dark}
             : null,
           /** 群管：禁言 / 踢人 / 入群审批。协议侧 group.* 是 message scope，装了就能用 */
           tab === 'groupadmin' ? h(GroupAdminTab, { chats, toast }) : null,
-          /* 频道：P0 只落「总览」，其余六页占位，按方案 P1–P4 分批替换 */
-          tab === 'ch-home' ? h(ChannelHomeTab, { config, saveCfg, toast }) : null,
+          /* 频道：总览 / 策略 / 接口 / 排障。老 key（ch-message 等）落到接口页并选中对应段 */
+          tab === 'ch-home' ? h(ChannelHomeTab, { config, saveCfg, toast, chats, setTab }) : null,
           tab === 'ch-policy'
             ? h(ChannelPolicyTab, { config, saveCfg, saveAll, toast, setTab, chats })
             : null,
-          tab === 'ch-channels'
+          activeTab === 'ch-api'
             ? h(ChannelApiTab, {
-                title: '频道与子频道',
-                groups: ['频道'],
-                note: '频道与子频道的列表/详情、创建·改名·删除。删除子频道不可恢复，会二次确认。',
-              })
-            : null,
-          tab === 'ch-message'
-            ? h(ChannelApiTab, {
-                title: '消息与私信',
-                groups: ['频道·消息', '频道·私信'],
-                note: '发频道消息 / 私信、撤回、创建私信会话。发送要带 msg_id 或 event_id 才是被动回复（不占主动额度）。',
-              })
-            : null,
-          tab === 'ch-content'
-            ? h(ChannelApiTab, {
-                title: '内容与互动',
-                groups: ['频道·公告', '频道·论坛', '频道·精华', '频道·日程', '频道·音频'],
-                note: '公告、论坛帖子、精华消息、日程、音频子频道。论坛仅私域；音频接口仅音频类机器人可用。',
-              })
-            : null,
-          tab === 'ch-member'
-            ? h(ChannelApiTab, {
-                title: '成员与权限',
-                groups: ['频道·成员', '频道·身份组', '频道·权限', '频道·API权限'],
-                note: '成员列表/详情/在线人数、身份组增删改、成员角色增删、子频道权限、API 权限申请。',
+                toast,
+                chats,
+                initialSection: LEGACY_CH_TABS[tab] || 'channels',
               })
             : null,
           tab === 'ch-diag' ? h(ChannelDiagTab, {}) : null,
