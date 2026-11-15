@@ -10146,6 +10146,102 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /**
+     * 频道排障（P4）。四块只读：方法表 / 投递终态 / 失联会话 / 错误码速查。
+     *
+     * 「最近频道事件」放在这里而不是总览——`ledger.recent` 要按 chatId 查，
+     * 总览页没有具体频道；这里至少能按失联清单里的会话反查。
+     */
+    function ChannelDiagTab() {
+      const [st, setSt] = useState(null)
+      const [methods, setMethods] = useState(null)
+      const [orphans, setOrphans] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const load = useCallback(async () => {
+        setBusy(true)
+        try {
+          const [a, b, c] = await Promise.all([
+            get('/channel/status').catch(() => null),
+            get('/channel/methods').catch(() => null),
+            get('/channel/orphans').catch(() => null),
+          ])
+          setSt(a); setMethods(b); setOrphans(c)
+        } finally { setBusy(false) }
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      const byGroup = {}
+      for (const [name, m] of Object.entries(methods?.methods || {})) {
+        const g = String(m?.group || '其他')
+        if (!byGroup[g]) byGroup[g] = []
+        byGroup[g].push({ name, ...m })
+      }
+      const delivery = (st?.delivery?.items || [])
+        .filter((x) => /^(guild|dm):/.test(String(x?.target || x?.chatId || '')))
+      const orph = Array.isArray(orphans?.items) ? orphans.items : []
+
+      return h('div', null,
+        h(Sec, {
+          n: '01', title: '频道方法表',
+          right: h('button', {
+            type: 'button', className: 'roost-btn', disabled: busy, onClick: load,
+          }, '刷新'),
+        },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '来自框架 qq.methods（group 以「频道」开头）。风险档决定操作台要不要二次确认。'),
+            Object.keys(byGroup).sort().map((g) => h('div', { key: g, style: { marginTop: 10 } },
+              h('p', { className: 'roost-note' }, `${g}（${byGroup[g].length}）`),
+              byGroup[g].map((m) => h('div', {
+                key: m.name,
+                style: { display: 'flex', gap: 8, fontSize: 12, padding: '2px 0' },
+              },
+                h('code', { style: { minWidth: 220 } }, m.name),
+                h('span', null, `${m.risk || '—'} · ${m.scope || '—'}`))))),
+            methods ? null : h('p', { className: 'roost-note' }, '读取方法表…'))),
+
+        h(Sec, { n: '02', title: '投递终态' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '最近 10 条频道 / 私信的发送结果。304023 / 304024 会先显示为审核中，'
+              + '结果由 MESSAGE_AUDIT_* 事件回来。'),
+            delivery.length
+              ? delivery.map((x) => h(GRow, {
+                  key: String(x.requestId || x.id || ''),
+                  label: String(x.target || x.chatId || ''),
+                  hint: String(x.state || ''),
+                }, h('code', null, String(x.code || x.state || ''))))
+              : h('p', { className: 'roost-note' }, '没有频道 / 私信的投递记录。'))),
+
+        h(Sec, { n: '03', title: '失联会话' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              `当前粒度：${orphans?.mode === 'channel' ? '一个子频道一个' : '一个频道一个'}。`
+              + '切换粒度后旧会话不会自动迁移，下面这些已经不再命中。'),
+            orph.length
+              ? orph.slice(0, 20).map((x) => h(GRow, {
+                  key: x.key,
+                  label: x.chatId,
+                  hint: x.title || '（无标题）',
+                }, h('code', null, String(x.sessionId || '').slice(-8) || '—')))
+              : h('p', { className: 'roost-note' }, '没有失联会话。'),
+            orph.length
+              ? h('p', { className: 'roost-note' },
+                  '接回办法：把「频道策略 → 会话粒度」切回原来的值，这些键就又能命中。')
+              : null)),
+
+        h(Sec, { n: '04', title: '错误码速查' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' }, '频道相关常见码；完整清单见框架 docs/官方接口限制.md。'),
+            [
+              ['304023 / 304024', '消息进审核；结果由 MESSAGE_AUDIT_PASS / REJECT 事件回来'],
+              ['40034128', '被动回复次数用完（群 5 / 单聊 4 次），框架会静默降级成主动消息'],
+              ['40054xxx', '主动消息额度 / 权限类（私信 2 条/天·用户、200 条/天·机器人）'],
+              ['4013 / 4014', 'intents 参数无效或无权限；4014 要去管理端申请频道能力'],
+            ].map(([k, v]) => h(GRow, { key: k, label: k }, h('span', { className: 'roost-note' }, v))))),
+      )
+    }
+
     /** 频道其余页的占位：P1–P4 逐个替换成真页面 */
     function ChannelStubTab({ title, note }) {
       return h(Sec, { n: '01', title },
@@ -16347,12 +16443,7 @@ select.roost-input{color-scheme:dark}
                 note: '成员列表/详情/在线人数、身份组增删改、成员角色增删、子频道权限、API 权限申请。',
               })
             : null,
-          tab === 'ch-diag'
-            ? h(ChannelStubTab, {
-                title: '频道排障',
-                note: 'P4 上：频道事件日志、notice 账本、投递终态与错误码、能力协商表、失联会话清单。',
-              })
-            : null,
+          tab === 'ch-diag' ? h(ChannelDiagTab, {}) : null,
           tab === 'account' ? h(AccountTab, { toast }) : null,
           tab === 'config'
             ? h('div', null,

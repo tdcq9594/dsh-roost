@@ -8319,6 +8319,39 @@ export function apply(ctx) {
         }
       }),
 
+      /**
+       * 失联会话清单：当前粒度下已经不会再命中的频道会话。
+       *
+       * 切 `guild.sessionMode` 会让所有频道 sessionKey 变一遍，旧会话既不自动
+       * 迁移也不删。这里把它们列出来，面板提示「切回原粒度」即可接回。
+       * 直接读 `sessions.json` 的原始键，再用 `unscopeKey` 还原成逻辑 chatId
+       * （persona 包装层的物理键带 `::p:` 后缀，逻辑层不该看到）。
+       */
+      route('/channel/orphans', async (req, res) => {
+        const mode = cfg.guild?.sessionMode || 'guild';
+        let chats = {};
+        try {
+          const raw = JSON.parse(readFileSync(join(dataDir(), 'sessions.json'), 'utf8'));
+          chats = raw?.chats && typeof raw.chats === 'object' ? raw.chats : {};
+        } catch { chats = {}; }
+        const items = Object.entries(chats)
+          .map(([key, e]) => ({
+            key,
+            chatId: unscopeKey(key),
+            sessionId: String(e?.sessionId || ''),
+            title: String(e?.title || ''),
+            kind: String(e?.kind || ''),
+          }))
+          .filter((x) => /^(guild|dm):/.test(x.chatId))
+          /** 私信键不随粒度变，不会失联 */
+          .filter((x) => {
+            if (x.chatId.startsWith('dm:')) return false;
+            const hasCh = x.chatId.includes(':ch:');
+            return mode === 'guild' ? hasCh : !hasCh;
+          });
+        send(res, 200, { ok: true, mode, items });
+      }),
+
       route('/wakeup/status', (req, res) => send(res, 200, { ok: true, ...wakeState() })),
       route('/wakeup/run-now', async (req, res) => send(res, 200, await runWakeup({ force: true }))),
 
