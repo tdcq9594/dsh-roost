@@ -10047,6 +10047,105 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /**
+     * 频道接口操作台（P3）。
+     *
+     * 四个页面（频道与子频道 / 消息与私信 / 内容与互动 / 成员与权限）共用这一个
+     * 组件，只是过滤的 group 不同 —— 不为 35 个端点各写一套表。
+     *
+     * 安全：非只读操作点「执行」先弹 confirm，确认后才带 `confirm: true`；
+     * 后端还会再校验一次（只放行 group 以「频道」开头的方法）。
+     */
+    function ChannelApiTab({ title, groups, note }) {
+      const [idx, setIdx] = useState(null)
+      const [sel, setSel] = useState('')
+      const [params, setParams] = useState('{}')
+      const [out, setOut] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const load = useCallback(async () => {
+        try {
+          const r = await get('/channel/methods')
+          setIdx(r?.methods && typeof r.methods === 'object' ? r.methods : {})
+        } catch { setIdx({}) }
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      /** 精确匹配「频道」但不匹配「频道·消息」这类子分组，靠 `·` 分隔 */
+      const inGroup = (g) => {
+        const s = String(g || '')
+        return groups.some((p) => s === p || s.startsWith(`${p}·`))
+      }
+      const list = Object.entries(idx || {})
+        .filter(([, v]) => inGroup(v?.group))
+        .sort((a, b) => String(a[1].group).localeCompare(String(b[1].group))
+          || String(a[0]).localeCompare(String(b[0])))
+      const cur = sel || (list[0] ? list[0][0] : '')
+      const meta = cur ? idx?.[cur] : null
+
+      const run = async () => {
+        if (!cur || busy) return
+        let p = {}
+        try { p = JSON.parse(params || '{}') } catch { toast('参数不是合法 JSON'); return }
+        const risk = String(meta?.risk || 'write')
+        const need = risk !== 'read'
+        if (need && !window.confirm(`${cur} 属 ${risk} 级操作，确定执行？`)) return
+        setBusy(true)
+        try {
+          const r = await post('/channel/qq', { method: cur, params: p, confirm: need })
+          setOut(r)
+          toast(r?.ok === false ? (r.message || '调用失败') : '已执行')
+        } finally { setBusy(false) }
+      }
+
+      if (idx === null) return h('div', { className: 'roost-note' }, '读取频道方法表…')
+      return h('div', null,
+        h(Sec, {
+          n: '01', title,
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新方法表'),
+        },
+          h('div', { className: 'roost-g-card' },
+            note ? h('p', { className: 'roost-g-desc' }, note) : null,
+            list.length
+              ? h(GRow, { label: '接口', hint: '只列频道相关方法；GET 只读，其余要二次确认' },
+                  h('select', {
+                    className: 'roost-g-sel', value: cur, disabled: busy,
+                    onChange: (e) => { setSel(e.target.value); setOut(null) },
+                  },
+                    list.map(([k, v]) => h('option', { key: k, value: k },
+                      `${k}（${v.group || '—'} / ${v.risk || '—'}）`))))
+              : h('p', { className: 'roost-note' },
+                  '框架没提供频道方法。检查外接协议是否连上、框架版本是否带 qq.methods.group。'),
+            cur
+              ? h('div', null,
+                  h('p', { className: 'roost-note', style: { marginTop: 8 } },
+                    meta?.blocked
+                      ? '这个方法被框架标为禁止外部调用。'
+                      : `风险档：${meta?.risk || '—'}；scope：${meta?.scope || '—'}`),
+                  h('textarea', {
+                    className: 'roost-g-num',
+                    style: { width: '100%', minHeight: 96, marginTop: 6, fontFamily: 'monospace' },
+                    value: params, disabled: busy, spellCheck: false,
+                    onChange: (e) => setParams(e.target.value),
+                    placeholder: '{"guild_id":"..."}',
+                  }),
+                  h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      disabled: busy || meta?.blocked, onClick: run,
+                    }, busy ? '执行中…' : '执行')),
+                  out
+                    ? h('pre', {
+                        className: 'roost-note',
+                        style: {
+                          marginTop: 10, whiteSpace: 'pre-wrap',
+                          maxHeight: 320, overflow: 'auto',
+                        },
+                      }, JSON.stringify(out, null, 2))
+                    : null)
+              : null)),
+      )
+    }
+
     /** 频道其余页的占位：P1–P4 逐个替换成真页面 */
     function ChannelStubTab({ title, note }) {
       return h(Sec, { n: '01', title },
@@ -16221,27 +16320,31 @@ select.roost-input{color-scheme:dark}
             ? h(ChannelPolicyTab, { config, saveCfg, saveAll, toast, setTab, chats })
             : null,
           tab === 'ch-channels'
-            ? h(ChannelStubTab, {
+            ? h(ChannelApiTab, {
                 title: '频道与子频道',
-                note: 'P3 上：频道/子频道列表与详情、创建·改名·删除、可见性与发言权限（写操作需二次确认）。',
+                groups: ['频道'],
+                note: '频道与子频道的列表/详情、创建·改名·删除。删除子频道不可恢复，会二次确认。',
               })
             : null,
           tab === 'ch-message'
-            ? h(ChannelStubTab, {
+            ? h(ChannelApiTab, {
                 title: '消息与私信',
-                note: 'P3 上：发消息（msg_id / event_id）、撤回、私信会话、表情表态、精华消息。',
+                groups: ['频道·消息', '频道·私信'],
+                note: '发频道消息 / 私信、撤回、创建私信会话。发送要带 msg_id 或 event_id 才是被动回复（不占主动额度）。',
               })
             : null,
           tab === 'ch-content'
-            ? h(ChannelStubTab, {
+            ? h(ChannelApiTab, {
                 title: '内容与互动',
-                note: 'P3 上：论坛帖子、公告、日程、音频子频道上下麦。',
+                groups: ['频道·公告', '频道·论坛', '频道·精华', '频道·日程', '频道·音频'],
+                note: '公告、论坛帖子、精华消息、日程、音频子频道。论坛仅私域；音频接口仅音频类机器人可用。',
               })
             : null,
           tab === 'ch-member'
-            ? h(ChannelStubTab, {
+            ? h(ChannelApiTab, {
                 title: '成员与权限',
-                note: 'P3 上：成员列表/详情/在线人数、身份组、成员角色、子频道权限、API 权限申请。',
+                groups: ['频道·成员', '频道·身份组', '频道·权限', '频道·API权限'],
+                note: '成员列表/详情/在线人数、身份组增删改、成员角色增删、子频道权限、API 权限申请。',
               })
             : null,
           tab === 'ch-diag'

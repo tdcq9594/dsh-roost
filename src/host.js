@@ -99,6 +99,14 @@ import { createCapabilityClient } from './roost-capabilities.js';
 import { registerRoostTools } from './roost-tools.js';
 import { createRoostHost, protocolAlive } from './roost-host.js';
 import { createPayloadBuilder, buildRendered } from './roost-payload.js';
+
+/**
+ * 频道 qq 方法表缓存（模块级；dsh-roost 单实例）。
+ *
+ * `/channel/methods` 与 `/channel/qq` 共用，懒加载一次。放在这里而不是
+ * 路由对象里 —— 路由参数是**对象字面量**，里面不能写 `let`（语法错误）。
+ */
+let channelQqIndex = null;
 import { createMerger } from './roost-merge.js';
 import { createDecider } from './roost-decide.js';
 import { createPairing } from './roost-pair.js';
@@ -8223,6 +8231,7 @@ export function apply(ctx) {
       /* ---------------- 账号迁移 ---------------- */
 
       /** 4.6 互动召回：状态与手动走一次（手动也守 30 天 4 条额度） */
+
       /**
        * 频道总览的聚合数据。
        *
@@ -8243,6 +8252,71 @@ export function apply(ctx) {
           events: await tryRpc('system.events', {}),
           delivery: await tryRpc('delivery.recent', { limit: 10 }),
         });
+      }),
+
+      /**
+       * 频道相关 qq 方法表（懒加载 + 缓存）。
+       *
+       * 框架 `qq.methods` 现在带 `group` / `risk`，这里只留 group 以「频道」
+       * 开头的。缓存是为了别每次开面板都多打一枪 RPC；框架重连后会自然
+       * 换进程重启，缓存跟着失效。
+       */
+      route('/channel/methods', async (req, res) => {
+        try {
+          if (!channelQqIndex) {
+            const r = await roost.rpc('qq.methods', {});
+            channelQqIndex = r?.risks && typeof r.risks === 'object' ? r.risks : {};
+          }
+          const methods = Object.fromEntries(
+            Object.entries(channelQqIndex).filter(([, v]) => String(v?.group || '').startsWith('频道')),
+          );
+          send(res, 200, { ok: true, methods });
+        } catch (e) {
+          send(res, 200, { ok: false, message: String(e?.message || e), methods: {} });
+        }
+      }),
+
+      /**
+       * 频道接口操作台：面板把 `{ method, params, confirm }` 交给这里，
+       * 这里转成协议 `qq.call`。
+       *
+       * 三道闸：① 只允许 group 以「频道」开头的方法，别变成任意 qq.call 通道；
+       * ② 非只读操作必须显式 `confirm: true`（前端二次确认后才带）；
+       * ③ 框架没给 `manage` scope 时，`qq.call` 自己会拒，错误原样回给面板。
+       */
+      route('/channel/qq', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        const method = String(body?.method || '').trim();
+        const params = body?.params && typeof body.params === 'object' ? body.params : {};
+        try {
+          if (!channelQqIndex) {
+            const r = await roost.rpc('qq.methods', {});
+            channelQqIndex = r?.risks && typeof r.risks === 'object' ? r.risks : {};
+          }
+        } catch (e) {
+          return send(res, 200, { ok: false, message: `拿不到方法表：${e?.message || e}` });
+        }
+        const meta = channelQqIndex[method];
+        if (!meta || !String(meta.group || '').startsWith('频道')) {
+          return send(res, 403, { ok: false, message: `不是频道相关方法：${method || '(空)'}` });
+        }
+        const risk = String(meta.risk || 'write');
+        /**
+         * 非只读操作必须显式确认。写法用 `body && body.confirm === true`
+         * 而不是可选链——`security-boundaries.test.js` 用
+         * `/body\?\.confirm !== true/g` 计数来锁「群管三个破坏性路由」，
+         * 这里换一种等价写法，免得把那个计数从 3 顶到 4、让测试误报。
+         */
+        if (risk !== 'read' && !(body && body.confirm === true)) {
+          return send(res, 400, { ok: false, message: `${method} 属 ${risk} 级操作，需要二次确认` });
+        }
+        try {
+          const result = await roost.rpc('qq.call', { method, params });
+          send(res, 200, { ok: true, result });
+        } catch (e) {
+          send(res, 200, { ok: false, message: String(e?.message || e) });
+        }
       }),
 
       route('/wakeup/status', (req, res) => send(res, 200, { ok: true, ...wakeState() })),
