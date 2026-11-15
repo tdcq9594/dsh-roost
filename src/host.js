@@ -99,6 +99,7 @@ import { createCapabilityClient } from './roost-capabilities.js';
 import { registerRoostTools } from './roost-tools.js';
 import { createRoostHost, protocolAlive } from './roost-host.js';
 import { createPayloadBuilder, buildRendered } from './roost-payload.js';
+import { interactionRouter } from './roost-interaction.js';
 
 /**
  * 频道 qq 方法表缓存（模块级；dsh-roost 单实例）。
@@ -3063,6 +3064,18 @@ export function apply(ctx) {
   function deliverNoticeFromRoost(data) {
     const name = String(data?.event ?? '');
     if (!name) return;
+    /**
+     * 交互事件（按钮回调）走独立路由。
+     *
+     * 以前这条通道只放行 AUDIT，其余全丢，INTERACTION_CREATE 根本到不了
+     * dsh-roost。现在交给 `interactionRouter`：解析、鉴权、按 nonce 找
+     * pending 都在那一侧；**没注册处理器时它只记一条 debug，不产生行为**，
+     * 所以这一步是纯加法，现有链路一点不变。
+     */
+    if (name === 'INTERACTION_CREATE') {
+      interactionRouter.dispatch(data);
+      return;
+    }
     /** 审核结果最有价值：它决定一条主动消息到底有没有出现在群里 */
     if (/AUDIT/i.test(name)) {
       log.info(`外接协议事件 ${name}：${JSON.stringify(data?.data ?? {}).slice(0, 200)}`);
