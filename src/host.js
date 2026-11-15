@@ -8223,6 +8223,28 @@ export function apply(ctx) {
       /* ---------------- 账号迁移 ---------------- */
 
       /** 4.6 互动召回：状态与手动走一次（手动也守 30 天 4 条额度） */
+      /**
+       * 频道总览的聚合数据。
+       *
+       * 面板不能直连外接协议，只能通过面板路由拿。这里一次把运行状态 /
+       * 额度 / 事件表拼好，省得前端打三个接口；每项都单独 try，频道没连上
+       * 时对应项为 null 而不是整页报错。全部只读。
+       */
+      route('/channel/status', async (req, res) => {
+        const tryRpc = async (m, p) => {
+          try { return await roost.rpc(m, p); } catch { return null; }
+        };
+        send(res, 200, {
+          ok: true,
+          enabled: cfg.guild?.enabled === true,
+          sessionMode: cfg.guild?.sessionMode || 'guild',
+          status: await tryRpc('runtime.status', {}),
+          quota: await tryRpc('quota.get', {}),
+          events: await tryRpc('system.events', {}),
+          delivery: await tryRpc('delivery.recent', { limit: 10 }),
+        });
+      }),
+
       route('/wakeup/status', (req, res) => send(res, 200, { ok: true, ...wakeState() })),
       route('/wakeup/run-now', async (req, res) => send(res, 200, await runWakeup({ force: true }))),
 

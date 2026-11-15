@@ -9787,7 +9787,7 @@ select.roost-input{color-scheme:dark}
       const [busy, setBusy] = useState(false)
       const [st, setSt] = useState(null)
       const loadSt = useCallback(async () => {
-        try { setSt(await get('/status')) } catch { setSt(null) }
+        try { setSt(await get('/channel/status')) } catch { setSt(null) }
       }, [])
       useEffect(() => { loadSt() }, [loadSt])
       if (!config) return h('div', { className: 'roost-note' }, '读取配置…')
@@ -9836,13 +9836,49 @@ select.roost-input{color-scheme:dark}
             gi && ci && gi !== ci
               ? h('p', { className: 'roost-note' },
                   '两者不一致：配置已改，但线上仍是旧订阅。需面板「上下线」或重启 Roost 才生效。')
+              : null,
+            st?.events?.meta
+              ? h('div', { style: { marginTop: 10 } },
+                  h('p', { className: 'roost-note' }, '订阅位（「已订阅」按当前连接的 intents 算）：'),
+                  Object.entries(st.events.meta).map(([name, m]) => {
+                    const has = (gi & (1 << Number(m.bit))) !== 0
+                    return h('div', {
+                      key: name,
+                      style: {
+                        display: 'flex', gap: 8, fontSize: 12,
+                        opacity: has ? 1 : 0.45, padding: '2px 0',
+                      },
+                    },
+                      h('code', { style: { minWidth: 200 } }, `${name}  1<<${m.bit}`),
+                      h('span', null, m.name || ''),
+                      h('span', { style: { marginLeft: 'auto' } }, has ? '已订阅' : '未订阅'))
+                  }))
               : null)),
-        h(Sec, { n: '02', title: '今日额度' },
+        h(Sec, {
+          n: '02', title: '今日额度',
+          right: st?.quota?.day ? `统计日 ${st.quota.day}` : null,
+        },
           h('div', { className: 'roost-g-card' },
             h('p', { className: 'roost-g-desc' },
               '频道主动消息：20 条/天·子频道、每频道每天最多 2 个子频道、每子频道 1 秒 ≤5 条；'
               + '私信 2 条/天·用户 + 200 条/天·机器人。'),
-            h('p', { className: 'roost-note' }, '用量来自框架 quota.get；拿不到时显示「框架未提供」。'))),
+            st?.quota
+              ? h('div', null,
+                  (() => {
+                    const rows = Object.entries(st.quota.items || {})
+                      .filter(([k]) => k.startsWith('guild:') || k.startsWith('dm:'))
+                    if (!rows.length) {
+                      return h('p', { className: 'roost-note' }, '今天还没有频道/私信主动消息记录。')
+                    }
+                    return rows.slice(0, 12).map(([k, v]) => h(GRow, {
+                      key: k,
+                      label: k,
+                      hint: k.startsWith('guild:')
+                        ? `上限 ${st.quota.limits?.guild ?? 20} 条/天·子频道`
+                        : `上限 ${st.quota.limits?.dm ?? 2} 条/天·用户`,
+                    }, h('code', null, String(v))))
+                  })())
+              : h('p', { className: 'roost-note' }, '框架未提供 quota.get（需要带该方法的框架版本）'))),
         h(Sec, { n: '03', title: '会话归属' },
           h('div', { className: 'roost-g-card' },
             h('p', { className: 'roost-g-desc' },
@@ -9850,8 +9886,164 @@ select.roost-input{color-scheme:dark}
               + '频道私信固定 dm:<用户ID>（一人一个，不随私信会话 id 变）。'),
             h('p', { className: 'roost-note' },
               '切换粒度不会迁移已有会话：旧会话保留在 DSH 里，但不再接回。'))),
+        h(Sec, { n: '04', title: '审核与投递' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '频道消息可能进审核：发送返回 304023 / 304024 时状态是「审核中」，'
+              + '结果通过 MESSAGE_AUDIT_PASS / REJECT 事件回来。这两条是事件，'
+              + '和 HTTP 响应里的 pending 不是一回事——关掉总开关只影响事件是否进这边，'
+              + '不影响群聊/单聊的投递终态。'),
+            (() => {
+              const items = Array.isArray(st?.delivery?.items) ? st.delivery.items : []
+              const ch = items.filter((x) => String(x.target || x.chatId || '').includes(':')
+                && /^(guild|dm):/.test(String(x.target || x.chatId || '')))
+              if (!st?.delivery) return h('p', { className: 'roost-note' }, '框架未提供 delivery.recent')
+              if (!ch.length) return h('p', { className: 'roost-note' }, '最近没有频道/私信的投递记录。')
+              return ch.slice(0, 8).map((x) => h(GRow, {
+                key: String(x.requestId || x.id || ''),
+                label: String(x.target || x.chatId || ''),
+                hint: String(x.state || ''),
+              }, h('code', null, String(x.code || x.state || ''))))
+            })())),
         h('p', { className: 'roost-note', style: { marginTop: 12 } },
           '其余六页（策略 / 频道与子频道 / 消息与私信 / 内容与互动 / 成员与权限 / 排障）按方案 P1–P4 分批上线。'),
+      )
+    }
+
+    /**
+     * 频道策略（P1）。
+     *
+     * 频道的接话 / 连发 / 刹车和群聊**共用**全局 `roostHost.decide` / `merge`，
+     * 这里只读展示并给跳转入口；真正能按频道单独调的是 `guild.overrides`。
+     * 覆写表是整份保存（`saveAll`），局部合并删不掉键。
+     */
+    function ChannelPolicyTab({ config, saveCfg, saveAll, toast, setTab, chats }) {
+      const g = config?.guild || {}
+      const decide = config?.roostHost?.decide || {}
+      const qqTools = config?.qqTools || {}
+      const overrides = g.overrides || {}
+      const list = (chats || []).filter((c) => c.kind === 'guild')
+      const [busy, setBusy] = useState(false)
+      const [pick, setPick] = useState('')
+      const [draft, setDraft] = useState(null)
+      /** 换频道要丢掉上一个的草稿，别写到新频道头上 */
+      useEffect(() => { setDraft(null) }, [pick])
+      if (!config) return h('div', { className: 'roost-note' }, '读取配置…')
+
+      const put = async (patch, full) => {
+        if (busy) return
+        setBusy(true)
+        try {
+          const r = full ? await saveAll(patch) : await saveCfg(patch)
+          toast(r?.ok === false ? (r.message || '没存上') : '已保存，下一轮生效')
+        } finally { setBusy(false) }
+      }
+
+      const key = pick || Object.keys(overrides)[0] || ''
+      const ov = draft !== null ? draft : { ...(overrides[key] || {}) }
+      const setOv = (k, v) => {
+        const next = { ...ov }
+        if (v === undefined) delete next[k]
+        else next[k] = v
+        setDraft(next)
+      }
+      const saveOv = async () => {
+        const next = { ...overrides }
+        if (Object.keys(ov).length) next[key] = ov
+        else delete next[key]
+        await put({ guild: { overrides: next } }, true)
+        setDraft(null)
+      }
+
+      return h('div', null,
+        h(Sec, { n: '01', title: '会话粒度', right: g.sessionMode === 'channel' ? '一个子频道一个' : '一个频道一个' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '频道私信固定一人一个，不受这里影响。切换粒度不会迁移已有会话——'
+              + '旧会话保留在 DSH 里，但不再接回。'),
+            h(GRow, { label: '会话粒度', hint: 'guild = 同频道的子频道/论坛/公告共用一个会话；channel = 一个子频道一个' },
+              h('select', {
+                className: 'roost-g-sel', value: g.sessionMode || 'guild', disabled: busy,
+                onChange: (e) => put({ guild: { sessionMode: e.target.value } }),
+              },
+                h('option', { value: 'guild' }, '一个频道一个'),
+                h('option', { value: 'channel' }, '一个子频道一个'))))),
+
+        h(Sec, { n: '02', title: '按频道覆写', right: draft !== null
+          ? h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: saveOv }, '保存覆写')
+          : null },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '只影响选中的那个频道；没填的项跟随全局「群聊策略」。键用 guild:<guildId>，'
+              + '所以同一频道的所有子频道共用这份覆写。'),
+            list.length
+              ? h(GRow, { label: '频道', hint: '来自当前会话映射' },
+                  h('select', {
+                    className: 'roost-g-sel', value: key, disabled: busy,
+                    onChange: (e) => setPick(e.target.value),
+                  },
+                    list.map((c) => h('option', { key: c.chatId || c.key, value: c.chatId || c.key },
+                      c.title || String(c.chatId || c.key).slice(0, 16)))))
+              : h('p', { className: 'roost-note' }, '还没有频道会话——先去「频道总览」打开总开关并收到一条消息。'),
+            key
+              ? OV_FIELDS.map((f) => h(GRow, { key: f.key, label: f.label, hint: '留空 = 跟随全局' },
+                  f.kind === 'select'
+                    ? h('select', {
+                        className: 'roost-g-sel', value: ov[f.key] ?? '', disabled: busy,
+                        onChange: (e) => setOv(f.key, e.target.value || undefined),
+                      },
+                        h('option', { value: '' }, '跟随全局'),
+                        (f.options || []).map(([v, t]) => h('option', { key: v, value: v }, t)))
+                    : h(GNum, {
+                        value: ov[f.key] ?? 0, min: 0, max: 100, disabled: busy,
+                        onSave: (v) => setOv(f.key, v),
+                      })))
+              : null)),
+
+        h(Sec, { n: '03', title: '接话与节奏（全局）', right: h('button', {
+          type: 'button', className: 'roost-btn',
+          onClick: () => { setTab('groupchat'); toast('已切到「群聊策略」，那边的 01–03 卡改的是同一份配置') },
+        }, '去群聊策略改') },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '接话方式、连发合并、安全刹车与群聊**共用同一份全局配置**，这里只读展示，'
+              + '避免两个页面各改一半打架。要单独调某个频道，用上面那张「按频道覆写」。'),
+            h(GRow, { label: '接话方式', hint: 'roostHost.decide.mode' },
+              h('code', null, String(decide.mode || 'ai'))),
+            h(GRow, { label: '冷却 / 每分钟上限', hint: 'roostHost.decide' },
+              h('code', null, `${decide.cooldownSec ?? 20}s / ${decide.maxRepliesPerMin ?? 3} 条`)))),
+
+        h(Sec, { n: '04', title: '连发与分段' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '频道没有群聊「每秒 5 条」那条限制（那是文字子频道的发送侧限制，'
+              + '框架出站调度器已经按 kind 处理），分段数仍受这里控制。'),
+            h(GRow, { label: '一条回复最多分几段', hint: 'qqTools.maxParts；频道默认 5、私信 4' },
+              h(GNum, {
+                value: qqTools.maxParts ?? 4, min: 1, max: 10, unit: '段', disabled: busy,
+                onSave: (v) => put({ qqTools: { maxParts: v } }),
+              })))),
+
+        h(Sec, { n: '05', title: '富媒体与内嵌格式' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '频道**只支持图片**：`image` 传公网 URL（平台转存）、`file_image` 走 multipart 直传；'
+              + '语音 / 视频 / 文件在频道没有对应发送字段，会被明确拒绝。'
+              + '另有 `embed` / `ark` / `markdown` 三种结构化消息。'),
+            h('p', { className: 'roost-note' },
+              '内嵌格式用频道自己的语法：`<@用户id>` 提到人、`<#子频道id>` 提到子频道、'
+              + '`<emoji:表情id>` 发表情——**不要套群聊的 `<qqbot-at-user>`**，频道不认。'))),
+
+        h(Sec, { n: '06', title: '事件订阅', right: h('button', {
+          type: 'button', className: 'roost-btn',
+          onClick: () => { setTab('ch-home'); toast('已切到「频道总览」，订阅位清单在「接入体检」卡里') },
+        }, '去总览看订阅位') },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '订阅只靠 intents 掩码，在 Identify 时一次性提交，**没有运行时动态增删**。'
+              + '改完必须让框架重建 Gateway（面板「上下线」或重启 Roost）才生效。'),
+            h('p', { className: 'roost-note' },
+              '关掉总开关时不会退订——框架照常收、照常推给别的插件，这边只在入口丢弃频道事件。'))),
       )
     }
 
@@ -16026,10 +16218,7 @@ select.roost-input{color-scheme:dark}
           /* 频道：P0 只落「总览」，其余六页占位，按方案 P1–P4 分批替换 */
           tab === 'ch-home' ? h(ChannelHomeTab, { config, saveCfg, toast }) : null,
           tab === 'ch-policy'
-            ? h(ChannelStubTab, {
-                title: '频道策略',
-                note: 'P1 上：会话粒度、接话方式、按频道覆写、插话概率、连发节奏、富媒体与内嵌格式、事件订阅开关。',
-              })
+            ? h(ChannelPolicyTab, { config, saveCfg, saveAll, toast, setTab, chats })
             : null,
           tab === 'ch-channels'
             ? h(ChannelStubTab, {
