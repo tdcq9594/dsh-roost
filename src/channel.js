@@ -230,6 +230,12 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
       isWakeup = false,
       markdown = true, keyboard = null,
       /**
+       * 引用回复（`<<quote:>>`）。官方是独立字段 `message_reference`，
+       * 不是 msg_id 那套被动回复；framework 的 methods.js 白名单已放行，
+       * buildSendPayload 会原样写进 body。默认 null = 不挂引用，行为不变。
+       */
+      messageReference = null,
+      /**
        * 官方图文卡片（`msg_type=8`，2026-10-28 官方新增，群聊/单聊都支持）。
        *
        * `{title, description, url, picUrl}` 四个字段都必填，框架的
@@ -292,6 +298,7 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
         ...(eventId && !msgId ? { eventId: String(eventId) } : {}),
         ...(receivedAt ? { receivedAt: Number(receivedAt) } : {}),
         ...(isWakeup ? { isWakeup: true } : {}),
+        ...(messageReference ? { messageReference } : {}),
       };
       /**
        * Markdown 是 ai-chat 时代的默认出口：`@` 标签、图文同条、按钮都只在

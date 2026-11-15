@@ -25,6 +25,56 @@ export function clipQuote(s) {
 }
 
 /**
+ * 引用消息里带的媒体，生成一段**结构化**说明。
+ *
+ * 官方 quote element 除了正文（`content`）还会带 `attachments`，
+ * 但 `quoted` 字段只取了正文，于是「引用一张图问这是啥」时模型只看到
+ * 一句「（引用了这句：）」，完全不知道有图。这里把类型、文件名、尺寸、
+ * 语音 ASR 这些已知字段补上，模型至少能说「你引用的是张图，我看不到内容」，
+ * 而不是凭空猜。
+ *
+ * **不下载、不看图**：`collectImages` 只管本条消息的附件，引用里的图模型
+ * 本来就看不到。这里刻意只描述「有什么」，不谎称「能看到」。
+ *
+ * 定义在 `inbound.js`（零 import 的纯函数模块），`buildRendered` 反向 import，
+ * 两条渲染路径共用同一段输出——`quote-clip.test.js` 的 Q6 钉死了它们必须逐字一致。
+ *
+ * @returns {string[]} 没有 quote 附件时是空数组
+ */
+export function describeQuoteAttachments(p) {
+  const out = [];
+  for (const el of p?.elements ?? []) {
+    if (el?.type !== 'quote') continue;
+    const list = Array.isArray(el.attachments) ? el.attachments : [];
+    for (const a of list) {
+      if (!a || typeof a !== 'object') continue;
+      const name = String(a.filename ?? '').trim();
+      const dim = a.width && a.height ? `，${Number(a.width)}×${Number(a.height)}` : '';
+      const size = a.size ? `，${Math.round(Number(a.size) / 1024)}KB` : '';
+      switch (a.type) {
+        case 'image':
+          out.push(`（引用的消息里有张图${name ? `：${name}` : ''}${dim}${size}，我看不到图的内容）`);
+          break;
+        case 'voice':
+          out.push(String(a.asrText ?? '').trim()
+            ? `（引用的消息里有条语音，转成文字是：${String(a.asrText).trim()}）`
+            : '（引用的消息里有条语音，没转出文字）');
+          break;
+        case 'video':
+          out.push(`（引用的消息里有段视频${name ? `：${name}` : ''}）`);
+          break;
+        case 'file':
+          out.push(`（引用的消息里有个文件：${name || '未命名'}${size}）`);
+          break;
+        default:
+          if (a.contentType) out.push(`（引用的消息里有个 ${a.contentType} 附件${name ? `：${name}` : ''}）`);
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * 会话类型契约（2026-11-15 加频道能力时统一）
  * ==========================================
  *
@@ -61,6 +111,7 @@ export function renderInbound(p) {
   if (said) parts.push(said);
 
   if (p?.quoted) parts.push(`（引用了这句：${clipQuote(p.quoted)}）`);
+  parts.push(...describeQuoteAttachments(p));
 
   for (const a of p?.attachments ?? []) {
     if (a?.type === 'voice') {

@@ -19,6 +19,7 @@
  *   · `<<say: 文本>>`        宿主 TTS 合成后发语音条（没开语音就静默跳过）
  *   · `<<button: 标签|指令>>` 挂到本条 Markdown 的 keyboard（type:2 指令型）
  *   · `<<pick: 标签|值>>`    回调型按钮（type:1），同组点一个其余变灰
+ *   · `<<quote: 引用索引>>`  让这条回复挂引用样式（不写就不挂）
  *   · `<<card: 标题|描述|https://链接|https://图片>>`
  *                            官方图文卡片（`msg_type=8`），**独占一条消息**：
  *                            正文先发、卡片后发，一轮最多一张
@@ -229,6 +230,8 @@ export function parseOutboundActions(raw) {
   take(/<<button[:：]\s*([\s\S]*?)>>/gi, 'button');
   /** pick 必须在通用兜底之前摘掉，否则会被 `<<[a-z]…>>` 那条整段吃掉 */
   take(/<<pick[:：]\s*([\s\S]*?)>>/gi, 'pick');
+  /** quote 的值允许留空：留空时用入站消息的 replyTo 自动补 */
+  take(/<<quote[:：]\s*([\s\S]*?)>>/gi, 'quote');
   take(/<<say[:：]\s*([\s\S]*?)>>/gi, 'say');
   take(/<<voice[:：]\s*([\s\S]*?)>>/gi, 'voice');
 
@@ -354,6 +357,8 @@ export function createActionRunner({ channel, tts = null, quota = null, picks = 
     eventId = '',
     /** 4.6：互动召回，官方 is_wakeup 消息（不校验 msg_id/event_id 有效期） */
     isWakeup = false,
+    /** `<<quote:>>` 留空时的兜底：入站 `replyTo`（被引用那条的 message_id） */
+    replyTo = '',
     requestId = '', senderId = '', onSent = () => {},
   } = {}) {
     const ch = channel();
@@ -411,6 +416,28 @@ export function createActionRunner({ channel, tts = null, quota = null, picks = 
       log('本轮有 <<pick:>> 但没接回调通道，已摘掉不发按钮');
     }
     const keyboard = combineKeyboards([buildKeyboard(buttons), pickKeyboard]);
+
+    /**
+     * `<<quote: 索引>>`：这条回复挂引用样式。
+     *
+     * **默认不挂**——只有模型/扩展显式写了标记才生效。原因：官方
+     * `message_reference` 要 `REFIDX_xxx`（取自 message_scene.ext.msg_idx），
+     * 而入站 `replyTo` 是被引用那条的 message_id，两者不是同一个东西；
+     * 而且 `markdown(msg_type=2) + message_reference` 能否共存没有源码可证。
+     * 自动给所有回复挂引用，最坏情况是整条发不出去——那是减功能，不是加功能。
+     *
+     * 显式标记让调用方自己保证索引格式：写了值就用值，留空则退回 `replyTo`。
+     * 只取最后一个标记，多个没有意义。
+     */
+    const quoteActions = actions.filter((a) => a.type === 'quote');
+    const quoteRef = quoteActions.length
+      ? String(quoteActions[quoteActions.length - 1].value || replyTo || '').trim().slice(0, 128)
+      : '';
+    const messageReference = quoteRef ? { message_id: quoteRef } : null;
+    if (quoteActions.length && !messageReference) {
+      log('<<quote:>> 没给索引、入站也没有 replyTo，这条按普通回复发');
+    }
+
     const silenceMs = Math.max(
       0,
       ...actions.filter((a) => a.type === 'silence').map((a) => parseDurationMs(a.value)),
@@ -423,7 +450,7 @@ export function createActionRunner({ channel, tts = null, quota = null, picks = 
     if (!skipOnly && (body.trim() || silenceMs > 0)) {
       r = await ch.send({
         scene, kind, target, text: body, msgId, receivedAt, eventId, isWakeup, requestId,
-        markdown: true, keyboard, silenceMs,
+        markdown: true, keyboard, silenceMs, messageReference,
       });
       if (r?.ok) {
         r.sent = true;

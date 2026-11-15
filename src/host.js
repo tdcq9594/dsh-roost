@@ -3050,6 +3050,8 @@ export function apply(ctx) {
       senderId: String(last?.sender?.openid ?? ''),
       /** 真的发出去了才记：没发出去也记的话，冷却会把下一句白吃掉 */
       onSent: () => roostDecider.noteReplied(chatId),
+      /** `<<quote:>>` 留空时的兜底索引；不写标记时完全用不到 */
+      replyTo: String(last?.replyTo ?? ''),
     });
     /**
      * 整批的附件 / 卡片合成一份。

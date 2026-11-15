@@ -24,7 +24,7 @@ import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'nod
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { textOf } from './roost-merge.js';
-import { clipQuote } from './inbound.js';
+import { clipQuote, describeQuoteAttachments } from './inbound.js';
 
 /** 最多看几张。一张图几百到几千 token，不设上限能把上下文撑爆 */
 /** 没传配置时的兜底；真实上限由 `roostHost.maxImages` 热读 */
@@ -65,6 +65,7 @@ function extOf(mime) {
   if (mime === 'image/png') return '.png';
   if (mime === 'image/gif') return '.gif';
   if (mime === 'image/webp') return '.webp';
+  if (mime === 'image/bmp') return '.bmp';
   return '.jpg';
 }
 
@@ -88,6 +89,26 @@ export function guessMime(buf, declared = '') {
   }
   const d = String(declared).split(';')[0].trim().toLowerCase();
   return OK_MIME.test(d) ? d : '';
+}
+
+/**
+ * 嗅文件头，认「所有」图片格式（含模型不收的 bmp），只用于**落盘扩展名**。
+ *
+ * 两层要分开，别合成一个函数：
+ *   · `guessMime`   → 只认模型收得下的 4 种，决定 `mediaType`
+ *   · `sniffImageType` → 多认一个 bmp，决定文件名后缀
+ *
+ * dsh-qqbot 也是这个分工（`transport/attachment.ts` 认 5 种用于改扩展名，
+ * `media/vision-tool.ts` 只认 4 种喂模型）。合成一个的后果是：bmp 被
+ * `image/bmp` 一路带到模型那边，直接报「不支持的图片格式」。
+ *
+ * 以前 bmp 走的是更糟的一条路：文件头认不出 → 退回声明 → QQ 网关统一标
+ * `image/png` → 按 `.png` 落盘、按 `image/png` 喂模型，字节和声明对不上。
+ */
+export function sniffImageType(buf) {
+  if (!buf || buf.length < 2) return '';
+  if (buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp';
+  return guessMime(buf, '');
 }
 
 /** 这个附件能不能当图看 */
@@ -129,6 +150,12 @@ function sweep(dir) {
 function imageNote(got, images) {
   if (images === 'off') return '（发来一张图；这一轮没开看图，看不到内容）';
   if (images === null) return '（发来一张图）';
+  /** 认得出格式但模型收不下（目前只有 BMP）：别骗它「已存到本地」，它读不了 */
+  if (got?.unsupported) {
+    return got.path
+      ? `（发来一张 ${String(got.mediaType || '').replace('image/', '').toUpperCase()} 图，这个格式我看不了，已存到本地 ${got.path}；可以说没看清，请对方转成 PNG / JPG 重发）`
+      : '（发来一张 BMP 图，这个格式我看不了；可以说没看清，请对方转成 PNG / JPG 重发）';
+  }
   if (got?.path) return `（发来一张图，已存到本地：${got.path}）`;
   if (got) return '（发来一张图，能看到内容，但没存到本地）';
   return '（发来一张图，但没取到——可以让对方重发）';
@@ -204,6 +231,8 @@ export function buildRendered(evt, text, { images = null } = {}) {
   const said = String(text ?? '').trim();
   if (said) parts.push(said);
   if (evt?.quoted) parts.push(`（引用了这句：${clipQuote(evt.quoted)}）`);
+  /** 与 renderInbound 共用同一段输出，两条路径必须逐字一致（quote-clip Q6） */
+  parts.push(...describeQuoteAttachments(evt));
   parts.push(...describeAttachments(evt, images));
   parts.push(...describeElements(evt));
   parts.push(...describeArk(evt));
@@ -334,16 +363,48 @@ export function createPayloadBuilder({
             log(`图片太大（${Math.round(buf.length / 1024)}KB），跳过`);
             break;
           }
-          const mime = guessMime(buf, res.headers.get('content-type') || '');
-          if (!mime) {
-            log('不是认识的图片格式，跳过');
-            break;
-          }
           /**
            * 文件名只用「消息 id + 序号」。不拿 URL 里的东西拼——那串是外部输入，
            * 带 `../` 或盘符就能写到目录外面去。
            */
           const safeId = String(evt?.msgId || evt?.eventId || 'img').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40) || 'img';
+          const declared = res.headers.get('content-type') || '';
+
+          /**
+           * BMP 单独走：认得出、按 `.bmp` 落盘，但**不喂给模型**。
+           *
+           * 模型侧只收 png/jpeg/gif/webp（同事的 `inspectImageFormat` 白名单、
+           * 本文件 `OK_MIME` 都是这四种）。以前 bmp 的文件头认不出 → 退回 QQ
+           * 网关统一标的 `image/png` → 按 `.png` 落盘、把 bmp 字节当 png 喂模型，
+           * 结果是「图存错了 + 模型读图报错」。现在明确告诉模型这个格式看不了，
+           * 让它请对方重发，落盘文件后缀也对得上。
+           *
+           * `data` 留空：下游 `turn.js` 的 `if (!img?.data) continue` 和
+           * `ext-llm.js` 的 `data.length > 100` 过滤都会自然跳过，不会把
+           * `image/bmp` 带进请求；`index` 照样占位，describeAttachments 的
+           * 配对不会错位。
+           */
+          if (sniffImageType(buf) === 'image/bmp') {
+            const name = `qq-${safeId}-${i + 1}.bmp`;
+            let path = '';
+            try {
+              path = join(imgDir, name);
+              writeFileSync(path, buf);
+            } catch (e) {
+              log(`BMP 落盘失败（${e?.message ?? e}），这一轮只给文字说明`);
+              path = '';
+            }
+            out.push({ data: '', mediaType: 'image/bmp', name, path, index: i, unsupported: true });
+            log('发来一张 BMP：模型看不了这个格式，已落盘并请对方转 PNG/JPG 重发');
+            saved = true;
+            break;
+          }
+
+          const mime = guessMime(buf, declared);
+          if (!mime) {
+            log('不是认识的图片格式，跳过');
+            break;
+          }
           const name = `qq-${safeId}-${i + 1}${extOf(mime)}`;
           let path = '';
           try {
