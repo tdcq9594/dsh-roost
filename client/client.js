@@ -9776,6 +9776,91 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /**
+     * 频道总览（P0 骨架，4 张卡）。
+     *
+     * 只做「总开关 / 接入体检 / 今日额度 / 会话归属」——这四块是开频道
+     * 之前必须先看清楚的。其余六页按方案 P1–P4 分批上，先占位。
+     */
+    function ChannelHomeTab({ config, saveCfg, toast }) {
+      const g = config?.guild || {}
+      const [busy, setBusy] = useState(false)
+      const [st, setSt] = useState(null)
+      const loadSt = useCallback(async () => {
+        try { setSt(await get('/status')) } catch { setSt(null) }
+      }, [])
+      useEffect(() => { loadSt() }, [loadSt])
+      if (!config) return h('div', { className: 'roost-note' }, '读取配置…')
+
+      const put = async (patch) => {
+        if (!saveCfg || busy) return
+        setBusy(true)
+        try {
+          const r = await saveCfg(patch)
+          toast(r?.ok === false ? (r.message || '没存上') : '已保存，下一轮生效')
+        } finally { setBusy(false) }
+      }
+      const on = g.enabled === true
+      const gi = Number(st?.gatewayIntents) || 0
+      const ci = Number(st?.intents) || 0
+      return h('div', null,
+        h(Sec, { n: '00', title: '频道总开关', right: on ? '已开启' : '已关闭' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '默认关。关着时只在 dsh-roost 入口丢弃频道事件，不改框架的 intents 订阅——'
+              + '框架照常收、照常推给别的插件，这边只是不处理。'),
+            h(GRow, { label: '启用频道', hint: '开启前请确认框架侧已订阅频道事件' },
+              h('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center' } },
+                h('input', {
+                  type: 'checkbox', checked: on, disabled: busy,
+                  onChange: (e) => put({ guild: { enabled: e.target.checked } }),
+                }),
+                h('span', null, on ? '开' : '关'))),
+            h(GRow, { label: '会话粒度', hint: 'guild = 一个频道一个会话；channel = 一个子频道一个' },
+              h('select', {
+                className: 'roost-g-num', value: g.sessionMode || 'guild', disabled: busy || !on,
+                onChange: (e) => put({ guild: { sessionMode: e.target.value } }),
+              },
+                h('option', { value: 'guild' }, '一个频道一个'),
+                h('option', { value: 'channel' }, '一个子频道一个'))),
+          )),
+        h(Sec, {
+          n: '01', title: '接入体检',
+          right: h('button', { type: 'button', className: 'roost-btn', onClick: loadSt }, '刷新'),
+        },
+          h('div', { className: 'roost-g-card' },
+            h(GRow, { label: '当前连接 intents', hint: 'Gateway 构造时的快照，线上真正在用的' },
+              h('code', null, gi ? String(gi) : '—')),
+            h(GRow, { label: '配置 intents', hint: '改完要重建 Gateway 才生效' },
+              h('code', null, ci ? String(ci) : '—')),
+            gi && ci && gi !== ci
+              ? h('p', { className: 'roost-note' },
+                  '两者不一致：配置已改，但线上仍是旧订阅。需面板「上下线」或重启 Roost 才生效。')
+              : null)),
+        h(Sec, { n: '02', title: '今日额度' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '频道主动消息：20 条/天·子频道、每频道每天最多 2 个子频道、每子频道 1 秒 ≤5 条；'
+              + '私信 2 条/天·用户 + 200 条/天·机器人。'),
+            h('p', { className: 'roost-note' }, '用量来自框架 quota.get；拿不到时显示「框架未提供」。'))),
+        h(Sec, { n: '03', title: '会话归属' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '一个频道一个 = guild:<guildId>；一个子频道一个 = guild:<guildId>:ch:<channelId>；'
+              + '频道私信固定 dm:<用户ID>（一人一个，不随私信会话 id 变）。'),
+            h('p', { className: 'roost-note' },
+              '切换粒度不会迁移已有会话：旧会话保留在 DSH 里，但不再接回。'))),
+        h('p', { className: 'roost-note', style: { marginTop: 12 } },
+          '其余六页（策略 / 频道与子频道 / 消息与私信 / 内容与互动 / 成员与权限 / 排障）按方案 P1–P4 分批上线。'),
+      )
+    }
+
+    /** 频道其余页的占位：P1–P4 逐个替换成真页面 */
+    function ChannelStubTab({ title, note }) {
+      return h(Sec, { n: '01', title },
+        h('div', { className: 'roost-g-card' }, h('p', { className: 'roost-g-desc' }, note)))
+    }
+
     function GroupAdminTab({ chats, toast }) {
       const groups = (chats || []).filter((c) => c.kind === 'group')
       const [gid, setGid] = useState('')
@@ -10654,6 +10739,9 @@ select.roost-input{color-scheme:dark}
       ['persona', '人格', '当前用哪个人格、按群指定；换人格去「人格」页点「用这个」'
         + '（name / text 是 0.10.0 之前的旧字段，只在人格文件读不出正文时才兜底）'],
       ['stickers', '表情包', '图放哪、要不要注入'],
+      ['guild', '频道', 'enabled：频道总开关，**默认关**。关着时只在 dsh-roost 入口丢弃频道事件，不动框架的 intents 订阅（框架照常收、照常推给别的插件）；'
+        + 'sessionMode：guild = 一个频道一个会话（同一频道的子频道/论坛/公告共用）、channel = 一个子频道一个会话；频道私信固定一人一个。'
+        + 'intentsPreset：面板勾选的订阅位预设；overrides：按频道覆写，键用 guild:<guildId>'],
       ['permissions', '权限', '主人/管理员/成员各能用什么工具'],
       ['qqTools', 'QQ 工具', '给 AI 的工具总开关、单次最多分几段发（maxParts）'],
       ['quota', '次数限制', '语音/发文件/表情包的额度覆盖。默认值在代码里（quota.js 的 QUOTA_DEFAULTS），'
@@ -15063,6 +15151,14 @@ select.roost-input{color-scheme:dark}
       /* 群聊：策略在前、动手管人在后 */
       ['groupchat', '群聊策略'],
       ['groupadmin', '群管'],
+      /* 频道：7 个二级页，按「看状态 / 调策略 / 管结构 / 发消息 / 做内容 / 管人 / 排障」拆 */
+      ['ch-home', '频道总览'],
+      ['ch-policy', '频道策略'],
+      ['ch-channels', '频道与子频道'],
+      ['ch-message', '消息与私信'],
+      ['ch-content', '内容与互动'],
+      ['ch-member', '成员与权限'],
+      ['ch-diag', '频道排障'],
       /* 系统：这台机器怎么跑 */
       ['chats', '会话'],
       /** 账号迁移：原先是隐藏页 + 弹窗（低频整页）；换机器人是真实高频需求，提成正式页签 */
@@ -15119,6 +15215,13 @@ select.roost-input{color-scheme:dark}
       'ext-api': '接口 api 扩展接口 协议',
       groupchat: '群聊 群聊策略 接话 连发 安全刹车',
       groupadmin: '群管 禁言 审批 群信息 入群',
+      'ch-home': '频道 频道总览 总开关 订阅 intents 额度 会话 审核',
+      'ch-policy': '频道策略 会话粒度 子频道 接话 覆写 富媒体',
+      'ch-channels': '子频道 频道结构 创建 改名 删除 权限',
+      'ch-message': '频道消息 私信 撤回 表态 精华 dms',
+      'ch-content': '论坛 帖子 公告 日程 音频 上麦',
+      'ch-member': '频道成员 身份组 角色 在线人数 api权限',
+      'ch-diag': '频道排障 事件 账本 投递 错误码',
       chats: '会话 身份 映射 上下文',
       account: '账号迁移 迁移 换号 绑定 旧 openid',
       sim: '模拟 模拟测试 试跑 演练 dry run 会不会回 为什么没回',
@@ -15158,6 +15261,11 @@ select.roost-input{color-scheme:dark}
        * 2026-11-13 群聊策略页做出来后，群管从「系统」搬过来。
        */
       { id: 'group', label: '群聊', icon: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM15.5 11a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5M3 19c.7-2.6 3-4 6-4s5.3 1.4 6 4M15 15.2c2 .2 3.5 1.4 4 3.3', tabs: ['groupchat', 'groupadmin'] },
+      /**
+       * 频道：功能比群聊多得多，所以拆 7 个二级页，每页 4–7 张卡。
+       * 只读诊断在首尾（总览/排障），配置在策略，调官方接口的写操作在中间四页。
+       */
+      { id: 'channel', label: '频道', icon: 'M4 6.5h16M4 12h10M4 17.5h7M17.5 15.5l3 2-3 2', tabs: ['ch-home', 'ch-policy', 'ch-channels', 'ch-message', 'ch-content', 'ch-member', 'ch-diag'] },
       { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
       { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['connect', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
@@ -15915,6 +16023,44 @@ select.roost-input{color-scheme:dark}
             : null,
           /** 群管：禁言 / 踢人 / 入群审批。协议侧 group.* 是 message scope，装了就能用 */
           tab === 'groupadmin' ? h(GroupAdminTab, { chats, toast }) : null,
+          /* 频道：P0 只落「总览」，其余六页占位，按方案 P1–P4 分批替换 */
+          tab === 'ch-home' ? h(ChannelHomeTab, { config, saveCfg, toast }) : null,
+          tab === 'ch-policy'
+            ? h(ChannelStubTab, {
+                title: '频道策略',
+                note: 'P1 上：会话粒度、接话方式、按频道覆写、插话概率、连发节奏、富媒体与内嵌格式、事件订阅开关。',
+              })
+            : null,
+          tab === 'ch-channels'
+            ? h(ChannelStubTab, {
+                title: '频道与子频道',
+                note: 'P3 上：频道/子频道列表与详情、创建·改名·删除、可见性与发言权限（写操作需二次确认）。',
+              })
+            : null,
+          tab === 'ch-message'
+            ? h(ChannelStubTab, {
+                title: '消息与私信',
+                note: 'P3 上：发消息（msg_id / event_id）、撤回、私信会话、表情表态、精华消息。',
+              })
+            : null,
+          tab === 'ch-content'
+            ? h(ChannelStubTab, {
+                title: '内容与互动',
+                note: 'P3 上：论坛帖子、公告、日程、音频子频道上下麦。',
+              })
+            : null,
+          tab === 'ch-member'
+            ? h(ChannelStubTab, {
+                title: '成员与权限',
+                note: 'P3 上：成员列表/详情/在线人数、身份组、成员角色、子频道权限、API 权限申请。',
+              })
+            : null,
+          tab === 'ch-diag'
+            ? h(ChannelStubTab, {
+                title: '频道排障',
+                note: 'P4 上：频道事件日志、notice 账本、投递终态与错误码、能力协商表、失联会话清单。',
+              })
+            : null,
           tab === 'account' ? h(AccountTab, { toast }) : null,
           tab === 'config'
             ? h('div', null,

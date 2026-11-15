@@ -22,7 +22,7 @@ import { createTurnRunner } from './turn.js';
 import { createTurnQueue } from './turnqueue.js';
 import { createInboundShell } from './inbound-shell.js';
 import { createInboundServer, postReply } from './server.js';
-import { renderInbound, chatOf, speakerTag, normalizeKind, sceneOfKind, isPrivateKind } from './inbound.js';
+import { renderInbound, chatOf, speakerTag, normalizeKind, sceneOfKind, isPrivateKind, isChannelChat, isChannelEvent } from './inbound.js';
 import { createAsrRecent } from './asr-recent.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools } from './permissions.js';
 import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
@@ -2739,6 +2739,15 @@ export function apply(ctx) {
       if (frame?.event === 'ext.call.request') {
         void handleExtCallRequest(data).catch((e) => log.warn(`扩展反向调用失败：${e?.message ?? e}`));
       }
+      /**
+       * 频道总开关：**只丢频道事件**。
+       *
+       * 位置必须卡在上面两个内部事件之后 —— `capabilities.changed` 要刷新
+       * 能力表、`ext.call.request` 要反向调扩展，提前 return 会把它们一起断掉。
+       * 也不能按事件名前缀判断：`AT_MESSAGE_CREATE` / `MESSAGE_CREATE` /
+       * `MESSAGE_DELETE` / `PUBLIC_MESSAGE_DELETE` 都没有频道前缀。
+       */
+      if (cfg.guild?.enabled !== true && isChannelEvent(frame?.event ?? data?.event)) return;
       deliverNoticeFromRoost(data);
     },
     onGap: (frame) => log.warn(`外接协议补拉有缺口（seq ${frame?.seq ?? '?'}），这段消息收不到了`),
@@ -4808,7 +4817,7 @@ export function apply(ctx) {
    * 四份按会话变化的状态（`memState` / `rounds` / `qqTurn` / `speaker`）。
    */
   async function handleTurn(payload) {
-    const chat = chatOf(payload);
+    const chat = chatOf(payload, { sessionMode: cfg.guild?.sessionMode });
     if (!chat.chatId) {
       log.warn('收到没有 chatId 的消息，忽略');
       return;
@@ -5535,6 +5544,18 @@ export function apply(ctx) {
    * 少包一层就等于没排队。
    */
   function onInbound(payload) {
+    /**
+     * 频道总开关（`channel.enabled`，默认关）。
+     *
+     * 关着时**只在 dsh-roost 丢弃**频道事件：不动框架 intents、不重连、
+     * 不退订 —— 框架照常收、照常推给别的订阅者（插件 / 面板不受影响）。
+     * 协议层没有动态退订，这是唯一可行做法。
+     *
+     * 闸必须在**最前面**：早于 `lastActiveAt`、ASR 读数、扩展素材审批，
+     * 否则关着开关仍会更新活跃时间、甚至吞掉主人的审批回复。
+     */
+    if (cfg.guild?.enabled !== true && isChannelChat(payload)) return;
+
     /** D10：只记时间戳，不在这条热链路上做任何判断 */
     lastActiveAt = Date.now();
     /**
@@ -5543,7 +5564,7 @@ export function apply(ctx) {
      * 双保险：读数只是排障用途，任何异常都不许影响消息链路（note 内部也逐字段兜了）。
      */
     try {
-      if (!memoryOff(chatOf(payload)?.chatId)) asrRecent.note(payload);
+      if (!memoryOff(chatOf(payload, { sessionMode: cfg.guild?.sessionMode })?.chatId)) asrRecent.note(payload);
     } catch {}
     /**
      * 扩展素材审批：主人私聊回「发 1 / 不发」。只有队列里真有待批才会命中，
@@ -5553,7 +5574,7 @@ export function apply(ctx) {
       ?? payload?.raw_message ?? (typeof payload?.message === 'string' ? payload.message : '');
     const reply = proactiveQueue.handleOwnerReply({
       text: typeof rawText === 'string' ? rawText : '',
-      isOwner: Boolean(String(chatOf(payload) || '')) && String(chatOf(payload)) === String(ownerId() || ''),
+      isOwner: Boolean(String(chatOf(payload, { sessionMode: cfg.guild?.sessionMode }) || '')) && String(chatOf(payload, { sessionMode: cfg.guild?.sessionMode })) === String(ownerId() || ''),
     });
     if (reply.handled) {
       log.info(`扩展素材审批：${reply.action} ${reply.count} 条`);

@@ -129,7 +129,7 @@ export function speakerTag(payload, chat) {
 }
 
 /** 会话标识：群和私聊要分开，同一个 openid 在两种场景下不是一回事 */
-export function chatOf(payload) {
+export function chatOf(payload, { sessionMode = 'guild' } = {}) {
   const chatId = String(payload?.chat?.chatId ?? '');
   const kind = normalizeKind(payload?.chat?.kind);
   /** 下游大量逻辑仍按 group/c2c 两态选人设、@ 标签、上限，统一从这里给映射值 */
@@ -161,8 +161,20 @@ export function chatOf(payload) {
    * 只换会话 / 人格映射的键，**出站 target 仍用 chatId**。
    */
   const guildId = String(payload?.chat?.guildId ?? '');
-  const sessionKey = kind === 'guild' ? `guild:${guildId || chatId}`
-    : kind === 'dm' ? `dm:${chatId}`
+  const channelId = String(payload?.chat?.channelId ?? '');
+  /**
+   * 频道私信用**用户 ID** 作键（一人一个）。
+   *
+   * 不能拿 `chatId`：那是 `createDms` 返回的私信会话 id，官方按
+   * 「机器人 + 用户 + 源频道」三元组生成 —— 同一用户从不同源频道进来
+   * 会拿到不同 id，一个人就开出好几个会话。`sender.id` 才是人。
+   */
+  const senderId = String(payload?.sender?.id ?? '').trim();
+  const sessionKey = kind === 'guild'
+    ? (sessionMode === 'channel'
+      ? `guild:${guildId || chatId}:ch:${channelId || chatId}`
+      : `guild:${guildId || chatId}`)
+    : kind === 'dm' ? `dm:${senderId || chatId}`
       : chatId;
 
   return {
@@ -175,7 +187,7 @@ export function chatOf(payload) {
     groupId: String(payload?.chat?.groupId ?? ''),
     /** 频道维度：频道 ID / 子频道 ID（群、单聊为空串） */
     guildId,
-    channelId: String(payload?.chat?.channelId ?? ''),
+    channelId,
     name: String(payload?.chat?.name ?? ''),
     preset: presetOfKind(kind),
     uin,
@@ -187,4 +199,44 @@ export function chatOf(payload) {
      */
     identityId: isPrivateKind(kind) ? (uin ? `u:${uin}` : '') : groupUin ? `g:${groupUin}` : '',
   };
+}
+
+/**
+ * 这条消息是不是频道场景（`guild` / `dm`）。
+ *
+ * **不能只靠 `chatOf().kind`**：`normalizeKind()` 对缺失 / 拼错的 kind 会回落
+ * `'group'`，频道 payload 少一个字段就会被当群聊放过去。所以双保险：
+ * 原始 kind 命中白名单，或带频道维度字段（`guildId` / `channelId`），任一成立即判频道。
+ *
+ * 只给**消息帧**用。notice 帧没有 `chat` 字段（`serializeNotice` 只给
+ * `{ at, event, data }`），那边走 `isChannelEvent()`。
+ */
+export function isChannelChat(payload) {
+  const raw = String(payload?.chat?.kind ?? '').trim().toLowerCase();
+  if (raw === 'guild' || raw === 'dm') return true;
+  return Boolean(
+    String(payload?.chat?.guildId ?? '').trim()
+    || String(payload?.chat?.channelId ?? '').trim(),
+  );
+}
+
+/**
+ * 这个事件是不是频道类（`onNotice` 入口过滤用）。
+ *
+ * 按官方 intents 表归类，**不能只按事件名前缀**：`AT_MESSAGE_CREATE` /
+ * `MESSAGE_CREATE` / `MESSAGE_DELETE` / `PUBLIC_MESSAGE_DELETE` 都没有频道前缀。
+ *
+ * 前缀兜住 `GUILD_*` / `CHANNEL_*` / `FORUM_*` / `AUDIO_*` /
+ * `MESSAGE_REACTION_*` / `MESSAGE_AUDIT_*` / `DIRECT_MESSAGE_*`；
+ * 无前缀的用显式名单补。`INTERACTION_CREATE`、群聊 / 好友事件不在此列，不过滤。
+ */
+const CHANNEL_EVENT_PREFIX = /^(GUILD_|CHANNEL_|FORUM_|AUDIO_|MESSAGE_REACTION_|MESSAGE_AUDIT_|DIRECT_MESSAGE_)/;
+const CHANNEL_EVENTS_NO_PREFIX = new Set([
+  'AT_MESSAGE_CREATE', 'MESSAGE_CREATE', 'MESSAGE_DELETE', 'PUBLIC_MESSAGE_DELETE',
+]);
+
+export function isChannelEvent(name) {
+  const n = String(name ?? '').trim();
+  if (!n) return false;
+  return CHANNEL_EVENT_PREFIX.test(n) || CHANNEL_EVENTS_NO_PREFIX.has(n);
 }

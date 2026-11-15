@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 
 import {
   speakerTag, chatOf, normalizeKind, isPrivateKind, sceneOfKind, presetOfKind,
+  isChannelChat, isChannelEvent,
 } from '../src/inbound.js';
 
 const OPENID = 'A1B2C3D4E5F60718293A4B5C6D7E8F90';
@@ -133,6 +134,50 @@ test('sessionKey：同频道不同子频道共用一个会话，群聊/单聊保
   /** 出站 target 绝不能被改 */
   assert.equal(base('CH1', 'CH1').chatId, 'CH1');
   assert.equal(base('CH2', 'CH2').channelId, 'CH2');
+});
+
+test('sessionMode=channel：一个子频道一个会话；dm 固定按用户 ID 一人一个', () => {
+  const g = (chatId) => ({ chat: { chatId, channelId: chatId, guildId: 'G1', kind: 'guild' } });
+  assert.equal(chatOf(g('CH1'), { sessionMode: 'channel' }).sessionKey, 'guild:G1:ch:CH1');
+  assert.notEqual(
+    chatOf(g('CH1'), { sessionMode: 'channel' }).sessionKey,
+    chatOf(g('CH2'), { sessionMode: 'channel' }).sessionKey,
+    'channel 模式下同频道不同子频道要分开',
+  );
+  assert.equal(chatOf(g('CH1')).sessionKey, 'guild:G1', '默认 guild 模式仍按频道聚合');
+
+  /** dm 两种 mode 都一样，且按 sender.id —— 同一用户不同私信会话 id 也要归一个 */
+  const dm = { chat: { chatId: 'DM9', channelId: 'CH9', kind: 'dm' }, sender: { id: 'U1' } };
+  const dm2 = { chat: { chatId: 'DM99', channelId: 'CH8', kind: 'dm' }, sender: { id: 'U1' } };
+  assert.equal(chatOf(dm).sessionKey, 'dm:U1');
+  assert.equal(chatOf(dm, { sessionMode: 'channel' }).sessionKey, 'dm:U1');
+  assert.equal(chatOf(dm2).sessionKey, 'dm:U1', '一人一个，不随私信会话 id 变');
+  /** 拿不到 sender.id 时退回会话 id，别算出 dm:undefined */
+  assert.equal(chatOf({ chat: { chatId: 'DM7', kind: 'dm' } }).sessionKey, 'dm:DM7');
+});
+
+test('isChannelChat：kind 缺失但有频道字段也要判成频道（防回落 group 漏过滤）', () => {
+  assert.equal(isChannelChat({ chat: { kind: 'guild' } }), true);
+  assert.equal(isChannelChat({ chat: { kind: 'dm' } }), true);
+  assert.equal(isChannelChat({ chat: { kind: 'group' } }), false);
+  assert.equal(isChannelChat({ chat: { kind: 'c2c' } }), false);
+  /** 关键：kind 缺失 / 拼错时不能靠 normalizeKind 的 group 回落 */
+  assert.equal(isChannelChat({ chat: { kind: '', guildId: 'G1' } }), true);
+  assert.equal(isChannelChat({ chat: { kind: 'unknown', channelId: 'CH1' } }), true);
+  assert.equal(isChannelChat({ chat: { kind: 'unknown' } }), false);
+  assert.equal(isChannelChat({}), false);
+});
+
+test('isChannelEvent：无频道前缀的消息事件也要认出，群聊/互动事件不能误伤', () => {
+  for (const n of [
+    'GUILD_CREATE', 'CHANNEL_UPDATE', 'FORUM_POST_CREATE', 'AUDIO_ON_MIC',
+    'MESSAGE_REACTION_ADD', 'DIRECT_MESSAGE_CREATE', 'MESSAGE_AUDIT_PASS',
+    'AT_MESSAGE_CREATE', 'MESSAGE_CREATE', 'MESSAGE_DELETE', 'PUBLIC_MESSAGE_DELETE',
+  ]) assert.equal(isChannelEvent(n), true, `${n} 应判为频道事件`);
+  for (const n of [
+    'INTERACTION_CREATE', 'GROUP_AT_MESSAGE_CREATE', 'C2C_MESSAGE_CREATE',
+    'GROUP_ADD_ROBOT', 'FRIEND_ADD', 'READY', 'RESUMED', '',
+  ]) assert.equal(isChannelEvent(n), false, `${n} 不该被当成频道事件`);
 });
 
 test('标签：单条批次仍然要标签（batch 存在但 multi 是假）', () => {
