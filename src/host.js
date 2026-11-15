@@ -6437,6 +6437,11 @@ export function apply(ctx) {
                */
               const r = await extMarket.install(arg?.id, {
                 confirmScopes: arg?.confirmScopes === true,
+                /**
+                 * `force` 只跳过「已是最新版」短路，不跳过哈希校验 / foreign 保护 /
+                 * 权限确认。面板的「强制重装」二次确认后才带，别让误点变成重装。
+                 */
+                ...(arg?.force === true ? { force: true } : {}),
                 ...(arg?.confirmTier !== undefined ? { confirmTier: arg.confirmTier } : {}),
               });
               return send(res, r.ok ? 200 : 400, r);

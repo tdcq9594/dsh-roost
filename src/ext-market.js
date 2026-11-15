@@ -153,8 +153,16 @@ async function defaultFetchText(url, guard = {}) {
   return await res.text();
 }
 
+/** 给进度文案用：字节数说人话，别把 12345678 直接糊到面板上。 */
+export function formatBytes(n) {
+  const b = Math.max(0, Number(n) || 0);
+  if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
+  if (b >= 1024) return `${Math.round(b / 1024)} KB`;
+  return `${b} B`;
+}
+
 /** 默认下载：GitHub codeload 的 tar.gz → 剥顶层 → 取 `entry.path` 子树 → 安全落盘。 */
-async function defaultDownload(entry, dest, { repo, branch, guard = {} } = {}) {
+async function defaultDownload(entry, dest, { repo, branch, guard = {}, onProgress = null } = {}) {
   const raw = entry.tarball || (repo ? tarballUrl(repo, branch) : '');
   if (!raw) throw new Error('索引条目缺 tarball，且索引里没有 repo 可拼下载地址');
   const url = assertSafeTarballUrl(raw);
@@ -171,7 +179,35 @@ async function defaultDownload(entry, dest, { repo, branch, guard = {} } = {}) {
    */
   const finalUrl = res.url || url;
   assertSafeTarballUrl(finalUrl);
-  const files = pickSubtree(extractTarGz(Buffer.from(await res.arrayBuffer()), { strip: 1 }), entry.path || '');
+  /**
+   * 整仓 tar.gz 动辄几十秒，一口气 `arrayBuffer()` 会让进度条一直停在
+   * 「正在下载扩展包」像死机。改成按块读、每 256 KB 报一次字节数；
+   * 没有可读流（部分测试 / 自定义运行时）时退回一次性读，行为不变。
+   */
+  const total = Number(res.headers?.get?.('content-length')) || 0;
+  const chunks = [];
+  let got = 0;
+  let lastReport = 0;
+  if (res.body && typeof res.body.getReader === 'function') {
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const buf = Buffer.from(value);
+      chunks.push(buf);
+      got += buf.length;
+      if (got - lastReport >= 256 * 1024) {
+        lastReport = got;
+        onProgress?.(got, total);
+      }
+    }
+  } else {
+    const buf = Buffer.from(await res.arrayBuffer());
+    chunks.push(buf);
+    got = buf.length;
+  }
+  onProgress?.(got, total);
+  const files = pickSubtree(extractTarGz(Buffer.concat(chunks), { strip: 1 }), entry.path || '');
   if (!files.size) throw new Error(`分发包里找不到 ${entry.path || '(根目录)'}`);
   // rejectSkips：跳过目录不参与哈希，就绝不能落盘，否则 sha256 白算。
   await writeFiles(dest, files, { rejectSkips: true });
@@ -211,6 +247,16 @@ export function createExtMarket({
   extGroups = null,
   extPatch = null,
   capStore = null,
+  /**
+   * 更新已装扩展时，等 DSH 释放扩展目录的最长时间（ms）。
+   * Windows 上扩展子进程的 cwd 就在 `<dataDir>/extensions/<id>/`，
+   * `registry.install()` 的原子 rename 会拿到 EBUSY；摘掉受管块后 DSH
+   * 需要一点时间 dispose 连接。超时不硬杀进程（官方 dsh-mcp-client 默认
+   * 500ms 自动重连，杀掉只会撞进落位窗口），而是保留原扩展、如实报错。
+   */
+  pauseTimeoutMs = 5_000,
+  /** 可注入的等待函数：测试不必真等 5 秒 */
+  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   log = () => {},
   now = () => Date.now(),
   ttlMs = 5 * 60_000,
@@ -317,6 +363,31 @@ export function createExtMarket({
    * 后两步失败不回滚扩展本体（已经装好了，删掉反而更糟），以 `warnings` 返回。
    */
   /**
+   * 落位重试：只重试「目录被占用」，其余错误原样返回。
+   *
+   * 判据用 `registry.install()` 的真实结果，不猜「DSH 是否已经释放目录」——
+   * HMR 在真机 desktop 上没有实测保证，假设它生效会在目录还被占着时继续
+   * 往下走。`registry.install()` 失败自带回滚（原目录不动），所以重试安全。
+   */
+  async function installWithBusyRetry(staging, source, key, { intervalMs = 200 } = {}) {
+    const deadline = now() + pauseTimeoutMs;
+    for (;;) {
+      const r = registry.install(staging, { source });
+      if (r.ok) return r;
+      const busy = r.code === 'EBUSY' || r.code === 'EPERM' || r.code === 'EACCES';
+      if (!busy) return r;
+      if (now() >= deadline) {
+        return {
+          ok: false, reason: 'ext_busy',
+          message: `扩展仍在运行，DSH 未及时释放目录（${pauseTimeoutMs / 1000}s 内一直被占用）；原扩展已保留，请重启 DSH 后重试`,
+        };
+      }
+      setPhase('pause', '正在等待扩展释放目录', key);
+      await wait(intervalMs);
+    }
+  }
+
+  /**
    * 5.6：包一层统一收尾。installInner 里失败分支很多（索引失败 / 已撤回 /
    * foreign / 哈希不符 / 要确认权限…），在外面统一设终态，进度条不会卡在
    * 「下载中」不动。
@@ -331,14 +402,13 @@ export function createExtMarket({
     return r;
   }
 
-  async function installInner(id, { confirmScopes = false, confirmTier } = {}) {
+  async function installInner(id, { confirmScopes = false, confirmTier, force = false } = {}) {
     const key = String(id ?? '');
     if (!EXT_ID_RE.test(key)) return { ok: false, reason: 'bad_id', message: '扩展 id 不合法' };
 
     let idx;
     try { idx = await index({ refresh: true }); }
     catch (e) { return { ok: false, reason: 'index_failed', message: `索引拉取失败：${e?.message ?? e}` }; }
-    setPhase('download', '正在下载扩展包', key);
 
     const entry = pickExtensions(idx).find((e) => e.id === key);
     if (!entry) return { ok: false, reason: 'not_found', message: `索引里没有扩展 ${key}` };
@@ -351,9 +421,39 @@ export function createExtMarket({
     if (registry.isForeign(key)) {
       return { ok: false, reason: 'foreign', message: `${key} 是用户手写的扩展，拒绝覆盖；要接管请先手动删掉该目录` };
     }
+    /**
+     * 已是最新版就直接收工。以前「重装」会把整仓 tar.gz 再下一遍、重新落位、
+     * 还轮换一次令牌（旧令牌立刻 401），用户切个页签回来再点一下就白挨这些。
+     *
+     * 判据与 `list()` 的 `updateAvailable` 同源：`.source.json` 里的目录哈希
+     * 对索引声明的 sha256。`force` 是**唯一**绕过口子，留给「目录疑似坏了，
+     * 想照着索引重新铺一遍」的场景，前端必须二次确认才给。
+     * 短路不跳过撤回 / foreign / 哈希校验 —— 它只是不重复下载与落位。
+     */
+    const wantSha = String(entry.sha256 ?? '').toLowerCase();
+    const installedSha = typeof registry.list === 'function'
+      ? String(registry.list().find((x) => x.id === key)?.source?.sha256 ?? '').toLowerCase()
+      : '';
+    if (!force && /^[0-9a-f]{64}$/.test(wantSha) && installedSha === wantSha) {
+      return {
+        ok: true, id: key, alreadyLatest: true,
+        message: `扩展「${key}」已是最新版（${wantSha.slice(0, 12)}…），无需重复安装`,
+      };
+    }
 
+    setPhase('download', '正在下载扩展包', key);
     const staging = join(tmpRoot, key);
     rmrfSync(staging);
+    const warnings = [];
+    /** 只要摘过受管块，任何出口（含抛错）都必须写回，绝不能把扩展留在离线状态 */
+    let needsResume = false;
+    const resume = () => {
+      if (!needsResume) return;
+      needsResume = false;
+      setPhase('resume', '正在恢复扩展连接', key);
+      try { syncBlock(); }
+      catch (e) { warnings.push(`扩展连接未能自动恢复（${e?.message ?? e}）：请重载 DSH 或手动同步受管块`); }
+    };
     try {
       /**
        * **必须有 sha256。** 缺了就无法校验内容，等于「索引说什么就装什么」；
@@ -361,7 +461,13 @@ export function createExtMarket({
        */
       const want = String(entry.sha256 ?? '').toLowerCase();
       if (!/^[0-9a-f]{64}$/.test(want)) throw new Error('索引条目缺 sha256，拒绝安装（无法校验内容）');
-      await downloadPkg(entry, staging, { repo: idx.repo, branch: idx.branch ?? 'main' });
+      await downloadPkg(entry, staging, {
+        repo: idx.repo,
+        branch: idx.branch ?? 'main',
+        /** 按字节回报，进度条不再几十秒一动不动像卡死 */
+        onProgress: (got, total) => setPhase('download',
+          `已下载 ${formatBytes(got)}${total ? ` / ${formatBytes(total)}` : ''}`, key),
+      });
       setPhase('verify', '正在校验目录哈希', key);
       const got = await hashDir(staging);
       if (got !== want) {
@@ -399,27 +505,48 @@ export function createExtMarket({
         };
       }
 
+      /**
+       * 更新已装且正在运行的 stdio 扩展：落位前先摘掉它的受管块条目，
+       * 让 DSH 自己 dispose 连接、放开目录。Windows 上扩展子进程的 cwd
+       * 就是 `<dataDir>/extensions/<id>/`，不松开目录 rename 必然 EBUSY。
+       * 新装 / 手写目录 / streamable-http 都不碰配置。
+       */
+      const local = typeof registry.list === 'function'
+        ? registry.list().find((x) => x.id === key) : null;
+      const needPause = Boolean(extPatch && local && !local.foreign
+        && (local.manifest?.transport ?? 'stdio') === 'stdio');
+      if (needPause) {
+        setPhase('pause', '正在暂停扩展连接', key);
+        needsResume = true;          // 先置位：render 半途抛错也要兜底恢复
+        syncBlock({ exclude: key }); // ext-patch 自带备份 + 写后校验 + 逐字节回滚
+      }
+
       setPhase('install', '正在落位', key);
-      const r = registry.install(staging, {
-        source: {
-          repo: idx.repo ?? '',
-          branch: idx.branch ?? 'main',
-          path: entry.path ?? '',
-          sha256: entry.sha256 ?? '',
-          installedAt: now(),
-        },
-      });
-      if (!r.ok) throw new Error(r.reason || '落位失败');
+      const source = {
+        repo: idx.repo ?? '',
+        branch: idx.branch ?? 'main',
+        path: entry.path ?? '',
+        sha256: entry.sha256 ?? '',
+        installedAt: now(),
+      };
+      const r = await installWithBusyRetry(staging, source, key);
+      if (!r.ok) {
+        if (r.reason === 'ext_busy') return { ok: false, reason: r.reason, message: r.message, warnings };
+        throw new Error(r.reason || '落位失败');
+      }
 
       setPhase('finalize', '正在写权限组与受管块', key);
-      const warnings = [];
       if (extGroups) {
         try { extGroups.add(key, { label: entry.name ?? key, capStore }); }
         catch (e) { warnings.push(`权限组初始化失败：${e?.message ?? e}`); }
       }
       if (extPatch) {
-        try { syncBlock(); }
+        /** 写回完整受管块 = 恢复连接，DSH 重新拉起扩展时读到的是新代码 */
+        if (needPause) setPhase('resume', '正在恢复扩展连接', key);
+        try { syncBlock(); needsResume = false; }
         catch (e) { warnings.push(`受管块未写入：${e?.message ?? e}`); }
+      } else {
+        needsResume = false;
       }
       log.info?.(`已安装扩展 ${key}${warnings.length ? `（${warnings.length} 项待处理）` : ''}`);
       return {
@@ -427,14 +554,20 @@ export function createExtMarket({
         message: warnings.length ? `已安装，但有 ${warnings.length} 项没接上：${warnings[0]}` : '已安装，下一条消息生效',
       };
     } catch (e) {
-      return { ok: false, reason: 'install_failed', message: `安装失败：${e?.message ?? e}` };
+      return { ok: false, reason: 'install_failed', message: `安装失败：${e?.message ?? e}`, warnings };
     } finally {
+      resume();                    // 幂等：正常路径已写回就不再动
       rmrfSync(staging);
     }
   }
 
-  /** 受管块按「当前已装 id」整块重算，不是增量追加 —— 卸载后不留悬空条目。 */
-  function syncBlock() {
+  /**
+   * 受管块按「当前已装 id」整块重算，不是增量追加 —— 卸载后不留悬空条目。
+   *
+   * `exclude` 只给更新流程用：落位前临时摘掉目标扩展的 `mcp-<id>` 条目，
+   * 让 DSH 自己 dispose 连接、放开目录。不传时与旧行为完全一致。
+   */
+  function syncBlock({ exclude = '' } = {}) {
     if (!extPatch) return null;
     /**
      * 只给**市场装的**扩展写受管块。用户手写目录没有 secrets、也没经过
@@ -454,7 +587,7 @@ export function createExtMarket({
        */
       .filter((x) => (x.manifest?.transport ?? 'stdio') === 'stdio')
       .map((x) => x.id)
-      .filter((x) => EXT_ID_RE.test(x));
+      .filter((x) => EXT_ID_RE.test(x) && x !== exclude);
     return extPatch.render(ids, { apply: true });
   }
 

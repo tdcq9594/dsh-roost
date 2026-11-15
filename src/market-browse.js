@@ -70,8 +70,11 @@ export const MARKET_PHASES = {
   verify: 65,
   scopes: 75,
   confirm: 75,
+  /** 更新已装扩展前先摘掉受管块，等 DSH 释放目录；新装不经过这两步 */
+  pause: 80,
   install: 85,
   finalize: 95,
+  resume: 96,
   done: 100,
   failed: 100,
 };
@@ -83,8 +86,10 @@ export const PHASE_LABELS = {
   verify: '校验哈希',
   scopes: '检查权限声明',
   confirm: '等你确认权限',
+  pause: '暂停扩展连接',
   install: '落位',
   finalize: '写权限组与受管块',
+  resume: '恢复扩展连接',
   done: '完成',
   failed: '结束（未成功）',
 };

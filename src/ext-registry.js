@@ -462,19 +462,36 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       // 直接用二次校验过的清单填 cache，别再读一次目标文件：落位刚 rename 完，
       // 若此刻读盘恰好失败，会出现「install 成功但 usage 为空」的窗口。
       usageCache.set(id, usageFromManifest(v.manifest));
-      // 方案 L：安装即发一扩展一令牌。令牌生成失败不把「已落位」说成安装失败，
+      // 方案 L：一扩展一令牌。令牌生成失败不把「已落位」说成安装失败，
       // 否则面板会以为目录还在回滚、实际却已装好；只记 warn，由 G3 的 401 暴露。
       let tokenIssued = false;
+      let tokenReused = false;
       if (secrets && clientStore) {
         // scope 来自清单声明；没写就是默认的两件（写自己记忆 + 读状态）。
-        try { secrets.issue(id, clientStore, { scopes: v.manifest.scopes }); tokenIssued = true; }
+        try {
+          /**
+           * 新装才签发新令牌；更新（含 force 重装）走 `sync()` 复用旧令牌。
+           * 换令牌会让还在运行的扩展进程立刻 401，而更新本身不该换身份。
+           * 老调用方注入的 secrets stub 没有 `sync` 时自动退回 `issue`，不挂。
+           */
+          const r = hadDest && typeof secrets.sync === 'function'
+            ? secrets.sync(id, clientStore, { scopes: v.manifest.scopes })
+            : secrets.issue(id, clientStore, { scopes: v.manifest.scopes });
+          tokenReused = r?.reused === true;
+          tokenIssued = !tokenReused;
+        }
         catch (e) { log.warn?.(`扩展 ${id} 令牌生成失败：${e?.message ?? e}`); }
       }
-      return { ok: true, id, manifest: v.manifest, dir: dest, foreign: !source, tokenIssued };
+      return { ok: true, id, manifest: v.manifest, dir: dest, foreign: !source, tokenIssued, tokenReused };
     } catch (e) {
       rmrf(staging);
       if (!keepOld) rmrf(old);
-      return { ok: false, reason: `落位失败，已回滚：${e?.message || e}` };
+      /**
+       * 把系统错误码原样带出去（Windows 上目录被进程当 cwd 时是 EBUSY/EPERM）。
+       * 上层 `ext-market` 靠它区分「占住了，可以等一等重试」和真正的坏数据；
+       * 靠 message 字符串猜会把本地化文案当成协议，太脆。
+       */
+      return { ok: false, reason: `落位失败，已回滚：${e?.message || e}`, code: e?.code };
     }
   }
 
@@ -625,11 +642,37 @@ export function createExtSecrets({ dir = dataDir(), log = () => {} } = {}) {
     return { token, ref, hash: client.hash, client };
   }
 
+  /**
+   * 安装/更新用：**复用已有令牌**，只按新清单同步 scopes。
+   *
+   * `issue()` 每次都换一个随机 token 并覆盖 `api-clients.json` 的 hash，
+   * 旧令牌立刻 401。更新时扩展进程可能还在跑、DSH 未必及时把它重启，
+   * 于是「装好了却鉴权失败」——面板那句「有扩展鉴权失败」就是这么来的。
+   * 扩展身份没变、目录哈希也校验过，没有理由换凭据。
+   *
+   * 只在「secret 文件 + 客户端记录 + hash 三者一致」时复用；任一处缺失或
+   * 对不上就退回 `issue()` 自愈（新装、备份还原、人工改坏都走这条）。
+   * scope 仍按新清单更新：清单新增权限不用换令牌也能生效，且用户在
+   * `needs_scope_confirm` 弹窗里已经确认过。
+   */
+  function sync(id, store, { scopes } = {}) {
+    if (!EXT_ID_RE.test(id)) throw new Error(`扩展 id 不合法：${id}`);
+    const existing = readSecret(id);
+    const client = store?.get?.(`ext:${id}`);
+    if (existing?.token && client?.hash && client.hash === sha256(existing.token)) {
+      const next = { ...client, extId: id, scopes: normalizeScopes(scopes) };
+      store.add(next);
+      return { token: existing.token, ref: existing.ref, hash: client.hash, client: next, reused: true };
+    }
+    return { ...issue(id, store, { scopes }), reused: false };
+  }
+
   return {
     root,
     fileOf,
     read: readSecret,
     issue,
+    sync,
     rotate(id, store, opts = {}) {
       /**
        * 轮换必须**保持原 scope**：从 api.clients 现有记录读，读不到才用清单/默认。

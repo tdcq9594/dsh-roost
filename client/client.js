@@ -1426,7 +1426,7 @@ select.roost-input{color-scheme:dark}
      * 习惯上分三段：平时是灰底普通按钮 → 点一下变成红底「确认删除」→ 再点才执行。
      * 4 秒没点就自己退回，不会一直挂在「确认」状态等人误触。
      */
-    function ConfirmLink({ label, confirmLabel, onConfirm, disabled, danger = true }) {
+    function ConfirmLink({ label, confirmLabel, onConfirm, disabled, danger = true, style = null }) {
       const [arm, setArm] = useState(false)
       useEffect(() => {
         if (!arm) return
@@ -1436,6 +1436,7 @@ select.roost-input{color-scheme:dark}
       return h('button', {
         type: 'button',
         className: 'roost-btn' + (danger ? ' danger' : '') + (arm ? ' armed' : ''),
+        style,
         disabled,
         onClick: () => {
           if (!arm) return setArm(true)
@@ -13850,11 +13851,11 @@ select.roost-input{color-scheme:dark}
           if (!r.ok) toast(r.message || '市场索引拉取失败')
         } finally { setMarketBusy('') }
       }
-      const marketAct = async (op, id) => {
+      const marketAct = async (op, id, extra = {}) => {
         setMarketBusy(id)
         if (op === 'extensions.market.install') startProgress()
         try {
-          let r = await EXT_POST(op, { id })
+          let r = await EXT_POST(op, { id, ...extra })
           /**
            * 扩展索要敏感权限（`say:write` / `proactive:write` 之类）：后端**不肯**
            * 直接装，回 `needs_scope_confirm`。这里必须把「要授什么」摆出来让用户
@@ -13869,6 +13870,8 @@ select.roost-input{color-scheme:dark}
             setTierTyped('')
             setScopeAsk({
               op, id,
+              /** 强制重装的 force 要跟着确认框走，否则第二次请求会被「已是最新版」短路 */
+              extra,
               scopes: r.scopes || [],
               tier: r.tier || '', tierLabel: r.tierLabel || '', tierColor: r.tierColor || '',
               confirm: r.confirm || '', risks: r.risks || [], message: r.message || '',
@@ -13897,6 +13900,7 @@ select.roost-input{color-scheme:dark}
         try {
           const r = await EXT_POST(ask.op, {
             id: ask.id, confirmScopes: true,
+            ...(ask.extra || {}),
             ...(ask.tier ? { confirmTier: ask.tier } : {}),
           })
           toast(r.message || (r.ok ? '完成' : '失败'))
@@ -14209,11 +14213,23 @@ select.roost-input{color-scheme:dark}
                     : null,
                   x.revoked
                     ? h('span', { className: 'd' }, '拒绝安装')
-                    : h('button', {
-                        type: 'button', className: 'roost-btn', style: { marginTop: 6 },
-                        disabled: marketBusy === x.id || x.foreign || !!scopeAsk || !!revokeAsk,
-                        onClick: () => marketAct('extensions.market.install', x.id),
-                      }, x.foreign ? '用户手写 · 不覆盖' : x.installed ? (x.updateAvailable ? '更新' : '重装') : '安装'),
+                    /**
+                     * 已装且无更新：后端会直接回「已是最新版」，只有明确「强制重装」
+                     * 才带 force。用二次确认挡住误点 —— 切页签回来手滑点一下，
+                     * 不该变成重下一遍整仓 tar.gz + 重启扩展连接。
+                     */
+                    : x.installed && !x.foreign && !x.updateAvailable
+                      ? h(ConfirmLink, {
+                          label: '重装', confirmLabel: '确认强制重装', danger: false,
+                          style: { marginTop: 6 },
+                          disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
+                          onConfirm: () => marketAct('extensions.market.install', x.id, { force: true }),
+                        })
+                      : h('button', {
+                          type: 'button', className: 'roost-btn', style: { marginTop: 6 },
+                          disabled: marketBusy === x.id || x.foreign || !!scopeAsk || !!revokeAsk,
+                          onClick: () => marketAct('extensions.market.install', x.id),
+                        }, x.foreign ? '用户手写 · 不覆盖' : x.installed ? '更新' : '安装'),
                   x.installed && !x.foreign
                     ? h(ConfirmLink, {
                         label: '卸载', confirmLabel: '确认卸载',
