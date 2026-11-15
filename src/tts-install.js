@@ -27,6 +27,7 @@ import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 
 import { SHERPA_MODELS } from './tts.js';
+import { OFFICIAL, downloadRegistries, normRegistry } from './npm-registry.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -85,14 +86,18 @@ export function platformPackage() {
   return PLATFORM_PACKAGES[`${process.platform}-${process.arch}`] || '';
 }
 
-export function npmTgz(name, version) {
+export function npmTgz(name, version, registry = OFFICIAL) {
   /**
    * scoped 包（`@andresaya/edge-tts`）的 tarball 文件名**不带 scope**：
    *   https://registry.npmjs.org/@andresaya/edge-tts/-/edge-tts-1.9.1.tgz
    * 用整个 name 拼会变成 `.../-/@andresaya/edge-tts-1.9.1.tgz` → 404。
+   *
+   * 第三个参数是 registry：语音引擎加起来 50 多 MB，硬写官方源在国内
+   * 经常下到一半超时。不传时行为与以前完全一致（官方源）。
    */
   const short = name.includes('/') ? name.split('/').pop() : name;
-  return `https://registry.npmjs.org/${name}/-/${short}-${version}.tgz`;
+  const base = normRegistry(registry) || OFFICIAL;
+  return `${base}/${name}/-/${short}-${version}.tgz`;
 }
 
 /**
@@ -143,6 +148,13 @@ export function createTtsInstaller({
   fetchImpl = (...args) => fetch(...args),
   log = () => {},
   onDone = () => {},
+  /**
+   * npm 源的覆盖值（配置里的 `update.registry`）。
+   *
+   * 传函数而不是字符串：配置可能在安装中途被改，装下一个包时应该用新值。
+   * 空 = 由 `npm-registry` 按环境变量 / `.npmrc` / 官方源自己解析。
+   */
+  registry = () => '',
 } = {}) {
   /** 同一时间只允许一个安装任务：两个并发下载会往同一个目录里写 */
   let state = {
@@ -201,6 +213,52 @@ export function createTtsInstaller({
     await pipeline(Readable.fromWeb(res.body), counter, createWriteStream(dest), { signal });
   }
 
+  /** 候选源列表（给直链下载轮询用）。`registry()` 每次现读，配置改了立刻生效 */
+  const npmCandidates = (name, version) =>
+    downloadRegistries({ override: registry() }).map((r) => npmTgz(name, version, r));
+
+  /**
+   * 按候选源顺序下载，前一个失败就换下一个。
+   *
+   * 语音引擎加起来 50 多 MB，硬写官方源在国内经常下到一半超时——
+   * 以前用户只能自己想办法（挂代理 / 手动下载）。这里至少给它一次
+   * 换镜像的机会，而且**失败要清理半成品**：留着半截 tgz 会让下一次
+   * 解压报一个完全看不懂的错。
+   *
+   * @param {string[]} urls 候选地址，按尝试顺序
+   * @param {string} dest 落盘路径
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<string>} 实际成功的地址
+   */
+  async function downloadFromAny(urls, dest, signal) {
+    const list = urls.filter(Boolean);
+    let lastErr = null;
+    for (let i = 0; i < list.length; i++) {
+      const url = list[i];
+      let host = url;
+      try {
+        host = new URL(url).host;
+      } catch {
+        // 地址拼坏了就原样显示，别为了美化抛一个更看不懂的错
+      }
+      try {
+        if (i > 0) {
+          set({ received: 0, total: 0, message: `换源重试（${host}）…` });
+          log(`下载失败，换源重试：${host}`);
+        }
+        await download(url, dest, signal);
+        if (i > 0) log(`换源成功：${host}`);
+        return url;
+      } catch (e) {
+        /** 用户点了取消：不该再往下试别的源 */
+        if (e?.name === 'AbortError' || signal?.aborted) throw e;
+        lastErr = e;
+        rmSync(dest, { force: true });
+      }
+    }
+    throw lastErr ?? new Error('所有下载源都失败了');
+  }
+
   /**
    * 解压。
    *
@@ -250,7 +308,7 @@ export function createTtsInstaller({
       const tgz = join(tmp, `${name}.tgz`);
       /** 每个包单独算进度，不然第二个包一上来就显示 100% */
       set({ received: 0, total: 0, message: `下载 ${name}…` });
-      await download(npmTgz(name, version), tgz, signal);
+      await downloadFromAny(npmCandidates(name, version), tgz, signal);
       set({ phase: PHASE.ENGINE, message: `解压 ${name}…` });
       await untar(tar, tgz, tmp, '-xzf');
       // npm 的 tgz 里统一是 `package/`，解出来要改名成包名
@@ -333,7 +391,7 @@ export function createTtsInstaller({
     for (const [name, version] of EDGE_PACKAGES) {
       const tgz = join(tmp, `${name.replace(/[\\/@]/g, '_')}.tgz`);
       set({ received: 0, total: 0, message: `下载 ${name}…` });
-      await download(npmTgz(name, version), tgz, signal);
+      await downloadFromAny(npmCandidates(name, version), tgz, signal);
       set({ phase: PHASE.ENGINE, message: `解压 ${name}…` });
       await untar(tar, tgz, tmp, '-xzf');
       const unpacked = join(tmp, 'package');

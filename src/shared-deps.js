@@ -24,9 +24,10 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import { execFile } from 'node:child_process';
 import { dataDir } from './config.js';
+import { registryArgs } from './npm-registry.js';
 
 /**
  * 允许安装的包。加新包前先想清楚：它有没有 postinstall 脚本？
@@ -108,6 +109,59 @@ function installedVersion(name) {
 }
 
 /**
+ * 系统 PATH 上的 ffmpeg；没有返回空串。
+ *
+ * 用户很可能已经用 apt / brew / choco / scoop 装过系统级 ffmpeg，
+ * 再为它下 62MB 的 npm 包纯属浪费。这里只**扫 PATH 目录**看可执行文件
+ * 在不在，不 spawn——面板随时可能问状态，起进程太贵。
+ *
+ * @param {{fresh?: boolean}} [o]
+ * @returns {string}
+ */
+let systemFfmpegCache; // undefined=没查过；''=没有；string=路径
+export function systemFfmpeg({ fresh = false } = {}) {
+  if (fresh) systemFfmpegCache = undefined;
+  if (systemFfmpegCache !== undefined) return systemFfmpegCache;
+
+  const names = process.platform === 'win32'
+    ? ['ffmpeg.exe', 'ffmpeg.cmd', 'ffmpeg.bat']
+    : ['ffmpeg'];
+  const dirs = String(process.env.PATH || process.env.Path || '')
+    .split(delimiter)
+    .map((d) => d.trim().replace(/^"|"$/g, ''))
+    .filter(Boolean);
+
+  for (const d of dirs) {
+    for (const n of names) {
+      const p = join(d, n);
+      if (existsSync(p)) {
+        systemFfmpegCache = p;
+        return p;
+      }
+    }
+  }
+  systemFfmpegCache = '';
+  return '';
+}
+
+/**
+ * 这次该用哪个 ffmpeg：**装好的那份优先，其次系统 PATH**。
+ *
+ * 装好的那份是平台子包里的静态二进制，版本行为都确定；系统那份不可控但
+ * 能省 62MB。调用方要的是「能转码就行」，两份都算数。
+ *
+ * @param {{fresh?: boolean}} [o]
+ * @returns {{path: string, source: 'managed'|'system'|''}}
+ */
+export function resolveFfmpeg({ fresh = false } = {}) {
+  const own = ffmpegBinary({ fresh });
+  if (own) return { path: own, source: 'managed' };
+  const sys = systemFfmpeg({ fresh });
+  if (sys) return { path: sys, source: 'system' };
+  return { path: '', source: '' };
+}
+
+/**
  * 当前正在装的那个包。
  *
  * **为什么放在模块里而不是让面板自己算时间**：`install()` 是一次
@@ -141,6 +195,14 @@ export function status() {
       version,
       available: name === FFMPEG ? Boolean(binary) : Boolean(version),
       binary,
+      /**
+       * 系统 PATH 上那份 ffmpeg（**不并进 `available`**）。
+       *
+       * `available` 的语义是「宿主装好的那份能不能用」，面板的「一键安装」
+       * 按钮按它显示；把系统那份混进去会让按钮显示「已装好」，而装的目录
+       * 里其实什么都没有。系统那份单独给，面板可以据此提示「不用再下 62MB」。
+       */
+      system: name === FFMPEG ? systemFfmpeg() : '',
       range: meta.range,
       size: meta.size,
       desc: meta.desc,
@@ -149,6 +211,8 @@ export function status() {
   return {
     dir: depsDir(),
     ffmpeg: ffmpegBinary(),
+    /** 系统里那份 ffmpeg 的路径；没有就是空串 */
+    systemFfmpeg: systemFfmpeg(),
     packages,
     /** 正在装：`{ name, startedAt, elapsedMs, step }`；没在装就是 null */
     installing: current
@@ -163,20 +227,84 @@ let chain = Promise.resolve();
 const inflight = new Map();
 
 /**
+ * npm 子进程的环境。
+ *
+ * 继承 `process.env`（npm 要读一大堆自己的配置：代理、缓存目录、userconfig…），
+ * 但**摘掉本进程的密钥**——装依赖的子进程没理由看到 QQ AppSecret 或面板口令。
+ * 以前这里是裸继承，等于把宿主进程的整个环境交给一个要联网的工具。
+ *
+ * 用「摘掉」而不是白名单：白名单一旦漏掉一个 `npm_config_*`，
+ * 表现是「用户配了代理/源却不生效」，那种问题极难排查。
+ */
+function npmEnv() {
+  const out = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (/^(QQ_|ROOST_SECRET|ROOST_TOKEN|ROOST_PANEL)/i.test(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
  * 安装白名单里的包。
  *
  * 返回 `{ ok, name, path, message, skipped }`，**不抛**：装失败的原因要原样
  * 带回面板，抛出去只会变成一句「500 内部错误」。
+ *
+ * @param {string} [name]
+ * @param {{log?: Function, timeoutMs?: number, registry?: string, preferSystem?: boolean}} [o]
+ *   `registry` 来自配置 `update.registry`，空则由 npm-registry 自己解析；
+ *   `preferSystem` 为真时，系统 PATH 上已有 ffmpeg 就直接复用、不下载。
  */
-export function install(name = FFMPEG, { log = () => {}, timeoutMs = 300_000 } = {}) {
+export function install(name = FFMPEG, {
+  log = () => {},
+  timeoutMs = 300_000,
+  registry = '',
+  preferSystem = false,
+} = {}) {
   const pkg = String(name ?? '').trim();
   if (!Object.hasOwn(WHITELIST, pkg)) {
     return Promise.resolve({ ok: false, name: pkg, message: `不在白名单里：${pkg || '(空)'}` });
   }
 
-  /** 已经能用就不跑 npm：这是最省事、也最不容易出错的「重装」 */
-  if (pkg === FFMPEG && ffmpegBinary({ fresh: true })) {
-    return Promise.resolve({ ok: true, name: pkg, path: ffmpegBinary(), skipped: true, message: '已经装好了' });
+  /**
+   * 已经能用就不跑 npm：这是最省事、也最不容易出错的「重装」。
+   */
+  if (pkg === FFMPEG) {
+    const own = ffmpegBinary({ fresh: true });
+    if (own) {
+      return Promise.resolve({ ok: true, name: pkg, path: own, skipped: true, source: 'managed', message: '已经装好了' });
+    }
+    /**
+     * 系统 PATH 上那份 ffmpeg：**只有调用方明确说「用系统的」才跳过安装**。
+     *
+     * 默认不跳过是有原因的：扩展是通过受管块里的 `ROOST_DEPS_DIR` 找
+     * `<deps>/node_modules/@ffmpeg-installer/<plat>/ffmpeg.exe` 的，
+     * 那是扩展和宿主之间唯一的约定。系统 PATH 上的那份它们看不见，
+     * 直接跳过会让「面板说装好了、扩展说没装」——比多下 62MB 难查得多。
+     *
+     * 想让宿主自己省下这 62MB，把 `preferSystem` 打开（面板以后可以给个开关），
+     * 但那时扩展得自己会找 PATH，不能只认 `ROOST_DEPS_DIR`。
+     */
+    const sys = systemFfmpeg({ fresh: true });
+    if (sys && preferSystem) {
+      return Promise.resolve({
+        ok: true, name: pkg, path: sys, skipped: true, source: 'system',
+        message: `系统里已有 ffmpeg（${sys}），按你的选择直接复用，不再下载 62MB`,
+      });
+    }
+    if (sys) {
+      log(`系统里已有 ffmpeg（${sys}），但仍会装一份到共享目录：扩展只认 ROOST_DEPS_DIR`);
+    }
+  } else if (installedVersion(pkg)) {
+    /**
+     * 纯 JS 包（qrcode）以前没有预检：每次点安装都跑一遍 npm，白等几十秒。
+     * 目录里已经有就直接复用。
+     */
+    return Promise.resolve({
+      ok: true, name: pkg, path: join(depsDir(), 'node_modules', pkg), skipped: true, source: 'managed',
+      message: '已经装好了',
+    });
   }
   if (inflight.has(pkg)) return inflight.get(pkg);
 
@@ -209,7 +337,12 @@ export function install(name = FFMPEG, { log = () => {}, timeoutMs = 300_000 } =
     }
 
     const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    log(`开始安装共享依赖 ${pkg}（${WHITELIST[pkg].size}）→ ${dir}`);
+    /**
+     * 源：配置里的 `update.registry` > 环境变量 > `.npmrc` > 官方。
+     * 解析到官方时不加参数，参数与以前完全一致。
+     */
+    const regArgs = registryArgs({ override: registry });
+    log(`开始安装共享依赖 ${pkg}（${WHITELIST[pkg].size}）→ ${dir}${regArgs.length ? `，源 ${regArgs[0].replace('--registry=', '')}` : ''}`);
     /**
      * 心跳：面板靠 `status().installing` 显示「已等待 N 秒」。
      *
@@ -226,12 +359,14 @@ export function install(name = FFMPEG, { log = () => {}, timeoutMs = 300_000 } =
          * 白名单里的包都是静态二进制，不需要脚本；开着它就等于
          * 把「面板点一下」变成「机器上跑任意 postinstall」。
          */
-        ['install', pkg, '--no-audit', '--no-fund', '--loglevel=error', '--ignore-scripts'],
+        ['install', pkg, ...regArgs, '--no-audit', '--no-fund', '--loglevel=error', '--ignore-scripts'],
         {
           cwd: dir,
           timeout: timeoutMs,
           windowsHide: true,
           maxBuffer: 8 * 1024 * 1024,
+          /** 继承环境但摘掉本进程密钥，见 `npmEnv()` */
+          env: npmEnv(),
           /**
            * Windows 必须走 shell：Node 20 起 `execFile('npm.cmd')` 会直接
            * `EINVAL`（不能 spawn 批处理，除非过 shell）。参数里没有空格，

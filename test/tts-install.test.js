@@ -249,3 +249,39 @@ test('edgeReady / startEdge：和 sherpa 共用状态机但各管各的目录', 
   mkdirSync(join(other, 'tts-runtime', 'node_modules', '@andresaya', 'edge-tts'), { recursive: true });
   assert.equal(createTtsInstaller({ dataDir: () => other }).edgeReady(), false);
 });
+
+/**
+ * 直链下载**不经过 npm**，所以 `npm_config_registry` 对它无效——
+ * 语音引擎那 50 多 MB 以前硬写 registry.npmjs.org，国内超时了只能干瞪眼。
+ * 这里钉住「官方失败会自动换镜像」，并且换源之后仍然装得对。
+ */
+test('微软朗读：官方源 404 时自动换镜像', { skip: !TAR && '本机没有 tar' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-edge-fb-'));
+  const work = mkdtempSync(join(tmpdir(), 'roost-edge-pkg-'));
+  const tgz = makeNpmTgz(work, 'edge-tts', { 'index.js': 'module.exports={};\n' });
+
+  /** 只有镜像上有；官方源一律 404 */
+  const fetchImpl = fakeFetch({ 'registry.npmmirror.com': tgz });
+  const installer = createTtsInstaller({
+    dataDir: () => dir,
+    fetchImpl,
+    /** 钉住起点是官方源，才能确定「先失败后换源」这条路径真的走过了 */
+    registry: () => 'https://registry.npmjs.org',
+  });
+
+  assert.equal(installer.startEdge().ok, true);
+  const state = await waitIdle(installer);
+  assert.equal(state.phase, 'done', state.error || state.message);
+
+  assert.equal(
+    existsSync(join(dir, 'tts-edge', 'node_modules', '@andresaya', 'edge-tts', 'index.js')),
+    true,
+    '换源之后仍然要落到正确位置',
+  );
+
+  const calls = fetchImpl.calls;
+  const firstOfficial = calls.findIndex((u) => u.includes('registry.npmjs.org'));
+  const firstMirror = calls.findIndex((u) => u.includes('registry.npmmirror.com'));
+  assert.ok(firstOfficial >= 0, '应该先试官方源');
+  assert.ok(firstMirror > firstOfficial, '官方失败之后才换镜像');
+});

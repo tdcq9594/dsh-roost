@@ -783,6 +783,12 @@ export function apply(ctx) {
   const ttsInstaller = createTtsInstaller({
     dataDir,
     log: (m) => log.info(m),
+    /**
+     * 直链下载走哪个 npm 源。配置里 `update.registry` 空着就交给
+     * npm-registry 自己解析（环境变量 / .npmrc / 官方源）。
+     * 传函数：配置改了之后装下一个包立刻用新源，不用重启。
+     */
+    registry: () => cfg.update?.registry || '',
     /** 装完马上把模型读进内存，用户第一次说话就不用等那 5 秒 */
     onDone: () => { tts.warmup().catch(() => {}); },
   });
@@ -2834,11 +2840,11 @@ export function apply(ctx) {
     /** 事件通道：auto = 装了 ws 就 WS、没装就 SSE；RPC 恒走 HTTP */
     transport: cfg.roostHost?.transport || 'auto',
     /**
-     * 找 ws 的顺序：**框架已装的** → 本插件自己装的 → 内置。
-     * 框架和本插件同机，用户为框架装过一次就够，不该让人装第二遍。
+     * 找 ws 的顺序：**框架已装的** → 全局（DSH 自带的 / 用户全局装的）→ 内置。
+     * 框架和本插件同机，用户为框架装过一次就够；DSH 桌面版自己就依赖 ws，
+     * 能直接复用就不该让人再装第二遍。都拿不到就是 null，自动走 SSE。
      */
-    /** 只用框架那一份；框架没装就是 null，自动走 SSE */
-    loadWs: async () => wsDeps.load(await roostDirOf()),
+    loadWs: async () => wsDeps.load(await roostDirOf()) ?? await wsDeps.loadGlobal(),
     /**
      * 连之前先确认 Roost 在跑。没跑就挂 `waiting` 等着，不发请求——
      * 否则面板上只会出现一屏「连不上（fetch failed）」，看不出真原因。
@@ -6346,7 +6352,11 @@ export function apply(ctx) {
               return send(res, 200, { ok: true, ...sharedDeps.status() });
             }
             case 'sharedDeps.install': {
-              const r = await sharedDeps.install(String(arg?.name ?? '').trim() || undefined, { log: (m) => log.info?.(m) });
+              const r = await sharedDeps.install(String(arg?.name ?? '').trim() || undefined, {
+                log: (m) => log.info?.(m),
+                /** 和自更新共用同一个源配置，面板里改一处就够了 */
+                registry: cfg.update?.registry || '',
+              });
               log.info(`共享依赖安装${r.ok ? '完成' : '失败'}：${r.name} ${r.message}`);
               return send(res, r.ok ? 200 : 500, r);
             }

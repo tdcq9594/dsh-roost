@@ -11,7 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 
 /** 每个用例一个独立数据目录：`dataDir()` 每次都读环境变量，改了立刻生效 */
 function sandbox(fn) {
@@ -108,4 +108,85 @@ test('用户自定义数据目录时，装的位置与受管块注入的值一�
   const m = block.match(/ROOST_DEPS_DIR: '([^']+)'/);
   assert.ok(m, '受管块里必须有 ROOST_DEPS_DIR');
   assert.equal(m[1].replace(/\\/g, '/'), join(dir, 'deps').replace(/\\/g, '/'));
+}));
+
+/* ---------------- 系统 PATH 上的 ffmpeg ---------------- */
+
+/**
+ * 造一个「PATH 上有 ffmpeg」的环境：临时目录里放一个同名空文件。
+ *
+ * 真实场景是用户用 apt / brew / choco / scoop 装过系统级 ffmpeg，
+ * 这时再下 62MB 的 npm 包纯属浪费——以前完全看不出这件事，
+ * 面板上永远显示「未安装」，点了就下一遍。
+ */
+function withFfmpegOnPath(fn) {
+  return async () => {
+    const bin = mkdtempSync(join(tmpdir(), 'dsh-ffbin-'));
+    const exe = join(bin, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+    writeFileSync(exe, '');
+    const oldPath = process.env.PATH;
+    const oldPathWin = process.env.Path;
+    process.env.PATH = `${bin}${delimiter}${oldPath || ''}`;
+    process.env.Path = process.env.PATH;
+    try {
+      await fn(bin, exe);
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldPathWin === undefined) delete process.env.Path;
+      else process.env.Path = oldPathWin;
+      rmSync(bin, { recursive: true, force: true });
+    }
+  };
+}
+
+test('系统 PATH 上有 ffmpeg：能找出来，且不算「宿主装好的那份」', sandbox(async () => {
+  await withFfmpegOnPath(async (_bin, exe) => {
+    const d = await fresh();
+    assert.equal(d.systemFfmpeg({ fresh: true }), exe);
+    /** 系统那份不并进受管状态：面板的「一键安装」按 available 显示 */
+    const s = d.status();
+    assert.equal(s.ffmpeg, '', '受管目录里还是没有');
+    assert.equal(s.systemFfmpeg, exe);
+    assert.equal(s.packages['@ffmpeg-installer/ffmpeg'].available, false);
+    assert.equal(s.packages['@ffmpeg-installer/ffmpeg'].system, exe);
+  })();
+}));
+
+test('系统已有 ffmpeg：默认仍然装到共享目录（扩展只认 ROOST_DEPS_DIR）', sandbox(async () => {
+  await withFfmpegOnPath(async (_bin, exe) => {
+    const d = await fresh();
+    /**
+     * 默认不跳过：扩展通过受管块里的 `ROOST_DEPS_DIR` 找二进制，
+     * 系统 PATH 上那份它们看不见。跳过会变成「面板说装好了、扩展说没装」。
+     * 这里只验「系统那份能被看见」，不真的跑 npm。
+     */
+    const r = d.resolveFfmpeg({ fresh: true });
+    assert.equal(r.source, 'system');
+    assert.equal(r.path, exe);
+    assert.equal(d.hasFfmpeg(), false, '受管那份还是没装');
+  })();
+}));
+
+test('系统已有 ffmpeg + 调用方明确要用系统的：跳过下载', sandbox(async () => {
+  await withFfmpegOnPath(async (_bin, exe) => {
+    const d = await fresh();
+    const r = await d.install('@ffmpeg-installer/ffmpeg', { preferSystem: true });
+    assert.equal(r.ok, true);
+    assert.equal(r.skipped, true);
+    assert.equal(r.source, 'system');
+    assert.equal(r.path, exe);
+    assert.match(r.message, /系统里已有/);
+  })();
+}));
+
+test('已经装好的纯 JS 包：预检直接复用，不再跑一遍 npm', sandbox(async (dir) => {
+  const d = await fresh();
+  const p = join(dir, 'deps', 'node_modules', 'qrcode');
+  mkdirSync(p, { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'qrcode', version: '1.5.4' }));
+
+  const r = await d.install('qrcode');
+  assert.equal(r.ok, true);
+  assert.equal(r.skipped, true);
+  assert.equal(r.source, 'managed');
 }));

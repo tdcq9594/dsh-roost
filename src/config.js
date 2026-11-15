@@ -991,6 +991,10 @@ export const DEFAULTS = {
    *
    * 默认走 npm 官方源；国内想换镜像填这里。空 = 用 DSH 自己配的 registry。
    * 只更新 dsh-roost 这一个包，不接受任意包名。
+   *
+   * **同一份值也给「装别人的东西」用**：宿主级共享依赖（ffmpeg / qrcode）的
+   * `npm install`、语音引擎的 tgz 直链下载，都读这里。面板里改一处，
+   * 三条下载路径一起生效。
    */
   update: {
     registry: '',

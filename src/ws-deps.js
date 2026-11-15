@@ -187,5 +187,28 @@ export function createWsDeps({ log = () => {} } = {}) {
     };
   }
 
-  return { status, load, installToRoost, depsRoot };
+  /**
+   * 全局兜底：框架目录里没有 ws 时，看看本进程能不能直接 `import('ws')`。
+   *
+   * 为什么要试：DSH 桌面版自己就用 ws，它的 `node_modules` 里一定有一份；
+   * 用户也可能全局装过。协议的两条通道（WS / SSE）能力完全一样，谁提供
+   * WebSocket 实现都行——能复用就别再让人为框架装一遍。
+   *
+   * 只在 `load()` 返回 null 时才调，**不改变 `load()` 的语义**：
+   * `load()` 仍然严格表示「框架那份装了没有」，面板据此显示安装状态。
+   *
+   * @returns {Promise<{WebSocket: Function}|null>}
+   */
+  async function loadGlobal() {
+    try {
+      const m = await import('ws');
+      const WS = m?.WebSocket ?? m?.default ?? null;
+      return WS ? { WebSocket: WS } : null;
+    } catch (e) {
+      log(`全局也没有 ws（继续用 SSE）：${e?.message ?? e}`);
+      return null;
+    }
+  }
+
+  return { status, load, loadGlobal, installToRoost, depsRoot };
 }
