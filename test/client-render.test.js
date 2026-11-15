@@ -263,6 +263,32 @@ test('前端渲染：人格页的分节要把并列的多块内容都渲染出�
   assert.ok(txt.includes('人格正文在 personas/*.md'), '人格正文说明没渲染出来')
 })
 
+test('前端渲染：安全防护页要有能点的开关，不是两行只读文字', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'security'
+  rt.reset()
+  const tree = expand(mod.RoostPage(), rt)
+
+  const switches = []
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.role === 'switch') switches.push(n)
+    walk(n.props?.children)
+  })(tree)
+
+  /**
+   * 1.3.1 这页是纯只读（「已开启 / 已关闭」两行字），用户的原话是
+   * 「这些功能的开关怎么没有」。全仓又找不到第三个写 `security` 的地方，
+   * 等于这两道闸只能手改 config.json。这条测试钉住「开关真的在」。
+   */
+  assert.equal(switches.length, 2, '危险命令确认 + 内网放行各一个开关')
+  assert.ok(switches.every((s) => typeof s.props.onClick === 'function'), '开关要能点')
+  assert.ok(textOf(tree).includes('白名单'), '白名单要能从面板改')
+  assert.ok(!textOf(tree).includes('这一页只读'), '不能再是只读页')
+})
+
 test('前端渲染：默认页签是概览，不是上次的残留', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)

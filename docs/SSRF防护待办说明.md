@@ -125,3 +125,43 @@ QQ 的附件 URL 通常是 `multimedia.nt.qq.com` 之类，但**字段本身是�
 - 官方两家实现本身就有 4 个可绕过缺口，照抄等于把漏洞一起搬进来。
 
 建议单独立一批，先写 `test/ssrf-guard.test.js` 钉死网段表与失败策略，再改两处调用点。
+
+---
+
+## 7. 1.3.2 落地记录（2026-11-15）
+
+1.3.1 上线后被两个真实场景打回来，本节是实际改法，前面的分析保留作背景。
+
+### 7.1 现场：fake-ip 代理把插件市场整个打死
+
+报错：`域名解析到内网地址 198.18.0.32，拒绝访问`（`ssrf.js` 的逐 IP 判定抛的）。
+
+- 插件市场索引 `raw.githubusercontent.com`、分发包 `codeload.github.com`；
+- Clash / mihomo 的 fake-ip 模式默认 `fake-ip-range: 198.18.0.1/16`，域名一律解析成假地址；
+- `isPrivateIp` 把 `198.18.0.0/15`（RFC 2544 benchmark 段）当保留段硬拒 → 挂了代理的用户**必然**打不开市场。
+
+结论：不是网络问题，是「校验假设公网解析」与「国内必须挂代理」的结构性冲突。
+
+### 7.2 改法
+
+| 改动 | 位置 | 说明 |
+|---|---|---|
+| `trustedHosts` | `ssrf.js` | 代码里写死的供应链主机**跳过 DNS 逐 IP 校验**，协议 / 端口 / 凭据 / 字面 IP 照旧判。四个域名 + 索引 URL 的 host |
+| `allowPrivate` 语义 | `ssrf.js` | 只放开 `isLanIp`（10/8、172.16/12、192.168/16、100.64/10、fc00::/7）；回环、169.254、198.18 等保留段仍拦 |
+| `blockedIp` | `ssrf.js` | 唯一裁决点，替代散在两处的 `isPrivateIp + allowLoopback` 组合 |
+| `allowHosts` 收紧 | `ssrf.js` | 不再豁免字面内网 IP（1.3.1 里白名单分支在前，`allowHosts:['127.0.0.1']` 能整道绕过） |
+| 接线 | `host.js` / `ext-market.js` | 1.3.1 的 `config.security.ssrf` **是死配置**：`allowPrivate` / `allowHosts` 写进磁盘后无人读。现在 `createExtMarket({ ssrf: () => cfg.security?.ssrf })`，每次出站重算白名单 |
+| 面板 | `client.js` `SecurityTab` | 从只读改成真开关（`saveCfg` 深合并、危险命令关闭要二次确认、白名单可编辑） |
+
+### 7.3 仍未做（维持 §6 的优先级）
+
+- 校验与请求绑同一 IP（自定义 `dispatcher`）：`trustedHosts` 放行的主机不再解析，但**用户白名单里的域仍是「查一次再 fetch 再解析一次」**，rebinding 窗口还在；
+- 重定向逐跳校验：现在靠 `assertSafeTarballUrl(res.url)` 事后补一刀；
+- `bot/src/host/media.js` 的 `assertUrl()` 仍然只校验协议（模型给的图片地址那条路）。
+
+### 7.4 测试
+
+`test/safety.test.js` 新增 4 条：`allowPrivate` 的放开 / 不放开边界、`allowHosts` 不豁免字面 IP、
+`trustedHosts` 跳过 DNS（用 `.invalid` 复现 fake-ip）、`marketGuardOpts` 的白名单过滤规则；
+`test/client-render.test.js` 新增 1 条：安全防护页必须渲染出两个可点的 `role=switch`。
+

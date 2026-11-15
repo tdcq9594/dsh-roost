@@ -1641,6 +1641,13 @@ export function apply(ctx) {
   }
   const extMarket = createExtMarket({
     dir: dataDir(), registry: extRegistry, extGroups, extPatch, capStore, log,
+    /**
+     * 5.11 的 SSRF 开关接进来。1.3.1 漏了这一步：`config.security.ssrf` 的
+     * `allowPrivate` / `allowHosts` 写进磁盘后没人读，面板上那句
+     * 「显式放行的域名：N 个」纯属摆设，用户按提示填了也不生效。
+     * 传 getter 而不是值：面板改完配置不该要求重启进程。
+     */
+    ssrf: () => cfg.security?.ssrf,
   });
   const extPanel = createExtPanel({
     dir: dataDir(), registry: extRegistry, clientStore: extClientStore,

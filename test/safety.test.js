@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { isDangerousCommand, createConfirmGate, dangerScanArgs } from '../src/safety.js';
-import { isPrivateIp, checkUrlSync, assertSafeUrl } from '../src/ssrf.js';
+import { isPrivateIp, isLanIp, checkUrlSync, assertSafeUrl } from '../src/ssrf.js';
+import { marketGuardOpts } from '../src/ext-market.js';
 
 test('危险命令：删根/格式化/关机/下载后执行都能认出来', () => {
   const danger = [
@@ -196,4 +197,70 @@ test('接线：guard 拦危险命令、确认在 QQ 里回、出站 URL 有校�
   assert.ok(host.includes('confirmGate.onMessage(chat.chatId, said)'), '要处理确认回复');
   assert.ok(host.includes('dangerousConfirm !== false'), '默认开、可关');
   assert.ok(market.includes('await assertSafeUrl(url'), '出站前要校验');
+  /**
+   * 1.3.1 的 `config.security.ssrf` 是死配置：`allowPrivate` / `allowHosts`
+   * 写进磁盘后没有任何一处读它。面板上那句「显式放行的域名：N 个」纯属摆设。
+   */
+  assert.ok(host.includes('ssrf: () => cfg.security?.ssrf'), 'security.ssrf 要接到插件市场');
+  assert.ok(market.includes('marketGuardOpts(readSsrf()'), '市场出站前要按配置取白名单');
+});
+
+test('SSRF：allowPrivate 只放开局域网段，回环 / 云元数据 / 保留段照旧拦', () => {
+  assert.throws(() => checkUrlSync('http://10.1.2.3/'), /内网/);
+  assert.ok(checkUrlSync('http://10.1.2.3/', { allowPrivate: true }));
+  assert.ok(checkUrlSync('http://192.168.1.9:8080/', { allowPrivate: true }));
+  assert.ok(checkUrlSync('http://100.100.1.1/', { allowPrivate: true }), 'CGNAT / Tailscale 也算内网');
+  assert.throws(() => checkUrlSync('http://127.0.0.1/', { allowPrivate: true }), /内网|回环/);
+  assert.throws(() => checkUrlSync('http://169.254.169.254/', { allowPrivate: true }), /内网/, '云元数据不跟着放开');
+  assert.throws(() => checkUrlSync('http://198.18.0.32/', { allowPrivate: true }), /内网/, 'fake-ip 段不是「局域网」');
+  assert.equal(isLanIp('198.18.0.32'), false);
+  assert.equal(isLanIp('100.100.1.1'), true);
+  assert.equal(isLanIp('172.20.0.1'), true);
+  assert.equal(isLanIp('8.8.8.8'), false);
+});
+
+test('SSRF：allowHosts 是「哪个域名」，不再连带豁免字面内网 IP', async () => {
+  /** 1.3.1 里白名单分支排在字面 IP 判定之前，`allowHosts:['10.0.0.1']` 能整道绕过 */
+  assert.throws(() => checkUrlSync('http://10.1.2.3/', { allowHosts: ['10.1.2.3'] }), /内网/);
+  await assert.rejects(() => assertSafeUrl('http://10.1.2.3/', { allowHosts: ['10.1.2.3'] }), /内网/);
+});
+
+test('SSRF：可信主机只跳过 DNS 段校验（fake-ip 代理不再误杀插件市场）', async () => {
+  const url = 'https://no-such-host.invalid/';
+  /**
+   * 不带 trustedHosts 时注定过不去：要么解析失败，要么解析出的地址被判内网。
+   * 后一种正是本机挂 Clash fake-ip 时发生的事（实测解析到 198.18.x.x），
+   * 所以两种结果都算「挡住了」，别把测试写死成某一种。
+   */
+  await assert.rejects(() => assertSafeUrl(url), /解析失败|内网/);
+  assert.equal(
+    await assertSafeUrl(url, { trustedHosts: ['no-such-host.invalid'] }),
+    url,
+    '可信主机不解析，直接放行',
+  );
+  /** 但协议 / 端口 / 字面内网 IP 不受 trustedHosts 保护 */
+  await assert.rejects(
+    () => assertSafeUrl('http://10.1.2.3/', { trustedHosts: ['10.1.2.3'] }),
+    /内网/,
+  );
+  await assert.rejects(
+    () => assertSafeUrl('ftp://no-such-host.invalid/', { trustedHosts: ['no-such-host.invalid'] }),
+    /http/,
+  );
+});
+
+test('市场：白名单配置翻成 assertSafeUrl 选项（字面 IP 不许进白名单）', () => {
+  const o = marketGuardOpts({
+    allowPrivate: true,
+    allowHosts: [' raw.githubusercontent.com ', '10.0.0.1', '127.0.0.1', '', null],
+  }, 'https://mirror.example.com/index.json');
+  assert.equal(o.allowPrivate, true);
+  assert.deepEqual(o.allowHosts, ['raw.githubusercontent.com'], '字面 IP 与空值要滤掉');
+  assert.ok(o.trustedHosts.includes('codeload.github.com'), '分发包主机免 DNS');
+  assert.ok(o.trustedHosts.includes('objects.githubusercontent.com'), '重定向后的主机也在');
+  assert.ok(o.trustedHosts.includes('mirror.example.com'), '自建镜像的索引主机也要能过');
+  const d = marketGuardOpts(undefined, 'http://127.0.0.1:8080/index.json');
+  assert.equal(d.allowPrivate, false);
+  assert.deepEqual(d.allowHosts, []);
+  assert.ok(!d.trustedHosts.includes('127.0.0.1'), '本机镜像走 allowLoopback，不进可信域名表');
 });

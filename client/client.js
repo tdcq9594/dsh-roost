@@ -14708,47 +14708,135 @@ select.roost-input{color-scheme:dark}
 
     /**
      * A6（第二轮对照）：安全防护独立页。
-     * 后端 5.11 的两道闸一直开着，面板却只有设置页一段说明 + 几个跳转按钮，
-     * 用户看不见「现在到底是开是关」。这里只读展示 config.security，
-     * 不在面板再造一份草稿（改仍走「设置 → 配置全文」，避免两份真相）。
+     *
+     * 上一版是纯只读（「已开启 / 已关闭」两行字），用户的反馈很直接：
+     * 「这些功能的开关怎么没有」。全仓找不到第三个写 `security` 的地方，
+     * 结果就是这两道闸**只能靠手改 config.json**，等于没有入口。
+     *
+     * 这一版改成真开关，走 `saveCfg`（`?mode=patch`，深合并）：只提交
+     * `security` 下被点的那一个键，不会把 `ssrf.allowHosts` 顶掉。
+     * 关掉「危险命令确认」是降安全等级的动作，先弹确认框再提交。
      */
-    function SecurityTab({ config, setTab }) {
+    function SecurityTab({ config, saveCfg, toast, setTab }) {
       const s = config?.security || {}
       const ssrf = s.ssrf || {}
       const hosts = Array.isArray(ssrf.allowHosts) ? ssrf.allowHosts : []
-      const row = (label, on, hint) => h('div', { className: 'roost-item' },
+      const [saving, setSaving] = useState(false)
+      const [err, setErr] = useState('')
+      const [askOff, setAskOff] = useState(false)
+      /** 白名单草稿：每行一个域名；config 从别处变了且没动过草稿就跟上 */
+      const [draftHosts, setDraftHosts] = useState(hosts.join('\n'))
+      const [touched, setTouched] = useState(false)
+      const hostKey = hosts.join('\n')
+      useEffect(() => { if (!touched) setDraftHosts(hostKey) }, [hostKey])
+
+      const patch = async (next, okText) => {
+        if (!saveCfg) { setErr('面板没接上保存接口，请刷新重试'); return }
+        setSaving(true); setErr('')
+        try {
+          const r = await saveCfg({ security: next })
+          if (r && r.ok === false) setErr(r.error || r.message || '保存失败')
+          else toast?.(okText || '已保存')
+        } catch (e) {
+          setErr(String(e?.message || e))
+        } finally {
+          setSaving(false)
+        }
+      }
+
+      const saveHosts = () => {
+        const list = draftHosts.split(/[\s,，;；]+/).map((x) => x.trim()).filter(Boolean)
+        setTouched(false)
+        patch({ ssrf: { allowHosts: list } }, list.length ? `已保存 ${list.length} 个域名` : '白名单已清空')
+      }
+
+      /** 状态字与开关并排：文字说清「现在是开是关」，开关负责改 */
+      const row = (label, on, hint, onToggle, extra) => h('div', { className: 'roost-item' },
         h('span', { className: 't' }, label,
           h('span', { className: 'd' }, ' · ' + (on ? '已开启' : '已关闭'))),
-        h('span', { className: 'd' }, hint))
+        h('div', {
+          style: {
+            marginLeft: 'auto', display: 'flex', alignItems: 'center',
+            gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end',
+          },
+        },
+          h('span', { className: 'd', style: { textAlign: 'right' } }, hint),
+          extra || null,
+          onToggle ? h(Switch, {
+            on, disabled: saving || !config, label,
+            onToggle,
+          }) : null))
+
       return h('div', null,
         h(Sec, { n: '01', title: '危险命令确认' },
           row('执行前先在 QQ 里问一句「确认」', s.dangerousConfirm !== false,
-            '删根目录 / 格式化 / 关机 / 下载后执行；60 秒不回就拦下。'),
+            '删根目录 / 格式化 / 关机 / 下载后执行；60 秒不回就拦下。',
+            (next) => (next ? patch({ dangerousConfirm: true }, '已开启') : setAskOff(true))),
           h('div', { className: 'roost-note' },
-            '对应 config.security.dangerousConfirm。这是工具层的硬闸，不靠模型自觉；关掉等于把这些动作直接放行。'),
+            '对应 config.security.dangerousConfirm。这是工具层的硬闸，不靠模型自觉；关掉等于把这些动作直接放行，'
+            + '所以关闭要先在面板上确认一次。'),
         ),
         h(Sec, { n: '02', title: '出站 URL 防护（SSRF）' },
-          row('默认拒绝内网地址', !ssrf.allowPrivate, '协议 / 端口 / DNS 解析后的逐 IP 都校验。'),
+          row('默认拒绝内网地址', !ssrf.allowPrivate,
+            '协议 / 端口 / DNS 解析后的逐 IP 都校验。',
+            (next) => patch({ ssrf: { allowPrivate: !next } }, next ? '已改为放行内网' : '已恢复默认拒绝'),
+            h('span', { className: 'd', style: { opacity: 0.7 } }, '（开着 = 允许自建内网服务）')),
           h('div', { className: 'roost-note' },
-            `显式放行的域名：${hosts.length} 个`
-            + (hosts.length ? '（' + hosts.slice(0, 5).join('、') + '）' : '')
-            + '。生图、TTS、云端 ASR、备份远端这些填 URL 的地方共用同一道校验。'),
+            '关闭后只放开 10/8、172.16/12、192.168/16、100.64/10 这类局域网段；'
+            + '回环、云元数据（169.254）和保留段照旧拦着。'),
+          h('div', { style: { marginTop: 10 } },
+            h('div', { className: 'roost-note', style: { marginBottom: 6 } },
+              `显式放行的域名：${hosts.length} 个。每行一个，只写域名（端口和协议不用写）。`),
+            h('textarea', {
+              className: 'roost-input',
+              value: draftHosts,
+              spellCheck: false,
+              placeholder: '例如：raw.githubusercontent.com',
+              rows: 3,
+              disabled: saving || !config,
+              style: { width: '100%', fontFamily: 'ui-monospace, monospace', fontSize: 12 },
+              onChange: (e) => { setTouched(true); setDraftHosts(e.target.value) },
+            }),
+            h('div', { style: { display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' } },
+              h('button', {
+                type: 'button', className: 'roost-primary',
+                disabled: saving || !config || !touched,
+                onClick: saveHosts,
+              }, touched ? '保存白名单' : '白名单已保存'),
+              h('span', { className: 'd' }, '生图、TTS、云端 ASR、备份远端这些填 URL 的地方共用同一道校验。'),
+            ),
+          ),
+          h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            '插件市场的几个入口（raw.githubusercontent.com / codeload.github.com / github.com）'
+            + '不参与 DNS 网段校验——它们不归攻击者控制，而开了 Clash 之类 fake-ip 代理时所有域名'
+            + '都会解析成 198.18.x.x 假地址，逐 IP 校验会把「挂了代理的正常用户」全拦死。'),
         ),
-        h(Sec, { n: '03', title: '在哪儿改 / 去哪儿看' },
+        h(Sec, { n: '03', title: '在哪儿看 / 怎么排查' },
           config ? null : h('div', { className: 'roost-empty' }, '配置还没读到，上面的状态按默认值显示。'),
+          err ? h('div', { className: 'roost-empty', style: { color: 'var(--danger, #e5484d)' } }, err) : null,
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h('button', {
               type: 'button', className: 'roost-btn',
               onClick: () => { if (setTab) setTab('config') },
-            }, '去设置改配置 ↗'),
+            }, '去配置全文核一遍 ↗'),
             h('button', {
               type: 'button', className: 'roost-btn',
               onClick: () => { if (setTab) setTab('logs') },
             }, '去排障看日志 ↗'),
           ),
           h('div', { className: 'roost-note' },
-            '这一页只读：开关在「设置 → 配置全文」的 security 段改，避免面板草稿与服务端配置变成两份真相。'),
+            '这一页的开关直接写服务端配置（深合并，只改被点的那一个键）；'
+            + '「配置全文」仍可看到同一个 security 段，两边读的是同一份 —— 改完立刻生效，不用重启。'),
         ),
+        askOff ? h(ConfirmModal, {
+          title: '关掉危险命令确认？',
+          danger: true,
+          message: '关掉之后，删根目录、格式化磁盘、关机、下载后直接执行这类命令不会再在 QQ 里问你，模型说执行就执行。\n\n'
+            + '只建议在完全信任当前模型与工作区的时候这么做。',
+          confirmText: '仍然关掉',
+          onClose: () => setAskOff(false),
+          onConfirm: async () => { setAskOff(false); await patch({ dangerousConfirm: false }, '已关闭') },
+        }) : null,
       )
     }
 
@@ -16536,8 +16624,8 @@ select.roost-input{color-scheme:dark}
                   '这页是接入的正门：装没装、凭证、在不在跑、组件版本都在这儿。老链接 ?tab=setup 打开的是同一份内容，两边都留着。'),
                 h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }))
             : null,
-          /** A6：安全防护独立页，只读 config.security，不新增配置草稿 */
-          tab === 'security' ? h(SecurityTab, { config, setTab }) : null,
+          /** A6：安全防护独立页；5.14 起开关可写（深合并到同一个 security 段） */
+          tab === 'security' ? h(SecurityTab, { config, saveCfg, toast, setTab }) : null,
           tab === 'her'
             ? h(HerTab, {
                 config,

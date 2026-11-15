@@ -17,6 +17,7 @@
  *      **不接受扩展仓下发的任何 `env` / `!!js` / YAML tag**（§8.2 第 3 条）。
  */
 import fs from 'node:fs';
+import { isIP } from 'node:net';
 import { assertSafeUrl } from './ssrf.js';
 import { join } from 'node:path';
 
@@ -85,6 +86,48 @@ function tarballUrl(repo, branch = 'main') {
 /** 允许的分发包主机：与索引一样属于供应链入口，不能放开到任意 https。 */
 const TARBALL_HOSTS = new Set(['codeload.github.com', 'github.com', 'objects.githubusercontent.com']);
 
+/**
+ * 代码里写死、不归攻击者控制的供应链主机。它们的 DNS 结果**不参与**
+ * 逐 IP 网段校验（别的检查照旧）：
+ *
+ *   · 这几个域名不存在 rebinding 的余地——谁也没法把
+ *     `raw.githubusercontent.com` 指到自己内网；
+ *   · 但 Clash / mihomo 的 fake-ip 模式默认把 `198.18.0.0/16` 当假地址池，
+ *     这些域名会被解析成 `198.18.x.x`，逐 IP 校验把它当保留段拒掉，
+ *     结果「挂了代理的正常用户」插件市场永远打不开（1.3.1 实测报错：
+ *     `域名解析到内网地址 198.18.0.32，拒绝访问`）。
+ *
+ * 官方实现（openclaw 的 `ssrf-guard.ts`）也是同样的取舍：QQ 官方域名白名单免解析。
+ */
+const TRUSTED_HOSTS = ['raw.githubusercontent.com', 'github.com', 'codeload.github.com',
+  'objects.githubusercontent.com'];
+
+/**
+ * 把 `config.security.ssrf` 翻成 `assertSafeUrl` 的选项。
+ *
+ * 1.3.1 的两个字段是**死配置**：`allowPrivate` / `allowHosts` 写进 config 后
+ * 没有任何一处读它，面板上「显式放行的域名：N 个」读的是个没人用的字段。
+ * 这里补上接线，同时做三道收窄：
+ *   · 字面 IP 不进白名单（白名单是「哪个域名可以访问」，不是「哪个 IP」）；
+ *   · 索引主机只在它是域名时才当可信（本机镜像走 `allowLoopback`）；
+ *   · `allowPrivate` 只放开局域网私有段，回环 / 云元数据 / 保留段仍由
+ *     `ssrf.js` 的 `blockedIp` 拦。
+ */
+export function marketGuardOpts(ssrfCfg, indexUrl = DEFAULT_EXT_INDEX_URL) {
+  const cfg = ssrfCfg && typeof ssrfCfg === 'object' ? ssrfCfg : {};
+  const allowHosts = (Array.isArray(cfg.allowHosts) ? cfg.allowHosts : [])
+    .map((h) => String(h ?? '').trim().toLowerCase())
+    .filter((h) => h && !isIP(h));
+  const trustedHosts = [...TRUSTED_HOSTS];
+  try {
+    const h = new URL(String(indexUrl)).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (h && !isIP(h) && !trustedHosts.includes(h)) trustedHosts.push(h);
+  } catch {
+    /** indexUrl 不合法时由 assertSafeIndexUrl 报错，这里不抢跑 */
+  }
+  return { allowPrivate: cfg.allowPrivate === true, allowHosts, trustedHosts };
+}
+
 export function assertSafeTarballUrl(raw) {
   let u;
   try { u = new URL(String(raw)); } catch { throw new Error('分发包地址不是合法 URL'); }
@@ -93,24 +136,33 @@ export function assertSafeTarballUrl(raw) {
   return u.href;
 }
 
-async function defaultFetchText(url) {
+/**
+ * @param {string} url
+ * @param {object} [guard] `marketGuardOpts()` 的结果；不传则等价于 1.3.1 的
+ *   「只放行本机回环」口径（测试和自定义 fetch 的老调用方不受影响）。
+ */
+async function defaultFetchText(url, guard = {}) {
   /**
    * 5.11：主机白名单只挡了「字面地址」，挡不住域名解析到 127.0.0.1 /
    * 169.254.169.254（DNS rebinding）。出站前逐 IP 再校一次。
    * 索引允许本机回环 http（自建镜像），与 assertSafeIndexUrl 口径一致。
    */
-  await assertSafeUrl(url, { allowLoopback: true });
+  await assertSafeUrl(url, { allowLoopback: true, ...guard });
   const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) });
   if (!res.ok) throw new Error(`拉索引失败：HTTP ${res.status}`);
   return await res.text();
 }
 
 /** 默认下载：GitHub codeload 的 tar.gz → 剥顶层 → 取 `entry.path` 子树 → 安全落盘。 */
-async function defaultDownload(entry, dest, { repo, branch } = {}) {
+async function defaultDownload(entry, dest, { repo, branch, guard = {} } = {}) {
   const raw = entry.tarball || (repo ? tarballUrl(repo, branch) : '');
   if (!raw) throw new Error('索引条目缺 tarball，且索引里没有 repo 可拼下载地址');
   const url = assertSafeTarballUrl(raw);
-  await assertSafeUrl(url);
+  /**
+   * 分发包同样要过统一校验。`assertSafeTarballUrl` 已经把主机锁在
+   * `TARBALL_HOSTS` 内，这里补的是 DNS 那一层（同样受 fake-ip 影响）。
+   */
+  await assertSafeUrl(url, guard);
   const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(60_000) });
   if (!res.ok) throw new Error(`下载分发包失败：HTTP ${res.status}`);
   /**
@@ -138,8 +190,14 @@ async function defaultDownload(entry, dest, { repo, branch } = {}) {
 export function createExtMarket({
   dir = dataDir(),
   indexUrl = DEFAULT_EXT_INDEX_URL,
-  fetchText = defaultFetchText,
-  download = defaultDownload,
+  /** `null` = 用默认实现（带 SSRF 校验）；注入自定义实现时校验由调用方负责 */
+  fetchText = null,
+  download = null,
+  /**
+   * `config.security.ssrf`：可以是对象，也可以是 getter（配置热更新后即时生效）。
+   * 不传 = 按 1.3.1 的老口径（只放行本机回环）。
+   */
+  ssrf = {},
   /**
    * 索引验签钩子（`({url, text}) => {ok, why}`）。
    *
@@ -160,6 +218,12 @@ export function createExtMarket({
   if (!registry || typeof registry.install !== 'function') {
     throw new Error('createExtMarket 需要 registry');
   }
+  const readSsrf = typeof ssrf === 'function' ? ssrf : () => ssrf;
+  /** 每次出站都重算：面板改了白名单不该要求重启进程 */
+  const guardNow = () => marketGuardOpts(readSsrf(), indexUrl);
+  const fetchIndex = fetchText ?? ((url) => defaultFetchText(url, guardNow()));
+  const downloadPkg = download
+    ?? ((entry, dest, opts) => defaultDownload(entry, dest, { ...opts, guard: guardNow() }));
   const tmpRoot = join(dir, '.market-tmp');
   let cache = null;
 
@@ -177,7 +241,7 @@ export function createExtMarket({
     const t = now();
     if (!refresh && cache && t - cache.at < ttlMs) return cache.value;
     const url = assertSafeIndexUrl(indexUrl);
-    const text = await fetchText(url);
+    const text = await fetchIndex(url);
     if (typeof verifyIndex === 'function') {
       const v = await verifyIndex({ url, text });
       if (!v?.ok) throw new Error(`索引验签未通过：${v?.why ?? '签名缺失或不匹配'}`);
@@ -297,7 +361,7 @@ export function createExtMarket({
        */
       const want = String(entry.sha256 ?? '').toLowerCase();
       if (!/^[0-9a-f]{64}$/.test(want)) throw new Error('索引条目缺 sha256，拒绝安装（无法校验内容）');
-      await download(entry, staging, { repo: idx.repo, branch: idx.branch ?? 'main' });
+      await downloadPkg(entry, staging, { repo: idx.repo, branch: idx.branch ?? 'main' });
       setPhase('verify', '正在校验目录哈希', key);
       const got = await hashDir(staging);
       if (got !== want) {
