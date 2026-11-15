@@ -42,6 +42,7 @@
  */
 
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { dirname } from 'node:path';
 
 /** 一条消息最多留几天等结果。超过就当没结果，别让文件无限长 */
@@ -98,7 +99,11 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
     const m = load();
     try {
       mkdirSync(dirname(file), { recursive: true });
-      const tmp = file + '.tmp';
+      /**
+       * 随机 tmp 名。固定 `file + '.tmp'` 只防「断电留半个文件」，
+       * 不防两个写者同时写同一个临时文件——后写的会覆盖前一个还没 rename 的内容。
+       */
+      const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
       writeFileSync(tmp, JSON.stringify(m, null, 2), 'utf8');
       renameSync(tmp, file); // 原子替换，断电不会留半个文件
     } catch {
