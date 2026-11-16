@@ -354,7 +354,14 @@ export function createApiV1({
         : known ? `disabled ${known.extId ? `ext:${known.extId}` : known.id}`
           : 'unknown-token';
       note('auth_failed', key);
-      try { auditFn({ op: 'ext.auth_failed', note: `${key.slice(0, 40)} | ${who}`.slice(0, 80) }); } catch { /* 同上 */ }
+      /**
+       * 上限 120 而不是 80：`EXT_ID_RE` 允许 id 到 32 字符，`disabled ext:` 前缀
+       * 13 个，who 最长 45。当前最长端点 26 字符，26 + 3 + 45 = 74，离 80 只剩
+       * 6 字符余量——**端点改个名字就会把 who 从中间切断**，面板拿到半截 id
+       * （`disabled ext:bil`）对不上停用名单，「能点名」静默退化成通用文案。
+       * 余量不值得省这几十字节。
+       */
+      try { auditFn({ op: 'ext.auth_failed', note: `${key.slice(0, 40)} | ${who}`.slice(0, 120) }); } catch { /* 同上 */ }
       reject({ tool: key, bucket: 'unknown', rule: 'Bearer 令牌无效或已吊销（401）' });
       return send(401, {
         ok: false,

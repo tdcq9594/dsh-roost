@@ -14623,10 +14623,10 @@ select.roost-input{color-scheme:dark}
                 const who = String(data.status.authFailedWho || '');
                 const off = Array.isArray(data.status.disabledClients) ? data.status.disabledClients : [];
                 if (who.startsWith('disabled ext:')) {
-                  return `「${who.slice('disabled ext:'.length)}」已被停用，但它的进程可能还在跑（宿主已经不认它的令牌）。重新启用后要重启 DSH 才会生效。`;
+                  return `「${who.slice('disabled ext:'.length)}」已被停用，但它的进程可能还在跑（宿主已经不认它的令牌）。重新启用后要重启 DSH 才会生效；不打算再用了就卸载它，这行字会跟着记录一起消失。`;
                 }
                 if (off.length) {
-                  return `这些扩展被停用了：${off.join('、')}。它们的进程如果还在跑就会一直 401 —— 重启 DSH 即可。`;
+                  return `这些扩展被停用了：${off.join('、')}。它们的进程如果还在跑就会一直 401 —— 重启 DSH 即可；不打算再用了就卸载，这行字会跟着消失。`;
                 }
                 if (who === 'unknown-token') {
                   return '令牌对不上（常见原因：备份还原后 secrets 丢了、手动改过、或者换了数据目录）。重新签发一次，再重启 DSH。';

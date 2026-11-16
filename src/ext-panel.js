@@ -560,8 +560,12 @@ export function createExtPanel({
      * 「令牌不对」的意思；但「被停用」这种能认出来，就一定要认出来：
      * 用户在面板上点了「停用」，DSH 里的进程还在跑，于是永久 401，
      * 而面板只会说「检查令牌是否被吊销」，指错方向。
+     *
+     * 解析时**取最后一段**而不是 `[1]`：端点里理论上不含 `|`，但按位置取会在
+     * 哪天格式变成 `端点 | 附加 | who` 时静默拿错，而 who 是各分支共同的尾段。
      */
-    const failWho = String(lastFail?.note ?? '').split('|')[1]?.trim() ?? '';
+    const noteParts = String(lastFail?.note ?? '').split('|');
+    const failWho = (noteParts.length > 1 ? noteParts[noteParts.length - 1] : '').trim();
     const disabledClients = (clientStore.list?.() ?? [])
       .filter((c) => c.enabled === false && c.extId)
       .map((c) => String(c.extId));
@@ -577,10 +581,24 @@ export function createExtPanel({
      */
     const failedId = failWho.startsWith('disabled ext:') ? failWho.slice('disabled ext:'.length) : '';
     const stillOff = Boolean(failedId) && disabledClients.includes(failedId);
+    /**
+     * **对象已经不存在了**才算「这条失败记录过时」——目录和客户端记录都没了。
+     *
+     * 卸载之后不该继续指着一条历史审计亮红灯：按时间的旧判据会一直亮
+     * （卸载后不会再有成功调用，`lastFail.at > lastOkAt` 恒成立），表现是
+     * 「红灯怎么点都消不掉」，用户只能以为面板坏了。
+     *
+     * **重新启用不算「不存在」**：进程还是旧令牌、还在 401，这时灯必须继续亮，
+     * 那正是「重启 DSH 才会生效」要提醒的事。所以这里只多开一个「对象没了」的
+     * 出口，不动 `stillOff` 与时间判据的关系。
+     */
+    const dirThere = Boolean(failedId) && Boolean(registry.pathOf?.(failedId))
+      && fs.existsSync(registry.pathOf(failedId));
+    const gone = Boolean(failedId) && !stillOff && !dirThere;
     return {
       ok: true,
       /** 当前是否处于失败态（失败之后还没成功过）。 */
-      authFailed: Boolean(lastFail && (stillOff || lastFail.at > lastOkAt)),
+      authFailed: Boolean(lastFail && !gone && (stillOff || lastFail.at > lastOkAt)),
       regenerated: Boolean(lastRegen && lastRegen.at > lastOkAt),
       /** 历史事实：曾经失败过 / 曾经因备份还原重建过令牌。 */
       authFailedEver: authFailed.length > 0,

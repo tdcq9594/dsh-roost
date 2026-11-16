@@ -454,3 +454,79 @@ test('鉴权失败：别的扩展调通了，不能把停用那个的红灯熄�
   r.clientStore.add({ id: 'ext:bili', name: '扩展 bili', hash: 'x', extId: 'bili', enabled: true, scopes: [] });
   assert.equal(r.panel.status().authFailed, false, '重新启用后不再按「还在停用」算');
 });
+
+/**
+ * 能点名的红灯，「为什么亮 / 什么时候灭」要说清楚：
+ *
+ *   · 扩展还被停用            → 亮（提醒「进程可能还在跑，重启 DSH」）
+ *   · 重新启用但还没调通       → **仍然亮**：进程还是旧令牌，401 还在发生。
+ *                               提前熄灯就是回到「灯灭了、扩展照样 401」那个旧毛病。
+ *   · 真的调通一次            → 灭（这条在原有用例里已覆盖）
+ *   · 卸载了（目录+记录都没了）→ 灭：对象已经不存在，不能指着一个历史审计常亮
+ *
+ * 最后一条是这次修的：旧判据比时间，卸载后不会再有成功调用，
+ * `lastFail.at > lastOkAt` 恒成立，红灯怎么点都消不掉。
+ */
+test('鉴权失败：重新启用但还没调通，红灯必须继续亮（不能提前熄灯）', () => {
+  const r = rig({});
+  r.clientStore.add({ id: 'ext:bili', name: '扩展 bili', hash: 'x', extId: 'bili', enabled: false, scopes: [] });
+  /** 只有失败、一次成功都没有：lastOkAt 是 0 */
+  fs.writeFileSync(join(r.d, 'audit.log'), [
+    JSON.stringify({ at: 10, op: 'ext.auth_failed', note: 'GET /v1/state | disabled ext:bili' }),
+  ].join('\n') + '\n', 'utf8');
+  assert.equal(r.panel.status().authFailed, true);
+
+  r.clientStore.add({ id: 'ext:bili', name: '扩展 bili', hash: 'x', extId: 'bili', enabled: true, scopes: [] });
+  const s = r.panel.status();
+  assert.equal(s.authFailedWho, 'disabled ext:bili');
+  assert.equal(s.authFailed, true, '进程还在用旧令牌 401，灯不能先灭 —— 那正是要提醒重启 DSH 的时候');
+});
+
+test('鉴权失败：卸载之后红灯要灭（旧审计记录不代表现状）', () => {
+  /** 走市场装的，才允许直接卸载（用户手写目录要 force） */
+  const r = rig({ source: MARKET_SOURCE() });
+  r.clientStore.add({ id: 'ext:bili', name: '扩展 bili', hash: 'x', extId: 'bili', enabled: false, scopes: [] });
+  fs.writeFileSync(join(r.d, 'audit.log'), [
+    JSON.stringify({ at: 10, op: 'ext.auth_failed', note: 'GET /v1/state | disabled ext:bili' }),
+  ].join('\n') + '\n', 'utf8');
+  assert.equal(r.panel.status().authFailed, true);
+
+  /** 真实卸载路径：删目录 + 删客户端记录 */
+  assert.equal(r.registry.remove('bili').ok, true);
+  assert.equal(r.clientStore.revoke('ext:bili'), true);
+
+  const s = r.panel.status();
+  assert.equal(s.authFailed, false, '这个扩展已经不存在了，红灯没有可指向的对象');
+  assert.equal(s.authFailedEver, true, '「曾经失败过」这个历史事实仍要留着');
+});
+
+test('鉴权失败：api-v1 写进审计的点名，面板要能原样认出来（跨模块契约）', async () => {
+  const r = rig({});
+  const audits = [];
+  const api = createApiV1({
+    dir: r.d, clientStore: r.clientStore,
+    auditFn: (e) => audits.push(e),
+    onReject: () => {},
+  });
+  /** `EXT_ID_RE` 上限 32 字符，加上 `disabled ext:` 前缀共 45 —— note 里最长的那段 */
+  const id = 'a'.repeat(32);
+  const token = 'tok-long-id';
+  r.clientStore.add({
+    id: `ext:${id}`, name: `扩展 ${id}`,
+    hash: createHash('sha256').update(token).digest('hex'),
+    extId: id, scopes: [], enabled: false,
+  });
+  /** 最长端点之一：端点名字变长时，长度上限最容易在这里先把 who 吃掉 */
+  const res = await callV1(api, 'POST', '/v1/memory/facts/edit', { token });
+  assert.equal(res.status, 401);
+
+  const note = String(audits.find((a) => a.op === 'ext.auth_failed')?.note ?? '');
+  assert.ok(note.includes(`disabled ext:${id}`), `审计里的点名必须完整，实际是：${note}`);
+
+  /** 同一条审计喂给面板：who 要能被解析出来，并且对上停用名单 */
+  fs.writeFileSync(join(r.d, 'audit.log'), `${JSON.stringify({ at: 10, op: 'ext.auth_failed', note })}\n`, 'utf8');
+  const s = r.panel.status();
+  assert.equal(s.authFailedWho, `disabled ext:${id}`);
+  assert.ok(s.disabledClients.includes(id));
+  assert.equal(s.authFailed, true);
+});
