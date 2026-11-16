@@ -24,6 +24,7 @@ import { createInboundShell } from './inbound-shell.js';
 import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf, speakerTag, normalizeKind, sceneOfKind, isPrivateKind, isChannelChat, isChannelEvent } from './inbound.js';
 import { createAsrRecent } from './asr-recent.js';
+import { createAvatarCache } from './avatar-cache.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools, isOwnerSender } from './permissions.js';
 import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
 import { resolvePolicy, dangerOf, BUCKETS, defaultStore } from './capabilities.js';
@@ -2525,8 +2526,24 @@ export function apply(ctx) {
     return { ...cfg.persona, byChat: { ...(cfg.persona?.byChat || {}), [chatId]: picked } };
   }
 
-  /** 动态块的字数硬上限（token 预算的粗护栏，先粗后细） */
-  const SCENE_MAX = 240;
+  /**
+   * 动态块的字数硬上限（token 预算的粗护栏，先粗后细）。
+   *
+   * 340（原 240）：场景块里要放头像的**本地绝对路径**
+   * （`C:\Users\…\dsh-roost\avatars\1a2b…jpg` 约 60 字符），再加上
+   * 「群号 + 群 openid + 说话人 + QQ 号」，240 会把尾巴截掉——而尾巴是
+   * 「群里可能还有别人，不必每句都接」这类**行为约束**，比头像重要得多。
+   */
+  const SCENE_MAX = 340;
+
+  /**
+   * 头像本地缓存：给模型的是路径，不是 URL。
+   *
+   * 模型读不出 URL 里的内容，qlogo 的地址还带一次性 key（转手就 403）；
+   * 落成本地文件后可以直接 `<<image: 路径>>` 发出去，也能被视觉工具读。
+   * TTL 内同一个人不重复下载，`qq_who` 查询时才强制刷新。
+   */
+  const avatars = createAvatarCache({ dir: join(dataDir(), 'avatars'), log: (m) => log.warn(m) });
   /** 平时的记忆预算（只放检索命中 + 最近说的） */
   const MEMORY_MAX = 600;
   /**
@@ -4354,15 +4371,37 @@ export function apply(ctx) {
      * 只给 openid 的话，换一次机器人它就把老朋友、老群当陌生人了。
      */
     const num = isGroup ? String(s.groupUin || '') : String(s.uin || '');
-    const mark = num ? `群号 ${num}，标识 ${s.idShort}` : `群标识 ${s.idShort}`;
+    /**
+     * **openid 要给完整值，不能只给前 8 位**。
+     *
+     * 以前这里写 `标识 ${idShort}`，模型只能"看个大概"：@ 人、调 QQ 工具、
+     * 记「这个人是谁」都要完整 openid，截断了等于没给。群聊的群 openid 同理
+     * （群管和发消息的工具参数都吃完整值）。
+     * 长度可控：群/私聊各 32 位左右，SCENE_MAX 240 放得下。
+     */
+    const fullId = String(s.chatId || '').trim();
+    const mark = [
+      num ? (isGroup ? `群号 ${num}` : `QQ ${num}`) : '',
+      fullId ? `${isGroup ? '群' : '用户'} openid ${fullId}` : '',
+    ].filter(Boolean).join('，') || '标识未知';
     const parts = [
       isGroup
         ? `你现在在 QQ 群${s.name ? `「${s.name}」` : ''}里说话（${mark}）。这是群聊，不是私聊。`
-        : `你现在在和${s.name ? `「${s.name}」` : '对方'}私聊（${num ? `QQ ${num}，标识 ${s.idShort}` : `标识 ${s.idShort}`}）。`,
+        : `你现在在和${s.name ? `「${s.name}」` : '对方'}私聊（${mark}）。`,
     ];
     if (s.sender) {
       const who = s.uin ? `${s.sender} / QQ ${s.uin}` : s.sender;
-      parts.push(`刚说话的是「${who}」${s.bucket ? `（${s.bucket}）` : ''}。`);
+      /**
+       * 括号里放档位 + **头像的本地路径**。
+       *
+       * 路径是给模型直接用的（`<<image: 路径>>` 发图、或交给视觉工具），
+       * 不是让它转述的，所以写绝对路径、不缩写。没缓存到就不写这半句，
+       * 免得模型拿着一个不存在的路径去发图。
+       */
+      const extra = [s.bucket, s.avatarPath ? `头像 ${s.avatarPath}` : '']
+        .filter(Boolean)
+        .join('，');
+      parts.push(`刚说话的是「${who}」${extra ? `（${extra}）` : ''}。`);
     }
     if (isGroup) parts.push('群里可能还有别人在聊，不必每句都接；接不上就不说。');
     return clip(parts.join(''), SCENE_MAX);
@@ -4878,8 +4917,100 @@ export function apply(ctx) {
         sessionOf: (id) => sessions.entry(id),
         callerOf: () => {
           const c = cur();
-          return { ...c, hasPayload: Boolean(c.payload) };
+          return { ...c, openid: c.senderId, hasPayload: Boolean(c.payload) };
         },
+        /**
+         * `qq_who`：按 openid 查昵称/头像/QQ号。
+         *
+         * **只在小窗里注册**（主人 2026-11-16 定）：官方 `getUserInfo` 要求
+         * **好友关系**——实测同群两个成员，没私聊过的那个直接回 `40184001`，
+         * 私聊过的正常返回。群里挂一个大概率查空、还会把「群里问这是谁」
+         * 变成公开检索的工具，没有意义。
+         *
+         * 私聊里照样能问「群里那位是谁」：本地 `people.list` 存着他说话时的
+         * 昵称 / 群名片 / 头像，官方接口只是补 QQ 昵称和主动推送开关。
+         */
+        infoOf: isPrivateKind(chat.kind) ? async ({ openid } = {}) => {
+          const id = String(openid || '').trim();
+          if (!id) return { ok: false, message: '缺少 openid' };
+
+          const c = cur();
+          const local = c.payload && String(c.payload.sender?.id ?? '') === id ? c.payload.sender : null;
+
+          /**
+           * 群成员资料的主来源是**框架攒的 `recentPeople`**，不是官方接口。
+           *
+           * 官方 `getUserInfo` 要求好友关系（2026-11-16 实测：同群两人，
+           * 没私聊过的回 `40184001`，私聊过的正常返回），而群里绝大多数人
+           * 不是好友——只靠它的话，「刚才那位是谁」永远查不到。`people.list`
+           * 给的是这个人说过话时事件里带的昵称/群名片/头像，正好覆盖这个场景。
+           * 老框架没有这个方法，`catch` 掉就行，不影响下面走官方/本地两条路。
+           */
+          let seen = null;
+          try {
+            const r = await roost.rpc('people.list', { limit: 200 });
+            seen = (r?.people ?? []).find((x) => x.openid === id) ?? null;
+          } catch { /* 老框架没 people.list：照旧只靠 payload + 官方接口 */ }
+
+          let remote = null;
+          let why = '';
+          try {
+            remote = await roost.rpc('qq.call', { method: 'getUserInfo', args: [id] });
+          } catch (e) {
+            why = String(e?.message ?? e);
+          }
+
+          if (!remote && !local && !seen) {
+            return {
+              ok: false,
+              message: `查不到 ${id} 的资料：这个人还没在群里说过话，而且和机器人不是好友（官方接口要求好友关系）。`,
+            };
+          }
+
+          /**
+           * 群名片优先当显示名：群里认人看的就是它。
+           *
+           * 合并用 `||` 而不是 `??`：`local` 存在但某个字段是**空串**很常见
+           * （事件里没带头像/群名片），`??` 只跳 null/undefined，会把这个空串
+           * 当成"有值"，后面的 `seen` / 官方资料就永远轮不上。
+           */
+          const card = String(local?.card || seen?.card || '').trim();
+          const nickname = String(remote?.username || local?.nickname || seen?.nickname || '').trim();
+          const name = card || nickname || String(seen?.name || '').trim();
+          const uin = String(local?.uin || seen?.uin || '');
+          /** 头像三处来源按可靠度排：本条消息 → 他以前说过的话 → 官方资料 */
+          const avatarUrl = String(local?.avatar || seen?.avatar || remote?.avatar || '').trim();
+          const avatarPath = avatarUrl
+            ? await avatars.pathOf({ openid: id, url: avatarUrl, force: true }).catch(() => '')
+            : '';
+
+          return {
+            ok: true,
+            openid: id,
+            uin,
+            name,
+            /** 群内昵称 / QQ 昵称分开给：群里认人看的是前者 */
+            card,
+            nickname: nickname || name,
+            /** 本地绝对路径，可直接 `<<image: 路径>>`；拿不到是空串 */
+            avatar: avatarPath,
+            /**
+             * 隐私类字段只给主人 / 管理员。
+             *
+             * 群成员的昵称、头像、群名片是**群里公开**的（主人 2026-11-16 定：
+             * 这些完全开放）；但「他收不收主动推送」「跨应用 id」是个人设置，
+             * 不该被随便一个群友问出来。
+             */
+            ...(['owner', 'admin'].includes(String(c.bucket || ''))
+              ? {
+                allowProactiveMsg: remote?.allow_proactive_msg ?? null,
+                unionOpenid: String(remote?.union_openid ?? ''),
+              }
+              : {}),
+            /** 只在「真的一点官方信息都没有」时解释一句，有本地资料就别刷噪音 */
+            ...(why && !remote && !local && !seen ? { note: `官方接口没查成（${why.slice(0, 80)}）` } : {}),
+          };
+        } : null,
         sendOf: async (raw, opts = {}) => {
           const c = cur();
           if (!c.payload) {
@@ -5671,6 +5802,30 @@ export function apply(ctx) {
        */
       sessions.patch(chat.sessionKey, { title: chat.name, kind: chat.kind, preset: chat.preset });
 
+      /**
+       * 头像先落本地再给模型。
+       *
+       * 模型读不了 URL：给一串 qlogo 地址它只能原样转述，而且那串 key 会过期。
+       * 落成本地文件后，场景块里写的是**绝对路径**，模型想发图直接
+       * `<<image: 路径>>`，想「看看这个人」也有东西可读。
+       *
+       * **最多等 1.2 秒**：缓存命中只是扫一次目录（毫秒级），只有这个人第一次
+       * 出现才真下载。为一个头像把整轮回复卡住不值得——超了这轮就不给，
+       * 那次下载照样会写完（`pathOf` 不随 race 取消），下一轮就有了。
+       */
+      const avatarPath = await Promise.race([
+        avatars
+          .pathOf({
+            openid: String(payload?.sender?.id ?? ''),
+            url: String(payload?.sender?.avatar ?? ''),
+          })
+          .catch(() => ''),
+        new Promise((resolve) => {
+          const t = setTimeout(() => resolve(''), 1200);
+          t.unref?.();
+        }),
+      ]);
+
       // 场景快照：roost-scene 和 /mind 都读它
       lastScene = {
         at: Date.now(),
@@ -5679,6 +5834,8 @@ export function apply(ctx) {
         name: String(chat.name || '').trim(),
         idShort: String(chat.chatId || '').slice(0, 8),
         sender: String(payload?.sender?.name || '').trim(),
+        /** 头像本地绝对路径（拿不到是空串）——模型要的是「能用」，不是「能看」 */
+        avatarPath,
         /**
          * 身份：QQ号 / 群号 + 别名 + 稳定 id。
          *

@@ -211,6 +211,53 @@ function buildSendFileDef({ caller, fileOf }) {
 }
 
 /**
+ * `qq_who`：按 openid 查一个人的资料（昵称、群昵称、QQ 号、头像本地路径）。
+ *
+ * 为什么需要它：场景块每轮只带**当前说话人**，模型想认「刚才 @ 的那位是谁」
+ * 或者「这个 openid 对应谁」时没有任何入口。昵称又不可靠（重名、能随便改），
+ * 身份只能靠 openid / QQ 号 —— 而这两个对模型来说只是随机串，得有地方换成人话。
+ *
+ * 头像是**本地文件路径**：模型拿 URL 既读不了也发不出去（qlogo 的 key 会过期），
+ * 路径可以直接 `<<image: 路径>>`。每次调用都强制刷新缓存（主人要求：
+ * 查询要拿最新的），日常对话走 TTL，不重复下载。
+ */
+function buildWhoDef({ caller, infoOf }) {
+  return {
+    name: 'qq_who',
+    description:
+      '查一个人的 QQ 资料：昵称、群昵称、QQ 号、openid、**头像的本地文件路径**。'
+      + '不传 openid 就是查当前正在说话的人。'
+      + '每次调用都会刷新头像缓存，拿最新的那张。'
+      + '要在回复里用他的头像（发图）、或者拿不准「这个人在群里是谁」时用它；'
+      + '昵称不可靠（重名、能随便改），身份以 QQ 号 / openid 为准。',
+    parameters: {
+      openid: {
+        type: 'string',
+        required: false,
+        description: '要查的人的 openid（消息头括号里那串）。不传就是当前说话的人。',
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      /** 必须是内容块数组——返回字符串会让 DSH 在结果投影处炸掉 */
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ openid } = {}) {
+      const c = caller();
+      const id = String(openid ?? '').trim() || String(c.openid || c.senderId || '');
+      if (!id) {
+        return { ok: false, message: '这一轮没有正在说话的人，得显式给一个 openid。' };
+      }
+      try {
+        return await infoOf({ openid: id });
+      } catch (e) {
+        return { ok: false, message: `查资料失败：${e?.message ?? e}` };
+      }
+    },
+  };
+}
+
+/**
  * 拼工具定义。抽成纯函数是为了能单测——
  * 次数上限和「群聊不能收尾」这类判断写错，表现是刷屏或者群里莫名退场，
  * 都是只能靠线上观察才会发现的那种错。
@@ -223,7 +270,7 @@ function buildSendFileDef({ caller, fileOf }) {
  * @param {() => object} o.cfgOf
  * @param {() => {parts:number}} o.stateOf 本轮已发段数
  */
-export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null }) {
+export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null }) {
   const caller = () => callerOf?.() || { chatId: '', kind: '', said: '', hasPayload: false, bucket: '' };
   const maxParts = () => maxPartsOf(cfgOf?.(), caller().kind);
 
@@ -405,6 +452,11 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
      * 必然失败的操作」——那种一轮模型调用直接白花。
      */
     ...(typeof fileOf === 'function' ? [buildSendFileDef({ caller, fileOf })] : []),
+    /**
+     * 查资料：同样「没给实现就不注册」——注册一个必然失败的工具，
+     * 等于教模型去做一件做不成的事，白烧一轮。
+     */
+    ...(typeof infoOf === 'function' ? [buildWhoDef({ caller, infoOf })] : []),
     /** 群管：和发言工具一起挂，但实现放在 group-tools.js（语义不同，也都依赖外接协议） */
     ...(typeof groupOf === 'function'
       ? buildGroupToolDefs({ groupOf, callerOf, ledgerOf, sessionOf, cfgOf })
@@ -420,8 +472,8 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
  *
  * @returns {Promise<{ok:boolean, names:string[], reason?:string, mode?:string, off?:Function}>}
  */
-export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, log = () => {} }) {
-  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf, sessionOf });
+export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, log = () => {} }) {
+  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf, sessionOf, infoOf });
   const registry = agent?.ctx?.tools;
   if (!registry?.register) {
     /**

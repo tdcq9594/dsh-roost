@@ -74,6 +74,12 @@ export function buildOutputPrompt({
 
   const fileDenied = toolWasDenied(denied, 'qq_send_file');
   const fileRegistered = !registeredNames || registeredNames.has('qq_send_file');
+  /**
+   * `qq_who` 是**可选**的只读工具，所以不进 `OUTPUT_TOOLS`（那个是「缺一个就
+   * 整段不注入」的硬清单）。没挂上就少教一句，不影响发言规则。
+   */
+  const whoDenied = toolWasDenied(denied, 'qq_who');
+  const whoRegistered = !registeredNames || registeredNames.has('qq_who');
 
   const lines = [
     '【发言方式】',
@@ -99,6 +105,19 @@ export function buildOutputPrompt({
     lines.push(
       '· 要发文件（文档、表格、压缩包、图片都算）就调 `qq_send_file`，参数是**绝对路径**，一轮最多一个。'
       + '路径要来自你确实看到过的文件，别凭印象拼；它发不出去会直接告诉你。',
+    );
+  }
+
+  /**
+   * 认人：昵称会重名、也能随便改，身份以 QQ 号 / openid 为准。
+   * 头像给的是**本地路径**——模型拿 URL 既读不了也发不出去。
+   */
+  if (!whoDenied && whoRegistered) {
+    lines.push(
+      '· 拿不准「这个 openid 是谁」、或者想用某个人的头像，调 `qq_who`（只读）：'
+      + '给 openid 查那个人，不给就查当前说话的人。'
+      + '返回昵称、群昵称、QQ 号、openid 和**头像的本地文件路径**'
+      + '（可以直接 `<<image: 路径>>` 发出去）。',
     );
   }
   return lines.join('\n');

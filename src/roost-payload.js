@@ -480,6 +480,11 @@ export function createPayloadBuilder({
          */
         guildId: String(evt?.chat?.guildId ?? ''),
         channelId: String(evt?.chat?.channelId ?? ''),
+        /**
+         * 跨应用群标识（2026-11-16），**只透传**。它换不出群 openid、不能拿去
+         * 发消息；跨机器人关联仍走 identity 的「群号 ↔ openid」绑定。
+         */
+        unionGroupId: String(evt?.chat?.unionGroupId ?? ''),
         uin: String(evt?.sender?.uin ?? ''),
         groupUin: String(evt?.chat?.groupUin ?? ''),
         /** 人和群分开两组：混用会让群会话读到私聊记忆 */
@@ -491,6 +496,15 @@ export function createPayloadBuilder({
         id: String(evt?.sender?.openid ?? ''),
         name: String(evt?.sender?.name ?? ''),
         uin: String(evt?.sender?.uin ?? ''),
+        /**
+         * 2026-11-16 起框架会把昵称/头像一起带出来（群聊是群内昵称）：
+         * `name` 是显示名，`nickname`/`card` 是原始的两个名字，`avatar` 是原图。
+         * 只透传，不在这里挑——下游要哪个由它自己决定。
+         */
+        nickname: String(evt?.sender?.nickname ?? ''),
+        card: String(evt?.sender?.card ?? ''),
+        avatar: String(evt?.sender?.avatar ?? ''),
+        unionOpenid: String(evt?.sender?.unionOpenid ?? ''),
         ...(perm ? { bucket: perm.bucket, level: perm.level, role: perm.role } : {}),
       },
       /** 人格归 dsh-roost 自己管，这里不塞 */

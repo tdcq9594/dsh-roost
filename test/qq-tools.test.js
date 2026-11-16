@@ -25,8 +25,12 @@ function make({
    * 要不要注册 `qq_send_file`，所以「刻意不传」和「忘了传」必须长得一样。
    */
   fileOf = null,
+  /** `qq_who` 的实现。同样：不传 = 没装 */
+  infoOf = null,
+  /** 当前说话人的 openid（`qq_who` 不传参数时用它） */
+  openid = '',
 } = {}) {
-  const box = { sent: [], opts: [], parts: 0, closed: false, closedWith: null, fileCalls: [] };
+  const box = { sent: [], opts: [], parts: 0, closed: false, closedWith: null, fileCalls: [], whoCalls: [] };
 
   const defs = buildQqToolDefs({
     callerOf: () => ({
@@ -35,6 +39,7 @@ function make({
       said,
       hasPayload,
       bucket: 'owner',
+      openid,
     }),
     sendOf: async (text, opts = {}) => {
       if (sendFails) return { ok: false, message: '通道断了' };
@@ -54,12 +59,18 @@ function make({
           return fileOf(p, opts);
         }
       : undefined,
+    infoOf: infoOf
+      ? async (q = {}) => {
+          box.whoCalls.push(q);
+          return infoOf(q);
+        }
+      : undefined,
     cfgOf: () => ({ qqTools: { maxParts } }),
     stateOf: () => ({ parts: box.parts }),
   });
 
   const by = (n) => defs.find((d) => d.name === n);
-  return { box, send: by('qq_send'), close: by('qq_close'), file: by('qq_send_file'), defs };
+  return { box, send: by('qq_send'), close: by('qq_close'), file: by('qq_send_file'), who: by('qq_who'), defs };
 }
 
 /* ---------------- 形状 ---------------- */
@@ -558,4 +569,72 @@ test('qq_send_file：output.render 返回内容块数组，且内容可读', () 
   const empty = file.output.render({}, undefined);
   assert.ok(Array.isArray(empty));
   assert.equal(empty[0].type, 'text');
+});
+
+/* ---------------- qq_who（只读查资料） ---------------- */
+
+/**
+ * 和 `qq_send_file` 同一条规矩：没实现就不注册。
+ *
+ * 注册了却查不到（老框架没有 `getUserInfo`、或机器人没权限），提示词会教模型
+ * 去调一个必然失败的工具——白烧一轮，还让它以为「自己没有认人能力」。
+ */
+test('qq_who：没传 infoOf 时清单里没有它', () => {
+  const { defs, who } = make();
+  assert.equal(who, undefined);
+  assert.ok(!defs.some((d) => d.name === 'qq_who'));
+});
+
+test('qq_who：传了就注册，openid 是可选参数（不传就查当前说话人）', () => {
+  const { who } = make({ infoOf: async () => ({ ok: true }) });
+  assert.equal(typeof who.execute, 'function');
+  assert.equal(who.parameters.openid?.required, false);
+  assert.equal(who.parameters.type, undefined, 'parameters 必须是扁平表，不能是 JSON Schema');
+});
+
+test('qq_who：不传 openid 时用这一轮说话的人', async () => {
+  const { who, box } = make({
+    openid: 'A1B2C3',
+    infoOf: async (q) => ({ ok: true, openid: q.openid }),
+  });
+  const r = await who.execute({});
+  assert.equal(r.openid, 'A1B2C3');
+  assert.deepEqual(box.whoCalls, [{ openid: 'A1B2C3' }]);
+});
+
+test('qq_who：传了 openid 就查那个人，前后空格去掉', async () => {
+  const { who, box } = make({
+    openid: 'SELF',
+    infoOf: async (q) => ({ ok: true, openid: q.openid }),
+  });
+  await who.execute({ openid: '  OTHER99  ' });
+  assert.deepEqual(box.whoCalls, [{ openid: 'OTHER99' }]);
+});
+
+test('qq_who：既没参数也没对话人 → 明确拒绝，不瞎查', async () => {
+  const { who, box } = make({ infoOf: async () => ({ ok: true }) });
+  const r = await who.execute({});
+  assert.equal(r.ok, false);
+  assert.match(r.message, /openid/);
+  assert.equal(box.whoCalls.length, 0, '没 openid 时不该调宿主');
+});
+
+test('qq_who：宿主抛错时转成 ok:false，不把异常甩给模型', async () => {
+  const { who } = make({
+    infoOf: async () => {
+      throw new Error('rpc 断了');
+    },
+  });
+  const r = await who.execute({ openid: 'X1' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /rpc 断了/);
+});
+
+test('qq_who：output.render 返回内容块数组（路径要能被模型看见）', () => {
+  const { who } = make({ infoOf: async () => ({ ok: true }) });
+  const value = { ok: true, openid: 'X1', name: '小明', avatar: '/data/avatars/abc.jpg' };
+  const out = who.output.render({}, value);
+  assert.ok(Array.isArray(out));
+  assert.equal(out[0].type, 'text');
+  assert.match(out[0].text, /abc\.jpg/);
 });

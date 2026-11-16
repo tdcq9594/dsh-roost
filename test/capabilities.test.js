@@ -233,6 +233,13 @@ test('resolvePolicy：newTools=nobody 时 `*` 不含未见过的工具', () => {
 test('resolvePolicy：配置里已失效的名字进 removed，不进 deny', () => {
   const store = defaultStore();
   store.defaults.member.allow = ['ghost_tool', 'qq_send'];
+  /**
+   * 低档是**累加**进来的：`unknown` 的默认值里既有 QQ 工具也有读图工具，
+   * 而这个测试的 pool 很小，它们会被算成「失效名字」混进 removed。
+   * 这条用例只想验「失效名字的走向」，所以把低档收成最小集合，别让默认值
+   * 跟着产品的权限调整一起漂。
+   */
+  store.defaults.unknown.allow = ['qq_send'];
 
   const r = resolvePolicy({ pool: POOL, bucket: 'member', store });
   assert.deepEqual(r.removed, ['ghost_tool']);

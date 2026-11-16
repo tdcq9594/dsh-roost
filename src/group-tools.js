@@ -41,9 +41,9 @@ export function buildGroupToolDefs({ groupOf, callerOf, ledgerOf = null, session
   const info = {
     name: 'qq_group_info',
     description:
-      '查当前这个群的情况：群名、你在群里的角色（群主/管理员/普通成员）、'
-      + '能不能管理（禁言/踢人需要你是管理员）、有没有开通「群管内邀」、群人数。'
-      + '被问到「你能不能管这个群」「你是不是管理员」时用它，不要凭感觉答。',
+      '查当前这个群的情况：群名、群人数、群简介、分类和标签，你在群里的角色（群主/管理员/普通成员）、'
+      + '能不能管理（禁言/踢人需要你是管理员）、有没有开通「群管内邀」。'
+      + '被问到「这个群是干嘛的」「群里有多少人」「你能不能管这个群」时用它，不要凭感觉答。',
     parameters: {
       groupId: { type: 'string', description: '群 openid；不填就是当前会话所在的群' },
     },
@@ -62,10 +62,14 @@ export function buildGroupToolDefs({ groupOf, callerOf, ledgerOf = null, session
         ok: true,
         groupId: gid,
         name: r.name || '',
+        /** 2026-11-16 群信息接口新增的三个字段（以前的实现里人数还是恒 0，见框架 group.info 的修订） */
+        memberCount: r.memberCount || 0,
+        memo: r.memo || '',
+        classText: r.classText || '',
+        tags: Array.isArray(r.tags) ? r.tags : [],
         role: r.role || 'unknown',
         canManage: r.canManage === true,
         invited: r.invited === true,
-        memberCount: r.memberCount || 0,
         note: r.canManage ? '你是管理员，能禁言/踢人' : (r.manageReason || '你不是管理员，只能看不能管'),
       };
     },

@@ -140,11 +140,24 @@ export function defaultStore() {
      */
     defaults: {
       owner: { allow: ['*'] },
-      admin: { allow: ['memory_search', 'memory_note', 'qq_send', 'sticker_pick'] },
+      /**
+       * `qq_group_info` / `qq_who` 进到最低档是刻意的（主人 2026-11-16 定）：
+       * 群名、群人数、群简介，以及群成员的昵称/头像/群名片，本来就**在群里
+       * 人人可见**，模型答「这个群是干嘛的」「刚才那位是谁」不该只有主人能答。
+       *
+       * 注意 `qq_who` **本身只在小窗注册**（群聊里不挂）：官方 `getUserInfo`
+       * 要好友关系，群里大概率查空。这里的档位是给私聊里那些非主人的会话用。
+       *
+       * `sticker_pick` / `read_image` 同样不按档位限制（2026-11-16 主人定）：
+       * 发表情、看消息里的图跟权限无关，卡住只会让人觉得「机器人装死」。
+       * **但 `read` / `write` / `edit` 仍然不给**——`read_image` 只读图片，
+       * `read` 能读整台机器的文本文件，两者不是一回事，别一起放开。
+       */
+      admin: { allow: ['memory_search', 'memory_note', 'qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who'] },
       manager: {},
       helper: {},
-      member: { allow: ['memory_search', 'qq_send', 'sticker_pick'] },
-      unknown: { allow: ['qq_send'] },
+      member: { allow: ['memory_search', 'qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who'] },
+      unknown: { allow: ['qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who'] },
     },
     /** 分组只用于展示与批量开关；解析时按 match 展开成工具名 */
     groups: {
