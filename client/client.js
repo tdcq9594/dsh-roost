@@ -10314,6 +10314,325 @@ select.roost-input{color-scheme:dark}
      * 参数是 `args` 数组（位置参数），协议会展开成 `QQApi[name](...args)`；
      * 和 WebUI `/api/qq/call` 那套 `__target` / `__rest` 对象不是一回事。
      */
+    /**
+     * 「人设 → 资料」：她长什么样、叫什么，以及**她能不能自己改**。
+     *
+     * 为什么单开一页、不塞进「人格」：人格页管的是「她怎么说话」，这一页管的是
+     * 「别人看到的她」。混在一起会让「改个名字」看起来像在改人设。
+     *
+     * 这一页**只放开关**，不在这儿直接改昵称——改资料要走开发者登录态、要留
+     * before/after 快照，那是工具层（`qq_name` / `qq_sign` / `qq_avatar` / `qq_menu`）
+     * 的活。面板的职责是定「什么时候允许她动」，不是替她动手。
+     */
+    const PROFILE_KINDS = [
+      ['menu', '菜单文案', '私聊那排入口上的一行字，改错了随时能改回来'],
+      ['sign', '简介', '别人点开你看到的那句话'],
+      ['name', '昵称', '所有人看到的名字；改的时候会连人格自称一起改'],
+      ['avatar', '头像', '要上传图片，平台会按内容规范过一遍'],
+    ]
+
+    /** 历史里的 before/after 可能是字符串、对象或 null，渲染成一行短摘要 */
+    function briefValue(v) {
+      if (v === null || v === undefined) return '（空）'
+      const s = typeof v === 'string' ? v : JSON.stringify(v)
+      return s.length > 48 ? s.slice(0, 48) + '…' : s
+    }
+
+    function ProfileTab({ toast }) {
+      const [data, setData] = useState(null)
+      const [err, setErr] = useState('')
+      const [busy, setBusy] = useState(false)
+
+      const load = useCallback(async () => {
+        try {
+          const r = await get('/self/profile')
+          if (r?.ok === false) { setErr(String(r.message || '读不到')); setData(null); return }
+          setErr('')
+          setData(r)
+        } catch (e) {
+          setErr(String(e?.message || e))
+          setData(null)
+        }
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      /**
+       * 保存一段。**不做乐观更新**：这是「关掉就不注册」的硬开关，
+       * 界面上先亮起来、实际没存进去，比卡一下更糟。
+       */
+      const save = useCallback(async (patch) => {
+        setBusy(true)
+        try {
+          const r = await post('/self/profile', { patch })
+          if (r?.ok === false) { toast(String(r.message || '保存失败')); return }
+          setData((d) => (d ? { ...d, cfg: r.cfg } : d))
+        } catch (e) {
+          toast('保存失败：' + String(e?.message || e))
+        } finally { setBusy(false) }
+      }, [toast])
+
+      const clearHistory = useCallback(async () => {
+        if (!window.confirm('清空变更记录？清掉之后就没法再退回上一版了（当前资料不受影响）。')) return
+        setBusy(true)
+        try {
+          const r = await post('/self/profile/history/clear', {})
+          if (r?.ok === false) { toast(String(r.message || '清空失败')); return }
+          toast('记录已清空')
+          await load()
+        } catch (e) {
+          toast('清空失败：' + String(e?.message || e))
+        } finally { setBusy(false) }
+      }, [load, toast])
+
+      /** 退回某一条历史之前的样子。与「清空记录」不同：这一步真的会改平台 */
+      const restore = useCallback(async (row) => {
+        const label = data?.labels?.[row.kind] || row.kind
+        if (!window.confirm(`把「${label}」改回 ${new Date(row.at).toLocaleString()} 之前的样子？`)) return
+        setBusy(true)
+        try {
+          const r = await post('/self/profile/restore', { kind: row.kind, at: row.at })
+          if (r?.ok === false) { toast(String(r.message || '退回失败')); return }
+          toast(String(r?.note || '已退回'))
+          await load()
+        } catch (e) {
+          toast('退回失败：' + String(e?.message || e))
+        } finally { setBusy(false) }
+      }, [data, load, toast])
+
+      /**
+       * 面板上直接改（人按的，不走「主人确认」那道）。
+       * 走同一套写入逻辑，所以历史里照样留痕、照样能退回。
+       */
+      const applyField = useCallback(async (kind, label, cur) => {
+        const v = window.prompt(`新的${label}（留空取消）`, cur || '')
+        if (v === null) return
+        const val = String(v).trim()
+        if (!val) return
+        setBusy(true)
+        try {
+          const r = await post('/self/profile/apply', { kind, value: val })
+          if (r?.ok === false) { toast(String(r.message || '没改成')); return }
+          toast(`${label}改好了`)
+          await load()
+        } catch (e) {
+          toast('没改成：' + String(e?.message || e))
+        } finally { setBusy(false) }
+      }, [load, toast])
+
+      /**
+       * 跳到 Roost **面板**的「开放平台」页（框架那台自己的网页面板，`#dev`）。
+       *
+       * 地址由后端给，前端不拼：面板端口（`webui.port`，被占会顺延）与外接协议
+       * 端口（`roostHost.url` = `6800+sha1(botId)%100`）是两个数，前端手里没有前者。
+       *
+       * 为什么是「先 fetch 再 open」而不是直接 open 一条后端 302：
+       * 面板 API 有请求栅栏（`fence.js`），浏览器顶层导航带不了自定义头，会 403。
+       *
+       * 不内嵌扫码：登录是**开发者身份**，票据在框架自己的会话里（`/api/dev/*`），
+       * 这边只有机器人 token，拿不到也写不进去。能做的是把门打开，登录完回来点「刷新」。
+       */
+      const openPlatform = useCallback(async () => {
+        setBusy(true)
+        try {
+          const r = await get('/self/panel')
+          if (r?.ok === false || !r?.url) { toast(String(r?.message || '拿不到面板地址')); return }
+          window.open(String(r.url), '_blank', 'noopener')
+        } catch (e) {
+          toast('打不开面板：' + String(e?.message || e))
+        } finally { setBusy(false) }
+      }, [toast])
+
+      const cfg = data?.cfg || null
+      const platform = data?.platform || null
+      const bot = platform?.bot?.base || null
+      const history = Array.isArray(data?.history) ? data.history : []
+
+      /* ---------- 01 资料现状 ---------- */
+      let nowBody
+      if (err) {
+        nowBody = h('p', { className: 'roost-note' }, err)
+      } else if (!data) {
+        nowBody = h('p', { className: 'roost-g-desc' }, '读配置中…')
+      } else if (!platform?.ok) {
+        nowBody = h('p', { className: 'roost-g-desc' }, '框架没连上，读不到平台上的资料。下面那些开关照样能改。')
+      } else if (!platform.loggedIn) {
+        nowBody = h('p', { className: 'roost-g-desc' },
+          '开放平台没登录（改资料走的是开发者登录态，不是机器人 token）。'
+          + '点上面「开放平台」打开 Roost 面板那一页扫码登录，回来再点「刷新」，'
+          + '这里就会显示她现在的名字、简介和头像。')
+      } else {
+        const editBtn = (kind, label, cur) => h('button', {
+          type: 'button', className: 'roost-btn', disabled: busy,
+          onClick: () => applyField(kind, label, cur),
+        }, '改')
+        const rows = [
+          h(GRow, { key: 'name', label: '昵称', hint: '所有人看到的名字' },
+            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '10px' } },
+              h('b', null, bot?.name || '（空）'),
+              editBtn('name', '昵称', bot?.name || ''))),
+          h(GRow, { key: 'desc', label: '简介', hint: '资料卡上那句话' },
+            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '10px' } },
+              h('span', null, bot?.desc || '（空）'),
+              editBtn('sign', '简介', bot?.desc || ''))),
+          h(GRow, { key: 'avatar', label: '头像', hint: '平台只回 URL，写回要 avatarId' },
+            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '10px' } },
+              bot?.avatar
+                ? h('img', {
+                    src: bot.avatar, alt: '',
+                    style: { width: '44px', height: '44px', borderRadius: '50%', objectFit: 'cover' },
+                  })
+                : h('span', null, '（无）'),
+              editBtn('avatar', '头像地址', bot?.avatar || ''))),
+        ]
+        /**
+         * 平台自己回的剩余次数。框架读了这个字段，但**没人验证过官方会不会
+         * 真的返回**——所以只在它有值的时候显示，不写「还剩 N 次」，更不拿它当限额。
+         */
+        if (bot && bot.modifyRemain !== null && bot.modifyRemain !== undefined) {
+          rows.push(h(GRow, { key: 'remain', label: '平台余量', hint: '框架读到的字段，含义未证实' },
+            h('b', null, String(bot.modifyRemain))))
+        }
+        if (platform.botError) {
+          rows.push(h('p', { key: 'boterr', className: 'roost-note' }, '读平台资料失败：' + platform.botError))
+        }
+        nowBody = h('div', null, rows)
+      }
+
+      /* ---------- 02 修改权限 ---------- */
+      const switchRows = !cfg
+        ? h('p', { className: 'roost-note' }, err || '读配置中…')
+        : h('div', null, PROFILE_KINDS.map(([kind, label, hint]) =>
+            h(GRow, { key: kind, label, hint: hint + '；间隔 0 = 不限' },
+              h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '12px' } },
+                h(Switch, {
+                  on: !!cfg[kind]?.enabled, disabled: busy, label: label + '开关',
+                  onToggle: (v) => save({ [kind]: { enabled: v } }),
+                }),
+                h(GNum, {
+                  value: cfg[kind]?.cooldownMin ?? 0, min: 0, max: 10080, step: 5,
+                  unit: '分钟', disabled: busy,
+                  onSave: (v) => save({ [kind]: { cooldownMin: v } }),
+                }),
+                /**
+                 * 菜单没有这一项：它一秒能改回来，为它加一道私聊确认
+                 * 只会让「换个说法」比说话还麻烦。
+                 */
+                kind === 'menu'
+                  ? null
+                  : h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+                      h('span', { className: 'roost-g-unit' }, '需主人确认'),
+                      h(Switch, {
+                        on: !!cfg[kind]?.confirm, disabled: busy, label: label + '需要主人确认',
+                        onToggle: (v) => save({ [kind]: { confirm: v } }),
+                      }))))))
+
+      /* ---------- 03 状态感知 ---------- */
+      const awareRows = !cfg
+        ? h('p', { className: 'roost-note' }, '读配置中…')
+        : h('div', null,
+            h(GRow, { label: '情绪', hint: '沿用心情页那套，注入的是自然语言，不是数字' },
+              h(Switch, {
+                on: !!cfg.awareness?.mood, disabled: busy, label: '情绪感知',
+                onToggle: (v) => save({ awareness: { mood: v } }),
+              })),
+            h(GRow, { label: '安静多久了', hint: '多久没人说话' },
+              h(Switch, {
+                on: !!cfg.awareness?.silence, disabled: busy, label: '静默感知',
+                onToggle: (v) => save({ awareness: { silence: v } }),
+              })))
+
+      /* ---------- 04 主动轮次 ---------- */
+      const fieldsOf = (cfg?.proactive?.fields || []).filter((x) => x !== 'name')
+      const proactiveRows = !cfg
+        ? h('p', { className: 'roost-note' }, '读配置中…')
+        : h('div', null,
+            h(GRow, { label: '允许她主动换', hint: '只在她主动搭话的那一轮' },
+              h(Switch, {
+                on: !!cfg.proactive?.enabled, disabled: busy, label: '主动改开关',
+                onToggle: (v) => save({ proactive: { enabled: v } }),
+              })),
+            h(GRow, { label: '可以动哪些', hint: '昵称永远需要有人点头' },
+              h('span', { style: { display: 'inline-flex', gap: '14px', flexWrap: 'wrap' } },
+                PROFILE_KINDS.filter(([k]) => k !== 'name').map(([kind, label]) =>
+                  h('label', { key: kind, style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: fieldsOf.includes(kind),
+                      disabled: busy || !cfg.proactive?.enabled,
+                      onChange: (e) => {
+                        const rest = fieldsOf.filter((x) => x !== kind)
+                        save({ proactive: { fields: e.target.checked ? rest.concat(kind) : rest } })
+                      },
+                    }),
+                    label)))))
+
+      /* ---------- 05 变更记录 ---------- */
+      const historyRows = history.length
+        ? h('div', null, history.map((r, i) =>
+            h('div', { key: i, className: 'roost-g-row' },
+              h('div', { className: 'roost-g-label' },
+                h('b', null, (data?.labels?.[r.kind] || r.kind) + (r.ok === false ? '（失败）' : '')),
+                h('small', null,
+                  new Date(r.at).toLocaleString()
+                  + (r.via === 'proactive' ? ' · 她主动改的' : ' · 主人让改的'))),
+              h('div', { className: 'roost-g-ctl' },
+                h('small', null, briefValue(r.before) + ' → ' + briefValue(r.after)),
+                r.ok !== false && r.before
+                  ? h('button', {
+                      type: 'button', className: 'roost-btn', disabled: busy,
+                      title: '把这一项改回这次改动之前的样子',
+                      onClick: () => restore(r),
+                    }, '退回')
+                  : null))))
+        : h('p', { className: 'roost-note' }, '还没有记录。')
+
+      return h('div', null,
+        h(Sec, {
+          n: '01', title: '资料现状',
+          right: h('span', { style: { display: 'inline-flex', gap: '8px' } },
+            h('button', {
+              type: 'button', className: 'roost-btn', onClick: openPlatform, disabled: busy,
+              title: '在浏览器里打开 Roost 面板的「开放平台」页（开发者后台，扫码登录）',
+            }, '开放平台'),
+            h('button', { type: 'button', className: 'roost-btn', onClick: load, disabled: busy }, '刷新')),
+        },
+          h('div', { className: 'roost-g-card' }, nowBody)),
+
+        h(Sec, { n: '02', title: '修改权限' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '关掉某一项，对应的工具就**不注册**——她不是"被拒绝"，是根本看不到这个能力。'
+              + '冷却填 0 表示完全不限制。打开「需主人确认」之后，改这一项会先私聊问你一句，'
+              + '你回「确认 1234」才真的改，回「不用」就不改。'),
+            switchRows)),
+
+        h(Sec, { n: '03', title: '状态感知' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '这两项**只影响她会不会想改**，不触发任何动作。关掉之后她照样能改，只是不知道自己现在什么心情。'),
+            awareRows)),
+
+        h(Sec, { n: '04', title: '主动轮次' },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '默认关。打开后，她主动找你的那一轮可以顺手换个说法——不额外多跑一次模型。'
+              + '昵称不在这里管：改名字必须有人在场，主动轮次一律改不了。'),
+            proactiveRows)),
+
+        h(Sec, {
+          n: '05', title: '变更记录',
+          right: history.length
+            ? h('button', { type: 'button', className: 'roost-btn', onClick: clearHistory, disabled: busy }, '清空记录')
+            : null,
+        },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '每次改资料前的旧值都存在本机（含正文，面板可清空）。点某一行的「退回」，'
+              + '就是把这一项改回那次改动之前的样子；头一条没有旧值，退不了。'),
+            historyRows)),
+      )
+    }
+
     function SelfConfigTab({ toast }) {
       const [idx, setIdx] = useState({})
       const [notice, setNotice] = useState('')
@@ -11390,6 +11709,10 @@ select.roost-input{color-scheme:dark}
         + '真正下传前会先问 DSH 这个模型支持哪几档，不支持就不传，避免整轮直接报错'],
       ['persona', '人格', '当前用哪个人格、按群指定；换人格去「人格」页点「用这个」'
         + '（name / text 是 0.10.0 之前的旧字段，只在人格文件读不出正文时才兜底）'],
+      ['selfExpression', '她自己的资料', 'menu / sign / name / avatar 四段的 enabled（工具注册不注册）与 cooldownMin'
+        + '（两次写至少隔几分钟，0 = 完全不限——这里不设默认值，也不编平台次数）；'
+        + 'awareness.mood / silence 只影响她「知不知道」自己的状态，不触发动作；'
+        + 'proactive.enabled 允许她在主动搭话那一轮顺手改，fields 决定能动哪几项（昵称永远要有人在场）'],
       ['stickers', '表情包', '图放哪、要不要注入'],
       ['guild', '频道', 'enabled：频道总开关，**默认关**。关着时只在 dsh-roost 入口丢弃频道事件，不动框架的 intents 订阅（框架照常收、照常推给别的插件）；'
         + 'sessionMode：guild = 一个频道一个会话（同一频道的子频道/论坛/公告共用）、channel = 一个子频道一个会话；频道私信固定一人一个。'
@@ -15895,6 +16218,14 @@ select.roost-input{color-scheme:dark}
       ['overview', '概览'],
       /* 人设：她是谁、心情如何、什么时候开口、记得什么 */
       ['her', '人格'],
+      /**
+       * 资料：她的名字 / 简介 / 头像 / 菜单，以及「她能不能自己改」。
+       *
+       * 归在「人设」而不是「系统 → 自身设置」：用户对这几项的直觉是
+       * 「她长什么样、叫什么」，跟人格放在一起才找得到；`bot-self` 那页是
+       * 给开发者用的接口操作台，两件事别混。
+       */
+      ['profile', '资料'],
       ['mood', '心情'],
       ['awake', '主动搭话'],
       ['memory', '记忆'],
@@ -15983,6 +16314,7 @@ select.roost-input{color-scheme:dark}
     const TAB_ALIAS = {
       overview: '概览 首页 总览 现在 状态 卡在哪',
       her: '人格 人设 角色 名字 自称',
+      profile: '资料 改资料 昵称 头像 简介 签名 菜单 换名字 换头像 自我表达 她能不能自己改',
       mood: '心情 情绪 状态 衰减',
       awake: '主动搭话 主动 唤醒 互动召回 机会',
       memory: '记忆 回忆 事实 日记 关系 星图 翻一翻 分层 遗忘 容量',
@@ -16001,7 +16333,7 @@ select.roost-input{color-scheme:dark}
       /* 四个老页签并进来之后，原来各自的词都收在这一条里，搜哪个都还能到 */
       'ch-api': '频道接口 子频道 频道结构 创建 改名 删除 权限 频道消息 私信 撤回 表态 精华 dms 论坛 帖子 公告 日程 音频 上麦 频道成员 身份组 角色 在线人数 api权限',
       'ch-diag': '频道排障 事件 账本 投递 错误码',
-      'bot-self': '自身设置 机器人身份 菜单 指令面板 全局菜单 panels 改资料',
+      'bot-self': '自身设置 机器人身份 菜单 指令面板 全局菜单 panels 接口台',
       chats: '会话 身份 映射 上下文',
       account: '账号迁移 迁移 换号 绑定 旧 openid',
       sim: '模拟 模拟测试 试跑 演练 dry run 会不会回 为什么没回',
@@ -16033,7 +16365,7 @@ select.roost-input{color-scheme:dark}
 
     const NAV_GROUPS = [
       { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview'] },
-      { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'mood', 'awake', 'memory', 'people'] },
+      { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'profile', 'mood', 'awake', 'memory', 'people'] },
       /* 表达：她怎么"出声"——说话（语音合成）与表情包。2026-11-13 从「能力」里独立出来 */
       { id: 'express', label: '表达', icon: 'M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.4A8 8 0 1 1 20.5 11.5zM9 13.2s1.1 1.5 3 1.5 3-1.5 3-1.5M9.5 9.6h.01M14.5 9.6h.01', tabs: ['express', 'stickers'] },
       /**
@@ -16855,6 +17187,8 @@ select.roost-input{color-scheme:dark}
               })
             : null,
           tab === 'ch-diag' ? h(ChannelDiagTab, {}) : null,
+          /** 人设 → 资料：她的名字 / 简介 / 头像 / 菜单，以及她能不能自己改 */
+          tab === 'profile' ? h(ProfileTab, { toast }) : null,
           /** 机器人身份：菜单 / 指令面板这条合规链，和开发者后台那套分开 */
           tab === 'bot-self' ? h(SelfConfigTab, { toast }) : null,
           tab === 'account' ? h(AccountTab, { toast }) : null,

@@ -82,6 +82,14 @@ import { createWakeupLedger, wakeupPlan, wakeupCycleOf, WAKEUP_DEFAULTS, WAKEUP_
 import { createFence, PEER } from './fence.js';
 import { audit, peerSummary } from './audit.js';
 import { createGroupAdmin } from './group-admin.js';
+import {
+  normalizeSelfExpression, patchSelfExpression, createHistory, KIND_LABELS, SELF_KINDS,
+} from './self-expression.js';
+import { createSlotStore, registerMenuTool, buildMenuPrompt, restoreMenuSlot } from './menu-tool.js';
+import {
+  registerProfileTools, buildProfilePrompt, restoreProfileValue, validateAvatarSource,
+} from './profile-tool.js';
+import { createProfileConfirm } from './profile-confirm.js';
 import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { wakeContext } from './wake-context.js';
 import { stripLeak } from './leak-guard.js';
@@ -109,6 +117,15 @@ import { createPickChannel } from './pick-channel.js';
  * 路由对象里 —— 路由参数是**对象字面量**，里面不能写 `let`（语法错误）。
  */
 let channelQqIndex = null;
+
+/**
+ * 三个资料工具的写入函数（确认流程要用）。
+ *
+ * 模块级而不是路由内：`route()` 的参数是对象字面量，里面不能写 `let`。
+ * 注册成功后才赋值；没赋值时确认流程会回「宿主没接上写入通道」，
+ * 而不是静默什么都不做。
+ */
+let profileApply = null;
 
 /**
  * 频道方法名兜底名单：方法名 → 分组。
@@ -2948,6 +2965,46 @@ export function apply(ctx) {
     protectedTargets: () => [ownerId()].filter(Boolean),
   });
 
+  /**
+   * 改资料的变更历史。面板「人设 → 资料」页读它，回滚也读它。
+   *
+   * 这里只做数据（`self-expression.js`）；真正写平台在工具层，因为两条链路
+   * （`dev.bot.*` 与 `qq.call`）的错误分类不同，混进来会让这段纯逻辑没法单测。
+   */
+  const selfHistory = createHistory({
+    dataDir,
+    log: (m) => log.warn(m),
+  });
+
+  /**
+   * 菜单里「她那一格」的身份（`menu-slot.json`）。
+   *
+   * 单独存而不是靠「名字以 `·` 开头」认：用户自己也可能起一个「·帮助」，
+   * 猜错就是把别人那一格改掉，而这种错只有有人点菜单时才会发现。
+   */
+  const menuSlots = createSlotStore({
+    dataDir,
+    log: (m) => log.warn(m),
+  });
+
+  /**
+   * 改资料的「私聊主人确认」通道。
+   *
+   * **必须在这一层**（和 `selfHistory` / `menuSlots` 同级），不能放进 `mount()`：
+   * 等主人回码的那段逻辑在 `handleTurn()` 里，而 `mount()` 与 `handleTurn()` 是
+   * 两个平级函数——放在 `mount()` 里的 `const` 在 `handleTurn()` 里根本看不见，
+   * 表现是**每一条进来的消息都抛 ReferenceError**。这种错 `node --check` 查不出来
+   * （作用域是运行时的事），单测也盖不到（它们测的是纯函数）。
+   *
+   * 放外层还顺带对了一件事：待确认是**全进程共享**的短时状态，不该每个 agent
+   * 各存一份。落盘不做——10 分钟就过期的请求，重启后还挂着才是真问题。
+   */
+  const profileConfirm = createProfileConfirm({
+    send: (payload) => sendOut(payload),
+    ownerOf: () => ownerId(),
+    log: (m) => log.warn(m),
+  });
+
   const buildFromRoost = createPayloadBuilder({
     rpc: (m, p, o) => roost.rpc(m, p, o),
     log: (m) => log.warn(`[roost-host] ${m}`),
@@ -4292,6 +4349,116 @@ export function apply(ctx) {
     }
 
     /**
+     * 她自己改菜单（`qq_menu`）。
+     *
+     * 只走 `qq.call`（机器人自己的 token），不碰开发者登录态——所以它是四个出口里
+     * 最独立的一个，也是唯一一个「改错了下一分钟能改回来」的。
+     *
+     * `enabled` 为假时**整个不注册**：注册了再拒绝，模型会以为这个能力存在，
+     * 反复去调一个注定失败的路径。代价是面板上关掉之后要等 agent 重挂才彻底消失，
+     * 所以工具 `execute()` 里还留了一道同样的判断（双保险）。
+     */
+    if (cfg.selfExpression?.menu?.enabled !== false) {
+      registerMenuTool({
+        agent,
+        rpc: (m, p) => roost.rpc(m, p),
+        cfgOf: () => cfg,
+        sidOf: () => agent?.session?.id || '',
+        callerOf: () => ({ kind: chat.kind }),
+        slots: menuSlots,
+        history: selfHistory,
+        audit,
+        log: (m) => log.warn(m),
+      })
+        .then((r) => {
+          if (r.ok) log.info(`菜单工具已挂上：${r.names.join('、')}（${r.mode}）`);
+          else log.warn(`菜单工具没挂上：${r.reason}`);
+          if (r.off) mountOffs.push(r.off);
+        })
+        .catch((e) => log.warn(`菜单工具挂载异常：${e?.message ?? e}`));
+    }
+
+    /**
+     * 简介与昵称（`qq_sign` / `qq_name`）。
+     *
+     * 走开发者后台（`dev.bot.*`），所以**依赖面板那边已经登录开放平台**；
+     * 没登录时工具照挂，执行时给一句「得主人先去扫码」，而不是整个消失。
+     *
+     * 昵称额外要求「这一轮有真实发送者且是主人」——`senderId` 而不是 `bucket`：
+     * 主动搭话轮被塞了 `bucket:'owner'`，按 bucket 判会放行。
+     */
+    const wantSign = cfg.selfExpression?.sign?.enabled !== false;
+    const wantName = cfg.selfExpression?.name?.enabled !== false;
+    const wantAvatar = cfg.selfExpression?.avatar?.enabled !== false;
+    if (wantSign || wantName || wantAvatar) {
+      const who = () => {
+        const sid = agent?.session?.id || '';
+        const s = sid ? speaker.get(sid) : null;
+        return {
+          sid,
+          bucket: String(s?.bucket || ''),
+          senderId: String(s?.payload?.sender?.id ?? ''),
+        };
+      };
+      registerProfileTools({
+        agent,
+        kinds: [wantSign ? 'sign' : '', wantName ? 'name' : '', wantAvatar ? 'avatar' : ''].filter(Boolean),
+        requestConfirm: (req) => profileConfirm.ask(req),
+        rpc: (m, p) => roost.rpc(m, p),
+        cfgOf: () => cfg,
+        history: selfHistory,
+        callerOf: who,
+        personaOf: () => {
+          const p = personas.resolve(chat.chatId, personaCfgFor(chat));
+          return { id: String(p?.id || ''), selfName: String(p?.selfName || '') };
+        },
+        /** 平台改名成功之后才轮到本地，见 profile-tool.js 里的顺序说明 */
+        syncPersonaName: (name) => { cfg = patchConfig({ persona: { name } }); },
+        audit,
+        log: (m) => log.warn(m),
+      })
+        .then((r) => {
+          if (r.ok) {
+            profileApply = r.apply || null;
+            log.info(`资料工具已挂上：${r.names.join('、')}（${r.mode}）`);
+          } else log.warn(`资料工具没挂上：${r.reason}`);
+          if (r.off) mountOffs.push(r.off);
+        })
+        .catch((e) => log.warn(`资料工具挂载异常：${e?.message ?? e}`));
+    }
+
+    /**
+     * 自我表达的提示词（菜单 / 简介 / 昵称）。
+     *
+     * **只在工具真挂上时才说有这个能力**：没挂上说有，她会一直调一个不存在的工具，
+     * 然后按「做不到」回复用户——表面正常，实际这一轮全废。
+     *
+     * 陈述句、不写「你必须」：她对「代价」的理解比对禁令稳，而祈使句会把她变成客服。
+     */
+    const selfExprOn = {
+      menu: cfg.selfExpression?.menu?.enabled !== false,
+      sign: cfg.selfExpression?.sign?.enabled !== false,
+      name: cfg.selfExpression?.name?.enabled !== false,
+    };
+    if (selfExprOn.menu || selfExprOn.sign || selfExprOn.name) {
+      try {
+        offs.push(agent.ctx.systemPrompt.context({
+          name: 'roost-self-expression',
+          order: 906,
+          text: () => [
+            buildMenuPrompt({
+              enabled: selfExprOn.menu,
+              cooldownMin: cfg.selfExpression?.menu?.cooldownMin ?? 0,
+            }),
+            buildProfilePrompt({ sign: selfExprOn.sign, name: selfExprOn.name }),
+          ].filter(Boolean).join('\n'),
+        }));
+      } catch (e) {
+        log.debug('挂自我表达提示失败：' + (e?.message ?? String(e)));
+      }
+    }
+
+    /**
      * QQ 动作工具（`qq_send` / `qq_close`）：让她自己决定说几句、什么时候退场。
      *
      * 挂载方式跟记忆工具一样，但**发送走被动回复**（`postReply(..., done:false)`）
@@ -5020,6 +5187,61 @@ export function apply(ctx) {
             text: '好，下一条同类命令我执行。',
           })?.catch?.(() => {});
         } catch { /* 回执发不出去也不影响批准 */ }
+        return;
+      }
+    }
+
+    /**
+     * 改资料的主人确认：主人在私聊里回码才执行。
+     *
+     * 三条限制缺一不可：
+     *   · 只在**主人的 c2c 会话**里认（群里有人猜到码也不能替他确认）
+     *   · 只在有待确认请求时才算（没挂请求就完全不影响正常聊天）
+     *   · 命中后**不进模型**：这一句是「批准」，不是聊天内容，
+     *     喂给模型它会当成新话题，还可能顺手发起别的改动
+     */
+    /**
+     * 扩展经 `/v1/message` 发来的那句**不算批准**，理由和上面那道闸一样：
+     * 拿到 `message:write` 的扩展本可以自己发一句话。这里虽然还要猜 4 位码，
+     * 但「能猜」和「该猜」是两回事——批准只能来自主人在 QQ 里按下的那一句。
+     */
+    const profileFromApi = /^api-/i.test(String(payload?.id ?? ''));
+    if (!profileFromApi
+      && profileConfirm.hasPending()
+      && String(chat.kind) === 'c2c'
+      && String(chat.chatId) === String(ownerId())) {
+      const said = String(payload?.text ?? '');
+      const req = profileConfirm.take(said);
+      if (req) {
+        const fn = profileApply?.payload;
+        const r = fn
+          ? await fn(req.kind, req.payload, { sid: `confirm-${req.code}` })
+          : { ok: false, message: '宿主没接上写入通道（工具可能没挂上）' };
+        try {
+          sendOut({
+            scene: chat.scene,
+            kind: chat.kind,
+            target: chat.chatId,
+            text: r?.ok
+              ? `好，改好了：${req.summary}`
+              : `这次没改成：${r?.message || '原因不明'}`,
+          })?.catch?.(() => {});
+        } catch { /* 回执发不出去不影响已经改了这件事 */ }
+        audit({ op: 'selfexpr.confirm', note: `${req.kind} ${r?.ok ? 'ok' : 'fail'}` });
+        log.info(`[profile-confirm] 主人确认 ${req.kind}（${req.code}）：${r?.ok ? '成功' : '失败'}`);
+        return;
+      }
+      const cancelled = profileConfirm.cancelLatest(said);
+      if (cancelled) {
+        try {
+          sendOut({
+            scene: chat.scene,
+            kind: chat.kind,
+            target: chat.chatId,
+            text: `好，那就不改${cancelled.kind === 'name' ? '名字' : ''}了。`,
+          })?.catch?.(() => {});
+        } catch { /* 同上 */ }
+        audit({ op: 'selfexpr.confirm', note: `${cancelled.kind} cancel` });
         return;
       }
     }
@@ -8583,6 +8805,189 @@ export function apply(ctx) {
         } catch (e) {
           send(res, 200, { ok: false, message: String(e?.message || e) });
         }
+      }),
+
+      /**
+       * 她自己改资料：配置 + 变更历史 + 平台现状（面板「人设 → 资料」页）。
+       *
+       * GET 一次给全。为什么把平台现状也塞进来：用户打开这一页最想问的是
+       * 「她现在叫什么」，而 `dev.bot.get` 需要开发者登录态、失败是常态——
+       * 不在这里一起拿，前端就得再写一个「先探测、再渲染」的状态机。
+       *
+       * POST 只写 `selfExpression` 这一段（白名单在 `patchSelfExpression` 里），
+       * 走 `patchConfig` 而不是 `saveConfig`：后者基线是 DEFAULTS，只提交一段
+       * 会把 token、端口一起打回默认值（2026-11-01 踩过）。
+       */
+      /**
+       * Roost **面板**的「开放平台」页地址（`#dev`）。
+       *
+       * 为什么不能直接用 `roostHost.url`：面板端口和外接协议端口是两个数。
+       *   · 外接协议：`6800 + sha1(botId)%100`（`roostHost.url` 就是它，只回 JSON）
+       *   · WebUI：`webui.port`，被占用还会往后顺延（`listenWithFallback`），
+       *     真正应答的端口只有 `setup` 的探活知道（`activePort`）
+       *
+       * 为什么返回地址而不是 302：面板 API 有请求栅栏（`fence.js`），而**浏览器
+       * 顶层导航带不了自定义头**，`window.open` 一条插件路由会直接 403。
+       * 所以让前端按正常 `fetch` 取地址、再打开。
+       *
+       * 地址里可能带访问密钥（`setup.webuiUrl()` 本来就带 key，向导那一屏也是
+       * 这么发给前端的）。这是同一份信任：能取到这个接口的人已经能用面板 API
+       * 读配置里的 `roostHost.token`，多一把面板密钥不改变边界。
+       */
+      route('/self/panel', async (req, res) => {
+        let up = false;
+        try {
+          up = await setup.isRunning();
+        } catch { up = false; }
+        if (!up) {
+          return send(res, 200, {
+            ok: false,
+            message: 'Roost 面板没在跑——这个按钮打开的是框架自己的网页面板（不是外接协议地址），先去「接入」页把它启动起来。',
+          });
+        }
+        try {
+          /**
+           * `webuiUrl()` 形如 `http://127.0.0.1:15207/?key=…`（没设密钥就是 `…/`）。
+           * 追加 `#dev` 落到「开放平台」那一页：框架面板用 `location.hash` 选页
+           * （`bot/web/app.js:285`，导航项的 `data-tab` 就叫 `dev`）。
+           */
+          return send(res, 200, { ok: true, url: `${setup.webuiUrl()}#dev` });
+        } catch (e) {
+          return send(res, 200, { ok: false, message: String(e?.message || e) });
+        }
+      }),
+
+      route('/self/profile', async (req, res) => {
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          const patch = body?.patch && typeof body.patch === 'object' ? body.patch : body;
+          const next = patchSelfExpression(cfg.selfExpression, patch);
+          cfg = patchConfig({ selfExpression: next });
+          audit({
+            op: 'selfexpr.patch',
+            note: Object.keys(patch && typeof patch === 'object' ? patch : {}).join(',') || 'noop',
+          });
+          return send(res, 200, { ok: true, cfg: normalizeSelfExpression(cfg.selfExpression) });
+        }
+
+        const se = normalizeSelfExpression(cfg.selfExpression);
+        /** 新的在前：面板是「最近改了什么」，不是时间线考古 */
+        const history = selfHistory.read().slice().reverse();
+        let platform = { ok: false, message: '框架没连上' };
+        try {
+          const hello = await roost.rpc('system.hello', {});
+          const appid = String(hello?.bot?.appId || '');
+          const st = await roost.rpc('dev.status', {});
+          platform = {
+            ok: true,
+            appid,
+            loggedIn: st?.loggedIn === true,
+            scanBusy: st?.scan?.busy === true,
+            bot: null,
+            botError: '',
+          };
+          if (appid && platform.loggedIn) {
+            try {
+              platform.bot = await roost.rpc('dev.bot.get', { appid });
+            } catch (e) {
+              platform.botError = String(e?.message || e);
+            }
+          }
+        } catch (e) {
+          platform = { ok: false, message: String(e?.message || e) };
+        }
+        return send(res, 200, { ok: true, cfg: se, history, labels: KIND_LABELS, platform });
+      }),
+
+      /**
+       * 人在面板上直接改（昵称 / 简介 / 头像）。
+       *
+       * **不经过「主人确认」**：那道机制防的是「AI 或别人替主人做决定」，
+       * 而这里就是主人自己按的按钮，再问一遍自己很荒谬。
+       * 写入仍走同一套逻辑（含历史与审计），所以照样能退回。
+       */
+      route('/self/profile/apply', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        const kind = String(body?.kind || '').trim();
+        const value = String(body?.value ?? '').trim();
+        if (!['sign', 'name', 'avatar'].includes(kind)) {
+          return send(res, 400, { ok: false, message: `不认识的类型：${kind || '(空)'}` });
+        }
+        if (!value) return send(res, 400, { ok: false, message: '要填一个新值。' });
+        if (!profileApply?.payload) {
+          return send(res, 200, { ok: false, message: '资料工具还没挂上（先确认配置里这一项是开着的）' });
+        }
+
+        let payload;
+        if (kind === 'sign') payload = { text: value };
+        else if (kind === 'name') payload = { name: value };
+        else {
+          /** 面板手动改头像只收地址：本机路径那种事应该由她自己用工具做 */
+          const v = validateAvatarSource({ url: value });
+          if (!v.ok) return send(res, 200, { ok: false, message: v.message });
+          payload = { src: v.src, via: v.kind };
+        }
+
+        /**
+         * `sid` 每次唯一：那道 10 秒「同轮只改一次」的闸是防模型连调的，
+         * 人在面板上改完昵称再改简介不该被它拦住。
+         */
+        const r = await profileApply.payload(kind, payload, { sid: `panel-${Date.now()}` });
+        audit({ op: 'selfexpr.apply', note: `${kind} ${r?.ok ? 'ok' : 'fail'}` });
+        return send(res, 200, r);
+      }),
+
+      /**
+       * 回滚一条：把某一类改回「这条历史里的 before」。
+       *
+       * 按 `{kind, at}` 精确定位，不做「自动回滚最近一次」——后者在历史里插进别的类型后
+       * 会回错版本，而「点哪条回到哪条之前」重复点也是幂等的。
+       *
+       * 这里**不再判 `enabled`**：回滚是补救，功能关掉之后恰恰更需要它。
+       * 只要求「这条历史存在、有 before」。
+       */
+      route('/self/profile/restore', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        const kind = String(body?.kind || '').trim();
+        const at = Number(body?.at) || 0;
+        if (!SELF_KINDS.includes(kind)) {
+          return send(res, 400, { ok: false, message: `不认识的类型：${kind || '(空)'}` });
+        }
+        const row = selfHistory.read().find((r) => r.kind === kind && Number(r.at) === at && r.ok !== false);
+        if (!row) return send(res, 200, { ok: false, message: '没找到这条记录（可能已经被清空）。' });
+        if (!row.before) {
+          return send(res, 200, { ok: false, message: '这一条没有旧值（它是第一次改），回不去。' });
+        }
+
+        let r;
+        if (kind === 'menu') {
+          r = await restoreMenuSlot({
+            rpc: (m, p) => roost.rpc(m, p),
+            slots: menuSlots,
+            before: row.before,
+            log: (m) => log.warn(m),
+          });
+        } else {
+          r = await restoreProfileValue({
+            kind,
+            before: row.before,
+            rpc: (m, p) => roost.rpc(m, p),
+            syncPersonaName: (name) => { cfg = patchConfig({ persona: { name } }); },
+            log: (m) => log.warn(m),
+          });
+        }
+        audit({ op: 'selfexpr.restore', note: `${kind}${r?.ok ? '' : ' 失败'}` });
+        return send(res, 200, r);
+      }),
+
+      /** 清空变更历史。不回滚任何东西，只丢快照——腾地方用，不是恢复出厂 */
+      route('/self/profile/history/clear', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const ok = selfHistory.clear();
+        audit({ op: 'selfexpr.history_clear', note: ok ? 'ok' : 'fail' });
+        return send(res, 200, { ok, message: ok ? '' : '清空失败，看日志' });
       }),
 
       /**

@@ -535,6 +535,46 @@ export const DEFAULTS = {
     maxParts: 3,
   },
   /**
+   * 她自己改资料：昵称 / 简介 / 头像 / 菜单（面板「人设 → 资料」页）。
+   *
+   * ## 为什么没有「限额」
+   *
+   * 网上流传的「官方机器人资料每月只能改 5 次」出自 2023 年版 `tencent-connect/bot-docs`
+   * 的 README，同一份文件还写着「个人开发者不能开群」——早已不成立。现行
+   * `bot.qq.com/wiki` 没有这一节，实改也没碰到限制。所以**真实上限未知**，
+   * 这里不编数字：`cooldownMin: 0` = 完全不检查时间，要限自己填。
+   *
+   * ## 两个键各管什么
+   *
+   *   · `enabled`     —— 工具**注册不注册**。关掉之后它不在 schema 里，
+   *                      模型不可能去调（不是「注册了再拒绝」，那样模型会以为能用）。
+   *   · `cooldownMin` —— 两次写之间的最小间隔，对谁调的都一样。0 = 不限。
+   *
+   * ## 为什么开关放在 config 而不是能力页
+   *
+   * 能力页管的是「哪一档人能调」，这里管的是「她能不能自己动」。两件事。
+   * 而且这几项要跟人设放一起看（她叫什么、能不能换名字），所以归「人设」组。
+   *
+   * `awareness` 只读上下文，不触发任何动作：让她知道现在什么心情、多久没人说话。
+   * `proactive` 是允许她在主动搭话那一轮顺手改，默认关——那是「未经请求的自动化」，
+   * 不是限额问题。
+   */
+  selfExpression: {
+    menu: { enabled: true, cooldownMin: 0 },
+    /**
+     * `confirm` = 改之前先私聊主人问一句，主人回码才执行。
+     * **必须写在这里**：`pruneTo` 只保留 `DEFAULTS` 里有的键，漏了的话
+     * 面板上打开、存盘时会被静默裁掉（配置回读还是 false）。
+     */
+    /** 简介（OneBot 的 longNick） */
+    sign: { enabled: true, cooldownMin: 0, confirm: false },
+    /** 昵称；改了要连人格卡的 `selfName` 一起改，否则会出现资料卡和自称对不上 */
+    name: { enabled: true, cooldownMin: 0, confirm: false },
+    avatar: { enabled: true, cooldownMin: 0, confirm: false },
+    awareness: { mood: true, silence: true },
+    proactive: { enabled: false, fields: ['menu'] },
+  },
+  /**
    * 发文件（`qq_send_file`）。
    *
    * **默认不限制路径**：这台机器只有主人能调工具（`permissions.owner = 'all'`，
