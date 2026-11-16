@@ -106,6 +106,12 @@ export function isRevoked(index, entry) {
  */
 export const MARKET_SOURCES = ['github', 'gitee', 'custom'];
 
+/**
+ * 覆盖 / 删除手写目录的整目录备份，默认保留天数。
+ * 与 `config.extensions.backupKeepDays` 的默认值一致；配置读不到时退回它。
+ */
+export const BACKUP_KEEP_DEFAULT_DAYS = 7;
+
 /** 仓库 slug（`owner/repo`）与分支 → 索引地址 */
 export function indexUrlFor({ source = 'github', indexUrl = '', repo = '', branch = 'main' } = {}) {
   const src = MARKET_SOURCES.includes(source) ? source : 'github';
@@ -393,20 +399,29 @@ export function createExtMarket({
     throw new Error('createExtMarket 需要 registry');
   }
   const readSsrf = typeof ssrf === 'function' ? ssrf : () => ssrf;
-  /** 每次出站都重算：面板改了白名单不该要求重启进程 */
+  /**
+   * 现读配置，**读不到就当没配**。
+   *
+   * 这是运行期高频路径（面板 status、每次出站都走），而 `marketCfg` 由宿主注入、
+   * 里面读的是还没完全初始化的 `cfg` 闭包。它抛一次，面板整个扩展页就报错，
+   * 而这里的信息（用哪个源）本来就有安全的默认值——吞掉比炸掉合理。
+   */
+  const marketCfgNow = () => {
+    try { return marketCfg() || {}; } catch { return {}; }
+  };
   /**
    * 当前数据源。每次调用现读配置：面板上换源立刻生效，不用重启。
    * 显式传了 `indexUrl` 参数（测试 / 内嵌）时那个说了算，不受 source 影响。
    */
   const sourceNow = () => {
-    const s = String(marketCfg()?.source ?? '').trim();
+    const s = String(marketCfgNow().source ?? '').trim();
     return MARKET_SOURCES.includes(s) ? s : 'github';
   };
   const indexUrlNow = () => {
     if (indexUrl && indexUrl !== DEFAULT_EXT_INDEX_URL) return indexUrl;
     return indexUrlFor({
       source: sourceNow(),
-      indexUrl: marketCfg()?.indexUrl,
+      indexUrl: marketCfgNow().indexUrl,
       repo: DEFAULT_EXT_REPO,
       branch: 'main',
     }) || DEFAULT_EXT_INDEX_URL;
@@ -418,9 +433,10 @@ export function createExtMarket({
     sources: MARKET_SOURCES,
     indexUrl: indexUrlNow(),
     /** 自建源才有意义；预设源这里是空串，面板据此决定要不要显示输入框 */
-    customUrl: String(marketCfg()?.indexUrl ?? ''),
+    customUrl: String(marketCfgNow().indexUrl ?? ''),
   });
 
+  /** 每次出站都重算：面板改了 SSRF 白名单 / 换了源都不该要求重启进程 */
   const guardNow = () => marketGuardOpts(readSsrf(), indexUrlNow());
   const fetchIndex = fetchText ?? ((url) => defaultFetchText(url, guardNow()));
   const downloadPkg = download
@@ -591,6 +607,49 @@ export function createExtMarket({
    * 用户找得到、也不受扩展目录清理影响。备份失败**一律中止**，宁可这次
    * 操作不做，也不要在没有退路的情况下覆盖。
    */
+  /**
+   * 备份保留天数。配置读不到 / 不合法就按默认 7 天——**这里不能报错也不能清成
+   * 「永久保留」**：漏清一次不会坏事，但一个坏配置把退路全删光就不可逆了。
+   * `<= 0` 是唯一表示「永久保留」的值（用户显式要的）。
+   */
+  function backupKeepDaysNow() {
+    const raw = Number(marketCfgNow().backupKeepDays);
+    if (!Number.isFinite(raw)) return BACKUP_KEEP_DEFAULT_DAYS;
+    return raw;
+  }
+
+  /**
+   * 清掉过期的自动备份。
+   *
+   * 只认 `ext-<id>-YYYYMMDD-HHMMSS` 这个格式（我们自己写的），**其它目录一律不碰**
+   * ——`backups/` 就在 `data/` 下面，用户很可能也往里放东西。时间从**目录名**解析
+   * 而不是 mtime：`cpSync` 出来又搬过一次的目录，mtime 会被改写。
+   *
+   * 删除失败只记 warn：清理是收尾动作，不能因为它让这次安装 / 卸载失败。
+   */
+  function pruneBackups() {
+    const keep = backupKeepDaysNow();
+    if (!(keep > 0)) return { removed: 0 };
+    const root = join(dir, 'backups');
+    let names = [];
+    try { names = fs.readdirSync(root); } catch { return { removed: 0 }; }
+    const cutoff = now() - keep * 24 * 3600 * 1000;
+    let removed = 0;
+    for (const name of names) {
+      const m = /^ext-(.+)-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(name);
+      if (!m) continue;
+      const at = new Date(
+        Number(m[2]), Number(m[3]) - 1, Number(m[4]),
+        Number(m[5]), Number(m[6]), Number(m[7]),
+      ).getTime();
+      if (!Number.isFinite(at) || at >= cutoff) continue;
+      try { rmrfSync(join(root, name)); removed += 1; }
+      catch (e) { log.warn?.(`[ext-market] 旧备份清不掉（${name}）：${e?.message ?? e}`); }
+    }
+    if (removed) log.info?.(`[ext-market] 已清理 ${removed} 份过期备份（保留 ${keep} 天）`);
+    return { removed };
+  }
+
   function backupForeign(id) {
     const src = registry.pathOf(id);
     if (!fs.existsSync(src)) return '';
@@ -601,6 +660,10 @@ export function createExtMarket({
     const dest = join(root, `ext-${id}-${stamp}`);
     fs.mkdirSync(root, { recursive: true });
     fs.cpSync(src, dest, { recursive: true });
+    /**
+     * 备份成功之后再清旧的：先删后拷的顺序，万一拷贝失败会连退路一起没了。
+     */
+    pruneBackups();
     return dest;
   }
 
@@ -899,8 +962,27 @@ export function createExtMarket({
   /** 索引缓存的旁路清理，测试与面板「强制刷新」用。 */
   function clearCache() { cache = null; }
 
+  /**
+   * 有安装 / 卸载正在跑？
+   *
+   * 换源、改 SSRF 白名单这类**全局**操作要拿它避让：安装流程会分好几次读
+   * `sourceNow()`（拉索引一次、拼 tarball 地址一次、报进度又一次），中途换源
+   * 就会出现「索引来自 A 源、包从 B 源下」的混搭。哈希校验能兜住坏包，但报错
+   * 信息会指向莫名其妙的地方，不如直接说「等这一轮跑完」。
+   */
+  function busy() { return running.size > 0; }
+
   return {
-    dir, tmpRoot, indexUrl: indexUrlNow(), index, list, install, progress,
+    dir, tmpRoot,
+    /** 见上：换源 / 改全局设置前先问一句 */
+    busy,
+    /**
+     * **getter，不是快照**。面板上换源之后不该要求重启进程，而这个字段早期
+     * 是创建时算一次就固定下来的——换完源再读它，拿到的还是旧地址。
+     * 现在每次读都按当前配置重算，和 `sourceInfo()` 同源。
+     */
+    get indexUrl() { return indexUrlNow(); },
+    index, list, install, progress,
     sourceInfo,
     remove, detectUpdates, revoke, syncBlock, clearCache,
   };

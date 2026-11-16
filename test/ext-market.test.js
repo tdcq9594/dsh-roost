@@ -238,10 +238,14 @@ function rig({ rows, indexExtra = {}, opts = {} } = {}) {
   const market = createExtMarket({
     dir, registry,
     fetchText: async () => fakeIndex(rows, indexExtra),
-    download: async (entry, dest) => { writeTree(dest, filesFor(entry.id)); return Object.keys(FILES).length; },
+    /** 想控节奏（测 busy）或换实现时由 `opts.download` 覆盖 */
+    download: opts.download
+      ?? (async (entry, dest) => { writeTree(dest, filesFor(entry.id)); return Object.keys(FILES).length; }),
     extGroups: { add: (id, o) => groups.push({ id, ...o }), remove: (id) => groups.push({ remove: id }) },
     extPatch: { render: (ids, o) => { blocks.push({ ids, ...o }); return { written: true, ids }; } },
     capStore: opts.capStore ?? null,
+    /** 配置 getter（数据源 / 备份保留天数），默认「没配」 */
+    marketCfg: opts.marketCfg ?? (() => ({})),
     log: { info: () => {}, warn: () => {} },
   });
   return { dir, registry, market, groups, blocks };
@@ -462,6 +466,43 @@ test('数据源：sourceInfo 现读配置，换源不用重启', async (t) => {
   assert.equal(m.sourceInfo().customUrl, 'https://mirror.example/index.json');
 });
 
+test('数据源：市场和 sourceInfo 同源，换源后读 indexUrl 拿到的是**新**地址', () => {
+  const d = fs.mkdtempSync(join(os.tmpdir(), 'roost-market-src-'));
+  HOMES.push(d);
+  const registry = createExtRegistry({ dir: d });
+  let src = 'github';
+  const m = createExtMarket({
+    dir: d, registry,
+    fetchText: async () => JSON.stringify({ schema: 1, repo: DEFAULT_EXT_REPO, branch: 'main', plugins: [] }),
+    marketCfg: () => ({ source: src, indexUrl: '' }),
+  });
+  /**
+   * 这个字段早期是创建时算一次的快照：面板换完源再读它，拿到的还是旧地址。
+   * 现在必须和 `sourceInfo()` 同源（getter），否则「换源不用重启」这条承诺
+   * 只在面板那一处成立，别处读到的是陈旧值。
+   */
+  assert.match(m.indexUrl, /raw\.githubusercontent\.com/);
+  src = 'gitee';
+  assert.match(m.indexUrl, /gitee\.com/);
+  assert.equal(m.indexUrl, m.sourceInfo().indexUrl);
+});
+
+test('数据源：配置 getter 抛错时退回官方源，不能把面板打崩', () => {
+  const d = fs.mkdtempSync(join(os.tmpdir(), 'roost-market-src-'));
+  HOMES.push(d);
+  const registry = createExtRegistry({ dir: d });
+  const m = createExtMarket({
+    dir: d, registry,
+    fetchText: async () => JSON.stringify({ schema: 1, repo: DEFAULT_EXT_REPO, branch: 'main', plugins: [] }),
+    /** 宿主注入的 getter 读的是还没初始化完的 cfg 闭包，抛错是有可能的 */
+    marketCfg: () => { throw new Error('cfg 还没就绪'); },
+  });
+  const info = m.sourceInfo();
+  assert.equal(info.source, 'github', '读不到就按官方源，不能把扩展页打成 500');
+  assert.match(info.indexUrl, /raw\.githubusercontent\.com/);
+  assert.equal(info.customUrl, '');
+});
+
 /**
  * 内网 http 镜像要能放行，但**必须显式打开**开关。
  *
@@ -528,4 +569,82 @@ test('foreign：不带 force 拒绝卸载，带 force 才删且先备份', async
   assert.equal(ok.ok, true, ok.message);
   assert.equal(fs.existsSync(dir), false);
   assert.ok(fs.readdirSync(join(r.dir, 'backups')).some((n) => n.startsWith('ext-bili-')), '删前要备份');
+});
+
+/**
+ * 备份保留 7 天。
+ *
+ * 手写目录常常带 `node_modules`，一次备份几十上百 MB；无限堆几个月能把盘吃干净。
+ * 但 `backups/` 就在 `data/` 下面，用户很可能也往里放东西——所以**只清我们
+ * 自己写的 `ext-<id>-YYYYMMDD-HHMMSS` 格式**，别的目录一律不碰。
+ * 时间从**目录名**解析而不是 mtime：拷贝过 / 搬过的目录 mtime 会变。
+ */
+test('备份：默认保留 7 天，过期的自动清、非本格式的目录不碰', async () => {
+  const sha = await shaFor('bili');
+  const r = rig({ rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: sha }] });
+  const dir = r.registry.pathOf('bili');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(join(dir, MANIFEST_FILE), `${JSON.stringify(manifest('bili'))}\n`, 'utf8');
+
+  const bk = join(r.dir, 'backups');
+  fs.mkdirSync(join(bk, 'ext-bili-20200101-000000'), { recursive: true });  // 早就过期
+  fs.mkdirSync(join(bk, 'user-notes'), { recursive: true });                // 用户自己的，不是我们的格式
+  fs.writeFileSync(join(bk, 'user-notes', 'a.txt'), 'keep me', 'utf8');
+
+  const out = await r.market.install('bili', { takeOver: true });
+  assert.equal(out.ok, true, out.message);
+
+  const names = fs.readdirSync(bk);
+  assert.equal(names.includes('ext-bili-20200101-000000'), false, '过期备份要清掉');
+  assert.equal(names.includes('user-notes'), true, '不是我们造的目录绝不能动');
+  assert.equal(fs.readFileSync(join(bk, 'user-notes', 'a.txt'), 'utf8'), 'keep me');
+  assert.equal(names.filter((n) => /^ext-bili-\d{8}-\d{6}$/.test(n)).length, 1, '这次的新备份要在');
+});
+
+test('备份：backupKeepDays=0 表示永久保留（显式要留证据的人）', async () => {
+  const sha = await shaFor('bili');
+  const r = rig({
+    rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: sha }],
+    opts: { marketCfg: () => ({ backupKeepDays: 0 }) },
+  });
+  const dir = r.registry.pathOf('bili');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(join(dir, MANIFEST_FILE), `${JSON.stringify(manifest('bili'))}\n`, 'utf8');
+  const bk = join(r.dir, 'backups');
+  fs.mkdirSync(join(bk, 'ext-bili-20200101-000000'), { recursive: true });
+
+  const out = await r.market.install('bili', { takeOver: true });
+  assert.equal(out.ok, true, out.message);
+  assert.equal(fs.readdirSync(bk).includes('ext-bili-20200101-000000'), true, '0 = 不清');
+});
+
+/**
+ * `busy()`：换源、改 SSRF 白名单这类**全局**操作要靠它避让。
+ * 安装流程会分好几次读当前源（拉索引 / 拼 tarball / 报进度），中途换源就成了
+ * 「索引来自 A 源、包从 B 源下」。哈希能兜住坏包，但报错会指错方向。
+ */
+test('busy：安装进行中为真，这一轮跑完为假', async () => {
+  const sha = await shaFor('bili');
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const r = rig({
+    rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: sha }],
+    opts: {
+      download: async (entry, dest) => {
+        await gate;                                    // 挂在这里，模拟「正在下载」
+        writeTree(dest, filesFor(entry.id));
+        return Object.keys(FILES).length;
+      },
+    },
+  });
+
+  assert.equal(r.market.busy(), false, '闲的时候不能误报，否则面板永远换不了源');
+  const p = r.market.install('bili');
+  /** `running.add()` 在第一个 await 之前同步执行，所以这一刻已经在装 */
+  assert.equal(r.market.busy(), true);
+
+  release();
+  const out = await p;
+  assert.equal(out.ok, true, out.message);
+  assert.equal(r.market.busy(), false, '跑完要放行');
 });

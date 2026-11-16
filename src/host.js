@@ -7068,6 +7068,19 @@ export function apply(ctx) {
              */
             case 'extensions.market.source': {
               if (arg?.set !== true) return send(res, 200, extMarket.sourceInfo());
+              /**
+               * **有安装 / 卸载在跑就不许换源**。
+               *
+               * 安装流程会分好几次读当前源（拉索引、拼 tarball 地址、报进度），
+               * 中途换掉就成了「索引来自 A 源、包从 B 源下」。哈希能兜住坏包，
+               * 但报错会指向莫名其妙的地方——直接说「等这一轮跑完」更诚实。
+               */
+              if (typeof extMarket.busy === 'function' && extMarket.busy()) {
+                return send(res, 409, {
+                  ok: false,
+                  message: '有扩展正在安装 / 卸载，等这一轮跑完再换数据源',
+                });
+              }
               const want = String(arg?.source ?? '').trim();
               if (!extMarket.sourceInfo().sources.includes(want)) {
                 return send(res, 400, {
@@ -7087,6 +7100,14 @@ export function apply(ctx) {
                 ? { marketSource: want, indexUrl }
                 : { marketSource: want };
               const out = applyConfigBody({ extensions: patchExt }, {});
+              /**
+               * 换完把索引缓存丢掉：`indexUrl` 是动态的，但缓存里存的是**旧源**
+               * 拉下来的那份。面板换源后紧接着会 `refresh:true` 自己覆盖掉，
+               * 别的调用方（更新检测、扩展列表）不一定——清掉最省心。
+               */
+              if (out.status >= 200 && out.status < 300) {
+                try { extMarket.clearCache?.(); } catch { /* 清缓存失败不影响保存 */ }
+              }
               return send(res, out.status, out.body);
             }
 
