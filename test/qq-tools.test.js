@@ -27,18 +27,25 @@ function make({
   fileOf = null,
   /** `qq_who` 的实现。同样：不传 = 没装 */
   infoOf = null,
-  /** 当前说话人的 openid（`qq_who` 不传参数时用它） */
+  /** `qq_search` 的实现。同样：不传 = 没装 */
+  searchOf = null,
+  /** 当前说话人的 openid（`qq_who` 不传参数时用它，`qq_search` 用它做权限收窄） */
   openid = '',
+  /** 权限档位：`qq_search` 靠它判「能不能看别人的消息」 */
+  bucket = 'owner',
+  /** 这一轮的会话 */
+  chatId = 'u1',
 } = {}) {
-  const box = { sent: [], opts: [], parts: 0, closed: false, closedWith: null, fileCalls: [], whoCalls: [] };
+  const box = { sent: [], opts: [], parts: 0, closed: false, closedWith: null, fileCalls: [], whoCalls: [], searchCalls: [] };
 
   const defs = buildQqToolDefs({
     callerOf: () => ({
-      chatId: 'u1',
+      chatId,
       kind,
       said,
       hasPayload,
-      bucket: 'owner',
+      bucket,
+      senderId: openid,
       openid,
     }),
     sendOf: async (text, opts = {}) => {
@@ -65,12 +72,26 @@ function make({
           return infoOf(q);
         }
       : undefined,
+    searchOf: searchOf
+      ? async (q = {}) => {
+          box.searchCalls.push(q);
+          return searchOf(q);
+        }
+      : undefined,
     cfgOf: () => ({ qqTools: { maxParts } }),
     stateOf: () => ({ parts: box.parts }),
   });
 
   const by = (n) => defs.find((d) => d.name === n);
-  return { box, send: by('qq_send'), close: by('qq_close'), file: by('qq_send_file'), who: by('qq_who'), defs };
+  return {
+    box,
+    send: by('qq_send'),
+    close: by('qq_close'),
+    file: by('qq_send_file'),
+    who: by('qq_who'),
+    search: by('qq_search'),
+    defs,
+  };
 }
 
 /* ---------------- 形状 ---------------- */
@@ -637,4 +658,71 @@ test('qq_who：output.render 返回内容块数组（路径要能被模型看见
   assert.ok(Array.isArray(out));
   assert.equal(out[0].type, 'text');
   assert.match(out[0].text, /abc\.jpg/);
+});
+
+/* ---------------- qq_search（跨会话搜历史） ---------------- */
+
+const SEARCH_OK = async () => ({ items: [{ seq: 1 }], terms: ['x'], relaxed: false, hasMore: false });
+
+test('qq_search：没传 searchOf 时清单里没有它', () => {
+  const { defs } = make();
+  assert.equal(defs.some((d) => d.name === 'qq_search'), false, '没实现就别注册');
+});
+
+test('qq_search：主人可以按别人查', async () => {
+  const { search, box } = make({ searchOf: SEARCH_OK, bucket: 'owner' });
+  const r = await search.execute({ q: '魂骨', person: '倦飞' });
+  assert.equal(r.ok, true);
+  assert.equal(r.scope, 'all');
+  assert.equal(box.searchCalls[0].person, '倦飞');
+});
+
+test('qq_search：普通成员传 person 会被忽略，强制只搜自己', async () => {
+  const { search, box } = make({ searchOf: SEARCH_OK, bucket: 'member', openid: 'ME1' });
+  const r = await search.execute({ q: '魂骨', person: '倦飞' });
+  assert.equal(r.ok, true);
+  assert.equal(r.scope, 'self');
+  assert.deepEqual(box.searchCalls[0].openids, ['ME1'], '必须覆盖成自己');
+  assert.equal(box.searchCalls[0].person, undefined, 'person 不能被透传');
+});
+
+test('qq_search：普通成员也能跨会话（chatId 生效，不再锁当前会话）', async () => {
+  const { search, box } = make({ searchOf: SEARCH_OK, bucket: 'member', openid: 'ME1' });
+  await search.execute({ q: 'x', chatId: 'OTHER_GROUP' });
+  assert.equal(box.searchCalls[0].chatId, 'OTHER_GROUP');
+  assert.deepEqual(box.searchCalls[0].openids, ['ME1'], '跨会话但仍只看自己的消息');
+});
+
+test('qq_search：普通成员拿不到身份就拒（不能退化成搜全部）', async () => {
+  const { search, box } = make({ searchOf: SEARCH_OK, bucket: 'member', openid: '' });
+  const r = await search.execute({ q: 'x' });
+  assert.equal(r.ok, false);
+  assert.equal(box.searchCalls.length, 0);
+});
+
+test('qq_search：around —— 普通成员只能围绕自己发的消息看上下文', async () => {
+  const other = make({
+    searchOf: async (a) => ({ anchor: { seq: a.around, userId: 'OTHER' }, items: [] }),
+    bucket: 'member',
+    openid: 'ME1',
+  });
+  const bad = await other.search.execute({ around: 12 });
+  assert.equal(bad.ok, false);
+  assert.match(bad.message, /不是你发的/);
+
+  const mine = make({
+    searchOf: async (a) => ({ anchor: { seq: a.around, userId: 'ME1' }, items: [{ seq: a.around }] }),
+    bucket: 'member',
+    openid: 'ME1',
+  });
+  const ok = await mine.search.execute({ around: 12 });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.items.length, 1);
+});
+
+test('qq_search：around 缺 seq 直接拒，不打后端', async () => {
+  const { search, box } = make({ searchOf: SEARCH_OK });
+  const r = await search.execute({ around: 0 });
+  assert.equal(r.ok, false);
+  assert.equal(box.searchCalls.length, 0);
 });

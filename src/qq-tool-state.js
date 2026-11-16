@@ -120,6 +120,24 @@ export function buildOutputPrompt({
       + '（可以直接 `<<image: 路径>>` 发出去）。',
     );
   }
+  /**
+   * 搜历史：只在工具真的挂上时教。
+   *
+   * 描述里必须把**权限差异**说清楚：普通群成员调用时只能搜自己、且只在当前
+   * 会话里。不写这句，模型会在群里承诺「我翻翻你们以前的聊天」，然后被工具
+   * 的收窄打了个空，看起来像失忆。
+   */
+  const searchDenied = toolWasDenied(denied, 'qq_search');
+  const searchRegistered = !registeredNames || registeredNames.has('qq_search');
+  if (!searchDenied && searchRegistered) {
+    lines.push(
+      '· 想不起来「以前说过什么」时，调 `qq_search`（只读）搜账本：'
+      + '关键词空格分隔、多个词要同时命中（没有结果会自动放宽成任一）。'
+      + '返回按时间倒序，带会话名、发言人、时间、正文。'
+      + '**普通成员只能搜到自己的消息、且只在当前会话范围内**；'
+      + '主人和管理员才能跨会话、按别人查。别承诺你权限外的检索。',
+    );
+  }
   return lines.join('\n');
 }
 

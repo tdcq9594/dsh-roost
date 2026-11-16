@@ -152,12 +152,16 @@ export function defaultStore() {
        * 发表情、看消息里的图跟权限无关，卡住只会让人觉得「机器人装死」。
        * **但 `read` / `write` / `edit` 仍然不给**——`read_image` 只读图片，
        * `read` 能读整台机器的文本文件，两者不是一回事，别一起放开。
+       *
+       * `qq_search` 也放到所有档位，但**工具内部按档位收窄**：非 owner/admin
+       * 只能搜自己、且只限当前会话（见 `search-scope.js`）。所以「允许调用」
+       * 不等于「能看别人的消息」，权限边界在工具里，不在这张名单里。
        */
-      admin: { allow: ['memory_search', 'memory_note', 'qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who'] },
+      admin: { allow: ['memory_search', 'memory_note', 'qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who', 'qq_search'] },
       manager: {},
       helper: {},
-      member: { allow: ['memory_search', 'qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who'] },
-      unknown: { allow: ['qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who'] },
+      member: { allow: ['memory_search', 'qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who', 'qq_search'] },
+      unknown: { allow: ['qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who', 'qq_search'] },
     },
     /** 分组只用于展示与批量开关；解析时按 match 展开成工具名 */
     groups: {

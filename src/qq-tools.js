@@ -31,6 +31,7 @@
 import { loadDefineTool, shapeTool } from './tools.js';
 import { acceptClose } from './closing.js';
 import { buildGroupToolDefs } from './group-tools.js';
+import { searchScopeOf } from './search-scope.js';
 
 /**
  * `qq_send` 里**仍然要拦**的标记：`say` / `button` / `silence`。
@@ -258,6 +259,165 @@ function buildWhoDef({ caller, infoOf }) {
 }
 
 /**
+ * `qq_search`：跨会话搜聊天记录（账本）。
+ *
+ * 权限由 `searchScopeOf` 按「这一轮谁在说话」钉死——普通群成员只能搜
+ * **自己**，而且**只在当前会话**；主人 / 管理员才能跨会话、按别人查。
+ * 这条边界写在工具里，不写在描述里：模型可能被群里的话术诱导，权限不能
+ * 靠它自觉。
+ *
+ * 为什么值得给模型：它记得「我之前说过什么」靠的是上下文和记忆条目，
+ * 一旦超出窗口就只能说「不记得了」。有了搜索，用一句关键词就能把当时的
+ * 原话捞出来——比让模型猜一句摘要可靠得多。
+ */
+function buildSearchDef({ caller, searchOf }) {
+  return {
+    name: 'qq_search',
+    description:
+      '搜聊天记录（框架账本，重启后仍在）：按关键词、发言人、时间、会话查以前说过什么。'
+      + '**所有人（包括普通群成员）都能跨会话搜**，但普通成员**只能搜到自己的消息**；'
+      + '主人和管理员才能按别人查。'
+      + '关键词空格分隔，多个词默认要同时命中；一条都没有时会自动放宽成任一命中（结果里 relaxed=true 说明放宽了）。'
+      + '返回按时间倒序，每条带 seq / 会话名 / 发言人 / 时间 / 正文 / openid。'
+      + '想看「那条消息前后到底怎么聊的」，把它的 seq 传给 `around`，会返回前后几条（普通成员只能看自己发的那条）。'
+      + '适合「上次说的那个东西叫什么」「我之前答应过什么」这类回溯；一次给准关键词比反复换词有用。',
+    parameters: {
+      q: {
+        type: 'string',
+        required: false,
+        description: '关键词，空格分隔多个词（例如「杭州 天气」）。疑问词会被自动剥掉。',
+      },
+      person: {
+        type: 'string',
+        required: false,
+        description: '发言人：昵称 / QQ 号 / openid。只有主人和管理员有效，其他人传了也会被忽略。',
+      },
+      kind: {
+        type: 'string',
+        required: false,
+        description: 'group（群聊）/ c2c（私聊）；不填=全部。',
+      },
+      days: {
+        type: 'number',
+        required: false,
+        description: '只看最近几天；不填=全部时间。',
+      },
+      chatId: {
+        type: 'string',
+        required: false,
+        description: '限定某个会话的 openid。只有主人和管理员有效。',
+      },
+      limit: {
+        type: 'number',
+        required: false,
+        description: '返回条数，默认 20，最多 50。',
+      },
+      around: {
+        type: 'number',
+        required: false,
+        description:
+          '看某条消息的**前后文**：传搜索结果里那条的 seq。'
+          + '普通成员只能围绕自己发的消息看前后（别人发的会被拒）。',
+      },
+      before: {
+        type: 'number',
+        required: false,
+        description: '配合 around：往前取几条，默认 3，最多 20。',
+      },
+      after: {
+        type: 'number',
+        required: false,
+        description: '配合 around：往后取几条，默认 3，最多 20。',
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ q, person, kind, days, chatId, around, before, after, limit } = {}) {
+      const c = caller();
+      const sc = searchScopeOf(c);
+
+      /**
+       * 看上下文：和「搜索」是两条路，**不走 openids 过滤**——前后文里必然
+       * 夹着别人的话，按 openid 过滤就把对话滤成独白了，没有意义。
+       * 所以这里的边界换成「围绕谁的消息」：
+       *   · 主人 / 管理员：任意一条；
+       *   · 其他人：只能围绕**自己发的**那条（`anchor.userId` 严格等于自己）。
+       * 拿不到 anchor 的 userId（老数据缺字段）时**直接拒**，fail-closed。
+       */
+      if (around) {
+        const seq = Number(around) || 0;
+        if (!seq) return { ok: false, message: 'around 要给搜索结果里那条的 seq。' };
+        if (!sc.privileged && !sc.selfOpenid) {
+          return { ok: false, message: '这一轮认不出你是谁（没有发送者 openid），没法看上下文。' };
+        }
+        try {
+          const r = await searchOf({ around: seq, before, after });
+          const anchorUser = String(r?.anchor?.userId ?? '');
+          if (!sc.privileged && anchorUser !== sc.selfOpenid) {
+            return { ok: false, message: '这条不是你发的，看不了它的上下文。' };
+          }
+          return {
+            ok: true,
+            scope: sc.privileged ? 'all' : 'self',
+            anchor: r?.anchor ?? null,
+            items: Array.isArray(r?.items) ? r.items : [],
+          };
+        } catch (e) {
+          return { ok: false, message: `取上下文失败：${e?.message ?? e}` };
+        }
+      }
+
+      const args = {
+        q: String(q ?? '').trim(),
+        kind: String(kind ?? '').trim(),
+        limit: Math.max(1, Math.min(50, Number(limit) || 20)),
+      };
+      const d = Math.max(0, Math.min(3650, Number(days) || 0));
+      if (d) args.since = Date.now() - d * 86_400_000;
+
+      if (sc.privileged) {
+        if (person) args.person = String(person).trim();
+        if (chatId) args.chatId = String(chatId).trim();
+      } else {
+        /**
+         * 非特权：**不管传了什么，都用当前说话人的 openid 覆盖**。
+         * 这里刻意不 merge，而是直接赋值——merge 就是「多给一点」的来源。
+         *
+         * 会话**不锁**：主人 2026-11-16 定「其他人也要可以跨会话」。跨会话
+         * 只暴露「这个群存在」，不暴露别人的消息；边界是「谁的消息」。
+         */
+        if (!sc.selfOpenid) {
+          return { ok: false, message: '这一轮认不出你是谁（没有发送者 openid），没法按「只看自己的消息」查。' };
+        }
+        args.openids = [sc.selfOpenid];
+        if (chatId) args.chatId = String(chatId).trim();
+      }
+
+      if (!args.q && !args.person && !(args.openids ?? []).length && !args.kind) {
+        return { ok: false, message: '给个条件：关键词 / 发言人 / 类型。' };
+      }
+
+      try {
+        const r = await searchOf(args);
+        return {
+          ok: true,
+          /** `all` = 跨会话；`self` = 只有自己的消息 —— 让模型知道自己的视野边界 */
+          scope: sc.privileged ? 'all' : 'self',
+          items: Array.isArray(r?.items) ? r.items : [],
+          terms: Array.isArray(r?.terms) ? r.terms : [],
+          relaxed: Boolean(r?.relaxed),
+          hasMore: Boolean(r?.hasMore),
+        };
+      } catch (e) {
+        return { ok: false, message: `搜索失败：${e?.message ?? e}` };
+      }
+    },
+  };
+}
+
+/**
  * 拼工具定义。抽成纯函数是为了能单测——
  * 次数上限和「群聊不能收尾」这类判断写错，表现是刷屏或者群里莫名退场，
  * 都是只能靠线上观察才会发现的那种错。
@@ -270,7 +430,7 @@ function buildWhoDef({ caller, infoOf }) {
  * @param {() => object} o.cfgOf
  * @param {() => {parts:number}} o.stateOf 本轮已发段数
  */
-export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null }) {
+export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null }) {
   const caller = () => callerOf?.() || { chatId: '', kind: '', said: '', hasPayload: false, bucket: '' };
   const maxParts = () => maxPartsOf(cfgOf?.(), caller().kind);
 
@@ -457,6 +617,8 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
      * 等于教模型去做一件做不成的事，白烧一轮。
      */
     ...(typeof infoOf === 'function' ? [buildWhoDef({ caller, infoOf })] : []),
+    /** 搜历史：同样「没给实现就不注册」 */
+    ...(typeof searchOf === 'function' ? [buildSearchDef({ caller, searchOf })] : []),
     /** 群管：和发言工具一起挂，但实现放在 group-tools.js（语义不同，也都依赖外接协议） */
     ...(typeof groupOf === 'function'
       ? buildGroupToolDefs({ groupOf, callerOf, ledgerOf, sessionOf, cfgOf })
@@ -472,8 +634,8 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
  *
  * @returns {Promise<{ok:boolean, names:string[], reason?:string, mode?:string, off?:Function}>}
  */
-export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, log = () => {} }) {
-  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf, sessionOf, infoOf });
+export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, log = () => {} }) {
+  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf, sessionOf, infoOf, searchOf });
   const registry = agent?.ctx?.tools;
   if (!registry?.register) {
     /**

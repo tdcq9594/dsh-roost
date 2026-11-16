@@ -5011,6 +5011,33 @@ export function apply(ctx) {
             ...(why && !remote && !local && !seen ? { note: `官方接口没查成（${why.slice(0, 80)}）` } : {}),
           };
         } : null,
+        /**
+         * `qq_search`：跨会话搜聊天记录（框架账本）。
+         *
+         * 权限不在这层判——`search-scope.js` 按「这一轮谁在说话」把 openids /
+         * chatId 钉死，这里只负责把参数转给框架。分层的原因：只有 `callerOf()`
+         * 知道当前说话人是谁，而账本 rpc 只认 openid。
+         */
+        searchOf: async (args = {}) => {
+          /** 看上下文是另一条协议方法（要先按 seq 定位会话），别混进搜索参数里 */
+          if (args.around) {
+            const r = await roost.rpc('ledger.around', {
+              seq: args.around,
+              before: args.before,
+              after: args.after,
+            });
+            return { anchor: r?.anchor ?? null, items: Array.isArray(r?.items) ? r.items : [] };
+          }
+          const r = await roost.rpc('ledger.search', args);
+          return {
+            items: Array.isArray(r?.items) ? r.items : [],
+            terms: Array.isArray(r?.terms) ? r.terms : [],
+            relaxed: Boolean(r?.relaxed),
+            hasMore: Boolean(r?.hasMore),
+            /** 后端会解释「为什么空」（比如关键词全是疑问词被剥光了） */
+            note: String(r?.note ?? ''),
+          };
+        },
         sendOf: async (raw, opts = {}) => {
           const c = cur();
           if (!c.payload) {
