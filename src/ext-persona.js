@@ -65,10 +65,10 @@ const str = (v, max = 200) => String(v ?? '').trim().slice(0, max);
  * 的 id 被切短之后可能正好等于**另一个真实会话**的 id，于是「给 A 群换人格」
  * 变成了「给 B 群换人格」，而两边都收到 `ok:true`。
  */
-function readChatId(raw) {
+function readChatId(raw, label = 'chatId') {
   const v = String(raw ?? '').trim();
   if (v.length > MAX_CHAT_ID) {
-    return { error: `chatId 太长了（${v.length} 字符，上限 ${MAX_CHAT_ID}）` };
+    return { error: `${label} 太长了（${v.length} 字符，上限 ${MAX_CHAT_ID}）` };
   }
   return { value: v };
 }
@@ -176,7 +176,7 @@ export function createExtPersona({
       const chatId = got.value;
       if (chatId && BAD_KEYS.has(chatId)) return bad('chatId 不合法');
       /** 可选：想知道「某个人」实际用哪个人格，就带上他的 openid */
-      const gotSender = readChatId(query?.senderId);
+      const gotSender = readChatId(query?.senderId, 'senderId');
       if (gotSender.error) return bad(gotSender.error);
       const senderId = gotSender.value;
       if (senderId && BAD_KEYS.has(senderId)) return bad('senderId 不合法');
@@ -199,6 +199,14 @@ export function createExtPersona({
           chatId: chatId || null,
           senderId: senderId || null,
           byChat: { ...(c.persona?.byChat || {}) },
+          /**
+           * 按人指定那一层也要回。
+           *
+           * 只回 `byChat` 的话，扩展看到的是一份**少了最高优先级那一层**的
+           * 配置：它算出来的 `current` 与实际生效的对不上，会以为自己「没设上」
+           * 或者重复设一遍。两层一起给，调用方自己也能按同一套优先级算。
+           */
+          bySender: { ...(c.persona?.bySender || {}) },
           rows,
         },
       };
@@ -369,7 +377,7 @@ export function createExtPersona({
        * 只对 `persona` 生效——`model` 是按会话的（`model.byChat`），
        * 混进来会让人以为模型也能按人配，实际写进去的是另一个键。
        */
-      const gotSender = readChatId(b.senderId);
+      const gotSender = readChatId(b.senderId, 'senderId');
       if (gotSender.error) return bad(gotSender.error);
       const senderId = gotSender.value;
       if (senderId && BAD_KEYS.has(senderId)) return bad('senderId 不合法');

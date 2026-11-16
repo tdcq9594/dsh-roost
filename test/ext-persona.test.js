@@ -131,6 +131,21 @@ test('P4 list：给行但不给正文；current / effective / byChat 都对', as
   assert.equal(scoped.body.effective, 'default', '会话有覆盖时 effective 要按覆盖算');
 });
 
+test('P4b list：bySender 也要回（只回 byChat 等于少给一层，调用方会以为自己没设上）', async () => {
+  const store = makeStore({ default: '默认', cat: '猫娘正文' });
+  const cfg = makeCfg({
+    mem: { ...baseCfg(), persona: { current: 'default', byChat: { g1: 'default' }, bySender: { u1: 'cat' }, name: 'x' } },
+  });
+  const { api } = build({ store, cfg });
+
+  const r = await api['personas.list']({ query: { chatId: 'g9', senderId: 'u1' } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.bySender, { u1: 'cat' }, '按人这一层要能读到');
+  assert.deepEqual(r.body.byChat, { g1: 'default' });
+  assert.equal(r.body.effective, 'cat', '按人优先于按会话与全局');
+  assert.equal(r.body.senderId, 'u1');
+});
+
 test('P5 list：chatId 是原型污染的名字 → 400', async () => {
   const { api } = build({ store: makeStore({ default: 'x' }), cfg: makeCfg({ mem: baseCfg() }) });
   for (const bad of ['__proto__', 'constructor', 'prototype']) {

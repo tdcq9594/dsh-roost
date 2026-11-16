@@ -142,7 +142,7 @@
 | POST | `/v1/memory/facts/edit` | `memory:write` | ✅ 可用 | 改一条事实：`{ id, chatId, text?, pin?, tier?, archived? }`；**只能改会话那一层**（全局记忆只读，`memory:write` 是默认 scope，放开就等于谁都能污染所有会话）；**没有硬删**，`archived: true` 是归档（可恢复），理由见模块注释 |
 | POST | `/v1/message` | `message:write` | ✅ 可用 | 把一条消息送进 QQ（复用现有入站链路，不另写一条） |
 | GET | `/v1/mood` | `state:read` | ✅ 可用 | 读当前心情 |
-| GET | `/v1/personas` | `prompt:write` | ✅ 可用 | 列出人格库里有哪些人格、当前用哪个；`?chatId=` 看该会话实际生效的那个，`?senderId=`（**发送者 openid**）看**这个人**实际生效的那个（不返回正文） |
+| GET | `/v1/personas` | `prompt:write` | ✅ 可用 | 列出人格库里有哪些人格、当前用哪个；`?chatId=` 看该会话实际生效的那个，`?senderId=`（**发送者 openid**）看**这个人**实际生效的那个。响应带 `byChat` 与 `bySender` 两层覆盖（不返回正文） |
 | POST | `/v1/personas/create` | `prompt:write` | ✅ 可用 | 新建一份人格（`id` + 可选 `raw` / `label` / `selfName` / `tags`）；已存在回 409，要覆盖传 `overwrite: true` |
 | GET | `/v1/personas/read` | `prompt:write` | ✅ 可用 | 读一份人格的正文（`?id=`），写回时原样传 `raw` |
 | POST | `/v1/personas/remove` | `prompt:write` | ✅ 可用 | 删除一份人格（必须传 `confirm: true`；默认人格不能删；删前自动备份，删后级联清 `byChat` 里的引用） |

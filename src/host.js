@@ -2506,13 +2506,23 @@ export function apply(ctx) {
      */
     const picked = pickPersonaId({
       persona: cfg.persona,
-      chatId: chat.chatId,
+      chatId: chat?.chatId,
       /** 发送者 openid（不是 chatId）：群里 chatId 是群 openid，查不到按人那层 */
-      senderId: chat.senderId,
-      runtimePick: keywordPick.get(chat.chatId) || '',
+      senderId: chat?.senderId,
+      runtimePick: keywordPick.get(chat?.chatId) || '',
     });
     if (!picked) return cfg.persona;
-    return { ...cfg.persona, byChat: { ...(cfg.persona?.byChat || {}), [chat.chatId]: picked } };
+    /**
+     * **空 chatId 绝不写进 `byChat`。**
+     *
+     * `resolve()` 查的是 `byChat[chatId]`，写一个 `''` 键谁都不会命中——这次
+     * 选择等于白算；更糟的是这个空键会跟着并进临时配置，日志里看不出异常，
+     * 表现只有「人格换了但没生效」。没有 chatId 的轮次（协议构造的内部轮次）
+     * 本来也谈不上会话级覆盖，直接回原配置就是正确行为。
+     */
+    const chatId = String(chat?.chatId ?? '');
+    if (!chatId) return cfg.persona;
+    return { ...cfg.persona, byChat: { ...(cfg.persona?.byChat || {}), [chatId]: picked } };
   }
 
   /** 动态块的字数硬上限（token 预算的粗护栏，先粗后细） */
