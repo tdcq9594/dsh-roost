@@ -422,7 +422,10 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
           fs.renameSync(old, dest);
           // 恢复出来的目录可能是用户手写的：foreign 检查要再做一次，
           // 不能因为「它是从 .old 恢复的」就绕过保护。
-          if (isForeign(id)) {
+          // `takeOver` 是**调用方已经确认并做过整目录备份**的口子，这里要一起认：
+          // 不认的话，一次历史 IO 故障留下的 `.old` 会让「用官方版替换」永远
+          // 卡在这句上，而面板只会说「拒绝覆盖」，看不出跟 `.old` 有关。
+          if (isForeign(id) && !takeOver) {
             return { ok: false, reason: '残留恢复出的目录是用户手写的，拒绝覆盖（foreign 保护）' };
           }
         } catch {

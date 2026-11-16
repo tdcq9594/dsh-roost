@@ -252,3 +252,32 @@ test('problems()：清单正常时为空', (t) => {
   assert.equal(r.list().length, 1);
   assert.deepEqual(r.problems(), []);
 });
+
+/**
+ * `.old` 残留恢复 × foreign 保护。
+ *
+ * `install()` 遇到上次失败留下的 `.<id>.old` 会先恢复成目标目录，再**重新**做
+ * foreign 检查（不能因为「它是从 .old 恢复的」就绕过保护）。但 `takeOver` 是
+ * 调用方已经二次确认并做过整目录备份的口子，这条路径必须一起认——否则一次
+ * 历史 IO 故障留下的 `.old`，会让「用官方版替换」永远卡在「拒绝覆盖」上，
+ * 而面板看不出跟 `.old` 有关。
+ */
+test('install：.old 恢复出手写目录，只有 takeOver 能穿过', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  const root = extensionsDir(home);
+  /** 造「上次双重 IO 故障」的现场：只剩 .bili.old，没有 dest */
+  fs.mkdirSync(join(root, '.bili.old'), { recursive: true });
+  fs.writeFileSync(join(root, '.bili.old', 'plugin.json'), JSON.stringify(manifest('bili'), null, 2));
+
+  /** 不带 takeOver：恢复之后老实拒绝，原内容不动 */
+  const r1 = reg.install(src, { source: { repo: 'x', version: '1.0.0' } });
+  assert.equal(r1.ok, false);
+  assert.match(r1.reason, /用户手写/);
+  assert.equal(fs.existsSync(join(root, 'bili', '.source.json')), false, '被拒绝时不能已经覆盖');
+
+  /** 带 takeOver（调用方已备份）：这次能过，并且写上了市场来源标记 */
+  const r2 = reg.install(src, { source: { repo: 'x', version: '1.0.0' }, takeOver: true });
+  assert.equal(r2.ok, true, r2.reason);
+  assert.equal(fs.existsSync(join(root, 'bili', '.source.json')), true);
+});
