@@ -108,6 +108,8 @@
 - `proactive:write`（**敏感**：面板发放要二次确认）
 - `session:write`（**敏感**：面板发放要二次确认）
 - `prompt:write`（**敏感**：面板发放要二次确认）
+- `config:write`（**敏感**：面板发放要二次确认）
+- `group:write`（**敏感**：面板发放要二次确认）
 - `core:write`（**敏感**：面板发放要二次确认）
 - `agent:write`（**敏感**：面板发放要二次确认）
 
@@ -116,7 +118,7 @@
 ## 6. 端点
 
 **「状态」列是硬事实，不是进度暗示**：✅ 的才是能用的；⛔ 的当前恒回 `501 not_implemented`
-（已预留路由与鉴权，只差业务）；🚫 是**设计上不开放**给扩展的，不会随版本变成可用。
+（已预留路由与鉴权，只差业务，**当前一条都没有**）；🚫 是**设计上不开放**给扩展的，不会随版本变成可用。
 
 | 方法 | 路径 | scope | 状态 | 说明 |
 |---|---|---|---|---|
@@ -124,26 +126,45 @@
 | GET | `/v1/agent.list` | `agent:write` | ✅ 可用 | 列出当前开着的独立会话 |
 | POST | `/v1/agent.new` | `agent:write` | ✅ 可用 | 开一个独立 Agent 会话（游戏裁判这类无 QQ 身份的场景） |
 | POST | `/v1/agent.prompt` | `agent:write` | ✅ 可用 | 给独立会话发一轮；默认 SSE 流式 |
+| GET | `/v1/config` | `state:read` | ✅ 可用 | 读程序配置（密钥一律打码成 `******`）；`?keys=memory.injectCount,chat.typing` 只取这几项 |
+| POST | `/v1/config` | `config:write` | ✅ 可用 | 局部修改程序配置，`{ "patch": { … } }`；**只能合并不能整份替换**，端口 / 面板密钥 / 外接凭证 / 权限策略 / 安全开关 / 扩展总闸 / 升级源 / 人格与模型不开放。响应 `changed` 是真实生效的路径，空数组说明键名没对上 |
 | GET | `/v1/context` | `context:read` | ✅ 可用 | 读当前会话的上下文摘要（条数、窗口占用） |
 | GET | `/v1/ext-ui/actions` | `state:read` | ✅ 可用 | 取走面板上点过的按钮动作（读即消费，只返回本扩展的） |
+| GET | `/v1/group/info` | `state:read` | ✅ 可用 | 群基本信息（人数、管理员、机器人权限）：`?groupId=` |
+| POST | `/v1/group/kick` | `group:write` | ✅ 可用 | 移出群成员：`{ groupId, targets:[openid], addToBlacklist?, confirm:true }`；主人自己在本地就被挡住 |
+| POST | `/v1/group/mute` | `group:write` | ✅ 可用 | 禁言：`{ groupId, targets:[openid], seconds, confirm:true }`；`seconds:0` 是解除 |
+| GET | `/v1/journal` | `memory:read` | ✅ 可用 | 她的日记：`?chatId=&q=&limit=&digests=1`；有 `q` 走全文检索，否则给最近的。正文按 500 字截断 |
 | POST | `/v1/llm.vision` | `agent:write` | ✅ 可用 | 把 1–4 张 base64 图 + 一段提示词交给当前模型，换回一段文字（图要先经附件服务登记，所以只能在宿主做） |
 | GET | `/v1/memory` | `memory:read` | ✅ 可用 | 读当前会话的记忆（列表形态）；scope:global 会带上全局那层 |
 | POST | `/v1/memory` | `memory:write` | ✅ 可用 | 往**当前会话**的记忆里写一条；**不能写 global**（会影响所有会话），要记自己的东西用 /v1/memory/ext.add |
 | POST | `/v1/memory/ext.add` | `memory:write` | ✅ 可用 | 往**扩展自己的命名空间**写一条（extId 由令牌决定，body 自报无效） |
+| GET | `/v1/memory/facts` | `memory:read` | ✅ 可用 | 带 id 的事实列表（老的 `/v1/memory` 只给纯字符串，改不了）；`?chatId=&scope=global / chat / both&q=&limit=&offset=&includeArchived=1` |
+| POST | `/v1/memory/facts/edit` | `memory:write` | ✅ 可用 | 改一条事实：`{ id, chatId, text?, pin?, tier?, archived? }`；**只能改会话那一层**（全局记忆只读，`memory:write` 是默认 scope，放开就等于谁都能污染所有会话）；**没有硬删**，`archived: true` 是归档（可恢复），理由见模块注释 |
 | POST | `/v1/message` | `message:write` | ✅ 可用 | 把一条消息送进 QQ（复用现有入站链路，不另写一条） |
 | GET | `/v1/mood` | `state:read` | ✅ 可用 | 读当前心情 |
+| GET | `/v1/personas` | `prompt:write` | ✅ 可用 | 列出人格库里有哪些人格、当前用哪个；`?chatId=` 看该会话实际生效的那个（不返回正文） |
+| POST | `/v1/personas/create` | `prompt:write` | ✅ 可用 | 新建一份人格（`id` + 可选 `raw` / `label` / `selfName` / `tags`）；已存在回 409，要覆盖传 `overwrite: true` |
+| GET | `/v1/personas/read` | `prompt:write` | ✅ 可用 | 读一份人格的正文（`?id=`），写回时原样传 `raw` |
+| POST | `/v1/personas/remove` | `prompt:write` | ✅ 可用 | 删除一份人格（必须传 `confirm: true`；默认人格不能删；删前自动备份，删后级联清 `byChat` 里的引用） |
+| POST | `/v1/personas/save` | `prompt:write` | ✅ 可用 | 改写一份**已存在**的人格正文（整份替换，不做分节合并）；不存在回 404 |
 | POST | `/v1/proactive` | `proactive:write` | ✅ 可用 | 排一条主动消息（受清醒时段与频次约束） |
 | POST | `/v1/proactive/submit` | `proactive:write` | ✅ 可用 | 扩展投递一条素材；宿主过门闸后让模型自己组织语言主动发出 |
 | POST | `/v1/roost.call` | `message:write` | ✅ 可用 | 由宿主代转一次直连协议调用（只读能力 / 插件工具 / `msg.send`）；框架地址与令牌不出宿主，写与管理面不开放 |
 | GET | `/v1/roost.capabilities` | `state:read` | ✅ 可用 | 列框架直连协议（roost-host/1）里可扩展调用的能力：只读方法、框架插件注册的 `tool.*`、发消息；`?filter=` 可按名字筛 |
 | POST | `/v1/say` | `say:write` | ✅ 可用 | 让机器人主动说一句；`pending` 表示进审核，不是已发出 |
+| GET | `/v1/self` | `state:read` | ✅ 可用 | 她现在的对外形象（名字 / 签名 / 头像设定）+ 最近 10 条变更历史；不含平台实时状态 |
+| POST | `/v1/self/propose` | `prompt:write` | ✅ 可用 | **提议**改名字 / 签名 / 头像：`{ kind: name / sign / avatar, value }`。响应 `pending:true` = 已发到主人私聊，他点确认按钮才真的改 |
 | POST | `/v1/send` | `message:write` | ✅ 可用 | 扩展直接把文本 / 文件 / 官方图文卡片发进会话，不跑模型；`target` 可填 `owner` 由宿主解析主人，或 `recent` 挑最近说过话且有授权的群 |
-| POST | `/v1/session.configure` | `prompt:write` | ⛔ 501 未接线 | 改会话配置（模型、人格、工具开关） |
+| POST | `/v1/session.configure` | `prompt:write` | ✅ 可用 | 改会话配置（模型、人格、工具开关） |
 | POST | `/v1/session.ensure` | `session:write` | ✅ 可用 | 确保会话存在 |
 | GET | `/v1/state` | `state:read` | ✅ 可用 | 读机器人与当前会话的状态（在线、绑定、档位） |
+| GET | `/v1/stickers` | `state:read` | ✅ 可用 | 表情库列表（`rel` = `分类/文件名`，**不给绝对路径**）；`?q=&category=&limit=` |
+| GET | `/v1/stickers/file` | `state:read` | ✅ 可用 | 取一张表情的字节（base64）：`?path=分类/文件名`；拿到的内容落一份到自己目录再用 `/v1/send` 发 |
+| POST | `/v1/tts` | `say:write` | ✅ 可用 | 把一句话合成语音，**只返回字节不发出去**：`{ text }`（≤500 字）→ `{ audio(base64), contentType, bytes, provider, silk }` |
+| GET | `/v1/usage` | `state:read` | ✅ 可用 | 模型用量与花费，`?days=`（1–90，默认 7） |
 | GET | `/v1/whoami` | （任意有效令牌） | ✅ 可用 | 回显令牌身份（不含 hash / 明文） |
 
-> 未接线的 1 条端点已预留路由与鉴权（scope 校验、限频、幂等都在生效），
+> 未接线的 0 条端点已预留路由与鉴权（scope 校验、限频、幂等都在生效），
 > 只差业务实现。第三方可以先按此契约开发，但**不要**把它们当成已可用能力。
 
 ### 幂等与限频
@@ -178,7 +199,7 @@
 | 404 `not_found` | 没有这个 `/v1` 端点 |
 | 413 `request_too_large` | 请求体超过 1 MB |
 | 429 `rate_limited` | 每客户端每分钟 120 次（响应带 `retry-after`） |
-| 501 `not_implemented` | 该端点业务尚未接线（见第 6 节「状态」列，当前有若干条） |
+| 501 `not_implemented` | 该端点业务尚未接线（见第 6 节「状态」列；**当前 0 条**，收到这个码说明是新加的占位还没实现） |
 
 ## 9. 为什么没生效
 

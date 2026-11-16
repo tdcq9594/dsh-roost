@@ -20,6 +20,27 @@ import { createClientStore } from './ext-registry.js';
 export const V1_SCOPES = [
   'message:write', 'say:write', 'state:read', 'context:read',
   'memory:read', 'memory:write', 'proactive:write', 'session:write', 'prompt:write',
+  /**
+   * 改程序配置（`POST /v1/config`）。
+   *
+   * 为什么新开一个而不是复用 `prompt:write`：那个的语义是「改人格与模型选择」，
+   * 而配置里还有记忆条数、主动发言频率、语音、配额这些**运行行为**参数。
+   * 复用会让「只想改人格」的扩展顺手拿到整份配置的写权限。
+   *
+   * 也不复用 `core:write`：那个是「接管/关闭内置功能」，配置写入不是接管。
+   *
+   * 危险面靠端点自己收窄（见 `ext-config-hooks.js` 的 `CONFIG_DENY`）：端口、
+   * 面板密钥、外接凭证、权限策略、安全开关、扩展总闸、升级源一律不许改。
+   */
+  'config:write',
+  /**
+   * 群管理（禁言 / 移出成员）。
+   *
+   * 为什么不复用 `message:write`：那条是「以机器人身份发消息」，装上就给了。
+   * 踢人和禁言是**管理他人**，跟发消息不是一回事，必须单独声明、单独点头。
+   * 也不复用 `core:write`：那个是「接管程序内置功能」。
+   */
+  'group:write',
   /** 最高等级：接管/关闭内置功能。本轮只做声明与分级告知，实际替换随内置功能解离落地。 */
   'core:write',
   // §7 表格没给 agent.* 定 scope，但「只要令牌有效就能开独立会话」会把
@@ -80,6 +101,48 @@ export const V1_ROUTES = {
   'GET /v1/memory': { scope: 'memory:read', hook: 'memory.read' },
   'POST /v1/memory': { scope: 'memory:write', hook: 'memory.write' },
   'POST /v1/memory/ext.add': { scope: 'memory:write', hook: 'memory.ext.add' },
+  /**
+   * 记忆的「带 id 的读」与「改一条」。
+   *
+   * 老的 `GET /v1/memory` 把事实映射成纯字符串，id 丢了，于是扩展读得到却
+   * **没法表达「改哪一条」**——面板能改、扩展只能看。那个形状有存量扩展在用
+   * 不能改，所以另开两条。
+   *
+   * 「删除」在这里是**归档**（`archived: true`，可恢复），不是抹掉：真删只有
+   * `memory.remove()` 的关键词 `includes` 匹配，删「约定：A」会顺手删掉
+   * 「约定：A 补充」，这种破坏性不开给扩展。
+   */
+  'GET /v1/memory/facts': { scope: 'memory:read', hook: 'memory.facts' },
+  'POST /v1/memory/facts/edit': { scope: 'memory:write', hook: 'memory.edit' },
+  /**
+   * 日记 / 用量 / 自我表达 / 表情库 —— 全是读，装扩展不用额外点头。
+   *
+   * 日记复用 `memory:read`：能读她记忆的人读日记不算放大，日记本来就是记忆
+   * 的一种形态。表情库同理（它本来就会进提示词）。
+   */
+  'GET /v1/journal': { scope: 'memory:read', hook: 'journal.read' },
+  'GET /v1/usage': { scope: 'state:read', hook: 'usage.read' },
+  'GET /v1/self': { scope: 'state:read', hook: 'self.read' },
+  'GET /v1/stickers': { scope: 'state:read', hook: 'stickers.list' },
+  'GET /v1/stickers/file': { scope: 'state:read', hook: 'stickers.file' },
+  /**
+   * 改她的对外形象：扩展只能**提议**，真正写下去要主人在 QQ 里点确认按钮。
+   * scope 用 `prompt:write`（改人格设定）——名字 / 签名 / 头像就是人格的门面。
+   */
+  'POST /v1/self/propose': { scope: 'prompt:write', hook: 'self.propose' },
+  /**
+   * 群管：读复用 `state:read`，写用专用的 `group:write`（见 `V1_SCOPES`）。
+   * 两个写端点各自还要 `confirm: true`——禁言和踢人都不可撤销。
+   */
+  'GET /v1/group/info': { scope: 'state:read', hook: 'group.info' },
+  'POST /v1/group/mute': { scope: 'group:write', hook: 'group.mute' },
+  'POST /v1/group/kick': { scope: 'group:write', hook: 'group.kick' },
+  /**
+   * 语音合成：**只返回字节，不发出去**（发不发由调用方决定）。
+   * scope 复用 `say:write`（「让机器人主动开口说话」）—— 合成语音就是这件事，
+   * 新开一个 scope 只会让已装的扩展多一次敏感授权。
+   */
+  'POST /v1/tts': { scope: 'say:write', hook: 'tts.speak' },
   'POST /v1/proactive': { scope: 'proactive:write', hook: 'proactive' },
   /**
    * 扩展投递一条**素材**，由宿主排队、过门闸、让模型组织语言后主动发出。
@@ -96,6 +159,35 @@ export const V1_ROUTES = {
   'GET /v1/ext-ui/actions': { scope: 'state:read', hook: 'ext-ui.actions' },
   'POST /v1/session.ensure': { scope: 'session:write', hook: 'session.ensure' },
   'POST /v1/session.configure': { scope: 'prompt:write', hook: 'session.configure' },
+  /**
+   * 人格库：列 / 读 / 改 / 建 / 删。
+   *
+   * 为什么要有这五条：面板那边 `/personas*` 有二十来条路由，扩展一条都调不到。
+   * 反馈里的「没有修改人格接口」就是这个——扩展能让她说话，却不能让她换个说法。
+   *
+   * 为什么不用 `session.configure` 一条包圆：那条是「**这个会话**现在用谁」，
+   * 改的是 `config.persona`；这五条改的是**人格文件本身**（`personas/*.md`）。
+   * 两件事的生命周期完全不同：切人格是每会话的，写正文是全局共享的。
+   *
+   * scope 统一 `prompt:write`（= 修改人格设定与模型选择）：这五条干的正是这件事。
+   */
+  'GET /v1/personas': { scope: 'prompt:write', hook: 'personas.list' },
+  'GET /v1/personas/read': { scope: 'prompt:write', hook: 'personas.read' },
+  'POST /v1/personas/save': { scope: 'prompt:write', hook: 'personas.save' },
+  'POST /v1/personas/create': { scope: 'prompt:write', hook: 'personas.create' },
+  'POST /v1/personas/remove': { scope: 'prompt:write', hook: 'personas.remove' },
+  /**
+   * 程序配置：读（打码）/ 局部写。
+   *
+   * 读复用 `state:read`（「读取机器人的状态、心情与当前设定」——设定就是配置）；
+   * 写用专用的 `config:write`，理由见 `V1_SCOPES` 里那段。
+   *
+   * 写**只做局部合并**，且顶层有一张拒绝表（端口 / 面板密钥 / 外接凭证 /
+   * 权限策略 / 安全开关 / 扩展总闸 / 升级源 / 人格与模型）。实现与面板
+   * `POST /config` 是同一份，见 `host.js` 的 `applyConfigBody()`。
+   */
+  'GET /v1/config': { scope: 'state:read', hook: 'config.read' },
+  'POST /v1/config': { scope: 'config:write', hook: 'config.patch' },
   'POST /v1/agent.new': { scope: 'agent:write', hook: 'agent' },
   'POST /v1/agent.prompt': { scope: 'agent:write', hook: 'agent' },
   'POST /v1/agent.close': { scope: 'agent:write', hook: 'agent' },
@@ -124,6 +216,11 @@ export const V1_IMPLEMENTED_HOOKS = Object.freeze([
   'agent', 'memory.ext.add', 'llm.vision',
   'message', 'send', 'say', 'state', 'mood', 'context',
   'memory.read', 'memory.write', 'proactive', 'proactive.submit', 'session.ensure',
+  'session.configure',
+  'memory.facts', 'memory.edit', 'journal.read', 'usage.read', 'self.read', 'stickers.list',
+  'stickers.file', 'self.propose', 'group.info', 'group.mute', 'group.kick', 'tts.speak',
+  'personas.list', 'personas.read', 'personas.save', 'personas.create', 'personas.remove',
+  'config.read', 'config.patch',
   'ext-ui.actions', 'roost.capabilities', 'roost.call',
 ]);
 
@@ -135,9 +232,12 @@ export const V1_IMPLEMENTED_HOOKS = Object.freeze([
  * 而是【清单静态声明 → 自动分级 → 安装时人话告知 → 主人点头】。
  * 见 `src/ext-tier.js`（L0–L3）与 `ext-market.js` 的分级确认。
  *
+ * 2026-11-16：`session.configure` 连同人格库五条、配置两条一起接线，
+ * 未接线清单已清空 —— 路由表里的每一条现在都能真跑。
+ *
  * 保留导出与 `isRouteDesignedOff()` 是为了文档生成和旧测试不破；
  * 空数组 = 没有任何端点被永久封禁。注意「已放开」不等于「已接线」：
- * 仍恒 501 的端点看 `V1_IMPLEMENTED_HOOKS`，那是可用能力清单不是权限清单。
+ * 恒 501 的端点看 `V1_IMPLEMENTED_HOOKS`，那是可用能力清单不是权限清单。
  */
 export const V1_DESIGNED_OFF = Object.freeze([]);
 

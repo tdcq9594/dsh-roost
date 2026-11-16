@@ -172,8 +172,10 @@ test('G3-5 whoami 不回显 hash / 明文；未知路径 404；未接线 hook �
   assert.ok(!JSON.stringify(ok.body).includes(f.issued.token));
   assert.equal((await call(f.api, 'GET', '/v1/nope', { token: f.issued.token })).status, 404);
   assert.equal((await call(f.api, 'GET', '/v1/memory', { token: f.issued.token })).status, 403, '缺 memory:read');
-  assert.equal(V1_SCOPES.length, 11, '§七 表格 9 个 + agent:write + core:write（2026-11-14 全放开）');
+  assert.equal(V1_SCOPES.length, 13, '§七 表格 9 个 + agent:write + core:write（2026-11-14 全放开）+ config:write / group:write（2026-11-16）');
   assert.ok(V1_SCOPES.includes('core:write'), '最高等级能力要在 scope 表里才能被清单声明');
+  assert.ok(V1_SCOPES.includes('config:write'), '改配置有专用 scope，别复用 prompt:write');
+  assert.ok(V1_SCOPES.includes('group:write'), '踢人 / 禁言有专用 scope，别复用 message:write');
   assert.ok(V1_ROUTES['POST /v1/message']);
 });
 
@@ -251,19 +253,20 @@ test('G3-10 install 自动发令牌、remove 自动吊销（ext-registry 接线�
  * 501。第三方照着文档开发，写完才发现一半端点不通。这条断言把「未接线清单」
  * 钉成快照：接一条就少一条，测试会红，逼着同步文档与 `V1_IMPLEMENTED_HOOKS`。
  */
-test('自查：未接线端点清单是硬快照（只剩设计上不开放的 session.configure）', () => {
+test('自查：未接线端点清单是硬快照（已清空）', () => {
   const notReady = Object.keys(V1_ROUTES).filter((k) => !isRouteImplemented(k)).sort();
-  assert.deepEqual(notReady, [
-    'POST /v1/session.configure',
-  ], '接线一条就更新这份快照，并重跑 build-ext-docs');
+  assert.deepEqual(notReady, [], '接线一条就更新这份快照，并重跑 build-ext-docs');
 
   /**
    * 2026-11-14 全放开：不再有「设计上永久不开放」的端点。安全边界改由
    * 清单静态声明 + 安装时分级告知（ext-tier.js L0–L3）。
-   * `session.configure` 仍留在 notReady 快照里，那只是「还没接线」，不是被封禁。
+   *
+   * 2026-11-16：`session.configure` 与人格 / 配置七条一起接线，这份清单
+   * 因此清空 —— 路由表里的每一条现在都真能跑，文档的「可用」列全绿。
    */
   assert.deepEqual([...V1_DESIGNED_OFF], []);
   assert.equal(isRouteDesignedOff('POST /v1/session.configure'), false);
+  assert.equal(isRouteImplemented('POST /v1/session.configure'), true);
 
   // 已实现的 hook 必须真在路由表里被用到，不能是死名单
   for (const name of V1_IMPLEMENTED_HOOKS) {

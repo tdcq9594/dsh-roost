@@ -23,6 +23,11 @@ import {
 } from '../src/api-v1.js';
 import { createClientStore } from '../src/ext-registry.js';
 import { createExtApiHooks } from '../src/ext-api-hooks.js';
+import { createExtPersona } from '../src/ext-persona.js';
+import { createExtConfigHooks } from '../src/ext-config-hooks.js';
+import { createExtMemoryEdit } from '../src/ext-memory-edit.js';
+import { createExtObserve } from '../src/ext-observe.js';
+import { createExtAct } from '../src/ext-act.js';
 
 function tmpHome() {
   const d = fs.mkdtempSync(join(os.tmpdir(), 'roost-v1-live-'));
@@ -65,6 +70,52 @@ test('全部端点：已实现的不是 501，未实现/不开放的才是 501',
     setupOf: () => ({ roostOwner: () => '', ownersConfigured: false }),
   });
 
+  /**
+   * 人格与配置这两组用**真实现 + 内存桩**，不用「一律 200」的占位：
+   * 它们的行为（404 / 400 / 409 / 403）正是这条测试要锁的东西，桩掉就等于没测。
+   */
+  const personaFiles = new Map([['default', '默认人格']]);
+  const personaHooks = createExtPersona({
+    personas: {
+      list: () => [...personaFiles.keys()].map((id) => ({ id, label: id, name: id, selfName: '', tags: [], chars: 1 })),
+      read: (id) => (personaFiles.has(id) ? { id, label: id, name: id, raw: personaFiles.get(id) } : null),
+      save: (id, raw) => { personaFiles.set(id, raw); return { id }; },
+      remove: (id) => { personaFiles.delete(id); return { id }; },
+    },
+    cfgOf: () => ({ persona: { current: 'default', byChat: {} }, model: { default: {}, byChat: {} } }),
+    loadDiskCfg: () => ({ persona: { current: 'default', byChat: {} }, model: { default: {}, byChat: {} } }),
+    saveCfg: (next) => next,
+  });
+  const configHooks = createExtConfigHooks({
+    readConfig: () => ({ config: { memory: { injectCount: 12 } }, revision: 'rev-live' }),
+    applyPatch: () => ({ status: 200, body: { ok: true, config: { memory: { injectCount: 8 } }, revision: 'rev-live' } }),
+  });
+
+  /** 记忆 / 观察 / 动作三组同样用真实现 + 内存桩，理由同上 */
+  const memoryEditHooks = createExtMemoryEdit({
+    memoryOf: () => ({
+      listFull: () => ({ global: [{ id: 'f1', text: '喜欢猫', at: 1, tier: 'long' }], chat: [] }),
+      editFact: () => ({ ok: true, id: 'f1', text: '喜欢狗', tier: 'long' }),
+    }),
+  });
+  const observeHooks = createExtObserve({
+    journalOf: () => ({ backend: () => 'sqlite', recent: () => [], search: async () => [], digests: () => [] }),
+    usageOf: () => ({ summary: () => ({ total: 0 }) }),
+    stickersOf: () => ({ snapshot: () => ({ roots: [], items: [], cats: [], missing: [] }) }),
+    cfgOf: () => ({ selfExpression: {} }),
+  });
+  const actHooks = createExtAct({
+    ask: async () => ({ ok: true }),
+    groupAdminOf: () => ({
+      info: async () => ({ ok: true, members: 3 }),
+      mute: async () => ({ ok: true }),
+      kick: async () => ({ ok: true }),
+    }),
+    ttsOf: () => ({ synthesize: async () => ({ audio: Buffer.from('x'), contentType: 'audio/mpeg' }) }),
+    roostOf: () => ({ rpc: async () => ({ ok: true }) }),
+    cfgOf: () => ({ tts: {} }),
+  });
+
   const api = createApiV1({
     dir, clientStore: store, auditFn: () => {},
     hooks: {
@@ -74,6 +125,11 @@ test('全部端点：已实现的不是 501，未实现/不开放的才是 501',
       /** 看图：参数不合法时给 400，重点是「不是 501」 */
       'llm.vision': async () => ({ status: 400, body: { ok: false, message: '没有可用的图片' } }),
       ...hooks,
+      ...personaHooks,
+      ...configHooks,
+      ...memoryEditHooks,
+      ...observeHooks,
+      ...actHooks,
     },
   });
 

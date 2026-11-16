@@ -70,11 +70,25 @@ test('群管：三个破坏性路由要服务端强确认，前端每一处都�
   for (const path of ['/group/mute', '/group/kick', '/group/join']) {
     assert.ok(HOST.includes(`route('${path}'`), `缺 ${path} 路由`);
   }
-  assert.equal((HOST.match(/body\?\.confirm !== true/g) || []).length, 3, '三个路由都要校验 confirm');
+  assert.ok((HOST.match(/body\?\.confirm !== true/g) || []).length >= 3,
+    '三个群管路由都要校验 confirm');
   assert.ok(HOST.includes("String(body?.action || 'list') !== 'list'"), 'join 的 list（默认值）是只读，不该要确认');
   /** 前端 4 个 ConfirmLink 回调都要带 confirm:true（不锁格式，只数出现次数） */
   assert.ok((CLIENT.match(/confirm:\s*true/g) || []).length >= 4,
     '禁言 / 踢出 / 通过 / 拒绝四处都要传 confirm:true');
+});
+
+test('资料：清空变更历史不可逆，服务端要强确认', () => {
+  assert.match(
+    HOST,
+    /route\('\/self\/profile\/history\/clear'[\s\S]{0,800}?body\?\.confirm !== true/,
+    '清空快照是唯一不可逆的资料操作，不能只靠前端 window.confirm',
+  );
+  assert.match(
+    CLIENT,
+    /post\('\/self\/profile\/history\/clear', \{ confirm: true \}\)/,
+    '前端调用要带上 confirm:true',
+  );
 });
 
 test('群管：主人和机器人自己在本地就被挡，不用等官方回 protected', async () => {

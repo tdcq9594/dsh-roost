@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  V1_ROUTES, V1_SCOPES, RATE_LIMIT, WINDOW_MS, IDEMPOTENT_TTL_MS, IDEMPOTENT_MAX, MAX_BODY_BYTES,
+  V1_ROUTES, V1_SCOPES, V1_IMPLEMENTED_HOOKS, RATE_LIMIT, WINDOW_MS, IDEMPOTENT_TTL_MS, IDEMPOTENT_MAX, MAX_BODY_BYTES,
   isRouteImplemented, isRouteDesignedOff,
 } from './api-v1.js';
 import { REJECTION_LAYERS, SENSITIVE_SCOPES, LOCALLY_MODIFIED_LABEL } from './ext-panel.js';
@@ -44,11 +44,30 @@ const ROUTE_NOTES = {
   'GET /v1/memory': '读当前会话的记忆（列表形态）；scope:global 会带上全局那层',
   'POST /v1/memory': '往**当前会话**的记忆里写一条；**不能写 global**（会影响所有会话），要记自己的东西用 /v1/memory/ext.add',
   'POST /v1/memory/ext.add': '往**扩展自己的命名空间**写一条（extId 由令牌决定，body 自报无效）',
+  'GET /v1/memory/facts': '带 id 的事实列表（老的 `/v1/memory` 只给纯字符串，改不了）；`?chatId=&scope=global / chat / both&q=&limit=&offset=&includeArchived=1`',
+  'POST /v1/memory/facts/edit': '改一条事实：`{ id, chatId, text?, pin?, tier?, archived? }`；**只能改会话那一层**（全局记忆只读，`memory:write` 是默认 scope，放开就等于谁都能污染所有会话）；**没有硬删**，`archived: true` 是归档（可恢复），理由见模块注释',
+  'GET /v1/journal': '她的日记：`?chatId=&q=&limit=&digests=1`；有 `q` 走全文检索，否则给最近的。正文按 500 字截断',
+  'GET /v1/usage': '模型用量与花费，`?days=`（1–90，默认 7）',
+  'GET /v1/self': '她现在的对外形象（名字 / 签名 / 头像设定）+ 最近 10 条变更历史；不含平台实时状态',
+  'GET /v1/stickers': '表情库列表（`rel` = `分类/文件名`，**不给绝对路径**）；`?q=&category=&limit=`',
+  'GET /v1/stickers/file': '取一张表情的字节（base64）：`?path=分类/文件名`；拿到的内容落一份到自己目录再用 `/v1/send` 发',
+  'POST /v1/self/propose': '**提议**改名字 / 签名 / 头像：`{ kind: name / sign / avatar, value }`。响应 `pending:true` = 已发到主人私聊，他点确认按钮才真的改',
+  'GET /v1/group/info': '群基本信息（人数、管理员、机器人权限）：`?groupId=`',
+  'POST /v1/group/mute': '禁言：`{ groupId, targets:[openid], seconds, confirm:true }`；`seconds:0` 是解除',
+  'POST /v1/group/kick': '移出群成员：`{ groupId, targets:[openid], addToBlacklist?, confirm:true }`；主人自己在本地就被挡住',
+  'POST /v1/tts': '把一句话合成语音，**只返回字节不发出去**：`{ text }`（≤500 字）→ `{ audio(base64), contentType, bytes, provider, silk }`',
   'POST /v1/proactive': '排一条主动消息（受清醒时段与频次约束）',
   'POST /v1/proactive/submit': '扩展投递一条素材；宿主过门闸后让模型自己组织语言主动发出',
   'GET /v1/ext-ui/actions': '取走面板上点过的按钮动作（读即消费，只返回本扩展的）',
   'POST /v1/session.ensure': '确保会话存在',
   'POST /v1/session.configure': '改会话配置（模型、人格、工具开关）',
+  'GET /v1/personas': '列出人格库里有哪些人格、当前用哪个；`?chatId=` 看该会话实际生效的那个（不返回正文）',
+  'GET /v1/personas/read': '读一份人格的正文（`?id=`），写回时原样传 `raw`',
+  'POST /v1/personas/save': '改写一份**已存在**的人格正文（整份替换，不做分节合并）；不存在回 404',
+  'POST /v1/personas/create': '新建一份人格（`id` + 可选 `raw` / `label` / `selfName` / `tags`）；已存在回 409，要覆盖传 `overwrite: true`',
+  'POST /v1/personas/remove': '删除一份人格（必须传 `confirm: true`；默认人格不能删；删前自动备份，删后级联清 `byChat` 里的引用）',
+  'GET /v1/config': '读程序配置（密钥一律打码成 `******`）；`?keys=memory.injectCount,chat.typing` 只取这几项',
+  'POST /v1/config': '局部修改程序配置，`{ "patch": { … } }`；**只能合并不能整份替换**，端口 / 面板密钥 / 外接凭证 / 权限策略 / 安全开关 / 扩展总闸 / 升级源 / 人格与模型不开放。响应 `changed` 是真实生效的路径，空数组说明键名没对上',
   'POST /v1/agent.new': '开一个独立 Agent 会话（游戏裁判这类无 QQ 身份的场景）',
   'POST /v1/agent.prompt': '给独立会话发一轮；默认 SSE 流式',
   'POST /v1/agent.close': '关独立会话并撤销它的注册',
@@ -63,8 +82,22 @@ const errCodeRows = [
   ['404 `not_found`', '没有这个 `/v1` 端点'],
   ['413 `request_too_large`', '请求体超过 1 MB'],
   ['429 `rate_limited`', '每客户端每分钟 120 次（响应带 `retry-after`）'],
-  ['501 `not_implemented`', '该端点业务尚未接线（见第 6 节「状态」列，当前有若干条）'],
+  ['501 `not_implemented`', notImplementedNote()],
 ];
+
+/** 「还有几条没接线」会变，写死就成了会过期的假话 */
+function pendingHooks() {
+  return Object.keys(V1_ROUTES).filter((k) => {
+    const h = V1_ROUTES[k].hook;
+    return h && !V1_IMPLEMENTED_HOOKS.includes(h);
+  });
+}
+
+function notImplementedNote() {
+  const pending = pendingHooks();
+  if (!pending.length) return '该端点业务尚未接线（见第 6 节「状态」列；**当前 0 条**，收到这个码说明是新加的占位还没实现）';
+  return `该端点业务尚未接线（见第 6 节「状态」列，当前还有 ${pending.length} 条：${pending.join('、')}）`;
+}
 
 function routeRows() {
   const missing = Object.keys(V1_ROUTES).filter((k) => !ROUTE_NOTES[k]);
@@ -200,7 +233,7 @@ ${V1_SCOPES.map((s) => `- \`${s}\`${SENSITIVE_SCOPES.includes(s) ? '（**敏感*
 ## 6. 端点
 
 **「状态」列是硬事实，不是进度暗示**：✅ 的才是能用的；⛔ 的当前恒回 \`501 not_implemented\`
-（已预留路由与鉴权，只差业务）；🚫 是**设计上不开放**给扩展的，不会随版本变成可用。
+（已预留路由与鉴权，只差业务${pendingHooks().length ? `，当前还有 ${pendingHooks().length} 条` : '，**当前一条都没有**'}）；🚫 是**设计上不开放**给扩展的，不会随版本变成可用。
 
 | 方法 | 路径 | scope | 状态 | 说明 |
 |---|---|---|---|---|

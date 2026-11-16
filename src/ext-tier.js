@@ -46,6 +46,8 @@ export const SCOPE_INFO = Object.freeze({
   'proactive:write': { level: 2, text: '不经你逐条同意，主动给你或群里发消息' },
   'say:write': { level: 2, text: '让机器人主动开口说话' },
   'prompt:write': { level: 2, text: '修改人格设定与模型选择' },
+  'config:write': { level: 2, text: '修改程序的运行配置（记忆条数、主动发言频率、语音、配额等）' },
+  'group:write': { level: 2, text: '在群里禁言或把成员移出群（不可撤销）' },
   'agent:write': { level: 2, text: '开独立 AI 会话、调用模型，消耗你的额度' },
 
   /** 阶段：内置功能解离后启用；本轮只做声明与告知，不实现实际替换。 */

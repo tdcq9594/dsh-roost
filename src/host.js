@@ -56,6 +56,11 @@ import { createExtMemory } from './ext-memory.js';
 import { createExtPanel, createRejectionLog } from './ext-panel.js';
 import { createFormRegistry } from './ext-forms.js';
 import { createExtApiHooks } from './ext-api-hooks.js';
+import { createExtPersona } from './ext-persona.js';
+import { createExtConfigHooks } from './ext-config-hooks.js';
+import { createExtMemoryEdit } from './ext-memory-edit.js';
+import { createExtObserve } from './ext-observe.js';
+import { createExtAct } from './ext-act.js';
 import { createExtPatch } from './ext-patch.js';
 import { createExtMarket } from './ext-market.js';
 import { pickModelFor, pickReasoningEffort, pickEffortFor } from './model-pick.js';
@@ -2034,6 +2039,228 @@ export function apply(ctx) {
     log,
   });
 
+  /**
+   * 配置写入的**唯一实现**。面板 `POST /config` 与 `/v1/config` 都调它。
+   *
+   * 为什么抽出来：这段原本内联在面板路由里，含冲突检测、密钥掩码回填、端口
+   * 校验、按需重启监听、外接协议重连、换人格补提示——一百来行。扩展那条端点
+   * 如果在别处重写一遍，两边必然漂移（「面板改了、扩展没跟上」已经出过事）。
+   *
+   * 返回 `{ status, body }` 而不是自己 `send()`：两条调用方一个用 `res`、一个
+   * 用 `{status, body}` 约定，让这里保持无副作用才好复用。
+   *
+   * 位置说明：这里引用 `switchNote` / `roost` / `startServer`，它们在后面才
+   * 初始化，所以本函数**只能在请求期被调用**，不能在这里就执行。
+   *
+   * @param {object} body  提交的配置（会被就地改动：删 `__revision`、回填端口）
+   * @param {{mode?:string}} [opts] `mode: 'full'` 整份替换，其余局部合并
+   */
+  function applyConfigBody(body, { mode } = {}) {
+    /**
+     * 保存语义由**显式模式**决定，默认走局部（`patch`）。
+     *
+     *   `?mode=full`  → 整份替换：没提交的字段回落到 DEFAULTS。
+     *                    「配置全文」编辑器用，删字段就是删字段。
+     *   其它（默认）  → 局部合并：没提交的字段保持磁盘现值。
+     *
+     * 为什么默认反过来：**外部的设置页不一定知道要带参数**。DSH 的通用设置页
+     * 只提交它渲染出来的那几项，旧默认（整份替换）会顺手把 `speakUp.prompt`、
+     * `qqTools.maxParts`、`persona.name`、`tts.provider` 一起抹成默认值
+     * ——用户看到的是「升级后她变了个人」，日志里却一个字都没有
+     * （2026-11 外部实测，四项同时被抹）。
+     *
+     * 方向选择：局部语义最多让「删字段」失效（用整份模式再存一次即可），
+     * 整份语义会**静默丢配置**。两者代价不对称，所以默认取局部。
+     */
+    const fullSave = mode === 'full';
+
+    /**
+     * 根必须是对象。
+     *
+     * `JSON.parse('null' | '[]' | '"abc"' | '123')` 都能过 parse，但 `merge`
+     * 见到非对象会直接返回原配置 —— 表现是「提示存好了，磁盘一个字没改」。
+     */
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          message: '配置必须是一个 JSON 对象（形如 { "server": { … } }），不能是 null / 数组 / 字符串 / 数字',
+        },
+      };
+    }
+
+    /**
+     * 冲突检测：面板拿的是旧快照就别整份覆盖。
+     * 整份保存是「以提交的为准」，别处刚改过（比如换人格写了 byChat）就会被抹掉。
+     */
+    const revision = typeof body.__revision === 'string' ? body.__revision : '';
+    if (revision && revision !== configRevision()) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          message: '配置在别处改过了，先刷新再保存',
+          config: publicConfig(cfg),
+          revision: configRevision(),
+        },
+      };
+    }
+    delete body.__revision;
+
+    /**
+     * 面板拿到的是打码后的密钥，原样提交回来时别把真密钥冲掉。
+     *
+     * **不能只是 `delete`**：`saveConfig` 的基线是 DEFAULTS（token 默认空串），
+     * 删掉这个键等于主动提交「没有 token」——真密钥会被默认空值顶掉。
+     * 必须显式回填当前内存里的真值。
+     */
+    if (body?.server?.token === '******') body.server.token = cfg.server.token;
+
+    /**
+     * 端口必须是 1–65535 的整数。
+     *
+     * 以前不校验：填 `"abc"` 也能保存成功，然后 `listen('abc')` 抛 EACCES，
+     * 而顺延逻辑只认 EADDRINUSE —— 于是服务直接起不来，面板只看到一句
+     * `permission denied abc`，既看不出是自己填错了，也不知道该改哪。
+     */
+    if (body?.server && 'port' in body.server) {
+      const n = Number(body.server.port);
+      if (!Number.isInteger(n) || n < 1 || n > 65535) {
+        return {
+          status: 400,
+          body: { ok: false, message: `端口必须是 1–65535 的整数，收到的是 ${JSON.stringify(body.server.port)}` },
+        };
+      }
+      body.server.port = n;
+    }
+
+    const beforePort = cfg.server.port;
+    const beforeToken = cfg.server.token;
+    const beforeCurrent = cfg.persona.current;
+    /** 外接协议的三个连接参数，保存后要拿来比对（见下面的重连判断） */
+    const beforeRoost = {
+      enabled: Boolean(cfg.roostHost?.enabled),
+      url: String(cfg.roostHost?.url ?? ''),
+      token: String(cfg.roostHost?.token ?? ''),
+    };
+    cfg = fullSave ? saveConfig(body) : patchConfig(body);
+    if (cfg.persona.current !== beforeCurrent) {
+      const hit = personas.list().find((p) => p.id === cfg.persona.current);
+      switchNote.set(hit?.label || hit?.name || cfg.persona.current);
+    }
+
+    /**
+     * 只有**端口或密钥**变了才重启监听。
+     *
+     * 以前是无条件 `startServer()`：改一个记忆条数也会关掉再重建收消息服务。
+     * 那几百毫秒里 ai-chat 推过来就是 connection refused；端口还会重新 bind
+     * 一次，万一那一刻被瞬时占用就漂到别的端口去了（棘轮的老诱因之一）。
+     */
+    const restarted = cfg.server.port !== beforePort || cfg.server.token !== beforeToken;
+    if (restarted) startServer();
+
+    /**
+     * 外接协议的连接参数变了要重连。
+     *
+     * 只改「看图」这种开关**不重连**——它是每轮现读的，重连反而会丢一段 seq。
+     * 地址 / token 变了就必须重连：不重连的话面板上显示「已连接」，实际上连的
+     * 还是旧地址，症状是「消息一条都不进来」。
+     */
+    const roostChanged = Boolean(cfg.roostHost?.enabled) !== beforeRoost.enabled
+      || String(cfg.roostHost?.url ?? '') !== beforeRoost.url
+      || String(cfg.roostHost?.token ?? '') !== beforeRoost.token;
+    if (roostChanged) {
+      roost.stop();
+      if (cfg.roostHost?.enabled) roost.start();
+    }
+
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        config: publicConfig(cfg),
+        message: restarted ? '已保存，服务已重载' : '已保存',
+        /** 成功也要回新版本号，否则客户端下次拿空串、冲突检测只生效一次 */
+        revision: configRevision(),
+      },
+    };
+  }
+
+  /**
+   * 扩展配置读写。`readConfig` 与面板 `GET /config` 同源：都先 `loadConfig()`
+   * 把内存同步到磁盘，再打码——否则「内存 cfg 落后」会让扩展读到旧值。
+   */
+  const extConfigHooks = createExtConfigHooks({
+    readConfig: () => {
+      cfg = loadConfig();
+      return { config: publicConfig(cfg), revision: configRevision() };
+    },
+    applyPatch: (patch, opts) => applyConfigBody(patch, opts),
+    log: (m) => log.warn(m),
+  });
+
+  /**
+   * 扩展人格接口。`onSwitched` 照抄面板 `/personas/use` 的两条收尾：
+   * 清掉内存里的临时选择（面板显式指定优先于聊天指令），再给下一轮一句提示。
+   */
+  const extPersonaHooks = createExtPersona({
+    personas,
+    cfgOf: () => cfg,
+    loadDiskCfg: () => loadConfig(),
+    saveCfg: (next) => (cfg = saveConfig(next)),
+    clearRefs: (ids) => clearByChatRefs(ids),
+    onSwitched: ({ id, chatId, label }) => {
+      if (chatId) {
+        keywordPick.delete(chatId);
+        keywordNote.set(chatId, `说话方式刚换成「${label}」，从这一轮起按新的来，别延续之前的语气。`);
+      } else {
+        switchNote.set(label);
+      }
+      addLog('info', 'persona', chatId
+        ? `扩展把群 ${chatId.slice(0, 8)}… 的人格指定为 ${id}`
+        : `扩展把当前人格切换为 ${id}`);
+    },
+    log: (m) => log.warn(m),
+  });
+
+  /**
+   * 记忆编辑（带 id 的读 + 改一条 / 归档）。老的 `/v1/memory` 形状不动。
+   */
+  const extMemoryEditHooks = createExtMemoryEdit({
+    memoryOf: () => memory,
+    aliasesOf: (chatId) => aliasesOf(chatId),
+    log: (m) => log.warn(m),
+  });
+
+  /** 只读一组：日记 / 用量 / 自我表达 / 表情库 */
+  const extObserveHooks = createExtObserve({
+    journalOf: () => journal,
+    usageOf: () => usage,
+    stickersOf: () => stickers,
+    cfgOf: () => cfg,
+    selfHistoryOf: () => selfHistory,
+    aliasesOf: (chatId) => aliasesOf(chatId),
+  });
+
+  /**
+   * 会改变什么的一组：自我表达提议 / 群管 / 语音。
+   *
+   * `ask` 直接接 `profileConfirm.ask`：扩展只能**提议**，真正写下去要主人在
+   * QQ 里点确认按钮——和「她自己想改资料」走完全同一条路径，包括按钮、nonce、
+   * 过期时间与回执。
+   */
+  const extActHooks = createExtAct({
+    ask: (req) => profileConfirm.ask(req),
+    groupAdminOf: () => groupAdmin,
+    ttsOf: () => tts,
+    roostOf: () => roost,
+    cfgOf: () => cfg,
+    /** 人格卡写了 selfName 时不该让扩展提议改昵称（写入时还有一道） */
+    personaOf: () => personas.resolve('', cfg.persona),
+    log: (m) => log.warn(m),
+  });
+
   const apiV1 = createApiV1({
     dir: dataDir(), log, clientStore: extClientStore, onReject,
     hooks: {
@@ -2054,6 +2281,16 @@ export function apply(ctx) {
         body: await extMemory.writeFromApi({ extId: body.extId, fact: body.fact ?? body.text, body }),
       }),
       ...extApiHooks,
+      /** 人格：列 / 读 / 改 / 建 / 删 / 切（`ext-persona.js`） */
+      ...extPersonaHooks,
+      /** 配置：读 / 局部写（`ext-config-hooks.js`，与面板 `/config` 同一份实现） */
+      ...extConfigHooks,
+      /** 记忆：带 id 的读 + 改一条 / 归档（`ext-memory-edit.js`） */
+      ...extMemoryEditHooks,
+      /** 只读：日记 / 用量 / 自我表达 / 表情库（`ext-observe.js`） */
+      ...extObserveHooks,
+      /** 会改东西：资料提议 / 群管 / 语音（`ext-act.js`） */
+      ...extActHooks,
     },
   });
   /** 队列自己每分钟消费一次：提交那一刻门闸没过，过点了要能补上 */
@@ -2991,7 +3228,7 @@ export function apply(ctx) {
    * 改资料的「私聊主人确认」通道。
    *
    * **必须在这一层**（和 `selfHistory` / `menuSlots` 同级），不能放进 `mount()`：
-   * 等主人回码的那段逻辑在 `handleTurn()` 里，而 `mount()` 与 `handleTurn()` 是
+   * 等主人点按钮/回确认的那段逻辑在 `handleTurn()` 里，而 `mount()` 与 `handleTurn()` 是
    * 两个平级函数——放在 `mount()` 里的 `const` 在 `handleTurn()` 里根本看不见，
    * 表现是**每一条进来的消息都抛 ReferenceError**。这种错 `node --check` 查不出来
    * （作用域是运行时的事），单测也盖不到（它们测的是纯函数）。
@@ -3004,6 +3241,65 @@ export function apply(ctx) {
     ownerOf: () => ownerId(),
     log: (m) => log.warn(m),
   });
+
+  /**
+   * 主人批准之后**真正执行**的那一段。
+   *
+   * 抽成函数是因为现在有**两个入口**：按钮回调（主路径）与文本兜底
+   * （按钮显示不出来的老客户端）。两个入口必须走同一段代码，否则迟早
+   * 出现「按钮点了会改、打字说确认不改」这种半套行为。
+   *
+   * `sid` 带上 kind 与时间戳：以前固定写 `'confirm'`，3 秒内连着确认两次
+   * 会被 `turnGuard` 当成重复调用拒掉，而请求这时已经从 pending 里摘走了。
+   */
+  async function applyConfirmedProfile(req) {
+    const fn = profileApply?.payload;
+    /**
+     * 写入本身抛错也要**有回执**。
+     *
+     * 工具层正常是「catch 住、返回 `{ok:false}`」，但它也可能在更早的地方炸
+     * （平台连不上、`dev.bot.set` 超时）。这时候如果不兜，主人点完按钮会
+     * 什么都不收到 —— 和「没点上」完全无法区分，然后他会再点一次，而那条
+     * 请求已经从 pending 里摘走了。
+     */
+    let r;
+    try {
+      r = fn
+        ? await fn(req.kind, req.payload, { sid: `confirm-${req.kind}-${req.at}` })
+        : { ok: false, message: '宿主没接上写入通道（工具可能没挂上）' };
+    } catch (e) {
+      r = { ok: false, message: e?.message || String(e) };
+    }
+    replyToOwner({
+      text: r?.ok ? `好，改好了：${req.summary}` : `这次没改成：${r?.message || '原因不明'}`,
+    });
+    audit({ op: 'selfexpr.confirm', note: `${req.kind} ${r?.ok ? 'ok' : 'fail'}` });
+    log.info(`[profile-confirm] 主人确认 ${req.kind}：${r?.ok ? '成功' : '失败'}`);
+    return r;
+  }
+
+  /** 确认结果回执统一走私聊主人：按钮可能从任何地方点，主人只有一个 */
+  function replyToOwner({ text }) {
+    const target = String(ownerId() || '').trim();
+    if (!target || !text) return;
+    try {
+      sendOut({ scene: 'c2c', kind: 'c2c', target, text })?.catch?.(() => {});
+    } catch { /* 回执发不出去不影响已经改了这件事 */ }
+  }
+
+  /**
+   * 主人在 QQ 里点了确认卡片上的按钮。
+   *
+   * 命中本通道之后**无论结果都回一句**：点下去没反应是最糟的反馈——
+   * 主人会以为没点上，然后再点一次（而那次 nonce 已经失效了）。
+   */
+  async function onConfirmButton(r) {
+    if (!r) return;
+    if (!r.ok) { replyToOwner({ text: r.message || '这次不算数。' }); return; }
+    if (r.approve) { await applyConfirmedProfile(r); return; }
+    replyToOwner({ text: `好，那就不改${r.kind === 'name' ? '名字' : ''}了。` });
+    audit({ op: 'selfexpr.confirm', note: `${r.kind} cancel` });
+  }
 
   const buildFromRoost = createPayloadBuilder({
     rpc: (m, p, o) => roost.rpc(m, p, o),
@@ -3066,7 +3362,22 @@ export function apply(ctx) {
     log: (m) => log.warn(m),
     debug: (m) => log.debug(m),
   });
-  interactionRouter.register((parsed) => pickChannel.handle(parsed));
+  /**
+   * 交互路由只有一个处理器，所以在这里按 `t` 分流：
+   *   · `pick`（`<<pick:>>` 那套）→ pickChannel
+   *   · `pf`（改资料的确认卡片）→ profileConfirm
+   *
+   * 两边都返回「这条归不归我」，都不认就继续往下交给别的通道（目前没有）。
+   * 改资料的确认是**异步**的（要写平台、要回执），所以这里不 await——
+   * 交互事件链断在中间会让后面所有消息都收不到（见 roost-interaction.js）。
+   */
+  interactionRouter.register((parsed) => {
+    if (pickChannel.handle(parsed)) return true;
+    const r = profileConfirm.handleInteraction(parsed);
+    if (!r) return false;
+    void onConfirmButton(r).catch((e) => log.warn(`[profile-confirm] 按钮结算失败：${e?.message ?? e}`));
+    return true;
+  });
 
   const outActions = createActionRunner({
     channel: () => channels.active(),
@@ -4416,6 +4727,8 @@ export function apply(ctx) {
         syncPersonaName: (name) => { cfg = patchConfig({ persona: { name } }); },
         audit,
         log: (m) => log.warn(m),
+        /** 头像 path 来源限定在数据目录（`profile-tool.js` 的 avatarRoots） */
+        dataDir: () => dataDir(),
       })
         .then((r) => {
           if (r.ok) {
@@ -5192,18 +5505,22 @@ export function apply(ctx) {
     }
 
     /**
-     * 改资料的主人确认：主人在私聊里回码才执行。
+     * 改资料的主人确认——**文本兜底**。
+     *
+     * 主路径是确认卡片上的按钮（`profileConfirm.handleInteraction`），这里只
+     * 覆盖「按钮显示不出来」的老客户端，所以只认「确认」「不用」两个字面，
+     * 不再认「好 / 行 / 可以 / 确定 / ok」那一串同义词。
      *
      * 三条限制缺一不可：
-     *   · 只在**主人的 c2c 会话**里认（群里有人猜到码也不能替他确认）
+     *   · 只在**主人的 c2c 会话**里认（群里有人说「确认」不能替他批准）
      *   · 只在有待确认请求时才算（没挂请求就完全不影响正常聊天）
      *   · 命中后**不进模型**：这一句是「批准」，不是聊天内容，
      *     喂给模型它会当成新话题，还可能顺手发起别的改动
      */
     /**
      * 扩展经 `/v1/message` 发来的那句**不算批准**，理由和上面那道闸一样：
-     * 拿到 `message:write` 的扩展本可以自己发一句话。这里虽然还要猜 4 位码，
-     * 但「能猜」和「该猜」是两回事——批准只能来自主人在 QQ 里按下的那一句。
+     * 拿到 `message:write` 的扩展本可以自己发一句话。批准只能来自主人在 QQ 里
+     * 按下的那颗按钮，或者他亲手打的那两个字。
      */
     const profileFromApi = /^api-/i.test(String(payload?.id ?? ''));
     if (!profileFromApi
@@ -5213,34 +5530,12 @@ export function apply(ctx) {
       const said = String(payload?.text ?? '');
       const req = profileConfirm.take(said);
       if (req) {
-        const fn = profileApply?.payload;
-        const r = fn
-          ? await fn(req.kind, req.payload, { sid: `confirm-${req.code}` })
-          : { ok: false, message: '宿主没接上写入通道（工具可能没挂上）' };
-        try {
-          sendOut({
-            scene: chat.scene,
-            kind: chat.kind,
-            target: chat.chatId,
-            text: r?.ok
-              ? `好，改好了：${req.summary}`
-              : `这次没改成：${r?.message || '原因不明'}`,
-          })?.catch?.(() => {});
-        } catch { /* 回执发不出去不影响已经改了这件事 */ }
-        audit({ op: 'selfexpr.confirm', note: `${req.kind} ${r?.ok ? 'ok' : 'fail'}` });
-        log.info(`[profile-confirm] 主人确认 ${req.kind}（${req.code}）：${r?.ok ? '成功' : '失败'}`);
+        await applyConfirmedProfile(req);
         return;
       }
       const cancelled = profileConfirm.cancelLatest(said);
       if (cancelled) {
-        try {
-          sendOut({
-            scene: chat.scene,
-            kind: chat.kind,
-            target: chat.chatId,
-            text: `好，那就不改${cancelled.kind === 'name' ? '名字' : ''}了。`,
-          })?.catch?.(() => {});
-        } catch { /* 同上 */ }
+        replyToOwner({ text: `好，那就不改${cancelled.kind === 'name' ? '名字' : ''}了。` });
         audit({ op: 'selfexpr.confirm', note: `${cancelled.kind} cancel` });
         return;
       }
@@ -8985,6 +9280,14 @@ export function apply(ctx) {
       /** 清空变更历史。不回滚任何东西，只丢快照——腾地方用，不是恢复出厂 */
       route('/self/profile/history/clear', async (req, res) => {
         if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        /**
+         * 服务端强确认：这是**唯一不可逆**的资料操作（快照清掉就退不回去了），
+         * 光靠前端 `window.confirm` 挡不住脚本直发 fetch。
+         */
+        if (body?.confirm !== true) {
+          return send(res, 200, { ok: false, reason: 'need_confirm', message: '清空变更记录不可逆，需要显式确认' });
+        }
         const ok = selfHistory.clear();
         audit({ op: 'selfexpr.history_clear', note: ok ? 'ok' : 'fail' });
         return send(res, 200, { ok, message: ok ? '' : '清空失败，看日志' });
@@ -9195,127 +9498,12 @@ export function apply(ctx) {
         }
         const body = await readBody(req);
         /**
-         * 保存语义由**显式模式**决定，默认走局部（`patch`）。
-         *
-         *   `?mode=full`  → 整份替换：没提交的字段回落到 DEFAULTS。
-         *                    「配置全文」编辑器用，删字段就是删字段。
-         *   其它（默认）  → 局部合并：没提交的字段保持磁盘现值。
-         *
-         * 为什么默认反过来：**外部的设置页不一定知道要带参数**。DSH 的通用设置页
-         * 只提交它渲染出来的那几项，旧默认（整份替换）会顺手把 `speakUp.prompt`、
-         * `qqTools.maxParts`、`persona.name`、`tts.provider` 一起抹成默认值
-         * ——用户看到的是「升级后她变了个人」，日志里却一个字都没有
-         * （2026-11 外部实测，四项同时被抹）。
-         *
-         * 方向选择：局部语义最多让「删字段」失效（用整份模式再存一次即可），
-         * 整份语义会**静默丢配置**。两者代价不对称，所以默认取局部。
+         * 保存语义由 `?mode=full` 决定；具体校验与副作用全在 `applyConfigBody()`，
+         * 与 `/v1/config` 共用同一份实现——见那个函数上方的说明。
          */
         const mode = new URL(req.url || '/', 'http://x').searchParams.get('mode');
-        const fullSave = mode === 'full';
-
-        /**
-         * 根必须是对象。
-         *
-         * `JSON.parse('null' | '[]' | '"abc"' | '123')` 都能过 parse，但 `merge`
-         * 见到非对象会直接返回原配置 —— 表现是「提示存好了，磁盘一个字没改」。
-         */
-        if (!body || typeof body !== 'object' || Array.isArray(body)) {
-          return send(res, 400, {
-            ok: false,
-            message: '配置必须是一个 JSON 对象（形如 { "server": { … } }），不能是 null / 数组 / 字符串 / 数字',
-          });
-        }
-
-        /**
-         * 面板拿到的是打码后的密钥，原样提交回来时别把真密钥冲掉。
-         *
-         * **不能只是 `delete`**：`saveConfig` 的基线是 DEFAULTS（token 默认空串），
-         * 删掉这个键等于主动提交「没有 token」——真密钥会被默认空值顶掉。
-         * 必须显式回填当前内存里的真值。
-         */
-        /**
-         * 冲突检测：面板拿的是旧快照就别整份覆盖。
-         * 整份保存是「以提交的为准」，别处刚改过（比如换人格写了 byChat）就会被抹掉。
-         */
-        const revision = typeof body.__revision === 'string' ? body.__revision : '';
-        if (revision && revision !== configRevision()) {
-          return send(res, 409, {
-            ok: false,
-            message: '配置在别处改过了，先刷新再保存',
-            config: publicConfig(cfg),
-            revision: configRevision(),
-          });
-        }
-        delete body.__revision;
-        /** 整份 vs 局部：看 `?mode=full`（见上面那段口径） */
-
-        if (body?.server?.token === '******') body.server.token = cfg.server.token;
-
-        /**
-         * 端口必须是 1–65535 的整数。
-         *
-         * 以前不校验：填 `"abc"` 也能保存成功，然后 `listen('abc')` 抛 EACCES，
-         * 而顺延逻辑只认 EADDRINUSE —— 于是服务直接起不来，面板只看到一句
-         * `permission denied abc`，既看不出是自己填错了，也不知道该改哪。
-         */
-        if (body?.server && 'port' in body.server) {
-          const n = Number(body.server.port);
-          if (!Number.isInteger(n) || n < 1 || n > 65535) {
-            return send(res, 400, {
-              ok: false,
-              message: `端口必须是 1–65535 的整数，收到的是 ${JSON.stringify(body.server.port)}`,
-            });
-          }
-          body.server.port = n;
-        }
-
-        const beforePort = cfg.server.port;
-        const beforeToken = cfg.server.token;
-        const beforeCurrent = cfg.persona.current;
-        /** 外接协议的三个连接参数，保存后要拿来比对（见下面的重连判断） */
-        const beforeRoost = {
-          enabled: Boolean(cfg.roostHost?.enabled),
-          url: String(cfg.roostHost?.url ?? ''),
-          token: String(cfg.roostHost?.token ?? ''),
-        };
-        cfg = fullSave ? saveConfig(body) : patchConfig(body);
-        if (cfg.persona.current !== beforeCurrent) {
-          const hit = personas.list().find((p) => p.id === cfg.persona.current);
-          switchNote.set(hit?.label || hit?.name || cfg.persona.current);
-        }
-
-        /**
-         * 只有**端口或密钥**变了才重启监听。
-         *
-         * 以前是无条件 `startServer()`：改一个记忆条数也会关掉再重建收消息服务。
-         * 那几百毫秒里 ai-chat 推过来就是 connection refused；端口还会重新 bind
-         * 一次，万一那一刻被瞬时占用就漂到别的端口去了（棘轮的老诱因之一）。
-         */
-        const restarted = cfg.server.port !== beforePort || cfg.server.token !== beforeToken;
-        if (restarted) startServer();
-
-        /**
-         * 外接协议的连接参数变了要重连。
-         *
-         * 只改「看图」这种开关**不重连**——它是每轮现读的，重连反而会丢一段 seq。
-         * 地址 / token 变了就必须重连：不重连的话面板上显示「已连接」，实际上连的
-         * 还是旧地址，症状是「消息一条都不进来」。
-         */
-        const roostChanged = Boolean(cfg.roostHost?.enabled) !== beforeRoost.enabled
-          || String(cfg.roostHost?.url ?? '') !== beforeRoost.url
-          || String(cfg.roostHost?.token ?? '') !== beforeRoost.token;
-        if (roostChanged) {
-          roost.stop();
-          if (cfg.roostHost?.enabled) roost.start();
-        }
-
-        return send(res, 200, {
-          ok: true,
-          config: publicConfig(cfg),
-          message: restarted ? '已保存，服务已重载' : '已保存',
-          /** 成功也要回新版本号，否则客户端下次拿空串、冲突检测只生效一次 */
-          revision: configRevision(),
-        });
+        const out = applyConfigBody(body, { mode });
+        return send(res, out.status, out.body);
       }),
       /**
        * 一键流程的接口。

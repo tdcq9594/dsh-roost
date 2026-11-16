@@ -43,13 +43,13 @@ export const EXT_DEFAULT_SCOPES = Object.freeze(['memory:write', 'state:read']);
 export const EXT_ALLOWED_SCOPES = Object.freeze([
   'message:write', 'say:write', 'state:read', 'context:read',
   'memory:read', 'memory:write', 'proactive:write', 'session:write',
-  'prompt:write', 'agent:write', 'core:write',
+  'prompt:write', 'config:write', 'group:write', 'agent:write', 'core:write',
 ]);
 
-/** 会对外产生可见动作（说话 / 刷屏 / 改人格 / 开会话）的 scope，安装时必须主人点头。 */
+/** 会对外产生可见动作（说话 / 刷屏 / 改人格 / 开会话 / 改配置 / 管群）的 scope，安装时必须主人点头。 */
 export const EXT_SENSITIVE_SCOPES = Object.freeze([
   'message:write', 'say:write', 'proactive:write', 'session:write', 'prompt:write', 'agent:write',
-  'core:write',
+  'config:write', 'group:write', 'core:write',
 ]);
 
 /** 去重 + 过滤未知项；结果为空时退回默认（绝不返回「无 scope 但令牌有效」这种半吊子态）。 */

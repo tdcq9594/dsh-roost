@@ -19,6 +19,8 @@ export type V1Scope =
   | 'proactive:write'
   | 'session:write'
   | 'prompt:write'
+  | 'config:write'
+  | 'group:write'
   | 'core:write'
   | 'agent:write';
 
@@ -30,6 +32,8 @@ export type SensitiveScope =
   | 'session:write'
   | 'prompt:write'
   | 'agent:write'
+  | 'config:write'
+  | 'group:write'
   | 'core:write';
 
 /** 拒绝诊断的五层来源。 */
