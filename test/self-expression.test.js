@@ -187,3 +187,62 @@ test('H6 清空后文件还在、只是空表', () => {
     assert.deepEqual(raw.entries, []);
   } finally { done(); }
 });
+
+/**
+ * `unattended`（2026-11-16）：没人看着的轮次允不允许改。
+ *
+ * 默认值按敏感度给，但**每一项都能在面板单独改**——这里守的是
+ * 「默认值对不对」与「开关真的写得进去」，不是替用户定死。
+ */
+test('U1 无人值守默认值：简介开、昵称头像关', () => {
+  const c = normalizeSelfExpression(undefined);
+  assert.equal(c.sign.unattended, true);
+  assert.equal(c.name.unattended, false);
+  assert.equal(c.avatar.unattended, false);
+  assert.equal('unattended' in c.menu, false, '菜单没有这一项');
+});
+
+test('U2 面板开关能逐项打开 / 关掉，且不串到别的项', () => {
+  const base = normalizeSelfExpression({});
+  const on = patchSelfExpression(base, { avatar: { unattended: true } });
+  assert.equal(on.avatar.unattended, true);
+  assert.equal(on.sign.unattended, true, '别的项不受影响');
+  assert.equal(on.name.unattended, false);
+
+  const off = patchSelfExpression(on, { sign: { unattended: false } });
+  assert.equal(off.sign.unattended, false);
+  assert.equal(off.avatar.unattended, true, '只改提交的那一项');
+});
+
+test('U3 显式 false 不会被缺省值盖回来', () => {
+  const c = normalizeSelfExpression({ sign: { unattended: false } });
+  assert.equal(c.sign.unattended, false, '用户关掉就是关掉');
+});
+
+/**
+ * `avatar.anyPath`（2026-11-16）：头像的本机图片路径能不能超出数据目录。
+ *
+ * 默认**开**——拿桌面/相册里的一张图当头像本来就是这个功能的用法，
+ * 升级不该悄悄收掉；想收紧的人自己在面板关。
+ */
+test('U4 anyPath 默认开，且只有头像有这一项', () => {
+  const c = normalizeSelfExpression(undefined);
+  assert.equal(c.avatar.anyPath, true);
+  assert.equal('anyPath' in c.sign, false, '只有头像有');
+  assert.equal('anyPath' in c.name, false);
+  assert.equal('anyPath' in c.menu, false);
+});
+
+test('U5 anyPath 显式 false 不被缺省值盖回来，patch 也写得进去', () => {
+  const c = normalizeSelfExpression({ avatar: { anyPath: false } });
+  assert.equal(c.avatar.anyPath, false);
+
+  const on = patchSelfExpression(c, { avatar: { anyPath: true } });
+  assert.equal(on.avatar.anyPath, true);
+  const off = patchSelfExpression(on, { avatar: { anyPath: false } });
+  assert.equal(off.avatar.anyPath, false);
+
+  /** 别的项提交 anyPath 应该被忽略（白名单式合并） */
+  const junk = patchSelfExpression(off, { sign: { anyPath: true } });
+  assert.equal('anyPath' in junk.sign, false);
+});

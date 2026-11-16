@@ -1217,7 +1217,7 @@ select.roost-input{color-scheme:dark}
           h('i', null,
             `${last.stage || '未知阶段'}：${last.message || '未知错误'}`
             + (ago ? `（${ago < 60 ? `${ago} 秒前` : `${Math.round(ago / 60)} 分钟前`}）` : '')
-            + ' —— 细节看「日志」页（带 stack 前两帧），或重启 DSH 让代码回到干净状态。'))
+            + ' —— 细节看「排障」（带 stack 前两帧），或重启 DSH 让代码回到干净状态。'))
       }
       if (!st.chats) {
         return h('div', { className: 'roost-banner' },
@@ -8124,6 +8124,7 @@ select.roost-input{color-scheme:dark}
       'memory:read': '读记忆', 'memory:write': '写记忆',
       'proactive:write': '主动发言', 'session:write': '写会话',
       'prompt:write': '写提示词', 'agent:write': '开独立会话',
+      'config:write': '改配置', 'group:write': '管群', 'core:write': '接管内置功能',
     }
     const scopeNote = (s) => (SCOPE_LABEL[s] ? `（${SCOPE_LABEL[s]}）` : '')
     const scopesText = (arr) => (arr || []).map((s) => s + scopeNote(s)).join('、')
@@ -10375,7 +10376,7 @@ select.roost-input{color-scheme:dark}
         if (!window.confirm('清空变更记录？清掉之后就没法再退回上一版了（当前资料不受影响）。')) return
         setBusy(true)
         try {
-          const r = await post('/self/profile/history/clear', {})
+          const r = await post('/self/profile/history/clear', { confirm: true })
           if (r?.ok === false) { toast(String(r.message || '清空失败')); return }
           toast('记录已清空')
           await load()
@@ -10514,17 +10515,43 @@ select.roost-input{color-scheme:dark}
                   onSave: (v) => save({ [kind]: { cooldownMin: v } }),
                 }),
                 /**
-                 * 菜单没有这一项：它一秒能改回来，为它加一道私聊确认
+                 * 菜单没有这两项：它一秒能改回来，为它加确认 / 无人值守判断
                  * 只会让「换个说法」比说话还麻烦。
                  */
                 kind === 'menu'
                   ? null
-                  : h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+                  : h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
                       h('span', { className: 'roost-g-unit' }, '需主人确认'),
                       h(Switch, {
                         on: !!cfg[kind]?.confirm, disabled: busy, label: label + '需要主人确认',
                         onToggle: (v) => save({ [kind]: { confirm: v } }),
-                      }))))))
+                      }),
+                      h('span', {
+                        className: 'roost-g-unit',
+                        title: '主动搭话 / 夜间巩固这类没有人在场的轮次',
+                      }, '没人看着也允许改'),
+                      h(Switch, {
+                        on: !!cfg[kind]?.unattended, disabled: busy, label: label + '无人值守也允许改',
+                        onToggle: (v) => save({ [kind]: { unattended: v } }),
+                      })),
+                /**
+                 * 头像独有：本机图片路径能不能超出数据目录。
+                 *
+                 * 开着 = 桌面/相册里随便一张图都能当头像（老行为，默认）；
+                 * 关掉 = 只认数据目录里的文件。这一项挡的不是主人手滑，是
+                 * 「提示词注入成功一次就把本机任意图传成公开头像」。
+                 */
+                kind === 'avatar'
+                  ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+                      h('span', {
+                        className: 'roost-g-unit',
+                        title: '关掉之后只能用数据目录里的图当头像',
+                      }, '允许任意路径'),
+                      h(Switch, {
+                        on: cfg.avatar?.anyPath !== false, disabled: busy, label: '头像允许读任意路径',
+                        onToggle: (v) => save({ avatar: { anyPath: v } }),
+                      }))
+                  : null))))
 
       /* ---------- 03 状态感知 ---------- */
       const awareRows = !cfg
@@ -10661,6 +10688,17 @@ select.roost-input{color-scheme:dark}
         setArgs(JSON.stringify(idx[name]?.args ?? [], null, 2))
         setOut(null)
       }
+      /** 发一次 qq.call。`confirm` 由调用方判好：常用三颗只放只读接口，恒 false */
+      const call = async (name, a, needConfirm) => {
+        setBusy(true)
+        try {
+          const r = await post('/self/qq', { method: name, args: a, confirm: needConfirm })
+          setOut(r)
+          toast(r?.ok === false ? (r.message || '调用失败') : '已执行')
+        } catch (e) {
+          toast('调用失败：' + String(e?.message || e))
+        } finally { setBusy(false) }
+      }
       const run = async () => {
         if (!cur || busy) return
         let a
@@ -10669,14 +10707,26 @@ select.roost-input{color-scheme:dark}
         const risk = String(meta?.risk || 'write')
         const need = risk !== 'read'
         if (need && !window.confirm(`${cur} 属 ${risk} 级操作，确定执行？`)) return
-        setBusy(true)
-        try {
-          const r = await post('/self/qq', { method: cur, args: a, confirm: need })
-          setOut(r)
-          toast(r?.ok === false ? (r.message || '调用失败') : '已执行')
-        } catch (e) {
-          toast('调用失败：' + String(e?.message || e))
-        } finally { setBusy(false) }
+        await call(cur, a, need)
+      }
+      /**
+       * 常用只读接口：主操作摆成按钮。
+       *
+       * 为什么加：这一页以前只有「选方法 + 手写 JSON 参数」一条路，想看一眼自己
+       * 现在叫什么，得先知道 `getMe` 的 args 是一个空数组——普通人到这一步就走了。
+       * **只放 `risk=read`**：改菜单、删面板这类写操作留在下面折叠的高级台里，
+       * 那里有二次确认、也才有地方逐字核对参数。
+       */
+      const QUICK = [
+        ['getMe', '查身份', '机器人自己的 openid / 昵称 / 头像地址'],
+        ['getGlobalMenu', '看全局菜单', '当前私聊那排入口的文案与动作'],
+        ['listPanels', '指令面板列表', '每个面板的 id、名称与元素个数'],
+      ]
+      const quick = (name) => {
+        const m0 = idx[name]
+        if (!m0) { toast('这个方法表里没有：' + name); return }
+        if (String(m0.risk || 'read') !== 'read') { toast('非只读接口请在下面「高级」里手动执行'); return }
+        return call(name, Array.isArray(m0.args) ? m0.args : [], false)
       }
       return h('div', null,
         h(Sec, {
@@ -10686,42 +10736,62 @@ select.roost-input{color-scheme:dark}
           h('div', { className: 'roost-g-card' },
             h('p', { className: 'roost-g-desc' },
               '这一页走机器人身份（AppID/Secret → access_token）：查身份、改全局菜单与指令面板。'
-              + '昵称、头像、回调、白名单、AppSecret 属于开发者后台，需要开发者登录态，这里不提供。'),
+              + '参数要手写，是给开发者用的；只想改名字头像的话不用来这一页。'),
+            h('p', { className: 'roost-note' },
+              '昵称 / 头像 / 简介 / 菜单文案的现状、授权与逐条退回在「人设 → 资料」；'
+              + '回调地址与 IP 白名单要去开发者后台；AppSecret 在「接入」页。'),
             notice ? h('p', { className: 'roost-note' }, notice) : null,
             names.length
-              ? h(GRow, { label: '接口', hint: '非只读要二次确认；带 <> 的参数是占位符' },
-                  h('select', {
-                    className: 'roost-g-sel', value: cur, disabled: busy,
-                    onChange: (e) => pick(e.target.value),
-                  },
-                    names.map((k) => h('option', { key: k, value: k },
-                      `${k}（${idx[k]?.group || '—'} / ${idx[k]?.risk || '—'}）`))))
+              ? h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0 2px' } },
+                  QUICK.map(([name, label, hint]) => (idx[name]
+                    ? h('button', {
+                        key: name, type: 'button', className: 'roost-btn',
+                        disabled: busy || Boolean(idx[name]?.blocked), title: hint,
+                        onClick: () => quick(name),
+                      }, label)
+                    : null)))
               : h('p', { className: 'roost-note' }, '方法表没读到。检查外接协议是否连上、框架是否提供 qq.methods。'),
-            cur
-              ? h('div', null,
-                  h('p', { className: 'roost-note', style: { marginTop: 8 } },
-                    `${meta?.desc || ''} · 风险 ${meta?.risk || '—'} · scope ${meta?.scope || '—'}`
-                    + (meta?.blocked ? ' · 框架标为禁止外部调用' : '')),
-                  h('p', { className: 'roost-note' },
-                    'args 是位置参数数组，会直接展开成 QQApi 的实参；不是 WebUI 那套 __target/__rest 对象。'),
-                  h('textarea', {
-                    className: 'roost-g-num',
-                    style: { width: '100%', minHeight: 120, marginTop: 6, fontFamily: 'monospace' },
-                    value: args, disabled: busy, spellCheck: false,
-                    onChange: (e) => setArgs(e.target.value),
-                    placeholder: '[]',
-                  }),
-                  h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
-                    h('button', {
-                      type: 'button', className: 'roost-btn',
-                      disabled: busy || meta?.blocked, onClick: () => run(),
-                    }, busy ? '执行中…' : '执行')),
-                  out
-                    ? h('pre', {
-                        className: 'roost-note',
-                        style: { marginTop: 10, whiteSpace: 'pre-wrap', maxHeight: 320, overflow: 'auto' },
-                      }, JSON.stringify(out, null, 2))
+            /**
+             * 高级台默认收起：能调任意方法，但参数是位置数组，只有开发者用得上。
+             * 常驻渲染（`details` 只折叠不卸载），切来切去不会丢掉手写的参数。
+             */
+            names.length
+              ? h('details', { style: { marginTop: 10 } },
+                  h('summary', { style: { cursor: 'pointer', fontSize: 12 } },
+                    '高级：直接调接口（给开发者）'),
+                  h(GRow, { label: '接口', hint: '非只读要二次确认；带 <> 的参数是占位符' },
+                    h('select', {
+                      className: 'roost-g-sel', value: cur, disabled: busy,
+                      onChange: (e) => pick(e.target.value),
+                    },
+                      names.map((k) => h('option', { key: k, value: k },
+                        `${k}（${idx[k]?.group || '—'} / ${idx[k]?.risk || '—'}）`)))),
+                  cur
+                    ? h('div', null,
+                        h('p', { className: 'roost-note', style: { marginTop: 8 } },
+                          `${meta?.desc || ''} · 风险 ${meta?.risk || '—'} · scope ${meta?.scope || '—'}`
+                          + (meta?.blocked ? ' · 框架标为禁止外部调用' : '')),
+                        h('p', { className: 'roost-note' },
+                          'args 是位置参数数组，会直接展开成 QQApi 的实参；不是 WebUI 那套 __target/__rest 对象。'),
+                        h('textarea', {
+                          className: 'roost-g-num',
+                          style: { width: '100%', minHeight: 120, marginTop: 6, fontFamily: 'monospace' },
+                          value: args, disabled: busy, spellCheck: false,
+                          onChange: (e) => setArgs(e.target.value),
+                          placeholder: '[]',
+                        }),
+                        h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+                          h('button', {
+                            type: 'button', className: 'roost-btn',
+                            disabled: busy || meta?.blocked, onClick: () => run(),
+                          }, busy ? '执行中…' : '执行')))
                     : null)
+              : null,
+            out
+              ? h('pre', {
+                  className: 'roost-note',
+                  style: { marginTop: 10, whiteSpace: 'pre-wrap', maxHeight: 320, overflow: 'auto' },
+                }, JSON.stringify(out, null, 2))
               : null)),
         h(Sec, { n: '02', title: '权限与限制' },
           h('div', { className: 'roost-g-card' },
@@ -10963,7 +11033,7 @@ select.roost-input{color-scheme:dark}
             ? h('div', null,
                 h('div', { className: 'roost-empty' }, '踢人需要「群管内邀」白名单，现在没开。'),
                 h('div', { className: 'roost-note' },
-                  '去开放平台申请通过后，在 Roost 面板（浏览器打开的那个）「配置 → 群管能力」打开。禁言不需要这个。'),
+                  '去 QQ 开放平台为这个机器人申请「群管内邀」权限，通过后回来点「刷新」。禁言不需要这个。'),
               )
             : h('div', null,
                 h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 8 } },
@@ -11711,8 +11781,11 @@ select.roost-input{color-scheme:dark}
         + '（name / text 是 0.10.0 之前的旧字段，只在人格文件读不出正文时才兜底）'],
       ['selfExpression', '她自己的资料', 'menu / sign / name / avatar 四段的 enabled（工具注册不注册）与 cooldownMin'
         + '（两次写至少隔几分钟，0 = 完全不限——这里不设默认值，也不编平台次数）；'
+        + 'sign / name / avatar 另有 confirm（改前私聊问一句，点「确认改」按钮才执行）与 unattended'
+        + '（主动搭话 / 夜间巩固这类没人看着的轮次允不允许改，默认简介开、昵称头像关，面板可逐项改）；'
+        + 'avatar.anyPath 决定本机图片能不能超出数据目录（默认允许，关掉后只能用数据目录里的图当头像）；'
         + 'awareness.mood / silence 只影响她「知不知道」自己的状态，不触发动作；'
-        + 'proactive.enabled 允许她在主动搭话那一轮顺手改，fields 决定能动哪几项（昵称永远要有人在场）'],
+        + 'proactive.enabled 允许她在主动搭话那一轮顺手改，fields 决定能动哪几项'],
       ['stickers', '表情包', '图放哪、要不要注入'],
       ['guild', '频道', 'enabled：频道总开关，**默认关**。关着时只在 dsh-roost 入口丢弃频道事件，不动框架的 intents 订阅（框架照常收、照常推给别的插件）；'
         + 'sessionMode：guild = 一个频道一个会话（同一频道的子频道/论坛/公告共用）、channel = 一个子频道一个会话；频道私信固定一人一个。'
@@ -14771,7 +14844,7 @@ select.roost-input{color-scheme:dark}
         ),
         h('label', { className: 'roost-note', style: { display: 'inline-flex', gap: 6, alignItems: 'center' } },
           h('input', { type: 'checkbox', checked: confirm, onChange: (e) => setConfirm(e.target.checked) }),
-          '我确认授予高权限 scope（agent:write / say:write / prompt:write / proactive:write）',
+          '我确认授予高权限 scope（agent:write / say:write / prompt:write / config:write / group:write / proactive:write）',
         ),
         issued
           ? h('div', { className: 'roost-note', style: { color: 'var(--ok)' } },
@@ -16255,9 +16328,13 @@ select.roost-input{color-scheme:dark}
       ['ch-policy', '频道策略'],
       ['ch-api', '频道接口'],
       ['ch-diag', '频道排障'],
+      /* 系统：这台机器怎么跑。**书写顺序与 `NAV_GROUPS.system.tabs` 保持一致**——
+         以前两处不一致，渲染被列表顺序盖掉（第三轮 A1）。现在渲染和 Alt+K 都
+         改走 `NAV_GROUPS`，这里仍对齐是为了不让人被第二份顺序误导。 */
+      /** A6：接入提成正式页签；setup 隐藏页、老深链、概览按钮一个不删 */
+      ['connect', '接入'],
       /** 机器人身份能改的自身设置（菜单 / 指令面板）；开发者后台那套不在这条链上 */
       ['bot-self', '自身设置'],
-      /* 系统：这台机器怎么跑 */
       ['chats', '会话'],
       /** 账号迁移：原先是隐藏页 + 弹窗（低频整页）；换机器人是真实高频需求，提成正式页签 */
       ['account', '账号迁移'],
@@ -16268,10 +16345,9 @@ select.roost-input{color-scheme:dark}
       ['config', '设置'],
       /* 2.3：备份从记忆页里长出一个正门，记忆页那块原地保留 */
       ['backup', '备份'],
-      ['about', '关于'],
-      /** A6：接入与安全防护提成正式页签；setup 隐藏页、老深链、概览按钮一个不删 */
-      ['connect', '接入'],
+      /** A6：安全防护同上，正式页签 */
       ['security', '安全防护'],
+      ['about', '关于'],
     ]
     /**
      * `chats` 原来是隐藏页，2026-11-12 提升成「身份」：它本来就是
@@ -16282,7 +16358,8 @@ select.roost-input{color-scheme:dark}
      * 频道接口台的四个老页签 key（2026-11-15 合并前各自是一页）。
      *
      * 只用来**接住老深链与老 localStorage**：打开时落到 `ch-api` 并选中对应段。
-     * 它们不进导航、不进 Alt+K（`ALL_TABS` 里没有），否则页签又会变回四个。
+     * 它们不进导航、不进 Alt+K（`TABS` 里没有，`paletteTabs` 也就带不进来），
+     * 否则页签又会变回四个。
      */
     const LEGACY_CH_TABS = {
       'ch-channels': 'channels',
@@ -16297,11 +16374,13 @@ select.roost-input{color-scheme:dark}
     /**
      * 两层导航：一级是分组（带图标），二级是组内页面。
      *
-     * 为什么现在分：8 个页签平铺一排，窄侧栏里正好挤满一行，再加一页就只能换行，
-     * 变成两排一样重的按钮、分不清主次。分组之后一级只有 4 个，加页只影响组内。
+     * 为什么现在分：页签一多，窄侧栏里平铺一排就挤到换行，变成两排一样重的按钮、
+     * 分不清主次。分组之后一级只有 7 个（2026-11-16 群聊并入「群与频道」前是 8 个），
+     * 加页只影响组内。
      *
      * 分组参照 aurabot 的「概览 / 人设 / 表达 / 平台 / 系统」思路，按我们的页面裁剪：
-     * 概览单独成组（只有一页，不渲染二级行），其余按「人设 / 能力 / 系统」收。
+     * 概览单独成组（只有一页，不渲染二级行），其余按「人设 / 表达 / 群与频道 / 能力 /
+     * 扩展 / 系统」收。
      * **tab 的 key 一个都不改**，老 `localStorage['roost.tab']` 照样落回原来那页，
      * 隐藏页（context/setup）不进口分组，仍靠 `roost-nav-current` 标记位置。
      */
@@ -16349,15 +16428,25 @@ select.roost-input{color-scheme:dark}
       setup: '向导 老链接 自测',
     }
 
-    /** 搜页签：页名或别名命中都算；空查询给全部（按导航顺序） */
-    function matchTabs(q, tabs, groups) {
+    /**
+     * 搜页签：页名 / 别名 / **所属组名** 命中都算；空查询给全部（按传入顺序）。
+     *
+     * 组名也算命中：用户记不住「群管」在哪一组，但记得「群与频道」——
+     * 搜组名就把该组页面全列出来，比让他一个个组去点快。
+     *
+     * 组标签走 `navGroupOf` 而不是自己 `find`：扩展页（`ext:<id>`）不在任何
+     * `NAV_GROUPS[x].tabs` 里，得问它自己声明的 `nav.group`，否则搜索结果显示
+     * 一个空组名（第三轮 A8）。`groups` 参数留着只为兼容既有调用与测试。
+     */
+    function matchTabs(q, tabs, groups, extPages = null) {
       const kw = String(q || '').trim().toLowerCase()
       const out = []
       for (const [id, label] of tabs) {
         const alias = TAB_ALIAS[id] || ''
+        const g = navGroupOf(id, extPages) || (groups || []).find((x) => x.tabs.includes(id)) || null
         const hit = !kw || label.toLowerCase().includes(kw) || alias.toLowerCase().includes(kw)
+          || (g ? String(g.label).toLowerCase().includes(kw) : false)
         if (!hit) continue
-        const g = groups.find((x) => x.tabs.includes(id))
         out.push({ id, label, group: g ? g.label : '' })
       }
       return out
@@ -16369,19 +16458,35 @@ select.roost-input{color-scheme:dark}
       /* 表达：她怎么"出声"——说话（语音合成）与表情包。2026-11-13 从「能力」里独立出来 */
       { id: 'express', label: '表达', icon: 'M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.4A8 8 0 1 1 20.5 11.5zM9 13.2s1.1 1.5 3 1.5 3-1.5 3-1.5M9.5 9.6h.01M14.5 9.6h.01', tabs: ['express', 'stickers'] },
       /**
-       * 群聊：两页都在才开组（单页组不渲染二级行，导航里看不到页名反而迷惑）。
-       * 2026-11-13 群聊策略页做出来后，群管从「系统」搬过来。
+       * 群与频道（2026-11-16 合组，一级 8 → 7）：它们回答同一个问题——
+       * 「在这个渠道里怎么说话」。
+       *
+       * 配置层本来就是共用的：频道策略页里写着「接话 / 连发 / 刹车与群聊
+       * **共用**全局 `roostHost.decide` / `merge`」，导航却劈成两个一级位，
+       * 点进去各只有 2 / 4 个页签。组内先群聊（多数人只有群）后频道
+       * （官方 Bot API 的可选平台）。
+       *
+       * **老 id `group` 不删**：已发布扩展的 `plugin.json` 里
+       * `ui.nav.group: 'group'` 还写着它，见下面 `GROUP_ALIAS`。
        */
-      { id: 'group', label: '群聊', icon: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM15.5 11a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5M3 19c.7-2.6 3-4 6-4s5.3 1.4 6 4M15 15.2c2 .2 3.5 1.4 4 3.3', tabs: ['groupchat', 'groupadmin'] },
-      /**
-       * 频道：四个二级页，按「看状态 / 调策略 / 调接口 / 排障」分工。
-       * 只读诊断在首尾（总览 / 排障），配置在策略，动官方接口的写操作在接口页。
-       */
-      { id: 'channel', label: '频道', icon: 'M4 6.5h16M4 12h10M4 17.5h7M17.5 15.5l3 2-3 2', tabs: ['ch-home', 'ch-policy', 'ch-api', 'ch-diag'] },
+      { id: 'channel', label: '群与频道', icon: 'M4 6.5h16M4 12h10M4 17.5h7M17.5 15.5l3 2-3 2',
+        tabs: ['groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag'] },
       { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
       { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
     ]
+    /**
+     * 合并前的一级组 id（2026-11-16 群聊并入「群与频道」）。
+     *
+     * 三处还在用旧 id，删掉这张表会**静默**失效、不是报错：
+     *  · 已发布扩展的 `plugin.json` 里 `ui.nav.group: 'group'` → 挂不上组，
+     *    页面从导航里消失（`navGroupOf` 找不到组会返回 null）；
+     *  · 老 `localStorage['roost.navlast']` 里 `{ group: 'groupadmin' }`；
+     *  · 老深链/书签（tab key 没变，只影响组名显示）。
+     */
+    const GROUP_ALIAS = { group: 'channel' }
+    /** 老组 id → 现组 id。只认一层，别写成递归 */
+    const groupIdOf = (id) => GROUP_ALIAS[String(id ?? '')] || String(id ?? '')
     /**
      * A1：系统组页最多，混了「接入与身份 / 诊断 / 运维 / 关于」四类。
      * 不拆组、不删页、不改 key，只在二级页签上给段首留一道分隔与悬浮说明。
@@ -16400,7 +16505,8 @@ select.roost-input{color-scheme:dark}
         const pid = key.slice(4)
         const page = (extPages || []).find((x) => x.id === pid)
         if (!page) return null
-        return NAV_GROUPS.find((g) => g.id === page.nav.group) || null
+        /** 扩展声明的组 id 可能是合并前的（`group`），归一后再找 */
+        return NAV_GROUPS.find((g) => g.id === groupIdOf(page.nav.group)) || null
       }
       return NAV_GROUPS.find((g) => g.tabs.includes(id)) || null
     }
@@ -16513,7 +16619,7 @@ select.roost-input{color-scheme:dark}
           }
           if (!palette.open) return
           if (e.key === 'Escape') { e.preventDefault(); setPalette({ open: false, q: '', idx: 0 }); return }
-          const list = matchTabs(palette.q, ALL_TABS.map((id) => [id, (TABS.find((t) => t[0] === id) || [id, id])[1]]), NAV_GROUPS)
+          const list = matchTabs(palette.q, paletteTabs(), NAV_GROUPS, extPages)
           if (e.key === 'ArrowDown') {
             e.preventDefault()
             setPalette((p) => ({ ...p, idx: Math.min(p.idx + 1, Math.max(0, list.length - 1)) }))
@@ -16575,8 +16681,34 @@ select.roost-input{color-scheme:dark}
         return declared.concat(ext)
       }
 
+      /**
+       * Alt+K 的候选清单：**按一级分组的顺序展开**，组内顺序等同导航里看到的顺序。
+       *
+       * 以前这里是 `ALL_TABS`（= `TABS` 的书写顺序），于是「接入」「安全防护」
+       * 在搜索结果里排到最后，和导航里第一位对不上——第三轮 A1 只修了渲染，
+       * 没修这一处。扩展页（`ext:<id>`）以前根本不在候选里，现在跟着组一起进来；
+       * 隐藏页接在末尾，给它们一个人话页名（以前直接显示 key）。
+       */
+      const paletteTabs = () => {
+        const ordered = NAV_GROUPS.flatMap((g) => tabsOfGroup(g))
+        const seen = new Set(ordered.map(([id]) => id))
+        const ext = dynamicTabs.filter(([id]) => !seen.has(id))
+        const hidden = HIDDEN_TABS.filter((id) => !seen.has(id))
+          .map((id) => [id, ({ context: '上下文', setup: '接入向导' })[id] || id])
+        return ordered.concat(ext, hidden)
+      }
+
       const [navLast, setNavLast] = useState(() => {
-        try { return JSON.parse(localStorage.getItem('roost.navlast') || '{}') || {} } catch { return {} }
+        try {
+          const raw = JSON.parse(localStorage.getItem('roost.navlast') || '{}') || {}
+          /**
+           * 合组迁移：老 `group`（群聊）的落点继承给 `channel`，否则「上次停在群管」
+           * 的人点一级组会掉回组内第一页（群聊策略），看着像设置丢了。
+           * 已有 `channel` 就听新的，别覆盖。
+           */
+          if (raw.group && !raw.channel) raw.channel = raw.group
+          return raw
+        } catch { return {} }
       })
       useEffect(() => {
         const g = navGroupOf(tab, extPages)
@@ -17278,7 +17410,7 @@ select.roost-input{color-scheme:dark}
          */
         palette.open
           ? (() => {
-              const list = matchTabs(palette.q, ALL_TABS.map((id) => [id, (TABS.find((t) => t[0] === id) || [id, id])[1]]), NAV_GROUPS)
+              const list = matchTabs(palette.q, paletteTabs(), NAV_GROUPS, extPages)
               return h('div', {
                 className: 'cap-modal', style: { zIndex: 2147483100, alignItems: 'flex-start' },
                 onClick: () => setPalette({ open: false, q: '', idx: 0 }),

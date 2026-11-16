@@ -49,28 +49,47 @@ export const MAX_FIELDS = 20;
 /**
  * 扩展页面能挂到哪个一级菜单下。
  *
- * 和前端 `NAV_GROUPS` 的 id 一一对应，**排除 `home`**：概览是单页首屏，
+ * 和前端 `NAV_GROUPS` 的 id 对应，**排除 `home`**：概览是单页首屏，
  * 往里塞扩展页会让「打开就看到现在什么状态」这件事失效。
  *
  * 允许挂到自己以外的组是有意的——一个「刷 B 站」的扩展挂在「表达」下
  * （她怎么说话、说什么）比埋在「扩展」里更好找。默认仍是 `mods`。
+ *
+ * 2026-11-16 群聊并入「群与频道」：`channel` **正式进白名单**（以前这里写着
+ * 「一一对应」却漏了它，扩展声明挂频道会被判非法、静默回落到 `mods`）；
+ * `group` 保留为历史别名，由 `groupOf` 归一成 `channel`，已发布扩展不用改。
  */
-export const UI_GROUPS = Object.freeze(['home', 'self', 'express', 'group', 'power', 'mods', 'system']);
+export const UI_GROUPS = Object.freeze(['home', 'self', 'express', 'group', 'channel', 'power', 'mods', 'system']);
+
+/**
+ * 合并前的一级组 id → 现在用的 id。
+ *
+ * 和前端 `client/client.js` 的 `GROUP_ALIAS` 是同一张表，改一边必须改另一边，
+ * 否则「面板里能挂、校验说非法」或者反过来。
+ */
+export const UI_GROUP_ALIAS = Object.freeze({ group: 'channel' });
 
 /** 中文别名 → id。用户手写 plugin.json 时更可能写「群聊」而不是 `group` */
 export const GROUP_ALIASES = Object.freeze({
-  人设: 'self', 表达: 'express', 群聊: 'group', 能力: 'power', 扩展: 'mods', 系统: 'system',
+  人设: 'self', 表达: 'express', 群聊: 'group', 群与频道: 'channel', 频道: 'channel',
+  能力: 'power', 扩展: 'mods', 系统: 'system',
   概览: 'home', 首页: 'home',
-  self: 'self', express: 'express', group: 'group', power: 'power', mods: 'mods', system: 'system',
+  self: 'self', express: 'express', group: 'group', channel: 'channel', power: 'power', mods: 'mods', system: 'system',
 });
 
 export const DEFAULT_GROUP = 'mods';
 
-/** 把 `group` 归一成 id；认不出来返回空串（调用方决定是报错还是回落） */
+/**
+ * 把 `group` 归一成 id；认不出来返回空串（调用方决定是报错还是回落）。
+ *
+ * 历史 id 在这一步就归一掉：调用方（校验与面板）拿到的永远只有现役 id，
+ * 老 `plugin.json` 写 `group` 和写 `channel` 落到同一个组。
+ */
 export function groupOf(raw) {
   const k = String(raw ?? '').trim();
   if (!k) return '';
-  return GROUP_ALIASES[k] || GROUP_ALIASES[k.toLowerCase()] || '';
+  const id = GROUP_ALIASES[k] || GROUP_ALIASES[k.toLowerCase()] || '';
+  return UI_GROUP_ALIAS[id] || id;
 }
 
 const isStr = (v) => typeof v === 'string' && v.trim() !== '';
@@ -144,7 +163,7 @@ export function normalizeUiSpec(raw) {
   if (nav && (!label || label.length > 12)) errors.push('ui.nav.label 必填且不超过 12 字');
   const group = groupOf(nav?.group);
   if (String(nav?.group ?? '').trim() && !group) {
-    errors.push(`ui.nav.group 只能是 ${UI_GROUPS.join(' / ')}（也可以写中文：人设 / 表达 / 群聊 / 能力 / 扩展 / 系统）`);
+    errors.push(`ui.nav.group 只能是 ${UI_GROUPS.join(' / ')}（也可以写中文：人设 / 表达 / 群聊（=群与频道） / 能力 / 扩展 / 系统）`);
   }
 
   /**

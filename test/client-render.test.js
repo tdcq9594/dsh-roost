@@ -93,8 +93,8 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-/* 与 client.js 的 TABS 同序：频道 7 页收成 4 页 + 新增「自身设置」后 30 个可见页签 */
-const TABS = ['overview', 'her', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'about', 'connect', 'security']
+/* 与 client.js 的 TABS 同序：频道 7 页收成 4 页 + 新增「资料」「自身设置」后 31 个可见页签 */
+const TABS = ['overview', 'her', 'profile', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag', 'connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about']
 /* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats / account 已提升为正式页） */
 const HIDDEN_TABS = ['context', 'setup']
 
@@ -112,18 +112,22 @@ const HIDDEN_TABS = ['context', 'setup']
  */
 const NAV = {
   home: { label: '概览', tabs: ['overview'] },
-  self: { label: '人设', tabs: ['her', 'mood', 'awake', 'memory', 'people'] },
+  /* 2026-11-16：人设组新增「资料」（她长什么样、能不能自己改） */
+  self: { label: '人设', tabs: ['her', 'profile', 'mood', 'awake', 'memory', 'people'] },
   express: { label: '表达', tabs: ['express', 'stickers'] },
-  group: { label: '群聊', tabs: ['groupchat', 'groupadmin'] },
-  /* 2026-11-15：频道从 7 页收成 4 页（四个接口页并成一页 ch-api） */
-  channel: { label: '频道', tabs: ['ch-home', 'ch-policy', 'ch-api', 'ch-diag'] },
+  /**
+   * 2026-11-16：**群聊并入「群与频道」**（一级 8 → 7）。两页回答同一个问题
+   * 「在这个渠道里怎么说话」，配置层 `roostHost.decide/merge` 本来就是共用的。
+   * 老 id `group` 走 `GROUP_ALIAS` 归一，已发布扩展不用改。
+   */
+  channel: { label: '群与频道', tabs: ['groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag'] },
   power: { label: '能力', tabs: ['caps', 'model'] },
   mods: { label: '扩展', tabs: ['ext', 'ext-market', 'ext-api'] },
   system: { label: '系统', tabs: ['connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
 }
 const TAB_LABEL = {
   overview: '概览', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆', people: '人物',
-  caps: '权限', express: '语音', stickers: '表情包', model: '模型',
+  caps: '权限', express: '语音', stickers: '表情包', model: '模型', profile: '资料',
   ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
   groupchat: '群聊策略', groupadmin: '群管',
   'ch-home': '频道总览', 'ch-policy': '频道策略', 'ch-api': '频道接口', 'ch-diag': '频道排障',
@@ -2187,6 +2191,54 @@ test('5.1 Alt+K 全局查找：页名与中文别名都能搜到', () => {
   assert.ok(src.includes("e.key === 'Enter'"), '回车要能跳');
   assert.ok(src.includes('搜页面：页名或别名'), '要有查找面板');
   void h
+})
+
+/**
+ * A8（第三轮报告）：扩展页也要进 Alt+K。
+ *
+ * 以前候选源是 `ALL_TABS`（只有内置页），扩展页 `ext:<id>` 根本不在里面；
+ * 就算被传进来，组标签原来靠 `GROUPS.find(g => g.tabs.includes(id))` 求，
+ * 扩展页不在任何组的 `tabs` 里 → 组名是空串，搜索结果看着像没挂到任何组。
+ */
+test('A8：扩展页进 Alt+K，组标签取它自己声明的 nav.group', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  /** 用老写法 `group`：它已并入「群与频道」，别名归一在这里也要生效 */
+  const extPages = [{ id: 'bili', nav: { label: '刷 B 站', group: 'group' } }]
+
+  const all = mod.matchTabs('', [['ext:bili', '刷 B 站']], [], extPages)
+  assert.equal(all.length, 1, '扩展页要出现在候选里')
+  assert.equal(all[0].group, '群与频道', '老 group 要归一到合并后的组名')
+
+  const byWord = mod.matchTabs('刷', [['ext:bili', '刷 B 站']], [], extPages)
+  assert.deepEqual(byWord.map((x) => x.id), ['ext:bili'], '按页名要能搜到扩展页')
+})
+
+/** 搜组名要列出该组所有页：记不住「群管」在哪，至少记得「群与频道」 */
+test('A8：Alt+K 支持按一级组名搜，列出组内全部页', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const tabs = [['groupchat', '群聊策略'], ['groupadmin', '群管'], ['ch-home', '频道总览'], ['memory', '记忆']]
+  const list = mod.matchTabs('群与频道', tabs, [], null)
+  assert.deepEqual(list.map((x) => x.id), ['groupchat', 'groupadmin', 'ch-home'],
+    '搜「群与频道」应列出该组三页（「记忆」在别的组）')
+  assert.equal(list[0].group, '群与频道')
+})
+
+/**
+ * A7（第三轮报告）：群聊并入「群与频道」，一级组 8 → 7。
+ *
+ * 直接盯源码而不是渲染结果：组多一个少一个，渲染仍然「每页都点得到」，
+ * 肉眼看不出来，只有把结构钉死才拦得住。
+ */
+test('A7：一级组群聊并入「群与频道」，且老 id 留了别名', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.match(src, /[{] id: 'channel', label: '群与频道'/, '一级组名要改')
+  assert.doesNotMatch(src, /[{] id: 'group', label: '群聊'/, '群聊组应已并入，不该还在')
+  assert.match(src, /tabs: \['groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag'\]/,
+    '组内顺序：先群聊（多数人只有群）后频道')
+  assert.match(src, /const GROUP_ALIAS = [{] group: 'channel' [}]/,
+    '老组 id 必须留别名——已发布扩展的 ui.nav.group 还写着 group，删了页面会从导航里消失')
 })
 
 

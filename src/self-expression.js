@@ -40,6 +40,26 @@ export const SELF_KINDS = Object.freeze(['menu', 'sign', 'name', 'avatar']);
  */
 export const CONFIRM_KINDS = Object.freeze(['sign', 'name', 'avatar']);
 
+/**
+ * 「没人看着的轮次（主动搭话 / 夜间巩固）允不允许改」的默认值。
+ *
+ * 简介不涉及对外身份，默认允许；昵称与头像是所有人看到的那张脸，
+ * 默认必须有人在场。三项都能在面板「人设 → 资料」里单独改，
+ * 这里只是**新装/升级后的初始值**，不替用户做长期决定。
+ */
+export const UNATTENDED_DEFAULTS = Object.freeze({ sign: true, name: false, avatar: false });
+
+/**
+ * 头像「本机图片路径」能不能超出数据目录。
+ *
+ * **默认允许**，因为这是老用户已有的用法（把桌面/相册里的一张图当头像），
+ * 升级不该悄悄把人家的能力收掉。代价是 `qq_avatar` 的 `path` 分支成了
+ * 模型可触发的一条读盘通道：提示词注入成功一次，就能把本机任意 png/jpg
+ * 传成公开头像。所以给一个开关，想收紧的人自己在面板关掉——关掉之后
+ * 只认数据目录里的文件（软链接按 `realpath` 判，绕不过去）。
+ */
+export const AVATAR_ANY_PATH_DEFAULT = true;
+
 /** 面板文案用；解析时不用 */
 export const KIND_LABELS = Object.freeze({
   menu: '菜单',
@@ -91,7 +111,21 @@ export function normalizeSelfExpression(raw) {
        * 那是用户明确要的才开，不是我们替他决定。
        * 菜单没有这个字段（见 `CONFIRM_KINDS`）。
        */
-      ...(CONFIRM_KINDS.includes(kind) ? { confirm: one.confirm === true } : {}),
+      ...(CONFIRM_KINDS.includes(kind) ? {
+        confirm: one.confirm === true,
+        /**
+         * 没人看着的轮次（主动搭话 / 夜间巩固）允不允许改。
+         * 缺键时取 `UNATTENDED_DEFAULTS`：简介允许、昵称头像不允许。
+         */
+        unattended: 'unattended' in one ? one.unattended === true : UNATTENDED_DEFAULTS[kind] === true,
+      } : {}),
+      /**
+       * 只有头像有这一项：`path` 分支能不能读数据目录之外的文件。
+       * 缺键按「允许」（见 `AVATAR_ANY_PATH_DEFAULT`），明确 `false` 才收窄。
+       */
+      ...(kind === 'avatar' ? {
+        anyPath: 'anyPath' in one ? one.anyPath !== false : AVATAR_ANY_PATH_DEFAULT,
+      } : {}),
     };
   }
   const aw = src.awareness && typeof src.awareness === 'object' ? src.awareness : {};
@@ -139,6 +173,8 @@ export function patchSelfExpression(cur, patch) {
     if ('enabled' in one) next[kind].enabled = one.enabled !== false;
     if ('cooldownMin' in one) next[kind].cooldownMin = normalizeCooldown(one.cooldownMin);
     if ('confirm' in one && CONFIRM_KINDS.includes(kind)) next[kind].confirm = one.confirm === true;
+    if ('unattended' in one && CONFIRM_KINDS.includes(kind)) next[kind].unattended = one.unattended === true;
+    if ('anyPath' in one && kind === 'avatar') next[kind].anyPath = one.anyPath !== false;
   }
 
   if (p.awareness && typeof p.awareness === 'object') {

@@ -8,7 +8,7 @@ import { join } from 'node:path';
 
 import {
   normalizeUiSpec, normalizeFields, projectRow, projectRows, readUiData,
-  UI_KINDS, UI_GROUPS, MAX_ROWS, MAX_UI_BYTES, MAX_UI_ACTIONS,
+  UI_KINDS, UI_GROUPS, groupOf, MAX_ROWS, MAX_UI_BYTES, MAX_UI_ACTIONS,
 } from '../src/ext-ui.js';
 import { validateManifest } from '../src/ext-registry.js';
 
@@ -24,9 +24,9 @@ const okSpec = {
   },
 };
 
-test('三种 kind 与四个分组是闭集，别的写法一律拒', () => {
+test('三种 kind 与八种页组是闭集，别的写法一律拒', () => {
   assert.deepEqual(UI_KINDS, ['table', 'cards', 'list', 'log']);
-  assert.deepEqual(UI_GROUPS, ['home', 'self', 'express', 'group', 'power', 'mods', 'system']);
+  assert.deepEqual(UI_GROUPS, ['home', 'self', 'express', 'group', 'channel', 'power', 'mods', 'system']);
 
   const bad = normalizeUiSpec({ ...okSpec, view: { ...okSpec.view, kind: 'iframe' } });
   assert.equal(bad.ok, false);
@@ -38,7 +38,33 @@ test('三种 kind 与四个分组是闭集，别的写法一律拒', () => {
   /** 中文别名也认：手写 plugin.json 时更可能写「群聊」 */
   const zh = normalizeUiSpec({ nav: { label: 'x', group: '群聊' }, view: okSpec.view });
   assert.equal(zh.ok, true, zh.errors.join('；'));
-  assert.equal(zh.spec.nav.group, 'group');
+  assert.equal(zh.spec.nav.group, 'channel', '「群聊」已并入「群与频道」，归一成 channel');
+});
+
+/**
+ * 2026-11-16：群聊并入「群与频道」，一级组 8 → 7。
+ *
+ * 老 `plugin.json` 写的是 `group`，**必须原样继续可用**：前端 `navGroupOf` 靠
+ * `NAV_GROUPS.find(g => g.id === 组id)` 找组，找不到就返回 null，那个扩展页
+ * 会从导航里**静默消失**（只剩深链和 Alt+K 能到）。
+ */
+test('老组 id `group` 归一成 `channel`，已发布扩展不用改', () => {
+  assert.equal(groupOf('group'), 'channel');
+  assert.equal(groupOf('群聊'), 'channel');
+  assert.equal(groupOf('channel'), 'channel');
+  assert.equal(groupOf('频道'), 'channel');
+  assert.equal(groupOf('群与频道'), 'channel');
+  assert.equal(groupOf('power'), 'power', '没合并的组不受影响');
+  assert.equal(groupOf('随便'), '');
+
+  const legacy = normalizeUiSpec({ nav: { label: 'x', group: 'group' }, view: okSpec.view });
+  assert.equal(legacy.ok, true, legacy.errors.join('；'));
+  assert.equal(legacy.spec.nav.group, 'channel');
+
+  /** channel 以前不在白名单里（那段注释写着「一一对应」却漏了它），现在能用 */
+  const direct = normalizeUiSpec({ nav: { label: 'x', group: 'channel' }, view: okSpec.view });
+  assert.equal(direct.ok, true, direct.errors.join('；'));
+  assert.equal(direct.spec.nav.group, 'channel');
 });
 
 test('没声明 ui 是合法的（多数扩展没有界面）', () => {

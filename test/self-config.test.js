@@ -107,9 +107,36 @@ test('前端：页签、分组、别名、渲染分支都接上了', () => {
   assert.match(CLIENT, /'connect', 'bot-self', 'chats'/);
   assert.match(CLIENT, /function SelfConfigTab\(/);
   assert.match(CLIENT, /tab === 'bot-self' \? h\(SelfConfigTab/);
-  assert.match(CLIENT, /post\('\/self\/qq', \{ method: cur, args: a, confirm: need \}\)/);
+  /** 2026-11-16：抽成 `call(name, args, confirm)`，常用按钮与高级台共用一条发送路径 */
+  assert.match(CLIENT, /post\('\/self\/qq', \{ method: name, args: a, confirm: needConfirm \}\)/);
+  assert.match(CLIENT, /const quick = \(name\) =>/, '常用只读接口要有按钮入口');
 });
 
-test('前端：页面明说开发者后台那套不在这条链上', () => {
-  assert.match(CLIENT, /AppSecret 属于开发者后台，需要开发者登录态，这里不提供/);
+/**
+ * N2（第四轮报告）：这一页原来只有「选方法 + 手写 JSON 参数」一条路，
+ * 想看一眼自己现在叫什么，得先知道 `getMe` 的 args 是空数组。
+ *
+ * 约束比功能重要：**快捷按钮只能放只读接口**。写操作（改菜单、删面板）
+ * 一律走折叠的高级台——那里有二次确认，也才有地方逐字核对参数。
+ */
+test('常用按钮只放只读接口，写操作一律走折叠的高级台', () => {
+  const from = CLIENT.indexOf('const QUICK = [');
+  assert.ok(from > 0, 'QUICK 表要在');
+  /** 表尾是「换行 + 6 空格 + ]」，别用第一个 `]`——每行数组自己的右括号先到 */
+  const block = CLIENT.slice(from, CLIENT.indexOf('\n      ]', from));
+  const names = [...block.matchAll(/\['(\w+)'/g)].map((m) => m[1]);
+  assert.deepEqual(names, ['getMe', 'getGlobalMenu', 'listPanels'],
+    '想加就只加只读方法；写方法进 QUICK 等于绕过二次确认');
+
+  /** 表挑得对还不够：quick() 自己再拦一道，防止以后有人把写方法塞进来 */
+  assert.match(CLIENT, /if \(String\(m0\.risk \|\| 'read'\) !== 'read'\)/,
+    'quick() 必须自己判 risk');
+  assert.match(CLIENT, /'高级：直接调接口（给开发者）'/, '高级台要还在，且标明是给开发者的');
+});
+
+test('前端：页面明说「改名字头像去人设 → 资料」，别和自身设置混淆', () => {
+  /* 2026-11-16：原来这句写「昵称、头像…这里不提供」，与新增的「人设 → 资料」页
+     正面矛盾（那边能改、还能逐条退回）。改成指路，并把开发者后台那套留在原句里 */
+  assert.match(CLIENT, /昵称 \/ 头像 \/ 简介 \/ 菜单文案的现状、授权与逐条退回在「人设 → 资料」/);
+  assert.match(CLIENT, /回调地址与 IP 白名单要去开发者后台/);
 });

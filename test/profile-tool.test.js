@@ -64,17 +64,20 @@ function fakeRpc({ name = '旧名', desc = '旧简介', loggedIn = true, failSet
 function makeTools({
   dir, rpc: rpcIn = null, cfg = {}, caller = { sid: 's1', bucket: 'owner', senderId: 'u1' },
   persona = { id: 'main', selfName: '' }, t = 1_000_000, requestConfirm = null,
+  /** 模拟「宿主忘了传 dataDir」：收紧之后这条路必须 fail-closed */
+  noDataDir = false,
 } = {}) {
   const rpc = rpcIn || fakeRpc();
   const history = createHistory({ dataDir: () => dir });
   const synced = [];
-  const { tools: [sign, name, avatar] } = buildProfileTools({
+  const built = buildProfileTools({
     rpc,
     cfgOf: () => ({
       selfExpression: {
-        sign: { enabled: true, cooldownMin: 0, ...(cfg.sign || {}) },
-        name: { enabled: true, cooldownMin: 0, ...(cfg.name || {}) },
-        avatar: { enabled: true, cooldownMin: 0, ...(cfg.avatar || {}) },
+        /** 与 `UNATTENDED_DEFAULTS` 一致：简介开、昵称头像关 */
+        sign: { enabled: true, cooldownMin: 0, unattended: true, ...(cfg.sign || {}) },
+        name: { enabled: true, cooldownMin: 0, unattended: false, ...(cfg.name || {}) },
+        avatar: { enabled: true, cooldownMin: 0, unattended: false, ...(cfg.avatar || {}) },
       },
     }),
     history,
@@ -83,8 +86,11 @@ function makeTools({
     syncPersonaName: (v) => synced.push(v),
     requestConfirm,
     now: () => t,
+    /** 与宿主一致：`anyPath` 没关时不限目录（AV9 的图就建在 dir 里，两种口径都过） */
+    dataDir: noDataDir ? null : () => dir,
   });
-  return { sign, name, avatar, rpc, history, synced };
+  const [sign, name, avatar] = built.tools;
+  return { sign, name, avatar, apply: built.apply, rpc, history, synced };
 }
 
 /* ---------------- 纯函数 ---------------- */
@@ -336,6 +342,30 @@ test('AV6 本地路径：真图读成 dataUrl；后缀 / 大小 / 存在性 / �
   } finally { done(); }
 });
 
+test('AV7 给了 roots 时，只允许数据目录内的图片', () => {
+  const { dir, done } = fresh();
+  try {
+    const inside = join(dir, 'a.png');
+    writeFileSync(inside, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    assert.equal(readImageAsDataUrl(inside, { roots: [dir] }).ok, true);
+
+    const outside = join(dir, '..', 'evil.png');
+    const r = readImageAsDataUrl(outside, { roots: [dir] });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /数据目录/);
+
+    /** 前缀相同的兄弟目录不算「在目录里」——不能靠 startsWith 判 */
+    const sibling = join(`${dir}-x`, 'a.png');
+    assert.equal(readImageAsDataUrl(sibling, { roots: [dir] }).ok, false);
+  } finally { done(); }
+});
+
+test('AV8 没有数据目录时 path 这条路 fail-closed（不是放行）', () => {
+  const r = validateAvatarSource({ path: 'C:/anywhere/x.png' }, { roots: [] });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /数据目录/);
+});
+
 test('AV7 超过 2MB 先 stat 就拒，不读进内存', () => {
   const r = readImageAsDataUrl('C:/x/big.png', {
     stat: () => ({ isFile: () => true, size: AVATAR_MAX_BYTES + 1 }),
@@ -469,19 +499,20 @@ test('RS4 没登录时回滚失败也要说人话', async () => {
 
 /* ---------------- 主人确认 ---------------- */
 
-test('CF1 开了「需确认」：不写平台，返回 pending 与码', async () => {
+test('CF1 开了「需确认」：不写平台，返回 pending，不带编号', async () => {
   const { dir, done } = fresh();
   try {
     const asked = [];
     const { sign, rpc } = makeTools({
       dir,
       cfg: { sign: { confirm: true } },
-      requestConfirm: async (req) => { asked.push(req); return { ok: true, code: '1234' }; },
+      requestConfirm: async (req) => { asked.push(req); return { ok: true }; },
     });
     const r = await sign.execute({ text: '新简介' });
     assert.equal(r.ok, false);
     assert.equal(r.pending, true);
-    assert.equal(r.code, '1234');
+    assert.equal('code' in r, false, '2026-11-16 起不再发码');
+    assert.match(r.message, /确认/);
     assert.equal(rpc.calls.filter((c) => c.m === 'dev.bot.set').length, 0, '确认前不许动平台');
     assert.equal(asked.length, 1);
     assert.deepEqual(asked[0].payload, { text: '新简介' });
@@ -539,11 +570,171 @@ test('CF5 头像开确认：payload 是 {src, via}，不是字符串', async () 
     const { avatar } = makeTools({
       dir,
       cfg: { avatar: { confirm: true } },
-      requestConfirm: async (req) => { asked.push(req); return { ok: true, code: '4321' }; },
+      requestConfirm: async (req) => { asked.push(req); return { ok: true }; },
     });
     const r = await avatar.execute({ url: 'https://example.com/z.png' });
     assert.equal(r.pending, true);
     assert.equal(asked.length, 1);
     assert.deepEqual(asked[0].payload, { src: { url: 'https://example.com/z.png' }, via: 'url' });
+  } finally { done(); }
+});
+
+/* 2026-11-16 主人定口径：简介不敏感，允许无人值守；昵称 / 头像是「所有人看到的脸」，必须有人在场 */
+
+test('CF6 简介允许无人值守（主动轮没有发送者也能改）', async () => {
+  const { dir, done } = fresh();
+  try {
+    const { sign, rpc } = makeTools({ dir, caller: { sid: 's1', bucket: 'owner', senderId: '' } });
+    const r = await sign.execute({ text: '夜里想安静一点' });
+    assert.equal(r.ok, true);
+    assert.equal(rpc.calls.filter((c) => c.m === 'dev.bot.set').length, 1, '该真的写下去');
+  } finally { done(); }
+});
+
+test('CF7 头像仍要求有人在场（无人值守直接拒，连确认都不发）', async () => {
+  const { dir, done } = fresh();
+  try {
+    let asked = 0;
+    const { avatar, rpc } = makeTools({
+      dir,
+      caller: { sid: 's1', bucket: 'owner', senderId: '' },
+      cfg: { avatar: { confirm: true } },
+      requestConfirm: async () => { asked += 1; return { ok: true }; },
+    });
+    const r = await avatar.execute({ url: 'https://example.com/z.png' });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /有人在跟你说话/);
+    assert.equal(asked, 0);
+    assert.equal(rpc.calls.filter((c) => c.m === 'dev.bot.avatar').length, 0);
+  } finally { done(); }
+});
+
+test('CF8 群友的轮次不能借主人上下文改资料（有发送者但不是 owner）', async () => {
+  const { dir, done } = fresh();
+  try {
+    for (const kind of ['sign', 'avatar', 'name']) {
+      const { sign, avatar, name } = makeTools({
+        dir,
+        caller: { sid: 's1', bucket: 'manager', senderId: 'u2' },
+        cfg: { [kind]: { confirm: true } },
+        requestConfirm: async () => ({ ok: true }),
+      });
+      const t = { sign, avatar, name }[kind];
+      const args = kind === 'sign' ? { text: '群友写的' } : kind === 'name' ? { name: '群友改的' } : { url: 'https://example.com/z.png' };
+      const r = await t.execute(args);
+      assert.equal(r.ok, false, `${kind} 该被拒`);
+      assert.match(r.message, /只有主人/, `${kind} 的拒绝理由要指明身份`);
+    }
+  } finally { done(); }
+});
+
+test('CF9 把「没人看着也允许改」打开，头像在无人值守轮也能改', async () => {
+  const { dir, done } = fresh();
+  try {
+    const { avatar, rpc } = makeTools({
+      dir,
+      caller: { sid: 's1', bucket: 'owner', senderId: '' },
+      cfg: { avatar: { unattended: true } },
+    });
+    const r = await avatar.execute({ url: 'https://example.com/z.png' });
+    assert.equal(r.ok, true, '开关打开就该放行');
+    assert.equal(rpc.calls.filter((c) => c.m === 'dev.bot.avatar').length, 1);
+  } finally { done(); }
+});
+
+test('CF10 昵称同理：开关打开后无人值守轮可改（默认是关的）', async () => {
+  const { dir, done } = fresh();
+  try {
+    const { name, rpc } = makeTools({
+      dir,
+      caller: { sid: 's1', bucket: 'owner', senderId: '' },
+      cfg: { name: { unattended: true } },
+    });
+    const r = await name.execute({ name: '小蓝' });
+    assert.equal(r.ok, true);
+    assert.equal(rpc.calls.filter((c) => c.m === 'dev.bot.set').length, 1);
+  } finally { done(); }
+});
+
+test('CF11 确认后执行仍复检 enabled：期间被关掉就不该改', async () => {
+  const { dir, done } = fresh();
+  try {
+    const { apply, rpc } = makeTools({ dir, cfg: { sign: { enabled: false } } });
+    const r = await apply.payload('sign', { text: '新简介' }, { sid: 'confirm' });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /关着/);
+    assert.equal(rpc.calls.filter((c) => c.m === 'dev.bot.set').length, 0, '开关关了就不许写平台');
+  } finally { done(); }
+});
+
+test('CF12 确认执行不要求在场（主人已亲口批准），无人值守也能落地', async () => {
+  const { dir, done } = fresh();
+  try {
+    const { apply, rpc } = makeTools({
+      dir,
+      caller: { sid: 's1', bucket: 'owner', senderId: '' },
+      cfg: { avatar: { unattended: false } },
+    });
+    const r = await apply.payload('avatar', { src: { url: 'https://example.com/z.png' }, via: 'url' }, { sid: 'confirm' });
+    assert.equal(r.ok, true);
+    assert.equal(rpc.calls.filter((c) => c.m === 'dev.bot.avatar').length, 1);
+  } finally { done(); }
+});
+
+/* ---------------- 头像任意路径开关（2026-11-16） ---------------- */
+
+test('AV10 anyPath 默认开：数据目录外的图照样能当头像（老行为不变）', async () => {
+  const { dir, done } = fresh();
+  const outside = join(tmpdir(), `roost-outside-${Date.now()}.png`);
+  try {
+    writeFileSync(outside, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    /** 不传 anyPath = 缺键，按「允许」处理，与 normalizeSelfExpression 同一口径 */
+    const { avatar } = makeTools({ dir });
+    const r = await avatar.execute({ path: outside });
+    assert.equal(r.ok, true, `默认该放行：${r.message || ''}`);
+    assert.equal(r.via, 'path');
+  } finally {
+    rmSync(outside, { force: true, maxRetries: 5, retryDelay: 100 });
+    done();
+  }
+});
+
+test('AV11 anyPath 关掉：数据目录外的图被拒，且不写平台', async () => {
+  const { dir, done } = fresh();
+  const outside = join(tmpdir(), `roost-outside-${Date.now()}.png`);
+  try {
+    writeFileSync(outside, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const { avatar, rpc } = makeTools({ dir, cfg: { avatar: { anyPath: false } } });
+    const r = await avatar.execute({ path: outside });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /数据目录/);
+    assert.equal(rpc.calls.filter((c) => c.m === 'dev.bot.avatar').length, 0, '拒了就不该打平台');
+  } finally {
+    rmSync(outside, { force: true, maxRetries: 5, retryDelay: 100 });
+    done();
+  }
+});
+
+test('AV12 anyPath 关掉 + 数据目录内的图 → 正常放行（不是一刀切禁掉）', async () => {
+  const { dir, done } = fresh();
+  try {
+    const png = join(dir, 'inside.png');
+    writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const { avatar } = makeTools({ dir, cfg: { avatar: { anyPath: false } } });
+    const r = await avatar.execute({ path: png });
+    assert.equal(r.ok, true, r.message || '');
+  } finally { done(); }
+});
+
+test('AV13 anyPath 关掉又拿不到数据目录 → fail-closed，不是 fail-open', async () => {
+  const { dir, done } = fresh();
+  try {
+    const png = join(dir, 'inside.png');
+    writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    /** 不传 dataDir：收紧之后就该一律拒，而不是「没配置就当没限制」 */
+    const { avatar } = makeTools({ dir, cfg: { avatar: { anyPath: false } }, noDataDir: true });
+    const r = await avatar.execute({ path: png });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /数据目录/);
   } finally { done(); }
 });

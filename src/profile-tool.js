@@ -24,11 +24,11 @@
  * 比替他改文件安全。
  */
 
-import { statSync, readFileSync } from 'node:fs';
-import { extname, resolve as resolvePath } from 'node:path';
+import { statSync, readFileSync, realpathSync } from 'node:fs';
+import { extname, resolve as resolvePath, relative as relativePath, isAbsolute } from 'node:path';
 
 import { loadDefineTool, shapeTool } from './tools.js';
-import { cooldownCheck, waitText } from './self-expression.js';
+import { cooldownCheck, waitText, KIND_LABELS } from './self-expression.js';
 
 /** 平台昵称的合理上限。官方没给明确数字，按 24 个字符挡，免得出现一串没有意义的长名 */
 export const MAX_NAME_LEN = 24;
@@ -94,9 +94,43 @@ const EXT_MIME = Object.freeze({
  *
  * @returns {{ok:true, dataUrl:string, bytes:number, mime:string} | {ok:false, message:string}}
  */
-export function readImageAsDataUrl(rawPath, { stat = statSync, readFile = readFileSync } = {}) {
+export function readImageAsDataUrl(rawPath, { roots = null, stat = statSync, readFile = readFileSync } = {}) {
   const p = resolvePath(String(rawPath ?? '').trim());
   if (!String(rawPath ?? '').trim()) return { ok: false, message: '路径是空的。' };
+
+  /**
+   * 限定目录（2026-11-16）：`qq_avatar` 的 path 分支是**模型可触发**的，
+   * 不设根的话等于开了一条「把本机任意 png/jpg 传成公开头像」的外泄通道
+   * ——提示词注入成功一次就能用。面板上传走 dataUrl，不受这条影响。
+   *
+   * 判越界前先 `realpath`：数据目录里放一个指向外部的软链接就能绕过纯字符串比较。
+   * 文件不存在时 realpath 会抛，退回原路径——后面 stat 一样会拒。
+   */
+  const realOrSelf = (x) => {
+    try { return realpathSync(x); } catch { return x; }
+  };
+  /**
+   * `roots` 三态：`null` = 不限；`[]` = **一个都不许**；数组 = 只许这些目录下。
+   *
+   * `[]` 必须和 `null` 分开判。上一版写的是 `roots.length`，空数组会落进
+   * 「不限制」那一支——`validateAvatarSource` 虽然先拦了一道，但这个函数是
+   * 导出的，别的调用方直接传 `[]` 就等于把限制悄悄关掉。fail-closed 要么
+   * 在每一层都成立，要么就不算成立。
+   */
+  if (Array.isArray(roots)) {
+    if (roots.length === 0) {
+      return { ok: false, message: '没有可用的数据目录，本机图片这条路先关着。' };
+    }
+    const realP = realOrSelf(p);
+    const inside = roots.some((r) => {
+      const base = realOrSelf(resolvePath(String(r || '')));
+      const rel = relativePath(base, realP);
+      return Boolean(rel) && !rel.startsWith('..') && !isAbsolute(rel);
+    });
+    if (!inside) {
+      return { ok: false, message: `本机图片只能从数据目录里取（${roots.join(' / ')}）。` };
+    }
+  }
 
   let st;
   try {
@@ -142,7 +176,7 @@ export function readImageAsDataUrl(rawPath, { stat = statSync, readFile = readFi
  *
  * @returns {{ok:true, src:object, kind:'url'|'dataUrl'|'path'} | {ok:false, message:string}}
  */
-export function validateAvatarSource({ url, dataUrl, path } = {}) {
+export function validateAvatarSource({ url, dataUrl, path } = {}, { roots = null } = {}) {
   const u = String(url ?? '').trim();
   if (u) {
     if (!/^https?:\/\//i.test(u)) {
@@ -169,7 +203,14 @@ export function validateAvatarSource({ url, dataUrl, path } = {}) {
 
   const pth = String(path ?? '').trim();
   if (pth) {
-    const got = readImageAsDataUrl(pth);
+    /**
+     * 没有数据目录就**关掉这条路**，不是放行。
+     * `buildProfileTools` 忘了传 `dataDir` 时，fail-open 等于悄悄把限制取消掉。
+     */
+    if (Array.isArray(roots) && roots.length === 0) {
+      return { ok: false, message: '没有可用的数据目录，本机图片这条路先关着；用 url 或 dataUrl。' };
+    }
+    const got = readImageAsDataUrl(pth, { roots });
     if (!got.ok) return got;
     return { ok: true, src: { dataUrl: got.dataUrl }, kind: 'path', bytes: got.bytes };
   }
@@ -206,7 +247,23 @@ export function checkRenameAllowed(persona) {
 export function buildProfileTools({
   rpc, cfgOf, history, personaOf = () => ({}), syncPersonaName = () => {},
   callerOf = () => ({}), requestConfirm = null, audit = () => {}, now = () => Date.now(), log = () => {},
+  dataDir = null,
 }) {
+  /**
+   * `path` 来源的允许根目录，三态：
+   *   · `null`  = 不限（`selfExpression.avatar.anyPath` 没关，默认就是这档）
+   *   · `[]`    = 一个都不许（开关关了但拿不到数据目录 → fail-closed）
+   *   · 数组    = 只许这些目录下
+   *
+   * 为什么不写死成「只许数据目录」：拿本机任意一张图当头像本来就是这个功能
+   * 的用法，升级时把人家的能力悄悄收掉比留个开关更糟。开关在面板
+   * 「人设 → 资料 → 头像」里，关掉之后才收窄。
+   */
+  const avatarRoots = () => {
+    /** 只有明确 `false` 才算收紧，缺键/旧配置一律按「允许」（与 normalize 同一口径） */
+    if (cfgOf()?.selfExpression?.avatar?.anyPath !== false) return null;
+    return typeof dataDir === 'function' ? [dataDir()] : [];
+  };
   /** 同一会话 10 秒内只允许一次写：防连调，也防模型把「改资料」当聊天动作反复用 */
   let lastWrite = { at: 0, sid: '' };
 
@@ -225,26 +282,36 @@ export function buildProfileTools({
   }
 
   /** 写之前的三道闸。返回非空就是拒绝理由 */
-  async function precheck(kind) {
+  async function precheck(kind, { skipPresence = false } = {}) {
     const conf = cfgOf()?.selfExpression?.[kind];
     if (conf?.enabled === false) return { ok: false, message: '这一项现在关着，改了也不会生效。' };
 
     const cd = cooldownCheck(history.lastAt(kind), conf?.cooldownMin, now());
     if (!cd.ok) return { ok: false, message: `刚改过，还要等 ${waitText(cd.waitMs)}。` };
 
+    /**
+     * 谁有资格发起改动（2026-11-16 主人定口径：**由开关决定，不写死**）。
+     *
+     *   · `unattended`（面板「没人看着也允许改」）为真时，主动搭话 / 夜间巩固
+     *     这类没有发送者的轮次也能改；为假时必须有真实发送者。
+     *     初始值：简介开、昵称与头像关。
+     *   · 任何**有发送者**的情况都必须 `bucket === 'owner'`：主人在群里说话时，
+     *     上下文里混着群友的文本，不能让群友的话借主人的轮次改资料。
+     *
+     * 不能只看 `bucket`：主动轮被硬塞了 `bucket:'owner'`，按 bucket 判是**放行**。
+     */
     const c = callerOf() || {};
-    if (kind === 'name') {
-      /**
-       * 昵称必须**有人在场**。
-       *
-       * 主动搭话、定时器那些轮次没有真实消息发送者（`senderId` 为空）。
-       * 注意不能靠 `bucket` 判：主动轮被硬塞了 `bucket:'owner'`，按 bucket 判是**放行**。
-       */
-      if (!String(c.senderId || '').trim()) {
-        return { ok: false, message: '改名字得有人在跟你说话的时候才行，这会儿没有。' };
+    const sender = String(c.senderId || '').trim();
+    const label = KIND_LABELS[kind] || '资料';
+    if (!skipPresence) {
+      if (conf?.unattended !== true && !sender) {
+        return {
+          ok: false,
+          message: `改${label}得有人在跟你说话的时候才行（「没人看着也允许改」在面板「人设 → 资料」里开）。`,
+        };
       }
-      if (String(c.bucket || '') !== 'owner') {
-        return { ok: false, message: '名字这事只有主人开口才算数。' };
+      if (sender && String(c.bucket || '') !== 'owner') {
+        return { ok: false, message: `${label}这事只有主人开口才算数。` };
       }
     }
 
@@ -283,8 +350,7 @@ export function buildProfileTools({
     return {
       ok: false,
       pending: true,
-      code: r.code,
-      message: `已经私聊问过主人了（编号 ${r.code}），等主人回复。这一轮不要重复请求。`,
+      message: '已经私聊问过主人了，等主人回「确认」。这一轮不要重复请求。',
     };
   }
 
@@ -512,7 +578,7 @@ export function buildProfileTools({
         }
       }
 
-      const v = validateAvatarSource({ url, dataUrl, path });
+      const v = validateAvatarSource({ url, dataUrl, path }, { roots: avatarRoots() });
       if (!v.ok) return { ok: false, message: v.message };
 
       const gate = await precheck('avatar');
@@ -534,6 +600,15 @@ export function buildProfileTools({
    * 「主人明明确认了，却没改成」，最难查。
    */
   async function applyPayload(kind, payload, opts) {
+    /**
+     * 主人确认之后执行，**仍然复检 enabled / 冷却 / 登录态**。
+     *
+     * 只跳过「在场」那一道（主人刚刚亲口批的，这会儿没有发送者也正常）。
+     * 但「这期间用户把开关关了」必须生效——否则面板上关掉、等十分钟再回
+     * 一句「确认」，照样会改，那等于开关是假的。
+     */
+    const gate = await precheck(kind, { skipPresence: true });
+    if (!gate.ok) return gate;
     if (kind === 'sign') return applySign(payload?.text, opts);
     if (kind === 'name') return applyName(payload?.name, opts);
     if (kind === 'avatar') return applyAvatar(payload, opts);
@@ -541,7 +616,7 @@ export function buildProfileTools({
   }
 
   /**
-   * `apply` 挂到返回值上：确认流程（主人在私聊里回码之后）要用同一套写入逻辑。
+   * `apply` 挂到返回值上：确认流程（主人在私聊里点按钮或回「确认」之后）要用同一套写入逻辑。
    * 各写一遍迟早会漂——尤其是「平台先写、本地后同步」这个顺序。
    */
   return {
@@ -629,7 +704,7 @@ export async function registerProfileTools({ agent, kinds = ['sign', 'name', 'av
     ok: true,
     names: made.map((m) => m.name),
     mode: defineTool ? 'defineTool' : 'plain',
-    /** 确认流程（主人在私聊回码之后）要用同一套写入逻辑，别各写一遍 */
+    /** 确认流程（主人在私聊点按钮或回「确认」之后）要用同一套写入逻辑，别各写一遍 */
     apply: built.apply,
     off: () => { for (const m of made) { try { m.off?.(); } catch { /* 同上 */ } } },
   };

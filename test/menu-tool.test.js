@@ -345,6 +345,8 @@ test('RM1 回滚那一格：按位置覆盖，别人的项不动', async () => {
     ];
     const rpc = fakeRpc({ items });
     const slots = createSlotStore({ dataDir: () => dir });
+    /** 真实运行时她每次改菜单都会写 slot；这条测的是「改名后按位置退回」 */
+    slots.write({ index: 1, name: '·新说法', type: 'send_message' });
     const r = await restoreMenuSlot({
       rpc, slots,
       before: { index: 1, name: '·旧说法', type: 'send_message', send_message: '旧的话' },
@@ -367,20 +369,63 @@ test('RM2 位置越界 → 拒（不「就近找一格」顶替）', async () =>
       rpc, slots, before: { index: 3, name: '·旧', type: 'send_message' },
     });
     assert.equal(r.ok, false);
-    assert.match(r.message, /不在了/);
+    assert.match(r.message, /找不到|不在了/);
   } finally { done(); }
 });
 
 test('RM3 那一格被换成了 link 类型 → 拒', async () => {
   const { dir, done } = fresh();
   try {
-    const rpc = fakeRpc({ items: [{ name: '官网', type: 'link', link: 'https://x' }] });
+    /** 名字仍是她的，但类型被换过 —— 才能走到类型判断那一支 */
+    const rpc = fakeRpc({ items: [{ name: '·旧', type: 'link', link: 'https://x' }] });
     const slots = createSlotStore({ dataDir: () => dir });
     const r = await restoreMenuSlot({
       rpc, slots, before: { index: 0, name: '·旧', type: 'send_message' },
     });
     assert.equal(r.ok, false);
     assert.match(r.message, /link/);
+  } finally { done(); }
+});
+
+test('RM5 菜单被重排：按名字找回那一格，别人的项不动', async () => {
+  const { dir, done } = fresh();
+  try {
+    const items = [
+      { name: '帮助', type: 'send_message', send_message: '怎么用' },
+      { name: '官网', type: 'link', link: 'https://x' },
+      { name: '·旧说法', type: 'send_message', send_message: '现在的话' },
+    ];
+    const rpc = fakeRpc({ items });
+    const slots = createSlotStore({ dataDir: () => dir });
+    const r = await restoreMenuSlot({
+      rpc, slots,
+      /** 历史里记的是第 0 格，但菜单被重排后她挪到了第 2 格 */
+      before: { index: 0, name: '·旧说法', type: 'send_message', send_message: '旧的话' },
+    });
+    assert.equal(r.ok, true);
+    const after = rpc.items();
+    assert.equal(after[0].name, '帮助', '别人那一格必须原样');
+    assert.equal(after[1].type, 'link', 'link 那格也不能被覆盖');
+    assert.equal(after[2].name, '·旧说法');
+    assert.equal(after[2].send_message, '旧的话');
+    assert.deepEqual(slots.read(), { index: 2, name: '·旧说法', type: 'send_message' });
+  } finally { done(); }
+});
+
+test('RM6 多格同名 → 拒（认不出原来那一格）', async () => {
+  const { dir, done } = fresh();
+  try {
+    const items = [
+      { name: '·旧说法', type: 'send_message' },
+      { name: '·旧说法', type: 'send_message' },
+    ];
+    const rpc = fakeRpc({ items });
+    const slots = createSlotStore({ dataDir: () => dir });
+    const r = await restoreMenuSlot({
+      rpc, slots, before: { index: 9, name: '·旧说法', type: 'send_message' },
+    });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /2 格/);
   } finally { done(); }
 });
 

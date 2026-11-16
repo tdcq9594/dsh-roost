@@ -401,16 +401,44 @@ export async function restoreMenuSlot({ rpc, slots, before, log = () => {} }) {
     return { ok: false, message: `读菜单失败：${e?.message ?? e}` };
   }
   if (!items) return { ok: false, message: '读回来了，但看不懂菜单的结构。' };
-  if (before.index >= items.length) {
-    return { ok: false, message: `原来的第 ${before.index + 1} 格已经不在了（菜单被删短了），没法按位置退回。` };
-  }
 
   const next = items.map(rebuildItem);
-  const cur = next[before.index];
+  const wantName = String(before.name);
+
+  /**
+   * 先确认「那一格还是她的」：
+   *
+   *   1. 位置 + 名字都对上 → 没动过，直接覆盖
+   *   2. 名字对不上 → 菜单被重排过，**按名字找唯一匹配**
+   *   3. 名字也找不到，但 slot 记录仍指着同一位置 → 她自己改过名，按位置覆盖
+   *   4. 以上都不成立 → 拒
+   *
+   * 绝不「就近找一格」顶上：那是拿别人那一格去改，而错只有有人点菜单时才会发现。
+   */
+  let idx = -1;
+  if (next[before.index] && next[before.index].name === wantName) {
+    idx = before.index;
+  } else {
+    const hits = next.map((it, i) => ({ it, i })).filter(({ it }) => it.name === wantName);
+    if (hits.length === 1) {
+      idx = hits[0].i;
+    } else if (hits.length > 1) {
+      return { ok: false, message: `菜单里有 ${hits.length} 格都叫「${wantName}」，认不出原来那一格，没法退回。` };
+    } else {
+      const slot = slots?.read?.() || null;
+      const sameSlot = slot && Number(slot.index) === before.index && next[before.index];
+      if (!sameSlot) {
+        return { ok: false, message: `菜单里找不到原来那一格「${wantName}」了（可能被删或换了位置），没法退回。` };
+      }
+      idx = before.index;
+    }
+  }
+
+  const cur = next[idx];
   if (cur.type !== 'send_message' && cur.type !== String(before.type || '')) {
     return { ok: false, message: `那一格现在是 ${cur.type} 类型，直接覆盖会把它的用途弄坏。` };
   }
-  cur.name = String(before.name);
+  cur.name = wantName;
   if (before.send_message !== undefined) cur.send_message = String(before.send_message);
 
   try {
@@ -418,9 +446,9 @@ export async function restoreMenuSlot({ rpc, slots, before, log = () => {} }) {
   } catch (e) {
     return { ok: false, message: `写菜单失败：${e?.message ?? e}` };
   }
-  slots.write({ index: before.index, name: cur.name, type: cur.type });
-  log(`[menu] 已退回：${before.index} → ${cur.name}`);
-  return { ok: true, restored: { index: before.index, name: cur.name } };
+  slots.write({ index: idx, name: cur.name, type: cur.type });
+  log(`[menu] 已退回：${idx} → ${cur.name}`);
+  return { ok: true, restored: { index: idx, name: cur.name } };
 }
 
 /** 提示词：只在工具真挂上时注入，否则她会一直调一个不存在的工具 */

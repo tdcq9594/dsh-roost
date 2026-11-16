@@ -137,20 +137,92 @@ export function assertSafeTarballUrl(raw) {
 }
 
 /**
- * @param {string} url
- * @param {object} [guard] `marketGuardOpts()` 的结果；不传则等价于 1.3.1 的
- *   「只放行本机回环」口径（测试和自定义 fetch 的老调用方不受影响）。
+ * 把 undici 的 `TypeError: fetch failed` 翻成人能看的错误。
+ *
+ * 面板以前原样显示 `fetch failed` —— 那是 undici 的兜底文案，真正的原因在
+ * `e.cause.code` 里（ENOTFOUND / ECONNREFUSED / ETIMEDOUT / 证书类…）。
+ * 四个英文单词既没说是 DNS 还是代理，也没说下一步做什么，用户只能猜。
+ *
+ * 顺带说清一件事：Node 的 `fetch` **不读** `HTTP_PROXY` / `HTTPS_PROXY`。
+ * 只开了系统代理的机器上，浏览器能打开 `raw.githubusercontent.com`，
+ * 这里照样 `ECONNREFUSED` —— 不是配置错了，是根本没走代理。
  */
-async function defaultFetchText(url, guard = {}) {
+export function describeFetchError(e, { url = '', timeoutMs = 0 } = {}) {
+  const cause = e?.cause ?? null;
+  const code = String(cause?.code ?? cause?.errno ?? '').trim();
+  let host = '';
+  try { host = new URL(String(url)).host; } catch { /* 地址本身不合法时就不提主机 */ }
+  const at = host ? `（${host}）` : '';
+
+  if (e?.name === 'AbortError' || e?.name === 'TimeoutError') {
+    return `请求超时${at}：${Math.round(timeoutMs / 1000)} 秒内没有响应`;
+  }
+
+  switch (code) {
+    case 'ENOTFOUND':
+      return `域名解析不出来${at}：DNS 失败，检查网络或 hosts`;
+    case 'EAI_AGAIN':
+      return `DNS 查询超时${at}：网络抖动，重试一次通常就好`;
+    case 'ECONNREFUSED':
+      return `连接被拒绝${at}：本机代理没开，或者端口不对（Node 的 fetch 不读系统代理设置）`;
+    case 'ECONNRESET':
+      return `连接被重置${at}：代理或防火墙中断了这次请求`;
+    case 'ETIMEDOUT':
+    case 'UND_ERR_CONNECT_TIMEOUT':
+      return `连接超时${at}：网络不通，或者需要代理（Node 的 fetch 不读系统代理设置）`;
+    case 'UND_ERR_HEADERS_TIMEOUT':
+      return `等响应头超时${at}：对方太慢，或者链路被卡住`;
+    case 'UND_ERR_SOCKET':
+      return `连接被对端关闭${at}：长连接失效，重试一次通常就好`;
+    case 'CERT_HAS_EXPIRED':
+      return `TLS 证书过期${at}：可能有中间人代理`;
+    case 'DEPTH_ZERO_SELF_SIGNED_CERT':
+    case 'SELF_SIGNED_CERT_IN_CHAIN':
+    case 'UNABLE_TO_VERIFY_LEAF_SIGNATURE':
+      return `TLS 证书不可信${at}：可能有中间人代理`;
+    default:
+      break;
+  }
+  const detail = code || String(e?.message ?? e ?? '').trim() || '未知原因';
+  return `网络请求失败${at}：${detail}`;
+}
+
+/**
+ * 出站拉取：网络错误重试一次，HTTP 层错误不重试。
+ *
+ * 为什么重试只给网络错误：`ECONNRESET` / `UND_ERR_SOCKET` 多半是复用的长连接
+ * 已经死了，换一条新的就好；而 4xx 是地址或权限问题、5xx 重试一次也一样，
+ * 重试只会让用户多等一轮还看到同一个错。
+ *
+ * @param {string} url
+ * @param {object} [guard] `marketGuardOpts()` 的结果
+ * @param {{retry?:number, timeoutMs?:number, fetchImpl?:Function, waitFn?:Function}} [o]
+ */
+export async function defaultFetchText(url, guard = {}, {
+  retry = 1, timeoutMs = 30_000, fetchImpl = fetch,
+  waitFn = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
   /**
    * 5.11：主机白名单只挡了「字面地址」，挡不住域名解析到 127.0.0.1 /
    * 169.254.169.254（DNS rebinding）。出站前逐 IP 再校一次。
    * 索引允许本机回环 http（自建镜像），与 assertSafeIndexUrl 口径一致。
    */
   await assertSafeUrl(url, { allowLoopback: true, ...guard });
-  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) });
-  if (!res.ok) throw new Error(`拉索引失败：HTTP ${res.status}`);
-  return await res.text();
+
+  let last = null;
+  for (let attempt = 0; attempt <= retry; attempt += 1) {
+    try {
+      const res = await fetchImpl(url, { redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
+      if (!res.ok) throw new Error(`拉索引失败：HTTP ${res.status}`);
+      return await res.text();
+    } catch (e) {
+      last = e;
+      /** HTTP 状态码是明确的答复，重试没有意义；只有「没连上」才值得再来一次 */
+      if (/^拉索引失败：HTTP /.test(String(e?.message ?? ''))) break;
+      if (attempt < retry) await waitFn(400);
+    }
+  }
+  throw new Error(describeFetchError(last, { url, timeoutMs }));
 }
 
 /** 给进度文案用：字节数说人话，别把 12345678 直接糊到面板上。 */
@@ -171,7 +243,13 @@ async function defaultDownload(entry, dest, { repo, branch, guard = {}, onProgre
    * `TARBALL_HOSTS` 内，这里补的是 DNS 那一层（同样受 fake-ip 影响）。
    */
   await assertSafeUrl(url, guard);
-  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(60_000) });
+  /** 下载失败同样要把 `fetch failed` 翻成人话——60 秒的等待换四个英文单词太亏 */
+  let res;
+  try {
+    res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(60_000) });
+  } catch (e) {
+    throw new Error(describeFetchError(e, { url, timeoutMs: 60_000 }));
+  }
   if (!res.ok) throw new Error(`下载分发包失败：HTTP ${res.status}`);
   /**
    * `redirect:'follow'` 只校验首跳；白名单主机自己 302 到别处就绕过了。
@@ -271,6 +349,17 @@ export function createExtMarket({
   const downloadPkg = download
     ?? ((entry, dest, opts) => defaultDownload(entry, dest, { ...opts, guard: guardNow() }));
   const tmpRoot = join(dir, '.market-tmp');
+  /**
+   * 正在装 / 卸的扩展 id。
+   *
+   * 没有这道闸时，面板连点两下「安装」会同时进 `installInner`：两条流程
+   * 抢同一个 `tmpRoot/<id>` 暂存目录（后一个的 `rmrfSync` 会把前一个正在写的
+   * 文件删掉），落位后还会各写一遍受管块。表现是随机的「哈希不符」或者
+   * 「装完扩展起不来」——比直接说「正在装，等它跑完」糟得多。
+   *
+   * 锁是**进程内**的：跨进程（多开 DSH）仍需靠 `registry.install` 的原子 rename 兜底。
+   */
+  const running = new Set();
   let cache = null;
 
   /**
@@ -394,12 +483,24 @@ export function createExtMarket({
    */
   async function install(id, opts = {}) {
     const key = String(id ?? '');
-    setPhase('index', '正在准备安装', key);
-    const r = await installInner(key, opts);
-    if (r?.ok) setPhase('done', r.message || '已安装', key);
-    else if (r?.reason === 'needs_scope_confirm' || r?.reason === 'needs_tier_confirm') setPhase('confirm', r.message || '等待确认权限', key);
-    else setPhase('failed', r?.message || '安装失败', key);
-    return r;
+    /** 同 id 已经在装：直接拒，别让两条流程抢同一个暂存目录 */
+    if (running.has(key)) {
+      return {
+        ok: false, reason: 'busy',
+        message: `「${key}」正在安装，等这一轮跑完再点（面板上的进度条就是它）`,
+      };
+    }
+    running.add(key);
+    try {
+      setPhase('index', '正在准备安装', key);
+      const r = await installInner(key, opts);
+      if (r?.ok) setPhase('done', r.message || '已安装', key);
+      else if (r?.reason === 'needs_scope_confirm' || r?.reason === 'needs_tier_confirm') setPhase('confirm', r.message || '等待确认权限', key);
+      else setPhase('failed', r?.message || '安装失败', key);
+      return r;
+    } finally {
+      running.delete(key);
+    }
   }
 
   async function installInner(id, { confirmScopes = false, confirmTier, force = false } = {}) {
@@ -594,16 +695,28 @@ export function createExtMarket({
   function remove(id) {
     const key = String(id ?? '');
     if (!EXT_ID_RE.test(key)) return { ok: false, reason: 'bad_id', message: '扩展 id 不合法' };
-    const r = registry.remove(key);
-    if (!r.ok) return r;
-    const warnings = [];
-    if (extGroups) {
-      try { extGroups.remove(key, { capStore }); }
-      catch (e) { warnings.push(`权限组清理失败：${e?.message ?? e}`); }
+    /**
+     * 正在装同一个 id 时不许卸：卸载会删目录，而安装流程可能刚把暂存目录
+     * rename 上来，两边撞在一起的结果是「装了一半的扩展 + 一条写坏的受管块」。
+     */
+    if (running.has(key)) {
+      return { ok: false, reason: 'busy', message: `「${key}」正在安装，等这一轮跑完再卸载` };
     }
-    try { syncBlock(); }
-    catch (e) { warnings.push(`受管块未同步：${e?.message ?? e}`); }
-    return { ok: true, id: key, warnings, message: warnings.length ? `已卸载，但有 ${warnings.length} 项没清干净` : '已卸载' };
+    running.add(key);
+    try {
+      const r = registry.remove(key);
+      if (!r.ok) return r;
+      const warnings = [];
+      if (extGroups) {
+        try { extGroups.remove(key, { capStore }); }
+        catch (e) { warnings.push(`权限组清理失败：${e?.message ?? e}`); }
+      }
+      try { syncBlock(); }
+      catch (e) { warnings.push(`受管块未同步：${e?.message ?? e}`); }
+      return { ok: true, id: key, warnings, message: warnings.length ? `已卸载，但有 ${warnings.length} 项没清干净` : '已卸载' };
+    } finally {
+      running.delete(key);
+    }
   }
 
   /** 按目录哈希判更新（扩展没有 version 契约）。 */

@@ -562,15 +562,27 @@ export const DEFAULTS = {
   selfExpression: {
     menu: { enabled: true, cooldownMin: 0 },
     /**
-     * `confirm` = 改之前先私聊主人问一句，主人回码才执行。
-     * **必须写在这里**：`pruneTo` 只保留 `DEFAULTS` 里有的键，漏了的话
-     * 面板上打开、存盘时会被静默裁掉（配置回读还是 false）。
+     * `confirm` = 改之前先私聊主人问一句，主人回「确认」才执行。
+     * `unattended` = 没人看着的轮次（主动搭话 / 夜间巩固）允不允许改。
+     * **两个键都必须写在这里**：`pruneTo` 只保留 `DEFAULTS` 里有的键，漏了的话
+     * 面板上打开、存盘时会被静默裁掉（配置回读还是旧值）。
+     *
+     * `unattended` 的初始值按「敏感度」给：简介允许、昵称头像不允许；
+     * 面板上三项都能单独改，用户自己定。
      */
     /** 简介（OneBot 的 longNick） */
-    sign: { enabled: true, cooldownMin: 0, confirm: false },
+    sign: { enabled: true, cooldownMin: 0, confirm: false, unattended: true },
     /** 昵称；改了要连人格卡的 `selfName` 一起改，否则会出现资料卡和自称对不上 */
-    name: { enabled: true, cooldownMin: 0, confirm: false },
-    avatar: { enabled: true, cooldownMin: 0, confirm: false },
+    name: { enabled: true, cooldownMin: 0, confirm: false, unattended: false },
+    /**
+     * 头像。`anyPath` = 本机图片路径能不能超出数据目录。
+     *
+     * 默认 `true`：老用户就是拿桌面/相册里的一张图当头像的，升级不该收掉。
+     * 关掉之后 `qq_avatar` 的 `path` 分支只认数据目录内的文件——这一条挡的
+     * 不是主人手滑，是「提示词注入成功一次就把本机任意图传成公开头像」。
+     * 同样是**键必须写在这里**，否则 `pruneTo` 会把面板打开的值裁掉。
+     */
+    avatar: { enabled: true, cooldownMin: 0, confirm: false, unattended: false, anyPath: true },
     awareness: { mood: true, silence: true },
     proactive: { enabled: false, fields: ['menu'] },
   },

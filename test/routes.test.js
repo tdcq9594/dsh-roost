@@ -1522,7 +1522,8 @@ test('路由：/extensions/ui 列出扩展页，group 归一成一级菜单 id',
   assert.equal(r.status, 200);
   const ids = r.json.pages.map((p) => p.id).sort();
   assert.deepEqual(ids, ['demo-two', 'demo-ui']);
-  assert.equal(r.json.pages.find((p) => p.id === 'demo-ui').nav.group, 'group', '中文「群聊」要归一成 group');
+  /* 2026-11-16 群聊并入「群与频道」：老写法 `群聊` / `group` 都归一成 channel */
+  assert.equal(r.json.pages.find((p) => p.id === 'demo-ui').nav.group, 'channel', '中文「群聊」要归一成 channel');
   assert.equal(r.json.pages.find((p) => p.id === 'demo-two').nav.group, 'express');
   off?.();
 });
