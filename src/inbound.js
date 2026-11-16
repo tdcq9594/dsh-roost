@@ -251,6 +251,13 @@ export function chatOf(payload, { sessionMode = 'guild' } = {}) {
     /** 两态投影：guild→group、dm→c2c，给只认 scene 的下游用 */
     scene,
     chatId,
+    /**
+     * **说话的人**（发送者 openid），不是会话 id。
+     *
+     * 按人指定人格（`persona.bySender`）要用它；没有真人的轮次（主动搭话）
+     * 是空串，那时就退回按会话。别拿 `chatId` 顶——群里那是群 openid。
+     */
+    senderId: String(payload?.sender?.id ?? ''),
     /** 会话 / 人格映射用的键；出站 target 仍用 chatId */
     sessionKey,
     groupId: String(payload?.chat?.groupId ?? ''),

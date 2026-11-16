@@ -40,6 +40,8 @@
  * · scope 统一 `prompt:write`：能改提示词来源的人，本来就能看到它。
  */
 
+import { pickPersonaId } from './personas.js';
+
 /** 人格正文上限。正常人写不出 20 万字符，超了基本是拿错文件或者脚本跑飞 */
 export const MAX_PERSONA_CHARS = 200_000;
 
@@ -140,10 +142,16 @@ export function createExtPersona({
   const findPersona = (id) => personas.list().find((p) => p.id === id) || null;
 
   /** 当前生效的人格 id（按会话覆盖优先） */
-  const effectiveOf = (chatId) => {
+  /**
+   * 这个会话 / 这个人**实际**会用哪个人格。
+   *
+   * 必须和宿主同一套优先级（`pickPersonaId`）：只看 `byChat` + `current` 的话，
+   * 给某人指定了专属人格，这里还会回报全局那个——调用方以为没设上，或者以为
+   * 设错了人。
+   */
+  const effectiveOf = (chatId, senderId = '') => {
     const c = cfgOf() || {};
-    const byChat = c.persona?.byChat || {};
-    return String((chatId && byChat[chatId]) || c.persona?.current || 'default');
+    return pickPersonaId({ persona: c.persona, chatId, senderId });
   };
 
   /** 长度闸：超上限直接抛，正常返回字数。调用方统一 catch 转 400 */
@@ -167,6 +175,11 @@ export function createExtPersona({
       if (got.error) return bad(got.error);
       const chatId = got.value;
       if (chatId && BAD_KEYS.has(chatId)) return bad('chatId 不合法');
+      /** 可选：想知道「某个人」实际用哪个人格，就带上他的 openid */
+      const gotSender = readChatId(query?.senderId);
+      if (gotSender.error) return bad(gotSender.error);
+      const senderId = gotSender.value;
+      if (senderId && BAD_KEYS.has(senderId)) return bad('senderId 不合法');
       const c = cfgOf() || {};
       const rows = personas.list().map((p) => ({
         id: p.id,
@@ -182,8 +195,9 @@ export function createExtPersona({
         body: {
           ok: true,
           current: String(c.persona?.current || 'default'),
-          effective: effectiveOf(chatId),
+          effective: effectiveOf(chatId, senderId),
           chatId: chatId || null,
+          senderId: senderId || null,
           byChat: { ...(c.persona?.byChat || {}) },
           rows,
         },
@@ -346,6 +360,33 @@ export function createExtPersona({
         ? [...new Set(b.clear.map((x) => str(x, 20)).filter(Boolean))]
         : [];
 
+      /**
+       * 按**人**指定人格（单人专属人设）：`senderId` 是发送者 openid。
+       *
+       * 和 `chatId` 是两个不同的东西，别混：群里 `chatId` 是**群 openid**，
+       * 给它换人格是「整个群换」，而用户要的是「这个人走到哪都用他那一套」。
+       *
+       * 只对 `persona` 生效——`model` 是按会话的（`model.byChat`），
+       * 混进来会让人以为模型也能按人配，实际写进去的是另一个键。
+       */
+      const gotSender = readChatId(b.senderId);
+      if (gotSender.error) return bad(gotSender.error);
+      const senderId = gotSender.value;
+      if (senderId && BAD_KEYS.has(senderId)) return bad('senderId 不合法');
+      /**
+       * 两个都给就说不清要改哪一层。宁可报错也不猜——猜错的表现是
+       * 「以为改了某个群，实际改的是某个人」，事后完全看不出来。
+       */
+      if (senderId && chatId) {
+        return bad('chatId 和 senderId 只能给一个：前者改会话，后者改人');
+      }
+      if (senderId && hasModelField) {
+        return bad('model 只能按会话配（chatId），不能和 senderId 一起用');
+      }
+      if (senderId && clear.includes('model')) {
+        return bad('clear 里的 model 只能按会话清（chatId），不能和 senderId 一起用');
+      }
+
       if (!wantPersona && !hasModelField && !clear.length) {
         return bad('至少给一项：persona / model / clear');
       }
@@ -360,6 +401,9 @@ export function createExtPersona({
       next.persona.byChat = next.persona.byChat && typeof next.persona.byChat === 'object'
         ? next.persona.byChat
         : {};
+      next.persona.bySender = next.persona.bySender && typeof next.persona.bySender === 'object'
+        ? next.persona.bySender
+        : {};
       next.model = next.model && typeof next.model === 'object' ? next.model : {};
       next.model.byChat = next.model.byChat && typeof next.model.byChat === 'object'
         ? next.model.byChat
@@ -368,7 +412,8 @@ export function createExtPersona({
       const touched = [];
 
       if (wantPersona) {
-        if (chatId) next.persona.byChat[chatId] = wantPersona;
+        if (senderId) next.persona.bySender[senderId] = wantPersona;
+        else if (chatId) next.persona.byChat[chatId] = wantPersona;
         else next.persona.current = wantPersona;
         touched.push('persona');
       }
@@ -391,7 +436,8 @@ export function createExtPersona({
 
       for (const what of clear) {
         if (what === 'persona') {
-          if (chatId) delete next.persona.byChat[chatId];
+          if (senderId) delete next.persona.bySender[senderId];
+          else if (chatId) delete next.persona.byChat[chatId];
           /** 全局没有「不选」这一档：清掉就是回到内置默认 */
           else next.persona.current = 'default';
           touched.push('persona');
@@ -408,7 +454,7 @@ export function createExtPersona({
       if (wantPersona) {
         const label = findPersona(wantPersona)?.label || wantPersona;
         try {
-          onSwitched({ id: wantPersona, chatId, label });
+          onSwitched({ id: wantPersona, chatId, senderId, label });
         } catch (e) {
           /** 提示写不进去不影响人格已经换了 */
           log(`[ext-persona] 切换提示没写上：${e?.message ?? e}`);
@@ -420,10 +466,11 @@ export function createExtPersona({
         body: {
           ok: true,
           chatId: chatId || null,
+          senderId: senderId || null,
           touched: [...new Set(touched)],
           persona: {
             current: String(saved?.persona?.current || 'default'),
-            effective: effectiveOf(chatId),
+            effective: effectiveOf(chatId, senderId),
             byChat: { ...(saved?.persona?.byChat || {}) },
           },
           model: {

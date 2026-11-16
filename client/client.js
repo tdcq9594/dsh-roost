@@ -3365,6 +3365,24 @@ select.roost-input{color-scheme:dark}
 
       /** 这一页说的是「当前这个会话里她是谁」，不是「全局默认是谁」 */
       const byChat = personas?.byChat || {}
+      /**
+       * 按**人**指定的人格（单人专属人设）。
+       *
+       * 和 `byChat` 是两个维度：上面那个是「这个会话用谁」，这个是「这个人用谁」，
+       * 后者优先。用户原话：「想给单人设置专属人设」。
+       */
+      /** 读 `/personas` 回的 bySender：reload() 只重拉那个，不重拉 /config */
+      const bySender = personas?.bySender || config?.persona?.bySender || {}
+      const bySenderCount = Object.keys(bySender).length
+      const [senderNew, setSenderNew] = useState('')
+      const [senderPick, setSenderPick] = useState('')
+      /** 走专门的路由：`/config` 的 patch 是深合并，删不掉一个键 */
+      const setBySender = async (senderId, id) => {
+        const r = await post('/personas/by-sender', { senderId, id })
+        if (r.ok === false) return toast(r.message || '没设成')
+        toast(id ? '已指定' : '已移除')
+        await reload()
+      }
       const byChatCount = Object.keys(byChat).length
       const curId = byChat[mem?.chatId] || personas?.current || config?.persona?.current || 'default'
       /** 全局当前（可能被本群覆盖，选择器要显示全局值） */
@@ -4157,6 +4175,61 @@ select.roost-input{color-scheme:dark}
            * 而不是再开一个入口让人猜「治理」在哪。
            */
           govOpen ? h(GovPanel, { toast, reload, tick: 0, onAfter: () => loadRepo(true) }) : null,
+        ),
+
+        /**
+         * 按人指定：单人专属人设。
+         *
+         * 为什么单独一节而不是塞进上面的表：上面那张表改的是「这个群 / 全局」，
+         * 这一节改的是「**这个人**」——他走到哪个群、私聊里，用的都是这一套。
+         * 粒度从会话换成发送者，是用户明确要的（「想给单人设置专属人设」）。
+         */
+        sec('按人指定', bySenderCount ? { right: h(Pill, null, `${bySenderCount} 人`) } : null,
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '给某一个人单独指定人格：他走到哪个群、私聊里都用这一套，优先级高于「按会话」和全局。'),
+          bySenderCount
+            ? h('div', null, Object.entries(bySender).map(([sid, pid]) => h('div', {
+                key: sid,
+                style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' },
+              },
+              h('code', { className: 'roost-faint', style: { wordBreak: 'break-all' } }, sid),
+              h('span', { className: 'roost-faint' }, '→'),
+              h('span', null, labelOf(pid)),
+              h('button', {
+                type: 'button', className: 'roost-btn',
+                onClick: () => setBySender(sid, ''),
+              }, '移除'),
+            )))
+            : h('div', { className: 'roost-empty' }, '还没有按人指定的。'),
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' } },
+            h('input', {
+              className: 'roost-input',
+              style: { minWidth: 240 },
+              placeholder: '发送者 openid（不是群号）',
+              value: senderNew,
+              onChange: (e) => setSenderNew(e.target.value.trim()),
+            }),
+            h('select', {
+              className: 'roost-input',
+              value: senderPick,
+              onChange: (e) => setSenderPick(e.target.value),
+            },
+            h('option', { value: '' }, '选一个人格…'),
+            mineAll.map((p) => h('option', { key: p.id, value: p.id }, p.label || p.name || p.id))),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              disabled: !senderNew || !senderPick,
+              onClick: async () => {
+                await setBySender(senderNew, senderPick)
+                setSenderNew('')
+                setSenderPick('')
+              },
+            }, '指定'),
+          ),
+          h('div', { className: 'roost-faint', style: { marginTop: 4 } },
+            'openid 从会话记录里抄。扩展也可以调 POST /v1/session.configure 带 senderId 设置。'
+            + '如果装了插件「rp人设」（persona-scope），别再对同一个人开它——'
+            + '它改的是**消息正文**、这里改的是**系统提示**，两段会一起进上下文，容易打架。'),
         ),
 
         /**
@@ -14222,6 +14295,14 @@ select.roost-input{color-scheme:dark}
       const [marketCategory, setMarketCategory] = useState('')
       const [marketTag, setMarketTag] = useState('')
       const [marketProgress, setMarketProgress] = useState(null)
+      /**
+       * 市场数据源。国内直连 `raw.githubusercontent.com` / `codeload.github.com`
+       * 经常被重置（面板报「连接被重置」），而 Gitee 是同一份仓库的镜像
+       * （索引字节数实测完全一致），换过去就能用。
+       */
+      const [marketSrc, setMarketSrc] = useState('github')
+      const [marketSrcUrl, setMarketSrcUrl] = useState('')
+      const [marketSrcInfo, setMarketSrcInfo] = useState(null)
       const progressTimer = useRef(null)
       const marketFilters = () => ({ q: marketQuery, category: marketCategory, tag: marketTag })
       const stopProgress = () => {
@@ -14339,7 +14420,35 @@ select.roost-input{color-scheme:dark}
         setDrafts(d)
       }
       /** 进扩展页就把市场拉出来，别让用户自己找「加载市场」按钮 */
-      useEffect(() => { load() }, [])
+      const loadSource = async () => {
+        try {
+          const r = await EXT_POST('extensions.market.source', {})
+          if (r?.ok !== false) {
+            setMarketSrcInfo(r)
+            setMarketSrc(r.source || 'github')
+            setMarketSrcUrl(r.customUrl || '')
+          }
+        } catch { /* 读不到就按默认 github 显示 */ }
+      }
+      const saveSource = async () => {
+        setMarketBusy('source')
+        try {
+          /**
+           * 只在 `custom` 时才提交地址：预设源也提交会把用户之前填的自建地址
+           * 冲成空串，切回「自定义」就得重填一遍。
+           */
+          const r = await EXT_POST('extensions.market.source', {
+            set: true,
+            source: marketSrc,
+            ...(marketSrc === 'custom' ? { indexUrl: marketSrcUrl } : {}),
+          })
+          if (r?.ok === false) { toast(r.message || '保存失败'); return }
+          toast('已切换数据源，正在重新拉取…')
+          await loadSource()
+          await loadMarket(true, marketFilters())
+        } finally { setMarketBusy('') }
+      }
+      useEffect(() => { load(); loadSource() }, [])
       /** 5.6：筛选条件变了重查（250ms 防抖），别每敲一个字都打一次索引 */
       useEffect(() => {
         const t = setTimeout(() => loadMarket(false, {
@@ -14501,7 +14610,30 @@ select.roost-input{color-scheme:dark}
             : '总开关：关 —— 清单还在、已发令牌照常，只是不挂 usage section。去「权限 → 高级 · 新功能」打开「用户扩展」。'),
         data?.status?.authFailed
           ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } },
-              `⚠ ${data.status.hintAuthFailed}：有扩展鉴权失败，检查令牌是否被吊销或凭据缺失。`)
+              `⚠ ${data.status.hintAuthFailed}：${(() => {
+                /**
+                 * 说清「是谁」和「下一步」。
+                 *
+                 * 以前固定一句「检查令牌是否被吊销或凭据缺失」——用户照着去查令牌，
+                 * 而令牌往往是好的。真实原因按出现频率排：
+                 *   1. 面板上把扩展停用了，DSH 里的进程还在跑（令牌已不被认）
+                 *   2. 备份还原 / 换数据目录后 secrets 丢了，宿主重发了新令牌
+                 *   3. 手动改过 api-clients.json
+                 */
+                const who = String(data.status.authFailedWho || '');
+                const off = Array.isArray(data.status.disabledClients) ? data.status.disabledClients : [];
+                if (who.startsWith('disabled ext:')) {
+                  return `「${who.slice('disabled ext:'.length)}」已被停用，但它的进程可能还在跑（宿主已经不认它的令牌）。重新启用后要重启 DSH 才会生效。`;
+                }
+                if (off.length) {
+                  return `这些扩展被停用了：${off.join('、')}。它们的进程如果还在跑就会一直 401 —— 重启 DSH 即可。`;
+                }
+                if (who === 'unknown-token') {
+                  return '令牌对不上（常见原因：备份还原后 secrets 丢了、手动改过、或者换了数据目录）。重新签发一次，再重启 DSH。';
+                }
+                if (who === 'no-token') return '扩展在调 /v1 但没带令牌，检查它的启动环境里有没有注入 DSH_ROOST_TOKEN。';
+                return '检查令牌是否被吊销或凭据缺失。';
+              })()}`)
           : null,
         data?.status?.regenerated
           ? h('div', { className: 'roost-note', style: { color: 'var(--warn)' } },
@@ -14509,6 +14641,37 @@ select.roost-input{color-scheme:dark}
           : null,
         h('div', { className: 'roost-note', style: { marginTop: 8 } },
           '从插件市场安装或更新扩展。',
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
+            h('span', { className: 'roost-faint' }, '数据源'),
+            h('select', {
+              className: 'roost-input',
+              value: marketSrc,
+              onChange: (e) => setMarketSrc(e.target.value),
+            },
+            h('option', { value: 'github' }, 'GitHub（官方）'),
+            h('option', { value: 'gitee' }, 'Gitee（镜像，国内更稳）'),
+            h('option', { value: 'custom' }, '自建 / 自定义地址')),
+            marketSrc === 'custom'
+              ? h('input', {
+                  className: 'roost-input',
+                  style: { minWidth: 260 },
+                  placeholder: 'https://…/index.json',
+                  value: marketSrcUrl,
+                  onChange: (e) => setMarketSrcUrl(e.target.value),
+                })
+              : null,
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              disabled: marketBusy === 'source',
+              onClick: saveSource,
+            }, marketBusy === 'source' ? '切换中…' : '应用'),
+            marketSrcInfo?.indexUrl
+              ? h('span', { className: 'roost-faint', style: { wordBreak: 'break-all' } },
+                  `当前：${marketSrcInfo.indexUrl}`)
+              : null,
+          ),
+          h('div', { className: 'roost-faint', style: { marginTop: 4 } },
+            'GitHub 拉不动（提示「连接被重置」）时换成 Gitee：同一份仓库的镜像，索引内容一样。'),
           h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
             h('button', {
               type: 'button', className: 'roost-btn', disabled: marketBusy === 'list',
@@ -14621,19 +14784,39 @@ select.roost-input{color-scheme:dark}
                           disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
                           onConfirm: () => marketAct('extensions.market.install', x.id, { force: true }),
                         })
-                      : h('button', {
-                          type: 'button', className: 'roost-btn', style: { marginTop: 6 },
-                          disabled: marketBusy === x.id || x.foreign || !!scopeAsk || !!revokeAsk,
-                          onClick: () => marketAct('extensions.market.install', x.id),
-                        }, x.foreign ? '用户手写 · 不覆盖' : x.installed ? '更新' : '安装'),
-                  x.installed && !x.foreign
+                      : x.foreign
+                        /**
+                         * 手写目录：**允许用官方版替换**（二次确认，服务端先整目录备份）。
+                         *
+                         * 以前这里写死禁用 + 「用户手写 · 不覆盖」，而判据只看有没有
+                         * `.source.json` —— 整目录拷进来的官方扩展同样没有那个文件，
+                         * 用户会卡在「既换不成官方版、也卸载不掉」。
+                         */
+                        ? h(ConfirmLink, {
+                            label: '用官方版替换',
+                            confirmLabel: '确认替换（先备份）',
+                            disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
+                            onConfirm: () => marketAct('extensions.market.install', x.id, { takeOver: true }),
+                          })
+                        : h('button', {
+                            type: 'button', className: 'roost-btn', style: { marginTop: 6 },
+                            disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
+                            onClick: () => marketAct('extensions.market.install', x.id),
+                          }, x.installed ? '更新' : '安装'),
+                  x.installed
                     ? h(ConfirmLink, {
-                        label: '卸载', confirmLabel: '确认卸载',
+                        label: '卸载',
+                        confirmLabel: x.foreign ? '确认删除（先备份）' : '确认卸载',
                         disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
-                        onConfirm: () => marketAct('extensions.market.remove', x.id),
+                        /** 手写目录要 force：服务端会先备份到 data/backups/ 再删 */
+                        onConfirm: () => marketAct('extensions.market.remove', x.id, x.foreign ? { force: true } : {}),
                       })
                     : null,
-                  x.installed && !x.foreign && !x.revoked
+                  /**
+                   * 「停用」只吊销令牌、不动文件，手写扩展同样该有 —— 以前用
+                   * `!x.foreign` 挡掉，等于手写扩展连停都停不了。
+                   */
+                  x.installed && !x.revoked
                     ? h('button', {
                         type: 'button', className: 'roost-btn', style: { marginTop: 6, marginLeft: 6 },
                         disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
@@ -14642,7 +14825,15 @@ select.roost-input{color-scheme:dark}
                     : null,
                 )),
               )
-            : (market ? h('div', { className: 'roost-empty' },
+            : (market && market.ok === false
+              /**
+               * 拉取失败时**不能**说「市场里还没有扩展条目」——那句话是在
+               * 描述「索引拉到了、里面是空的」，而这里根本没拉到。用户看到
+               * 上面一行红字 + 下面一句「还没有条目」，会以为市场真的没东西。
+               */
+              ? h('div', { className: 'roost-empty', style: { color: 'var(--bad)' } },
+                `索引没拉到：${market.message || '原因不明'}。上面的红字是具体错误；网络恢复后点「刷新市场」重试。`)
+              : market ? h('div', { className: 'roost-empty' },
                 (marketQuery || marketCategory || marketTag)
                   ? '当前筛选下没有条目，换个词或清掉筛选。'
                   : '市场里还没有扩展条目。') : null),

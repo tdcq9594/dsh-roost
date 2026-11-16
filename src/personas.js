@@ -456,6 +456,32 @@ export function dupGroups(list) {
   return out;
 }
 
+/**
+ * 这一轮该用哪个人格。**四层优先级**，从高到低：
+ *
+ *   1. `runtimePick` —— 这一轮 `<<persona:>>` 显式切的（临时，重启就没了）
+ *   2. `bySender[发送者]` —— **单人专属人设**：这个人走到哪都用他那一套
+ *   3. `byChat[会话]` —— 按群 / 按私聊指定
+ *   4. `current` —— 全局默认
+ *
+ * 为什么按人排在按会话前面：按人是更具体的意图（「给这个人」），而按会话是
+ * 「给这个场合」。两者冲突时听更具体的那个。
+ *
+ * **`senderId` 必须是发送者的 openid，不是 chatId**：群里 chatId 是群 openid，
+ * 拿它查 `bySender` 永远查不到，而「按人」正是要用在这里。
+ *
+ * 抽成纯函数是为了能单测——`host.js` 里那段内联逻辑测不到，而优先级错了
+ * 表现只是「人格不对」，没有任何报错。
+ */
+export function pickPersonaId({ persona = {}, chatId = '', senderId = '', runtimePick = '' } = {}) {
+  if (runtimePick) return String(runtimePick);
+  const bySender = persona?.bySender && typeof persona.bySender === 'object' ? persona.bySender : {};
+  const one = senderId ? bySender[senderId] : '';
+  if (one) return String(one);
+  const byChat = persona?.byChat && typeof persona.byChat === 'object' ? persona.byChat : {};
+  return String(byChat[chatId] || persona?.current || 'default');
+}
+
 export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
   const dir = () => join(dataDir, 'personas');
 

@@ -71,7 +71,7 @@ import { isDangerousCommand, createConfirmGate, dangerScanArgs } from './safety.
 import { createClosing, shouldNotePending } from './closing.js';
 import { createAccount } from './account.js';
 import { createRewriter } from './rewrite.js';
-import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand, trimPersonaBody, trimDemos, dupGroups } from './personas.js';
+import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand, trimPersonaBody, trimDemos, dupGroups, pickPersonaId } from './personas.js';
 import { createPersonaRepo, scanPersona } from './persona-repo.js';
 import { createUpdater, changelogSection } from './update.js';
 import { createDepsCheck } from './deps.js';
@@ -817,7 +817,7 @@ export function apply(ctx) {
     }
   }
 
-  /** 删掉人格后，把 byChat 里指向它的项清掉——不清就持续制造失效引用 */
+  /** 删掉人格后，把 byChat / bySender 里指向它的项清掉——不清就持续制造失效引用 */
   function clearByChatRefs(ids) {
     const gone = new Set(ids || []);
     if (!gone.size) return;
@@ -825,6 +825,10 @@ export function apply(ctx) {
     let changed = false;
     for (const [chatId, pid] of Object.entries(next.persona.byChat || {})) {
       if (gone.has(pid)) { delete next.persona.byChat[chatId]; changed = true; }
+    }
+    /** 按人那层同样要清：留着就是「这个人永远指向一个不存在的人格」 */
+    for (const [sid, pid] of Object.entries(next.persona.bySender || {})) {
+      if (gone.has(pid)) { delete next.persona.bySender[sid]; changed = true; }
     }
     if (changed) cfg = saveConfig(next);
   }
@@ -1727,6 +1731,11 @@ export function apply(ctx) {
      * 传 getter 而不是值：面板改完配置不该要求重启进程。
      */
     ssrf: () => cfg.security?.ssrf,
+    /** 市场数据源：面板上换源立刻生效，不要求重启进程 */
+    marketCfg: () => ({
+      source: cfg.extensions?.marketSource,
+      indexUrl: cfg.extensions?.indexUrl,
+    }),
   });
   const extPanel = createExtPanel({
     dir: dataDir(), registry: extRegistry, clientStore: extClientStore,
@@ -2210,7 +2219,19 @@ export function apply(ctx) {
     loadDiskCfg: () => loadConfig(),
     saveCfg: (next) => (cfg = saveConfig(next)),
     clearRefs: (ids) => clearByChatRefs(ids),
-    onSwitched: ({ id, chatId, label }) => {
+    onSwitched: ({ id, chatId, senderId, label }) => {
+      /**
+       * 三种作用域，提示也要分开：
+       *   · 按人（`senderId`）→ **不注入提示**。提示是按会话投递的，没有
+       *     「只给这个人」的通道；塞进 `switchNote` 会让**所有会话**下一轮都
+       *     看到「说话方式刚换了」，而实际只有那个人变了。
+       *   · 按会话（`chatId`）→ 那个会话的下一轮一句提示。
+       *   · 全局 → 全局提示。
+       */
+      if (senderId) {
+        addLog('info', 'persona', `扩展给 ${String(senderId).slice(0, 8)}… 指定了专属人格 ${id}`);
+        return;
+      }
       if (chatId) {
         keywordPick.delete(chatId);
         keywordNote.set(chatId, `说话方式刚换成「${label}」，从这一轮起按新的来，别延续之前的语气。`);
@@ -2450,6 +2471,18 @@ export function apply(ctx) {
   /** 这一轮要注入的「刚切了人格」提示；轮末清掉 */
   /** 关键词切人格的当轮提示：chatId → 提示。**不能是单变量**，两个群并发会串台 */
   const keywordNote = new Map();
+  /**
+   * 这一轮说话人的档位：chatId → bucket。
+   *
+   * 为什么要在外面存一份：`<<say>>` 的语音额度要按档位给（主人的额度更松，
+   * 见 `quota` 的 `byBucket`），但档位是在 `handleTurn` 里由 `bucketOf(payload)`
+   * 算出来的，而出站那一层的 `send` 只看得到**原始事件**（`batch.msg`，
+   * 里面没有 bucket 字段）。存一份现成的比在出站层重算一遍便宜，也不会
+   * 因为重算口径不同而分叉。
+   *
+   * 只增不删会一直长：按 `PERSONA_MAP_MAX` 同样上限做淘汰。
+   */
+  const turnBucket = new Map();
 
   /**
    * 面板换人格后的一次性提示。
@@ -2464,7 +2497,20 @@ export function apply(ctx) {
 
   /** 合并「关键词临时人格」后的 persona 配置，给 resolve 用 */
   function personaCfgFor(chat) {
-    const picked = keywordPick.get(chat.chatId);
+    /**
+     * 四层优先级收在 `pickPersonaId()` 里（`personas.js`，纯函数、可单测）：
+     * 当轮 `<<persona:>>` > 按人 > 按会话 > 全局 current。
+     *
+     * 这里只做一件事：把结果塞回 `byChat[chatId]`，`personas.resolve()`
+     * 不用知道上面有几层——它只看 `byChat[chatId]`。
+     */
+    const picked = pickPersonaId({
+      persona: cfg.persona,
+      chatId: chat.chatId,
+      /** 发送者 openid（不是 chatId）：群里 chatId 是群 openid，查不到按人那层 */
+      senderId: chat.senderId,
+      runtimePick: keywordPick.get(chat.chatId) || '',
+    });
     if (!picked) return cfg.persona;
     return { ...cfg.persona, byChat: { ...(cfg.persona?.byChat || {}), [chat.chatId]: picked } };
   }
@@ -3495,6 +3541,12 @@ export function apply(ctx) {
        * 于是退回 `id || target` —— 「按人算」静默变成「按会话算」，不报任何错。
        */
       senderId: String(last?.sender?.openid ?? ''),
+      /**
+       * 说话人的档位：`quota.voice.byBucket` 靠它给主人更松的额度。
+       * 由 `handleTurn` 算好存进 `turnBucket`（出站层拿不到 payload）。
+       * 拿不到就是空串 → 走默认额度，不会误给高配额。
+       */
+      bucket: turnBucket.get(chatId) || '',
       /** 真的发出去了才记：没发出去也记的话，冷却会把下一句白吃掉 */
       onSent: () => roostDecider.noteReplied(chatId),
       /** `<<quote:>>` 留空时的兜底索引；不写标记时完全用不到 */
@@ -5560,6 +5612,11 @@ export function apply(ctx) {
     /** 这一句是谁说的、他能让 AI 干到什么程度 */
     const bucket = bucketOf(payload);
     lastBucket = bucket;
+    /** 给「按档位配额」用：出站那一层只拿得到原始事件，没有 bucket 字段 */
+    turnBucket.set(chat.chatId, bucket);
+    if (turnBucket.size > PERSONA_MAP_MAX) {
+      turnBucket.delete(turnBucket.keys().next().value);
+    }
     let sid = '';
     let restore = null;
     /**
@@ -6981,12 +7038,18 @@ export function apply(ctx) {
                  * 权限确认。面板的「强制重装」二次确认后才带，别让误点变成重装。
                  */
                 ...(arg?.force === true ? { force: true } : {}),
+                /**
+                 * 「用官方版替换手写目录」：面板二次确认后才带。市场那边会先
+                 * 把原目录整份备份到 `data/backups/`，备份失败就中止。
+                 */
+                ...(arg?.takeOver === true ? { takeOver: true } : {}),
                 ...(arg?.confirmTier !== undefined ? { confirmTier: arg.confirmTier } : {}),
               });
               return send(res, r.ok ? 200 : 400, r);
             }
             case 'extensions.market.remove': {
-              const r = extMarket.remove(arg?.id);
+              /** 手写目录要 `force`（市场会先整目录备份再删），面板二次确认后带 */
+              const r = extMarket.remove(arg?.id, { force: arg?.force === true });
               return send(res, r.ok ? 200 : 400, r);
             }
             case 'extensions.market.updates': {
@@ -6995,6 +7058,36 @@ export function apply(ctx) {
             case 'extensions.market.revoke': {
               const r = extMarket.revoke(arg?.id, { reason: arg?.reason });
               return send(res, r.ok ? 200 : 400, r);
+            }
+            /**
+             * 市场数据源：`github` / `gitee` / `custom`。
+             *
+             * 不带 `set` 就是读当前生效值；带 `set:true` 写进配置。保存走
+             * `applyConfigBody()`——和面板 `/config` 同一条路径，冲突检测、
+             * 掩码回填、热生效都在那一份里，别在这儿另写一遍。
+             */
+            case 'extensions.market.source': {
+              if (arg?.set !== true) return send(res, 200, extMarket.sourceInfo());
+              const want = String(arg?.source ?? '').trim();
+              if (!extMarket.sourceInfo().sources.includes(want)) {
+                return send(res, 400, {
+                  ok: false,
+                  message: `数据源只能是 ${extMarket.sourceInfo().sources.join(' / ')}`,
+                });
+              }
+              const indexUrl = String(arg?.indexUrl ?? '').trim();
+              if (want === 'custom' && !/^https?:\/\//i.test(indexUrl)) {
+                return send(res, 400, { ok: false, message: '自建源要给一个 http(s) 索引地址' });
+              }
+              /**
+               * 预设源**不覆盖** `indexUrl`：用户之前填的自建地址要留着，
+               * 否则切回「自定义」得重填一遍。
+               */
+              const patchExt = want === 'custom'
+                ? { marketSource: want, indexUrl }
+                : { marketSource: want };
+              const out = applyConfigBody({ extensions: patchExt }, {});
+              return send(res, out.status, out.body);
             }
 
             /**
@@ -10752,6 +10845,14 @@ export function apply(ctx) {
           personas: list,
           current: cfg.persona?.current || 'default',
           byChat: cfg.persona?.byChat || {},
+          /**
+           * 按人指定的人格（单人专属人设）。
+           *
+           * 必须跟着 `/personas` 一起回：面板那一节渲染的就是它，而 `reload()`
+           * 只重拉 `/personas`（不重拉 `/config`）。少了这个字段，用户点完
+           * 「指定」会看到 toast 说成功、列表却纹丝不动。
+           */
+          bySender: cfg.persona?.bySender || {},
           /** 她的名字（全局）：面板顶部直接用，不用再拉一次 /config */
           globalName: globalName(),
           /** 用过几次：面板列表上显示，帮用户删掉从没用过的 */
@@ -10808,6 +10909,48 @@ export function apply(ctx) {
        * 用它删 byChat 的键删不掉（旧键会从磁盘补回来）。整份写下去才是准的。
        * `cfg` 本身就是完整配置，不存在「冲掉别的段」的问题。
        */
+      /**
+       * 按人指定人格（单人专属人设）。
+       *
+       * `{ senderId, id }`：`id` 为空 = 移除这一格。
+       *
+       * 为什么单独一条路由而不是走 `/config` 的 patch：`patchConfig` 对对象是
+       * **深合并**，`{ persona: { bySender: {} } }` 删不掉任何一个键——用户点了
+       * 「移除」会看到「成功」但配置没变。这里整份读、改、写，和 `/personas/use`
+       * 同一套口径（基线取磁盘，不用内存快照）。
+       */
+      route('/personas/by-sender', async (req, res) => {
+        const b = await readBody(req);
+        const senderId = String(b.senderId ?? '').trim();
+        const id = String(b.id ?? '').trim();
+        if (!senderId) return send(res, 400, { ok: false, message: '缺 senderId（发送者 openid，不是群号）' });
+        /** 会被当对象键写进配置，原型污染三个名字一律拒 */
+        if (senderId === '__proto__' || senderId === 'constructor' || senderId === 'prototype') {
+          return send(res, 400, { ok: false, message: 'senderId 不合法' });
+        }
+        if (senderId.length > 128) {
+          return send(res, 400, { ok: false, message: 'senderId 太长了（上限 128 字符）' });
+        }
+        if (id && !personas.list().some((p) => p.id === id)) {
+          return send(res, 404, { ok: false, message: `没有「${id}」这个人格` });
+        }
+
+        const next = structuredClone(loadConfig());
+        next.persona = next.persona && typeof next.persona === 'object' ? next.persona : {};
+        next.persona.bySender = next.persona.bySender && typeof next.persona.bySender === 'object'
+          ? { ...next.persona.bySender }
+          : {};
+        if (id) next.persona.bySender[senderId] = id;
+        else delete next.persona.bySender[senderId];
+
+        cfg = saveConfig(next);
+        return send(res, 200, {
+          ok: true,
+          message: id ? '已指定' : '已移除',
+          bySender: { ...(cfg.persona?.bySender || {}) },
+        });
+      }),
+
       route('/personas/use', async (req, res) => {
         const b = await readBody(req);
         const id = String(b.id || '').trim();

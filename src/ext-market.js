@@ -33,7 +33,9 @@ function readJson(file) {
 }
 
 export const EXT_KIND = 'dsh-extension';
-export const DEFAULT_EXT_INDEX_URL = 'https://raw.githubusercontent.com/tdcq9594/qq-bot-roost-plugins/main/index.json';
+/** 官方插件仓。镜像（Gitee）是同一份仓库，所以 slug 两边通用 */
+export const DEFAULT_EXT_REPO = 'tdcq9594/qq-bot-roost-plugins';
+export const DEFAULT_EXT_INDEX_URL = `https://raw.githubusercontent.com/${DEFAULT_EXT_REPO}/main/index.json`;
 
 function isLoopbackHost(host) {
   const h = String(host ?? '').replace(/^\[|\]$/g, '');
@@ -42,14 +44,25 @@ function isLoopbackHost(host) {
 
 /**
  * 索引地址白名单。`file://` 会让本地文件变成「远程索引」，内网 http 可被
- * 中间人替换成任意 `command` —— 两者都拒。本机回环留给测试与自建镜像。
+ * 中间人替换成任意 `command` —— 默认两者都拒。本机回环留给测试与自建镜像。
+ *
+ * **内网 http 镜像要显式放行**（`allowPrivate`，来自 `security.ssrf.allowPrivate`）：
+ * 自建镜像多半是 `http://192.168.x.x/index.json`，一路 https 强求等于把这个
+ * 用法堵死。放行之后**运行期仍由 `ssrf.js` 逐 IP 校验**（`marketGuardOpts`
+ * 已经把 allowPrivate 传下去了），所以这里只是「静态白名单」这一层松口，
+ * 不是把 SSRF 防护整个关掉。
+ *
+ * @param {string} raw
+ * @param {{allowPrivate?:boolean}} [o]
  */
-export function assertSafeIndexUrl(raw) {
+export function assertSafeIndexUrl(raw, { allowPrivate = false } = {}) {
   let u;
   try { u = new URL(String(raw)); } catch { throw new Error('索引地址不是合法 URL'); }
   if (u.protocol === 'https:') return u.href;
-  if (u.protocol === 'http:' && isLoopbackHost(u.hostname)) return u.href;
-  throw new Error('索引地址必须是 https（或本机回环 http）');
+  if (u.protocol !== 'http:') throw new Error('索引地址必须是 http(s)');
+  if (isLoopbackHost(u.hostname)) return u.href;
+  if (allowPrivate) return u.href;
+  throw new Error('索引地址必须是 https（或本机回环 http）；要用内网 http 镜像，先在「安全 → 网络访问」里打开「允许访问内网」');
 }
 
 /**
@@ -79,12 +92,41 @@ export function isRevoked(index, entry) {
   return false;
 }
 
-function tarballUrl(repo, branch = 'main') {
-  return `https://codeload.github.com/${repo}/tar.gz/refs/heads/${encodeURIComponent(branch)}`;
+/**
+ * 索引与分发包的**来源**。
+ *
+ * 为什么要有这个：`raw.githubusercontent.com` 与 `codeload.github.com` 在国内
+ * 经常被重置（面板报「连接被重置」），而市场读的就是这两个域名。我们自己一直在
+ * 同步 Gitee 镜像，同一个 `index.json` 两边字节数完全一致（实测 14981），
+ * 归档结构也一样是「单层顶层目录」——所以换源只是换两个 URL，不用改下载逻辑。
+ *
+ *   · `github` 默认，官方源
+ *   · `gitee`  镜像源（同一份仓库，`raw` 会 302 到 `raw.giteeusercontent.com`）
+ *   · `custom` 自建镜像 / 内网源，地址由用户填（仍要过 `assertSafeIndexUrl`）
+ */
+export const MARKET_SOURCES = ['github', 'gitee', 'custom'];
+
+/** 仓库 slug（`owner/repo`）与分支 → 索引地址 */
+export function indexUrlFor({ source = 'github', indexUrl = '', repo = '', branch = 'main' } = {}) {
+  const src = MARKET_SOURCES.includes(source) ? source : 'github';
+  if (src === 'custom') return String(indexUrl ?? '').trim();
+  if (!repo) return DEFAULT_EXT_INDEX_URL;
+  const ref = encodeURIComponent(branch || 'main');
+  return src === 'gitee'
+    ? `https://gitee.com/${repo}/raw/${ref}/index.json`
+    : `https://raw.githubusercontent.com/${repo}/${ref}/index.json`;
+}
+
+/** 仓库 slug 与分支 → 整仓归档地址（两边都是「单层顶层目录」的 tar.gz） */
+function tarballUrl(repo, branch = 'main', source = 'github') {
+  const ref = encodeURIComponent(branch || 'main');
+  return source === 'gitee'
+    ? `https://gitee.com/${repo}/repository/archive/${ref}.tar.gz`
+    : `https://codeload.github.com/${repo}/tar.gz/refs/heads/${ref}`;
 }
 
 /** 允许的分发包主机：与索引一样属于供应链入口，不能放开到任意 https。 */
-const TARBALL_HOSTS = new Set(['codeload.github.com', 'github.com', 'objects.githubusercontent.com']);
+const TARBALL_HOSTS = new Set(['codeload.github.com', 'github.com', 'objects.githubusercontent.com', 'gitee.com']);
 
 /**
  * 代码里写死、不归攻击者控制的供应链主机。它们的 DNS 结果**不参与**
@@ -100,7 +142,9 @@ const TARBALL_HOSTS = new Set(['codeload.github.com', 'github.com', 'objects.git
  * 官方实现（openclaw 的 `ssrf-guard.ts`）也是同样的取舍：QQ 官方域名白名单免解析。
  */
 const TRUSTED_HOSTS = ['raw.githubusercontent.com', 'github.com', 'codeload.github.com',
-  'objects.githubusercontent.com'];
+  'objects.githubusercontent.com',
+  /** Gitee 镜像：`raw` 会 302 到 `raw.giteeusercontent.com`，两个都要认 */
+  'gitee.com', 'raw.giteeusercontent.com'];
 
 /**
  * 把 `config.security.ssrf` 翻成 `assertSafeUrl` 的选项。
@@ -234,8 +278,8 @@ export function formatBytes(n) {
 }
 
 /** 默认下载：GitHub codeload 的 tar.gz → 剥顶层 → 取 `entry.path` 子树 → 安全落盘。 */
-async function defaultDownload(entry, dest, { repo, branch, guard = {}, onProgress = null } = {}) {
-  const raw = entry.tarball || (repo ? tarballUrl(repo, branch) : '');
+async function defaultDownload(entry, dest, { repo, branch, source = 'github', guard = {}, onProgress = null } = {}) {
+  const raw = entry.tarball || (repo ? tarballUrl(repo, branch, source) : '');
   if (!raw) throw new Error('索引条目缺 tarball，且索引里没有 repo 可拼下载地址');
   const url = assertSafeTarballUrl(raw);
   /**
@@ -304,6 +348,12 @@ async function defaultDownload(entry, dest, { repo, branch, guard = {}, onProgre
 export function createExtMarket({
   dir = dataDir(),
   indexUrl = DEFAULT_EXT_INDEX_URL,
+  /**
+   * 数据源：`{ source: 'github' | 'gitee' | 'custom', indexUrl: '自建地址' }`。
+   * 传 getter 而不是值——面板上换源不该要求重启进程。
+   * 显式传了 `indexUrl` 参数（测试 / 内嵌）时以那个为准。
+   */
+  marketCfg = () => ({}),
   /** `null` = 用默认实现（带 SSRF 校验）；注入自定义实现时校验由调用方负责 */
   fetchText = null,
   download = null,
@@ -344,7 +394,34 @@ export function createExtMarket({
   }
   const readSsrf = typeof ssrf === 'function' ? ssrf : () => ssrf;
   /** 每次出站都重算：面板改了白名单不该要求重启进程 */
-  const guardNow = () => marketGuardOpts(readSsrf(), indexUrl);
+  /**
+   * 当前数据源。每次调用现读配置：面板上换源立刻生效，不用重启。
+   * 显式传了 `indexUrl` 参数（测试 / 内嵌）时那个说了算，不受 source 影响。
+   */
+  const sourceNow = () => {
+    const s = String(marketCfg()?.source ?? '').trim();
+    return MARKET_SOURCES.includes(s) ? s : 'github';
+  };
+  const indexUrlNow = () => {
+    if (indexUrl && indexUrl !== DEFAULT_EXT_INDEX_URL) return indexUrl;
+    return indexUrlFor({
+      source: sourceNow(),
+      indexUrl: marketCfg()?.indexUrl,
+      repo: DEFAULT_EXT_REPO,
+      branch: 'main',
+    }) || DEFAULT_EXT_INDEX_URL;
+  };
+  /** 面板用：当前生效的是哪一源、解析出的地址是什么 */
+  const sourceInfo = () => ({
+    ok: true,
+    source: sourceNow(),
+    sources: MARKET_SOURCES,
+    indexUrl: indexUrlNow(),
+    /** 自建源才有意义；预设源这里是空串，面板据此决定要不要显示输入框 */
+    customUrl: String(marketCfg()?.indexUrl ?? ''),
+  });
+
+  const guardNow = () => marketGuardOpts(readSsrf(), indexUrlNow());
   const fetchIndex = fetchText ?? ((url) => defaultFetchText(url, guardNow()));
   const downloadPkg = download
     ?? ((entry, dest, opts) => defaultDownload(entry, dest, { ...opts, guard: guardNow() }));
@@ -375,7 +452,7 @@ export function createExtMarket({
   async function index({ refresh = false } = {}) {
     const t = now();
     if (!refresh && cache && t - cache.at < ttlMs) return cache.value;
-    const url = assertSafeIndexUrl(indexUrl);
+    const url = assertSafeIndexUrl(indexUrlNow(), { allowPrivate: readSsrf()?.allowPrivate === true });
     const text = await fetchIndex(url);
     if (typeof verifyIndex === 'function') {
       const v = await verifyIndex({ url, text });
@@ -458,10 +535,10 @@ export function createExtMarket({
    * HMR 在真机 desktop 上没有实测保证，假设它生效会在目录还被占着时继续
    * 往下走。`registry.install()` 失败自带回滚（原目录不动），所以重试安全。
    */
-  async function installWithBusyRetry(staging, source, key, { intervalMs = 200 } = {}) {
+  async function installWithBusyRetry(staging, source, key, { intervalMs = 200, takeOver = false } = {}) {
     const deadline = now() + pauseTimeoutMs;
     for (;;) {
-      const r = registry.install(staging, { source });
+      const r = registry.install(staging, { source, takeOver });
       if (r.ok) return r;
       const busy = r.code === 'EBUSY' || r.code === 'EPERM' || r.code === 'EACCES';
       if (!busy) return r;
@@ -503,7 +580,31 @@ export function createExtMarket({
     }
   }
 
-  async function installInner(id, { confirmScopes = false, confirmTier, force = false } = {}) {
+  /**
+   * 覆盖 / 删除「用户手写」目录之前**整目录备份**。
+   *
+   * 为什么必须备份：那类目录里的东西不是我们装的，可能是人家手写的代码，
+   * 也可能是运行时数据（`imagegen` 的 `gallery.json` 就是画作库索引）。
+   * 删了/覆盖了就真没了。
+   *
+   * 放在 `data/backups/ext-<id>-<时间>/`：和 `data/` 其它东西同级，
+   * 用户找得到、也不受扩展目录清理影响。备份失败**一律中止**，宁可这次
+   * 操作不做，也不要在没有退路的情况下覆盖。
+   */
+  function backupForeign(id) {
+    const src = registry.pathOf(id);
+    if (!fs.existsSync(src)) return '';
+    const root = join(dir, 'backups');
+    const d = new Date(now());
+    const p2 = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+    const dest = join(root, `ext-${id}-${stamp}`);
+    fs.mkdirSync(root, { recursive: true });
+    fs.cpSync(src, dest, { recursive: true });
+    return dest;
+  }
+
+  async function installInner(id, { confirmScopes = false, confirmTier, force = false, takeOver = false } = {}) {
     const key = String(id ?? '');
     if (!EXT_ID_RE.test(key)) return { ok: false, reason: 'bad_id', message: '扩展 id 不合法' };
 
@@ -520,7 +621,20 @@ export function createExtMarket({
      * 覆盖用户文件的后门）。要接管就由用户自己删目录，那是他看得见的动作。
      */
     if (registry.isForeign(key)) {
-      return { ok: false, reason: 'foreign', message: `${key} 是用户手写的扩展，拒绝覆盖；要接管请先手动删掉该目录` };
+      /**
+       * 用户手写目录默认拒。带 `takeOver` 才放行，而且**先整目录备份**。
+       *
+       * 为什么改口（原注释写的是「一律拒，不给 force 后门」）：判据只看有没有
+       * `.source.json`，而整目录拷进来（或手工解压）的**官方扩展**同样没有那个
+       * 文件——用户会看到「有卸载按钮却没有、也换不成官方版」。真正的风险是
+       * 覆盖掉用户手写的东西，那个风险靠**备份 + 面板二次确认**兜，不靠让人
+       * 自己去文件管理器删目录（那才是最容易误删的动作）。
+       */
+      if (!takeOver) {
+        return { ok: false, reason: 'foreign', message: `${key} 是用户手写的扩展，拒绝覆盖；要替换成官方版请确认后用 takeOver（会先备份）` };
+      }
+      try { backupForeign(key); }
+      catch (e) { return { ok: false, reason: 'backup_failed', message: `备份失败，没有覆盖：${e?.message ?? e}` }; }
     }
     /**
      * 已是最新版就直接收工。以前「重装」会把整仓 tar.gz 再下一遍、重新落位、
@@ -565,6 +679,8 @@ export function createExtMarket({
       await downloadPkg(entry, staging, {
         repo: idx.repo,
         branch: idx.branch ?? 'main',
+        /** 换源：Gitee 镜像的归档地址与 codeload 不同，但结构一样（单层顶层目录） */
+        source: sourceNow(),
         /** 按字节回报，进度条不再几十秒一动不动像卡死 */
         onProgress: (got, total) => setPhase('download',
           `已下载 ${formatBytes(got)}${total ? ` / ${formatBytes(total)}` : ''}`, key),
@@ -630,7 +746,7 @@ export function createExtMarket({
         sha256: entry.sha256 ?? '',
         installedAt: now(),
       };
-      const r = await installWithBusyRetry(staging, source, key);
+      const r = await installWithBusyRetry(staging, source, key, { takeOver });
       if (!r.ok) {
         if (r.reason === 'ext_busy') return { ok: false, reason: r.reason, message: r.message, warnings };
         throw new Error(r.reason || '落位失败');
@@ -692,7 +808,7 @@ export function createExtMarket({
     return extPatch.render(ids, { apply: true });
   }
 
-  function remove(id) {
+  function remove(id, { force = false } = {}) {
     const key = String(id ?? '');
     if (!EXT_ID_RE.test(key)) return { ok: false, reason: 'bad_id', message: '扩展 id 不合法' };
     /**
@@ -702,9 +818,24 @@ export function createExtMarket({
     if (running.has(key)) {
       return { ok: false, reason: 'busy', message: `「${key}」正在安装，等这一轮跑完再卸载` };
     }
+    /**
+     * 手写目录：**先备份再删**。不备份就直接删，等于让「点错一下」变成
+     * 不可恢复的丢代码。
+     */
+    let backup = '';
+    if (registry.isForeign(key)) {
+      if (!force) {
+        return {
+          ok: false, reason: 'foreign',
+          message: `${key} 是用户手写的扩展；确认要删就带 force（会先备份到 data/backups/）`,
+        };
+      }
+      try { backup = backupForeign(key); }
+      catch (e) { return { ok: false, reason: 'backup_failed', message: `备份失败，没有删除：${e?.message ?? e}` }; }
+    }
     running.add(key);
     try {
-      const r = registry.remove(key);
+      const r = registry.remove(key, { force });
       if (!r.ok) return r;
       const warnings = [];
       if (extGroups) {
@@ -713,7 +844,7 @@ export function createExtMarket({
       }
       try { syncBlock(); }
       catch (e) { warnings.push(`受管块未同步：${e?.message ?? e}`); }
-      return { ok: true, id: key, warnings, message: warnings.length ? `已卸载，但有 ${warnings.length} 项没清干净` : '已卸载' };
+      return { ok: true, id: key, warnings, backup, message: warnings.length ? `已卸载，但有 ${warnings.length} 项没清干净` : (backup ? `已卸载（原目录备份在 ${backup}）` : '已卸载') };
     } finally {
       running.delete(key);
     }
@@ -769,7 +900,8 @@ export function createExtMarket({
   function clearCache() { cache = null; }
 
   return {
-    dir, tmpRoot, indexUrl, index, list, install, progress,
+    dir, tmpRoot, indexUrl: indexUrlNow(), index, list, install, progress,
+    sourceInfo,
     remove, detectUpdates, revoke, syncBlock, clearCache,
   };
 }

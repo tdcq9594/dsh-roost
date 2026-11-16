@@ -383,7 +383,19 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
    * `source` 传对象表示「市场装的」，会写 `.source.json`；不传表示用户手写目录，
    * 之后 foreign 保护会拒绝任何覆盖它的安装。
    */
-  function install(srcDir, { source = null } = {}) {
+  /**
+   * 安装 / 更新。
+   *
+   * `takeOver` 放行「用户手写」目录的覆盖：判据只看有没有 `.source.json`，
+   * 整目录拷进来的官方扩展同样没有那个文件，于是既不能更新也不能卸载。
+   * 默认仍然拒；调用方（市场）必须先**备份整个目录**再带这个参数，
+   * 面板上还要二次确认——「看得见的动作」这条原则靠备份 + 确认来满足，
+   * 而不是靠「让你自己去文件管理器删」。
+   *
+   * @param {string} srcDir
+   * @param {{source?:object|null, takeOver?:boolean}} [o]
+   */
+  function install(srcDir, { source = null, takeOver = false } = {}) {
     const from = resolve(srcDir);
     const v = validateManifest(readJson(join(from, MANIFEST_FILE)), { expectedId: basename(from) });
     if (!v.ok) return { ok: false, reason: v.errors.join('；') };
@@ -393,8 +405,8 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
     // §8.3：没有 `.source.json` 的目录是用户手写的，**只读、绝不覆盖**。
     // 这里不给 force 口子 —— 面板一旦能给，就等于给市场安装开了覆盖用户
     // 文件的后门。要接管就由用户自己先删目录，那是他看得见的动作。
-    if (exists(dest) && isForeign(id)) {
-      return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝覆盖（foreign 保护）` };
+    if (exists(dest) && isForeign(id) && !takeOver) {
+      return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝覆盖（foreign 保护；确认要替换就带 takeOver）` };
     }
 
     fs.mkdirSync(root, { recursive: true });
@@ -496,11 +508,23 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
   }
 
   /** 卸载：用户手写目录面板不能卸（§8.3），只有市场装的可卸。 */
-  function remove(id) {
+  /**
+   * 卸载。
+   *
+   * `force` 放行「用户手写」的目录：判据只看有没有 `.source.json`，而整目录
+   * 拷进来（或手工放进来的）官方扩展同样没有那个文件 —— 用户会看到「有卸载
+   * 按钮但没有、也删不掉」。默认仍然拒（防误删），面板二次确认后带 `force`。
+   *
+   * @param {string} id
+   * @param {{force?:boolean}} [o]
+   */
+  function remove(id, { force = false } = {}) {
     if (!EXT_ID_RE.test(id)) return { ok: false, reason: 'id 不合法' };
     const dest = pathOf(id);
     if (!exists(dest)) return { ok: false, reason: `扩展 ${id} 不存在` };
-    if (isForeign(id)) return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝卸载` };
+    if (isForeign(id) && !force) {
+      return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝卸载（确认要删就带 force）` };
+    }
     rmrf(dest);
     /**
      * 删完要**回读确认**：扩展进程的 cwd 就在这个目录里，Windows 上句柄没退
@@ -607,6 +631,24 @@ export function createClientStore({ dir = dataDir(), log = () => {} } = {}) {
         if (cb.length === hb.length && timingSafeEqual(cb, hb)) return c;
       }
       log.warn?.('ext.auth_failed：令牌未在 api.clients 命中');
+      return null;
+    },
+    /**
+     * 调试用：**含已停用**的客户端里找这个令牌。
+     *
+     * `verify()` 会跳过 `enabled:false`，于是「面板上把扩展停了、DSH 里的进程
+     * 还在跑」这种情况只能报一句「令牌无效或已吊销」——用户照这句话去查令牌，
+     * 而令牌其实是好的。这个方法让调用方能说出「是 X 被停用了」。
+     *
+     * 只给宿主自己用，**不参与鉴权判定**（返回值照样不放行）。
+     */
+    matchAny(token) {
+      if (typeof token !== 'string' || !token) return null;
+      const hb = Buffer.from(sha256(token), 'utf8');
+      for (const c of readAll()) {
+        const cb = Buffer.from(String(c.hash ?? ''), 'utf8');
+        if (cb.length === hb.length && timingSafeEqual(cb, hb)) return c;
+      }
       return null;
     },
   };

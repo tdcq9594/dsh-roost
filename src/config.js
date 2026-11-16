@@ -506,6 +506,23 @@ export const DEFAULTS = {
   /** 用户扩展总闸（F）：一期 HTTP/独立进程，默认关；目录 extensions/ 不受升级覆盖 */
   extensions: {
     enabled: false,
+    /**
+     * 市场数据源：`github` / `gitee` / `custom`。
+     *
+     * 默认 `github`（官方源）。国内访问 `raw.githubusercontent.com` 与
+     * `codeload.github.com` 经常被重置，面板会报「连接被重置」——那台机器
+     * 换成 `gitee` 就能用（同一份仓库的镜像，索引字节数实测完全一致）。
+     * `custom` 给自建镜像 / 内网源用，地址填在 `indexUrl`。
+     */
+    marketSource: 'github',
+    /**
+     * `custom` 时用的索引地址；预设源忽略这一项。
+     *
+     * 要 https（或本机回环 http）。**内网 http 镜像**（`http://192.168.x.x/…`）
+     * 需要先在「安全 → 网络访问」里打开 `security.ssrf.allowPrivate`——
+     * 放行之后运行期仍由 SSRF 防护逐 IP 校验，不是把防护整个关掉。
+     */
+    indexUrl: '',
   },
   /**
    * 对话收尾：**她也会把话说完，然后退场**。
@@ -974,6 +991,15 @@ export const DEFAULTS = {
     current: 'default',
     /** 按会话指定：{ "群openid": "personaId" }，留空就用 current */
     byChat: {},
+    /**
+     * 按**人**指定：{ "发送者openid": "personaId" }。
+     *
+     * 优先级高于 byChat：同一个人在群里和私聊里都用他专属那一套。
+     * 为什么单独一层而不是往 byChat 里塞 "u:" 前缀：两类键会混在一起，
+     * 删人格时的 clearRefs 之类的遍历要不停地区分前缀，迟早出错。
+     * **必须写在这里**，否则 pruneTo() 会把整层静默裁掉。
+     */
+    bySender: {},
     scope: {
       /**
        * 4.5 人格隔离总开关，默认关（升级前后行为逐字一致）。

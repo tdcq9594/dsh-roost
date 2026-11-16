@@ -337,11 +337,32 @@ export function createApiV1({
     const token = bearerOf(req);
     const client = token ? store.verify(token) : null;
     if (!client || client.enabled === false) {
-      // 缺值 / 失效：不是静默失联，审计里留一条，面板据此显示「扩展鉴权失败」。
+      /**
+       * 缺值 / 失效：不是静默失联，审计里留一条，面板据此显示「扩展鉴权失败」。
+       *
+       * **note 里要带上是谁**。以前只记端点（`GET /v1/state`），面板于是只能
+       * 说一句「检查令牌是否被吊销或凭据缺失」——用户照着去查令牌，而令牌
+       * 往往是好的。三种情况分开记：
+       *   1. 没带令牌 → `no-token`
+       *   2. 令牌是这个扩展的、但客户端记录被停用了（面板上「停用」过，
+       *      DSH 里的进程还在跑）→ `disabled ext:<id>`
+       *   3. 令牌完全对不上（备份还原丢了 secrets / 手动改坏 / 旧令牌）
+       *      → `unknown-token`
+       */
+      const known = token ? store.matchAny?.(token) : null;
+      const who = !token ? 'no-token'
+        : known ? `disabled ${known.extId ? `ext:${known.extId}` : known.id}`
+          : 'unknown-token';
       note('auth_failed', key);
-      try { auditFn({ op: 'ext.auth_failed', note: key.slice(0, 40) }); } catch { /* 同上 */ }
+      try { auditFn({ op: 'ext.auth_failed', note: `${key.slice(0, 40)} | ${who}`.slice(0, 80) }); } catch { /* 同上 */ }
       reject({ tool: key, bucket: 'unknown', rule: 'Bearer 令牌无效或已吊销（401）' });
-      return send(401, { ok: false, error: 'unauthorized', message: '客户端令牌无效或已吊销' });
+      return send(401, {
+        ok: false,
+        error: 'unauthorized',
+        message: known
+          ? `这个扩展（${known.extId ? `ext:${known.extId}` : known.id}）已被停用，宿主不再认它的令牌；重新启用后要重启 DSH，扩展才会拿到新令牌`
+          : '客户端令牌无效或已吊销',
+      });
     }
     /**
      * 2026-11-14 全放开：删掉「client.extId 就一律拒绝 agent.* / say」的

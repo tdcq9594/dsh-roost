@@ -1575,3 +1575,44 @@ test('路由：/extensions/ui/data 没 ui / 没数据文件都给具体原因', 
   assert.equal(list.json.pages.some((p) => p.id === 'plain-ext'), false, '没 ui 的不该出现在页面清单里');
   off?.();
 });
+
+/**
+ * 按人指定人格（单人专属人设）。
+ *
+ * 用户需求：「想给单人设置专属人设」。粒度从**会话**换成**发送者**——
+ * 给某个人指定之后，他走到哪个群、私聊里都用那一套。
+ *
+ * 走独立路由而不是 `/config` 的 patch：`patchConfig` 对对象是深合并，
+ * 删不掉一个键，用户点「移除」会看到「成功」但配置没变。
+ */
+test('按人指定人格：设置 / 移除都真的落盘，且不动 byChat 与全局', async () => {
+  const h = await bootHost({
+    server: { token: 'REAL_TOKEN', port: 17321 },
+    persona: { current: 'default', byChat: { 群A: 'snarky' } },
+  });
+  const { call, off } = h;
+  try {
+    const r1 = await h.call('/personas/by-sender', { method: 'POST', body: { senderId: 'u1', id: 'teacher' } });
+    assert.equal(r1.status, 200);
+    assert.equal(r1.json.bySender.u1, 'teacher');
+    assert.equal(r1.json.byChat?.群A, undefined, '这条路由不碰 byChat');
+
+    /** 整份写最大的风险：把 token 冲掉。直接看磁盘 */
+    const disk = JSON.parse(readFileSync(join(h.dir, 'config.json'), 'utf8'));
+    assert.equal(disk.server.token, 'REAL_TOKEN', '指定人格不能把 token 冲掉');
+    assert.equal(disk.persona.bySender.u1, 'teacher');
+    assert.equal(disk.persona.byChat.群A, 'snarky', '按会话那层不能丢');
+    assert.equal(disk.persona.current, 'default', '也不动全局');
+
+    const r2 = await h.call('/personas/by-sender', { method: 'POST', body: { senderId: 'u1', id: '' } });
+    assert.equal(r2.status, 200);
+    const disk2 = JSON.parse(readFileSync(join(h.dir, 'config.json'), 'utf8'));
+    assert.equal(disk2.persona.bySender.u1, undefined, '移除要真的删掉');
+
+    assert.equal((await h.call('/personas/by-sender', { method: 'POST', body: { senderId: 'u1', id: '不存在' } })).status, 404);
+    assert.equal((await h.call('/personas/by-sender', { method: 'POST', body: { senderId: '  ', id: 'teacher' } })).status, 400);
+    assert.equal((await h.call('/personas/by-sender', { method: 'POST', body: { senderId: '__proto__', id: 'teacher' } })).status, 400);
+  } finally {
+    off?.();
+  }
+});

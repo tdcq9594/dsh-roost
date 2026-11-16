@@ -296,3 +296,22 @@ test('配额：语音发出失败要把额度退回去（那次语音没真的�
   await run({ text: '<<say: 一句>>', target: 'g1', senderId: 'u1' });
   assert.equal(undone, 1, '发送失败必须回退配额');
 });
+
+test('配额：按档位给额度（主人那档更松），bucket 要传到 charge', async () => {
+  /**
+   * 面板上「主人单独一套额度」(`quota.voice.byBucket.owner`) 配了却不生效，
+   * 因为出站层拿不到 bucket —— 档位是在 handleTurn 里算的，出站只看得到
+   * 原始事件（没有 bucket 字段）。宿主现在存一份 turnBucket 传进来。
+   */
+  const ch = fakeChannel();
+  const charged = [];
+  const quota = { charge(p) { charged.push(p); return { ok: true }; } };
+  const run = createActionRunner({ channel: () => ch, quota, tts: { synthesize: async () => ({ audio: Buffer.from('x'), contentType: 'audio/mpeg' }) } });
+  await run({ text: '<<say: 一句>>', target: 'g1', senderId: 'u1', bucket: 'owner' });
+  assert.equal(charged[0].bucket, 'owner', '主人那档要能命中 byBucket');
+
+  /** 拿不到档位时是空串 —— 走默认额度，不会误给高配额 */
+  charged.length = 0;
+  await run({ text: '<<say: 又一句>>', target: 'g1', senderId: 'u2' });
+  assert.equal(charged[0].bucket, '');
+});

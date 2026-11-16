@@ -142,7 +142,7 @@
 | POST | `/v1/memory/facts/edit` | `memory:write` | ✅ 可用 | 改一条事实：`{ id, chatId, text?, pin?, tier?, archived? }`；**只能改会话那一层**（全局记忆只读，`memory:write` 是默认 scope，放开就等于谁都能污染所有会话）；**没有硬删**，`archived: true` 是归档（可恢复），理由见模块注释 |
 | POST | `/v1/message` | `message:write` | ✅ 可用 | 把一条消息送进 QQ（复用现有入站链路，不另写一条） |
 | GET | `/v1/mood` | `state:read` | ✅ 可用 | 读当前心情 |
-| GET | `/v1/personas` | `prompt:write` | ✅ 可用 | 列出人格库里有哪些人格、当前用哪个；`?chatId=` 看该会话实际生效的那个（不返回正文） |
+| GET | `/v1/personas` | `prompt:write` | ✅ 可用 | 列出人格库里有哪些人格、当前用哪个；`?chatId=` 看该会话实际生效的那个，`?senderId=`（**发送者 openid**）看**这个人**实际生效的那个（不返回正文） |
 | POST | `/v1/personas/create` | `prompt:write` | ✅ 可用 | 新建一份人格（`id` + 可选 `raw` / `label` / `selfName` / `tags`）；已存在回 409，要覆盖传 `overwrite: true` |
 | GET | `/v1/personas/read` | `prompt:write` | ✅ 可用 | 读一份人格的正文（`?id=`），写回时原样传 `raw` |
 | POST | `/v1/personas/remove` | `prompt:write` | ✅ 可用 | 删除一份人格（必须传 `confirm: true`；默认人格不能删；删前自动备份，删后级联清 `byChat` 里的引用） |
@@ -155,7 +155,7 @@
 | GET | `/v1/self` | `state:read` | ✅ 可用 | 她现在的对外形象（名字 / 签名 / 头像设定）+ 最近 10 条变更历史；不含平台实时状态 |
 | POST | `/v1/self/propose` | `prompt:write` | ✅ 可用 | **提议**改名字 / 签名 / 头像：`{ kind: name / sign / avatar, value }`。响应 `pending:true` = 已发到主人私聊，他点确认按钮才真的改 |
 | POST | `/v1/send` | `message:write` | ✅ 可用 | 扩展直接把文本 / 文件 / 官方图文卡片发进会话，不跑模型；`target` 可填 `owner` 由宿主解析主人，或 `recent` 挑最近说过话且有授权的群 |
-| POST | `/v1/session.configure` | `prompt:write` | ✅ 可用 | 改会话配置（模型、人格、工具开关） |
+| POST | `/v1/session.configure` | `prompt:write` | ✅ 可用 | 切人格 / 设模型 / 清覆盖：`{ chatId?, senderId?, persona?, model?, clear? }`。`chatId` 改**这个会话**，`senderId`（**发送者 openid**）改**这个人**（走到哪都用他那一套，优先级高于会话），都不传才是全局。`model` 只能按会话配，和 `senderId` 一起用会 400 |
 | POST | `/v1/session.ensure` | `session:write` | ✅ 可用 | 确保会话存在 |
 | GET | `/v1/state` | `state:read` | ✅ 可用 | 读机器人与当前会话的状态（在线、绑定、档位） |
 | GET | `/v1/stickers` | `state:read` | ✅ 可用 | 表情库列表（`rel` = `分类/文件名`，**不给绝对路径**）；`?q=&category=&limit=` |

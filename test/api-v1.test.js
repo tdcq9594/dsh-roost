@@ -82,7 +82,21 @@ test('G3-1 401：无 Bearer / 错令牌 / 已禁用客户端，且记 ext.auth_f
   assert.ok(f.audits.some((a) => a.op === 'ext.auth_failed'));
   const c = f.store.get('ext:bili');
   f.store.add({ ...c, enabled: false });
-  assert.equal((await call(f.api, 'GET', '/v1/whoami', { token: f.issued.token })).status, 401);
+  const off = await call(f.api, 'GET', '/v1/whoami', { token: f.issued.token });
+  assert.equal(off.status, 401);
+  /**
+   * 「哪个扩展在 401」要说得出。
+   *
+   * 面板原来只有一句「检查令牌是否被吊销或凭据缺失」——而最常见的真实原因
+   * 是「面板上把扩展停了、DSH 里的进程还在跑」，令牌本身是好的。用户照着
+   * 那句话去查令牌，方向从一开始就是错的。
+   */
+  assert.match(off.body.message, /ext:bili/, '401 消息里要带上扩展 id');
+  assert.match(off.body.message, /停用/, '要说清是被停用，不是令牌坏了');
+  assert.ok(
+    f.audits.some((a) => a.op === 'ext.auth_failed' && /disabled ext:bili/.test(String(a.note))),
+    '审计 note 要记成 disabled ext:<id>，面板据此点名',
+  );
 });
 
 test('G3-2 403：scope 不足 / 扩展令牌调 /v1/say 仍被硬隔离', async (t) => {

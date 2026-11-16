@@ -298,7 +298,7 @@ test('P19 configure：切全局 → persona.current，并回调 onSwitched（cha
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.touched, ['persona']);
   assert.equal(cfg.state.mem.persona.current, 'cat');
-  assert.deepEqual(switched, [{ id: 'cat', chatId: '', label: 'cat' }]);
+  assert.deepEqual(switched, [{ id: 'cat', chatId: '', senderId: '', label: 'cat' }]);
 });
 
 test('P20 configure：切会话 → byChat[chatId]，不动 current', async () => {
@@ -421,4 +421,71 @@ test('P29 chatId 超长要报错，不能截短了指向另一个会话', async 
 test('P30 构造时缺依赖要立刻炸，不要等到请求期', () => {
   assert.throws(() => createExtPersona({}), /personas/);
   assert.throws(() => createExtPersona({ personas: { save() {} } }), /cfgOf/);
+});
+
+/* ── 6b. 单人专属人设（senderId） ───────────────────────────────────── */
+
+/**
+ * 用户需求：「想给单人设置专属人设」。
+ *
+ * 原来的粒度只有 `byChat`（一个会话一个档），群里没法给某个人单独换。
+ * 现在 `session.configure` 可以带 `senderId`（**发送者 openid**），
+ * 写进 `persona.bySender`，优先级高于 `byChat`。
+ *
+ * 为什么必须和 `chatId` 分开：群里 `chatId` 是**群 openid**，拿它当「人」
+ * 就是之前那类粒度错的翻版。
+ */
+test('P28 configure：给单个人指定人设 → bySender，不动 byChat / current', async () => {
+  const store = makeStore({ default: 'x', cat: '猫' });
+  const cfg = makeCfg({ mem: baseCfg() });
+  const { api } = build({ store, cfg });
+
+  const r = await api['session.configure']({ body: { persona: 'cat', senderId: 'u1' } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.touched, ['persona']);
+  assert.equal(cfg.state.mem.persona.bySender.u1, 'cat');
+  assert.deepEqual(cfg.state.mem.persona.byChat, {}, '按人不能顺手写按会话');
+  assert.equal(cfg.state.mem.persona.current, 'default', '也不动全局');
+});
+
+test('P29 configure：clear persona + senderId → 只删这个人那一格', async () => {
+  const store = makeStore({ default: 'x', cat: '猫' });
+  const cfg = makeCfg({ mem: { ...baseCfg(), persona: { current: 'default', byChat: { g1: 'cat' }, bySender: { u1: 'cat', u2: 'cat' } } } });
+  const { api } = build({ store, cfg });
+
+  const r = await api['session.configure']({ body: { clear: ['persona'], senderId: 'u1' } });
+  assert.equal(r.status, 200);
+  assert.equal(cfg.state.mem.persona.bySender.u1, undefined);
+  assert.equal(cfg.state.mem.persona.bySender.u2, 'cat', '别人不受影响');
+  assert.equal(cfg.state.mem.persona.byChat.g1, 'cat', '按会话那层也不受影响');
+});
+
+test('P30 configure：model 不能和 senderId 一起用（模型是按会话配的）', async () => {
+  const store = makeStore({ default: 'x', cat: '猫' });
+  const cfg = makeCfg({ mem: baseCfg() });
+  const { api } = build({ store, cfg });
+
+  const r = await api['session.configure']({ body: { model: { name: 'gpt' }, senderId: 'u1' } });
+  assert.equal(r.status, 400);
+  assert.match(r.body.message, /按会话/);
+  assert.equal(cfg.state.mem.model?.byChat?.u1, undefined, '一个字节都不该写');
+});
+
+test('P31 personas.list：带 senderId 时 effective 按人算（否则调用方以为没设上）', async () => {
+  const store = makeStore({ default: 'x', cat: '猫', dog: '狗' });
+  const cfg = makeCfg({
+    mem: { ...baseCfg(), persona: { current: 'default', byChat: { g1: 'cat' }, bySender: { u1: 'dog' } } },
+  });
+  const { api } = build({ store, cfg });
+
+  const asPerson = await api['personas.list']({ query: { senderId: 'u1' } });
+  assert.equal(asPerson.body.effective, 'dog', '这个人的专属人格要盖过全局');
+  assert.equal(asPerson.body.senderId, 'u1');
+
+  const asChat = await api['personas.list']({ query: { chatId: 'g1' } });
+  assert.equal(asChat.body.effective, 'cat');
+
+  /** 同一个人在那个群里，仍然是他自己的那一套 */
+  const both = await api['personas.list']({ query: { chatId: 'g1', senderId: 'u1' } });
+  assert.equal(both.body.effective, 'dog');
 });

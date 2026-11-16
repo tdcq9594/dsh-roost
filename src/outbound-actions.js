@@ -363,7 +363,7 @@ export function createActionRunner({ channel, tts = null, quota = null, picks = 
      * `senderId` 是**说话的人**，不是会话 id——`<<say>>` 的语音额度按人扣。
      * 没有真人（主动搭话 / 事件轮）时留空，配额退回按会话算。
      */
-    requestId = '', senderId = '', onSent = () => {},
+    requestId = '', senderId = '', bucket = '', onSent = () => {},
   } = {}) {
     const ch = channel();
     const { text: body0, actions, wantSkip } = parseOutboundActions(text);
@@ -541,10 +541,14 @@ export function createActionRunner({ channel, tts = null, quota = null, picks = 
            * **不通过就退化成文字**：这是「防刷屏」不是「不许说话」，
            * 用户还能看到内容；静默丢弃会让她这一句凭空消失。
            */
+          /**
+           * `bucket` 决定用哪一档额度（主人那档更松，见 `quota` 的 `byBucket`）。
+           * 以前不传，面板上「主人单独一套额度」配了也不生效——静默失效。
+           */
           const q = quota && typeof quota.charge === 'function'
             ? quota.charge(senderId
-              ? { feature: 'voice', per: 'person', id: String(senderId) }
-              : { feature: 'voice', per: 'chat', id: String(target) })
+              ? { feature: 'voice', per: 'person', id: String(senderId), bucket }
+              : { feature: 'voice', per: 'chat', id: String(target), bucket })
             : null;
           if (q && q.ok === false) {
             log(`语音条额度用完（${q.message}），这句改发文字`);

@@ -17,6 +17,7 @@ import { gzipSync } from 'node:zlib';
 import { createExtRegistry, SOURCE_FILE, MANIFEST_FILE } from '../src/ext-registry.js';
 import {
   createExtMarket, assertSafeIndexUrl, isExtensionEntry, pickExtensions, isRevoked,
+  indexUrlFor, assertSafeTarballUrl, MARKET_SOURCES, DEFAULT_EXT_REPO, DEFAULT_EXT_INDEX_URL,
 } from '../src/ext-market.js';
 import {
   hashDir, untar, extractTarGz, pickSubtree, safeRelPath, writeFiles,
@@ -186,7 +187,7 @@ test('G6-5 索引 URL 白名单：https / 本机回环 http 通过，其余拒',
   assert.match(assertSafeIndexUrl('http://127.0.0.1:8080/index.json'), /^http:\/\/127\.0\.0\.1/);
   assert.match(assertSafeIndexUrl('http://localhost/i.json'), /^http:\/\/localhost/);
   for (const bad of ['http://example.com/i.json', 'file:///etc/passwd', 'ftp://x/y', 'not a url']) {
-    assert.throws(() => assertSafeIndexUrl(bad), /https|合法 URL/);
+    assert.throws(() => assertSafeIndexUrl(bad), /https|http\(s\)|合法 URL/);
   }
 });
 
@@ -291,7 +292,12 @@ test('G6-10 撤回条目拒装；foreign 目录一律拒，市场没有 force �
   assert.equal(foreign.registry.isForeign('bili'), true);
   const out = await foreign.market.install('bili');
   assert.equal(out.reason, 'foreign');
-  assert.match(out.message, /手动删掉/);
+  /**
+   * 默认仍然拒（不给「随手一点就覆盖用户文件」的后门）。
+   * 2026-11-16 起放行条件是**显式 takeOver + 先整目录备份**，
+   * 所以文案从「请先手动删掉该目录」改成指路 takeOver。
+   */
+  assert.match(out.message, /takeOver|备份/);
   assert.equal(fs.readFileSync(join(foreign.registry.pathOf('bili'), MANIFEST_FILE), 'utf8'), own,
     '用户手写清单一字节都不能被市场改');
 });
@@ -392,4 +398,134 @@ test('G6-16 验签钩子：注入后验不过即拒装；默认不注入 = 不�
   assert.match(out.message, /索引验签未通过/);
   assert.equal(calls, 1);
   assert.equal(registry.read('bili'), null);
+});
+
+/* ---------------- 数据源（github / gitee / custom） ---------------- */
+
+/**
+ * 用户反馈：「市场还不能自选数据来源 github、gitee 或者自选吗」。
+ *
+ * 背景：`raw.githubusercontent.com` 与 `codeload.github.com` 在国内经常被重置，
+ * 面板报「连接被重置」；而 Gitee 是同一份仓库的镜像——索引字节数实测完全一致
+ * （14981），归档结构也一样是「单层顶层目录」，所以换源只换两个 URL。
+ */
+test('数据源：三种预设解析出的索引地址', () => {
+  assert.deepEqual(MARKET_SOURCES, ['github', 'gitee', 'custom']);
+  assert.equal(
+    indexUrlFor({ source: 'github', repo: DEFAULT_EXT_REPO }),
+    DEFAULT_EXT_INDEX_URL,
+  );
+  assert.equal(
+    indexUrlFor({ source: 'gitee', repo: DEFAULT_EXT_REPO }),
+    'https://gitee.com/tdcq9594/qq-bot-roost-plugins/raw/main/index.json',
+  );
+  assert.equal(
+    indexUrlFor({ source: 'custom', indexUrl: 'https://mirror.example/ext/index.json' }),
+    'https://mirror.example/ext/index.json',
+  );
+  /** 认不出的值退回官方源，不能让一个错字变成「索引地址为空」 */
+  assert.equal(indexUrlFor({ source: 'gihub', repo: DEFAULT_EXT_REPO }), DEFAULT_EXT_INDEX_URL);
+});
+
+test('数据源：Gitee 的整仓归档在分发包白名单里', () => {
+  /** 换源要能真的装下来：分发包主机白名单得认 gitee.com，否则列表能拉、安装被拒 */
+  assert.equal(
+    assertSafeTarballUrl('https://gitee.com/tdcq9594/qq-bot-roost-plugins/repository/archive/main.tar.gz'),
+    'https://gitee.com/tdcq9594/qq-bot-roost-plugins/repository/archive/main.tar.gz',
+  );
+  /** 别的域名照样拒，换源不是放开白名单 */
+  assert.throws(() => assertSafeTarballUrl('https://evil.example/x.tar.gz'), /白名单/);
+});
+
+test('数据源：sourceInfo 现读配置，换源不用重启', async (t) => {
+  const d = fs.mkdtempSync(join(os.tmpdir(), 'roost-market-src-'));
+  HOMES.push(d);
+  const registry = createExtRegistry({ dir: d });
+  let src = 'github';
+  let custom = '';
+  const m = createExtMarket({
+    dir: d, registry,
+    fetchText: async () => JSON.stringify({ schema: 1, repo: DEFAULT_EXT_REPO, branch: 'main', plugins: [] }),
+    marketCfg: () => ({ source: src, indexUrl: custom }),
+  });
+
+  assert.equal(m.sourceInfo().source, 'github');
+  assert.match(m.sourceInfo().indexUrl, /raw\.githubusercontent\.com/);
+
+  src = 'gitee';
+  assert.equal(m.sourceInfo().source, 'gitee');
+  assert.match(m.sourceInfo().indexUrl, /gitee\.com\/.*\/raw\/main\/index\.json/);
+
+  src = 'custom';
+  custom = 'https://mirror.example/index.json';
+  assert.equal(m.sourceInfo().indexUrl, 'https://mirror.example/index.json');
+  assert.equal(m.sourceInfo().customUrl, 'https://mirror.example/index.json');
+});
+
+/**
+ * 内网 http 镜像要能放行，但**必须显式打开**开关。
+ *
+ * 自建镜像多半是 `http://192.168.x.x/index.json`；一路强求 https 等于把这个
+ * 用法堵死。放开之后运行期仍由 `ssrf.js` 逐 IP 校验（`marketGuardOpts` 已经
+ * 把 allowPrivate 传下去了），所以这里只是静态白名单这一层松口。
+ */
+test('数据源：内网 http 镜像默认拒，打开 allowPrivate 才放行', () => {
+  const lan = 'http://192.168.1.9/ext/index.json';
+  assert.throws(() => assertSafeIndexUrl(lan), /https|允许访问内网/);
+  assert.equal(assertSafeIndexUrl(lan, { allowPrivate: true }), lan);
+
+  /** 本机回环不用开开关（自建 / 测试常用） */
+  assert.equal(assertSafeIndexUrl('http://127.0.0.1:8080/i.json'), 'http://127.0.0.1:8080/i.json');
+
+  /** `file://` 就算开了 allowPrivate 也不许——本地文件不能变成「远程索引」 */
+  assert.throws(() => assertSafeIndexUrl('file:///etc/passwd', { allowPrivate: true }), /http/);
+});
+
+/**
+ * 用户手写目录：**能替换、能卸载，但都必须先整目录备份**。
+ *
+ * 起因是用户截图：`imagegen` 是整目录拷进来的（没有 `.source.json`），被判成
+ * 「用户手写」→ 卸载按钮没有、装官方版的按钮也是禁用 + 「不覆盖」，卡死。
+ * 判据只看来源标记、不看内容，而**运行时数据**（`gallery.json`）又让「内容
+ * 一致」永远不成立，所以不能靠哈希判等，只能给显式动作 + 备份兜底。
+ */
+test('foreign：takeOver 才允许替换，且替换前整目录备份到 data/backups/', async () => {
+  const sha = await shaFor('bili');
+  const r = rig({ rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: sha }] });
+  const dir = r.registry.pathOf('bili');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(join(dir, MANIFEST_FILE), `${JSON.stringify(manifest('bili'))}\n`, 'utf8');
+  /** 运行时数据：备份必须把它一起带走 */
+  fs.writeFileSync(join(dir, 'gallery.json'), '{"items":[1]}', 'utf8');
+
+  const out = await r.market.install('bili', { takeOver: true });
+  assert.equal(out.ok, true, out.message);
+
+  const bk = fs.readdirSync(join(r.dir, 'backups')).filter((n) => n.startsWith('ext-bili-'));
+  assert.equal(bk.length, 1, '要留一份备份');
+  assert.equal(
+    fs.readFileSync(join(r.dir, 'backups', bk[0], 'gallery.json'), 'utf8'),
+    '{"items":[1]}',
+    '运行时数据要一起备份（删了就没了）',
+  );
+  /** 替换后是受管扩展：有了 .source.json，不再是 foreign */
+  assert.equal(r.registry.isForeign('bili'), false);
+});
+
+test('foreign：不带 force 拒绝卸载，带 force 才删且先备份', async () => {
+  const sha = await shaFor('bili');
+  const r = rig({ rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: sha }] });
+  const dir = r.registry.pathOf('bili');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(join(dir, MANIFEST_FILE), `${JSON.stringify(manifest('bili'))}\n`, 'utf8');
+
+  const denied = r.market.remove('bili');
+  assert.equal(denied.ok, false);
+  assert.equal(denied.reason, 'foreign');
+  assert.equal(fs.existsSync(dir), true, '没确认就不许删');
+
+  const ok = r.market.remove('bili', { force: true });
+  assert.equal(ok.ok, true, ok.message);
+  assert.equal(fs.existsSync(dir), false);
+  assert.ok(fs.readdirSync(join(r.dir, 'backups')).some((n) => n.startsWith('ext-bili-')), '删前要备份');
 });

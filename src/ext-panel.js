@@ -552,16 +552,45 @@ export function createExtPanel({
     }
     const lastFail = authFailed.length ? authFailed[authFailed.length - 1] : null;
     const lastRegen = regenerated.length ? regenerated[regenerated.length - 1] : null;
+    /**
+     * 「哪个扩展在 401」。
+     *
+     * 审计 note 现在是 `端点 | no-token / disabled ext:<id> / unknown-token`
+     * （`api-v1.js` 记的）。令牌完全对不上时宿主**没法**反推是谁——那正是
+     * 「令牌不对」的意思；但「被停用」这种能认出来，就一定要认出来：
+     * 用户在面板上点了「停用」，DSH 里的进程还在跑，于是永久 401，
+     * 而面板只会说「检查令牌是否被吊销」，指错方向。
+     */
+    const failWho = String(lastFail?.note ?? '').split('|')[1]?.trim() ?? '';
+    const disabledClients = (clientStore.list?.() ?? [])
+      .filter((c) => c.enabled === false && c.extId)
+      .map((c) => String(c.extId));
+    /**
+     * 「已经恢复」的判据要**分人**。
+     *
+     * 原来只看「最后一条失败之后有没有任何一次成功的 `/v1` 调用」——可成功记录
+     * 不带客户端 id，于是**一个健康的扩展就能把另一个坏掉的扩展的红灯熄掉**。
+     * 用户看到的就是「重新点进来又可以了，但鉴权一直不行」：灯灭了，扩展照样 401。
+     *
+     * 能点名的那种（`disabled ext:<id>`）就按人判：那个扩展**还在停用名单里**
+     * 就一直亮着，等它被重新启用、真的调通一次再灭。
+     */
+    const failedId = failWho.startsWith('disabled ext:') ? failWho.slice('disabled ext:'.length) : '';
+    const stillOff = Boolean(failedId) && disabledClients.includes(failedId);
     return {
       ok: true,
       /** 当前是否处于失败态（失败之后还没成功过）。 */
-      authFailed: Boolean(lastFail && lastFail.at > lastOkAt),
+      authFailed: Boolean(lastFail && (stillOff || lastFail.at > lastOkAt)),
       regenerated: Boolean(lastRegen && lastRegen.at > lastOkAt),
       /** 历史事实：曾经失败过 / 曾经因备份还原重建过令牌。 */
       authFailedEver: authFailed.length > 0,
       regeneratedEver: regenerated.length > 0,
       authFailedLast: lastFail,
       regeneratedLast: lastRegen,
+      /** 最后那次失败是谁：`no-token` / `disabled ext:<id>` / `unknown-token` */
+      authFailedWho: failWho,
+      /** 被停用的扩展：令牌宿主不再认，进程却可能还在跑 */
+      disabledClients,
       lastOkAt,
       hintAuthFailed: '扩展鉴权失败',
       hintRegenerated: '令牌已重新生成',

@@ -398,3 +398,59 @@ test('G5-15 门 G5 三处联动：staged 清空、JSON_SECTIONS 补 extensions�
   const { DEFAULTS } = await import('../src/config.js');
   assert.ok('extensions' in DEFAULTS, 'JSON_SECTIONS 的段必须在后端 DEFAULTS 里');
 });
+
+/**
+ * 「哪个扩展在 401」要说得出。
+ *
+ * 用户反馈「鉴权一直不行」——而面板只有一句「检查令牌是否被吊销或凭据缺失」，
+ * 最常见的真实原因却是「面板上把扩展停了、DSH 里的进程还在跑」，令牌本身是好的。
+ * 所以审计 note 里要带 `disabled ext:<id>`，面板把它和停用清单一起摆出来。
+ */
+test('鉴权失败：能点名是谁（停用的扩展）+ 列出全部被停用的', () => {
+  const r = rig({});
+  r.clientStore.add({ id: 'ext:bili', name: '扩展 bili', hash: 'x', extId: 'bili', enabled: false, scopes: [] });
+  r.clientStore.add({ id: 'ext:imagegen', name: '扩展 imagegen', hash: 'y', extId: 'imagegen', enabled: false, scopes: [] });
+  fs.writeFileSync(join(r.d, 'audit.log'), [
+    JSON.stringify({ at: 10, op: 'ext.auth_failed', note: 'GET /v1/state | disabled ext:bili' }),
+  ].join('\n') + '\n', 'utf8');
+
+  const s = r.panel.status();
+  assert.equal(s.authFailed, true);
+  assert.equal(s.authFailedWho, 'disabled ext:bili');
+  assert.deepEqual(s.disabledClients.sort(), ['bili', 'imagegen']);
+});
+
+test('鉴权失败：令牌完全对不上时如实说 unknown-token，不瞎点名', () => {
+  const r = rig({});
+  fs.writeFileSync(join(r.d, 'audit.log'), [
+    JSON.stringify({ at: 10, op: 'ext.auth_failed', note: 'POST /v1/say | unknown-token' }),
+  ].join('\n') + '\n', 'utf8');
+  const s = r.panel.status();
+  assert.equal(s.authFailedWho, 'unknown-token');
+  assert.deepEqual(s.disabledClients, []);
+});
+
+/**
+ * 「灯灭了、扩展还在 401」——用户原话：「重新点进来又可以了，但鉴权一直不行」。
+ *
+ * 原来「已恢复」的判据是「最后一条失败之后有没有任何一次成功的 `/v1` 调用」，
+ * 而成功记录不带客户端 id —— 一个健康的扩展就能把另一个坏掉的扩展的红灯熄掉。
+ * 能点名的失败（`disabled ext:<id>`）改成按人判：那个扩展还在停用名单里就亮着。
+ */
+test('鉴权失败：别的扩展调通了，不能把停用那个的红灯熄掉', () => {
+  const r = rig({});
+  r.clientStore.add({ id: 'ext:bili', name: '扩展 bili', hash: 'x', extId: 'bili', enabled: false, scopes: [] });
+  fs.writeFileSync(join(r.d, 'audit.log'), [
+    JSON.stringify({ at: 10, op: 'ext.auth_failed', note: 'GET /v1/state | disabled ext:bili' }),
+    /** 另一个扩展（imagegen）调通了 —— 它不该让 bili 的红灯灭掉 */
+    JSON.stringify({ at: 20, op: 'v1.state', note: 'ok' }),
+  ].join('\n') + '\n', 'utf8');
+
+  const s = r.panel.status();
+  assert.equal(s.lastOkAt, 20);
+  assert.equal(s.authFailed, true, 'bili 还停着，红灯不能因为别人成功就熄');
+
+  /** 重新启用之后，才回到「看有没有成功调用」的常规判据 */
+  r.clientStore.add({ id: 'ext:bili', name: '扩展 bili', hash: 'x', extId: 'bili', enabled: true, scopes: [] });
+  assert.equal(r.panel.status().authFailed, false, '重新启用后不再按「还在停用」算');
+});
