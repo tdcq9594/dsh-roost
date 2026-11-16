@@ -1616,3 +1616,166 @@ test('按人指定人格：设置 / 移除都真的落盘，且不动 byChat 与
     off?.();
   }
 });
+
+/* ---------------- 频道发帖 ---------------- */
+
+test('频道发帖：配置写入要过夹紧（坏 id 清空、越界夹回、默认试运行）', async () => {
+  const { call, off } = await bootHost();
+  try {
+    const before = await call('/channel/post');
+    assert.equal(before.status, 200);
+    assert.equal(before.json.ok, true);
+    assert.equal(before.json.cfg.dryRun, true, '默认必须是试运行');
+    assert.deepEqual(before.json.history, []);
+
+    const r = await call('/channel/post/config', {
+      method: 'POST',
+      body: { timesPerDay: 99, channelId: 'abc', guildId: '12x', format: 2, maxChars: 10, minChars: 500 },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.channelPost.timesPerDay, 24, '越界要夹回上限');
+    assert.equal(r.json.channelPost.channelId, '', '坏 channelId 必须清空（否则只会得到 10003）');
+    assert.equal(r.json.channelPost.guildId, '');
+    assert.equal(r.json.channelPost.format, 3, 'HTML/JSON 不开放');
+    assert.equal(r.json.channelPost.maxChars, 500, 'max 不能小于 min');
+  } finally {
+    off?.();
+  }
+});
+
+test('频道发帖：会真发的两个入口都要二次确认', async () => {
+  const { call, off } = await bootHost();
+  try {
+    /** tick 今天若有错过档位就会立刻发一篇，不是只读检查 */
+    const t = await call('/channel/post/tick', { method: 'POST', body: {} });
+    assert.equal(t.status, 400);
+    assert.match(t.json.message, /二次确认/);
+
+    const s = await call('/channel/post/send', { method: 'POST', body: { title: '标题', text: '正文' } });
+    assert.equal(s.status, 400, '没 confirm 不该发');
+    assert.match(s.json.message, /二次确认/);
+  } finally {
+    off?.();
+  }
+});
+
+test('频道发帖：没选版块时 send 被拒，且给的是「去面板哪一卡」', async () => {
+  const { call, off } = await bootHost();
+  try {
+    const r = await call('/channel/post/send', { method: 'POST', body: { confirm: true } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, false);
+    assert.match(r.json.message, /版块/);
+  } finally {
+    off?.();
+  }
+});
+
+test('频道发帖：开了 guild.enabled 之后，体检第一盏灯必须是绿的', async () => {
+  /**
+   * 主人实测反馈：面板两边都开了（订阅位「频道消息」+ 01 卡「启用频道」），
+   * 体检第一盏灯还是不亮。这条把「保存 → 体检」整条链路钉死：
+   * 只要 `guild.enabled` 真的进了配置，`diagnose` 就必须读到 true。
+   */
+  const { call, off } = await bootHost();
+  try {
+    const saved = await call('/config', { method: 'POST', body: { guild: { enabled: true } } });
+    assert.equal(saved.status, 200, `保存失败：${JSON.stringify(saved.json)}`);
+
+    const d = await call('/channel/post/diagnose', { method: 'POST', body: {} });
+    assert.equal(d.status, 200);
+    const g = d.json.steps.find((s) => s.id === 'guild');
+    /**
+     * 关键断言：**总开关开着就是绿**，不能因为"还没选频道"把它降成空心圈。
+     * 主人实测就是这样被误导的——他确认了三遍开关，问题其实在判据里。
+     */
+    assert.equal(g.state, 'ok', `guild 灯是 ${g.state}：${g.detail}`);
+    assert.equal(d.json.blocked, false);
+    assert.equal(d.json.verified, false, '还没发过，所以 verified=false');
+    /** 没选频道 + 没探测权限 → 这两项仍是待办，但都属于第 3 盏那边的事 */
+    assert.equal(d.json.steps.find((s) => s.id === 'channel').state, 'todo');
+
+    /** 再读一次 /channel/post，配置里也应该是开着的（面板据此回显开关） */
+    const st = await call('/channel/post');
+    assert.equal(st.json.cfg.guildId, '', '还没选频道，但总开关要能读出来');
+  } finally {
+    off?.();
+  }
+});
+
+test('主人别名：登记频道侧 id 后落盘、可撤销；坏 id 直接拒', async () => {
+  /**
+   * 频道侧的人 id 和群/私聊 openid 是两套标识，框架 owners 只认一种，
+   * 所以主人在频道里会被算成普通成员（2026-11-17 实机）。
+   * 这张表是 dsh-roost 自己的补救，不动框架配置。
+   */
+  const { call, off, dir } = await bootHost();
+  try {
+    const g = await call('/owner/aliases');
+    assert.equal(g.status, 200);
+    assert.deepEqual(g.json.aliases, []);
+    assert.deepEqual(g.json.recent, [], '还没人说话，候选是空的');
+
+    const bad = await call('/owner/aliases', { method: 'POST', body: { add: '有 空格' } });
+    assert.equal(bad.status, 400, '含空格的 id 匹配永远失败，必须在入口拒掉');
+
+    const ok = await call('/owner/aliases', { method: 'POST', body: { add: 'ABC123DEF456' } });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.json.aliases, ['ABC123DEF456']);
+
+    /** 必须真的写进 config.json：重启后还要生效 */
+    const disk = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'));
+    assert.deepEqual(disk.ownerAliases, ['ABC123DEF456']);
+
+    /** 重复添加不产生重复项 */
+    const again = await call('/owner/aliases', { method: 'POST', body: { add: 'ABC123DEF456' } });
+    assert.deepEqual(again.json.aliases, ['ABC123DEF456']);
+
+    const rm = await call('/owner/aliases', { method: 'POST', body: { remove: 'ABC123DEF456' } });
+    assert.deepEqual(rm.json.aliases, []);
+  } finally {
+    off?.();
+  }
+});
+
+test('频道分享链接：手填的 appid 优先；没填要说明为什么拿不到', async () => {
+  /**
+   * 这条链接只由 appid 拼成（实测解开放平台那张码就是这个格式）。
+   * 面板之前因为 rpc 拿不到 appid 就整块消失——现在手填一次就能一直用。
+   */
+  const a = await bootHost({ shareAppid: '102056878' });
+  try {
+    const r = await a.call('/channel/share');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.url, 'https://qun.qq.com/qunpro/robot/share?robot_appid=102056878');
+    assert.equal(r.json.appid, '102056878');
+  } finally {
+    a.off?.();
+  }
+
+  const b = await bootHost();
+  try {
+    const r = await b.call('/channel/share');
+    assert.equal(r.json.url, '', '没 appid 就不该拼出个打不开的链接');
+    assert.ok(String(r.json.reason || '').length > 0, '必须说明原因，不能只给一句"没连上"');
+  } finally {
+    b.off?.();
+  }
+});
+
+test('频道分享链接：?appid= 直接拼（前端不再自己实现一遍）', async () => {
+  /**
+   * 手填 appid 时前端只传参、不拼串。之前前后端各有一份"清洗 + 拼 URL"，
+   * 腾讯一改格式就会漂移——那种 bug 只有用户手填时才暴露，最难发现。
+   */
+  const { call, off } = await bootHost();
+  try {
+    const r = await call('/channel/share?appid=102%20056%20878');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.appid, '102056878', '非数字要去掉');
+    assert.equal(r.json.url, 'https://qun.qq.com/qunpro/robot/share?robot_appid=102056878');
+    assert.equal(r.json.manual, true);
+  } finally {
+    off?.();
+  }
+});

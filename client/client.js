@@ -9862,6 +9862,44 @@ select.roost-input{color-scheme:dark}
       const g = config?.guild || {}
       const [busy, setBusy] = useState(false)
       const [st, setSt] = useState(null)
+      /**
+       * 「我在频道里是谁」的候选。
+       *
+       * 频道用的人 id（`author.id`）和群/私聊的 openid 是两套标识，框架的主人名单
+       * 只认一种 → 主人在频道里被算成普通成员。这里列出最近说过话的人，
+       * 点「这是我」就把那个 id 记进 `ownerAliases`，之后一直按主人算。
+       */
+      const [me, setMe] = useState(null)
+      const loadMe = useCallback(async () => {
+        try { setMe(await get('/owner/aliases')) } catch { setMe(null) }
+      }, [])
+      useEffect(() => { loadMe() }, [loadMe])
+      /**
+       * 「把机器人加进频道」的链接。
+       *
+       * 二维码不在这里画（2026-11-17 主人决定）：这条链接在浏览器打开后，
+       * 腾讯自己的页面就会显示二维码。少一层本地生成就少一种"码不对/画不出"的故障。
+       */
+      const [share, setShare] = useState(null)
+      const [manualAppid, setManualAppid] = useState('')
+      const loadShare = useCallback(async () => {
+        try {
+          const r = await get('/channel/share')
+          setShare(r)
+          if (r?.appid) setManualAppid((v) => v || r.appid)
+        } catch { setShare(null) }
+      }, [])
+      useEffect(() => { loadShare() }, [loadShare])
+      const doCopyShareUrl = async () => {
+        const u = share?.url || ''
+        if (!u) return
+        try {
+          await navigator.clipboard.writeText(u)
+          toast('链接复制好了')
+        } catch {
+          window.prompt('手动复制这个链接：', u)
+        }
+      }
       const loadSt = useCallback(async () => {
         try { setSt(await get('/channel/status')) } catch { setSt(null) }
       }, [])
@@ -9889,8 +9927,71 @@ select.roost-input{color-scheme:dark}
       /** 频道会话：一个频道一个 / 一个子频道一个都算，私信单独标出来 */
       const guildChats = (chats || []).filter((c) => c.kind === 'guild' || c.kind === 'dm')
       return h('div', null,
+        /**
+         * 06：把机器人加进频道。
+         *
+         * 频道加机器人只有「商店页添加」和「扫二维码」两条路，而**官方没有
+         * 获取二维码的接口**——那张码只在开放平台「使用范围与人员」页面上。
+         * 所以这里做的是"存一张"：存过一次，以后不用回去翻。
+         */
+        h(Sec, { n: '01', title: '把机器人加进频道', defaultOpen: true },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '加机器人都在 QQ 客户端里完成，三条路选一条：① 频道设置 → 机器人 → 商店页里添加；'
+              + '② 手机打开下面这条链接，腾讯的页面会显示二维码，扫了就能加到频道；'
+              + '③ 扫开放平台「使用范围与人员」页面上的那张码。'),
+            share && share.url
+              ? h('div', { style: { marginTop: 10 } },
+                h('div', { className: 'roost-g-unit', style: { marginBottom: 4 } },
+                  share.appid ? `机器人资料卡链接（appid ${share.appid}）` : '机器人资料卡链接'),
+                h('code', {
+                  style: {
+                    display: 'block', padding: '6px 10px', borderRadius: 6, wordBreak: 'break-all',
+                    fontSize: 12, background: 'var(--dsw-alias-fill-secondary, rgba(128,128,128,.12))',
+                  },
+                }, share.url),
+                h('div', { className: 'roost-g-ov', style: { marginTop: 8 } },
+                  h('button', { type: 'button', className: 'roost-btn', onClick: doCopyShareUrl }, '复制链接'),
+                  h('a', {
+                    href: share.url, target: '_blank', rel: 'noreferrer', className: 'roost-btn',
+                  }, '在浏览器打开'),
+                  h('a', {
+                    href: 'https://q.qq.com/#/apps', target: '_blank', rel: 'noreferrer',
+                    className: 'roost-g-unit',
+                  }, '去开放平台 →')),
+                h('p', { className: 'roost-note', style: { marginTop: 6 } },
+                  '浏览器打开后腾讯会给你二维码，用手机 QQ 扫即可；链接本身也能直接发到手机上点开。'))
+              : h('div', null,
+                h('p', { className: 'roost-note' },
+                  share && share.reason
+                    ? `拿不到 appid：${share.reason}`
+                    : '拿不到 appid（框架没连上？）。'),
+                /** 读不到就让人手填：这条链接只为拼 URL，填一次就够 */
+                h('div', { className: 'roost-g-ov', style: { marginTop: 6 } },
+                  h('input', {
+                    type: 'text', className: 'roost-g-num', placeholder: '填机器人 AppID，例如 102056878',
+                    style: { width: 200 }, value: manualAppid, disabled: busy,
+                    onChange: (e) => setManualAppid(e.target.value.replace(/\D/g, '').slice(0, 20)),
+                  }),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: busy || !manualAppid,
+                    onClick: async () => {
+                      /** 拼链接只做一次（后端）：前端不重复实现清洗和格式，避免两边漂移 */
+                      const r = await get('/channel/share?appid=' + encodeURIComponent(manualAppid))
+                      if (!r?.url) { toast('appid 要是一串数字'); return }
+                      setShare(r)
+                      if (saveCfg) await saveCfg({ shareAppid: manualAppid })
+                      toast('链接拼好了')
+                    },
+                  }, '用这个 appid'),
+                  h('a', {
+                    href: 'https://q.qq.com/#/apps', target: '_blank', rel: 'noreferrer',
+                    className: 'roost-g-unit',
+                  }, '去开放平台查 →'))),
+          )),
+
         h(Sec, {
-          n: '01', title: '总开关与粒度',
+          n: '02', title: '总开关与粒度',
           right: on ? '已开启' : '已关闭',
         },
           h('div', { className: 'roost-g-card' },
@@ -9922,7 +10023,7 @@ select.roost-input{color-scheme:dark}
               : null,
           )),
         h(Sec, {
-          n: '02', title: '接入体检',
+          n: '03', title: '接入体检',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadSt }, '刷新'),
         },
           h('div', { className: 'roost-g-card' },
@@ -9930,6 +10031,14 @@ select.roost-input{color-scheme:dark}
               h('code', null, hasMask ? String(mask) : '—')),
             h('p', { className: 'roost-note' },
               '改完 intents 要重建 Gateway 才生效：面板「上下线」点一次（下线 → 上线），或重启机器人。'),
+            /**
+             * 这两个开关被问过很多次，索性写在勾选的地方：
+             * 订阅位管「网关推不推」，01 卡的启用频道管「dsh-roost 处不处理」。
+             * 只开订阅位 → 事件进来了但这边直接丢；只开总开关 → 这边等不到事件。
+             */
+            h('p', { className: 'roost-note' },
+              '⚠️ 这里的「已订阅」只表示**网关会把事件推过来**。dsh-roost 要不要处理，看上面 01 卡的'
+              + '「启用频道」——**两个都开着**，频道消息才会真的进到她这里。'),
             !hasMask
               ? h('p', { className: 'roost-note' },
                   '读不到框架配置（config.get 没通），下面只列订阅位、不判断已订未订。')
@@ -9954,7 +10063,7 @@ select.roost-input{color-scheme:dark}
                   }))
               : null)),
         h(Sec, {
-          n: '03', title: '额度与投递',
+          n: '04', title: '额度与投递',
           right: st?.quota?.day ? `统计日 ${st.quota.day}` : null,
         },
           h('div', { className: 'roost-g-card' },
@@ -9995,7 +10104,7 @@ select.roost-input{color-scheme:dark}
               }, h('code', null, String(x.code || x.state || ''))))
             })())),
         h(Sec, {
-          n: '04', title: '频道会话',
+          n: '05', title: '频道会话',
           right: chats === null ? '读取中…' : `${guildChats.length} 个`,
         },
           h('div', { className: 'roost-g-card' },
@@ -10015,6 +10124,46 @@ select.roost-input{color-scheme:dark}
                 : h('p', { className: 'roost-note' },
                     '还没有频道会话。先在 QQ 里给频道发一条消息，这里就会长出来。'),
           )),
+
+        /**
+         * 05：我在频道里是谁。
+         *
+         * 单独一张卡是因为它回答的是一个**只在频道里才会出现**的问题：
+         * 同一个人换渠道就换 id，框架的主人名单认不出频道侧的你。
+         */
+        h(Sec, { n: '06', title: '我在频道里是谁', defaultOpen: false },
+          h('div', { className: 'roost-g-card' },
+            h('p', { className: 'roost-g-desc' },
+              '频道用的人 id 和群/私聊的 openid 不是同一套，框架的「主人」名单只认一种——'
+              + '所以你在频道里说话时，她可能把你当成普通成员。下面这些是最近说过话的人，'
+              + '点「这是我」，这个 id 之后就一直按主人算（只影响 dsh-roost，不改框架配置）。'),
+            !me
+              ? h('p', { className: 'roost-note' }, '读取中…（读不到就说明这条接口没通）')
+              : (me.recent || []).length
+                ? me.recent.map((s) => h(GRow, {
+                  key: s.id,
+                  label: s.name || `（没有昵称）…${String(s.id).slice(-6)}`,
+                  hint: `${{ group: '群', c2c: '私聊', guild: '频道', dm: '频道私信' }[s.kind] || s.kind}`
+                    + ` · ${String(s.id).slice(0, 10)}…`,
+                },
+                  s.isOwnerAlias
+                    ? h('span', { className: 'roost-g-unit' }, '已是主人')
+                    : h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: async () => {
+                        const r = await post('/owner/aliases', { add: s.id })
+                        if (r?.ok) { toast('记下了，之后按主人算'); await loadMe() }
+                        else toast(r?.message || '没记上')
+                      },
+                    }, '这是我')))
+                : h('p', { className: 'roost-note' },
+                  '还没有记录：先在频道里给机器人发一句话，再回来这一页看。'),
+            (me?.aliases || []).length
+              ? h('p', { className: 'roost-note', style: { marginTop: 8 } },
+                '已登记的 id：' + me.aliases.join('、'))
+              : null,
+          )),
+
       )
     }
 
@@ -10034,6 +10183,22 @@ select.roost-input{color-scheme:dark}
       const [busy, setBusy] = useState(false)
       const [pick, setPick] = useState('')
       const [draft, setDraft] = useState(null)
+      /**
+       * 机器人加入的频道：直接问 QQ 要（`getMyGuilds`）。
+       *
+       * 原来这里的下拉是从会话映射里推的——机器人刚进频道、没人说话时就空着，
+       * 用户看到的是「还没有频道会话」，于是整张卡一个可改项都没有。
+       */
+      const [guilds, setGuilds] = useState(null)
+      useEffect(() => {
+        (async () => {
+          try {
+            const r = await post('/channel/guilds', {})
+            setGuilds(Array.isArray(r?.guilds) ? r.guilds : [])
+          } catch { setGuilds([]) }
+        })()
+      }, [])
+
       /** 换频道要丢掉上一个的草稿，别写到新频道头上 */
       useEffect(() => { setDraft(null) }, [pick])
       if (!config) return h('div', { className: 'roost-note' }, '读取配置…')
@@ -10071,15 +10236,23 @@ select.roost-input{color-scheme:dark}
             h('p', { className: 'roost-g-desc' },
               '只影响选中的那个频道；没填的项跟随全局「群聊策略」。键用 guild:<guildId>，'
               + '所以同一频道的所有子频道共用这份覆写。'),
-            list.length
-              ? h(GRow, { label: '频道', hint: '来自当前会话映射' },
-                  h('select', {
-                    className: 'roost-g-sel', value: key, disabled: busy,
-                    onChange: (e) => setPick(e.target.value),
-                  },
-                    list.map((c) => h('option', { key: c.chatId || c.key, value: c.chatId || c.key },
-                      c.title || String(c.chatId || c.key).slice(0, 16)))))
-              : h('p', { className: 'roost-note' }, '还没有频道会话——先去「频道总览」打开总开关并收到一条消息。'),
+            guilds === null
+              ? h('p', { className: 'roost-note' }, '正在问 QQ 要频道列表…')
+              : (guilds.length || Object.keys(overrides).length)
+                ? h(GRow, { label: '频道', hint: '机器人加入的频道（直接问 QQ 要，不要求有人说过话）' },
+                    h('select', {
+                      className: 'roost-g-sel', value: key, disabled: busy,
+                      onChange: (e) => setPick(e.target.value),
+                    },
+                      guilds.length ? null : h('option', { value: '' }, '选一个频道'),
+                      guilds.map((g) => h('option', { key: g.id, value: `guild:${g.id}` },
+                        g.name || `频道 …${String(g.id).slice(-6)}`)),
+                      /** 已配过、但机器人已经不在里面的频道：也要能选中去删掉，不能凭空消失 */
+                      Object.keys(overrides)
+                        .filter((k) => !guilds.some((g) => `guild:${g.id}` === k))
+                        .map((k) => h('option', { key: k, value: k }, `${k}（机器人不在这个频道了）`))))
+                : h('p', { className: 'roost-note' },
+                    '拉不到频道列表：先确认机器人已经被拉进频道（「频道总览 → 01」有加机器人的链接）。'),
             key
               ? OV_FIELDS.map((f) => h(GRow, { key: f.key, label: f.label, hint: '留空 = 跟随全局' },
                   f.kind === 'select'
@@ -10144,6 +10317,8 @@ select.roost-input{color-scheme:dark}
               '订阅只靠 intents 掩码，在 Identify 时一次性提交，**没有运行时动态增删**。'
               + '改完必须让框架重建 Gateway（面板「上下线」或重启 Roost）才生效；'
               + '关掉总开关不会退订——框架照常收、照常推给别的插件，这边只在入口丢弃频道事件。'))),
+
+
       )
     }
 
@@ -10972,6 +11147,632 @@ select.roost-input{color-scheme:dark}
               ['40054xxx', '主动消息额度 / 权限类（私信 2 条/天·用户、200 条/天·机器人）'],
               ['4013 / 4014', 'intents 参数无效或无权限；4014 要去管理端申请频道能力'],
             ].map(([k, v]) => h(GRow, { key: k, label: k }, h('span', { className: 'roost-note' }, v))))),
+      )
+    }
+
+    /**
+     * 频道发帖：让她在频道的一个论坛版块里，每天写几篇留着的小记。
+     *
+     * 页面结构**照 aurabot 的空间日记页**排：开关 + 排期 + 字数 + 预览 + 历史。
+     * 唯一多出来的是最上面那条「能不能发」的体检——空间那边第三方协议端登录了
+     * 就能发，不需要；频道要先有论坛权限、要有论坛版块，这些不查清楚就是白配。
+     *
+     * 体检**不挡操作**：没通过也能配排期、能看草稿，只是真发时会告诉你还差哪一步。
+     */
+    /**
+     * 从会话映射里抽「频道」候选：真正的 guild_id，且按频道去重。
+     *
+     * 两个坑：
+     *   ① 会话可能按**子频道**粒度建，`chatId` 形如 `guild:<guildId>:ch:<channelId>`；
+     *      把整串当 guildId 存进去，`normalizePostCfg` 的纯数字校验会把它清空——
+     *      用户看到的现象是"选了频道，保存完又变回未选"。
+     *   ② 同一频道下多个子频道会重复，下拉里必须合成一条。
+     *
+     * 导出给测试：这类"字符串切一半"的逻辑，光看代码看不出错。
+     */
+    function guildChoicesOf(chats) {
+      const seen = new Map()
+      for (const c of (chats || [])) {
+        if (c.kind !== 'guild') continue
+        const hit = String(c.chatId || '').match(/^guild:(\d{1,20})/)
+        if (hit && !seen.has(hit[1])) seen.set(hit[1], c.title || '')
+      }
+      return [...seen.entries()].map(([id, title]) => ({ id, title }))
+    }
+
+    /** 子频道类型 → 人话。发帖只认 10007，其它要标出来为什么选不了 */
+    const SUB_TYPE_NAME = { 0: '文字', 2: '语音', 4: '分组', 10005: '直播', 10006: '应用', 10007: '论坛' }
+
+    function ChannelPostTab({ chats, toast, setTab, seed }) {
+      /**
+       * `seed` 只给渲染测试注入一份快照（`{ st, diag, guilds, subs }`）。
+       *
+       * 生产路径不传：数据由挂载时的 `load()` 拉。渲染测试里 `useEffect` 不跑，
+       * 没有这个口子就断言不到「体检没过时界面上到底写了什么」——
+       * 而那正是这个页面最该被测到的一段（用户就是照着那几句走的）。
+       */
+      const [st, setSt] = useState(seed?.st || null)
+      const [diag, setDiag] = useState(seed?.diag || null)
+      const [guilds, setGuilds] = useState(Array.isArray(seed?.guilds) ? seed.guilds : [])
+      /** 读频道列表失败的原因：只说"拉不到"等于没说，用户没法判断该改哪儿 */
+      const [guildsErr, setGuildsErr] = useState('')
+      const [subs, setSubs] = useState(Array.isArray(seed?.subs) ? seed.subs : [])
+      /** 「把机器人加进频道」的链接：这是发帖的前置条件，缺了它这页什么都做不了 */
+      const [share, setShare] = useState(seed?.share || null)
+      const [busy, setBusy] = useState(false)
+      const [draft, setDraft] = useState(null)
+      /** 生成失败时模型到底输出了什么：排障的唯一线索，界面上要能看到 */
+      const [rawOut, setRawOut] = useState('')
+      const [newName, setNewName] = useState('她的日记本')
+      /** 建版块失败时的服务端原文：判断"参数哪不对"的唯一线索，别用弹窗盖住 */
+      const [createErr, setCreateErr] = useState('')
+
+      const cfg = st?.cfg || {}
+      const steps = diag?.steps || []
+
+      const load = useCallback(async () => {
+        setBusy(true)
+        try {
+          const a = await get('/channel/post')
+          setSt(a)
+          /**
+           * 一次拉三样：体检、机器人加入的频道、当前频道的子频道。
+           *
+           * 「频道」必须来自 `getGuilds`（机器人所在频道），不能从会话映射反推——
+           * 那要求先有人说过话，而选频道发生在说话之前，是死锁。
+           */
+          const [d, g, sh] = await Promise.all([
+            post('/channel/post/diagnose', {}).catch(() => null),
+            post('/channel/guilds', {}).catch(() => null),
+            get('/channel/share').catch(() => null),
+          ])
+          setDiag(d)
+          setGuilds(Array.isArray(g?.guilds) ? g.guilds : [])
+          setGuildsErr(g && g.ok === false ? String(g.message || '读不到频道列表') : '')
+          setShare(sh?.url ? sh : null)
+          const gid = a?.cfg?.guildId || ''
+          if (gid) {
+            const s = await post('/channel/post/subs', { guildId: gid }).catch(() => null)
+            setSubs(Array.isArray(s?.channels) ? s.channels : [])
+          } else {
+            setSubs([])
+          }
+        } catch (e) {
+          toast('读发帖设置失败：' + String(e?.message || e))
+        } finally {
+          setBusy(false)
+        }
+      }, [toast])
+
+      useEffect(() => { load() }, [load])
+
+      /** 改一项配置：整份走 normalize，后端只回夹紧后的值 */
+      const save = async (patch, okText = '已保存') => {
+        setBusy(true)
+        try {
+          const r = await post('/channel/post/config', patch)
+          if (r?.ok) {
+            setSt((s) => ({ ...(s || {}), cfg: r.channelPost }))
+            toast(okText)
+          } else toast(r?.message || '保存失败')
+          return r
+        } catch (e) {
+          toast('保存失败：' + String(e?.message || e))
+          return null
+        } finally { setBusy(false) }
+      }
+
+      const runDiag = async () => {
+        setBusy(true)
+        try {
+          const d = await post('/channel/post/diagnose', {})
+          setDiag(d)
+          if (Array.isArray(d?.forumChannels)) setChans(d.forumChannels)
+          toast(d?.ready ? '都齐了，她可以发了' : d?.blocked ? (d.steps.find((x) => x.state === 'fail')?.detail || '还差一步') : '还差几步')
+        } catch (e) { toast('体检失败：' + String(e?.message || e)) } finally { setBusy(false) }
+      }
+
+      /**
+       * 建一个论坛版块。
+       *
+       * 失败时**不弹窗**：弹窗盖住原文也没法复制，而这条错误的核心信息
+       * 恰恰是服务端那串原话。改成页面内一行红字。
+       */
+      const doCreate = async () => {
+        if (!/^\d{1,20}$/.test(String(cfg.guildId || ''))) { toast('先选一个频道'); return }
+        setBusy(true)
+        setCreateErr('')
+        try {
+          const r = await post('/channel/post/channel', { mode: 'create', name: newName })
+          if (r?.ok) {
+            toast(`建好了：${r.name || newName}`)
+            await save({ channelId: r.id }, '已选为发帖版块')
+            await load()
+          } else {
+            setCreateErr([r?.message || '没建成', r?.raw ? `　（服务端原文：${r.raw}）` : ''].join(''))
+          }
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      /**
+       * 体检项里的「就地操作」。
+       *
+       * 让用户不必滚到 03 卡去选：哪一项没过，就在那一行直接选。
+       * 只做「有数据可选项」的两种（选频道 / 选版块），其余仍给文字说明——
+       * 这一行不该长成第二个设置面板。
+       */
+      const inlineActionOf = (s) => {
+        if (!s || s.id !== 'channel') return null
+        if (!cfg.guildId) {
+          if (!guildChoices.length) return null
+          return h('select', {
+            className: 'roost-g-sel', style: { maxWidth: 180, flex: '0 0 auto' }, value: '', disabled: busy,
+            onChange: async (e) => {
+              const v = e.target.value
+              if (!v) return
+              await save({ guildId: v, channelId: '' }, '频道选好了')
+              await load()
+            },
+          },
+            h('option', { value: '' }, '选频道…'),
+            guildChoices.map((g) => h('option', { key: g.id, value: g.id },
+              g.name || `…${String(g.id).slice(-6)}`)))
+        }
+        if (!cfg.channelId) {
+          const list = (subs || []).filter((c) => c.isForum)
+          if (!list.length) return null
+          return h('select', {
+            className: 'roost-g-sel', style: { maxWidth: 180, flex: '0 0 auto' }, value: '', disabled: busy,
+            onChange: async (e) => {
+              const v = e.target.value
+              if (!v) return
+              await post('/channel/post/channel', { mode: 'pick', channelId: v, guildId: cfg.guildId })
+              toast('版块选好了')
+              await load()
+            },
+          },
+            h('option', { value: '' }, '选版块…'),
+            list.map((c) => h('option', { key: c.id, value: c.id }, c.name || c.id)))
+        }
+        return null
+      }
+
+      const doPreview = async () => {
+        setBusy(true)
+        try {
+          const r = await post('/channel/post/preview', {})
+          if (r?.ok) { setDraft(r); setRawOut(''); toast('草稿生成好了') }
+          else { setDraft(null); setRawOut(String(r?.raw || '')); toast(r?.message || '没写出来') }
+        } catch (e) { toast('生成失败：' + String(e?.message || e)) } finally { setBusy(false) }
+      }
+
+      const doSend = async () => {
+        const body = draft ? { title: draft.title, text: draft.text, confirm: true } : { confirm: true }
+        if (!window.confirm('真的发到频道版块？发出去要等审核，撤不回来。')) return
+        setBusy(true)
+        try {
+          const r = await post('/channel/post/send', body)
+          if (r?.ok) {
+            toast(r.dryRun ? '试运行：没真发（去关掉「试运行」再发）' : '已提交，等审核；过一会儿点「查上线」看看')
+            setDraft(null)
+            await load()
+          } else {
+            toast(r?.message || '发失败')
+            if (Array.isArray(r?.todo) && r.todo.length) {
+              window.alert([r.message, '', ...r.todo.map((x, i) => `${i + 1}. ${x}`)].join('\n'))
+            }
+          }
+        } catch (e) { toast('发失败：' + String(e?.message || e)) } finally { setBusy(false) }
+      }
+
+      /**
+       * 发一条**待发草稿**。
+       *
+       * 这是 `askFirst` 的落地：她在对话里写好一篇（`qq_post_thread` 拒发只记账），
+       * 面板上出现「《标题》 发」，人点了才走真发。不做对话里多轮确认——
+       * 那需要跨轮状态机，而"显式操作"本来就只有面板有。
+       */
+      const doSendDraft = async (row) => {
+        if (!window.confirm(`发《${row.title || '这一篇'}》？发出去要等审核，撤不回来。`)) return
+        setBusy(true)
+        try {
+          const r = await post('/channel/post/send', { title: row.title, text: row.text, confirm: true })
+          toast(r?.ok ? (r.dryRun ? '试运行：没真发（去关掉「试运行」再发）' : '已提交，等审核') : (r?.message || '发失败'))
+          await load()
+        } catch (e) { toast('发失败：' + String(e?.message || e)) } finally { setBusy(false) }
+      }
+
+      const doSync = async () => {        setBusy(true)
+        try {
+          const r = await post('/channel/post/sync', {})
+          if (r?.ok) { toast(r.changed ? `更新了 ${r.changed} 条` : '还没有新进展'); await load() }
+          else toast(r?.warning || r?.message || '对账失败')
+        } catch (e) { toast('对账失败：' + String(e?.message || e)) } finally { setBusy(false) }
+      }
+
+      const doTick = async () => {
+        /**
+         * 必须问一句：`tick` 不是"只读检查"，今天有错过的档位时它会**立刻真发一篇**。
+         * 原本文案叫「现在检查一次」，用户点下去可能凭空多出一篇帖子。
+         */
+        if (!window.confirm('检查今天的排期。如果有错过的档位，会立刻发一篇（受「试运行」开关约束）。继续？')) return
+        setBusy(true)
+        try {
+          const r = await post('/channel/post/tick', { confirm: true })
+          toast(r?.ok ? (r.next ? `下次 ${r.next}` : '今天没有待发的了') : (r?.message || '检查失败'))
+          await load()
+        } catch (e) { toast('检查失败：' + String(e?.message || e)) } finally { setBusy(false) }
+      }
+
+      /**
+       * 频道候选：优先 `getMyGuilds`（机器人所在频道），拉不到才回退会话映射。
+       *
+       * 再加一条兜底：**已经选过的频道必须始终在列表里**。私有机器人的
+       * `/users/@me/guilds` 可能回空，但 `getGuildChannels` 明明能读到子频道——
+       * 这时下拉不能把用户选过的东西弄丢，否则看着像"配置没了"。
+       */
+      const guildChoices = (() => {
+        const base = guilds.length ? guilds : guildChoicesOf(chats)
+        const cur = String(cfg.guildId || '')
+        if (cur && !base.some((g) => String(g.id) === cur)) {
+          return [...base, { id: cur, name: `当前频道 …${cur.slice(-6)}` }]
+        }
+        return base
+      })()
+      /** `info` 是"验证状态"（还没试发过），不是配置没配好，所以用中性点而不是空心圈 */
+      const lamp = (s) => (s === 'ok' ? '●' : s === 'fail' ? '✕' : s === 'info' ? '·' : '○')
+      const lampColor = (s) => (s === 'ok'
+        ? 'var(--dsw-alias-state-success, #3c9)'
+        : s === 'fail' ? 'var(--dsw-alias-state-danger, #e55)' : 'var(--dsw-alias-label-tertiary, #888)')
+      const stateText = (s) => ({ pending: '已提交', live: '已上线', stale: '没看到', dry: '试运行', failed: '没发成', draft: '待发' }[s] || s || '—')
+      const fmtAt = (t) => {
+        const d = new Date(Number(t) || 0)
+        return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+      }
+
+      const ready = diag?.ready === true
+      const todoCount = diag ? steps.filter((x) => x.state !== 'ok').length : null
+
+      return h('div', null,
+        h(Sec, { n: '01', title: '频道发帖', defaultOpen: true },
+          h('div', { className: 'roost-note', style: { marginBottom: 10 } },
+            '让她在频道里有一个自己的版块，想写什么就写一篇。你只要做三件事：开频道、给权限、选版块——剩下的她来写。'),
+
+          /**
+           * 一键打开「加机器人」链接，放在体检条之前。
+           *
+           * 频道没加，这一页什么都做不了；而这个链接在浏览器打开后腾讯会直接给二维码，
+           * 比让人回去翻开放平台快得多。
+           */
+          share && share.url
+            ? h('p', { className: 'roost-g-unit', style: { marginBottom: 8 } },
+              '还没把机器人加进频道？',
+              h('a', {
+                href: share.url, target: '_blank', rel: 'noreferrer',
+                style: { marginLeft: 6, fontWeight: 600 },
+              }, '打开链接 →'),
+              h('span', { style: { marginLeft: 6, opacity: 0.75 } }, '（腾讯会显示二维码，扫了就加进去）'))
+            : null,
+
+          /** ---------- 体检条 ---------- */
+          h('div', {
+            style: {
+              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+              padding: '10px 12px', borderRadius: 8, marginBottom: 12,
+              border: '1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.25))',
+            },
+          },
+            h('span', { style: { fontWeight: 600 } },
+              diag == null ? '正在体检…' : ready ? '她可以在频道发帖了' : (diag.blocked ? '有一项卡住了' : `还差 ${todoCount} 项`)),
+            steps.map((s) => h('span', {
+              key: s.id, title: s.detail, style: { color: lampColor(s.state), fontSize: 13 },
+            }, `${lamp(s.state)} ${({ guild: '频道已开', perm: '有论坛权限', channel: '选了版块', sent: '发过一篇' }[s.id] || s.id)}`)),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy, style: { marginLeft: 'auto' },
+              onClick: runDiag,
+            }, '重新体检'),
+          ),
+          /**
+           * 「接下来做什么」——**把指引印在界面上，不藏在 title 提示里**。
+           *
+           * 上一版的问题：四盏灯只有名字，具体该点哪儿全在 `title` 属性里。
+           * 桌面端要悬停才看得到，手机上根本点不出来——等于没有指引。
+           * 现在只列没通过的项，每项一句"点哪里"，能跳到别的页的给按钮，
+           * 有分步操作的直接列成编号清单（比如论坛权限那三步）。
+           */
+          /** 全绿的时候别让人愣着：告诉他现在能做什么 */
+          diag && diag.ready
+            ? h('div', { className: 'roost-g-card', style: { marginBottom: 12 } },
+              h('div', { className: 'roost-g-desc' },
+                diag.verified
+                  ? '都齐了，也发过一篇了。想让她自己在聊天里发帖，就打开 06 卡那个开关。'
+                  : '配置都齐了，可以发了。还没真发过——去 04 卡点「现在真发一篇」确认一次；成功之后她才能在对话里自己发。'))
+            : null,
+          diag && !diag.ready && steps.some((s) => s.state === 'todo' || s.state === 'fail')
+            ? h('div', { className: 'roost-g-card', style: { marginBottom: 12 } },
+              h('div', { className: 'roost-g-desc', style: { marginBottom: 2 } }, '接下来做什么'),
+              h('div', { className: 'roost-g-unit', style: { marginBottom: 4 } },
+                '从上往下做；每做完一步点右上角「重新体检」。论坛权限那几步要去 QQ 开放平台，改完记得回来重查。'),
+              steps.filter((s) => s.state !== 'ok').map((s) => h('div', {
+                key: 'todo-' + s.id,
+                style: {
+                  display: 'flex', gap: 8, alignItems: 'flex-start', padding: '6px 0',
+                  borderTop: '1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.15))',
+                },
+              },
+                h('span', { style: { color: lampColor(s.state), minWidth: 14, lineHeight: '22px' } }, lamp(s.state)),
+                h('div', { style: { flex: 1, lineHeight: 1.65 } },
+                  h('div', null, s.detail),
+                  Array.isArray(s.todo) && s.todo.length
+                    ? h('ol', { style: { margin: '4px 0 0 18px', padding: 0 } },
+                      s.todo.map((t, i) => h('li', { key: i, style: { marginBottom: 2 } }, t)))
+                    : null,
+                  /** 必须去外部后台才能修的（目前只有论坛权限），给一个能点的入口 */
+                  s.url
+                    ? h('a', {
+                      href: s.url, target: '_blank', rel: 'noreferrer',
+                      style: { display: 'inline-block', marginTop: 4, fontSize: 12 },
+                    }, '打开 QQ 开放平台 →')
+                    : null),
+                inlineActionOf(s) || (s.jump && setTab
+                  ? h('button', {
+                    type: 'button', className: 'roost-btn', style: { whiteSpace: 'nowrap' },
+                    onClick: () => setTab(s.jump),
+                  }, '去打开')
+                  : null))))
+            : null,
+          /**
+           * 快捷入口：体检区本身就是操作台。
+           *
+           * 这些按钮**不预先禁用**——点下去失败时返回的正是「还差哪一步」，
+           * 比一上来就灰着更有信息量。
+           */
+          h('div', { className: 'roost-g-ov', style: { marginBottom: 12 } },
+            h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: doPreview }, '先看草稿'),
+            h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: doSend }, '现在发一篇'),
+            h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: runDiag }, '重新体检'),
+            share && share.url
+              ? h('a', {
+                href: share.url, target: '_blank', rel: 'noreferrer',
+                className: 'roost-g-unit', style: { marginLeft: 'auto' },
+              }, '把机器人加进频道 →')
+              : null),
+          diag && diag.permError
+            ? h('div', { className: 'roost-note', style: { color: 'var(--dsw-alias-state-danger, #e55)' } },
+              `${diag.permError.code || ''} ${diag.permError.message || ''}`.trim())
+            : null,
+          /**
+           * 最近一次失败。
+           *
+           * 定时发帖失败时没人在场、也没有会话能让模型说话——**面板是唯一出口**。
+           * 所以这里必须明写"上次没发成 + 原因"，而不是只在历史列表里留一行红字。
+           */
+          st && st.lastError && st.lastError.message
+            ? h('div', { className: 'roost-note', style: { color: 'var(--dsw-alias-state-danger, #e55)' } },
+              `上次没发成（${fmtAt(st.lastError.at)}）：${st.lastError.message}`,
+              st.lastError.code ? `　[${st.lastError.code}]` : '',
+              '　——改好之后点「现在发一篇」再试一次，或等下一次排期自动重试')
+            : null,
+        ),
+
+        /** ---------- 01 总开关与排期 ---------- */
+        h(GCard, {
+          n: '01', title: '总开关与排期',
+          desc: '每天挑几个时间自己写一篇。时间在窗口里随机、两两隔开，不是固定整点——固定整点一眼就是机器人。',
+        },
+          h(GRow, { label: '允许发帖', hint: '关着的时候，排期和她自己都不会发；手动「现在发一篇」也拦' },
+            h(Switch, {
+              on: cfg.enabled === true, disabled: busy,
+              onToggle: (v) => save({ enabled: v }, v ? '已打开' : '已关闭'),
+            })),
+          h(GRow, { label: '每天几篇', hint: '自动排期与她自己发共用这一个数；0 = 只手动' },
+            h(GNum, {
+              value: cfg.timesPerDay ?? 2, min: 0, max: 24, unit: '篇', disabled: busy,
+              onSave: (v) => save({ timesPerDay: v }),
+            })),
+          h(GRow, { label: '时间窗', hint: '跨天也行（比如 22:00–02:00）；起止相同视为全天' },
+            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+              h('input', {
+                type: 'time', className: 'roost-g-num', value: cfg.windowStart || '10:00', disabled: busy,
+                onChange: (e) => save({ windowStart: e.target.value }),
+              }),
+              h('span', { className: 'roost-g-unit' }, '到'),
+              h('input', {
+                type: 'time', className: 'roost-g-num', value: cfg.windowEnd || '23:30', disabled: busy,
+                onChange: (e) => save({ windowEnd: e.target.value }),
+              }))),
+          h(GRow, { label: '两篇至少隔', hint: '排不开时会自动放宽到能塞下为止' },
+            h(GNum, {
+              value: cfg.minGapMinutes ?? 180, min: 0, max: 1440, step: 30, unit: '分钟', disabled: busy,
+              onSave: (v) => save({ minGapMinutes: v }),
+            })),
+          h('div', { className: 'roost-g-note' },
+            st?.next ? `下一次：今天 ${st.next}` : '今天没有待发的了',
+            st?.plan?.times?.length
+              ? `　今天的排期：${st.plan.times.map((m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`).join('、')}`
+              : '',
+            st?.today ? `　今天已发 ${st.today} 篇` : ''),
+          h('div', { className: 'roost-g-ov' },
+            h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: doTick }, '补发错过的那一篇'),
+            h('span', { className: 'roost-g-unit' }, '平时每分钟自动检查；这个按钮只在今天有错过档位时才会真发')),
+        ),
+
+        /** ---------- 02 写什么 ---------- */
+        h(GCard, {
+          n: '02', title: '写什么',
+          desc: '字数只管正文，标题会截到 20 字（频道帖子必须有标题，这点和空间说说不同）。',
+        },
+          h(GRow, { label: '字数', hint: '太短会像没写完，太长没人看' },
+            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+              h(GNum, { value: cfg.minChars ?? 80, min: 20, max: 1000, unit: '字起', disabled: busy, onSave: (v) => save({ minChars: v }) }),
+              h(GNum, { value: cfg.maxChars ?? 600, min: 20, max: 2000, unit: '字止', disabled: busy, onSave: (v) => save({ maxChars: v }) }))),
+          h(GRow, { label: '正文格式', hint: 'Markdown 能分段；纯文本最不容易出错' },
+            h('select', {
+              className: 'roost-g-sel', value: String(cfg.format || 3), disabled: busy,
+              onChange: (e) => save({ format: Number(e.target.value) }),
+            },
+              h('option', { value: '3' }, 'Markdown'),
+              h('option', { value: '1' }, '纯文本'))),
+          h('div', { className: 'roost-g-note' },
+            '素材来自这个频道里各文字子频道最近的聊天；没有素材时她会写心情，不会去读私聊凑内容。'),
+        ),
+
+        /** ---------- 03 发到哪 ---------- */
+        h(GCard, {
+          n: '03', title: '发到哪',
+          desc: '先选频道、再选子频道。发帖只支持「论坛」类型的子频道，其它类型会列出来但选不了。',
+        },
+          h(GRow, { label: '频道', hint: '机器人加入的频道（直接问 QQ 要，不要求先在频道里说过话）' },
+            guildChoices.length
+              ? h('select', {
+                  className: 'roost-g-sel', value: cfg.guildId || '', disabled: busy,
+                  onChange: async (e) => {
+                    await save({ guildId: e.target.value, channelId: '' }, '已切换频道')
+                    await load()
+                  },
+                },
+                  h('option', { key: '', value: '' }, '选一个频道'),
+                  guildChoices.map((g) => h('option', { key: g.id, value: g.id },
+                    g.name ? `${g.name}（…${g.id.slice(-6)}）` : `频道 …${g.id.slice(-6)}`)))
+              : h('span', { className: 'roost-g-unit' },
+                guildsErr
+                  ? `拉不到频道列表：${guildsErr}`
+                  : '拉不到频道列表：确认机器人已经被拉进频道，然后点右上角「重新体检」')),
+          h(GRow, { label: '子频道', hint: '选了就能发到它里面；非论坛类型会标注原因' },
+            subs.length
+              ? h('select', {
+                  className: 'roost-g-sel', value: cfg.channelId || '', disabled: busy,
+                  onChange: async (e) => {
+                    const id = e.target.value
+                    if (!id) return
+                    await post('/channel/post/channel', { mode: 'pick', channelId: id, guildId: cfg.guildId })
+                    toast('已选发帖版块')
+                    await load()
+                  },
+                },
+                  h('option', { key: '', value: '' }, '选一个子频道'),
+                  subs.map((c) => h('option', { key: c.id, value: c.id, disabled: !c.isForum },
+                    `${c.name || c.id}　${c.isForum ? '（论坛，可以发）' : `（${SUB_TYPE_NAME[c.type] || 'type ' + c.type}，发不了）`}`)))
+              : h('span', { className: 'roost-g-unit' },
+                cfg.guildId
+                  ? '这个频道里没有读到子频道：可能没权限，或这个频道只有一个默认板块'
+                  : '先选上面的频道')),
+          /**
+           * 建论坛版块。
+           *
+           * 官方接口**支持**论坛类型（NodeSDK 文档里"不支持创建的"只有子频道分组），
+           * 所以失败基本都是参数问题——把服务端原文摊在界面上，别用弹窗盖住。
+           */
+          h('div', { className: 'roost-g-ov', style: { marginTop: 6 } },
+            h('input', {
+              type: 'text', className: 'roost-g-num', value: newName, disabled: busy, maxLength: 20,
+              style: { width: 160 }, onChange: (e) => setNewName(e.target.value),
+            }),
+            h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: doCreate }, '建一个论坛版块'),
+            h('span', { className: 'roost-g-unit' }, '手动建更稳：频道设置 → 新建子频道 → 类型选「论坛」（这个接口只对私域机器人开放）')),
+          createErr
+            ? h('p', { className: 'roost-note', style: { color: 'var(--dsw-alias-state-danger, #e55)', marginTop: 4 } }, createErr)
+            : null,
+          h(GRow, { label: '试运行', hint: '只影响定时和自动发帖；「现在真发一篇」按钮不受它限制' },
+            h(Switch, {
+              on: cfg.dryRun !== false, disabled: busy,
+              onToggle: (v) => save({ dryRun: v }, v ? '已打开试运行（定时只记账）' : '已关掉试运行，定时会真发'),
+            })),
+        ),
+
+        /** ---------- 04 现在发一篇 ---------- */
+        h(GCard, {
+          n: '04', title: '现在发一篇',
+          desc: '先看草稿，满意再发。发出去要过审核，所以「已提交」不等于「已经能看见」。',
+        },
+          h('div', { className: 'roost-g-ov' },
+            h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: doPreview }, '先看草稿（不发）'),
+            h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: doSend }, '现在真发一篇'),
+            h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: doSync }, '查上线'),
+            h('span', { className: 'roost-g-unit' }, busy ? '忙…' : '')),
+          draft
+            ? h('div', {
+                style: {
+                  marginTop: 10, padding: 12, borderRadius: 8,
+                  border: '1px dashed var(--dsw-alias-border-secondary, rgba(128,128,128,.35))',
+                  whiteSpace: 'pre-wrap', lineHeight: 1.7,
+                },
+              },
+                h('div', { style: { fontWeight: 600, marginBottom: 6 } }, draft.title),
+                h('div', null, draft.text),
+                h('div', { className: 'roost-g-unit', style: { marginTop: 8 } },
+                  `素材 ${draft.excerptLines ?? 0} 行`))
+            : h('div', { className: 'roost-g-note' }, '还没有草稿。点「先看草稿」生成一篇，它不会发布。'),
+          rawOut
+            ? h('div', { style: { marginTop: 10 } },
+              h('div', { className: 'roost-g-unit', style: { marginBottom: 4 } },
+                '模型这次的原始输出（复制给开发者看，能定位是没写正文还是被截断）：'),
+              h('pre', {
+                style: {
+                  margin: 0, padding: 8, borderRadius: 6, fontSize: 12, lineHeight: 1.5,
+                  whiteSpace: 'pre-wrap', maxHeight: 180, overflow: 'auto',
+                  background: 'var(--dsw-alias-fill-secondary, rgba(128,128,128,.12))',
+                },
+              }, rawOut))
+            : null,
+        ),
+
+        /** ---------- 05 历史 ---------- */
+        h(GCard, {
+          n: '05', title: '发过什么',
+          desc: '「已上线」是列表里认领到了；「没看到」只代表这批里没找到，可能还在审核，不代表失败。她写好等你点头的那几条也在这里，标「待发」。',
+        },
+          (st?.history || []).length
+            ? h('div', null, st.history.slice(0, 20).map((r) => h('div', {
+                key: String(r.at) + String(r.title || ''),
+                style: {
+                  display: 'flex', gap: 10, alignItems: 'baseline', padding: '6px 0',
+                  borderTop: '1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.18))',
+                },
+              },
+                h('span', { className: 'roost-g-unit', style: { minWidth: 76 } }, fmtAt(r.at)),
+                h('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                  r.title || '（无标题）'),
+                h('span', {
+                  style: {
+                    fontSize: 12,
+                    color: r.state === 'live' ? 'var(--dsw-alias-state-success, #3c9)'
+                      : r.state === 'failed' ? 'var(--dsw-alias-state-danger, #e55)'
+                        : 'var(--dsw-alias-label-tertiary, #888)',
+                  },
+                }, stateText(r.state)),
+                r.state === 'draft'
+                  ? h('button', {
+                      type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+                      disabled: busy, onClick: () => doSendDraft(r),
+                    }, '发')
+                  : null)))
+            : h('div', { className: 'roost-g-note' }, '还没发过。'),
+        ),
+
+        /** ---------- 06 交给她自己发 ---------- */
+        h(GCard, {
+          n: '06', title: '交给她自己发',
+          desc: '打开之后，聊天里她说「我发个帖子」时就有这个工具了；发到哪个版块是这里定死的，她改不了。',
+        },
+          h(GRow, { label: '允许她在对话里发帖', hint: ready ? '体检已通过' : '体检还没全绿，建议先去 04 卡发一篇看看' },
+            h(Switch, {
+              on: cfg.allowTools === true, disabled: busy,
+              onToggle: (v) => {
+                if (v && !ready && !window.confirm('体检还没全绿，可能发不出去。仍然打开？')) return
+                save({ allowTools: v }, v ? '已允许她自己发' : '已收回')
+              },
+            })),
+          h(GRow, { label: '每次发之前问我', hint: '她写好会先在面板里放一条待发，你点「发」才算' },
+            h(Switch, {
+              on: cfg.askFirst !== false, disabled: busy,
+              onToggle: (v) => save({ askFirst: v }),
+            })),
+          h('div', { className: 'roost-g-note' },
+            '每天最多发几篇跟着 01 卡的「每天几篇」走，不另设计数器。'),
+        ),
       )
     }
 
@@ -11839,6 +12640,15 @@ select.roost-input{color-scheme:dark}
       ['wakeup', '互动召回', 'enabled 默认关。官方口径：用户主动说过话之后 30 天内，当天 / 1–3 天 / 3–7 天 / 7–30 天四个窗口各 1 条（共 4 条），超 30 天没额度；idleHours 是「多久没说话才召回」的额外门槛，默认 72 小时所以实际只命中后两档。和 speakUp 是两本账'],
       ['speakUp', '私聊排期', '主人 openid、间隔/免打扰/每日上限、followUps（说几次没回就不再追）'],
       ['extProactive', '扩展主动消息', '扩展只投递素材，措辞、门闸、额度、审批都在宿主。enabled 默认开；maxPerDay 是这条通道自己的每日额度（和 speakUp 两本账）；approval 开了群分享要主人回「发 1」或去面板点批准；allowGroup 关掉后素材只能发私聊'],
+      ['shareAppid', '手填的机器人 AppID', '「加机器人进频道」那条链接只由 appid 拼成。'
+        + '正常情况下从框架读；读不到（外接协议断开 / 框架配置没填）时可以在这里填一次，'
+        + '面板「频道总览 → 01」也能直接填'],
+      ['ownerAliases', '主人的其他渠道 id', '同一个人的 id 在群/私聊（openid）和频道（author.id）是两套标识，'
+        + '框架 owners 只认一种，所以主人在频道里会被算成普通成员。这里登记的 id 命中就按主人算（只影响本插件）；'
+        + '面板「群与频道 → 频道总览 → 我在频道里是谁」可以直接点选，不用手填'],
+      ['channelPost', '频道发帖', 'enabled：允不允许发；guildId / channelId 是目标频道与论坛版块（面板「发帖」页选）；'
+        + 'timesPerDay / windowStart / windowEnd / minGapMinutes 是每天几篇与排期；minChars / maxChars 是正文字数；'
+        + 'dryRun 试运行（默认开，只记账不外发）；allowTools 允不允许她在对话里自己发；askFirst 每次发前要不要先点头'],
       ['closing', '收尾', '对话冷掉前自己补一句：多久算冷（coolMinutes）、盯几个会话（maxChats）、记录留几天（ttlDays）'],
       ['leakGuard', '防复读', 'enabled：她回复里整段复述了注入的记忆块，出站前删掉那几句。默认关，日常在「权限」页高级组里点'],
       ['bridge', '对外联动（实验）', 'enabled：让别的 DSH 插件通过 ctx.get("aurabot") 主动发消息、读状态；接口可能变，默认关'],
@@ -16517,6 +17327,8 @@ select.roost-input{color-scheme:dark}
        */
       ['ch-home', '频道总览'],
       ['ch-policy', '频道策略'],
+      /* 发帖是**新的一件事**（内容创作与发布），不是接口台的第五个过滤器，所以单开一页 */
+      ['ch-post', '发帖'],
       ['ch-api', '频道接口'],
       ['ch-diag', '频道排障'],
       /* 系统：这台机器怎么跑。**书写顺序与 `NAV_GROUPS.system.tabs` 保持一致**——
@@ -16603,6 +17415,7 @@ select.roost-input{color-scheme:dark}
       /* 四个老页签并进来之后，原来各自的词都收在这一条里，搜哪个都还能到 */
       'ch-api': '频道接口 子频道 频道结构 创建 改名 删除 权限 频道消息 私信 撤回 表态 精华 dms 论坛 帖子 公告 日程 音频 上麦 频道成员 身份组 角色 在线人数 api权限',
       'ch-diag': '频道排障 事件 账本 投递 错误码',
+      'ch-post': '发帖 频道发帖 记 日记 版块 论坛 帖子 自动写 排期 putThread',
       'bot-self': '自身设置 机器人身份 菜单 指令面板 全局菜单 panels 接口台',
       chats: '会话 身份 映射 上下文',
       account: '账号迁移 迁移 换号 绑定 旧 openid',
@@ -16646,8 +17459,15 @@ select.roost-input{color-scheme:dark}
     const NAV_GROUPS = [
       { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview'] },
       { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'profile', 'mood', 'awake', 'memory', 'people'] },
-      /* 表达：她怎么"出声"——说话（语音合成）与表情包。2026-11-13 从「能力」里独立出来 */
-      { id: 'express', label: '表达', icon: 'M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.4A8 8 0 1 1 20.5 11.5zM9 13.2s1.1 1.5 3 1.5 3-1.5 3-1.5M9.5 9.6h.01M14.5 9.6h.01', tabs: ['express', 'stickers'] },
+      /**
+       * 表达：她怎么"出声"——说话（语音合成）、表情包、发帖。
+       *
+       * 发帖（`ch-post`）2026-11-17 从「群与频道」搬来这里：它是**她的表达出口**
+       * （代替 QQ 空间那样，在版块里写点留着的东西），不是频道运维。
+       * 技术上它要发到论坛子频道，但那是"发到哪儿"，不是"这件事属于频道管理"——
+       * 把它和频道策略、订阅位、接口台放一起，用户会以为得先搞懂频道才能用。
+       */
+      { id: 'express', label: '表达', icon: 'M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.4A8 8 0 1 1 20.5 11.5zM9 13.2s1.1 1.5 3 1.5 3-1.5 3-1.5M9.5 9.6h.01M14.5 9.6h.01', tabs: ['express', 'stickers', 'ch-post'] },
       /**
        * 群与频道（2026-11-16 合组，一级 8 → 7）：它们回答同一个问题——
        * 「在这个渠道里怎么说话」。
@@ -17510,6 +18330,8 @@ select.roost-input{color-scheme:dark}
               })
             : null,
           tab === 'ch-diag' ? h(ChannelDiagTab, {}) : null,
+          /** 发帖：开关 + 排期 + 版块 + 预览 + 历史。体检条在页顶，不挡操作 */
+          tab === 'ch-post' ? h(ChannelPostTab, { chats, toast, setTab }) : null,
           /** 人设 → 资料：她的名字 / 简介 / 头像 / 菜单，以及她能不能自己改 */
           tab === 'profile' ? h(ProfileTab, { toast }) : null,
           /** 机器人身份：菜单 / 指令面板这条合规链，和开发者后台那套分开 */
@@ -17686,6 +18508,13 @@ select.roost-input{color-scheme:dark}
     exports.HerTab = HerTab
     /** 5.2：排障页筛选的渲染测试要直接渲染它 */
     exports.LogsTab = LogsTab
+    /** 频道发帖页：测试直接渲染，盯住「没数据也不白屏」和六张卡都在 */
+    exports.ChannelPostTab = ChannelPostTab
+    /** 频道总览 / 策略：渲染测试要锁住「卡在哪一页、什么顺序」 */
+    exports.ChannelHomeTab = ChannelHomeTab
+    exports.ChannelPolicyTab = ChannelPolicyTab
+    /** 频道下拉的候选抽取（子频道 chatId → 纯 guildId + 去重），测试直接断言 */
+    exports.guildChoicesOf = guildChoicesOf
     exports.CapsTab = CapsTab
     exports.ToolsModal = ToolsModal
     /**

@@ -88,6 +88,26 @@ export function maxPartsOf(cfg, kind = 'group') {
 }
 
 /**
+ * 这个会话该不该挂 QQ 动作工具。
+ *
+ * 抽成纯函数而不是写在 `mount()` 里，是因为这条判据有两个真后果、必须能单测：
+ *
+ *   · **系统会话不挂**（2026-11-17）：`systemTurn()` 建的是 `system:*` 会话
+ *     （巩固、频道日记的生成），它没有 QQ 场景。`qq_send` 会往一个不存在的
+ *     chatId 发（静默失败）；更糟的是生成日记那一轮里模型手上有 `qq_post_thread`，
+ *     能自己再发一篇 —— 变成"一次触发、两篇帖子"。
+ *   · **总开关关着一律不挂**：`qqTools.enabled=false` 是主人的明确意思，
+ *     不能因为会话类型不同就绕过。
+ *
+ * @param {{ cfg?: object, kind?: string }} o
+ * @returns {boolean}
+ */
+export function shouldRegisterQqTools({ cfg, kind } = {}) {
+  if (cfg?.qqTools?.enabled === false) return false;
+  return String(kind || '') !== 'system';
+}
+
+/**
  * openid 的合法形状：QQ 官方的 `member_openid` / `user_openid` 是
  * base64url 风格的长串（大写字母、数字，偶有 `-` `_`）。
  *
@@ -430,7 +450,7 @@ function buildSearchDef({ caller, searchOf }) {
  * @param {() => object} o.cfgOf
  * @param {() => {parts:number}} o.stateOf 本轮已发段数
  */
-export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null }) {
+export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null }) {
   const caller = () => callerOf?.() || { chatId: '', kind: '', said: '', hasPayload: false, bucket: '' };
   const maxParts = () => maxPartsOf(cfgOf?.(), caller().kind);
 
@@ -619,11 +639,68 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
     ...(typeof infoOf === 'function' ? [buildWhoDef({ caller, infoOf })] : []),
     /** 搜历史：同样「没给实现就不注册」 */
     ...(typeof searchOf === 'function' ? [buildSearchDef({ caller, searchOf })] : []),
+    /**
+     * 频道发帖：**给了实现才注册**（宿主没接 channelPost 时不该出现这个工具）。
+     * 注册之后具体能不能发，由 `execute` 每次现判——主人随时会改开关。
+     */
+    ...(typeof postThreadOf === 'function' ? [buildPostThreadDef({ postThreadOf })] : []),
     /** 群管：和发言工具一起挂，但实现放在 group-tools.js（语义不同，也都依赖外接协议） */
     ...(typeof groupOf === 'function'
       ? buildGroupToolDefs({ groupOf, callerOf, ledgerOf, sessionOf, cfgOf })
       : []),
   ];
+}
+
+/**
+ * `qq_post_thread`：往频道版块里发一篇帖子（标题 + 正文）。
+ *
+ * **只在 QQ 会话注册**（`system:*` 会话由 `shouldRegisterQqTools` 挡掉），
+ * 而且**不接受 channelId**——目标版块由主人在面板里定死。这是安全边界：
+ * 被提示注入一次，最多让她写一篇烂文章，做不到"发到任意子频道"。
+ *
+ * 条件不满足时**不是不注册，而是拒绝并说明原因**：注册级开关读的是
+ * 挂载那一刻的配置，而主人随时可能在面板上打开/关闭；用 execute 内判定
+ * 才不会出现"改了设置要重启才生效"的怪事。
+ */
+function buildPostThreadDef({ postThreadOf }) {
+  return {
+    name: 'qq_post_thread',
+    description:
+      '在频道的一个版块里发一篇**帖子**（有标题、会一直留着，别人刷版块能看到）。'
+      + '这和 `qq_send` 不是一回事：`qq_send` 是现在这段对话里说一句，说完就过去了。'
+      +       '只在主人打开「允许她在对话里发帖」之后可用；发到哪个版块由主人定，你改不了。'
+      + '内容会被审核，所以「已提交」不等于「已经能看见」。'
+      /**
+       * 这一句是「链路不通时用户能不能被正确指引」的最后一环：
+       * 拒绝时宿主会把「去哪个面板点哪里」写进 `say`，模型只要照读。
+       * 不写这句，模型倾向于自己编一句"发帖功能好像没开"——那等于什么都没说。
+       */
+      + '**返回 `ok:false` 时，`say` 里已经写好了该告诉主人什么、去哪个面板点哪里——照它复述，不要自己猜原因，也不要编一个。**',
+    parameters: {
+      title: {
+        type: 'string',
+        description: '帖子标题，20 字内，不要带日期前缀、不要和正文第一句重复',
+      },
+      text: {
+        type: 'string',
+        required: true,
+        description: '正文。第一人称、口语、分段写；不要写 Markdown 标题、不要写标记',
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ title, text } = {}) {
+      const t = String(text ?? '').trim();
+      if (!t) return { ok: false, message: '要写点什么再发' };
+      try {
+        return await postThreadOf({ title: String(title ?? '').trim(), text: t });
+      } catch (e) {
+        return { ok: false, message: String(e?.message || e) };
+      }
+    },
+  };
 }
 
 /**
@@ -634,8 +711,8 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
  *
  * @returns {Promise<{ok:boolean, names:string[], reason?:string, mode?:string, off?:Function}>}
  */
-export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, log = () => {} }) {
-  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf, sessionOf, infoOf, searchOf });
+export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null, log = () => {} }) {
+  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf, sessionOf, infoOf, searchOf, postThreadOf });
   const registry = agent?.ctx?.tools;
   if (!registry?.register) {
     /**

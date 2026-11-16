@@ -33,10 +33,11 @@ import { createCapabilityStore } from './capability-store.js';
 import { createExtGroups } from './ext-groups.js';
 import { createQuota, QUOTA_DEFAULTS } from './quota.js';
 import { createSetup } from './setup.js';
-import { maxPartsOf } from './qq-tools.js';
+import { maxPartsOf, shouldRegisterQqTools } from './qq-tools.js';
 import { createMemory, W_EXPLICIT } from './memory.js';
 import { createJournal } from './journal.js';
 import { createLedgerReader } from './ledger-read.js';
+import { createChannelPost, normalizePostCfg, guide, humanError, pickErrorCode, shareUrlOf } from './channel-post.js';
 import { createGraph } from './graph.js';
 import { createSelf } from './self.js';
 import { createConsolidate } from './consolidate.js';
@@ -1374,6 +1375,28 @@ export function apply(ctx) {
    * 不落盘——重启后 Roost 配置那份还在，学到的丢了也无所谓。
    */
   let learnedOwner = '';
+  /**
+   * 最近说过话的人（最多 20 个，按 id 去重，新的在前）。
+   *
+   * 只存内存：这是给面板「这是你吗」列候选用的，重启清空不影响任何持久状态。
+   * 为什么要有它：报告要在**另一个渠道**把自己登记成主人，可他手上没有那个 id ——
+   * 让用户自己去账本里翻一串 openid 是不现实的。
+   */
+  const recentSenders = [];
+  /**
+   * 机器人 appid（来自 `system.hello` 的 `bot.appId`）。
+   *
+   * 缓存是因为握手信息一个进程内不会变，而「加机器人到频道」那张卡每次开页
+   * 都要用一次。拿不到就留空，面板据此显示"框架没连上"而不是给个空链接。
+   */
+  let appidCache = '';
+  /**
+   * 上次问 appid 失败的时间与原因。
+   *
+   * **失败也要缓存**：拿不到时每次开页都要把「外接协议 1.5s + 面板接口」重走一遍，
+   * 白等好几秒。60 秒内直接回上次的原因。
+   */
+  let appidMiss = { at: 0, reason: '' };
 
   /**
    * 主动搭话发给谁。三级兜底，越靠前越优先：
@@ -3316,6 +3339,31 @@ export function apply(ctx) {
   });
 
   /**
+   * 频道发帖：每天往频道的一个论坛版块里写几篇。
+   *
+   * 骨架搬自 aurabot 的空间日记（排期/重试/清洗/对账口径原样），
+   * 差别与理由都写在 `channel-post.js` 的文件头。
+   *
+   * 定时器照 `consolidate` 那套：启动 60 秒后补跑一次（多半是关机错过了当天的点），
+   * 之后每分钟看一眼。两个都 unref——不能因为定时器让进程退不出去。
+   * 一分钟一次不是浪费：没到点就是一次纯内存比较，`plan.times` 里没有到期项直接 return。
+   */
+  const channelPost = createChannelPost({
+    cfgOf: () => cfg,
+    patchCfg: (patch) => { cfg = patchConfig(patch); },
+    dirOf: dataDir,
+    callQq: (method, args) => roost.rpc('qq.call', { method, args }),
+    systemTurn,
+    ledgerRecent: (q) => ledgerRead.recent(q),
+    journalAdd: (row) => journal.add(row),
+    log: (m) => log.warn(m),
+  });
+  const postBoot = setTimeout(() => channelPost.tick().catch(() => {}), 60_000);
+  postBoot.unref?.();
+  const postTimer = setInterval(() => channelPost.tick().catch(() => {}), 60_000);
+  postTimer.unref?.();
+
+  /**
    * 主人批准之后**真正执行**的那一段。
    *
    * 抽成函数是因为现在有**两个入口**：按钮回调（主路径）与文本兜底
@@ -3588,6 +3636,36 @@ export function apply(ctx) {
      */
     const merged = { ...last, attachments: batch.attachments, elements: batch.elements };
     const payload = await buildFromRoost(merged, { send });
+    /**
+     * 主人别名提升。
+     *
+     * 框架的 `owners` 里通常是群/私聊 openid，而频道侧用的是 `author.id`
+     * （另一套标识空间），所以主人在频道里必然被算成普通成员。
+     * `cfg.ownerAliases` 是他手动登记的其他渠道 id，命中就升到主人档——
+     * 只改这一条 payload 的 bucket，不动框架配置，也不影响别人。
+     */
+    const aliases = Array.isArray(cfg.ownerAliases) ? cfg.ownerAliases.map((x) => String(x).trim()) : [];
+    const senderId = String(payload?.sender?.id ?? '').trim();
+    if (senderId && aliases.includes(senderId)) {
+      payload.sender.bucket = 'owner';
+      payload.sender.level = 0;
+      payload.sender.role = 'owner';
+    }
+    /** 最近说过话的人：面板「这是你吗」用它列候选，省得用户自己找 id */
+    if (senderId) {
+      recentSenders.unshift({
+        id: senderId, name: String(payload?.sender?.name ?? ''),
+        kind: chatKind, chatId,
+        guildId: String(last?.chat?.guildId ?? ''),
+        at: Number(last?.at) || Date.now(),
+        isOwnerAlias: aliases.includes(senderId),
+      });
+      /** 同一个 id 只留最近一条，最多 20 个 */
+      const dedup = new Map();
+      for (const s of recentSenders) if (!dedup.has(s.id)) dedup.set(s.id, s);
+      recentSenders.length = 0;
+      recentSenders.push(...[...dedup.values()].slice(0, 20));
+    }
     if (batch.count > 1) {
       payload.text = batch.text;
       payload.rendered = buildRendered(merged, batch.text, { images: payload.images });
@@ -4878,8 +4956,13 @@ export function apply(ctx) {
      * 挂载方式跟记忆工具一样，但**发送走被动回复**（`postReply(..., done:false)`）
      * 而不是主动接口——正处在"对方刚说完话"的 5 分钟窗口里，
      * 主动消息既浪费配额（20 条/分），群里还可能因为没 `group_push` 授权直接被拒。
+     *
+     * **系统会话（`systemTurn` 建的 `system:*`）一个都不挂**（2026-11-17）：
+     * 它没有 QQ 场景。`qq_send` 会往一个不存在的 chatId 发（静默失败），
+     * 而 `qq_post_thread` 更糟——在生成日记的那一轮里，模型手上有发帖工具，
+     * 就能自己再发一篇，变成"一次触发、两篇帖子"。这条判据比逐个工具打补丁可靠。
      */
-    if (cfg.qqTools?.enabled !== false) {
+    if (shouldRegisterQqTools({ cfg, kind: chat.kind })) {
       const sidFor = () => agent?.session?.id;
       /**
        * 这一轮是谁在说。工具 execute 时才读，不烤进定义——
@@ -5018,6 +5101,75 @@ export function apply(ctx) {
          * chatId 钉死，这里只负责把参数转给框架。分层的原因：只有 `callerOf()`
          * 知道当前说话人是谁，而账本 rpc 只认 openid。
          */
+        /**
+         * 频道发帖：她自己往频道版块里发一篇。
+         *
+         * **工具没有 channelId 参数**，目标由面板定死——这是安全边界：
+         * 被提示注入一次，最多让她写一篇烂文章，做不到"发到任意子频道"。
+         *
+         * 五个条件每次现判（工具是注册一次、长期在的，而主人随时会改开关）：
+         * 总开关 → 允许她自己发 → 选了版块 → 真发过一篇 → 字数不超。
+         * `askFirst` 只落一条待发草稿，等人在面板上点头。
+         */
+        postThreadOf: async ({ title, text } = {}) => {
+          const c = normalizePostCfg(cfg.channelPost);
+          /**
+           * 前置条件不满足时一律走 `guide()`：它带回 `say`，里面**已经写好
+           * 该让主人点哪里**。模型只要复述，不用自己猜"是不是没开"——
+           * 这正是「链路不通时用户能被正确指引」的关键一环。
+           */
+          if (!c.enabled) {
+            return guide('主人还没打开「允许发帖」，这次不发了', ['点面板「群与频道 → 发帖」→ 01 卡把「允许发帖」打开']);
+          }
+          if (!c.allowTools) {
+            return guide('主人还没允许你在对话里自己发帖', ['点面板「群与频道 → 发帖」→ 06 卡把「允许她在对话里发帖」打开']);
+          }
+          if (!c.channelId) {
+            return guide('还没选发帖版块', ['点面板「群与频道 → 发帖」→ 03 卡选一个论坛版块', '没有论坛版块就先建一个（频道设置 → 新建子频道 → 类型选「论坛」）']);
+          }
+          if (!c.verifiedAt) {
+            return guide('还没成功发过一篇，先手动试一次', ['点面板「群与频道 → 发帖」→ 04 卡「现在真发一篇」，成功过一次之后这个工具才可用']);
+          }
+          /**
+           * 每日次数对她自己发同样生效。
+           *
+           * `timesPerDay` 的语义是"每天最多几篇"，不分是排期发的还是她自己发的；
+           * 不在这里判，她能一天在对话里写十篇堆到面板上。
+           */
+          if (c.timesPerDay === 0) {
+            return guide('主人设的是「只手动发」', ['面板 01 卡「每天几篇」是 0，所以她不能自己在对话里发', '要让她自己发，把「每天几篇」调成 1 以上']);
+          }
+          const usedToday = channelPost.state().today;
+          if (usedToday >= c.timesPerDay) {
+            return guide('今天的篇数用完了', [`今天已经发了 ${usedToday} 篇，上限是 ${c.timesPerDay} 篇`, '明天再写，或让主人在 01 卡把「每天几篇」调大']);
+          }
+          const t = String(text || '').trim();
+          if (!t) return guide('正文是空的', ['把要说的话写进 `text` 再发一次']);
+          if (t.length > c.maxChars) {
+            return guide('正文太长了', [`当前 ${t.length} 字，上限 ${c.maxChars} 字`, '写短一点再发（或让主人在 02 卡把上限调大）']);
+          }
+          if (c.askFirst) {
+            const d = channelPost.addDraft({ title, text: t, source: 'tool' });
+            return d.ok
+              ? { ok: true, message: `写好了《${d.title}》。等主人点头——面板「发帖」页会出现这一条，点「发」才真发` }
+              : d;
+          }
+          const r = await channelPost.sendDraft({ title, text: t, source: 'tool' });
+          if (!r.ok) {
+            return {
+              ok: false,
+              message: r.message,
+              ...(Array.isArray(r.todo) ? { todo: r.todo } : {}),
+              ...(r.say ? { say: r.say } : {}),
+              ...(r.code ? { code: r.code } : {}),
+            };
+          }
+          return {
+            ok: true,
+            message: r.dryRun ? '试运行：没真发（面板里开着试运行）' : '已提交，等审核；通过之后才会出现在版块里',
+            taskId: r.taskId || '',
+          };
+        },
         searchOf: async (args = {}) => {
           /** 看上下文是另一条协议方法（要先按 seq 定位会话），别混进搜索参数里 */
           if (args.around) {
@@ -9239,6 +9391,276 @@ export function apply(ctx) {
        * 额度 / 事件表拼好，省得前端打三个接口；每项都单独 try，频道没连上
        * 时对应项为 null 而不是整页报错。全部只读。
        */
+      /**
+       * 频道发帖 · 面板「发帖」页的全部后端。
+       *
+       * 七个端点，**分成"读"与"写"两类**：
+       *   · 读（GET）：`/channel/post`、`/channel/post/diagnose`、`/channel/post/channels`、`/channel/post/sync`
+       *   · 写（POST）：`/channel/post/config`、`/channel/post/channel`、`/channel/post/preview`、
+       *     `/channel/post/send`、`/channel/post/tick`
+       *
+       * 两道闸：
+       *   ① 真发必须带 `confirm: true`——「发到公开版块」不该由一次误点触发；
+       *   ② 配置只走 `normalizePostCfg` 夹紧后整份写回，不接受任意键（避免顺手改别的配置）。
+       */
+      route('/channel/post', async (_req, res) => {
+        try {
+          send(res, 200, { ok: true, ...channelPost.state() });
+        } catch (e) {
+          send(res, 200, { ok: false, message: String(e?.message || e) });
+        }
+      }),
+
+      route('/channel/post/config', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          return send(res, 400, { ok: false, message: '参数要是一个对象' });
+        }
+        const next = normalizePostCfg({ ...cfg.channelPost, ...body });
+        cfg = patchConfig({ channelPost: next });
+        send(res, 200, { ok: true, channelPost: normalizePostCfg(cfg.channelPost) });
+      }),
+
+      route('/channel/post/diagnose', async (_req, res) => {
+        try {
+          send(res, 200, await channelPost.diagnose());
+        } catch (e) {
+          send(res, 200, { ok: false, message: String(e?.message || e) });
+        }
+      }),
+
+      /** 论坛版块列表（只回 type=10007）。面板「发到哪」卡用它渲染单选。 */
+      /**
+       * 机器人加入的频道列表（`getMyGuilds`）。
+       *
+       * **不读会话映射**：那要求机器人已经收到过频道消息，而"选频道"发生在收到消息之前。
+       * 发帖页的「发到哪个频道」和策略页的「按频道覆写」都用这一个接口。
+       */
+      route('/channel/guilds', async (_req, res) => {
+        try {
+          send(res, 200, { ok: true, guilds: await channelPost.listGuilds() });
+        } catch (e) {
+          const h = humanError(pickErrorCode(e), e?.message);
+          send(res, 200, { ok: false, message: h.title, todo: h.todo, url: h.url, guilds: [] });
+        }
+      }),
+
+      /**
+       * 某频道下的**全部**子频道（不只论坛）。
+       *
+       * 界面要把完整的频道结构摆出来，用户才知道自己有哪些子频道、哪个能发帖。
+       * 只回论坛版块会让没建论坛的人以为"我的子频道没列出来"。
+       */
+      route('/channel/post/subs', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        const guildId = String(body?.guildId || '').trim();
+        if (!/^\d{1,20}$/.test(guildId)) return send(res, 400, { ok: false, message: '频道 id 不对', channels: [] });
+        try {
+          send(res, 200, { ok: true, channels: await channelPost.listSubChannels(guildId) });
+        } catch (e) {
+          const h = humanError(pickErrorCode(e), e?.message);
+          send(res, 200, { ok: false, message: h.title, todo: h.todo, url: h.url, channels: [] });
+        }
+      }),
+
+      /**
+       * 选版块 / 试着建一个。
+       *
+       * 建版块**不承诺成功**：官方创建子频道接口的请求体 `type` 没给枚举
+       * （只有响应里列了 10007），而且需要管理员权限。失败时把 code/todo 原样
+       * 带回去，面板据此改口说"你手动建一个"。
+       */
+      route('/channel/post/channel', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        if (String(body?.mode || '') === 'create') {
+          return send(res, 200, await channelPost.createForumChannel(body?.name));
+        }
+        const channelId = String(body?.channelId || '').trim();
+        if (!/^\d{1,20}$/.test(channelId)) return send(res, 400, { ok: false, message: '版块 id 不对' });
+        const guildId = String(body?.guildId || cfg.channelPost?.guildId || '').trim();
+        cfg = patchConfig({ channelPost: { channelId, guildId } });
+        send(res, 200, { ok: true, channelPost: normalizePostCfg(cfg.channelPost) });
+      }),
+
+      /** 生成一篇草稿：不发布、不记账、不消耗当天次数（与 aurabot 的 preview 同义）。 */
+      route('/channel/post/preview', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        send(res, 200, await channelPost.preview());
+      }),
+
+      /**
+       * 真发一篇。
+       *
+       * 两种用法：
+       *   · 带 `{ title, text }` —— 面板预览过、用户点"真发"的那一篇（原样发，不重新生成）；
+       *   · 不带 —— 现生成一篇再发（`write({ force: true })`）。
+       * 两种都走同一个 `sendDraft`，所以历史里都会有记录。
+       */
+      route('/channel/post/send', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        if (body?.confirm !== true) return send(res, 400, { ok: false, message: '发到频道版块要二次确认' });
+        const title = String(body?.title || '').trim();
+        const text = String(body?.text || '').trim();
+        try {
+          if (title && text) {
+            const r = await channelPost.sendDraft({ title, text, force: true, source: 'panel' });
+            return send(res, 200, r);
+          }
+          send(res, 200, await channelPost.write({ force: true }));
+        } catch (e) {
+          send(res, 200, { ok: false, message: String(e?.message || e) });
+        }
+      }),
+
+      /** 拉一次帖子列表，把「已提交」认领成「已上线」。只读，可反复点。 */
+      route('/channel/post/sync', async (_req, res) => {
+        try {
+          send(res, 200, await channelPost.sync());
+        } catch (e) {
+          send(res, 200, { ok: false, message: String(e?.message || e) });
+        }
+      }),
+
+      /**
+       * 立刻跑一次排期检查。
+       *
+       * **它不是只读**：今天有错过档位时会立刻真发一篇（受 dryRun 约束）。
+       * 所以和 `/channel/post/send` 一样要显式 `confirm: true` ——
+       * 这条闸防的不是面板（面板自己会问），是别的调用方顺手一调就多发一篇。
+       */
+      route('/channel/post/tick', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req);
+        if (body?.confirm !== true) return send(res, 400, { ok: false, message: '补发可能真的发一篇，需要二次确认' });
+        try {
+          await channelPost.tick();
+          send(res, 200, { ok: true, next: channelPost.nextTime() });
+        } catch (e) {
+          send(res, 200, { ok: false, message: String(e?.message || e) });
+        }
+      }),
+
+      /**
+       * 主人别名表：「我在别的渠道也是我」。
+       *
+       * 频道侧的人 id（`author.id`）和群/私聊的 openid 不在一个标识空间，
+       * 框架 `owners` 只认一种 → 主人在频道里被算成普通成员。
+       * 这张表命中 `payload.sender.id` 就按主人算（见 `deliverBatch` 的提升逻辑）。
+       *
+       * GET 一并回 `recent`（最近说过话的人），面板据此列「这是我」的候选，
+       * 省得用户自己去账本里翻 openid。
+       */
+      route('/owner/aliases', async (req, res) => {
+        if (req.method === 'GET') {
+          return send(res, 200, {
+            ok: true,
+            aliases: Array.isArray(cfg.ownerAliases) ? cfg.ownerAliases : [],
+            recent: recentSenders,
+          });
+        }
+        const body = await readBody(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          return send(res, 400, { ok: false, message: '参数要是一个对象' });
+        }
+        const add = String(body.add || '').trim();
+        const remove = String(body.remove || '').trim();
+        const cur = Array.isArray(cfg.ownerAliases) ? cfg.ownerAliases.map((x) => String(x)) : [];
+        let next = cur;
+        if (add) {
+          /** 只收标识符字符：这个值会参与身份比较，放进空白/引号只会让匹配永远失败 */
+          if (!/^[A-Za-z0-9_:.-]{1,64}$/.test(add)) return send(res, 400, { ok: false, message: 'id 格式不对' });
+          if (!cur.includes(add)) next = [...cur, add];
+        } else if (remove) {
+          next = cur.filter((x) => x !== remove);
+        } else {
+          return send(res, 400, { ok: false, message: '要给 add 或 remove' });
+        }
+        cfg = patchConfig({ ownerAliases: next });
+        send(res, 200, { ok: true, aliases: cfg.ownerAliases });
+      }),
+
+      /**
+       * 「把机器人加进频道」的链接。
+       *
+       * **不在这里画二维码**（2026-11-17 主人决定）：这条链接在浏览器里打开后，
+       * 腾讯自己的页面就会给出二维码，比我们本地画一张更可靠——不会出现
+       * "码和图对不上""版本旧了画不出"这些自己给自己找的麻烦。
+       *
+       * 链接是 appid 拼出来的（实测扫开放平台那张码，解出来就是它），
+       * appid 从 `system.hello` 读一次缓存。
+       */
+      route('/channel/share', async (req, res) => {
+        /**
+         * `?appid=` 用于手填：调用方给什么就用什么，不再问框架。
+         * 这样前端不必自己实现一遍「清洗 + 拼链接」——两份实现必然漂移。
+         */
+        let manual = '';
+        try {
+          manual = String(new URL(req.url || '/', 'http://localhost').searchParams.get('appid') || '')
+            .replace(/\D/g, '').slice(0, 20);
+        } catch { /* url 解析失败就当没传 */ }
+        if (manual) {
+          return send(res, 200, { ok: true, appid: manual, url: shareUrlOf(manual), reason: '', manual: true });
+        }
+
+        /** 60 秒内刚失败过：直接回上次的原因，不再重走两条路 */
+        if (!appidCache && Date.now() - appidMiss.at < 60_000) {
+          return send(res, 200, { ok: true, appid: '', url: '', reason: appidMiss.reason });
+        }
+        /**
+         * 失败原因要带出去。
+         *
+         * 之前这里是 `catch {}`，面板只剩一句"框架没连上"——而真实原因可能是
+         * 「配置里没有 appId」「外接协议断开」「scope 不够」，三种的修法完全不同。
+         */
+        let reason = '';
+        /**
+         * appid 是**当前那个机器人**的，不是常量。按可靠度依次问：
+         *
+         *   1. 外接协议 `system.hello` —— 已经连着时最快，`bot.appId` 就是当前 runtime；
+         *   2. 框架自己的面板接口 `/api/bots` —— 同机带 key 就能读，**不依赖外接协议**
+         *      （外接协议没连上是很常见的状态，而框架进程一直跑着）；
+         *   3. 配置里手填的 `shareAppid` —— 最后兜底，只在上面两条都读不到时用。
+         */
+        if (!appidCache) {
+          try {
+            const hello = await Promise.race([
+              roost.rpc('system.hello', {}),
+              new Promise((_, rej) => {
+                const t = setTimeout(() => rej(new Error('外接协议没响应')), 1500);
+                t.unref?.();
+              }),
+            ]);
+            appidCache = String(hello?.bot?.appId || '');
+            if (!appidCache) reason = '框架回了 hello，但里面没有 appId';
+          } catch (e) {
+            reason = String(e?.message || e);
+          }
+        }
+        if (!appidCache && setup?.api) {
+          try {
+            const r = await setup.api('/api/bots');
+            const list = Array.isArray(r?.bots) ? r.bots : [];
+            const cur = String(r?.current || '');
+            /** 多机器人时取「当前在跑的那个」，取不到才退回第一个在线的 */
+            const bot = list.find((b) => b.id === cur) || list.find((b) => b.online) || list[0];
+            appidCache = String(bot?.appId || '');
+            if (appidCache) reason = '';
+            else reason = '框架的机器人列表里没有 appId（框架配置里没填？）';
+          } catch (e) {
+            reason = `面板接口也读不到：${e?.message || e}`;
+          }
+        }
+        if (!appidCache) appidCache = String(cfg.shareAppid || '').replace(/\D/g, '');
+        if (appidCache) appidMiss = { at: 0, reason: '' };
+        else appidMiss = { at: Date.now(), reason };
+        send(res, 200, { ok: true, appid: appidCache, url: shareUrlOf(appidCache), reason });
+      }),
+
       route('/channel/status', async (req, res) => {
         const tryRpc = async (m, p) => {
           try { return await roost.rpc(m, p); } catch { return null; }

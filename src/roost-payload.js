@@ -300,16 +300,32 @@ export function createPayloadBuilder({
   async function permissionOf(evt) {
     const userId = String(evt?.sender?.openid ?? '').trim();
     if (!userId) return null;
-    /** 保留四态：宿主协议 roles.resolve 现在认 guild/dm，频道权限走 channel:${groupId} scope */
+    /** 保留四态：宿主协议 roles.resolve 认 guild/dm，频道权限走 `channel:${groupId}` scope */
     const k = evt?.chat?.kind;
     const kind = ['group', 'c2c', 'guild', 'dm'].includes(k) ? k : 'group';
-    const key = `${kind}:${evt?.chat?.chatId ?? ''}:${userId}`;
+    /**
+     * 缓存键必须带上频道维度。
+     *
+     * 同一个人在同一个频道私信里的档位是稳定的，但同一串 chatId 换频道就不成立了；
+     * 只用 `kind:chatId:userId` 的话，换频道后会吃到上一个频道的档位。
+     */
+    const guildId = String(evt?.chat?.guildId ?? '');
+    const key = `${kind}:${guildId || evt?.chat?.chatId || ''}:${userId}`;
     const hit = perms.get(key);
     if (hit && Date.now() - hit.at < PERM_TTL_MS) return hit.value;
     try {
       const v = await rpc('roles.resolve', {
         userId, kind, chatId: String(evt?.chat?.chatId ?? ''),
         groupId: String(evt?.chat?.groupId ?? evt?.chat?.chatId ?? ''),
+        /**
+         * **这两个必须传。** 宿主侧 `roles.resolve` 会拿它们拼 scope：
+         * `scopeOf({kind, guildId, groupId})` 对 guild/dm 走 `channel:${groupId}`，
+         * 缺了 guildId 就只能用频道私信的会话 id 去查频道角色 —— 查不到，
+         * 于是主人在频道里被算成「普通成员」（2026-11-17 实机：频道私信里她问
+         * 「资料卡上就写着天道酬勤」，完全不认得主人）。
+         */
+        guildId,
+        channelId: String(evt?.chat?.channelId ?? ''),
       });
       const value = v?.bucket ? { bucket: v.bucket, level: v.level, role: v.role } : null;
       perms.set(key, { at: Date.now(), value });

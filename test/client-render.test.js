@@ -2236,11 +2236,217 @@ test('A7：一级组群聊并入「群与频道」，且老 id 留了别名', ()
   assert.match(src, /[{] id: 'channel', label: '群与频道'/, '一级组名要改')
   assert.doesNotMatch(src, /[{] id: 'group', label: '群聊'/, '群聊组应已并入，不该还在')
   assert.match(src, /tabs: \['groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag'\]/,
-    '组内顺序：先群聊（多数人只有群）后频道')
+    '频道组只留渠道相关：群聊 / 群管 / 频道总览 / 频道策略 / 接口台 / 排障')
+  /**
+   * 发帖 2026-11-17 移到「表达」：它是她的表达出口（代替 QQ 空间），不是频道运维。
+   * 混在频道组里会让人以为「得先搞懂频道才能用」。
+   */
+  assert.match(src, /tabs: \['express', 'stickers', 'ch-post'\]/,
+    '发帖要归「表达」（语音 / 表情包 / 发帖 都是"她怎么出声"）')
   assert.match(src, /const GROUP_ALIAS = [{] group: 'channel' [}]/,
     '老组 id 必须留别名——已发布扩展的 ui.nav.group 还写着 group，删了页面会从导航里消失')
 })
 
+
+test('发帖页：没有数据也不白屏，六张卡都在', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  rt.reset()
+  /**
+   * 不传 st / diag（`useEffect` 在 Node 里不跑），模拟"刚打开面板、还没拉到数据"。
+   * 这一层专抓空数据崩溃：新装用户所有状态都是 null，少写一个 `?.` 就白屏。
+   */
+  const txt = textOf(expand(h(mod.ChannelPostTab, { chats: [], toast: () => {} }), rt))
+  for (const must of [
+    '频道发帖', '正在体检',
+    '总开关与排期', '写什么', '发到哪', '现在发一篇', '发过什么', '交给她自己发',
+    '先看草稿', '重新体检',
+  ]) {
+    assert.ok(txt.includes(must), `发帖页缺「${must}」`)
+  }
+  /** 没有频道会话时不能露出一堆空下拉，要告诉用户下一步做什么 */
+  /** 拉不到频道列表时要说清下一步（不是丢一个空下拉在那儿） */
+  assert.ok(txt.includes('拉不到频道列表'), '缺「确认机器人已被拉进频道」的提示')
+})
+
+test('频道总览：加机器人排最前；两张新卡不能用别的页面的变量（会 ReferenceError）', () => {
+  /**
+   * 踩过：`me` / `qr` 的 state 加在总览页，但 05/06 两张卡被插进了 `ChannelPolicyTab`，
+   * 打开策略页直接 `ReferenceError: me is not defined`；总览页也只剩 4 张卡。
+   * 这条同时锁住「卡在总览页」和「顺序：加机器人在最前」。
+   */
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  rt.reset()
+  const txt = textOf(expand(h(mod.ChannelHomeTab, {
+    config: { guild: { enabled: true } },
+    saveCfg: async () => ({ ok: true }),
+    toast: () => {},
+    chats: [],
+    setTab: () => {},
+  }), rt))
+
+  const iAdd = txt.indexOf('把机器人加进频道')
+  const iSwitch = txt.indexOf('总开关与粒度')
+  const iMe = txt.indexOf('我在频道里是谁')
+  assert.ok(iAdd >= 0, '总览页要有「把机器人加进频道」')
+  assert.ok(iSwitch >= 0, '总开关那张卡还在')
+  assert.ok(iMe >= 0, '「我在频道里是谁」也要在总览页')
+  assert.ok(iAdd < iSwitch, '加机器人要排在总开关前面，否则用户注意不到')
+
+  /** 策略页不该再引用总览页的 state */
+  rt.reset()
+  const policy = textOf(expand(h(mod.ChannelPolicyTab, {
+    config: { guild: {}, roostHost: {} },
+    saveCfg: async () => ({ ok: true }),
+    saveAll: async () => ({ ok: true }),
+    toast: () => {},
+    chats: [],
+    setTab: () => {},
+  }), rt))
+  assert.ok(policy.length > 0, '策略页要能渲染（渲染期间抛错会被这里捕获）')
+})
+
+test('发帖页：体检区能就地选频道、也有常用动作按钮（不用滚到下面的卡）', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  rt.reset()
+  const txt = textOf(expand(h(mod.ChannelPostTab, {
+    chats: [],
+    toast: () => {},
+    setTab: () => {},
+    seed: {
+      diag: {
+        ok: true, blocked: false, ready: false, verified: false, pending: 1,
+        steps: [
+          { id: 'guild', state: 'ok', detail: '总开关已打开' },
+          { id: 'perm', state: 'ok', detail: '有论坛权限' },
+          { id: 'channel', state: 'todo', detail: '还没选频道：在下面 03 卡里选一个' },
+          { id: 'sent', state: 'info', detail: '还没真发过' },
+        ],
+      },
+      st: { cfg: {}, history: [], plan: { times: [] }, today: 0, lastError: null },
+      guilds: [{ id: '123456789', name: '我的频道' }],
+      subs: [],
+    },
+  }), rt))
+
+  /** 就地选频道：这一行直接给下拉，不必滚到 03 卡 */
+  assert.ok(txt.includes('选频道'), '体检区要有就地的频道下拉')
+  /** 常用动作也在这一区 */
+  for (const must of ['先看草稿', '现在发一篇', '重新体检']) {
+    assert.ok(txt.includes(must), `体检区缺快捷入口「${must}」`)
+  }
+})
+
+test('发帖页：顶部有一键打开「加机器人」的链接（没加频道就什么都做不了）', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  rt.reset()
+  const txt = textOf(expand(h(mod.ChannelPostTab, {
+    chats: [],
+    toast: () => {},
+    setTab: () => {},
+    seed: {
+      share: { ok: true, appid: '102056878', url: 'https://qun.qq.com/qunpro/robot/share?robot_appid=102056878' },
+      st: { cfg: {}, history: [], plan: { times: [] }, today: 0, lastError: null },
+      diag: null,
+    },
+  }), rt))
+  assert.ok(txt.includes('还没把机器人加进频道'), '要有一句直白的入口提示')
+  assert.ok(txt.includes('打开链接'), '要能一键打开（浏览器里腾讯会给二维码）')
+})
+
+test('发帖页：频道候选只取 guild_id 那一段，并按频道去重', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  /**
+   * 会话可能是子频道粒度（`guild:<guildId>:ch:<channelId>`）。整串当 guildId
+   * 存进去会被 normalize 的纯数字校验清空，用户的表现是「选了频道，保存完又变回未选」。
+   */
+  const out = mod.guildChoicesOf([
+    { kind: 'guild', chatId: 'guild:123456789', title: '闲聊' },
+    { kind: 'guild', chatId: 'guild:123456789:ch:998877', title: '另一个子频道' },
+    { kind: 'guild', chatId: 'guild:555000111:ch:222333', title: '公告' },
+    { kind: 'group', chatId: 'group:abc', title: '群' },
+    { kind: 'dm', chatId: 'guild:777', title: '私信' },
+    { kind: 'guild', chatId: 'guild:坏掉的' },
+  ])
+  assert.deepEqual(out, [
+    { id: '123456789', title: '闲聊' },
+    { id: '555000111', title: '公告' },
+  ], '同频道的多个子频道要合成一条，非数字 id 要丢掉')
+})
+
+test('发帖页：频道 / 子频道两个下拉要真的列出东西，非论坛类型标出来', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  rt.reset()
+  const txt = textOf(expand(h(mod.ChannelPostTab, {
+    chats: [],
+    toast: () => {},
+    setTab: () => {},
+    seed: {
+      st: { cfg: { guildId: '123456789' }, history: [], plan: { times: [] }, today: 0, lastError: null },
+      diag: null,
+      guilds: [{ id: '123456789', name: '我的频道' }],
+      subs: [
+        { id: '900', name: '综合讨论', type: 0, isForum: false },
+        { id: '901', name: '日记本', type: 10007, isForum: true },
+      ],
+    },
+  }), rt))
+
+  /**
+   * 主人反馈过：「发在哪个频道、哪个子频道怎么都没有选项」。
+   * 以前只列论坛版块，非论坛的子频道一个都不显示，看起来就像"我的子频道没被认出来"。
+   */
+  assert.ok(txt.includes('我的频道'), '频道下拉要有频道名')
+  assert.ok(txt.includes('综合讨论'), '非论坛子频道也要列出来')
+  assert.ok(txt.includes('发不了'), '要标注为什么选不了')
+  assert.ok(txt.includes('日记本'), '论坛子频道要在列表里')
+  assert.ok(txt.includes('可以发'), '论坛子频道要标出可用')
+})
+
+test('发帖页：体检没过时，界面上直接写清「点哪里」（不靠 hover）', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  rt.reset()
+  const diag = {
+    ok: true, blocked: true, ready: false, pending: 3,
+    steps: [
+      { id: 'guild', state: 'todo', jump: 'ch-home', detail: '频道总开关还关着：去「频道总览」的 01 卡「总开关与粒度」，把「启用频道」打开' },
+      { id: 'perm', state: 'fail', detail: '这个机器人还没拿到「论坛」权限', todo: ['去开放平台勾上论坛', '把机器人移出频道再重新添加', '回来点「重新体检」'] },
+      { id: 'channel', state: 'todo', detail: '还没选版块：在下面 03 卡「发到哪」里选一个' },
+      { id: 'sent', state: 'todo', detail: '还没真发过：去 04 卡点「现在真发一篇」' },
+    ],
+  }
+  const txt = textOf(expand(h(mod.ChannelPostTab, {
+    chats: [],
+    toast: () => {},
+    setTab: () => {},
+    seed: { diag, st: { cfg: {}, history: [], plan: { times: [] }, today: 0, lastError: null }, chans: [] },
+  }), rt))
+
+  /**
+   * 上一版四盏灯只有名字，具体点哪儿全在 `title` 里——手机点不出来等于没有。
+   * 这几条锁住「指引必须印在界面上」。
+   */
+  for (const must of [
+    '接下来做什么',
+    '总开关与粒度', '启用频道', '去打开',
+    '把机器人移出频道再重新添加',
+    '03 卡', '04 卡',
+  ]) {
+    assert.ok(txt.includes(must), `体检指引缺「${must}」`)
+  }
+})
 
 test('5.2 排障页：级别 / 模块筛选与自动刷新开关', () => {
   const rt = makeReact()

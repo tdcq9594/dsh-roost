@@ -205,6 +205,11 @@ export function createRoostHost({
     if (body.ok === false) {
       const e = new Error(body?.error?.message || `HTTP ${res.status}`);
       e.code = body?.error?.code || '';
+      /**
+       * 官方业务错误码（11253 / 503004 / 304018 …）。框架 2026-11-17 起才带这个字段，
+       * 老框架读不到就是 undefined —— 调用方要能容忍"只有 message"的情况。
+       */
+      if (Number(body?.error?.qqCode) > 0) e.qqCode = Number(body.error.qqCode);
       e.http = res.status;
       throw e;
     }

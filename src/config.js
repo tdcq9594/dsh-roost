@@ -10,6 +10,11 @@ import { readFileSync, writeFileSync, chmodSync, mkdirSync, existsSync } from 'n
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+/**
+ * 频道发帖的默认值放在 `channel-post.js` 里（那份才是唯一来源），
+ * 这里只展开一次。该模块不 import 本文件，不会形成循环依赖。
+ */
+import { POST_DEFAULTS } from './channel-post.js';
 
 /** 数据目录：默认 ~/.dsh/dsh-roost，可用 DSH_ROOST_DATA 覆盖 */
 export function dataDir() {
@@ -852,6 +857,33 @@ export const DEFAULTS = {
     /** 按频道覆写：{ [sessionKey]: { … } }，键用 `guild:<guildId>` */
     overrides: {},
   },
+  /**
+   * 频道发帖：让她在频道的一个论坛版块里，每天写几篇留着的小记。
+   *
+   * **默认值必须在这里列全**：`pruneTo()` 按 DEFAULTS 的键裁剪，没列的键会被
+   * 静默丢掉（`persona.bySender` 那次就栽在这上面）。所以直接展开模块里的
+   * `POST_DEFAULTS`，保证"默认值"只有一份定义。
+   */
+  channelPost: { ...POST_DEFAULTS },
+  /**
+   * 主人的**其他渠道 id**。
+   *
+   * 同一个人在不同渠道是不同 id：群/私聊是 `member_openid`，频道是 `author.id`
+   * （频道成员 id，另一套标识空间）。框架的 `owners` 只认一种，于是主人在频道里
+   * 被算成普通成员——2026-11-17 实机：她在频道私信里反问「资料卡上就写着天道酬勤」。
+   *
+   * 这里存的 id 命中 `payload.sender.id` 就按主人算（见 host 的入站提升）。
+   * 只影响 dsh-roost 自己的判档，不动框架 owners。
+   */
+  ownerAliases: [],
+  /**
+   * 手填的机器人 AppID。
+   *
+   * 正常情况下从框架 `system.hello` 读；但外接协议断开、或框架配置里没有
+   * appId 时读不到。而「加机器人」那条链接只要 appid 就能拼，没有理由
+   * 因为读不到就让人干看着。填一次就存这儿，优先于协议查询。
+   */
+  shareAppid: '',
   /**
    * 主动搭话：主人一阵子没找你，你主动在私聊里说句话。
    * **只在私聊，不在群里**；默认关着。

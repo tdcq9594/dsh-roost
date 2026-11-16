@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildQqToolDefs, buildAtPrefix, MAX_PARTS, AT_ID_RE, maxPartsOf } from '../src/qq-tools.js';
+import { buildQqToolDefs, buildAtPrefix, MAX_PARTS, AT_ID_RE, maxPartsOf, shouldRegisterQqTools } from '../src/qq-tools.js';
 
 /**
  * 造一套工具，返回 { send, close } 和记账用的箱子。
@@ -29,6 +29,8 @@ function make({
   infoOf = null,
   /** `qq_search` 的实现。同样：不传 = 没装 */
   searchOf = null,
+  /** `qq_post_thread` 的实现。同样：不传 = 没装 */
+  postThreadOf = null,
   /** 当前说话人的 openid（`qq_who` 不传参数时用它，`qq_search` 用它做权限收窄） */
   openid = '',
   /** 权限档位：`qq_search` 靠它判「能不能看别人的消息」 */
@@ -36,7 +38,7 @@ function make({
   /** 这一轮的会话 */
   chatId = 'u1',
 } = {}) {
-  const box = { sent: [], opts: [], parts: 0, closed: false, closedWith: null, fileCalls: [], whoCalls: [], searchCalls: [] };
+  const box = { sent: [], opts: [], parts: 0, closed: false, closedWith: null, fileCalls: [], whoCalls: [], searchCalls: [], postCalls: [] };
 
   const defs = buildQqToolDefs({
     callerOf: () => ({
@@ -78,6 +80,12 @@ function make({
           return searchOf(q);
         }
       : undefined,
+    postThreadOf: postThreadOf
+      ? async (q = {}) => {
+          box.postCalls.push(q);
+          return postThreadOf(q);
+        }
+      : undefined,
     cfgOf: () => ({ qqTools: { maxParts } }),
     stateOf: () => ({ parts: box.parts }),
   });
@@ -90,6 +98,7 @@ function make({
     file: by('qq_send_file'),
     who: by('qq_who'),
     search: by('qq_search'),
+    post: by('qq_post_thread'),
     defs,
   };
 }
@@ -725,4 +734,81 @@ test('qq_search：around 缺 seq 直接拒，不打后端', async () => {
   const r = await search.execute({ around: 0 });
   assert.equal(r.ok, false);
   assert.equal(box.searchCalls.length, 0);
+});
+
+/* ---------------- 工具注册判据 ---------------- */
+
+test('shouldRegisterQqTools：系统会话一个 QQ 工具都不挂', () => {
+  // 系统会话 = systemTurn() 建的 system:*，用来跑巩固 / 频道日记的生成。
+  // 挂了 qq_post_thread 就会"一次触发、两篇帖子"，挂了 qq_send 会往不存在的会话发。
+  assert.equal(shouldRegisterQqTools({ cfg: {}, kind: 'system' }), false);
+  assert.equal(shouldRegisterQqTools({ cfg: { qqTools: { enabled: true } }, kind: 'system' }), false);
+});
+
+test('shouldRegisterQqTools：总开关关着一律不挂，其它会话类型照旧', () => {
+  assert.equal(shouldRegisterQqTools({ cfg: { qqTools: { enabled: false } }, kind: 'c2c' }), false);
+  assert.equal(shouldRegisterQqTools({ cfg: { qqTools: { enabled: false } }, kind: 'group' }), false);
+  // 默认（没配过）= 挂
+  assert.equal(shouldRegisterQqTools({ cfg: {}, kind: 'c2c' }), true);
+  assert.equal(shouldRegisterQqTools({ cfg: {}, kind: 'group' }), true);
+  assert.equal(shouldRegisterQqTools({ cfg: {}, kind: 'guild' }), true);
+  assert.equal(shouldRegisterQqTools({ cfg: {}, kind: 'dm' }), true);
+});
+
+/* ---------------- qq_post_thread ---------------- */
+
+test('qq_post_thread：不给实现就不注册（和 file / who / search 同口径）', () => {
+  const { defs, post } = make();
+  assert.equal(post, undefined);
+  assert.ok(!defs.some((d) => d.name === 'qq_post_thread'));
+});
+
+test('qq_post_thread：参数只有 title / text，**没有 channelId**', () => {
+  const { post } = make({ postThreadOf: async () => ({ ok: true }) });
+  assert.ok(post, '给了实现就该注册');
+  assert.deepEqual(Object.keys(post.parameters).sort(), ['text', 'title']);
+  assert.equal(post.parameters.text.required, true);
+  // 目标版块由主人定死；模型能传 channelId 就等于能被注入到任意子频道
+  assert.equal('channelId' in post.parameters, false);
+});
+
+test('qq_post_thread：空正文直接拒，不打后端', async () => {
+  const { post, box } = make({ postThreadOf: async () => ({ ok: true }) });
+  const r = await post.execute({ title: '标题', text: '   ' });
+  assert.equal(r.ok, false);
+  assert.equal(box.postCalls.length, 0);
+});
+
+test('qq_post_thread：把 { title, text } 原样交给宿主，结果原样回给模型', async () => {
+  const { post, box } = make({
+    postThreadOf: async () => ({ ok: true, message: '写好了，等主人点头' }),
+  });
+  const r = await post.execute({ title: '风很大', text: '今天风很大。' });
+  assert.equal(r.ok, true);
+  assert.match(r.message, /等主人点头/);
+  assert.deepEqual(box.postCalls, [{ title: '风很大', text: '今天风很大。' }]);
+});
+
+test('qq_post_thread：宿主拒绝时把原因带回去（别静默成功）', async () => {
+  const { post } = make({
+    postThreadOf: async () => ({ ok: false, message: '主人还没允许你在对话里自己发帖' }),
+  });
+  const r = await post.execute({ title: 't', text: 'x' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /还没允许/);
+});
+
+test('qq_post_thread：描述里明确要求「失败照 say 复述」（否则模型会自己编一句）', () => {
+  const { post } = make({ postThreadOf: async () => ({ ok: true }) });
+  assert.match(post.description, /照它复述/);
+  assert.match(post.description, /不要自己猜/);
+});
+
+test('qq_post_thread：宿主给的 say 原样回给模型，不能被吞掉', async () => {
+  const say = '这个机器人还没拿到「论坛」权限。请告诉主人：1) 去开放平台勾论坛 2) 移出频道再重新添加';
+  const { post } = make({ postThreadOf: async () => ({ ok: false, message: '没权限', todo: ['勾论坛'], say }) });
+  const r = await post.execute({ title: 't', text: 'x' });
+  assert.equal(r.ok, false);
+  assert.equal(r.say, say);
+  assert.deepEqual(r.todo, ['勾论坛']);
 });
