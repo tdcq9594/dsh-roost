@@ -263,6 +263,29 @@ test('配额：语音条额度用完时这句退化成文字，内容不丢', as
   assert.ok(sent.some((t) => t.includes('我想说的那句话')), '额度用完不能把这句吞掉');
 });
 
+test('配额：没有发送者时退回按会话算，不能拿群 openid 顶成一个人', async () => {
+  /**
+   * 用户反馈：「粒度是 chatId 不是发送者，在群里就直接认群的 openid」。
+   * 主动搭话 / 事件轮没有真人，旧实现写成 `id: senderId || target`，
+   * 群聊里 target 是**群 openid** —— 于是整群共用「一个人」的额度，
+   * 面板上还写着「按人」。
+   */
+  const ch = fakeChannel();
+  const charged = [];
+  const quota = {
+    charge(p) {
+      charged.push(p);
+      return { ok: false, used: 3, max: 3, message: '用完了' };
+    },
+  };
+  const run = createActionRunner({ channel: () => ch, quota, tts: { synthesize: async () => ({ audio: Buffer.from('x') }) } });
+  await run({ text: '<<say: 一句>>', target: 'group-openid', senderId: '' });
+
+  assert.equal(charged.length, 1);
+  assert.equal(charged[0].per, 'chat', '没有发送者就按会话算');
+  assert.equal(charged[0].id, 'group-openid', 'id 是会话，不是「某个人」');
+});
+
 test('配额：语音发出失败要把额度退回去（那次语音没真的出去）', async () => {
   const ch = fakeChannel({ async sendVoice() { return { ok: false, message: '上传失败' }; } });
   let undone = 0;

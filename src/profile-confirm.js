@@ -279,25 +279,24 @@ export function createProfileConfirm({ send, ownerOf, now = () => Date.now(), tt
 
     const operatorId = String(parsed?.operatorId ?? '').trim();
     const chatId = String(parsed?.chatId ?? '').trim();
+    const scene = String(parsed?.scene ?? '').trim();
     /**
-     * 身份判定：**拿到的任何一个 id 等于主人就算数，一个都拿不到就拒**。
+     * 身份只能来自**点击者**（`operatorId`，群聊里是 `group_member_openid`）。
      *
-     * 为什么不是只比 `operatorId`：官方在不同事件里给的字段不一样，c2c 的
-     * 交互回调可能只带 `chat_id`、也可能只带 `user_openid`，两者在私聊场景下
-     * 都是主人那个 openid。只认一个字段的话，字段一旦换名字，**所有按钮都会
-     * 被静默拒掉**——表现是「点了没反应」，比放宽一点糟得多。
-     *
-     * 仍然严格：必须**等于主人**，群里点的（group_member_openid / group_openid）
-     * 与主人的 c2c openid 不是一个作用域，自然对不上。
+     * `chatId` 在私聊里恰好等于那个人，看着能用；到群里它是**群 openid**，
+     * 拿它当身份等于「这个群里任何人点都算主人」。所以它只在事件明确是私聊
+     * 时才兜底——那时 chatId 就是那一个人。
      */
-    const ids = [operatorId, chatId].filter(Boolean);
+    const ids = [];
+    if (operatorId) ids.push(operatorId);
+    else if (scene === 'c2c' && chatId) ids.push(chatId);
     const owner = String(hit.owner || '').trim();
     if (!ids.length) {
       log('[profile-confirm] 按钮点击拿不到任何身份字段，已忽略（fail-closed）');
       return { ok: false, denied: true, message: '认不出是谁点的，这次不算。' };
     }
     if (owner && !ids.includes(owner)) {
-      log(`[profile-confirm] 按钮点击者不是主人，已忽略：${ids.join(' / ')}`);
+      log(`[profile-confirm] 按钮点击者不是主人，已忽略：${ids.join(' / ')}（scene=${scene || '?'}）`);
       return { ok: false, denied: true, message: '这个按钮只有主人点才算数。' };
     }
 

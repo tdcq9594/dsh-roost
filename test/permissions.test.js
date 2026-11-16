@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, AWAKE_DENY_TOOLS, OUTPUT_TOOLS } from '../src/permissions.js';
+import { planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, AWAKE_DENY_TOOLS, OUTPUT_TOOLS, isOwnerSender } from '../src/permissions.js';
 
 /** 这版 DSH 真实报出来的全局工具（2026-10-28 面板日志里抄的） */
 const REAL_TOOLS = [
@@ -232,4 +232,36 @@ test('人格工具：keep=[] 这种极端值也不能把输出通道切掉', () 
   assert.ok(!plan.deny.includes('qq_close'));
   assert.ok(plan.deny.includes('qq_send_file'), '发文件不是输出通道，档位不许就得收');
   assert.ok(plan.deny.includes('edit'), '人格放开但档位不许的，照样收');
+});
+
+/**
+ * 主人判定：看**发送者**，不看 chatId。
+ *
+ * 2026-11-16 用户反馈：「粒度是 chatId 不是发送者，在群里就直接认群的 openid」。
+ * 两处踩到（扩展素材审批的 `isOwner`、改资料的确认按钮），根因同一个——
+ * 私聊里 chatId 恰好等于那个人，群里 chatId 是群 openid。
+ */
+test('主人判定：私聊里发送者等于主人 → 算', () => {
+  assert.equal(isOwnerSender({ senderId: 'u1', kind: 'c2c', ownerId: 'u1' }), true);
+  assert.equal(isOwnerSender({ senderId: 'u1', kind: 'dm', ownerId: 'u1' }), true);
+});
+
+test('主人判定：框架说这一句是 owner 档 → 算（它本来就是按发送者算的）', () => {
+  assert.equal(isOwnerSender({ senderId: 'u1', bucket: 'owner', kind: 'group', ownerId: 'u9' }), true);
+});
+
+test('主人判定：群里 chatId 是群 openid，绝不能拿它当主人', () => {
+  /** 主人把「主动搭话」填成群时 ownerId 就是群 openid；群里谁说话 chatId 都是它 */
+  assert.equal(isOwnerSender({ senderId: 'member1', bucket: 'member', kind: 'group', ownerId: 'g1' }), false);
+  assert.equal(isOwnerSender({ senderId: '', bucket: 'member', kind: 'group', ownerId: 'g1' }), false);
+});
+
+test('主人判定：没有发送者一律不算（主动搭话那类没有真人的轮次）', () => {
+  assert.equal(isOwnerSender({ senderId: '', bucket: 'owner', kind: 'c2c', ownerId: 'u1' }), false);
+  assert.equal(isOwnerSender({}), false);
+});
+
+test('主人判定：群档位不是 owner 的普通成员 → 不算', () => {
+  assert.equal(isOwnerSender({ senderId: 'm1', bucket: 'manager', kind: 'group', ownerId: 'u1' }), false);
+  assert.equal(isOwnerSender({ senderId: 'm1', bucket: 'unknown', kind: 'group', ownerId: 'u1' }), false);
 });

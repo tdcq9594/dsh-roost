@@ -24,7 +24,7 @@ import { createInboundShell } from './inbound-shell.js';
 import { createInboundServer, postReply } from './server.js';
 import { renderInbound, chatOf, speakerTag, normalizeKind, sceneOfKind, isPrivateKind, isChannelChat, isChannelEvent } from './inbound.js';
 import { createAsrRecent } from './asr-recent.js';
-import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools } from './permissions.js';
+import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools, isOwnerSender } from './permissions.js';
 import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
 import { resolvePolicy, dangerOf, BUCKETS, defaultStore } from './capabilities.js';
 import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting } from './features.js';
@@ -5521,12 +5521,17 @@ export function apply(ctx) {
      * 扩展经 `/v1/message` 发来的那句**不算批准**，理由和上面那道闸一样：
      * 拿到 `message:write` 的扩展本可以自己发一句话。批准只能来自主人在 QQ 里
      * 按下的那颗按钮，或者他亲手打的那两个字。
+     *
+     * 身份同样看**发送者**：私聊里 chatId 恰好等于那个人，群里 chatId 是群
+     * openid，拿它当身份等于「这个群里谁说话都算主人」。
      */
     const profileFromApi = /^api-/i.test(String(payload?.id ?? ''));
+    const profileSender = String(payload?.sender?.id ?? '').trim();
     if (!profileFromApi
       && profileConfirm.hasPending()
       && String(chat.kind) === 'c2c'
-      && String(chat.chatId) === String(ownerId())) {
+      && profileSender
+      && profileSender === String(ownerId())) {
       const said = String(payload?.text ?? '');
       const req = profileConfirm.take(said);
       if (req) {
@@ -6241,9 +6246,26 @@ export function apply(ctx) {
      */
     const rawText = payload?.text ?? payload?.message?.text ?? payload?.content
       ?? payload?.raw_message ?? (typeof payload?.message === 'string' ? payload.message : '');
+    /**
+     * 主人判定看**发送者**，不看 chatId。
+     *
+     * 这里原来是 `String(chatOf(...)) === String(ownerId())`：`chatOf()` 返回的是
+     * 对象，`String()` 出来是 `"[object Object]"`，所以**恒为 false** —— 主人的
+     * 「发 1」从来没被认过，那条回复还会被当成普通聊天喂给模型。
+     *
+     * 就算把字段取对也不该用 chatId：群里 chatId 是**群 openid**，一旦
+     * `ownerId()` 恰好是那个群（用户把「主动搭话」填成群），群里任何人回一句
+     * 都会被当成主人批准。判据统一收到 `isOwnerSender()`（见 `permissions.js`）。
+     */
+    const replyChat = chatOf(payload, { sessionMode: cfg.guild?.sessionMode });
     const reply = proactiveQueue.handleOwnerReply({
       text: typeof rawText === 'string' ? rawText : '',
-      isOwner: Boolean(String(chatOf(payload, { sessionMode: cfg.guild?.sessionMode }) || '')) && String(chatOf(payload, { sessionMode: cfg.guild?.sessionMode })) === String(ownerId() || ''),
+      isOwner: isOwnerSender({
+        senderId: String(payload?.sender?.id ?? ''),
+        bucket: bucketOf(payload),
+        kind: replyChat?.kind,
+        ownerId: ownerId(),
+      }),
     });
     if (reply.handled) {
       log.info(`扩展素材审批：${reply.action} ${reply.count} 条`);

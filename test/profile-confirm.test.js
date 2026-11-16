@@ -191,21 +191,58 @@ test('B5 拿不到点击者身份 → fail-closed，不批', async () => {
   assert.equal(c.hasPending(), true);
 });
 
-test('B5b 只给了 chatId 且就是主人 → 照样算（官方不同事件给的字段不一样）', async () => {
+test('B5b 私聊事件只给了 chatId 且就是主人 → 照样算（官方不同事件给的字段不一样）', async () => {
   const { c, sent } = setup();
   await c.ask({ kind: 'sign', payload: { text: 'x' }, summary: 'x' });
   const n = buttonsOf(sent[0])[0].n;
   /**
    * c2c 的交互回调可能只带 `chat_id` 不带 `user_openid`。只认 operatorId
    * 的话，字段一换名字所有按钮都会被静默拒掉（「点了没反应」）。
+   *
+   * 但这条兜底**必须同时确认是私聊**：群里 `chat_id` 是群 openid，
+   * 拿它当身份等于「这个群里任何人点都算主人」。
    */
   const r = c.handleInteraction({
     buttonData: JSON.stringify({ t: CONFIRM_BUTTON_TAG, n, v: 'y' }),
     chatId: 'owner-openid',
+    scene: 'c2c',
   });
   assert.equal(r.ok, true);
   assert.equal(r.approve, true);
   assert.equal(r.operatorId, 'owner-openid', '没 operatorId 时用 chatId 顶上');
+});
+
+test('B5c 群里只给 chatId（群 openid）→ 不算主人，不能靠它顶身份', async () => {
+  const { c, sent } = setup({ owner: 'group-openid' });
+  await c.ask({ kind: 'sign', payload: { text: 'x' }, summary: 'x' });
+  const n = buttonsOf(sent[0])[0].n;
+  /**
+   * 这是用户反馈的那个洞：主人把「主动搭话」填成群，`ownerOf()` 就成了群
+   * openid；而群里交互事件的 `chatId` 正好也是群 openid。旧实现把 chatId
+   * 当点击者，于是**群里任何人**点「确认改」都会通过。
+   */
+  const r = c.handleInteraction({
+    buttonData: JSON.stringify({ t: CONFIRM_BUTTON_TAG, n, v: 'y' }),
+    chatId: 'group-openid',
+    scene: 'group',
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.denied, true);
+  assert.equal(c.hasPending(), true, '请求要留着，等真正的主人点');
+});
+
+test('B5d 群里点了、但带的是成员 openid 且不是主人 → 不算', async () => {
+  const { c, sent } = setup();
+  await c.ask({ kind: 'sign', payload: { text: 'x' }, summary: 'x' });
+  const n = buttonsOf(sent[0])[0].n;
+  const r = c.handleInteraction({
+    buttonData: JSON.stringify({ t: CONFIRM_BUTTON_TAG, n, v: 'y' }),
+    operatorId: 'someone-else-member-openid',
+    chatId: 'group-openid',
+    scene: 'group',
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.denied, true);
 });
 
 test('B6 别人点的按钮不算数', async () => {

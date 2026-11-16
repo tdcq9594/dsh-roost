@@ -370,6 +370,38 @@ export function bucketOf(payload) {
 }
 
 /**
+ * 这条消息是不是**主人本人**说的。
+ *
+ * ## 为什么必须看发送者，不能看 chatId
+ *
+ * 私聊里 `chatId` 恰好等于那个人的 openid，所以「`chatId === 主人`」看起来能用；
+ * 到了群里 `chatId` 是**群 openid**，跟说话的人没关系。两个后果都很糟：
+ *
+ *   · 用户把「主动搭话」的 chatId 填成群（让它在群里说话，很常见的配置）时，
+ *     `ownerId()` 就成了那个群 —— 群里**任何人**发一句话都会被判成主人；
+ *   · 反过来，主人在群里说话永远判不出是主人。
+ *
+ * 所以判据分两条，都落在**发送者**上：
+ *   1. 框架算出来的 `bucket` 是 `owner`（它本来就是按发送者算的）；
+ *   2. 或者「私聊 + 发送者 openid 等于主人私聊 openid」（老版本 ai-chat 只给
+ *      level 不给 bucket 时的备份路径）。
+ *
+ * 空发送者一律不算 —— 主动搭话那类没有真人的轮次不该能批准任何东西。
+ *
+ * @param {{senderId?:string, bucket?:string, kind?:string, ownerId?:string}} o
+ *        `kind` 用框架四态（`c2c` / `dm` 算私聊）
+ * @returns {boolean}
+ */
+export function isOwnerSender({ senderId = '', bucket = '', kind = '', ownerId = '' } = {}) {
+  const sender = String(senderId ?? '').trim();
+  if (!sender) return false;
+  if (bucket === 'owner') return true;
+  const priv = kind === 'c2c' || kind === 'dm';
+  const owner = String(ownerId ?? '').trim();
+  return Boolean(priv && owner && sender === owner);
+}
+
+/**
  * 这一档能不能用本地工具。
  *
  * @param {string} bucket

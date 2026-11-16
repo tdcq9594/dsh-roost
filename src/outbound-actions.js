@@ -359,6 +359,10 @@ export function createActionRunner({ channel, tts = null, quota = null, picks = 
     isWakeup = false,
     /** `<<quote:>>` 留空时的兜底：入站 `replyTo`（被引用那条的 message_id） */
     replyTo = '',
+    /**
+     * `senderId` 是**说话的人**，不是会话 id——`<<say>>` 的语音额度按人扣。
+     * 没有真人（主动搭话 / 事件轮）时留空，配额退回按会话算。
+     */
     requestId = '', senderId = '', onSent = () => {},
   } = {}) {
     const ch = channel();
@@ -528,13 +532,19 @@ export function createActionRunner({ channel, tts = null, quota = null, picks = 
            *
            * 以前扣在 ai-chat 侧，那边不传 openid，按人算不了，所以
            * `QUOTA_WIRED.voice` 一直是 false、面板显示「暂不生效」。
-           * 直连之后 `<<say>>` 在这里执行，发送者身份是现成的（`who`）。
+           * 直连之后 `<<say>>` 在这里执行，发送者身份是现成的。
+           *
+           * **没有发送者就按会话算，不能拿 `target` 顶成一个人**：群里 `target`
+           * 是**群 openid**，顶上去等于「整群共用一个「人」的额度」，面板上却
+           * 还写着「按人」。主动搭话那种没有真人的轮次就会走到这里。
            *
            * **不通过就退化成文字**：这是「防刷屏」不是「不许说话」，
            * 用户还能看到内容；静默丢弃会让她这一句凭空消失。
            */
           const q = quota && typeof quota.charge === 'function'
-            ? quota.charge({ feature: 'voice', per: 'person', id: String(senderId || target) })
+            ? quota.charge(senderId
+              ? { feature: 'voice', per: 'person', id: String(senderId) }
+              : { feature: 'voice', per: 'chat', id: String(target) })
             : null;
           if (q && q.ok === false) {
             log(`语音条额度用完（${q.message}），这句改发文字`);
