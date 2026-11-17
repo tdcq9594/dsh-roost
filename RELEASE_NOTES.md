@@ -1,3 +1,32 @@
+## v1.3.11：按人指定的人格，终于只认那一个人
+
+> `latest` 从 **1.3.10** 升到 **1.3.11**。配置不用改。这版收下了仓库的第一个外部 PR（[@haibiandefengshu](https://github.com/haibiandefengshu)），修的是群聊里一个存在很久、但很难自己发现的静默故障。
+
+一句话：**群里换个人说话，「按人绑定的人格」不会再套用第一个说话那个人的设定了。**
+
+### 它坏在哪
+
+`mount(agent, chat)` 对一个 agent 只跑一次（工具注册、usage section、权限上下文这些副作用重复跑会翻倍），闭包里捕获的是**第一轮**那个 `chat`。而群里换人说话时 `chatOf()` 造的是新对象（`senderId` 不同），会话键却一致——`sessionKey` 是 `guild:<guildId>`，落到同一个 DSH 会话、同一个 agent。`mount()` 第二句就 `return` 了，闭包仍指向旧对象：
+
+- `personas.resolve(chat.chatId, personaCfgFor(chat))` —— `bySender` 那层永远查的是第一个人
+- `memory.getPersonaOverride` / `aliasesOf` / `maxPartsOf` —— 同理
+- `shouldRegisterQqTools({ kind: chat.kind })` —— kind 停在首轮消息的类型上
+
+表现只有一句：**「我给他配了专属人格，怎么没生效」**。当轮的 `personas.resolve` 拿的是新 chat，所以面板显示是对的，只有真正进提示词的那份人格是错的——这种「界面对、行为错」的 bug 最难自己撞见。
+
+### 怎么修的
+
+给每个 agent 记一份首挂时捕获的 `chat` 对象，之后每轮把新 chat **原地**灌进去，闭包一行都不用改，读到的就是当轮的值。这是 PR 的思路，我们合并时又检修了一轮：
+
+- **登记挪回 `mount()` 末尾**。PR 原本把它提到了开头，等于把「挂载全部成功才登记」变成「一进来就登记」：首挂半路抛错（`registerProfileTools`、`registerRoostTools`、`cfg.roostHost` 那几段没有整体 try）的 agent 会永久停在半挂状态，工具、人格、权限上下文都缺一块，而且**日志里看不出来**。原语义是「没挂全 → 下轮重试」，这个不能丢。
+- **只留一份状态**。原来的 `mounted` WeakSet 和新的 `mountedChat` 登记时机完全相同，两份状态一旦分叉就是「以为挂过了、其实没挂」，合并成一张表。
+- **抽成纯函数并补测试**。刷新逻辑挪到 `src/live-chat.js` 的 `refreshLiveChat()`：只覆盖新 chat 有的键（不把 `uin` / `aliases` 抹成 `undefined`）、目标被 `Object.freeze` 时返回 `false` 而不是抛。配套 `test/live-chat.test.js` 6 条——`mount()` 埋在 `apply()` 闭包里，假 ctx 到不了那一层，抽出来才钉得住。
+- 冻结退化不再静默：打一行 `chat-frozen` 警告，线上真退化时日志里能看见。
+
+### 顺带
+
+`build-ext-docs` 生成的 `docs/API.md` 版本行跟着走到 1.3.11；测试总数 3111 → 3117。
+
 ## v1.3.10：面板的「更新」按钮终于能用了
 
 > `latest` 从 **1.3.9** 升到 **1.3.10**。配置不用改。这版只修一件事，但是件大事：**那颗按钮以前点一百次也升不上去**。
