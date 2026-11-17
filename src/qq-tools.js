@@ -32,6 +32,7 @@ import { loadDefineTool, shapeTool } from './tools.js';
 import { acceptClose } from './closing.js';
 import { buildGroupToolDefs } from './group-tools.js';
 import { searchScopeOf } from './search-scope.js';
+import { cleanOutbound } from './outbound-clean.js';
 
 /**
  * `qq_send` 里**仍然要拦**的标记：`say` / `button` / `silence`。
@@ -98,6 +99,13 @@ export function maxPartsOf(cfg, kind = 'group') {
  *     能自己再发一篇 —— 变成"一次触发、两篇帖子"。
  *   · **总开关关着一律不挂**：`qqTools.enabled=false` 是主人的明确意思，
  *     不能因为会话类型不同就绕过。
+ *
+ * 自驱会话（`autotelic`）**不在这条判据里，因为它压根不经过 QQ 会话上下文**：
+ * 挂载点是 `host.js` 的 `chat.kind`，而自驱走 `agentV1.prompt(sid, …)`，
+ * 手里没有 `qq_send` / `qq_post_thread`。所以那边"绝不往主人私聊推"是**技术上成立**的，
+ * 提示词里的「不要发任何 QQ 消息」只是第二道防线。
+ * ⚠️ 将来若把自驱改成 QQ 会话（带上 chat.kind）跑，必须同时加进这里的排除名单，
+ * 否则它就有了发消息的手。
  *
  * @param {{ cfg?: object, kind?: string }} o
  * @returns {boolean}
@@ -504,7 +512,12 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },
     async execute({ text, at } = {}) {
-      const t = String(text ?? '').trim();
+      /**
+       * 出站清洗：模型偶尔会把宿主注入的内容（消息头、场景块、输出协议）
+       * 顺着正文续写进来，或者把「（思考：…）」「最终回答：」写在里面。
+       * 先洗再判空——洗完什么都不剩，说明整段都是不该发的。
+       */
+      const t = cleanOutbound(String(text ?? '').trim());
       if (!t) return { ok: false, message: '要说什么？' };
       /**
        * 只剩 `say` / `button` / `silence` 要拦（`image` / `image-alone` /

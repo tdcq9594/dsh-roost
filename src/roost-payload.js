@@ -221,6 +221,27 @@ function describeArk(evt) {
 }
 
 /**
+ * 这条消息 @ 了谁。
+ *
+ * 2026-11-17 核验：框架 `serialize.js` 一直有 `mentions`，但我们**从没接**——
+ * 模型只能看到发送人和正文，分不清「@小明 你帮我看看」是在叫小明还是叫它，
+ * 于是抢答别人的请求。aurabot 的 `fix(#475)` 修的是同一件事。
+ *
+ * 群聊 `mentions` 形如 `[{ id, member_openid, username, avatar }]`，
+ * 频道是 `[{ id, username }]`，这里只取名字；名字缺失就退回 id。
+ */
+export function describeMentions(evt) {
+  const list = Array.isArray(evt?.mentions) ? evt.mentions : [];
+  const names = list
+    .map((m) => String(m?.username ?? m?.name ?? m?.id ?? m?.member_openid ?? '').trim())
+    .filter(Boolean);
+  if (!names.length) return [];
+  /** 去重：同一个人被 @ 两次不写两遍 */
+  const uniq = [...new Set(names)];
+  return [`（这条 @ 了：${uniq.slice(0, 6).join('、')}${uniq.length > 6 ? ' 等' : ''}）`];
+}
+
+/**
  * 给模型看的完整用户内容。
  *
  * 顺序有讲究：先说用户打的字，再补上下文（引用、附件、卡片）。
@@ -230,6 +251,8 @@ export function buildRendered(evt, text, { images = null } = {}) {
   const parts = [];
   const said = String(text ?? '').trim();
   if (said) parts.push(said);
+  /** @ 了谁必须紧跟正文：模型要能判断"这句是给谁的" */
+  parts.push(...describeMentions(evt));
   if (evt?.quoted) parts.push(`（引用了这句：${clipQuote(evt.quoted)}）`);
   /** 与 renderInbound 共用同一段输出，两条路径必须逐字一致（quote-clip Q6） */
   parts.push(...describeQuoteAttachments(evt));
@@ -527,6 +550,8 @@ export function createPayloadBuilder({
       system: '',
       channel: { markdown: wantMarkdown(), files: true },
       text,
+      /** 只透传：账本用它判断「（@某人）」，出站不还原 */
+      mentions: Array.isArray(evt?.mentions) ? evt.mentions : [],
       rendered: buildRendered(evt, text, { images }),
       quoted: String(evt?.quoted ?? ''),
       images: Array.isArray(images) ? images : [],

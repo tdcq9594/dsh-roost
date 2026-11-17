@@ -7017,7 +7017,7 @@ select.roost-input{color-scheme:dark}
         }, c.enabled ? '关掉' : '打开'),
       },
         h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-          '给她一点自己的时间：自己挑一件事琢磨、记进哈希链账本。**默认全关**——'
+          '给她一点自己的时间：自己挑一件事琢磨、记进哈希链账本。默认全关——'
           + '不开就一行代码都不跑；开了也默认只能想、不能动手，产物只进账本和这里，不会发到 QQ。'),
 
         h('div', { style: { display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, marginBottom: 8 } },
@@ -13022,11 +13022,54 @@ select.roost-input{color-scheme:dark}
     }
 
     /** 交流反馈群：固定群号，一键复制 */
+    /**
+     * 更新历史。
+     *
+     * 面板原来只在**版本变过**时弹一次「这次改了什么」，看过就没了——
+     * 换机器、隔几版才回来、或者想知道某个行为是哪版改的，都没有地方翻。
+     * 这里把 notes 里的版本全列出来，默认当前版本。
+     */
+    function ChangelogBlock({ toast }) {
+      const [data, setData] = useState(null)
+      const [sel, setSel] = useState('')
+      const load = useCallback(async (v) => {
+        try {
+          const r = await get('/update/notes' + (v ? '?version=' + encodeURIComponent(v) : ''))
+          if (r) { setData(r); setSel(r.showing || r.version || '') }
+        } catch { /* 读不到就留空，别让整页崩 */ }
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      const versions = data?.versions || []
+      /** 默认展开：整个面板的既定规则是「分节默认全展开，折叠不卸载功能」 */
+      return h(Sec, { n: '02', title: '更新历史' },
+        h('div', { className: 'roost-g-card' },
+          h('p', { className: 'roost-g-desc' },
+            '每一版改了什么都在这里，往回翻得到。只列有说明的版本——很早的版本可能没写。'),
+          versions.length
+            ? h(GRow, { label: '版本', hint: '新的在前' },
+              h('select', {
+                className: 'roost-g-sel', value: sel,
+                onChange: (e) => load(e.target.value),
+              },
+                versions.map((v) => h('option', { key: v, value: v },
+                  v === data?.version ? `v${v}（当前）` : `v${v}`))))
+            : h('p', { className: 'roost-note' }, '还没有更新说明。'),
+          h('pre', {
+            style: {
+              marginTop: 8, padding: '10px 12px', borderRadius: 8, whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word', fontSize: 12.5, lineHeight: 1.7,
+              maxHeight: 420, overflow: 'auto', fontFamily: 'inherit',
+              background: 'var(--dsw-alias-fill-secondary, rgba(128,128,128,.12))',
+            },
+          }, data?.notes || '这一版没写说明。')))
+    }
+
     function FeedbackCard({ toast }) {
       const [copied, setCopied] = useState(false)
       const group = '1130901545'
 
-      return h(Sec, { n: '02', title: '交流反馈群' },
+      return h(Sec, { n: '03', title: '交流反馈群' },
         h('div', { className: 'roost-note', style: { marginTop: 2 } },
           '遇到问题、想加功能，或者只是想看看别人怎么用，都可以进群说。'),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' } },
@@ -16547,6 +16590,7 @@ select.roost-input{color-scheme:dark}
     function UpdateTab({ toast }) {
       return h('div', null,
         h(UpdatesBlock, { toast }),
+        h(ChangelogBlock, { toast }),
         h(FeedbackCard, { toast }),
       )
     }

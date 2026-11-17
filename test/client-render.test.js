@@ -2481,3 +2481,13 @@ test('5.2 排障页：级别 / 模块筛选与自动刷新开关', () => {
   assert.ok(src.includes("localStorage.setItem('roost.logs.auto'"), '开关要记住');
   assert.ok(src.includes('if (!logAuto) return'), '关掉就不轮询');
 })
+
+test('更新页：有「更新历史」入口，不只在版本变时弹一次', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+  rt.reset()
+  const txt = textOf(expand(h(mod.UpdateTab, { toast: () => {} }), rt))
+  assert.ok(txt.includes('更新历史'), '要有一个能往回翻的入口')
+  assert.ok(txt.includes('交流反馈群'), '反馈群那张卡还在')
+})

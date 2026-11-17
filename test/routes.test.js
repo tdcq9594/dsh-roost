@@ -1779,3 +1779,25 @@ test('频道分享链接：?appid= 直接拼（前端不再自己实现一遍）
     off?.();
   }
 });
+
+test('更新说明：能按版本往回翻，不是只看当前版', async () => {
+  /**
+   * 面板原来只在版本变过时弹一次「这次改了什么」，看过就没了——
+   * 换机器、隔几版回来、查某个行为是哪版改的，都没地方翻。
+   */
+  const { call, off } = await bootHost();
+  try {
+    const cur = await call('/update/notes');
+    assert.equal(cur.json.ok, true);
+    assert.ok(Array.isArray(cur.json.versions) && cur.json.versions.length > 3,
+      '要能列出所有版本（新的在前）');
+    assert.equal(cur.json.showing, cur.json.versions[0], '默认显示最新那版');
+
+    const older = cur.json.versions[1];
+    const past = await call('/update/notes?version=' + older);
+    assert.equal(past.json.showing, older, '要能取到历史某一版');
+    assert.ok(past.json.notes.length > 0, '历史版本的内容不能是空的');
+  } finally {
+    off?.();
+  }
+});

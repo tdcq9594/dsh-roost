@@ -17,7 +17,7 @@ import { join } from 'node:path';
 
 import {
   createUpdater, patchExclude, installKind, findProfileDir, humanFail, ageText, compareVersion, PKG,
-  updateCommand, changelogSection,
+  updateCommand, changelogSection, markdownToPlain,
 } from '../src/update.js';
 
 const YAML = `# pnpm 的供应链保护配置
@@ -917,3 +917,34 @@ test('检查：符号链接装法返回空命令，只留「git pull」的说法
     done();
   }
 });
+
+test('markdownToPlain：面板是纯文本，星号/反引号/围栏不许露出来', () => {
+  /**
+   * 面板「这次改了什么」用纯文本渲染（插件前端零依赖，没有 md 解析器）。
+   * 2026-11-17 主人看到的是 `**只改测试**` 和裸的 ``` —— 比不显示还难读。
+   */
+  const md = [
+    '## v1.0.0：标题',
+    '',
+    '> 引言一行',
+    '',
+    '**粗体** 和 `行内代码`，还有 [链接](https://example.com)',
+    '',
+    '```js',
+    'const a = 1',
+    '```',
+    '',
+    '- 第一项',
+    '- 第二项',
+    '',
+    '---',
+    '',
+  ].join('\n')
+  const out = markdownToPlain(md)
+  assert.doesNotMatch(out, /\*\*|`{3}|^#{1,6} |^> /m, 'markdown 标记不能留')
+  assert.match(out, /粗体 和 行内代码/, '内容要保留')
+  assert.match(out, /const a = 1/, '代码块内容要留下')
+  assert.match(out, /· 第一项/, '列表换成 ·')
+  assert.match(out, /链接/, '链接留文字')
+  assert.doesNotMatch(out, /\n{3,}/, '别留大片空行')
+})

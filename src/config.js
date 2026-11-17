@@ -6,7 +6,7 @@
  * 生命周期不一样，混在一起升级和迁移都麻烦。
  */
 
-import { readFileSync, writeFileSync, chmodSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, chmodSync, mkdirSync, existsSync, renameSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -1248,12 +1248,49 @@ export function migrateRetentionMode(saved) {
   return true;
 }
 
-export function loadConfig() {
-  let saved = {};
+/**
+ * 同步等一小会儿（只有出错才走这里，正常路径零开销）。
+ *
+ * 用 `Atomics.wait` 而不是 `execSync('sleep')`：不建子进程、不会被沙箱拦。
+ */
+function sleepSync(ms) {
   try {
-    saved = JSON.parse(readFileSync(FILE(), 'utf8'));
-  } catch {
-    saved = {};
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch { /* 环境不支持就当场不睡，最多多试两次 */ }
+}
+
+export function loadConfig() {
+  /**
+   * 读配置要重试。
+   *
+   * Windows 上杀毒 / 备份 / 同步盘会在文件被短暂占用时抛 `EBUSY` / `EPERM`，
+   * 断电或进程被杀会留下 0 字节或写了一半的文件——这几种几十毫秒内就自愈。
+   * 而「一次失败就回落默认值」的后果是**灾难性的**：这里返回全默认，上层
+   * `patchConfig` 一写盘就固化了，用户只是重启了一次，配置却永久变默认。
+   *
+   * 三次都读不出来时**先把坏文件挪走再回落**：留着那份「坏但还能手工救」的
+   * 内容，比直接覆盖掉强。新装（ENOENT）是正常情况，不重试、也不备份。
+   */
+  let saved = {};
+  for (let i = 0; i < 3; i++) {
+    try {
+      const text = readFileSync(FILE(), 'utf8');
+      if (!text.trim()) throw Object.assign(new Error('配置文件是空的'), { code: 'EMPTYFILE' });
+      saved = JSON.parse(text);
+      break;
+    } catch (e) {
+      if (e?.code === 'ENOENT') break;
+      if (i === 2) {
+        try {
+          const bak = `${FILE()}.bad-${Date.now()}`;
+          renameSync(FILE(), bak);
+          console.warn(`[roost] 配置读不出来（${e?.code || e?.message}），已备份到 ${bak}，本次按默认值启动`);
+        } catch { /* 备份也失败就认了，至少别把启动卡死 */ }
+        saved = {};
+      } else {
+        sleepSync(30);
+      }
+    }
   }
   migrateTtsSpeed(saved);
   migrateRetentionMode(saved);

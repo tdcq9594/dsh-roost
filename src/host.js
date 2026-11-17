@@ -75,7 +75,7 @@ import { createAccount } from './account.js';
 import { createRewriter } from './rewrite.js';
 import { createPersonas, legacyPersonaText, personaName, parseSwitchCommand, trimPersonaBody, trimDemos, dupGroups, pickPersonaId } from './personas.js';
 import { createPersonaRepo, scanPersona } from './persona-repo.js';
-import { createUpdater, changelogSection } from './update.js';
+import { createUpdater, changelogSection, changelogVersions, markdownToPlain } from './update.js';
 import { createDepsCheck } from './deps.js';
 import { pathAllowed, MAX_FILE_BYTES } from './send-file.js';
 import { createStickers } from './stickers.js';
@@ -12018,19 +12018,33 @@ export function apply(ctx) {
        * 刚重启完只看到版本号变了，还得自己去仓库翻——这条把那段直接端到面板上。
        * 找不到对应版本就返回空串，不编内容（宁可不说，也不能说错的）。
        */
+      /**
+       * 更新说明。
+       *
+       * `?version=x.y.z` 取历史某一版——面板的「更新历史」靠它往回翻。
+       * 不传就是当前版本；`versions` 永远带全量列表，前端不必自己推。
+       *
+       * 返回值一律是**剥过 markdown 的纯文本**：面板那块地方是纯文本渲染。
+       */
       route('/update/notes', async (req, res) => {
         const version = updater.own();
+        let want = '';
         try {
-          let notes = '';
+          want = String(new URL(req.url || '/', 'http://localhost').searchParams.get('version') || '')
+            .replace(/^v/i, '').trim();
+        } catch { /* 解析失败就当没传 */ }
+        try {
+          let text = '';
           for (const f of ['RELEASE_NOTES.md', 'CHANGELOG.md']) {
-            try {
-              notes = changelogSection(readFileSync(join(import.meta.dirname, '..', f), 'utf8'), version);
-            } catch {}
-            if (notes) break;
+            try { text = readFileSync(join(import.meta.dirname, '..', f), 'utf8'); } catch {}
+            if (text) break;
           }
-          return send(res, 200, { ok: true, version, notes });
+          const versions = changelogVersions(text);
+          const showing = want && versions.includes(want) ? want : version;
+          const notes = markdownToPlain(changelogSection(text, showing));
+          return send(res, 200, { ok: true, version, showing, versions, notes });
         } catch (e) {
-          return send(res, 200, { ok: false, version, notes: '', message: e.message });
+          return send(res, 200, { ok: false, version, showing: version, versions: [], notes: '', message: e.message });
         }
       }),
 

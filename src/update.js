@@ -181,6 +181,46 @@ export function updateCommand({
  * 用来在「刚更新完」时告诉用户这次改了什么——不然重启完只看到版本号变了，
  * 还得自己去仓库翻。找不到这一段就返回空串（不编内容）。
  */
+/**
+ * 把 markdown 剥成纯文本。
+ *
+ * 面板「这次改了什么」是**纯文本渲染**（插件前端零依赖，没有 markdown 解析器），
+ * 直接把原文塞过去，屏幕上会出现 `**只改测试**`、`` `pickTitle` `` 和裸的 ``` 围栏——
+ * 比不显示还难读（2026-11-17 主人反馈）。
+ *
+ * 只做「去标记、留内容」：代码块留主体、列表换成 ·、链接留文字。不做语法高亮，
+ * 也不试图还原层级——面板那块地方就是一段说明，不是文档。
+ */
+/**
+ * 列出 notes 里出现过的所有版本号（新的在前）。
+ *
+ * 面板要给一个「更新历史」的入口——**只看当前版本是不够的**：
+ * 用户换机器、隔了几版才回来，或者想知道某个行为是哪版改的，都得往回翻。
+ */
+export function changelogVersions(text) {
+  const out = [];
+  const re = /^##\s+v?(\d+\.\d+\.\d+(?:-[\w.]+)?)/gm;
+  let m;
+  const src = String(text ?? '');
+  while ((m = re.exec(src))) out.push(m[1]);
+  return out;
+}
+
+export function markdownToPlain(text) {
+  return String(text ?? '')
+    // 代码围栏：去掉 ``` 那两行，留里面的代码
+    .replace(/```[^\n]*\n([\s\S]*?)```/g, (_, body) => body)
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^>\s?/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '· ')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/\[([^\]\n]+)\]\([^)\n]+\)/g, '$1')
+    .replace(/^---+\s*$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function changelogSection(text, version) {
   const v = String(version || '').replace(/^v/i, '');
   if (!v) return '';
