@@ -1609,3 +1609,63 @@ test('自更新：no-version 时连 installBundle 都不许碰（回归 2026-11-
     done();
   }
 });
+
+/**
+ * `listVersions` 把**已装的那一版**也列出来时，不能直接拿去更新。
+ *
+ * DSH 会判 `invalid-spec`（"not a version newer than the installed"），面板翻成
+ * 「版本号不合法，可能是 registry 返回了脏数据」——等于拿自己的脏输入骂 registry，
+ * 用户没有任何可执行的动作。这种情况应当直接报「已是最新」。
+ */
+test('自更新：listVersions 给回已装版本时，报已是最新而不是 invalid-spec', async () => {
+  const { d, done } = tmp();
+  try {
+    const p = profileReal(d);
+    writeFileSync(join(p, 'node_modules', PKG, 'package.json'),
+      JSON.stringify({ name: PKG, version: '1.3.11' }), 'utf8');
+    let upgraded = 0;
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          listVersions: async () => ({ ok: true, value: { versions: [{ version: '1.3.11' }] } }),
+          updateBundle: async () => { upgraded += 1; return { result: { application: 'applied' } }; },
+        },
+      }),
+      profileDir: p,
+      fetchImpl: async () => { throw new Error('timeout'); },
+    });
+    const r = await u.self();
+    assert.equal(r.ok, true);
+    assert.equal(r.already, true);
+    assert.equal(r.version, '1.3.11');
+    assert.equal(upgraded, 0, '同一个版本不该去调 updateBundle');
+    assert.match(r.message, /最新版/);
+  } finally {
+    done();
+  }
+});
+
+test('自更新：listVersions 给的版本比已装的旧时也不动', async () => {
+  const { d, done } = tmp();
+  try {
+    const p = profileReal(d);
+    writeFileSync(join(p, 'node_modules', PKG, 'package.json'),
+      JSON.stringify({ name: PKG, version: '2.0.0' }), 'utf8');
+    let upgraded = 0;
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          listVersions: async () => ({ versions: [{ version: '1.9.9' }] }),
+          updateBundle: async () => { upgraded += 1; return { result: { application: 'applied' } }; },
+        },
+      }),
+      profileDir: p,
+      fetchImpl: async () => { throw new Error('timeout'); },
+    });
+    const r = await u.self();
+    assert.equal(r.already, true);
+    assert.equal(upgraded, 0, '别把降级当成升级');
+  } finally {
+    done();
+  }
+});

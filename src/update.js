@@ -1109,6 +1109,28 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       if (target) log(`check() 没查到最新版，改用 DSH 的 listVersions：v${target}`);
     }
     /**
+     * 目标版本必须**真的比已装的新**。
+     *
+     * `listVersions()` 按约定只返回更新的版本，但源不同步、缓存脏、或者用户配了个
+     * 落后镜像时，它可能把**已装的那一版**一起列出来。不挡的话就直接交给
+     * `updateBundle(name, 已装版本)`，DSH 判 `invalid-spec`（"not a version newer
+     * than the installed"），面板翻译成「版本号不合法，可能是 registry 返回了脏数据」
+     * ——那是在骂自己的输入，用户完全没法据此做任何事。
+     *
+     * 两侧都用**磁盘上的版本**比：装完没重启时运行中的 `own` 还是旧值。
+     */
+    if (target) {
+      const have = installedVersion() || own;
+      if (have && compareVersion(target, have) <= 0) {
+        return {
+          ok: true,
+          already: true,
+          version: have,
+          message: `已经是最新版（v${have}）${info.pendingRestart ? '，重启 DSH 生效。' : ''}`,
+        };
+      }
+    }
+    /**
      * 装包源**跟版本走**，不跟配置走。
      *
      * 镜像滞后时 `check()` 给的 latest 只存在于官方源：还按配置的源去装，
