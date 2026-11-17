@@ -18,6 +18,7 @@ import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, readF
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets } from './config.js';
 import { redactText, redactValue, addSecretProvider } from './redact.js';
 import { createSessions, chatSessionKey } from './sessions.js';
+import { refreshLiveChat } from './live-chat.js';
 import { createTurnRunner } from './turn.js';
 import { createTurnQueue } from './turnqueue.js';
 import { createInboundShell } from './inbound-shell.js';
@@ -1693,13 +1694,18 @@ export function apply(ctx) {
   /** 端口租约：跟 Roost 互通「实际在哪个端口」 */
   const lease = createLease({ file: join(dataDir(), 'ports.json'), log: (m) => log.warn(m) });
 
-  const mounted = new WeakSet();
   /**
-   * 每个 agent 首次挂载时捕获到的 chat 对象。
+   * agent → 首挂时捕获到的 chat 对象（**挂全了才登记**）。
    *
-   * mount() 只跑一次，闭包里捕获的是**第一轮**的 chat；群里换个人说话时
-   * `agentFor()` 会造一个新的 chat（senderId 不同），但 mount() 里提前 return，
-   * 闭包仍指向旧对象 —— 于是「按人绑定的人格」永远停在第一个说话的人身上。
+   * `mount()` 只跑一次，闭包里捕获的是第一轮的 chat；群里换个人说话时
+   * `agentFor()` 会造一个新的 chat（`senderId` 不同），但会话键一致、落到同一个
+   * agent，`mount()` 里提前 return，闭包仍指向旧对象 —— 于是「按人绑定的人格」
+   * 永远停在第一个说话的人身上。所以每轮把新 chat 原地灌进这个对象，
+   * 刷新逻辑在 `live-chat.js`（纯函数，有单测）。
+   *
+   * 这张表**同时**承担原来 `mounted` WeakSet 的职责：登记时机与原
+   * `mounted.add(agent)` 完全一致（挂载全部成功之后），所以不必维护两份状态 ——
+   * 两份状态一旦分叉，就会出现「以为挂过了、其实没挂」的静默失效。
    */
   const mountedChat = new WeakMap();
   /** mount() 挂上去的取消函数。不能在 mount 里调 ctx.onTeardown，见下面注释 */
@@ -4800,18 +4806,19 @@ export function apply(ctx) {
    */
   function mount(agent, chat) {
     /**
-     * 已挂载过的 agent：把最新的 chat **原地**灌进首次捕获的那个对象，
-     * 让闭包里读到的 `chat.chatId` / `chat.kind` 每轮都是当轮的。
+     * 已挂载过的 agent：把最新的 chat **原地**灌进首挂时捕获的那个对象，
+     * 让闭包里读到的 `chat.chatId` / `chat.kind` / `chat.senderId` 每轮都是当轮的。
      *
-     * 原地赋值而不是重新挂载：挂载副作用（工具、section、权限上下文）只该做一次。
+     * 原地刷新而不是重新挂载：挂载副作用（工具、section、权限上下文）只该做一次，
+     * 重挂会让它们翻倍。刷新的纯函数在 `live-chat.js`，冻结对象也只退化不抛。
      */
     const prevChat = mountedChat.get(agent);
     if (prevChat) {
-      try { Object.assign(prevChat, chat); } catch { /* 冻结对象就退化成旧行为 */ }
+      if (!refreshLiveChat(prevChat, chat)) {
+        warnOnce('chat-frozen', '这一轮拿到的 chat 对象被冻结了，人格 / 工具按上一轮的值继续');
+      }
       return;
     }
-    mountedChat.set(agent, chat);
-    if (mounted.has(agent)) return;
     const offs = [];
 
     /**
@@ -5866,7 +5873,14 @@ export function apply(ctx) {
       }).catch((e) => log.warn(`框架能力工具挂载异常：${e?.message ?? e}`));
     }
 
-    mounted.add(agent);
+    /**
+     * 登记必须是**最后一步**：这行之前抛错就当没挂过，下一轮会重试。
+     *
+     * 这条语义继承自原来的 `mounted.add(agent)`（那时它在同一位置），别挪到函数
+     * 开头 —— 提前登记会让「首挂半路抛错」的 agent 永久停半挂状态（工具、人格、
+     * 权限上下文都缺一块），而且日志里看不出来。
+     */
+    mountedChat.set(agent, chat);
     /**
      * **不能在这里调 `ctx.onTeardown`。**
      *
