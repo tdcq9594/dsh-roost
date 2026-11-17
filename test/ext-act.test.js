@@ -75,15 +75,11 @@ test('A3 propose：头像只收 http(s)，本机路径不收', async () => {
   assert.equal((await api['self.propose']({ body: { kind: 'avatar', value: 'https://x/a.png' } })).status, 200);
 });
 
-test('A4 propose：人格卡写了 selfName 时，改昵称在提议阶段就拦（别等主人点完才失败）', async () => {
+test('A4 propose：人格卡写了 selfName 也不再拦（平台昵称 ≠ 她的自称）', async () => {
   const { api, asks } = build({ persona: { selfName: '若叶睦' } });
   const r = await api['self.propose']({ body: { kind: 'name', value: '小美' } });
-  assert.equal(r.status, 409);
-  assert.match(r.body.message, /若叶睦/);
-  assert.deepEqual(asks, [], '拦在提议阶段，主人不会收到一张注定失败的确认卡');
-
-  /** 签名不受 selfName 影响 */
-  assert.equal((await api['self.propose']({ body: { kind: 'sign', value: '你好' } })).status, 200);
+  assert.equal(r.status, 200, '2026-11-17 主人定：改平台昵称不该被 selfName 挡回去');
+  assert.deepEqual(asks[0].payload, { name: '小美' });
 });
 
 test('A5 propose：成功时明确说「已发出请求」，不是「已改」', async () => {

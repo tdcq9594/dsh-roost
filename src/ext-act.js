@@ -27,7 +27,7 @@
  */
 
 import {
-  validateProfileText, validateAvatarSource, checkRenameAllowed, MAX_NAME_LEN, MAX_DESC_LEN,
+  validateProfileText, validateAvatarSource, MAX_NAME_LEN, MAX_DESC_LEN,
 } from './profile-tool.js';
 import { runPreview, PREVIEW_TEXT_LIMIT } from './tts-preview.js';
 
@@ -83,7 +83,8 @@ function readTargets(raw) {
  * @param {()=>object} p.ttsOf
  * @param {()=>{rpc:Function}} p.roostOf
  * @param {()=>object} p.cfgOf
- * @param {()=>object} [p.personaOf]  当前生效的人格（判断 selfName 是否写死）
+ * @param {()=>object} [p.personaOf]  当前生效的人格。**2026-11-17 起不参与改昵称判定**
+ *        （`selfName` 不再拦，平台昵称和她的自称是两件事）；形参保留，调用方不用改。
  * @param {(m:string)=>void} [p.log]
  */
 export function createExtAct({
@@ -123,16 +124,10 @@ export function createExtAct({
         const v = validateProfileText(value, { field: '昵称', max: MAX_NAME_LEN });
         if (!v.ok) return bad(v.message);
         /**
-         * 人格卡写了 `selfName` 的话，改平台昵称会变成「资料卡一个名字、
-         * 她自称另一个名字」。这道检查在写入时也有（`profile-tool.js`），
-         * 但**提议时先拦**更好：否则主人点完「确认改」才收到「没改成」。
+         * **不再因人格卡的 `selfName` 拦提议**（2026-11-17 主人定）：
+         * 平台昵称和她的自称是两件事，角色扮演里本来就可以不一样。
+         * 不一致由写入侧在结果的 note 里说清，不在这里 409。
          */
-        if (typeof personaOf === 'function') {
-          let persona = null;
-          try { persona = personaOf(); } catch { /* 拿不到人格就不拦，写入时还有一道 */ }
-          const allowed = checkRenameAllowed(persona);
-          if (!allowed.ok) return bad(allowed.message, 409, 'conflict');
-        }
         payload = { name: v.text };
         summary = `名字改成「${v.text}」`;
       } else if (kind === 'sign') {

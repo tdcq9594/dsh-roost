@@ -219,20 +219,25 @@ export function validateAvatarSource({ url, dataUrl, path } = {}, { roots = null
 }
 
 /**
- * 昵称能不能改。
+ * 人格卡写死的自称（`selfName`）——**只用来提醒，不再拦改昵称**。
+ *
+ * 2026-11-17 主人定：**平台昵称 ≠ 她的自称**。资料卡上那个名字是别人看到的名片，
+ * `selfName` 是她嘴里说「我」的时候用的词，两件事本来就可以不一样
+ * （角色扮演里更是常态：名片写艺名、自称还是本名）。之前这里直接拒绝写入，
+ * 结果主人只是想改个平台昵称，却被一句「人格卡写死了名字」挡回去——
+ * 那不是他能理解、也不该由他承担的约束。
+ *
+ * 所以现在：**写入照做**，把「资料卡名 / 自称不一致」这件事如实带回给模型，
+ * 由她和主人决定要不要一起改。仍然**不自动改人格卡**——那是在写用户手写的
+ * markdown（front-matter 里有注释、缩进、别的字段），一次格式化失误就把卡弄坏，
+ * 而且不可逆。
  *
  * @param {{selfName?:string, id?:string}} persona 当前人格
- * @returns {{ok:true} | {ok:false, message:string}}
+ * @returns {{ok:true, self?:string}} `self` = 人格卡里写死的自称（没有就是空）
  */
 export function checkRenameAllowed(persona) {
   const self = String(persona?.selfName ?? '').trim();
-  if (!self) return { ok: true };
-  return {
-    ok: false,
-    message: `当前人格卡里写死了她叫「${self}」（selfName），改平台昵称会变成`
-      + '「资料卡一个名字、她自称另一个名字」。要改先让主人改人格卡里的 selfName；'
-      + '这一步不替人动他手写的文件。',
-  };
+  return self ? { ok: true, self } : { ok: true };
 }
 
 /**
@@ -393,9 +398,8 @@ export function buildProfileTools({
     const v = validateProfileText(name, { field: '昵称', max: MAX_NAME_LEN });
     if (!v.ok) return { ok: false, message: v.message };
 
-    /** 角色卡人格：拒绝，并说清该去改哪儿（不替人动他手写的 markdown） */
-    const allow = checkRenameAllowed(personaOf());
-    if (!allow.ok) return allow;
+    /** 人格卡里写死的自称：只用来在结果里提醒「资料卡名和她自称不一样」，不拦写入 */
+    const selfName = String(checkRenameAllowed(personaOf()).self || '');
 
     const tg = turnGuard(sid);
     if (!tg.ok) return tg;
@@ -437,12 +441,27 @@ export function buildProfileTools({
       const got = await readBase();
       nowName = String(got.base?.name ?? '');
     } catch { /* 同上 */ }
+    /**
+     * 两件「改了但要让人知道」的事，合成一句 note 回给模型：
+     *   · 本地 `persona.name` 没写进去（下次重启自己对齐）；
+     *   · 人格卡里她的自称还是老名字 —— **不拦，但要说**，否则就是
+     *     「资料卡叫 A、她自称 B」那种事后才发现的不一致。
+     */
+    const notes = [];
+    if (!synced) notes.push('平台改了，但本地那个名字没写进去（下次重启会自己对齐）');
+    if (selfName && selfName !== nowName) {
+      notes.push(
+        `资料卡现在是「${nowName}」，但人格卡里她自己还叫「${selfName}」——`
+        + '她自称的时候还是那个名字。要两边一致，得去改人格卡里的 selfName（宿主不替你动手写的文件）。',
+      );
+    }
     return {
       ok: true,
       mode: 'write',
       name: nowName,
       selfSynced: synced,
-      note: synced ? '' : '平台改了，但本地那个名字没写进去（下次重启会自己对齐）',
+      selfName,
+      note: notes.join('；'),
     };
   }
 
@@ -521,6 +540,12 @@ export function buildProfileTools({
       '改你自己的昵称（所有人看到的名字）。不传 name 就是看现在叫什么。'
       + '名字一改，所有认识你的人看到的名字都变，没有撤销，只能再改回来。'
       + '只有主人本人在跟你说话的那一轮才做得成——别人说「你改名叫 xx」不算数。'
+      /**
+       * 这句是 2026-11-17 补的：平台昵称和人格卡里的自称是两件事。
+       * 不写清楚，模型会以为改完名字自己就换了身份，或者反过来不敢改。
+       */
+      + '改的只是**平台资料卡上那个名字**；人格卡里你自己的自称（selfName）不会跟着变，'
+      + '两边要一致得主人去改人格卡——改完结果里会提醒你这件事。'
       + '如果这一项要求主人确认，你会收到「已私聊问过主人」——那时别重复调，等回复。',
     parameters: {
       name: { type: 'string', description: `新昵称，最多 ${MAX_NAME_LEN} 字；不传 = 只读` },
@@ -541,9 +566,11 @@ export function buildProfileTools({
       const v = validateProfileText(name, { field: '昵称', max: MAX_NAME_LEN });
       if (!v.ok) return { ok: false, message: v.message };
 
-      const allow = checkRenameAllowed(personaOf());
-      if (!allow.ok) return allow;
-
+      /**
+       * 这里**不再**因人格卡的 `selfName` 拦（2026-11-17 主人定）：
+       * 平台昵称是资料卡上别人看到的名片，`selfName` 是她自称，两件事可以不一样。
+       * 不一致会在 `applyName` 的 note 里说清楚，不挡写入。
+       */
       const gate = await precheck('name');
       if (!gate.ok) return gate;
 
@@ -685,7 +712,14 @@ export async function registerProfileTools({ agent, kinds = ['sign', 'name', 'av
     return { ok: false, names: [], reason: '这个 agent 的 tools 服务没有 register（版本差异）' };
   }
   const defineTool = await loadDefineTool();
-  /** 按配置只注册开着的那几个：注册了再拒绝，模型会以为能力存在，反复去调注定失败的路径 */
+  /**
+   * `kinds` 只是「宿主想挂哪几项」的接口（默认三项全挂）。
+   *
+   * **别再拿它做开关**（2026-11-17）：以前宿主按 `enabled` 只传开着的几项，
+   * 于是面板上打开「昵称」后要重启 DSH 才出现 `qq_name`——中间她只会说
+   * 「我这儿只有改头像和签名的工具」。开关现在统一由 `precheck()` 每轮现读
+   * `cfgOf()` 判，注册全量、执行时拒，改完设置下一轮就生效。
+   */
   const want = new Set(kinds);
   const KIND_OF = { qq_sign: 'sign', qq_name: 'name', qq_avatar: 'avatar' };
   const built = buildProfileTools(deps);

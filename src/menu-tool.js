@@ -271,8 +271,9 @@ export function buildMenuTool({ rpc, cfgOf, slots, history, audit = () => {}, no
     async execute({ text, say } = {}) {
       const conf = cfgOf()?.selfExpression?.menu;
       /**
-       * 双保险：注册时已经按 `enabled` 跳过了，但面板上刚关掉、agent 还没重挂时，
-       * 这里必须再挡一次——否则「关了还生效」是最难解释的那种行为。
+       * **这是唯一的开关判据**（2026-11-17 起）：工具无条件注册，面板上关掉之后
+       * 下一轮就拒，不用等 agent 重挂。之前注册处也判一次，代价是「改完设置要
+       * 重启 DSH 才生效」——那是比「模型看见一个被拒的工具」更糟的体验。
        */
       if (conf?.enabled === false) {
         return { ok: false, message: '菜单这一项现在关着，改了也不会生效。' };

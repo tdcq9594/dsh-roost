@@ -4844,43 +4844,47 @@ export function apply(ctx) {
      * 只走 `qq.call`（机器人自己的 token），不碰开发者登录态——所以它是四个出口里
      * 最独立的一个，也是唯一一个「改错了下一分钟能改回来」的。
      *
-     * `enabled` 为假时**整个不注册**：注册了再拒绝，模型会以为这个能力存在，
-     * 反复去调一个注定失败的路径。代价是面板上关掉之后要等 agent 重挂才彻底消失，
-     * 所以工具 `execute()` 里还留了一道同样的判断（双保险）。
+     * **无条件注册，开关在 execute 里现判**（2026-11-17 改）：
+     * 原来 `enabled` 为假就整个不注册，代价是主人改完面板要**重启 DSH** 才生效——
+     * 而 `mount()` 每个 agent 只跑一次，重启前她一直说「我这儿没这个工具」。
+     * 那是「改了设置没反应」最典型的现场。`menu-tool.js` 的 execute 里本来就有
+     * 同一道判断（双保险），所以把注册收窄撤掉即可，行为边界不变。
      */
-    if (cfg.selfExpression?.menu?.enabled !== false) {
-      registerMenuTool({
-        agent,
-        rpc: (m, p) => roost.rpc(m, p),
-        cfgOf: () => cfg,
-        sidOf: () => agent?.session?.id || '',
-        callerOf: () => ({ kind: chat.kind }),
-        slots: menuSlots,
-        history: selfHistory,
-        audit,
-        log: (m) => log.warn(m),
+    registerMenuTool({
+      agent,
+      rpc: (m, p) => roost.rpc(m, p),
+      cfgOf: () => cfg,
+      sidOf: () => agent?.session?.id || '',
+      callerOf: () => ({ kind: chat.kind }),
+      slots: menuSlots,
+      history: selfHistory,
+      audit,
+      log: (m) => log.warn(m),
+    })
+      .then((r) => {
+        if (r.ok) log.info(`菜单工具已挂上：${r.names.join('、')}（${r.mode}）`);
+        else log.warn(`菜单工具没挂上：${r.reason}`);
+        if (r.off) mountOffs.push(r.off);
       })
-        .then((r) => {
-          if (r.ok) log.info(`菜单工具已挂上：${r.names.join('、')}（${r.mode}）`);
-          else log.warn(`菜单工具没挂上：${r.reason}`);
-          if (r.off) mountOffs.push(r.off);
-        })
-        .catch((e) => log.warn(`菜单工具挂载异常：${e?.message ?? e}`));
-    }
+      .catch((e) => log.warn(`菜单工具挂载异常：${e?.message ?? e}`));
 
     /**
-     * 简介与昵称（`qq_sign` / `qq_name`）。
+     * 简介 / 昵称 / 头像（`qq_sign` / `qq_name` / `qq_avatar`）。
      *
      * 走开发者后台（`dev.bot.*`），所以**依赖面板那边已经登录开放平台**；
      * 没登录时工具照挂，执行时给一句「得主人先去扫码」，而不是整个消失。
      *
      * 昵称额外要求「这一轮有真实发送者且是主人」——`senderId` 而不是 `bucket`：
      * 主动搭话轮被塞了 `bucket:'owner'`，按 bucket 判会放行。
+     *
+     * **三个都无条件注册，开关交给 execute 现判**（2026-11-17 改）：
+     * 原来按 `enabled` 只注册开着的那几个，而 `mount()` 每个 agent 只跑一次 →
+     * 面板上打开「昵称」之后，她要等到 DSH 重启才看得见 `qq_name`，
+     * 中间只会回「我这儿只有改头像和签名的工具」。`precheck()` 里读的是
+     * `cfgOf()`（每轮现读），所以注册全量就够了，边界一点没松。
      */
-    const wantSign = cfg.selfExpression?.sign?.enabled !== false;
-    const wantName = cfg.selfExpression?.name?.enabled !== false;
-    const wantAvatar = cfg.selfExpression?.avatar?.enabled !== false;
-    if (wantSign || wantName || wantAvatar) {
+    /** 单独一层块：`who` 只在这一段用，不跟后面 QQ 工具那段的 `cur` 混在一个作用域 */
+    {
       const who = () => {
         const sid = agent?.session?.id || '';
         const s = sid ? speaker.get(sid) : null;
@@ -4892,7 +4896,8 @@ export function apply(ctx) {
       };
       registerProfileTools({
         agent,
-        kinds: [wantSign ? 'sign' : '', wantName ? 'name' : '', wantAvatar ? 'avatar' : ''].filter(Boolean),
+        /** 三项全注册；开没开由 `precheck()` 每轮现读 `cfgOf()` 判 */
+        kinds: ['sign', 'name', 'avatar'],
         requestConfirm: (req) => profileConfirm.ask(req),
         rpc: (m, p) => roost.rpc(m, p),
         cfgOf: () => cfg,
@@ -4922,32 +4927,35 @@ export function apply(ctx) {
     /**
      * 自我表达的提示词（菜单 / 简介 / 昵称）。
      *
-     * **只在工具真挂上时才说有这个能力**：没挂上说有，她会一直调一个不存在的工具，
-     * 然后按「做不到」回复用户——表面正常，实际这一轮全废。
+     * **每轮现读配置**（2026-11-17 改）：原来 `selfExprOn` 是挂载那一刻的快照，
+     * 于是面板上打开「昵称」之后，提示词里也不会出现「你的名字也能改」那句——
+     * 模型连这个能力的存在都不知道，只会说「我这儿没有」。
+     * 现在改成在函数里现算：改完设置下一轮就认，三项全关时返回空串。
      *
      * 陈述句、不写「你必须」：她对「代价」的理解比对禁令稳，而祈使句会把她变成客服。
      */
-    const selfExprOn = {
-      menu: cfg.selfExpression?.menu?.enabled !== false,
-      sign: cfg.selfExpression?.sign?.enabled !== false,
-      name: cfg.selfExpression?.name?.enabled !== false,
-    };
-    if (selfExprOn.menu || selfExprOn.sign || selfExprOn.name) {
-      try {
-        offs.push(agent.ctx.systemPrompt.context({
-          name: 'roost-self-expression',
-          order: 906,
-          text: () => [
+    try {
+      offs.push(agent.ctx.systemPrompt.context({
+        name: 'roost-self-expression',
+        order: 906,
+        text: () => {
+          const on = {
+            menu: cfg.selfExpression?.menu?.enabled !== false,
+            sign: cfg.selfExpression?.sign?.enabled !== false,
+            name: cfg.selfExpression?.name?.enabled !== false,
+          };
+          if (!on.menu && !on.sign && !on.name) return '';
+          return [
             buildMenuPrompt({
-              enabled: selfExprOn.menu,
+              enabled: on.menu,
               cooldownMin: cfg.selfExpression?.menu?.cooldownMin ?? 0,
             }),
-            buildProfilePrompt({ sign: selfExprOn.sign, name: selfExprOn.name }),
-          ].filter(Boolean).join('\n'),
-        }));
-      } catch (e) {
-        log.debug('挂自我表达提示失败：' + (e?.message ?? String(e)));
-      }
+            buildProfilePrompt({ sign: on.sign, name: on.name }),
+          ].filter(Boolean).join('\n');
+        },
+      }));
+    } catch (e) {
+      log.debug('挂自我表达提示失败：' + (e?.message ?? String(e)));
     }
 
     /**

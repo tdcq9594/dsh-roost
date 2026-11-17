@@ -3,7 +3,7 @@
  *
  * 这一组最该守住的是**顺序与判据**，不是格式化：
  *   · 昵称没有真实发送者时必须拒（主动搭话轮被塞了 bucket:'owner'，按 bucket 判会放行）
- *   · `selfName` 存在时必须拒（改平台昵称会造成「资料卡一个名、自称另一个名」）
+ *   · `selfName` 存在时**不拦**，但要在结果里说明「资料卡名和她自称不一样」（2026-11-17 主人定）
  *   · 平台写成功后**才**同步本地名字（反了就是「她说自己叫小蓝、点开还是大肥鱼」）
  *
  * 跑法：node --test test/profile-tool.test.js
@@ -109,11 +109,10 @@ test('V1 文本校验：空 / 超长 / 正常', () => {
   assert.deepEqual(validateProfileText(' 今天也很好 ', { field: '简介', max: 20 }), { ok: true, text: '今天也很好' });
 });
 
-test('R1 角色卡人格（有 selfName）→ 拒绝改昵称', () => {
+test('R1 角色卡人格（有 selfName）→ 不拦，只把自称带出来', () => {
   const r = checkRenameAllowed({ id: 'waka', selfName: '若叶睦' });
-  assert.equal(r.ok, false);
-  assert.match(r.message, /若叶睦/);
-  assert.match(r.message, /人格卡/, '要告诉人该去哪儿改，而不是只说不行');
+  assert.equal(r.ok, true, '平台昵称是资料卡名片，selfName 是她自称，两件事可以不一样');
+  assert.equal(r.self, '若叶睦');
 });
 
 test('R2 普通人格 → 允许', () => {
@@ -210,14 +209,16 @@ test('N2 说话人不是主人 → 拒', async () => {
   } finally { done(); }
 });
 
-test('N3 角色卡人格 → 拒（即使主人亲自说）', async () => {
+test('N3 角色卡人格 → 照改（selfName 不再拦），但结果里要提醒自称还是老名', async () => {
   const { dir, done } = fresh();
   try {
     const { name, rpc } = makeTools({ dir, persona: { id: 'waka', selfName: '若叶睦' } });
     const r = await name.execute({ name: '小蓝' });
-    assert.equal(r.ok, false);
-    assert.match(r.message, /若叶睦/);
-    assert.equal(rpc.calls.filter((c) => c.m === 'dev.bot.set').length, 0);
+    assert.equal(r.ok, true, '平台昵称和自称是两件事，不能因为 selfName 就拒改');
+    assert.equal(r.name, '小蓝');
+    assert.equal(r.selfName, '若叶睦');
+    assert.match(r.note, /若叶睦/, '要让她知道自称还是老名字，别以为改完两边就一致了');
+    assert.equal(rpc.calls.filter((c) => c.m === 'dev.bot.set').length, 1);
   } finally { done(); }
 });
 
