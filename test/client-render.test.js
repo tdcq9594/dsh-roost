@@ -1864,7 +1864,11 @@ const memFixture = {
     edges: [{ id: 'e1', src: '阿岚', rel: '喜欢', dst: '猫', from: Date.now() }],
     suppressed: [], ended: [],
   },
-  backups: [{ at: Date.now(), label: '定时备份', bytes: 2048, kind: 'retention', name: 'pre-retention-a.json' }],
+  backups: [
+    { at: Date.now(), label: '定时备份', bytes: 2048, kind: 'retention', name: 'pre-retention-a.json' },
+    /** 整包备份：清单里要有「用它恢复」那一条（导入/恢复是 1.3.12 补的） */
+    { at: Date.now(), label: '完整备份', bytes: 4096, kind: 'full', name: 'dsh-roost-backup-20261117-221500.zip' },
+  ],
   restorePending: null,
   chats: [], scene: null,
 }
@@ -1917,8 +1921,8 @@ test('2.3/4.3：备份页五节 01–05，导出 / 待生效 / 清单 / 不带�
   assert.deepEqual(numsOf(tree), ['01', '02', '03', '04', '05'], '备份页编号应 01–05 连续')
   const txt = textOf(tree)
   for (const must of [
-    '导出备份（zip）', 'config.json', '导入请用命令行',
-    '没有待生效的恢复', '定时备份', '还原这一份',
+    '导出备份（zip）', 'config.json', '导入备份（zip）', '重启 DSH 才换上',
+    '没有待生效的恢复', '定时备份', '还原这一份', '用它恢复',
     '不会带过去的', 'secrets/', '扩展长期令牌明文', 'zip 炸弹',
     /** 4.3/4.4 第五节 */
     '每天自动备份', '留最近几份', '立即备份并推送', '口令没配就拒推', 'Gitee',

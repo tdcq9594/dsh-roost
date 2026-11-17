@@ -14,7 +14,7 @@
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
 import { basename, join, resolve, extname, relative, sep } from 'node:path';
-import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, readFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, createWriteStream, readFileSync, rmSync, realpathSync } from 'node:fs';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets } from './config.js';
 import { redactText, redactValue, addSecretProvider } from './redact.js';
 import { createSessions, chatSessionKey } from './sessions.js';
@@ -270,8 +270,8 @@ import {
 import { createTtsInstaller } from './tts-install.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
-  applyPendingRestore, cancelRestore, createBackup, listBackups,
-  pendingRestore, restoreRetentionRows,
+  applyPendingRestore, cancelRestore, createBackup, isFullBackupName, listBackups,
+  pendingRestore, restoreRetentionRows, stageRestore, versionGapText,
 } from './backup.js';
 import { pushBackup, scheduleDue } from './backup-remote.js';
 
@@ -6987,6 +6987,46 @@ export function apply(ctx) {
     };
 
     /**
+     * 把请求体当**二进制**收进文件（备份导入用）。
+     *
+     * 不能复用 `readBody()`：那是给 JSON 的——整份读成字符串、解析失败就当空对象，
+     * 拿它收 zip 会把二进制拼进 JS 字符串（编码一坏就废），而且没有体积上限。
+     *
+     * 1GB 这道闸不是随手的数：`createBackup()` 的 zip 上限是 4GB，但面板走 HTTP
+     * 传 4GB 不现实，而且用户真正该用的那条路是 `node scripts/backup.mjs import`
+     * （不占内存、不限大小）。超限就明确指路，别让人对着一个转圈的进度条猜。
+     */
+    const UPLOAD_MAX = 1024 * 1024 * 1024;
+    const receiveToFile = async (req, file) => {
+      const ws = createWriteStream(file);
+      /**
+       * 写盘失败（磁盘满 / 没权限）是以 `'error'` 事件冒出来的，**不是抛异常**。
+       * 没有监听器的 EventEmitter 收到 error 会当场抛——那会穿透 route() 的
+       * Promise 链，把整个进程带崩。先记下来，出循环再抛，交给上层回 400。
+       */
+      let failed = null;
+      ws.on('error', (e) => { failed = e; });
+      let bytes = 0;
+      try {
+        for await (const chunk of req) {
+          if (failed) throw failed;
+          bytes += chunk.length;
+          if (bytes > UPLOAD_MAX) throw new Error('文件超过 1GB：请改用 node scripts/backup.mjs import 传');
+          /** 背压：写不动就等 drain，别把整份备份堆进内存 */
+          if (!ws.write(chunk)) await new Promise((r) => ws.once('drain', r));
+        }
+      } finally {
+        /** 出错时也要把它关掉：`end()` 之后再等 `close`，不然句柄悬着 */
+        await new Promise((resolve) => {
+          ws.once('close', resolve);
+          try { ws.end(); } catch { resolve(); }
+        });
+      }
+      if (failed) throw failed;
+      return bytes;
+    };
+
+    /**
      * 注册一条路由。
      *
      * **单条失败不能拖死整个插件**：如果上一次激活的清理没跑干净
@@ -7075,6 +7115,34 @@ export function apply(ctx) {
         ROOST_API_URL: port ? `http://127.0.0.1:${port}/v1` : '',
         ROOST_API_TOKEN: String(extSecrets?.read?.(id)?.token || ''),
         ROOST_EXT_ID: String(id || ''),
+      };
+    };
+
+    /**
+     * 把一个备份 zip 交给 `.restore/`——**下次启动才换上**。
+     *
+     * 两个入口共用这一段：本机 `backups/` 里挑一份（`/backup/restore-local`），
+     * 或者从别的机器上传（`/backup/import`，换电脑迁移的正路）。
+     *
+     * 校验和落盘全在 `stageRestore()`：manifest、`schema`/`app`、条目必须是
+     * `data/` 前缀、`safeRel` 挡路径穿越、解包总量 512MB、失败自动清掉不留半份。
+     * 这里只负责「拿到一个 zip」，并把「来自哪个版本」翻成人话提醒——
+     * 版本号不拦（`schema` 是硬门槛），但也不能一声不吭。
+     */
+    const stageRestoreFrom = (zip) => {
+      const r = stageRestore({ zip, root: dataDir() });
+      return {
+        ok: true,
+        files: r.files,
+        info: r.info,
+        warn: versionGapText(r.info?.version, updater.own()),
+        /**
+         * 文案里必须写「重启后生效」和「现有数据没动」。
+         * 面板放导入按钮的风险正是这两点容易被误解成「已经恢复了」——
+         * 当初就是因为这个顾虑才把导入关在 CLI 里。
+         */
+        message: `已暂存 ${r.files} 个文件，重启 DSH 后生效。`
+          + '现有数据一个字节没动；真换上去时旧文件会留在 backups/pre-restore-*/。',
       };
     };
 
@@ -10292,6 +10360,44 @@ export function apply(ctx) {
         const body = await readBody(req).catch(() => ({}));
         const r = await runBackup({ push: body?.push !== false });
         return send(res, 200, r);
+      }),
+
+      /** 备份页 03：拿 backups/ 里现成的一份整包恢复（零上传） */
+      route('/backup/restore-local', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req).catch(() => ({}));
+        const name = String(body?.name || '');
+        if (!isFullBackupName(name)) {
+          return send(res, 400, {
+            ok: false,
+            message: '只能选 backups/ 里自己打出来的整包备份（dsh-roost-backup-*.zip）',
+          });
+        }
+        const zip = join(dataDir(), 'backups', name);
+        if (!existsSync(zip)) return send(res, 404, { ok: false, message: '这份备份已经不在了，刷新一下清单' });
+        try {
+          return send(res, 200, stageRestoreFrom(zip));
+        } catch (e) {
+          /** 校验失败的原文直接给：认不出格式 / 路径不安全 / 没有 config.json 都在里面 */
+          return send(res, 400, { ok: false, message: `这份备份没法恢复：${e?.message ?? e}` });
+        }
+      }),
+
+      /** 备份页 01：从本机选一个 zip 上传（换电脑迁移用） */
+      route('/backup/import', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        /** 临时文件放数据目录：同一块盘，后面真要 `rename` 也不会跨卷失败 */
+        const tmp = join(dataDir(), `.import-${Date.now()}.zip`);
+        try {
+          const bytes = await receiveToFile(req, tmp);
+          if (!bytes) return send(res, 400, { ok: false, message: '没收到文件：先选一个 .zip 再点导入' });
+          return send(res, 200, stageRestoreFrom(tmp));
+        } catch (e) {
+          return send(res, 400, { ok: false, message: `导入失败：${e?.message ?? e}` });
+        } finally {
+          /** 无论成败都不留：`.restore/` 已经拿到需要的东西，原包没用了 */
+          rmSync(tmp, { force: true });
+        }
       }),
 
       /**

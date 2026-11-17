@@ -485,6 +485,39 @@ export function listBackups(root) {
 }
 
 /**
+ * 面板「用这一份恢复」能不能接这个名字——只认我们自己打出来的整包 zip。
+ *
+ * 面板传上来的名字来自备份清单，但它终究是**请求参数**：挡掉路径分隔符和
+ * `..`，再卡 `BACKUP_PREFIX` + `.zip` 两头，剩下的才可能落到 `backups/` 里。
+ * 抽成纯函数是为了单测（`test/backup-import.test.js`），路由里只剩一句话。
+ */
+export function isFullBackupName(name) {
+  const s = String(name ?? '');
+  if (!s || s !== s.trim()) return false;
+  if (s.includes('/') || s.includes('\\') || s.includes('..')) return false;
+  return s.startsWith(BACKUP_PREFIX) && s.toLowerCase().endsWith('.zip');
+}
+
+/**
+ * 恢复一份**别的版本**打出来的备份时，给一句人话提醒。
+ *
+ * 不拦：`schema` / `app` 才是硬门槛（`stageRestore` 里已经卡了），版本号只说明
+ * 「数据结构可能对不上」。但也不能一声不吭——把 0.x 的包往 1.x 里恢复，缺的字段
+ * 会以默认值出现，事后很难追。
+ *
+ * 大版本不同要说重一点：那已经不是「少几个字段」的量级。
+ */
+export function versionGapText(fromVersion, toVersion) {
+  const from = String(fromVersion ?? '').trim();
+  const to = String(toVersion ?? '').trim();
+  if (!from || !to || from === to) return '';
+  const major = (v) => Number(String(v).split('.')[0]) || 0;
+  return major(from) !== major(to)
+    ? `这份备份来自 v${from}，当前是 v${to}：**大版本不同**，数据结构大概率对不上，恢复前先想清楚。`
+    : `这份备份来自 v${from}，当前是 v${to}：格式基本兼容，但新增字段会以默认值出现。`;
+}
+
+/**
  * D11 `purge` 备份的**行级还原**（§3③）。
  *
  * 和整包恢复是两件事：这里只把 `pre-retention-*.json` 里带原文的行插回去，

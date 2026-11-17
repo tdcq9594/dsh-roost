@@ -5294,8 +5294,8 @@ select.roost-input{color-scheme:dark}
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '导出会打包配置、记忆、日记、图谱、人格等；SQLite 用一致性快照，运行中导出也安全。'
             + '⚠ 包里含 config.json（里面有密钥），别外传。'
-            + '导入请用命令行 node scripts/backup.mjs import <zip>：只暂存到 .restore/，下次启动 DSH 才生效，'
-            + '所以面板不放导入按钮。'),
+            + '导入/整包恢复在「备份」页第 01 节：只用 .restore/ 暂存，**下次启动 DSH 才生效**，'
+            + '所以这里不放第二颗按钮（两处入口走出两条逻辑）。'),
           mem?.restorePending
             ? h('div', { className: 'roost-note', style: { marginBottom: 8 } },
                 `有一份整包恢复等着下次启动生效（${mem.restorePending.files} 个文件，${mem.restorePending.createdAt || ''}）。`,
@@ -6622,8 +6622,12 @@ select.roost-input{color-scheme:dark}
 
     /**
      * 备份页：E4 那块从记忆页里长出一个正门。
-     * 不做「面板导入」——整包恢复只暂存到 .restore/、下次启动才生效，
-     * 在面板放个按钮会让人以为点完就已经恢复了（记忆页那条注释写过这个坑）。
+     *
+     * **导入在这里，但语义必须说死**：整包恢复只暂存到 `.restore/`、下次启动才换上。
+     * 以前因为怕人误会「点完就已经恢复了」而不放按钮，代价是换电脑迁移只能开终端打
+     * 命令（导出却只要点一下），最需要人的那一步反而最麻烦。现在补上按钮，靠三件事
+     * 防误会：按钮旁的文案、第 02 节「等着下次启动生效的恢复」、以及成功气泡里
+     * 明写「重启 DSH 后生效 / 现有数据没动」。
      *
      * 「不会带过去的」照 src/backup.js 的 SKIP / shouldSkip 实写，
      * 不凭印象编：尤其 secrets/ 是扩展长期令牌明文，必须显式说清。
@@ -6634,6 +6638,42 @@ select.roost-input{color-scheme:dark}
       const shortTime = (at) => new Date(at).toLocaleString('zh-CN', {
         month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
       })
+
+      /**
+       * 暂存一份恢复：上传的 zip，或清单里现成的一份，走同一个回调。
+       *
+       * 面板不重复校验——格式、`data/` 前缀、路径穿越、解包上限全在宿主的
+       * `stageRestore()` 里，这里只把失败原文显示出来，别用一句「失败了」盖掉。
+       */
+      const stageBackup = async (path, init) => {
+        try {
+          const res = await fetch(API + path, init)
+          const r = await res.json().catch(() => ({}))
+          if (!res.ok || r.ok === false) throw new Error(r.message || ('HTTP ' + res.status))
+          toast(r.message || '已暂存，重启 DSH 后生效')
+          if (r.warn) toast('⚠ ' + r.warn)
+          if (reload) reload()
+        } catch (e) {
+          toast('没成：' + e.message)
+        }
+      }
+
+      /** 选文件 → 确认 → 上传。用临时 input，省得为一次选择挂个 ref */
+      const pickAndImport = () => {
+        const input = document.createElement('input')
+        input.type = 'file'
+        input.accept = '.zip,application/zip'
+        input.onchange = () => {
+          const f = input.files && input.files[0]
+          if (!f) return
+          if (!/\.zip$/i.test(f.name)) return toast('要选 .zip 备份文件')
+          const ok = window.confirm(`用「${f.name}」暂存一份恢复？\n\n`
+            + '只暂存到 .restore/，重启 DSH 后才换上；现有数据现在一个字节都不会动。')
+          if (!ok) return
+          stageBackup('/backup/import', { method: 'POST', body: f })
+        }
+        input.click()
+      }
 
       /** 4.3/4.4：定时与云备份。推送结果就地展示（reason 分类给不同指引） */
       const [pushResult, setPushResult] = useState(null)
@@ -6681,13 +6721,20 @@ select.roost-input{color-scheme:dark}
         h(Sec, { n: '01', title: '导出备份' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '打包配置、记忆、日记、图谱、人格等；SQLite 用一致性快照，运行中导出也安全。'
-            + '⚠ 包里含 config.json（里面有密钥），别外传。'
-            + '导入请用命令行 node scripts/backup.mjs import <zip>：只暂存到 .restore/，下次启动 DSH 才生效，'
-            + '所以面板不放导入按钮。'),
-          h('button', {
-            type: 'button', className: 'roost-primary',
-            onClick: () => downloadBackupZip(toast, reload),
-          }, '导出备份（zip）'),
+            + '⚠ 包里含 config.json（里面有密钥、端口、路径），别外传；'
+            + '**导入会连旧机器的 config.json 一起带过来**（只把数据目录那段换成本机路径）。'
+            + '导入只暂存到 .restore/，**重启 DSH 才换上**，现有数据不动，随时能在第 02 节反悔。'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+            h('button', {
+              type: 'button', className: 'roost-primary',
+              onClick: () => downloadBackupZip(toast, reload),
+            }, '导出备份（zip）'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy,
+              title: '换电脑迁移时用：从本机选一个之前导出的 zip',
+              onClick: pickAndImport,
+            }, '导入备份（zip）'),
+          ),
         ),
 
         h(Sec, { n: '02', title: '等着下次启动生效的恢复' },
@@ -6725,7 +6772,15 @@ select.roost-input{color-scheme:dark}
                           reload()
                         },
                       })
-                    : null,
+                    : h(ConfirmLink, {
+                        label: '用它恢复', confirmLabel: '确认暂存这份备份', disabled: busy,
+                        /** 零上传：文件已经在 backups/ 里，把名字交给宿主就行 */
+                        onConfirm: () => stageBackup('/backup/restore-local', {
+                          method: 'POST',
+                          headers: { 'content-type': 'application/json' },
+                          body: JSON.stringify({ name: b.name }),
+                        }),
+                      }),
                 )))
             : h('div', { className: 'roost-empty' }, '还没有备份。'),
           backups.length > 20
