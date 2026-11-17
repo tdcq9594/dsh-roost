@@ -963,9 +963,8 @@ export function apply(ctx) {
     log: (m) => log.warn(m),
   });
 
-  const sessions = personaScope.wrapSessions(
-    createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) }),
-  );
+  const sessionsStore = createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) });
+  const sessions = personaScope.wrapSessions(sessionsStore);
 
   /**
    * 清掉历史上「漏了 sessionKey」留下的那条映射。
@@ -973,10 +972,13 @@ export function apply(ctx) {
    * 键名就是字符串 `"undefined"`：谁都能命中它，于是短记窗口里会冒出主动搭话的
    * 整段提示词、刷B站的结果也会写进同一个会话。留着它只会继续误导下一轮，
    * DSH 那个会话本身不动（用户在侧栏里自己删）。
+   *
+   * **必须走原始的 `sessionsStore`**：人格作用域开着时，包装层的 `entry()`
+   * 会把键改写成 `p:<人格>:undefined`，永远查不到这一条，清理就成了摆设。
    */
   try {
-    if (sessions.entry('undefined')) {
-      sessions.remove('undefined');
+    if (sessionsStore.entry('undefined')) {
+      sessionsStore.remove('undefined');
       log.warn('清掉一条 sessionKey 缺失的旧映射（键名 "undefined"），相关功能会各建各的窗口');
     }
   } catch {}
