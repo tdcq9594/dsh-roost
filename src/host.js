@@ -10386,9 +10386,15 @@ export function apply(ctx) {
       /** 备份页 01：从本机选一个 zip 上传（换电脑迁移用） */
       route('/backup/import', async (req, res) => {
         if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
-        /** 临时文件放数据目录：同一块盘，后面真要 `rename` 也不会跨卷失败 */
-        const tmp = join(dataDir(), `.import-${Date.now()}.zip`);
+        /**
+         * 临时文件放数据目录的 `tmp/` 下：那个目录在 `backup.js:SKIP` 里，**永远不会
+         * 被下一次导出打进去**（进程半路被杀时残留的 zip 不该进包，几百 MB 的包
+         * 套包会把用户的备份撑爆）。同一块盘也省得跨卷问题。
+         */
+        const tmpDir = join(dataDir(), 'tmp');
+        const tmp = join(tmpDir, `.import-${Date.now()}.zip`);
         try {
+          mkdirSync(tmpDir, { recursive: true });
           const bytes = await receiveToFile(req, tmp);
           if (!bytes) return send(res, 400, { ok: false, message: '没收到文件：先选一个 .zip 再点导入' });
           return send(res, 200, stageRestoreFrom(tmp));

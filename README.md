@@ -223,7 +223,7 @@ DeepSeek 抽风 / 502 了怎么办
 
 <summary>怎么升级 / 换电脑</summary>
 
-升级走面板「设置」顶部「更新」；换电脑用 `node scripts/backup.mjs export` 打一个 zip，新机器 `import` 后**下次启动**才换上，可以 `cancel` 反悔。详见 [手册 · 一键备份](docs/USER-MANUAL.md#一键备份换电脑)。
+升级走面板「设置」顶部「更新」；换电脑用面板「备份」页的「导出备份（zip）」，新机器在那页「导入备份（zip）」后**下次启动**才换上，可以取消反悔；也可以用命令行 `node scripts/backup.mjs export|import|cancel`。详见 [手册 · 一键备份](docs/USER-MANUAL.md#一键备份换电脑)。
 
 </details>
 
