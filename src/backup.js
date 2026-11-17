@@ -201,6 +201,21 @@ function sqliteSnapshot(file) {
  */
 export function createBackup({ root, out, now = new Date(), version = '', log = () => {} } = {}) {
   if (!root) throw new Error('没给数据目录');
+  /**
+   * 没有 `config.json` 就**不是能恢复的备份**。
+   *
+   * `stageRestore()` 把它当硬校验（恢复时缺了直接拒：「备份里没有 config.json」），
+   * 可导出这边以前不管——从一个没启动过的目录、或者拷了一半的目录导出来的包，
+   * 用户以为备份好了，等换电脑那天才发现装不回去。**假成功比报错难查得多**，
+   * 所以在这里提前挡，而且要在动任何文件之前挡（别留半个 zip 或空的 backups/）。
+   *
+   * 定时 / 云备份那条路也走这里：`runBackup()` 会把它兜成 `{ok:false, message}`，
+   * 面板和日志都能看见，不会静默。
+   */
+  if (!existsSync(join(root, 'config.json'))) {
+    throw new Error('这个目录里没有 config.json，不像 dsh-roost 的数据目录（或还没启动过）：'
+      + '先启动一次插件让它把配置落盘，再来导出。');
+  }
   const dest = out || dirOf(root);
   mkdirSync(dest, { recursive: true });
   const stamp = now.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);

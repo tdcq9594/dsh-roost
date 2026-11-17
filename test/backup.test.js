@@ -258,10 +258,17 @@ test('同一分钟导出两次不覆盖旧包；listBackups 区分完整包 / �
 });
 
 test('备份里缺 config.json 被拒（不是本插件的数据目录）', (t) => {
-  const root = fixture(t, false);
-  writeFileSync(join(root, 'memory.json'), '{}');
+  /**
+   * 导出现在会自己挡掉「没有 config.json 的目录」，所以这里造假包的方式换了：
+   * 先正常导一份，再把包里的 `data/config.json` 改个名（等长替换，`patchName` 会
+   * 同时改 local 与 central 两处头）。验的是恢复侧的硬校验——别人给的、老版本打的
+   * 包都可能缺这个文件。
+   */
+  const root = fixture(t);
   const exp = createBackup({ root, out: join(root, 'backups'), now: fixedNow });
-  assert.throws(() => stageRestore({ zip: exp.file, root }), /没有 config.json/);
+  const broken = join(root, 'backups', 'no-config.zip');
+  writeFileSync(broken, patchName(readFileSync(exp.file), 'data/config.json', 'data/confix.json'));
+  assert.throws(() => stageRestore({ zip: broken, root }), /没有 config\.json/);
 });
 
 test('快照失败即整份备份失败，不交半成品', (t) => {
@@ -280,4 +287,29 @@ test('导出目录可以在数据目录之外，且不把 out 里的东西打进
   const exp = createBackup({ root, out, now: fixedNow });
   assert.equal(resolve(exp.file).startsWith(resolve(out)), true);
   assert.equal(exp.files, 4);
+});
+
+/* ---------------- 导出前的门槛：没有 config.json 的目录不许导出 ---------------- */
+
+/**
+ * 从一个没有 `config.json` 的目录导出，会得到一个**永远恢复不了**的包：
+ * `stageRestore()` 硬性要求包里有 config.json。用户那时才知道，等于白备份。
+ * 所以导出这一步就要拒，而且必须在写任何文件之前拒（不留半个 zip、不留空的 backups/）。
+ */
+test('导出：目录里没有 config.json 时直接报错，不留半份文件', (t) => {
+  const root = fixture(t, false);
+  assert.throws(
+    () => createBackup({ root, now: fixedNow }),
+    /没有 config\.json/,
+    '没有配置文件就不该产出备份',
+  );
+  assert.equal(existsSync(join(root, 'backups')), false, '连备份目录都不该被建出来');
+});
+
+test('导出：正常的目录照旧能导出（守住上面那条门槛别过头）', (t) => {
+  const root = fixture(t);
+  const r = createBackup({ root, now: fixedNow });
+  assert.ok(existsSync(r.file));
+  assert.match(r.name, /^dsh-roost-backup-/);
+  assert.ok(r.files > 0);
 });
