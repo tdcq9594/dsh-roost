@@ -262,7 +262,16 @@ const APP_OK = new Set(['applied', 'restart-required', 'overridden', 'success'])
  * 于是所有失败都落到兜底文案，用户看不出任何可行动的信息。
  */
 const FAIL_TEXT = {
-  'already-installed': '这一版已经装过了（DSH 在热更新模式下会拒绝重装同一个包）。重启 DSH 再看版本；要换别的版本得先卸载。',
+  /**
+   * DSH 的 `installBundle` 是「装新包」：同名包已存在就直接拒，**跟版本无关**
+   * （`known.has(name)` → `<name> is already installed`）。
+   * 升级得用 `updateBundle`，所以这条只在老 DSH 的兜底路径上出现——
+   * 文案不能再叫人「先卸载」，那对版本升级是错的（`pnpm add` 本来就是原地替换）。
+   */
+  'already-installed': '这个 DSH 版本的插件面板只能装新包、装不了升级，本地什么都没动。'
+    + '用下面那行命令原地升到新版（不用先卸载），跑完重启 DSH。',
+  'not-updatable': '这个包在 DSH 里不是「按包名存的 registry 依赖」（比如 git 装的），面板升级不了。'
+    + '用下面那行命令。',
   'invalid-spec': '版本号不合法，可能是 registry 返回了脏数据。稍后重试，或去 DSH 插件管理里手动更新。',
   'incompatible-version': '这个版本要求更高版本的 DSH，当前装不了。先升级 DSH。',
   'management-required': '这个 DSH 没给插件管理权限。去 DSH 设置里打开后重试。',
@@ -768,6 +777,14 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     const leftH = Math.floor(leftMin / 60);
     const leftM = leftMin % 60;
     const k = kind();
+    /**
+     * 宿主能力探测。
+     *
+     * `installBundle` **只能装新包**：DSH 拿到 spec 先看包名，已存在就直接
+     * `already-installed`。升级得用 `updateBundle`（DSH 自己的插件页走它），
+     * 所以「面板能不能自己更新」看的是后者，不是前者。
+     */
+    const hasApi = (n) => typeof pm()?.[n] === 'function';
     /** 磁盘上装着的版本；读不到就退回运行中版本（测试环境没有真实 node_modules） */
     const installed = installedVersion();
     const base = installed || own;
@@ -797,10 +814,15 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       sources: Array.isArray(r.sources) ? r.sources : [],
       error: err,
       kind: k,
-      // 只有真实目录才给更新按钮；符号链接会把开发链路搞断
-      // 不只看有没有这个服务，还要看它到底有没有 installBundle——
-      // 两个条件不一致会让面板显示一个点了没反应的按钮
-      canSelf: k === 'real' && typeof pm()?.installBundle === 'function',
+      /**
+       * 只有真实目录才给更新按钮；符号链接会把开发链路搞断。
+       *
+       * 判据是 **`updateBundle`**，不是 `installBundle`：后者按包名拒绝已存在的包，
+       * 「有更新」的前提恰恰是「已经装着旧版」，拿它做按钮就是点一次失败一次
+       * （2026-11-17 用户实测面板 already-installed、同一时刻 CLI 2.1s 升级成功）。
+       * 老 DSH 没有 `updateBundle` → `canSelf` 为假 → 面板直接给可跑的命令。
+       */
+      canSelf: k === 'real' && hasApi('updateBundle'),
       /**
        * 比的是**磁盘上那份**，不是运行中那份。
        *
@@ -822,7 +844,7 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       coolingLeftText: cooling
         ? `还差 ${leftH} 小时${leftM ? ` ${leftM} 分钟` : ''}满 24 小时`
         : '',
-      hasManager: typeof pm()?.installBundle === 'function',
+      hasManager: hasApi('installBundle') || hasApi('updateBundle'),
       /** 手动更新的命令（兜底出口）：一键装走不通时给这条，别只甩一句「去插件管理里手动更新」 */
       command: cmd.command,
       shell: cmd.shell,
@@ -951,7 +973,8 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       };
     }
     const manager = pm();
-    if (!manager?.installBundle) {
+    /** 两个 API 有一个就能动：能升级的走 `updateBundle`，只有 `installBundle` 的退回那条已知失败的旧路 */
+    if (!manager?.updateBundle && !manager?.installBundle) {
       return {
         ok: false,
         code: 'no-manager',
@@ -1028,12 +1051,14 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       log(info.mirrorLag
         ? `配置的源只有 v${info.mirrorLatest}，v${target} 只在官方源上——这次从 ${source} 装`
         : `v${target} 不在配置的源上（没同步到这个 tag），这次从 ${source} 装`);
-      /**
-       * 兜底命令也得跟着改：面板上那行 `plugin add dsh-roost@<新版>` 如果还跟着
-       * 配置的源走，用户复制去跑同样会 `not-found`。版本号和源一起写死最稳。
-       */
-      cmd = updateCommand({ profileDir: profile(), version: target, registry: source });
     }
+    /**
+     * 命令里**写死版本号**：知道目标版本就该给一行可复现的（别再交给 pnpm 猜
+     * `latest`——镜像滞后时它猜出来的是旧版）。源只在这版不在用户源上时才带。
+     */
+    cmd = updateCommand({
+      profileDir: profile(), version: target, registry: offPrimary ? source : '',
+    });
     const installOpts = { saveExact: true, requestId };
     if (source) installOpts.registry = source;
     /**
@@ -1045,9 +1070,44 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
      * 面板也就能给出「点立即安装」这个准确的下一步。
      */
     if (target) installOpts.expected = { name: PKG, version: target };
+    /**
+     * **升级必须走 `updateBundle`，`installBundle` 装不了。**
+     *
+     * `installBundle` 是「装一个新的组合包」：DSH 拿到 spec 先看**包名**，
+     * `known.has(name)` 为真就 `refused('already-installed', "<name> is already installed")`
+     * ——按名字拒绝，跟版本号无关。而面板出现更新横幅的前提恰恰是「已经装着旧版」，
+     * 两个条件一叠加，这颗按钮就是**点一次失败一次**（2026-11-17 用户实测：
+     * 面板回 already-installed，同一时刻 CLI `dsh plugin add` 2.1s 就升上去了）。
+     *
+     * `updateBundle(name, version, { registry, requestId })` 才是升级入口
+     * （DSH 自己的插件页也走它）：先按 `listVersions` 同一套计划核对目标版本，
+     * 版本不存在 / 不是组合包 / engines 不满足时停在 `step:'check'`，**profile 不动**。
+     *
+     * 老 DSH 没有这个方法，只能退回 `installBundle`——那条路注定 already-installed，
+     * 所以失败文案里必须把可跑的命令顶出来（见下面的 `already-installed` 分支）。
+     */
+    const canUpgrade = typeof manager.updateBundle === 'function';
+    const useUpdate = canUpgrade && Boolean(target);
+    /**
+     * 只有 `updateBundle`、又恰好查不到版本号：这条路要确切版本，走不下去。
+     * 别去调 `installBundle`（不存在，会变成 `manager.installBundle is not a function`），
+     * 直接给命令。
+     */
+    if (!useUpdate && typeof manager.installBundle !== 'function') {
+      return {
+        ok: false,
+        code: 'no-version',
+        command: cmd.command,
+        shell: cmd.shell,
+        message: '这次没查到最新版，而面板升级需要确切版本号。稍后点「重新检查」，'
+          + '或者用下面那行命令直接装。',
+      };
+    }
     let result;
     try {
-      result = await manager.installBundle(spec, installOpts);
+      result = useUpdate
+        ? await manager.updateBundle(PKG, target, source ? { registry: source, requestId } : { requestId })
+        : await manager.installBundle(spec, installOpts);
     } catch (e) {
       return {
         ok: false,
@@ -1064,35 +1124,80 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
      *   ChangeResult { changed, application, restartReason?, error?, packageResult?, bundle?, … }
      *   { status: 'refused', problem, reason }        ← 连 pnpm 都没跑就被拒
      *
+     * `updateBundle` 又多一层：`{ from, to, step, result: ChangeResult }`
+     * （失败时可能是 remote 包装的 `{ ok:false, error:{message} }`）。
+     *
      * 以前只认 `application === 'success'`（这个值不存在）并去读
      * `packageResult.code`（这个字段也不存在），结果**每一次成功都被报成失败**，
      * 真正的错误码也全被丢掉，用户只能看到兜底文案。
      */
-    const app = result?.application;
-    const refused = result?.status === 'refused';
-    const errCode = result?.error?.code || (refused ? result?.problem : '') || '';
+    /**
+     * remote 层可能再包一层 `{ ok, value|error }`（`registries()` 就是这么给的），
+     * 先剥掉；`ok:false` 表示连 ChangeResult 都没拿到。
+     */
+    let answer = result;
+    if (answer && typeof answer === 'object' && typeof answer.ok === 'boolean'
+      && ('value' in answer || 'error' in answer)) {
+      if (!answer.ok) {
+        const why = answer.error?.message || '没有给出原因';
+        return {
+          ok: false,
+          code: 'refused',
+          command: cmd.command,
+          shell: cmd.shell,
+          message: `DSH 拒绝了这次升级：${why}（本地什么都没动）。可以试试下面那行命令。`,
+          detail: { code: 'refused', diagnostic: why },
+          raw: result,
+        };
+      }
+      answer = answer.value;
+    }
+    /**
+     * 统一成 ChangeResult 那一层。
+     *
+     * `updateBundle` 把结果包在 `result` 里（外层还有 from/to/step，留着做诊断），
+     * `installBundle` 直接给 ChangeResult。
+     */
+    const change = useUpdate && answer && typeof answer === 'object' && 'step' in answer
+      ? (answer.result || {})
+      : answer;
+    const app = change?.application;
+    const refused = change?.status === 'refused';
+    const errCode = change?.error?.code || (refused ? change?.problem : '') || '';
     /** 给人看的细节：错误码之外还有 pnpm 的分类、原文和日志路径 */
     const detail = {
       code: errCode,
-      diagnostic: result?.error?.diagnostic || (refused ? result?.reason : '') || '',
-      kind: result?.packageResult?.kind || '',
-      failedAt: result?.failedAt || '',
-      exitCode: result?.packageResult?.exitCode ?? null,
-      timedOut: Boolean(result?.packageResult?.timedOut),
-      logPath: result?.packageResult?.logPath || '',
+      diagnostic: change?.error?.diagnostic || (refused ? change?.reason : '') || '',
+      kind: change?.packageResult?.kind || '',
+      failedAt: change?.failedAt || answer?.failedAt || '',
+      exitCode: change?.packageResult?.exitCode ?? null,
+      timedOut: Boolean(change?.packageResult?.timedOut),
+      logPath: change?.packageResult?.logPath || '',
       // pnpm 输出可能很长；只带前 400 字，够定位又不会把响应撑大
-      output: String(result?.packageResult?.output || '').slice(0, 400),
+      output: String(change?.packageResult?.output || '').slice(0, 400),
+      /** 升级专用的进度信息：停在哪一步、从哪版到哪版（installBundle 路径为空） */
+      step: answer?.step || '',
+      from: answer?.from || '',
+      to: answer?.to || '',
     };
 
     if (app === 'cancelled') {
       return { ok: false, code: 'cancelled', message: humanFail('cancelled'), detail };
     }
-    if (refused || app === 'failed' || (result?.error && !APP_OK.has(app))) {
+    if (refused || app === 'failed' || (change?.error && !APP_OK.has(app))) {
       /** 版本核对失败：把「本来要装哪版、现在还剩哪版」说清楚，光有错误码没用 */
       const message = errCode === 'unexpected-package' && target
         ? `没装上 v${target}：DSH 核对版本不符，已经回滚（本地仍是 v${info.installed || own}）。`
           + '多半是新版本发布不满 24 小时被 pnpm 挡回旧版——点「立即安装（不等 24 小时）」，或明天再更新。'
-        : humanFail(errCode, detail);
+        /**
+         * `already-installed` 只在老 DSH（没有 `updateBundle`）那条路上出现：
+         * 面板 API 按**包名**拒绝，跟版本无关。这时唯一能走通的是命令行，
+         * 文案就必须把命令抬出来，而不是叫人「先卸载」——升级本来就是原地替换。
+         */
+        : errCode === 'already-installed'
+          ? '这个 DSH 版本的插件面板只能装新包、装不了升级（返回 already-installed）。'
+            + '跑下面那行命令就行，原地升到新版，不用先卸载；跑完重启 DSH。'
+          : humanFail(errCode, detail);
       return {
         ok: false,
         code: errCode || 'failed',
@@ -1127,7 +1232,13 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
      * 兜底成请求版本后 downgraded 恒为 false → 用户看到「已装 v1.0.0」，
      * 重启后还是 0.13.0。写进磁盘的那份才是事实。
      */
-    const reported = String(result?.bundle?.version || result?.version || '').replace(/^v/i, '');
+    /**
+     * 装到的版本，按可信度取：磁盘 > DSH 报的 bundle.version > `updateBundle.to`。
+     *
+     * `updateBundle` 的 ChangeResult 未必带 `bundle`，但它外层一定给了 `to`——
+     * 磁盘读不到时（Windows 上文件被占）靠它兜一下，别动不动就报「没核对到」。
+     */
+    const reported = String(change?.bundle?.version || change?.version || answer?.to || '').replace(/^v/i, '');
     const onDisk = String(installedVersion() || '').replace(/^v/i, '');
     const got = onDisk || reported;
     const wanted = info.latest || reported;
@@ -1137,7 +1248,7 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     const downgraded = Boolean(wanted && got && compareVersion(got, wanted) < 0);
     /** `restart-required` / `overridden` 都表示"现在还没生效" */
     const needRestart = app === 'restart-required' || app === 'overridden'
-      || Boolean(result?.restartReason) || result?.changed === true;
+      || Boolean(change?.restartReason) || change?.changed === true;
     return {
       ok: true,
       version: got,
@@ -1146,7 +1257,7 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       unverified,
       exemption,
       application: app,
-      restartReason: result?.restartReason || '',
+      restartReason: change?.restartReason || '',
       message: downgraded
         ? `已装 v${got}，不是最新的 v${wanted}——因为新版本发布不满 24 小时，pnpm 降级了。`
           + '可以点「立即安装（不等 24 小时）」，或明天再更新。'
@@ -1160,6 +1271,8 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
             : `已装 v${got}，重启 DSH 才生效。`,
       restart: needRestart,
       unknownLatest,
+      /** 成功也留诊断：`step`/`from`/`to` 能看出这次是「检查通过后装上了」还是别的路径 */
+      detail,
     };
   }
 

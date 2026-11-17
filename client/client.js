@@ -1262,7 +1262,14 @@ select.roost-input{color-scheme:dark}
         ? '这个 DSH 版本没有 pluginManager：把下面这行粘到 PowerShell 里跑，跑完重启 DSH。'
         : i.kind === 'unknown'
           ? '找不到已安装的目录：确认下面命令里的 profile 名对不对，再跑。'
-          : 'DSH 不让面板自己装：把下面这行粘到 PowerShell 里跑，跑完重启 DSH。'
+          /**
+           * 真实目录 + 有 pluginManager，却还是不给按钮 = 这个 DSH 只有
+           * `installBundle`（按包名拒绝已存在的包），没有升级用的 `updateBundle`。
+           * 这时候「DSH 不让面板自己装」是误导——它让装新包，只是升不了级。
+           */
+          : i.kind === 'real' && i.hasManager
+            ? '这个 DSH 版本的插件面板只能装新包、装不了升级：把下面那行粘到 PowerShell 里跑，跑完重启 DSH。'
+            : 'DSH 不让面板自己装：把下面这行粘到 PowerShell 里跑，跑完重启 DSH。'
 
     /**
      * 概览页顶部的更新横幅。
@@ -1333,7 +1340,16 @@ select.roost-input{color-scheme:dark}
       const doSelf = async () => {
         setBusy(true)
         try {
-          const r = await post('/update/self', {})
+          /**
+           * 横幅只有一颗按钮，所以**冷却期内直接带 `fresh`**。
+           *
+           * 不带的话 pnpm 的 `minimumReleaseAge` 会把刚发的版本过滤掉：
+           * 轻则静默装回旧版，重则 `no-matching-version`——用户看到的就是
+           * 「有新版本、点了没反应」。设置页那边有单独的「立即安装」按钮，
+           * 这里没有，就别让他为了一条 yaml 豁免多跑一趟。
+           */
+          const fresh = Boolean(info && (info.cooling || info.coolingUnknown))
+          const r = await post('/update/self', { fresh })
           toast(r.message || (r.ok ? '装好了，重启 DSH 生效' : '没更新成'))
           await fetchInfo(true)
         } finally {
@@ -12888,7 +12904,13 @@ select.roost-input{color-scheme:dark}
                     // 用户会以为"更新失败"，然后再点一次
                     ? `新版已经装到磁盘上了，重启 DSH 就会生效（面板上的版本号要重启后才变）。`
                     : info?.kind === 'real'
-                      ? '装完要重启 DSH 才生效。'
+                      /**
+                       * 真实目录但没有 `updateBundle`：面板装不了升级。
+                       * 这时候还写「装完要重启」会让人以为按钮在、只是没显示。
+                       */
+                      ? (info?.canSelf === false
+                        ? '这个 DSH 版本的插件面板只能装新包、装不了升级，请用下面那行命令（跑完重启 DSH）。'
+                        : '装完要重启 DSH 才生效。')
                       : info?.hasManager === false
                         ? '这个 DSH 版本没有 pluginManager，请用下面那行命令手动更新。'
                         : (info?.error
@@ -13005,6 +13027,9 @@ select.roost-input{color-scheme:dark}
                 const d = fail.detail || {}
                 const lines = [
                   fail.code ? `code: ${fail.code}` : '',
+                  /** 升级专用：卡在哪一步、从哪版到哪版（停在 check 说明 profile 没动） */
+                  d.step ? `step: ${d.step}` : '',
+                  (d.from || d.to) ? `version: ${d.from || '?'} → ${d.to || '?'}` : '',
                   d.kind ? `kind: ${d.kind}${d.timedOut ? '（静默超时）' : ''}` : '',
                   d.failedAt ? `failedAt: ${d.failedAt}` : '',
                   d.exitCode != null ? `exitCode: ${d.exitCode}` : '',

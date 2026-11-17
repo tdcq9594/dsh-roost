@@ -201,16 +201,42 @@ test('检查：能读出最新版和发布时长，冷却期内要标出来', as
   const { d, done } = tmp();
   try {
     const u = createUpdater({
-      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success' }) } }),
+      ctx: fakeCtx({
+        pm: { installBundle: async () => ({ application: 'success' }), updateBundle: async () => ({}) },
+      }),
       profileDir: profileReal(d),
       fetchImpl: fakeFetch('99.0.0', { publishedAgoMs: 30 * 60_000 }),
     });
     const r = await u.check();
     assert.equal(r.latest, '99.0.0');
     assert.equal(r.hasUpdate, true);
-    assert.equal(r.canSelf, true, '真实目录 + 有 pluginManager 才能自更新');
+    assert.equal(r.canSelf, true, '真实目录 + 有 updateBundle 才能自更新');
     assert.equal(r.cooling, true, '发布 30 分钟，在 24 小时冷却期内');
     assert.match(r.coolingLeftText, /还差 24 小时|还差 2[34] 小时/);
+  } finally {
+    done();
+  }
+});
+
+/**
+ * 只有 `installBundle` 的老 DSH 不给按钮。
+ *
+ * `installBundle` 按**包名**拒绝已存在的包（`<name> is already installed`），
+ * 而「有更新」的前提就是「已经装着旧版」——留着按钮等于点一次失败一次。
+ */
+test('检查：老 DSH 没有 updateBundle 时不给更新按钮，只留命令', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success' }) } }),
+      profileDir: profileReal(d),
+      fetchImpl: fakeFetch('99.0.0'),
+    });
+    const r = await u.check();
+    assert.equal(r.hasUpdate, true);
+    assert.equal(r.canSelf, false, '装不了就别给按钮');
+    assert.equal(r.hasManager, true, '但 manager 是存在的，文案不能说他没装');
+    assert.match(r.command, /add dsh-roost@99\.0\.0/);
   } finally {
     done();
   }
@@ -472,7 +498,9 @@ test('自更新：refused 形态要按 problem 翻译，不当成未知失败', 
     const r = await u.self();
     assert.equal(r.ok, false);
     assert.equal(r.code, 'already-installed');
-    assert.match(r.message, /已经装过/);
+    /** 按包名拒（不是按版本），文案要说清「装不了升级」并给出命令 */
+    assert.match(r.message, /already-installed/);
+    assert.match(r.message, /命令/);
     assert.match(r.detail.diagnostic, /already installed/);
   } finally {
     done();
@@ -1240,3 +1268,197 @@ test('markdownToPlain：面板是纯文本，星号/反引号/围栏不许露出
   assert.match(out, /链接/, '链接留文字')
   assert.doesNotMatch(out, /\n{3,}/, '别留大片空行')
 })
+
+/* ---------------- 升级：updateBundle ---------------- */
+
+/**
+ * **升级必须走 `updateBundle`。**
+ *
+ * 现场（2026-11-17）：面板点「更新到 v1.3.9」→ `installBundle` 回
+ * `already-installed`（按**包名**拒，跟版本无关），而同一时刻
+ * `dsh plugin add dsh-roost@1.3.9` 2.1 秒就升上去了。
+ */
+test('自更新：升级走 updateBundle，不走 installBundle', async () => {
+  const { d, done } = tmp();
+  try {
+    const calls = [];
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => { throw new Error('升级不该走 installBundle'); },
+          updateBundle: async (name, version, opts) => {
+            calls.push({ name, version, opts });
+            return {
+              from: '1.3.7', to: version, step: 'install',
+              result: { changed: true, application: 'applied', bundle: { version } },
+            };
+          },
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [OFFICIAL]: '99.0.2' }),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, true);
+    assert.equal(calls.length, 1, '只该调一次');
+    assert.equal(calls[0].name, PKG, '按包名升级');
+    assert.equal(calls[0].version, '99.0.2', '按确切版本升级');
+    assert.equal(calls[0].opts.registry, OFFICIAL);
+    assert.ok(calls[0].opts.requestId, 'requestId 要带，进度和日志靠它');
+    assert.equal(r.version, '99.0.2');
+    assert.equal(r.detail.step, 'install');
+  } finally {
+    done();
+  }
+});
+
+/** 目标版本在 registry 上拿不到：更新停在 `step:'check'`，profile 不动 */
+test('自更新：updateBundle 停在 check 时如实报 not-found', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          updateBundle: async () => ({
+            from: '1.3.8', to: '99.0.2', step: 'check',
+            result: {
+              changed: false, application: 'failed', stage: 'check', target: PKG,
+              error: { code: 'not-found', diagnostic: 'no such version 99.0.2' },
+            },
+          }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [OFFICIAL]: '99.0.2' }),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'not-found');
+    assert.match(r.message, /没有这个版本|还没同步/);
+    assert.equal(r.detail.step, 'check', '要让用户看到卡在哪一步');
+    assert.equal(r.detail.from, '1.3.8');
+  } finally {
+    done();
+  }
+});
+
+/** remote 层拒绝（没拿到 ChangeResult）：也要说清本地没动 */
+test('自更新：updateBundle 被 DSH 直接拒绝时说明原因', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { updateBundle: async () => ({ ok: false, error: { message: 'profile 正在停止' } }) } }),
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [OFFICIAL]: '99.0.2' }),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, false);
+    assert.match(r.message, /profile 正在停止/);
+    assert.match(r.message, /本地什么都没动/);
+    assert.match(r.command, /add dsh-roost@99\.0\.2/, '拒绝时也要给出可跑的命令');
+  } finally {
+    done();
+  }
+});
+
+/** 老 DSH（只有 installBundle）撞 already-installed：文案要指向命令，不是「先卸载」 */
+test('自更新：老 DSH 回 already-installed 时把命令抬出来', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => ({
+            status: 'refused', problem: 'already-installed', reason: 'dsh-roost is already installed',
+          }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [OFFICIAL]: '99.0.2' }),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'already-installed');
+    assert.match(r.message, /already-installed/);
+    assert.match(r.message, /命令/, '要给出下一步');
+    assert.doesNotMatch(r.message, /得先卸载/, '升级是原地替换，别叫人卸载');
+    assert.match(r.command, /add dsh-roost@99\.0\.2/);
+  } finally {
+    done();
+  }
+});
+
+/** remote 层把结果包成 `{ ok, value }`（`registries()` 就是这个形状）时也要认 */
+test('自更新：updateBundle 的结果被包成 {ok,value} 也能认', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          updateBundle: async (name, version) => ({
+            ok: true,
+            value: {
+              from: '1.3.8', to: version, step: 'install',
+              result: { changed: true, application: 'applied', bundle: { version } },
+            },
+          }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [OFFICIAL]: '99.0.2' }),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, true, '剥掉 {ok,value} 之后才算成功');
+    assert.equal(r.version, '99.0.2');
+    assert.equal(r.detail.step, 'install');
+  } finally {
+    done();
+  }
+});
+
+/** 只有 updateBundle、又查不到版本号：别去调不存在的 installBundle */
+test('自更新：只有 updateBundle 且查不到版本时给命令，不炸', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({ pm: { updateBundle: async () => ({}) } }),
+      profileDir: profileReal(d),
+      fetchImpl: async () => { throw new Error('The operation was aborted due to timeout'); },
+    });
+    const r = await u.self();
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'no-version');
+    assert.match(r.message, /确切版本|重新检查/);
+    assert.match(r.command, /add dsh-roost/, '要给一条能跑的命令');
+  } finally {
+    done();
+  }
+});
+
+/** 磁盘读不到版本时，用 `updateBundle` 的 `to` 兜底，别报「没核对到」 */
+test('自更新：ChangeResult 没带 bundle 时用 to 兜底版本号', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          /** 只返回外层 to，不带改变结果的 bundle.version（真实 updateBundle 可能这样） */
+          updateBundle: async (name, version) => ({
+            from: '1.3.8', to: version, step: 'install',
+            result: { changed: true, application: 'restart-required', restartReason: 'no-hmr' },
+          }),
+        },
+      }),
+      /** profileReal 里没有 package.json：模拟「磁盘读不到版本」 */
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [OFFICIAL]: '99.0.2' }),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, true);
+    assert.equal(r.version, '99.0.2', 'to 是唯一还能拿到版本的地方');
+    assert.equal(r.unverified, false, '别动不动就说没核对到');
+    assert.equal(r.downgraded, false);
+  } finally {
+    done();
+  }
+});
