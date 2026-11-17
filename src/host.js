@@ -15,7 +15,7 @@
 
 import { basename, join, resolve, extname, relative, sep } from 'node:path';
 import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, createWriteStream, readFileSync, rmSync, realpathSync } from 'node:fs';
-import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets } from './config.js';
+import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets, restoreMaskedSecrets } from './config.js';
 import { redactText, redactValue, addSecretProvider } from './redact.js';
 import { createSessions, chatSessionKey } from './sessions.js';
 import { refreshLiveChat } from './live-chat.js';
@@ -11222,11 +11222,23 @@ export function apply(ctx) {
         }
         const raw = body?.draft;
         const draft = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+        /**
+         * 草稿里的密钥是**打过码的 `******`**（面板拿的是 `publicConfig()`）。
+         *
+         * 以前这里直接把草稿交给合成：上游收到 `Authorization: Bearer ******`
+         * 回 401，面板显示「语音服务鉴权失败」。而 Key 其实好好躺在磁盘上
+         * （`saveConfig` 有还原、这条路没有），用户只会怀疑「保存后 Key 丢了」。
+         *
+         * 只还原 `******`：用户手填的新 Key、或故意清空的空串，都按原样用。
+         */
+        const draftForSynth = draft
+          ? restoreMaskedSecrets({ tts: draft }, { tts: cfg.tts || {} }).tts
+          : (cfg.tts || {});
         try {
           const r = await runPreview({
             text,
             /** 草稿没传（老前端）就退回已保存配置，别拿空配置去撞上游 */
-            draft: draft || cfg.tts || {},
+            draft: draftForSynth,
             synth: (t, o) => tts.synthesize(t, o),
             convert: (p) => roost.rpc('media.convert', p, { timeout: 30_000 }),
           });

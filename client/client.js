@@ -15571,6 +15571,23 @@ select.roost-input{color-scheme:dark}
             value: Array.isArray(val) ? val.join('\n') : '',
             onChange: (e) => cfgSet(path, e.target.value.split('\n')),
           })
+        } else if (f.multiline) {
+          /**
+           * 清单里写了 `multiline: true` 的字符串：渲染成多行。
+           *
+           * 以前这类字段只能是单行 input，hint 写着「一行一个」却输不进
+           * 第二行。值仍是**字符串**，不换成 array —— 换类型会让已经存着的
+           * 字符串变非法值，用户下一次保存就把内容清空了。
+           *
+           * 旧宿主看不到这个标志，会走下面的单行分支，行为不变。
+           */
+          control = h('textarea', {
+            className: 'roost-input', rows: 4, style: { width: '100%' },
+            maxLength: f.maxLength,
+            placeholder: f.placeholder || '',
+            value: val === undefined ? '' : String(val),
+            onChange: (e) => cfgSet(path, e.target.value),
+          })
         } else {
           control = h('input', {
             className: 'roost-input', type: 'text', maxLength: f.maxLength,

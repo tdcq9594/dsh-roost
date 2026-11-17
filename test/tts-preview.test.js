@@ -143,6 +143,12 @@ test('接线：面板路由 / 前端按钮 / 不碰 quota / 走同一个 synthes
   assert.equal(block.includes('quota.charge'), false, '试听不占配额');
   assert.equal(block.includes('writeFile'), false, '试听不写盘');
   assert.equal(block.includes('saveCfg'), false);
+  /**
+   * 草稿来自面板，密钥是 `publicConfig()` 打过的 `******`。
+   * 少了这一步，上游收到的就是 `Bearer ******` → 401 →「鉴权失败」，
+   * 而用户刚填的 Key 明明在磁盘上（2026-11-18 实测）。
+   */
+  assert.ok(block.includes('restoreMaskedSecrets'), '试听草稿必须先把 ****** 还原成已保存的密钥');
 
   const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
   assert.ok(client.includes("post('/tts/preview'"), '前端要调试听');

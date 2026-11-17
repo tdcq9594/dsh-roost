@@ -118,6 +118,20 @@ function normalizeField(key, raw, depth, errors) {
   if (raw.type === 'string') {
     out.maxLength = Number.isInteger(raw.maxLength) && raw.maxLength > 0 ? Math.min(raw.maxLength, 4096) : 512;
     if (raw.placeholder !== undefined) out.placeholder = String(raw.placeholder).slice(0, 80);
+    /**
+     * **多行软标志**（2026-11-18）。有些字符串天然是「一行一条」的清单
+     * （提示词片段、长说明），单行 `<input>` 里回车没有意义，作者只能把
+     * hint 写成「一行一个」而控件根本输不进第二行。
+     *
+     * 为什么不做成新 `type: 'textarea'`：那会让**没升级的宿主**把整份清单
+     * 判成非法（`type 必须是 … 之一`），扩展直接从已装列表消失——这是一次
+     * 静默的卸载，比不能换行严重得多。软标志则相反：老宿主不认识这个键，
+     * `normalizeField` 只取白名单、未知键静默丢弃，照旧渲染单行。
+     *
+     * 只对 `string` 有意义，其它类型声明了也无效（不报错，免得清单因为
+     * 一个装饰性字段被整份拒收）。
+     */
+    if (raw.multiline === true) out.multiline = true;
   }
 
   if (raw.type === 'select') {

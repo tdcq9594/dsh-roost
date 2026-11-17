@@ -58,6 +58,34 @@ test('声明：类型与默认值规范化', () => {
   assert.equal(r.spec[5].properties[0].default, 1);
 });
 
+test('声明：multiline 只对 string 生效，声明在别的类型上不报错也不生效', () => {
+  const r = normalizeConfigSpec({
+    kw: { type: 'string', label: '方向', maxLength: 400, multiline: true },
+    plain: { type: 'string', label: '单行' },
+    n: { type: 'number', multiline: true },
+    b: { type: 'boolean', multiline: true },
+  });
+  assert.equal(r.ok, true, r.errors.join('；'));
+
+  const byKey = Object.fromEntries(r.spec.map((f) => [f.key, f]));
+  assert.equal(byKey.kw.multiline, true, 'string 上的 multiline 要保留');
+  assert.equal(byKey.kw.maxLength, 400, '多行不改字符串的既有约束');
+  assert.equal(byKey.plain.multiline, undefined, '没声明就不带这个键（老面板按单行渲染）');
+  assert.equal(byKey.n.multiline, undefined, 'number 上声明无效');
+  assert.equal(byKey.b.multiline, undefined, 'boolean 上声明无效');
+
+  /**
+   * 关键：**不能因为一个装饰性字段把整份清单判死**。
+   * 宿主旧版本根本不认识 multiline，新扩展带上它也必须能装。
+   */
+  const m = validateManifest({
+    api: 1, kind: 'dsh-extension', id: 'demo', serverName: 'demo', name: 'demo', description: 'demo',
+    transport: 'stdio', command: 'node',
+    config: { kw: { type: 'string', multiline: true } },
+  });
+  assert.equal(m.ok, true, m.errors.join('；'));
+});
+
 test('声明：非法项逐条拒收', () => {
   const bad = normalizeConfigSpec({
     'a b': { type: 'string' },

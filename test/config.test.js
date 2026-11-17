@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadConfig, saveConfig, patchConfig, readRawConfig, DEFAULTS, dataDir, publicConfig, migrateRetentionMode } from '../src/config.js';
+import { loadConfig, saveConfig, patchConfig, readRawConfig, DEFAULTS, dataDir, publicConfig, migrateRetentionMode, restoreMaskedSecrets } from '../src/config.js';
 
 /** 每个用例一个干净的 data 目录（dataDir() 每次读 env） */
 function freshDir() {
@@ -290,4 +290,35 @@ test('配置：按群覆写增改可用局部 patch，删除必须整份保存',
   saveConfig({ ...full, group: { ...full.group, overrides: rest } });
   assert.equal(loadConfig().group.overrides.G1, undefined, '整份保存才真的删掉');
   assert.deepEqual(loadConfig().group.overrides.G2, { maxPerHour: 7 });
+});
+
+/**
+ * 掩码回填：`******` = 「沿用已保存的值」。
+ *
+ * 这条原来是 `saveConfig` 的私有细节，只在保存路径上生效；面板的**试听**
+ * 把草稿直接交给合成，于是 `Authorization: Bearer ******` 换来上游 401，
+ * 面板显示「语音服务鉴权失败」，用户以为 Key 被弄丢了。
+ * 现在导出给非保存路径复用，行为必须逐条钉住。
+ */
+test('配置：****** 回填磁盘原值，空串才是清除', () => {
+  const stored = { tts: { apiKey: 'sk-openai', mimo: { apiKey: 'sk-mimo' }, gptSovits: { apiKey: 'sk-gpt' } } };
+
+  const kept = restoreMaskedSecrets({
+    tts: { apiKey: '******', mimo: { apiKey: '******' }, gptSovits: { apiKey: '******' } },
+  }, stored);
+  assert.equal(kept.tts.apiKey, 'sk-openai');
+  assert.equal(kept.tts.mimo.apiKey, 'sk-mimo', '试听必须拿到真 Key');
+  assert.equal(kept.tts.gptSovits.apiKey, 'sk-gpt');
+
+  /** 明确写成空串是「清除」，不能被偷偷补回来 */
+  assert.equal(restoreMaskedSecrets({ tts: { mimo: { apiKey: '' } } }, stored).tts.mimo.apiKey, '');
+  /** 手填新值按新值存 */
+  assert.equal(restoreMaskedSecrets({ tts: { mimo: { apiKey: 'sk-new' } } }, stored).tts.mimo.apiKey, 'sk-new');
+  /** 磁盘上本来就没有 Key 时，回填空串而不是把掩码当真 Key */
+  assert.equal(restoreMaskedSecrets({ tts: { mimo: { apiKey: '******' } } }, {}).tts.mimo.apiKey, '');
+
+  /** 不能改动调用方传进来的对象（试听草稿还要接着用） */
+  const next = { tts: { mimo: { apiKey: '******' } } };
+  restoreMaskedSecrets(next, stored);
+  assert.equal(next.tts.mimo.apiKey, '******');
 });

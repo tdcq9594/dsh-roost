@@ -1359,8 +1359,14 @@ function putAt(root, path, value) {
   node[path.at(-1)] = value;
 }
 
-/** Masked values in a config-editor submission mean "keep existing", not a new secret. */
-function restoreMaskedSecrets(next, stored) {
+/**
+ * Masked values in a config-editor submission mean "keep existing", not a new secret.
+ *
+ * 导出是为了给**非保存**的提交路径复用：`/tts/preview` 收到的是面板草稿
+ * （密钥已按 `publicConfig()` 打成 `******`），不还原就会把掩码当真实 Key
+ * 发给上游，面板上显示「鉴权失败」—— 用户只会以为 Key 被弄丢了。
+ */
+export function restoreMaskedSecrets(next, stored) {
   const out = structuredClone(next && typeof next === 'object' ? next : {});
   for (const path of SECRET_PATHS) {
     if (valueAt(out, path) !== SECRET_MASK) continue;
