@@ -748,9 +748,15 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
      */
     const primarySrc = Array.isArray(r.sources) ? r.sources[0] : null;
     const primaryTag = primarySrc ? String((ch === 'beta' ? primarySrc.beta : primarySrc.latest) || '') : '';
-    const mirrorLag = Boolean(primaryTag) && Boolean(latest)
-      && compareVersion(latest, primaryTag) > 0;
-    const installRegistry = mirrorLag ? DEFAULT_REGISTRY : (r.installRegistry || reg);
+    /**
+     * 主源**没有**这一版：要么版本更低，要么这个 tag 压根没同步过来
+     * （镜像有 `latest` 却没 `beta` 很常见）。两种都得改走官方，否则
+     * pnpm 拿 `dsh-roost@<新版>` 去镜像上解析就是 `not-found`。
+     */
+    const lagging = Boolean(primarySrc && latest) && (!primaryTag || compareVersion(latest, primaryTag) > 0);
+    /** 面板提示只在**有版本号可比**时给：主源连 tag 都没有，说不出「还停在哪个版本」 */
+    const mirrorLag = Boolean(primaryTag) && lagging;
+    const installRegistry = lagging ? DEFAULT_REGISTRY : (r.installRegistry || reg);
 
     const age = publishedAt ? Date.now() - publishedAt : NaN;
     const ageKnown = Number.isFinite(age);
@@ -768,8 +774,8 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     /** 手动更新的命令：一键装走不通时，这条是用户唯一能真正执行的动作（link 装法下为空） */
     const cmd = updateCommand({
       profileDir: profile(), version: latest, linked: k === 'linked',
-      /** 镜像还没这版时，手动命令也得显式带官方源，否则装回来的还是旧版 */
-      registry: mirrorLag ? installRegistry : '',
+      /** 这版不在主源上时，手动命令也得显式带官方源，否则装回来的还是旧版 */
+      registry: lagging ? installRegistry : '',
     });
     const result = {
       ok: true,
@@ -1016,8 +1022,12 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
      * 所以把它交给 DSH：官方排第一，配置的 fallback 仍在其后兜底。
      */
     const source = info.installRegistry || info.registry || '';
-    if (info.mirrorLag) {
-      log(`配置的源只有 v${info.mirrorLatest}，v${target} 只在官方源上——这次从 ${source} 装`);
+    /** 装包源和配置的源不一致 = 这版不在用户源上（滞后，或镜像根本没这个 tag） */
+    const offPrimary = Boolean(source) && source !== (info.registry || '');
+    if (offPrimary) {
+      log(info.mirrorLag
+        ? `配置的源只有 v${info.mirrorLatest}，v${target} 只在官方源上——这次从 ${source} 装`
+        : `v${target} 不在配置的源上（没同步到这个 tag），这次从 ${source} 装`);
       /**
        * 兜底命令也得跟着改：面板上那行 `plugin add dsh-roost@<新版>` 如果还跟着
        * 配置的源走，用户复制去跑同样会 `not-found`。版本号和源一起写死最稳。

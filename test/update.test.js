@@ -572,6 +572,49 @@ test('检查：镜像滞后时按官方版本判更新，并标出 mirrorLag', a
   }
 });
 
+/**
+ * beta 通道要**单独**判滞后。
+ *
+ * 镜像常常先把 `latest` 同步了、`beta` 还停着。拿稳定版的结论去判 beta，
+ * 面板会以为镜像有这一版，然后把 `dsh-roost@<beta>` 丢给镜像 → `not-found`。
+ */
+test('检查：beta 通道单独判滞后，不吃 latest 的结论', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => ({}),
+          registries: async () => ({ ok: true, value: { registry: MIRROR, fallbackRegistries: [], resolved: null } }),
+        },
+      }),
+      profileDir: profileReal(d),
+      /** 两边的 latest 一样（99.0.2），但 beta 只有官方有 */
+      fetchImpl: async (url) => {
+        const mirror = String(url).startsWith(MIRROR);
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            'dist-tags': mirror ? { latest: '99.0.2' } : { latest: '99.0.2', beta: '99.1.0-beta.1' },
+            time: {},
+          }),
+        };
+      },
+    });
+    const info = await u.check({ channel: 'beta' });
+    assert.equal(info.latest, '99.1.0-beta.1', 'beta 通道比的是 beta 标签');
+    assert.equal(info.installRegistry, OFFICIAL, '镜像连 beta 标签都没有，装包必须走官方');
+    /**
+     * 没有可比的版本号时不喊「还停在 v…」——主源上根本没有 beta 通道，
+     * 说它「停在某个版本」是编的。面板那句提示留给真正有滞后数字的情况。
+     */
+    assert.equal(info.mirrorLag, false);
+    assert.match(info.command, /--registry=https:\/\/registry\.npmjs\.org/, '兜底命令也要带官方源');
+  } finally {
+    done();
+  }
+});
+
 /** 主源更新（或镜像已经同步到更高版本）时以主源为准，不能反过来被官方压住 */
 test('检查：主源版本更高时用主源的，不标滞后', async () => {
   const { d, done } = tmp();
