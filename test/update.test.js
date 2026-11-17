@@ -17,7 +17,7 @@ import { join } from 'node:path';
 
 import {
   createUpdater, patchExclude, installKind, findProfileDir, humanFail, ageText, compareVersion, PKG,
-  updateCommand, changelogSection, markdownToPlain,
+  updateCommand, changelogSection, markdownToPlain, pickUpdateTarget,
 } from '../src/update.js';
 
 const YAML = `# pnpm 的供应链保护配置
@@ -344,9 +344,12 @@ test('自更新：装成功后必须提示重启，并如实报告实际装到�
     const u = createUpdater({
       ctx: fakeCtx({
         pm: {
-          installBundle: async (spec, opts) => {
-            calls.push({ spec, opts });
-            return { application: 'success', version: '99.0.0' };
+          updateBundle: async (name, version, options) => {
+            calls.push({ name, version, options });
+            return {
+              from: '0.10.0', to: version, step: 'install',
+              result: { application: 'restart-required', changed: true, version: '99.0.0' },
+            };
           },
         },
       }),
@@ -358,8 +361,9 @@ test('自更新：装成功后必须提示重启，并如实报告实际装到�
     assert.equal(r.version, '99.0.0');
     assert.equal(r.downgraded, false);
     assert.match(r.message, /重启 DSH/);
-    assert.equal(calls[0].spec, 'dsh-roost@99.0.0', '包名写死，不接受任意包');
-    assert.equal(calls[0].opts.saveExact, true);
+    assert.equal(calls[0].name, PKG, '包名写死，不接受任意包');
+    assert.equal(calls[0].version, '99.0.0', '升级必须给确切版本号');
+    assert.ok(calls[0].options.requestId, 'requestId 要带上：面板靠它拿进度');
   } finally {
     done();
   }
@@ -369,7 +373,14 @@ test('自更新：请求 99.0.0 却装到 0.10.6 时要明说是降级，不能�
   const { d, done } = tmp();
   try {
     const u = createUpdater({
-      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success', version: '0.10.6' }) } }),
+      ctx: fakeCtx({
+        pm: {
+          updateBundle: async (name, version) => ({
+            from: '0.10.0', to: version, step: 'install',
+            result: { application: 'success', changed: true, version: '0.10.6' },
+          }),
+        },
+      }),
       profileDir: profileReal(d),
       fetchImpl: fakeFetch('99.0.0', { publishedAgoMs: 10 * 60_000 }),
     });
@@ -395,13 +406,16 @@ test('自更新：失败要翻译成人话，并且说明本地什么都没动',
     const u = createUpdater({
       ctx: fakeCtx({
         pm: {
-          installBundle: async () => ({
-            changed: false,
-            application: 'failed',
-            error: { code: 'operation-error', diagnostic: 'ERR_PNPM_FETCH_404  dsh-roost@99.0.0' },
-            packageResult: { exitCode: 1, output: 'ERR_PNPM_FETCH_404', kind: 'network', logPath: '/tmp/x.log' },
-            failedAt: 'registry',
-            registries: ['https://registry.npmjs.org'],
+          updateBundle: async (name, version) => ({
+            from: '0.10.0', to: version, step: 'install',
+            result: {
+              changed: false,
+              application: 'failed',
+              error: { code: 'operation-error', diagnostic: 'ERR_PNPM_FETCH_404  dsh-roost@99.0.0' },
+              packageResult: { exitCode: 1, output: 'ERR_PNPM_FETCH_404', kind: 'network', logPath: '/tmp/x.log' },
+              failedAt: 'registry',
+              registries: ['https://registry.npmjs.org'],
+            },
           }),
         },
       }),
@@ -431,7 +445,12 @@ test('自更新：application=applied 算成功，不能报失败', async () => 
   try {
     const u = createUpdater({
       ctx: fakeCtx({
-        pm: { installBundle: async () => ({ changed: true, application: 'applied', bundle: { version: '99.0.0' } }) },
+        pm: {
+          updateBundle: async (name, version) => ({
+            from: '0.10.0', to: version, step: 'install',
+            result: { changed: true, application: 'applied', bundle: { version: '99.0.0' } },
+          }),
+        },
       }),
       profileDir: profileReal(d),
       fetchImpl: fakeFetch('99.0.0'),
@@ -452,11 +471,14 @@ test('自更新：application=restart-required 算成功，并说明为什么必
     const u = createUpdater({
       ctx: fakeCtx({
         pm: {
-          installBundle: async () => ({
-            changed: true,
-            application: 'restart-required',
-            restartReason: 'no-hmr',
-            bundle: { version: '99.0.0' },
+          updateBundle: async (name, version) => ({
+            from: '0.10.0', to: version, step: 'install',
+            result: {
+              changed: true,
+              application: 'restart-required',
+              restartReason: 'no-hmr',
+              bundle: { version: '99.0.0' },
+            },
           }),
         },
       }),
@@ -485,10 +507,13 @@ test('自更新：refused 形态要按 problem 翻译，不当成未知失败', 
     const u = createUpdater({
       ctx: fakeCtx({
         pm: {
-          installBundle: async () => ({
-            status: 'refused',
-            problem: 'already-installed',
-            reason: 'dsh-roost@99.0.0 is already installed',
+          updateBundle: async () => ({
+            from: '0.10.0', to: '99.0.0', step: 'check',
+            result: {
+              status: 'refused',
+              problem: 'already-installed',
+              reason: 'dsh-roost@99.0.0 is already installed',
+            },
           }),
         },
       }),
@@ -719,7 +744,7 @@ test('检查：主源就是官方源时只问一次', async () => {
  * 镜像滞后时版本号只存在于官方源，还按配置的源去装就是 not-found；
  * `expected` 则让 DSH 自己核对——装不到这一版就回滚，而不是静默装旧版。
  */
-test('自更新：镜像滞后时把官方源和 expected 一起交给 installBundle', async () => {
+test('自更新：镜像滞后时把官方源一起交给 updateBundle', async () => {
   const { d, done } = tmp();
   try {
     const calls = [];
@@ -727,9 +752,12 @@ test('自更新：镜像滞后时把官方源和 expected 一起交给 installBu
       ctx: fakeCtx({
         pm: {
           registries: async () => ({ ok: true, value: { registry: MIRROR, fallbackRegistries: [], resolved: null } }),
-          installBundle: async (spec, opts) => {
-            calls.push({ spec, opts });
-            return { changed: true, application: 'applied', bundle: { version: '99.0.2' } };
+          updateBundle: async (name, version, options) => {
+            calls.push({ name, version, options });
+            return {
+              from: '99.0.1', to: version, step: 'install',
+              result: { changed: true, application: 'applied', bundle: { version: '99.0.2' } },
+            };
           },
         },
       }),
@@ -739,9 +767,8 @@ test('自更新：镜像滞后时把官方源和 expected 一起交给 installBu
     const r = await u.self();
     assert.equal(r.ok, true);
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].spec, `${PKG}@99.0.2`, '装的是官方源上那版');
-    assert.equal(calls[0].opts.registry, OFFICIAL, '必须指定官方源，否则 pnpm 去镜像上找 99.0.2 会 404');
-    assert.deepEqual(calls[0].opts.expected, { name: PKG, version: '99.0.2' });
+    assert.equal(calls[0].version, '99.0.2', '装的是官方源上那版');
+    assert.equal(calls[0].options.registry, OFFICIAL, '必须指定官方源，否则 pnpm 去镜像上找 99.0.2 会 404');
   } finally {
     done();
   }
@@ -759,14 +786,17 @@ test('自更新：unexpected-package 要提示点「立即安装」而不是只�
     const u = createUpdater({
       ctx: fakeCtx({
         pm: {
-          installBundle: async () => ({
-            changed: false,
-            application: 'failed',
-            error: {
-              code: 'unexpected-package',
-              diagnostic: `expected ${PKG}@99.0.2, found ${PKG}@99.0.1`,
+          updateBundle: async (name, version) => ({
+            from: '99.0.1', to: version, step: 'install',
+            result: {
+              changed: false,
+              application: 'failed',
+              error: {
+                code: 'unexpected-package',
+                diagnostic: `expected ${PKG}@99.0.2, found ${PKG}@99.0.1`,
+              },
+              registries: [OFFICIAL],
             },
-            registries: [OFFICIAL],
           }),
         },
       }),
@@ -785,22 +815,25 @@ test('自更新：unexpected-package 要提示点「立即安装」而不是只�
 });
 
 /**
- * 查不到最新版不该把人堵死。
+ * **这一条是 2026-11-17 那个 bug 的回归测试。**
  *
- * `check()` 只是个前置；装的时候 pnpm 自己解析 `latest` 标签。
- * 以前这里直接 return「查不到最新版」，于是 registry 一超时用户连试都试不了。
+ * `check()` 拉不到 registry 时，以前会把 `dsh-roost@latest` 丢给 `installBundle`，
+ * 而那个接口按**包名**拒绝已存在的包：升级请求在下载前就被 `already-installed`
+ * 打回（`application:"failed"` / `changed:false`），「普通更新」和「立即安装」
+ * 两条路一起失效。现在只允许两种结局：先问 DSH 的 `listVersions` 拿到确切版本
+ * 走 `updateBundle`；拿不到就明说「查不到版本」并给命令——**一次装包都不调**。
  */
-test('自更新：查不到最新版时，仍按 latest 标签尝试安装', async () => {
+test('自更新：查不到最新版且 DSH 也给不出列表时，不装，直接给命令', async () => {
   const { d, done } = tmp();
   try {
-    let spec = '';
+    let installed = false;
+    let upgraded = false;
     const u = createUpdater({
       ctx: fakeCtx({
         pm: {
-          installBundle: async (s) => {
-            spec = s;
-            return { changed: true, application: 'applied', bundle: { version: '1.2.3' } };
-          },
+          installBundle: async () => { installed = true; return { application: 'applied' }; },
+          updateBundle: async () => { upgraded = true; return { result: { application: 'applied' } }; },
+          listVersions: async () => { throw new Error('registry 全挂了'); },
         },
       }),
       profileDir: profileReal(d),
@@ -812,9 +845,45 @@ test('自更新：查不到最新版时，仍按 latest 标签尝试安装', asy
     assert.equal(info.hasUpdate, false, '拿不到 latest 时不知道有没有新版');
 
     const r = await u.self();
-    assert.equal(r.ok, true, '查不到版本号不等于不能装');
-    assert.equal(spec, 'dsh-roost@latest', '交给 pnpm 解析 latest');
-    assert.equal(r.version, '1.2.3');
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'no-version');
+    assert.ok(r.command, '必须给一行能直接跑的命令');
+    assert.equal(installed, false, '绝不能退回 installBundle：那条路必然 already-installed');
+    assert.equal(upgraded, false, '没有确切版本号也不能硬调 updateBundle');
+  } finally {
+    done();
+  }
+});
+
+test('自更新：check() 拿不到版本时，用 DSH 的 listVersions 补上再走 updateBundle', async () => {
+  const { d, done } = tmp();
+  try {
+    const calls = [];
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          listVersions: async (name, options) => {
+            calls.push({ name, options });
+            /** 真实形状：remote 包装 + 新版本在前 */
+            return { ok: true, value: { versions: [{ version: '2.0.0' }, { version: '1.9.0' }], registry: OFFICIAL } };
+          },
+          updateBundle: async (name, version) => {
+            calls.push({ upgraded: { name, version } });
+            return {
+              from: '1.0.0', to: version, step: 'install',
+              result: { changed: true, application: 'restart-required' },
+            };
+          },
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: async () => { throw new Error('timeout'); },
+    });
+    const r = await u.self();
+    assert.equal(r.ok, true);
+    assert.equal(r.version, '2.0.0', '取列表里最新的那个');
+    assert.equal(calls[0].name, PKG);
+    assert.equal(calls[1].upgraded.version, '2.0.0', '确切版本号交给 updateBundle');
     assert.match(r.message, /重启 DSH/);
   } finally {
     done();
@@ -850,11 +919,11 @@ test('检查：装好但没重启时，不再提示有新版，而是提示重�
   }
 });
 
-test('自更新：installBundle 抛异常也不崩，返回结构化失败', async () => {
+test('自更新：updateBundle 抛异常也不崩，返回结构化失败', async () => {
   const { d, done } = tmp();
   try {
     const u = createUpdater({
-      ctx: fakeCtx({ pm: { installBundle: async () => { throw new Error('pnpm 挂了'); } } }),
+      ctx: fakeCtx({ pm: { updateBundle: async () => { throw new Error('pnpm 挂了'); } } }),
       profileDir: profileReal(d),
       fetchImpl: fakeFetch('99.0.0'),
     });
@@ -875,7 +944,12 @@ test('「不等 24 小时」：先写豁免再装，写之前备份', async () =
     writeFileSync(yaml, YAML, 'utf8');
 
     const u = createUpdater({
-      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success', version: '99.0.0' }) } }),
+      ctx: fakeCtx({ pm: {
+          updateBundle: async (name, version) => ({
+            from: '0.0.0', to: version, step: 'install',
+            result: { application: 'success', version: '99.0.0' },
+          }),
+        } }),
       profileDir: p,
       fetchImpl: fakeFetch('99.0.0', { publishedAgoMs: 60 * 60_000 }), // 发布 1 小时，在冷却期
     });
@@ -899,7 +973,12 @@ test('「不等 24 小时」：不在冷却期就不该动那个文件', async (
     const yaml = join(p, 'pnpm-workspace.yaml');
     writeFileSync(yaml, YAML, 'utf8');
     const u = createUpdater({
-      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success', version: '99.0.0' }) } }),
+      ctx: fakeCtx({ pm: {
+          updateBundle: async (name, version) => ({
+            from: '0.0.0', to: version, step: 'install',
+            result: { application: 'success', version: '99.0.0' },
+          }),
+        } }),
       profileDir: p,
       fetchImpl: fakeFetch('99.0.0', { publishedAgoMs: 72 * 3600_000 }), // 三天前，早过冷却期
     });
@@ -970,14 +1049,21 @@ test('检查：冷却剩余按分钟显示，23 小时 04 分不再说成 24 小
  * pnpm 被 24h 冷却挡住时**静默保留旧版、不报错**，返回里也未必带 version。
  * 旧实现拿 info.latest 兜底 got，于是「装好了 v1.0.0」、重启后还是 0.13.0。
  */
-test('自更新：installBundle 没给 version 时，以磁盘版本为准判降级', async () => {
+test('自更新：updateBundle 没给 version 时，以磁盘版本为准判降级', async () => {
   const { d, done } = tmp();
   try {
     const p = profileReal(d);
     writeFileSync(join(p, 'node_modules', PKG, 'package.json'),
       JSON.stringify({ name: PKG, version: '0.13.0' }), 'utf8');
     const u = createUpdater({
-      ctx: fakeCtx({ pm: { installBundle: async () => ({ changed: true, application: 'applied' }) } }),
+      ctx: fakeCtx({
+        pm: {
+          updateBundle: async (name, version) => ({
+            from: '0.13.0', to: version, step: 'install',
+            result: { changed: true, application: 'applied' },
+          }),
+        },
+      }),
       profileDir: p,
       fetchImpl: fakeFetch('1.0.0', { publishedAgoMs: 56 * 60_000 }),
     });
@@ -998,7 +1084,12 @@ test('「不等 24 小时」：发布时间未知时也允许写豁免（否则�
     const yaml = join(p, 'pnpm-workspace.yaml');
     writeFileSync(yaml, YAML, 'utf8');
     const u = createUpdater({
-      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success', version: '99.0.0' }) } }),
+      ctx: fakeCtx({ pm: {
+          updateBundle: async (name, version) => ({
+            from: '0.0.0', to: version, step: 'install',
+            result: { application: 'success', version: '99.0.0' },
+          }),
+        } }),
       profileDir: p,
       // 无 time：模拟简版元数据 / 镜像缺时间字段
       fetchImpl: async () => ({
@@ -1145,7 +1236,7 @@ test('检查：6 小时内复用远端结果，force 才真的重查', async () 
   try {
     let calls = 0;
     const u = createUpdater({
-      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success' }) } }),
+      ctx: fakeCtx({ pm: { updateBundle: async (name, version) => ({ from: '0.0.0', to: version, step: 'install', result: { application: 'success' } }) } }),
       profileDir: profileReal(d),
       fetchImpl: async (...a) => { calls++; return fakeFetch('99.0.0')(...a); },
     });
@@ -1188,7 +1279,7 @@ test('后台检查：watch 查完把结果写进快照，概览页只读快照',
   const { d, done } = tmp();
   try {
     const u = createUpdater({
-      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success' }) } }),
+      ctx: fakeCtx({ pm: { updateBundle: async (name, version) => ({ from: '0.0.0', to: version, step: 'install', result: { application: 'success' } }) } }),
       profileDir: profileReal(d),
       fetchImpl: fakeFetch('99.0.0'),
     });
@@ -1225,7 +1316,7 @@ test('检查：符号链接装法返回空命令，只留「git pull」的说法
       return;
     }
     const u = createUpdater({
-      ctx: fakeCtx({ pm: { installBundle: async () => ({ application: 'success' }) } }),
+      ctx: fakeCtx({ pm: { updateBundle: async (name, version) => ({ from: '0.0.0', to: version, step: 'install', result: { application: 'success' } }) } }),
       profileDir: p,
       fetchImpl: fakeFetch('99.0.0'),
     });
@@ -1361,15 +1452,23 @@ test('自更新：updateBundle 被 DSH 直接拒绝时说明原因', async () =>
   }
 });
 
-/** 老 DSH（只有 installBundle）撞 already-installed：文案要指向命令，不是「先卸载」 */
-test('自更新：老 DSH 回 already-installed 时把命令抬出来', async () => {
+/**
+ * DSH 自己的 `updateBundle` 回 `already-installed`：文案要指向命令，不是「先卸载」。
+ *
+ * 正常情况下它内部会先卸旧版再装，不该出现；真出现就说明这个 DSH 版本的插件面板
+ * 按包名拒绝升级，唯一能走通的是命令行。
+ */
+test('自更新：updateBundle 回 already-installed 时把命令抬出来', async () => {
   const { d, done } = tmp();
   try {
     const u = createUpdater({
       ctx: fakeCtx({
         pm: {
-          installBundle: async () => ({
-            status: 'refused', problem: 'already-installed', reason: 'dsh-roost is already installed',
+          updateBundle: async () => ({
+            from: '0.0.0', to: '99.0.2', step: 'check',
+            result: {
+              status: 'refused', problem: 'already-installed', reason: 'dsh-roost is already installed',
+            },
           }),
         },
       }),
@@ -1458,6 +1557,54 @@ test('自更新：ChangeResult 没带 bundle 时用 to 兜底版本号', async (
     assert.equal(r.version, '99.0.2', 'to 是唯一还能拿到版本的地方');
     assert.equal(r.unverified, false, '别动不动就说没核对到');
     assert.equal(r.downgraded, false);
+  } finally {
+    done();
+  }
+});
+
+/* ---------------- 版本落实：pickUpdateTarget + 不再退化到 installBundle ---------------- */
+
+/**
+ * `listVersions()` 的返回要认三种形状（remote 包装 / 带 versions / 直接数组），
+ * 并且**跳过弃用和不兼容的**——装一个弃用版比不装更糟。
+ */
+test('版本落实：从 listVersions 的返回里挑最新可用版本', () => {
+  assert.equal(pickUpdateTarget({ versions: [{ version: '2.0.0' }, { version: '1.9.0' }] }), '2.0.0');
+  assert.equal(pickUpdateTarget({ ok: true, value: { versions: [{ version: 'v2.1.0' }] } }), '2.1.0', 'v 前缀要去掉');
+  assert.equal(pickUpdateTarget(['3.0.0', '2.0.0']), '3.0.0', '直接给数组也认');
+  assert.equal(pickUpdateTarget({ versions: [{ version: '2.0.0', deprecated: '别用' }, { version: '1.5.0' }] }), '1.5.0', '弃用版跳过');
+  assert.equal(pickUpdateTarget({ versions: [{ version: '2.0.0', compatible: false }, { version: '1.5.0' }] }), '1.5.0', '不兼容的跳过');
+  assert.equal(pickUpdateTarget({ ok: false, error: { message: 'registry 全挂' } }), '', 'remote 拒绝就是没有');
+  assert.equal(pickUpdateTarget({ versions: [] }), '');
+  assert.equal(pickUpdateTarget(null), '');
+});
+
+test('版本落实：升级路径里不再有 installBundle 调用（那条路必然 already-installed）', () => {
+  const src = readFileSync(new URL('../src/update.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /manager\.installBundle\s*\(/, '升级绝不能调 installBundle：它按包名拒绝已存在的包');
+  assert.match(src, /manager\.updateBundle\s*\(/);
+  /** 注释里还留着那句「installBundle 装不了升级」的来龙去脉，这是有意的 */
+  assert.match(src, /listVersions/);
+});
+
+test('自更新：no-version 时连 installBundle 都不许碰（回归 2026-11-17 already-installed）', async () => {
+  const { d, done } = tmp();
+  try {
+    let touched = false;
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => { touched = true; return { application: 'applied' }; },
+          /** 只有 updateBundle，没有 listVersions：老一点的 DSH */
+          updateBundle: async () => { touched = true; return { result: { application: 'applied' } }; },
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: async () => { throw new Error('timeout'); },
+    });
+    const r = await u.self();
+    assert.equal(r.code, 'no-version');
+    assert.equal(touched, false, '版本落实不了就老老实实给命令，别去撞那堵墙');
   } finally {
     done();
   }
