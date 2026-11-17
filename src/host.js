@@ -1694,6 +1694,14 @@ export function apply(ctx) {
   const lease = createLease({ file: join(dataDir(), 'ports.json'), log: (m) => log.warn(m) });
 
   const mounted = new WeakSet();
+  /**
+   * 每个 agent 首次挂载时捕获到的 chat 对象。
+   *
+   * mount() 只跑一次，闭包里捕获的是**第一轮**的 chat；群里换个人说话时
+   * `agentFor()` 会造一个新的 chat（senderId 不同），但 mount() 里提前 return，
+   * 闭包仍指向旧对象 —— 于是「按人绑定的人格」永远停在第一个说话的人身上。
+   */
+  const mountedChat = new WeakMap();
   /** mount() 挂上去的取消函数。不能在 mount 里调 ctx.onTeardown，见下面注释 */
   const mountOffs = [];
 
@@ -4791,6 +4799,18 @@ export function apply(ctx) {
    * 挂人格 + 权限上下文（每个 agent 只挂一次，内容每轮现读）
    */
   function mount(agent, chat) {
+    /**
+     * 已挂载过的 agent：把最新的 chat **原地**灌进首次捕获的那个对象，
+     * 让闭包里读到的 `chat.chatId` / `chat.kind` 每轮都是当轮的。
+     *
+     * 原地赋值而不是重新挂载：挂载副作用（工具、section、权限上下文）只该做一次。
+     */
+    const prevChat = mountedChat.get(agent);
+    if (prevChat) {
+      try { Object.assign(prevChat, chat); } catch { /* 冻结对象就退化成旧行为 */ }
+      return;
+    }
+    mountedChat.set(agent, chat);
     if (mounted.has(agent)) return;
     const offs = [];
 
