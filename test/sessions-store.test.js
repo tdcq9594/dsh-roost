@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSessions } from '../src/sessions.js';
+import { createSessions, chatSessionKey } from '../src/sessions.js';
 
 /** 每个用例一个干净目录，避免互相污染（这份文件是整份覆盖的，共用目录会串） */
 function fresh() {
@@ -207,4 +207,31 @@ test('A16 重启后映射还在（最基本的那个诉求）', () => {
   assert.equal(s2.get('A'), 'sid-a');
   assert.equal(s2.entry('A')?.title, '群一');
   assert.equal(s2.size, 1);
+});
+
+/**
+ * A17 空键一律不写。
+ *
+ * 真机现场（2026-11-17）：几处手写的 chat 字面量漏了 `sessionKey`，
+ * `sessions.set(undefined, …)` 把键名落成了字符串 `"undefined"`。
+ * 那个键谁都会命中，于是「她的短记」窗口里冒出了主动搭话的整段提示词，
+ * 刷B站的结果也往同一个会话里塞——症状要到很久以后才看得出来。
+ */
+test('A17 空键不写盘，别把 undefined 变成公共槽位', () => {
+  const t = fresh();
+  const s = t.make();
+  s.set(undefined, 'sid-x', { title: '她的短记', kind: 'system' });
+  s.set(null, 'sid-y');
+  s.set('', 'sid-z');
+  assert.equal(s.size, 0, '一个都不该记下来');
+  assert.deepEqual(t.disk().chats, {}, '磁盘上也不能出现 "undefined" / "null" / "" 键');
+  assert.ok(t.logs.some((m) => /空键/.test(m)), '要留一条日志，别静默吞掉');
+});
+
+/** A18 键的兜底：有 sessionKey 用它，没有就用 chatId —— 手写字面量不会互相串 */
+test('A18 chatSessionKey 优先 sessionKey，其次 chatId', () => {
+  assert.equal(chatSessionKey({ sessionKey: 'guild:1', chatId: 'abc' }), 'guild:1');
+  assert.equal(chatSessionKey({ chatId: 'system:bili' }), 'system:bili', '漏 sessionKey 时不能返回 undefined');
+  assert.equal(chatSessionKey({}), '');
+  assert.equal(chatSessionKey(null), '');
 });

@@ -43,6 +43,20 @@ const TOMB_TTL_MS = 10 * 60 * 1000;
 /** 损坏备份最多留几份：反复用同一个坏文件启动时别把目录堆满 */
 const CORRUPT_KEEP = 3;
 
+/**
+ * 会话映射的键：`sessionKey` 是正解，缺了才退回 `chatId`。
+ *
+ * **手写的 chat 字面量常常漏 `sessionKey`**（主动搭话、巩固、自测、系统窗口
+ * 都是这么写出来的）。少了它，`sessions.get(undefined)` 一律命中同一个键 ——
+ * 落盘后键名就是字符串 `"undefined"`，于是「刷B站」「她的短记」「主动搭话」
+ * 全挤在同一个 DSH 会话里：短记窗口里冒出主动搭话的整段提示词，就是这条路。
+ *
+ * 所以这里统一收口：谁都能少写，但到这里一定会变成唯一且稳定的键。
+ */
+export function chatSessionKey(chat) {
+  return String(chat?.sessionKey || chat?.chatId || '').trim();
+}
+
 export function createSessions({ dataDir, log = () => {} }) {
   const file = join(dataDir, 'sessions.json');
 
@@ -236,6 +250,15 @@ export function createSessions({ dataDir, log = () => {} }) {
      * 不能让之前的 `remove()` 继续压制它。
      */
     set(chatId, sessionId, { preset = '', title = '', kind = '' } = {}) {
+      /**
+       * **空键一律不写。** 写下去就会变成 `"undefined"` / `"null"` / `""` 这种
+       * 谁都能命中的公共槽位，而症状（两个功能共用一个 DSH 会话）要到很久以后
+       * 才看得出来。宁可这一轮不绑定，也不污染整份映射。
+       */
+      if (!chatId) {
+        log(`sessions.set 收到空键（sessionId=${sessionId}，title=${title || '—'}），已忽略`);
+        return;
+      }
       tombs.delete(chatId);
       map.chats[chatId] = { sessionId: String(sessionId), preset, title, kind, at: Date.now() };
       save();

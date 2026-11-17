@@ -17,7 +17,7 @@ import { basename, join, resolve, extname, relative, sep } from 'node:path';
 import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, readFileSync, rmSync, realpathSync } from 'node:fs';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets } from './config.js';
 import { redactText, redactValue, addSecretProvider } from './redact.js';
-import { createSessions } from './sessions.js';
+import { createSessions, chatSessionKey } from './sessions.js';
 import { createTurnRunner } from './turn.js';
 import { createTurnQueue } from './turnqueue.js';
 import { createInboundShell } from './inbound-shell.js';
@@ -966,6 +966,20 @@ export function apply(ctx) {
   const sessions = personaScope.wrapSessions(
     createSessions({ dataDir: dataDir(), log: (m) => log.warn(m) }),
   );
+
+  /**
+   * 清掉历史上「漏了 sessionKey」留下的那条映射。
+   *
+   * 键名就是字符串 `"undefined"`：谁都能命中它，于是短记窗口里会冒出主动搭话的
+   * 整段提示词、刷B站的结果也会写进同一个会话。留着它只会继续误导下一轮，
+   * DSH 那个会话本身不动（用户在侧栏里自己删）。
+   */
+  try {
+    if (sessions.entry('undefined')) {
+      sessions.remove('undefined');
+      log.warn('清掉一条 sessionKey 缺失的旧映射（键名 "undefined"），相关功能会各建各的窗口');
+    }
+  } catch {}
   const turns = createTurnRunner({ ctx, log, timeoutSec: () => Number(cfg.chat?.turnTimeoutSec) || 150 });
   /**
    * 同会话排队。**先声明后赋值**：主动搭话/觉醒的回调在文件里位置更靠前，
@@ -1473,7 +1487,7 @@ export function apply(ctx) {
          * 用户实测撞到的「为什么没发给主人而是单独开一个会话」就是这一行。
          */
         if (!owner) throw new Error('不知道该发给谁：Roost 没配主人（owners），DSH 也没填 chatId，不建会话');
-        const chat = { kind: 'c2c', chatId: owner, name: '主动搭话', preset: 'roost-private' };
+        const chat = { kind: 'c2c', chatId: owner, sessionKey: owner, name: '主动搭话', preset: 'roost-private' };
         const { agent } = await agentFor(chat);
         mount(agent, chat);
         /** 工具是异步挂的：等挂完再开这一轮，否则第一轮拿到的工具清单是空的 */
@@ -2837,9 +2851,12 @@ export function apply(ctx) {
     profilesEnabled: () => cfg.profiles?.enabled === true,
     log: (m) => log.info(m),
     generate: async (prompt) => {
+      const consolidateChat = cfg.memory?.consolidateChat || 'consolidate';
       const chat = {
         kind: 'c2c',
-        chatId: cfg.memory?.consolidateChat || 'consolidate',
+        chatId: consolidateChat,
+        /** 和 chatId 同值：漏了 sessionKey 会落到公共的 "undefined" 槽位 */
+        sessionKey: consolidateChat,
         name: '巩固',
         preset: 'roost-private',
       };
@@ -3993,7 +4010,7 @@ export function apply(ctx) {
         const sid = sessions.get(owner);
         if (turnQueue?.isBusy(owner) || (sid && turns.isWaiting(sid))) return '<<skip>>';
       }
-      const chat = { kind: 'c2c', chatId: owner, name: '主动搭话', preset: 'roost-private' };
+      const chat = { kind: 'c2c', chatId: owner, sessionKey: owner, name: '主动搭话', preset: 'roost-private' };
       const { agent } = await agentFor(chat);
       mount(agent, chat);
       /** 工具是异步挂的：等挂完再开这一轮，否则第一轮拿到的工具清单是空的 */
@@ -4646,7 +4663,22 @@ export function apply(ctx) {
     }
   }
 
-  async function agentFor(chat) {
+  async function agentFor(rawChat) {
+    /**
+     * **补齐 sessionKey。**
+     *
+     * 手写的 chat 字面量（主动搭话 / 巩固 / 自测 / 系统窗口）一直没写这个字段，
+     * 而 `sessions.get(undefined)` 每次命中的都是同一个坑：键名落盘成 `"undefined"`，
+     * 于是「她的短记」窗口里出现了主动搭话的整段提示词（2026-11-17 真机）。
+     * 这里统一兜一次，顺带把「谁都能少写」这件事变成不会出错的事。
+     */
+    const chat = rawChat?.sessionKey
+      ? rawChat
+      : { ...rawChat, sessionKey: chatSessionKey(rawChat) };
+    if (!chat.sessionKey) {
+      warnOnce('chat-no-key', '有会话既没有 sessionKey 也没有 chatId，这一轮不建会话');
+      throw new Error('会话缺 sessionKey / chatId');
+    }
     /** 绑定了号码但没做一键改写时，也靠别名接回旧会话上下文（审计 §3 P2） */
     /** 频道会话按 guild 聚合，且不要接群/单聊的旧别名，避免读回别的会话 */
     const sid = sessions.get(chat.sessionKey, chat.sessionKey === chat.chatId ? chat.aliases : []);
@@ -4714,8 +4746,15 @@ export function apply(ctx) {
     /**
      * `sessionTitle()` 读的是 `chat.name`（见 chat-name.js），不是 `title`。
      * 传错字段窗口会显示成「QQ · 群 m:bili」这种占位符。
+     *
+     * `sessionKey` 必须显式给：`agentFor()` 拿不到它时所有系统窗口会共用
+     * 同一个 `"undefined"` 槽位（2026-11-17 真机：「她的短记」里冒出主动搭话的
+     * 整段提示词）。`chatId` 就是 `system:<name>`，两者同值最直观。
      */
-    const chat = { chatId: `system:${key}`, kind: 'system', name: String(windowName || `刷 ${key}`) };
+    const chat = {
+      chatId: `system:${key}`, sessionKey: `system:${key}`,
+      kind: 'system', name: String(windowName || `刷 ${key}`),
+    };
     const { agent } = await agentFor(chat);
     return turns.run(agent, String(text ?? ''), {
       source: { kind: 'roost-ext-system', speaker: { role: 'none' } },
@@ -12097,7 +12136,10 @@ export function apply(ctx) {
       route('/selftest', async (req, res) => {
         const started = Date.now();
         try {
-          const chat = { kind: 'c2c', chatId: 'selftest', name: '自测', preset: 'roost-private' };
+          const chat = {
+            kind: 'c2c', chatId: 'selftest', sessionKey: 'selftest',
+            name: '自测', preset: 'roost-private',
+          };
           const { agent } = await agentFor(chat);
           mount(agent, chat);
           /** 工具是异步挂的：等挂完再开这一轮，否则第一轮拿到的工具清单是空的 */
