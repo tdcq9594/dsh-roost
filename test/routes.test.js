@@ -269,6 +269,33 @@ test('账号迁移：/account/scan 把记忆里的旧 openid 列出来', async (
   off?.();
 });
 
+test('账号迁移：/account/scan 剔掉频道键和手写假键，并把数报出来', async () => {
+  /**
+   * 这两类键在真机上确实会躺进库里（2026-11-17 实测：模拟测试留下的
+   * `g1::p:pA` / `g2::p:pB` / `GROUP_OPENID_XYZ_9999`，还有一条 20 位假数字），
+   * 面板上表现为一串「(不像 openid)」的行，逼用户给它选「群 / 私聊」。
+   * 剔掉可以，但**必须报数**——静默少列会让人以为记忆丢了。
+   */
+  const { call, off } = await bootHost({}, {
+    memory: {
+      chats: {
+        [OLD_OPENID]: ['这个群叫我小离'],
+        'g1::p:pA': ['测试事实'],
+        'guild:15101838774426010225': ['频道里说过一句'],
+      },
+    },
+    journal: [{ chatId: OLD_OPENID, text: '今天聊了搬家', role: 'user', kind: 'chat', at: Date.now() }],
+  });
+  const r = await call('/account/scan');
+  assert.equal(r.status, 200);
+  const keys = r.json.items.map((x) => x.key);
+  assert.deepEqual(keys, [OLD_OPENID], `列表里只该剩真 openid，实际 ${JSON.stringify(keys)}`);
+  assert.equal(r.json.skipped.channel, 1);
+  assert.equal(r.json.skipped.junk, 1);
+  assert.deepEqual(r.json.skipped.junkKeys, ['g1'], '假键要把原样键名带出来');
+  off?.();
+});
+
 test('账号迁移：/account/scan 空库也返回 200 + 空列表（新装用户的常态）', async () => {
   const { call, off } = await bootHost();
   const r = await call('/account/scan');

@@ -66,6 +66,54 @@ export function isValidUin(v) {
   return UIN_RE.test(String(v ?? '').trim());
 }
 
+/**
+ * 频道会话键：`guild:<频道ID>`、`guild:<频道ID>:ch:<子频道ID>`、`dm:<用户ID>`。
+ *
+ * 这类键**绑不了号码**，两个独立的原因：
+ *
+ *   1. **没有号码可绑。** roost 的身份表只有「人」和「群」（`users` / `groups`），
+ *      频道两者都不是——`inbound.js` 的 `chatOf()` 里，频道场景的 `uin` / `groupUin`
+ *      恒为空、`identityId` 也是空串，注释原话是「频道没有 QQ号 / 群号可绑」。
+ *   2. **绑了也读不到。** 读旧记忆靠 `aliases`（这个号码名下每条 claim 的 openid）
+ *      去并键，而频道会话的别名恒为空数组。就算硬把 `guild:…` 存成一条 claim，
+ *      也没有任何一条读路径会把它当别名取出来。**看起来绑成功了，记忆还是读不到**
+ *      ——正是本模块最怕的那种「界面上完全看不出来」的错。
+ *
+ * 留在列表里只会逼用户在「群 / 私聊」里选一个都不对的类型，选完得到一个永久
+ * 无效的绑定。所以扫描时整类剔掉，但**要报个数**（`skipped.channel`）：
+ * 静默少列会让人以为记忆丢了。
+ */
+export function isChannelKey(key) {
+  return /^(?:guild|dm):/i.test(String(key ?? '').trim());
+}
+
+/**
+ * 手写的假键：模拟测试 / 手工调试留在库里的残留（`g1`、`g2`、
+ * `GROUP_OPENID_XYZ_9999`、`13779558826057500581` 这类）。
+ *
+ * 判定刻意**窄到只有一条**：既不是 32 位 openid、又不带 `:` 命名空间。
+ *
+ * 为什么这么窄：
+ *
+ *   · 带 `:` 的都有确定形态（`guild:` / `dm:` / `system:` / `c2c:<号码>:<openid>` /
+ *     `aiocqhttp:GroupMessage:<号码>`），宁可留着让人看见，也不能失手藏掉真键。
+ *   · 不带 `:` 的**号码键**（`group_763366431`、`user-10001`）在 `scan()` 里
+ *     先被 `uinFromKey()` 收走了，走不到这里——所以这里剩下的「无冒号、
+ *     非 openid」只可能是人手敲的常量。
+ *
+ * 为什么可以剔：这些键绑上去也接不上任何真实会话——它们是模拟测试的
+ * 临时 chatId，官方报文里永远不会再出现同样的值。留着只会让「未对上」
+ * 列表里堆一串谁也认不出的行，用户还得为它选「群 / 私聊」。
+ *
+ * 剔除必须**报个数**（`skipped.junk`），否则就成了本模块最怕的静默漏键。
+ */
+export function isJunkKey(key) {
+  const s = String(key ?? '').trim();
+  if (!s) return true;
+  if (/^[0-9a-f]{32}$/i.test(s)) return false;
+  return !s.includes(':');
+}
+
 /** 反查分片大小：roost 那边 `items.slice(0, 500)` 硬上限 */
 const RESOLVE_CHUNK = 500;
 
@@ -192,18 +240,34 @@ export function createAccount({ memory, journal, graph, sessions, setup, log = (
     /**
      * 扫一遍本机数据，列出所有「认不出号码」的键。
      *
-     * @returns {Promise<{ok:boolean, roost:{ok:boolean,error:string}, items:Array}>}
+     * @returns {Promise<{ok:boolean, roost:{ok:boolean,error:string},
+     *   skipped:{channel:number, junk:number, junkKeys:string[]}, items:Array}>}
      */
     async scan() {
       const all = collect();
 
       /**
-       * 键里已经有号码的**不算待迁移**：那说明本来就对上了
-       * （老版本手动把号码当 chatId 用的情况）。列出来只会让人误以为
-       * 还得再绑一次。
+       * 频道会话（`guild:` / `dm:`）整类剔掉，理由见 `isChannelKey()`。
+       * 只报个数，不列内容——它们不是「还没绑」，是「不可能绑」。
        */
-      const rows = all
-        .filter((r) => !uinFromKey(r.key))
+      const channelCount = all.filter((r) => isChannelKey(r.key)).length;
+
+      /**
+       * 号码键先走一步：键里已经有号码的**不算待迁移**（老版本手动把号码
+       * 当 chatId 用的情况），列出来只会让人误以为还得再绑一次。
+       *
+       * **顺序不能换**：`group_763366431` / `user-10001` 这类老键没有冒号，
+       * 先跑 `isJunkKey()` 会被当成人手敲的假键剔掉——真迁移数据就这么丢了。
+       */
+      const named = all
+        .filter((r) => !isChannelKey(r.key))
+        .filter((r) => !uinFromKey(r.key));
+
+      /** 手写的假键（模拟测试残留），理由见 `isJunkKey()` */
+      const junk = named.filter((r) => isJunkKey(r.key));
+
+      const rows = named
+        .filter((r) => !isJunkKey(r.key))
         .map((r) => {
           const si = sessionInfo(r.key);
           return {
@@ -231,7 +295,20 @@ export function createAccount({ memory, journal, graph, sessions, setup, log = (
       const res = await resolveBound(rows.map((r) => r.key));
       for (const r of rows) r.bound = res.map.get(r.key) ?? null;
 
-      return { ok: true, roost: { ok: res.ok, error: res.error || '' }, items: rows };
+      return {
+        ok: true,
+        roost: { ok: res.ok, error: res.error || '' },
+        /**
+         * 剔掉了什么要说清楚。`junkKeys` 带前几个原样键名——
+         * 只报个数的话，用户判断不了「是不是把我真的旧键扔了」。
+         */
+        skipped: {
+          channel: channelCount,
+          junk: junk.length,
+          junkKeys: junk.slice(0, 5).map((r) => r.key),
+        },
+        items: rows,
+      };
     },
 
     /**

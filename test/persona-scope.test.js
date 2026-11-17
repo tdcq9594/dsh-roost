@@ -338,25 +338,33 @@ test('B 模式没指定 owner：就算账本被手工写坏也不生效（第二
 
 test('账号迁移扫描：物理键还原合并，面板不出现 ::p: 内部记号', async () => {
   const { createAccount } = await import('../src/account.js');
+  /**
+   * 键要用**真实的 openid 形状**（32 位 hex）。以前这里写的是 `'AAA'`，
+   * 而 `account.js` 现在会把「无冒号又不是 openid」的键当成模拟测试残留剔掉
+   * ——那条规则守的是「界面别堆一堆 g1 / GROUP_OPENID 这种手敲的假键」，
+   * 这里换掉夹具就行，被测的是物理键合并，不是键长什么样。
+   */
+  const A = 'AAAA1111BBBB2222CCCC3333DDDD4444';
+  const B = 'BBBB2222CCCC3333DDDD4444EEEE5555';
   const acct = createAccount({
     memory: { scanKeys: () => [
-      { chatId: 'AAA::p:lazycat', facts: 3 },
-      { chatId: 'AAA::p:other', facts: 5 },
-      { chatId: 'AAA', facts: 2 },
-      { chatId: 'BBB', facts: 1 },
+      { chatId: `${A}::p:lazycat`, facts: 3 },
+      { chatId: `${A}::p:other`, facts: 5 },
+      { chatId: A, facts: 2 },
+      { chatId: B, facts: 1 },
     ] },
-    journal: { scanChats: () => [{ chatId: 'AAA::p:lazycat', journal: 7 }] },
-    graph: { scanChats: () => [{ chatId: 'AAA::p:other', edges: 2, episodes: 1 }] },
+    journal: { scanChats: () => [{ chatId: `${A}::p:lazycat`, journal: 7 }] },
+    graph: { scanChats: () => [{ chatId: `${A}::p:other`, edges: 2, episodes: 1 }] },
     sessions: { entry: () => null },
   });
   const r = await acct.scan();
   assert.equal(r.items.some((x) => String(x.key).includes('::p:')), false, '不能把物理键吐给面板');
-  const aaa = r.items.find((x) => x.key === 'AAA');
+  const aaa = r.items.find((x) => x.key === A);
   assert.ok(aaa, '三个物理/逻辑键应合并成一条');
   assert.equal(aaa.facts, 5, '合并取最大值，不能把共享记忆重复相加');
   assert.equal(aaa.journal, 7);
   assert.equal(aaa.edges, 2);
-  assert.equal(r.items.length, 2, 'AAA 与 BBB 两条');
+  assert.equal(r.items.length, 2, 'A 与 B 两条');
 });
 
 test('一键改写计划：物理键计数能被 openid 查到（不再恒为 0）', async () => {

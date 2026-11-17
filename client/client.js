@@ -12173,6 +12173,27 @@ select.roost-input{color-scheme:dark}
           h('div', { className: 'roost-note' },
             '这些键在记忆里有东西，但认不出是哪个号码。填上号码、选好类型，点绑定。',
             '只写 Roost 的身份表，**不碰记忆一个字节**。'),
+          /**
+           * 剔掉的键要报出来，各说各的原因。
+           *
+           * · **频道会话**（`guild:…` / `dm:…`）是「不可能绑」：频道没有号码，
+           *   身份表里也没这种记录，绑了读记忆时也取不到（详见 `isChannelKey()`）。
+           * · **手写假键**（`g1`、`GROUP_OPENID_XYZ_9999`、20 位假数字）是模拟测试
+           *   留下的残留，绑上去一辈子也接不上真会话（详见 `isJunkKey()`）。
+           *
+           * 假键把原样键名带出来：只报个数的话，用户没法判断是不是把真键扔了。
+           */
+          scan?.skipped?.channel
+            ? h('div', { className: 'roost-note' },
+                `另有 ${scan.skipped.channel} 个频道会话键（guild:… / dm:…）没列出来——`,
+                '频道没有 QQ号 / 群号可绑，绑了也读不到记忆，所以整类跳过。')
+            : null,
+          scan?.skipped?.junk
+            ? h('div', { className: 'roost-note' },
+                `另有 ${scan.skipped.junk} 个手写假键（模拟测试残留）没列出来：`,
+                (scan.skipped.junkKeys || []).join('、') + (scan.skipped.junk > (scan.skipped.junkKeys || []).length ? ' 等' : ''),
+                '。它们既不是 openid 也不是号码，绑上去接不上任何真实会话。')
+            : null,
           todo.length
             ? h('div', null,
                 h('div', { className: 'acc-head' },

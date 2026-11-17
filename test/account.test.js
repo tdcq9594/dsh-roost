@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createAccount, uinFromKey, isValidUin } from '../src/account.js';
+import { createAccount, uinFromKey, isValidUin, isChannelKey, isJunkKey } from '../src/account.js';
 
 const OPENID = 'AAAA1111BBBB2222CCCC3333DDDD4444';
 
@@ -113,6 +113,117 @@ test('扫描：键里已有号码的不算待迁移（本来就对上了）', as
   });
   const r = await acc.scan();
   assert.deepEqual(r.items.map((x) => x.key), [OPENID], '10001 这种键不该出现在列表里');
+});
+
+test('isChannelKey：认得出频道会话的三种形态，别的键不误伤', () => {
+  assert.equal(isChannelKey('guild:1559554321'), true);
+  assert.equal(isChannelKey('guild:1559554321:ch:64467'), true, '按子频道分粒度时更长');
+  assert.equal(isChannelKey(`dm:${OPENID}`), true, '频道私信也是频道');
+  assert.equal(isChannelKey('GUILD:1'), true, '大小写不该漏');
+  assert.equal(isChannelKey(OPENID), false);
+  assert.equal(isChannelKey('763366431'), false);
+  assert.equal(isChannelKey('aiocqhttp:GroupMessage:763366431'), false);
+  assert.equal(isChannelKey(''), false);
+  assert.equal(isChannelKey(null), false);
+});
+
+test('扫描：频道会话键不参与绑定，但要报个数（不能静默消失）', async () => {
+  /**
+   * 频道没有 QQ号 / 群号可绑，绑了读记忆时也取不到（别名恒空），
+   * 所以整类不进列表。但**必须报数**——本模块最怕的就是静默漏键：
+   * 用户看到频道会话的记忆不见了，只会以为数据丢了。
+   *
+   * 顺带守住顺序：`guild:1559554321` 里的数字 10 位、正好长得像号码，
+   * 先跑 `uinFromKey` 会被当成「本来就对上了」**悄悄**滤掉，数就对不上。
+   */
+  const { acc, calls } = make({
+    mem: [
+      { chatId: 'guild:1559554321', facts: 3 },
+      { chatId: 'guild:1559554321:ch:64467', facts: 2 },
+      { chatId: `dm:${OPENID}`, facts: 1 },
+      { chatId: OPENID, facts: 1 },
+    ],
+    api: () => ({ items: [{ query: { openid: OPENID }, bound: false }] }),
+  });
+  const r = await acc.scan();
+  assert.deepEqual(r.items.map((x) => x.key), [OPENID], '频道键一个都不该进待迁移列表');
+  assert.equal(r.skipped.channel, 3, '跳过几个要说出来');
+  assert.deepEqual(
+    JSON.parse(calls[0].init.body).items.map((x) => x.openid),
+    [OPENID],
+    '频道键连反查都不该发给 roost',
+  );
+});
+
+test('isJunkKey：只认「无冒号 + 非 openid」，带命名空间的一律留着', () => {
+  // 模拟测试 / 手工调试的残留
+  assert.equal(isJunkKey('g1'), true);
+  assert.equal(isJunkKey('g2'), true);
+  assert.equal(isJunkKey('GROUP_OPENID_XYZ_9999'), true);
+  assert.equal(isJunkKey('13779558826057500581'), true, '20 位数字：不是号码，也不可能是 openid');
+  assert.equal(isJunkKey(''), true);
+
+  // 真键一个都不能误判
+  assert.equal(isJunkKey(OPENID), false);
+  assert.equal(isJunkKey('guild:1559554321'), false, '频道键归 isChannelKey 管，这里别有交集');
+  assert.equal(isJunkKey(`dm:${OPENID}`), false);
+  assert.equal(isJunkKey('system:bili'), false);
+  assert.equal(isJunkKey(`c2c:10001:${OPENID}`), false, '带号码 + openid 的老键要留着');
+  /** 号码老键没有冒号，但它们会被 `uinFromKey()` 先拦下，永远走不到这里 */
+  assert.equal(isJunkKey('group_763366431'), true, '单看形状是假键——scan() 里必须先跑 uinFromKey');
+});
+
+test('扫描：手写假键不列出来，但报个数和键名（不能静默消失）', async () => {
+  const { acc, calls } = make({
+    mem: [
+      { chatId: 'g1::p:pA', facts: 1 },
+      { chatId: 'g2::p:pB', facts: 1 },
+      { chatId: 'GROUP_OPENID_XYZ_9999', facts: 0 },
+      { chatId: '13779558826057500581', facts: 1 },
+      { chatId: OPENID, facts: 1 },
+    ],
+    jr: [{ chatId: '13779558826057500581', journal: 6 }],
+    api: () => ({ items: [{ query: { openid: OPENID }, bound: false }] }),
+  });
+  const r = await acc.scan();
+  assert.deepEqual(r.items.map((x) => x.key), [OPENID], '假键一个都不该进列表');
+  assert.equal(r.skipped.junk, 4, 'g1 / g2 / GROUP_OPENID_XYZ_9999 / 20 位假数字');
+  assert.deepEqual(
+    r.skipped.junkKeys,
+    ['g1', 'g2', 'GROUP_OPENID_XYZ_9999', '13779558826057500581'],
+    '键名要带出来，用户才能判断是不是把真键扔了',
+  );
+  assert.deepEqual(
+    JSON.parse(calls[0].init.body).items.map((x) => x.openid),
+    [OPENID],
+    '假键连反查都不该发',
+  );
+});
+
+test('扫描：号码老键先被 uinFromKey 收走，不会被当成假键剔掉（顺序守门）', async () => {
+  /**
+   * `group_763366431` 没有冒号、也不是 openid——单看形状就是「假键」。
+   * 若 `isJunkKey()` 跑在 `uinFromKey()` 前面，真迁移数据会被静默扔掉。
+   */
+  const { acc } = make({
+    mem: [{ chatId: 'group_763366431', facts: 3 }, { chatId: 'user-10001', facts: 2 }],
+    api: () => ({ items: [] }),
+  });
+  const r = await acc.scan();
+  assert.deepEqual(r.items, []);
+  assert.equal(r.skipped.junk, 0, '有号码的键算「本来就对上了」，不是假键');
+  assert.deepEqual(r.skipped.junkKeys, []);
+});
+
+test('扫描：带冒号的老键（c2c:/号码/openid）要留在列表里', async () => {
+  const key = `c2c:10001:${OPENID}`;
+  const { acc } = make({
+    mem: [{ chatId: key, facts: 1 }],
+    api: () => ({ items: [{ query: { openid: key }, bound: false }] }),
+  });
+  const r = await acc.scan();
+  assert.deepEqual(r.items.map((x) => x.key), [key], '带命名空间的键一律不剔');
+  assert.equal(r.skipped.junk, 0);
 });
 
 test('扫描：只有某一个来源有数据，另外两列是 null 而不是 0', async () => {
