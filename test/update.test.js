@@ -59,6 +59,31 @@ function fakeFetch(latest, { publishedAgoMs = 0, fail = false } = {}) {
   };
 }
 
+/** 双源测试用：镜像是用户配的源，官方源用来核对版本 */
+const MIRROR = 'https://registry.npmmirror.com';
+const OFFICIAL = 'https://registry.npmjs.org';
+
+/**
+ * 按源给不同版本：模拟「官方发了新版、镜像还没同步」。
+ *
+ * 没列出来的源一律当断网（`fetch` 抛错），这样「官方源挂了」也能顺带验。
+ */
+function packumentBySource(map) {
+  return async (url) => {
+    const hit = Object.keys(map).find((reg) => String(url).startsWith(reg));
+    if (!hit) throw new Error(`连不上 ${url}`);
+    const latest = map[hit];
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        'dist-tags': { latest },
+        time: { [latest]: new Date(Date.now() - 60_000).toISOString() },
+      }),
+    };
+  };
+}
+
 /* ---------------- 纯函数 ---------------- */
 
 test('版本比较：按数字比，不按字符串比', () => {
@@ -455,16 +480,19 @@ test('自更新：refused 形态要按 problem 翻译，不当成未知失败', 
 });
 
 /**
- * 用户配了镜像就得用镜像。
+ * 用户配了镜像就得用镜像——**而且还要额外问一次官方源**。
  *
- * `pluginManager.registries()` 是 `async`，返回值还被 remote 层包成
- * `{ ok, value: { registry, fallbackRegistries } }`。以前这里当同步数组取，
- * 拿到的永远是 Promise → 一律退回官方 registry.npmjs.org（国内必超时）。
+ * 以前只问用户配的源：`pluginManager.registries()` 是 `async`，返回值还被
+ * remote 层包成 `{ ok, value: { registry, fallbackRegistries } }`。这里当同步
+ * 数组取，拿到的永远是 Promise → 一律退回官方 registry.npmjs.org（国内必超时）。
+ *
+ * 但「只问用户的源」也有反作用：镜像有同步延迟，滞后多久面板就滞后多久。
+ * 所以现在的口径是：**用户的源当主源（装包走它），官方源只用来核对版本**。
  */
-test('检查：用 DSH 配的 registry，而不是永远官方源', async () => {
+test('检查：主源用 DSH 配的 registry，同时问官方源核对版本', async () => {
   const { d, done } = tmp();
   try {
-    let asked = '';
+    const asked = [];
     const u = createUpdater({
       ctx: fakeCtx({
         pm: {
@@ -477,13 +505,15 @@ test('检查：用 DSH 配的 registry，而不是永远官方源', async () => 
       }),
       profileDir: profileReal(d),
       fetchImpl: async (url) => {
-        asked = url;
+        asked.push(url);
         return { ok: true, status: 200, json: async () => ({ 'dist-tags': { latest: '99.0.0' }, time: {} }) };
       },
     });
-    await u.check();
-    assert.match(asked, /registry\.npmmirror\.com/, '必须去问用户配的源');
-    assert.doesNotMatch(asked, /registry\.npmjs\.org/);
+    const info = await u.check();
+    assert.match(asked.join(' '), /registry\.npmmirror\.com/, '必须去问用户配的源');
+    assert.match(asked.join(' '), /registry\.npmjs\.org/, '还要问官方源：镜像有同步延迟');
+    assert.equal(info.registry, 'https://registry.npmmirror.com', '主源仍是用户配的那个');
+    assert.equal(info.mirrorLag, false, '两边版本一样，不算滞后');
   } finally {
     done();
   }
@@ -493,17 +523,191 @@ test('检查：用 DSH 配的 registry，而不是永远官方源', async () => 
 test('检查：registries() 直接给数组时也能取到第一个', async () => {
   const { d, done } = tmp();
   try {
-    let asked = '';
+    const asked = [];
     const u = createUpdater({
       ctx: fakeCtx({ pm: { installBundle: async () => ({}), registries: async () => ['https://mirror.example.com'] } }),
       profileDir: profileReal(d),
       fetchImpl: async (url) => {
-        asked = url;
+        asked.push(url);
         return { ok: true, status: 200, json: async () => ({ 'dist-tags': { latest: '99.0.0' }, time: {} }) };
       },
     });
-    await u.check();
-    assert.match(asked, /mirror\.example\.com/);
+    const info = await u.check();
+    assert.match(asked.join(' '), /mirror\.example\.com/);
+    assert.equal(info.registry, 'https://mirror.example.com');
+  } finally {
+    done();
+  }
+});
+
+/**
+ * **镜像滞后不再让面板装作「已是最新」。**
+ *
+ * 现场：npm 上 13:31 发了新版，npmmirror 还停在上一版。只问镜像时
+ * `hasUpdate = 旧 < 旧 = false`，面板一口咬定「已经是最新版」，
+ * 用户点一百次都没用——而 npm 上明明有新版。
+ */
+test('检查：镜像滞后时按官方版本判更新，并标出 mirrorLag', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => ({}),
+          registries: async () => ({ ok: true, value: { registry: MIRROR, fallbackRegistries: [], resolved: null } }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [MIRROR]: '99.0.1', [OFFICIAL]: '99.0.2' }),
+    });
+    const info = await u.check();
+    assert.equal(info.latest, '99.0.2', '官方源已经发了 99.0.2，不能被镜像拖成 99.0.1');
+    assert.equal(info.hasUpdate, true, '这就是「点一百次都没用」的回归点');
+    assert.equal(info.mirrorLag, true);
+    assert.equal(info.mirrorLatest, '99.0.1', '要把镜像停在哪个版本说清楚');
+    assert.equal(info.installRegistry, OFFICIAL, '镜像没有 99.0.2，装包得改走官方');
+    assert.equal(info.sources.length, 2, '两个源各留一条结论，诊断时能看出谁没跟上');
+  } finally {
+    done();
+  }
+});
+
+/** 主源更新（或镜像已经同步到更高版本）时以主源为准，不能反过来被官方压住 */
+test('检查：主源版本更高时用主源的，不标滞后', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => ({}),
+          registries: async () => ({ ok: true, value: { registry: MIRROR, fallbackRegistries: [], resolved: null } }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [MIRROR]: '99.0.3', [OFFICIAL]: '99.0.2' }),
+    });
+    const info = await u.check();
+    assert.equal(info.latest, '99.0.3');
+    assert.equal(info.mirrorLag, false);
+    assert.equal(info.installRegistry, MIRROR, '主源有这版就照旧走主源');
+  } finally {
+    done();
+  }
+});
+
+/** 官方源挂了不能影响主源：面板不该因为「备用源」超时就说查不到最新版 */
+test('检查：官方源超时不影响主源结论，也不报错', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => ({}),
+          registries: async () => ({ ok: true, value: { registry: MIRROR, fallbackRegistries: [], resolved: null } }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: async (url) => {
+        if (String(url).includes('npmjs.org')) throw new Error('The operation was aborted due to timeout');
+        return { ok: true, status: 200, json: async () => ({ 'dist-tags': { latest: '99.0.2' }, time: {} }) };
+      },
+    });
+    const info = await u.check();
+    assert.equal(info.latest, '99.0.2');
+    assert.equal(info.error, '', '备用源挂了不算错');
+    assert.equal(info.mirrorLag, false);
+    assert.equal(info.unknownLatest, false);
+  } finally {
+    done();
+  }
+});
+
+/** 用户本来就配了官方源：只问一次，别做无意义的重复请求 */
+test('检查：主源就是官方源时只问一次', async () => {
+  const { d, done } = tmp();
+  try {
+    const asked = [];
+    const u = createUpdater({
+      profileDir: profileReal(d),
+      fetchImpl: async (url) => {
+        asked.push(url);
+        return { ok: true, status: 200, json: async () => ({ 'dist-tags': { latest: '99.0.2' }, time: {} }) };
+      },
+    });
+    const info = await u.check();
+    assert.equal(info.registry, OFFICIAL);
+    assert.equal(asked.length, 1, `只该请求一次，实际 ${asked.length} 次`);
+  } finally {
+    done();
+  }
+});
+
+/**
+ * 装包要带上「装哪个源」和「必须装到这版」。
+ *
+ * 镜像滞后时版本号只存在于官方源，还按配置的源去装就是 not-found；
+ * `expected` 则让 DSH 自己核对——装不到这一版就回滚，而不是静默装旧版。
+ */
+test('自更新：镜像滞后时把官方源和 expected 一起交给 installBundle', async () => {
+  const { d, done } = tmp();
+  try {
+    const calls = [];
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          registries: async () => ({ ok: true, value: { registry: MIRROR, fallbackRegistries: [], resolved: null } }),
+          installBundle: async (spec, opts) => {
+            calls.push({ spec, opts });
+            return { changed: true, application: 'applied', bundle: { version: '99.0.2' } };
+          },
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [MIRROR]: '99.0.1', [OFFICIAL]: '99.0.2' }),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].spec, `${PKG}@99.0.2`, '装的是官方源上那版');
+    assert.equal(calls[0].opts.registry, OFFICIAL, '必须指定官方源，否则 pnpm 去镜像上找 99.0.2 会 404');
+    assert.deepEqual(calls[0].opts.expected, { name: PKG, version: '99.0.2' });
+  } finally {
+    done();
+  }
+});
+
+/**
+ * 版本核对失败（`unexpected-package`）要给出可执行的下一步。
+ *
+ * 这条就是 pnpm 24 小时冷却把新版挡回旧版时的真实下场：DSH 回滚，
+ * 用户看到「失败」——不告诉他去点「立即安装」等于白说。
+ */
+test('自更新：unexpected-package 要提示点「立即安装」而不是只说失败', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          installBundle: async () => ({
+            changed: false,
+            application: 'failed',
+            error: {
+              code: 'unexpected-package',
+              diagnostic: `expected ${PKG}@99.0.2, found ${PKG}@99.0.1`,
+            },
+            registries: [OFFICIAL],
+          }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [OFFICIAL]: '99.0.2' }),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'unexpected-package');
+    assert.match(r.message, /99\.0\.2/, '要说清本来要装哪版');
+    assert.match(r.message, /立即安装/, '要给出下一步，而不是只说失败');
+    assert.match(r.detail.diagnostic, /expected/, '诊断原文要留着');
   } finally {
     done();
   }
@@ -795,6 +999,51 @@ test('手动命令：装在 LOCALAPPDATA 下时用 $env: 写法，换用户也�
 test('手动命令：没有版本号时不带 @，交给 pnpm 自己解析 latest', () => {
   const r = updateCommand({ profileDir: '/p/desktop', platform: 'linux', env: {} });
   assert.match(r.command, /add dsh-roost$/);
+});
+
+/**
+ * 镜像滞后时手动命令要**带上官方源**。
+ *
+ * 不带的话，用户复制那行去跑，pnpm 仍然按配置的镜像解析 `dsh-roost@<新版>`，
+ * 撞 `not-found`——等于把「一键装不上」原样搬到了终端。
+ */
+test('手动命令：给了 registry 就带 --registry，且排在 spec 之后', () => {
+  const r = updateCommand({
+    profileDir: '/p/desktop', version: '99.0.2', platform: 'linux', env: {},
+    registry: 'https://registry.npmjs.org',
+  });
+  assert.equal(r.command, 'dsh plugin --profile desktop add dsh-roost@99.0.2 --registry=https://registry.npmjs.org');
+  assert.doesNotMatch(
+    updateCommand({ profileDir: '/p/desktop', version: '99.0.2', platform: 'linux', env: {} }).command,
+    /--registry/,
+    '没传就不该出现，命令越短越好复制',
+  );
+});
+
+/** 自更新失败时给的手动命令，在镜像滞后场景下也要带官方源 */
+test('自更新：镜像滞后时兜底命令带官方源和确切版本', async () => {
+  const { d, done } = tmp();
+  try {
+    const u = createUpdater({
+      ctx: fakeCtx({
+        pm: {
+          registries: async () => ({ ok: true, value: { registry: MIRROR, fallbackRegistries: [], resolved: null } }),
+          // 装不起来：模拟 pnpm 在镜像上 not-found
+          installBundle: async () => ({
+            changed: false, application: 'failed', status: 'refused', problem: 'not-found', reason: 'ERR_PNPM_FETCH_404',
+          }),
+        },
+      }),
+      profileDir: profileReal(d),
+      fetchImpl: packumentBySource({ [MIRROR]: '99.0.1', [OFFICIAL]: '99.0.2' }),
+    });
+    const r = await u.self();
+    assert.equal(r.ok, false);
+    assert.match(r.command, /dsh-roost@99\.0\.2/, '命令要写死版本，别再让 pnpm 去猜');
+    assert.match(r.command, /--registry=https:\/\/registry\.npmjs\.org/, '要带官方源');
+  } finally {
+    done();
+  }
 });
 
 test('更新说明：只取当前版本那一段，不吃到下一版', () => {

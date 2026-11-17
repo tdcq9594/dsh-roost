@@ -1343,6 +1343,8 @@ select.roost-input{color-scheme:dark}
 
       const pending = Boolean(info && info.pending)
       const restart = Boolean(info && info.ok !== false && info.pendingRestart && !info.hasUpdate)
+      /** 源地址只留主机名（和设置页同一口径） */
+      const hostOf = (u) => String(u || '').replace(/^https?:\/\//, '').replace(/\/+$/, '')
       /** 跳过的是**这一版**：出了下一版还会提示 */
       const upd = Boolean(info && info.ok !== false && info.hasUpdate && info.latest
         && !pending && skip !== info.latest)
@@ -1382,6 +1384,18 @@ select.roost-input{color-scheme:dark}
               h('i', null, info.canSelf
                 ? '装完重启 DSH 才生效；设置、人格、记忆、扩展都不动。'
                 : whyManual(info)),
+              /**
+               * 镜像滞后时把话说在前面：用户看到「你的源上是旧版」就不会以为
+               * 是更新坏了，也不会为了更新去手动换源——这次装的是官方那份。
+               */
+              info.mirrorLag
+                ? h('i', null, info.canSelf
+                  ? `你配的源（${hostOf(info.registry)}）还没同步 v${info.latest}，`
+                    + '这次直接从官方源装，装完重启 DSH 才生效。'
+                  // 装不了的时候别许一个我们做不到的承诺（link: 装法根本没按钮）；
+                  // 下面那行手动命令已经自带 --registry，不用再叮嘱一遍
+                  : `你配的源（${hostOf(info.registry)}）还没同步 v${info.latest}。`)
+                : null,
               /** `link:` 装法没有可用命令（服务端返回空串）：只留上面那句「git pull 后重启」 */
               info.command
                 ? h(info.canSelf ? 'details' : 'div', { className: 'roost-cmd' },
@@ -12724,7 +12738,8 @@ select.roost-input{color-scheme:dark}
       ['server', '服务', '端口与密钥'],
       ['tts', '语音合成', '默认关闭；在「表达 → 语音合成」那张卡里改（也可以在这里手改）'],
       ['setup', '接入', '装在哪、用哪种接入方式'],
-      ['update', '更新源', 'npm 源（registry）；留空用默认源'],
+      ['update', '更新源', 'npm 源（registry）。留空跟随 pnpm 配置的源（国内常是镜像，同步有延迟）；'
+        + '版本检查会同时问官方源、取较新者，装包仍优先走你配的源'],
       ['extensions', '用户扩展', 'enabled：扩展说明要不要进 QQ 会话提示词。关着时清单还在、/v1 与已发令牌照常，只是不挂 usage section'],
     ]
 
@@ -12818,6 +12833,8 @@ select.roost-input{color-scheme:dark}
       const own = info?.own ? 'v' + info.own : '—'
       const latest = info?.latest ? 'v' + info.latest : ''
       const pending = repo?.pending || 0
+      /** 源地址只留主机名：面板一行放不下完整 URL，用户认的也是 `registry.npmmirror.com` */
+      const hostOf = (u) => String(u || '').replace(/^https?:\/\//, '').replace(/\/+$/, '')
 
       return h(Sec, {
         n: '01', title: '更新',
@@ -12884,6 +12901,23 @@ select.roost-input{color-scheme:dark}
                       + '点「立即安装」会先给 dsh-roost 加一条豁免再装。'
                     : `查不到 ${latest} 的发布时间，可能仍在 pnpm 的 24 小时冷却期内。`
                       + '点「立即安装」会加一条只对本包生效的豁免，避免静默装到旧版。')
+              : null,
+            /**
+             * 「是谁说的」要写在面板上。
+             *
+             * 用户配了镜像时，镜像滞后会让面板一直说「已是最新」——而 npm 上
+             * 明明有新版。现在版本判断取两个源里较新的那个，镜像是谁说清楚的，
+             * 免得用户以为源配错了、或者以为更新坏了。
+             */
+            info?.mirrorLag
+              ? h('div', { className: 'roost-note', style: { color: 'var(--warn)', marginTop: 2 } },
+                  `你配的源（${hostOf(info.registry)}）还停在 v${info.mirrorLatest}，`
+                  + `${latest} 目前只在官方源上。版本判断按官方算`
+                  + (info.canSelf ? '，点更新也会直接从官方装，不用先换源。' : '。'))
+              : null,
+            info?.ok !== false && info?.registry && !info?.mirrorLag
+              ? h('div', { className: 'roost-note', style: { marginTop: 2, opacity: 0.65 } },
+                  `查询源：${hostOf(info.registry)}`)
               : null,
           ),
           h('div', { className: 'roost-acts' },

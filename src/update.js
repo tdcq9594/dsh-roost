@@ -143,16 +143,25 @@ function portablePath(p, env) {
 export function updateCommand({
   profileDir, version = '', platform = process.platform, exists = existsSync,
   linked = false, env = process.env, resourcesPath = process.resourcesPath,
+  registry = '',
 } = {}) {
   const P = platform === 'win32' ? wpath : ppath;
   const profile = P.basename(String(profileDir || '')) || 'desktop';
   const spec = version ? `${PKG}@${version}` : PKG;
+  /**
+   * `--registry=` 只在「这个版本不在用户配的源上」时加（镜像滞后）。
+   *
+   * DSH 的 CLI 自己就解析这个参数（`args.filter(a => a.startsWith('--registry='))`），
+   * 所以对 `plugin add` 一样有效。平时不加：命令越短越容易复制粘贴，
+   * 而且跟着用户自己的源走本来就是默认行为。
+   */
+  const regArg = registry ? ` --registry=${registry}` : '';
   if (linked) return { command: '', shell: '', profile, spec, linked: true, via: 'linked' };
 
   if (platform !== 'win32') {
     const onPath = findDshOnPath({ platform, exists, env });
     return {
-      command: `${onPath || 'dsh'} plugin --profile ${profile} add ${spec}`,
+      command: `${onPath || 'dsh'} plugin --profile ${profile} add ${spec}${regArg}`,
       shell: '终端',
       profile,
       spec,
@@ -165,8 +174,8 @@ export function updateCommand({
   return {
     // PATH 里有 dsh 就直接写命令名：最短、也最容易复制到别的机器
     command: cli.onPath
-      ? `dsh plugin --profile ${profile} add ${spec}`
-      : `& ${cli.path ? portablePath(cli.path, env) : '"dsh.cmd"'} plugin --profile ${profile} add ${spec}`,
+      ? `dsh plugin --profile ${profile} add ${spec}${regArg}`
+      : `& ${cli.path ? portablePath(cli.path, env) : '"dsh.cmd"'} plugin --profile ${profile} add ${spec}${regArg}`,
     shell: 'PowerShell',
     profile,
     spec,
@@ -266,6 +275,13 @@ const FAIL_TEXT = {
   'bundle-in-use': '这个包正在被使用，先停掉相关插件。',
   'stale-approval': '构建许可过期了，再点一次即可。',
   'operation-error': '安装过程报错，具体看下面的诊断。',
+  /**
+   * 我们给 `installBundle` 带了 `expected`：装到的版本不符会被 DSH 回滚。
+   * 最常见的原因就是 pnpm 的 24 小时冷却把新版本挡回旧版（静默降级），
+   * 所以文案要直接指向那颗「立即安装（不等 24 小时）」。
+   */
+  'unexpected-package': '装到的版本和预期不符，DSH 已经回滚（本地还是原来那版）。'
+    + '多半是新版本发布不满 24 小时被 pnpm 挡回旧版——点「立即安装（不等 24 小时）」再试。',
   cancelled: '已取消，本地什么都没动。',
 };
 
@@ -539,22 +555,25 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
   }
 
   /**
-   * 远端信息：registry 上的最新版 + 发布时间。
+   * 问**一个**源要版本信息。
    *
    * 拉**整份 packument**而不是 `/latest`：`/latest` 只给版本号，而我们要
    * 顺手读 `time` 算「发布多久了」——24 小时冷却期内点更新是白点，得提前说。
    * 只查一次，两个信息都拿到。
    *
-   * **只缓存成功拿到版本号的结果。** 把断网的 error 也缓存六小时，
-   * 用户点「重新检查」就不会真的重查，只能干等缓存过期——那比慢更糟。
-   * 缓存的键带 registry：用户换了源必须重查。
+   * 必须拉完整 packument（application/json）：简版元数据
+   * （application/vnd.npm.install-v1+json）只有 name / dist-tags / versions /
+   * modified，**不带 time**；取 `j.time[latest]` 永远是 undefined →
+   * publishedAt=0 → age=NaN → cooling 恒 false，冷却警告和「立即安装」按钮
+   * 都不渲染，24 小时豁免一次都没生效过。
+   *
+   * 完整 packument 更大：主源给 8 秒；失败时退回简版只拿 latest，
+   * 发布时间标成「未知」（coolingUnknown），而不是假装不在冷却期。
+   *
+   * @param {string} reg
+   * @param {{timeoutMs?: number, quiet?: boolean}} [opts] `quiet` = 备用源，失败不刷日志
    */
-  async function remote({ force = false } = {}) {
-    const reg = await registryUrl();
-    if (!force && remoteCache && remoteCache.registry === reg
-      && Date.now() - remoteCache.at < REMOTE_TTL_MS) {
-      return { ...remoteCache.value, registry: reg, cached: true };
-    }
+  async function probe(reg, { timeoutMs = 8000, quiet = false } = {}) {
     const url = `${reg}/${PKG}`;
     let latest = '';
     /** 5.8：测试版标签（dist-tag `beta`）；没发布时是空串，`check()` 会回落 latest */
@@ -563,21 +582,9 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     let betaPublishedAt = 0;
     let err = '';
     try {
-      /**
-       * 必须拉**完整 packument**（application/json）。
-       *
-       * npm 的简版元数据 application/vnd.npm.install-v1+json 只有
-       * name / dist-tags / versions / modified，**不带 time**；
-       * 之前用简版取 `j.time[latest]` 永远是 undefined → publishedAt=0
-       * → age=NaN → cooling 恒 false，冷却警告和「立即安装」按钮都不渲染，
-       * 24 小时豁免在生产环境一次都没生效过。
-       *
-       * 完整 packument 更大：保留 8 秒超时；失败时退回简版只拿 latest，
-       * 发布时间标成「未知」（coolingUnknown），而不是假装不在冷却期。
-       */
-      const getPackument = async (accept, timeoutMs) => {
+      const getPackument = async (accept, ms) => {
         const res = await fetchImpl(url, {
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: AbortSignal.timeout(ms),
           headers: { accept },
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -585,10 +592,15 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       };
       let j;
       try {
-        j = await getPackument('application/json', 8000);
+        j = await getPackument('application/json', timeoutMs);
       } catch (e) {
-        log(`完整 packument 拉取失败（${e.message}），退回简版元数据（拿不到发布时间）`);
-        j = await getPackument('application/vnd.npm.install-v1+json', 4000);
+        if (!quiet) log(`完整 packument 拉取失败（${e.message}），退回简版元数据（拿不到发布时间）`);
+        /**
+         * 备用源只用来核对版本号：拿不到完整元数据就**直接放弃**，
+         * 别为一个辅助结论再等一轮——它多等一秒，用户就多等一秒。
+         */
+        if (quiet) throw e;
+        j = await getPackument('application/vnd.npm.install-v1+json', Math.min(4000, timeoutMs));
       }
       latest = String(j?.['dist-tags']?.latest ?? '');
       /**
@@ -603,13 +615,105 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     } catch (e) {
       // 更新是低频操作，失败就如实说，不闷头重试——重试只会让人多等十几秒
       err = e.message;
-      log(`查最新版失败（${url}）：${e.message}`);
+      if (!quiet) log(`查最新版失败（${url}）：${e.message}`);
     }
+    return { registry: reg, latest, beta, publishedAt, betaPublishedAt, error: err };
+  }
 
-    const value = { latest, beta, publishedAt, betaPublishedAt, error: err };
+  /**
+   * 要问的源：**用户的源在前，官方源在后**（同一个就不重复问）。
+   *
+   * 只问用户配的源是不够的：镜像同步新版本有分钟级（偶尔更久）的延迟，
+   * 这段时间里 `hasUpdate` 恒 false，面板一口咬定「已经是最新版」，
+   * 用户点一百次都没用——而这根本不是用户的问题。
+   * 现在两个源都问、按版本号取较新者：**版本判断不吃镜像的延迟**，
+   * 装包仍然优先走用户的源（镜像没这版时才改走官方，见 `remote()`）。
+   */
+  async function probeRegistries() {
+    const reg = await registryUrl();
+    return reg === DEFAULT_REGISTRY ? [reg] : [reg, DEFAULT_REGISTRY];
+  }
+
+  /** 几个源里挑版本最高的那个，连它的发布时间一起带出来 */
+  function bestOf(probes, field) {
+    let best = null;
+    for (const p of probes) {
+      const v = p[field];
+      if (!v) continue;
+      if (!best || compareVersion(v, best.version) > 0) {
+        best = { version: v, at: field === 'beta' ? p.betaPublishedAt : p.publishedAt };
+      }
+    }
+    return best;
+  }
+
+  /**
+   * 远端信息：各源上的最新版 + 发布时间，合并成一个结论。
+   *
+   * **只缓存成功拿到版本号的结果。** 把断网的 error 也缓存六小时，
+   * 用户点「重新检查」就不会真的重查，只能干等缓存过期——那比慢更糟。
+   * 缓存的键带**全部**源：用户换了源必须重查。
+   */
+  async function remote({ force = false } = {}) {
+    const regs = await probeRegistries();
+    const key = regs.join('|');
+    if (!force && remoteCache && remoteCache.key === key
+      && Date.now() - remoteCache.at < REMOTE_TTL_MS) {
+      return { ...remoteCache.value, cached: true };
+    }
+    /**
+     * 并发问，不排队。官方源只给 3 秒（完整 packument 一次拉不到就放弃，
+     * 不再退简版）：国内直连常常超时，**它慢不能拖慢主源**——
+     * 真正的结论由「谁的版本更新」决定，备用源只是核对。
+     */
+    const probes = await Promise.all(regs.map((r, i) => probe(r, {
+      timeoutMs: i === 0 ? 8000 : 3000,
+      quiet: i > 0,
+    })));
+    const primary = probes[0];
+    const bl = bestOf(probes, 'latest');
+    const bb = bestOf(probes, 'beta');
+    const latest = bl?.version || '';
+    const beta = bb?.version || '';
+    const publishedAt = latest ? bl.at || 0 : 0;
+    const betaPublishedAt = beta ? bb.at || 0 : 0;
+    /**
+     * 主源拿到东西了，备用源失败就**不算错误**——面板不该因为备用源挂了
+     * 就显示「查不到最新版」。只有主源自己也什么都没拿到才交出去。
+     */
+    const err = primary.latest || primary.beta ? '' : primary.error;
+    /**
+     * 镜像滞后：主源的版本低于最终选中的版本。
+     * 这正是「面板说已是最新、npm 上其实早有新版」的判定。
+     */
+    const mirrorLag = Boolean(primary.latest) && Boolean(latest)
+      && compareVersion(latest, primary.latest) > 0;
+    /**
+     * 装包首选源。
+     *
+     * 镜像是装包真正会走的源；它上面**没有这个版本**时必须改走官方：
+     * spec 是写死版本号的 `dsh-roost@1.3.8`，pnpm 会在镜像上解析它，
+     * 撞 `not-found` 直接失败。`installBundle` 的 `registry` 选项是
+     * 「先问这个」，配置的 fallback 仍排在后面兜底。
+     */
+    const installRegistry = latest && (mirrorLag || !primary.latest)
+      ? DEFAULT_REGISTRY : primary.registry;
+
+    const value = {
+      latest, beta, publishedAt, betaPublishedAt, error: err,
+      /** 主源（用户配的源）：装包默认走它 */
+      registry: primary.registry,
+      installRegistry,
+      mirrorLag,
+      mirrorLatest: primary.latest || '',
+      /** 每个源的结论：诊断用，面板只在滞后时展示 */
+      sources: probes.map((p) => ({
+        registry: p.registry, latest: p.latest, beta: p.beta, error: p.error,
+      })),
+    };
     // 失败不写缓存：下次进来（或点「重新检查」）应该真的重试一次
-    if (latest) remoteCache = { at: Date.now(), registry: reg, value };
-    return { ...value, registry: reg, cached: false };
+    if (latest || beta) remoteCache = { at: Date.now(), key, value };
+    return { ...value, cached: false };
   }
 
   /**
@@ -636,6 +740,17 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     const latest = pick.version;
     const publishedAt = pick.publishedAt;
     const err = r.error;
+    /**
+     * 这一版的版本号，**主源到底有没有**。
+     *
+     * 按通道单独判：开测试版的人，镜像可能已经同步了 `latest`（1.3.8）
+     * 却没同步 `beta`，拿稳定版的结论去装 beta 一样会 `not-found`。
+     */
+    const primarySrc = Array.isArray(r.sources) ? r.sources[0] : null;
+    const primaryTag = primarySrc ? String((ch === 'beta' ? primarySrc.beta : primarySrc.latest) || '') : '';
+    const mirrorLag = Boolean(primaryTag) && Boolean(latest)
+      && compareVersion(latest, primaryTag) > 0;
+    const installRegistry = mirrorLag ? DEFAULT_REGISTRY : (r.installRegistry || reg);
 
     const age = publishedAt ? Date.now() - publishedAt : NaN;
     const ageKnown = Number.isFinite(age);
@@ -651,13 +766,29 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     const installed = installedVersion();
     const base = installed || own;
     /** 手动更新的命令：一键装走不通时，这条是用户唯一能真正执行的动作（link 装法下为空） */
-    const cmd = updateCommand({ profileDir: profile(), version: latest, linked: k === 'linked' });
+    const cmd = updateCommand({
+      profileDir: profile(), version: latest, linked: k === 'linked',
+      /** 镜像还没这版时，手动命令也得显式带官方源，否则装回来的还是旧版 */
+      registry: mirrorLag ? installRegistry : '',
+    });
     const result = {
       ok: true,
       own,
       installed,
       latest,
       registry: reg,
+      /**
+       * 这次装包实际会先问哪个源。
+       *
+       * 平时等于 `registry`（用户的源）；镜像还没同步到 `latest` 时是官方源
+       * ——否则按钮会写出一个镜像上并不存在的版本号，点了必然 not-found。
+       */
+      installRegistry,
+      /** 用户的源比官方旧：面板要明说「镜像还没同步」，别让用户以为源配错了 */
+      mirrorLag,
+      mirrorLatest: primaryTag,
+      /** 每个源的结论（诊断用）：镜像滞后时能一眼看出谁没跟上 */
+      sources: Array.isArray(r.sources) ? r.sources : [],
       error: err,
       kind: k,
       // 只有真实目录才给更新按钮；符号链接会把开发链路搞断
@@ -803,7 +934,7 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
           + '改源码就不再生效了。开发机请 git pull 后重启 DSH。',
       };
     }
-    const cmd = updateCommand({ profileDir: profile() });
+    let cmd = updateCommand({ profileDir: profile() });
     if (k === 'unknown') {
       return {
         ok: false,
@@ -876,9 +1007,37 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
     const requestId = `roost-self-${Date.now()}`;
     /** 版本号未知时交给 pnpm 解析 latest tag */
     const spec = unknownLatest ? `${PKG}@latest` : `${PKG}@${info.latest}`;
+    const target = unknownLatest ? '' : String(info.latest || '');
+    /**
+     * 装包源**跟版本走**，不跟配置走。
+     *
+     * 镜像滞后时 `check()` 给的 latest 只存在于官方源：还按配置的源去装，
+     * pnpm 会拿 `dsh-roost@<新版>` 到镜像上解析，直接 `not-found`。
+     * 所以把它交给 DSH：官方排第一，配置的 fallback 仍在其后兜底。
+     */
+    const source = info.installRegistry || info.registry || '';
+    if (info.mirrorLag) {
+      log(`配置的源只有 v${info.mirrorLatest}，v${target} 只在官方源上——这次从 ${source} 装`);
+      /**
+       * 兜底命令也得跟着改：面板上那行 `plugin add dsh-roost@<新版>` 如果还跟着
+       * 配置的源走，用户复制去跑同样会 `not-found`。版本号和源一起写死最稳。
+       */
+      cmd = updateCommand({ profileDir: profile(), version: target, registry: source });
+    }
+    const installOpts = { saveExact: true, requestId };
+    if (source) installOpts.registry = source;
+    /**
+     * `expected` 让 DSH 自己核对**装到的版本**。
+     *
+     * 没有它，pnpm 被 24 小时冷却挡回旧版时会静默成功，我们只能事后读磁盘
+     * 才发现降级（`downgraded`），等于让用户白等一次安装。
+     * 带上它，版本不符会被回滚成 `unexpected-package`，本地不留脏状态，
+     * 面板也就能给出「点立即安装」这个准确的下一步。
+     */
+    if (target) installOpts.expected = { name: PKG, version: target };
     let result;
     try {
-      result = await manager.installBundle(spec, { saveExact: true, requestId });
+      result = await manager.installBundle(spec, installOpts);
     } catch (e) {
       return {
         ok: false,
@@ -919,12 +1078,17 @@ export function createUpdater({ ctx, registry, profileDir, fetchImpl = globalThi
       return { ok: false, code: 'cancelled', message: humanFail('cancelled'), detail };
     }
     if (refused || app === 'failed' || (result?.error && !APP_OK.has(app))) {
+      /** 版本核对失败：把「本来要装哪版、现在还剩哪版」说清楚，光有错误码没用 */
+      const message = errCode === 'unexpected-package' && target
+        ? `没装上 v${target}：DSH 核对版本不符，已经回滚（本地仍是 v${info.installed || own}）。`
+          + '多半是新版本发布不满 24 小时被 pnpm 挡回旧版——点「立即安装（不等 24 小时）」，或明天再更新。'
+        : humanFail(errCode, detail);
       return {
         ok: false,
         code: errCode || 'failed',
         command: cmd.command,
         shell: cmd.shell,
-        message: humanFail(errCode, detail),
+        message,
         detail,
         raw: result,
       };
