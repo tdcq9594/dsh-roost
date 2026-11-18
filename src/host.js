@@ -2796,7 +2796,17 @@ export function apply(ctx) {
     const q = String(text ?? '');
     /** 第三路（M3）：查询里提到的实体，把相关日记拉进来。 */
     const entityNames = new Map();
+    /**
+     * P1：只给**弱关联**（邻接联想）记权重。直接关联不写，`journal.search`
+     * 的缺省就是 0.5——少传一半条目，也不会有"两处各自定义 0.5"的隐患。
+     */
+    const entityWeights = new Map();
     const entities = [];
+    /**
+     * P1 关系联想：默认关（见 `features.graphAdjacent`）。
+     * 放在循环外读一次——`rawFeature` 是纯内存查表，但这里没必要每个实体问一遍。
+     */
+    const adjacentOn = rawFeature(cfg, capStore.get(), 'graphAdjacent') === true;
     try {
       const named = graph
         .entities({ chatId, limit: Number(cfg.recall?.entityLimit) || 40, aliases: aliasesOf(chatId) })
@@ -2809,6 +2819,22 @@ export function apply(ctx) {
           aliases: aliasesOf(chatId),
         });
         for (const id of ids) if (!entityNames.has(id)) entityNames.set(id, e.name);
+        /**
+         * 再扩一跳：顺着这个人的邻接实体（他身边的人 / 参与的事）找日记。
+         * 只在开关打开时走——这一层是猜测性联想，图和边脏的时候会很吵。
+         */
+        if (!adjacentOn) continue;
+        const near = graph.adjacentJournalIds(e.name, {
+          chatId,
+          limit: Number(cfg.recall?.adjacentLimit) || 3,
+          aliases: aliasesOf(chatId),
+        });
+        for (const id of near) {
+          /** 已经靠直接关联进来的不降级：先到先得，一跳优先 */
+          if (entityNames.has(id)) continue;
+          entityNames.set(id, e.name);
+          entityWeights.set(id, 0.3);
+        }
       }
     } catch (e) {
       log.debug(`实体路跳过：${e.message}`);
@@ -2818,6 +2844,8 @@ export function apply(ctx) {
       limit: Number(cfg.memory?.hits) || 3,
       entityJournalIds: [...entityNames.keys()],
       entityNames,
+      /** P1：弱关联的融合权重（缺省 0.5，只覆盖邻接那批） */
+      entityWeights,
       // 换过机器人时旧日记在旧 openid 下面，别名一起查
       aliases: aliasesOf(chatId),
       /** 3.3：每路取几条，原写死 40 */

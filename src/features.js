@@ -94,6 +94,31 @@ export const FEATURES = [
     offHint: '她不能再主动查，但每轮自动带上的那几条记忆照常。',
   },
   {
+    /**
+     * P1 图谱邻接召回（2026-11-18）。**默认关**。
+     *
+     * 打开后：问起某个人 / 东西时，除了直接连着的日记，还会顺着他身边的人和
+     * 事再往外找一层（`graph.adjacentJournalIds()`），融合权重 0.3 —— 低于直接
+     * 关联的 0.5，所以它只能补位，抢不过字面命中和直接关联。
+     *
+     * 为什么默认关：这一层是**猜测性联想**，效果完全取决于图谱质量。边的关系
+     * 词是模型自由抽的（本机真实库 39 条边里，「约定」11 条、「要求」2 条、
+     * 「是」2 条，其余各 1 条），图越脏、联想越容易跑偏。先开一段时间看召回
+     * 质量，觉得吵随时关掉，不影响任何已存数据。
+     */
+    id: 'graphAdjacent',
+    label: '关系联想',
+    desc: '问起某个人时，顺着他身边的人和事再多找一层日记',
+    source: 'store',
+    path: ['features', 'graphAdjacent'],
+    /** 记忆总开关关着时，没有日记可联想 */
+    requires: ['memory'],
+    affects: NONE,
+    /** `source:'store'` 的项没配过时按 `default` 算，这里显式关 */
+    default: false,
+    offHint: '只在直接关联之外少一层联想；直接关联的实体召回不受影响。',
+  },
+  {
     id: 'chatTools',
     label: '让她自己翻聊天记录',
     desc: '给她一个工具，需要时按会话看最近聊了什么',
@@ -642,7 +667,7 @@ export function cannotEnable(cfg = {}, store = {}, id) {
 /** 面板分组：按「她主动做什么 / 她怎么表达 / 她记不记得住」分，不按代码模块分 */
 export const FEATURE_GROUPS = [
   { id: 'talk', label: '怎么说话', ids: ['qqTools', 'stickers', 'voice'] },
-  { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact'] },
+  { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'graphAdjacent', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact'] },
   { id: 'queue', label: '消息来不及回的时候', ids: ['queueMax', 'queueMinBudgetSec'] },
   { id: 'proactive', label: '会不会主动找你', ids: ['speakUp', 'awake'] },
   { id: 'work', label: '干不干活', ids: ['sendFile', 'personaCommand'] },

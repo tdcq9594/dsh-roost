@@ -1741,7 +1741,12 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       /** 3.4：预览/dry-run 传 false —— 不写 access_count，不把「试一下」当成「被想起」 */
       touch = true,
       /** 3.4：Map<journalId, 实体名>，命中原因里标「从谁联想来」 */
-      entityNames = null } = {}) {
+      entityNames = null,
+      /**
+       * P1：Map<journalId, 融合权重>。不传 = 全部按 0.5（第一跳）。
+       * 邻接联想（二跳）传 0.3，低于直接关联——它只是补位，不该盖过直接证据。
+       */
+      entityWeights = null } = {}) {
       const terms = queryTerms(query);
       const entIds = [...new Set((entityJournalIds || []).filter(Boolean))];
       // 有实体路也能搜（查询词为空但提到了某个人）
@@ -1763,24 +1768,40 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       const byId = new Map(kw.map((r) => [r.id, r]));
 
       /* 第三路：实体。不用算向量，纯靠图谱把候选日记拉进来 */
-      entIds.forEach((id, i) => {
-        /**
-         * **先确认这一行还在，再给它加分。**
-         *
-         * 以前是先 `bump` 后查：图谱里 `episode.journal_id` 指向的日记
-         * 被「彻底删除」之后，这个 id 就成了死 id——`byId` 里没有它，
-         * 下面拼结果时读 `r.text` 直接抛 TypeError，被 `host` 那边的
-         * catch 吞成一条 warn，于是**这一轮日记检索整段失效**。
-         * 用户看到的是"她突然想不起以前的事"，日志里只有一行不好归因的警告。
-         *
-         * 死 id 是正常现象（删过日记就会留），所以这里直接跳过，不报错。
-         */
+      /**
+       * **先确认这一行还在，再给它加分。**
+       *
+       * 以前是先 `bump` 后查：图谱里 `episode.journal_id` 指向的日记
+       * 被「彻底删除」之后，这个 id 就成了死 id——`byId` 里没有它，
+       * 下面拼结果时读 `r.text` 直接抛 TypeError，被 `host` 那边的
+       * catch 吞成一条 warn，于是**这一轮日记检索整段失效**。
+       * 用户看到的是"她突然想不起以前的事"，日志里只有一行不好归因的警告。
+       *
+       * 死 id 是正常现象（删过日记就会留），所以这里直接跳过，不报错。
+       */
+      const addEntity = (id, i, w) => {
         const row = byId.get(id) || s.get(id);
         /** `get()` 故意不过滤（写路径与溯源要用），实体路这里得自己挡一道 */
         if (!row || !isActive(row)) return;
         byId.set(id, row);
-        bump(id, i, 0.5);
-      });
+        bump(id, i, w);
+      };
+      /**
+       * 实体路分两档权重：直接关联 0.5、邻接联想 0.3（P1，`features.graphAdjacent`）。
+       *
+       * 分两轮而不是一个 `forEach`：`bump` 的 `i` 是**这一路内部**的排名位，
+       * 混在一起的话「第 4 条直接关联」会被「第 1 条邻接联想」挤到后面，
+       * 而它们本该各排各的。
+       */
+      const weightOf = (id) => {
+        const w = entityWeights?.get?.(id);
+        return Number.isFinite(w) && w > 0 ? w : 0.5;
+      };
+      const strongIds = [];
+      const weakIds = [];
+      for (const id of entIds) (weightOf(id) >= 0.5 ? strongIds : weakIds).push(id);
+      strongIds.forEach((id, i) => addEntity(id, i, weightOf(id)));
+      weakIds.forEach((id, i) => addEntity(id, i, weightOf(id)));
       let vecHits = [];
       if (embed?.enabled?.()) {
         try {

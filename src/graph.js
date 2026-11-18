@@ -594,6 +594,59 @@ export function createGraph({ file, log = () => {} } = {}) {
     }
   }
 
+  /**
+   * 从命中实体**再扩一跳**取日记（P1，2026-11-18）。
+   *
+   * `linkedJournalIds()` 只走「实体 → 它自己的边 → 日记」。问「张三最近忙什么」
+   * 时，如果那些日记里压根没出现「张三」三个字，就一条也捞不到。这一层多走
+   * 一步：命中实体 A 的邻接实体 B（A—关系→B 或 B—关系→A），再取 B 牵涉的日记。
+   *
+   * 三条必须守住的边界，缺一条就会串味：
+   *  1. **`keys` 为空直接不启用**。`chatScope()` 在 keys 为空时返回空片段 =
+   *     不过滤 = 全表扫，私聊 / 没有别名的场景会把所有会话的日记都联想进来。
+   *  2. **只卡日记归属，不卡片边归属**。串味的本质是「把别的群的日记内容带进来」，
+   *     而日记归属由 `episode.chat_id` 决定——边和实体允许挂全局（`chat_id=''`）。
+   *     真实库里 84 个实体有 36 个是全局的（「主人」「倦飞之鸟」这种跨会话的人），
+   *     如果连实体和边都限定本会话，二跳在真实数据上恒为空，等于没做。
+   *  3. **只走活边**（`valid_to IS NULL`），并排除自环（`m.key <> n.key`）。
+   *
+   * 走 `episode.journal_id` 反查，和第一跳一样**不改表结构**；二跳没有"这条边
+   * 自己记的日记"这种精度要求，多绕一层 join 足够。
+   *
+   * @returns {string[]} 日记 id，按日记时间倒序、已去重
+   */
+  function adjacentJournalIds(entityName, { chatId = '', limit = 3, aliases = [] } = {}) {
+    const d = open();
+    if (!d) return [];
+    const key = normKey(entityName);
+    if (!key) return [];
+    const keys = chatKeys(chatId, aliases);
+    if (!keys.length) return [];
+    const marks = keys.map(() => '?').join(',');
+    try {
+      const sql = `SELECT ep.journal_id AS jid, MAX(ep.at) AS latest
+           FROM entity n
+           JOIN edge g1 ON (g1.src_id = n.id OR g1.dst_id = n.id)
+           JOIN entity m ON m.id = CASE WHEN g1.src_id = n.id THEN g1.dst_id ELSE g1.src_id END
+           JOIN edge g2 ON (g2.src_id = m.id OR g2.dst_id = m.id)
+           JOIN episode ep ON ep.id = g2.episode_id
+           WHERE n.key = ?
+             AND (n.chat_id IN (${marks}) OR n.chat_id='')
+             AND g1.valid_to IS NULL AND g2.valid_to IS NULL
+             AND ep.chat_id IN (${marks})
+             AND ep.journal_id IS NOT NULL
+             AND m.key <> n.key
+           GROUP BY ep.journal_id
+           ORDER BY latest DESC
+           LIMIT ?`;
+      const rows = d.prepare(sql).all(key, ...keys, ...keys, limit);
+      return rows.map((r) => String(r.jid)).filter(Boolean);
+    } catch (e) {
+      log(`邻接联想失败：${e.message}`);
+      return [];
+    }
+  }
+
   /** 这条 (主语, 关系) 现在有没有活边。给"改主意"的护栏用 */
   /**
    * 这组 (src, rel) 还有没有活边。
@@ -872,6 +925,8 @@ export function createGraph({ file, log = () => {} } = {}) {
     entities,
     episodes,
     linkedJournalIds,
+    /** P1：命中实体的邻接实体牵涉的日记（二跳，默认关，见 `features.graphAdjacent`） */
+    adjacentJournalIds,
     /** 彻底删某个会话在图谱里的痕迹（日记被彻底删除时跟着走） */
     purgeChat,
     hasActive,

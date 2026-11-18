@@ -461,6 +461,13 @@ export const DEFAULTS = {
     entityLimit: 40,
     /** 每个实体联想几条日记（原写死 5） */
     linkLimit: 5,
+    /**
+     * 邻接联想（二跳）每个实体再取几条（`features.graphAdjacent` 打开才用）。
+     *
+     * 比 `linkLimit` 小是有意的：这一层是猜测，宁可少联想几条，也不要拿
+     * 一堆弱关联去挤真正的直接证据。
+     */
+    adjacentLimit: 3,
     /** 平时（非深度重注）记忆注入预算，字（原写死 600） */
     residentMax: 600,
     /** 每 N 轮那次全量重注的预算，字（原写死 1200） */
