@@ -370,6 +370,9 @@ function makePost(over = {}) {
     systemTurn: over.systemTurn || (async () => '{"title":"风很大","text":"今天风很大。"}'),
     ledgerRecent: over.ledgerRecent || (() => [{ at: clock - 60_000, who: '主人', text: '今天好热', kind: 'user' }]),
     journalAdd: (r) => memos.push(r),
+    /** 宿主注入的运行态判据（总开关 / 断线冷却 / 试运行），默认都「正常放行」 */
+    pausedOf: over.pausedOf || (() => false),
+    dryRunOf: over.dryRunOf || (() => false),
     log: () => {},
   });
   return { post, cfg, calls, memos, dir, advance: (ms) => { clock += ms; }, setClock: (v) => { clock = v; }, getClock: () => clock };
@@ -389,6 +392,65 @@ test('publish：总开关关着 / 没选版块 / 试运行 都不调接口', asy
   assert.equal(r.ok, true);
   assert.equal(r.dryRun, true);
   assert.equal(c.calls.length, 0, '试运行不能碰发布接口');
+});
+
+/**
+ * 短记是**唯一绕开 `channel.send` 的外发路径**（直接 `callQq('putThread')`）。
+ * 所以总开关与全局试运行必须在这里单独判——别指望通道层兜住。
+ */
+test('publish：总开关关着（pausedOf）→ 不发、不碰接口，且与「允许发帖」不是同一个开关', async () => {
+  const a = makePost({ pausedOf: () => true });
+  const r = await a.post.publish({ title: 't', text: 'x' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /总开关/);
+  assert.equal(a.calls.length, 0);
+
+  /** 它的 `enabled`（允许发帖）与顶层总开关同名不同层：这里开、总开关关，仍然不发 */
+  assert.equal(a.cfg.channelPost.enabled, true);
+});
+
+test('publish：全局试运行（dryRunOf）也要让短记只生成不发布', async () => {
+  /** 短记自己的 dryRun 是 false，只有全局那个开着 */
+  const a = makePost({ dryRunOf: () => true });
+  const r = await a.post.publish({ title: 't', text: 'x' });
+  assert.equal(r.ok, true);
+  assert.equal(r.dryRun, true);
+  assert.equal(r.state, 'dry');
+  assert.equal(a.calls.length, 0, '全局试运行时短记不许真发到频道');
+});
+
+test('publish：断线时把 network:true 传出来（tick 靠它决定要不要重试）', async () => {
+  const a = makePost({
+    callQq: async (m) => {
+      if (m === 'putThread') throw Object.assign(new Error('连不上框架'), { code: 'NETWORK' });
+      return undefined;
+    },
+  });
+  const r = await a.post.publish({ title: 't', text: 'x' });
+  assert.equal(r.ok, false);
+  assert.equal(r.network, true, '不带这个标记，tick 会把它当成「今天这篇废了」');
+});
+
+test('tick：断线不占重试档位、不标 done（网络好了还能补发）', async () => {
+  const h = makePost({
+    cfg: { windowStart: '08:00', windowEnd: '08:01' },
+    callQq: async (m) => {
+      if (m === 'putThread') throw Object.assign(new Error('连不上框架'), { code: 'NETWORK' });
+      return undefined;
+    },
+  });
+  h.setClock(at(9, 0));
+  await h.post.tick();
+  const plan = h.post.state().plan;
+  assert.equal(plan.done.length, 0, '断线不能把这一档标成已完成');
+  assert.deepEqual(plan.retry, {}, '断线不排重试档位：留给下一轮，别把 3 次机会耗在断网上');
+
+  /** 连试两轮也还是同一个结果——不会因为次数累积就放弃当天那篇 */
+  h.advance(60_000); await h.post.tick();
+  h.advance(60_000); await h.post.tick();
+  const plan2 = h.post.state().plan;
+  assert.equal(plan2.done.length, 0);
+  assert.deepEqual(plan2.retry, {});
 });
 
 test('sendDraft：真发走 putThread(args 数组)、记账 pending、写记忆、verifiedAt 落配置', async () => {

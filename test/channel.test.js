@@ -255,3 +255,50 @@ test('没有句子边界时退回硬切，长度仍然受控', async () => {
   await ch.send({ target: 'u9', text: 'x'.repeat(5000) });
   assert.ok(calls[0][1].content.length <= 1501, '硬切也要落在上限内');
 });
+
+/* ---------------- 试运行：四条出站路唯一的汇合点 ---------------- */
+
+/**
+ * 试运行**只能**拦在 `channel.send`。
+ *
+ * 主动消息走 `sendOut`，主回复走 `outActions` 的裸通道，`qq_send` 与扩展
+ * `/v1/message` 走 `postReply`——四条路最后都掉进这个 `send`。放 `sendOut`
+ * 只能拦住主动的那一条，被动回复会照发，试运行等于假话。
+ */
+test('试运行：一条 rpc 都不打，但返回足够让上游照常记账', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm1', requestId: 'r1' }; } };
+  let dry = true;
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false, dryRunOf: () => dry, log: () => {} });
+
+  /** 被动回复形态（带 msgId）——这正是放 sendOut 会漏掉的那条 */
+  const r = await ch.send({ target: 'u9', text: '在呢', msgId: 'm_7' });
+  assert.equal(r.ok, true, 'ok 必须为真：上游 sendOut 靠 ok && !pending 记账');
+  assert.equal(r.pending, false, 'pending 为假，投递账本才不会多一条假记录');
+  assert.equal(r.dryRun, true);
+  assert.equal(r.scene, 'c2c');
+  assert.equal(r.target, 'u9');
+  assert.ok(r.requestId, '下游记账要用它当幂等键');
+  assert.deepEqual(calls, [], '试运行不许打任何 rpc');
+
+  /** 带静默的也一样：`gate.silence` 是服务端状态，试运行不该改 */
+  const r2 = await ch.send({ target: 'u9', text: '', silenceMs: 60_000 });
+  assert.equal(r2.ok, true);
+  assert.equal(r2.silentOnly, true, '只有静默没正文时，语义要保留');
+  assert.deepEqual(calls, [], '试运行也不许设静默');
+
+  /** 关掉就照常发 */
+  dry = false;
+  await ch.send({ target: 'u9', text: '在呢' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'msg.send');
+});
+
+test('试运行：缺省（不传 dryRunOf）行为完全不变', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm1' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false, log: () => {} });
+  const r = await ch.send({ target: 'u9', text: '在呢' });
+  assert.equal(r.dryRun, undefined, '没开试运行就不该带这个标记');
+  assert.equal(calls.length, 1);
+});

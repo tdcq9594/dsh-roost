@@ -10,6 +10,7 @@ import { DEFAULTS } from '../src/config.js';
 import { createDecider } from '../src/roost-decide.js';
 import { createPayloadBuilder } from '../src/roost-payload.js';
 import { createRoostHostChannel } from '../src/channel.js';
+import { patchForFeature, readFeatures } from '../src/features.js';
 
 test('配置形状：三个旧设置项都在 DEFAULTS 里（否则面板保存会被 pruneTo 裁掉）', () => {
   assert.equal(DEFAULTS.roostHost.decide.engagedMaxTurns, 6, '旧 ai-chat policyEngagedMaxTurns 默认 6');
@@ -131,4 +132,35 @@ test('视觉能力三态：auto 才去问模型；「未知」和探测失败一
   assert.doesNotMatch((await always(evt, { send: async () => ({}) })).rendered, /这一轮没开看图/);
   const never = createPayloadBuilder({ rpc, vision: () => false, fetchImpl });
   assert.match((await never(evt, { send: async () => ({}) })).rendered, /这一轮没开看图/);
+});
+
+/* ---------------- 运行态开关（2026-11-18） ---------------- */
+
+/**
+ * `enabled` / `dryRun` 必须在 DEFAULTS 顶层：`loadConfig()` 走 pruneTo，
+ * DEFAULTS 里没有的键会被静默裁掉——面板改了也存不住（这条踩过好几次）。
+ */
+test('配置形状：总开关与试运行在 DEFAULTS 顶层，缺省「开 + 不试运行」', () => {
+  assert.equal(DEFAULTS.enabled, true, '老配置没有这个键，必须默认开');
+  assert.equal(DEFAULTS.dryRun, false, '试运行默认关，不能替任何人做决定');
+});
+
+test('总开关 / 试运行：面板写入的是顶层布尔，不套子树', () => {
+  const a = patchForFeature('botEnabled', false);
+  assert.deepEqual(a, { config: { enabled: false } });
+  const b = patchForFeature('dryRun', true);
+  assert.deepEqual(b, { config: { dryRun: true } });
+});
+
+/**
+ * 手改 `config.json` 写成字符串的情况。判据（`features.js` 的 isOff）要认，
+ * 面板才可能显示成关着；否则就是「面板说关着、实际还在跑」。
+ */
+test('总开关：手改成字符串 "false" 也算关', () => {
+  assert.equal(readFeatures({ enabled: 'false' }).botEnabled, false);
+  assert.equal(readFeatures({ enabled: 'false ' }).botEnabled, false);
+  assert.equal(readFeatures({}).botEnabled, true);
+  /** 试运行反过来：没写过就是关，写了字符串 "true" 才算开 */
+  assert.equal(readFeatures({}).dryRun, false);
+  assert.equal(readFeatures({ dryRun: 'true' }).dryRun, true);
 });

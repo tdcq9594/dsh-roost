@@ -958,10 +958,31 @@ export function createAwake({
     return results;
   }
 
+  /**
+   * 撤销一次「已经决定要说」的记账（2026-11-18）。
+   *
+   * 用在**发送失败**之后：`compose()` 在决定说的那一刻就把 `settled` 置成
+   * `false`、并记下 `lastWakeKind`，本意是「等主人下一条回复来结算」。
+   * 可是话根本没发出去，下一轮 `settleNoReply()` 会把它算成「说了没人理」，
+   * 连续两次就降这类主动的权重——断线一夜之后她会明显不爱开口，而原因
+   * 完全不在她身上。
+   *
+   * **`casualCount` 不回滚**：那是「决定说」那一刻花掉的额度，注释里已经
+   * 写过宁可少说一句，也不在同一个额度里反复开口。回滚等于给失败开绿灯。
+   */
+  function undoCompose() {
+    state.settled = true;
+    state.lastWakeKind = '';
+    save();
+    return true;
+  }
+
   return {
     noteUser,
     compose,
     wakeGroups,
+    /** 发送失败时回滚 `settled` / `lastWakeKind`，别把失败算成「说了没人理」 */
+    undoCompose,
     /** C3：官方点赞点踩 / 主人回复文本，两个反馈入口 */
     feedback,
     noteOwnerReply,

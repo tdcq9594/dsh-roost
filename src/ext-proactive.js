@@ -220,6 +220,15 @@ export function createProactiveQueue({ dir = '', cfgOf = () => ({}), now = () =>
       tidy();
       st.sentToday += 1;
       x.state = 'done';
+    } else if (outcome === 'offline') {
+      /**
+       * 断线（2026-11-18）：**不算她的失败**。
+       *
+       * 以前 `NETWORK` 走普通失败分支，`attempts + 1`，3 分钟（3 次 drain）
+       * 就把队列清空——断一次网，攒了一天的素材全丢，恢复后什么也没有。
+       * 这里保持 `pending`、不计 attempt；超过 TTL 24h 才自然过期。
+       */
+      x.state = 'pending';
     } else {
       x.attempts = Number(x.attempts || 0) + 1;
       /**
@@ -425,14 +434,17 @@ export function createProactiveDispatcher({
         hasGroupAuthz,
       });
     } catch (e) {
-      queue.settle(item.id, 'failed', String(e?.message ?? e).slice(0, 150));
+      /** 断线单独结算：不计 attempt，别让一次断网把攒的素材全丢掉 */
+      queue.settle(item.id, e?.code === 'NETWORK' ? 'offline' : 'failed', String(e?.message ?? e).slice(0, 150));
       return { ok: false, sent: 0, why: String(e?.message ?? e) };
     }
     if (r?.ok && r.text) {
       queue.settle(item.id, 'sent');
       return { ok: true, sent: 1, id: item.id, text: r.text };
     }
-    queue.settle(item.id, r?.skipped ? 'skip' : 'failed', String(r?.why || r?.message || '没发出去').slice(0, 150));
+    /** `code === 'NETWORK'` 是通道层判定的断线（`channel.send` 不抛，靠 code 传） */
+    const outcome = r?.skipped ? 'skip' : (r?.code === 'NETWORK' ? 'offline' : 'failed');
+    queue.settle(item.id, outcome, String(r?.why || r?.message || '没发出去').slice(0, 150));
     return { ok: false, sent: 0, id: item.id, why: r?.why || r?.message || '没发出去' };
   }
 

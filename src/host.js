@@ -29,7 +29,7 @@ import { createAvatarCache } from './avatar-cache.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools, isOwnerSender } from './permissions.js';
 import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
 import { resolvePolicy, dangerOf, BUCKETS, defaultStore } from './capabilities.js';
-import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting } from './features.js';
+import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting, isOff, isOn } from './features.js';
 import { createCapabilityStore } from './capability-store.js';
 import { createExtGroups } from './ext-groups.js';
 import { createQuota, QUOTA_DEFAULTS } from './quota.js';
@@ -843,6 +843,36 @@ export function apply(ctx) {
   }
 
   let cfg = loadConfig();
+
+  /**
+   * 运行态判据（2026-11-18）。三个闭包，**别合并成一个**：
+   *
+   *   · `masterOff()` —— 人主动关的总开关。手动按钮、`sendOut` 用它。
+   *   · `paused()`    —— 总开关 **或** 刚断线失败过。所有定时器用它。
+   *   · `dryRunOn()`  —— 试运行。通道层与短记用它。
+   *
+   * 手动点一下时网络刚好抖一下，不该被那 2 分钟冷却挡回去——冷却只服务
+   * 「定时器别空转」，不是手动按钮的闸，所以 `masterOff` 与 `paused` 要分开。
+   *
+   * 判据一律走 `features.js` 的 `isOff` / `isOn`：手改 `config.json` 写成
+   * 字符串 `"false"` / `"true"` 时，`=== false` 那套会判反（面板显示关着、
+   * 实际还在跑），而这里认。
+   */
+  const masterOff = () => isOff(cfg.enabled);
+  /**
+   * 断线冷却：最后一次 `NETWORK` 失败之后 2 分钟内，定时器先别试。
+   *
+   * **不用 `roost.status().connected` 当总闸**：那个只代表事件流（WS/SSE 收到
+   * `welcome`），不代表 HTTP rpc 可用——短记走 HTTP，事件流断了它照样能发成功。
+   * 所以判据是「刚失败过」，不是「没连上」。
+   */
+  let netFailAt = 0;
+  const offlineCooling = () => netFailAt > 0 && Date.now() - netFailAt < 120_000;
+  const paused = () => masterOff() || offlineCooling();
+  const dryRunOn = () => isOn(cfg.dryRun);
+  /** 冷却打点：失败记时刻，成功清零。只给主动发送与短记两条路用 */
+  const noteNetFail = () => { netFailAt = Date.now(); };
+  const noteNetOk = () => { if (netFailAt) netFailAt = 0; };
   /**
    * E7：把当前配置里的密钥挂给日志脱敏器；`cfg` 被 patchConfig 换掉后自动跟随。
    * **用 add 而不是 set**：同进程多次 apply() 时，后者会把前一个实例的 provider
@@ -1614,8 +1644,13 @@ export function apply(ctx) {
     log: (m) => log.info(m),
   });
 
-  /** 每分钟问一次「该说话了吗」。unref 是为了不拖住进程退出 */
-  const speakTimer = setInterval(() => speakUp.tick().catch(() => {}), 60_000);
+  /**
+   * 每分钟问一次「该说话了吗」。unref 是为了不拖住进程退出。
+   *
+   * `paused()` 排在**最前面**：总开关关着 / 刚断线失败过时，连 tick 都不进，
+   * 不跑模型、不占额度。只靠出口拦的话，模型照跑、账照记，只是最后一句被吞。
+   */
+  const speakTimer = setInterval(() => { if (paused()) return; speakUp.tick().catch(() => {}); }, 60_000);
   speakTimer.unref?.();
 
   /**
@@ -1652,8 +1687,18 @@ export function apply(ctx) {
     };
   };
   let wakeRunning = false;
+  /** 召回失败后的下一次最早尝试时刻（0 = 没有退避） */
+  let wakeNextAt = 0;
   const runWakeup = async ({ force = false } = {}) => {
     if (wakeRunning) return { ok: false, code: 'BUSY', message: '上一次召回还没结束' };
+    /**
+     * 失败退避（2026-11-18）。以前发不出去就 `return`，5 分钟的定时器下一轮
+     * 又来一遍：断线一夜 ≈ 150 轮模型调用白烧，日志里全是同一条。
+     * 30 分钟足够覆盖网络抖动与重启；`force`（面板手动点）不受它限制。
+     */
+    if (!force && Date.now() < wakeNextAt) {
+      return { ok: false, code: 'COOLING', message: '上一次没发出去，等一下再试' };
+    }
     const c = { ...WAKEUP_DEFAULTS, ...(cfg.wakeup || {}) };
     /**
      * force 是面板「立刻走一次」，用来跳过开关和静默时长做人工验证，
@@ -1679,7 +1724,20 @@ export function apply(ctx) {
         return { ok: false, skipped: true, message: '她自己决定不说' };
       }
       const r = await sendOut({ scene: 'c2c', target, text, isWakeup: true });
-      if (!r?.ok) return { ok: false, message: r?.message || '没发出去', code: r?.code };
+      if (!r?.ok) {
+        /**
+         * 没发出去：**回滚 compose 的记账 + 退避**。
+         *
+         * 不回滚的后果比白烧一轮模型重得多：`compose` 已经写了 `settled:false`
+         * 与 `lastWakeKind`，下一轮 `settleNoReply()` 会把这句没发出去的话算成
+         * 「说了没人理」，连续两次就降这类主动的权重——断线一夜回来她就不爱
+         * 开口了，而原因根本不在她身上。
+         */
+        try { awake.undoCompose(); } catch { /* 老盘没有这个字段也不该影响返回 */ }
+        wakeNextAt = Date.now() + 30 * 60_000;
+        return { ok: false, message: r?.message || '没发出去', code: r?.code };
+      }
+      wakeNextAt = 0;
       wakeLedger.mark(plan.anchor, plan.cycle, { target: String(target).slice(0, 12) });
       return { ok: true, anchor: plan.anchor, cycle: plan.cycle, window: plan.label, message: `互动召回已发出（${plan.label}）` };
     } finally {
@@ -1687,7 +1745,7 @@ export function apply(ctx) {
     }
   };
   /** 5 分钟看一次就够：窗口最短也是「当天」，没必要每分钟醒一次 */
-  const wakeTimer = setInterval(() => { runWakeup().catch(() => {}); }, 300_000);
+  const wakeTimer = setInterval(() => { if (paused()) return; runWakeup().catch(() => {}); }, 300_000);
   wakeTimer.unref?.();
 
   /** 已经挂过人格/权限上下文的 agent，避免每轮重复挂 */
@@ -2370,6 +2428,8 @@ export function apply(ctx) {
   });
   /** 队列自己每分钟消费一次：提交那一刻门闸没过，过点了要能补上 */
   const proactiveTimer = setInterval(() => {
+    /** 不 drain 就不消费 attempt，`MAX_ATTEMPTS` 不消耗，开回来积压的已过 TTL */
+    if (paused()) return;
     void proactiveDispatcher.drain().catch(() => {});
   }, 60_000);
   proactiveTimer.unref?.();
@@ -3155,10 +3215,11 @@ export function apply(ctx) {
   /**
    * 启动 60 秒后先补跑一次（多半是昨天关机错过了四点），
    * 之后每十分钟看一眼。两个都 unref：不能因为定时器让进程退不出去。
+   * 两个都要 gate：否则「关着的时候重启一次」照样会跑一轮。
    */
-  const consolidateBoot = setTimeout(() => consolidateTick(), 60_000);
+  const consolidateBoot = setTimeout(() => { if (!paused()) consolidateTick(); }, 60_000);
   consolidateBoot.unref?.();
-  const consolidateTimer = setInterval(() => consolidateTick(), 10 * 60_000);
+  const consolidateTimer = setInterval(() => { if (paused()) return; consolidateTick(); }, 10 * 60_000);
   consolidateTimer.unref?.();
 
   /* ---------------- 4.3/4.4 定时备份 + 加密云备份 ---------------- */
@@ -3413,15 +3474,35 @@ export function apply(ctx) {
     cfgOf: () => cfg,
     patchCfg: (patch) => { cfg = patchConfig(patch); },
     dirOf: dataDir,
-    callQq: (method, args) => roost.rpc('qq.call', { method, args }),
+    /**
+     * 短记的 QQ 调用走 HTTP rpc，**它抛异常**——和 `channel.send`（内部 catch
+     * 后返回 `{network:true}`）形态相反，所以打点要分开写在这里。
+     */
+    callQq: async (method, args) => {
+      try {
+        const r = await roost.rpc('qq.call', { method, args });
+        noteNetOk();
+        return r;
+      } catch (e) {
+        if (e?.code === 'NETWORK') noteNetFail();
+        throw e;
+      }
+    },
     systemTurn,
     ledgerRecent: (q) => ledgerRead.recent(q),
     journalAdd: (row) => journal.add(row),
     log: (m) => log.warn(m),
+    /**
+     * 它绕开 `channel.send` 直接 `callQq('putThread')`，所以试运行与总开关
+     * 都得单独传进去。传函数而不是值：toggle 一落盘，下一轮 tick 就生效。
+     */
+    pausedOf: () => paused(),
+    dryRunOf: () => dryRunOn(),
   });
-  const postBoot = setTimeout(() => channelPost.tick().catch(() => {}), 60_000);
+  /** 两个都要 gate：这是唯一会**真的发到频道**的定时行为，且它绕开了 `channel.send` */
+  const postBoot = setTimeout(() => { if (!paused()) channelPost.tick().catch(() => {}); }, 60_000);
   postBoot.unref?.();
-  const postTimer = setInterval(() => channelPost.tick().catch(() => {}), 60_000);
+  const postTimer = setInterval(() => { if (paused()) return; channelPost.tick().catch(() => {}); }, 60_000);
   postTimer.unref?.();
 
   /**
@@ -3523,6 +3604,12 @@ export function apply(ctx) {
         log: (m) => log.warn(m),
         /** 旧 ai-chat 面板的 markdown 开关，热读 */
         markdownEnabled: () => cfg.roostHost?.markdown !== false,
+        /**
+         * 试运行。拦在通道层是**唯一能覆盖四条出站路**的位置：主动消息走
+         * `sendOut`，主回复走 `outActions` 的裸通道，`qq_send` 与扩展
+         * `/v1/message` 走 `postReply`——四条最后都掉进 `send`。
+         */
+        dryRunOf: () => dryRunOn(),
       }),
     },
     pick: () => 'roost',
@@ -3606,8 +3693,14 @@ export function apply(ctx) {
        * 以前是 `log.debug`——默认级别下**根本看不见**，注释却写着「唯一证据」。
        * 2026-11-13 审计改成 info：这行每条不接的消息都会打一次，但它本来就该
        * 一次一条（噪声上限就是消息量），换来的是「为什么她不理我」能当场回答。
+       *
+       * **例外：总开关关着**（2026-11-18）。这个理由恒定，不是「策略没生效」，
+       * 而是用户自己关的——热门群里会一路刷屏，把真正要排查的其它理由冲掉。
+       * 所以只有它降到 debug。
        */
-      log.info(`外接消息不接（${verdict.reason}）：${String(evt?.content ?? '').slice(0, 30)}`);
+      const line = `外接消息不接（${verdict.reason}）：${String(evt?.content ?? '').slice(0, 30)}`;
+      if (verdict.reason === '总开关关着') log.debug(line);
+      else log.info(line);
       return;
     }
     roostMerger.add(evt, {
@@ -3898,7 +3991,30 @@ export function apply(ctx) {
    * 通道回 `pending` 就登记进投递跟踪，其余原样返回。
    */
   const sendOut = async (payload) => {
+    /**
+     * 总开关：关着时**一条都不发**，连通道都不碰。
+     *
+     * 这是入站 `judge()` 之外的第二道门。入站那道已经让消息进不了模型，
+     * 但定时行为（搭话 / 召回 / 群主动 / 扩展主动）不是消息驱动的，
+     * 它们直接从这儿出去——`paused()` 已经把定时器挡在入口，这里是兜底：
+     * 手动按钮、扩展回调、以后新增的调用点都不用各自记得判。
+     */
+    if (masterOff()) {
+      return { ok: false, code: 'disabled', message: '总开关关着，这条没发' };
+    }
+    /**
+     * **试运行不在这里**：`channel.send` 内部已经统一拦了（那里是四条出站路
+     * 唯一的汇合点，被动回复也过）。在这里早退只能拦住主动消息，还会跳过
+     * 下面整块记账——试运行的语义是「记忆照写、只是不发」，正好相反。
+     */
     const r = await channels.active().send(payload);
+    /**
+     * 断线冷却打点。`channel.send` **不抛**——它内部 catch 之后返回
+     * `{ok:false, network:true}`，所以这里必须判返回值。写成 try/catch
+     * 会永远进不去，冷却静默失效。
+     */
+    if (r?.network) noteNetFail();
+    else if (r?.ok) noteNetOk();
     if (r?.ok && r.pending && r.requestId) {
       deliveryTrack.note({
         requestId: r.requestId,
@@ -4151,6 +4267,7 @@ export function apply(ctx) {
    * 白名单为空时 `wakeGroups` 第一行就返回，等于零开销。
    */
   const groupTimer = setInterval(() => {
+    if (paused()) return;
     if (cfg.awake?.enabled === false) return;
     awake.wakeGroups().catch((e) => log.warn(`群主动失败：${e?.message ?? e}`));
   }, 5 * 60_000);
@@ -9690,6 +9807,8 @@ export function apply(ctx) {
        */
       route('/channel/post/send', async (req, res) => {
         if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        /** 总开关关着时**连模型都不跑**：明确拒，不要让它「跑完一轮再失败」 */
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
         const body = await readBody(req);
         if (body?.confirm !== true) return send(res, 400, { ok: false, message: '发到频道版块要二次确认' });
         const title = String(body?.title || '').trim();
@@ -9723,6 +9842,7 @@ export function apply(ctx) {
        */
       route('/channel/post/tick', async (req, res) => {
         if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
         const body = await readBody(req);
         if (body?.confirm !== true) return send(res, 400, { ok: false, message: '补发可能真的发一篇，需要二次确认' });
         try {
@@ -10268,7 +10388,10 @@ export function apply(ctx) {
       }),
 
       route('/wakeup/status', (req, res) => send(res, 200, { ok: true, ...wakeState() })),
-      route('/wakeup/run-now', async (req, res) => send(res, 200, await runWakeup({ force: true }))),
+      route('/wakeup/run-now', async (req, res) => {
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
+        send(res, 200, await runWakeup({ force: true }));
+      }),
 
       /**
        * 扫描本机数据里「认不出号码」的键。
@@ -10601,6 +10724,13 @@ export function apply(ctx) {
           const deliv = deliveryTrack.stats();
           return send(res, 200, { ok: true, ...st, groups, delivery: deliv });
         }
+        /**
+         * GET 只是看状态（面板概览、群候选、投递账本），**不拦**。
+         * POST 才是「现在就主动一次」：group 分支跑 `wakeGroups`（每个候选群
+         * 一轮模型）、c2c 分支跑 `compose` 再 `sendOut`。总开关关着时两个都得拒，
+         * 且要在 `readBody` 之前拒——连解析都不必做。
+         */
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
         const body = await readBody(req);
         try {
           if (body?.target === 'group') {
@@ -10798,11 +10928,17 @@ export function apply(ctx) {
        * 手动走一次。`fire()` 自己会先检查 chatId（这是唯一绕过 `tick()` 的入口），
        * 没配就返回 `ok:false`，**不建会话、不跑模型**。
        */
-      route('/speakup/fire', async (req, res) => send(res, 200, await speakUp.fire('手动'))),
+      route('/speakup/fire', async (req, res) => {
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
+        send(res, 200, await speakUp.fire('手动'));
+      }),
 
       /** 扩展素材队列：面板看得到待批、能点批准，不用非得在 QQ 里回「发 1」 */
       route('/ext-proactive/state', (req, res) => send(res, 200, proactiveQueue.state())),
-      route('/ext-proactive/drain', async (req, res) => send(res, 200, await proactiveDispatcher.drain())),
+      route('/ext-proactive/drain', async (req, res) => {
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
+        send(res, 200, await proactiveDispatcher.drain());
+      }),
       route('/ext-proactive/decide', (req, res) => {
         const q = new URL(String(req?.url || '/'), 'http://127.0.0.1').searchParams;
         const idx = (q.get('index') || '').split(/[\s,]+/).filter(Boolean).map(Number);

@@ -638,6 +638,16 @@ export function createPostStore({ dirOf, now = () => Date.now(), log = () => {} 
  */
 export function createChannelPost({
   cfgOf, patchCfg = () => {}, dirOf, callQq, systemTurn, ledgerRecent, journalAdd, log = () => {}, now = () => Date.now(),
+  /**
+   * 宿主注入的两个运行态判据（2026-11-18）。**不在这里 import `features.js`**：
+   * 这个模块只依赖 `node:fs` / `node:path`，它是发帖引擎，不是配置消费者；
+   * 口径统一由宿主维持（`paused()` 已含总开关与断线冷却）。
+   *
+   *   · `pausedOf()`  —— 总开关关着 / 刚断线失败过 → 不发
+   *   · `dryRunOf()`  —— 试运行 → 只生成不发布（与短记自己的 `channelPost.dryRun` 是 OR）
+   */
+  pausedOf = () => false,
+  dryRunOf = () => false,
 }) {
   const store = createPostStore({ dirOf, now, log });
   const cfgOfPost = () => normalizePostCfg(cfgOf()?.channelPost);
@@ -864,17 +874,31 @@ export function createChannelPost({
     const clean = cleanDraft(text);
     if (!clean) return { ok: false, message: '正文是空的' };
     const t = cleanDraft(title).slice(0, 20) || pickTitle(clean, now());
+    /**
+     * **总开关**（2026-11-18）。注意判的是顶层 `cfgOf()?.enabled`，不是上面的
+     * `cfg.enabled`——`cfg` 是 `cfgOfPost()` 裁出来的 channelPost 子树，
+     * 它的 `enabled` 是「允许发帖」，同名不同层，写混就等于没判。
+     *
+     * 为什么这里必须单独判：短记发帖走 `callQq('putThread')` 的 HTTP，
+     * **连 `channel.send` 都不经过**，是全仓唯一完全绕开出站口的外发路径。
+     */
+    if (pausedOf()) return { ok: false, message: '现在不能发：总开关关着，或者刚断线还没恢复' };
     if (!cfg.enabled) return { ok: false, message: '「允许发帖」的总开关还关着' };
     if (!cfg.channelId) return { ok: false, message: '还没选发帖版块' };
 
-    const isDry = dryRun === undefined ? cfg.dryRun : Boolean(dryRun);
+    /**
+     * 两种试运行取并集：短记自己的 `channelPost.dryRun`（面板上那个），
+     * 和全局的「试运行」。后者不 OR 进来就是「全局试运行开着、短记照样真发」。
+     */
+    const isDry = (dryRun === undefined ? cfg.dryRun : Boolean(dryRun)) || dryRunOf() === true;
     if (isDry) {
       log(`试运行：本来要发《${t}》到版块 ${cfg.channelId}`);
       return { ok: true, dryRun: true, title: t, text: clean, state: 'dry' };
     }
 
     const latest = cfgOfPost();
-    if (!latest.enabled || !latest.channelId) return { ok: false, message: '发布前开关已变化，本次未发布' };
+    /** 生成期间被关掉也一样不发：这里补的第二道闸，`enabled` 与总开关都判 */
+    if (pausedOf() || !latest.enabled || !latest.channelId) return { ok: false, message: '发布前开关已变化，本次未发布' };
 
     const at = now();
     try {
@@ -884,7 +908,14 @@ export function createChannelPost({
       return { ok: true, title: t, text: clean, taskId, createTime: String(r?.create_time ?? ''), state: 'pending' };
     } catch (e) {
       const h = humanError(pickErrorCode(e), e?.message);
-      return { ok: false, message: h.title, todo: h.todo, say: h.say, code: h.code, raw: String(e?.message || e) };
+      /**
+       * `network` 必须传出来：`tick()` 靠它区分「今天这篇废了」和「网断了，
+       * 下一轮接着发」。不传的话断线一天会把三档全部烧成失败。
+       */
+      return {
+        ok: false, message: h.title, todo: h.todo, say: h.say, code: h.code,
+        network: e?.code === 'NETWORK', raw: String(e?.message || e),
+      };
     }
   }
 
@@ -1137,6 +1168,17 @@ export function createChannelPost({
       return;
     }
     const count = ((retry && retry.count) || 0) + 1;
+    /**
+     * 断线：**不占重试档位、不标 done**（2026-11-18）。
+     *
+     * 以前 `NETWORK` 和业务失败一样处理，每档 2/5/15 分钟重试、每次都重新
+     * 生成一遍正文，然后当天这篇放弃——断线一天＝三档全丢，还白烧 12 次模型。
+     * 现在直接留在待发：定时器本身有断线冷却（`paused()`）挡着，不会每分钟空转。
+     */
+    if (r && r.network) {
+      log('发帖时连不上，这一档留着下一轮再发');
+      return;
+    }
     const delayMin = RETRY_DELAY_MIN[count - 1];
     if (!delayMin) {
       s2.plan.done.push(due);

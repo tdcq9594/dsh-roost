@@ -202,3 +202,31 @@ test('C3：群主动不记 lastWakeKind，免得误伤私聊权重', async () =>
   assert.equal(s.state().lastWakeKind, '');
   assert.equal(s.state().settled, true);
 });
+
+/**
+ * `undoCompose()`：发送失败时把「已经决定要说」的记账撤回来。
+ *
+ * 不撤的后果：下一轮 `settleNoReply()` 把这句**没发出去**的话算成
+ * 「说了没人理」，连续两次降权——断线一夜回来她就不爱开口了，
+ * 而原因根本不在她身上（这是 2026-11-18 断线兜底里最隐蔽的一条）。
+ */
+test('undoCompose：回滚 settled / lastWakeKind，但不退 casual 额度', async () => {
+  const s = scene();
+  const v = await s.a.compose({ kind: 'c2c' });
+  assert.equal(v.speak, true, '这个场景要能说出话来，否则测不到记账');
+
+  const before = s.state();
+  assert.equal(before.settled, false, '决定说话就该等着结算');
+  assert.ok(before.lastWakeKind, '要记下是哪一类机会');
+
+  assert.equal(s.a.undoCompose(), true);
+  const after = s.state();
+  assert.equal(after.settled, true, '没发出去就不该等结算');
+  assert.equal(after.lastWakeKind, '', '类别也清掉：它只属于那一次没发出去的话');
+  assert.equal(after.casualCount, before.casualCount,
+    'casual 额度是「决定说」那一刻花掉的，失败也不退（否则失败等于白给一次机会）');
+
+  /** 回滚之后再走一轮，不该被记成「没回音」 */
+  await s.a.compose({ kind: 'c2c' });
+  assert.equal(s.state().noReplyStreak, 0, '上一轮没发出去，不该累计「没回音」');
+});

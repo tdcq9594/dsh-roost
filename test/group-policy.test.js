@@ -217,3 +217,39 @@ test('决策链：每条判定都记下来（含不接的），新的在前，�
   d.check(c2c);
   assert.equal(d.recent(1)[0].kind, 'c2c');
 });
+
+/* ------------------------------------------------------------------ */
+/* 总开关（2026-11-18）                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 总开关排在任何判定之前：关掉就是「一条都不接」，私聊也一样。
+ * 这是刻意不留暗门——「关掉」如果还能私聊回，用户会以为开关坏了。
+ */
+test('总开关：关着时私聊和群消息都不接', () => {
+  const d = mk({ enabled: false });
+  for (const evt of [c2c, group()]) {
+    const v = d.check(evt);
+    assert.equal(v.go, false);
+    assert.match(v.reason, /总开关/);
+  }
+});
+
+/**
+ * 手改 `config.json` 写成字符串 `"false"` 的情况。
+ * 用 `=== false` 判会漏掉它 → 面板显示关着、实际还在接话。
+ */
+test('总开关：字符串 "false" 也算关（与 features.js 同一口径）', () => {
+  const d = mk({ enabled: 'false' });
+  assert.equal(d.check(c2c).go, false);
+  assert.match(d.check(c2c).reason, /总开关/);
+});
+
+/** 老配置没有这个键：必须与升级前逐字节一致，一条都不能少接 */
+test('总开关：没配这个键 / 显式 true 时行为完全不变', () => {
+  assert.equal(mk({}).check(c2c).go, true, '老配置（没有 enabled）要照常接');
+  assert.equal(mk({ enabled: true }).check(c2c).go, true);
+  const g = mk({}); 
+  /** 群里那条走的是「模式收敛」，这里只确认没被总开关提前掐掉 */
+  assert.doesNotMatch(g.check(group()).reason, /总开关/);
+});

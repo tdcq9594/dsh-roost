@@ -194,11 +194,14 @@ function fileTypeOfName(p) {
  * @param {object} o
  * @param {object} o.host  `createRoostHost()` 的实例（要有 rpc）
  * @param {(m:string)=>void} [o.log]
+ * @param {()=>boolean} [o.dryRunOf]  试运行开关（宿主注入，热读）
  */
-export function createRoostHostChannel({ host, log = () => {}, markdownEnabled = true } = {}) {
+export function createRoostHostChannel({ host, log = () => {}, markdownEnabled = true, dryRunOf = () => false } = {}) {
   if (!host?.rpc) throw new Error('roost 通道需要 createRoostHost 实例');
   /** 旧 ai-chat 面板的 `markdown` 开关；热读，面板关掉下一轮就生效 */
   const wantMarkdown = () => (typeof markdownEnabled === 'function' ? markdownEnabled() : markdownEnabled);
+  /** 试运行；宿主那侧是 `() => isOn(cfg.dryRun)`，这里只管调 */
+  const isDry = () => dryRunOf() === true;
 
   return {
     name: 'roost',
@@ -280,6 +283,28 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
        */
       const rid = String(requestId || '').trim()
         || `rh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+      /**
+       * 试运行：模型照跑、记忆照写，消息**不真的发**。
+       *
+       * 拦在这里而不是 `sendOut`：这是四条出站路唯一的汇合点——主动消息走
+       * `sendOut`，主回复走 `outActions` 的裸通道，`qq_send` 与扩展
+       * `/v1/message` 走 `postReply`。放在 `sendOut` 只能拦住主动的那一条，
+       * 被动回复会照发，试运行就成了假话。
+       *
+       * 返回 `{ok:true, pending:false}` 是**故意的**：上游 `sendOut` 后面
+       * 那三块记账（事件 / 惦记 / 日记）判的是 `r.ok && !r.pending`，
+       * 这样记忆与日记照写，只有真正落到 QQ 的那一步被跳过。
+       *
+       * 位置在 `gate.silence` 之前：试运行不该改变任何服务端状态。
+       */
+      if (isDry()) {
+        log(`试运行：本来要发到 ${scene}/${target}${t ? `（${t.length} 字）` : '（卡片/仅静默）'}，已拦下`);
+        return {
+          ok: true, scene, target, id: '', pending: false, requestId: rid, dryRun: true,
+          ...(t || hasCard ? {} : { silentOnly: true }),
+        };
+      }
 
       if (Number(silenceMs) > 0) {
         await host.rpc('gate.silence', { chatId: String(target), ms: Number(silenceMs) })

@@ -2495,3 +2495,48 @@ test('更新页：有「更新历史」入口，不只在版本变时弹一次',
   assert.ok(txt.includes('更新历史'), '要有一个能往回翻的入口')
   assert.ok(txt.includes('交流反馈群'), '反馈群那张卡还在')
 })
+
+/**
+ * 页头清理（2026-11-18）：删掉 `:17321` 端口徽章与「通道 roost」徽章。
+ *
+ * 两个都是死信息：概览页早已改成看外接协议连接状态（连没连上、seq 走没走），
+ * 而「通道」只剩一种实现，恒定值等于零信息。
+ */
+test('前端渲染：页头不再出现端口号与「通道」徽章', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'overview'
+  rt.reset()
+  const tree = expand(mod.RoostPage(), rt)
+
+  const head = tree.props.children
+    .find((n) => ((n && n.props && n.props.className) || '').includes('roost-head'))
+  assert.ok(head, '缺页头')
+
+  const texts = []
+  ;(function walk(n) {
+    if (n == null) return
+    if (typeof n === 'string' || typeof n === 'number') { texts.push(String(n)); return }
+    if (Array.isArray(n)) return n.forEach(walk)
+    walk(n.props?.children)
+  })(head)
+
+  const joined = texts.join(' | ')
+  assert.doesNotMatch(joined, /:17321/, '端口徽章该删掉')
+  assert.doesNotMatch(joined, /端口没起/, '「端口没起」跟着端口徽章一起删')
+  assert.doesNotMatch(joined, /通道\s*roost/, '「通道」是恒定值，删')
+  assert.doesNotMatch(joined, /^通道 /, '「通道」是恒定值，删')
+});
+
+/**
+ * 页头两个开关接的是**现成**的「能力」页接口，不新开 API。
+ * 这条是源码级检查：渲染替身不跑 `useEffect`，开关本体渲染不出来，
+ * 但「有没有真的接上」必须能被反过来验证（否则删了接线测试还是绿的）。
+ */
+test('页头开关：走 features.get / features.patch，id 与后端注册的一致', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.match(src, /quick\('features\.get'\)/, '初值要来自 features.get')
+  assert.match(src, /quick\('features\.patch'/, '点击要走 features.patch')
+  assert.match(src, /'botEnabled'/, '总开关的 id 是 botEnabled（避开顶层 enabled 撞名）')
+  assert.match(src, /'dryRun'/, '试运行的 id 是 dryRun')
+});

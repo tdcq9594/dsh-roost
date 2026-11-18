@@ -365,10 +365,23 @@ test('对齐：后端每条路由在前端都有入口', async () => {
   const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
 
+  /**
+   * 面板上**故意没有入口**的路由。
+   *
+   * `/channels` 是通道能力表。2026-11-18 删掉了页头那两个 Pill（`:17321`
+   * 端口与「通道 roost」），它是最后一个消费者——只剩一种通道了，
+   * 「这个平台能干什么」不再是用户要决策的事。但接口本身留着：
+   * 排障时要能一眼看出直连通道声明了什么能力、降级退成什么，
+   * 而且它有自己的一条断言（`/channels 的能力表如实声明`）。
+   *
+   * 往这张表里加东西要有同样具体的理由，不许拿它当「先加个接口回头再接」的挡箭牌。
+   */
+  const NO_PANEL_ENTRY = ['/channels'];
+
   const routes = [...host.matchAll(/route\('(\/[a-z/-]+)'/g)].map((m) => m[1]);
   assert.ok(routes.length >= 30, `只解析到 ${routes.length} 条路由，正则可能失效了`);
 
-  const missing = routes.filter((p) => !client.includes(`'${p}`));
+  const missing = routes.filter((p) => !client.includes(`'${p}`) && !NO_PANEL_ENTRY.includes(p));
   assert.deepEqual(missing, [], `这些后端路由前端没有入口：${missing.join('、')}`);
 });
 
@@ -441,7 +454,24 @@ test('对齐：后端有的配置段，设置页也要列出来', async () => {
   assert.equal(FEATURES.find((f) => f.id === 'events')?.staged, undefined,
     'events 已上线，不该还挂着 staged');
 
-  const missing = Object.keys(DEFAULTS).filter((k) => !keys.includes(k) && !NOT_SHIPPED.includes(k));
+  /**
+   * 运行态开关（2026-11-18）：`enabled` / `dryRun`。
+   *
+   * 它们**不进设置页的 JSON 块**——页头和「能力」页各有一个开关，
+   * 改完立刻生效。放进 JSON 块反而会出现「这里存了、那里没生效」的两套真相
+   * （JSON 块要按保存按钮）。
+   *
+   * 白名单按 FEATURES 反查：每个豁免段必须能找到一条 `path:[k]` 的 toggle，
+   * 且不是 `staged`。这样它就不能被拿来塞「先加个配置键、回头再接界面」。
+   */
+  const RUNTIME_ONLY = ['enabled', 'dryRun'];
+  for (const k of RUNTIME_ONLY) {
+    const f = FEATURES.find((x) => Array.isArray(x.path) && x.path.length === 1 && x.path[0] === k);
+    assert.ok(f, `RUNTIME_ONLY 里的 ${k} 必须在 FEATURES 里有对应的开关，否则它就是绕过界面的漏网配置`);
+    assert.equal(f.staged, undefined, `${k} 已经能用了，不该还挂着 staged`);
+  }
+
+  const missing = Object.keys(DEFAULTS).filter((k) => !keys.includes(k) && !NOT_SHIPPED.includes(k) && !RUNTIME_ONLY.includes(k));
   assert.deepEqual(missing, [], `后端有、设置页没列出的配置段：${missing.join('、')}`);
 });
 
@@ -1826,5 +1856,103 @@ test('更新说明：能按版本往回翻，不是只看当前版', async () =>
     assert.ok(past.json.notes.length > 0, '历史版本的内容不能是空的');
   } finally {
     off?.();
+  }
+});
+
+/* ---------------- 总开关 / 试运行（2026-11-18） ---------------- */
+
+/**
+ * 总开关关着时，**手动按钮必须明确拒绝**，不能「跑完一轮模型才失败」。
+ * 七个入口全在这一条里验：驳回、文案、且 GET 状态页不受影响。
+ */
+test('总开关：关着时七个手动入口一律 409，GET 看状态照常', async () => {
+  const { call, off } = await bootHost({ enabled: false });
+  try {
+    const posts = [
+      '/speakup/fire', '/wakeup/run-now', '/ext-proactive/drain',
+      '/channel/post/send', '/channel/post/tick', '/awake',
+    ];
+    for (const p of posts) {
+      const r = await call(p, { method: 'POST', body: {} });
+      assert.equal(r.status, 409, `${p} 在总开关关着时该 409`);
+      assert.match(r.json.message, /总开关/, `${p} 要说清是总开关`);
+    }
+    /** `GET /awake` 只是看状态：拦了面板就没法解释「她为什么不说」 */
+    const g = await call('/awake');
+    assert.equal(g.status, 200, 'GET 状态不该被总开关拦住');
+  } finally {
+    off?.();
+  }
+});
+
+/**
+ * 两个开关走的是「能力」页同一个接口，页头只是另一个入口。
+ * `dryRun` 的默认值是 `false`，`features.js` 里写漏 `default:false` 的话，
+ * 这里会变成 `true`（`readFeatures` 把 undefined 当开）——所以这条值钱。
+ */
+test('总开关 / 试运行：默认值正确、能从 features.patch 改、改完立刻生效', async () => {
+  const { call, off } = await bootHost();
+  try {
+    const g = await call('/quick', { method: 'POST', body: { op: 'features.get', arg: {} } });
+    assert.equal(g.json.ok, true);
+    assert.equal(g.json.on.botEnabled, true, '总开关缺省就是开（老配置没有这个键）');
+    assert.equal(g.json.on.dryRun, false, '试运行默认必须关');
+    assert.ok(g.json.groups.some((x) => x.id === 'run'), '「运行」组要下发（页头与能力页共用）');
+
+    const p = await call('/quick', { method: 'POST', body: { op: 'features.patch', arg: { id: 'dryRun', on: true } } });
+    assert.equal(p.json.ok, true, '试运行要能打开');
+    const g2 = await call('/quick', { method: 'POST', body: { op: 'features.get', arg: {} } });
+    assert.equal(g2.json.on.dryRun, true);
+
+    /** 关掉总开关后，同一个手动入口立刻变 409——判据是热读的，不用重启 */
+    const off1 = await call('/quick', { method: 'POST', body: { op: 'features.patch', arg: { id: 'botEnabled', on: false } } });
+    assert.equal(off1.json.ok, true);
+    const fired = await call('/speakup/fire', { method: 'POST', body: {} });
+    assert.equal(fired.status, 409, '刚关掉就该生效');
+  } finally {
+    off?.();
+  }
+});
+
+/** 试着写一个不存在的开关：要 400 而不是静默成功 */
+test('features.patch：没有这个开关就 400，不许静默通过', async () => {
+  const { call, off } = await bootHost();
+  try {
+    const r = await call('/quick', { method: 'POST', body: { op: 'features.patch', arg: { id: 'nope', on: true } } });
+    assert.equal(r.status, 400);
+    assert.match(r.json.message, /没有这个开关/);
+  } finally {
+    off?.();
+  }
+});
+
+/**
+ * 「总开关 = 全停」的定时器部分。
+ *
+ * 为什么只做源码级检查：六个定时器最短 60 秒、最长 10 分钟，跑真的一轮要
+ * 几分钟；而这里要防的是**有人以后加定时行为时忘了挂判据**——
+ * 那种回归在行为测试里根本看不见（原来的定时器也不会跑）。
+ * 逐个对名字定位到那一行，断言同一个包装里调了 `paused()`。
+ */
+test('全停：六个定时器 + 两个启动补跑都挂了 paused() 判据', async () => {
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const lines = host.split('\n');
+  const need = [
+    'const speakTimer = setInterval(',
+    'const wakeTimer = setInterval(',
+    'const proactiveTimer = setInterval(',
+    'const groupTimer = setInterval(',
+    'const postTimer = setInterval(',
+    'const consolidateTimer = setInterval(',
+    'const postBoot = setTimeout(',
+    'const consolidateBoot = setTimeout(',
+  ];
+  for (const key of need) {
+    const i = lines.findIndex((l) => l.includes(key));
+    assert.ok(i >= 0, `没找到 ${key}，正则/变量名可能改了`);
+    /** 多行回调的判据在下一行，所以看这个小窗口，不只看那一行 */
+    const block = lines.slice(i, i + 4).join('\n');
+    assert.ok(block.includes('paused()'), `${key} 少了 paused() 判据——总开关关着或断线时它还会跑`);
   }
 });

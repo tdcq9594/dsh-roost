@@ -38,6 +38,23 @@ const FILE = () => join(dataDir(), 'config.json');
 export const WIZARD_VERSION = 1;
 
 export const DEFAULTS = {
+  /**
+   * 总开关。关掉后**全停**：消息一条不接（不进模型、不写记忆、不占额度）、
+   * 出站一条不发、六个定时行为与两个启动补跑一起停。
+   *
+   * 缺省 `true`：老配置没有这个键，升级后行为必须逐字节一致。
+   * 面板本身照常可用——它走宿主 HTTP，不经 QQ 通道。
+   */
+  enabled: true,
+  /**
+   * 试运行。照常收消息、照常跑模型、照常写记忆与日记，只是**不真的发到 QQ**。
+   *
+   * 拦截点在最底层的 `channel.send`（四条出站路径的唯一汇合处），
+   * 另加短记的 `publish()`——它直接 `callQq('putThread')`，不走通道。
+   *
+   * 缺省 `false`：不做任何人的默认动作。
+   */
+  dryRun: false,
   server: {
     /** 固定服务的端口（/v1 控制面、TTS、健康检查）。端口被占会自动顺延 */
     port: 17321,

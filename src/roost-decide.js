@@ -24,6 +24,13 @@
  * 没人叫她的普通一句」）。两者默认都不生效，升级前后行为完全一致。
  */
 
+/**
+ * 总开关的判据**复用** `features.js` 的 `isOff`——那份认布尔 `false`，
+ * 也认手改成字符串的 `"false"`。在这里再写一遍 `=== false` 就会漏后者：
+ * 面板显示关着、实际还在接话。`features.js` 本身零 import，不循环。
+ */
+import { isOff } from './features.js';
+
 /** 默认忽略词：别的插件靠这些前缀干活，别抢 */
 export const DEFAULT_IGNORE = ['/'];
 
@@ -138,11 +145,23 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
    * 真正的判定收在 `impl.judge` 里，外面再包一层 `check` 只为记
    * 「这条为什么回 / 不回」——这里有二十多个 return，挨个插日志必漏一处。
    *
+   * **只拦 `message` 事件**。`onNotice` 那条路上的框架事件
+   * （`capabilities.changed` / `ext.call.request` / 审核结果通知 / 按钮回调）
+   * 不受总开关影响：那些是宿主内部的通知与对账，不是她说话；拦了会让待确认
+   * 的提案卡死、能力表停止刷新。以后别把这条当漏洞「补」上。
+   *
    * @param {object} evt roost 的 message 事件 data
    * @returns {{go:boolean, force?:boolean, cooling?:boolean, delayMs?:number, reason:string}}
    */
   const impl = {
     judge(evt) {
+      /**
+       * 总开关排第一：关着时**连判定都不做**——不占配额、不动冷却状态、
+       * 不给 runtime 记一笔「刚回过」。私聊也在这里被挡住（下面那条
+       * 「私聊一律理」在它后面）。
+       */
+      if (isOff(cfg()?.enabled)) return { go: false, reason: '总开关关着' };
+
       const chatId = String(evt?.chat?.chatId ?? '');
       /** 按群覆写在这里生效；chance 是这一层的插话概率 */
       const { decide: c, chance } = conf(chatId);

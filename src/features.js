@@ -51,6 +51,38 @@ export function kindOf(f) {
 
 export const FEATURES = [
   {
+    /**
+     * 总开关（2026-11-18）。与 aurabot 的 `enabled` 同义：**关掉就是全停**。
+     *
+     * id 故意不叫 `enabled`：`features.get` 的返回体顶层已经有一个 `enabled`
+     * （`capStore.enabled()`，能力总闸），两个同名并存，前端会把
+     * `r.enabled` 和 `r.on.enabled` 读混。config 键仍是顶层 `enabled`。
+     */
+    id: 'botEnabled',
+    label: '总开关',
+    desc: '关掉后一条消息都不接，她也不会自己开口',
+    source: 'config',
+    path: ['enabled'],
+    requires: NONE,
+    affects: NONE,
+    offHint: '消息一条不接、不跑模型、不写记忆，定时行为（主动搭话 / 召回 / 群主动 / 短记 / 巩固）全停。面板照常能用。',
+  },
+  {
+    /**
+     * 试运行。**必须写 `default: false`**：`readFeatures` 把 `undefined` 当开，
+     * 不写这一行，面板会显示「试运行：开」而实际是关。
+     */
+    id: 'dryRun',
+    label: '试运行',
+    desc: '照常回、照常记，只是不真的发到 QQ',
+    source: 'config',
+    path: ['dryRun'],
+    default: false,
+    requires: NONE,
+    affects: NONE,
+    offHint: '消息会真的发出去。打开后可以在不动真群的情况下看她会怎么回。',
+  },
+  {
     id: 'speakUp',
     label: '主动搭话',
     desc: '一阵子没聊，她在私聊里主动说句话',
@@ -485,8 +517,21 @@ function pick(obj, path) {
  * toggle 的「关」判据。配置可能来自手改的 JSON，写成字符串 `"false"` 时
  * 旧口径会判成开（面板显示开着、实际却收走了工具），所以字符串也要认。
  * 只服务布尔项：`pick()` 还被 `readSettings()` 和非布尔项复用，不动它。
+ *
+ * **导出给宿主复用**：`host.js` 的 `masterOff()`（总开关）与
+ * `channel-post.js` 的总开关判据都调它。口径只在这一处定义——别在别处
+ * 再写一遍 `=== false`，那样手改成字符串 `"false"` 就漏了。
  */
-const isOff = (v) => v === false || (typeof v === 'string' && v.trim().toLowerCase() === 'false');
+export const isOff = (v) => v === false || (typeof v === 'string' && v.trim().toLowerCase() === 'false');
+
+/**
+ * 「开」判据，**不是 `isOff` 取反**。
+ *
+ * `undefined`（老配置没写过这个键）必须算关：`dryRun` 的默认值是 `false`，
+ * 取反会把 undefined 变成「开」，面板显示开着、实际在真发。
+ * 所以只有 `default: false` 的项才用它。
+ */
+export const isOn = (v) => (v === undefined ? false : !isOff(v));
 
 export function readFeatures(cfg = {}, store = {}) {
   const out = {};
@@ -666,6 +711,8 @@ export function cannotEnable(cfg = {}, store = {}, id) {
 
 /** 面板分组：按「她主动做什么 / 她怎么表达 / 她记不记得住」分，不按代码模块分 */
 export const FEATURE_GROUPS = [
+  /** 运行态排最前：它决定后面所有开关生效不生效 */
+  { id: 'run', label: '运行', ids: ['botEnabled', 'dryRun'] },
   { id: 'talk', label: '怎么说话', ids: ['qqTools', 'stickers', 'voice'] },
   { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'graphAdjacent', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact'] },
   { id: 'queue', label: '消息来不及回的时候', ids: ['queueMax', 'queueMinBudgetSec'] },

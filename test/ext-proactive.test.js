@@ -328,3 +328,38 @@ test('drain：指定的群仍然按原样走，不会被 recent 逻辑改掉', a
   assert.equal(r.ok, true);
   assert.equal(sp.calls[0].opts.target, '123456789');
 }));
+
+/**
+ * 断线（2026-11-18）：`NETWORK` 不算她的失败。
+ *
+ * 以前它走普通失败分支 `attempts+1`，dispatcher 每 60 秒 drain 一次，
+ * 3 次就把队列清空——断一次网，攒了一天的素材全丢，恢复后什么也没有。
+ */
+test('drain：NETWORK 不计 attempt、不丢队列（恢复后还能发）', async () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item());
+  /** `channel.send` 断线时不抛，靠 code 传出来；speakUp 原样转成 code */
+  const { d, sp } = makeDispatcher(queue, { result: { ok: false, code: 'NETWORK', message: '连不上框架' } });
+
+  for (let i = 0; i < 3; i++) {
+    const r = await d.drain();
+    assert.equal(r.ok, false);
+  }
+  assert.equal(sp.calls.length, 3, '三轮都试过（说明不是被门闸挡掉）');
+  const st = queue.state();
+  assert.equal(st.queued, 1, '断线三轮后素材还在队列里');
+  /** `attempts` 不在 `state()` 的对外字段里，看内部账 */
+  assert.equal(Number(queue._raw().items[0]?.attempts || 0), 0, '断线不该消耗重试次数');
+  assert.equal(queue._raw().items[0]?.state, 'pending');
+  assert.equal(st.history[0].outcome, 'offline', '结算结局要能区分「断线」和「真失败」');
+}));
+
+/** 对照组：普通失败仍然要计次数，否则「一直发不出去」的坏素材会永远占着队列 */
+test('drain：普通失败照旧计 attempt', async () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item());
+  const { d } = makeDispatcher(queue, { result: { ok: false, code: 'rate', message: '太频繁' } });
+  await d.drain();
+  assert.equal(Number(queue._raw().items[0]?.attempts || 0), 1);
+  assert.equal(queue.state().history[0].outcome, 'failed');
+}));

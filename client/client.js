@@ -955,7 +955,17 @@ select.roost-input{color-scheme:dark}
 .roost-title-lg{font-size:18px;font-weight:600;letter-spacing:-.02em;line-height:1.3}
 .roost-sub{font-size:11.5px;line-height:1.55;
   color:var(--dsw-alias-label-tertiary,inherit);margin-top:2px}
-.roost-head .roost-pill{font-size:10.5px;padding:1px 9px}
+/* 标题行：左标题 / 右快速开关。flex-wrap 是给窄栏兜底的，
+   正常宽度下永远是一行 */
+.roost-head-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.roost-head-quick{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.roost-head-q{display:flex;align-items:center;gap:6px;font-size:11.5px;line-height:1;
+  color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;white-space:nowrap}
+/* 窄栏里只留开关本身：三组「文字+开关」会把页签条挤到第二屏 */
+@container (max-width:620px){
+  .roost-head-q span{display:none}
+  .roost-head-quick{gap:10px}
+}
 /* 面板在窄侧栏里：统计卡回到两列，页头与页签一起收紧 */
 @container (max-width:620px){
   .roost-head{padding:12px 16px 0}
@@ -18011,7 +18021,14 @@ select.roost-input{color-scheme:dark}
       const [capRetention, setCapRetention] = useState(null)
       /** 能力页：次数配额（每个功能用了多少 / 上限多少） */
       const [capQuota, setCapQuota] = useState(null)
-      const [ch, setCh] = useState(null)
+      /**
+       * 页头两个开关的初值。
+       *
+       * **不复用 `capFeat`**：那个是「能力」页的内容，`loadCaps` 只在
+       * `tab === 'caps'` 时才跑，首屏是 null。页头必须自己拉一次。
+       * 存的是 `features.get` 返回的 `on`（算过依赖的**生效态**），不是 `raw`。
+       */
+      const [featOn, setFeatOn] = useState(null)
       const [reg, setReg] = useState(null)
       const [busy, setBusy] = useState(false)
       const [toastMsg, setToastMsg] = useState('')
@@ -18030,10 +18047,13 @@ select.roost-input{color-scheme:dark}
         setSetupSt(b.ok === false ? null : b)
       }, [])
 
+      /**
+       * 只剩一种通道（roost 外接协议直连），页头那个「通道 roost」徽章
+       * 是恒定值，零信息量，已随端口徽章一起删掉——这里不再拉 `/channels`。
+       */
       const loadSetupMeta = useCallback(async () => {
-        const [a, b] = await Promise.all([get('/registrations'), get('/channels')])
+        const a = await get('/registrations')
         setReg(a.ok === false ? null : a)
-        setCh(b.ok === false ? null : b)
       }, [])
 
       const loadConfig = useCallback(async () => {
@@ -18258,6 +18278,39 @@ select.roost-input{color-scheme:dark}
       }, [mem])
 
       /**
+       * 页头两个开关的初值（异步，到了才渲染开关）。
+       *
+       * 与「能力」页同一个接口，所以两处永远看到同一个真相；取 `on` 而不是
+       * `raw`——`on` 是算过 `requires` 的**生效态**，页头要显示的就是它。
+       *
+       * **不复用 `toggleFeat`**：那个定义在 `CapsTab` 内部，页头在主组件
+       * 作用域里调不到；这里直接打 `features.patch`，成功后只更新自己这份
+       * `featOn`（不 `reload()`——那是整页状态重拉）。
+       */
+      const loadFeatOn = useCallback(async () => {
+        const r = await quick('features.get')
+        if (r.ok === false) return
+        setFeatOn(r.on || null)
+      }, [quick])
+      useEffect(() => { loadFeatOn() }, [loadFeatOn])
+
+      /**
+       * 页头开关：总开关 / 试运行。
+       *
+       * 失败时**不改本地状态**并把后端的原话 toast 出来——后端 `cannotEnable`
+       * 与 `staged` 都是 409 + 原因，吞掉就会出现「显示开着、实际没开」。
+       */
+      const toggleHeadFeat = useCallback(async (id, on) => {
+        const r = await quick('features.patch', { id, on })
+        if (r.ok === false) {
+          toast(r.message || '改不了，稍后再试')
+          return
+        }
+        if (r.message) toast(r.message)
+        setFeatOn((prev) => ({ ...(prev || {}), [id]: on }))
+      }, [quick, toast])
+
+      /**
        * 能力页：一次拉两份——策略本体 + 四个档位的试算。
        *
        * 试算放服务端算（`capabilities.preview`），用的是和真实生效同一个
@@ -18357,14 +18410,45 @@ select.roost-input{color-scheme:dark}
       return h('div', { className: 'roost-root' },
         h('div', { className: 'roost-head' },
           h('div', { className: 'roost-head-inner' },
-          h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
+          /**
+           * 标题行：左边标题，右边两个开关。
+           *
+           * 删掉的两块是死信息（2026-11-18）：`:17321` 端口徽章读的是
+           * `st.actualPort || st.port`，概览页早已改成看外接协议连接状态
+           * （连没连上、seq 有没有推进），端口对不对得上不再是问题；
+           * 「通道 roost」更是恒定值——只剩这一种通道了。
+           */
+          h('div', { className: 'roost-head-row' },
             h('div', { className: 'roost-title-lg' }, 'Roost'),
-            st
-              ? h(Pill, { tone: st.listening ? 'ok' : 'bad' }, st.listening ? `:${st.actualPort || st.port}` : '端口没起')
-              : null,
-            ch?.current ? h(Pill, null, '通道 ' + ch.current) : null,
+            /**
+             * 快速开关：页头改了**立刻生效**（不走「保存设置」）。
+             * `featOn` 为 null 时整块不渲染——宁可晚半秒出现，也不要先显示
+             * 一个默认开着、实际关着的开关。
+             */
+            featOn ? h('div', { className: 'roost-head-quick' },
+              [
+                ['botEnabled', '总开关', '关掉后一条消息都不接，定时行为全停'],
+                ['dryRun', '试运行', '照常回、照常记，只是不真的发到 QQ'],
+              ].map(([id, label, hint]) => h('label', {
+                key: id, className: 'roost-head-q', title: `${hint}（改完立刻生效）`,
+              },
+                h('span', null, label),
+                h('button', {
+                  type: 'button', className: 'roost-switch', role: 'switch',
+                  'aria-checked': featOn[id] ? 'true' : 'false',
+                  'aria-label': label,
+                  'data-on': featOn[id] ? '1' : '0',
+                  title: hint,
+                  onClick: () => toggleHeadFeat(id, !featOn[id]),
+                }),
+              )),
+            ) : null,
           ),
           h('div', { className: 'roost-note roost-sub' }, 'QQ 消息从这里交给 DSH 会话回答。'),
+          /** 关着时给一句提示：否则下面所有开关都「改了没反应」，看不出为什么 */
+          featOn && featOn.botEnabled === false
+            ? h('div', { className: 'roost-note roost-sub' }, '总开关关着：消息不接、她也不主动开口，下面的设置暂时不生效。')
+            : null,
 
           h('div', { className: 'roost-nav' },
             h('div', {
