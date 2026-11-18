@@ -2125,3 +2125,38 @@ test('graph.text：实体名里的换行不能伪造出第二条关系', () => {
   assert.equal(text.split('\n').length, 1, `只该有一条关系：${JSON.stringify(text)}`);
   assert.ok(!/\n\s*·/.test(text), '伪造的「· 」顶不到行首');
 });
+
+/* ---------- retention 还原：字段不能丢（2026-11-18 复核补） ---------- */
+
+test('retention：entries 带 status/tier/pin，insertRaw 还原后一个不丢', () => {
+  const m = freshFacts();
+  m.add('g1', '张三说主人下周三出差', 'global', { status: 'hearsay', src: { speaker: '张三' } });
+  m.add('g1', '主人可能喜欢下雨天', 'global', { status: 'guess', tier: 'core', pin: 0.8 });
+  const rows = m.retention.entries();
+
+  assert.equal(rows.find((r) => r.text.includes('下周三')).status, 'hearsay');
+  const guessed = rows.find((r) => r.text.includes('下雨天'));
+  assert.equal(guessed.status, 'guess');
+  assert.equal(guessed.tier, 'core');
+  assert.equal(guessed.pin, 0.8);
+
+  /** 模拟「清理 → 后悔 → 另一个库还原」 */
+  const m2 = freshFacts();
+  for (const r of rows) m2.insertRaw(r);
+  const back = m2.listFull('g1').global;
+  assert.equal(back.find((x) => x.text.includes('下周三')).status, 'hearsay',
+    '听说的还原后还是听说的，不能变回本人说的');
+  const backGuessed = back.find((x) => x.text.includes('下雨天'));
+  assert.equal(backGuessed.status, 'guess');
+  assert.equal(backGuessed.tier, 'core');
+  assert.equal(backGuessed.pin, 0.8);
+});
+
+test('retention：insertRaw 对默认值不落盘（老库还原后字节不变）', () => {
+  const m = freshFacts();
+  m.insertRaw({ scope: 'global', text: '普通一条', w: 1, at: Date.now() });
+  const meta = readRaw().meta.global['普通一条'];
+  assert.equal(meta.status, undefined, 'fact 是默认值，不该写进文件');
+  assert.equal(meta.tier, undefined, 'long 是默认值，不该写进文件');
+  assert.equal(meta.pin, undefined);
+});

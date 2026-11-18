@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   MANIFEST, applyPendingRestore, cancelRestore, createBackup, listBackups,
-  pendingRestore, safeRel, shouldSkip, stageRestore,
+  pendingRestore, restoreRetentionRows, safeRel, shouldSkip, stageRestore,
 } from '../src/backup.js';
 
 function fixture(t, init = true) {
@@ -312,4 +312,53 @@ test('导出：正常的目录照旧能导出（守住上面那条门槛别过�
   assert.ok(existsSync(r.file));
   assert.match(r.name, /^dsh-roost-backup-/);
   assert.ok(r.files > 0);
+});
+
+/**
+ * 行级还原要把 `retention.entries()` 导出的字段**原样带回**。
+ *
+ * 这条链路上有四个白名单式重建（entries → normalizeEntry → 这里的 row →
+ * `insertRaw`），漏一个就静默退回默认值。`status` 丢了最要命：
+ * 「听说的」还原回来变成「本人说的」，面板和注入都看不出异常。
+ */
+test('retention 行级还原：status / tier / pin / reviewedAt 原样带回', () => {
+  const inserted = [];
+  const memory = {
+    retention: { entries: () => [] },
+    insertRaw: (row) => { inserted.push(row); return true; },
+  };
+  const journal = { get: () => null, insertRaw: () => true };
+  const payload = {
+    facts: [{
+      scope: 'global', chatId: '', text: '张三说他下周三出差', w: 2, at: 1,
+      src: { speaker: '张三' }, until: 0, expiredBy: '',
+      status: 'hearsay', tier: 'core', pin: 0.5, reviewedAt: 123, archivedAt: 456,
+    }],
+    journal: [],
+  };
+  const r = restoreRetentionRows({ payload, memory, journal });
+  assert.equal(r.facts, 1);
+  const row = inserted[0];
+  assert.equal(row.status, 'hearsay', '可信度不能丢');
+  assert.equal(row.tier, 'core', '层级不能丢');
+  assert.equal(row.pin, 0.5, '置顶度不能丢');
+  assert.equal(row.reviewedAt, 123);
+  assert.equal(row.archivedAt, 456);
+});
+
+test('retention 行级还原：老备份没有这些字段时给默认值，不写坏库', () => {
+  const inserted = [];
+  const memory = {
+    retention: { entries: () => [] },
+    insertRaw: (row) => { inserted.push(row); return true; },
+  };
+  const journal = { get: () => null, insertRaw: () => true };
+  restoreRetentionRows({
+    payload: { facts: [{ scope: 'global', text: '老备份的一条', w: 1, at: 1 }], journal: [] },
+    memory, journal,
+  });
+  const row = inserted[0];
+  assert.equal(row.status, 'fact', '缺省 = fact');
+  assert.equal(row.tier, 'long');
+  assert.equal(row.pin, 0);
 });

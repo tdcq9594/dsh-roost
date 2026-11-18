@@ -91,6 +91,16 @@ export function normalizeEntry(raw, target, chatId = '') {
     scope: String(e.scope || 'global'),
     importance: 0.5,
     lastAccess: 0,
+    /**
+     * 这几个是「原样插回」要用的字段，`pre-retention-*.json` 里的行会
+     * 一路走到 `memory.insertRaw()`。这里做白名单式重建，漏一个就等于
+     * 还原时丢掉——尤其 `status`：一条「听说的」会静默变回「本人说的」。
+     */
+    status: String(e.status || 'fact'),
+    tier: String(e.tier || 'long'),
+    pin: Number(e.pin) || 0,
+    reviewedAt: Number(e.reviewedAt) || 0,
+    archivedAt: Number(e.archivedAt) || 0,
   };
 }
 

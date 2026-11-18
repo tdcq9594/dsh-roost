@@ -1116,6 +1116,17 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
               src: x.src || null,
               until: Number(x.until) > 0 ? Number(x.until) : 0,
               expiredBy: String(x.expiredBy || ''),
+              /**
+               * 下面这几个字段**必须一起导出**，否则「清理 → 后悔 → 还原」
+               * 会把它们全丢掉：`insertRaw()` 只重建它认识的那几个键。
+               * 丢了 `status` 的后果最直接——一条「听说的」还原回来变成
+               * 「本人说的」，注入时不再带后缀，还挡得住同级取代。
+               */
+              status: statusOf(x),
+              tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
+              pin: clamp01(x.pin),
+              reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : 0,
+              archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : 0,
             });
           }
         };
@@ -1214,6 +1225,18 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
       if (row.src != null) meta.src = row.src;
       if (Number(row.until) > 0) meta.until = Number(row.until);
       if (row.expiredBy) meta.expiredBy = String(row.expiredBy);
+      /**
+       * 原样插回**必须带上这几个**。`insertRaw` 是 retention 还原的落点，
+       * 它不经过 `addInto`，字段少一个就静默退回默认值——最刺眼的是
+       * `status`：「听说的」还原成「本人说的」，面板上没有任何痕迹。
+       * 默认值照 `addInto` 的口径不落盘（fact / long / 0），
+       * 这样老库还原回来仍是逐字节一样的文件。
+       */
+      if (FACT_STATUSES.includes(row.status) && row.status !== 'fact') meta.status = row.status;
+      if (FACT_TIERS.includes(row.tier) && row.tier !== 'long') meta.tier = row.tier;
+      if (Number(row.pin) > 0) meta.pin = clamp01(row.pin);
+      if (Number(row.reviewedAt) > 0) meta.reviewedAt = Number(row.reviewedAt);
+      if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);
       list.push(text);
       mm[text] = meta;
       save();

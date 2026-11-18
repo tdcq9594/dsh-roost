@@ -412,3 +412,21 @@ test('邻接联想也要物理化 + 带旧键（漏登记会静默失效）', ()
   assert.deepEqual(calls[0].args[1].aliases, ['ACCOUNT_ALIAS', CHAT], '旧键也要一起查');
   assert.equal(calls[0].args[1].limit, 3, '其余选项原样透传');
 });
+
+test('recentChat / removeEntity 也要物理化（漏登记会静默失效）', () => {
+  const s = scope({ enabled: true, policy: 'shared', personaId: 'lazycat' });
+  const { store, calls } = fakeStore(['recentChat', 'removeEntity']);
+  const phys = CHAT + SCOPE_JOIN + 'lazycat';
+
+  /** `recentChat(chatId, {limit, aliases})`：chatId 在第一个参数 */
+  s.wrapJournal(store).recentChat(CHAT, { limit: 1200 });
+  assert.equal(calls[0].args[0], phys, '「提炼说话风格」按物理键才读得到消息');
+  assert.equal(calls[0].args[1].limit, 1200, '其余选项原样透传');
+  assert.deepEqual(calls[0].args[1].aliases, [CHAT], '读操作要带旧键');
+
+  /** `removeEntity(ref, {chatId, aliases})`：chatId 在第二个参数 */
+  s.wrapGraph(store).removeEntity('e1', { chatId: CHAT, aliases: ['ACCOUNT_ALIAS'] });
+  assert.equal(calls[1].args[1].chatId, phys, '面板删实体按物理键才删得到');
+  assert.deepEqual(calls[1].args[1].aliases, ['ACCOUNT_ALIAS'],
+    '写操作不追加旧键（删除不跨键，和 forget / purgeChat 同款）');
+});

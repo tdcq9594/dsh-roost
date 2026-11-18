@@ -146,6 +146,12 @@ export const PLAN = {
     add: ['row:0', null, 'write'],
     recent: [0, 3, 'read'], listChat: [0, 2, 'read'], digests: [0, 2, 'read'],
     recentTimeline: [0, 'obj:1', 'read'], top: [0, 'obj:1', 'read'],
+    /**
+     * `recentChat(chatId, {limit, aliases})`：chatId 在第一个参数，别名在第二个。
+     * 漏登记的后果同样是静默失效——「提炼说话风格」在人格隔离开启后按逻辑键
+     * 读消息，读到 0 条，界面只说「没东西可提炼」。
+     */
+    recentChat: [0, 'obj:1', 'read'],
     search: ['obj:1', 'obj:1', 'read'],
     invalidated: ['obj:0', 'obj:0', 'read'],
     forget: ['obj:0', null, 'write'],
@@ -165,6 +171,13 @@ export const PLAN = {
      */
     adjacentJournalIds: ['obj:1', 'obj:1', 'read'],
     edgesAsOf: ['obj:1', 'obj:1', 'read'], episodes: ['obj:0', null, 'write'],
+    /**
+     * `removeEntity(ref, {chatId, aliases})`：面板删实体走这里。
+     * 漏登记 → 人格隔离开启后按逻辑键删，删不到，只回一句「没删成」。
+     * 按写操作的既有约定（`forget` / `purgeChat` 同款）不追加旧键——
+     * 删除不跨键，别名由调用方自己传（`host` 那边传的就是 `aliasesOf(chatId)`）。
+     */
+    removeEntity: ['obj:1', null, 'write'],
     addEdge: ['obj:0', null, 'write'], closeEdge: ['obj:0', null, 'write'],
     suppressEdge: ['obj:0', null, 'write'], unsuppressEdge: ['obj:0', null, 'write'],
     addEpisode: ['obj:0', null, 'write'], purgeChat: [0, null, 'write'],

@@ -572,6 +572,16 @@ export function restoreRetentionRows({ payload, memory, journal }) {
       src: raw.src ?? null,
       until: Number(raw.until) || 0,
       expiredBy: String(raw.expiredBy || ''),
+      /**
+       * 「原样插回」的字段清单要跟着 `retention.entries()` 走。
+       * 这里漏一个，还原出来的那条就退回默认值——`status` 丢了最要命：
+       * 「听说的」会变成「本人说的」，注入时不再带后缀。
+       */
+      status: String(raw.status || 'fact'),
+      tier: String(raw.tier || 'long'),
+      pin: Number(raw.pin) || 0,
+      reviewedAt: Number(raw.reviewedAt) || 0,
+      archivedAt: Number(raw.archivedAt) || 0,
     };
     if (!row.text) { skipped += 1; continue; }
     const key = JSON.stringify([row.scope, row.chatId, row.text]);
