@@ -964,7 +964,8 @@ export function createChannelPost({
    * @param {object} o
    * @param {string} o.title
    * @param {string} o.text
-   * @param {boolean} [o.force]   忽略试运行
+   * @param {boolean} [o.force]   只忽略**短记自己的** `channelPost.dryRun`；
+   *   全局「试运行」仍由 `publish()` 里的 `dryRunOf()` 判，传 `force` 也穿不过去
    * @param {string} [o.source]   `auto`（定时/手动生成）/ `panel`（预览后确认）
    */
   async function sendDraft({ title, text, force = false, source = 'panel' } = {}) {
@@ -1002,7 +1003,7 @@ export function createChannelPost({
    *
    * @param {object} o
    * @param {boolean} [o.preview]  只要草稿
-   * @param {boolean} [o.force]    忽略试运行（面板上"真发"按钮）
+   * @param {boolean} [o.force]    只忽略短记自己的 dryRun（面板上"真发"按钮）
    */
   async function write({ preview: wantPreview = false, force = false } = {}) {
     if (busy) return { ok: false, message: '上一篇还在写' };

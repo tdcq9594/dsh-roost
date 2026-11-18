@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createQuota, QUOTA_DEFAULTS } from '../src/quota.js';
+import { createQuota, shouldCharge, QUOTA_DEFAULTS } from '../src/quota.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'dsh-roost-quota-'));
 
@@ -288,4 +288,26 @@ test('quota：接上的项必须真的拦得住（voice / memory 不再是「暂
   assert.equal(q.charge({ feature: 'voice', id: 'U1', key: 'v2' }).ok, false, '语音条第 2 次要被拦');
   assert.equal(q.charge({ feature: 'memory', id: 'U1', key: 'm1' }).ok, true);
   assert.equal(q.charge({ feature: 'memory', id: 'U1', key: 'm2' }).ok, false, '翻记忆第 2 次要被拦');
+});
+
+/* ---------------- 试运行该不该扣 ---------------- */
+
+/**
+ * 试运行「照常跑模型、照常记账、只是不发」。`voice` / `file` 是「发一次扣一次」
+ * 的额度——真发被通道层拦住了，额度却还扣，几轮预览就把真实额度吃光。
+ *
+ * 反过来说，`tool`（防死循环）/ `memory`（每轮上限）/ `sticker`（挑选次数）
+ * **必须照扣**：它们与「发不发到 QQ」无关，试运行不该成为绕过保护的后门。
+ */
+test('试运行：发送类额度不扣，保护类额度照扣', () => {
+  assert.equal(shouldCharge('voice', true), false, '语音条额度不该扣');
+  assert.equal(shouldCharge('file', true), false, '发文件额度不该扣');
+  assert.equal(shouldCharge('tool', true), true, '工具次数是防失控的闸，照扣');
+  assert.equal(shouldCharge('memory', true), true, '记忆条数是每轮上限，照扣');
+  assert.equal(shouldCharge('sticker', true), true, '表情是「挑选」次数，挑了不等于发出去了');
+
+  assert.equal(shouldCharge('voice', false), true, '没开试运行就得照常扣');
+  assert.equal(shouldCharge('file', false), true);
+  assert.equal(shouldCharge('voice', undefined), true, '缺省必须扣，不能因为没传就静默放行');
+  assert.equal(shouldCharge(undefined, true), true, '没给 feature 时按扣处理，宁严不松');
 });

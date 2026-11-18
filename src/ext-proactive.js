@@ -220,13 +220,17 @@ export function createProactiveQueue({ dir = '', cfgOf = () => ({}), now = () =>
       tidy();
       st.sentToday += 1;
       x.state = 'done';
-    } else if (outcome === 'offline') {
+    } else if (outcome === 'offline' || outcome === 'dry') {
       /**
        * 断线（2026-11-18）：**不算她的失败**。
        *
        * 以前 `NETWORK` 走普通失败分支，`attempts + 1`，3 分钟（3 次 drain）
        * 就把队列清空——断一次网，攒了一天的素材全丢，恢复后什么也没有。
        * 这里保持 `pending`、不计 attempt；超过 TTL 24h 才自然过期。
+       *
+       * `dry`（试运行，2026-11-18 复查）同理：`take()` 已经把状态置成
+       * `inflight`，不结算就会**永远卡在那儿**（`tidy()` 只清 done/dropped/过期），
+       * 比标成 sent 还糟。回到 `pending`、不计 attempt，关掉试运行接着发。
        */
       x.state = 'pending';
     } else {
@@ -437,6 +441,21 @@ export function createProactiveDispatcher({
       /** 断线单独结算：不计 attempt，别让一次断网把攒的素材全丢掉 */
       queue.settle(item.id, e?.code === 'NETWORK' ? 'offline' : 'failed', String(e?.message ?? e).slice(0, 150));
       return { ok: false, sent: 0, why: String(e?.message ?? e) };
+    }
+    if (r?.ok && r.text && r.dryRun) {
+      /**
+       * 试运行：**素材不消费**（2026-11-18 复查）。
+       *
+       * 标成 `sent` 会让它从待发里消失，用户关掉试运行后就没东西可发了；
+       * 结算成 `dry` 则回到 `pending`、不计 attempt（见 `settle`）。
+       * 代价是下一轮定时 drain 还会再预览一次——这是 §5.4「试运行期间定时
+       * 行为照跑」的一部分，换来的是「关掉试运行接着发」。
+       */
+      queue.settle(item.id, 'dry', '试运行，没真发（素材留着）');
+      return {
+        ok: true, sent: 0, id: item.id, text: r.text, dryRun: true,
+        why: '试运行，没真发（素材留着）',
+      };
     }
     if (r?.ok && r.text) {
       queue.settle(item.id, 'sent');

@@ -302,3 +302,98 @@ test('试运行：缺省（不传 dryRunOf）行为完全不变', async () => {
   assert.equal(r.dryRun, undefined, '没开试运行就不该带这个标记');
   assert.equal(calls.length, 1);
 });
+
+/* ---------------- 总开关：在途那一轮也要拦 ---------------- */
+
+/**
+ * `judge()` 拦新消息，`sendOut()` 拦主动发送，两者都盖不住「模型已经在跑、
+ * 主人才把总开关关掉」——那一轮跑完仍会走到 `send`，把话发出去。
+ *
+ * 这条测的就是那个时间窗：只判总开关、不判试运行；返回 `ok:false`，
+ * 因为关掉期间不该写记忆 / 日记 / 惦记。
+ */
+test('总开关：关着时连被动回复也不发，且不带 ok', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm1' }; } };
+  let off = true;
+  const ch = createRoostHostChannel({
+    host, markdownEnabled: () => false, masterOffOf: () => off, log: () => {},
+  });
+
+  /** 被动回复形态：这条不经过 `sendOut`，是 `judge()` 之后才关的开关 */
+  const r = await ch.send({ target: 'u9', text: '在呢', msgId: 'm_7' });
+  assert.equal(r.ok, false, 'ok 必须为假：关掉期间不记账');
+  assert.equal(r.code, 'disabled', '上游靠这个 code 区分「没发」和「发失败」');
+  assert.deepEqual(calls, [], '总开关关着不许打任何 rpc');
+
+  /** 带静默的也一样：`gate.silence` 是服务端状态，关着时不该改 */
+  await ch.send({ target: 'u9', text: '', silenceMs: 60_000 });
+  assert.deepEqual(calls, [], '总开关关着也不许设静默');
+
+  off = false;
+  const r2 = await ch.send({ target: 'u9', text: '在呢', msgId: 'm_7' });
+  assert.equal(r2.ok, true);
+  assert.equal(calls.length, 1, '开关一开立刻恢复，不用重启');
+  assert.equal(calls[0][0], 'msg.send');
+});
+
+test('总开关：缺省（不传 masterOffOf）不影响任何发送', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm1' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false, log: () => {} });
+  const r = await ch.send({ target: 'u9', text: '在呢' });
+  assert.equal(r.ok, true);
+  assert.equal(r.code, undefined, '没传判据就该照常发，不能平白多一个 disabled');
+  assert.equal(calls.length, 1);
+});
+
+/* ---------------- 文件 / 语音：另一条 rpc，也要判 ---------------- */
+
+/**
+ * `<<file:>>` / `<<image>>` / `<<voice:>>` / `<<say>>` 走的是 `media.send`，
+ * 不经过上面的 `send`。只拦 `send` 的后果是「试运行开着、文件语音照样真发」，
+ * 以及「总开关关着、在途那一轮的附件照样出去」。
+ */
+test('试运行 / 总开关：文件和语音同样拦在 rpc 之前', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm1' }; } };
+  let dry = false;
+  let off = false;
+  const ch = createRoostHostChannel({
+    host, markdownEnabled: () => false,
+    dryRunOf: () => dry, masterOffOf: () => off, log: () => {},
+  });
+
+  /** 正常：两条都真打 media.send */
+  assert.equal((await ch.sendFile({ target: 'u9', path: '/tmp/a.pdf' })).ok, true);
+  assert.equal((await ch.sendVoice({ target: 'u9', path: '/tmp/a.silk' })).ok, true);
+  assert.deepEqual(calls.map((c) => c[0]), ['media.send', 'media.send']);
+  calls.length = 0;
+
+  /** 试运行：`ok:true` 让出站动作层照常 onSent，但一条 rpc 都不打 */
+  dry = true;
+  const f = await ch.sendFile({ target: 'u9', path: '/tmp/a.pdf' });
+  assert.equal(f.ok, true, '试运行要返回 ok，否则出站动作层会记成发失败');
+  assert.equal(f.dryRun, true);
+  assert.equal(f.pending, false);
+  const v = await ch.sendVoice({ target: 'u9', path: '/tmp/a.silk' });
+  assert.equal(v.ok, true);
+  assert.equal(v.dryRun, true);
+  assert.deepEqual(calls, [], '试运行不许发文件 / 语音');
+  dry = false;
+
+  /** 总开关关：`ok:false` + `disabled`，关掉期间不留记账 */
+  off = true;
+  const f2 = await ch.sendFile({ target: 'u9', path: '/tmp/a.pdf' });
+  assert.equal(f2.ok, false);
+  assert.equal(f2.code, 'disabled');
+  const v2 = await ch.sendVoice({ target: 'u9', path: '/tmp/a.silk' });
+  assert.equal(v2.ok, false);
+  assert.equal(v2.code, 'disabled');
+  assert.deepEqual(calls, [], '总开关关着不许发文件 / 语音');
+
+  /** 开回来立刻恢复 */
+  off = false;
+  await ch.sendFile({ target: 'u9', path: '/tmp/a.pdf' });
+  assert.equal(calls.length, 1);
+});

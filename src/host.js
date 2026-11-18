@@ -32,7 +32,7 @@ import { resolvePolicy, dangerOf, BUCKETS, defaultStore } from './capabilities.j
 import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting, isOff, isOn } from './features.js';
 import { createCapabilityStore } from './capability-store.js';
 import { createExtGroups } from './ext-groups.js';
-import { createQuota, QUOTA_DEFAULTS } from './quota.js';
+import { createQuota, shouldCharge, QUOTA_DEFAULTS } from './quota.js';
 import { createSetup } from './setup.js';
 import { maxPartsOf, shouldRegisterQqTools } from './qq-tools.js';
 import { createMemory, W_EXPLICIT } from './memory.js';
@@ -1037,7 +1037,24 @@ export function apply(ctx) {
    * 配额表允许在 `config.json` 的 `quota` 段覆盖（面板会写），
    * 所以用 `defaults` 传的是**当前配置里的覆盖值**，而不是烤死的默认值。
    */
-  const quota = createQuota({ dir: dataDir(), log, defaults: () => cfg.quota || {} });
+  const quotaRaw = createQuota({ dir: dataDir(), log, defaults: () => cfg.quota || {} });
+
+  /**
+   * 试运行不扣**发送类**额度（2026-11-18 复查）。
+   *
+   * 试运行的语义是「照常跑模型、照常记账、只是不发」。`voice` / `file` 这两种
+   * 额度是「发一次扣一次」——真发的那一步已经被通道层拦住了，额度却还在扣，
+   * 于是预览几轮就把真实额度吃光，关掉试运行后她会「莫名其妙发不了了」。
+   *
+   * 哪些算「发送类」由 `quota.js` 的 `shouldCharge()` 定 —— `tool` / `memory` /
+   * `sticker` 不在其中（前两个是防失控的保护与上限，第三个只是挑选）。
+   */
+  const quota = {
+    ...quotaRaw,
+    charge: (p) => (shouldCharge(p?.feature, dryRunOn())
+      ? quotaRaw.charge(p)
+      : { ok: true, dryRun: true, message: '试运行，不扣额度' }),
+  };
 
   /**
    * DSH 的模型清单（面板「模型」页下拉的数据源）。
@@ -1738,6 +1755,24 @@ export function apply(ctx) {
         return { ok: false, message: r?.message || '没发出去', code: r?.code };
       }
       wakeNextAt = 0;
+      /**
+       * 试运行不占**官方窗口额度**（2026-11-18 复查）。
+       *
+       * `channel.send` 在试运行下返回 `ok:true`（故意的，好让上面的记忆 / 日记
+       * 记账照走）。但 `wakeLedger` 记的不是「她说过什么」，而是「这个 30 天
+       * 窗口的官方召回名额已经用掉了」——消息没发出去却占掉名额，关掉试运行
+       * 后要等下个窗口，面板还会显示「近期已召回」。所以这里单独让开。
+       *
+       * `awake.compose()` 的记账**不回滚**：试运行的语义就是记忆照写，
+       * 只有「官方额度」这种一次性资源不该被试运行消耗。
+       */
+      if (r?.dryRun) {
+        log('试运行：互动召回没真发，不占窗口额度');
+        return {
+          ok: true, dryRun: true, anchor: plan.anchor, cycle: plan.cycle, window: plan.label,
+          message: `试运行：本来会发（${plan.label}），没真发、没占额度`,
+        };
+      }
       wakeLedger.mark(plan.anchor, plan.cycle, { target: String(target).slice(0, 12) });
       return { ok: true, anchor: plan.anchor, cycle: plan.cycle, window: plan.label, message: `互动召回已发出（${plan.label}）` };
     } finally {
@@ -2397,7 +2432,18 @@ export function apply(ctx) {
   const apiV1 = createApiV1({
     dir: dataDir(), log, clientStore: extClientStore, onReject,
     hooks: {
-      agent: (a) => agentV1.handleHook(a),
+      /**
+       * `agent.prompt` 是「让她在某个独立会话里跑一轮」——会跑模型、写会话，
+       * 与面板上被 409 掉的那些按钮是同一类事，不能因为走的是扩展令牌就放行
+       * （2026-11-19 自检补）。只拦这一条：同一 hook 还管着 `agent.list` /
+       * `agent.new` / `agent.close`，那几个不跑模型，拦了会让桌面版连会话都列不出来。
+       */
+      agent: (a) => {
+        if (a?.key === 'POST /v1/agent.prompt' && masterOff()) {
+          return { status: 409, body: { ok: false, error: 'disabled', message: '总开关关着，先打开再手动触发' } };
+        }
+        return agentV1.handleHook(a);
+      },
       'llm.vision': async ({ body, client }) => {
         /**
          * `ext-llm.js` 拿 extId 当视觉会话 id。以前直接用请求体里的
@@ -3610,6 +3656,12 @@ export function apply(ctx) {
          * `/v1/message` 走 `postReply`——四条最后都掉进 `send`。
          */
         dryRunOf: () => dryRunOn(),
+        /**
+         * 总开关。`judge()` 与 `sendOut()` 之外的最后一道：盖住「模型在跑、
+         * 主人才关掉」那段在途窗口——那一轮不经过 `judge()`，也不一定经过
+         * `sendOut()`（被动回复走裸通道），只有这里能同时管住四条出站路。
+         */
+        masterOffOf: () => masterOff(),
       }),
     },
     pick: () => 'roost',
@@ -3642,6 +3694,26 @@ export function apply(ctx) {
    */
   interactionRouter.register((parsed) => {
     if (pickChannel.handle(parsed)) return true;
+    /**
+     * 总开关关着时，确认按钮**不结算**（2026-11-19 自检发现）。
+     *
+     * 按钮回调是独立入口（`deliverNoticeFromRoost` → `interactionRouter`），
+     * 不经过 `deliverFromRoost` 的 `judge()`，也不经过任何出站通道——它直接
+     * 落到 `applyConfirmedProfile` 去写平台昵称/签名/头像，是一次**对外动作**，
+     * 与 `POST /self/profile/apply` 同性质。而那条端点是 409 的，这里原来没拦。
+     *
+     * 更糟的是回执：`replyToOwner` 走 `sendOut`，同一个判据也拦着，于是
+     * 「资料真改了、主人什么都没收到」——他会以为没点上，再点一次就只剩
+     * 「这条确认已经失效了」（nonce 已摘）。
+     *
+     * 拦在 `handleInteraction` **之前**是故意的：它会先把 pending 摘掉，
+     * 之后再拦就等于「点了、请求没了、什么也没改」。提前让开，请求还挂着，
+     * 重开总开关再点一次仍然算数。
+     */
+    if (masterOff()) {
+      log.debug('总开关关着，确认按钮不结算（请求仍挂着）');
+      return true;
+    }
     const r = profileConfirm.handleInteraction(parsed);
     if (!r) return false;
     void onConfirmButton(r).catch((e) => log.warn(`[profile-confirm] 按钮结算失败：${e?.message ?? e}`));
@@ -3654,6 +3726,11 @@ export function apply(ctx) {
     /** `<<say>>` 的语音条额度按人扣；以前扣在 ai-chat 侧、拿不到 openid，所以一直没接 */
     quota,
     picks: pickChannel,
+    /**
+     * 试运行。`<<say>>` 要先扣语音条额度再调 TTS，两步都在 `channel.sendVoice`
+     * 之前——通道层拦不住，得让出站动作层自己跳过。
+     */
+    dryRunOf: () => dryRunOn(),
     log: (m) => log.warn(m),
   });
 
@@ -4027,11 +4104,20 @@ export function apply(ctx) {
       log.info(`主动消息进审核，登记等确认（${r.requestId}）`);
     }
     /**
+     * 试运行（2026-11-19 自检）：通道层把消息拦住了，可这里的记账仍按
+     * 「发出去了」往下走。**日记照写**——§5.5.2 要的就是她以为自己说过；
+     * 但下面两项不是记忆，是**行为排期**，得让开：
+     *   · `events` 是「主动说过几句」的统计，dryRun 一条都没送到；
+     *   · `closing.notePending` 记的是「问过、等他回」——他根本没收到那句，
+     *     下次开场就会变成「你怎么不回我」，那是测试模式里的假戏。
+     */
+    const delivered = Boolean(r?.ok) && r?.dryRun !== true;
+    /**
      * D8：只记**明确送到了**的主动消息。pending 还不知道会不会过审，
      * 记了就是「她以为找过你、其实没人看见」——投递账本那套教训照搬。
      * 不存正文、不存 target，只留一个动作类型（见 events.js 白名单）。
      */
-    if (r?.ok && !r.pending && cfg.events?.enabled === true) {
+    if (delivered && !r.pending && cfg.events?.enabled === true) {
       events.push({ kind: 'proactive', scene: payload?.scene });
     }
     /**
@@ -4039,7 +4125,7 @@ export function apply(ctx) {
      * 进审核（pending）不记——还没确定送到，记了又是「她以为问过、其实没人看见」；
      * 只私聊，群里不惦记谁没回。判问句复用 closing.js 的纯函数，不另写一份。
      */
-    if (shouldNotePending({ ok: r?.ok, pending: r?.pending, scene: payload?.scene, text: payload?.text })) {
+    if (delivered && shouldNotePending({ ok: r?.ok, pending: r?.pending, scene: payload?.scene, text: payload?.text })) {
       closing.notePending(payload?.target, payload.text);
     }
     /**
@@ -4283,6 +4369,14 @@ export function apply(ctx) {
    * 只有拿到明确终态才记账（见 `src/delivery.js` 的 `nextState`）。
    */
   const deliveryTick = () => {
+    /**
+     * 总开关关着 / 断线冷却中不查（2026-11-19 自检补）。
+     *
+     * 这一步只是「问框架那条消息到底送没送到」，不发新消息，所以最初漏了它。
+     * 但它每 10 分钟真打一次 `delivery.get` —— 关掉之后不该再往框架上打，
+     * 而旧账也不会烂掉：开回来的下一轮（≤10 分钟）照常结。
+     */
+    if (paused()) return;
     deliveryTrack
       .resolve({ limit: 10 })
       .then((r) => {
@@ -6972,6 +7066,16 @@ export function apply(ctx) {
       try {
         const c = cfg.autotelic || {};
         if (c.enabled !== true || Number(c.heartbeatMin) <= 0) return;
+        /**
+         * 总开关关着 / 断线冷却中不跑（2026-11-19 自检补）。
+         *
+         * **这是最容易漏的一处**：`autotelic` 是唯一「没人叫她、她自己决定
+         * 要做事」的模块，`tick()` 里会建会话、跑模型，`allowAct` 开着时
+         * 还能真调工具。它自带 `enabled` 开关，看着像「已经管住了」——
+         * 但那是**另一个**开关，与总开关不是一回事；两个都开着时，
+         * 关掉总开关她照样在后台自己立项、自己推进。
+         */
+        if (paused()) return;
         autotelic.tick().catch((e) => log.warn(`自驱心跳失败：${e?.message || e}`));
       } catch (e) {
         log.warn(`自驱心跳异常：${e?.message || e}`);
@@ -9365,6 +9469,13 @@ export function apply(ctx) {
             hour: Number(cfg.memory?.consolidateHour) || 4,
           });
         }
+        /**
+         * 总开关关着时**不手动补跑**（2026-11-19 定）。
+         *
+         * GET 只报状态，照常；补跑会跑模型、写记忆，与「关了就是全停」冲突。
+         * 凌晨漏了想补，先打开总开关，补完再关。
+         */
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
         const body = await readBody(req);
         const r = await consolidate.run({ day: String(body?.day || ''), dry: Boolean(body?.dry) });
         return send(res, 200, r);
@@ -9798,12 +9909,15 @@ export function apply(ctx) {
       }),
 
       /**
-       * 真发一篇。
+       * 发一篇。
        *
        * 两种用法：
        *   · 带 `{ title, text }` —— 面板预览过、用户点"真发"的那一篇（原样发，不重新生成）；
        *   · 不带 —— 现生成一篇再发（`write({ force: true })`）。
        * 两种都走同一个 `sendDraft`，所以历史里都会有记录。
+       *
+       * 这里的 `force` **只覆盖短记自己的** `channelPost.dryRun`；全局「试运行」
+       * 是 `publish()` 里 `dryRunOf()` 那一路，穿不过去（2026-11-18 复查确认）。
        */
       route('/channel/post/send', async (req, res) => {
         if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
@@ -10264,6 +10378,14 @@ export function apply(ctx) {
        */
       route('/self/profile/apply', async (req, res) => {
         if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        /**
+         * 总开关关着时不改（2026-11-19 定）。
+         *
+         * 这一处最容易觉得「主人自己按的，凭什么拦」——但改资料会打到 QQ 平台，
+         * 属于「对外动作」。全停就该是全停，不留「这个按钮例外」的口子；
+         * 要改先打开总开关，改完再关，只多两步。
+         */
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再改资料' });
         const body = await readBody(req);
         const kind = String(body?.kind || '').trim();
         const value = String(body?.value ?? '').trim();
@@ -10458,6 +10580,8 @@ export function apply(ctx) {
        * 光靠前端弹窗拦不住。内部会自动先整文件备份，失败自动回退。
        */
       route('/account/rewrite', async (req, res) => {
+        /** 总开关关着时不动账号数据（2026-11-19 定）：它改文件、重启存储，是重活 */
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
         const body = await readBody(req);
         const r = await rewriter.apply(body);
         const status = r.ok ? 200 : r.code === 'CONFIRM_REQUIRED' ? 400 : 409;
@@ -10781,6 +10905,8 @@ export function apply(ctx) {
         const body = await readBody(req);
         const target = String(body?.chatId || chatId);
         if (!target) return send(res, 400, { ok: false, message: '缺 chatId' });
+        /** 总开关关着时不手动压（2026-11-19 定）：压缩会跑模型重写上下文。GET 看占用不拦 */
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
         const r = await compact.compact(target, {
           kind: lastScene?.kind,
           name: lastScene?.name,
@@ -11064,6 +11190,8 @@ export function apply(ctx) {
         const body = await readBody(req).catch(() => ({}));
         const text = String(body?.text ?? '');
         if (!text.trim()) return send(res, 400, { ok: false, reason: '这段是空的，没什么可改' });
+        /** 总开关关着时不润色（2026-11-19 定）：润色要调模型，属「关了全停」范围 */
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再润色' });
 
         const id = String(body?.id ?? '').trim();
         const p = id ? personas.read(id) : null;
@@ -11241,11 +11369,15 @@ export function apply(ctx) {
       }),
 
       route('/autotelic/think', async (req, res) => {
+        /** 总开关关着时不动脑（2026-11-19 自检补）：`think()` 会写立项、动账本 */
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
         const r = autotelic.think({ manual: true });
         return send(res, r.ok ? 200 : 409, r);
       }),
 
       route('/autotelic/step', async (req, res) => {
+        /** 同上：`step()` 会建会话跑模型，`allowAct` 开着还能真调工具 */
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
         const r = await autotelic.step({ manual: true });
         return send(res, r.ok ? 200 : 409, r);
       }),

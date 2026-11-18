@@ -416,3 +416,22 @@ export function createQuota({ dir, log = () => {}, now = () => Date.now(), defau
 
   return { charge, usage, reset, table };
 }
+
+/**
+ * 「真发出去才算一次」的额度。试运行不发消息，这几种就不该扣。
+ *
+ * 为什么只有这两种：`tool` 是防模型死循环调工具的闸、`memory` 是每轮写记忆
+ * 的上限、`sticker` 是「挑选」次数——三者与「发不发到 QQ」无关，试运行照样
+ * 要算，否则试运行会变成绕过保护和上限的后门。
+ */
+export const SEND_QUOTA_FEATURES = Object.freeze(['voice', 'file']);
+
+/**
+ * 这一笔额度该不该真的扣。`dryRun` 由调用方热读（宿主 `isOn(cfg.dryRun)`）。
+ *
+ * @param {string} feature  `voice` / `file` / `tool` / `memory` / `sticker`
+ * @param {boolean} dryRun  当前是否试运行
+ */
+export function shouldCharge(feature, dryRun) {
+  return !(dryRun === true && SEND_QUOTA_FEATURES.includes(String(feature || '')));
+}

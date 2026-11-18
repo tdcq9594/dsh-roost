@@ -370,8 +370,18 @@ export function createSpeakUp({ dataDir, cfgOf, ownerOf, generate, send, log = (
       }
       state.lastBotAt = Date.now();
       state.lastText = text.slice(0, 100);
-      state.todayCount = (state.day === new Date().toDateString() ? state.todayCount : 0) + 1;
-      state.day = new Date().toDateString();
+      /**
+       * 今天的次数：**试运行不算**（2026-11-18 复查）。话没真发出去，却把
+       * `maxPerDay` 的名额吃掉，预览几次就「今天已经说过了」——和 `voice` /
+       * `file` 额度是同一个道理。
+       *
+       * `unanswered` / `lastBotAt` 仍照写：「以为说过、没人回」是方案 §5.5.2
+       * 明确要的试运行观感（记忆与惦记照写，只有真发那一步被跳过）。
+       */
+      if (!r?.dryRun) {
+        state.todayCount = (state.day === new Date().toDateString() ? state.todayCount : 0) + 1;
+        state.day = new Date().toDateString();
+      }
       state.nextAt = scheduleNext(cfg);
       /**
        * 「说完这句，让我静静」——两个动作可以同时发生。
@@ -385,7 +395,12 @@ export function createSpeakUp({ dataDir, cfgOf, ownerOf, generate, send, log = (
       save();
 
       log(`主动找主人说话了（${reason}）：${text.slice(0, 40)}`);
-      return { ok: true, text };
+      /**
+       * `dryRun` 要**透传出去**：扩展主动（`ext-proactive.drain`）靠它决定
+       * 素材算不算「已发」——试运行把队列里的素材标成 sent，用户关掉试运行
+       * 后就没东西可发了。
+       */
+      return { ok: true, text, ...(r?.dryRun ? { dryRun: true } : {}) };
     } catch (e) {
       log(`主动搭话失败：${e?.message ?? e}`);
       // 失败了也排下一次，不然会每分钟重试一次

@@ -908,7 +908,12 @@ export function createAwake({
         // 「说完这句，让我静静」——群主动也认这个标记
         silenceMs: v.silenceMs || 0,
       });
-      if (r?.ok) {
+      /**
+       * 试运行不算「在这个群说了一次」（2026-11-18 复查）。`count` 是每群每天的
+       * 主动额度，话没真发出去却占掉它，预览几次这个群今天就不能再主动了。
+       * 与 `speakup` 的 `todayCount`、`quota` 的 `voice`/`file` 同一个道理。
+       */
+      if (r?.ok && !r?.dryRun) {
         const today = dayKey(now());
         const g = state.groups[cand.chatId] || {};
         state.groups[cand.chatId] = {
@@ -923,6 +928,8 @@ export function createAwake({
         };
         save();
         log(`在群 ${cand.name} 主动说了话（${v.kind}）：${v.text.slice(0, 40)}`);
+      } else if (r?.dryRun) {
+        log(`试运行：本来要在群 ${cand.name} 说一句（${v.kind}），没真发`);
       } else if (r?.code === 'quota') {
         /**
          * 这个群的主动额度今天用完了，等跨天。
@@ -950,9 +957,10 @@ export function createAwake({
          * 必须长得不一样，否则人会把一条可能被驳的消息当成已经送达。
          */
         pending: Boolean(r?.pending),
-        why: r?.ok ? (r?.pending ? '说了（等审核）' : '说了') : r?.message,
+        why: r?.ok ? (r?.dryRun ? '试运行，没真发' : (r?.pending ? '说了（等审核）' : '说了')) : r?.message,
         kind: v.kind,
         text: r?.ok ? v.text : '',
+        ...(r?.dryRun ? { dryRun: true } : {}),
       });
     }
     return results;

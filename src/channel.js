@@ -194,14 +194,20 @@ function fileTypeOfName(p) {
  * @param {object} o
  * @param {object} o.host  `createRoostHost()` 的实例（要有 rpc）
  * @param {(m:string)=>void} [o.log]
- * @param {()=>boolean} [o.dryRunOf]  试运行开关（宿主注入，热读）
+ * @param {()=>boolean} [o.dryRunOf]     试运行开关（宿主注入，热读）
+ * @param {()=>boolean} [o.masterOffOf]  总开关是否关着（宿主注入，热读）
  */
-export function createRoostHostChannel({ host, log = () => {}, markdownEnabled = true, dryRunOf = () => false } = {}) {
+export function createRoostHostChannel({
+  host, log = () => {}, markdownEnabled = true,
+  dryRunOf = () => false, masterOffOf = () => false,
+} = {}) {
   if (!host?.rpc) throw new Error('roost 通道需要 createRoostHost 实例');
   /** 旧 ai-chat 面板的 `markdown` 开关；热读，面板关掉下一轮就生效 */
   const wantMarkdown = () => (typeof markdownEnabled === 'function' ? markdownEnabled() : markdownEnabled);
   /** 试运行；宿主那侧是 `() => isOn(cfg.dryRun)`，这里只管调 */
   const isDry = () => dryRunOf() === true;
+  /** 总开关；宿主那侧是 `() => isOff(cfg.enabled)` */
+  const isMasterOff = () => masterOffOf() === true;
 
   return {
     name: 'roost',
@@ -284,6 +290,21 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
       const rid = String(requestId || '').trim()
         || `rh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
+      /**
+       * 总开关（2026-11-18 复查补上）。`judge()` 只拦**新进来的消息**，
+       * `sendOut()` 只拦**主动**发送；两个都盖不住「模型已经在跑、主人才
+       * 关掉开关」这条：那一轮跑完仍会走到这里，把话发出去。总开关说的是
+       * 关掉就是关掉，这个时间窗（几秒到几十秒）也得堵。
+       *
+       * 返回 `ok:false` 而不是像试运行那样 `ok:true`——关掉期间不该留下任何
+       * 记账（记忆 / 日记 / 惦记），对应 §5.4 矩阵里 `enabled=❌` 那一行。
+       * 位置与试运行相邻：都在 `rid` 之后、`gate.silence` 之前，不打点、
+       * 不改任何服务端状态。
+       */
+      if (isMasterOff()) {
+        log(`总开关关着：本来要发到 ${scene}/${target}，已拦下`);
+        return { ok: false, code: 'disabled', message: '总开关关着，这条没发' };
+      }
       /**
        * 试运行：模型照跑、记忆照写，消息**不真的发**。
        *
@@ -401,6 +422,16 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
     async sendTyping({ scene = 'c2c', target } = {}) {
       if (scene === 'group') return { ok: false, message: '群聊没有「正在输入」' };
       if (!target) return { ok: false, message: '缺 target' };
+      /**
+       * 总开关 / 试运行（2026-11-19 自检补）。
+       *
+       * 调用点在入站路径上，`judge()` 已经把总开关关着时的消息挡住了，正常
+       * 走不到这里。但它和 `sendFile` / `sendVoice` 一样**直接打 rpc、不经过
+       * `send`**，留个没判据的入口迟早被别处调用；而且「正在输入」闪一下
+       * 然后一个字都没有，比什么都不做更让人困惑。
+       */
+      if (isMasterOff()) return { ok: false, code: 'disabled', message: '总开关关着' };
+      if (isDry()) return { ok: true, dryRun: true, pending: false };
       try {
         return await host.rpc('msg.typing', { chatId: String(target) });
       } catch (e) {
@@ -415,6 +446,19 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
      */
     async sendVoice({ scene = 'c2c', target, path: p = '', dataBase64 = '', fileName = '', msgId = '', receivedAt = 0, eventId = '', isWakeup = false } = {}) {
       if (!target || (!p && !dataBase64)) return { ok: false, message: '缺 target 或音频' };
+      /**
+       * 总开关 / 试运行（2026-11-18 复查补上）。`<<voice:>>` 与 `<<say>>`
+       * 同 `sendFile` 一样直接打 `media.send`，不经过 `send`——不判就出现
+       * 「试运行只拦住文字、语音照发」。返回值形状与 `send` 对齐。
+       */
+      if (isMasterOff()) {
+        log(`总开关关着：本来要发语音到 ${scene}/${target}，已拦下`);
+        return { ok: false, code: 'disabled', message: '总开关关着，这条语音没发' };
+      }
+      if (isDry()) {
+        log(`试运行：本来要发语音到 ${scene}/${target}，已拦下`);
+        return { ok: true, id: '', pending: false, dryRun: true };
+      }
       try {
         const r = await host.rpc('media.send', {
           scene: scene === 'group' ? 'group' : 'c2c',
@@ -482,6 +526,22 @@ export function createRoostHostChannel({ host, log = () => {}, markdownEnabled =
       if (!p) return { ok: false, message: '缺 path' };
       const rid = String(requestId || '').trim()
         || `rf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      /**
+       * 总开关 / 试运行（2026-11-18 复查补上）。
+       *
+       * `<<file:>>` 与 `<<image>>` 走的是**另一条 rpc**（`media.send`），
+       * 不经过上面的 `send`——于是「试运行开着、文件照样真发到 QQ」。
+       * 两条判据与 `send` 同形：总开关 → `ok:false` 不记账；试运行 →
+       * `ok:true` 让出站动作层照常 `onSent()`，只有落 QQ 那一步被跳过。
+       */
+      if (isMasterOff()) {
+        log(`总开关关着：本来要发文件到 ${scene}/${target}，已拦下`);
+        return { ok: false, code: 'disabled', message: '总开关关着，这个文件没发' };
+      }
+      if (isDry()) {
+        log(`试运行：本来要发文件 ${p} 到 ${scene}/${target}，已拦下`);
+        return { ok: true, id: '', pending: false, requestId: rid, dryRun: true };
+      }
       try {
         const r = await host.rpc('media.send', {
           scene: scene === 'group' ? 'group' : 'c2c',

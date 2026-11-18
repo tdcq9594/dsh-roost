@@ -328,7 +328,12 @@ export function parseOutboundActions(raw) {
  *                                  没注入时 `<<pick:>>` 只摘掉不发按钮——纯加法，不产生孤儿回调
  * @param {(m:string)=>void} [o.log]
  */
-export function createActionRunner({ channel, tts = null, quota = null, picks = null, onPick = null, log = () => {} } = {}) {
+export function createActionRunner({
+  channel, tts = null, quota = null, picks = null, onPick = null, log = () => {},
+  dryRunOf = () => false,
+} = {}) {
+  /** 试运行：正文 / 文件 / 语音的发送在通道层已经拦了，这里只管**发送之前**那几步 */
+  const isDry = () => dryRunOf() === true;
   /** chatId → { id, kind, at } */
   const lastSent = new Map();
   /** `chatId|type|value` → at */
@@ -520,6 +525,21 @@ export function createActionRunner({ channel, tts = null, quota = null, picks = 
       if (a.type === 'imageAlone' && !IMAGE_EXT.test(a.value.split(/[?#]/)[0])) continue;
       if (a.type === 'voice' && !VOICE_EXT.test(a.value.split(/[?#]/)[0])) continue;
       if (seen(target, a.type, a.value)) continue;
+      /**
+       * 试运行：`<<say>>` 在真正发送之前还有两步副作用——按人扣语音条额度
+       * （落盘 `quota.json`）、调 TTS 合成（配了云端就要钱）。通道层只拦得住
+       * 「发出去」，这两步都在 `sendVoice` 之前，所以必须在这里提前让开。
+       *
+       * 仍然记一条 `mediaSent` + `onSent()`：试运行的语义是「记忆照写、只是
+       * 不打扰人」，和正文那条口径一致。`<<voice:>>` / `<<image>>` 不用这一步，
+       * 它们发送前的动作就是读本地文件，通道层已经拦住了。
+       */
+      if (a.type === 'say' && isDry()) {
+        log(`试运行：本来要念「${a.value}」，已拦下（不合成、不扣额度）`);
+        mediaSent += 1;
+        onSent();
+        continue;
+      }
       try {
         let sent = null;
         if (a.type === 'imageAlone' && typeof ch.sendFile === 'function') {

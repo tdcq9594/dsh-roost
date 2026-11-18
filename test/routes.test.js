@@ -1886,6 +1886,45 @@ test('总开关：关着时七个手动入口一律 409，GET 看状态照常', 
 });
 
 /**
+ * 手动「补跑」类端点（2026-11-19）。
+ *
+ * 这五个不是「干活的按钮」而是「维护工具」——巩固、压缩、人格润色、改资料、
+ * 合并账号键。它们都会跑模型或改数据文件，所以与上面七个同规格：关着就 409。
+ * 曾经的判断是「面板读写照常可用」，主人否了：关掉就是全关，不留例外按钮。
+ *
+ * 只读那一半照常——`GET /consolidate` 看上次跑没跑、`GET /compact` 看窗口
+ * 占用，正是「关了为什么还没动」的解释界面，拦了就没地方看。
+ */
+test('总开关：关着时七个维护端点也 409，只读的 GET 照常', async () => {
+  const { call, off } = await bootHost({ enabled: false });
+  try {
+    /** 带最小合法 body：这些路由把参数校验放在前面，空体会先吃 400 */
+    const posts = [
+      ['/consolidate', {}],
+      ['/compact', { chatId: 'g1' }],
+      ['/personas/polish', { text: '一段要润色的话' }],
+      ['/self/profile/apply', { kind: 'sign', value: '签名' }],
+      ['/account/rewrite', {}],
+      /** 自驱的两个手动按钮：一个写立项、一个建会话跑模型（2026-11-19 自检补） */
+      ['/autotelic/think', {}],
+      ['/autotelic/step', {}],
+    ];
+    for (const [p, body] of posts) {
+      const r = await call(p, { method: 'POST', body });
+      assert.equal(r.status, 409, `${p} 在总开关关着时该 409`);
+      assert.match(r.json.message, /总开关/, `${p} 要说清是总开关`);
+    }
+
+    for (const p of ['/consolidate', '/compact', '/autotelic/status', '/autotelic/review']) {
+      const g = await call(p);
+      assert.equal(g.status, 200, `${p} 的 GET 只是看状态，不该被拦`);
+    }
+  } finally {
+    off?.();
+  }
+});
+
+/**
  * 两个开关走的是「能力」页同一个接口，页头只是另一个入口。
  * `dryRun` 的默认值是 `false`，`features.js` 里写漏 `default:false` 的话，
  * 这里会变成 `true`（`readFeatures` 把 undefined 当开）——所以这条值钱。
@@ -1934,25 +1973,163 @@ test('features.patch：没有这个开关就 400，不许静默通过', async ()
  * 那种回归在行为测试里根本看不见（原来的定时器也不会跑）。
  * 逐个对名字定位到那一行，断言同一个包装里调了 `paused()`。
  */
-test('全停：六个定时器 + 两个启动补跑都挂了 paused() 判据', async () => {
+test('全停：八个定时器 + 两个启动补跑都挂了 paused() 判据', async () => {
   const { readFileSync } = await import('node:fs');
   const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   const lines = host.split('\n');
+  /**
+   * 每个 key 的判据可能隔几行（有的中间夹着 `try` 或注释），窗口按 key 给，
+   * 不搞一刀切：窗口开太大反而容易把**别的**定时器里的 `paused()` 认成自己的。
+   */
   const need = [
-    'const speakTimer = setInterval(',
-    'const wakeTimer = setInterval(',
-    'const proactiveTimer = setInterval(',
-    'const groupTimer = setInterval(',
-    'const postTimer = setInterval(',
-    'const consolidateTimer = setInterval(',
-    'const postBoot = setTimeout(',
-    'const consolidateBoot = setTimeout(',
+    ['const speakTimer = setInterval(', 2],
+    ['const wakeTimer = setInterval(', 2],
+    ['const proactiveTimer = setInterval(', 4],
+    ['const groupTimer = setInterval(', 3],
+    ['const postTimer = setInterval(', 2],
+    ['const consolidateTimer = setInterval(', 2],
+    ['const postBoot = setTimeout(', 2],
+    ['const consolidateBoot = setTimeout(', 2],
+    /**
+     * 这两个是 2026-11-19 自检补的：前者是 `autotelic` 自驱心跳（唯一
+     * 「她自己决定要做事」的模块，自带 `enabled` 开关，最容易以为已经管住），
+     * 后者是投递回查（只问「送到没」，不发新消息，所以最初漏了）。
+     * 两个判据前面都写了多行注释，窗口得放宽。
+     */
+    ['const t = setInterval(() => {', 14],
+    ['const deliveryTick = () => {', 14],
   ];
-  for (const key of need) {
+  for (const [key, span] of need) {
     const i = lines.findIndex((l) => l.includes(key));
     assert.ok(i >= 0, `没找到 ${key}，正则/变量名可能改了`);
-    /** 多行回调的判据在下一行，所以看这个小窗口，不只看那一行 */
-    const block = lines.slice(i, i + 4).join('\n');
+    const block = lines.slice(i, i + span).join('\n');
     assert.ok(block.includes('paused()'), `${key} 少了 paused() 判据——总开关关着或断线时它还会跑`);
   }
+
+  /**
+   * `paused()` 必须是「总开关 **或** 断线冷却」。少了后半个，定时器在断线时
+   * 还是会一轮轮空转烧模型（方案 §5.8.2 的核心）。这条防的是「有人觉得
+   * 冷却多余，把 `|| offlineCooling()` 删了」——行为测试看不出来，因为
+   * 定时器最短也要 60 秒才跑一次。
+   */
+  const pausedDef = lines.find((l) => l.includes('const paused = '));
+  assert.ok(pausedDef, '没找到 paused 定义');
+  assert.match(pausedDef, /masterOff\(\)/, 'paused 要含总开关');
+  assert.match(pausedDef, /offlineCooling\(\)/, 'paused 要含断线冷却，否则断线时定时器空转');
+  const coolDef = lines.find((l) => l.includes('const offlineCooling = '));
+  assert.ok(coolDef, '没找到 offlineCooling 定义');
+  assert.match(coolDef, /120_000/, '冷却窗口按 §5.8.2 是 2 分钟');
+});
+
+/**
+ * 试运行的副作用：**不能消耗一次性资源**。
+ *
+ * 通道层拦得住「发出去」，拦不住发送之前的记账——额度扣减、官方召回窗口占用
+ * 都在 `send` 之前发生。这两条都是源码级：单测 `shouldCharge` 绿了，接线丢了
+ * 照样绿；`wakeLedger.mark` 要真跑一轮召回才看得见，而那一轮要模型 + 主人 id。
+ */
+test('试运行：不扣发送类额度、不占用官方召回窗口（源码级接线）', async () => {
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+
+  /** quota 必须被包一层，把 `shouldCharge` 接上 */
+  assert.match(
+    host,
+    /charge: \(p\) => \(shouldCharge\(p\?\.feature, dryRunOn\(\)\)/,
+    'quota 的 charge 包装没接上 shouldCharge：试运行会照扣 voice / file 额度',
+  );
+
+  /**
+   * `wakeLedger.mark` 必须在 `r?.dryRun` 分支**之后**。
+   * 顺序写反的话，试运行点「走一次」会占掉这个 30 天窗口的官方名额，
+   * 关掉试运行后要等下个窗口——而消息根本没发出去。
+   */
+  const lines = host.split('\n');
+  const markIdx = lines.findIndex((l) => l.includes('wakeLedger.mark(plan.anchor'));
+  assert.ok(markIdx > 0, '没找到 wakeLedger.mark，代码结构可能改了');
+  const before = lines.slice(Math.max(0, markIdx - 16), markIdx).join('\n');
+  assert.match(before, /r\?\.dryRun/, '试运行必须先于 wakeLedger.mark 让开，否则白占一次官方召回额度');
+});
+
+/**
+ * 试运行：`sendOut` 里的**行为排期**要让开，日记要让路相反。
+ *
+ * `channel.send` 拦下消息、返回 `{ok:true, dryRun:true}`，所以 `sendOut` 后面
+ * 那串 `r?.ok` 判断会全部成立。不区分的话，预览一轮就：
+ *   · 记一条「主动说过话」的统计（她一句也没说出去）
+ *   · 记一条「问过、等他回」（他没收到，下次开场变成「你怎么不回我」）
+ * 而日记**必须照写**——§5.5.2 要的就是她以为自己说过。
+ */
+test('试运行：sendOut 的事件统计与「等他回」让开，日记照写', async () => {
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const lines = host.split('\n');
+
+  const defIdx = lines.findIndex((l) => l.includes('const delivered = Boolean(r?.ok)'));
+  assert.ok(defIdx > 0, '没找到 delivered 判据——试运行会照记「主动说过」');
+
+  const eventsIdx = lines.findIndex((l) => l.includes("events.push({ kind: 'proactive'"));
+  const closingIdx = lines.findIndex((l, i) => l.includes('closing.notePending(') && i > eventsIdx);
+  const journalIdx = lines.findIndex((l, i) => l.includes('journalAdd(') && i > closingIdx);
+  assert.ok(eventsIdx > 0 && closingIdx > eventsIdx && journalIdx > closingIdx, '记账点改名了，测试要跟着改');
+
+  assert.match(lines[eventsIdx - 2] + lines[eventsIdx - 1], /delivered/, 'events 统计没让开试运行');
+  assert.match(lines[closingIdx - 1] + lines[closingIdx], /delivered/, 'notePending 没让开试运行——他会收到「你怎么不回我」');
+  /** 日记仍按 r?.ok：试运行要留下「她以为说过」的痕迹 */
+  assert.doesNotMatch(lines.slice(journalIdx - 3, journalIdx).join('\n'), /delivered/,
+    '日记不能跟着让开：§5.5.2 要的就是 she thinks she said it');
+});
+
+/**
+ * 确认按钮（2026-11-19 自检）。
+ *
+ * 按钮回调是**第三条入口**：`deliverNoticeFromRoost` → `interactionRouter`，
+ * 既不经过 `deliverFromRoost` 的 `judge()`，也不经过任何出站通道——它直接落到
+ * `applyConfirmedProfile` 去写平台昵称/签名/头像。原来这里没判总开关，于是
+ * 「关着点确认」仍会真的改资料；而回执走 `sendOut`（同一个判据拦着），
+ * 主人什么都收不到，会以为没点上、再点一次只剩「已失效」。
+ *
+ * 顺序也是断言的一部分：`handleInteraction` 会先把 pending 摘掉，判据放在
+ * 它之后等于「点了、请求没了、什么也没改」。
+ */
+test('总开关：确认按钮在 handleInteraction 之前让开（否则关着也改资料）', async () => {
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const lines = host.split('\n');
+
+  const regIdx = lines.findIndex((l) => l.includes('interactionRouter.register('));
+  assert.ok(regIdx > 0, '没找到 interactionRouter.register，代码结构可能改了');
+  const block = lines.slice(regIdx, regIdx + 30).join('\n');
+
+  const gate = block.indexOf('if (masterOff())');
+  const settle = block.indexOf('profileConfirm.handleInteraction(parsed)');
+  assert.ok(gate > 0, '按钮回调没判总开关：关着点确认仍会写平台资料');
+  assert.ok(settle > 0, '没找到 handleInteraction 调用，代码结构可能改了');
+  assert.ok(gate < settle, '判据必须在 handleInteraction 之前——它先摘 pending，之后再拦等于白点');
+});
+
+/**
+ * 扩展那条暗门（2026-11-19 自检）。
+ *
+ * `/v1` 是给扩展和桌面版用的，不经过面板那套 409。其中 `POST /v1/agent.prompt`
+ * 就是「让她跑一轮」——与面板上被拒的按钮完全同一类事。不拦的话，关掉总开关
+ * 之后扩展照样能让她跑模型、写会话。
+ *
+ * 只能做源码级：`/v1` 由收消息服务那条 effect 挂载，而测试里那条被跳过了
+ * （否则会 bind 端口）。断言两件事——判了 key、判了 masterOff。
+ */
+test('总开关：扩展 /v1/agent.prompt 也拒绝，agent.list 不受影响', async () => {
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+
+  assert.match(
+    host,
+    /a\?\.key === 'POST \/v1\/agent\.prompt' && masterOff\(\)/,
+    '扩展的 agent.prompt 没判总开关：关掉之后扩展照样能让她跑模型',
+  );
+  assert.match(
+    host,
+    /return agentV1\.handleHook\(a\)/,
+    '同一 hook 还要放行 agent.list / agent.new / agent.close，不能整条拒掉',
+  );
 });

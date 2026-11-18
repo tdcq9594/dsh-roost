@@ -363,3 +363,28 @@ test('drain：普通失败照旧计 attempt', async () => withDir(async (dir) =>
   assert.equal(Number(queue._raw().items[0]?.attempts || 0), 1);
   assert.equal(queue.state().history[0].outcome, 'failed');
 }));
+
+/**
+ * 试运行（2026-11-18 复查）：`speakUp.fire` 会带动 `dryRun`。
+ * 素材**不能**结算成 sent —— 那会把它从待发里摘掉，用户关掉试运行后
+ * 就没东西可发了；也不该计 attempt，试运行不是「发失败」。
+ */
+test('drain：试运行不消费素材、不占今日条数、不烧 attempt', async () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item());
+  const { d, sp } = makeDispatcher(queue, {
+    result: { ok: true, text: '预览效果', dryRun: true },
+  });
+
+  const r = await d.drain();
+  assert.equal(r.ok, true);
+  assert.equal(r.sent, 0, '试运行不算发出');
+  assert.equal(r.dryRun, true);
+  assert.equal(sp.calls.length, 1, '预览要真的跑一轮，让主人看到她会怎么说');
+
+  assert.equal(queue.state().queued, 1, '素材要留着，关掉试运行接着发');
+  assert.equal(queue.state().sentToday, 0, '试运行不占今天的条数');
+  const it = queue._raw().items.find((x) => x.state === 'pending');
+  assert.ok(it, '状态仍是 pending');
+  assert.equal(it.attempts || 0, 0, '试运行不计 attempt，别烧 MAX_ATTEMPTS');
+}));

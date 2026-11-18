@@ -864,3 +864,27 @@ test('dayKey / asHHMM 基本形状', () => {
   assert.equal(asHHMM(600), '10:00');
   assert.equal(asHHMM(1439), '23:59');
 });
+
+/**
+ * 面板「真发一篇」传 `force: true`，但它只把**短记自己的** `dryRun` 顶掉；
+ * `publish()` 里 `isDry` 的第二个分支 `dryRunOf()` 是全局「试运行」，`force`
+ * 穿不过去。这条守的就是这个分层：否则「开着全局试运行点发一篇」会真发到频道，
+ * 而面板上「试运行：没真发（去关掉再发）」那句永远不会出现。
+ */
+test('sendDraft：force 只顶掉短记自己的 dryRun，顶不掉全局试运行', async () => {
+  /** 短记自己的 dryRun 关、全局开 —— 必须仍然只生成 */
+  const a = makePost({ dryRunOf: () => true });
+  const r = await a.post.sendDraft({ title: '风很大', text: '今天风很大。', force: true, source: 'panel' });
+
+  assert.equal(r.ok, true, '试运行不是失败：要返回 ok，前端才知道「没真发」而不是「发失败了」');
+  assert.equal(r.dryRun, true);
+  assert.equal(r.state, 'dry');
+  assert.equal(a.calls.filter((c) => c[0] === 'putThread').length, 0, '全局试运行不许被 force 穿过去');
+
+  /** 反过来：全局关、短记自己开 + force —— 这是「真发」按钮该有的效果 */
+  const b = makePost({ cfg: { dryRun: true } });
+  const r2 = await b.post.sendDraft({ title: 't', text: '正文', force: true, source: 'panel' });
+  assert.equal(r2.ok, true);
+  assert.notEqual(r2.dryRun, true, 'force 的意义就是让「真发」按钮能越过短记自己的试运行');
+  assert.equal(b.calls.filter((c) => c[0] === 'putThread').length, 1);
+});

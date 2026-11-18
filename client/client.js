@@ -5120,7 +5120,7 @@ select.roost-input{color-scheme:dark}
               type: 'button', className: 'roost-btn', disabled: busy,
               onClick: async () => {
                 const r = await post('/consolidate', {})
-                toast(r.ok ? `巩固完成：压缩 ${r.compressed} 条、三元组 ${r.triples} 个、撤销 ${r.revoked || 0} 条` : (r.reason || '没跑成'))
+                toast(r.ok ? `巩固完成：压缩 ${r.compressed} 条、三元组 ${r.triples} 个、撤销 ${r.revoked || 0} 条` : (r.reason || r.message || '没跑成'))
                 reload()
               },
             }, '手动跑一次巩固'),
@@ -7666,7 +7666,7 @@ select.roost-input{color-scheme:dark}
               type: 'button', className: 'roost-primary', disabled: busy,
               onClick: async () => {
                 const r = await post('/compact', {})
-                toast(r.ok ? '换好了，新的开场已经就位' : (r.why || '没换成'))
+                toast(r.ok ? '换好了，新的开场已经就位' : (r.why || r.message || '没换成'))
                 reload()
               },
             }, busy ? '压着…' : '现在就压一次'),
@@ -12544,7 +12544,7 @@ select.roost-input{color-scheme:dark}
         const r = await post('/account/rewrite', { confirm: confirmWord })
         setBusy('')
         setLastResult(r)
-        toast(r.ok ? '改写完成，备份路径在下面' : (r.error || '改写失败'))
+        toast(r.ok ? '改写完成，备份路径在下面' : (r.error || r.message || '改写失败'))
         setConfirmWord('')
         setStoppedOld(false)
         /** 旧清单已经不对了（那些键被合并掉了），清掉免得用户对着过期数据做决定 */

@@ -315,3 +315,47 @@ test('配额：按档位给额度（主人那档更松），bucket 要传到 cha
   await run({ text: '<<say: 又一句>>', target: 'g1', senderId: 'u2' });
   assert.equal(charged[0].bucket, '');
 });
+
+/* ---------------- 试运行：发送之前的副作用也要让开 ---------------- */
+
+/**
+ * `<<say>>` 在真正发出去之前还有两步：按人扣语音条额度（落盘 `quota.json`）、
+ * 调 TTS 合成（云端要钱）。通道层只拦得住「发出去」，这两步都在 `sendVoice`
+ * 之前——不在出站层让开，试运行就会「没发出去、额度没了、钱花了」。
+ */
+test('试运行：<<say>> 不合成、不扣额度，但照常记成说过', async () => {
+  const ch = fakeChannel();
+  let synth = 0;
+  const charged = [];
+  const tts = { synthesize: async () => { synth += 1; return { audio: Buffer.from('RIFFfake') }; } };
+  const quota = { charge(p) { charged.push(p); return { ok: true }; } };
+  let sent = 0;
+  const run = createActionRunner({
+    channel: () => ch, tts, quota, dryRunOf: () => true, log: () => {},
+  });
+  await run({ text: '<<say: 你好>>', target: 'g1', senderId: 'u1', onSent: () => { sent += 1; } });
+
+  assert.equal(synth, 0, '试运行不该调 TTS（云端要钱）');
+  assert.equal(charged.length, 0, '试运行不该扣语音条额度');
+  assert.equal(ch.calls.filter((c) => c[0] === 'voice').length, 0, '也不该发语音');
+  assert.equal(sent, 1, '但要记成「说过」——试运行是记忆照写');
+});
+
+test('试运行：关掉之后 <<say>> 照常合成并发送（判据是热读的）', async () => {
+  const ch = fakeChannel();
+  let synth = 0;
+  const charged = [];
+  let dry = true;
+  const tts = { synthesize: async () => { synth += 1; return { audio: Buffer.from('RIFFfake') }; } };
+  const quota = { charge(p) { charged.push(p); return { ok: true }; } };
+  const run = createActionRunner({ channel: () => ch, tts, quota, dryRunOf: () => dry });
+
+  await run({ text: '<<say: 一>>', target: 'g1', senderId: 'u1' });
+  assert.equal(synth, 0);
+
+  dry = false;
+  await run({ text: '<<say: 二>>', target: 'g1', senderId: 'u1' });
+  assert.equal(synth, 1, '开关一关就该恢复合成');
+  assert.equal(charged.length, 1, '恢复后额度照扣');
+  assert.equal(ch.calls.filter((c) => c[0] === 'voice').length, 1);
+});

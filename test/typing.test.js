@@ -38,6 +38,43 @@ test('sendTyping：协议侧抛错时返回 ok:false，不冒泡', async () => {
   assert.match(r.message, /宿主没这个能力/);
 });
 
+/**
+ * 「正在输入」也不经过 `send`，所以总开关和试运行必须各判一次
+ * （2026-11-19 自检）。正常路径上 `judge()` 已经把总开关关着的消息挡住，
+ * 但留一个不判据的 rpc 入口迟早被别处调用——`sendFile` / `sendVoice` 就是实例。
+ */
+test('sendTyping：总开关关着不发，试运行也不发（一条 rpc 都不打）', async () => {
+  const rpc = [];
+  const host = { rpc: async (name) => { rpc.push(name); return { ok: true }; } };
+
+  const off = createRoostHostChannel({
+    host, log: () => {}, markdownEnabled: true, masterOffOf: () => true,
+  });
+  const r1 = await off.sendTyping({ scene: 'c2c', target: 'OPENID_A' });
+  assert.equal(r1.ok, false);
+  assert.equal(r1.code, 'disabled');
+  assert.equal(rpc.length, 0, '总开关关着不能真打 msg.typing');
+
+  const dry = createRoostHostChannel({
+    host, log: () => {}, markdownEnabled: true, dryRunOf: () => true,
+  });
+  const r2 = await dry.sendTyping({ scene: 'c2c', target: 'OPENID_A' });
+  assert.equal(r2.ok, true, '试运行不是失败');
+  assert.equal(r2.dryRun, true);
+  assert.equal(rpc.length, 0, '试运行也不该让她在对方那里闪一下「正在输入」');
+
+  /** 判据是热读的：开关一开立刻恢复 */
+  let isOffNow = true;
+  const live = createRoostHostChannel({
+    host, log: () => {}, markdownEnabled: true, masterOffOf: () => isOffNow,
+  });
+  await live.sendTyping({ scene: 'c2c', target: 'OPENID_A' });
+  assert.equal(rpc.length, 0);
+  isOffNow = false;
+  await live.sendTyping({ scene: 'c2c', target: 'OPENID_A' });
+  assert.deepEqual(rpc, ['msg.typing'], '打开后要照常发');
+});
+
 test('配置与节流：默认开、每会话 60 秒一次、只在单聊', async () => {
   const { DEFAULTS } = await import('../src/config.js');
   assert.equal(DEFAULTS.chat?.typing, true, '默认开');
