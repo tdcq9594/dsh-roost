@@ -141,11 +141,18 @@ export function statusOf(meta) {
   return FACT_STATUSES.includes(s) ? s : 'fact';
 }
 
-/** 取两者里更可信的那个；用于"重提一次"时不降级、确认时可以升级 */
+/**
+ * 取两者里更可信的那个；用于"重提一次"时不降级、确认时可以升级。
+ *
+ * `a` 是**库里已有的值**：没有 status 的老数据按 `fact` 算（和 `statusOf`
+ * 同一口径）。这一点不能省——`addInto` 的「又提了一次」分支没有跨级顶替
+ * 护栏，若这里把 `undefined` 当成"空"再返回 `b`，一条老事实遇上一字不差的
+ * 转述就会被静默降级成 `hearsay`，注入时还带上「（听说的）」，与"重提一次
+ * 不降级"正好相反。`b` 不传 = 没表态，保持原样。
+ */
 export function strongerStatus(a, b) {
-  const x = FACT_STATUSES.includes(a) ? a : '';
+  const x = statusOf({ status: a });
   const y = FACT_STATUSES.includes(b) ? b : '';
-  if (!x) return y || 'fact';
   if (!y) return x;
   return STATUS_RANK[y] > STATUS_RANK[x] ? y : x;
 }

@@ -156,6 +156,14 @@ export const PLAN = {
     isSuppressed: ['obj:0', 'obj:0', 'read'], endedEdges: ['obj:0', 'obj:0', 'read'],
     text: ['obj:0', 'obj:0', 'read'], suppressed: ['obj:0', 'obj:0', 'read'],
     hasActive: ['obj:2', 'obj:2', 'read'], linkedJournalIds: ['obj:1', 'obj:1', 'read'],
+    /**
+     * 邻接联想（P1）。签名与 `linkedJournalIds` 一样是 `(实体名, {chatId, aliases})`。
+     *
+     * **漏登记的代价是静默失效**：`wrap()` 只覆盖表里列出的方法，没列的保留
+     * 裸函数，拿到的是逻辑 chatId，而实体 / 边 / episode 都存在物理键下面——
+     * 人格隔离开启后二跳会恒返回空，且 `recallFor` 的 catch 只打 debug。
+     */
+    adjacentJournalIds: ['obj:1', 'obj:1', 'read'],
     edgesAsOf: ['obj:1', 'obj:1', 'read'], episodes: ['obj:0', null, 'write'],
     addEdge: ['obj:0', null, 'write'], closeEdge: ['obj:0', null, 'write'],
     suppressEdge: ['obj:0', null, 'write'], unsuppressEdge: ['obj:0', null, 'write'],

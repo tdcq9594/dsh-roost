@@ -394,3 +394,21 @@ test('一键改写计划：物理键计数能被 openid 查到（不再恒为 0�
     else process.env.DSH_ROOST_DATA = prev;
   }
 });
+
+/**
+ * 反向守护：**store 上新增的读方法必须同步登记到 PLAN**。
+ *
+ * 现有那条守护测试只做单向（PLAN 里的名字得在真实 store 上存在），所以
+ * `graph.adjacentJournalIds`（P1 邻接联想）上线时漏登记没被发现——`wrap()`
+ * 只覆盖表里列出的方法，没列的保留裸函数，人格隔离开启后它拿到逻辑 chatId，
+ * 查的键在库里不存在，二跳恒返回空且不报错。
+ */
+test('邻接联想也要物理化 + 带旧键（漏登记会静默失效）', () => {
+  const s = scope({ enabled: true, policy: 'shared', personaId: 'lazycat' });
+  const { store, calls } = fakeStore(['adjacentJournalIds']);
+  const g = s.wrapGraph(store);
+  g.adjacentJournalIds('张三', { chatId: CHAT, aliases: ['ACCOUNT_ALIAS'], limit: 3 });
+  assert.equal(calls[0].args[1].chatId, CHAT + SCOPE_JOIN + 'lazycat', 'chatId 在第二个参数里，必须换物理键');
+  assert.deepEqual(calls[0].args[1].aliases, ['ACCOUNT_ALIAS', CHAT], '旧键也要一起查');
+  assert.equal(calls[0].args[1].limit, 3, '其余选项原样透传');
+});

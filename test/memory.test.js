@@ -20,7 +20,7 @@ import {
 } from '../src/tokenize.js';
 import { createJournal, classify, dayOf, scoreOf, cosine, DEFAULT_KEEP_DAYS, ERASED } from '../src/journal.js';
 import { createGraph } from '../src/graph.js';
-import { createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc } from '../src/memory.js';
+import { createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc, strongerStatus, canSupersede } from '../src/memory.js';
 import {
   createConsolidate,
   parseJsonLoose,
@@ -2072,6 +2072,41 @@ test('status：重提一次不降级，src 保留 speaker', () => {
   const row = m.listFull('g1').global[0];
   assert.equal(row.status, 'hearsay', '再听一遍还是听说的，不能凭一次重提升成事实');
   assert.equal(row.speaker, '张三');
+});
+
+test('status：无 status 的老条目被一字不差的转述重提时不许降级', () => {
+  /**
+   * `addInto` 的「又提了一次」分支**没有**跨级顶替护栏（那条只在取代路径上），
+   * 直接信 `strongerStatus` 的结果。所以这里必须把 `undefined`（老数据 =
+   * fact）当事实看，否则一条老事实遇上一字不差的 hearsay 会被静默降级，
+   * 注入时还带上「（听说的）」。
+   */
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  m.add('g1', '主人住在杭州', 'global', { status: 'hearsay' });
+  assert.equal(m.listFull('g1').global[0].status, 'fact', '无 status 的老条目就是 fact');
+  assert.equal(readRaw().meta.global['主人住在杭州'].status, undefined, '也不能因此把 fact 写进文件');
+
+  /** 老库：手工抹掉字段，模拟升级前写下的数据 */
+  const m2 = freshFacts();
+  m2.add('g1', '主人养了只猫叫年糕', 'global', { status: 'fact' });
+  const raw = readRaw();
+  delete raw.meta.global['主人养了只猫叫年糕'].status;
+  writeFileSync(join(process.env.DSH_ROOST_DATA, 'memory.json'), JSON.stringify(raw));
+  const m3 = createMemory();
+  m3.add('g1', '主人养了只猫叫年糕', 'global', { status: 'hearsay' });
+  assert.equal(m3.listFull('g1').global[0].status, 'fact', '升级后也是 fact，不因为一次转述降级');
+});
+
+test('strongerStatus：无 status 当 fact，不会被 hearsay / guess 拉低', () => {
+  assert.equal(strongerStatus(undefined, 'hearsay'), 'fact');
+  assert.equal(strongerStatus(undefined, 'guess'), 'fact');
+  assert.equal(strongerStatus(undefined, ''), 'fact');
+  assert.equal(strongerStatus('fact', 'hearsay'), 'fact');
+  assert.equal(strongerStatus('hearsay', ''), 'hearsay', '没表态保持原样');
+  assert.equal(strongerStatus('hearsay', 'fact'), 'fact', '明确说了可以升');
+  assert.equal(strongerStatus('guess', 'hearsay'), 'hearsay');
+  assert.equal(canSupersede('hearsay', undefined), false, '转述不许顶掉无 status 的老事实');
 });
 
 test('status：normalizeSrc 保留 speaker，但裁长度、去掉空值', () => {
