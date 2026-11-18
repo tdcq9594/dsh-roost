@@ -64,10 +64,18 @@ npm pack --dry-run
 
 ## 提交与发版
 
-- 默认分支 `main`；PR 目标选 `main`。
+- 默认分支 `main`；PR 目标选 `main`。分支保护已开：必须走 PR + CI 全绿才能合并。
 - 文档细节放 [`docs/USER-MANUAL.md`](docs/USER-MANUAL.md)，README 只留概览和指向，别把手册又搬回 README。
-- 版本号和发版由维护者统一处理，**不要在 PR 里自行 bump 版本、打 tag 或发 Release**。
 - 提交信息用中文或英文都行，写清改了什么、为什么。
+
+发版由 PR 驱动、CI 自动完成（`release.yml`），流程：
+
+1. 要发新版时，在 PR 里 bump `package.json` version（末位 +0.0.1，**不按 commit 前缀跳位**），
+   并在 `RELEASE_NOTES.md` 顶部加 `## vX.Y.Z：...` 段、段内写「一句话：」。
+2. PR 合并进 `main` 后，`release.yml` 校验版本/notes 一致 → 等维护者批准 `Release` environment →
+   **自动建 tag + Release + 发 npm**。
+3. **不要手动 `git tag` 或 `git push origin vX.Y.Z`**——tag 由 CI 建，手动推会造成内容未校验的坏状态。
+4. 外部贡献者不要自行 bump 版本或发版——版本决策由维护者做；上面的流程是维护者发版时走的。
 
 ## 许可
 

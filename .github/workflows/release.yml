@@ -1,77 +1,156 @@
-name: 建 GitHub Release
+name: 发版
 
-# 什么时候跑：推 tag（v*）时。
+# 什么时候跑：主分支 push（含 PR 合并）与手动触发。
 #
-# 为什么要单独一个 workflow：dsh-roost 的 ci.yml 只监听 main push / PR，
-# 没有 tag 触发；框架仓是把建 Release 挂在 release-check.yml 的 verify 之后，
-# 这里没有那个 job（也没有指纹脚本，dsh-roost 不发指纹），所以把校验直接
-# 放在同一个 job：版本号对不上、notes 没写、缺「一句话：」都不建。
+# 触发方式从「推 tag」改成「版本变化」——发版清单第 2 步 bump 了 package.json 的
+# version、PR 合并进 main 后，这里自动完成：校验 → 建 tag → 建 Release → 发 npm。
+# 这样版本号、tag、Release、npm 四者由一次合并串行产生，不再靠人记住七步顺序。
 #
-# 根治「只推 tag 没建 Release → releases/latest 停在旧版」。三端核对要看
-# releases/latest，漏建 Release 会让核对指向旧版，而且很晚才发现。
+# 为什么分 check / release 两个 job：
+#   - check 只做校验和判定，失败就红，几秒出结果
+#   - release 挂 environment: Release（required reviewers），发版前要人工批准，
+#     把「提交前先问」变成系统闸门；needs + if 确保校验不过时不触发审批
+#
+# 为什么建 tag / Release / npm 都在 release 这一个 job：
+#   GITHUB_TOKEN 触发的事件不会启动别的 workflow（dispatch 除外），
+#   所以不能「建 tag → 触发另一个 job 建 Release」，必须一次做完。
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的连续 push 串行处理，避免两个发版 run 同时抢着建同一个 tag。
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: 建 GitHub Release
+  check:
+    name: 发版前校验
     runs-on: ubuntu-latest
-    permissions:
-      contents: write   # 建 Release 需要；只在 job 级给
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      mode: ${{ steps.decide.outputs.mode }}
+      title: ${{ steps.decide.outputs.title }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # 拉全历史，否则看不到旧 tag
+          fetch-tags: true
 
       - name: 装 Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22.x'
+          node-version: '24'    # OIDC trusted publishing 要 npm >= 11.5.1（Node 22 自带的是 npm 10）
 
-      - name: 生成 Release 标题与正文（含版本校验）
+      - name: 版本判定与 notes 校验
+        id: decide
         shell: bash
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
           ver=$(node -p "require('./package.json').version")
-          echo "tag = $tag, package.json = $ver"
-          if [ "v$ver" != "$tag" ]; then
-            echo "tag 和 package.json 的版本号不一致，发布出去的包会自报错误版本" >&2
-            exit 1
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+          # 三段式判定：看当前版本的 tag 在不在、指向哪。
+          # 用精确 tag 名而非 sort -V：递增校验已在 PR 层做（见发版清单），
+          # 这里只认「这个版本的 tag 建没建」，不重复比大小。
+          if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null 2>&1; then
+            tag_sha=$(git rev-list -n 1 "v$ver")
+            if [ "$tag_sha" = "$GITHUB_SHA" ]; then
+              # 常规发版后 CI 重跑：tag 就在当前提交，续跑补建 Release/npm。
+              echo "v$ver 的 tag 已指向当前提交 → resume"
+              echo "mode=resume" >> "$GITHUB_OUTPUT"
+            else
+              # 发版后又有普通改动合入（未 bump）：不该再发一次。
+              echo "v$ver 的 tag 指向别的提交，当前是普通改动 → skip"
+              echo "mode=skip" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "v$ver 尚无 tag → release"
+            echo "mode=release" >> "$GITHUB_OUTPUT"
           fi
 
+          # notes 校验：无论 release 还是 resume 都要过，skip 时也顺手校验（便宜）。
           head_line=$(grep -m1 '^## v' RELEASE_NOTES.md || true)
           if [ -z "$head_line" ]; then
             echo "RELEASE_NOTES.md 里没有 '## vX.Y.Z：' 开头的段落" >&2
             exit 1
           fi
           notes_ver=$(printf '%s' "$head_line" | sed -nE 's/^## v([0-9.]+).*/\1/p')
-          tag_ver="${tag#v}"
-          if [ "$notes_ver" != "$tag_ver" ]; then
-            echo "RELEASE_NOTES 顶部段是 v$notes_ver，tag 是 v$tag_ver——先把新版 notes 写到最上面" >&2
+          if [ "$notes_ver" != "$ver" ]; then
+            echo "RELEASE_NOTES 顶部段是 v$notes_ver，package.json 是 v$ver——先把新版 notes 写到最上面" >&2
             exit 1
           fi
 
-          # 正文取顶部段（第一个 ## v 到下一个 ## v 之前）。
-          # test/routes.test.js 断言当前版本那段必须有「一句话：」，缺了它
-          # 面板「这次更新改了什么」会没内容——建 Release 前先拦住。
           awk '/^## v/{n++} n==1' RELEASE_NOTES.md > "$RUNNER_TEMP/release-body.md"
           if ! grep -q '^一句话：' "$RUNNER_TEMP/release-body.md"; then
-            echo "RELEASE_NOTES 顶部段缺「一句话：」开头的一行" >&2
+            echo "RELEASE_NOTES 顶部段缺「一句话：」开头的一行（面板靠它显示更新说明）" >&2
             exit 1
           fi
 
           title=$(printf '%s' "$head_line" | sed -E 's/^## (v[0-9.]+)：/\1 — /')
-          printf 'RELEASE_TITLE=%s\n' "$title" >> "$GITHUB_ENV"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: 建 tag / Release / 发 npm
+    needs: check
+    if: needs.check.outputs.mode != 'skip'
+    runs-on: ubuntu-latest
+    environment: Release       # required reviewers = 主人；合并后仍需人工点批准才发
+    permissions:
+      contents: write          # 建 tag + Release
+      id-token: write          # npm OIDC trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false   # 官方建议：发布构建不要缓存
+
+      - name: 生成 Release 正文（check job 的临时目录不共享，这里重取）
+        shell: bash
+        run: awk '/^## v/{n++} n==1' RELEASE_NOTES.md > "$RUNNER_TEMP/release-body.md"
+
+      - name: 建 tag（已存在则跳过）
+        if: needs.check.outputs.mode == 'release'
+        shell: bash
+        run: |
+          ver="${{ needs.check.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null 2>&1; then
+            echo "v$ver 已存在，跳过建 tag"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$ver" -m "${{ needs.check.outputs.title }}"
+          git push origin "v$ver"
 
       - name: 建 Release（已存在则跳过，不覆盖人工内容）
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
+          ver="${{ needs.check.outputs.version }}"
+          tag="v$ver"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag 已存在，跳过（不覆盖人工内容）"
             exit 0
           fi
-          gh release create "$tag" --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/release-body.md"
+          gh release create "$tag" --title "${{ needs.check.outputs.title }}" --notes-file "$RUNNER_TEMP/release-body.md"
+
+      - name: 发 npm（OIDC trusted publishing）
+        shell: bash
+        run: |
+          # 403 previously published = 已写过，不是失败，别换版本号重发。
+          # 这里不吞错误：真失败要让审批人看见，人工判断后再决定补发。
+          if ! npm publish --access public; then
+            echo "npm publish 失败。若是 403 previously published 说明该版本已入库（幂等正常）；" >&2
+            echo "其余失败需人工排查，不要在 workflow 里改版本号重发。" >&2
+            exit 1
+          fi
