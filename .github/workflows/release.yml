@@ -52,8 +52,7 @@ jobs:
           echo "version=$ver" >> "$GITHUB_OUTPUT"
 
           # 三段式判定：看当前版本的 tag 在不在、指向哪。
-          # 用精确 tag 名而非 sort -V：递增校验已在 PR 层做（见发版清单），
-          # 这里只认「这个版本的 tag 建没建」，不重复比大小。
+          # 递增校验在下面的独立块做，这里只认「这个版本的 tag 建没建」，不重复比大小。
           if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null 2>&1; then
             tag_sha=$(git rev-list -n 1 "v$ver")
             if [ "$tag_sha" = "$GITHUB_SHA" ]; then
@@ -68,6 +67,21 @@ jobs:
           else
             echo "v$ver 尚无 tag → release"
             echo "mode=release" >> "$GITHUB_OUTPUT"
+          fi
+
+          # 递增校验（发版必须增版本）：取已发布的最大 vX.Y.Z，用 sort -V 比数值
+          # 而非字符串（否则 1.10.0 会被当成小于 1.9.0）。只拦「版本倒退」：
+          # - release：ver > latest 才真发版，满足「发版必须增版本」
+          # - skip：ver == latest（发版后普通改动未 bump），相等不算倒退，正常跳过
+          # - resume：ver == latest（tag 就在当前提交），相等正常续跑
+          latest_ver=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -V | tail -1)
+          if [ -n "$latest_ver" ]; then
+            bigger=$(printf '%s\n%s\n' "$latest_ver" "$ver" | sort -V | tail -1)
+            if [ "$bigger" != "$ver" ]; then
+              echo "版本倒退：package.json 是 v$ver，已发布最新是 v$latest_ver——发版必须递增版本号" >&2
+              exit 1
+            fi
+            echo "递增校验通过：v$ver >= 已发布最新 v$latest_ver"
           fi
 
           # notes 校验：无论 release 还是 resume 都要过，skip 时也顺手校验（便宜）。
