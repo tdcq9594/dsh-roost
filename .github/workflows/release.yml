@@ -1,0 +1,77 @@
+name: 建 GitHub Release
+
+# 什么时候跑：推 tag（v*）时。
+#
+# 为什么要单独一个 workflow：dsh-roost 的 ci.yml 只监听 main push / PR，
+# 没有 tag 触发；框架仓是把建 Release 挂在 release-check.yml 的 verify 之后，
+# 这里没有那个 job（也没有指纹脚本，dsh-roost 不发指纹），所以把校验直接
+# 放在同一个 job：版本号对不上、notes 没写、缺「一句话：」都不建。
+#
+# 根治「只推 tag 没建 Release → releases/latest 停在旧版」。三端核对要看
+# releases/latest，漏建 Release 会让核对指向旧版，而且很晚才发现。
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: 建 GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 建 Release 需要；只在 job 级给
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: 生成 Release 标题与正文（含版本校验）
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          ver=$(node -p "require('./package.json').version")
+          echo "tag = $tag, package.json = $ver"
+          if [ "v$ver" != "$tag" ]; then
+            echo "tag 和 package.json 的版本号不一致，发布出去的包会自报错误版本" >&2
+            exit 1
+          fi
+
+          head_line=$(grep -m1 '^## v' RELEASE_NOTES.md || true)
+          if [ -z "$head_line" ]; then
+            echo "RELEASE_NOTES.md 里没有 '## vX.Y.Z：' 开头的段落" >&2
+            exit 1
+          fi
+          notes_ver=$(printf '%s' "$head_line" | sed -nE 's/^## v([0-9.]+).*/\1/p')
+          tag_ver="${tag#v}"
+          if [ "$notes_ver" != "$tag_ver" ]; then
+            echo "RELEASE_NOTES 顶部段是 v$notes_ver，tag 是 v$tag_ver——先把新版 notes 写到最上面" >&2
+            exit 1
+          fi
+
+          # 正文取顶部段（第一个 ## v 到下一个 ## v 之前）。
+          # test/routes.test.js 断言当前版本那段必须有「一句话：」，缺了它
+          # 面板「这次更新改了什么」会没内容——建 Release 前先拦住。
+          awk '/^## v/{n++} n==1' RELEASE_NOTES.md > "$RUNNER_TEMP/release-body.md"
+          if ! grep -q '^一句话：' "$RUNNER_TEMP/release-body.md"; then
+            echo "RELEASE_NOTES 顶部段缺「一句话：」开头的一行" >&2
+            exit 1
+          fi
+
+          title=$(printf '%s' "$head_line" | sed -E 's/^## (v[0-9.]+)：/\1 — /')
+          printf 'RELEASE_TITLE=%s\n' "$title" >> "$GITHUB_ENV"
+
+      - name: 建 Release（已存在则跳过，不覆盖人工内容）
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag 已存在，跳过（不覆盖人工内容）"
+            exit 0
+          fi
+          gh release create "$tag" --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/release-body.md"
