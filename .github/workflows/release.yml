@@ -204,13 +204,15 @@ jobs:
         run: |
           ver="${{ needs.check.outputs.version }}"
           pkg="dsh-roost"
-          # registry 和 GitHub 都有传播延迟，轮询等它们追上（12 次 × 15s ≈ 3 分钟）
+          # registry 和 GitHub 都有传播延迟，轮询等它们追上。
+          # 32 次 × 15s ≈ 8 分钟：npm 传播实测可达 7 分钟（2026-11-16 记录），
+          # 原来 3 分钟会误判成「没发出去」。
           ok=0
-          for i in $(seq 1 12); do
+          for i in $(seq 1 32); do
             pub=$(npm view "$pkg" version 2>/dev/null || true)
             rel=$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name 2>/dev/null || true)
             if [ "$pub" = "$ver" ] && [ "$rel" = "v$ver" ]; then ok=1; break; fi
-            echo "等待传播（$i/12）：npm=$pub release=$rel"
+            echo "等待传播（$i/32）：npm=$pub release=$rel"
             sleep 15
           done
           if [ "$ok" != 1 ]; then
