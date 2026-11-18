@@ -177,15 +177,23 @@ export const MAX_PROMPT_FACTS = 10;
  * 就让模型去「作废某条旧约定」，等于给它一张空白支票。
  */
 export function normalizeAgreement(raw) {
-  if (typeof raw === 'string') return { text: raw.trim(), op: 'add', old: '' };
+  if (typeof raw === 'string') return { text: raw.trim(), op: 'add', old: '', status: 'fact' };
   const o = raw && typeof raw === 'object' ? raw : {};
   const text = String(o.text ?? '').trim();
   const want = String(o.op ?? '').toLowerCase();
   const op = ['add', 'update', 'outdated'].includes(want) ? want : 'add';
   const old = String(o.old ?? '').trim();
-  if (!text) return { text: '', op: 'add', old: '' };
-  if (!old && op !== 'add') return { text, op: 'add', old: '', degraded: '缺 old 定位词' };
-  return { text, op, old };
+  /**
+   * 可信度：只认 `hearsay`，其它一律 `fact`。
+   *
+   * 为什么默认 fact 而不是"让模型必须表态"：老 prompt 跑出来的输出里没有
+   * 这个字段，天天有历史输出没这个键；默认 fact 才能让老行为逐字节不变，
+   * 也不会因为模型漏写就把一条真事实降级成"听说的"。
+   */
+  const status = String(o.status ?? '').toLowerCase() === 'hearsay' ? 'hearsay' : 'fact';
+  if (!text) return { text: '', op: 'add', old: '', status: 'fact' };
+  if (!old && op !== 'add') return { text, op: 'add', old: '', status, degraded: '缺 old 定位词' };
+  return { text, op, old, status };
 }
 
 /**
@@ -260,6 +268,14 @@ export function buildPrompt({ day, chatName, items, revocation = null, facts = [
     '   · op=outdated：旧约定不再成立、也没有新值 → 只作废，不记新的',
     '   · 其余照旧给字符串（= 新增）。old 找不到、或匹配到多条时我不会猜，一律按新增处理；',
     '     所以拿不准就写字符串，宁可多留一条，也不要误作废。',
+    /**
+     * 可信度：只教模型认「转述」这一种，不教它认「猜的」。
+     *
+     * 转述是最常见的失真来源（"张三说他下周三出差"被记成"主人下周三出差"），
+     * 而"猜的"应当由程序按来源判定，不该让模型给自己的输出打分。
+     */
+    '   · 若这条约定**不是你亲耳听当事人说的**（是别人转述、或记录里说"某某说他…"），',
+    '     在对象里加 "status":"hearsay"；是本人说的、或拿不准，就**不要写**这个键（默认当本人说的）。',
     '6. closed：以前答应过、今天明显已经办完的约定，给 [{"s":"主语","rel":"约定","o":"那件事"}]；没有就给空数组',
     /**
      * D7 第 8 项：把「对一个人的印象」交给每天这次巩固顺带提炼。
@@ -773,7 +789,11 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
        * 预览说能作废、真跑却不敢时一律退化成新增，绝不误作废一条无关的事实。
        */
       if (preview.will === 'supersede') {
-        const r = memory?.supersede?.(chatId, item.old, { at });
+        /**
+         * `status` 一起递进去：`memory.supersede()` 会拦住"听说的顶掉本人说的"。
+         * 拦下来在这里退化成新增（新信息不丢），而不是静默关掉一条真事实。
+         */
+        const r = memory?.supersede?.(chatId, item.old, { at, status: item.status });
         if (!r?.ok) {
           out.fallback += 1;
           out.agreementOps[out.agreementOps.length - 1] = {
@@ -802,7 +822,12 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
        * `chatId` 为空时（老日记没有归属）退回全局：宁可放错位置，
        * 也不要因为拿不到 id 就把一条约定静默丢掉。
        */
-      memory.add(chatId, `约定：${item.text.slice(0, 160)}`, chatId ? 'chat' : 'global');
+      memory.add(
+        chatId,
+        `约定：${item.text.slice(0, 160)}`,
+        chatId ? 'chat' : 'global',
+        { status: item.status },
+      );
       graph?.addEdge?.({ src: '主人', rel: '约定', dst: item.text.slice(0, 40), at, chatId });
       out.agreements += 1;
     }

@@ -4553,6 +4553,13 @@ select.roost-input{color-scheme:dark}
         if (s?.manual) parts.push('你手动记的')
         else if (s?.at) parts.push(`来自 ${ago(s.at)}的对话`)
         else parts.push('来源不明')
+        /**
+         * 可信度（2026-11-18）：默认 fact 不标，只有转述和猜测才显出来。
+         * 不标"本人说的"是有意的——大多数条目都是，全标等于噪音。
+         * 「猜的」那档不注入，但留在库里，面板得让它看得见、删得掉。
+         */
+        if (d.status === 'hearsay') parts.push(s?.speaker ? `听说·${s.speaker}说的` : '听说的')
+        else if (d.status === 'guess') parts.push('猜的 · 不注入')
         return parts.join(' · ')
       }
 

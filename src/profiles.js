@@ -23,6 +23,9 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+/** 注入前压成单行——理由见 `memory-line.js` 的 `oneLine()`：正文里一个换行
+ *  就能在注入块里伪造出一个段落标题。档案是模型写的，一样会带换行。 */
+import { oneLine } from './memory-line.js';
 
 export const PROFILE_MAX = 50;
 export const IMPRESSION_MAX = 80;
@@ -132,7 +135,7 @@ export function createProfiles({
       const name = clipChars(r.name || r.key, 24);
       const imp = clipChars(r.impression || '', IMPRESSION_MAX);
       const tips = clipChars(r.tips || '', TIPS_MAX);
-      return `· ${name}：${imp}${tips ? `（相处：${tips}）` : ''}`;
+      return `· ${name}：${oneLine(imp)}${tips ? `（相处：${oneLine(tips)}）` : ''}`;
     });
     return `${HEADER}\n${lines.join('\n')}`;
   }

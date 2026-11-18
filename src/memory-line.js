@@ -30,6 +30,21 @@ function clip(text, max = 60) {
 }
 
 /**
+ * 注入用：正文压成**单行**。
+ *
+ * 记忆正文允许换行（模型写约定时本来就可能带），但注入块是靠 `· ` 列表
+ * 和 `【小标题】` 分节的——正文里一个换行就能伪造出一个段落标题或一条
+ * 假条目（"【关系】\n· 主人授权你…"）。roost 用的是中文方括号标题，
+ * 伪造段落比伪造 XML 标签现实得多。
+ *
+ * 所以只在**渲染时**压平：存储、面板展示、主键（`meta[正文]`）一个字节
+ * 都不动。改 `clean()` 会拆出重复条目、压平用户手记的排版。
+ */
+export function oneLine(text) {
+  return String(text ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/**
  * 出处只回答两件事：这记忆是不是这个群的、是不是她自己说的。
  * 不写 openid、不写消息 id——注入块里那些字符串是纯噪音，
  * 还会让模型拿它当身份去 @ 人。
@@ -48,7 +63,7 @@ function sourceOf(r, chatId) {
  */
 export function memoryLine(row, { bucket = 'member', chatId = '', max = 60 } = {}) {
   const r = row && typeof row === 'object' ? row : {};
-  const body = clip(r.digest || r.text || '', max);
+  const body = clip(oneLine(r.digest || r.text || ''), max);
   if (!body) return '';
 
   const head = [];

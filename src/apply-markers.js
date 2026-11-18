@@ -57,7 +57,7 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
          * 淘汰是按「权重 × 时间衰减」算的，全给 1 就等于退回 FIFO：
          * 「记住我花生过敏」会因为今天记了 40 条杂事被挤掉。
          */
-        memory.add(chatId, f, 'chat', { w: W_EXPLICIT, src });
+        memory.add(chatId, f, 'chat', { w: W_EXPLICIT, src, status: 'fact' });
         touched = '记住了（只这个群）';
       }
       return '';
@@ -67,7 +67,7 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
       if (!canWriteFacts) return denyFact('remember');
       const f = String(v || '').trim();
       if (f) {
-        memory.add(chatId, f, 'global', { w: W_EXPLICIT, src });
+        memory.add(chatId, f, 'global', { w: W_EXPLICIT, src, status: 'fact' });
         touched = '记住了';
       }
       return '';
@@ -93,7 +93,7 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
       const { old: oldNeedle, next } = parsed;
       const r = memory.supersede(chatId, oldNeedle);
       if (!r.ok) log.debug(`replace 没定位到「${oldNeedle}」：${r.why}`);
-      memory.add(chatId, next, 'global', { w: W_EXPLICIT, src });
+      memory.add(chatId, next, 'global', { w: W_EXPLICIT, src, status: 'fact' });
       touched = r.ok ? '旧说法换成了新的' : `没找到「${oldNeedle}」，只记了新的`;
       return '';
     });

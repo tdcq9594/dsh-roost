@@ -61,11 +61,17 @@ const oldFact = { text: '约定：周末不排会' };
 /* ---------------- 纯函数 ---------------- */
 
 test('D6：老的字符串 agreements 继续按新增；三态对象归一化', () => {
-  assert.deepEqual(normalizeAgreement('明天买牛奶'), { text: '明天买牛奶', op: 'add', old: '' });
+  /** `status` 是 2026-11-18 新增：老输出没有这个键 → 默认 fact，行为不变 */
+  assert.deepEqual(normalizeAgreement('明天买牛奶'),
+    { text: '明天买牛奶', op: 'add', old: '', status: 'fact' });
   assert.deepEqual(normalizeAgreement({ text: '改成周六', op: 'update', old: '周末' }),
-    { text: '改成周六', op: 'update', old: '周末' });
+    { text: '改成周六', op: 'update', old: '周末', status: 'fact' });
   assert.deepEqual(normalizeAgreement({ text: '不用了', op: 'outdated', old: '周末' }),
-    { text: '不用了', op: 'outdated', old: '周末' });
+    { text: '不用了', op: 'outdated', old: '周末', status: 'fact' });
+  /** 只有 hearsay 被认；别的值（含模型瞎写）一律退回 fact，不静默降级 */
+  assert.equal(normalizeAgreement({ text: '张三说出差', status: 'hearsay' }).status, 'hearsay');
+  assert.equal(normalizeAgreement({ text: '张三说出差', status: 'guess' }).status, 'fact');
+  assert.equal(normalizeAgreement('明天买牛奶').status, 'fact');
   /** 缺定位词不许让模型去「作废某条旧约定」 */
   assert.equal(normalizeAgreement({ text: '改成周六', op: 'update' }).op, 'add');
   assert.equal(normalizeAgreement({ text: '改成周六', op: 'bogus', old: '周末' }).op, 'add');

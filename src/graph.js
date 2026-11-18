@@ -24,6 +24,8 @@
 
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+/** 实体/关系名是模型抽的，同样会带换行；注入前压成单行（见 `memory-line.js`） */
+import { oneLine } from './memory-line.js';
 
 /**
  * "同一时刻只能有一个值"的关系。
@@ -553,7 +555,7 @@ export function createGraph({ file, log = () => {} } = {}) {
     if (!enabled()) return '';
     const rows = nowEdges({ chatId, limit, aliases });
     if (!rows.length) return '';
-    const lines = rows.map((e) => `${e.src}—${e.rel}→${e.dst}`);
+    const lines = rows.map((e) => `${oneLine(e.src)}—${oneLine(e.rel)}→${oneLine(e.dst)}`);
     let out = '';
     for (const line of lines) {
       if (out.length + line.length + 3 > max) break;

@@ -111,6 +111,50 @@ export const TIER_DECAY = Object.freeze({ short: 0.5, long: 1, core: 0 });
 /** 归档的条目不注入，但留在库里可恢复；和 until 一样占名额时打折 */
 export const ARCHIVE_WEIGHT = 0.25;
 
+/* ---------------- 可信度分级（2026-11-18） ----------------
+ * 修的问题：群聊里"张三说他下周三出差"这种**转述**，和主人亲口说的
+ * "我下周三出差"以前在库里长得一模一样，同样的 `w`、同样进 system 常驻。
+ * 转述被当成铁律讲给主人听，是记忆系统最伤信任的一种错。
+ *
+ * 三档（`meta[正文].status`，旁路字段）：
+ *   fact     本人说的 / 手记 / 模型标记 —— **老数据没有这个字段，一律按 fact**
+ *   hearsay  听人转述的 —— 照常注入，但渲染时标「（听说的）」
+ *   guess    模型推测的 —— **不注入**，留在库里给面板看
+ *
+ * 为什么是"标注"而不是"降权"：淘汰（每层配额 + 总量 40 条）与排序共用
+ * `scoreOfFact`，动 `w` 等于让转述优先被静默删掉——用户只会看到"她忘事了"。
+ * 只在排序处打折又违背 `listRanked` 注释里那条「留得下必须看得见」。
+ *
+ * 为什么不硬拦"转述不许取代本人陈述"：模型把真实改口（"我搬到上海了"）
+ * 误标成 hearsay 时，旧事实就永远改不掉，两条矛盾长期并存——比被顶掉更糟。
+ * 所以只拦**跨级顶替**（低可信度不许关掉高可信度），同级允许。
+ */
+export const FACT_STATUSES = Object.freeze(['fact', 'hearsay', 'guess']);
+/** 数字越大越可信；只在"跨级顶替"时用，不参与打分 */
+const STATUS_RANK = Object.freeze({ fact: 2, hearsay: 1, guess: 0 });
+/** 拦截时给调用方/面板看的说法 */
+const STATUS_LABEL = Object.freeze({ fact: '本人说的', hearsay: '听说的', guess: '猜的' });
+
+/** 归一化：不认识的值 / 老数据没有 → fact（保守：宁可当真，也不静默丢一条） */
+export function statusOf(meta) {
+  const s = meta?.status;
+  return FACT_STATUSES.includes(s) ? s : 'fact';
+}
+
+/** 取两者里更可信的那个；用于"重提一次"时不降级、确认时可以升级 */
+export function strongerStatus(a, b) {
+  const x = FACT_STATUSES.includes(a) ? a : '';
+  const y = FACT_STATUSES.includes(b) ? b : '';
+  if (!x) return y || 'fact';
+  if (!y) return x;
+  return STATUS_RANK[y] > STATUS_RANK[x] ? y : x;
+}
+
+/** 低可信度不许取代高可信度；同级 / 升级都允许 */
+export function canSupersede(nextStatus, oldStatus) {
+  return STATUS_RANK[statusOf({ status: nextStatus })] >= STATUS_RANK[statusOf({ status: oldStatus })];
+}
+
 /** 正文 → 稳定短 id（djb2）；同一句话永远同一个 id，编辑后自然换新 id */
 export function factIdOf(text) {
   let h = 5381;
@@ -193,6 +237,10 @@ export function similarityOf(a, b) {
  *   at         记下这条的时间
  *   manual     面板上手动记的（人手写的，没有消息来源）
  *   by         谁记的（现在只有 'owner'）
+ *   speaker    这句话是谁说的（巩固时从 `[id] 时间 某人(level): text` 里带出来）。
+ *              **只记来源，不参与可信度判定**——status 在 `meta[正文].status`，
+ *              免得同一个事实有两份真相；留着它是为了以后能重判（模型标错了，
+ *              还能凭说话人重新算一次，而不是无从下手）。
  *
  * @returns {object|null} 清理过的出处；没有任何有效字段时返回 null（不存 `{}`）
  */
@@ -219,6 +267,8 @@ export function normalizeSrc(raw) {
   if (raw.manual === true) out.manual = true;
   const by = s(raw.by, 20);
   if (by) out.by = by;
+  const speaker = s(raw.speaker, 40);
+  if (speaker) out.speaker = speaker;
 
   return Object.keys(out).length ? out : null;
 }
@@ -380,6 +430,14 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
     const old = metaMap[f];
     // 收口在这里：所有写入路径（模型标记、面板手记、以后新增的）都过一遍
     const src = normalizeSrc(opts.src);
+    /**
+     * 调用方不传 = **没表态**（不是"说这是真的"）。
+     *
+     * 区分这两种很重要：老调用点、`<<remember>>`、面板手记都不传，
+     * 它们不该把一条"听说的"顺手升成事实；只有显式传 `status:'fact'`
+     * （= 又一次亲口确认）才允许升级。
+     */
+    const nextStatus = FACT_STATUSES.includes(opts.status) ? opts.status : '';
 
     /**
      * 同槽位取代：这次记的和某条旧说法几乎是同一句，就给旧的打 `until`。
@@ -404,6 +462,14 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
         if (other.length < SUPERSEDE_MIN_LEN) continue;
         if (similarityOf(other, f) < SUPERSEDE_SIM) continue;
         if (conflicting(other, f)) continue; // 过敏 / 不过敏、3 栋 / 4 栋：不是改口，都留着
+        /**
+         * 跨级顶替护栏：听说的关不掉本人说的、猜的谁都关不掉。
+         *
+         * 为什么只拦跨级：模型把真实改口（"我搬到上海了"）误标成 hearsay 时，
+         * 硬拦会让旧事实**永远改不掉**，两条矛盾长期并存——比被顶掉更糟。
+         * 同级的照旧取代，人工入口（`<<remember>>`、面板手记）恒为 fact。
+         */
+        if (!canSupersede(nextStatus, om?.status)) continue;
         metaMap[other] = { ...om, until: t };
       }
     };
@@ -423,8 +489,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
         w: Math.min(W_MAX, (Number(old?.w) > 0 ? Number(old.w) : 1) + W_BUMP),
         at: t,
         src: src || old?.src || null,
+        /** 重提一次不降级（听说的再听一遍还是听说的）；明确说了一次算确认，可升到 fact */
+        status: strongerStatus(old?.status, nextStatus),
       };
       if (next.until) next.until = null;
+      /** fact 是默认值，不落盘——老库、普通事实的字节与升级前完全一致 */
+      if (next.status === 'fact') delete next.status;
       metaMap[f] = next;
       supersede();
       return list;
@@ -436,6 +506,7 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
       w: Number(opts.w) > 0 ? Number(opts.w) : 1, at: t, src,
       ...(opts.pin !== undefined ? { pin: clamp01(opts.pin) } : {}),
       ...(FACT_TIERS.includes(opts.tier) ? { tier: opts.tier } : {}),
+      ...(nextStatus && nextStatus !== 'fact' ? { status: nextStatus } : {}),
     };
     supersede();
 
@@ -553,8 +624,13 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
      * `fitBudget` 万一要砍时，砍掉的是分数低的尾巴而不是最新的几条。
      *
      * 历史（`until`）不参与排序：它不注入，排进来只会白占名额。
+     * `guess`（猜的）同理不注入。
+     *
+     * @param {{annotate?:boolean}} [opts] `annotate:true` 时给 `hearsay` 加「（听说的）」后缀，
+     *   只在拼提示词时用；其它调用方要原文
      */
-    listRanked(chatId, aliases = []) {
+    listRanked(chatId, aliases = [], opts = {}) {
+      const annotate = opts?.annotate === true;
       const m = load();
       const t = now();
       /**
@@ -571,15 +647,27 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
        */
       const rank = (list, mm, noDecay) =>
         (Array.isArray(list) ? list : [])
-          .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt)
+          /**
+           * `guess`（模型猜的）不参与注入，但**留在库里**给面板看。
+           *
+           * 这里必须是**黑名单**（`!== 'guess'`），不能写白名单（`=== 'fact'`）：
+           * 老库一条 status 都没有，白名单会把它们一次性全滤掉——升级即失忆。
+           */
+          .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt
+            && statusOf(mm?.[text]) !== 'guess')
           .map((text, i) => {
             const meta = mm?.[text];
             const alias = Boolean(noDecay?.has(text));
             const s = alias ? scoreOfAliasFact(meta, t) : scoreOfFact(meta, t);
-            return { text, i, s, alias };
+            return { text, i, s, alias, st: statusOf(meta) };
           })
           .sort((a, b) => b.s - a.s || (a.alias === b.alias ? b.i - a.i : a.alias ? 1 : -1))
-          .map((x) => x.text);
+          /**
+           * 「（听说的）」是**可选**的渲染标注，默认不加：
+           * `listRanked` 还被扩展读接口和巩固的对照清单用着，那些地方要的是原文。
+           * 只有真正拼进提示词的 `memoryStatic` 才传 `annotate: true`。
+           */
+          .map((x) => (annotate && x.st === 'hearsay' ? `${x.text}（听说的）` : x.text));
       const c = collectChat(m, chatId, aliases);
       return {
         global: rank(m.global, m.meta.global, null),
@@ -607,6 +695,13 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
             at: Number(x.at) || 0,
             src: x.src || null,
             until: Number(x.until) > 0 ? Number(x.until) : null,
+            /**
+             * 可信度：面板据此标「听说的 / 猜的」。
+             * 老数据没有这个字段，`statusOf` 一律给 `fact`——不写回磁盘。
+             * `speaker` 从出处里取，只作展示/以后重判用，不参与打分。
+             */
+            status: statusOf(x),
+            speaker: String(x.src?.speaker ?? ''),
             /** 以下都是可选扩展字段，老库没有时给默认，不写回磁盘 */
             tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
             pin: clamp01(x.pin),
@@ -626,7 +721,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
      * 记一条。
      *
      * @param {'global'|'chat'} scope 默认 global —— 用户说"记住 XX"多半是关于他自己
-     * @param {{w?:number, src?:{journalId?:string, eventIds?:string[], at?:number}, at?:number}} [opts]
+     * @param {{w?:number, status?:'fact'|'hearsay'|'guess', src?:{journalId?:string, eventIds?:string[], speaker?:string, at?:number}, at?:number}} [opts]
+     *   `status` 不传 = `fact`（手记、`<<remember>>`、老调用点都是这一档）
      */
     add(chatId, fact, scope = 'global', opts = {}) {
       const m = load();
@@ -709,6 +805,23 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
       }
 
       const h = hits[0];
+      /**
+       * 跨级顶替护栏（和 `addInto` 里那条同一口径）。
+       *
+       * 约定更新是**唯一**会走到这里的自动化路径：巩固可能把一条"听说的"
+       * 当成 update 递进来。放它过去，主人亲口说的事就被一句转述关掉了。
+       * 拦下来时上层（`consolidate.js`）会退化成新增，不丢新信息。
+       *
+       * @param {{at?:number, status?:string}} [opts]
+       */
+      if (!canSupersede(opts.status, h.mm[h.text]?.status)) {
+        const was = statusOf({ status: h.mm[h.text]?.status });
+        return {
+          ok: false,
+          why: `「${h.text}」是${STATUS_LABEL[was]}，这次只有${STATUS_LABEL[statusOf({ status: opts.status })]}，不能顶掉它`,
+          candidates: [h.text],
+        };
+      }
       h.mm[h.text] = { ...(h.mm[h.text] ?? {}), until: at };
       save();
       return { ok: true, text: h.text, scope: h.scope };
