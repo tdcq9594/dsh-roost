@@ -42,7 +42,7 @@ export const SHERPA_MODELS = {
  * 微软在线朗读（Edge TTS）的常用音色。
  *
  * 来源：`bot/plugins/ai-chat/tts.js` 里已经跑通过的那套方案
- * （`@andresaya/edge-tts`），以及 `docs/TTS与翻唱调研.md` 的选型结论：
+ * （`@andresaya/edge-tts`），以及 TTS 选型调研的结论：
  * 纯 Node 实现、不用 Python / venv、不要 API Key。
  *
  * **两个必须让用户知道的点**：

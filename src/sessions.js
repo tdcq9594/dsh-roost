@@ -152,7 +152,7 @@ export function createSessions({ dataDir, log = () => {} }) {
       /**
        * **保留 `chats` 之外的顶层字段**。
        *
-       * 扩展机制方案（`docs/扩展机制方案.md` §6）规划了往这份文件里加
+       * 扩展机制（v1.1.0 已落地）规划了往这份文件里加
        * `overrides[chatId]`。只写 `{ chats }` 会把它静默抹掉——而且是在
        * 「保存会话映射」这种看不出来会动配置的时机上抹掉。
        */

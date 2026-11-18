@@ -46,7 +46,7 @@ export const SHERPA_NODE_VERSION = '2.0.1';
  *
  * 来源：`https://registry.npmjs.org/@andresaya%2Fedge-tts/latest` 查到的
  * 1.9.1 依赖表（`ws ^8.18.3`、`commander ^12.1.0`），加上
- * `docs/TTS与翻唱调研.md` 的选型结论。跟着 latest 走等于把上游发新版
+ * TTS 选型调研的结论。跟着 latest 走等于把上游发新版
  * 变成用户的安装失败。
  *
  * 许可提醒：`@andresaya/edge-tts` 是 GPL-3.0-only。这里**只下载到用户自己的

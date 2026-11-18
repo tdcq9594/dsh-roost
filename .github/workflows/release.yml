@@ -53,20 +53,36 @@ jobs:
 
           # 三段式判定：看当前版本的 tag 在不在、指向哪。
           # 递增校验在下面的独立块做，这里只认「这个版本的 tag 建没建」，不重复比大小。
+          mode=''
           if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null 2>&1; then
             tag_sha=$(git rev-list -n 1 "v$ver")
             if [ "$tag_sha" = "$GITHUB_SHA" ]; then
               # 常规发版后 CI 重跑：tag 就在当前提交，续跑补建 Release/npm。
               echo "v$ver 的 tag 已指向当前提交 → resume"
-              echo "mode=resume" >> "$GITHUB_OUTPUT"
+              mode=resume
             else
               # 发版后又有普通改动合入（未 bump）：不该再发一次。
               echo "v$ver 的 tag 指向别的提交，当前是普通改动 → skip"
-              echo "mode=skip" >> "$GITHUB_OUTPUT"
+              mode=skip
             fi
           else
             echo "v$ver 尚无 tag → release"
-            echo "mode=release" >> "$GITHUB_OUTPUT"
+            mode=release
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+          # skip 时显式说清「为什么没发版」，否则「改了代码却没发版」完全静默：
+          # 两个 PR bump 到同一版本时，后合并的就落在这里。
+          if [ "$mode" = "skip" ]; then
+            {
+              echo "### 本次不发版（skip）"
+              echo ""
+              echo "版本号是 \`$ver\`，但 tag \`v$ver\` 已经存在且**不指向**这次提交。"
+              echo ""
+              echo "两种可能："
+              echo "- 这是发版后的普通改动（没 bump 版本）——正常，无需处理；"
+              echo "- 你 bump 到的版本号已被别人先发了——本次改动**没有**对应版本。"
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
           # 递增校验（发版必须增版本）：取已发布的最大 vX.Y.Z，用 sort -V 比数值
@@ -127,6 +143,10 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false   # 官方建议：发布构建不要缓存
 
+      - name: 升级 npm（OIDC 改 dist-tag 要 >= 11.21.0，Node 24 自带的版本不够新）
+        shell: bash
+        run: npm i -g npm@^11.21.0
+
       - name: 生成 Release 正文（check job 的临时目录不共享，这里重取）
         shell: bash
         run: awk '/^## v/{n++} n==1' RELEASE_NOTES.md > "$RUNNER_TEMP/release-body.md"
@@ -158,13 +178,67 @@ jobs:
           fi
           gh release create "$tag" --title "${{ needs.check.outputs.title }}" --notes-file "$RUNNER_TEMP/release-body.md"
 
-      - name: 发 npm（OIDC trusted publishing）
+      - name: 发 npm（OIDC trusted publishing · 已发布则跳过）
         shell: bash
+        env:
+          VER: ${{ needs.check.outputs.version }}
         run: |
-          # 403 previously published = 已写过，不是失败，别换版本号重发。
-          # 这里不吞错误：真失败要让审批人看见，人工判断后再决定补发。
+          pkg="dsh-roost"
+          # 幂等：resume 重跑 / 手动 dispatch 时这一版已经发过了，npm 只会回
+          # `403 previously published`。先查一次，已发布就跳过，否则重跑会被拦成红。
+          published=$(npm view "$pkg@$VER" version 2>/dev/null || true)
+          if [ "$published" = "$VER" ]; then
+            echo "$pkg@$VER 已在 npm 上，跳过发布（幂等）"
+            exit 0
+          fi
           if ! npm publish --access public; then
-            echo "npm publish 失败。若是 403 previously published 说明该版本已入库（幂等正常）；" >&2
+            echo "npm publish 失败。若日志是 403 previously published，说明并发/刚已入库，重跑即可；" >&2
             echo "其余失败需人工排查，不要在 workflow 里改版本号重发。" >&2
             exit 1
           fi
+
+      - name: 发后自检：Release + npm 版本都指向新版本
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver="${{ needs.check.outputs.version }}"
+          pkg="dsh-roost"
+          # registry 和 GitHub 都有传播延迟，轮询等它们追上（12 次 × 15s ≈ 3 分钟）
+          ok=0
+          for i in $(seq 1 12); do
+            pub=$(npm view "$pkg" version 2>/dev/null || true)
+            rel=$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name 2>/dev/null || true)
+            if [ "$pub" = "$ver" ] && [ "$rel" = "v$ver" ]; then ok=1; break; fi
+            echo "等待传播（$i/12）：npm=$pub release=$rel"
+            sleep 15
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::发后自检失败：npm 或 releases/latest 没指向 v$ver，去核对再决定是否补发" >&2
+            exit 1
+          fi
+          echo "OK：npm 与 releases/latest 都是 v$ver"
+
+      - name: beta 标签对齐（OIDC dist-tag · 幂等）
+        shell: bash
+        run: |
+          pkg="dsh-roost"
+          beta=$(npm view "$pkg" dist-tags.beta 2>/dev/null || true)
+          latest=$(npm view "$pkg" dist-tags.latest 2>/dev/null || true)
+          if [ -z "$beta" ]; then
+            echo "该包没有 beta 标签，跳过对齐"
+            exit 0
+          fi
+          if [ "$beta" = "$latest" ]; then
+            echo "beta 已等于 latest=$latest，无需对齐"
+            exit 0
+          fi
+          # 规则：正式版高于 beta 就把 beta 指到最新版；beta 更高就保留测试通道不动。
+          # 预发布号（1.2.3-beta.1）按 sort -V 也比正式版大，正好落入「不动」。
+          bigger=$(printf '%s\n%s\n' "$beta" "$latest" | sort -V | tail -1)
+          if [ "$bigger" = "$beta" ]; then
+            echo "beta=$beta 不低于 latest=$latest，保留测试通道不动"
+            exit 0
+          fi
+          npm dist-tag add "$pkg@$latest" beta
+          echo "beta 已从 $beta 对齐到 $latest"

@@ -1,7 +1,7 @@
 /**
  * 能力策略：**谁、在哪个群、能调哪些工具**。
  *
- * 设计文档见 `docs/能力页方案.md`。这里只放纯逻辑，不碰 DSH 上下文——
+ * 设计文档已归档（不入库）。这里只放纯逻辑，不碰 DSH 上下文——
  * 原因和 `permissions.js` 一样：`tools.restrict()` 会校验名字，
  * 只要有一个不存在就**整批拒绝**（0.10.10 踩过，白名单从来没生效过）。
  * 所以这个模块的铁律是：
@@ -20,7 +20,7 @@
  * 主人特意给某人配了 3 级，到 QQ 这边跟路人拿同一套工具，等于没配。
  *
  * `unknown` 不在框架等级里，它是 `bucketOf()` 拿不到权限信息时的兜底，
- * 排在最末、页面上不可配（见 `docs/能力页方案.md` 第五节）。
+ * 排在最末、页面上不可配。
  */
 export const BUCKETS = ['owner', 'admin', 'manager', 'helper', 'member', 'unknown'];
 
@@ -78,8 +78,8 @@ export const PINNED_KEEP = ['qq_send', 'qq_close'];
 export const PINNED_SOFT = ['memory_search', 'memory_note', 'sticker_pick'];
 
 /**
- * 不许开：DSH 原生的 `skill` 工具和我们自管的技能目录会打架
- * （见 `docs/能力页方案.md` 第八节）。只有 `skills.mode === 'self'` 时才拦。
+ * 不许开：DSH 原生的 `skill` 工具和我们自管的技能目录会打架。
+ * 只有 `skills.mode === 'self'` 时才拦。
  */
 export const PINNED_DENY_SELF_SKILLS = ['skill'];
 
