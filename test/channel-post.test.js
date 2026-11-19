@@ -272,7 +272,33 @@ test('humanError：已知码给人话，未知码原样显示不编解释', () =
 
   const unknown = humanError('123456', 'some raw message');
   assert.match(unknown.title, /没见过的错误/);
-  assert.ok(unknown.todo.some((s) => s.includes('123456')));
+  assert.equal(unknown.raw, 'some raw message', '原文留在 raw 字段，面板单独渲染');
+  assert.ok(
+    !unknown.todo.some((s) => s.includes('123456')),
+    'todo 里别再抄一遍原文：面板已经把 raw 渲染成红字，抄一遍就是同一句话出现两次',
+  );
+});
+
+test('humanError：连不上 roost 是人话 + 可操作步骤，不是「没见过的错误」', () => {
+  const raw = '连不上 roost（http://127.0.0.1:6807）（那个端口没人监听：外接协议没开，或端口填错了）';
+
+  /** 1. 新版：框架抛错带 code: 'NETWORK' */
+  const h = humanError('NETWORK', raw);
+  assert.match(h.title, /连不上 roost/);
+  assert.equal(h.code, 'NETWORK');
+  assert.ok(!/没见过的错误/.test(h.title), '这不是未知错误，方向不能搞错');
+  assert.ok(!h.todo.some((s) => /开发者/.test(s)), '用户自己能修，不该让他去找开发者');
+  assert.ok(h.todo.some((s) => /外接协议/.test(s)), '必须告诉他去看外接协议');
+  assert.ok(h.todo.some((s) => /重新体检/.test(s)), '修完要能自检，闭环');
+  assert.match(h.say, /不是权限问题/, '这条最容易被误当成论坛权限问题');
+
+  /** 2. 老框架不透传 code：只靠消息前缀也要认出来 */
+  const legacy = humanError('', raw);
+  assert.match(legacy.title, /连不上 roost/);
+  assert.equal(legacy.code, 'NETWORK');
+
+  /** 3. 真正未知的码不许被这条吃掉 */
+  assert.match(humanError('999999', 'boom').title, /没见过的错误/);
 });
 
 /* ---------------- 「链路不通时能不能正确指引用户」 ---------------- */

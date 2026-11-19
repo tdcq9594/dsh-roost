@@ -11690,7 +11690,12 @@ select.roost-input{color-scheme:dark}
               : null),
           diag && diag.permError
             ? h('div', { className: 'roost-note', style: { color: 'var(--dsw-alias-state-danger, #e55)' } },
-              `${diag.permError.code || ''} ${diag.permError.message || ''}`.trim())
+              /**
+               * 只显示**数字**业务码。`NETWORK` 这类内部标识对用户没有意义，
+               * 拼在「连不上 roost」前面只会让人以为是另一个错误
+               * （2026-11-19 截图：红字以 `NETWORK` 开头，读者会以为码本身有问题）。
+               */
+              `${/^\d+$/.test(String(diag.permError.code ?? '')) ? String(diag.permError.code) + ' ' : ''}${diag.permError.message || ''}`.trim())
             : null,
           /**
            * 最近一次失败。
