@@ -109,23 +109,23 @@ test('建星图：确定性（黄金角球面，不用 random）+ 关系线不�
 
 test('筛选：搜索 / 星团 / 只看快忘了 / 最近 7 天可叠加', () => {
   const { stars } = mod.buildStarMap(sampleMem(), { now: NOW })
-  assert.equal(mod.filterStars(stars, {}, { now: NOW }).stars.length, stars.length)
-  const q = mod.filterStars(stars, { q: '花生' }, { now: NOW })
+  assert.equal(mod.filterStars(stars, { now: NOW }).stars.length, stars.length)
+  const q = mod.filterStars(stars, { q: '花生', now: NOW })
   assert.equal(q.stars.length, 1)
   assert.ok(q.matched.has(q.stars[0].id))
 
-  const g = mod.filterStars(stars, { group: 'entity' }, { now: NOW })
+  const g = mod.filterStars(stars, { group: 'entity', now: NOW })
   assert.ok(g.stars.length >= 3)
   for (const s of g.stars) assert.equal(s.group, 'entity')
 
-  const dim = mod.filterStars(stars, { quick: 'dim' }, { now: NOW })
+  const dim = mod.filterStars(stars, { quick: 'dim', now: NOW })
   for (const s of dim.stars) assert.ok(s.brightness < 0.35)
 
-  const recent = mod.filterStars(stars, { quick: 'recent' }, { now: NOW })
+  const recent = mod.filterStars(stars, { quick: 'recent', now: NOW })
   assert.ok(recent.stars.length > 0)
   for (const s of recent.stars) assert.ok(s.at && NOW - s.at <= 7 * DAY)
 
-  const both = mod.filterStars(stars, { group: 'entity', quick: 'recent' }, { now: NOW })
+  const both = mod.filterStars(stars, { group: 'entity', quick: 'recent', now: NOW })
   for (const s of both.stars) assert.equal(s.group, 'entity')
 })
 

@@ -151,8 +151,55 @@ window.__ModuleLoader__.load({
   --ok:var(--dsw-alias-state-success-primary, #12855a);
   --warn:var(--dsw-alias-state-warn-primary, #b45309);
   --bad:var(--dsw-alias-state-error-primary, #b42318);
-  --accent:var(--dsw-alias-brand-primary, #2563eb);
+  --accent:var(--roost-accent, var(--dsw-alias-brand-primary, #2563eb));
 }
+/**
+ * 用户自选的强调色（个性化页）。
+ *
+ * 只覆盖 --accent 这一个锚点：面板里 39 处用它，其中 9 处是 color-mix
+ * 派生（14% / 30% / 9% / 8%），换一个值那些药丸底与边框自动跟着变。
+ * **其余颜色一概不碰**——--dsw-alias-* 是宿主的两套主题令牌，改它们会在
+ * 宿主切深浅时花掉（2026-11-11 的下拉弹层事故就是这个形状）。
+ *
+ * 深浅各给一个值（inline 注入两个变量），否则浅色主题下会出现荧光色下划线。
+ * 没有注入这两个变量时（选了「跟随宿主」）整条回落到宿主令牌。
+ */
+@media (prefers-color-scheme: light){
+  .roost-root{--accent:var(--roost-accent-light, var(--roost-accent, var(--dsw-alias-brand-primary, #2563eb)))}
+}
+/**
+ * 关动效（个性化页的开关）。
+ *
+ * 用一条通配规则兜住全部：分节入场、切页淡入、.roost-node.current::after
+ * 那个 2.4s 无限呼吸、以及所有按钮/选项卡过渡。逐条列会漏——现有三段
+ * prefers-reduced-motion 就漏了呼吸圈和 .roost-fade。
+ */
+.roost-root.no-anim *,
+.roost-root.no-anim *::before,
+.roost-root.no-anim *::after{animation:none!important;transition:none!important}
+/* ── 个性化页（2026-11-19）────────────────────────────
+   三样东西没有现成样式可复用：组切换胶囊、行内上下移按钮、色块。
+   其余（分节、行、开关、输入框）全部走既有的 Sec / GRow / Switch / roost-g-area。 */
+.roost-pf-grp{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 12px}
+.roost-pf-grp button{padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:transparent;
+  color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;font:inherit;font-size:12px;
+  transition:background .16s,color .16s,border-color .16s}
+.roost-pf-grp button:hover{color:var(--dsw-alias-label-primary,inherit);background:var(--hover)}
+.roost-pf-grp button[data-on="1"]{color:var(--dsw-alias-label-primary,inherit);border-color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.roost-pf-order{display:inline-flex;gap:4px}
+.roost-pf-order button{width:26px;height:26px;padding:0;display:inline-flex;align-items:center;justify-content:center;
+  border-radius:6px;border:1px solid var(--line);background:transparent;color:inherit;cursor:pointer;
+  font:inherit;font-size:12px;line-height:1}
+.roost-pf-order button:hover:not(:disabled){background:var(--hover)}
+.roost-pf-order button:disabled{opacity:.28;cursor:not-allowed}
+.roost-swatches{display:flex;gap:10px;flex-wrap:wrap;padding:2px 0 6px}
+.roost-swatch{width:32px;height:32px;padding:0;border-radius:9px;border:2px solid transparent;
+  background:transparent;cursor:pointer}
+.roost-swatch span{display:block;width:100%;height:100%;border-radius:7px}
+.roost-swatch.host span{background:linear-gradient(135deg,#39404d 50%,#24272e 50%)}
+.roost-swatch[data-on="1"]{border-color:var(--dsw-alias-label-primary,#e6e7eb)}
+.roost-swatch:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 /* 首次接入向导：全屏遮罩，窄侧栏里也要能滚、不能把按钮挤出屏幕 */
 /* 垂直也居中：卡片贴顶会在大屏上留下半屏空白，看着像没加载完 */
 .roost-wizard{display:flex;align-items:center;justify-content:center;width:100%;height:100%;overflow:auto;padding:20px;box-sizing:border-box}
@@ -17503,6 +17550,14 @@ select.roost-input{color-scheme:dark}
      */
     const TABS = [
       ['overview', '概览'],
+      /**
+       * 个性化（2026-11-19）：菜单顺序 / 显示隐藏 / 强调色 / 动效。
+       *
+       * 为什么不放「系统」组：系统组已经 11 页，是全站最重的一组；而这几项
+       * 是「我每天看的界面怎么摆」，不是运维。放概览组还顺手补上「概览只有
+       * 一页」那个唯一的单页组（二级行现在会出现，见 `groupTabs.length > 1`）。
+       */
+      ['personalize', '个性化'],
       /* 人设：她是谁、心情如何、什么时候开口、记得什么 */
       ['her', '人格'],
       /**
@@ -17587,6 +17642,115 @@ select.roost-input{color-scheme:dark}
     /** 深链校验用：老 key 也放行，否则老书签会被当成无效值、静默退回概览 */
     const KNOWN_TABS = ALL_TABS.concat(Object.keys(LEGACY_CH_TABS))
 
+    /* ---------------- 个性化：菜单显隐 / 顺序 / 外观 ---------------- */
+
+    /**
+     * 不可隐藏的页（**恢复入口 + 唯一入口**）。
+     *
+     * 这份名单的每一条都有代价可算：
+     *   · `overview` / `config` / `caps` —— 关了功能之后要能把开关找回来；
+     *   · `ext-market` / `ext-api` —— 装扩展与控制面各只有这一个入口；
+     *   · `express` —— 含「听语音（ASR）」全仓唯一入口，与 `tts.enabled` 无关
+     *     （关语音藏整页会连带把 ASR 设置弄丢）；
+     *   · `personalize` —— 它自己。藏了就再也进不来，连「全部显示」都点不到。
+     */
+    const PROTECTED_TABS = Object.freeze([
+      'overview', 'config', 'caps', 'ext-market', 'ext-api', 'express', 'personalize',
+    ])
+
+    /**
+     * 强调色预设：深/浅各一个值。
+     *
+     * 只给预设、不给任意 hex：这几个值都按 WCAG AA 算过（深色底 5.30–7.32，
+     * 浅色底 5.01–6.04），用户自选很容易选出一个把下划线糊进背景的颜色。
+     * 串里的 `id` 会存进偏好，改 id 等于让老用户的设置失效——只能加不能改。
+     */
+    const ACCENT_PRESETS = Object.freeze([
+      { id: 'host', label: '跟随宿主', dark: '', light: '' },
+      { id: 'blue', label: '蓝', dark: '#4c8dff', light: '#2563eb' },
+      { id: 'teal', label: '青', dark: '#2bb8b8', light: '#0e7c7c' },
+      { id: 'green', label: '绿', dark: '#3fb950', light: '#1a7f37' },
+      { id: 'purple', label: '紫', dark: '#a371f7', light: '#7c3aed' },
+      { id: 'orange', label: '橙', dark: '#d29922', light: '#b45309' },
+      { id: 'magenta', label: '洋红', dark: '#e85a8a', light: '#be185d' },
+    ])
+    const accentOf = (id) => ACCENT_PRESETS.find((a) => a.id === id) || ACCENT_PRESETS[0]
+    /** 页签中文名（查不到就退回 key，`TABS` 是唯一来源） */
+    const tabLabel = (id) => (TABS.find(([x]) => x === id) || [])[1] || String(id)
+
+    /** 个性化偏好的键。**只存这台浏览器**：纯显示层，不进 config（进 config 要同步
+     *  `DEFAULTS` + `JSON_SECTIONS`，还会让 JSON 编辑器多一段给人手改坏）。 */
+    const UI_PREF_KEY = 'roost.ui.v1'
+
+    /**
+     * 读偏好：**逐字段校验，坏字段丢字段**。
+     *
+     * 不整份拒绝的理由：用户手改 JSON 时最容易错一个逗号或一个引号，
+     * 整份拒掉等于「我改个颜色，顺序和隐藏全没了」。
+     */
+    function readUiPref() {
+      const empty = { hidden: [], order: {}, accent: 'host', anim: true }
+      let raw = null
+      try { raw = JSON.parse(localStorage.getItem(UI_PREF_KEY) || 'null') } catch { return empty }
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return empty
+      const ids = new Set(ALL_TABS)
+      const hidden = Array.isArray(raw.hidden)
+        ? raw.hidden.filter((id) => typeof id === 'string' && ids.has(id) && !PROTECTED_TABS.includes(id))
+        : []
+      const order = {}
+      if (raw.order && typeof raw.order === 'object' && !Array.isArray(raw.order)) {
+        for (const [g, list] of Object.entries(raw.order)) {
+          if (Array.isArray(list)) order[g] = list.filter((id) => typeof id === 'string' && ids.has(id))
+        }
+      }
+      const accents = ['host', 'blue', 'teal', 'green', 'purple', 'orange', 'magenta']
+      return {
+        hidden,
+        order,
+        accent: accents.includes(raw.accent) ? raw.accent : 'host',
+        anim: raw.anim !== false,
+      }
+    }
+
+    function writeUiPref(p) {
+      try { localStorage.setItem(UI_PREF_KEY, JSON.stringify(p)) } catch { /* 存不了就只活这一页 */ }
+    }
+
+    /**
+     * 要隐藏哪些页。**返回"要藏的"集合**，名字按语义取（旧方案曾叫
+     * `visibleTabIds` 却返回隐藏集，容易写反，这里改掉）。
+     *
+     * 两个来源，都 fail-open：
+     *   · 自动型 —— 功能关了 / 一个扩展都没装（§11 白名单：只藏 `stickers`、`ext`）；
+     *   · 用户型 —— 个性化页里手动关掉的（保护名单除外）。
+     * `featOn === null`（还没读到 / 接口失败）一律不藏；扩展清单同理，必须
+     * 「读成功且确实为空」才藏。
+     */
+    function hiddenTabIds(featOn, installedRows, installedReady, prefs) {
+      const out = new Set()
+      if (featOn && featOn.stickers === false) out.add('stickers')
+      if (installedReady === true && Array.isArray(installedRows) && installedRows.length === 0) out.add('ext')
+      for (const id of (prefs && prefs.hidden) || []) {
+        if (!PROTECTED_TABS.includes(id)) out.add(id)
+      }
+      return out
+    }
+
+    /** 组内顺序：用户排过的在前（按排的次序），没排过的按声明顺序接后 */
+    function orderTabs(g, ids, prefs) {
+      const order = (prefs && prefs.order && prefs.order[g.id]) || []
+      const pos = (id) => {
+        const i = order.indexOf(id)
+        return i < 0 ? Number.MAX_SAFE_INTEGER : i
+      }
+      return ids.slice().sort((a, b) => {
+        const pa = pos(a), pb = pos(b)
+        if (pa !== pb) return pa - pb
+        return g.tabs.indexOf(a) - g.tabs.indexOf(b)
+      })
+    }
+
+
     /**
      * 两层导航：一级是分组（带图标），二级是组内页面。
      *
@@ -17608,6 +17772,7 @@ select.roost-input{color-scheme:dark}
      */
     const TAB_ALIAS = {
       overview: '概览 首页 总览 现在 状态 卡在哪',
+      personalize: '个性化 外观 主题 颜色 强调色 菜单 页签 顺序 隐藏 显示 布局 自定义 动画',
       her: '人格 人设 角色 名字 自称',
       profile: '资料 改资料 昵称 头像 简介 签名 菜单 换名字 换头像 自我表达 她能不能自己改',
       mood: '心情 情绪 状态 衰减',
@@ -17670,7 +17835,7 @@ select.roost-input{color-scheme:dark}
     }
 
     const NAV_GROUPS = [
-      { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview'] },
+      { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview', 'personalize'] },
       { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'profile', 'mood', 'awake', 'memory', 'people'] },
       /**
        * 表达：她怎么"出声"——说话（语音合成）、表情包、发帖。
@@ -17789,8 +17954,230 @@ select.roost-input{color-scheme:dark}
        */
       : ({ children }) => (Array.isArray(children) ? children[0] : children) ?? null
 
+    /**
+     * 个性化：菜单顺序与显示 / 强调色 / 动效 / 导出导入。
+     *
+     * 两条边界写死在页面里（不是藏在代码注释里，用户看不到就等于没有）：
+     *   · **隐藏 ≠ 关功能**：只从导航拿掉入口，功能照常跑，要真关去「权限」页；
+     *   · 偏好**只存在这台浏览器**，换机器要自己把下面那段 JSON 搬过去。
+     *
+     * 所有状态都在 `RoostPage`（`uiPref` / `setPrefs`），本组件只负责画和改——
+     * 放自己 state 里会出现「本页变了、导航和颜色没变」。
+     */
+    function PersonalizeTab({ uiPref, setPrefs, toast }) {
+      const [editGroup, setEditGroup] = useState('self')
+      const [draft, setDraft] = useState(null)
+      const g = NAV_GROUPS.find((x) => x.id === editGroup) || NAV_GROUPS[1]
+      const hidden = new Set(uiPref.hidden || [])
+
+      /** 每次改动都清掉 04 的草稿：否则先编辑过 textarea、再动 01/02/03，
+       *  下面那段 JSON 会停在改之前的样子，用户以为没生效 */
+      const patch = (next) => { setDraft(null); setPrefs((prev) => ({ ...prev, ...next })) }
+
+      /** 上下移：以「当前可见顺序」为基准重写这一组的 order，隐藏页接在后面 */
+      const move = (id, dir) => {
+        setDraft(null)
+        setPrefs((prev) => {
+          const h = new Set(prev.hidden || [])
+          const vis = orderTabs(g, g.tabs.filter((x) => !h.has(x)), prev)
+          const i = vis.indexOf(id)
+          const j = i + dir
+          if (i < 0 || j < 0 || j >= vis.length) return prev
+          const next = vis.slice()
+          next.splice(i, 1)
+          next.splice(j, 0, id)
+          const rest = g.tabs.filter((x) => !next.includes(x))
+          return { ...prev, order: { ...(prev.order || {}), [g.id]: next.concat(rest) } }
+        })
+      }
+
+      const toggleHidden = (id) => {
+        if (PROTECTED_TABS.includes(id)) {
+          toast(`「${tabLabel(id)}」是恢复入口，不能隐藏`)
+          return
+        }
+        const wasHidden = hidden.has(id)
+        setDraft(null)
+        setPrefs((prev) => {
+          const cur = prev.hidden || []
+          return { ...prev, hidden: wasHidden ? cur.filter((x) => x !== id) : [...cur, id] }
+        })
+        /** 当前页不跳走（与深链口径一致），只说去哪找 */
+        toast(wasHidden
+          ? `「${tabLabel(id)}」回到导航`
+          : `「${tabLabel(id)}」已从导航隐藏，Alt+K 还能找到`)
+      }
+
+      const resetAll = () => {
+        setDraft(null)
+        setPrefs({ hidden: [], order: {}, accent: 'host', anim: true })
+        toast('已恢复默认（只重置这一页的四项）')
+      }
+
+      /** 导入：**逐字段校验，坏字段丢字段**，不整份拒绝 */
+      const importJson = () => {
+        let raw = null
+        const text = draft === null ? JSON.stringify(uiPref) : draft
+        try { raw = JSON.parse(text) } catch (e) { toast('这段不是合法 JSON：' + e.message); return }
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { toast('要一段对象 JSON'); return }
+        const ids = new Set(ALL_TABS)
+        const next = {
+          hidden: Array.isArray(raw.hidden)
+            ? raw.hidden.filter((x) => typeof x === 'string' && ids.has(x) && !PROTECTED_TABS.includes(x))
+            : [],
+          order: {},
+          accent: ACCENT_PRESETS.some((a) => a.id === raw.accent) ? raw.accent : 'host',
+          anim: raw.anim !== false,
+        }
+        if (raw.order && typeof raw.order === 'object' && !Array.isArray(raw.order)) {
+          for (const [k, list] of Object.entries(raw.order)) {
+            if (Array.isArray(list)) next.order[k] = list.filter((x) => typeof x === 'string' && ids.has(x))
+          }
+        }
+        setPrefs(next)
+        setDraft(null)
+        toast('已导入（坏字段会被丢掉，不会整份失败）')
+      }
+
+      /* 组内列表：先按用户顺序排，再渲染每一行 */
+      const ids = orderTabs(g, g.tabs, uiPref)
+      const visibleIds = orderTabs(g, g.tabs.filter((x) => !hidden.has(x)), uiPref)
+
+      return h('div', null,
+        /* 01 菜单顺序与显示 */
+        h(Sec, { n: '01', title: '菜单顺序与显示' },
+          h('div', { className: 'roost-note' },
+            '隐藏只是从这里拿掉入口，功能照常运行；要真关某个功能，去「权限」页改开关。'
+            + '顺序只影响组内，一级分组不跟着变。扩展页不在这里排，也不在这里藏。'),
+          h('div', { className: 'roost-pf-grp' },
+            NAV_GROUPS.map((x) => h('button', {
+              key: x.id, type: 'button',
+              'data-on': x.id === g.id ? '1' : '0',
+              'aria-pressed': x.id === g.id ? 'true' : 'false',
+              onClick: () => setEditGroup(x.id),
+            }, x.label))),
+          ids.map((id) => {
+            const prot = PROTECTED_TABS.includes(id)
+            const vi = visibleIds.indexOf(id)
+            return h(GRow, {
+              key: id,
+              label: tabLabel(id) + (prot ? '（固定）' : ''),
+              hint: id === 'personalize'
+                ? '本页自己：藏了就再也进不来，所以锁着'
+                : (id === 'express' ? '含「听语音」唯一入口，关语音也不藏' : ''),
+            },
+              h('span', { className: 'roost-pf-order' },
+                h('button', {
+                  type: 'button', title: '上移', 'aria-label': `把${tabLabel(id)}上移`,
+                  disabled: vi <= 0, onClick: () => move(id, -1),
+                }, '↑'),
+                h('button', {
+                  type: 'button', title: '下移', 'aria-label': `把${tabLabel(id)}下移`,
+                  disabled: vi < 0 || vi >= visibleIds.length - 1, onClick: () => move(id, 1),
+                }, '↓')),
+              h(Switch, {
+                on: !hidden.has(id), label: `${tabLabel(id)}显示`, disabled: prot,
+                title: prot ? '受保护，不能隐藏' : (hidden.has(id) ? '已隐藏' : '显示中'),
+                onToggle: () => toggleHidden(id),
+              }),
+            )
+          }),
+        ),
+
+        /* 02 强调色 */
+        h(Sec, { n: '02', title: '强调色' },
+          h('div', { className: 'roost-note' },
+            '只换面板自己的强调色（选中下划线、药丸底、焦点环），不改宿主的背景与文字。'
+            + '这几个值都算过对比度；「跟随宿主」会跟 DSH 的深浅主题自己变。'),
+          h('div', { className: 'roost-swatches' },
+            ACCENT_PRESETS.map((a) => h('button', {
+              key: a.id, type: 'button',
+              className: 'roost-swatch' + (a.id === 'host' ? ' host' : ''),
+              'data-on': uiPref.accent === a.id ? '1' : '0',
+              'aria-pressed': uiPref.accent === a.id ? 'true' : 'false',
+              title: a.label, 'aria-label': a.label,
+              onClick: () => patch({ accent: a.id }),
+            }, h('span', { style: a.dark ? { background: a.dark } : null })))),
+          h('div', { className: 'roost-note' },
+            '当前：' + accentOf(uiPref.accent).label
+            + (uiPref.accent === 'host' ? '（跟随 DSH 主题）' : `（${accentOf(uiPref.accent).dark}）`)),
+        ),
+
+        /* 03 动效 */
+        h(Sec, { n: '03', title: '动效' },
+          h(GRow, {
+            label: '界面动画',
+            hint: '分节入场、切页淡入、指示呼吸圈、按钮回弹；关掉之后全部静止',
+          },
+            h(Switch, {
+              on: uiPref.anim !== false, label: '界面动画',
+              onToggle: (v) => patch({ anim: v }),
+            })),
+        ),
+
+        /* 04 导出与导入 */
+        h(Sec, { n: '04', title: '导出与导入' },
+          h('div', { className: 'roost-note' },
+            '偏好只存在这台浏览器。换电脑时把下面这段复制走，粘回来点「导入」。'),
+          h('textarea', {
+            className: 'roost-g-area',
+            style: { minHeight: 96, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 11.5 },
+            value: draft === null ? JSON.stringify(uiPref, null, 2) : draft,
+            onChange: (e) => setDraft(e.target.value),
+            spellCheck: false, 'aria-label': '偏好 JSON',
+          }),
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' } },
+            h('button', { type: 'button', className: 'roost-btn', onClick: resetAll }, '恢复默认'),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => {
+                const text = JSON.stringify(uiPref, null, 2)
+                setDraft(null)
+                /** `typeof` 而不是 `navigator?.`：无 navigator 的环境里后者会抛 */
+                try {
+                  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+                    navigator.clipboard.writeText(text)
+                    toast('已复制到剪贴板')
+                  } else toast('浏览器不让写剪贴板，请手动选中上面那段')
+                } catch { toast('复制失败，请手动选中上面那段') }
+              },
+            }, '复制'),
+            h('button', { type: 'button', className: 'roost-primary', onClick: importJson }, '导入'),
+          ),
+        ),
+      )
+    }
+
     function RoostPage() {
       useStyle()
+      /**
+       * 页头开关的生效态（`features.get` 的 `on`，算过依赖）。
+       *
+       * **声明必须在这里、早于 `hiddenIds`**：导航显隐要读它，
+       * 放在下面（页头那两个开关旁边）会撞 TDZ —— 渲染直接抛
+       * 「Cannot access 'featOn' before initialization」。
+       */
+      const [featOn, setFeatOn] = useState(null)
+      /**
+       * 个性化偏好：顺序 / 隐藏 / 强调色 / 动效。
+       *
+       * **必须放在这一层**：强调色与 `no-anim` 都注入 `.roost-root`，
+       * 导航过滤也在这里算。放子组件里会出现「本页 UI 变了、导航和颜色没变」
+       * ——这类设置页最常见的假成功。
+       */
+      const [uiPref, setUiPref] = useState(readUiPref)
+      /**
+       * 必须支持函数式更新：快速连点 ↑↓ 时两次 `setPrefs` 会落在同一批里，
+       * 用 `{...uiPref, ...}` 的快照写法会让第二次覆盖第一次（改动静默丢失）。
+       */
+      const setPrefs = useCallback((next) => {
+        setUiPref((prev) => (typeof next === 'function' ? next(prev) : next))
+      }, [])
+      /** 持久化放 effect：`setUiPref` 里做副作用在 StrictMode 下会被执行两次 */
+      useEffect(() => { writeUiPref(uiPref) }, [uiPref])
+      /** 已装扩展清单：`null` = 还没读到；`ready` 区分「读到空」与「没读到」 */
+      const [installedRows, setInstalledRows] = useState(null)
+      const [installedReady, setInstalledReady] = useState(false)
       /**
        * 记住上次停在哪一页。
        *
@@ -17880,12 +18267,22 @@ select.roost-input{color-scheme:dark}
         return () => { alive = false }
       }, [])
       /** 静态页 + 扩展页。只用于渲染导航，不改 `TABS` 本身 */
-      const dynamicTabs = extPages.length
+      /**
+       * 要藏起来的页（自动 + 用户手动），导航 / Alt+K / 一级组全读这一份。
+       *
+       * 只算一次、下面七处消费——分散判的话必然出现「导航没了但搜索还能跳进去」
+       * 或「点一级分组落空」。
+       */
+      const hiddenIds = hiddenTabIds(featOn, installedRows, installedReady, uiPref)
+
+      /** 静态页 + 扩展页，**已扣掉隐藏页**。只用于渲染导航，不改 `TABS` 本身 */
+      const dynamicTabs = (extPages.length
         ? TABS.concat(extPages.map((p) => [`ext:${p.id}`, p.nav.label]))
-        : TABS
+        : TABS).filter(([id]) => !hiddenIds.has(id))
 
       /**
-       * 某个一级分组里的页面，**按 `NAV_GROUPS[x].tabs` 声明的顺序**排。
+       * 某个一级分组里的页面，**按 `NAV_GROUPS[x].tabs` 声明的顺序**排，
+       * 再叠加用户自定义的顺序（个性化页里 ↑↓ 排过的）。
        *
        * 为什么不能直接用 `dynamicTabs` 过滤：`TABS` 是「有哪些页」的清单，
        * 它的书写顺序只服务于 Alt+K 全站遍历；组内的主次是 `NAV_GROUPS`
@@ -17893,16 +18290,18 @@ select.roost-input{color-scheme:dark}
        * `NAV_GROUPS.system` 把 `connect` 排在首位，实际渲染成倒数第二，
        * `SYSTEM_SEG` 的分段标记跟着错位（第三轮 A1）。
        *
-       * 扩展页（`ext:*`）不在静态声明里，按 `extPages` 顺序接在组内末尾。
+       * 扩展页（`ext:*`）不在静态声明里，按 `extPages` 顺序接在组内末尾，
+       * 且**不参与用户排序**（它们的 id 不稳定，排了也是白排）。
        */
       const tabsOfGroup = (g) => {
         if (!g) return []
-        const declared = g.tabs
+        const declaredIds = g.tabs.filter((id) => dynamicTabs.some(([tid]) => tid === id))
+        const ordered = orderTabs(g, declaredIds, uiPref)
           .map((id) => dynamicTabs.find(([tid]) => tid === id))
           .filter(Boolean)
         const ext = dynamicTabs.filter(([id]) =>
           id.startsWith('ext:') && (navGroupOf(id, extPages)?.id || '') === g.id)
-        return declared.concat(ext)
+        return ordered.concat(ext)
       }
 
       /**
@@ -17912,6 +18311,9 @@ select.roost-input{color-scheme:dark}
        * 在搜索结果里排到最后，和导航里第一位对不上——第三轮 A1 只修了渲染，
        * 没修这一处。扩展页（`ext:<id>`）以前根本不在候选里，现在跟着组一起进来；
        * 隐藏页接在末尾，给它们一个人话页名（以前直接显示 key）。
+       *
+       * **被藏掉的页也要列出来**（§11 红线：导航隐藏但 Alt+K 仍可达），
+       * 带「（已隐藏）」后缀——不然用户会以为设置把功能弄丢了。
        */
       const paletteTabs = () => {
         const ordered = NAV_GROUPS.flatMap((g) => tabsOfGroup(g))
@@ -17919,7 +18321,10 @@ select.roost-input{color-scheme:dark}
         const ext = dynamicTabs.filter(([id]) => !seen.has(id))
         const hidden = HIDDEN_TABS.filter((id) => !seen.has(id))
           .map((id) => [id, ({ context: '上下文', setup: '接入向导' })[id] || id])
-        return ordered.concat(ext, hidden)
+        const off = TABS
+          .filter(([id]) => hiddenIds.has(id) && !seen.has(id))
+          .map(([id, label]) => [id, label + '（已隐藏）'])
+        return ordered.concat(ext, hidden, off)
       }
 
       const [navLast, setNavLast] = useState(() => {
@@ -17945,13 +18350,18 @@ select.roost-input{color-scheme:dark}
       const openGroup = useCallback((g) => {
         /**
          * 组内页面要算上扩展页：点「表达」时如果只有一个内置页 + 一个扩展页，也得能落到扩展页。
-         * 顺序走 `tabsOfGroup`（= 分组声明顺序），这样「点一级分组」的默认落点
-         * 和二级行第一个页签永远是同一页，不会指东落西。
+         * 顺序走 `tabsOfGroup`（= 分组声明顺序 + 用户自定义），这样「点一级分组」的
+         * 默认落点和二级行第一个页签永远是同一页，不会指东落西。
          */
         const list = tabsOfGroup(g).map(([id]) => id)
+        /**
+         * 「概览」组恒回首屏。它现在有两页（概览 / 个性化），若沿用「上次那页」，
+         * 用户从个性化出来再点一级「概览」就不回首屏了——与"概览是首屏"的定位冲突。
+         */
+        if (g.id === 'home' && list.includes('overview')) { setTab('overview'); return }
         const want = navLast[g.id]
-        setTab(list.includes(want) ? want : (list[0] || g.tabs[0]))
-      }, [navLast, setTab, extPages, dynamicTabs, tabsOfGroup])
+        setTab(list.includes(want) ? want : (list[0] || ''))
+      }, [navLast, setTab, extPages, dynamicTabs, tabsOfGroup, uiPref])
       /** 日志统一拉一次：概览显示最近 6 条，排障页显示全量，别两处各起一个轮询 */
       const [logs, setLogs] = useState(null)
       /** 5.2：自动刷新开关（存 localStorage，刷新页面也记得） */
@@ -18028,7 +18438,6 @@ select.roost-input{color-scheme:dark}
        * `tab === 'caps'` 时才跑，首屏是 null。页头必须自己拉一次。
        * 存的是 `features.get` 返回的 `on`（算过依赖的**生效态**），不是 `raw`。
        */
-      const [featOn, setFeatOn] = useState(null)
       const [reg, setReg] = useState(null)
       const [busy, setBusy] = useState(false)
       const [toastMsg, setToastMsg] = useState('')
@@ -18295,6 +18704,24 @@ select.roost-input{color-scheme:dark}
       useEffect(() => { loadFeatOn() }, [loadFeatOn])
 
       /**
+       * 「已安装」页的显隐判据：**真清单为空才藏**。
+       *
+       * 不能用 `/extensions/ui` 的 `pages`——那只收声明了合法 UI 的扩展，
+       * 装了不带 UI 的扩展时它也是空，会把卸载/诊断入口一起藏掉。
+       */
+      useEffect(() => {
+        let alive = true
+        ;(async () => {
+          const r = await quick('extensions.get')
+          if (!alive || !r || r.ok === false) return
+          if (!Array.isArray(r.rows)) return
+          setInstalledRows(r.rows)
+          setInstalledReady(true)
+        })()
+        return () => { alive = false }
+      }, [quick])
+
+      /**
        * 页头开关：总开关 / 试运行。
        *
        * 失败时**不改本地状态**并把后端的原话 toast 出来——后端 `cannotEnable`
@@ -18334,6 +18761,12 @@ select.roost-input{color-scheme:dark}
         setCapPreview(p.ok === false ? null : p)
         setCapChats(c && c.ok !== false ? c.chats || [] : [])
         setCapFeat(f.ok === false ? null : f)
+        /**
+         * 顺带刷页头的 `featOn`：`voice`/`stickers` 的开关在权限页改，
+         * 走的是这条路径（`reload()` → `loadCaps`），不是页头那两个。
+         * 不同步的话「关掉表情包」之后导航永远不会隐藏——§11 独立审查查出的第一条。
+         */
+        if (f.ok !== false) setFeatOn(f.on || null)
         setCapQuota(q.ok === false ? null : q)
         setCapRetention(rt.ok === false ? null : rt)
       }, [quick])
@@ -18391,13 +18824,25 @@ select.roost-input{color-scheme:dark}
       const groupTabs = tabsOfGroup(curGroup)
 
       /**
+       * 根节点的外观：强调色 + 关动效。
+       *
+       * 写在 `.roost-root` 的 inline style 上——CSS 里的 `--accent` 读的就是
+       * 这两个变量（见 CSS 里那段注释）。空对象就别传，免得渲染出空的 style。
+       */
+      const accent = accentOf(uiPref.accent)
+      const rootStyle = accent.dark
+        ? { '--roost-accent': accent.dark, '--roost-accent-light': accent.light }
+        : undefined
+      const rootClass = 'roost-root' + (uiPref.anim === false ? ' no-anim' : '')
+
+      /**
        * 首次接入向导：新装 / 升级后 `needed=true`，整棵面板树都不挂，
        * 只留全屏向导（照 aurabot `showWizard ? h(Wizard) : null` 的做法）。
        * 这样老配置在没重新接入前不会给人一种「一切正常」的错觉。
        * 跳过后后端仍返回 needed=false，但概览页会把未接入状态一直显示着。
        */
       if (st?.wizard?.needed) {
-        return h('div', { className: 'roost-root' },
+        return h('div', { className: rootClass, style: rootStyle },
           h(SetupWizard, {
             st,
             toast,
@@ -18407,7 +18852,7 @@ select.roost-input{color-scheme:dark}
         )
       }
 
-      return h('div', { className: 'roost-root' },
+      return h('div', { className: rootClass, style: rootStyle },
         h('div', { className: 'roost-head' },
           h('div', { className: 'roost-head-inner' },
           /**
@@ -18459,7 +18904,7 @@ select.roost-input{color-scheme:dark}
                  不能只靠类名——将来有人改 CSS 时这一条还在 */
               style: { display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', padding: '6px 0 0' },
             },
-              NAV_GROUPS.map((g) => {
+              NAV_GROUPS.filter((g) => tabsOfGroup(g).length > 0).map((g) => {
                 const on = curGroup && curGroup.id === g.id
                 /** 悬浮提示把组内页面列出来：只看「能力」猜不到里面有扩展。
                     顺序与点进去后二级行一致，否则提示里看到的和实际的不一样 */
@@ -18479,7 +18924,12 @@ select.roost-input{color-scheme:dark}
             ),
             /** 二级只在该组超过一页时出现：概览单独成组，不该留一条空的二级行。 */
             groupTabs.length > 1
-              ? h('div', { className: 'roost-nav-sub', role: 'tablist', 'aria-label': curGroup.label },
+              ? h('div', {
+                  className: 'roost-nav-sub', role: 'tablist', 'aria-label': curGroup.label,
+                  /* 与一级组那排同一条硬约束：只换行、不 overflow。写 inline 是为了
+                     将来有人改 CSS 时这条还在（2026-11-06 踩过竖滚动条） */
+                  style: { flexWrap: 'wrap' },
+                },
                   groupTabs.map(([id, label]) => h('button', {
                     key: id, type: 'button',
                     className: 'roost-tab',
@@ -18499,10 +18949,17 @@ select.roost-input{color-scheme:dark}
               : null,
             /** 隐藏页标记放两个 tablist 外面：tablist 的 owned element 必须是 role=tab，
                 放外面既能保住 aria-current 的读屏语义，也不破坏 tablist 结构。 */
-            HIDDEN_TABS.includes(tab)
+            /**
+             * 当前位置标记：隐藏页（context/setup）与**被藏起来的正式页**共用。
+             * 深链或 Alt+K 打开一个藏起来的页时，正文照常渲染、一级组照常高亮，
+             * 只在这里补一个不可点的「当前页」标记——不然用户会以为导航坏了。
+             */
+            HIDDEN_TABS.includes(tab) || hiddenIds.has(tab)
               ? h('div', { className: 'roost-nav-sub' },
                   h('span', { className: 'roost-nav-current', 'aria-current': 'page' },
-                    ({ context: '上下文', setup: '接入' })[tab] || tab))
+                    ({ context: '上下文', setup: '接入' })[tab]
+                    || ((TABS.find(([id]) => id === tab) || [])[1] ?? tab)
+                      + (hiddenIds.has(tab) ? '（已隐藏）' : '')))
               : null,
             ),
           ),
@@ -18521,6 +18978,8 @@ select.roost-input{color-scheme:dark}
           h(RenderBoundary, { key: 'tab:' + tab },
             h('div', { className: 'roost-body-inner' },
             tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
+          /** 个性化：偏好状态在 RoostPage（`uiPref`），这里只传下去 */
+          tab === 'personalize' ? h(PersonalizeTab, { uiPref, setPrefs, toast }) : null,
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }) : null,
           /** A6：接入提成正门；隐藏页 setup 与 ?tab=setup 深链原样保留，两边同一份内容 */
           tab === 'connect'
@@ -18839,6 +19298,12 @@ select.roost-input{color-scheme:dark}
      */
     /** 5.1：Alt+K 查找的匹配函数，导出给测试（搜别名能不能命中） */
     exports.matchTabs = matchTabs
+    /* 个性化：纯函数导出给单测（渲染测试的假 React 不跑 effect，读不到真实 featOn） */
+    exports.hiddenTabIds = hiddenTabIds
+    exports.orderTabs = orderTabs
+    exports.readUiPref = readUiPref
+    exports.PROTECTED_TABS = PROTECTED_TABS
+    exports.ACCENT_PRESETS = ACCENT_PRESETS
     exports.starScoreOf = starScoreOf
     exports.buildStarMap = buildStarMap
     exports.filterStars = filterStars

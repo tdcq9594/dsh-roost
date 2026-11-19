@@ -94,7 +94,7 @@ globalThis.localStorage = {
 }
 
 /* 与 client.js 的 TABS 同序：频道 7 页收成 4 页 + 新增「资料」「自身设置」后 31 个可见页签 */
-const TABS = ['overview', 'her', 'profile', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag', 'connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about']
+const TABS = ['overview', 'personalize', 'her', 'profile', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'ch-post', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag', 'connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about']
 /* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats / account 已提升为正式页） */
 const HIDDEN_TABS = ['context', 'setup']
 
@@ -111,10 +111,10 @@ const HIDDEN_TABS = ['context', 'setup']
  * 这里是特意抄的死结构：页签改动必须同步改这里，改不动就说明导航真坏了。
  */
 const NAV = {
-  home: { label: '概览', tabs: ['overview'] },
+  home: { label: '概览', tabs: ['overview', 'personalize'] },
   /* 2026-11-16：人设组新增「资料」（她长什么样、能不能自己改） */
   self: { label: '人设', tabs: ['her', 'profile', 'mood', 'awake', 'memory', 'people'] },
-  express: { label: '表达', tabs: ['express', 'stickers'] },
+  express: { label: '表达', tabs: ['express', 'stickers', 'ch-post'] },
   /**
    * 2026-11-16：**群聊并入「群与频道」**（一级 8 → 7）。两页回答同一个问题
    * 「在这个渠道里怎么说话」，配置层 `roostHost.decide/merge` 本来就是共用的。
@@ -126,8 +126,8 @@ const NAV = {
   system: { label: '系统', tabs: ['connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
 }
 const TAB_LABEL = {
-  overview: '概览', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆', people: '人物',
-  caps: '权限', express: '语音', stickers: '表情包', model: '模型', profile: '资料',
+  overview: '概览', personalize: '个性化', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆', people: '人物',
+  caps: '权限', express: '语音', stickers: '表情包', 'ch-post': '发帖', model: '模型', profile: '资料',
   ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
   groupchat: '群聊策略', groupadmin: '群管',
   'ch-home': '频道总览', 'ch-policy': '频道策略', 'ch-api': '频道接口', 'ch-diag': '频道排障',
@@ -1766,8 +1766,10 @@ test('向导：遮罩条件只看后端 needed，源码里不许自己拼判断'
   assert.ok(src.includes("if (st?.wizard?.needed)"), '缺全屏遮罩分支')
   assert.ok(src.includes('h(SetupWizard,'), '遮罩必须挂向导组件')
   // 遮罩分支里不能把整棵面板树一起挂回去
+  // 边界取「挂向导组件」而不是判断语句的下一行：根节点的 className 会随外观注入变
+  // （个性化页的 `rootClass` / `rootStyle`），用字面量定位会一改就红。
   const a = src.indexOf("if (st?.wizard?.needed)")
-  const b = src.indexOf("return h('div', { className: 'roost-root' },", a)
+  const b = src.indexOf('h(SetupWizard', a)
   const block = src.slice(a, b)
   assert.ok(block.length < 500, '遮罩分支不该夹带面板正文')
   assert.ok(!block.includes('roost-head'), '向导时不该渲染页头')
