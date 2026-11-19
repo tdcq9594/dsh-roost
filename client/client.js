@@ -9854,14 +9854,33 @@ select.roost-input{color-scheme:dark}
 
         h(GCard, {
           n: '04', title: '静默时段与忽略词',
-          desc: '静默时段里她不主动接话，但被叫到还是会回；起止填同一个数 = 关掉。忽略词是别的插件靠前缀干活的，别抢。',
+          desc: '两条静默各管一头：「她别插话」是这段内她不主动接话、但被叫到还会回；'
+            + '「对外静默」是这段内**连别人 @ 她也不起轮次**，只有主人叫得醒。忽略词是别的插件靠前缀干活的，别抢。',
         },
-          h(GRow, { label: '每天几点到几点安静', hint: '跨零点也行，比如 22 点到 7 点；两个数相同 = 不设' },
+          h(GRow, { label: '她别插话', hint: '这段内不主动接话，但被 @ / 被叫到还是会回；起止相同 = 不设' },
             h(GNum, { value: decide.quietStartHour ?? 0, min: 0, max: 23, unit: '点', disabled: busy,
               onSave: (v) => setDecide('quietStartHour', v) }),
             h('span', { className: 'roost-g-unit' }, '到'),
             h(GNum, { value: decide.quietEndHour ?? 0, min: 0, max: 23, unit: '点', disabled: busy,
               onSave: (v) => setDecide('quietEndHour', v) })),
+          /**
+           * 对外静默（2026-11-19）：与上面那条正交。
+           *
+           * 两个输入都填了才生效（起止相同视为关），留空 = 不启用——半天填一半
+           * 不该变成「整天把群友全挡了」。判定在 `roost-decide.js` 里排在
+           * 「必回」四条之前，主人豁免。
+           */
+          h(GRow, { label: '对外静默（只有主人叫得醒）', hint: '这段内别人 @、引用、唤醒词、追问都不起轮次；两个都填才生效，留空 = 不启用' },
+            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+              h('input', {
+                type: 'time', className: 'roost-g-num', value: decide.guestQuietFrom || '', disabled: busy,
+                onChange: (e) => setDecide('guestQuietFrom', e.target.value),
+              }),
+              h('span', { className: 'roost-g-unit' }, '到'),
+              h('input', {
+                type: 'time', className: 'roost-g-num', value: decide.guestQuietTo || '', disabled: busy,
+                onChange: (e) => setDecide('guestQuietTo', e.target.value),
+              }))),
           h(GRow, { label: '忽略词', hint: '一行一个；以这些词开头的消息不接，也不会触发一轮模型调用' },
             h('textarea', {
               className: 'roost-g-area', value: words, disabled: busy,

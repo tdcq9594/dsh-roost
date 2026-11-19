@@ -44,6 +44,8 @@ export const DEFAULT_IGNORE = ['/'];
 export const OVERRIDE_KEYS = Object.freeze([
   'mode', 'engagedMaxTurns', 'windowMin', 'cooldownSec', 'maxRepliesPerMin',
   'maxPerHour', 'burstMax', 'quietStartHour', 'quietEndHour',
+  /** 对外静默窗口（这段内只有主人叫得醒）——单群可单独设或关掉 */
+  'guestQuietFrom', 'guestQuietTo',
   'shortAskMustReply', 'silent', 'ignoreWords',
   /** group 层自己的键也允许按群覆写 */
   'interruptChance',
@@ -98,6 +100,63 @@ export function inQuietHours(p, hour = new Date().getHours()) {
   const b = Number(p?.quietEndHour) || 0;
   if (a === b) return false;
   return a < b ? h >= a && h < b : h >= a || h < b;
+}
+
+/**
+ * 对外静默窗口是否生效：`[from, to)`，`HH:mm`，支持跨夜。
+ *
+ * 与 `quietStartHour/quietEndHour` **正交**：那个管「她别插话」（对主人），
+ * 这个管「别人别叫醒她」。所以两套并存，不合并——合成一个键之后，
+ * 「深夜别插嘴但主人喊我还在」这种最常见的配置就表达不出来了。
+ *
+ * 为什么用分钟比较而不是整点：`01:30–08:00` 这种半小时边界必须精确生效。
+ * 解析不出来 / 起止相同，一律当「没设」（fail-open，宁可多回一句）。
+ */
+export function guestQuietActive(ts, from, to) {
+  const parse = (v) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(v ?? '').trim());
+    if (!m) return null;
+    const h = Number(m[1]);
+    const mi = Number(m[2]);
+    if (!Number.isFinite(h) || !Number.isFinite(mi)) return null;
+    if (h > 23 || mi > 59) return null;
+    return h * 60 + mi;
+  };
+  const a = parse(from);
+  const b = parse(to);
+  if (a === null || b === null || a === b) return false;
+  const d = new Date(Number(ts) || Date.now());
+  const cur = d.getHours() * 60 + d.getMinutes();
+  return a < b ? cur >= a && cur < b : cur >= a || cur < b;
+}
+
+/**
+ * 这条消息要不要因为「对外静默」被拦下（不起轮次）。
+ *
+ * **为什么不在 `judge()` 里判**：那里是同步路径，拿不到 `bucket`——框架的
+ * message 事件只带 `sender.openid`，档位要 `roles.resolve` 异步查。
+ * 硬在 judge 里判就只剩两条路：要么一律当成「不是主人」（**把主人也关在门外**），
+ * 要么 fail-open 放行（窗口对谁都失效）。两条都不能要。
+ *
+ * 所以判定放在宿主拿到 `payload` 之后：那里 `sender.bucket` 已经是
+ * `roles.resolve` 的结果，判定同步、精确，而且仍在**起轮之前**。
+ *
+ * @param {number} now
+ * @param {{guestQuietFrom?:string, guestQuietTo?:string}} decide 该群生效的接话配置
+ * @param {string} bucket `owner` / `admin` / `member` / …
+ * @param {string} kind 框架四态（`c2c`/`dm` 是一对一）
+ */
+export function guestQuietSkip(now, decide, bucket, kind = 'group') {
+  /**
+   * **只管群**。一对一里不存在「别人叫醒她」——那是用户专门点开来跟自己说话，
+   * 深夜私聊自己的机器人却被拦一句，属于明显的坏体验。
+   */
+  if (kind === 'c2c' || kind === 'dm') return { skip: false, reason: '' }
+  const from = decide?.guestQuietFrom;
+  const to = decide?.guestQuietTo;
+  if (!guestQuietActive(now, from, to)) return { skip: false, reason: '' }
+  if (bucket === 'owner') return { skip: false, reason: '' }
+  return { skip: true, reason: `对外静默（${from}–${to}），只有主人叫得醒她` }
 }
 
 /** 这条消息的正文。纯语音要走 asrText（content 是空串） */

@@ -123,6 +123,10 @@ export function simulate({ input = {}, cfg = {}, tools = null, now = Date.now(),
    * 每次模拟都新建一个 decider：冷却 / 配额 / 窗口状态都在实例内部，
    * 复用真链路的实例会让模拟「吃掉」一次真实判定，反过来真链路也会让
    * 模拟结果带上历史状态——两边都不可信。
+   *
+   * **不注入 `isOwner`**：模拟页验的是「别人发一句会怎样」，默认按非主人算，
+   * 所以配了「对外静默」的群在模拟里会如实显示被拦。想验「主人在窗口内
+   * 还叫得醒她」，走真实群或 `test/guest-quiet.test.js`——这里判不出主人。
    */
   const decider = createDecider({ cfg: () => cfg, now: () => Number(now) || Date.now(), random: () => random });
   const verdict = decider.check({

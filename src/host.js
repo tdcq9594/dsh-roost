@@ -237,7 +237,7 @@ export const SELF_CONFIG_METHODS = new Map([
   }],
 ]);
 import { createMerger } from './roost-merge.js';
-import { createDecider } from './roost-decide.js';
+import { createDecider, guestQuietSkip, resolveGroupPolicy } from './roost-decide.js';
 import { createPairing } from './roost-pair.js';
 import { createSetupWizard } from './setup-wizard.js';
 import { createWsDeps } from './ws-deps.js';
@@ -3902,6 +3902,25 @@ export function apply(ctx) {
       payload.rendered = buildRendered(merged, batch.text, { images: payload.images });
       /** 多条批次里每条已经自带 `名字(openid)：`，上层不要再套统一标签 */
       payload.batch = { count: batch.count, multi: batch.multi };
+    }
+    /**
+     * 对外静默窗口：这段内**只有主人叫得醒她**，别人的 @ / 引用 / 唤醒词 /
+     * 追问都不起轮次。
+     *
+     * 位置：(a) 必须在 `onInbound` **之前**——晚一步轮次就起来了，模型调用
+     * 已经发生；(b) 不能在 `roostDecider` 里判——那条是同步路径，只有
+     * `sender.openid`，档位要 `roles.resolve` 异步查，硬判等于「把主人也关在门外」；
+     * (c) 必须在 `ownerAliases` 提升之后——否则登记过的主人别名会被误拦。
+     */
+    const quiet = guestQuietSkip(
+      Date.now(),
+      resolveGroupPolicy(cfg, chatId).decide,
+      bucketOf(payload),
+      chatKind,
+    );
+    if (quiet.skip) {
+      log.info(`外接消息不接（${quiet.reason}）：${String(payload?.text ?? '').slice(0, 30)}`);
+      return;
     }
     onInbound(payload);
   }

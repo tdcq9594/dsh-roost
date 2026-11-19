@@ -106,8 +106,25 @@ export function classifyOwnerReply(text) {
 
 /** 在不在清醒时段（跨零点也支持） */
 export function inWindow(hour, from, to) {
-  if (from === to) return true;
-  return from < to ? hour >= from && hour < to : hour >= from || hour < to;
+  /**
+   * 先数值化：面板写回的是数字，但手改 `config.json` 的人常写成 `"8"`。
+   * 老实现直接拿原始值比较，字符串和数字永远不等，`from === to` 也就判不出来。
+   */
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  /**
+   * 24 点 = 午夜 = 0 点，必须先折。
+   *
+   * 不折的话 `8–24` 会走 `hour >= 8 && hour < 24`，而 `hour` 恒在 0–23，
+   * 后半段永远成立 → 等同于「全天」，安静时段整个失效（aurabot 同款 bug，
+   * 它 2026-11-17 用 `awakeTo=24` 踩到过）。
+   */
+  const a = ((num(from) % 24) + 24) % 24;
+  const b = ((num(to) % 24) + 24) % 24;
+  if (a === b) return true;
+  return a < b ? hour >= a && hour < b : hour >= a || hour < b;
 }
 
 const dayKey = (ts) => new Date(ts).toDateString();

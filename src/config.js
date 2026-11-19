@@ -818,6 +818,16 @@ export const DEFAULTS = {
       burstMax: 0,
       quietStartHour: 0,
       quietEndHour: 0,
+      /**
+       * 对外静默窗口（`HH:mm`，跨夜，留空 = 不启用）：这段内**只有主人叫得醒她**，
+       * 别人的 @ / 引用 / 唤醒词 / 追问都不起轮次。
+       *
+       * 与上面那对 `quietStart/EndHour` **正交**，别合并：那对管「她别插话」
+       * （对主人），这对管「别人别叫醒她」。合成一个键之后，最常见的
+       * 「深夜别插嘴、但我喊她要在」就表达不出来了。
+       */
+      guestQuietFrom: '',
+      guestQuietTo: '',
       shortAskMustReply: false,
       silent: false,
       /** 这些词开头的不接：别的插件靠它们干活，别抢 */
