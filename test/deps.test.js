@@ -50,7 +50,7 @@ test('移除 ai-chat：不再请求插件索引，返回值里没有 plugin 段'
   assert.equal('plugin' in r, false);
   assert.equal(f.calls.some((u) => u.includes('raw.githubusercontent.com')), false,
     '插件索引不该再发请求');
-  assert.equal(f.calls.every((u) => u.includes('github.com/tdcq9594/qq-bot-roost') ||
+  assert.equal(f.calls.every((u) => u.includes('github.com/roost-qq/qq-bot-roost') ||
     u.includes('api.github.com')), true);
 });
 

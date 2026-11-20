@@ -14,8 +14,7 @@
  */
 
 import { compareVersion } from './version.js';
-
-const FW_REPO = 'tdcq9594/qq-bot-roost';
+import { FW_REPO } from './repo.js';
 
 /** 查一次缓存半小时：面板每次打开都打一遍 GitHub 没必要，也容易撞限额 */
 const TTL_MS = 30 * 60_000;

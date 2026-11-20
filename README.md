@@ -4,11 +4,11 @@
 
 > 给 QQ 机器人接上 DSH 的全部能力：工具、记忆、上下文压缩、主动搭话。
 
-[![npm version](https://img.shields.io/npm/v/dsh-roost?color=6c5ce7)](https://www.npmjs.com/package/dsh-roost) [![npm downloads](https://img.shields.io/npm/dm/dsh-roost?color=4b6fff)](https://www.npmjs.com/package/dsh-roost) [![CI](https://github.com/tdcq9594/dsh-roost/actions/workflows/ci.yml/badge.svg)](https://github.com/tdcq9594/dsh-roost/actions/workflows/ci.yml) [![GitHub stars](https://img.shields.io/github/stars/tdcq9594/dsh-roost?color=eab308)](https://github.com/tdcq9594/dsh-roost) [![DSH plugin](https://img.shields.io/badge/dsh--plugin-✅-green)](https://github.com/topics/dsh-plugin) [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](#) [![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/dsh-roost?color=6c5ce7)](https://www.npmjs.com/package/dsh-roost) [![npm downloads](https://img.shields.io/npm/dm/dsh-roost?color=4b6fff)](https://www.npmjs.com/package/dsh-roost) [![CI](https://github.com/roost-qq/dsh-roost/actions/workflows/ci.yml/badge.svg)](https://github.com/roost-qq/dsh-roost/actions/workflows/ci.yml) [![GitHub stars](https://img.shields.io/github/stars/roost-qq/dsh-roost?color=eab308)](https://github.com/roost-qq/dsh-roost) [![DSH plugin](https://img.shields.io/badge/dsh--plugin-✅-green)](https://github.com/topics/dsh-plugin) [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](#) [![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
 
 **零依赖，装在 DSH 里**：权限、记忆、人格、扩展、排期都在侧栏面板里点着配。
 
-[快速开始](#快速开始) ｜ [使用手册](docs/USER-MANUAL.md) ｜ [常见问题](#常见问题) ｜ [文档](#文档) ｜ [贡献](https://github.com/tdcq9594/dsh-roost/blob/main/CONTRIBUTING.md)
+[快速开始](#快速开始) ｜ [使用手册](docs/USER-MANUAL.md) ｜ [常见问题](#常见问题) ｜ [文档](#文档) ｜ [贡献](https://github.com/roost-qq/dsh-roost/blob/main/CONTRIBUTING.md)
 
 </div>
 
@@ -34,7 +34,7 @@
 
 | 你要的能力                                         | 由谁提供                                                                                                                  |
 | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| 收发 QQ 消息、语音 ASR、引用 / 合并转发、切段、防吵（冷却 / 配额 / 认领） | [Roost](https://github.com/tdcq9594/qq-bot-roost) 框架的外接协议 `roost-host/1` |
+| 收发 QQ 消息、语音 ASR、引用 / 合并转发、切段、防吵（冷却 / 配额 / 认领） | [Roost](https://github.com/roost-qq/qq-bot-roost) 框架的外接协议 `roost-host/1` |
 | 会话、工具（文件 / 命令）、三层记忆、上下文压缩、人格                  | DSH                                                                                                                   |
 | 会话映射、逐条权限、侧栏面板、一键接入、主动搭话与排期                  | **dsh-roost**                                                                                                         |
 
@@ -75,7 +75,7 @@ QQ ⇄ Roost 内核 ⇄ 外接协议事件流 / RPC ⇄ dsh-roost ⇄ DSH 会话
 | 🗜️ 上下文压缩                | 群 85% / 私聊 75% 时开新会话 + 摘要开场，压缩前的缓存命中率记进面板                                                                 |
 | 📱 侧栏面板                  | 七个一级分组：概览 / 人设 / 表达 / 群与频道 / 能力 / 扩展 / 系统，都在 DSH 里点着配；菜单显隐与顺序、强调色、动效在「概览 → 个性化」；接入与账号迁移从按钮打开整页      |
 | 🧬 人格四段式                 | 性格 / 开场白 / 说话示例 / 世界书；世界书命中才注入，聊几十轮人设也不被冲淡                                                                |
-| 🔄 人格库一键更新               | 独立仓库 [dsh-roost-personas](https://github.com/tdcq9594/dsh-roost-personas) 推个 commit，面板点一下就拿到，不用发版；只覆盖没改过的 |
+| 🔄 人格库一键更新               | 独立仓库 [dsh-roost-personas](https://github.com/roost-qq/dsh-roost-personas) 推个 commit，面板点一下就拿到，不用发版；只覆盖没改过的 |
 | ⬆️ 本体自更新                 | 设置页查最新版一键装，失败回滚 `package.json` + lock；符号链接装的开发机自动禁用                                                       |
 | 🧩 扩展 + 可调设置             | 扩展是标准 MCP server；在 `plugin.json` 声明字段后，面板直接按声明画表单，值宿主代存、密钥单独存且不回显，改完重启生效                        |
 | 🎭 双人格 preset            | 私聊 `roost-private` / 群聊 `roost-social` 各一套提示词                                                             |
@@ -99,7 +99,7 @@ DSH 插件市场里输入包名 `dsh-roost`，或命令行：
 dsh plugin --profile web add dsh-roost
 ```
 
-从源码装也行：`git clone https://github.com/tdcq9594/dsh-roost.git`（零依赖，不用 `npm install`）。
+从源码装也行：`git clone https://github.com/roost-qq/dsh-roost.git`（零依赖，不用 `npm install`）。
 
 ### 2. 找到入口
 
@@ -151,7 +151,7 @@ dsh plugin --profile web add dsh-roost
 | [自驱引擎](docs/自驱引擎.md)                                                   | 实验功能，默认关：面板入口、配置段、账本                      |
 | [聊天内切人格指令](docs/聊天内切人格指令.md)                                         | `persona.command`，默认关                       |
 | [人格迁移规范](docs/QQ-Agent人格迁移.md)                                        | 社区角色卡转成本仓人格文件的规则                       |
-| [参与贡献](https://github.com/tdcq9594/dsh-roost/blob/main/CONTRIBUTING.md) | 本地跑起来、PR 前五步检查、代码约定                                   |
+| [参与贡献](https://github.com/roost-qq/dsh-roost/blob/main/CONTRIBUTING.md) | 本地跑起来、PR 前五步检查、代码约定                                   |
 
 设计方案、调研、与其它项目的对照、阶段进度与交接记录**不入库**，归档在开发机 `D:\WorkBuddy\_archive\` 下，需要时查 git 历史。
 
@@ -229,7 +229,7 @@ DeepSeek 抽风 / 502 了怎么办
 
 ## 参与贡献
 
-欢迎提 issue、改文档、修 bug。本地怎么跑、PR 前要过哪五步检查、代码约定，都写在 **[CONTRIBUTING.md](https://github.com/tdcq9594/dsh-roost/blob/main/CONTRIBUTING.md)**。
+欢迎提 issue、改文档、修 bug。本地怎么跑、PR 前要过哪五步检查、代码约定，都写在 **[CONTRIBUTING.md](https://github.com/roost-qq/dsh-roost/blob/main/CONTRIBUTING.md)**。
 
 ---
 
@@ -237,7 +237,7 @@ DeepSeek 抽风 / 502 了怎么办
 
 角色设计参考了 [Aurabot（dsh-aurabot-qq）](https://github.com/aureth-labs/dsh-aurabot-qq)：一个 QQ 会话对一个 DSH 会话、人格独占系统提示词、安全默认、按会话挂东西、用 `agent.followup` + `sessions.flush` 投递、从 `session/event` 取回复。这些思路让我们少走了不少弯路，在此致谢。
 
-QQ 侧依托自家的 [栖 Roost](https://github.com/tdcq9594/qq-bot-roost)，通过它的外接协议 `roost-host/1` 直连，不再经过任何中间插件；许可也沿用 Roost 的 AGPL-3.0-only。
+QQ 侧依托自家的 [栖 Roost](https://github.com/roost-qq/qq-bot-roost)，通过它的外接协议 `roost-host/1` 直连，不再经过任何中间插件；许可也沿用 Roost 的 AGPL-3.0-only。
 
 ---
 
@@ -295,7 +295,7 @@ QQ 侧依托自家的 [栖 Roost](https://github.com/tdcq9594/qq-bot-roost)，�
 
 ### 开发与测试
 
-见 [使用手册 · 开发与测试](docs/USER-MANUAL.md#开发与测试) 与 [CONTRIBUTING.md](https://github.com/tdcq9594/dsh-roost/blob/main/CONTRIBUTING.md)。
+见 [使用手册 · 开发与测试](docs/USER-MANUAL.md#开发与测试) 与 [CONTRIBUTING.md](https://github.com/roost-qq/dsh-roost/blob/main/CONTRIBUTING.md)。
 
 </details>
 
@@ -303,4 +303,4 @@ QQ 侧依托自家的 [栖 Roost](https://github.com/tdcq9594/qq-bot-roost)，�
 
 ## 许可
 
-沿用 [Roost](https://github.com/tdcq9594/qq-bot-roost) 的许可：**GNU Affero General Public License v3.0 only（AGPL-3.0-only）**。允许商业使用与收费分发，但分发或通过网络提供服务时必须同样以 AGPL-3.0-only 开源并提供完整对应源码。全文见 [LICENSE](LICENSE)。
+沿用 [Roost](https://github.com/roost-qq/qq-bot-roost) 的许可：**GNU Affero General Public License v3.0 only（AGPL-3.0-only）**。允许商业使用与收费分发，但分发或通过网络提供服务时必须同样以 AGPL-3.0-only 开源并提供完整对应源码。全文见 [LICENSE](LICENSE)。

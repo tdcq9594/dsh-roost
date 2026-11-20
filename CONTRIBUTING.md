@@ -10,7 +10,7 @@
 
 ## 提问题 / 提需求
 
-去 [GitHub Issues](https://github.com/tdcq9594/dsh-roost/issues)。报告「没回话」「装不上」这类问题时，带上这四样能省掉一轮来回：
+去 [GitHub Issues](https://github.com/roost-qq/dsh-roost/issues)。报告「没回话」「装不上」这类问题时，带上这四样能省掉一轮来回：
 
 - 面板「日志」页里出错前后那几行（按级别筛一下）
 - `config.json` 里 `server.port` / `server.token` 是否两边一致（**密钥贴出来前先打码**）
@@ -22,7 +22,7 @@
 ## 本地跑起来
 
 ```bash
-git clone https://github.com/tdcq9594/dsh-roost.git
+git clone https://github.com/roost-qq/dsh-roost.git
 cd dsh-roost
 npm test
 ```
@@ -79,4 +79,4 @@ npm pack --dry-run
 
 ## 许可
 
-沿用 [Roost](https://github.com/tdcq9594/qq-bot-roost) 的 **AGPL-3.0-only**（全文见 [LICENSE](LICENSE)）。你提交的贡献按同一许可授权；通过网络提供服务时，同样要以 AGPL-3.0-only 开源并提供完整对应源码。
+沿用 [Roost](https://github.com/roost-qq/qq-bot-roost) 的 **AGPL-3.0-only**（全文见 [LICENSE](LICENSE)）。你提交的贡献按同一许可授权；通过网络提供服务时，同样要以 AGPL-3.0-only 开源并提供完整对应源码。

@@ -27,6 +27,7 @@ import { parsePersona } from '../src/personas.js';
 // 哈希规则只能有一个定义处（见 catalog.js）：这里算出来的 sha256 要和
 // persona-repo 校验时用的完全一致，否则 Windows 检出会被判成「改过」。
 import { hashText } from '../src/catalog.js';
+import { PERSONA_REPO } from '../src/repo.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const DIR = path.join(ROOT, 'personas');
@@ -106,9 +107,9 @@ async function build() {
     packFiles,
     index: {
     schema: 3,
-    // 只是给面板显示「仓库 tdcq9594/dsh-roost-personas · 」用的，
+    // 只是给面板显示「仓库 roost-qq/dsh-roost-personas · 」用的，
     // 真正拉取的地址由 sources 决定（可换源）。
-    repo: 'tdcq9594/dsh-roost-personas',
+    repo: PERSONA_REPO,
     branch: 'main',
     minVersion: MIN_VERSION,
     packs,

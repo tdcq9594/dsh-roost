@@ -16679,7 +16679,7 @@ select.roost-input{color-scheme:dark}
           ver?.latest ? row('最新版本', ver.latest + (ver.hasUpdate ? '（有新版，去「更新」页装）' : '（已是最新）')) : null,
         ),
         h(Sec, { n: '02', title: '仓库与许可' },
-          row('GitHub', h('a', { href: 'https://github.com/tdcq9594/dsh-roost', target: '_blank', rel: 'noreferrer' }, 'tdcq9594/dsh-roost')),
+          row('GitHub', h('a', { href: 'https://github.com/roost-qq/dsh-roost', target: '_blank', rel: 'noreferrer' }, 'roost-qq/dsh-roost')),
           row('Gitee', h('a', { href: 'https://gitee.com/tdcq9594/dsh-roost', target: '_blank', rel: 'noreferrer' }, 'tdcq9594/dsh-roost')),
           h('div', { className: 'roost-note' },
             '永久免费，禁止收费与商业使用（自写协议 v2.0，非 OSI 许可）。'

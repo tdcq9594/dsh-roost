@@ -34,6 +34,7 @@ import { checkUrlSync, isPrivateIp } from './ssrf.js';
 // 哈希规则只能有一个定义处：这里、catalog、构建脚本必须算出一模一样的 sha256，
 // 否则 Windows 检出（CRLF）会被判成「改过」，一键更新永远跳过用户文件。
 import { hashText } from './catalog.js';
+import { PERSONA_REPO, GITEE_PERSONA_REPO } from './repo.js';
 
 // 兼容旧引用：本模块曾经自己实现过一份，测试和其它模块直接从这儿 import
 export { compareVersion };
@@ -74,8 +75,8 @@ const ALLOW_HOSTS = new Set(['raw.githubusercontent.com', 'gitee.com']);
  * 与仓库里那份 index.json 对不上。
  */
 const DEFAULT_SOURCES = [
-  'https://raw.githubusercontent.com/tdcq9594/dsh-roost-personas/main',
-  'https://gitee.com/tdcq9594/dsh-roost-personas/raw/main',
+  `https://raw.githubusercontent.com/${PERSONA_REPO}/main`,
+  `https://gitee.com/${GITEE_PERSONA_REPO}/raw/main`,
 ];
 
 /**

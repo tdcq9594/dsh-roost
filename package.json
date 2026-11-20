@@ -60,9 +60,9 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tdcq9594/dsh-roost.git"
+    "url": "git+https://github.com/roost-qq/dsh-roost.git"
   },
-  "homepage": "https://github.com/tdcq9594/dsh-roost",
+  "homepage": "https://github.com/roost-qq/dsh-roost",
   "engines": {
     "node": ">=22",
     "dsh": ">=0.2.0"

@@ -38,7 +38,7 @@
 - 🗜️ **上下文压缩**：到阈值（群 85% / 私聊 75%）开新会话 + 摘要开场，旧会话保留可回查；压之前那一刻的**缓存命中率**记在面板和日志里，阈值该往上还是往下调用它判断
 - 📱 **侧栏面板**：七个一级分组（概览 / 人设 / 表达 / 群与频道 / 能力 / 扩展 / 系统），组内两行导航；菜单顺序与显隐、强调色、动效在「概览 → 个性化」里改，接入向导与账号迁移从按钮打开整页弹窗
 - 🧬 **人格四段式**：人格文件分性格 / 开场白 / 说话示例 / 世界书四段。世界书一行一条 `触发词 | 内容`，**命中才注入**；开场白给主动搭话一个语气锚；近处指令贴在离历史最近的位置，聊到几十轮人设也不被冲淡
-- 🔄 **人格库一键更新**：人格放在独立仓库 [dsh-roost-personas](https://github.com/tdcq9594/dsh-roost-personas)，改完推一个 commit，面板点一下就拿到——**不用发版**。只覆盖没改过的，你改过和自建的一个不碰
+- 🔄 **人格库一键更新**：人格放在独立仓库 [dsh-roost-personas](https://github.com/roost-qq/dsh-roost-personas)，改完推一个 commit，面板点一下就拿到——**不用发版**。只覆盖没改过的，你改过和自建的一个不碰
 - ⬆️ **本体自更新**：设置页顶部查最新版、一键装。走 DSH 自己的 `pluginManager`（失败会回滚 `package.json` + `pnpm-lock.yaml`），装完提示重启。开发机（符号链接装的）自动禁用
 - 🎭 **双人格 preset**：私聊（`roost-private`）/ 群聊（`roost-social`）各一套提示词
 - 🖼️ **表情包**：图丢进目录就能用，文件名或侧车 `.tags` 当标签；图多了建子目录分类，`sticker_pick` 按需取图——**加图不会冲掉提示词缓存**
@@ -569,4 +569,4 @@ CI（GitHub Actions，Node 22 / 24 矩阵）跑同样这些，外加三件单测
 - `scripts/dry-run.mjs` 用假 ctx 真跑一遍 `apply()`，确认插件能加载、路由能注册
 - `npm pack --dry-run` 检查 `files` 字段没漏 `src/host.js` / `client/client.js`——打包漏文件，用户装上去就是坏的
 
-贡献流程见 [CONTRIBUTING.md](https://github.com/tdcq9594/dsh-roost/blob/main/CONTRIBUTING.md)。
+贡献流程见 [CONTRIBUTING.md](https://github.com/roost-qq/dsh-roost/blob/main/CONTRIBUTING.md)。

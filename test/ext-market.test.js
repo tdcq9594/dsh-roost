@@ -19,6 +19,7 @@ import {
   createExtMarket, assertSafeIndexUrl, isExtensionEntry, pickExtensions, isRevoked,
   indexUrlFor, assertSafeTarballUrl, MARKET_SOURCES, DEFAULT_EXT_REPO, DEFAULT_EXT_INDEX_URL,
 } from '../src/ext-market.js';
+import { FW_REPO, EXT_REPO, PERSONA_REPO, GITEE_PERSONA_REPO, giteeRepoOf } from '../src/repo.js';
 import {
   hashDir, untar, extractTarGz, pickSubtree, safeRelPath, writeFiles,
 } from '../src/ext-bundle.js';
@@ -414,6 +415,12 @@ test('G6-16 验签钩子：注入后验不过即拒装；默认不注入 = 不�
  * （14981），归档结构也一样是「单层顶层目录」，所以换源只换两个 URL。
  */
 test('数据源：三种预设解析出的索引地址', () => {
+  assert.equal(FW_REPO, 'roost-qq/qq-bot-roost');
+  assert.equal(EXT_REPO, 'roost-qq/qq-bot-roost-plugins');
+  assert.equal(PERSONA_REPO, 'roost-qq/dsh-roost-personas');
+  assert.equal(giteeRepoOf(EXT_REPO), 'tdcq9594/qq-bot-roost-plugins');
+  assert.equal(giteeRepoOf('a/b'), 'a/b');
+  assert.equal(GITEE_PERSONA_REPO, 'tdcq9594/dsh-roost-personas');
   assert.deepEqual(MARKET_SOURCES, ['github', 'gitee', 'custom']);
   assert.equal(
     indexUrlFor({ source: 'github', repo: DEFAULT_EXT_REPO }),

@@ -26,6 +26,7 @@ import { EXT_ID_RE, MANIFEST_FILE, sensitiveScopesOf } from './ext-registry.js';
 import { hashDir, extractTarGz, pickSubtree, writeFiles, rmrfSync } from './ext-bundle.js';
 import { normalizeTags, categoryOf, filterMarketRows, facetsOf, phaseView } from './market-browse.js';
 import { deriveTier, riskLines, installNotice } from './ext-tier.js';
+import { EXT_REPO, giteeRepoOf } from './repo.js';
 
 /** 读一份 JSON：读不到返回 null（清单损坏时按「没有 scope 声明」处理，不崩）。 */
 function readJson(file) {
@@ -33,8 +34,8 @@ function readJson(file) {
 }
 
 export const EXT_KIND = 'dsh-extension';
-/** 官方插件仓。镜像（Gitee）是同一份仓库，所以 slug 两边通用 */
-export const DEFAULT_EXT_REPO = 'tdcq9594/qq-bot-roost-plugins';
+/** 官方插件仓。GitHub 与 Gitee 的 owner 不同，换算见 ./repo.js */
+export const DEFAULT_EXT_REPO = EXT_REPO;
 export const DEFAULT_EXT_INDEX_URL = `https://raw.githubusercontent.com/${DEFAULT_EXT_REPO}/main/index.json`;
 
 function isLoopbackHost(host) {
@@ -119,7 +120,7 @@ export function indexUrlFor({ source = 'github', indexUrl = '', repo = '', branc
   if (!repo) return DEFAULT_EXT_INDEX_URL;
   const ref = encodeURIComponent(branch || 'main');
   return src === 'gitee'
-    ? `https://gitee.com/${repo}/raw/${ref}/index.json`
+    ? `https://gitee.com/${giteeRepoOf(repo)}/raw/${ref}/index.json`
     : `https://raw.githubusercontent.com/${repo}/${ref}/index.json`;
 }
 
@@ -127,7 +128,7 @@ export function indexUrlFor({ source = 'github', indexUrl = '', repo = '', branc
 function tarballUrl(repo, branch = 'main', source = 'github') {
   const ref = encodeURIComponent(branch || 'main');
   return source === 'gitee'
-    ? `https://gitee.com/${repo}/repository/archive/${ref}.tar.gz`
+    ? `https://gitee.com/${giteeRepoOf(repo)}/repository/archive/${ref}.tar.gz`
     : `https://codeload.github.com/${repo}/tar.gz/refs/heads/${ref}`;
 }
 

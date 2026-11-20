@@ -20,8 +20,7 @@ import { pipeline } from 'node:stream/promises';
 import { createLease } from './lease.js';
 import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
-
-const REPO = 'tdcq9594/qq-bot-roost';
+import { FW_REPO as REPO, GITEE_FW_REPO as GITEE_REPO } from './repo.js';
 
 /**
  * 下载源，**按可用性排序**。
@@ -35,7 +34,7 @@ const REPO = 'tdcq9594/qq-bot-roost';
  * 3. GitHub 放最后——留着兜底，但它目前对这个仓库不可靠。
  */
 const SOURCES = (v) => [
-  { url: `https://gitee.com/${REPO}/repository/archive/v${v}.zip`, kind: 'zip' },
+  { url: `https://gitee.com/${GITEE_REPO}/repository/archive/v${v}.zip`, kind: 'zip' },
   { url: `https://registry.npmjs.org/qq-bot-roost/-/qq-bot-roost-${v}.tgz`, kind: 'tgz' },
   { url: `https://codeload.github.com/${REPO}/zip/refs/tags/v${v}`, kind: 'zip' },
 ];
@@ -202,7 +201,7 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     }
 
     try {
-      const r = await fetch(`https://gitee.com/api/v5/repos/${REPO}/tags`, {
+      const r = await fetch(`https://gitee.com/api/v5/repos/${GITEE_REPO}/tags`, {
         signal: AbortSignal.timeout(8000),
       });
       if (r.ok) {
