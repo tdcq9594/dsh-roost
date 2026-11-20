@@ -89,6 +89,14 @@ export function createPendingOpenings({
    * 一次瞬时读故障就会把所有待交开场抹掉。宁可这一轮不写，等下次启动恢复。
    */
   let ioFailed = false;
+  /**
+   * 读盘时见到旧格式（v1，带 `text`）→ 需要立刻回写一次把正文抹掉。
+   *
+   * 只在**能重建**时置位：抹掉盘上正文的前提是「随时能再拼出来」，否则
+   * 等于把内容删了还不回去。没有 `rebuild` 的调用方（单测、外部复用）
+   * 会把正文留在内存里，盘上原样不动。
+   */
+  let needMigrate = false;
 
   function readDisk() {
     let text;
@@ -172,13 +180,23 @@ export function createPendingOpenings({
      * 逐键拷进无原型对象，不能直接 `map = disk.chats`：
      * 那样从盘上读回的 `__proto__` 键又会变成原型链上的幽灵。
      *
-     * **只取 `at`**：旧格式（v1）的条目里带 `text`，那是聊天原文，读进来
-     * 就不再往外写了——下次 `save()` 落盘时自动瘦成指针，等于顺手做了迁移。
+     * **只取 `at`**：旧格式（v1）的条目里带 `text`，那是聊天原文。
+     *   · 能重建（`rebuild` 已注入）→ 丢掉正文、置 `needMigrate`，本轮就把
+     *     盘上的正文抹掉，不让它在盘上躺到 TTL；
+     *   · 不能重建 → 正文留在**内存**里（至少本进程还能用），盘上不动，
+     *     因为删了就要不回来了。
      */
+    const canRebuild = typeof rebuild === 'function';
     const next = Object.create(null);
     for (const [k, v] of Object.entries(disk?.chats ?? {})) {
       const at = Number(v?.at);
-      next[k] = { at: Number.isFinite(at) ? at : 0 };
+      const text = typeof v?.text === 'string' ? v.text : null;
+      const row = { at: Number.isFinite(at) ? at : 0 };
+      if (text !== null) {
+        if (canRebuild) needMigrate = true;
+        else row.text = text;
+      }
+      next[k] = row;
     }
     map = next;
   }
@@ -186,8 +204,12 @@ export function createPendingOpenings({
   /**
    * 取正文：内存里有就用内存的，没有就现拼。
    *
-   * 重建抛错按「没有开场」处理——这条路径在收消息的主链路上，一段开场
-   * 比不上「消息能正常回」重要。
+   * 返回值三态，**必须区分**：
+   *   · 字符串（可能为空串）——拿到了 / 确实没有内容；
+   *   · `null`——**重建失败**（日记打不开、DB 没就绪）。
+   *
+   * 压成一个空串会让 `take()` 把指针删掉，等于把一次瞬时读故障升级成
+   * 永久失忆——正是这个模块存在的理由。
    */
   function resolveText(chatId, entry) {
     if (entry && typeof entry.text === 'string') return entry.text;
@@ -196,8 +218,8 @@ export function createPendingOpenings({
       const t = rebuild(chatId, { at: Number(entry?.at) || 0 });
       return typeof t === 'string' ? t : '';
     } catch (e) {
-      log(`压缩开场重建失败（按没有开场处理）：${e?.message ?? e}`);
-      return '';
+      log(`压缩开场重建失败（这次先不给开场，指针留着）：${e?.message ?? e}`);
+      return null;
     }
   }
 
@@ -245,7 +267,8 @@ export function createPendingOpenings({
   }
 
   load();
-  if (prune()) save();
+  /** 迁移（抹掉旧格式正文）与过期清理共用一次写盘 */
+  if (needMigrate || prune()) save();
 
   return {
     /** 记下开场（覆盖同会话的旧值） */
@@ -273,7 +296,10 @@ export function createPendingOpenings({
     get(chatId) {
       if (prune()) save();
       const entry = map[chatId];
-      return entry ? resolveText(chatId, entry) : '';
+      if (!entry) return '';
+      const text = resolveText(chatId, entry);
+      /** 重建失败对 `get` 就是「这次看不到」，指针留着等下次 */
+      return text === null ? '' : text;
     },
 
     /**
@@ -282,14 +308,16 @@ export function createPendingOpenings({
      * 先删内存再落盘：即使写盘失败，本进程也不会重复注入；
      * 重启后最多重复一次开场，比「开场丢了」可接受。
      *
-     * 正文为空也照样删指针：留着一个拼不出内容的指针没有意义，下次还得
-     * 白重建一遍。
+     * 两种情况**不删指针**：
+     *   · 重建失败（`null`）——下一条消息还能再试；
+     *   · 正文为空串时反而要删：留一个拼不出内容的指针，下次还得白重建。
      */
     take(chatId) {
       if (prune()) save();
       const entry = map[chatId];
       if (!entry) return '';
       const text = resolveText(chatId, entry);
+      if (text === null) return '';
       delete map[chatId];
       save();
       return text;

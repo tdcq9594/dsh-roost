@@ -45,11 +45,13 @@ export function createTimers({ log } = {}) {
   };
 
   function drop(handle) {
+    /**
+     * 不提前 `return`：Node 的 `Timeout` 是唯一对象，正常不会撞；但桩实现
+     * （测试里把 `setInterval` 换成恒返回同一个数字的）会出现两个条目共用
+     * 一个句柄，那时要一起摘掉，否则 `size()` 永远少一。
+     */
     for (const e of live) {
-      if (e.handle === handle) {
-        live.delete(e);
-        return;
-      }
+      if (e.handle === handle) live.delete(e);
     }
   }
 

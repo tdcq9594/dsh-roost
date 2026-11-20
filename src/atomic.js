@@ -74,6 +74,15 @@ export function writeFileAtomic(file, data, { mode, mkdir = true } = {}) {
  * @param {object} [opts] 除 `indent` / `newline` 外同 `writeFileAtomic`
  */
 export function writeJsonAtomic(file, value, { indent = 2, newline = false, ...opts } = {}) {
-  const text = JSON.stringify(value, null, indent) + (newline ? '\n' : '');
-  return writeFileAtomic(file, text, opts);
+  const text = JSON.stringify(value, null, indent);
+  /**
+   * `JSON.stringify(undefined)`（以及函数 / Symbol）返回 `undefined`，
+   * 拼上 `'\n'` 会变成字符串 `"undefined"`——**静默写出一个坏文件**。
+   * 旧写法 `writeFileSync(tmp, undefined)` 是抛 TypeError、目标文件保持原样，
+   * 这里必须保持「宁可不写也不能写坏」。
+   */
+  if (typeof text !== 'string') {
+    throw new TypeError('writeJsonAtomic 收到不可序列化的值（undefined / 函数 / Symbol）');
+  }
+  return writeFileAtomic(file, text + (newline ? '\n' : ''), opts);
 }

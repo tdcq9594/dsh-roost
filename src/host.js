@@ -102,7 +102,7 @@ import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { wakeContext } from './wake-context.js';
 import { stripLeak } from './leak-guard.js';
 import { createBridge } from './bridge.js';
-import { createCompact, makeOpening } from './compact.js';
+import { createCompact, makeOpening, compactCfgOf } from './compact.js';
 import { createPendingOpenings } from './pending-opening.js';
 import { createTimers } from './timers.js';
 import { createUsage } from './usage.js';
@@ -4099,15 +4099,21 @@ export function apply(ctx) {
   /**
    * 重启后重建压缩开场。
    *
-   * 与 `createCompact()` 里那条走的是**同一个** `makeOpening()`——挑料规则
-   * （用户 8 条 / 她 3 条 / 摘要 N 条 / 约定）必须一致，否则重启后拼出来的
-   * 开场跟压缩那一刻那份不是一回事。
+   * 与 `createCompact()` 里那条走的是**同一个** `makeOpening()`，配额也走
+   * 同一个 `compactCfgOf()`——挑料规则（用户 8 条 / 她 3 条 / 摘要 N 条 /
+   * 约定）必须一致，否则重启后拼出来的开场跟压缩那一刻那份不是一回事。
+   *
+   * ⚠️ 这里要传**整份 `cfg` 归一化后的配额**，不能直接把 `cfg` 递进去：
+   * `makeOpening` 读的是扁平的 `keepRecentUser` / `keepDigests`，而它们
+   * 在 `cfg` 里位于 `cfg.compact` 下面。递错的后果不是报错，是**静默取默认**：
+   * `keepDigests` 变成 `undefined`，`journal.digests` 回 5 条，`buildOpening`
+   * 再 `slice(-3)`——「这几天」从最新 3 条变成最旧 3 条。
    */
   const rebuildOpening = makeOpening({
     journal,
     agreementsOf: (chatId) => readAgreements({ memory, graph, chatId, aliases: aliasesOf(chatId) }),
     aliasesOf,
-    cfgOf: () => cfg,
+    cfgOf: compactCfgOf(() => cfg),
   });
 
   /**

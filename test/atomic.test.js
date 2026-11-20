@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -77,6 +77,22 @@ test('原子写 JSON：newline 与 indent 可调（迁就仓里两种既有格�
   assert.equal(readFileSync(f, 'utf8'), '{\n  "a": 1\n}\n');
   writeJsonAtomic(f, [1, 2], { indent: 0 });
   assert.equal(readFileSync(f, 'utf8'), '[1,2]', 'indent 0 = 紧凑，和 JSON.stringify(x) 一致');
+});
+
+test('原子写 JSON：不可序列化的值要抛错，不能静默写出 "undefined"', () => {
+  const dir = tmpDir();
+  const f = join(dir, 'e.json');
+  writeFileSync(f, '{"old":1}', 'utf8');
+  /**
+   * `JSON.stringify(undefined)` 返回 `undefined`，拼上换行就成了字符串
+   * `"undefined"` —— 一个能写进去、下次读会崩的坏文件。旧写法
+   * `writeFileSync(tmp, undefined)` 是抛 TypeError、目标文件不动。
+   */
+  for (const bad of [undefined, () => {}, Symbol('x')]) {
+    assert.throws(() => writeJsonAtomic(f, bad), TypeError);
+  }
+  assert.equal(readFileSync(f, 'utf8'), '{"old":1}', '失败时目标文件必须原样不动');
+  assert.deepEqual(readdirSync(dir), ['e.json'], '失败后不许留 tmp');
 });
 
 test('原子写：tmp 名每次都不一样（同进程连写、多进程共用目录都不撞）', () => {

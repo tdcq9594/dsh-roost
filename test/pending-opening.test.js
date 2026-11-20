@@ -62,7 +62,7 @@ test('开场：**盘上不存正文**（清空日记后重建为空，不能还�
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).chats.c1, undefined);
 });
 
-test('开场：重建抛错按「没有开场」处理，不许炸掉收消息的路径', () => {
+test('开场：重建抛错时**保留指针**（一次瞬时读故障不能变成永久失忆）', () => {
   const file = tmpFile();
   createPendingOpenings({ file }).set('c1', '开场 A');
   const again = createPendingOpenings({
@@ -70,8 +70,12 @@ test('开场：重建抛错按「没有开场」处理，不许炸掉收消息�
     log: () => {},
     rebuild: () => { throw new Error('日记打不开'); },
   });
-  assert.equal(again.get('c1'), '');
-  assert.equal(again.take('c1'), '');
+  assert.equal(again.get('c1'), '', '这次看不到');
+  assert.equal(again.take('c1'), '', '这次拿不到');
+  assert.equal(again.size, 1, '指针必须留着，下一条消息还能再试');
+  /** 日记恢复之后，同一个指针还能拼出来 */
+  const healed = createPendingOpenings({ file, rebuild: () => '恢复后的开场' });
+  assert.equal(healed.take('c1'), '恢复后的开场');
 });
 
 test('开场：没有 rebuild 时重启后读不到正文（不假装有）', () => {
@@ -181,14 +185,33 @@ test('开场：旧格式（带 text）读进来只留 at，正文不再上盘', 
   assert.equal(p.take('c1'), '重建的');
 });
 
-test('开场：旧格式迁移后，再写一次盘上就没有 text 了', () => {
+test('开场：旧格式读到就立刻回写，别让正文在盘上躺到 TTL', () => {
+  const file = tmpFile();
+  writeFileSync(
+    file,
+    JSON.stringify({ chats: { c1: { text: '旧正文，不该留在盘上', at: Date.now() } } }),
+    'utf8',
+  );
+  /** 只是构造一下，不 set / 不 take：光「启动」就该把正文抹掉 */
+  createPendingOpenings({ file, rebuild: () => '重建的' });
+  assert.ok(!readFileSync(file, 'utf8').includes('旧正文'), '启动时就要迁移落盘');
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(file, 'utf8')).chats.c1), ['at']);
+});
+
+test('开场：没有 rebuild 时旧正文留在内存里（删了就回不来）', () => {
   const file = tmpFile();
   writeFileSync(file, JSON.stringify({ chats: { c1: { text: '旧正文', at: Date.now() } } }), 'utf8');
   const p = createPendingOpenings({ file });
-  p.set('c2', '新开场');
-  const disk = readFileSync(file, 'utf8');
-  assert.ok(!disk.includes('旧正文'), '迁移时旧正文要被清掉');
-  assert.deepEqual(Object.keys(JSON.parse(disk).chats.c1), ['at']);
+  assert.equal(p.take('c1'), '旧正文', '不能重建就把正文留着用');
+});
+
+test('开场：损坏备份最多留 3 份（不能每次启动都新增）', () => {
+  const file = tmpFile();
+  writeFileSync(file, '坏文件', 'utf8');
+  for (let i = 0; i < 6; i += 1) createPendingOpenings({ file });
+
+  const baks = readdirSync(join(file, '..')).filter((n) => n.includes('.corrupted.'));
+  assert.ok(baks.length <= 3, `备份 ${baks.length} 份，应 ≤3`);
 });
 
 test('开场：读盘失败时仍写内存（不能把读故障升级成当场失忆）', () => {

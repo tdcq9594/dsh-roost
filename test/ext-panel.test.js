@@ -278,6 +278,10 @@ test('G5-7c clients 分页：limit 夹紧、offset 容错、关键词只搜可�
   assert.equal(r.panel.clients({ offset: -3 }).offset, 0);
   assert.equal(r.panel.clients({ offset: 999 }).rows.length, 0);
   assert.equal(r.panel.clients({ offset: 999 }).hasMore, false);
+  /** `Math.trunc(Infinity)` 还是 Infinity，会原样回给前端（HTTP 里变 null） */
+  assert.equal(r.panel.clients({ offset: Infinity }).offset, 0);
+  assert.equal(r.panel.clients({ offset: 'abc' }).offset, 0);
+  assert.equal(r.panel.clients({ offset: 1.9 }).offset, 1);
 
   const q = r.panel.clients({ q: 'k1' });
   assert.equal(q.total, 1);

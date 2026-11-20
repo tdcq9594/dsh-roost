@@ -467,7 +467,9 @@ export function createExtPanel({
      */
     const n = Math.trunc(Number(limit));
     const lim = Number.isFinite(n) && n > 0 ? Math.min(CLIENT_PAGE_MAX, n) : CLIENT_PAGE_DEFAULT;
-    const off = Math.max(0, Math.trunc(Number(offset)) || 0);
+    /** `offset: Infinity` 也要按 0：`Math.trunc(Infinity)` 还是 Infinity，会原样回给前端 */
+    const m = Math.trunc(Number(offset));
+    const off = Number.isFinite(m) && m > 0 ? m : 0;
 
     return {
       ok: true,

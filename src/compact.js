@@ -76,6 +76,21 @@ export const DEFAULTS = {
   keepDigests: 3,
 };
 
+/**
+ * 把**整份插件配置**归一成 compact 配额。
+ *
+ * 两个调用方必须用同一份，否则重启后重建的开场跟压缩那一刻不是一回事：
+ *   · `createCompact()` 内部；
+ *   · `host.js` 的 `rebuildOpening`（`pending-opening` 重建时用）。
+ *
+ * 这里是唯一的归一化出口——别再在别处手写 `{ ...DEFAULTS, ...cfg.compact }`，
+ * 那种「看起来一样」的复制正是上一版的 bug 来源（`host.js` 直接把整份 `cfg`
+ * 传进去，`keepDigests` 取到 `undefined`，摘要从「最新 3 条」变成「最旧 3 条」）。
+ */
+export function compactCfgOf(cfgOf = () => ({})) {
+  return () => ({ ...DEFAULTS, ...(cfgOf()?.compact ?? {}) });
+}
+
 const DAY = 86_400_000;
 
 /**
@@ -362,7 +377,7 @@ export function createCompact({
    */
   const history = [];
 
-  const cfg = () => ({ ...DEFAULTS, ...(cfgOf()?.compact ?? {}) });
+  const cfg = compactCfgOf(cfgOf);
 
   function noteTurn(chatId) {
     turns.set(chatId, Number(turns.get(chatId) || 0) + 1);
@@ -412,7 +427,6 @@ export function createCompact({
     const sid = sessions.get(chatId);
     if (!sid) return { ok: false, why: '这个会话还没有 DSH 会话' };
 
-    const c = cfg();
     let opening = '';
     try {
       /** 挑料规则与 `pending-opening` 的重建共用一份，见 `makeOpening()` */
