@@ -102,7 +102,7 @@ import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { wakeContext } from './wake-context.js';
 import { stripLeak } from './leak-guard.js';
 import { createBridge } from './bridge.js';
-import { createCompact } from './compact.js';
+import { createCompact, makeOpening } from './compact.js';
 import { createPendingOpenings } from './pending-opening.js';
 import { createTimers } from './timers.js';
 import { createUsage } from './usage.js';
@@ -4097,15 +4097,34 @@ export function apply(ctx) {
   });
 
   /**
+   * 重启后重建压缩开场。
+   *
+   * 与 `createCompact()` 里那条走的是**同一个** `makeOpening()`——挑料规则
+   * （用户 8 条 / 她 3 条 / 摘要 N 条 / 约定）必须一致，否则重启后拼出来的
+   * 开场跟压缩那一刻那份不是一回事。
+   */
+  const rebuildOpening = makeOpening({
+    journal,
+    agreementsOf: (chatId) => readAgreements({ memory, graph, chatId, aliases: aliasesOf(chatId) }),
+    aliasesOf,
+    cfgOf: () => cfg,
+  });
+
+  /**
    * 压缩后要拼在下一条用户消息前面的开场白。
    *
    * **必须落盘**：`compact.js` 是「建新会话 → 落映射 → 交开场」，
    * 映射在 `sessions.json`，开场只放内存的话，进程在两步之间退出就会
    * 「映射指向新会话、开场没了」——下一条消息直接失忆。
+   *
+   * 盘上只存 `{ at }` 指针，正文靠 `rebuildOpening` 现拼：开场本来就是
+   * 从日记确定性重建的，存一份正文只是让「清空记忆」清不干净（详见
+   * `pending-opening.js` 顶部）。
    */
   const pendingOpening = createPendingOpenings({
     file: join(dataDir(), 'opening-pending.json'),
     log: (m) => log.warn(m),
+    rebuild: (chatId) => rebuildOpening(chatId),
   });
 
   /**

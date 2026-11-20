@@ -1,7 +1,10 @@
 // 压缩开场的持久化暂存。
 //
-// 最要紧的两条：**重启后开场还在**（否则映射指向新会话、开场没了 = 失忆），
-// 以及**取走即删**（否则同一段开场会被重复拼进每一轮）。
+// 三条最要紧：
+//   1. **重启后开场还能拼出来**（否则映射指向新会话、开场没了 = 失忆）；
+//   2. **取走即删**（否则同一段开场会被重复拼进每一轮）；
+//   3. **盘上只有指针**（`{ at }`），正文一个字都不落盘——正文是从日记
+//      确定性重建的，存一份只会让「清空记忆」清不干净。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,6 +20,9 @@ function tmpFile() {
   return join(mkdtempSync(join(tmpdir(), 'pending-opening-')), 'opening-pending.json');
 }
 
+/** 重启后的正文来源：测试里固定回一个串，便于断言「走的是重建而不是盘上正文」 */
+const fixed = (text) => (chatId) => `${text}:${chatId}`;
+
 test('开场：set 之后 get 得到，take 之后就没有了', () => {
   const p = createPendingOpenings({ file: tmpFile() });
   p.set('c1', '（接着上面继续聊）');
@@ -26,12 +32,52 @@ test('开场：set 之后 get 得到，take 之后就没有了', () => {
   assert.equal(p.size, 0);
 });
 
-test('开场：重启后还在（映射已落盘、开场不能只活在内存里）', () => {
+test('开场：重启后还能拼出来（映射已落盘、开场不能只活在内存里）', () => {
   const file = tmpFile();
   createPendingOpenings({ file }).set('c1', '开场 A');
 
-  const again = createPendingOpenings({ file });
-  assert.equal(again.get('c1'), '开场 A');
+  const calls = [];
+  const again = createPendingOpenings({
+    file,
+    rebuild: (chatId) => { calls.push(chatId); return '重建的开场'; },
+  });
+  assert.equal(again.get('c1'), '重建的开场');
+  assert.deepEqual(calls, ['c1'], '重启后必须走重建');
+});
+
+test('开场：**盘上不存正文**（清空日记后重建为空，不能还留着聊天片段）', () => {
+  const file = tmpFile();
+  const p = createPendingOpenings({ file });
+  p.set('c1', '用户原话：我下周要去杭州出差');
+  const raw = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(raw.version, 2);
+  assert.ok(raw.chats.c1.at > 0, '指针要带时间戳（TTL 用）');
+  assert.equal(raw.chats.c1.text, undefined, '正文绝不能落盘');
+  assert.ok(!readFileSync(file, 'utf8').includes('杭州'), '盘上不该出现聊天原文');
+
+  /** 日记被清掉之后重建为空：开场就没有了，指针也顺手删掉 */
+  const after = createPendingOpenings({ file, rebuild: () => '' });
+  assert.equal(after.take('c1'), '');
+  assert.equal(after.size, 0, '拼不出内容的指针不该留着');
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).chats.c1, undefined);
+});
+
+test('开场：重建抛错按「没有开场」处理，不许炸掉收消息的路径', () => {
+  const file = tmpFile();
+  createPendingOpenings({ file }).set('c1', '开场 A');
+  const again = createPendingOpenings({
+    file,
+    log: () => {},
+    rebuild: () => { throw new Error('日记打不开'); },
+  });
+  assert.equal(again.get('c1'), '');
+  assert.equal(again.take('c1'), '');
+});
+
+test('开场：没有 rebuild 时重启后读不到正文（不假装有）', () => {
+  const file = tmpFile();
+  createPendingOpenings({ file }).set('c1', '开场 A');
+  assert.equal(createPendingOpenings({ file }).get('c1'), '');
 });
 
 test('开场：取走之后重启不再出现（不能重复拼开场）', () => {
@@ -40,7 +86,7 @@ test('开场：取走之后重启不再出现（不能重复拼开场）', () =>
   p.set('c1', '开场 A');
   assert.equal(p.take('c1'), '开场 A');
 
-  assert.equal(createPendingOpenings({ file }).get('c1'), '');
+  assert.equal(createPendingOpenings({ file, rebuild: fixed('重建') }).get('c1'), '');
 });
 
 test('开场：不同会话互不覆盖', () => {
@@ -73,8 +119,9 @@ test('开场：超过 24 小时未消费就丢弃', () => {
   p.set('c1', '旧开场');
   t += 25 * HOUR;
 
-  const again = createPendingOpenings({ file, now: () => t });
-  assert.equal(again.get('c1'), '');
+  const again = createPendingOpenings({ file, now: () => t, rebuild: fixed('重建') });
+  assert.equal(again.get('c1'), '', '过期条目连指针都不该留');
+  assert.equal(again.size, 0);
 });
 
 test('开场：损坏文件不抛错，且先备份再降级', () => {
@@ -87,12 +134,12 @@ test('开场：损坏文件不抛错，且先备份再降级', () => {
   assert.equal(baks.length, 1);
 });
 
-test('开场：写盘是完整 JSON（不会留下半份文件）', () => {
+test('开场：写盘是完整 JSON，且只有指针', () => {
   const file = tmpFile();
   const p = createPendingOpenings({ file });
   p.set('c1', '开场');
   const raw = JSON.parse(readFileSync(file, 'utf8'));
-  assert.equal(raw.chats.c1.text, '开场');
+  assert.deepEqual(Object.keys(raw.chats.c1), ['at']);
 });
 
 test('开场：超过上限时淘汰最旧的，不无限增长', () => {
@@ -106,6 +153,8 @@ test('开场：超过上限时淘汰最旧的，不无限增长', () => {
   assert.equal(p.size, 50);
   assert.equal(p.get('c0'), '');
   assert.equal(p.get('c59'), '开场 59');
+  /** 盘上也只能有 50 条指针 */
+  assert.equal(Object.keys(JSON.parse(readFileSync(file, 'utf8')).chats).length, 50);
 });
 
 test('开场：盘上是 {"chats":[]} 时不能静默永久失忆', () => {
@@ -115,24 +164,31 @@ test('开场：盘上是 {"chats":[]} 时不能静默永久失忆', () => {
   const p = createPendingOpenings({ file });
   p.set('c1', '开场 A');
   /** 数组也是 object：漏判会让 map 变数组，字符串键被 JSON.stringify 丢掉 */
-  assert.equal(createPendingOpenings({ file }).get('c1'), '开场 A');
+  const again = createPendingOpenings({ file, rebuild: fixed('重建') });
+  assert.equal(again.size, 1, '键不能丢');
+  assert.equal(again.get('c1'), '重建:c1');
 });
 
-test('开场：损坏备份最多留 3 份（不能每次启动都新增）', () => {
+test('开场：旧格式（带 text）读进来只留 at，正文不再上盘', () => {
   const file = tmpFile();
-  writeFileSync(file, '坏文件', 'utf8');
-  for (let i = 0; i < 6; i += 1) createPendingOpenings({ file });
-
-  const baks = readdirSync(join(file, '..')).filter((n) => n.includes('.corrupted.'));
-  assert.ok(baks.length <= 3, `备份 ${baks.length} 份，应 ≤3`);
+  writeFileSync(
+    file,
+    JSON.stringify({ chats: { c1: { text: '旧正文，不该被读回来', at: Date.now() } } }),
+    'utf8',
+  );
+  const p = createPendingOpenings({ file, rebuild: () => '重建的' });
+  /** 旧正文被丢掉，走重建——这正是「盘上只存指针」想要的迁移结果 */
+  assert.equal(p.take('c1'), '重建的');
 });
 
-test('开场：旧格式里 text 是数字时，take 也返回字符串', () => {
+test('开场：旧格式迁移后，再写一次盘上就没有 text 了', () => {
   const file = tmpFile();
-  writeFileSync(file, JSON.stringify({ chats: { c1: { text: 123, at: Date.now() } } }), 'utf8');
-
+  writeFileSync(file, JSON.stringify({ chats: { c1: { text: '旧正文', at: Date.now() } } }), 'utf8');
   const p = createPendingOpenings({ file });
-  assert.equal(p.take('c1'), '123');
+  p.set('c2', '新开场');
+  const disk = readFileSync(file, 'utf8');
+  assert.ok(!disk.includes('旧正文'), '迁移时旧正文要被清掉');
+  assert.deepEqual(Object.keys(JSON.parse(disk).chats.c1), ['at']);
 });
 
 test('开场：读盘失败时仍写内存（不能把读故障升级成当场失忆）', () => {
@@ -153,8 +209,10 @@ test('开场：__proto__ 当普通键处理，不能变成原型上的幽灵条�
 
   assert.equal(p.size, 1);
   assert.equal(p.get('__proto__'), 'payload');
-  /** 重启读回也不能走原型链 */
-  assert.equal(createPendingOpenings({ file }).get('__proto__'), 'payload');
+  /** 重启读回也不能走原型链：指针在，正文靠重建 */
+  const again = createPendingOpenings({ file, rebuild: fixed('重建') });
+  assert.equal(again.size, 1);
+  assert.equal(again.get('__proto__'), '重建:__proto__');
   assert.equal(p.take('__proto__'), 'payload');
   assert.equal(p.size, 0);
 });
