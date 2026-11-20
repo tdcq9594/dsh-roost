@@ -20,10 +20,12 @@
  */
 
 import {
-  readdirSync, readFileSync, writeFileSync, existsSync, statSync, mkdirSync, renameSync,
+  readdirSync, readFileSync, existsSync, statSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+
+import { writeFileAtomic } from './atomic.js';
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 
@@ -98,13 +100,10 @@ export function createCatalog({ dir, parse, log = () => {} }) {
     return data;
   }
 
-  /** 原子写：先 `.tmp` 再 rename。半截 JSON 比没有更糟（下次读会崩） */
+  /** 原子写：半截 JSON 比没有更糟（下次读会崩） */
   function write(next) {
     try {
-      mkdirSync(dir(), { recursive: true });
-      const tmp = `${file()}.tmp`;
-      writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
-      renameSync(tmp, file());
+      writeFileAtomic(file(), JSON.stringify(next, null, 2) + '\n');
     } catch (e) {
       log(`写人格目录失败：${e.message}`);
     }

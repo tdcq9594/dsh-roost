@@ -14,9 +14,11 @@
  */
 
 import {
-  readFileSync, writeFileSync, mkdirSync, renameSync,
+  readFileSync, mkdirSync,
 } from 'node:fs';
 import { join } from 'node:path';
+
+import { writeFileAtomic, writeJsonAtomic } from './atomic.js';
 
 const SCHEMA = 1;
 
@@ -89,12 +91,11 @@ export function createPrefs({ dir, log = () => {} }) {
       if (prev !== null) {
         try {
           JSON.parse(prev);
-          writeFileSync(bak(), prev, 'utf8');
+          /** `.bak` 也走原子写：它是最后一道保险，半截的备份比没有更坏 */
+          writeFileAtomic(bak(), prev);
         } catch {}
       }
-      const tmp = `${file()}.tmp`;
-      writeFileSync(tmp, JSON.stringify(clean, null, 2) + '\n', 'utf8');
-      renameSync(tmp, file());
+      writeJsonAtomic(file(), clean, { newline: true });
     } catch (e) {
       log(`写人格偏好失败：${e.message}`);
     }

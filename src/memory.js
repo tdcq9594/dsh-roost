@@ -33,9 +33,11 @@
  *   实际无影响——文本相同就是同一条事实，而且我们从不改写已存的文本。
  */
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
+
+import { writeJsonAtomic } from './atomic.js';
 
 /** 一条最多 200 字，每层最多 40 条（比原来的 20 条放宽，跨群后量会涨） */
 const FACT_MAX = 200;
@@ -410,10 +412,7 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
   function save() {
     const m = load();
     try {
-      mkdirSync(dataDir(), { recursive: true });
-      const tmp = file() + '.tmp';
-      writeFileSync(tmp, JSON.stringify(m, null, 2), 'utf8');
-      renameSync(tmp, file()); // 原子替换，断电不会留半个文件
+      writeJsonAtomic(file(), m);
     } catch {
       /* 写不进去就算了，不能因为存记忆把这一轮弄挂 */
     }

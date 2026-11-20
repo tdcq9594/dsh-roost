@@ -13,6 +13,8 @@
 import fs from 'node:fs';
 import { join } from 'node:path';
 
+import { writeFileAtomic } from './atomic.js';
+
 import {
   V1_ROUTES, V1_SCOPES, V1_IMPLEMENTED_HOOKS, RATE_LIMIT, WINDOW_MS, IDEMPOTENT_TTL_MS, IDEMPOTENT_MAX, MAX_BODY_BYTES,
   isRouteImplemented, isRouteDesignedOff,
@@ -446,11 +448,8 @@ export function writeDocs({ docsDir, version = '' } = {}) {
   const out = [];
   for (const d of buildDocs({ version })) {
     const file = join(docsDir, d.name);
-    fs.mkdirSync(docsDir, { recursive: true });
     // 原子写：中断时不会留下一份半截 API.md（与 ext-patch / ext-memory-store 同一口径）。
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, d.text, 'utf8');
-    fs.renameSync(tmp, file);
+    writeFileAtomic(file, d.text);
     out.push(file);
   }
   return out;

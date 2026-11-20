@@ -27,9 +27,11 @@
  * kind 过滤，自述会被当成聊天记录再喂回巩固，形成自我强化的回音。
  */
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
+
+import { writeJsonAtomic } from './atomic.js';
 
 /** 一条自述最多多少字 */
 const NOTE_MAX = 200;
@@ -89,10 +91,7 @@ export function createSelf({ log = () => {}, now = () => Date.now() } = {}) {
 
   function save() {
     try {
-      mkdirSync(dataDir(), { recursive: true });
-      const tmp = file() + '.tmp';
-      writeFileSync(tmp, JSON.stringify(load(), null, 2), 'utf8');
-      renameSync(tmp, file()); // 原子替换，断电不会留半个文件
+      writeJsonAtomic(file(), load());
     } catch (e) {
       log(`自述存不下来：${e.message}`);
     }

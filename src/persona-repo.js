@@ -26,10 +26,11 @@
  */
 
 import {
-  readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, readdirSync,
+  readFileSync, existsSync, readdirSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { compareVersion } from './version.js';
+import { writeFileAtomic } from './atomic.js';
 import { checkUrlSync, isPrivateIp } from './ssrf.js';
 // 哈希规则只能有一个定义处：这里、catalog、构建脚本必须算出一模一样的 sha256，
 // 否则 Windows 检出（CRLF）会被判成「改过」，一键更新永远跳过用户文件。
@@ -290,12 +291,9 @@ export function createPersonaRepo({
     }
   }
 
-  /** 原子写：先写 `.tmp` 再 rename。半截文件比没有文件更糟（下次读会崩） */
+  /** 原子写：半截文件比没有文件更糟（下次读会崩）。实现统一在 `atomic.js`。 */
   function writeAtomic(file, text) {
-    mkdirSync(join(file, '..'), { recursive: true });
-    const tmp = `${file}.tmp`;
-    writeFileSync(tmp, text, 'utf8');
-    renameSync(tmp, file);
+    writeFileAtomic(file, text);
   }
 
   function saveSynced(map) {

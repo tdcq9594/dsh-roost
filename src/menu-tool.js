@@ -26,10 +26,11 @@
  * 而模型没有腾格的能力，等于把她这条表达通道彻底弄哑。
  */
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { loadDefineTool, shapeTool } from './tools.js';
+import { writeJsonAtomic } from './atomic.js';
 import { cooldownCheck, waitText } from './self-expression.js';
 
 /** 菜单最多 10 项（官方限制；框架 `setGlobalMenu` 也会校验） */
@@ -222,11 +223,7 @@ export function createSlotStore({ dataDir, log = () => {} } = {}) {
 
   function write(slot) {
     try {
-      const dir = dataDir();
-      mkdirSync(dir, { recursive: true });
-      const tmp = `${file()}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ ...slot, at: Date.now() }, null, 2), { mode: 0o600 });
-      renameSync(tmp, file());
+      writeJsonAtomic(file(), { ...slot, at: Date.now() }, { mode: 0o600 });
     } catch (e) {
       /** 记不住身份不该让改菜单失败——下次会退回「· 前缀」判据 */
       log(`[menu] 写 menu-slot 失败：${e?.message ?? e}`);

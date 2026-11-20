@@ -37,12 +37,12 @@ import {
   renameSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from 'node:fs';
 import { basename, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { dataDir } from './config.js';
+import { writeJsonAtomic } from './atomic.js';
 import { isValidUin } from './account.js';
 import { unscopeKey } from './persona-scope.js';
 
@@ -75,13 +75,6 @@ const BACKUP_FILES = [
   'profiles.json',
   'closing.json',
 ];
-
-/** 原子写：先写 .tmp 再 rename，断电/异常时不会留下半个 JSON */
-function writeJsonAtomic(file, value) {
-  const tmp = `${file}.rewrite.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
-  renameSync(tmp, file);
-}
 
 function readJson(file) {
   try {

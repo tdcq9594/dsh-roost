@@ -14,8 +14,9 @@
  * 「Roost 想通知 dsh-roost，但它不知道 dsh-roost 换到哪了」——鸡生蛋。
  */
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+import { writeJsonAtomic } from './atomic.js';
 
 /** 往后试多少个端口。20 够用了，再多就是扫别人服务了 */
 export const SCAN = 20;
@@ -86,11 +87,7 @@ export function createLease({ file, log = () => {} }) {
     const all = read();
     all[kind] = { want: Number(want) || 0, actual: Number(actual) || 0, pid, at: new Date().toISOString() };
     try {
-      const dir = dirname(file);
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      const tmp = `${file}.tmp`;
-      writeFileSync(tmp, JSON.stringify(all, null, 2), 'utf8');
-      renameSync(tmp, file);
+      writeJsonAtomic(file, all);
     } catch (e) {
       log(`端口租约写不进去（不影响运行）：${e.message}`);
     }

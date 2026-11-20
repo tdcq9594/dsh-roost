@@ -21,9 +21,11 @@
  * 两者生命周期完全不同，混在一起早晚互相污染。
  */
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
+
+import { writeFileAtomic } from './atomic.js';
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -152,10 +154,7 @@ export function createClosing(cfg = {}) {
 
   function save() {
     try {
-      mkdirSync(dataDir(), { recursive: true });
-      const tmp = file() + '.tmp';
-      writeFileSync(tmp, JSON.stringify(load(), null, 2), 'utf8');
-      renameSync(tmp, file());
+      writeFileAtomic(file(), JSON.stringify(load(), null, 2));
     } catch {
       /* 存不下就算了——收尾是锦上添花，不能因为写盘失败把这一轮弄挂 */
     }

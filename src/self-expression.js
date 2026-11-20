@@ -26,8 +26,10 @@
  * 面板可一键清空、随备份走（备份是全目录打包）。审计那边仍然不记内容。
  */
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+import { writeJsonAtomic } from './atomic.js';
 
 /** 四个出口。顺序 = 面板上的展示顺序，也是「由轻到重」的顺序 */
 export const SELF_KINDS = Object.freeze(['menu', 'sign', 'name', 'avatar']);
@@ -255,12 +257,7 @@ export function createHistory({ dataDir, now = () => Date.now(), log = () => {} 
   }
 
   function writeAll(rows) {
-    const dir = dataDir();
-    mkdirSync(dir, { recursive: true });
-    const tmp = `${file()}.tmp`;
-    const body = JSON.stringify({ version: 1, entries: rows.slice(-MAX_HISTORY) }, null, 2);
-    writeFileSync(tmp, body, { mode: 0o600 });
-    renameSync(tmp, file());
+    writeJsonAtomic(file(), { version: 1, entries: rows.slice(-MAX_HISTORY) }, { mode: 0o600 });
   }
 
   /**

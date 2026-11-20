@@ -27,8 +27,10 @@
  * **绝不为了凑素材去读私聊或别的群**。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+import { writeFileAtomic } from './atomic.js';
 
 /* ------------------------------------------------------------------ *
  * 配置
@@ -642,13 +644,8 @@ export function createPostStore({ dirOf, now = () => Date.now(), log = () => {} 
   }
 
   function save(s) {
-    const dir = dirOf();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const f = fileOf();
-    const tmp = `${f}.tmp`;
     const body = { plan: s.plan, history: (s.history || []).slice(0, MAX_HISTORY) };
-    writeFileSync(tmp, JSON.stringify(body, null, 2));
-    renameSync(tmp, f);   // 原子替换：写一半断电也不会留下半个 JSON
+    writeFileAtomic(fileOf(), JSON.stringify(body, null, 2));
     return body;
   }
 

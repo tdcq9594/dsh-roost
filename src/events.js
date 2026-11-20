@@ -14,8 +14,9 @@
  * 「真 TTL」不是注入时假装看不见：load() 会把过期行**从盘上删掉**。
  * 只是筛掉不落盘，文件会一直留着几个月前的事，清了也还在。
  */
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+import { writeJsonAtomic } from './atomic.js';
 
 export const EVENT_TTL_MS = 24 * 3_600_000;
 export const EVENT_MAX = 100;
@@ -54,10 +55,7 @@ export function createEvents({
 
   function save() {
     try {
-      mkdirSync(dirname(file), { recursive: true });
-      const tmp = `${file}.tmp`;
-      writeFileSync(tmp, JSON.stringify(load()), 'utf8');
-      renameSync(tmp, file);
+      writeJsonAtomic(file, load(), { indent: 0 });
     } catch (e) {
       log(`写经历失败（不影响聊天）：${e.message}`);
     }
