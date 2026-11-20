@@ -104,6 +104,7 @@ import { stripLeak } from './leak-guard.js';
 import { createBridge } from './bridge.js';
 import { createCompact } from './compact.js';
 import { createPendingOpenings } from './pending-opening.js';
+import { createTimers } from './timers.js';
 import { createUsage } from './usage.js';
 import { priceTierOf } from './offpeak.js';
 import { createOwnership, createPersonaScope, unscopeKey, LEGACY_POLICIES, LEGACY_LABELS } from './persona-scope.js';
@@ -515,6 +516,14 @@ export function apply(ctx) {
   };
 
   /**
+   * 长期定时器登记表（见 `timers.js`）。
+   *
+   * `teardown` 不再手写 clear 清单——那份清单漏过一次备份 / 发帖 / 投递回查，
+   * 而 `unref()` 只保证不阻进程退出，不保证重载后不重复跑。现在只清这一处。
+   */
+  const timers = createTimers({ log });
+
+  /**
    * E4 一键备份：**启动时、读配置之前**把 `.restore/` 换上（交接 §3③）。
    *
    * 按契约放在最前面：`loadConfig()` / `createMemory()` / `createJournal()`
@@ -792,7 +801,7 @@ export function apply(ctx) {
     if (!id) return;
     usageBuf.set(id, (usageBuf.get(id) || 0) + 1);
     if (usageTimer) return;
-    usageTimer = setTimeout(() => {
+    usageTimer = setTimeout(() => { // timer-ok: 30 秒 debounce，自己摘自己 + teardown 兜底
       usageTimer = null;
       flushUsage();
     }, 30_000);
@@ -943,7 +952,7 @@ export function apply(ctx) {
    * 关着语音的人不会平白多花 30MB 内存。延迟 5 秒是为了不跟启动时的
    * 其它初始化抢 CPU。
    */
-  setTimeout(() => { tts.warmup().catch(() => {}); }, 5000).unref?.();
+  setTimeout(() => { tts.warmup().catch(() => {}); }, 5000).unref?.(); // timer-ok: 一次性预热，5 秒后自然结束
 
   /**
    * 4.5 人格隔离：只在 store 层把物理键按人格分开。
@@ -1668,8 +1677,7 @@ export function apply(ctx) {
    * `paused()` 排在**最前面**：总开关关着 / 刚断线失败过时，连 tick 都不进，
    * 不跑模型、不占额度。只靠出口拦的话，模型照跑、账照记，只是最后一句被吞。
    */
-  const speakTimer = setInterval(() => { if (paused()) return; speakUp.tick().catch(() => {}); }, 60_000);
-  speakTimer.unref?.();
+  timers.every(() => { if (paused()) return; speakUp.tick().catch(() => {}); }, 60_000, '主动搭话检查');
 
   /**
    * 4.6 互动召回：与主动搭话**两本账**。
@@ -1781,8 +1789,7 @@ export function apply(ctx) {
     }
   };
   /** 5 分钟看一次就够：窗口最短也是「当天」，没必要每分钟醒一次 */
-  const wakeTimer = setInterval(() => { if (paused()) return; runWakeup().catch(() => {}); }, 300_000);
-  wakeTimer.unref?.();
+  timers.every(() => { if (paused()) return; runWakeup().catch(() => {}); }, 300_000, '互动召回检查');
 
   /** 已经挂过人格/权限上下文的 agent，避免每轮重复挂 */
   /** 端口租约：跟 Roost 互通「实际在哪个端口」 */
@@ -2096,7 +2103,7 @@ export function apply(ctx) {
       const ppl = await Promise.race([
         account.people(),
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('框架没响应')), 1500);
+          timer = setTimeout(() => reject(new Error('框架没响应')), 1500); // timer-ok: 单次调用的超时竞速，随调用结束
         }),
       ]);
       remote = Array.isArray(ppl?.groups) ? ppl.groups : [];
@@ -2474,19 +2481,18 @@ export function apply(ctx) {
     },
   });
   /** 队列自己每分钟消费一次：提交那一刻门闸没过，过点了要能补上 */
-  const proactiveTimer = setInterval(() => {
+  timers.every(() => {
     /** 不 drain 就不消费 attempt，`MAX_ATTEMPTS` 不消耗，开回来积压的已过 TTL */
     if (paused()) return;
     void proactiveDispatcher.drain().catch(() => {});
-  }, 60_000);
-  proactiveTimer.unref?.();
+  }, 60_000, '队列消费');
 
   /**
    * persist 快照恢复（§6.3「恢复后按 id 拉回并重新注册 section」）。
    * `ctx.agents` 是延迟激活的服务（P2 探针约 3.5s 后才可用），所以排到后面；
    * timer 用 unref 不阻进程退出，teardown 里清掉，失败只 warn 不拖崩激活。
    */
-  const restoreTimer = setTimeout(() => {
+  const restoreTimer = setTimeout(() => { // timer-ok: 一次性快照恢复，已由 mountOffs 清理
     void agentV1.restore().catch((e) => log.warn?.(`独立会话恢复失败：${e?.message ?? e}`));
   }, 3500);
   restoreTimer.unref?.();
@@ -3291,10 +3297,8 @@ export function apply(ctx) {
    * 之后每十分钟看一眼。两个都 unref：不能因为定时器让进程退不出去。
    * 两个都要 gate：否则「关着的时候重启一次」照样会跑一轮。
    */
-  const consolidateBoot = setTimeout(() => { if (!paused()) consolidateTick(); }, 60_000);
-  consolidateBoot.unref?.();
-  const consolidateTimer = setInterval(() => { if (paused()) return; consolidateTick(); }, 10 * 60_000);
-  consolidateTimer.unref?.();
+  timers.after(() => { if (!paused()) consolidateTick(); }, 60_000, '记忆巩固补跑');
+  timers.every(() => { if (paused()) return; consolidateTick(); }, 10 * 60_000, '记忆巩固检查');
 
   /* ---------------- 4.3/4.4 定时备份 + 加密云备份 ---------------- */
 
@@ -3366,10 +3370,8 @@ export function apply(ctx) {
       log.warn(`定时备份失败：${r.message}`);
     }
   };
-  const backupBoot = setTimeout(() => backupTick().catch(() => {}), 120_000);
-  backupBoot.unref?.();
-  const backupTimer = setInterval(() => backupTick().catch(() => {}), 10 * 60_000);
-  backupTimer.unref?.();
+  timers.after(() => backupTick().catch(() => {}), 120_000, '定时备份补跑');
+  timers.every(() => backupTick().catch(() => {}), 10 * 60_000, '定时备份');
 
   /* ---------------- 通道 / 注册方式 / 觉醒 / 压缩 ---------------- */
 
@@ -3580,10 +3582,8 @@ export function apply(ctx) {
     dryRunOf: () => dryRunOn(),
   });
   /** 两个都要 gate：这是唯一会**真的发到频道**的定时行为，且它绕开了 `channel.send` */
-  const postBoot = setTimeout(() => { if (!paused()) channelPost.tick().catch(() => {}); }, 60_000);
-  postBoot.unref?.();
-  const postTimer = setInterval(() => { if (paused()) return; channelPost.tick().catch(() => {}); }, 60_000);
-  postTimer.unref?.();
+  timers.after(() => { if (!paused()) channelPost.tick().catch(() => {}); }, 60_000, '频道发帖补跑');
+  timers.every(() => { if (paused()) return; channelPost.tick().catch(() => {}); }, 60_000, '频道发帖');
 
   /**
    * 主人批准之后**真正执行**的那一段。
@@ -4414,12 +4414,11 @@ export function apply(ctx) {
    * 五分钟一次，比私聊稀疏得多——群里插话的成本高，不值得每分钟算一遍。
    * 白名单为空时 `wakeGroups` 第一行就返回，等于零开销。
    */
-  const groupTimer = setInterval(() => {
+  timers.every(() => {
     if (paused()) return;
     if (cfg.awake?.enabled === false) return;
     awake.wakeGroups().catch((e) => log.warn(`群主动失败：${e?.message ?? e}`));
-  }, 5 * 60_000);
-  groupTimer.unref?.();
+  }, 5 * 60_000, '群主动检查');
 
   /**
    * 投递终态的回查循环（桥 3）。
@@ -4449,10 +4448,8 @@ export function apply(ctx) {
       .catch((e) => log.warn(`投递回查失败：${e?.message ?? e}`));
   };
   /** 启动后先等一分钟（刚起来时 ai-chat 可能还没就绪），之后每十分钟一次 */
-  const deliveryBoot = setTimeout(deliveryTick, 60_000);
-  deliveryBoot.unref?.();
-  const deliveryTimer = setInterval(deliveryTick, 10 * 60_000);
-  deliveryTimer.unref?.();
+  timers.after(deliveryTick, 60_000, '投递回查补跑');
+  timers.every(deliveryTick, 10 * 60_000, '投递回查');
 
   /**
    * 群白名单的逐项判定（面板要看"这个群为什么不能主动"）。
@@ -6393,7 +6390,7 @@ export function apply(ctx) {
           })
           .catch(() => ''),
         new Promise((resolve) => {
-          const t = setTimeout(() => resolve(''), 1200);
+          const t = setTimeout(() => resolve(''), 1200); // timer-ok: 单次调用的超时竞速，随调用结束
           t.unref?.();
         }),
       ]);
@@ -7123,7 +7120,7 @@ export function apply(ctx) {
    * 后者在用户改配置之后不会重排，得重启才生效。
    */
   ctx.effect(() => {
-    const t = setInterval(() => {
+    const t = setInterval(() => { // timer-ok: 由本 effect 返回的 cleanup 清掉
       try {
         const c = cfg.autotelic || {};
         if (c.enabled !== true || Number(c.heartbeatMin) <= 0) return;
@@ -10115,7 +10112,7 @@ export function apply(ctx) {
             const hello = await Promise.race([
               roost.rpc('system.hello', {}),
               new Promise((_, rej) => {
-                const t = setTimeout(() => rej(new Error('外接协议没响应')), 1500);
+                const t = setTimeout(() => rej(new Error('外接协议没响应')), 1500); // timer-ok: 单次调用的超时竞速，随调用结束
                 t.unref?.();
               }),
             ]);
@@ -11793,7 +11790,7 @@ export function apply(ctx) {
         });
 
         /** 每 60ms 跑一片：太快会和消息处理抢事件循环，太慢用户看着像卡住 */
-        const timer = setInterval(() => {
+        const timer = setInterval(() => { // timer-ok: 任务级，跑完自清 + teardown 兜底
           const p = stickerTagJob.tick();
           if (!p.running) {
             clearInterval(timer);
@@ -12699,23 +12696,15 @@ export function apply(ctx) {
     ];
 
     return () => {
-      clearInterval(speakTimer);
-      clearInterval(proactiveTimer);
-      clearInterval(wakeTimer);
-      clearInterval(groupTimer);
-      clearTimeout(consolidateBoot);
-      clearInterval(consolidateTimer);
       /**
-       * 这三个以前漏了：`unref()` 只保证不阻进程退出，**不保证重载后不重复**。
-       * 插件重载会再 apply 一次，旧实例的备份 / 发帖 / 投递回查还在跑，
-       * 表现是同一时刻备份两遍、同一条帖发两次、同一条投递查两次。
+       * 长期定时器一把清掉。
+       *
+       * 以前是手写清单，2026-11 漏了备份 / 发帖 / 投递回查三个：`unref()` 只保证
+       * 不阻进程退出，**不保证重载后不重复**——插件重载会再 apply 一次，旧实例
+       * 还在跑，表现是同一时刻备份两遍、同一条帖发两次、同一条投递查两次。
+       * 现在统一登记在 `timers` 里，加定时器不必再回来补这一行。
        */
-      clearTimeout(backupBoot);
-      clearInterval(backupTimer);
-      clearTimeout(postBoot);
-      clearInterval(postTimer);
-      clearTimeout(deliveryBoot);
-      clearInterval(deliveryTimer);
+      timers.clearAll();
       /** 表情补标签是任务级定时器，重载发生在任务中途时也要清掉 */
       if (stickerTagTimer) {
         clearInterval(stickerTagTimer);
