@@ -8,8 +8,13 @@ name: 发版
 #
 # 为什么分 check / release 两个 job：
 #   - check 只做校验和判定，失败就红，几秒出结果
-#   - release 挂 environment: Release（required reviewers），发版前要人工批准，
-#     把「提交前先问」变成系统闸门；needs + if 确保校验不过时不触发审批
+#   - release 挂 environment: Release（secret 与 npm OIDC 绑定都靠它），
+#     needs + if 确保校验不过时不进入发版
+#
+# 发版标签门禁（2026-11-21 加）：push 触发时，必须有一个带 release 标签的
+# 已合并 PR 关联到本次提交，才允许真发版。普通功能 PR 即使误 bump 版本也不发。
+# 豁免：workflow_dispatch（手动触发即显式意图，用于补发）与 resume（tag 已在
+# 当前提交，说明上一次已批准发版，这里只是补建后半段）。
 #
 # 为什么建 tag / Release / npm 都在 release 这一个 job：
 #   GITHUB_TOKEN 触发的事件不会启动别的 workflow（dispatch 除外），
@@ -29,6 +34,9 @@ jobs:
   check:
     name: 发版前校验
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read   # 查关联 PR 的 release 标签
     outputs:
       version: ${{ steps.decide.outputs.version }}
       mode: ${{ steps.decide.outputs.mode }}
@@ -47,6 +55,8 @@ jobs:
       - name: 版本判定与 notes 校验
         id: decide
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ver=$(node -p "require('./package.json').version")
           echo "version=$ver" >> "$GITHUB_OUTPUT"
@@ -69,7 +79,37 @@ jobs:
             echo "v$ver 尚无 tag → release"
             mode=release
           fi
+
+          # 发版标签门禁（push 触发时生效）：
+          # 必须有一个带 release 标签的「已合并」PR 关联到本次提交，才准发版。
+          # 豁免：workflow_dispatch（手动触发即显式意图，用于补发）与 resume
+          # （tag 已在当前提交，说明上一次已批准发版，这里只是补建后半段）。
+          no_label=0
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$mode" = "release" ]; then
+            prs=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+              --jq '.[] | select(.state == "closed" and .merged_at != null) | .number' 2>/dev/null || true)
+            # rebase 合并时上面的反查可能为空，兜底从合并 commit 的 message 里取 (#N)
+            msg_pr=$(git log -1 --format=%B "$GITHUB_SHA" | grep -oE '\(#[0-9]+\)' | head -1 | tr -d '(#)' || true)
+            if [ -n "$msg_pr" ]; then
+              prs=$(printf '%s\n%s\n' "$prs" "$msg_pr" | grep -v '^$' | sort -u)
+            fi
+            found=0
+            for pr in $prs; do
+              labels=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.labels[].name' 2>/dev/null || true)
+              if printf '%s\n' "$labels" | grep -qx 'release'; then
+                echo "发版门禁通过：关联 PR #$pr 带 release 标签"
+                found=1
+                break
+              fi
+            done
+            if [ "$found" -ne 1 ]; then
+              echo "v$ver 未发现带 release 标签的已合并 PR → skip（不发版）"
+              mode=skip
+              no_label=1
+            fi
+          fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "no_label=$no_label" >> "$GITHUB_OUTPUT"
 
           # skip 时显式说清「为什么没发版」，否则「改了代码却没发版」完全静默：
           # 两个 PR bump 到同一版本时，后合并的就落在这里。
@@ -77,11 +117,19 @@ jobs:
             {
               echo "### 本次不发版（skip）"
               echo ""
-              echo "版本号是 \`$ver\`，但 tag \`v$ver\` 已经存在且**不指向**这次提交。"
-              echo ""
-              echo "两种可能："
-              echo "- 这是发版后的普通改动（没 bump 版本）——正常，无需处理；"
-              echo "- 你 bump 到的版本号已被别人先发了——本次改动**没有**对应版本。"
+              if [ "$no_label" -eq 1 ]; then
+                echo "版本号是 \`$ver\`（尚无 tag），但**触发本次 push 的 PR 没有 \`release\` 标签**。"
+                echo ""
+                echo "发版需要显式声明：给对应的发版 PR 补上 \`release\` 标签后重新推送，"
+                echo "或在 Actions 里手动触发「发版」（手动触发不受标签门禁限制）。"
+                echo "普通功能 PR 不该 bump 版本号——若这次 bump 是误操作，请回滚版本。"
+              else
+                echo "版本号是 \`$ver\`，但 tag \`v$ver\` 已经存在且**不指向**这次提交。"
+                echo ""
+                echo "两种可能："
+                echo "- 这是发版后的普通改动（没 bump 版本）——正常，无需处理；"
+                echo "- 你 bump 到的版本号已被别人先发了——本次改动**没有**对应版本。"
+              fi
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
