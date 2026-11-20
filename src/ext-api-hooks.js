@@ -537,6 +537,34 @@ export function createExtApiHooks({
     },
 
     /**
+     * 只读版：只放 `readonly`，不发消息、不调插件工具。
+     *
+     * 参数不需要 `narrowMsgSend` 那套收窄——只读方法没有目标 / 账本键，
+     * 直接把 `params` 透传给 `link.rpc`。路由层用的是 `state:read`，
+     * 所以扩展读运行状态不必先拿到 `message:write`。
+     */
+    async 'roost.read'({ body }) {
+      const link = typeof roostOf === 'function' ? roostOf() : null;
+      if (!link || typeof link.rpc !== 'function') {
+        return bad('还没连上 roost 外接协议', 503, 'internal');
+      }
+      const method = String(body?.method ?? '').trim();
+      const verdict = classifyRoostCall(method, link.caps ?? null);
+      if (!verdict.ok) return bad(verdict.why, 403, 'forbidden');
+      if (verdict.kind !== 'readonly') {
+        return bad('roost.read 只接受只读方法；发消息 / 插件工具请用 roost.call', 403, 'forbidden');
+      }
+      const input = body?.params && typeof body.params === 'object' && !Array.isArray(body.params)
+        ? body.params : {};
+      try {
+        const data = await link.rpc(method, input);
+        return { status: 200, body: { ok: true, method, data: data ?? null } };
+      } catch (e) {
+        return bad(`协议调用失败（${method}）：${String(e?.message ?? e).slice(0, 180)}`, 502, 'internal');
+      }
+    },
+
+    /**
      * 投递一条消息进 QQ 会话，跑完整一轮，回复发回同一目标。
      *
      * `sender.bucket` **写死 `member`**：`bucketOf()` 信任 payload 里的这个字段，

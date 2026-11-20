@@ -69,10 +69,13 @@ function rig(over = {}) {
 test('两个协议端点都接线了，且文档生成用的 hook 名单对得上', () => {
   assert.equal(V1_ROUTES['GET /v1/roost.capabilities'].scope, 'state:read');
   assert.equal(V1_ROUTES['POST /v1/roost.call'].scope, 'message:write');
+  assert.equal(V1_ROUTES['POST /v1/roost.read'].scope, 'state:read');
   assert.equal(isRouteImplemented('GET /v1/roost.capabilities'), true);
   assert.equal(isRouteImplemented('POST /v1/roost.call'), true);
+  assert.equal(isRouteImplemented('POST /v1/roost.read'), true);
   assert.ok(V1_IMPLEMENTED_HOOKS.includes('roost.capabilities'));
   assert.ok(V1_IMPLEMENTED_HOOKS.includes('roost.call'));
+  assert.ok(V1_IMPLEMENTED_HOOKS.includes('roost.read'));
 });
 
 // ---------------------------------------------------------------- 白名单
@@ -180,6 +183,25 @@ test('没连上协议时 capabilities 回 503，不假装是空清单', async ()
   const { hooks } = rig({ caps: null });
   const r = await hooks['roost.capabilities']({ query: {} });
   assert.equal(r.status, 503);
+});
+
+test('roost.read 转只读能力：state:read 就够，参数原样透传', async () => {
+  const { hooks, calls } = rig();
+  const r = await hooks['roost.read']({ body: { method: 'runtime.status', params: { verbose: 1 } } });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.data.from, 'framework');
+  assert.deepEqual(calls.rpc[0], ['runtime.status', { verbose: 1 }]);
+});
+
+test('roost.read 拒绝 msg.send / tool.*，且不转发', async () => {
+  const { hooks, calls } = rig();
+  const send = await hooks['roost.read']({
+    body: { method: 'msg.send', params: { target: 'owner', text: 'x' } },
+  });
+  assert.equal(send.status, 403);
+  const tool = await hooks['roost.read']({ body: { method: 'tool.hello.say', params: {} } });
+  assert.equal(tool.status, 403);
+  assert.equal(calls.rpc.length, 0);
 });
 
 test('roost.call 转只读能力：参数原样透传', async () => {

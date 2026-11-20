@@ -95,6 +95,15 @@ export const V1_ROUTES = {
    */
   'GET /v1/roost.capabilities': { scope: 'state:read', hook: 'roost.capabilities' },
   'POST /v1/roost.call': { scope: 'message:write', hook: 'roost.call' },
+  /**
+   * 只读版转发：读 `runtime.status` 这类能力不必申请 `message:write`。
+   *
+   * `roost.call` 的白名单同时包含只读能力、插件工具和 `msg.send`，
+   * 路由层只能统一要 `message:write`；结果是想读运行状态的扩展也得拿到
+   * 「能发消息」的权限，最小授权被架空。这里按「只读 / 写」拆成两条，
+   * 共用 `classifyRoostCall` 的判定，read 只放 `readonly`。
+   */
+  'POST /v1/roost.read': { scope: 'state:read', hook: 'roost.read' },
   'GET /v1/state': { scope: 'state:read', hook: 'state' },
   'GET /v1/mood': { scope: 'state:read', hook: 'mood' },
   'GET /v1/context': { scope: 'context:read', hook: 'context' },
@@ -221,7 +230,7 @@ export const V1_IMPLEMENTED_HOOKS = Object.freeze([
   'stickers.file', 'self.propose', 'group.info', 'group.mute', 'group.kick', 'tts.speak',
   'personas.list', 'personas.read', 'personas.save', 'personas.create', 'personas.remove',
   'config.read', 'config.patch',
-  'ext-ui.actions', 'roost.capabilities', 'roost.call',
+  'ext-ui.actions', 'roost.capabilities', 'roost.call', 'roost.read',
 ]);
 
 /**
