@@ -37,6 +37,33 @@ window.__ModuleLoader__.load({
     /** 首次创建工作区的默认名字；只影响「还叫目录名」的那些，用户改过的不动 */
     const DEFAULT_WORKSPACE_TITLE = 'Roost·QQ'
 
+    /**
+     * QR SVG 是宿主给的，不是用户输入，但面板用 `dangerouslySetInnerHTML`
+     * 插进去——上游一旦把 SVG 拼错或被替换，就是面板内的 XSS。
+     * 只留 svg 本身：剥脚本、外部嵌入、内联事件和 javascript: 链接。
+     */
+    const safeSvg = (s) => {
+      const t = String(s || '').trim()
+      /**
+       * 从第一个 `<svg` 开始截，不要求整串以它开头：
+       * qrcode 的 `toString` 现在不带 XML 声明，但换版本/换实现可能带
+       * `<?xml …?>` 或注释——写死 `^<svg` 会让二维码直接变空白，而且不报错。
+       */
+      const i = t.toLowerCase().indexOf('<svg')
+      if (i < 0) return ''
+      return t
+        .slice(i)
+        .replace(/<\s*(script|foreignObject|iframe|object|embed|animate|set)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+        .replace(/<\s*(script|foreignObject|iframe|object|embed|animate|set)\b[^>]*\/?>/gi, '')
+        .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        /**
+         * 二维码不需要任何链接，直接把 href/xlink:href 全剥掉。
+         * 只挡 `javascript:` 字面量不够：`java\tscript:`、无引号、
+         * 大小写混写都能绕过，而这里本来就没有合法的链接用途。
+         */
+        .replace(/\s(href|xlink:href)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    }
+
     /* ---------------- 请求 ---------------- */
 
     /**
@@ -2770,7 +2797,7 @@ select.roost-input{color-scheme:dark}
                     qrSvg
                       ? h('div', {
                           style: { background: '#fff', padding: 8, borderRadius: 10, lineHeight: 0, margin: '8px 0' },
-                          dangerouslySetInnerHTML: { __html: qrSvg },
+                          dangerouslySetInnerHTML: { __html: safeSvg(qrSvg) },
                         })
                       : null,
                     qrTip ? h('div', { className: 'roost-note' }, qrTip) : null,

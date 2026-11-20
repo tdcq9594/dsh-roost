@@ -39,6 +39,20 @@ import {
 export const LEVELS = ['critical', 'important', 'normal'];
 
 /**
+ * 可信度三档（与 `memory.js` 的 status 同一套口径）。
+ *
+ * `fact` 是默认值**不落盘**：老库每一行 status 都是空串，字节与升级前一致。
+ * 读取时由 `normRow()` 把空串归一成 `fact`，所以调用方永远拿到三档之一。
+ */
+export const STATUSES = ['fact', 'hearsay', 'guess'];
+
+function normStatus(v) {
+  const s = String(v ?? '');
+  /** `fact` 是默认值，不落盘；只写 hearsay/guess */
+  return STATUSES.includes(s) && s !== 'fact' ? s : '';
+}
+
+/**
  * 抹除后留在行上的占位符。
  *
  * 抽成常量而不是各处写字面量：这两个值同时是**「这一行不再承载信息」的判据**
@@ -255,6 +269,8 @@ function normRow(r) {
      */
     invalidAt: Number(r.invalid_at ?? r.invalidAt ?? 0),
     supersededBy: String(r.superseded_by ?? r.supersededBy ?? ''),
+    /** 空串 = 老数据 = fact；只认 hearsay/guess，别的值一律当 fact */
+    status: r.status === 'hearsay' || r.status === 'guess' ? r.status : 'fact',
   };
 }
 
@@ -339,7 +355,10 @@ function createSqliteStore(file, log) {
           -- 失效（批次 2）：0 = 有效；被推翻时写失效时刻，并把推翻它的
           -- 消息 id 记进 superseded_by。行、正文、出处一律不删
           invalid_at INTEGER NOT NULL DEFAULT 0,
-          superseded_by TEXT NOT NULL DEFAULT ''
+          superseded_by TEXT NOT NULL DEFAULT '',
+          -- 可信度（v1.3.14 的三档）：fact 是默认值不落盘，老库字节不变。
+          -- hearsay/guess 才写；读取时空串一律归一成 fact。
+          status TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS journal_day ON journal(day);
         CREATE INDEX IF NOT EXISTS journal_chat ON journal(chat_id, at);
@@ -373,6 +392,7 @@ function createSqliteStore(file, log) {
        */
       if (!cols.has('invalid_at')) db.exec('ALTER TABLE journal ADD COLUMN invalid_at INTEGER NOT NULL DEFAULT 0');
       if (!cols.has('superseded_by')) db.exec(`ALTER TABLE journal ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''`);
+      if (!cols.has('status')) db.exec(`ALTER TABLE journal ADD COLUMN status TEXT NOT NULL DEFAULT ''`);
       /**
        * FTS5 单独一张表而不是 external content：
        * external content 要靠触发器同步，改一行忘了同步就静默不一致。
@@ -397,8 +417,8 @@ function createSqliteStore(file, log) {
       if (!d) return null;
       const r = d
         .prepare(
-          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO NOTHING`,
         )
         .run(
@@ -416,6 +436,7 @@ function createSqliteStore(file, log) {
           row.vec ?? null,
           row.eventIds?.length ? JSON.stringify(row.eventIds) : null,
           row.evidence?.length ? JSON.stringify(row.evidence) : null,
+          normStatus(row.status),
         );
       if (!r.changes) return false; // 幂等：同一条消息写了两次
       d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(row.id, indexText(row.text));
@@ -436,8 +457,8 @@ function createSqliteStore(file, log) {
       const at = Number(row.at) || 0;
       const r = d
         .prepare(
-          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,accessed,last_access,invalid_at,superseded_by)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,accessed,last_access,invalid_at,superseded_by,status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO NOTHING`,
         )
         .run(
@@ -459,10 +480,27 @@ function createSqliteStore(file, log) {
           Number(row.lastAccess) || 0,
           Number(row.invalidAt) || 0,
           String(row.supersededBy ?? ''),
+          normStatus(row.status),
         );
       if (!r.changes) return false;
       d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(id, indexText(String(row.text ?? '')));
       return true;
+    },
+
+    /**
+     * 批量记访问：一条 UPDATE 代替 N 次「get + update」。
+     *
+     * 检索一次命中 3–6 条，原实现每条先读一次再写一次（SQLite 上 2N 次
+     * prepare/执行，JSONL 上更是 N 次整文件重写）；日记到几万行时肉眼可见。
+     */
+    touch(ids, at) {
+      const list = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
+      if (!list.length) return;
+      const d = open();
+      if (!d) return;
+      const ph = list.map(() => '?').join(',');
+      d.prepare(`UPDATE journal SET accessed=accessed+1, last_access=? WHERE id IN (${ph})`)
+        .run(Number(at) || Date.now(), ...list);
     },
 
     get(id) {
@@ -1077,10 +1115,24 @@ function createJsonlStore(file, log) {
    * 盘写不进去时照样 `return n`：内存说改好了、盘上没改，重启后旧键复活，
    * 而一键改写那边报的是「成功」。
    */
+  /**
+   * JSONL 落盘前的序列化。
+   *
+   * `fact` 不落盘——和 SQLite 的空串默认同一口径。`normRow()` 读取时
+   * 一定会把空串归一成 fact，所以落盘时删掉它不会丢信息；不删的话，
+   * 一次 rewrite 会把老行全部改写成带 `"status":"fact"`，破坏「升级前后
+   * 字节不变」的承诺。
+   */
+  function jsonOf(r) {
+    const o = { ...r };
+    if (o.status === 'fact') delete o.status;
+    return JSON.stringify(o);
+  }
+
   function rewrite() {
     try {
       ensureDir(file);
-      writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''), 'utf8');
+      writeFileSync(file, rows.map(jsonOf).join('\n') + (rows.length ? '\n' : ''), 'utf8');
       return true;
     } catch (e) {
       log(`日记文件写不进去：${e.message}`);
@@ -1109,7 +1161,7 @@ function createJsonlStore(file, log) {
       // 追加而不是整文件重写：白天每条消息都走这条路
       try {
         ensureDir(file);
-        appendFileSync(file, JSON.stringify(normRow(row)) + '\n', 'utf8');
+        appendFileSync(file, jsonOf(normRow(row)) + '\n', 'utf8');
       } catch (e) {
         log(`日记追加失败：${e.message}`);
       }
@@ -1146,6 +1198,22 @@ function createJsonlStore(file, log) {
       if (patch.text !== undefined) reindex();
       rewrite();
       return true;
+    },
+
+    /** 批量记访问：一次 rewrite 代替 N 次「update → rewrite」 */
+    touch(ids, at) {
+      load();
+      const want = new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean));
+      if (!want.size) return;
+      const t = Number(at) || Date.now();
+      let dirty = false;
+      for (const r of rows) {
+        if (!want.has(r.id)) continue;
+        r.accessed = Number(r.accessed || 0) + 1;
+        r.lastAccess = t;
+        dirty = true;
+      }
+      if (dirty) rewrite();
     },
 
     /** 同 SQLite 后端：只写两列，正文 / 出处 / 向量 / 倒排都不动 */
@@ -1565,9 +1633,15 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
   }
 
   /** 搜到就记一次访问——access_count 是排序的一部分 */
-  function touchIds(ids) {
+  function touchIds(ids, at) {
     const s = get();
-    const t = now();
+    /** 传了 at 就用它（面板/备份重放要按历史时刻记），否则用当前时钟 */
+    const t = Number(at) || now();
+    /** 新后端有批量方法；老后端（或注入的假 store）退回逐条，行为不变 */
+    if (typeof s.touch === 'function') {
+      s.touch(ids, t);
+      return;
+    }
     for (const id of ids || []) {
       const r = s.get(id);
       if (r) s.update(id, { accessed: (r.accessed || 0) + 1, lastAccess: t });
@@ -1603,6 +1677,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       eventIds = [],
       /** 原文快照 `[{eventId, at, sender, excerpt}]`。events 7 天后删了，它还留着 */
       evidence = [],
+      /** 可信度：默认 fact（不落盘）；只有 hearsay/guess 才写 */
+      status = '',
     }) {
       const t = String(text ?? '').trim();
       if (!t) return { added: false, level: 'normal' };
@@ -1623,6 +1699,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         vec: null,
         eventIds: (eventIds || []).map(String).filter(Boolean).slice(0, 50),
         evidence: (evidence || []).slice(0, 50),
+        status: normStatus(status),
       };
       const added = get().insert(row);
       return { added: Boolean(added), level: lv };
@@ -1718,7 +1795,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     },
 
     /** 搜到就记一次访问——access_count 是排序的一部分 */
-    touch: (ids) => touchIds(ids),
+    touch: (ids, at) => touchIds(ids, at),
 
     /**
      * 检索。

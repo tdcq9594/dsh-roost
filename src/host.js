@@ -103,6 +103,7 @@ import { wakeContext } from './wake-context.js';
 import { stripLeak } from './leak-guard.js';
 import { createBridge } from './bridge.js';
 import { createCompact } from './compact.js';
+import { createPendingOpenings } from './pending-opening.js';
 import { createUsage } from './usage.js';
 import { priceTierOf } from './offpeak.js';
 import { createOwnership, createPersonaScope, unscopeKey, LEGACY_POLICIES, LEGACY_LABELS } from './persona-scope.js';
@@ -2990,6 +2991,9 @@ export function apply(ctx) {
    * 它要调模型，所以 `generate` 复用 DSH 会话（跟主动搭话同一套办法）——
    * 单独一个内部会话，不碰任何 QQ 会话的上下文。
    */
+  /** 巩固会话配成真人会话时只警告一次，别每晚刷屏 */
+  const warnedConsolidate = new Set();
+
   const consolidate = createConsolidate({
     journal,
     graph,
@@ -3002,6 +3006,30 @@ export function apply(ctx) {
     log: (m) => log.info(m),
     generate: async (prompt) => {
       const consolidateChat = cfg.memory?.consolidateChat || 'consolidate';
+      /**
+       * 默认的 `consolidate` 是独立标识，不会和任何真人会话抢锁。
+       * 一旦用户把它配成已有会话（典型是某个私聊 openid），凌晨巩固就会
+       * 和前台共用一把 turn 锁——撞上时失败、只能次日补跑，而现象是静默的。
+       *
+       * 这里只警告一次，不改变行为：共用是不是有意选择，只有用户知道。
+       */
+      if (
+        consolidateChat !== 'consolidate' &&
+        /**
+         * 必须用**未包装**的 `sessionsStore`：人格作用域开着时，包装层的
+         * `entry()` 会把 key 改写成 `${chatId}::p:${人格}`，拿配置里的原始
+         * chatId 去查永远查不到——警告静默失效，而失效的正是最需要提醒的场景。
+         */
+        sessionsStore.entry(consolidateChat) &&
+        !warnedConsolidate.has(consolidateChat)
+      ) {
+        warnedConsolidate.add(consolidateChat);
+        log.warn(
+          `巩固会话配成了已有会话 ${String(consolidateChat).slice(0, 8)}…：` +
+            '凌晨巩固可能和它正在跑的一轮抢锁而失败（次日补跑）。' +
+            '建议改回独立标识（默认 consolidate），面板「记忆 → 巩固」可改。',
+        );
+      }
       const chat = {
         kind: 'c2c',
         chatId: consolidateChat,
@@ -3321,6 +3349,12 @@ export function apply(ctx) {
   };
 
   const backupTick = async () => {
+    /**
+     * 只看总开关，不看 `paused()`：`paused()` 还包含断线冷却，
+     * 而备份是本地操作、云推失败本来也只降级成一条 warn。持续断线时
+     * 冷却会被反复刷新，用 `paused()` 会把当天的备份整个跳过。
+     */
+    if (masterOff()) return;
     const s = cfg.backup?.schedule;
     if (s?.enabled !== true) return;
     if (!scheduleDue({ lastAt: lastFullBackupAt(), hour: s.hour })) return;
@@ -4062,8 +4096,17 @@ export function apply(ctx) {
     log: (m) => log.warn(m),
   });
 
-  /** 压缩后要拼在下一条用户消息前面的开场白 */
-  const pendingOpening = new Map();
+  /**
+   * 压缩后要拼在下一条用户消息前面的开场白。
+   *
+   * **必须落盘**：`compact.js` 是「建新会话 → 落映射 → 交开场」，
+   * 映射在 `sessions.json`，开场只放内存的话，进程在两步之间退出就会
+   * 「映射指向新会话、开场没了」——下一条消息直接失忆。
+   */
+  const pendingOpening = createPendingOpenings({
+    file: join(dataDir(), 'opening-pending.json'),
+    log: (m) => log.warn(m),
+  });
 
   /**
    * 投递终态跟踪（桥 3）。
@@ -6537,9 +6580,8 @@ export function apply(ctx) {
        */
       const prevRound = rounds.get(chat.chatId);
       const firstRound = !prevRound || !prevRound.n;
-      const opening = pendingOpening.get(chat.chatId);
+      const opening = pendingOpening.take(chat.chatId);
       if (opening) {
-        pendingOpening.delete(chat.chatId);
         text = `${opening}\n\n${text}`;
         log.info(`压缩后的第一条消息带上了开场白（${opening.length} 字）`);
       }
@@ -12663,6 +12705,22 @@ export function apply(ctx) {
       clearInterval(groupTimer);
       clearTimeout(consolidateBoot);
       clearInterval(consolidateTimer);
+      /**
+       * 这三个以前漏了：`unref()` 只保证不阻进程退出，**不保证重载后不重复**。
+       * 插件重载会再 apply 一次，旧实例的备份 / 发帖 / 投递回查还在跑，
+       * 表现是同一时刻备份两遍、同一条帖发两次、同一条投递查两次。
+       */
+      clearTimeout(backupBoot);
+      clearInterval(backupTimer);
+      clearTimeout(postBoot);
+      clearInterval(postTimer);
+      clearTimeout(deliveryBoot);
+      clearInterval(deliveryTimer);
+      /** 表情补标签是任务级定时器，重载发生在任务中途时也要清掉 */
+      if (stickerTagTimer) {
+        clearInterval(stickerTagTimer);
+        stickerTagTimer = null;
+      }
       /** 使用次数还在内存里：退出前补一次，别把最近 30 秒的计数丢掉 */
       clearTimeout(usageTimer);
       flushUsage();
