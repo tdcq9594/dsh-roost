@@ -250,3 +250,21 @@ test('开场：文件损坏降级后，__proto__ 也不能变幽灵', () => {
   assert.equal(p.get('__proto__'), 'GHOST');
   assert.equal(p.take('__proto__'), 'GHOST');
 });
+
+test('开场：迁移那次启动也要清理过期条目（`||` 短路会漏掉）', () => {
+  const file = tmpFile();
+  const t = Date.now();
+  writeFileSync(
+    file,
+    JSON.stringify({ chats: { c1: { text: '旧正文', at: t }, old: { at: 1 } } }),
+    'utf8',
+  );
+  /**
+   * 写成 `if (needMigrate || prune()) save()` 时 `prune()` 会被短路，
+   * 迁移那次启动不但不清理过期条目，还会把它原样写回去。
+   */
+  createPendingOpenings({ file, rebuild: () => '重建的', now: () => t });
+  const disk = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(disk.chats.old, undefined, '过期条目必须清掉');
+  assert.deepEqual(Object.keys(disk.chats.c1), ['at'], '迁移与清理要一次做完');
+});

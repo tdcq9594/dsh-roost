@@ -4106,8 +4106,9 @@ export function apply(ctx) {
    * ⚠️ 这里要传**整份 `cfg` 归一化后的配额**，不能直接把 `cfg` 递进去：
    * `makeOpening` 读的是扁平的 `keepRecentUser` / `keepDigests`，而它们
    * 在 `cfg` 里位于 `cfg.compact` 下面。递错的后果不是报错，是**静默取默认**：
-   * `keepDigests` 变成 `undefined`，`journal.digests` 回 5 条，`buildOpening`
-   * 再 `slice(-3)`——「这几天」从最新 3 条变成最旧 3 条。
+   * `keepDigests` 变 `undefined`，`journal.digests` 按 5 条兜底，`buildOpening`
+   * 再 `slice(-3)`——「这几天」从最新 3 条变成「最新 5 条里的第 3~5 条」，
+   * 正好把最新那两条丢掉。
    */
   const rebuildOpening = makeOpening({
     journal,

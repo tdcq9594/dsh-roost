@@ -85,7 +85,9 @@ export const DEFAULTS = {
  *
  * 这里是唯一的归一化出口——别再在别处手写 `{ ...DEFAULTS, ...cfg.compact }`，
  * 那种「看起来一样」的复制正是上一版的 bug 来源（`host.js` 直接把整份 `cfg`
- * 传进去，`keepDigests` 取到 `undefined`，摘要从「最新 3 条」变成「最旧 3 条」）。
+ * 传进去，`keepDigests` 取到 `undefined`，`journal.digests` 于是按 5 条兜底，
+ * `buildOpening` 再 `slice(-3)` ——「这几天」从**最新 3 条**变成**最新 5 条里
+ * 的第 3~5 条**，正好把最新那两条丢了）。
  */
 export function compactCfgOf(cfgOf = () => ({})) {
   return () => ({ ...DEFAULTS, ...(cfgOf()?.compact ?? {}) });

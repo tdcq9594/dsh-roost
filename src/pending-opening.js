@@ -97,6 +97,8 @@ export function createPendingOpenings({
    * 会把正文留在内存里，盘上原样不动。
    */
   let needMigrate = false;
+  /** 已经报过「重建失败」的会话：每条消息一次 warn 会把日志刷满 */
+  const warned = new Set();
 
   function readDisk() {
     let text;
@@ -183,8 +185,10 @@ export function createPendingOpenings({
      * **只取 `at`**：旧格式（v1）的条目里带 `text`，那是聊天原文。
      *   · 能重建（`rebuild` 已注入）→ 丢掉正文、置 `needMigrate`，本轮就把
      *     盘上的正文抹掉，不让它在盘上躺到 TTL；
-     *   · 不能重建 → 正文留在**内存**里（至少本进程还能用），盘上不动，
-     *     因为删了就要不回来了。
+     *   · 不能重建 → 正文留在**内存**里，盘上在**这次构造时**不动，因为删了
+     *     就要不回来。注意：之后任何一次 `set()` 都会 `save()`，而 `save()`
+     *     只写指针——那时旧正文还是会从盘上消失（本进程内仍可用）。
+     *     生产上只有一个调用方且恒传 `rebuild`，这条分支只服务于单测/复用。
      */
     const canRebuild = typeof rebuild === 'function';
     const next = Object.create(null);
@@ -218,7 +222,15 @@ export function createPendingOpenings({
       const t = rebuild(chatId, { at: Number(entry?.at) || 0 });
       return typeof t === 'string' ? t : '';
     } catch (e) {
-      log(`压缩开场重建失败（这次先不给开场，指针留着）：${e?.message ?? e}`);
+      /**
+       * 每个会话只 warn 一次：`take()` 在**每条消息**的路径上，重建要是持续
+       * 失败（日记库坏了），指针会留到 TTL 过期——24 小时里每条消息一条 warn
+       * 能把日志刷满，反而看不见真正的原因。
+       */
+      if (!warned.has(chatId)) {
+        warned.add(chatId);
+        log(`压缩开场重建失败（这次先不给开场，指针留着；本会话不再重复报）：${e?.message ?? e}`);
+      }
       return null;
     }
   }
@@ -267,8 +279,14 @@ export function createPendingOpenings({
   }
 
   load();
-  /** 迁移（抹掉旧格式正文）与过期清理共用一次写盘 */
-  if (needMigrate || prune()) save();
+  /**
+   * 迁移（抹掉旧格式正文）与过期清理共用一次写盘。
+   *
+   * ⚠️ `prune()` 必须**先求值**：写成 `needMigrate || prune()` 会短路，
+   * 迁移那次启动的过期条目既不清理、又会被 `save()` 原样写回去。
+   */
+  const dirty = prune();
+  if (needMigrate || dirty) save();
 
   return {
     /** 记下开场（覆盖同会话的旧值） */

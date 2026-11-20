@@ -16109,6 +16109,32 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /**
+     * 「加载更多」的合并规则（纯函数，单测直接调）。
+     *
+     * `base` 是**发请求那一刻**的快照。请求在途时列表可能被新建 / 吊销重置过
+     * （它们也调 `load()`），拿旧 `base` 覆盖会把已吊销的行写回去、行数也会多。
+     * 所以两个前提不成立就返回 `null`，由调用方丢掉这份响应：
+     *   · 当前行数必须还是发请求时那个数（没被重置过）；
+     *   · 服务端 `total` 必须没变（没人在期间增删）。
+     *
+     * 合并按 id 去重：offset 分页在「期间增删」时必然错位，去重至少不会重复渲染
+     * （重复 key 会让 React 报错、也会让计数看起来不对）。
+     */
+    function mergeClientPage(cur, page, base) {
+      const curRows = (cur && cur.rows) || []
+      if (!cur || curRows.length !== base.length) return null
+      if (Number(page.total) !== Number(cur.total)) return null
+      const seen = new Set(base.map((c) => c.id))
+      return {
+        ...cur,
+        total: Number(page.total) || 0,
+        limit: Number(page.limit) || 20,
+        hasMore: Boolean(page.hasMore),
+        rows: [...curRows, ...((page.rows || []).filter((c) => !seen.has(c.id)))],
+      }
+    }
+
     /** 接入页：发放带 agent:write 的客户端令牌（阶段 3 缺口 2 的落点）。 */
     function ExtClientsBlock({ toast }) {
       const [data, setData] = useState(null)
@@ -16125,34 +16151,28 @@ select.roost-input{color-scheme:dark}
        * 一个扩展一个 `ext:<id>` 令牌，装得多的机器这张表会很长；`limit=20`
        * 一页，`offset` 往后翻。**新建 / 吊销之后一律从第 0 页重来**：分页状态
        * 留着会让「刚发的令牌」落到看不见的页上，看起来像没发出去。
-       *
-       * `offset` 用**已显示条数**推算，会漂：两次请求之间列表变了（多开一个
-       * 面板、扩展装卸自动增删 `ext:<id>`），offset 就错位——多一条会重复、
-       * 少一条会漏。所以翻页时按 id 去重，并发现 `total` 变了就退回第 0 页。
        */
       const load = async ({ append = false } = {}) => {
         const base = append && data ? (data.rows || []) : []
         const r = await EXT_POST('extensions.clients.list', { limit: 20, offset: base.length })
         if (r?.ok === false) { toast(r.message || '读不到令牌列表'); return }
-        const shifted = append && data && Number(r.total) !== Number(data.total)
-        if (shifted) {
-          /** 条数变了：offset 已经不可信，从头来一遍（比显示错位强） */
+        if (!append) {
+          setData({
+            availableScopes: r.availableScopes || [],
+            total: Number(r.total) || 0,
+            limit: Number(r.limit) || 20,
+            hasMore: Boolean(r.hasMore),
+            rows: r.rows || [],
+          })
+          return
+        }
+        /** 条数变了说明期间增删过，offset 已经不可信：退回第 0 页重来一遍 */
+        if (data && Number(r.total) !== Number(data.total)) {
           await load()
           return
         }
-        const rows = append
-          ? (() => {
-              const seen = new Set(base.map((c) => c.id))
-              return [...base, ...(r.rows || []).filter((c) => !seen.has(c.id))]
-            })()
-          : (r.rows || [])
-        setData({
-          availableScopes: r.availableScopes || [],
-          total: Number(r.total) || 0,
-          limit: Number(r.limit) || 20,
-          hasMore: Boolean(r.hasMore),
-          rows,
-        })
+        /** 函数式更新：用**当前** state 合并，不能用闭包里那份旧快照 */
+        setData((cur) => mergeClientPage(cur, r, base) || cur)
       }
       useEffect(() => { load() }, [])
       const create = async () => {
@@ -19410,6 +19430,7 @@ select.roost-input{color-scheme:dark}
     exports.PROTECTED_TABS = PROTECTED_TABS
     exports.ACCENT_PRESETS = ACCENT_PRESETS
     exports.starScoreOf = starScoreOf
+    exports.mergeClientPage = mergeClientPage
     exports.buildStarMap = buildStarMap
     exports.filterStars = filterStars
     exports.projectStars = projectStars

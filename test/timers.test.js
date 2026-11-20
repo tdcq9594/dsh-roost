@@ -226,3 +226,29 @@ test('门禁：teardown 只清 timers 一处，不再手写长期定时器清单
     assert.ok(!src.includes(name), `${name} 应该已经交给 timers 管理，host.js 里不该再有这个变量`);
   }
 });
+
+test('timers：多个条目共用一个句柄时，摘的时候一起摘（桩实现才会出现）', () => {
+  /**
+   * Node 的 `Timeout` 是唯一对象，真实环境不会撞；但桩实现（测试里把
+   * `setInterval` 换成恒返回同一个数字）会出现两个条目共用一个句柄。
+   * 上一版 `drop()` 找到第一个就 `return`，另一条永远留在表里。
+   */
+  const realInterval = globalThis.setInterval;
+  const realTimeout = globalThis.setTimeout;
+  const fake = { unref() {} };
+  let fireAfter = null;
+  globalThis.setInterval = () => fake;
+  globalThis.setTimeout = (fn) => { fireAfter = fn; return fake; };
+  try {
+    const t = createTimers();
+    t.every(() => {}, 1000, 'a');
+    t.after(() => {}, 1, 'b');
+    assert.equal(t.size(), 2, '两条都登记了');
+    assert.equal(typeof fireAfter, 'function');
+    fireAfter();
+    assert.equal(t.size(), 0, '同一个句柄的两条要一起摘掉，不能只摘一条');
+  } finally {
+    globalThis.setInterval = realInterval;
+    globalThis.setTimeout = realTimeout;
+  }
+});

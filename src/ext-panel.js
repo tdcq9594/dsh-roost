@@ -22,6 +22,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 import { dataDir } from './config.js';
+import { writeJsonAtomic as writeJsonAtomicShared } from './atomic.js';
 import { BUCKETS, resolvePolicy } from './capabilities.js';
 import { V1_SCOPES } from './api-v1.js';
 import { USAGE_CHAR_LIMIT } from './ext-usage.js';
@@ -72,12 +73,16 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 
-/** 原子写：随机 .tmp + rename，坏文件不会留在目录里被扫描器当扩展。 */
+/**
+ * 原子写包装：实现统一在 `atomic.js`（随机 tmp 名 + 失败清 tmp + 不可序列化
+ * 的值直接抛错，不再写出字符串 `"undefined"`）。
+ *
+ * 这里保留薄薄一层是因为调用方还要传 `dir`——`writeJsonAtomic` 自己会建
+ * `dirname(file)`，`dir` 只是历史参数，留着不影响行为。
+ */
 function writeJsonAtomic(file, value, dir) {
   fs.mkdirSync(dir, { recursive: true });
-  const tmp = join(dir, `.${file.split(/[\\/]/).pop()}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, file);
+  return writeJsonAtomicShared(file, value, { newline: true });
 }
 
 /**
