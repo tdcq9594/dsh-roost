@@ -219,6 +219,74 @@ test('G5-7 revokeClient：面板客户端可吊销，扩展令牌只许由卸载
   assert.ok(r.clientStore.get('ext:bili'));
 });
 
+/**
+ * 分页：装几十个扩展时，一个扩展一条 `ext:<id>` 令牌，整表一次拉下来没必要。
+ *
+ * 两个要点：`total` 是**过滤后**的总数（不是全库），以及新建的令牌必须
+ * 出现在第一页——`clientStore.list()` 是追加顺序（新的在最后），不分页时
+ * 无所谓，分页之后「刚发的令牌在最后一页」等于让人以为没发出去。
+ */
+test('G5-7b clients 分页：limit/offset 切片、total 是过滤后总数、新建的在第一页', () => {
+  const r = rig({});
+  /** 造 25 条，时间戳刻意全部相同：验证同毫秒下的排序稳定（按 id 兜底） */
+  for (let i = 0; i < 25; i += 1) {
+    r.clientStore.add({
+      id: `ext:e${String(i).padStart(2, '0')}`, hash: 'h'.repeat(64), extId: `e${String(i).padStart(2, '0')}`,
+      scopes: [], enabled: true, createdAt: 1000,
+    });
+  }
+  const p1 = r.panel.clients();
+  assert.equal(p1.rows.length, 20, '默认一页 20 条');
+  assert.equal(p1.total, 25);
+  assert.equal(p1.hasMore, true);
+  assert.equal(p1.offset, 0);
+  assert.ok(p1.availableScopes.includes('agent:write'), 'availableScopes 每页都要给');
+
+  const p2 = r.panel.clients({ offset: 20 });
+  assert.equal(p2.rows.length, 5);
+  assert.equal(p2.hasMore, false);
+  /** 两页不重叠、合起来正好是全量 */
+  const ids = new Set([...p1.rows, ...p2.rows].map((x) => x.id));
+  assert.equal(ids.size, 25);
+
+  /** 新建的令牌（createdAt 更新）必须落在第一页第一条 */
+  const made = r.panel.createClient({ name: '刚发的', scopes: [], principal: 'owner' });
+  const after = r.panel.clients({ limit: 1 });
+  assert.equal(after.total, 26);
+  assert.equal(after.rows[0].id, made.id, '新建的令牌要在第一页，否则用户以为没发出去');
+  assert.equal(after.hasMore, true);
+});
+
+test('G5-7c clients 分页：limit 夹紧、offset 容错、关键词只搜可见字段', () => {
+  const r = rig({});
+  for (let i = 0; i < 3; i += 1) {
+    r.clientStore.add({
+      id: `ext:k${i}`, hash: 'h'.repeat(64), extId: `k${i}`, name: `扩展 k${i}`,
+      scopes: [], enabled: true, createdAt: 2000 + i,
+    });
+  }
+  /** 上限 200：`limit=1e9` 不能把分页当摆设 */
+  assert.equal(r.panel.clients({ limit: 1e9 }).rows.length, 3);
+  /**
+   * `limit=0` / 负数 / 非数字一律当「没给」，用默认 20。
+   * 回 0 条对谁都没用，而回一整页至少能看出「参数传错了」。
+   */
+  assert.equal(r.panel.clients({ limit: 0 }).limit, 20, 'limit=0 回默认值，不是 0 条');
+  assert.equal(r.panel.clients({ limit: -5 }).limit, 20);
+  assert.equal(r.panel.clients({ limit: 'abc' }).limit, 20, '非法 limit 回默认值');
+  assert.equal(r.panel.clients({ limit: 2 }).rows.length, 2);
+  assert.equal(r.panel.clients({ offset: -3 }).offset, 0);
+  assert.equal(r.panel.clients({ offset: 999 }).rows.length, 0);
+  assert.equal(r.panel.clients({ offset: 999 }).hasMore, false);
+
+  const q = r.panel.clients({ q: 'k1' });
+  assert.equal(q.total, 1);
+  assert.equal(q.rows[0].id, 'ext:k1');
+  assert.equal(r.panel.clients({ q: '没这个' }).total, 0);
+  /** 关键词不能搜到 hash —— 那是敏感字段，匹配到就等于泄露存在性 */
+  assert.equal(r.panel.clients({ q: 'hhhh' }).total, 0);
+});
+
 // ---------------------------------------------------------------- 5.3 状态
 
 test('G5-8 status 只认后端审计事件；waiting-credentials 不算鉴权失败', () => {

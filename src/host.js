@@ -7745,7 +7745,12 @@ export function apply(ctx) {
               return send(res, r.ok ? 200 : 429, r);
             }
             case 'extensions.clients.list': {
-              return send(res, 200, extPanel.clients());
+              /** 分页 + 关键词：装了几十个扩展时，整表一次拉下来没必要 */
+              return send(res, 200, extPanel.clients({
+                limit: arg?.limit,
+                offset: arg?.offset,
+                q: arg?.q,
+              }));
             }
             case 'extensions.clients.create': {
               const r = extPanel.createClient({

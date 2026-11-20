@@ -1016,6 +1016,15 @@ test('G5-18 /quick 客户端：发放 / 列表不回 hash / 吊销 / 坏 scope 4
     assert.equal(one.hash, undefined);
     assert.equal(one.token, undefined);
     assert.ok(listed.availableScopes.includes('agent:write'));
+    /**
+     * 分页参数要**真的从 /quick 的 arg 传到聚合层**：只测 `panel.clients()`
+     * 的话，路由漏传参数照样绿，而面板看到的是「永远第一页」。
+     */
+    const paged = (await extOp(call, 'extensions.clients.list', { limit: 1, offset: 0 })).json;
+    assert.equal(paged.limit, 1);
+    assert.equal(paged.rows.length, 1);
+    assert.ok(paged.total >= 1);
+    assert.equal(typeof paged.hasMore, 'boolean');
     const bad = await extOp(call, 'extensions.clients.create', { scopes: ['nope'] });
     assert.equal(bad.status, 400);
     const revoked = await extOp(call, 'extensions.clients.revoke', { id: made.json.id });

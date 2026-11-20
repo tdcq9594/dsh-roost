@@ -16118,7 +16118,26 @@ select.roost-input{color-scheme:dark}
       const [confirm, setConfirm] = useState(false)
       const [issued, setIssued] = useState(null)
       const [busy, setBusy] = useState(false)
-      const load = async () => setData(await EXT_POST('extensions.clients.list'))
+      const [moreBusy, setMoreBusy] = useState(false)
+      /**
+       * 列表分页。
+       *
+       * 一个扩展一个 `ext:<id>` 令牌，装得多的机器这张表会很长；`limit=20`
+       * 一页，`offset` 往后翻。**新建 / 吊销之后一律从第 0 页重来**：分页状态
+       * 留着会让「刚发的令牌」落到看不见的页上，看起来像没发出去。
+       */
+      const load = async ({ append = false } = {}) => {
+        const offset = append && data ? (data.rows || []).length : 0
+        const r = await EXT_POST('extensions.clients.list', { limit: 20, offset })
+        if (r?.ok === false) { toast(r.message || '读不到令牌列表'); return }
+        setData((cur) => ({
+          availableScopes: r.availableScopes || [],
+          total: Number(r.total) || 0,
+          limit: Number(r.limit) || 20,
+          hasMore: Boolean(r.hasMore),
+          rows: append && cur ? [...(cur.rows || []), ...(r.rows || [])] : (r.rows || []),
+        }))
+      }
       useEffect(() => { load() }, [])
       const create = async () => {
         setBusy(true)
@@ -16180,6 +16199,25 @@ select.roost-input{color-scheme:dark}
                 )),
               )
             : h('div', { className: 'roost-empty' }, '还没有客户端。'),
+          /**
+           * 分页脚：只有真超过一页才出现，否则「共 N 条」这种文案纯属噪音。
+           * `total` 是**过滤后**的总数（关键词搜过的也是它），不是全库条数。
+           */
+          (data?.total || 0) > (data?.limit || 20)
+            ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 } },
+                h('span', { className: 'roost-muted', style: { fontSize: 10.5 } },
+                  `已显示 ${(data.rows || []).length} / ${data.total} 条`),
+                data.hasMore
+                  ? h('button', {
+                      type: 'button', className: 'roost-btn', disabled: moreBusy,
+                      onClick: async () => {
+                        setMoreBusy(true)
+                        try { await load({ append: true }) } finally { setMoreBusy(false) }
+                      },
+                    }, moreBusy ? '翻…' : '加载更多')
+                  : null,
+              )
+            : null,
         ),
       )
     }
