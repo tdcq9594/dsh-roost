@@ -29,6 +29,8 @@
 import fs from 'node:fs';
 import { join } from 'node:path';
 
+import { writeJsonAtomic } from './atomic.js';
+
 /** 窗口名的字面量，写错了当 `day` 处理，但会有 warn */
 export const WINDOWS = ['message', 'turn', 'minute', 'hour', 'day'];
 
@@ -175,10 +177,7 @@ export function createQuota({ dir, log = () => {}, now = () => Date.now(), defau
 
   function save() {
     try {
-      const tmp = `${file}.tmp`;
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(tmp, JSON.stringify({ counts, seen }, null, 2) + '\n', 'utf8');
-      fs.renameSync(tmp, file);
+      writeJsonAtomic(file, { counts, seen }, { newline: true });
     } catch (e) {
       /**
        * 写不动就算了。**不能因为配额写不进去而让对话失败**——

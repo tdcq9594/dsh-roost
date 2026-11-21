@@ -826,7 +826,20 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         chatId,
         `约定：${item.text.slice(0, 160)}`,
         chatId ? 'chat' : 'global',
-        { status: item.status },
+        {
+          status: item.status,
+          /**
+           * 出处必须符合 `memory.js` 的契约：`journalId` 是**消息 id**
+           * （拿它调 `/r/context?aroundId=` 能翻回原文），不是摘要行 id。
+           * 摘要行 `day:<日期>` 在 journal 里也是一行，但不是原文消息，
+           * 拿它去翻会定位到摘要本身，事后核不出来这句话是谁说的。
+           */
+          src: {
+            journalId: String(list[list.length - 1]?.id || ''),
+            eventIds: list.slice(-20).map((r) => r.id),
+            at,
+          },
+        },
       );
       graph?.addEdge?.({ src: '主人', rel: '约定', dst: item.text.slice(0, 40), at, chatId });
       out.agreements += 1;

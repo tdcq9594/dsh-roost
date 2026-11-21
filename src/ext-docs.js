@@ -13,6 +13,8 @@
 import fs from 'node:fs';
 import { join } from 'node:path';
 
+import { writeFileAtomic } from './atomic.js';
+
 import {
   V1_ROUTES, V1_SCOPES, V1_IMPLEMENTED_HOOKS, RATE_LIMIT, WINDOW_MS, IDEMPOTENT_TTL_MS, IDEMPOTENT_MAX, MAX_BODY_BYTES,
   isRouteImplemented, isRouteDesignedOff,
@@ -38,6 +40,7 @@ const ROUTE_NOTES = {
   'POST /v1/say': '让机器人主动说一句；`pending` 表示进审核，不是已发出',
   'GET /v1/roost.capabilities': '列框架直连协议（roost-host/1）里可扩展调用的能力：只读方法、框架插件注册的 `tool.*`、发消息；`?filter=` 可按名字筛',
   'POST /v1/roost.call': '由宿主代转一次直连协议调用（只读能力 / 插件工具 / `msg.send`）；框架地址与令牌不出宿主，写与管理面不开放',
+  'POST /v1/roost.read': '只读版转发：只能调 `runtime.status` 这类只读能力，scope 是 `state:read`，不必申请发消息权限；发消息 / 插件工具仍走 `/v1/roost.call`',
   'GET /v1/state': '读机器人与当前会话的状态（在线、绑定、档位）',
   'GET /v1/mood': '读当前心情',
   'GET /v1/context': '读当前会话的上下文摘要（条数、窗口占用）',
@@ -445,11 +448,8 @@ export function writeDocs({ docsDir, version = '' } = {}) {
   const out = [];
   for (const d of buildDocs({ version })) {
     const file = join(docsDir, d.name);
-    fs.mkdirSync(docsDir, { recursive: true });
     // 原子写：中断时不会留下一份半截 API.md（与 ext-patch / ext-memory-store 同一口径）。
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, d.text, 'utf8');
-    fs.renameSync(tmp, file);
+    writeFileAtomic(file, d.text);
     out.push(file);
   }
   return out;

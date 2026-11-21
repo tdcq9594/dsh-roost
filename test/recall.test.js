@@ -83,3 +83,79 @@ test('D3：空结果也要留一行（排查「她为什么没想起」全靠它
   assert.deepEqual(r.items, []);
   assert.equal(r.shortPhrase, true);
 });
+
+test('去重：同一句内容被写成两条 id 时只留先到的（分高的在前）', async () => {
+  const j = fakeJournal({
+    q: [
+      { id: 'a', score: 0.9, text: '同一句话' },
+      { id: 'b', score: 0.8, text: '同一 句话' },
+      { id: 'c', score: 0.7, text: '另一句' },
+    ],
+  });
+  const r = await searchWithShortContext(j, 'q', { limit: 3 });
+
+  assert.equal(r.hits.length, 2);
+  assert.equal(r.hits[0].id, 'a');
+  assert.equal(r.hits[1].id, 'c');
+});
+
+test('去重：空白差异算同一句，不同内容不能误合并', async () => {
+  const j = fakeJournal({
+    q: [
+      { id: 'a', score: 0.9, text: '她 喜欢 猫' },
+      { id: 'b', score: 0.8, text: '她喜欢猫' },
+      { id: 'c', score: 0.7, text: '她喜欢狗' },
+    ],
+  });
+  const r = await searchWithShortContext(j, 'q', { limit: 3 });
+
+  assert.equal(r.hits.length, 2);
+  assert.deepEqual(r.hits.map((h) => h.id), ['a', 'c']);
+});
+
+test('去重：重复项不能把结果挤到 limit 以下（检索层要多取候选）', async () => {
+  const j = fakeJournal({
+    q: [
+      { id: 'a', score: 0.9, text: '同一句' },
+      { id: 'b', score: 0.8, text: '同一句' },
+      { id: 'c', score: 0.7, text: '第二句' },
+      { id: 'd', score: 0.6, text: '第三句' },
+      { id: 'e', score: 0.5, text: '第四句' },
+    ],
+  });
+  const r = await searchWithShortContext(j, 'q', { limit: 3 });
+
+  assert.equal(r.hits.length, 3);
+  assert.deepEqual(r.hits.map((h) => h.id), ['a', 'c', 'd']);
+});
+
+test('去重：digest 行 text 是空串时按 digest 去重（用 ?? 会整类漏掉）', async () => {
+  const j = fakeJournal({
+    q: [
+      { id: 'a', score: 0.9, text: '', digest: '同一段摘要' },
+      { id: 'b', score: 0.8, text: '', digest: '同一段摘要' },
+    ],
+  });
+  const r = await searchWithShortContext(j, 'q', { limit: 3 });
+
+  assert.equal(r.hits.length, 1);
+  assert.equal(r.hits[0].id, 'a');
+});
+
+test('去重：主结果重复导致不足时仍触发短句补检索', async () => {
+  const j = fakeJournal({
+    '嗯': [
+      { id: 'a', score: 0.9, text: '同一句' },
+      { id: 'b', score: 0.8, text: '同一句' },
+    ],
+    '上一句 嗯': [
+      { id: 'a', score: 0.9, text: '同一句' },
+      { id: 'b', score: 0.8, text: '同一句' },
+      { id: 'c', score: 0.7, text: '补充' },
+    ],
+  });
+  const r = await searchWithShortContext(j, '嗯', { limit: 3 }, '上一句');
+
+  assert.equal(r.usedPrev, true);
+  assert.deepEqual(r.hits.map((h) => h.id), ['a', 'c']);
+});

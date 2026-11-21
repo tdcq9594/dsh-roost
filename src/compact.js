@@ -76,6 +76,23 @@ export const DEFAULTS = {
   keepDigests: 3,
 };
 
+/**
+ * 把**整份插件配置**归一成 compact 配额。
+ *
+ * 两个调用方必须用同一份，否则重启后重建的开场跟压缩那一刻不是一回事：
+ *   · `createCompact()` 内部；
+ *   · `host.js` 的 `rebuildOpening`（`pending-opening` 重建时用）。
+ *
+ * 这里是唯一的归一化出口——别再在别处手写 `{ ...DEFAULTS, ...cfg.compact }`，
+ * 那种「看起来一样」的复制正是上一版的 bug 来源（`host.js` 直接把整份 `cfg`
+ * 传进去，`keepDigests` 取到 `undefined`，`journal.digests` 于是按 5 条兜底，
+ * `buildOpening` 再 `slice(-3)` ——「这几天」从**最新 3 条**变成**最新 5 条里
+ * 的第 3~5 条**，正好把最新那两条丢了）。
+ */
+export function compactCfgOf(cfgOf = () => ({})) {
+  return () => ({ ...DEFAULTS, ...(cfgOf()?.compact ?? {}) });
+}
+
 const DAY = 86_400_000;
 
 /**
@@ -276,6 +293,64 @@ export function buildOpening({ digests = [], recent = [], agreements = [], now =
 }
 
 /**
+ * 按配额从日记里挑料并拼开场。
+ *
+ * 抽出来是因为有**两个调用方**：
+ *   · `compact()` 压缩那一刻直接拼；
+ *   · `pending-opening` 在重启后**重建**——盘上只存「哪个会话、什么时候压的」，
+ *     不存正文（见 `pending-opening.js` 顶部）。两边必须用同一份挑料规则，
+ *     否则重启后拼出来的开场跟压缩时那份不是一回事。
+ *
+ * @returns {(chatId: string) => string}
+ */
+export function makeOpening({
+  journal,
+  agreementsOf = () => [],
+  aliasesOf = () => [],
+  cfgOf = () => ({}),
+  now = () => Date.now(),
+} = {}) {
+  return (chatId) => {
+    const c = cfgOf() || {};
+    /**
+     * 开场按角色配额挑，不是简单取最近 N 条（第 3 批 C4）。
+     *
+     * 依据：Codex CLI 是"用户消息永久逐字保留、只压缩模型回复"；
+     * SillyTavern 的 Summaryception 用 3/9/27 分层。共同点是
+     * **用户原话权重更高**——指代（"那个""上面第二个"）几乎都在用户话里，
+     * 而她自己的话被复述错一句，反而是"人设崩塌"。
+     *
+     * 多取一些再分（40 条），因为 8 条用户消息可能散落在 30 条里。
+     */
+    const pool = journal.recent(chatId, 40, 'chat', aliasesOf(chatId));
+    const users = pool.filter((r) => r.role !== 'bot').slice(0, Number(c.keepRecentUser) || 8);
+    const bots = pool.filter((r) => r.role === 'bot').slice(0, Number(c.keepRecentBot) || 3);
+    const recent = [...users, ...bots].sort((a, b) => a.at - b.at);
+    const digests = journal.digests(chatId, c.keepDigests, aliasesOf(chatId));
+    const agreements = agreementsOf(chatId) || [];
+    /**
+     * **三样都空就别给骨架**（2026-11 复核）。
+     *
+     * 日记被「彻底删除」或 7 天滚动清掉之后重建，`buildOpening` 照样会拼一段
+     * 「（接着上面继续聊…）不要重新自我介绍」——判真、消费掉指针、注入给模型，
+     * 而模型看到「接着上面」却没有「上面」，只能硬编一句。
+     *
+     * 返回空串会走 `pending-opening` 里既有的「删指针但不注入」分支；
+     * `compact()` 那边 `if (text)` 也不会把空串写成指针。
+     * **注意**：`buildOpening()` 单独调用时仍保留骨架（有测试钉着），
+     * 这里只拦「确实一点料都没有」的重建路径。
+     */
+    if (!digests.length && !recent.length && !agreements.length) return '';
+    return buildOpening({
+      digests,
+      recent,
+      agreements,
+      now: now(),
+    });
+  };
+}
+
+/**
  * 压缩的执行体。
  *
  * @param {object} o
@@ -319,7 +394,7 @@ export function createCompact({
    */
   const history = [];
 
-  const cfg = () => ({ ...DEFAULTS, ...(cfgOf()?.compact ?? {}) });
+  const cfg = compactCfgOf(cfgOf);
 
   function noteTurn(chatId) {
     turns.set(chatId, Number(turns.get(chatId) || 0) + 1);
@@ -369,30 +444,10 @@ export function createCompact({
     const sid = sessions.get(chatId);
     if (!sid) return { ok: false, why: '这个会话还没有 DSH 会话' };
 
-    const c = cfg();
     let opening = '';
     try {
-      /**
-       * 开场按角色配额挑，不是简单取最近 N 条（第 3 批 C4）。
-       *
-       * 依据：Codex CLI 是"用户消息永久逐字保留、只压缩模型回复"；
-       * SillyTavern 的 Summaryception 用 3/9/27 分层。共同点是
-       * **用户原话权重更高**——指代（"那个""上面第二个"）几乎都在用户话里，
-       * 而她自己的话被复述错一句，反而是"人设崩塌"。
-       *
-       * 多取一些再分（40 条），因为 8 条用户消息可能散落在 30 条里。
-       */
-      const pool = journal.recent(chatId, 40, 'chat', aliasesOf(chatId));
-      const users = pool.filter((r) => r.role !== 'bot').slice(0, Number(c.keepRecentUser) || 8);
-      const bots = pool.filter((r) => r.role === 'bot').slice(0, Number(c.keepRecentBot) || 3);
-      const recent = [...users, ...bots].sort((a, b) => a.at - b.at);
-
-      opening = buildOpening({
-        digests: journal.digests(chatId, c.keepDigests, aliasesOf(chatId)),
-        recent,
-        agreements: agreementsOf(chatId) || [],
-        now: now(),
-      });
+      /** 挑料规则与 `pending-opening` 的重建共用一份，见 `makeOpening()` */
+      opening = makeOpening({ journal, agreementsOf, aliasesOf, cfgOf: cfg, now })(chatId);
     } catch (e) {
       log(`拼开场失败：${e.message}`);
     }

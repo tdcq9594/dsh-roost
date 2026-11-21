@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import { join } from 'node:path';
 
 import { dataDir } from './config.js';
+import { writeFileAtomic } from './atomic.js';
 import { extensionsDir } from './ext-registry.js';
 
 export const GROUPS_FILE = 'ext-groups.json';
@@ -65,10 +66,7 @@ export function createExtGroups({ dir = dataDir(), log = () => {} } = {}) {
   }
 
   function writeUnlocked(state) {
-    fs.mkdirSync(root, { recursive: true });
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8');
-    fs.renameSync(tmp, file);
+    writeFileAtomic(file, JSON.stringify(state, null, 2) + '\n');
     return state;
   }
 

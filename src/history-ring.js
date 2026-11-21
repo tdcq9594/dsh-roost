@@ -12,8 +12,9 @@
  * 200 条 × 约 150 字节 = 30 KB，每次 push 整文件重写足够轻；写盘失败
  * 一律吞掉，行为日志不能把聊天弄挂。
  */
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+import { writeJsonAtomic } from './atomic.js';
 
 export function createHistoryRing({ file, max = 200, log = () => {} } = {}) {
   let rows = null;
@@ -31,10 +32,7 @@ export function createHistoryRing({ file, max = 200, log = () => {} } = {}) {
 
   function save() {
     try {
-      mkdirSync(dirname(file), { recursive: true });
-      const tmp = `${file}.tmp`;
-      writeFileSync(tmp, JSON.stringify(load()), 'utf8');
-      renameSync(tmp, file);
+      writeJsonAtomic(file, load(), { indent: 0 });
     } catch (e) {
       log(`写历史失败（不影响聊天）：${e.message}`);
     }

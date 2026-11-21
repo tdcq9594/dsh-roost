@@ -128,3 +128,15 @@ test('tgzUrl：scoped 包文件名不带 scope，换源只换前缀', () => {
   assert.equal(tgzUrl('ws', '8.18.3', NPM_MIRROR), `${NPM_MIRROR}/ws/-/ws-8.18.3.tgz`);
   assert.equal(tgzUrl('ws', '8.18.3', 'ftp://x'), `${OFFICIAL}/ws/-/ws-8.18.3.tgz`);
 });
+
+test('normRegistry：带 shell 元字符的地址一律拒绝（Windows 安装走 shell:true）', () => {
+  assert.equal(normRegistry('https://registry.local&calc.exe'), '');
+  assert.equal(normRegistry('https://registry.local|calc.exe'), '');
+  assert.equal(normRegistry('https://registry.local;calc.exe'), '');
+  assert.equal(normRegistry('https://registry.local/$(calc).exe'), '');
+  assert.equal(normRegistry('https://registry.local/`calc`'), '');
+
+  /** 正常地址不受影响 */
+  assert.equal(normRegistry('https://registry.npmjs.org'), 'https://registry.npmjs.org');
+  assert.equal(normRegistry('registry.npmmirror.com'), 'https://registry.npmmirror.com');
+});

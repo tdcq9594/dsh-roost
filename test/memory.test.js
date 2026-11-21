@@ -6,7 +6,7 @@
 import { conflicting } from '../src/memory.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmdirSync, existsSync, statSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -2159,4 +2159,312 @@ test('retention：insertRaw 对默认值不落盘（老库还原后字节不变�
   assert.equal(meta.status, undefined, 'fact 是默认值，不该写进文件');
   assert.equal(meta.tier, undefined, 'long 是默认值，不该写进文件');
   assert.equal(meta.pin, undefined);
+});
+
+/* ---------------- 读盘失败不能把整库覆盖掉 ---------------- */
+
+/**
+ * 2026-11 审查发现：`load()` 以前把所有读错误都 `catch` 成空对象，随后任意一次
+ * 写就把整份 `memory.json` 重写成「只有这次的新数据」——facts、personas、
+ * authz 一起没，而且没有任何报错。
+ *
+ * 关键是要区分「文件不存在」（真空）和「读不动」（EBUSY/EACCES，盘上还有东西）。
+ */
+test('facts：读不动时不许覆盖（瞬时故障不能变永久失忆）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-facts-eisdir-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const target = join(dir, 'memory.json');
+  /** 用目录占住文件名：readFileSync 报 EISDIR，走「读不动」分支 */
+  mkdirSync(target);
+
+  const m = createMemory({ log: () => {} });
+  m.add('g1', '主人下周出差');
+  /** 内存里这一轮看得到（不能当场失忆） */
+  assert.deepEqual(m.list('g1').global, ['主人下周出差']);
+
+  /**
+   * 把故障撤掉（目录挪走）再写一次。
+   *
+   * 这一笔是关键：`ioFailed` 有**5 秒节流**——读失败后短时间内不重试、
+   * 也不落盘，免得「读的时候恰好被占用 → 之后占用解除 → 一次普通写入」
+   * 用空表把盘上的整库盖掉。超过节流窗口会自己重试（见下一条用例）。
+   */
+  rmdirSync(target);
+  m.add('g1', '第二条');
+  assert.equal(existsSync(target), false, '读失败后的节流窗口内不许落盘');
+});
+
+test('facts：读失败会自己恢复（不能永久禁读写）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-facts-recover-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const target = join(dir, 'memory.json');
+  mkdirSync(target);
+
+  let t = 1_000_000;
+  const m = createMemory({ now: () => t, log: () => {} });
+  m.add('g1', '故障期间的');
+  assert.equal(statSync(target).isDirectory(), true, '故障期间不写（路径还是那个目录）');
+
+  /** 故障解除：换成一份正常文件，再过掉节流窗口 */
+  rmdirSync(target);
+  writeFileSync(target, JSON.stringify({ global: ['盘上旧事实'] }), 'utf8');
+  t += 6_000;
+
+  assert.deepEqual(m.list('g1').global, ['盘上旧事实'], '重试成功要读到盘上的内容');
+  m.add('g1', '恢复后写的');
+  assert.deepEqual(
+    createMemory().list('g1').global,
+    ['盘上旧事实', '恢复后写的'],
+    '恢复之后必须能落盘，不能永久禁写',
+  );
+});
+
+test('facts：reload() 清掉读失败标记（一键回退后要能落盘）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-facts-reload-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const target = join(dir, 'memory.json');
+  mkdirSync(target);
+
+  const m = createMemory({ log: () => {} });
+  m.add('g1', '故障期间的');
+
+  /** 回退流程：文件被换成正常内容 → reload() → 继续用 */
+  rmdirSync(target);
+  writeFileSync(target, JSON.stringify({ global: ['回退后的'] }), 'utf8');
+  m.reload();
+  m.add('g1', '新增的');
+
+  assert.deepEqual(createMemory().list('g1').global, ['回退后的', '新增的']);
+});
+
+test('facts：坏 JSON 先隔离再降级，隔离副本里留着原文', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-facts-corrupt-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const broken = '{"global":["旧事实A"],"chats":{'; // 写到一半
+  writeFileSync(join(dir, 'memory.json'), broken, 'utf8');
+
+  const m = createMemory({ log: () => {} });
+  assert.deepEqual(m.list('g1').global, [], '坏文件读不出内容');
+  m.add('g1', '新事实');
+  assert.deepEqual(createMemory().list('g1').global, ['新事实'], '降级后能正常写');
+
+  const baks = readdirSync(dir).filter((n) => n.startsWith('memory.json.corrupted.'));
+  assert.equal(baks.length, 1, '坏文件要留一份');
+  assert.equal(readFileSync(join(dir, baks[0]), 'utf8'), broken, '备份必须是原文，不是降级后的空表');
+});
+
+test('facts：chats 是数组时按对象处理（否则 add 会静默丢数据）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-facts-arr-'));
+  process.env.DSH_ROOST_DATA = dir;
+  writeFileSync(join(dir, 'memory.json'), JSON.stringify({ global: [], chats: [] }), 'utf8');
+
+  const m = createMemory({ log: () => {} });
+  m.add('g1', '别丢');
+  /**
+   * 数组上写字符串键会被 `JSON.stringify` 丢弃：`add()` 返回成功、重启后
+   * 那条事实不存在。现在 `chats` 一律归一成普通对象。
+   *
+   * 这种形状问题不值得隔离（数组里本来也存不住按 chatId 的事实），
+   * 修好形状继续用就行。
+   */
+  assert.deepEqual(createMemory().list('g1').global, ['别丢']);
+  const raw = JSON.parse(readFileSync(join(dir, 'memory.json'), 'utf8'));
+  assert.equal(Array.isArray(raw.chats), false, '落盘必须是对象，不能还是数组');
+});
+
+test('facts：首次运行（没有文件）不该产生隔离副本', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-facts-fresh-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const m = createMemory({ log: () => {} });
+  m.add('g1', '第一条');
+  assert.equal(readdirSync(dir).some((n) => n.startsWith('memory.json.corrupted.')), false);
+  assert.deepEqual(createMemory().list('g1').global, ['第一条']);
+});
+
+/* ---------------- 彻底删除要跨别名键 ---------------- */
+
+/**
+ * 换过机器人的会话在库里散在好几个 openid 下（`aliasesOf(chatId)` 非空）。
+ * 「彻底删除」只删当前键 = 删一半：旧键下的正文和 `episode.text` 还在，
+ * 下一条消息她又想起来了——而 `clearChat` 一直是带别名删的。
+ */
+test('日记：彻底删除要连别名键一起删', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const t = Date.now();
+  j.add({ id: 'a', at: t, chatId: 'new-openid', text: '今天聊了天气' });
+  j.add({ id: 'b', at: t + 1, chatId: 'old-openid', text: '小美是主人的前女友' });
+
+  assert.equal(j.purgeChat('new-openid', ['old-openid']), 2, '两个键都要删');
+  assert.deepEqual(j.listChat('new-openid', ['old-openid']), [], '删完检索不到');
+  j.close();
+});
+
+test('日记：别名去重后不会重复计数', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  j.add({ id: 'a', at: Date.now(), chatId: 'g1', text: '一句话' });
+  /** 别名里混进 chatId 本身、空串、空白：都不能让它多算一条 */
+  assert.equal(j.purgeChat('g1', ['g1', '', '  ', null]), 1);
+  j.close();
+});
+
+test('图谱：彻底删除要连别名键一起删（含 episode 原文）', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const t = Date.now();
+  const ep1 = g.addEpisode({ at: t, chatId: 'new-openid', text: '今天聊了天气', journalId: 'j1' });
+  const ep2 = g.addEpisode({ at: t, chatId: 'old-openid', text: '小美是主人的前女友', journalId: 'j2' });
+  g.addEdge({ src: '小美', rel: '住在', dst: '杭州', chatId: 'old-openid', episodeId: ep2, at: t });
+  g.addEdge({ src: '主人', rel: '住在', dst: '上海', chatId: 'new-openid', episodeId: ep1, at: t });
+
+  const r = g.purgeChat('new-openid', ['old-openid']);
+  assert.equal(r.episodes, 2, '两个键的原文片段都要清');
+  assert.equal(r.edges, 2, '两个键的边都要清');
+  assert.equal(g.episodes({ chatId: 'old-openid' }).length, 0, '旧键的原文不能留');
+  assert.equal(g.nowEdges({ chatId: 'old-openid' }).length, 0, '旧键的关系不能留');
+});
+
+/**
+ * JSONL 后端（sqlite 打不开时的兜底）也要支持按别名删。
+ *
+ * 这条分支平时跑不到，只有 `journal.sqlite` 打不开才切过去——所以单测里
+ * 用「目录占住 sqlite 路径」来强制它。
+ */
+test('日记（JSONL 后端）：彻底删除也要带别名', () => {
+  const dir = tmp();
+  const file = join(dir, 'j.sqlite');
+  /** 占住路径 → sqlite 打不开 → 退回 JSONL */
+  mkdirSync(file);
+  const j = createJournal({ file, log: () => {} });
+  const t = Date.now();
+  j.add({ id: 'a', at: t, chatId: 'new-openid', text: '今天聊了天气' });
+  j.add({ id: 'b', at: t + 1, chatId: 'old-openid', text: '小美是主人的前女友' });
+  j.add({ id: 'c', at: t + 2, chatId: 'other', text: '别的会话' });
+
+  assert.equal(j.purgeChat('new-openid', ['old-openid']), 2, '两个键都要删');
+  assert.equal(j.listChat('other').length, 1, '别的会话不能误删');
+  j.close();
+});
+
+/**
+ * JSONL 后端：坏行不能静默丢，整份坏掉时不许重写（2026-11 审查）。
+ *
+ * 以前逐行 `catch {}`，一个字都不打；下一次整份重写就把那行从磁盘上
+ * 永久抹掉。最刺眼的是「崩溃前最后一条」——恰好是最该留的那条。
+ */
+test('日记（JSONL 后端）：坏行要留痕并隔离，好行照常能读', () => {
+  const dir = tmp();
+  const file = join(dir, 'j.sqlite');
+  mkdirSync(file);
+  const jsonl = join(dir, 'j.jsonl');
+  const good = JSON.stringify({ id: 'a', at: 1, chatId: 'g1', sender: 'u', role: 'user', text: '主人住在杭州' });
+  /** 最后一行写一半：进程被杀 / 断电的形态 */
+  writeFileSync(jsonl, `${good}\n{"id":"b","at":2,"chatId":"g1","te`, 'utf8');
+
+  const logs = [];
+  const j = createJournal({ file, log: (m) => logs.push(m) });
+  assert.equal(j.listChat('g1').length, 1, '好行要读出来');
+  assert.equal(
+    logs.some((m) => m.includes('1 行解析不了')),
+    true,
+    `坏行要留痕：${logs.join(' | ')}`,
+  );
+  const baks = readdirSync(dir).filter((n) => n.startsWith('j.jsonl.corrupted.'));
+  assert.equal(baks.length, 1, '坏文件要留一份原文');
+  assert.equal(readFileSync(join(dir, baks[0]), 'utf8').includes('"id":"b"'), true, '备份是原文');
+  j.close();
+});
+
+test('日记（JSONL 后端）：整份解析不了时，重写也不能把原文弄丢', () => {
+  const dir = tmp();
+  const file = join(dir, 'j.sqlite');
+  mkdirSync(file);
+  const jsonl = join(dir, 'j.jsonl');
+  /** UTF-16 另存：utf8 读出来每行都坏（记事本另存就是这个形态） */
+  const original = Buffer.from('{"id":"a","text":"杭州"}\n', 'utf16le');
+  writeFileSync(jsonl, original);
+
+  const logs = [];
+  const j = createJournal({ file, log: (m) => logs.push(m) });
+  assert.deepEqual(j.listChat('g1'), [], '读不出内容');
+  assert.equal(logs.some((m) => m.includes('解析不了')), true, `要留痕：${logs.join(' | ')}`);
+
+  /** 隔离必须发生在任何重写**之前**：后面 `add` 会触发 rewrite */
+  j.add({ id: 'b', at: Date.now(), chatId: 'g1', text: '新写的一条' });
+  const baks = readdirSync(dir).filter((n) => n.startsWith('j.jsonl.corrupted.'));
+  assert.equal(baks.length, 1, '原文要留一份');
+  assert.deepEqual(
+    readFileSync(join(dir, baks[0])),
+    original,
+    '隔离副本必须是原始字节（不是降级后的空表）',
+  );
+  j.close();
+});
+
+/**
+ * 读不动时 `add()` 必须回 false（2026-11 复核）。
+ *
+ * 以前无条件 `return true`：工具回「记住了」、面板回 `ok:true`，可 5 秒后
+ * 重读成功时 `cache` 被盘上内容整体替换——那条事实内存和磁盘都没了，
+ * 而模型以为记住了，后面再也不会重提。
+ */
+test('facts：读不动时 add() 回 false（别让模型以为记住了）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-facts-honest-'));
+  process.env.DSH_ROOST_DATA = dir;
+  mkdirSync(join(dir, 'memory.json'));
+
+  const m = createMemory({ log: () => {} });
+  assert.equal(m.add('g1', '主人下周出差'), false, '没落盘就不能报成功');
+  /** 内存里这一轮仍然看得到（不能当场失忆） */
+  assert.deepEqual(m.list('g1').global, ['主人下周出差']);
+});
+
+/**
+ * `close()` 之后不许被懒打开（2026-11 复核）。
+ *
+ * 插件重载时旧实例还有在飞的异步回调（投递回查 / 发帖 / 巩固），它们
+ * `add()` 一下就把库重新打开：`store = null` → `get()` 见 null 就 `open()`。
+ * 句柄再也关不掉，每次重载漏一个 fd。
+ */
+test('日记：close() 之后 add() 不能再把库打开', () => {
+  const dir = tmp();
+  const j = createJournal({ file: join(dir, 'j.sqlite'), log: () => {} });
+  j.add({ id: 'a', at: 1, chatId: 'g1', text: '关之前写的' });
+  const before = j.stats().total;
+  j.close();
+
+  const r = j.add({ id: 'b', at: 2, chatId: 'g1', text: '关之后写的' });
+  assert.equal(r.added, false, '关掉之后不该写进去');
+
+  /**
+   * 关键断言：**句柄真的释放了**。
+   *
+   * 以前 `close()` 只把 store 置 null，下一次任何读（`stats()` 也算）都会
+   * 新建一个 store 把库重新打开——Windows 上连库文件都删不掉。
+   * 只断言「总数没变」是假绿：`stats()` 自己就会重开。
+   */
+  assert.equal(j.stats(), null, '关掉之后读操作应当空转（store 不再重开）');
+  assert.deepEqual(j.recent('g1', 5), [], '读也返回空');
+  assert.doesNotThrow(() => rmSync(join(dir, 'j.sqlite')), '库文件要能删掉（句柄已释放）');
+});
+
+/**
+ * JSONL 后端也要认 `close({ final:false })`（2026-11 复核）。
+ *
+ * 一键改写是「关句柄让 WAL checkpoint → 备份 → rekey 继续用同一个实例」。
+ * sqlite store 改了签名、JSONL 没改：`final:false` 照样置 `closed`，
+ * 之后 `load()` 返回空表，`rekey` 直接抛 `rows is not iterable`。
+ */
+test('日记（JSONL 后端）：close({final:false}) 之后还能继续用', () => {
+  const dir = tmp();
+  const file = join(dir, 'j.sqlite');
+  /** 占住 sqlite 路径 → 强制走 JSONL */
+  mkdirSync(file);
+  const j = createJournal({ file, log: () => {} });
+  j.add({ id: 'a', at: 1, chatId: 'old', text: '旧键的约定' });
+  assert.equal(j.scanChats().length, 1);
+
+  j.close({ final: false });
+  assert.equal(j.scanChats().length, 1, '关完还要读得到（改写要用）');
+  assert.equal(j.rekey(['old'], 'uin1'), 1, 'rekey 不能抛');
+  assert.deepEqual(j.scanChats().map((x) => x.chatId), ['uin1']);
+  j.close();
 });

@@ -37,12 +37,12 @@ import {
   renameSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from 'node:fs';
 import { basename, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { dataDir } from './config.js';
+import { writeJsonAtomic } from './atomic.js';
 import { isValidUin } from './account.js';
 import { unscopeKey } from './persona-scope.js';
 
@@ -75,13 +75,6 @@ const BACKUP_FILES = [
   'profiles.json',
   'closing.json',
 ];
-
-/** 原子写：先写 .tmp 再 rename，断电/异常时不会留下半个 JSON */
-function writeJsonAtomic(file, value) {
-  const tmp = `${file}.rewrite.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
-  renameSync(tmp, file);
-}
 
 function readJson(file) {
   try {
@@ -168,8 +161,13 @@ export function createRewriter({
 
   /** 关掉 sqlite 句柄。Windows 上打开着的文件没法被回退覆盖 */
   function closeHandles() {
-    try { journal?.close?.(); } catch {}
-    try { graph?.close?.(); } catch {}
+    /**
+     * `final:false`：这里关句柄只是为了把 WAL checkpoint 进主库（备份要完整），
+     * 下面 `rekey()` 还要接着用同一个实例。传默认值（final）会让日记永久关闭，
+     * 改写之后「日记一条都不搬」——2026-11 复核抓到过。
+     */
+    try { journal?.close?.({ final: false }); } catch {}
+    try { graph?.close?.({ final: false }); } catch {}
   }
 
   /** 丢掉内存缓存，否则下一次 save() 会把刚恢复的文件又盖回去 */

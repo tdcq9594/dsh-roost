@@ -24,9 +24,47 @@ import { READONLY_METHODS, PRIVILEGED_METHODS } from './roost-capabilities.js';
 /** 主人/管理员专属的只读方法也不给扩展（日志、插件运行数据、配置快照） */
 const PRIVILEGED = new Set(PRIVILEGED_METHODS);
 
-/** 扩展可调用的只读能力。能力表会再校验一次「框架真的有这个方法」 */
-export const EXT_ROOST_READONLY = Object.freeze(
+/**
+ * 「只读」不等于「可以给扩展」（2026-11 复核）。
+ *
+ * `roost.read` 只要求 `state:read`，而它在**默认 scope** 里——安装时不需要
+ * 主人确认。以前这些方法全在放行名单里，等于任何装上的扩展都能按 chatId
+ * 读**任意会话的消息原文**、拿 openid ↔ QQ 号 ↔ 群号的映射、枚举会话键。
+ * 在 `roost.read` 出现之前它们走 `roost.call`，要求 `message:write`（敏感、
+ * 安装时二次确认），门槛不该因为拆了个只读端点就降到零。
+ *
+ * 另外这也和本文件自己的原则冲突（见 `OWNER_ALIASES` 的注释）：
+ * 「扩展不该拿到主人的 openid」——`identity.resolve` 正是在交出去。
+ */
+const PRIVATE = new Set([
+  'identity.list', 'identity.resolve',
+  'ledger.recent', 'ledger.timeline', 'ledger.stats',
+  'msg.get',
+  'delivery.recent', 'delivery.get',
+  'roles.resolve', 'reach.get',
+  /** 「按会话键」返回额度快照 = 把有哪些会话列出来 */
+  'quota.get',
+]);
+
+/**
+ * 经 `roost.call`（要 `message:write`）能调的只读方法。
+ *
+ * **`PRIVATE` 不在这里过滤**：这些方法本来就是要 `message:write` 这道门槛的，
+ * 拆出只读端点不该把它们从 `roost.call` 上也一起拿掉（2026-11 复核：
+ * 第一版就是这么错的，等于把门槛从「敏感」改成「不存在」）。
+ */
+export const EXT_ROOST_CALLABLE = Object.freeze(
   READONLY_METHODS.map((m) => m.name).filter((n) => !PRIVILEGED.has(n)),
+);
+
+/**
+ * 经 `roost.read`（只要默认的 `state:read`）能调的方法。
+ *
+ * = 上表再减掉 `PRIVATE`：这些方法读的是**别人的会话原文和身份映射**，
+ * 默认权限不该够得着。
+ */
+export const EXT_ROOST_READONLY = Object.freeze(
+  EXT_ROOST_CALLABLE.filter((n) => !PRIVATE.has(n)),
 );
 
 /** 扩展可调用的消息发送方法 */
@@ -46,9 +84,12 @@ export function isOwnerAlias(v) {
  * 拉到的真实能力表判断，框架老版本没有的方法、已卸载插件的工具都会 404，
  * 而不是把请求打到一个不存在的闭包上。
  *
+ * @param {'call'|'read'} [o.surface] 哪个入口在问。`read` 会把 `PRIVATE`
+ *   那批方法判成「需要 message:write」，而不是「不存在」——扩展作者才知道
+ *   该换哪个端点。
  * @returns {{ok:true, kind:'readonly'|'tool'|'send'}|{ok:false, why:string}}
  */
-export function classifyRoostCall(method, caps = null) {
+export function classifyRoostCall(method, caps = null, { surface = 'call' } = {}) {
   const key = String(method ?? '').trim();
   if (!key) return { ok: false, why: '缺 method' };
   if (key.length > 120) return { ok: false, why: 'method 太长' };
@@ -66,9 +107,17 @@ export function classifyRoostCall(method, caps = null) {
     return { ok: true, kind: 'tool' };
   }
 
-  if (EXT_ROOST_READONLY.includes(key)) {
+  const allowed = surface === 'read' ? EXT_ROOST_READONLY : EXT_ROOST_CALLABLE;
+  if (allowed.includes(key)) {
     if (caps && !caps.has(key)) return { ok: false, why: `框架没有这个能力：${key}` };
     return { ok: true, kind: 'readonly' };
+  }
+  /**
+   * 只读端点撞上「需要 message:write」的那批：给可操作的提示，别报「不存在」。
+   * 这条分支同时也保证了 `roost.call` 不会被误伤。
+   */
+  if (surface === 'read' && EXT_ROOST_CALLABLE.includes(key)) {
+    return { ok: false, why: `${key} 读的是别人的会话/身份，需要 message:write：请改用 roost.call` };
   }
 
   return { ok: false, why: `方法 ${key} 不对扩展开放（只开只读能力、tool.* 与 msg.send）` };

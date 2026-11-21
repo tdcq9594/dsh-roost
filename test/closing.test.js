@@ -250,3 +250,21 @@ test('enabled=false 时 set 被拒（总开关）', () => {
   assert.equal(c.set('u1', { point: '不该记' }).ok, false);
   assert.equal(c.get('u1'), null);
 });
+
+/**
+ * 按会话清空要带别名（2026-11 复核）。
+ *
+ * 换过机器人的会话在盘上散在多个 openid 下，而 `get(chatId, aliases)` 会把
+ * 旧键那条读出来——只删当前键，「彻底删除」之后收尾刹车还在生效。
+ */
+test('收尾：clear / clearPending 要一起清别名键', () => {
+  const closing = fresh();
+  closing.set('new', { point: '新键摘要' });
+  closing.set('old', { point: '旧键摘要' });
+  closing.notePending('old', '问出去还没人回的那句话');
+
+  assert.equal(closing.clear('new', ['old']), true);
+  assert.equal(closing.get('new', ['old']), null, '旧键那条也要没了');
+  assert.equal(closing.clearPending('new', ['old']), true);
+  assert.equal(closing.pending('old'), null);
+});

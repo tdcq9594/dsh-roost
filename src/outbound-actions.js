@@ -473,12 +473,28 @@ export function createActionRunner({
 
     /** 4. 这一轮要发的文件（原来就在 send() 里，搬过来保持顺序） */
     const files = Array.isArray(extra?.files) ? extra.files.map(String).filter(Boolean) : [];
+    /**
+     * 文件发送的结果要**带出去**。
+     *
+     * 以前只 `log` 一句、`rf` 直接丢掉，而返回值是正文那条的结果——
+     * 正文为空（`qq_send_file` 就是这样：`postReply(payload, '', false, {files})`）
+     * 时 `r` 恒为 `{ok:true, sent:false}`，调用方再怎么判都判不出失败，
+     * 于是 `turnSt.files` / 配额不回滚、工具还回 `ok:true`。
+     *
+     * 用 `filesOk` 而不是覆盖 `ok`：正文可能已经发出去了，把 `ok` 打成 false
+     * 会让上层以为整条都没发、再发一遍正文。
+     */
+    let filesOk = true;
+    const fileErrors = [];
     for (const f of files) {
       if (typeof ch.sendFile !== 'function') break;
       const rf = await ch.sendFile({ scene, target, path: f, msgId, receivedAt, eventId, isWakeup, requestId: String(extra?.requestId ?? '') })
         .catch((e) => ({ ok: false, message: e?.message ?? String(e) }));
-      if (!rf?.ok) log(`发文件失败（${f}）：${rf?.message ?? '未知原因'}`);
-      else onSent();
+      if (!rf?.ok) {
+        filesOk = false;
+        fileErrors.push({ path: f, message: rf?.message ?? '未知原因', network: rf?.network === true });
+        log(`发文件失败（${f}）：${rf?.message ?? '未知原因'}`);
+      } else onSent();
     }
 
     /**
@@ -612,6 +628,7 @@ export function createActionRunner({
       }
     }
 
-    return r;
+    /** 文件失败不覆盖 `ok`（正文可能已发），单独用 `filesOk` 告诉调用方 */
+    return filesOk ? { ...r, filesOk: true } : { ...r, filesOk: false, fileErrors };
   };
 }

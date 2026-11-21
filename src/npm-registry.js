@@ -52,6 +52,18 @@ export function normRegistry(raw) {
   try {
     const u = new URL(withProto);
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return '';
+    /**
+     * **必须挡 shell 元字符**：Windows 上安装共享依赖走 `shell: true`
+     * （Node 20 起不能直接 spawn `npm.cmd`），registry 会拼进命令行。
+     * `https://registry.local&calc.exe` 能被 `new URL` 当成合法 host，
+     * 拼进去就是 `npm install ... --registry=https://registry.local&calc.exe`
+     * —— `&` 后面那段会被 cmd 当成第二条命令。
+     *
+     * 校验**原串**而不是 `u.host`：`new URL` 会把反引号之类的字符
+     * 百分号编码，解析后再查就漏了。registry 本来就不该带 query/fragment，
+     * 宁可拒绝也不放行。
+     */
+    if (/[&|;<>()$`"'\s]/.test(withProto)) return '';
     return withProto.replace(/\/+$/, '');
   } catch {
     return '';

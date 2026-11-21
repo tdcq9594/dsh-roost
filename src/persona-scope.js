@@ -29,8 +29,9 @@
  * 由三个通用函数提取/替换/注入，不再猜方法语义。
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
+
+import { writeJsonAtomic } from './atomic.js';
 
 export const LEGACY_POLICIES = Object.freeze(['shared', 'owner', 'perChat']);
 export const LEGACY_LABELS = Object.freeze({
@@ -105,10 +106,7 @@ export function createOwnership({ file, log = () => {} } = {}) {
       };
       if (!LEGACY_POLICIES.includes(next.policy)) next.policy = '';
       try {
-        mkdirSync(dirname(file), { recursive: true });
-        const tmp = `${file}.tmp`;
-        writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
-        renameSync(tmp, file);
+        writeJsonAtomic(file, next);
       } catch (e) {
         log(`人格归属账本写盘失败：${e.message}`);
         return { ok: false, error: e.message };

@@ -30,9 +30,11 @@
  *   · 不做「自己写代码 / 跑 Python」。那两件要单独设计沙箱，不该顺手带进来。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+
+import { writeJsonAtomic } from './atomic.js';
 
 import {
   appendLedger, readLedger, verifyChain, dayStats, ledgerPath, GENESIS,
@@ -219,10 +221,7 @@ export function createAutotelic({
   }
   function saveState() {
     try {
-      mkdirSync(dir, { recursive: true });
-      const tmp = `${stateFile()}.${process.pid}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-      renameSync(tmp, stateFile());
+      writeJsonAtomic(stateFile(), state, { newline: true });
     } catch (e) {
       log(`自驱状态写盘失败：${e?.message || e}`);
     }

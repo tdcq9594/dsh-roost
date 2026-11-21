@@ -20,9 +20,11 @@
  * 扩展自己写运行时文件会让 `build-index --check` 变脏。
  */
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+
+import { writeJsonAtomic } from './atomic.js';
 
 export const LIMITS = Object.freeze({
   MAX_TEXT: 2000,
@@ -123,10 +125,7 @@ export function createProactiveQueue({ dir = '', cfgOf = () => ({}), now = () =>
   function save() {
     if (!path) return;
     try {
-      mkdirSync(dirname(path), { recursive: true });
-      const tmp = `${path}.tmp`;
-      writeFileSync(tmp, JSON.stringify(st, null, 2), 'utf8');
-      renameSync(tmp, path);
+      writeJsonAtomic(path, st);
     } catch (e) {
       log(`主动消息队列落盘失败：${e?.message ?? e}`);
     }

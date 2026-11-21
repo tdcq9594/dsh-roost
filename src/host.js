@@ -102,7 +102,9 @@ import { createAwake, readAgreements, groupCandidates } from './awake.js';
 import { wakeContext } from './wake-context.js';
 import { stripLeak } from './leak-guard.js';
 import { createBridge } from './bridge.js';
-import { createCompact } from './compact.js';
+import { createCompact, makeOpening, compactCfgOf } from './compact.js';
+import { createPendingOpenings } from './pending-opening.js';
+import { createTimers } from './timers.js';
 import { createUsage } from './usage.js';
 import { priceTierOf } from './offpeak.js';
 import { createOwnership, createPersonaScope, unscopeKey, LEGACY_POLICIES, LEGACY_LABELS } from './persona-scope.js';
@@ -514,6 +516,24 @@ export function apply(ctx) {
   };
 
   /**
+   * 长期定时器登记表（见 `timers.js`）。
+   *
+   * `teardown` 不再手写 clear 清单——那份清单漏过一次备份 / 发帖 / 投递回查，
+   * 而 `unref()` 只保证不阻进程退出，不保证重载后不重复跑。现在只清这一处。
+   */
+  const timers = createTimers({ log });
+
+  /**
+   * 已经 teardown 了。
+   *
+   * `timers.clearAll()` 只能拦住**还没触发**的定时器，拦不住已经在飞的异步
+   * 回调。投递回查（`deliveryTick`）一次会并发 10 个 RPC，重载时那批回来
+   * 还会 `journalAdd`——而 journal 已经 `close()` 了，`open()` 见到
+   * `db === null` 会**把库重新打开**，句柄再也关不掉（每次重载漏一个）。
+   */
+  let disposed = false;
+
+  /**
    * E4 一键备份：**启动时、读配置之前**把 `.restore/` 换上（交接 §3③）。
    *
    * 按契约放在最前面：`loadConfig()` / `createMemory()` / `createJournal()`
@@ -791,7 +811,7 @@ export function apply(ctx) {
     if (!id) return;
     usageBuf.set(id, (usageBuf.get(id) || 0) + 1);
     if (usageTimer) return;
-    usageTimer = setTimeout(() => {
+    usageTimer = setTimeout(() => { // timer-ok: 30 秒 debounce，自己摘自己 + teardown 兜底
       usageTimer = null;
       flushUsage();
     }, 30_000);
@@ -942,7 +962,7 @@ export function apply(ctx) {
    * 关着语音的人不会平白多花 30MB 内存。延迟 5 秒是为了不跟启动时的
    * 其它初始化抢 CPU。
    */
-  setTimeout(() => { tts.warmup().catch(() => {}); }, 5000).unref?.();
+  setTimeout(() => { tts.warmup().catch(() => {}); }, 5000).unref?.(); // timer-ok: 一次性预热，5 秒后自然结束
 
   /**
    * 4.5 人格隔离：只在 store 层把物理键按人格分开。
@@ -1667,8 +1687,7 @@ export function apply(ctx) {
    * `paused()` 排在**最前面**：总开关关着 / 刚断线失败过时，连 tick 都不进，
    * 不跑模型、不占额度。只靠出口拦的话，模型照跑、账照记，只是最后一句被吞。
    */
-  const speakTimer = setInterval(() => { if (paused()) return; speakUp.tick().catch(() => {}); }, 60_000);
-  speakTimer.unref?.();
+  timers.every(() => { if (paused()) return; speakUp.tick().catch(() => {}); }, 60_000, '主动搭话检查');
 
   /**
    * 4.6 互动召回：与主动搭话**两本账**。
@@ -1780,8 +1799,7 @@ export function apply(ctx) {
     }
   };
   /** 5 分钟看一次就够：窗口最短也是「当天」，没必要每分钟醒一次 */
-  const wakeTimer = setInterval(() => { if (paused()) return; runWakeup().catch(() => {}); }, 300_000);
-  wakeTimer.unref?.();
+  timers.every(() => { if (paused()) return; runWakeup().catch(() => {}); }, 300_000, '互动召回检查');
 
   /** 已经挂过人格/权限上下文的 agent，避免每轮重复挂 */
   /** 端口租约：跟 Roost 互通「实际在哪个端口」 */
@@ -2095,7 +2113,7 @@ export function apply(ctx) {
       const ppl = await Promise.race([
         account.people(),
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('框架没响应')), 1500);
+          timer = setTimeout(() => reject(new Error('框架没响应')), 1500); // timer-ok: 单次调用的超时竞速，随调用结束
         }),
       ]);
       remote = Array.isArray(ppl?.groups) ? ppl.groups : [];
@@ -2473,19 +2491,18 @@ export function apply(ctx) {
     },
   });
   /** 队列自己每分钟消费一次：提交那一刻门闸没过，过点了要能补上 */
-  const proactiveTimer = setInterval(() => {
+  timers.every(() => {
     /** 不 drain 就不消费 attempt，`MAX_ATTEMPTS` 不消耗，开回来积压的已过 TTL */
     if (paused()) return;
     void proactiveDispatcher.drain().catch(() => {});
-  }, 60_000);
-  proactiveTimer.unref?.();
+  }, 60_000, '队列消费');
 
   /**
    * persist 快照恢复（§6.3「恢复后按 id 拉回并重新注册 section」）。
    * `ctx.agents` 是延迟激活的服务（P2 探针约 3.5s 后才可用），所以排到后面；
    * timer 用 unref 不阻进程退出，teardown 里清掉，失败只 warn 不拖崩激活。
    */
-  const restoreTimer = setTimeout(() => {
+  const restoreTimer = setTimeout(() => { // timer-ok: 一次性快照恢复，已由 mountOffs 清理
     void agentV1.restore().catch((e) => log.warn?.(`独立会话恢复失败：${e?.message ?? e}`));
   }, 3500);
   restoreTimer.unref?.();
@@ -2735,7 +2752,11 @@ export function apply(ctx) {
     dyn: Number(cfg.recall?.dynMax) || MEMORY_DYN_MAX,
   });
 
-  const memory = personaScope.wrapMemory(createMemory({ capacityOf: () => cfg.memory?.capacity }));
+  const memory = personaScope.wrapMemory(createMemory({
+    capacityOf: () => cfg.memory?.capacity,
+    /** 读盘失败 / 坏文件隔离都要留痕：这类问题以前是静默的 */
+    log: (m) => log.warn(m),
+  }));
   const mood = createMood({ cfgOf: () => cfg.mood });
   /**
    * 两份行为日志（B4 / D3）。**不存消息正文**：心情历史只有数值和原因，
@@ -2990,6 +3011,9 @@ export function apply(ctx) {
    * 它要调模型，所以 `generate` 复用 DSH 会话（跟主动搭话同一套办法）——
    * 单独一个内部会话，不碰任何 QQ 会话的上下文。
    */
+  /** 巩固会话配成真人会话时只警告一次，别每晚刷屏 */
+  const warnedConsolidate = new Set();
+
   const consolidate = createConsolidate({
     journal,
     graph,
@@ -3002,6 +3026,30 @@ export function apply(ctx) {
     log: (m) => log.info(m),
     generate: async (prompt) => {
       const consolidateChat = cfg.memory?.consolidateChat || 'consolidate';
+      /**
+       * 默认的 `consolidate` 是独立标识，不会和任何真人会话抢锁。
+       * 一旦用户把它配成已有会话（典型是某个私聊 openid），凌晨巩固就会
+       * 和前台共用一把 turn 锁——撞上时失败、只能次日补跑，而现象是静默的。
+       *
+       * 这里只警告一次，不改变行为：共用是不是有意选择，只有用户知道。
+       */
+      if (
+        consolidateChat !== 'consolidate' &&
+        /**
+         * 必须用**未包装**的 `sessionsStore`：人格作用域开着时，包装层的
+         * `entry()` 会把 key 改写成 `${chatId}::p:${人格}`，拿配置里的原始
+         * chatId 去查永远查不到——警告静默失效，而失效的正是最需要提醒的场景。
+         */
+        sessionsStore.entry(consolidateChat) &&
+        !warnedConsolidate.has(consolidateChat)
+      ) {
+        warnedConsolidate.add(consolidateChat);
+        log.warn(
+          `巩固会话配成了已有会话 ${String(consolidateChat).slice(0, 8)}…：` +
+            '凌晨巩固可能和它正在跑的一轮抢锁而失败（次日补跑）。' +
+            '建议改回独立标识（默认 consolidate），面板「记忆 → 巩固」可改。',
+        );
+      }
       const chat = {
         kind: 'c2c',
         chatId: consolidateChat,
@@ -3263,10 +3311,8 @@ export function apply(ctx) {
    * 之后每十分钟看一眼。两个都 unref：不能因为定时器让进程退不出去。
    * 两个都要 gate：否则「关着的时候重启一次」照样会跑一轮。
    */
-  const consolidateBoot = setTimeout(() => { if (!paused()) consolidateTick(); }, 60_000);
-  consolidateBoot.unref?.();
-  const consolidateTimer = setInterval(() => { if (paused()) return; consolidateTick(); }, 10 * 60_000);
-  consolidateTimer.unref?.();
+  timers.after(() => { if (!paused()) consolidateTick(); }, 60_000, '记忆巩固补跑');
+  timers.every(() => { if (paused()) return; consolidateTick(); }, 10 * 60_000, '记忆巩固检查');
 
   /* ---------------- 4.3/4.4 定时备份 + 加密云备份 ---------------- */
 
@@ -3321,6 +3367,12 @@ export function apply(ctx) {
   };
 
   const backupTick = async () => {
+    /**
+     * 只看总开关，不看 `paused()`：`paused()` 还包含断线冷却，
+     * 而备份是本地操作、云推失败本来也只降级成一条 warn。持续断线时
+     * 冷却会被反复刷新，用 `paused()` 会把当天的备份整个跳过。
+     */
+    if (masterOff()) return;
     const s = cfg.backup?.schedule;
     if (s?.enabled !== true) return;
     if (!scheduleDue({ lastAt: lastFullBackupAt(), hour: s.hour })) return;
@@ -3332,10 +3384,8 @@ export function apply(ctx) {
       log.warn(`定时备份失败：${r.message}`);
     }
   };
-  const backupBoot = setTimeout(() => backupTick().catch(() => {}), 120_000);
-  backupBoot.unref?.();
-  const backupTimer = setInterval(() => backupTick().catch(() => {}), 10 * 60_000);
-  backupTimer.unref?.();
+  timers.after(() => backupTick().catch(() => {}), 120_000, '定时备份补跑');
+  timers.every(() => backupTick().catch(() => {}), 10 * 60_000, '定时备份');
 
   /* ---------------- 通道 / 注册方式 / 觉醒 / 压缩 ---------------- */
 
@@ -3546,10 +3596,8 @@ export function apply(ctx) {
     dryRunOf: () => dryRunOn(),
   });
   /** 两个都要 gate：这是唯一会**真的发到频道**的定时行为，且它绕开了 `channel.send` */
-  const postBoot = setTimeout(() => { if (!paused()) channelPost.tick().catch(() => {}); }, 60_000);
-  postBoot.unref?.();
-  const postTimer = setInterval(() => { if (paused()) return; channelPost.tick().catch(() => {}); }, 60_000);
-  postTimer.unref?.();
+  timers.after(() => { if (!paused()) channelPost.tick().catch(() => {}); }, 60_000, '频道发帖补跑');
+  timers.every(() => { if (paused()) return; channelPost.tick().catch(() => {}); }, 60_000, '频道发帖');
 
   /**
    * 主人批准之后**真正执行**的那一段。
@@ -4062,8 +4110,43 @@ export function apply(ctx) {
     log: (m) => log.warn(m),
   });
 
-  /** 压缩后要拼在下一条用户消息前面的开场白 */
-  const pendingOpening = new Map();
+  /**
+   * 重启后重建压缩开场。
+   *
+   * 与 `createCompact()` 里那条走的是**同一个** `makeOpening()`，配额也走
+   * 同一个 `compactCfgOf()`——挑料规则（用户 8 条 / 她 3 条 / 摘要 N 条 /
+   * 约定）必须一致，否则重启后拼出来的开场跟压缩那一刻那份不是一回事。
+   *
+   * ⚠️ 这里要传**整份 `cfg` 归一化后的配额**，不能直接把 `cfg` 递进去：
+   * `makeOpening` 读的是扁平的 `keepRecentUser` / `keepDigests`，而它们
+   * 在 `cfg` 里位于 `cfg.compact` 下面。递错的后果不是报错，是**静默取默认**：
+   * `keepDigests` 变 `undefined`，`journal.digests` 按 5 条兜底，`buildOpening`
+   * 再 `slice(-3)`——「这几天」从最新 3 条变成「最新 5 条里的第 3~5 条」，
+   * 正好把最新那两条丢掉。
+   */
+  const rebuildOpening = makeOpening({
+    journal,
+    agreementsOf: (chatId) => readAgreements({ memory, graph, chatId, aliases: aliasesOf(chatId) }),
+    aliasesOf,
+    cfgOf: compactCfgOf(() => cfg),
+  });
+
+  /**
+   * 压缩后要拼在下一条用户消息前面的开场白。
+   *
+   * **必须落盘**：`compact.js` 是「建新会话 → 落映射 → 交开场」，
+   * 映射在 `sessions.json`，开场只放内存的话，进程在两步之间退出就会
+   * 「映射指向新会话、开场没了」——下一条消息直接失忆。
+   *
+   * 盘上只存 `{ at }` 指针，正文靠 `rebuildOpening` 现拼：开场本来就是
+   * 从日记确定性重建的，存一份正文只是让「清空记忆」清不干净（详见
+   * `pending-opening.js` 顶部）。
+   */
+  const pendingOpening = createPendingOpenings({
+    file: join(dataDir(), 'opening-pending.json'),
+    log: (m) => log.warn(m),
+    rebuild: (chatId) => rebuildOpening(chatId),
+  });
 
   /**
    * 投递终态跟踪（桥 3）。
@@ -4371,12 +4454,11 @@ export function apply(ctx) {
    * 五分钟一次，比私聊稀疏得多——群里插话的成本高，不值得每分钟算一遍。
    * 白名单为空时 `wakeGroups` 第一行就返回，等于零开销。
    */
-  const groupTimer = setInterval(() => {
+  timers.every(() => {
     if (paused()) return;
     if (cfg.awake?.enabled === false) return;
     awake.wakeGroups().catch((e) => log.warn(`群主动失败：${e?.message ?? e}`));
-  }, 5 * 60_000);
-  groupTimer.unref?.();
+  }, 5 * 60_000, '群主动检查');
 
   /**
    * 投递终态的回查循环（桥 3）。
@@ -4396,20 +4478,53 @@ export function apply(ctx) {
      * 而旧账也不会烂掉：开回来的下一轮（≤10 分钟）照常结。
      */
     if (paused()) return;
+    /** 重载后旧实例的定时器可能还在飞：别再打框架、更别写已关闭的库 */
+    if (disposed) return;
     deliveryTrack
       .resolve({ limit: 10 })
       .then((r) => {
+        if (disposed) return;
         if (r.checked && !r.skipped) {
           log.info(`投递回查：查了 ${r.checked} 条，结案 ${r.settled.length} 条，还有 ${r.still} 条在等`);
+        }
+        /**
+         * **过审送达的主动消息要补写日记**（2026-11 审查）。
+         *
+         * 进审核时 `sendOut` 三处都因为 `pending` 跳过 events / `closing.notePending`
+         * / `journalAdd`；十分钟后这里结案成 `sent`，以前只打一行日志——
+         * 那句「她主动说过的话」永远不进日记，`【刚才说到】` 和 `wakeMaterials`
+         * 都看不到，下一轮容易把同一句再说一遍。
+         *
+         * 行 id 用 `delivery:<requestId>`：稳定且幂等，重复结案不会写出两行。
+         */
+        for (const it of r.settled || []) {
+          if (it.state !== 'sent' || !it.text) continue;
+          /**
+           * 期间用户清空过这个会话：正文已经在 `clearChat` 里抹掉了，
+           * 别再把原文写回日记。
+           *
+           * **不能靠「账本里还有没有这条」判**：`resolve()` 返回前会 `prune()`
+           * 掉超过 2 天的结案条目，那属于正常 TTL 回收，按存在性判会把
+           * 正常该补的那行也一起跳过（2026-11 复核）。
+           */
+          if (it.cleared) continue;
+          const cid = String(it.chatId || it.target || '');
+          if (!cid) continue;
+          journalAdd(
+            { id: `delivery:${it.requestId}` },
+            { chatId: cid, aliases: aliasesOf(cid) },
+            /** 用全文：`text` 只有 60 字（面板预览用），写进日记等于记半句话 */
+            it.full || it.text,
+            'bot',
+            { kind: 'proactive' },
+          );
         }
       })
       .catch((e) => log.warn(`投递回查失败：${e?.message ?? e}`));
   };
   /** 启动后先等一分钟（刚起来时 ai-chat 可能还没就绪），之后每十分钟一次 */
-  const deliveryBoot = setTimeout(deliveryTick, 60_000);
-  deliveryBoot.unref?.();
-  const deliveryTimer = setInterval(deliveryTick, 10 * 60_000);
-  deliveryTimer.unref?.();
+  timers.after(deliveryTick, 60_000, '投递回查补跑');
+  timers.every(deliveryTick, 10 * 60_000, '投递回查');
 
   /**
    * 群白名单的逐项判定（面板要看"这个群为什么不能主动"）。
@@ -5587,9 +5702,30 @@ export function apply(ctx) {
           });
           if (at.note) log.info(`@ 没挂上：${at.note}`);
 
-          await postReply(c.payload, at.prefix ? at.prefix + text : text, false, {
+          const sent = await postReply(c.payload, at.prefix ? at.prefix + text : text, false, {
             requestId: opts.requestId,
           });
+          /**
+           * **没发出去就不算发过**。
+           *
+           * 出站层失败只回 `{ok:false}`、不抛异常。以前这里照样
+           * `st2.parts += 1` 并 `return {ok:true}`：宿主以为「已经用工具发过」，
+           * 主回复分支于是不再发正文（话彻底消失），日记里还记了一句没发出去的话。
+           */
+          if (sent?.ok === false) {
+            /**
+             * `network:true` 是**不确定**（请求可能到了服务端）。
+             * 别让模型原样重发——重复两句比少一句更糟；换句话说是安全的。
+             */
+            const hint = sent.network === true
+              ? '不确定有没有发出去，别原样重发，换个说法。'
+              /** 总开关关着：换多少句都发不出去，别让模型白试 */
+              : sent.code === 'disabled'
+                ? '机器人总开关关着，先让主人打开再说话。'
+                : '换一句短一点的再试，或者稍后再说。';
+            log.warn(`分段发送失败（${sent.message || sent.code || '未知原因'}${sent.network ? ' / 网络不确定' : ''}）`);
+            return { ok: false, message: `这句没发出去：${sent.message || '通道异常'}。${hint}` };
+          }
           /**
            * 记下这一轮发了什么：turn 结束时要拿它写日记，并且决定正文不再重发。
            *
@@ -5733,7 +5869,26 @@ export function apply(ctx) {
           turnSt.files = (turnSt.files || 0) + 1;
           turnSt.fileNames = [...(turnSt.fileNames || []), basename(abs)];
           try {
-            await postReply(c.payload, '', false, { files: [abs] });
+            const sent = await postReply(c.payload, '', false, { files: [abs] });
+            /**
+             * 文件的结果在 `filesOk` 里，不在 `ok` 里——正文是空串，`ok` 说的是
+             * 正文那条（恒 true）。只判 `ok` 等于没判（2026-11 复核抓到的）。
+             */
+            if (sent?.ok === false || sent?.filesOk === false) {
+              const why = sent?.fileErrors?.[0]?.message || sent?.message || '通道异常';
+              const network = sent?.fileErrors?.[0]?.network === true || sent?.network === true;
+              turnSt.files -= 1;
+              turnSt.fileNames.pop();
+              q.undo?.();
+              log.warn(`文件没发出去（${why}）：${basename(abs)}`);
+              return {
+                ok: false,
+                reason: 'send',
+                message: network
+                  ? `文件不确定有没有发出去（${why}），别原样重发，跟对方说一声。`
+                  : `文件没发出去（${why}）。跟对方说一声，或者稍后再试。`,
+              };
+            }
           } catch (e) {
             turnSt.files -= 1;
             turnSt.fileNames.pop();
@@ -6350,7 +6505,7 @@ export function apply(ctx) {
           })
           .catch(() => ''),
         new Promise((resolve) => {
-          const t = setTimeout(() => resolve(''), 1200);
+          const t = setTimeout(() => resolve(''), 1200); // timer-ok: 单次调用的超时竞速，随调用结束
           t.unref?.();
         }),
       ]);
@@ -6537,9 +6692,19 @@ export function apply(ctx) {
        */
       const prevRound = rounds.get(chat.chatId);
       const firstRound = !prevRound || !prevRound.n;
+      /**
+       * **先看，不消费**（`get` 而不是 `take`）。
+       *
+       * `take()` 是「先删再返回」，而这段开场要拼进**这一轮**的 prompt；
+       * 模型调用在下面（`turns.run`），它完全可能失败（5xx / 150 秒超时 /
+       * 会话被归档）。以前在这里就 take，那一轮一失败开场就永久没了，
+       * 而 `rounds` 已经加过——下一条**成功**的消息既没有开场也没有自述，
+       * 表现就是「压缩完她突然失忆」。
+       *
+       * 现在跑成功了才 `clear()`（见 `turns.run` 之后），失败就留着下次再用。
+       */
       const opening = pendingOpening.get(chat.chatId);
       if (opening) {
-        pendingOpening.delete(chat.chatId);
         text = `${opening}\n\n${text}`;
         log.info(`压缩后的第一条消息带上了开场白（${opening.length} 字）`);
       }
@@ -6674,6 +6839,14 @@ export function apply(ctx) {
       });
 
       /**
+       * 这一轮**跑成功了**，开场才算真的消费掉。
+       *
+       * 上面是 `get()` 拿的正文（没删），失败会跳到 catch，指针留着——
+       * 下一条消息重新拼一次，不会出现「压缩完第一轮就失忆」。
+       */
+      if (opening) pendingOpening.clear(chat.chatId);
+
+      /**
        * 记忆标记在这里处理，**不在 ai-chat 那边**。
        *
        * 记忆已经归 dsh-roost 了（情绪要调制它、抽取要调模型），
@@ -6766,8 +6939,28 @@ export function apply(ctx) {
          * 后缀 `:main` 是必须的——`delivery.claim` 对已发送的 requestId
          * 一律返回 reuse、不比较正文，同一轮里再加第二个回话点必须换后缀。
          */
-        await postReply(payload, guardOutbound(reply), true, { requestId: `${payload.id}:main` });
-        journalAdd(payload, chat, journalText, 'bot');
+        /**
+         * **判返回值**：出站层失败不抛异常，只回 `{ok:false}`。
+         * 不看的话，断线时日记里照样留下「我说过这句话」，下一轮拼
+         * 【刚才说到】就把它捞出来当既定事实——正是上面注释要避免的形态。
+         */
+        const sent = await postReply(payload, guardOutbound(reply), true, { requestId: `${payload.id}:main` });
+        if (sent?.ok === false) {
+          log.warn(`主回复没发出去（${sent.message || sent.code || '未知原因'}），这一轮不写日记`);
+          /**
+           * 但**文件那件事要留下**：文件是在 `fileOf` 里当场发成功的，
+           * 失败的只有正文。整条都不写的话，她下一轮完全不记得发过这份文件，
+           * 可能再发一遍。
+           */
+          /**
+           * 行 id 换一个后缀：同一条消息被重试、这次正文发成功时，
+           * `journalText` 那条会撞上这里的主键（`ON CONFLICT DO NOTHING`），
+           * 结果日记里永久只剩「（发了文件：x）」，那句话反而丢了。
+           */
+          if (fileNote) journalAdd({ ...payload, id: `${payload.id}:file` }, chat, fileNote, 'bot');
+        } else {
+          journalAdd(payload, chat, journalText, 'bot');
+        }
       }
 
       /**
@@ -6962,7 +7155,23 @@ export function apply(ctx) {
     q: turnQueue,
     handleTurn,
     postReply,
-    chatOf,
+    /**
+     * ⚠️ 必须传**字符串**。`inbound.js` 的 `chatOf()` 返回的是对象
+     * （`{ chatId, sessionKey, kind, … }`），直接传进去会被 `String()` 成
+     * `"[object Object]"`——全进程挤成一条队列，第三个会话的消息被
+     * 「上一条还在想」拒掉且不重试。2026-11 实测过这个形态。
+     */
+    chatIdOf: (p) => chatOf(p).chatId,
+    /**
+     * 排队键用 **sessionKey**：频道里同一个 guild 的多个子频道共用一个
+     * DSH 会话（`sessions` 按 sessionKey 存），按 chatId 分会各占一条 lane
+     * 并发跑，撞上 turn 的 busy 锁——后一条被回「上一条还在想」且不重试。
+     * 群 / 私聊里 sessionKey 就等于 chatId，没有区别。
+     */
+    keyOf: (p) => {
+      const c = chatOf(p);
+      return c.sessionKey || c.chatId;
+    },
     log: (m) => log.info(m),
   });
 
@@ -7081,7 +7290,7 @@ export function apply(ctx) {
    * 后者在用户改配置之后不会重排，得重启才生效。
    */
   ctx.effect(() => {
-    const t = setInterval(() => {
+    const t = setInterval(() => { // timer-ok: 由本 effect 返回的 cleanup 清掉
       try {
         const c = cfg.autotelic || {};
         if (c.enabled !== true || Number(c.heartbeatMin) <= 0) return;
@@ -7706,7 +7915,12 @@ export function apply(ctx) {
               return send(res, r.ok ? 200 : 429, r);
             }
             case 'extensions.clients.list': {
-              return send(res, 200, extPanel.clients());
+              /** 分页 + 关键词：装了几十个扩展时，整表一次拉下来没必要 */
+              return send(res, 200, extPanel.clients({
+                limit: arg?.limit,
+                offset: arg?.offset,
+                q: arg?.q,
+              }));
             }
             case 'extensions.clients.create': {
               const r = extPanel.createClient({
@@ -8801,6 +9015,30 @@ export function apply(ctx) {
               } catch (e) {
                 log.warn(`清日记失败：${e.message}`);
               }
+              /**
+               * **压缩开场也要清**（2026-11 复核）。
+               *
+               * 开场正文是压缩那一刻从日记拼出来的，存在内存里（`set()` 写正文，
+               * 重建结果也会缓存）。日记清了、开场还在，下一条消息照样把
+               * 「刚才说到」里那几句**用户刚删掉的原话**拼进 prompt，
+               * 而且这一轮的回复又会写回日记——删掉的内容绕一圈又回来了。
+               */
+              pendingOpening.clear(chatId);
+              /**
+               * `closing.json` 也要清。
+               *
+               * 它存着「上次这段聊到：…」的收尾摘要和私聊里「问出去还没人回」
+               * 的那句话（120 字原话，留 14 天），**每轮无条件注入**。
+               * 只清日记不清它，等于删了正文还留着摘要——下一轮照样把
+               * 用户刚要求删掉的内容拼进 prompt。
+               */
+              closing.clear(chatId, aliasesOf(chatId));
+              closing.clearPending(chatId, aliasesOf(chatId));
+              /**
+               * 投递账本里的 `text` / `full` 也是原文（留 3 天）。
+               * `keepPending`：还在等审核的那几条留着，否则它们永远不会结案。
+               */
+              deliveryTrack.clearChat(chatId, aliasesOf(chatId), { keepPending: true });
               return send(res, 200, {
                 ok: true,
                 journal: j,
@@ -8824,7 +9062,12 @@ export function apply(ctx) {
               memory.clearChat(chatId, aliasesOf(chatId));
               let j = 0;
               try {
-                j = journal.purgeChat(chatId);
+                /**
+                 * **带别名**：换过机器人的会话在库里散在好几个 openid 下。
+                 * 只删当前键等于「彻底删除」删了一半，旧键下的正文与
+                 * `episode.text` 原样留着、还能被检索到。
+                 */
+                j = journal.purgeChat(chatId, aliasesOf(chatId));
               } catch (e) {
                 log.warn(`彻底删日记失败：${e.message}`);
               }
@@ -8838,10 +9081,24 @@ export function apply(ctx) {
                */
               let g = { episodes: 0, edges: 0, entities: 0 };
               try {
-                g = graph.purgeChat?.(chatId) || g;
+                /** 同样带别名，理由见上 */
+                g = graph.purgeChat?.(chatId, aliasesOf(chatId)) || g;
               } catch (e) {
                 log.warn(`清图谱失败：${e.message}`);
               }
+              /** 压缩开场同理：不清的话下一条消息还会把已删的原话拼进 prompt */
+              pendingOpening.clear(chatId);
+              /**
+               * 「彻底删除」要把**所有还留着原文的地方**清干净。
+               * `closing.json`（收尾摘要 + 私聊那句没回的话）和
+               * `delivery.json`（发出的正文 60/1000 字）都是实打实的原文，
+               * 它们每轮/每次结案都会被读出来用。
+               */
+              closing.clear(chatId, aliasesOf(chatId));
+              closing.clearPending(chatId, aliasesOf(chatId));
+              deliveryTrack.clearChat(chatId, aliasesOf(chatId));
+              /** 召回日志只存 queryLen + 命中的 id（没有正文），但删干净更省事 */
+              recallLog.clear();
               log.info(
                 `彻底删除 ${chatId.slice(0, 8)}：日记 ${j} 条、原文片段 ${g.episodes} 段、`
                 + `关系 ${g.edges} 条、实体 ${g.entities} 个（磁盘旧页待压库）`,
@@ -10073,7 +10330,7 @@ export function apply(ctx) {
             const hello = await Promise.race([
               roost.rpc('system.hello', {}),
               new Promise((_, rej) => {
-                const t = setTimeout(() => rej(new Error('外接协议没响应')), 1500);
+                const t = setTimeout(() => rej(new Error('外接协议没响应')), 1500); // timer-ok: 单次调用的超时竞速，随调用结束
                 t.unref?.();
               }),
             ]);
@@ -11751,7 +12008,7 @@ export function apply(ctx) {
         });
 
         /** 每 60ms 跑一片：太快会和消息处理抢事件循环，太慢用户看着像卡住 */
-        const timer = setInterval(() => {
+        const timer = setInterval(() => { // timer-ok: 任务级，跑完自清 + teardown 兜底
           const p = stickerTagJob.tick();
           if (!p.running) {
             clearInterval(timer);
@@ -12657,12 +12914,22 @@ export function apply(ctx) {
     ];
 
     return () => {
-      clearInterval(speakTimer);
-      clearInterval(proactiveTimer);
-      clearInterval(wakeTimer);
-      clearInterval(groupTimer);
-      clearTimeout(consolidateBoot);
-      clearInterval(consolidateTimer);
+      /** 先立旗：在飞的异步回调回来时据此放弃（见 `disposed` 的注释） */
+      disposed = true;
+      /**
+       * 长期定时器一把清掉。
+       *
+       * 以前是手写清单，2026-11 漏了备份 / 发帖 / 投递回查三个：`unref()` 只保证
+       * 不阻进程退出，**不保证重载后不重复**——插件重载会再 apply 一次，旧实例
+       * 还在跑，表现是同一时刻备份两遍、同一条帖发两次、同一条投递查两次。
+       * 现在统一登记在 `timers` 里，加定时器不必再回来补这一行。
+       */
+      timers.clearAll();
+      /** 表情补标签是任务级定时器，重载发生在任务中途时也要清掉 */
+      if (stickerTagTimer) {
+        clearInterval(stickerTagTimer);
+        stickerTagTimer = null;
+      }
       /** 使用次数还在内存里：退出前补一次，别把最近 30 秒的计数丢掉 */
       clearTimeout(usageTimer);
       flushUsage();

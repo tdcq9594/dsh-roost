@@ -288,3 +288,105 @@ test('串联：发一条进审核 → 登记 → 过一阵查到 sent', async ()
   assert.equal(track.stats().by.sent, 1);
   tick(1);
 });
+
+/**
+ * 人格归因要能过重启（2026-11 审查）。
+ *
+ * `note()` 一直写 `personaId`，但 `load()` 的字段映射里没有它：进程重启后
+ * 这个字段消失，下一次 `save()` 还会把它从盘上彻底抹掉——按人格的送达统计
+ * 重启即清零，而且没有任何报错。
+ */
+test('投递账本：personaId 要能落盘并读回来', () => {
+  const { track, file } = rig();
+  track.note({ requestId: 'r1', target: 'g1', text: '在吗', personaId: 'p-x' });
+  assert.equal(track.list()[0].personaId, 'p-x', '内存里有');
+
+  /** 模拟重启：同一个文件新建一份 track */
+  const again = createDeliveryTrack({
+    file,
+    channelOf: () => createFakeChannel({}),
+    now: () => 1_700_000_000_000,
+    log: () => {},
+  });
+  assert.equal(again.list()[0].personaId, 'p-x', '重启后不能丢');
+});
+
+/**
+ * 进日记的那份要用全文（2026-11 复核）。
+ *
+ * `text` 只有 60 字，是给面板列表预览的。结案成 `sent` 之后拿它补写日记，
+ * 等于「她记得自己说了半句话」。
+ */
+test('投递账本：全文单独存一份，且能过重启', () => {
+  const long = '一'.repeat(150);
+  const { track, file } = rig();
+  track.note({ requestId: 'r1', target: 'g1', text: long });
+
+  const row = track.list()[0];
+  assert.equal(row.text.length, 60, '预览仍是 60 字');
+  assert.equal(row.full.length, 150, '全文要完整');
+
+  const again = createDeliveryTrack({
+    file,
+    channelOf: () => createFakeChannel({}),
+    now: () => 1_700_000_000_000,
+    log: () => {},
+  });
+  assert.equal(again.list()[0].full.length, 150, '重启后全文还在');
+});
+
+/**
+ * 按会话清空要带别名，并且「清空记忆」不能把还在等审核的记录删掉
+ * （2026-11 复核）。
+ */
+test('投递账本：clearChat 带别名 + 保留待结案', () => {
+  const { track } = rig();
+  track.note({ requestId: 'r1', chatId: 'new', target: 'new', text: 'A' });
+  track.note({ requestId: 'r2', chatId: 'old', target: 'old', text: 'B' });
+  track.note({ requestId: 'r3', chatId: 'other', target: 'other', text: 'C' });
+
+  /** 只删当前键会漏掉旧键（换过机器人的会话） */
+  assert.equal(track.clearChat('new', ['old']), 2);
+  assert.deepEqual(track.list().map((x) => x.requestId), ['r3']);
+});
+
+test('投递账本：keepPending 时「还在等」的不删（否则永远不结案）', () => {
+  const { track } = rig();
+  track.note({ requestId: 'w1', chatId: 'g1', target: 'g1', text: '等审核' });
+  assert.equal(track.list()[0].state, 'waiting');
+  assert.equal(track.clearChat('g1', [], { keepPending: true }), 0, '待结案的要留着');
+  assert.equal(track.list().length, 1);
+});
+
+/**
+ * 清空记忆时保留的「待结案」条目要**抹掉正文**（2026-11 复核）。
+ *
+ * 只保留记录、不抹正文的话，十分钟后结案时 `journalAdd` 又把用户刚要求
+ * 清掉的那句话写回日记——「清空」和「彻底删除」只差十分钟。
+ */
+test('投递账本：keepPending 保留的条目要抹正文并打 cleared（且落盘）', () => {
+  const { track, file } = rig();
+  track.note({ requestId: 'w1', chatId: 'g1', target: 'g1', text: '她主动说的那句：周末我去了海边' });
+  track.clearChat('g1', [], { keepPending: true });
+
+  const row = track.list()[0];
+  assert.equal(row.state, 'waiting', '记录还在，好让它能结案');
+  assert.equal(row.text, '', '正文要抹掉');
+  assert.equal(row.full, '', '全文也要抹掉');
+  assert.equal(row.cleared, true, '打标记：结案时别补写日记');
+
+  /**
+   * **必须落盘**。以前只按「删了几条」判 `save()`：`keepPending` 时一条都没删
+   * （`n === 0`），内存里抹了、盘上还留着原文——重启后结案照样写回日记
+   * （2026-11 复核的独立验证脚本抓到）。
+   */
+  const again = createDeliveryTrack({
+    file,
+    channelOf: () => createFakeChannel({}),
+    now: () => 1_700_000_000_000,
+    log: () => {},
+  });
+  const row2 = again.list()[0];
+  assert.equal(row2.text, '', '重启后正文也得是空的');
+  assert.equal(row2.cleared, true, 'cleared 要过重启');
+});

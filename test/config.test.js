@@ -217,8 +217,16 @@ test('密钥：数组/对象这类非字符串值不会写进磁盘', () => {
   saveConfig({ server: { token: { nested: 1 } } });
   assert.equal(loadConfig().server.token, '', '对象也要当没设置');
 
+  /**
+   * **数字和布尔保留成字符串**（2026-11-21 调整）。
+   *
+   * 原来这里是「数字同样不行 → 空串」。改的理由：备份口令常被手写成纯数字
+   * （`"passphrase": 123456`），`backup-remote.js` 本来就会 `String()` 一下，
+   * 清空反而让「推备份失败：passphrase 没配」变得莫名其妙。
+   * 数组/对象才是真正会拼出垃圾的形态（上面两条），那两类继续清空。
+   */
   saveConfig({ tts: { gptSovits: { apiKey: 12345 } } });
-  assert.equal(loadConfig().tts.gptSovits.apiKey, '', '数字同样不行');
+  assert.equal(loadConfig().tts.gptSovits.apiKey, '12345', '数字要保留成字符串');
 });
 
 test('配置：阶段 2 新增的开关字段存得下去（pruneTo 不会把它们裁掉）', () => {
@@ -321,4 +329,54 @@ test('配置：****** 回填磁盘原值，空串才是清除', () => {
   const next = { tts: { mimo: { apiKey: '******' } } };
   restoreMaskedSecrets(next, stored);
   assert.equal(next.tts.mimo.apiKey, '******');
+});
+
+/**
+ * 备份远端凭据必须打码。
+ *
+ * 漏掉时不是「面板上看得见」这么轻：`GET /v1/config` 只要 `state:read`
+ * （默认 scope、安装时不用确认），返回体就是 `publicConfig()` ——
+ * Gitee PAT / WebDAV 密码 / 备份口令三份明文会原样交给任何装上的扩展。
+ */
+test('配置全文：备份远端凭据也要遮罩，且保存掩码不覆盖真值', () => {
+  freshDir();
+  saveConfig({
+    backup: {
+      remote: {
+        kind: 'gitee',
+        gitee: { owner: 'me', repo: 'priv', token: 'gitee-pat', branch: 'master' },
+        webdav: { url: 'https://dav.example/x', user: 'me', pass: 'webdav-pass' },
+        passphrase: 'backup-pass',
+      },
+    },
+  });
+
+  const view = publicConfig(loadConfig());
+  assert.equal(view.backup.remote.gitee.token, '******', 'Gitee PAT 要遮罩');
+  assert.equal(view.backup.remote.webdav.pass, '******', 'WebDAV 密码要遮罩');
+  assert.equal(view.backup.remote.passphrase, '******', '备份口令要遮罩');
+  /** 非密钥字段不该被遮 */
+  assert.equal(view.backup.remote.gitee.owner, 'me');
+
+  saveConfig(view);
+  const disk = JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'config.json'), 'utf8'));
+  assert.equal(disk.backup.remote.gitee.token, 'gitee-pat', '保存掩码不能把真值冲掉');
+  assert.equal(disk.backup.remote.webdav.pass, 'webdav-pass');
+  assert.equal(disk.backup.remote.passphrase, 'backup-pass');
+});
+
+/**
+ * 数字型口令不能被 `coerceSecrets` 清空。
+ *
+ * 备份口令常被写成纯数字（`123456`），`backup-remote.js` 自己会 `String()`。
+ * 如果保存配置时按「非字符串一律当没设置」处理，用户存一次就变成
+ * 「passphrase 没配」，推备份直接失败——而且看不出来为什么。
+ */
+test('配置：数字型备份口令要保留成字符串，不能清空', () => {
+  freshDir();
+  saveConfig({ backup: { remote: { passphrase: 123456 } } });
+  assert.equal(loadConfig().backup.remote.passphrase, '123456');
+  /** 数组 / 对象仍然要拍平成空串（那是脏数据，拼进请求头会出事） */
+  saveConfig({ backup: { remote: { passphrase: ['x'] } } });
+  assert.equal(loadConfig().backup.remote.passphrase, '');
 });

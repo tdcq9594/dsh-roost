@@ -13,6 +13,8 @@ import {
   thresholdFor,
   buildOpening,
   createCompact,
+  makeOpening,
+  compactCfgOf,
   DEFAULTS,
 } from '../src/compact.js';
 
@@ -480,4 +482,116 @@ test('压缩：换会话后 kind 要一起存（丢了面板分不出群/私聊�
   assert.equal(meta.length, 1);
   assert.equal(meta[0].kind, 'group', 'sessions.set 必须带上 kind');
   assert.equal(meta[0].title, 'QQ · 摸鱼群（续）');
+});
+
+/* ---------------- 开场重建：配额归一化只有一个出口 ---------------- */
+
+/**
+ * 2026-11 踩过：`host.js` 的 `rebuildOpening` 直接把**整份** `cfg` 传给
+ * `makeOpening`，而它读的是扁平的 `keepDigests` —— 那在 `cfg.compact` 下面。
+ * 后果不是报错，是**静默取默认**：`keepDigests` 变 `undefined`，
+ * `journal.digests` 回 5 条，`buildOpening` 再 `slice(-3)`，
+ * 「这几天」从最新 3 条变成最旧 3 条。
+ *
+ * 所以归一化只留 `compactCfgOf()` 一个出口，下面三条钉住它。
+ */
+function fakeJournal({ rows = [], digests = [] } = {}) {
+  const calls = { recent: [], digests: [] };
+  return {
+    calls,
+    recent(chatId, n, kind, aliases) {
+      calls.recent.push({ chatId, n, kind, aliases });
+      return rows;
+    },
+    digests(chatId, n, aliases) {
+      calls.digests.push({ chatId, n, aliases });
+      return digests;
+    },
+  };
+}
+
+test('开场重建：compactCfgOf 把 cfg.compact 摊平，缺的字段回默认', () => {
+  const flat = compactCfgOf(() => ({ compact: { keepDigests: 7 } }))();
+  assert.equal(flat.keepDigests, 7, '配了的要生效');
+  assert.equal(flat.keepRecentUser, DEFAULTS.keepRecentUser, '没配的回默认');
+  assert.equal(flat.keepRecentBot, DEFAULTS.keepRecentBot);
+  assert.equal(flat.enabled, DEFAULTS.enabled);
+  /** cfgOf 返回空 / undefined 也不能炸 */
+  assert.equal(compactCfgOf(() => undefined)().keepDigests, DEFAULTS.keepDigests);
+  assert.equal(compactCfgOf()().keepDigests, DEFAULTS.keepDigests);
+});
+
+test('开场重建：摘要条数按配置传下去，不是 undefined', () => {
+  const j = fakeJournal({ digests: [{ at: 1, text: 'd1' }] });
+  makeOpening({ journal: j, cfgOf: compactCfgOf(() => ({ compact: { keepDigests: 7 } })) })('g1');
+  assert.equal(j.calls.digests[0].n, 7, '必须是有值的数字；undefined 会让 journal 用 5 条兜底');
+  assert.equal(j.calls.digests[0].chatId, 'g1');
+});
+
+test('开场重建：用户 / 她的条数配额按配置生效', () => {
+  const rows = [];
+  for (let i = 0; i < 30; i += 1) rows.push({ role: 'user', sender: '主人', text: `u${i}`, at: i });
+  for (let i = 0; i < 5; i += 1) rows.push({ role: 'bot', text: `b${i}`, at: 100 + i });
+  const j = fakeJournal({ rows });
+  const text = makeOpening({
+    journal: j,
+    cfgOf: compactCfgOf(() => ({ compact: { keepRecentUser: 4, keepRecentBot: 2 } })),
+  })('g1');
+  assert.equal(j.calls.recent[0].n, 40, '一次多取一些再按角色分');
+  const userLines = text.split('\n').filter((l) => l.includes('主人（')).length;
+  const botLines = text.split('\n').filter((l) => l.includes('你（')).length;
+  assert.equal(userLines, 4, `用户原话 4 条，实际 ${userLines}`);
+  assert.equal(botLines, 2, `她的话 2 条，实际 ${botLines}`);
+});
+
+test('开场重建：与 buildOpening 直接拼出来的完全一致（同一份规则）', () => {
+  const digests = [{ at: 1, text: 'd1' }, { at: 2, text: 'd2' }, { at: 3, text: 'd3' }, { at: 4, text: 'd4' }];
+  const rows = [
+    { role: 'user', sender: '主人', text: 'u1', at: 10 },
+    { role: 'bot', text: 'b1', at: 11 },
+  ];
+  const j = fakeJournal({ rows, digests });
+  const now = 5_000;
+  const viaMake = makeOpening({ journal: j, cfgOf: compactCfgOf(() => ({})), now: () => now })('g1');
+  const direct = buildOpening({ digests, recent: rows, agreements: [], now });
+  assert.equal(viaMake, direct);
+});
+
+test('开场重建：host.js 的接线必须过 compactCfgOf（源码级，挡住回退）', async () => {
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const at = host.indexOf('const rebuildOpening = makeOpening(');
+  assert.ok(at > 0, '没找到 rebuildOpening 的构造，变量名可能改了');
+  const block = host.slice(at, host.indexOf('});', at));
+  assert.match(block, /cfgOf:\s*compactCfgOf\(/, 'rebuildOpening 的 cfgOf 必须过 compactCfgOf');
+  /**
+   * 直接写 `cfgOf: () => cfg` 就是那个 bug 的形状：`keepDigests` 取到
+   * `undefined`，摘要从最新 3 条变最旧 3 条，而且**不报错**。
+   */
+  assert.ok(!/cfgOf:\s*\(\)\s*=>\s*cfg\b/.test(block), '不许把整份 cfg 直接递进去');
+});
+
+/**
+ * 重建开场时「一点料都没有」要回空串（2026-11 复核）。
+ *
+ * `buildOpening({})` 保留骨架是有意的（压缩那一刻总要给模型一句话），
+ * 但**重建**路径不同：日记被「彻底删除」或 7 天滚动清掉之后，
+ * 骨架会被判真、消费掉指针、注入给模型——模型看到「接着上面」却没有「上面」。
+ */
+test('开场：重建路径没有料时回空串（不注入无内容的骨架）', () => {
+  const mk = makeOpening({
+    journal: { recent: () => [], digests: () => [] },
+    agreementsOf: () => [],
+  });
+  assert.equal(mk('g1'), '', '三样都空 → 空串（`pending-opening` 据此删指针但不注入）');
+
+  /** 有料时照常拼 */
+  const mk2 = makeOpening({
+    journal: {
+      recent: () => [{ at: Date.now(), role: 'user', sender: '主人', text: '在吗' }],
+      digests: () => [],
+    },
+    agreementsOf: () => [],
+  });
+  assert.match(mk2('g1'), /刚才说到/);
 });

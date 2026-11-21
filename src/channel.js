@@ -331,7 +331,15 @@ export function createRoostHostChannel({
         await host.rpc('gate.silence', { chatId: String(target), ms: Number(silenceMs) })
           .catch((e) => log(`设静默失败（不影响这条发送）：${e?.message ?? e}`));
       }
-      if (!t) return { ok: true, scene, target, id: '', pending: false, requestId: rid, silentOnly: true };
+      /**
+       * 只有正文为空、**并且没有卡片**时才算「只设静默、不说话」。
+       *
+       * 漏掉 `!hasCard` 的后果：模型写 `<skip>` + `<<card: …>>`（只发卡片不带
+       * 正文）或扩展 `POST /v1/send {card}` 时，这里直接返回 `ok:true`，
+       * 一次 `msg.send` 都没打——上游按 `ok` 记账，面板显示「发出去了」，
+       * 群里什么都没有。卡片分支在下面（`msgType: 8`）。
+       */
+      if (!t && !hasCard) return { ok: true, scene, target, id: '', pending: false, requestId: rid, silentOnly: true };
 
       const base = {
         kind: SEND_KINDS.has(kind) ? kind : (scene === 'group' ? 'group' : 'c2c'),
