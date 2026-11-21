@@ -15274,7 +15274,12 @@ select.roost-input{color-scheme:dark}
     /* ---------------- 扩展面板（2026-11-12 独立成一级分组「扩展」，下辖三页） ---------------- */
 
     /** 三段都走 /quick 的扩展 op；这些是全局设置，chatId 留空。 */
-    const EXT_POST = (op, arg) => post('/quick', { op, arg, chatId: '' })
+    /**
+     * `extra` 给扩展页面的转发用：带 `{ viaExt: id }`，服务端据此按该扩展
+     * **实际授予的 scope** 判权（见 `src/ext-quick-guard.js`）。
+     * 面板自己的按钮不传，保持全权。
+     */
+    const EXT_POST = (op, arg, extra) => post('/quick', { op, arg, chatId: '', ...(extra || {}) })
     const EXT_BUCKET_LABEL = {
       owner: '主人', admin: '管理员', manager: '群管', helper: '助手', member: '群成员', unknown: '未识别',
     }
@@ -17245,6 +17250,43 @@ select.roost-input{color-scheme:dark}
      */
     function ExtUiPage({ id, toast }) {
       const [d, setD] = useState(null)
+      /** 沙箱 iframe 的句柄：既要拿 `contentWindow` 校验来源，也要回消息 */
+      const frameRef = useRef(null)
+
+      /**
+       * 沙箱页面的**唯一通道**。
+       *
+       * 页面是 opaque origin（`sandbox` 没给 `allow-same-origin`），它既读不到
+       * 父窗口，也不能直接调面板 API。所有操作都走这里：
+       *   页面 `fetch('/roost/api/quick')` → 注入的垫片转成 `postMessage`
+       *   → 这里按 `viaExt` 转发 → 服务端按该扩展**实际授予的 scope** 判权
+       *   → 结果回给页面。
+       *
+       * `viaExt` **只从这里填**：页面载荷里带的同名字段一律忽略，
+       * 否则页面自称「我是 ext:manage」就能越权。
+       */
+      useEffect(() => {
+        const onMsg = async (e) => {
+          const f = frameRef.current
+          if (!f || !f.contentWindow || e.source !== f.contentWindow) return
+          const m = e.data
+          if (!m || m.type !== 'roost:quick' || !m.id) return
+          let status = 200
+          let body
+          try {
+            body = await EXT_POST(String(m.op || ''), m.arg || {}, { viaExt: id })
+            if (body && body.ok === false) status = 403
+          } catch (err) {
+            status = 500
+            body = { ok: false, message: String((err && err.message) || err) }
+          }
+          try {
+            f.contentWindow.postMessage({ type: 'roost:reply', id: m.id, ok: status < 400, status, body }, '*')
+          } catch { /* 页面已经走了 */ }
+        }
+        window.addEventListener('message', onMsg)
+        return () => window.removeEventListener('message', onMsg)
+      }, [id])
       /** 设置表单：`null` = 还没改过，直接用服务端返回的当前值 */
       const [cfgDraft, setCfgDraft] = useState(null)
       const [cfgSecrets, setCfgSecrets] = useState({})
@@ -17409,8 +17451,24 @@ select.roost-input{color-scheme:dark}
        */
       if (d.page) {
         return h('iframe', {
+          ref: frameRef,
           src: API + '/ext-pages?id=' + encodeURIComponent(id) + '&file=' + encodeURIComponent(d.page),
           title: d.nav?.label || id,
+          /**
+           * **沙箱**（2026-11-21）：不给 `allow-same-origin`，页面变成 opaque
+           * origin——读不到父窗口、带不上面板 cookie、直接 fetch 面板接口会被
+           * CORS 挡。能力收窄到「注入垫片转发的那几个 op」，且服务端再按
+           * 该扩展声明过的 scope 判一次。
+           *
+           * 几个 `allow-*` 不是随手加的，是 5 个存量页面实测要用的：
+           *   · `allow-modals`  —— `confirm()`（删人设卡/预设共 10 处）；
+           *   · `allow-popups`  —— `target="_blank"` 打开 B 站（4 处）；
+           *   · `allow-forms`   —— 页面里的表单提交。
+           * 少了 `allow-modals` 的表现是**静默返回 false**，删除按钮全失效。
+           */
+          sandbox: 'allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox',
+          /** 剪贴板要单独授权（imagegen 的「复制」按钮） */
+          allow: 'clipboard-write',
           style: {
             width: '100%', height: 'calc(100vh - 136px)', minHeight: 480,
             border: 0, display: 'block', background: 'transparent',

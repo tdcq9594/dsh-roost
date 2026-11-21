@@ -51,6 +51,8 @@ import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
 import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
+import { guardQuickCall } from './ext-quick-guard.js';
+import { injectShim } from './ext-page-shim.js';
 import { mountUsageSections, mountToolOutputBudget } from './ext-usage.js';
 import { createApiV1 } from './api-v1.js';
 import { createAgentV1 } from './agent-v1.js';
@@ -7783,7 +7785,27 @@ export function apply(ctx) {
 
         const chatId = String(body?.chatId || lastScene?.chatId || '');
         const op = String(body?.op || '');
-        const arg = body?.arg;
+        let arg = body?.arg;
+
+        /**
+         * **扩展页面转发的调用**（2026-11-21）。
+         *
+         * `viaExt` 只认父窗口填的：页面在沙箱里，`postMessage` 载荷里的
+         * `viaExt` 会被父窗口丢掉。判据是**令牌上实际授予的 scope**（不是清单
+         * 声明），主人收回过 scope 时立刻生效。
+         *
+         * 面板自己的按钮不带这个字段，保持全权——这套判权只管扩展页面。
+         */
+        const viaExt = String(body?.viaExt || '').trim();
+        if (viaExt) {
+          const granted = extClientStore?.get?.(`ext:${viaExt}`)?.scopes;
+          const g = guardQuickCall({ op, arg, viaExt, scopes: Array.isArray(granted) ? granted : [] });
+          if (!g.ok) {
+            log.warn(`面板 API 拒绝 ${viaExt} 调 ${op}：${g.why}`);
+            return send(res, g.status, { ok: false, message: g.why });
+          }
+          arg = g.arg;
+        }
 
         /**
          * 审计：谁、什么时候、对哪个会话、点了什么。
@@ -11646,10 +11668,40 @@ export function apply(ctx) {
           '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
           '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.woff': 'font/woff',
         };
+        const type = TYPE[extname(abs).toLowerCase()] || 'application/octet-stream';
+        const isHtml = /^text\/html/.test(type);
+        if (isHtml) {
+          /**
+           * **注入 `fetch` 垫片**（2026-11-21）。
+           *
+           * 沙箱之后页面是 opaque origin，直接 `fetch('/roost/api/quick')` 会被
+           * CORS 挡。5 个存量页面都是 `fetch` + `.json()` 的写法，垫片让它们
+           * 一行都不用改：`/roost/api/quick` 的请求转成 `postMessage`，
+           * 由面板按该扩展**声明过的 scope** 转发。
+           */
+          buf = Buffer.from(injectShim(buf.toString('utf8')), 'utf8');
+        }
         res.writeHead(200, {
-          'content-type': TYPE[extname(abs).toLowerCase()] || 'application/octet-stream',
+          'content-type': type,
           'cache-control': 'no-store',
           'x-content-type-options': 'nosniff',
+          /**
+           * 沙箱页面要能读**自己目录下**的 JSON（榜单、画廊快照）。
+           *
+           * 只放行 `null`（opaque origin），**不要写 `*`**：`localhost` 在浏览器里
+           * 是可达的，写 `*` 等于让任何网页都能读这些文件（里面有扩展自己抓的
+           * 历史、画廊快照）。沙箱 iframe 的 `Origin` 正好是字面量 `null`，
+           * 正常网页的 `Origin` 是它自己的域名，匹配不上。
+           */
+          'access-control-allow-origin': 'null',
+          vary: 'origin',
+          ...(isHtml ? {
+            /**
+             * 第二道沙箱：即使有人绕过 iframe 属性直接打开这个地址，
+             * 文档本身也是 opaque origin。
+             */
+            'content-security-policy': 'sandbox allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox',
+          } : {}),
         });
         res.end(buf);
       /**

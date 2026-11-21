@@ -365,7 +365,7 @@ test('接线：面板 API 拒绝 Origin: null，/ext-pages 豁免', () => {
   /** /ext-pages 走 skipFence，天然豁免（路由体很长，窗口要够大） */
   const ep = SRC.indexOf("route('/ext-pages'");
   assert.ok(ep > 0, '找不到 /ext-pages');
-  assert.match(SRC.slice(ep, ep + 4000), /skipFence: true/, '/ext-pages 要标 skipFence');
+  assert.match(SRC.slice(ep, ep + 9000), /skipFence: true/, '/ext-pages 要标 skipFence');
 });
 
 /**
@@ -379,5 +379,45 @@ test('接线：/ext-pages 先验指纹', () => {
   assert.ok(
     block.indexOf('manifestStateOf') < block.indexOf('normalizeUiSpec'),
     '指纹要在发文件之前判',
+  );
+});
+
+/**
+ * 扩展页面转发的 `/quick` 要过判权（2026-11-21）。
+ *
+ * `viaExt` 只认父窗口填的：页面在沙箱里，`postMessage` 载荷里的同名字段
+ * 会被父窗口丢掉。判据是**令牌上实际授予的 scope**，不是清单声明——
+ * 主人收回过 scope 时立刻生效。
+ */
+test('接线：/quick 用 guardQuickCall 判扩展页面的调用', () => {
+  const at = SRC.indexOf("route('/quick'");
+  assert.ok(at > 0, '找不到 /quick');
+  const block = SRC.slice(at, at + 2600);
+
+  assert.match(block, /const viaExt = String\(body\?\.viaExt \|\| ''\)\.trim\(\)/, '要读 viaExt');
+  assert.match(block, /guardQuickCall\(\{ op, arg, viaExt/, '要过判权');
+  assert.match(block, /extClientStore\?\.get\?\.\(/, '按扩展 id 取令牌记录');
+  assert.match(block, /extClientStore/, '判据取自令牌存储');
+  assert.match(block, /\.scopes/, '读令牌上的 scopes');
+  assert.ok(
+    block.indexOf('guardQuickCall') < block.indexOf('switch (op)'),
+    '判权要在 switch 之前（否则已经执行了）',
+  );
+});
+
+/**
+ * `/ext-pages` 要带沙箱头、放行自己目录的 JSON、并注入垫片（2026-11-21）。
+ */
+test('接线：/ext-pages 带 CSP 沙箱 + CORS + 垫片注入', () => {
+  const at = SRC.indexOf("route('/ext-pages'");
+  const block = SRC.slice(at, at + 7000);
+
+  assert.match(block, /content-security-policy': 'sandbox allow-scripts/, '要发 CSP 沙箱');
+  assert.match(block, /access-control-allow-origin': 'null'/, '只放行 opaque origin');
+  assert.equal(/access-control-allow-origin': '\*'/.test(block), false, '不能写 *（任何网页都能读 localhost）');
+  assert.match(block, /injectShim\(buf\.toString\('utf8'\)\)/, 'HTML 要注入垫片');
+  assert.ok(
+    block.indexOf('injectShim') < block.indexOf('res.end(buf)'),
+    '注入要在发送之前',
   );
 });
