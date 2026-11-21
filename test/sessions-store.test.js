@@ -235,3 +235,14 @@ test('A18 chatSessionKey 优先 sessionKey，其次 chatId', () => {
   assert.equal(chatSessionKey({}), '');
   assert.equal(chatSessionKey(null), '');
 });
+
+test('A8b 损坏文件：load 与首次 save 只隔离一份（不是两份副本）', () => {
+  const t = fresh();
+  writeFileSync(t.file, '{bad', 'utf8');
+  const s = t.make();
+  /** 触发一次写盘：以前 `save()` 会再隔离一份，同一个坏文件留两份副本 */
+  s.set('g1', 'sid-1');
+  const baks = readdirSync(t.dir).filter((n) => n.startsWith('sessions.json.corrupted.'));
+  assert.equal(baks.length, 1, `只该留一份，实际 ${baks.length}`);
+  assert.equal(t.logs.filter((m) => /损坏/.test(m)).length, 1, '日志也别重复');
+});

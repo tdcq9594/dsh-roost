@@ -288,3 +288,49 @@ test('串联：发一条进审核 → 登记 → 过一阵查到 sent', async ()
   assert.equal(track.stats().by.sent, 1);
   tick(1);
 });
+
+/**
+ * 人格归因要能过重启（2026-11 审查）。
+ *
+ * `note()` 一直写 `personaId`，但 `load()` 的字段映射里没有它：进程重启后
+ * 这个字段消失，下一次 `save()` 还会把它从盘上彻底抹掉——按人格的送达统计
+ * 重启即清零，而且没有任何报错。
+ */
+test('投递账本：personaId 要能落盘并读回来', () => {
+  const { track, file } = rig();
+  track.note({ requestId: 'r1', target: 'g1', text: '在吗', personaId: 'p-x' });
+  assert.equal(track.list()[0].personaId, 'p-x', '内存里有');
+
+  /** 模拟重启：同一个文件新建一份 track */
+  const again = createDeliveryTrack({
+    file,
+    channelOf: () => createFakeChannel({}),
+    now: () => 1_700_000_000_000,
+    log: () => {},
+  });
+  assert.equal(again.list()[0].personaId, 'p-x', '重启后不能丢');
+});
+
+/**
+ * 进日记的那份要用全文（2026-11 复核）。
+ *
+ * `text` 只有 60 字，是给面板列表预览的。结案成 `sent` 之后拿它补写日记，
+ * 等于「她记得自己说了半句话」。
+ */
+test('投递账本：全文单独存一份，且能过重启', () => {
+  const long = '一'.repeat(150);
+  const { track, file } = rig();
+  track.note({ requestId: 'r1', target: 'g1', text: long });
+
+  const row = track.list()[0];
+  assert.equal(row.text.length, 60, '预览仍是 60 字');
+  assert.equal(row.full.length, 150, '全文要完整');
+
+  const again = createDeliveryTrack({
+    file,
+    channelOf: () => createFakeChannel({}),
+    now: () => 1_700_000_000_000,
+    log: () => {},
+  });
+  assert.equal(again.list()[0].full.length, 150, '重启后全文还在');
+});

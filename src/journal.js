@@ -25,8 +25,9 @@
  *   功能一样、检索退化为线性扫描——日记这条线不能因为环境差异就断掉。
  */
 
-import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, copyFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { writeFileAtomic } from './atomic.js';
 import {
   indexText,
   indexTerms,
@@ -415,31 +416,49 @@ function createSqliteStore(file, log) {
     insert(row) {
       const d = open();
       if (!d) return null;
-      const r = d
-        .prepare(
-          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(id) DO NOTHING`,
-        )
-        .run(
-          row.id,
-          row.at,
-          row.day,
-          row.chatId,
-          row.sender,
-          row.role,
-          row.text,
-          row.level,
-          row.kind,
-          row.digest ?? null,
-          row.keepUntil ?? 0,
-          row.vec ?? null,
-          row.eventIds?.length ? JSON.stringify(row.eventIds) : null,
-          row.evidence?.length ? JSON.stringify(row.evidence) : null,
-          normStatus(row.status),
-        );
-      if (!r.changes) return false; // 幂等：同一条消息写了两次
-      d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(row.id, indexText(row.text));
+      /**
+       * 行和 FTS 索引放在**一个事务**里。
+       *
+       * 两条独立语句：中间崩溃（断电 / 库被杀）会留下「行在库里、检索永远
+       * 找不到」的残局，而全仓没有 FTS 重建入口（`vacuum()` 只 VACUUM）。
+       */
+      d.exec('BEGIN');
+      let inserted;
+      try {
+        inserted = d
+          .prepare(
+            `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,status)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO NOTHING`,
+          )
+          .run(
+            row.id,
+            row.at,
+            row.day,
+            row.chatId,
+            row.sender,
+            row.role,
+            row.text,
+            row.level,
+            row.kind,
+            row.digest ?? null,
+            row.keepUntil ?? 0,
+            row.vec ?? null,
+            row.eventIds?.length ? JSON.stringify(row.eventIds) : null,
+            row.evidence?.length ? JSON.stringify(row.evidence) : null,
+            normStatus(row.status),
+          );
+        if (inserted.changes) {
+          d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(row.id, indexText(row.text));
+        }
+        d.exec('COMMIT');
+      } catch (e) {
+        try {
+          d.exec('ROLLBACK');
+        } catch {}
+        throw e;
+      }
+      if (!inserted.changes) return false; // 幂等：同一条消息写了两次
       return true;
     },
 
@@ -455,13 +474,21 @@ function createSqliteStore(file, log) {
       const id = String(row?.id ?? '');
       if (!id) return false;
       const at = Number(row.at) || 0;
-      const r = d
-        .prepare(
-          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,accessed,last_access,invalid_at,superseded_by,status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(id) DO NOTHING`,
-        )
-        .run(
+      /**
+       * 和 `insert()` 同一套：行 + FTS 放一个事务里。
+       * 这条是备份还原路径（`backup.js` 逐行调），中途崩了会留下
+       * 「行在库里、检索找不到」且没有重建入口。
+       */
+      d.exec('BEGIN');
+      let r;
+      try {
+        r = d
+          .prepare(
+            `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,accessed,last_access,invalid_at,superseded_by,status)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO NOTHING`,
+          )
+          .run(
           id,
           at,
           String(row.day || dayOf(at)),
@@ -482,9 +509,17 @@ function createSqliteStore(file, log) {
           String(row.supersededBy ?? ''),
           normStatus(row.status),
         );
-      if (!r.changes) return false;
-      d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(id, indexText(String(row.text ?? '')));
-      return true;
+        if (r.changes) {
+          d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(id, indexText(String(row.text ?? '')));
+        }
+        d.exec('COMMIT');
+      } catch (e) {
+        try {
+          d.exec('ROLLBACK');
+        } catch {}
+        throw e;
+      }
+      return Boolean(r.changes);
     },
 
     /**
@@ -531,16 +566,29 @@ function createSqliteStore(file, log) {
       }
       if (!cols.length) return false;
       vals.push(id);
-      d.prepare(`UPDATE journal SET ${cols.join(',')} WHERE id=?`).run(...vals);
       /**
-       * 文本被抹掉（用户说"别记这个"）时必须同步删索引，
-       * 否则 FTS 里还留着原文的词，搜得到一条空记录。
+       * 改行 + 重建索引放一个事务里：中间崩溃会留下「正文改了、索引还是旧的」，
+       * 搜出来的是原文的词、拿到的却是占位符。
        */
-      if (patch.text !== undefined) {
-        d.prepare('DELETE FROM journal_fts WHERE jid=?').run(id);
-        if (String(patch.text).trim()) {
-          d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(id, indexText(patch.text));
+      d.exec('BEGIN');
+      try {
+        d.prepare(`UPDATE journal SET ${cols.join(',')} WHERE id=?`).run(...vals);
+        /**
+         * 文本被抹掉（用户说"别记这个"）时必须同步删索引，
+         * 否则 FTS 里还留着原文的词，搜得到一条空记录。
+         */
+        if (patch.text !== undefined) {
+          d.prepare('DELETE FROM journal_fts WHERE jid=?').run(id);
+          if (String(patch.text).trim()) {
+            d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(id, indexText(patch.text));
+          }
         }
+        d.exec('COMMIT');
+      } catch (e) {
+        try {
+          d.exec('ROLLBACK');
+        } catch {}
+        throw e;
       }
       return true;
     },
@@ -1090,21 +1138,52 @@ function createSqliteStore(file, log) {
 function createJsonlStore(file, log) {
   let rows = null;
   let index = null;
+  /**
+   * 上次 `load()` 里有几行解析不了。
+   *
+   * 以前逐行 `catch {}`，**一个字都不打**：最后一行写一半（进程被杀）、
+   * 记事本另存成 UTF-16、任意一行坏掉，那一行（或整库）就静默消失，
+   * 而下一次整份重写会把它从磁盘上永久抹掉。
+   */
+  let badLines = 0;
+  let quarantined = false;
+
+  /** 坏行先留一份原文，再允许后面的重写 —— 顺序反了就再也救不回来 */
+  function quarantineIfBad() {
+    if (!badLines || quarantined) return;
+    quarantined = true;
+    try {
+      const bak = `${file}.corrupted.${Date.now()}`;
+      /** **按字节复制**：先按 utf8 读再写回去，UTF-16 那种文件会被替换字符改写，
+       *  「备份原文」就成了假的 */
+      copyFileSync(file, bak);
+      log(`日记里有 ${badLines} 行解析不了，原文已备份到 ${bak}`);
+    } catch (e) {
+      log(`日记坏行备份失败（${badLines} 行）：${e.message}`);
+    }
+  }
 
   function load() {
     if (rows) return rows;
     rows = [];
+    badLines = 0;
     try {
       if (existsSync(file)) {
         for (const line of readFileSync(file, 'utf8').split('\n')) {
           if (!line.trim()) continue;
           try {
             rows.push(normRow(JSON.parse(line)));
-          } catch {}
+          } catch {
+            badLines += 1;
+          }
         }
       }
     } catch (e) {
       log(`日记文件读不出来：${e.message}`);
+    }
+    if (badLines) {
+      log(`日记有 ${badLines} 行解析不了（已跳过，原文会先备份）`);
+      quarantineIfBad();
     }
     index = new Map(); // 词 → Set(row 下标)
     rows.forEach((r, i) => {
@@ -1140,7 +1219,12 @@ function createJsonlStore(file, log) {
   function rewrite() {
     try {
       ensureDir(file);
-      writeFileSync(file, rows.map(jsonOf).join('\n') + (rows.length ? '\n' : ''), 'utf8');
+      /**
+       * **原子写**。以前是 `writeFileSync` 直接盖活文件：写到一半断电/ENOSPC
+       * 会把整份日记截断成半截。同仓 `sessions.js` / `atomic.js` /
+       * `pending-opening.js` 都是随机 tmp + rename，唯独这里没有。
+       */
+      writeFileAtomic(file, rows.map(jsonOf).join('\n') + (rows.length ? '\n' : ''), 'utf8');
       return true;
     } catch (e) {
       log(`日记文件写不进去：${e.message}`);

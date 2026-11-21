@@ -199,3 +199,58 @@ test('接线：memory.purge 要带 aliasesOf 删日记与图谱', () => {
     '清图谱也必须带别名键',
   );
 });
+
+/**
+ * 发送失败不能记账（2026-11 审查）。
+ *
+ * 出站层失败**只回 `{ok:false}`、不抛异常**，所以三处都必须看返回值：
+ * 主回复（失败仍写日记 → 下一轮拿没发出去的话当既定事实）、`qq_send`
+ * （失败仍 `parts += 1` → 主回复分支不再发正文，话彻底消失）、
+ * `qq_send_file`（失败仍占名额与配额）。
+ */
+test('接线：三处发送都要判 ok===false', () => {
+  const mainAt = SRC.indexOf('const sent = await postReply(payload, guardOutbound(reply)');
+  assert.ok(mainAt > 0, '主回复要接返回值');
+  const mainBlock = SRC.slice(mainAt, mainAt + 600);
+  assert.ok(
+    mainBlock.includes('sent?.ok === false'),
+    '主回复没判失败分支',
+  );
+  assert.ok(
+    mainBlock.indexOf('sent?.ok === false') < mainBlock.indexOf('journalAdd(payload, chat, journalText'),
+    '日记必须在「发送成功」之后写',
+  );
+
+  /**
+   * `qq_send`：失败必须 `return { ok:false }` 且**排在 `st2.parts += 1` 之前**。
+   * 只看「有没有那段文案」不够——文案会改，顺序才是语义。
+   */
+  const sendFailAt = SRC.indexOf('return { ok: false, message: `这句没发出去');
+  assert.ok(sendFailAt > 0, 'qq_send 失败没回 ok:false');
+  /** 失败返回**之后**最近的那次 `st2.parts += 1`（文件里还有别处也累加） */
+  const partsAt = SRC.indexOf('st2.parts += 1', sendFailAt);
+  assert.ok(partsAt > 0, '失败分支后面没有段数累加，说明 qq_send 那段结构变了');
+  assert.ok(sendFailAt < partsAt, '失败分支必须在累加段数之前 return');
+  /** 文件失败在 `filesOk` 里（正文空串时 `ok` 恒 true），必须一并判并回滚 */
+  const fileFailAt = SRC.indexOf('sent?.filesOk === false');
+  assert.ok(fileFailAt > 0, 'qq_send_file 要判 filesOk');
+  const rollbackAt = SRC.indexOf('turnSt.files -= 1', fileFailAt);
+  assert.ok(rollbackAt > 0, 'qq_send_file 失败要回滚 files');
+  assert.ok(rollbackAt - fileFailAt < 800, '回滚要在失败分支里，不能隔太远');
+  assert.ok(SRC.indexOf('q.undo?.()', fileFailAt) < rollbackAt + 400, '配额也要回滚');
+});
+
+/**
+ * 过审送达的主动消息要补写日记。
+ *
+ * 进审核时 `sendOut` 因为 `pending` 跳过 journalAdd；十分钟后结案成 `sent`，
+ * 以前只打一行日志——那句话永远不进日记，下一轮容易再说一遍。
+ */
+test('接线：投递结案成 sent 时要补写日记', () => {
+  const at = SRC.indexOf('for (const it of r.settled || [])');
+  assert.ok(at > 0, '找不到 settled 的处理循环');
+  const block = SRC.slice(at, at + 900);
+  assert.ok(block.includes("it.state !== 'sent'"), '只处理 sent');
+  assert.ok(block.includes('journalAdd('), '要真的写日记');
+  assert.ok(block.includes('delivery:${it.requestId}'), '行 id 要用 requestId 保证幂等');
+});

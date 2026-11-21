@@ -236,17 +236,33 @@ export function createGraph({ file, log = () => {} } = {}) {
       .get(sid, r0, did);
     if (alive) return Number(alive.id);
 
-    if (FUNCTIONAL.test(r0)) {
-      // 旧的同关系活边全部关掉（valid_to 打上现在的时间，不是删除）
-      d.prepare('UPDATE edge SET valid_to=? WHERE src_id=? AND rel=? AND valid_to IS NULL').run(t, sid, r0);
-    }
+    /**
+     * 关旧边 + 插新边放在**一个事务**里。
+     *
+     * 两条独立语句：INSERT 失败（磁盘满 / 库忙）时旧边已经关了、新边没有，
+     * 那条关系在 `nowEdges` 里彻底消失，`endedEdges` 里留一条「已结束」
+     * 却没有任何替代。同文件 `suppressEdge` 早就是 BEGIN/COMMIT 写法。
+     */
+    d.exec('BEGIN');
+    try {
+      if (FUNCTIONAL.test(r0)) {
+        // 旧的同关系活边全部关掉（valid_to 打上现在的时间，不是删除）
+        d.prepare('UPDATE edge SET valid_to=? WHERE src_id=? AND rel=? AND valid_to IS NULL').run(t, sid, r0);
+      }
 
-    const r = d
-      .prepare(
-        'INSERT INTO edge(src_id,rel,dst_id,valid_from,valid_to,episode_id,chat_id) VALUES (?,?,?,?,NULL,?,?)',
-      )
-      .run(sid, r0, did, t, episodeId, chatId);
-    return Number(r.lastInsertRowid);
+      const r = d
+        .prepare(
+          'INSERT INTO edge(src_id,rel,dst_id,valid_from,valid_to,episode_id,chat_id) VALUES (?,?,?,?,NULL,?,?)',
+        )
+        .run(sid, r0, did, t, episodeId, chatId);
+      d.exec('COMMIT');
+      return Number(r.lastInsertRowid);
+    } catch (e) {
+      try {
+        d.exec('ROLLBACK');
+      } catch {}
+      throw e;
+    }
   }
 
   /**

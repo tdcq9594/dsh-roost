@@ -151,6 +151,29 @@ export function deriveTier(manifest = {}) {
     reasons.push({ kind: 'form', key: form, level: 3, text: '这是可关闭、可替换的核心扩展' });
     level = Math.max(level, 3);
   }
+  /**
+   * **面板页面 / 进程内运行也是权限**（2026-11 审查补）。
+   *
+   * 以前分级只看 `scopes` / `overrides` / `form`，于是「只声明默认
+   * `state:read`、但带一个 `ui.page`」的扩展算 L1（无需确认）。而面板页
+   * 是**同源 iframe**、`/quick` 就在同源上：页面里的 JS 能拿主人身份调
+   * `extensions.clients.create` 发高权令牌、改配置。`inprocess` 更直接——
+   * 代码就在宿主进程里跑。两种都按最高风险算。
+   */
+  if (manifest?.ui?.page) {
+    reasons.push({
+      kind: 'ui', key: 'page', level: 3,
+      text: '会在面板里开一个页面：页面与面板同源，等于拿到主人的全部操作权限',
+    });
+    level = Math.max(level, 3);
+  }
+  if (form === 'inprocess') {
+    reasons.push({
+      kind: 'form', key: 'inprocess', level: 3,
+      text: '在宿主进程内运行：能直接读写本机文件、进程与密钥',
+    });
+    level = Math.max(level, 3);
+  }
   if (!FORMS.includes(rawForm) && rawForm) {
     reasons.push({ kind: 'form', key: rawForm, level: 3, text: `未知运行形态「${rawForm}」` });
     level = Math.max(level, 3);

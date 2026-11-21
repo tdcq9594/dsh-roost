@@ -237,6 +237,12 @@ export function createExtPanel({
             scopes: granted,
             overrides: Array.isArray(e.manifest?.overrides) ? e.manifest.overrides : [],
             form: e.manifest?.form,
+            /**
+             * `ui` 也要传：面板页 / 进程内运行本身就是最高风险
+             * （同源 iframe 等于主人权限）。不传的话「已安装」页会把它显示成
+             * L0/L1，而安装确认时算的是 L3 —— 同一个扩展两处不一致。
+             */
+            ui: e.manifest?.ui,
           });
           return { id: t.id, label: t.label, color: t.color, summary: t.summary, risks: riskLines(t) };
         })(),

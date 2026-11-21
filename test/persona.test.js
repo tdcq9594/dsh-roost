@@ -754,3 +754,26 @@ test('dupGroups：垃圾输入不抛', async () => {
   assert.deepEqual(dupGroups([]), {});
   assert.deepEqual(dupGroups([null, { id: 'p' }, { id: 'q', chars: 'abc' }]), {});
 });
+
+/**
+ * 偏好文件读不动时，**不许把用户删掉的内置人格补回来**（2026-11 复核）。
+ *
+ * `prefs.read()` 读失败返回默认值（`deleted: []`），`seed()` 拿空墓碑去补文件，
+ * 等于把删掉的全拷回来；而且文件一存在，后面就再也不会被清掉。
+ */
+test('人格：偏好读不动时跳过内置补齐（删掉的不能复活）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-persona-locked-'));
+  try {
+    /** 目录占住偏好文件（在 `personas/` 里，不是 dataDir）：读不动（非 ENOENT） */
+    mkdirSync(join(dir, 'personas'), { recursive: true });
+    mkdirSync(join(dir, 'personas', '.prefs.json'));
+    const p = createPersonas({ dataDir: dir, log: () => {} });
+    /** `list()` 里可能有内置条目（目录直接读仓库那份），关键是**没往用户目录拷** */
+    p.list();
+    const userDir = join(dir, 'personas');
+    const copied = existsSync(userDir) ? readdirSync(userDir).filter((n) => n.endsWith('.md')) : [];
+    assert.deepEqual(copied, [], '读不到墓碑就别补，一个文件都不该拷进用户目录');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});

@@ -1036,7 +1036,12 @@ export function createChannelPost({
    * @param {boolean} [o.force]    只忽略短记自己的 dryRun（面板上"真发"按钮）
    */
   async function write({ preview: wantPreview = false, force = false } = {}) {
-    if (busy) return { ok: false, message: '上一篇还在写' };
+    /**
+     * 上一次还在写就**不算失败**：`code:'BUSY'` 让 `tick()` 直接跳过，
+     * 不写重试记录、不占重试档位。以前它和真失败一样被记成「发帖失败，
+     * 2 分钟后再试（上一篇还在写）」，日志会误导排障。
+     */
+    if (busy) return { ok: false, code: 'BUSY', message: '上一篇还在写' };
     busy = true;
     try {
       const cfg = cfgOfPost();
@@ -1208,6 +1213,11 @@ export function createChannelPost({
      */
     if (r && r.network) {
       log('发帖时连不上，这一档留着下一轮再发');
+      return;
+    }
+    /** 上一篇还没写完：不是失败，别写重试记录、别计次 */
+    if (r && r.code === 'BUSY') {
+      log('上一篇还没写完，这一档下一轮再看');
       return;
     }
     const delayMin = RETRY_DELAY_MIN[count - 1];

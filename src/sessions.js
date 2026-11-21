@@ -73,6 +73,9 @@ export function createSessions({ dataDir, log = () => {} }) {
    */
   const tombs = new Map();
 
+  /** 坏文件只隔离一次（`load()` 与首次 `save()` 都会走到 `quarantine()`） */
+  let quarantinedOnce = false;
+
   /**
    * 读磁盘，三态返回：
    *   - `null`      确实没有这个文件（首次启动）
@@ -107,6 +110,9 @@ export function createSessions({ dataDir, log = () => {} }) {
 
   /** 坏文件先另存一份再降级：不备份的话，下一次写盘就把原文件彻底覆盖了 */
   function quarantine() {
+    /** 同一份坏文件只隔离一次：`load()` 和首次 `save()` 都会走到这里 */
+    if (quarantinedOnce) return false;
+    quarantinedOnce = true;
     try {
       const bak = `${file}.corrupted.${Date.now()}`;
       copyFileSync(file, bak);
@@ -123,8 +129,10 @@ export function createSessions({ dataDir, log = () => {} }) {
         }
       }
       log(`会话映射损坏（解析失败或结构不对），已备份到 ${bak}`);
+      return true;
     } catch (e) {
       log(`会话映射损坏，备份也失败：${e.message}`);
+      return false;
     }
   }
 
@@ -148,6 +156,29 @@ export function createSessions({ dataDir, log = () => {} }) {
       mkdirSync(dirname(file), { recursive: true });
 
       const disk = readDisk();
+      /**
+       * `undefined` = 既不是「没有文件」也不是「能解析」：读不动或内容坏了。
+       *
+       * 以前直接 `{...undefined, chats:{}}` 继续写，磁盘上那份半截文件被覆盖、
+       * `overrides` 之类 `chats` 之外的顶层字段一起消失，而且**没有隔离副本**。
+       * 现在分两种：
+       *   · 读得到但解析不了 —— 坏文件，隔离原文后照常写（自愈）；
+       *   · 根本读不到（EBUSY / EACCES）—— 盘上还有东西，这一轮不写。
+       */
+      if (disk === undefined) {
+        let text = null;
+        try {
+          text = readFileSync(file, 'utf8');
+        } catch {
+          /* 读不到，下面拒绝写 */
+        }
+        if (text === null) {
+          log('会话映射读不动（非 ENOENT），跳过这次写盘，等下次');
+          return;
+        }
+        /** 只在真隔离了才多说一句：`load()` 已经报过就别重复 */
+        if (quarantine()) log('会话映射文件损坏，已隔离原文后重建');
+      }
 
       /**
        * **保留 `chats` 之外的顶层字段**。

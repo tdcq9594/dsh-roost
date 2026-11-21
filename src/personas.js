@@ -29,6 +29,7 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlink
 import { join } from 'node:path';
 
 import { createCatalog } from './catalog.js';
+import { writeFileAtomic } from './atomic.js';
 import { createPrefs } from './prefs.js';
 
 /**
@@ -541,7 +542,21 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
        * 以前 `remove()` 只 unlink，下一次 `list()` 里 `seed()` 又把它拷回来——
        * 也就是说**内置人格其实删不掉**。现在靠 `.prefs.json` 的 `deleted` 记住。
        */
-      const deleted = new Set(prefs.read().deleted);
+      /**
+       * 偏好文件读不动就**别 seed**。
+       *
+       * `read()` 读失败时给的是默认值（`deleted: []`），拿空墓碑去补文件，
+       * 等于把用户删掉的内置人格全部拷回来——而且磁盘上文件一存在，
+       * 后面就再也不会被清掉。
+       *
+       * **先 read 再问 `unavailable()`**：没读过的时候这个标志还是 false。
+       */
+      const prefsNow = prefs.read();
+      if (prefs.unavailable?.() === true) {
+        log('人格偏好读不到，跳过本轮内置人格补齐（免得把删掉的又装回来）');
+        return;
+      }
+      const deleted = new Set(prefsNow.deleted);
       for (const n of src) {
         if (!n.endsWith('.md')) continue;
         if (deleted.has(n.slice(0, -3))) continue;
@@ -705,7 +720,9 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
       const f = join(dir(), `${clean}.md`);
       // 覆盖旧内容前也备份：注释里说「删除/覆盖共用同一条规则」，那就得真共用
       if (existsSync(f)) backup(clean, `${clean}.md`);
-      writeFileSync(f, String(raw ?? ''), 'utf8');
+      /** 原子写：写到一半失败会把人格文件截断，`parsePersona` 拿到半个正文，
+       *  而系统提示词直接用它。`persona-repo.js` 早就是原子写的。 */
+      writeFileAtomic(f, String(raw ?? ''));
       // 用户又写了这个 id，说明他想要它——从墓碑里摘掉
       try {
         const p = prefs.read();
@@ -719,6 +736,19 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
     remove(id) {
       const clean = safeId(id);
       if (clean === 'default') throw new Error('默认人格不能删');
+      /**
+       * 偏好文件读不动时**不能删**。
+       *
+       * 删文件 + 写墓碑是两件事，墓碑写不进去就成了「删了又回来」：
+       * 用户看到删掉了，下次 `seed()` 见到空墓碑又拷回来。宁可这一轮报错，
+       * 让人过一会儿再删。
+       *
+       * 先 `read()` 一次再问标志：没读过时 `unavailable()` 还是 false。
+       */
+      prefs.read();
+      if (prefs.unavailable?.() === true) {
+        throw new Error('人格偏好文件正被占用，这一轮先别删（过一会儿再试）');
+      }
       const item = catalog.get(clean);
       const file = item ? item.file : `${clean}.md`;
       const f = join(dir(), file);
@@ -810,7 +840,7 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
         const close = m[3].startsWith('\r\n') || m[3].startsWith('\n') ? m[3] : eol + m[3];
         const out = m[1] + lines.join(eol) + close + String(text).slice(m[0].length);
         backup(id, item.file);
-        writeFileSync(f, out, 'utf8');
+        writeFileAtomic(f, out);
         changed.push(id);
       }
 
@@ -917,7 +947,7 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
           writeFileSync(join(cdir, `${safeId(it.id)}.md`), readFileSync(target, 'utf8'), 'utf8');
           conflicts.push(it.id);
         }
-        writeFileSync(target, it.text, 'utf8');
+        writeFileAtomic(target, it.text);
         restored.push(it.id);
       }
       try {

@@ -2343,3 +2343,58 @@ test('日记（JSONL 后端）：彻底删除也要带别名', () => {
   assert.equal(j.listChat('other').length, 1, '别的会话不能误删');
   j.close();
 });
+
+/**
+ * JSONL 后端：坏行不能静默丢，整份坏掉时不许重写（2026-11 审查）。
+ *
+ * 以前逐行 `catch {}`，一个字都不打；下一次整份重写就把那行从磁盘上
+ * 永久抹掉。最刺眼的是「崩溃前最后一条」——恰好是最该留的那条。
+ */
+test('日记（JSONL 后端）：坏行要留痕并隔离，好行照常能读', () => {
+  const dir = tmp();
+  const file = join(dir, 'j.sqlite');
+  mkdirSync(file);
+  const jsonl = join(dir, 'j.jsonl');
+  const good = JSON.stringify({ id: 'a', at: 1, chatId: 'g1', sender: 'u', role: 'user', text: '主人住在杭州' });
+  /** 最后一行写一半：进程被杀 / 断电的形态 */
+  writeFileSync(jsonl, `${good}\n{"id":"b","at":2,"chatId":"g1","te`, 'utf8');
+
+  const logs = [];
+  const j = createJournal({ file, log: (m) => logs.push(m) });
+  assert.equal(j.listChat('g1').length, 1, '好行要读出来');
+  assert.equal(
+    logs.some((m) => m.includes('1 行解析不了')),
+    true,
+    `坏行要留痕：${logs.join(' | ')}`,
+  );
+  const baks = readdirSync(dir).filter((n) => n.startsWith('j.jsonl.corrupted.'));
+  assert.equal(baks.length, 1, '坏文件要留一份原文');
+  assert.equal(readFileSync(join(dir, baks[0]), 'utf8').includes('"id":"b"'), true, '备份是原文');
+  j.close();
+});
+
+test('日记（JSONL 后端）：整份解析不了时，重写也不能把原文弄丢', () => {
+  const dir = tmp();
+  const file = join(dir, 'j.sqlite');
+  mkdirSync(file);
+  const jsonl = join(dir, 'j.jsonl');
+  /** UTF-16 另存：utf8 读出来每行都坏（记事本另存就是这个形态） */
+  const original = Buffer.from('{"id":"a","text":"杭州"}\n', 'utf16le');
+  writeFileSync(jsonl, original);
+
+  const logs = [];
+  const j = createJournal({ file, log: (m) => logs.push(m) });
+  assert.deepEqual(j.listChat('g1'), [], '读不出内容');
+  assert.equal(logs.some((m) => m.includes('解析不了')), true, `要留痕：${logs.join(' | ')}`);
+
+  /** 隔离必须发生在任何重写**之前**：后面 `add` 会触发 rewrite */
+  j.add({ id: 'b', at: Date.now(), chatId: 'g1', text: '新写的一条' });
+  const baks = readdirSync(dir).filter((n) => n.startsWith('j.jsonl.corrupted.'));
+  assert.equal(baks.length, 1, '原文要留一份');
+  assert.deepEqual(
+    readFileSync(join(dir, baks[0])),
+    original,
+    '隔离副本必须是原始字节（不是降级后的空表）',
+  );
+  j.close();
+});

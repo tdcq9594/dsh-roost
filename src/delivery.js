@@ -57,6 +57,13 @@ const SETTLED = new Set(['sent', 'failed', 'unknown', 'gone']);
 
 /** 每条的正文摘要上限（面板显示用，不存全文） */
 const TEXT_MAX = 60;
+/**
+ * 进日记的那份要长一点。
+ *
+ * `TEXT_MAX` 是**面板列表预览**用的（60 字够看）。但结案成 `sent` 之后要拿它
+ * 补写日记，60 字写进去等于「她记得自己说了半句话」。这里单独留一份长的。
+ */
+const TEXT_FULL_MAX = 1000;
 
 /**
  * @param {object} o
@@ -82,11 +89,18 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
             target: String(x.target ?? ''),
             chatId: String(x.chatId ?? x.target ?? ''),
             text: String(x.text ?? '').slice(0, TEXT_MAX),
+            full: String(x.full ?? x.text ?? '').slice(0, TEXT_FULL_MAX),
             at: Number(x.at) || 0,
             state: String(x.state || 'waiting'),
             code: String(x.code || ''),
             parts: Number(x.parts) || 0,
             checkedAt: Number(x.checkedAt) || 0,
+            /**
+             * 4.5 流水层的人格归因。`note()` 一直写这个字段，但 `load()`
+             * 的映射里没有它——**重启后消失**，下一次 `save()` 还会把它从
+             * 盘上彻底抹掉，于是按人格的送达统计重启即清零。
+             */
+            personaId: String(x.personaId ?? ''),
           })),
       };
     } catch {
@@ -165,6 +179,8 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
       /** 4.5 流水层：只加一个统计标记，requestId 幂等键与 chatId 都不动 */
       personaId: String(personaId || ''),
       text: String(text ?? '').slice(0, TEXT_MAX),
+      /** 补写日记用（见 `TEXT_FULL_MAX`） */
+      full: String(text ?? '').slice(0, TEXT_FULL_MAX),
       at: now(),
       state: 'waiting',
       code: '',

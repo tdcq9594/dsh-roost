@@ -32,6 +32,7 @@ import { crc32, deflateRawSync, inflateRawSync } from 'node:zlib';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { writeFileAtomic } from './atomic.js';
 
 export const MANIFEST = 'dsh-roost-backup.json';
 export const SCHEMA = 1;
@@ -93,15 +94,23 @@ const dirOf = (root) => join(root, 'backups');
 const stageDir = (root) => join(root, '.restore');
 const pendingFile = (root) => join(root, '.restore-pending.json');
 
-/** 遍历数据目录，返回 POSIX 相对路径（不跟随符号链接）。 */
-function walk(root, rel = '', out = []) {
+/** 遍历数据目录，返回 POSIX 相对路径（不跟随符号链接）。
+ *
+ * `oversize`：超过单文件上限的**不静默跳过**，记下来让调用方报错。
+ * 以前直接 `continue`，于是包里缺了整个 `journal.sqlite`，
+ * 备份却回 `ok` —— 文件头自己批评的「假成功比报错难查得多」。
+ */
+function walk(root, rel = '', out = [], oversize = []) {
   for (const item of readdirSync(join(root, rel), { withFileTypes: true })) {
     const next = rel ? `${rel}/${item.name}` : item.name;
     if (shouldSkip(next)) continue;
     if (item.isSymbolicLink()) continue;
     const full = join(root, ...next.split('/'));
-    if (item.isDirectory()) walk(root, next, out);
-    else if (item.isFile() && statSync(full).size <= MAX_FILE) out.push({ rel: next, full });
+    if (item.isDirectory()) walk(root, next, out, oversize);
+    else if (item.isFile()) {
+      if (statSync(full).size <= MAX_FILE) out.push({ rel: next, full });
+      else oversize.push(next);
+    }
   }
   return out;
 }
@@ -229,7 +238,17 @@ export function createBackup({ root, out, now = new Date(), version = '', log = 
   const final = join(dest, name);
   const tmp = `${final}.tmp`;
 
-  const items = walk(root);
+  const oversize = [];
+  const items = walk(root, '', [], oversize);
+  /**
+   * 有文件超过单文件上限就**整包取消**。
+   *
+   * 静默跳过的话，备份返回 `ok` 但包里缺了整个 `journal.sqlite`——
+   * 用户以为有备份，真出事才发现缺的是最要紧的那份。
+   */
+  if (oversize.length) {
+    throw new Error(`这些文件超过单文件上限（2GB），备份已取消：${oversize.join('、')}`);
+  }
   /** `backups/` 被整段跳过，但行级备份要单独收进包（不递归备份目录）。 */
   try {
     const bdir = dirOf(root);
@@ -473,7 +492,12 @@ export function applyPendingRestore({ root, now = Date.now() } = {}) {
     const esc = (s) => JSON.stringify(s).slice(1, -1);
     const raw = readFileSync(config, 'utf8');
     const old = esc(pending.dataDir);
-    if (raw.includes(old)) writeFileSync(config, raw.replaceAll(old, esc(resolve(root))), 'utf8');
+    /**
+     * 走原子写：这是**启动路径上、`loadConfig()` 之前**唯一一次改配置。
+     * 直接 `writeFileSync` 写一半断电，`config.json` 就被截断，
+     * 下次启动所有设置要重配。
+     */
+    if (raw.includes(old)) writeFileAtomic(config, raw.replaceAll(old, esc(resolve(root))));
   }
 
   rmSync(stage, { recursive: true, force: true });

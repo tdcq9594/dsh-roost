@@ -4474,6 +4474,29 @@ export function apply(ctx) {
         if (r.checked && !r.skipped) {
           log.info(`投递回查：查了 ${r.checked} 条，结案 ${r.settled.length} 条，还有 ${r.still} 条在等`);
         }
+        /**
+         * **过审送达的主动消息要补写日记**（2026-11 审查）。
+         *
+         * 进审核时 `sendOut` 三处都因为 `pending` 跳过 events / `closing.notePending`
+         * / `journalAdd`；十分钟后这里结案成 `sent`，以前只打一行日志——
+         * 那句「她主动说过的话」永远不进日记，`【刚才说到】` 和 `wakeMaterials`
+         * 都看不到，下一轮容易把同一句再说一遍。
+         *
+         * 行 id 用 `delivery:<requestId>`：稳定且幂等，重复结案不会写出两行。
+         */
+        for (const it of r.settled || []) {
+          if (it.state !== 'sent' || !it.text) continue;
+          const cid = String(it.chatId || it.target || '');
+          if (!cid) continue;
+          journalAdd(
+            { id: `delivery:${it.requestId}` },
+            { chatId: cid, aliases: aliasesOf(cid) },
+            /** 用全文：`text` 只有 60 字（面板预览用），写进日记等于记半句话 */
+            it.full || it.text,
+            'bot',
+            { kind: 'proactive' },
+          );
+        }
       })
       .catch((e) => log.warn(`投递回查失败：${e?.message ?? e}`));
   };
@@ -5657,9 +5680,30 @@ export function apply(ctx) {
           });
           if (at.note) log.info(`@ 没挂上：${at.note}`);
 
-          await postReply(c.payload, at.prefix ? at.prefix + text : text, false, {
+          const sent = await postReply(c.payload, at.prefix ? at.prefix + text : text, false, {
             requestId: opts.requestId,
           });
+          /**
+           * **没发出去就不算发过**。
+           *
+           * 出站层失败只回 `{ok:false}`、不抛异常。以前这里照样
+           * `st2.parts += 1` 并 `return {ok:true}`：宿主以为「已经用工具发过」，
+           * 主回复分支于是不再发正文（话彻底消失），日记里还记了一句没发出去的话。
+           */
+          if (sent?.ok === false) {
+            /**
+             * `network:true` 是**不确定**（请求可能到了服务端）。
+             * 别让模型原样重发——重复两句比少一句更糟；换句话说是安全的。
+             */
+            const hint = sent.network === true
+              ? '不确定有没有发出去，别原样重发，换个说法。'
+              /** 总开关关着：换多少句都发不出去，别让模型白试 */
+              : sent.code === 'disabled'
+                ? '机器人总开关关着，先让主人打开再说话。'
+                : '换一句短一点的再试，或者稍后再说。';
+            log.warn(`分段发送失败（${sent.message || sent.code || '未知原因'}${sent.network ? ' / 网络不确定' : ''}）`);
+            return { ok: false, message: `这句没发出去：${sent.message || '通道异常'}。${hint}` };
+          }
           /**
            * 记下这一轮发了什么：turn 结束时要拿它写日记，并且决定正文不再重发。
            *
@@ -5803,7 +5847,26 @@ export function apply(ctx) {
           turnSt.files = (turnSt.files || 0) + 1;
           turnSt.fileNames = [...(turnSt.fileNames || []), basename(abs)];
           try {
-            await postReply(c.payload, '', false, { files: [abs] });
+            const sent = await postReply(c.payload, '', false, { files: [abs] });
+            /**
+             * 文件的结果在 `filesOk` 里，不在 `ok` 里——正文是空串，`ok` 说的是
+             * 正文那条（恒 true）。只判 `ok` 等于没判（2026-11 复核抓到的）。
+             */
+            if (sent?.ok === false || sent?.filesOk === false) {
+              const why = sent?.fileErrors?.[0]?.message || sent?.message || '通道异常';
+              const network = sent?.fileErrors?.[0]?.network === true || sent?.network === true;
+              turnSt.files -= 1;
+              turnSt.fileNames.pop();
+              q.undo?.();
+              log.warn(`文件没发出去（${why}）：${basename(abs)}`);
+              return {
+                ok: false,
+                reason: 'send',
+                message: network
+                  ? `文件不确定有没有发出去（${why}），别原样重发，跟对方说一声。`
+                  : `文件没发出去（${why}）。跟对方说一声，或者稍后再试。`,
+              };
+            }
           } catch (e) {
             turnSt.files -= 1;
             turnSt.fileNames.pop();
@@ -6854,8 +6917,17 @@ export function apply(ctx) {
          * 后缀 `:main` 是必须的——`delivery.claim` 对已发送的 requestId
          * 一律返回 reuse、不比较正文，同一轮里再加第二个回话点必须换后缀。
          */
-        await postReply(payload, guardOutbound(reply), true, { requestId: `${payload.id}:main` });
-        journalAdd(payload, chat, journalText, 'bot');
+        /**
+         * **判返回值**：出站层失败不抛异常，只回 `{ok:false}`。
+         * 不看的话，断线时日记里照样留下「我说过这句话」，下一轮拼
+         * 【刚才说到】就把它捞出来当既定事实——正是上面注释要避免的形态。
+         */
+        const sent = await postReply(payload, guardOutbound(reply), true, { requestId: `${payload.id}:main` });
+        if (sent?.ok === false) {
+          log.warn(`主回复没发出去（${sent.message || sent.code || '未知原因'}），这一轮不写日记`);
+        } else {
+          journalAdd(payload, chat, journalText, 'bot');
+        }
       }
 
       /**

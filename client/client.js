@@ -51,17 +51,42 @@ window.__ModuleLoader__.load({
        */
       const i = t.toLowerCase().indexOf('<svg')
       if (i < 0) return ''
-      return t
-        .slice(i)
+      /**
+       * **反复剥到稳定为止**。
+       *
+       * 单遍黑名单挡不住自嵌套：`<scr<script>ipt>` 剥掉内层后，剩下的两半
+       * 正好拼回一个完整的 `<script>`（2026-11 审查实测能绕过）。
+       * 每轮至少少一个标签，几轮就收敛；上限 8 轮只是防病态输入。
+       */
+      const strip = (s) => s
         .replace(/<\s*(script|foreignObject|iframe|object|embed|animate|set)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
         .replace(/<\s*(script|foreignObject|iframe|object|embed|animate|set)\b[^>]*\/?>/gi, '')
-        .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        /**
+         * 前导用 `[\s/]` 而不是 `\s`：`<svg/onload=alert(1)>` 里属性前的 `/`
+         * 会被 HTML tokenizer 当成属性分隔符，和空格等价（2026-11 复核实测）。
+         */
+        .replace(/[\s/]on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
         /**
          * 二维码不需要任何链接，直接把 href/xlink:href 全剥掉。
          * 只挡 `javascript:` 字面量不够：`java\tscript:`、无引号、
          * 大小写混写都能绕过，而这里本来就没有合法的链接用途。
          */
-        .replace(/\s(href|xlink:href)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/[\s/](href|xlink:href)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      let out = t.slice(i)
+      for (let n = 0; n < 32; n += 1) {
+        const next = strip(out)
+        if (next === out) break
+        out = next
+      }
+      /**
+       * **fail-closed**：剥到上限还剩危险标签/事件，就一个字都不给。
+       *
+       * 二维码画不出来只是难看；放一个 `<script>` 进面板是另一回事。
+       * 深度嵌套（十几层 `<scr<script>…`）会一次只收敛一层，靠这个兜底。
+       */
+      if (/<\s*(script|foreignObject|iframe|object|embed|animate|set)\b/i.test(out)) return ''
+      if (/[\s/]on[a-z]+\s*=/i.test(out)) return ''
+      return out
     }
 
     /* ---------------- 请求 ---------------- */
@@ -4546,7 +4571,11 @@ select.roost-input{color-scheme:dark}
         setRecallErr(r?.ok === false ? (r.message || '召回记录读取失败') : '')
         setRecallRows(r?.rows || [])
       }
-      useEffect(() => { loadRecall() }, [])
+      /**
+       * 切会话要重拉：`loadRecall` 读的是 `mem.chatId` 的召回记录。
+       * 只挂载时拉一次的话，标题写着 B 群、下面列的还是 A 群的召回。
+       */
+      useEffect(() => { loadRecall() }, [mem?.chatId])
       const [q, setQ] = useState('')
       const [hits, setHits] = useState(null)
       const [fact, setFact] = useState('')
@@ -4559,23 +4588,50 @@ select.roost-input{color-scheme:dark}
       const [browseEdit, setBrowseEdit] = useState(null)
       /** 容量编辑态：null = 跟着 config 显示，改过才用本地值 */
       const [capEdit, setCapEdit] = useState(null)
+      /**
+       * 请求快照：回来时对不上就丢弃。
+       *
+       * 两个真实时序（2026-11 审查）：
+       *   · 搜完点「加载更多」（在途）→ 输入新词回车 → 旧 append 回来把旧词的
+       *     行接到新列表后面，`total` 也被旧响应写回；
+       *   · 切会话后列表没重置 → 新群的页接在旧群后面，行内「归档/作废」
+       *     带着新群的 chatId 打到**错的会话**。
+       */
+      const browseSeq = useRef(0)
       const loadBrowse = async ({ append = false } = {}) => {
+        const seq = ++browseSeq.current
+        const baseLen = append && browse ? browse.items.length : 0
+        const baseQ = browseQ
+        const baseChat = mem?.chatId || ''
         setBrowseBusy(true)
         try {
-          const offset = append && browse ? browse.items.length : 0
+          const offset = baseLen
           const qs = '?limit=20&offset=' + offset
-            + '&q=' + encodeURIComponent(browseQ)
-            + (mem?.chatId ? '&chatId=' + encodeURIComponent(mem.chatId) : '')
+            + '&q=' + encodeURIComponent(baseQ)
+            + (baseChat ? '&chatId=' + encodeURIComponent(baseChat) : '')
           const r = await get('/memory/browse' + qs)
+          /** 期间又搜了一次 / 又切了会话：这份结果已经过期，直接丢 */
+          if (seq !== browseSeq.current) return
           if (r?.ok === false) { toast(r.message || '翻不动'); return }
           setBrowse((cur) => ({
             total: Number(r.total) || 0,
             hasMore: Boolean(r.hasMore),
-            items: append && cur ? [...cur.items, ...(r.items || [])] : (r.items || []),
+            /**
+             * 追加要求「当前列表还是发起时那一份」：行数对不上说明中间被
+             * 重置或被另一次搜索换掉了，宁可丢掉这一页也不要串群。
+             */
+            items: append && cur && cur.items.length === baseLen
+              ? [...cur.items, ...(r.items || [])]
+              : (r.items || []),
           }))
         } catch (e) {
-          toast('翻不动：' + e.message)
+          if (seq === browseSeq.current) toast('翻不动：' + e.message)
         } finally {
+          /**
+           * **无条件复位**。按序号判断的话，「切会话」把序号加了、却不会发起
+           * 新请求，在途那次回来时就永远不复位 —— 搜索按钮永久 disabled。
+           * 迟到的响应已经在 try 里 return 掉了，这里复位不会写脏状态。
+           */
           setBrowseBusy(false)
         }
       }
@@ -4761,7 +4817,21 @@ select.roost-input{color-scheme:dark}
               ? h('select', {
                   className: 'roost-input',
                   value: mem.chatId || '',
-                  onChange: (e) => { setHits(null); onPickChat?.(e.target.value) },
+                  /**
+                   * 切会话要把「翻一翻」整块清掉。
+                   *
+                   * 只 `setHits(null)` 的话，旧群的行还留在表里：新群的页接在
+                   * 后面，行内「归档 / 作废」发出去的是 `{ id: 旧行id,
+                   * chatId: 新群 }` —— 写操作打到错的会话。
+                   */
+                  onChange: (e) => {
+                    setHits(null)
+                    browseSeq.current += 1
+                    setBrowse(null)
+                    setBrowseQ('')
+                    setBrowseEdit(null)
+                    onPickChat?.(e.target.value)
+                  },
                   style: { flex: 1, minWidth: 170, marginLeft: 'auto' },
                   'aria-label': '看哪个会话的记忆',
                 },
@@ -7683,6 +7753,12 @@ select.roost-input{color-scheme:dark}
       const th = ctxInfo?.cfg || {}
       const b = mind?.budgets?.memory || {}
       const pct = p.percent
+      /**
+       * `usageInfo` 有、但 `total` 缺（老服务端 / 中间层返回 `{}`）时不能直接点。
+       * 以前 `usageInfo.total.output` 会抛，整页进 `RenderBoundary` 变成
+       * 「面板渲染出错」——「排障」和「上下文」两页都会中。
+       */
+      const ut = usageInfo?.total || {}
 
       return h('div', null,
         h(Sec, { n: numbered ? '01' : null, title: '窗口占用', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
@@ -7791,16 +7867,15 @@ select.roost-input{color-scheme:dark}
           !usageInfo
             ? h('div', { className: 'roost-empty' }, '还没有用量数据（要先聊过，且服务商回报过 usage）')
             : h('div', null,
-                h(Row, { k: '近 7 天' },
-                  /**
+                h(Row, { k: '近 7 天' },                  /**
                    * **只统计 token，不折算金额。**
                    * 订阅制、免费额度、自建模型都不按 token 收钱，
                    * 硬乘一个单价出来的美元数不是账单，只会误导。
                    */
-                  `计费 ${Number(billedOf(usageInfo.total)).toLocaleString()}`
-                  + ` · 输出 ${Number(usageInfo.total.output || 0).toLocaleString()}`
-                  + ` · 命中 ${usageInfo.total.cacheHit == null ? '—' : usageInfo.total.cacheHit + '%'}`),
-                h(Row, { k: '轮数' }, String(usageInfo.total.turns || 0)),
+                  `计费 ${Number(billedOf(ut)).toLocaleString()}`
+                  + ` · 输出 ${Number(ut.output || 0).toLocaleString()}`
+                  + ` · 命中 ${ut.cacheHit == null ? '—' : ut.cacheHit + '%'}`),
+                h(Row, { k: '轮数' }, String(ut.turns || 0)),
                 Object.entries(usageInfo.chats || {})
                   .sort((a, b) => billedOf(b[1]) - billedOf(a[1]))
                   .slice(0, 3)
@@ -15411,6 +15486,14 @@ select.roost-input{color-scheme:dark}
       const stopProgress = () => {
         if (progressTimer.current) { clearInterval(progressTimer.current); progressTimer.current = null }
       }
+      /**
+       * 卸载时停掉轮询。
+       *
+       * 以前只在动作函数里 `stopProgress()`：安装请求还没回来就切到别的页，
+       * 组件卸载了但 interval 还在，每 400ms 一直打 `market.progress`
+       * （请求挂死的话永不停止）。
+       */
+      useEffect(() => () => stopProgress(), [])
       /** 安装是单个 POST，中途拿不到响应体；用另一个只读 op 轮询阶段 */
       const startProgress = () => {
         stopProgress()
@@ -16394,7 +16477,8 @@ select.roost-input{color-scheme:dark}
         return `${(v / 1024 / 1024).toFixed(1)} MB`
       }
 
-      const stats = data?.stats
+      /** `data` 在但 `stats` 缺（老服务端/中间层返回 {}）时别整页崩进 RenderBoundary */
+      const stats = data?.stats || {}
       return h(Sec, {
         n, title: '表情库',
         right: h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
@@ -18809,7 +18893,15 @@ select.roost-input{color-scheme:dark}
          */
         const r = await post('/quick', { op, arg, chatId: mem?.chatId || '' })
         return r
-      }, [mem])
+        /**
+         * 依赖只写 `chatId`，不写整个 `mem`。
+         *
+         * `loadMemory` 每次都 `setMem({ ...r })` 换新对象，依赖 `[mem]` 会让
+         * `quick` 每次刷新都换身份 → 所有以 `quick` 为依赖的 effect 重跑。
+         * 实测：刷一次记忆多打 2 次 `features.get` + 2 次 `extensions.get`，
+         * 把「旧快照盖掉刚点的开关」那个窗口越开越大。
+         */
+      }, [mem?.chatId])
 
       /**
        * 页头两个开关的初值（异步，到了才渲染开关）。
@@ -18821,9 +18913,19 @@ select.roost-input{color-scheme:dark}
        * 作用域里调不到；这里直接打 `features.patch`，成功后只更新自己这份
        * `featOn`（不 `reload()`——那是整页状态重拉）。
        */
+      /**
+       * 本地写入序号：**迟到的 `features.get` 不许盖掉刚点的开关**。
+       *
+       * 真实时序：进「能力」页会连打 `capabilities.get` + 5 个接口（几百毫秒），
+       * 这期间点页头总开关 → PATCH 成功、开关变关 → 切换前的 `features.get`
+       * 快照返回 → 开关自己弹回「开」。后端是关的，面板在撒谎。
+       */
+      const featSeq = useRef(0)
       const loadFeatOn = useCallback(async () => {
+        const seq = featSeq.current
         const r = await quick('features.get')
         if (r.ok === false) return
+        if (seq !== featSeq.current) return
         setFeatOn(r.on || null)
       }, [quick])
       useEffect(() => { loadFeatOn() }, [loadFeatOn])
@@ -18853,6 +18955,8 @@ select.roost-input{color-scheme:dark}
        * 与 `staged` 都是 409 + 原因，吞掉就会出现「显示开着、实际没开」。
        */
       const toggleHeadFeat = useCallback(async (id, on) => {
+        /** 先加序号：在途的 `features.get` 快照一律作废（见上面的注释） */
+        featSeq.current += 1
         const r = await quick('features.patch', { id, on })
         if (r.ok === false) {
           toast(r.message || '改不了，稍后再试')
@@ -18870,6 +18974,8 @@ select.roost-input{color-scheme:dark}
        * 那就是"面板说没有、实际有"这类最伤信任的 bug。
        */
       const loadCaps = useCallback(async () => {
+        /** 进来先记序号：这之后如果点了页头开关，这次 `features.get` 的结果就作废 */
+        const featSeqAtStart = featSeq.current
         const r = await quick('capabilities.get')
         if (r.ok === false) {
           setCaps(null)
@@ -18890,8 +18996,11 @@ select.roost-input{color-scheme:dark}
          * 顺带刷页头的 `featOn`：`voice`/`stickers` 的开关在权限页改，
          * 走的是这条路径（`reload()` → `loadCaps`），不是页头那两个。
          * 不同步的话「关掉表情包」之后导航永远不会隐藏——§11 独立审查查出的第一条。
+         *
+         * **但要带序号**：这条 `features.get` 可能比用户点的页头开关更晚回来，
+         * 无脑写就把开关弹回旧值（和 `loadFeatOn` 同一类时序，2026-11 复核）。
          */
-        if (f.ok !== false) setFeatOn(f.on || null)
+        if (f.ok !== false && featSeqAtStart === featSeq.current) setFeatOn(f.on || null)
         setCapQuota(q.ok === false ? null : q)
         setCapRetention(rt.ok === false ? null : rt)
       }, [quick])

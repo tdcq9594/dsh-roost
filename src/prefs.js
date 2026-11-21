@@ -14,7 +14,7 @@
  */
 
 import {
-  readFileSync, mkdirSync,
+  readFileSync, mkdirSync, copyFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 
@@ -64,11 +64,55 @@ export function createPrefs({ dir, log = () => {} }) {
   /**
    * 读。坏了返回默认值，**不抛错**——偏好丢了顶多收藏没了，
    * 抛出去会让插件起不来，代价不对等。
+   *
+   * 但「坏了」要分三种（2026-11 审查）：
+   *   · 文件不存在 —— 真的空，可以写；
+   *   · 不是合法 JSON —— 先隔离原文再降级，降级后的写入会让它自愈；
+   *   · **读不动**（EBUSY / EACCES）—— 盘上还有内容，这一轮禁止写。
+   * 以前三种一律当空，于是 `patch()` 会把 `.prefs.json` 重写成
+   * 「默认值 + 这一处改动」：收藏、置顶、分组全没，最要命的是 `deleted`
+   * 墓碑一丢，用户删掉的内置人格下次 `seed()` 会**全部长回来**。
    */
-  function read() {
+  let ioFailed = false;
+  /** 同一份坏文件只隔离一次：`read()` 会被反复调用，不然每次调用都留一份副本 */
+  let quarantined = false;
+
+  function quarantine(why) {
+    if (quarantined) return;
+    quarantined = true;
     try {
-      return normalize(JSON.parse(readFileSync(file(), 'utf8')));
-    } catch {
+      const f = join(dir(), `.prefs.corrupted.${Date.now()}`);
+      /** 按字节复制：先按 utf8 读再写回会把非 UTF-8 的原文改坏，备份就成了假的 */
+      copyFileSync(file(), f);
+      log(`人格偏好${why}，已备份到 ${f}`);
+    } catch (e) {
+      log(`人格偏好${why}，备份也失败：${e.message}`);
+    }
+  }
+
+  function read() {
+    let text;
+    try {
+      text = readFileSync(file(), 'utf8');
+    } catch (e) {
+      if (e?.code === 'ENOENT') {
+        ioFailed = false;
+        quarantined = false;
+        return empty();
+      }
+      ioFailed = true;
+      log(`人格偏好读取失败（${e?.code || e?.message}），本次不写入，稍后重试`);
+      return empty();
+    }
+    try {
+      const j = JSON.parse(text);
+      /** 解析成功才复位：在 parse 之前复位的话，每次失败都会再隔离一份 */
+      ioFailed = false;
+      quarantined = false;
+      return normalize(j);
+    } catch (e) {
+      quarantine(`不是合法 JSON（${e?.message ?? e}）`);
+      ioFailed = false;
       return empty();
     }
   }
@@ -78,6 +122,11 @@ export function createPrefs({ dir, log = () => {} }) {
    */
   function save(next) {
     const clean = normalize(next);
+    /** 读不动过：绝不拿默认值盖盘上还能救的内容 */
+    if (ioFailed) {
+      log('人格偏好这一轮读不动，跳过写入（等下次读成功）');
+      return clean;
+    }
     try {
       mkdirSync(dir(), { recursive: true });
       /**
@@ -119,5 +168,20 @@ export function createPrefs({ dir, log = () => {} }) {
     return save(next);
   }
 
-  return { read, save, patch, file, bak };
+  return {
+    read,
+    save,
+    patch,
+    file,
+    bak,
+    /**
+     * 这一轮读不到盘上那份偏好（EBUSY / EACCES）。
+     *
+     * **调用方必须看它**：`read()` 读不动时返回的是默认值，`deleted` 是空数组——
+     * `seed()` 拿着空墓碑会把用户删掉的内置人格全部拷回来，`remove()` 会
+     * 「删了文件但墓碑没写进去」，用户看到删掉了、重启又回来。
+     * 这两处见到 `true` 就该跳过或报错，而不是当成「没有偏好」。
+     */
+    unavailable: () => ioFailed,
+  };
 }
