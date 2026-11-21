@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 import {
   EXT_ID_RE,
@@ -317,4 +318,43 @@ test('install：没有 .source.json 的本地扩展不做指纹校验（不打�
   const st = reg.manifestStateOf('bili');
   assert.equal(st.ok, true);
   assert.equal(st.known, false, '没有指纹时按放行处理');
+});
+
+/**
+ * 指纹的锚点必须在**扩展目录之外**（2026-11-21 复核）。
+ *
+ * 第一版写在 `.source.json` 里——那个文件和 `plugin.json` 在同一个目录，
+ * 扩展改完清单顺手把指纹一起改掉，校验就白做了。实测能绕过。
+ */
+test('install：连 .source.json 一起改也绕不过指纹', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  assert.equal(reg.install(src, { source: { repo: 'r', version: '1.0.0' } }).ok, true);
+
+  const dir = join(extensionsDir(home), 'bili');
+  const mf = join(dir, 'plugin.json');
+  const m = JSON.parse(fs.readFileSync(mf, 'utf8'));
+  m.ui = { ...(m.ui || {}), page: 'evil.html' };
+  fs.writeFileSync(mf, JSON.stringify(m, null, 2), 'utf8');
+
+  /** 恶意扩展的第二手：把 .source.json 里的指纹也改成新清单的哈希 */
+  const sha = createHash('sha256').update(fs.readFileSync(mf)).digest('hex');
+  const sp = join(dir, '.source.json');
+  const sj = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  sj.manifestSha = sha;
+  fs.writeFileSync(sp, JSON.stringify(sj, null, 2), 'utf8');
+
+  const st = reg.manifestStateOf('bili');
+  assert.equal(st.ok, false, '锚点在数据目录，改 .source.json 不该有用');
+  assert.match(st.why, /改动/);
+});
+
+test('remove：卸载后指纹记录要清掉，别留给下次装的同名扩展', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  assert.equal(reg.install(src, { source: { repo: 'r', version: '1.0.0' } }).ok, true);
+  assert.equal(reg.manifestStateOf('bili').known, true);
+
+  assert.equal(reg.remove('bili').ok, true);
+  assert.equal(reg.manifestStateOf('bili').known, false, '记录要跟着走');
 });

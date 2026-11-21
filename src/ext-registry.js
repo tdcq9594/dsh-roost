@@ -26,6 +26,18 @@ import { normalizeConfigSpec } from './ext-config.js';
 export const EXT_ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
 export const EXT_KIND = 'dsh-extension';
 export const SOURCE_FILE = '.source.json';
+
+/**
+ * 清单指纹的存放处：**数据目录下、扩展目录之外**。
+ *
+ * 一开始写在 `.source.json` 里（就在扩展目录内），结果扩展自己改完
+ * `plugin.json` 顺手把指纹一起改掉，校验就白做了——锚点不能放在被保护的
+ * 对象内部。挪出来之后，扩展要同时改两个不同位置的文件才绕得过。
+ *
+ * 注意：这仍然**不是**防恶意进程的安全边界（本机进程哪都能写），
+ * 它防的是「装完之后清单被改了却没人发现」。
+ */
+export const MANIFEST_SHA_FILE = 'ext-manifest-sha.json';
 export const MANIFEST_FILE = 'plugin.json';
 
 /**
@@ -252,6 +264,27 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
 
   const pathOf = (id) => join(root, id);
   const sourcePathOf = (id) => join(pathOf(id), SOURCE_FILE);
+  const manifestShaPath = () => join(dir, MANIFEST_SHA_FILE);
+
+  function readManifestShas() {
+    try {
+      const j = JSON.parse(fs.readFileSync(manifestShaPath(), 'utf8'));
+      return j && typeof j === 'object' ? j : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeManifestSha(id, sha) {
+    const all = readManifestShas();
+    if (sha) all[id] = sha;
+    else delete all[id];
+    try {
+      fs.writeFileSync(manifestShaPath(), JSON.stringify(all, null, 2) + '\n', 'utf8');
+    } catch (e) {
+      log.warn?.(`清单指纹写不进去（${id}）：${e?.message ?? e}`);
+    }
+  }
 
   /** 有 `.source.json` = 市场装的；没有但目录在 = 用户手写（只读，绝不覆盖）。 */
   function sourceOf(id) {
@@ -469,6 +502,8 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
           .digest('hex');
         const srcOut = { ...source, manifestSha };
         fs.writeFileSync(join(staging, SOURCE_FILE), JSON.stringify(srcOut, null, 2) + '\n', 'utf8');
+        /** 真正的锚点在数据目录下（见 `MANIFEST_SHA_FILE` 的注释） */
+        writeManifestSha(id, manifestSha);
       }
 
       const hadDest = exists(dest);
@@ -555,6 +590,8 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝卸载（确认要删就带 force）` };
     }
     rmrf(dest);
+    /** 指纹跟着走：留着的话，同名扩展下次装上会撞上一个对不上的旧指纹 */
+    writeManifestSha(id, '');
     /**
      * 删完要**回读确认**：扩展进程的 cwd 就在这个目录里，Windows 上句柄没退
      * 干净时会「内容删光、目录留着」。**不能提前 return** —— 令牌吊销和密钥清理
@@ -594,7 +631,11 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
    * ——那种场景本来就没有「安装确认」可言，卡住只会打断开发。
    */
   function manifestStateOf(id) {
-    const want = String(sourceOf(id)?.manifestSha || '');
+    /**
+     * 只认**扩展目录之外**那份记录。`.source.json` 里的同名字段只作历史遗留，
+     * 不能当判据——它和 `plugin.json` 在同一个目录里，扩展能一起改。
+     */
+    const want = String(readManifestShas()[id] || '');
     if (!want) return { ok: true, known: false, why: '' };
     let got;
     try {
