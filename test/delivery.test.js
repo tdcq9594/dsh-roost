@@ -364,8 +364,8 @@ test('投递账本：keepPending 时「还在等」的不删（否则永远不�
  * 只保留记录、不抹正文的话，十分钟后结案时 `journalAdd` 又把用户刚要求
  * 清掉的那句话写回日记——「清空」和「彻底删除」只差十分钟。
  */
-test('投递账本：keepPending 保留的条目要抹正文并打 cleared', () => {
-  const { track } = rig();
+test('投递账本：keepPending 保留的条目要抹正文并打 cleared（且落盘）', () => {
+  const { track, file } = rig();
   track.note({ requestId: 'w1', chatId: 'g1', target: 'g1', text: '她主动说的那句：周末我去了海边' });
   track.clearChat('g1', [], { keepPending: true });
 
@@ -374,4 +374,19 @@ test('投递账本：keepPending 保留的条目要抹正文并打 cleared', () 
   assert.equal(row.text, '', '正文要抹掉');
   assert.equal(row.full, '', '全文也要抹掉');
   assert.equal(row.cleared, true, '打标记：结案时别补写日记');
+
+  /**
+   * **必须落盘**。以前只按「删了几条」判 `save()`：`keepPending` 时一条都没删
+   * （`n === 0`），内存里抹了、盘上还留着原文——重启后结案照样写回日记
+   * （2026-11 复核的独立验证脚本抓到）。
+   */
+  const again = createDeliveryTrack({
+    file,
+    channelOf: () => createFakeChannel({}),
+    now: () => 1_700_000_000_000,
+    log: () => {},
+  });
+  const row2 = again.list()[0];
+  assert.equal(row2.text, '', '重启后正文也得是空的');
+  assert.equal(row2.cleared, true, 'cleared 要过重启');
 });

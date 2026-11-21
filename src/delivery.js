@@ -316,6 +316,7 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
      * `keepPending`：「清空本会话记忆」不该把**还在等审核**的记录删掉——
      * 删了它们再也不会结案，面板「待确认」静默消失。「彻底删除」才全清。
      */
+    let blanked = 0;
     m.items = m.items.filter((x) => {
       if (!keys.has(x.chatId) && !keys.has(x.target)) return true;
       if (!keepPending || SETTLED.has(x.state)) return false;
@@ -324,13 +325,21 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
        * 只留记录不留原文——否则十分钟后结案时，`journalAdd` 又把用户刚要求
        * 清掉的那句话写回日记（2026-11 复核实测）。
        */
+      if (x.text || x.full || !x.cleared) blanked += 1;
       x.text = '';
       x.full = '';
       x.cleared = true;
       return true;
     });
     const n = before - m.items.length;
-    if (n) save();
+    /**
+     * **抹正文也要落盘**。
+     *
+     * 以前只按「删了几条」判 `save()`：`keepPending` 时一条都没删（`n === 0`），
+     * 于是内存里抹了、盘上还留着原文——重启后结案照样把原文写回日记，
+     * 而 `cleared` 标记也一起丢了。
+     */
+    if (n || blanked) save();
     return n;
   }
 
