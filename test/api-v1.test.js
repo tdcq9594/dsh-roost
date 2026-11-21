@@ -186,7 +186,14 @@ test('G3-5 whoami 不回显 hash / 明文；未知路径 404；未接线 hook �
   assert.ok(!JSON.stringify(ok.body).includes(f.issued.token));
   assert.equal((await call(f.api, 'GET', '/v1/nope', { token: f.issued.token })).status, 404);
   assert.equal((await call(f.api, 'GET', '/v1/memory', { token: f.issued.token })).status, 403, '缺 memory:read');
-  assert.equal(V1_SCOPES.length, 13, '§七 表格 9 个 + agent:write + core:write（2026-11-14 全放开）+ config:write / group:write（2026-11-16）');
+  /**
+   * 18 = 原 13（§七 表格 9 + agent:write + core:write + config:write / group:write）
+   *    + 2026-11-21 面板 API 管理面的 5 个（groups:read / model:write /
+   *      host:maintenance / memory:purge / ext:manage）。
+   * 这五个目前只给 `/quick` 的 op 判权用，`/v1` 还没有端点；
+   * 但令牌是按这份表发放的，所以必须在这里。
+   */
+  assert.equal(V1_SCOPES.length, 18, 'scope 表条数变了就回来对一遍（见上）');
   assert.ok(V1_SCOPES.includes('core:write'), '最高等级能力要在 scope 表里才能被清单声明');
   assert.ok(V1_SCOPES.includes('config:write'), '改配置有专用 scope，别复用 prompt:write');
   assert.ok(V1_SCOPES.includes('group:write'), '踢人 / 禁言有专用 scope，别复用 message:write');

@@ -33,6 +33,8 @@ export const V1_SCOPES = [
    * 面板密钥、外接凭证、权限策略、安全开关、扩展总闸、升级源一律不许改。
    */
   'config:write',
+  /** 面板 API 的管理面（见 `ext-quick-scopes.js`）；`/v1` 暂无端点用到 */
+  'groups:read', 'model:write', 'host:maintenance', 'memory:purge', 'ext:manage',
   /**
    * 群管理（禁言 / 移出成员）。
    *

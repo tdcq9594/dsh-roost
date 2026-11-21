@@ -342,3 +342,42 @@ test('接线：投递结案补日记要认 cleared 标记', () => {
     '不能用「账本里还有没有」判：prune 会把正常的也算成被清掉',
   );
 });
+
+/**
+ * 面板 API 拒绝 opaque origin（2026-11-21）。
+ *
+ * 沙箱 iframe / `data:` / `file:` 页面发来的请求带 `Origin: null`。它们读不到
+ * 响应，但**请求照样会到达服务器并执行**——`/quick` 是 POST，只判「是不是主人」
+ * 挡不住（CSRF 形态）。`/ext-pages` 必须豁免：沙箱页面要能取自己目录下的 JSON。
+ */
+test('接线：面板 API 拒绝 Origin: null，/ext-pages 豁免', () => {
+  const at = SRC.indexOf("const route = (path, handler");
+  assert.ok(at > 0, '找不到 route()');
+  const block = SRC.slice(at, at + 1600);
+
+  assert.match(block, /req\.headers\?\.origin === 'null'/, '要判 Origin: null');
+  assert.match(block, /if \(!skipFence && req\.headers\?\.origin === 'null'\)/, '只在走栅栏的路由上拦');
+  /** 顺序：Origin 判断必须在 fence 之前，否则栅栏先放行了 */
+  assert.ok(
+    block.indexOf("origin === 'null'") < block.indexOf('fence(req)'),
+    'Origin 判断要在 fence 之前',
+  );
+  /** /ext-pages 走 skipFence，天然豁免（路由体很长，窗口要够大） */
+  const ep = SRC.indexOf("route('/ext-pages'");
+  assert.ok(ep > 0, '找不到 /ext-pages');
+  assert.match(SRC.slice(ep, ep + 4000), /skipFence: true/, '/ext-pages 要标 skipFence');
+});
+
+/**
+ * `/ext-pages` 要先验清单指纹再发文件（2026-11-21）。
+ */
+test('接线：/ext-pages 先验指纹', () => {
+  const at = SRC.indexOf("route('/ext-pages'");
+  assert.ok(at > 0, '找不到 /ext-pages');
+  const block = SRC.slice(at, at + 1200);
+  assert.match(block, /manifestStateOf\?\.\(id\)/, '要查指纹');
+  assert.ok(
+    block.indexOf('manifestStateOf') < block.indexOf('normalizeUiSpec'),
+    '指纹要在发文件之前判',
+  );
+});

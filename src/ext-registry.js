@@ -44,12 +44,22 @@ export const EXT_ALLOWED_SCOPES = Object.freeze([
   'message:write', 'say:write', 'state:read', 'context:read',
   'memory:read', 'memory:write', 'proactive:write', 'session:write',
   'prompt:write', 'config:write', 'group:write', 'agent:write', 'core:write',
+  /**
+   * 下面五个覆盖**面板 API（`/quick`）里的管理面**（2026-11-21）。
+   *
+   * 以前那 40 个 op 没有 scope 概念，扩展页面只要同源就能调——等于
+   * 「没声明也能拿到」。现在每个 op 都归到一个 scope 上（见
+   * `ext-quick-scopes.js` 的 `OP_SCOPE`）：声明了就能用，没声明就调不到。
+   */
+  'groups:read', 'model:write', 'host:maintenance', 'memory:purge', 'ext:manage',
 ]);
 
 /** 会对外产生可见动作（说话 / 刷屏 / 改人格 / 开会话 / 改配置 / 管群）的 scope，安装时必须主人点头。 */
 export const EXT_SENSITIVE_SCOPES = Object.freeze([
   'message:write', 'say:write', 'proactive:write', 'session:write', 'prompt:write', 'agent:write',
   'config:write', 'group:write', 'core:write',
+  /** 新增的五个都是敏感项：安装时逐条列出、二次确认 */
+  'groups:read', 'model:write', 'host:maintenance', 'memory:purge', 'ext:manage',
 ]);
 
 /** 去重 + 过滤未知项；结果为空时退回默认（绝不返回「无 scope 但令牌有效」这种半吊子态）。 */
@@ -443,7 +453,23 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       // 落位后按目标目录名再校验一次，防「目录名与清单 id 不一致」混进来
       const again = validateManifest(readJson(join(staging, MANIFEST_FILE)), { expectedId: id });
       if (!again.ok) throw new Error(again.errors.join('；'));
-      if (source) fs.writeFileSync(join(staging, SOURCE_FILE), JSON.stringify(source, null, 2) + '\n', 'utf8');
+      if (source) {
+        /**
+         * **清单指纹**：安装那一刻 `plugin.json` 的 sha256。
+         *
+         * 防的是「装完自己改清单」：安装时验的是整包 sha256，之后没人再看；
+         * 一个 `mcp` 扩展把自己的 `plugin.json` 改一下加上 `ui.page`，
+         * 运行期 `read()` 重读就生效，分级与安装确认全被绕过。
+         *
+         * 只哈希这一个文件，**不要哈希整个目录**：`config.json`、`.source.json`、
+         * 扩展自己写的 JSON 都不在 bundle 里，整目录哈希会永远对不上。
+         */
+        const manifestSha = createHash('sha256')
+          .update(fs.readFileSync(join(staging, MANIFEST_FILE)))
+          .digest('hex');
+        const srcOut = { ...source, manifestSha };
+        fs.writeFileSync(join(staging, SOURCE_FILE), JSON.stringify(srcOut, null, 2) + '\n', 'utf8');
+      }
 
       const hadDest = exists(dest);
       if (hadDest) {
@@ -561,9 +587,30 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       : { ok: true, id };
   }
 
+  /**
+   * 清单还是安装时那一份吗。
+   *
+   * `known:false` = 没有指纹（用户手写 / 本地目录装的），无从校验，按放行处理
+   * ——那种场景本来就没有「安装确认」可言，卡住只会打断开发。
+   */
+  function manifestStateOf(id) {
+    const want = String(sourceOf(id)?.manifestSha || '');
+    if (!want) return { ok: true, known: false, why: '' };
+    let got;
+    try {
+      got = createHash('sha256').update(fs.readFileSync(join(pathOf(id), MANIFEST_FILE))).digest('hex');
+    } catch (e) {
+      return { ok: false, known: true, why: `读不到清单：${e?.message ?? e}` };
+    }
+    if (got !== want) {
+      return { ok: false, known: true, why: 'plugin.json 在安装后被改动过（分级与安装确认已失效）' };
+    }
+    return { ok: true, known: true, why: '' };
+  }
+
   return {
     dir, root, list, problems, read, sourceOf, isForeign, install, remove, pathOf,
-    liveUsage, refreshUsage, configSpecOf,
+    liveUsage, refreshUsage, configSpecOf, manifestStateOf,
   };
 }
 

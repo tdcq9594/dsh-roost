@@ -7553,6 +7553,23 @@ export function apply(ctx) {
              * 注意这里**包括读接口**：`GET /journal` 能翻出全部日记原文，
              * 读和写一样是隐私。宿主自己的 API 也是这么做的。
              */
+            /**
+             * **opaque origin 一律拒**（2026-11-21）。
+             *
+             * 沙箱 iframe / `data:` / `file:` 页面发来的请求，`Origin` 是字面量
+             * `null`。它们读不到响应，但**请求照样会到达服务器并执行**——
+             * `/quick` 是 POST，只看「是不是主人」是挡不住的（CSRF 形态）。
+             *
+             * 只拦 `skipFence` 之外的路由：`/ext-pages` 要允许沙箱页面取自己
+             * 目录下的 JSON（靠 CORS 白名单，不靠 Origin）。
+             */
+            if (!skipFence && req.headers?.origin === 'null') {
+              log.warn(`面板 API 拒绝 ${path}：请求来自 opaque origin（Origin: null）`);
+              return send(res, 403, {
+                ok: false,
+                message: '这个请求来自一个沙箱页面，面板接口不接受（扩展页面请通过面板转发）',
+              });
+            }
             let bad = null;
             if (!skipFence) {
               try {
@@ -11571,6 +11588,21 @@ export function apply(ctx) {
         if (!id || !rel) return send(res, 400, { ok: false, message: '缺 id / file' });
         const m = extRegistry.read(id);
         if (!m) return send(res, 404, { ok: false, message: `没有「${id}」这个扩展` });
+        /**
+         * **清单指纹**（2026-11-21）：装完之后被改过清单的扩展，页面不给开。
+         *
+         * 装的时候验的是整包 sha256，之后没人再看——一个 `mcp` 扩展把自己
+         * 的 `plugin.json` 改一下加上 `ui.page`，分级和安装确认就都绕过了。
+         * 没有指纹（用户手写 / 本地目录）时 `known:false`，按放行处理。
+         */
+        const trust = extRegistry.manifestStateOf?.(id);
+        if (trust && trust.ok === false) {
+          log.warn(`扩展 ${id} 的页面被拒：${trust.why}`);
+          return send(res, 404, {
+            ok: false,
+            message: `「${id}」的清单在安装后被改动过，页面已停用；确认要这个版本就重装一次：${trust.why}`,
+          });
+        }
         const spec = normalizeUiSpec(m.ui);
         if (!spec.ok || !spec.spec.page) {
           return send(res, 404, { ok: false, message: '这个扩展没有声明页面' });

@@ -281,3 +281,40 @@ test('install：.old 恢复出手写目录，只有 takeOver 能穿过', (t) => 
   assert.equal(r2.ok, true, r2.reason);
   assert.equal(fs.existsSync(join(root, 'bili', '.source.json')), true);
 });
+
+/**
+ * 清单指纹（2026-11-21）。
+ *
+ * 装的时候验的是整包 sha256，之后没人再看——一个 `mcp` 扩展把自己的
+ * `plugin.json` 改一下加上 `ui.page`，分级与安装确认就都被绕过了。
+ */
+test('install：记下清单指纹，装完之后改动要能被发现', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  assert.equal(reg.install(src, { source: { repo: 'r', version: '1.0.0' } }).ok, true);
+
+  const src1 = reg.sourceOf('bili');
+  assert.match(String(src1.manifestSha || ''), /^[0-9a-f]{64}$/, '要记下 64 位 sha256');
+  assert.equal(reg.manifestStateOf('bili').ok, true, '刚装完应当一致');
+  assert.equal(reg.manifestStateOf('bili').known, true);
+
+  /** 装完之后改清单：加一个 ui.page（正是要防的形态） */
+  const mf = join(extensionsDir(home), 'bili', 'plugin.json');
+  const m = JSON.parse(fs.readFileSync(mf, 'utf8'));
+  m.ui = { ...(m.ui || {}), page: 'evil.html' };
+  fs.writeFileSync(mf, JSON.stringify(m, null, 2), 'utf8');
+
+  const st = reg.manifestStateOf('bili');
+  assert.equal(st.ok, false, '改动后要判为不可信');
+  assert.match(st.why, /改动/);
+});
+
+test('install：没有 .source.json 的本地扩展不做指纹校验（不打断开发）', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  assert.equal(reg.install(src, { source: null }).ok, true);
+
+  const st = reg.manifestStateOf('bili');
+  assert.equal(st.ok, true);
+  assert.equal(st.known, false, '没有指纹时按放行处理');
+});

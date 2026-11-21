@@ -52,6 +52,18 @@ export const SCOPE_INFO = Object.freeze({
 
   /** 阶段：内置功能解离后启用；本轮只做声明与告知，不实现实际替换。 */
   'core:write': { level: 3, text: '关闭或接管程序内置功能' },
+
+  /**
+   * 面板 API 的管理面（2026-11-21）。
+   *
+   * 以前这些能力没有 scope：扩展页面只要同源就能调，等于「没声明也能拿到」。
+   * 现在逐条声明、逐条告知——`level` 按破坏力排，全部进安装确认。
+   */
+  'groups:read': { level: 1, text: '读取机器人在哪些群里（群 openid 清单）' },
+  'model:write': { level: 2, text: '改模型、配额、能力档位与保留策略——会改变她之后所有对话的表现' },
+  'host:maintenance': { level: 2, text: '给宿主装共享依赖、还原备份——会动到程序本体' },
+  'memory:purge': { level: 3, text: '彻底删除记忆、清空全局记忆与自我叙述（不可恢复）' },
+  'ext:manage': { level: 3, text: '安装 / 卸载其它扩展、发放或吊销访问令牌、读写别人的配置' },
 });
 
 /**
