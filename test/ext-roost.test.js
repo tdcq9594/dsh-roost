@@ -313,3 +313,52 @@ test('/v1/send 保持旧行为：不填 target 仍然报错', async () => {
   assert.equal(r.status, 400);
   assert.equal(calls.chSend.length, 0);
 });
+
+/**
+ * 「只读」不等于「可以给扩展」（2026-11 复核）。
+ *
+ * `roost.read` 只要 `state:read`，而它在**默认 scope** 里——安装时不需要
+ * 主人确认。如果身份 / 账本 / 投递这些也在放行名单里，任何装上的扩展都能
+ * 按 chatId 读**任意会话的消息原文**、拿 openid ↔ QQ 号 ↔ 群号的映射。
+ * 它们在 `roost.read` 出现之前走 `roost.call`（要求 `message:write`，敏感、
+ * 安装时二次确认），门槛不该因为拆了个只读端点就降到零。
+ */
+test('白名单：身份 / 账本 / 投递这类隐私只读不开放给扩展', () => {
+  const forbidden = [
+    'identity.list', 'identity.resolve',
+    'ledger.recent', 'ledger.timeline', 'ledger.stats',
+    'msg.get', 'delivery.recent', 'delivery.get',
+    'roles.resolve', 'reach.get', 'quota.get',
+  ];
+  for (const m of forbidden) {
+    assert.equal(EXT_ROOST_READONLY.includes(m), false, `${m} 不该在扩展只读白名单里`);
+  }
+  /** 无害的那些要留着，别一刀切把功能关死 */
+  for (const m of ['runtime.status', 'system.hello', 'plugin.list', 'group.info']) {
+    assert.equal(EXT_ROOST_READONLY.includes(m), true, `${m} 应该仍然可用`);
+  }
+});
+
+/**
+ * 收紧 `roost.read` **不能把 `roost.call` 一起关掉**（2026-11 复核）。
+ *
+ * 身份 / 账本 / 投递这些方法本来就要 `message:write` 这道门槛；拆出只读端点
+ * 的正确做法是「默认权限够不着，敏感权限仍然够得着」，而不是从白名单里删掉。
+ */
+test('白名单：roost.call（message:write）仍可调身份 / 账本 / 投递', () => {
+  const caps = { has: () => true, list: () => [] };
+  for (const m of ['delivery.get', 'msg.get', 'identity.resolve', 'ledger.timeline', 'quota.get']) {
+    const r = classifyRoostCall(m, caps);
+    assert.equal(r.ok, true, `roost.call 应该仍能调 ${m}`);
+    assert.equal(r.kind, 'readonly');
+  }
+});
+
+test('白名单：roost.read 拒绝这些，并且提示改用 roost.call', () => {
+  const caps = { has: () => true, list: () => [] };
+  const r = classifyRoostCall('delivery.get', caps, { surface: 'read' });
+  assert.equal(r.ok, false);
+  assert.match(r.why, /roost\.call/, '要给可操作的提示，不能只说「不存在」');
+  /** 无害的只读在 read 面照常放行 */
+  assert.equal(classifyRoostCall('runtime.status', caps, { surface: 'read' }).ok, true);
+});

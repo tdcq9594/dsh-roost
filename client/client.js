@@ -4979,9 +4979,10 @@ select.roost-input{color-scheme:dark}
               placeholder: '搜一条记忆…（回车搜索）',
               value: browseQ,
               onChange: (e) => setBrowseQ(e.target.value),
-              onKeyDown: (e) => { if (e.key === 'Enter') loadBrowse() },
+              /** 判忙：连按回车会打出多个请求，先回来的那个会把 busy 提前复位 */
+              onKeyDown: (e) => { if (e.key === 'Enter' && !browseBusy) loadBrowse() },
             }),
-            h('button', { type: 'button', className: 'roost-btn', disabled: browseBusy, onClick: () => loadBrowse() },
+            h('button', { type: 'button', className: 'roost-btn', disabled: browseBusy, onClick: () => { if (!browseBusy) loadBrowse() } },
               browseBusy ? '翻…' : '搜索'),
           ),
           !browse
@@ -16235,27 +16236,43 @@ select.roost-input{color-scheme:dark}
        * 一页，`offset` 往后翻。**新建 / 吊销之后一律从第 0 页重来**：分页状态
        * 留着会让「刚发的令牌」落到看不见的页上，看起来像没发出去。
        */
-      const load = async ({ append = false } = {}) => {
+      /** 关键词（后端按名字 / id / scope 过滤）。空串 = 不过滤 */
+      const [q, setQ] = useState('')
+      /** 列表请求在途：防连点 / 连按回车打出多个请求 */
+      const [listBusy, setListBusy] = useState(false)
+      /** 请求序号：慢的旧响应不许盖掉新的一次搜索（「清空」后尤其明显） */
+      const listSeq = useRef(0)
+      const load = async ({ append = false, q: qOverride } = {}) => {
+        /** `qOverride` 给「清空」用：`setQ` 之后这次渲染的闭包还是旧值 */
+        const term = qOverride === undefined ? q : qOverride
         const base = append && data ? (data.rows || []) : []
-        const r = await EXT_POST('extensions.clients.list', { limit: 20, offset: base.length })
-        if (r?.ok === false) { toast(r.message || '读不到令牌列表'); return }
-        if (!append) {
-          setData({
-            availableScopes: r.availableScopes || [],
-            total: Number(r.total) || 0,
-            limit: Number(r.limit) || 20,
-            hasMore: Boolean(r.hasMore),
-            rows: r.rows || [],
-          })
-          return
+        const seq = ++listSeq.current
+        setListBusy(true)
+        try {
+          const r = await EXT_POST('extensions.clients.list', { limit: 20, offset: base.length, q: term })
+          if (seq !== listSeq.current) return
+          if (r?.ok === false) { toast(r.message || '读不到令牌列表'); return }
+          if (!append) {
+            setData({
+              availableScopes: r.availableScopes || [],
+              total: Number(r.total) || 0,
+              limit: Number(r.limit) || 20,
+              hasMore: Boolean(r.hasMore),
+              rows: r.rows || [],
+            })
+            return
+          }
+          /** 条数变了说明期间增删过，offset 已经不可信：退回第 0 页重来一遍 */
+          if (data && Number(r.total) !== Number(data.total)) {
+            await load()
+            return
+          }
+          /** 函数式更新：用**当前** state 合并，不能用闭包里那份旧快照 */
+          setData((cur) => mergeClientPage(cur, r, base) || cur)
+        } finally {
+          /** 只有最新那次才复位忙态：否则先回来的旧请求会把按钮提前放开 */
+          if (seq === listSeq.current) setListBusy(false)
         }
-        /** 条数变了说明期间增删过，offset 已经不可信：退回第 0 页重来一遍 */
-        if (data && Number(r.total) !== Number(data.total)) {
-          await load()
-          return
-        }
-        /** 函数式更新：用**当前** state 合并，不能用闭包里那份旧快照 */
-        setData((cur) => mergeClientPage(cur, r, base) || cur)
       }
       useEffect(() => { load() }, [])
       const create = async () => {
@@ -16305,6 +16322,30 @@ select.roost-input{color-scheme:dark}
         h(Sec, { n: '02', title: '已经发出去的令牌' },
           h('div', { className: 'roost-note' },
             '明文只在生成时显示一次，服务端只存 hash。这里能吊销的是面板发放的令牌；扩展自己的由安装 / 卸载自动管理，不在这里发。'),
+          /**
+           * 搜索框。后端一直支持 `q`（名字 / id / scope 子串），但前端没入口，
+           * 等于白做（2026-11 复核）。回车才发请求，别每敲一个字打一次。
+           */
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', margin: '6px 0' } },
+            h('input', {
+              /** 后端只匹配 name / id（`ext-panel.js` 的 `q`），别在文案里承诺 scope */
+              className: 'roost-input', placeholder: '按名字 / id 搜（回车）', value: q,
+              style: { flex: 1, minWidth: 160 },
+              onChange: (e) => setQ(e.target.value),
+              onKeyDown: (e) => { if (e.key === 'Enter' && !listBusy) load() },
+            }),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: listBusy,
+              onClick: () => { if (!listBusy) load() },
+            }, listBusy ? '搜…' : '搜索'),
+            q
+              ? h('button', {
+                  type: 'button', className: 'roost-btn',
+                  /** 显式把空串传给这一趟，别依赖 `setQ` 之后的新渲染 */
+                  onClick: () => { setQ(''); load({ q: '' }) },
+                }, '清空')
+              : null,
+          ),
           (data?.rows || []).length
             ? h('div', { className: 'roost-list' },
                 data.rows.map((c) => h('div', { key: c.id, className: 'roost-item' },

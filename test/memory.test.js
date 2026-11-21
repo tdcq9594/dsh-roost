@@ -6,7 +6,7 @@
 import { conflicting } from '../src/memory.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmdirSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmdirSync, existsSync, statSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -2396,5 +2396,75 @@ test('日记（JSONL 后端）：整份解析不了时，重写也不能把原�
     original,
     '隔离副本必须是原始字节（不是降级后的空表）',
   );
+  j.close();
+});
+
+/**
+ * 读不动时 `add()` 必须回 false（2026-11 复核）。
+ *
+ * 以前无条件 `return true`：工具回「记住了」、面板回 `ok:true`，可 5 秒后
+ * 重读成功时 `cache` 被盘上内容整体替换——那条事实内存和磁盘都没了，
+ * 而模型以为记住了，后面再也不会重提。
+ */
+test('facts：读不动时 add() 回 false（别让模型以为记住了）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-facts-honest-'));
+  process.env.DSH_ROOST_DATA = dir;
+  mkdirSync(join(dir, 'memory.json'));
+
+  const m = createMemory({ log: () => {} });
+  assert.equal(m.add('g1', '主人下周出差'), false, '没落盘就不能报成功');
+  /** 内存里这一轮仍然看得到（不能当场失忆） */
+  assert.deepEqual(m.list('g1').global, ['主人下周出差']);
+});
+
+/**
+ * `close()` 之后不许被懒打开（2026-11 复核）。
+ *
+ * 插件重载时旧实例还有在飞的异步回调（投递回查 / 发帖 / 巩固），它们
+ * `add()` 一下就把库重新打开：`store = null` → `get()` 见 null 就 `open()`。
+ * 句柄再也关不掉，每次重载漏一个 fd。
+ */
+test('日记：close() 之后 add() 不能再把库打开', () => {
+  const dir = tmp();
+  const j = createJournal({ file: join(dir, 'j.sqlite'), log: () => {} });
+  j.add({ id: 'a', at: 1, chatId: 'g1', text: '关之前写的' });
+  const before = j.stats().total;
+  j.close();
+
+  const r = j.add({ id: 'b', at: 2, chatId: 'g1', text: '关之后写的' });
+  assert.equal(r.added, false, '关掉之后不该写进去');
+
+  /**
+   * 关键断言：**句柄真的释放了**。
+   *
+   * 以前 `close()` 只把 store 置 null，下一次任何读（`stats()` 也算）都会
+   * 新建一个 store 把库重新打开——Windows 上连库文件都删不掉。
+   * 只断言「总数没变」是假绿：`stats()` 自己就会重开。
+   */
+  assert.equal(j.stats(), null, '关掉之后读操作应当空转（store 不再重开）');
+  assert.deepEqual(j.recent('g1', 5), [], '读也返回空');
+  assert.doesNotThrow(() => rmSync(join(dir, 'j.sqlite')), '库文件要能删掉（句柄已释放）');
+});
+
+/**
+ * JSONL 后端也要认 `close({ final:false })`（2026-11 复核）。
+ *
+ * 一键改写是「关句柄让 WAL checkpoint → 备份 → rekey 继续用同一个实例」。
+ * sqlite store 改了签名、JSONL 没改：`final:false` 照样置 `closed`，
+ * 之后 `load()` 返回空表，`rekey` 直接抛 `rows is not iterable`。
+ */
+test('日记（JSONL 后端）：close({final:false}) 之后还能继续用', () => {
+  const dir = tmp();
+  const file = join(dir, 'j.sqlite');
+  /** 占住 sqlite 路径 → 强制走 JSONL */
+  mkdirSync(file);
+  const j = createJournal({ file, log: () => {} });
+  j.add({ id: 'a', at: 1, chatId: 'old', text: '旧键的约定' });
+  assert.equal(j.scanChats().length, 1);
+
+  j.close({ final: false });
+  assert.equal(j.scanChats().length, 1, '关完还要读得到（改写要用）');
+  assert.equal(j.rekey(['old'], 'uin1'), 1, 'rekey 不能抛');
+  assert.deepEqual(j.scanChats().map((x) => x.chatId), ['uin1']);
   j.close();
 });

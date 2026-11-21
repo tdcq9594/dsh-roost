@@ -777,3 +777,57 @@ test('人格：偏好读不动时跳过内置补齐（删掉的不能复活）',
     rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
   }
 });
+
+/**
+ * 批量删除也要有「偏好读不动就别删」的闸（2026-11 复核）。
+ *
+ * 只修了单删：`removeMany` 直接 unlink + `prefs.patch`。偏好读不动时
+ * 墓碑写不进去，文件被删了、重启后 `seed()` 又把它拷回来。
+ */
+test('人格：偏好读不动时批量删除要整体拒绝（一个都不删）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-persona-rmmany-'));
+  try {
+    const p = createPersonas({ dataDir: dir, log: () => {} });
+    /** 先正常建好库，再让偏好文件读不动 */
+    p.list();
+    const userDir = join(dir, 'personas');
+    /** `default` 不能删（`removeMany` 会先把它过滤掉，list 空就直接早退） */
+    const first = readdirSync(userDir).find((n) => n.endsWith('.md') && n !== 'default.md');
+    assert.ok(first, '要先有一个非默认的内置人格文件');
+
+    rmSync(join(userDir, '.prefs.json'), { force: true });
+    mkdirSync(join(userDir, '.prefs.json'));
+
+    const r = p.removeMany([first.replace(/\.md$/, '')]);
+    assert.equal(r.ok, false, '要整体拒绝，不能删一半');
+    assert.match(String(r.message || ''), /占用/, '要带 message：前端只读它');
+    assert.equal(existsSync(join(userDir, first)), true, '文件必须还在');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
+
+/**
+ * 偏好锁解除后要能补上（2026-11 复核）。
+ *
+ * `ensureSeeded()` 以前先置 `seeded = true` 再调 `seed()`：偏好读不动时
+ * `seed()` 早退，整个进程的人格库就是空的，锁解除也不会再补，只能重启。
+ */
+test('人格：偏好锁解除后能补上内置人格（不用重启）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-persona-retry-'));
+  try {
+    const ud = join(dir, 'personas');
+    mkdirSync(ud, { recursive: true });
+    mkdirSync(join(ud, '.prefs.json'));
+
+    const p = createPersonas({ dataDir: dir, log: () => {} });
+    p.list();
+    assert.deepEqual(readdirSync(ud).filter((n) => n.endsWith('.md')), [], '锁着时不补');
+
+    rmSync(join(ud, '.prefs.json'), { recursive: true, force: true });
+    p.list();
+    assert.ok(readdirSync(ud).some((n) => n.endsWith('.md')), '锁解除后下一次 list 要补上');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});

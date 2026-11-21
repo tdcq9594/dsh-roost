@@ -211,7 +211,7 @@ test('接线：memory.purge 要带 aliasesOf 删日记与图谱', () => {
 test('接线：三处发送都要判 ok===false', () => {
   const mainAt = SRC.indexOf('const sent = await postReply(payload, guardOutbound(reply)');
   assert.ok(mainAt > 0, '主回复要接返回值');
-  const mainBlock = SRC.slice(mainAt, mainAt + 600);
+  const mainBlock = SRC.slice(mainAt, mainAt + 1200);
   assert.ok(
     mainBlock.includes('sent?.ok === false'),
     '主回复没判失败分支',
@@ -253,4 +253,92 @@ test('接线：投递结案成 sent 时要补写日记', () => {
   assert.ok(block.includes("it.state !== 'sent'"), '只处理 sent');
   assert.ok(block.includes('journalAdd('), '要真的写日记');
   assert.ok(block.includes('delivery:${it.requestId}'), '行 id 要用 requestId 保证幂等');
+});
+
+/**
+ * 「彻底删除 / 清空本会话」必须连压缩开场一起清（2026-11 复核）。
+ *
+ * 开场正文存在内存里（`set()` 写正文，重建结果也会缓存）。日记清了、
+ * 开场还在，下一条消息照样把「刚才说到」里那几句**用户刚删掉的原话**
+ * 拼进 prompt，而这一轮的回复又写回日记——删掉的内容绕一圈又回来了。
+ */
+test('接线：清记忆 / 彻底删除都要清掉压缩开场', () => {
+  const clearCase = SRC.indexOf("case 'memory.clear': {");
+  const purgeCase = SRC.indexOf("case 'memory.purge': {");
+  assert.ok(clearCase > 0 && purgeCase > 0, '两个 case 都要在');
+
+  const clearBlock = SRC.slice(clearCase, purgeCase);
+  const purgeEnd = SRC.indexOf("case 'memory.clearGlobal'", purgeCase);
+  const purgeBlock = SRC.slice(purgeCase, purgeEnd > purgeCase ? purgeEnd : purgeCase + 4000);
+
+  assert.match(clearBlock, /pendingOpening\.clear\(chatId\)/, 'memory.clear 要清开场');
+  assert.match(purgeBlock, /pendingOpening\.clear\(chatId\)/, 'memory.purge 要清开场');
+});
+
+/**
+ * 主回复没发出去时，**文件那件事仍要写日记**。
+ *
+ * 文件是在 `fileOf` 里当场发成功的，失败的只有正文。整条都不写的话，
+ * 她下一轮完全不记得发过这份文件，可能再发一遍。
+ */
+test('接线：主回复失败时 fileNote 仍要单独落日记', () => {
+  const at = SRC.indexOf('主回复没发出去');
+  assert.ok(at > 0, '找不到主回复失败分支');
+  const block = SRC.slice(at, at + 500);
+  assert.match(block, /if \(fileNote\) journalAdd\(/, '失败分支要把文件那件事记下来');
+});
+
+/**
+ * teardown 之后在飞的投递回查不许再写已关闭的 journal。
+ *
+ * `timers.clearAll()` 拦不住已经发出的异步回调；`journal.close()` 只把
+ * `db` 置 null，回调里的 `add()` 会**把库重新打开**，句柄再也关不掉。
+ */
+test('接线：teardown 之后投递回查要放弃', () => {
+  const at = SRC.indexOf('const deliveryTick = () => {');
+  assert.ok(at > 0, '找不到 deliveryTick');
+  const block = SRC.slice(at, at + 1400);
+  assert.match(block, /if \(disposed\) return;/, 'tick 入口要判 disposed');
+  assert.match(block, /\.then\(\(r\) => \{\s*if \(disposed\) return;/, '回调回来也要判');
+});
+
+/**
+ * 「彻底删除 / 清空」要把**所有还留着原文的地方**清干净（2026-11 复核）。
+ *
+ * `closing.json` 存「上次这段聊到：…」的摘要和私聊里那句没回的话（120 字原话），
+ * `delivery.json` 存发出去的正文（60 / 1000 字）。它们每轮 / 每次结案都会被读出来用，
+ * 只清日记等于「删了正文还留着摘要」。
+ */
+test('接线：清记忆 / 彻底删除要连 closing 与 delivery 一起清', () => {
+  const clearCase = SRC.indexOf("case 'memory.clear': {");
+  const purgeCase = SRC.indexOf("case 'memory.purge': {");
+  const clearBlock = SRC.slice(clearCase, purgeCase);
+  const purgeEnd = SRC.indexOf("case 'memory.clearGlobal'", purgeCase);
+  const purgeBlock = SRC.slice(purgeCase, purgeEnd > purgeCase ? purgeEnd : purgeCase + 4000);
+
+  for (const [name, block] of [['memory.clear', clearBlock], ['memory.purge', purgeBlock]]) {
+    /** 三处都要**带别名**：换过机器人的会话散在多个 openid 下 */
+    assert.match(block, /closing\.clear\(chatId,\s*aliasesOf\(chatId\)\)/, `${name} 要清收尾摘要（带别名）`);
+    assert.match(block, /closing\.clearPending\(chatId,\s*aliasesOf\(chatId\)\)/, `${name} 要清「没回的那句话」（带别名）`);
+    assert.match(block, /deliveryTrack\.clearChat\(chatId,\s*aliasesOf\(chatId\)/, `${name} 要清投递账本里的正文（带别名）`);
+  }
+});
+
+/**
+ * 清空记忆后，待审核的那条**结案时不许把原文补回日记**（2026-11 复核）。
+ *
+ * 判据是账本上的 `cleared` 标记，**不能**用「账本里还有没有这条」：
+ * `resolve()` 返回前会 `prune()` 掉超过 2 天的结案条目，那是正常 TTL 回收，
+ * 按存在性判会把该补的那行也一起跳过。
+ */
+test('接线：投递结案补日记要认 cleared 标记', () => {
+  const at = SRC.indexOf('for (const it of r.settled || [])');
+  assert.ok(at > 0, '找不到 settled 循环');
+  const block = SRC.slice(at, at + 1200);
+  assert.match(block, /if \(it\.cleared\) continue;/, '要认 cleared');
+  assert.equal(
+    /deliveryTrack\.get\(it\.requestId\)/.test(block),
+    false,
+    '不能用「账本里还有没有」判：prune 会把正常的也算成被清掉',
+  );
 });

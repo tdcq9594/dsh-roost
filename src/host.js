@@ -524,6 +524,16 @@ export function apply(ctx) {
   const timers = createTimers({ log });
 
   /**
+   * 已经 teardown 了。
+   *
+   * `timers.clearAll()` 只能拦住**还没触发**的定时器，拦不住已经在飞的异步
+   * 回调。投递回查（`deliveryTick`）一次会并发 10 个 RPC，重载时那批回来
+   * 还会 `journalAdd`——而 journal 已经 `close()` 了，`open()` 见到
+   * `db === null` 会**把库重新打开**，句柄再也关不掉（每次重载漏一个）。
+   */
+  let disposed = false;
+
+  /**
    * E4 一键备份：**启动时、读配置之前**把 `.restore/` 换上（交接 §3③）。
    *
    * 按契约放在最前面：`loadConfig()` / `createMemory()` / `createJournal()`
@@ -4468,9 +4478,12 @@ export function apply(ctx) {
      * 而旧账也不会烂掉：开回来的下一轮（≤10 分钟）照常结。
      */
     if (paused()) return;
+    /** 重载后旧实例的定时器可能还在飞：别再打框架、更别写已关闭的库 */
+    if (disposed) return;
     deliveryTrack
       .resolve({ limit: 10 })
       .then((r) => {
+        if (disposed) return;
         if (r.checked && !r.skipped) {
           log.info(`投递回查：查了 ${r.checked} 条，结案 ${r.settled.length} 条，还有 ${r.still} 条在等`);
         }
@@ -4486,6 +4499,15 @@ export function apply(ctx) {
          */
         for (const it of r.settled || []) {
           if (it.state !== 'sent' || !it.text) continue;
+          /**
+           * 期间用户清空过这个会话：正文已经在 `clearChat` 里抹掉了，
+           * 别再把原文写回日记。
+           *
+           * **不能靠「账本里还有没有这条」判**：`resolve()` 返回前会 `prune()`
+           * 掉超过 2 天的结案条目，那属于正常 TTL 回收，按存在性判会把
+           * 正常该补的那行也一起跳过（2026-11 复核）。
+           */
+          if (it.cleared) continue;
           const cid = String(it.chatId || it.target || '');
           if (!cid) continue;
           journalAdd(
@@ -6925,6 +6947,17 @@ export function apply(ctx) {
         const sent = await postReply(payload, guardOutbound(reply), true, { requestId: `${payload.id}:main` });
         if (sent?.ok === false) {
           log.warn(`主回复没发出去（${sent.message || sent.code || '未知原因'}），这一轮不写日记`);
+          /**
+           * 但**文件那件事要留下**：文件是在 `fileOf` 里当场发成功的，
+           * 失败的只有正文。整条都不写的话，她下一轮完全不记得发过这份文件，
+           * 可能再发一遍。
+           */
+          /**
+           * 行 id 换一个后缀：同一条消息被重试、这次正文发成功时，
+           * `journalText` 那条会撞上这里的主键（`ON CONFLICT DO NOTHING`），
+           * 结果日记里永久只剩「（发了文件：x）」，那句话反而丢了。
+           */
+          if (fileNote) journalAdd({ ...payload, id: `${payload.id}:file` }, chat, fileNote, 'bot');
         } else {
           journalAdd(payload, chat, journalText, 'bot');
         }
@@ -8982,6 +9015,30 @@ export function apply(ctx) {
               } catch (e) {
                 log.warn(`清日记失败：${e.message}`);
               }
+              /**
+               * **压缩开场也要清**（2026-11 复核）。
+               *
+               * 开场正文是压缩那一刻从日记拼出来的，存在内存里（`set()` 写正文，
+               * 重建结果也会缓存）。日记清了、开场还在，下一条消息照样把
+               * 「刚才说到」里那几句**用户刚删掉的原话**拼进 prompt，
+               * 而且这一轮的回复又会写回日记——删掉的内容绕一圈又回来了。
+               */
+              pendingOpening.clear(chatId);
+              /**
+               * `closing.json` 也要清。
+               *
+               * 它存着「上次这段聊到：…」的收尾摘要和私聊里「问出去还没人回」
+               * 的那句话（120 字原话，留 14 天），**每轮无条件注入**。
+               * 只清日记不清它，等于删了正文还留着摘要——下一轮照样把
+               * 用户刚要求删掉的内容拼进 prompt。
+               */
+              closing.clear(chatId, aliasesOf(chatId));
+              closing.clearPending(chatId, aliasesOf(chatId));
+              /**
+               * 投递账本里的 `text` / `full` 也是原文（留 3 天）。
+               * `keepPending`：还在等审核的那几条留着，否则它们永远不会结案。
+               */
+              deliveryTrack.clearChat(chatId, aliasesOf(chatId), { keepPending: true });
               return send(res, 200, {
                 ok: true,
                 journal: j,
@@ -9029,6 +9086,19 @@ export function apply(ctx) {
               } catch (e) {
                 log.warn(`清图谱失败：${e.message}`);
               }
+              /** 压缩开场同理：不清的话下一条消息还会把已删的原话拼进 prompt */
+              pendingOpening.clear(chatId);
+              /**
+               * 「彻底删除」要把**所有还留着原文的地方**清干净。
+               * `closing.json`（收尾摘要 + 私聊那句没回的话）和
+               * `delivery.json`（发出的正文 60/1000 字）都是实打实的原文，
+               * 它们每轮/每次结案都会被读出来用。
+               */
+              closing.clear(chatId, aliasesOf(chatId));
+              closing.clearPending(chatId, aliasesOf(chatId));
+              deliveryTrack.clearChat(chatId, aliasesOf(chatId));
+              /** 召回日志只存 queryLen + 命中的 id（没有正文），但删干净更省事 */
+              recallLog.clear();
               log.info(
                 `彻底删除 ${chatId.slice(0, 8)}：日记 ${j} 条、原文片段 ${g.episodes} 段、`
                 + `关系 ${g.edges} 条、实体 ${g.entities} 个（磁盘旧页待压库）`,
@@ -12844,6 +12914,8 @@ export function apply(ctx) {
     ];
 
     return () => {
+      /** 先立旗：在飞的异步回调回来时据此放弃（见 `disposed` 的注释） */
+      disposed = true;
       /**
        * 长期定时器一把清掉。
        *

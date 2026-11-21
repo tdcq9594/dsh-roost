@@ -228,13 +228,24 @@ export function createClosing(cfg = {}) {
       return null;
     },
 
-    /** 主动清掉（对方又聊起来了、或者用户要求别记） */
-    clear(chatId) {
+    /**
+     * 主动清掉（对方又聊起来了、或者用户要求别记）。
+     *
+     * `aliases` 一起清：换过机器人的会话在盘上散在好几个 openid 下，
+     * 而 `get(chatId, aliases)` 会把旧键那条读出来——只删当前键的话，
+     * 「彻底删除」之后收尾刹车还在生效（2026-11 复核）。
+     */
+    clear(chatId, aliases = []) {
       const db = load();
-      if (!db.chats[chatId]) return false;
-      delete db.chats[chatId];
-      save();
-      return true;
+      const keys = [chatId, ...(Array.isArray(aliases) ? aliases : [])];
+      let n = 0;
+      for (const k of keys) {
+        if (!k || !db.chats[k]) continue;
+        delete db.chats[k];
+        n += 1;
+      }
+      if (n) save();
+      return n > 0;
     },
 
     /**
@@ -270,12 +281,17 @@ export function createClosing(cfg = {}) {
     },
 
     /** 对方回话了就翻篇。只清 pending，不动收尾记录 */
-    clearPending(chatId) {
+    clearPending(chatId, aliases = []) {
       const db = load();
-      if (!db.pending?.[chatId]) return false;
-      delete db.pending[chatId];
-      save();
-      return true;
+      const keys = [chatId, ...(Array.isArray(aliases) ? aliases : [])];
+      let n = 0;
+      for (const k of keys) {
+        if (!k || !db.pending?.[k]) continue;
+        delete db.pending[k];
+        n += 1;
+      }
+      if (n) save();
+      return n > 0;
     },
 
     /**

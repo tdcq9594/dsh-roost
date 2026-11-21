@@ -161,8 +161,13 @@ export function createRewriter({
 
   /** 关掉 sqlite 句柄。Windows 上打开着的文件没法被回退覆盖 */
   function closeHandles() {
-    try { journal?.close?.(); } catch {}
-    try { graph?.close?.(); } catch {}
+    /**
+     * `final:false`：这里关句柄只是为了把 WAL checkpoint 进主库（备份要完整），
+     * 下面 `rekey()` 还要接着用同一个实例。传默认值（final）会让日记永久关闭，
+     * 改写之后「日记一条都不搬」——2026-11 复核抓到过。
+     */
+    try { journal?.close?.({ final: false }); } catch {}
+    try { graph?.close?.({ final: false }); } catch {}
   }
 
   /** 丢掉内存缓存，否则下一次 save() 会把刚恢复的文件又盖回去 */

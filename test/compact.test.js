@@ -570,3 +570,28 @@ test('开场重建：host.js 的接线必须过 compactCfgOf（源码级，挡�
    */
   assert.ok(!/cfgOf:\s*\(\)\s*=>\s*cfg\b/.test(block), '不许把整份 cfg 直接递进去');
 });
+
+/**
+ * 重建开场时「一点料都没有」要回空串（2026-11 复核）。
+ *
+ * `buildOpening({})` 保留骨架是有意的（压缩那一刻总要给模型一句话），
+ * 但**重建**路径不同：日记被「彻底删除」或 7 天滚动清掉之后，
+ * 骨架会被判真、消费掉指针、注入给模型——模型看到「接着上面」却没有「上面」。
+ */
+test('开场：重建路径没有料时回空串（不注入无内容的骨架）', () => {
+  const mk = makeOpening({
+    journal: { recent: () => [], digests: () => [] },
+    agreementsOf: () => [],
+  });
+  assert.equal(mk('g1'), '', '三样都空 → 空串（`pending-opening` 据此删指针但不注入）');
+
+  /** 有料时照常拼 */
+  const mk2 = makeOpening({
+    journal: {
+      recent: () => [{ at: Date.now(), role: 'user', sender: '主人', text: '在吗' }],
+      digests: () => [],
+    },
+    agreementsOf: () => [],
+  });
+  assert.match(mk2('g1'), /刚才说到/);
+});

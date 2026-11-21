@@ -63,8 +63,12 @@ export function createGraph({ file, log = () => {} } = {}) {
   let db = null;
   let ready = false;
   let broken = false;
+  /** `close({final:true})` 之后置 true：不许再懒打开（见 `open()`） */
+  let closed = false;
 
   function open() {
+    /** `close({final:true})` 之后不再重开（同 `journal.js`，见那里的注释） */
+    if (closed) return null;
     if (ready) return db;
     ready = true;
     if (broken) return null;
@@ -965,7 +969,14 @@ export function createGraph({ file, log = () => {} } = {}) {
     rekey,
     reset,
     isFunctional: (rel) => FUNCTIONAL.test(String(rel ?? '')),
-    close() {
+    /**
+     * @param {object} [o]
+     * @param {boolean} [o.final] 默认 true = 收尾（之后永不重开）。
+     *   一键改写 / 备份前要先关句柄让 WAL checkpoint，那种传 `final:false`
+     *   ——关完还要 `rekey()` 接着用。
+     */
+    close({ final = true } = {}) {
+      if (final) closed = true;
       try {
         db?.close();
       } catch {}

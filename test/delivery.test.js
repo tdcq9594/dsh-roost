@@ -334,3 +334,44 @@ test('投递账本：全文单独存一份，且能过重启', () => {
   });
   assert.equal(again.list()[0].full.length, 150, '重启后全文还在');
 });
+
+/**
+ * 按会话清空要带别名，并且「清空记忆」不能把还在等审核的记录删掉
+ * （2026-11 复核）。
+ */
+test('投递账本：clearChat 带别名 + 保留待结案', () => {
+  const { track } = rig();
+  track.note({ requestId: 'r1', chatId: 'new', target: 'new', text: 'A' });
+  track.note({ requestId: 'r2', chatId: 'old', target: 'old', text: 'B' });
+  track.note({ requestId: 'r3', chatId: 'other', target: 'other', text: 'C' });
+
+  /** 只删当前键会漏掉旧键（换过机器人的会话） */
+  assert.equal(track.clearChat('new', ['old']), 2);
+  assert.deepEqual(track.list().map((x) => x.requestId), ['r3']);
+});
+
+test('投递账本：keepPending 时「还在等」的不删（否则永远不结案）', () => {
+  const { track } = rig();
+  track.note({ requestId: 'w1', chatId: 'g1', target: 'g1', text: '等审核' });
+  assert.equal(track.list()[0].state, 'waiting');
+  assert.equal(track.clearChat('g1', [], { keepPending: true }), 0, '待结案的要留着');
+  assert.equal(track.list().length, 1);
+});
+
+/**
+ * 清空记忆时保留的「待结案」条目要**抹掉正文**（2026-11 复核）。
+ *
+ * 只保留记录、不抹正文的话，十分钟后结案时 `journalAdd` 又把用户刚要求
+ * 清掉的那句话写回日记——「清空」和「彻底删除」只差十分钟。
+ */
+test('投递账本：keepPending 保留的条目要抹正文并打 cleared', () => {
+  const { track } = rig();
+  track.note({ requestId: 'w1', chatId: 'g1', target: 'g1', text: '她主动说的那句：周末我去了海边' });
+  track.clearChat('g1', [], { keepPending: true });
+
+  const row = track.list()[0];
+  assert.equal(row.state, 'waiting', '记录还在，好让它能结案');
+  assert.equal(row.text, '', '正文要抹掉');
+  assert.equal(row.full, '', '全文也要抹掉');
+  assert.equal(row.cleared, true, '打标记：结案时别补写日记');
+});

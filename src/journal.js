@@ -296,6 +296,8 @@ function parseList(v) {
 function createSqliteStore(file, log) {
   let db = null;
   let broken = false;
+  /** `close()` 之后置 true：不许再懒打开（见 `open()`） */
+  let closed = false;
   /**
    * 有没有「删过行、但还没 VACUUM」。
    *
@@ -323,6 +325,16 @@ function createSqliteStore(file, log) {
   }
 
   function open() {
+    /**
+     * `close()` 之后**不再重开**。
+     *
+     * 以前 `close()` 只把 `db` 置 null，下一次任何读（`stats()` / `recent()` /
+     * `byDay()`）都会把它重新打开——插件重载时旧实例还有在飞的定时器和请求，
+     * 句柄再也关不掉（Windows 上连库文件都删不掉）。
+     * 这个 store 的每个方法都写了 `const d = open(); if (!d) return …`，
+     * 所以这里返回 null 就是安全的「什么都不做」。
+     */
+    if (closed) return null;
     if (db || broken) return db;
     try {
       ensureDir(file);
@@ -393,6 +405,13 @@ function createSqliteStore(file, log) {
        */
       if (!cols.has('invalid_at')) db.exec('ALTER TABLE journal ADD COLUMN invalid_at INTEGER NOT NULL DEFAULT 0');
       if (!cols.has('superseded_by')) db.exec(`ALTER TABLE journal ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''`);
+      /**
+       * `status`（可信度）：**当前没有生产写入方**，落盘一律是 `''` → 归一成
+       * `fact`。留着它是为了让「备份还原」原样带回（`insertRaw` 会写它），
+       * 以及给「听说的 / 本人确认」这条口径留位置；`journal.add({status})`
+       * 也收这个参数，将来哪个调用方知道了直接传即可。
+       * 别在没接上写入方之前把它当成活的——面板和检索读到的永远是 fact。
+       */
       if (!cols.has('status')) db.exec(`ALTER TABLE journal ADD COLUMN status TEXT NOT NULL DEFAULT ''`);
       /**
        * FTS5 单独一张表而不是 external content：
@@ -1120,7 +1139,8 @@ function createSqliteStore(file, log) {
       }
     },
 
-    close() {
+    close({ final = true } = {}) {
+      if (final) closed = true;
       try {
         db?.close();
       } catch {}
@@ -1138,6 +1158,8 @@ function createSqliteStore(file, log) {
 function createJsonlStore(file, log) {
   let rows = null;
   let index = null;
+  /** `close()` 之后不再读盘（和 sqlite store 同一条规矩） */
+  let closed = false;
   /**
    * 上次 `load()` 里有几行解析不了。
    *
@@ -1164,6 +1186,11 @@ function createJsonlStore(file, log) {
   }
 
   function load() {
+    /** `closed` 时给空数组（不是 null）：调用方会直接 `for (const r of rows)` */
+    if (closed) {
+      rows = rows || [];
+      return rows;
+    }
     if (rows) return rows;
     rows = [];
     badLines = 0;
@@ -1224,7 +1251,8 @@ function createJsonlStore(file, log) {
        * 会把整份日记截断成半截。同仓 `sessions.js` / `atomic.js` /
        * `pending-opening.js` 都是随机 tmp + rename，唯独这里没有。
        */
-      writeFileAtomic(file, rows.map(jsonOf).join('\n') + (rows.length ? '\n' : ''), 'utf8');
+      /** 第三个参数是 `{ mode, mkdir }`，别传 `'utf8'`（解构字符串得到 undefined，靠默认值侥幸生效） */
+      writeFileAtomic(file, rows.map(jsonOf).join('\n') + (rows.length ? '\n' : ''));
       return true;
     } catch (e) {
       log(`日记文件写不进去：${e.message}`);
@@ -1596,7 +1624,9 @@ function createJsonlStore(file, log) {
     /** JSONL 每次 rewrite 都是整文件重写，旧内容已经不在了，没有可压的 */
     vacuum: () => false,
 
-    close() {
+    /** 同 sqlite store：`final:false` = 关完还要接着用（备份前 checkpoint 那种） */
+    close({ final = true } = {}) {
+      if (final) closed = true;
       rows = null;
       index = null;
     },
@@ -1701,6 +1731,8 @@ function perKeyRows(chatId, aliases, take) {
  */
 export function createJournal({ file, embed = null, log = () => {}, now = () => Date.now() } = {}) {
   let store = null;
+  /** `close()` 之后置 true：懒打开会把库重新打开（见 `close()` 的注释） */
+  let closed = false;
 
   function get() {
     if (store) return store;
@@ -1774,6 +1806,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       /** 可信度：默认 fact（不落盘）；只有 hearsay/guess 才写 */
       status = '',
     }) {
+      /** 已经 close 了：在飞的回调不许把库重新打开（见 `close()` 的注释） */
+      if (closed) return { added: false, level: 'normal' };
       const t = String(text ?? '').trim();
       if (!t) return { added: false, level: 'normal' };
       const ts = Number(at) || now();
@@ -2242,9 +2276,27 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
 
     vecOf: (row) => toVec(row?.vec),
 
-    close() {
-      store?.close();
-      store = null;
+    /**
+     * 关掉后端。
+     *
+     * 关完**不许再被懒打开**：`store = null` 之后 `get()` 见到 null 会重新
+     * `open()`。插件重载时旧实例还有在飞的异步回调（投递回查、发帖、巩固），
+     * 它们 `add()` 一下就把库重新打开，句柄再也关不掉（每次重载漏一个 fd）。
+     */
+    /**
+     * @param {object} [o]
+     * @param {boolean} [o.final] 默认 true = 这是收尾（之后**永不重开**）。
+     *   一键改写 / 备份前要先关句柄让 WAL checkpoint，那种要传 `final:false`——
+     *   关完还得继续用同一个实例（`rekey()` 靠懒打开重新连上）。
+     */
+    close({ final = true } = {}) {
+      if (final) closed = true;
+      store?.close({ final });
+      /**
+       * **不置 null**：`get()` 见 null 会 `createSqliteStore()` 新建一个
+       * （closed=false），下一次任何读就把库重新打开了。留着这个已关闭的
+       * store 引用，它自己会把所有方法变成 no-op。
+       */
     },
   };
 }

@@ -553,8 +553,16 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
        */
       const prefsNow = prefs.read();
       if (prefs.unavailable?.() === true) {
-        log('人格偏好读不到，跳过本轮内置人格补齐（免得把删掉的又装回来）');
-        return;
+        /**
+         * 节流：`seeded` 保持 false 之后每次 `list()` 都会重试 `seed()`，
+         * 而 `resolve()` 一轮要调两次——锁着的时候会刷屏。
+         */
+        if (Date.now() - lastSeedWarnAt > 5000) {
+          lastSeedWarnAt = Date.now();
+          log('人格偏好读不到，跳过本轮内置人格补齐（免得把删掉的又装回来）');
+        }
+        /** false = 没做成，`ensureSeeded()` 据此保留重试机会 */
+        return false;
       }
       const deleted = new Set(prefsNow.deleted);
       for (const n of src) {
@@ -573,10 +581,19 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
     }
   }
 
+  /** 偏好读不到时那条日志的节流游标（见 `seed()`） */
+  let lastSeedWarnAt = -Infinity;
+
   function ensureSeeded() {
     if (seeded) return;
-    seeded = true;
-    seed();
+    /**
+     * **seed() 说「这一轮没做成」就别记成做过了**。
+     *
+     * 偏好文件读不动时 `seed()` 会早退（不然会把用户删掉的人格补回来）。
+     * 以前这里先置 `seeded = true` 再调：早退之后整个进程的人格库是空的，
+     * 锁一解除也不会再补，只能重启恢复。
+     */
+    seeded = seed() !== false;
   }
 
   /**
@@ -861,6 +878,25 @@ export function createPersonas({ dataDir, builtinDir, log = () => {} }) {
     removeMany(ids, refs = {}) {
       const list = [...new Set((ids || []).map(safeId))].filter((x) => x !== 'default');
       if (!list.length) return { ok: true, batch: null, removed: [], skipped: [] };
+      /**
+       * 和单删同一条规则：偏好读不动就**一个都不删**。
+       *
+       * 删文件 + 写墓碑是两件事，墓碑写不进去就成了「删了又回来」——
+       * 用户看到删掉了，重启后 `seed()` 见到空墓碑又全拷回来。
+       * 批量删除以前漏了这道闸（只修了 `remove()`）。
+       */
+      prefs.read();
+      if (prefs.unavailable?.() === true) {
+        const why = '人格偏好文件正被占用，这一轮先别删（过一会儿再试）';
+        return {
+          ok: false,
+          /** 前端只读 `message`，没有它用户只看到「没删成」，看不到真正原因 */
+          message: why,
+          batch: null,
+          removed: [],
+          skipped: list.map((id) => ({ id, why })),
+        };
+      }
 
       /**
        * **先 prune 再建目录**：`pruneBackups()` 只留 5 个目录，先建后 prune 的话，

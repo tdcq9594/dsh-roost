@@ -326,10 +326,25 @@ export function makeOpening({
     const users = pool.filter((r) => r.role !== 'bot').slice(0, Number(c.keepRecentUser) || 8);
     const bots = pool.filter((r) => r.role === 'bot').slice(0, Number(c.keepRecentBot) || 3);
     const recent = [...users, ...bots].sort((a, b) => a.at - b.at);
+    const digests = journal.digests(chatId, c.keepDigests, aliasesOf(chatId));
+    const agreements = agreementsOf(chatId) || [];
+    /**
+     * **三样都空就别给骨架**（2026-11 复核）。
+     *
+     * 日记被「彻底删除」或 7 天滚动清掉之后重建，`buildOpening` 照样会拼一段
+     * 「（接着上面继续聊…）不要重新自我介绍」——判真、消费掉指针、注入给模型，
+     * 而模型看到「接着上面」却没有「上面」，只能硬编一句。
+     *
+     * 返回空串会走 `pending-opening` 里既有的「删指针但不注入」分支；
+     * `compact()` 那边 `if (text)` 也不会把空串写成指针。
+     * **注意**：`buildOpening()` 单独调用时仍保留骨架（有测试钉着），
+     * 这里只拦「确实一点料都没有」的重建路径。
+     */
+    if (!digests.length && !recent.length && !agreements.length) return '';
     return buildOpening({
-      digests: journal.digests(chatId, c.keepDigests, aliasesOf(chatId)),
+      digests,
       recent,
-      agreements: agreementsOf(chatId) || [],
+      agreements,
       now: now(),
     });
   };

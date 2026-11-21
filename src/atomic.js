@@ -40,15 +40,32 @@ function tmpNameOf(file) {
 export function writeFileAtomic(file, data, { mode, mkdir = true } = {}) {
   if (mkdir) fs.mkdirSync(dirname(file), { recursive: true });
   const tmp = tmpNameOf(file);
+  /**
+   * 没显式给 `mode` 时**继承目标文件现有的权限**（2026-11 复核）。
+   *
+   * 原子写的 tmp 是新建的，走 `0666 & ~umask`；直接 rename 过去会把原本
+   * `0600` 的文件悄悄降成 `0644`。密钥类文件（`secrets/`、`api-clients.json`）
+   * 正好都在这条路径上——下次谁加一个写入点忘了传 mode 就是权限泄漏。
+   * Windows 上 `mode` 无意义，`statSync().mode` 拿到的值 chmod 也不会生效，
+   * 所以失败一律忽略。
+   */
+  let useMode = mode;
+  if (!useMode) {
+    try {
+      useMode = fs.statSync(file).mode & 0o777;
+    } catch {
+      /* 目标不存在（首次创建）：按 umask 默认即可 */
+    }
+  }
   try {
-    fs.writeFileSync(tmp, data, mode ? { encoding: 'utf8', mode } : 'utf8');
+    fs.writeFileSync(tmp, data, useMode ? { encoding: 'utf8', mode: useMode } : 'utf8');
     /**
      * Windows 会忽略 `mode`，POSIX 上 `writeFileSync` 又受 umask 影响，
      * 所以显式再 chmod 一次；失败不算错误（FAT / 网络盘不支持）。
      */
-    if (mode) {
+    if (useMode) {
       try {
-        fs.chmodSync(tmp, mode);
+        fs.chmodSync(tmp, useMode);
       } catch {}
     }
     fs.renameSync(tmp, file);

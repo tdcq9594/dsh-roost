@@ -101,6 +101,12 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
              * 盘上彻底抹掉，于是按人格的送达统计重启即清零。
              */
             personaId: String(x.personaId ?? ''),
+            /**
+             * 用户清空过这个会话：正文已抹掉，结案时**不许**再补写日记。
+             * 单看「账本里还有没有这条」判不出来——结案后 `prune()` 也会删，
+             * 而且那是正常的 TTL 回收（2026-11 复核）。
+             */
+            cleared: x.cleared === true,
           })),
       };
     } catch {
@@ -291,10 +297,48 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
     };
   }
 
+  /**
+   * 彻底删除某个会话：账本里那几条**正文**也别留着。
+   *
+   * 3 天 TTL 只保证「过一阵子会没」，不等于「用户点了彻底删除就没了」。
+   * 这里存着 `text` / `full`（各 60 / 1000 字），是实打实的消息原文。
+   */
+  function clearChat(chatId, aliases = [], { keepPending = false } = {}) {
+    const keys = new Set(
+      [chatId, ...(Array.isArray(aliases) ? aliases : [])].map((k) => String(k ?? '')).filter(Boolean),
+    );
+    if (!keys.size) return 0;
+    const m = load();
+    const before = m.items.length;
+    /**
+     * `chatId` 与 `target` 都可能命中（频道消息两者不同），两个方向都查。
+     *
+     * `keepPending`：「清空本会话记忆」不该把**还在等审核**的记录删掉——
+     * 删了它们再也不会结案，面板「待确认」静默消失。「彻底删除」才全清。
+     */
+    m.items = m.items.filter((x) => {
+      if (!keys.has(x.chatId) && !keys.has(x.target)) return true;
+      if (!keepPending || SETTLED.has(x.state)) return false;
+      /**
+       * 还在等审核：留着让它能结案，但**正文抹掉**。
+       * 只留记录不留原文——否则十分钟后结案时，`journalAdd` 又把用户刚要求
+       * 清掉的那句话写回日记（2026-11 复核实测）。
+       */
+      x.text = '';
+      x.full = '';
+      x.cleared = true;
+      return true;
+    });
+    const n = before - m.items.length;
+    if (n) save();
+    return n;
+  }
+
   return {
     note,
     resolve,
     nextState,
+    clearChat,
     /** 还在等的（面板「待确认」） */
     pending: () => load().items.filter((x) => !SETTLED.has(x.state)),
     /** 全部，新的在前（面板用） */

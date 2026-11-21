@@ -839,8 +839,15 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       } else {
         m.global = addInto(m.global, m.meta.global, fact, opts);
       }
-      save();
-      return true;
+      /**
+       * **把落盘结果如实回给调用方**（2026-11 复核）。
+       *
+       * `save()` 在读盘失败（`ioFailed`）或写不进去时返回 false。以前这里
+       * 无条件 `return true`：工具回「记住了」、面板回 `ok:true`，可 5 秒后
+       * 重读成功时 `cache` 会被盘上内容整体替换——那条事实**内存和磁盘都没了**，
+       * 而模型以为记住了。
+       */
+      return save();
     },
 
     /**
@@ -1337,8 +1344,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);
       list.push(text);
       mm[text] = meta;
-      save();
-      return true;
+      /** 同 `add()`：还原进内存但没落盘，要如实回 false（备份还原靠它判断） */
+      return save();
     },
   };
 }
