@@ -45,7 +45,7 @@
 <summary>数据怎么走（链路图）</summary>
 
 ```
-QQ ⇄ Roost 内核 ⇄ 外接协议事件流 / RPC ⇄ dsh-roost ⇄ DSH 会话 ⇄ DeepSeek
+QQ ⇄ Roost 框架 ⇄ 外接协议事件流 / RPC ⇄ dsh-roost ⇄ DSH 会话 ⇄ DeepSeek
 ```
 
 协议帧、方法表与鉴权见 Roost 仓库的 `docs/宿主协议v1.md`。本仓库只做客户端。
@@ -230,6 +230,18 @@ DeepSeek 抽风 / 502 了怎么办
 ## 参与贡献
 
 欢迎提 issue、改文档、修 bug。本地怎么跑、PR 前要过哪五步检查、代码约定，都写在 **[CONTRIBUTING.md](https://github.com/roost-qq/dsh-roost/blob/main/CONTRIBUTING.md)**。
+
+---
+
+## 💬 交流群
+
+安装踩坑、用法讨论、人格与扩展的开发想法都欢迎来聊。提问时尽量带上版本号和相关日志。
+
+群号：**1130901545**
+
+<div align="center">
+<img src="docs/images/qq-group.jpg" alt="roost 交流群二维码" width="240" />
+</div>
 
 ---
 
