@@ -153,7 +153,7 @@ async function boot({ enabled = false, seedProfile = true } = {}) {
     await routes.get(key)(req, res);
     return res;
   };
-  const quick = (op, arg) => call('/roost/api/quick', { op, arg });
+  const quick = (op, arg) => call('/roost/api/quick', { viaExt: '@panel', op, arg });
   return {
     quick, call, routes, data,
     file: join(data, 'profiles.json'),
@@ -198,7 +198,7 @@ test('D7：profiles.clear 独立生效，memory.clear 不连带清档案', async
   const before = b.disk();
   assert.match(before, /小明/);
 
-  const mc = await b.call('/roost/api/quick', { op: 'memory.clear', chatId: 'g1' });
+  const mc = await b.call('/roost/api/quick', { viaExt: '@panel', op: 'memory.clear', chatId: 'g1' });
   assert.equal(mc.body.ok, true, mc.body.message);
   assert.match(b.disk(), /小明/, '契约 §3④：跨群档案不挂会话级清空');
 

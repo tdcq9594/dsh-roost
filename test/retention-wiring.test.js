@@ -81,7 +81,7 @@ async function boot({ factsMode = 'expire', journalMode = 'off', seedJournal = t
     await h(req, res);
     return res;
   };
-  const quick = (op, arg) => call('/roost/api/quick', { op, arg });
+  const quick = (op, arg) => call('/roost/api/quick', { viaExt: '@panel', op, arg });
   return {
     quick, call, data, mfile,
     mem: () => (existsSync(mfile) ? readFileSync(mfile, 'utf8') : null),

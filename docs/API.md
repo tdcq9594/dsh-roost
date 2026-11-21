@@ -109,6 +109,11 @@
 - `session:write`（**敏感**：面板发放要二次确认）
 - `prompt:write`（**敏感**：面板发放要二次确认）
 - `config:write`（**敏感**：面板发放要二次确认）
+- `groups:read`（**敏感**：面板发放要二次确认）
+- `model:write`（**敏感**：面板发放要二次确认）
+- `host:maintenance`（**敏感**：面板发放要二次确认）
+- `memory:purge`（**敏感**：面板发放要二次确认）
+- `ext:manage`（**敏感**：面板发放要二次确认）
 - `group:write`（**敏感**：面板发放要二次确认）
 - `core:write`（**敏感**：面板发放要二次确认）
 - `agent:write`（**敏感**：面板发放要二次确认）

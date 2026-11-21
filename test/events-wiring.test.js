@@ -55,7 +55,7 @@ async function boot({ enabled = false, seed = [] } = {}) {
     await h(req, res);
     return res;
   };
-  const quick = (op, arg) => call('/roost/api/quick', { op, arg });
+  const quick = (op, arg) => call('/roost/api/quick', { viaExt: '@panel', op, arg });
   const file = join(data, 'events.json');
   return {
     quick, call, file, data,
@@ -102,7 +102,7 @@ test('D8：独立清空入口能清盘；memory.clear 也连带清', async (t) =
 
   const two = await boot({ enabled: true, seed: [freshRow(), freshRow()] });
   t.after(two.done);
-  const c = await two.call('/roost/api/quick', { op: 'memory.clear', chatId: 'g1' });
+  const c = await two.call('/roost/api/quick', { viaExt: '@panel', op: 'memory.clear', chatId: 'g1' });
   assert.equal(c.body.ok, true, c.body.message);
   assert.deepEqual(two.read(), [], '清记忆不把经历留成第二份档案');
 });
