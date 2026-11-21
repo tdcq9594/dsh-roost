@@ -1,10 +1,7 @@
 # 参与贡献
 
-> **⚠️ 历史文档（2026-11-12）**：本文写于 ai-chat 中间层时代，文中的
-> `POST /inbound` / `/r/reply` / 插件适配器 / 端口同步等描述**已全部废弃**。
-> 现行链路是 Roost 框架外接协议 `roost-host/1` 直连，见
-> [接入说明](docs/接入说明.md) 与 [使用手册](docs/USER-MANUAL.md)。
-> 本文保留作为当时的设计记录，不要照着它配置。
+现行链路是 Roost 框架外接协议 `roost-host/1` 直连，背景见
+[接入说明](docs/接入说明.md) 与 [使用手册](docs/USER-MANUAL.md)。
 
 欢迎提 issue、改文档、修 bug。这个仓库是零依赖的 DSH 插件，跑起来不需要 `npm install`，只要 Node 22+。
 
@@ -14,7 +11,7 @@
 
 - 面板「日志」页里出错前后那几行（按级别筛一下）
 - `config.json` 里 `server.port` / `server.token` 是否两边一致（**密钥贴出来前先打码**）
-- ai-chat 那一侧的「DSH 地址」和适配器设置
+- 面板「概览」页里 Roost 直连是否显示已连上
 - DSH 版本、Node 版本、操作系统
 
 别把 AppSecret、共享密钥、openid 原文贴进 issue。
@@ -72,8 +69,8 @@ npm pack --dry-run
 
 1. 要发新版时，在 PR 里 bump `package.json` version（末位 +0.0.1，**不按 commit 前缀跳位**），
    并在 `RELEASE_NOTES.md` 顶部加 `## vX.Y.Z：...` 段、段内写「一句话：」。
-2. PR 合并进 `main` 后，`release.yml` 校验版本/notes 一致 → 等维护者批准 `Release` environment →
-   **自动建 tag + Release + 发 npm**。
+2. PR 打上 `release` 标签、合并进 `main` 后，`release.yml` 校验版本/notes 一致 →
+   **自动建 tag + Release + 发 npm**（`Release` environment 只用来挂密钥，无需人工审批）。
 3. **不要手动 `git tag` 或 `git push origin vX.Y.Z`**——tag 由 CI 建，手动推会造成内容未校验的坏状态。
 4. 外部贡献者不要自行 bump 版本或发版——版本决策由维护者做；上面的流程是维护者发版时走的。
 
