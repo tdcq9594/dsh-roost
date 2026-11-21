@@ -51,7 +51,7 @@ import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
 import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
-import { guardQuickCall } from './ext-quick-guard.js';
+import { guardQuickCall, PANEL_MARK } from './ext-quick-guard.js';
 import { injectShim } from './ext-page-shim.js';
 import { mountUsageSections, mountToolOutputBudget } from './ext-usage.js';
 import { createApiV1 } from './api-v1.js';
@@ -7797,8 +7797,12 @@ export function apply(ctx) {
          * 面板自己的按钮不带这个字段，保持全权——这套判权只管扩展页面。
          */
         const viaExt = String(body?.viaExt || '').trim();
-        if (viaExt) {
-          const granted = extClientStore?.get?.(`ext:${viaExt}`)?.scopes;
+        /**
+         * **面板必须显式带 `@panel`**（2026-11-21 复核）。以前「不带 = 面板」，
+         * 于是任何漏传该字段的调用都会拿到全权；现在漏传直接 400。
+         */
+        if (viaExt !== PANEL_MARK) {
+          const granted = viaExt ? extClientStore?.get?.(`ext:${viaExt}`)?.scopes : null;
           const g = guardQuickCall({ op, arg, viaExt, scopes: Array.isArray(granted) ? granted : [] });
           if (!g.ok) {
             log.warn(`面板 API 拒绝 ${viaExt} 调 ${op}：${g.why}`);

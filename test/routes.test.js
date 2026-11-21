@@ -921,7 +921,7 @@ test('路由：/quick memory.remove 只碰到失效行时说「已作废」而�
   const { call, off } = await bootHost({}, STALE_SEED);
   const r = await call('/quick', {
     method: 'POST',
-    body: { op: 'memory.remove', arg: '表情包', chatId: 'g1' },
+    body: { viaExt: '@panel', op: 'memory.remove', arg: '表情包', chatId: 'g1' },
   });
   assert.equal(r.status, 200);
   assert.equal(r.json.removed, 0, '失效行不该被抹');
@@ -954,7 +954,7 @@ function seedExt(dir, id, withSource = true) {
   if (withSource) writeFileSync(join(d, '.source.json'), JSON.stringify({ repo: 'market', tag: 'v1' }), 'utf8');
 }
 
-const extOp = (call, op, arg = {}) => call('/quick', { method: 'POST', body: { op, arg, chatId: '' } });
+const extOp = (call, op, arg = {}) => call('/quick', { method: 'POST', body: { viaExt: '@panel', op, arg, chatId: '' } });
 
 test('G5-16 /quick 扩展 op 全接线：读清单 / 六档 / 诊断 / 状态都真注册了', async () => {
   const { call, off, dir } = await bootHost({}, {});
@@ -1131,7 +1131,7 @@ test('路由：更新说明取的是当前版本那一段', async () => {
 
 const modelOp = (call, op, arg = {}) => call('/quick', {
   method: 'POST',
-  body: { op, arg, chatId: '' },
+  body: { viaExt: '@panel', op, arg, chatId: '' },
 });
 
 test('路由：model.set 的四个入口各改各的，互不串台', async () => {
@@ -1941,19 +1941,19 @@ test('总开关：关着时七个维护端点也 409，只读的 GET 照常', as
 test('总开关 / 试运行：默认值正确、能从 features.patch 改、改完立刻生效', async () => {
   const { call, off } = await bootHost();
   try {
-    const g = await call('/quick', { method: 'POST', body: { op: 'features.get', arg: {} } });
+    const g = await call('/quick', { method: 'POST', body: { viaExt: '@panel', op: 'features.get', arg: {} } });
     assert.equal(g.json.ok, true);
     assert.equal(g.json.on.botEnabled, true, '总开关缺省就是开（老配置没有这个键）');
     assert.equal(g.json.on.dryRun, false, '试运行默认必须关');
     assert.ok(g.json.groups.some((x) => x.id === 'run'), '「运行」组要下发（页头与能力页共用）');
 
-    const p = await call('/quick', { method: 'POST', body: { op: 'features.patch', arg: { id: 'dryRun', on: true } } });
+    const p = await call('/quick', { method: 'POST', body: { viaExt: '@panel', op: 'features.patch', arg: { id: 'dryRun', on: true } } });
     assert.equal(p.json.ok, true, '试运行要能打开');
-    const g2 = await call('/quick', { method: 'POST', body: { op: 'features.get', arg: {} } });
+    const g2 = await call('/quick', { method: 'POST', body: { viaExt: '@panel', op: 'features.get', arg: {} } });
     assert.equal(g2.json.on.dryRun, true);
 
     /** 关掉总开关后，同一个手动入口立刻变 409——判据是热读的，不用重启 */
-    const off1 = await call('/quick', { method: 'POST', body: { op: 'features.patch', arg: { id: 'botEnabled', on: false } } });
+    const off1 = await call('/quick', { method: 'POST', body: { viaExt: '@panel', op: 'features.patch', arg: { id: 'botEnabled', on: false } } });
     assert.equal(off1.json.ok, true);
     const fired = await call('/speakup/fire', { method: 'POST', body: {} });
     assert.equal(fired.status, 409, '刚关掉就该生效');
@@ -1966,7 +1966,7 @@ test('总开关 / 试运行：默认值正确、能从 features.patch 改、改�
 test('features.patch：没有这个开关就 400，不许静默通过', async () => {
   const { call, off } = await bootHost();
   try {
-    const r = await call('/quick', { method: 'POST', body: { op: 'features.patch', arg: { id: 'nope', on: true } } });
+    const r = await call('/quick', { method: 'POST', body: { viaExt: '@panel', op: 'features.patch', arg: { id: 'nope', on: true } } });
     assert.equal(r.status, 400);
     assert.match(r.json.message, /没有这个开关/);
   } finally {

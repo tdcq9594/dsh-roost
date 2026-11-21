@@ -1181,7 +1181,7 @@ test('面板 quick：memory.mute 真的把会话写进 offChats', async () => {
     const req = {
       headers: { host: '127.0.0.1:8931' },
       async *[Symbol.asyncIterator]() {
-        yield JSON.stringify(body);
+        yield JSON.stringify({ viaExt: '@panel', ...body });
       },
     };
     await routes.get('/roost/api/quick')(req, res);
@@ -1342,7 +1342,7 @@ test('面板 quick：能力页的启用 / 改 / 读，以及"没启用时不许�
     const res = { statusCode: 0, setHeader() {}, end(s) { this.body = JSON.parse(s); } };
     const req = {
       headers: { host: '127.0.0.1:8931' },
-      async *[Symbol.asyncIterator]() { yield JSON.stringify(body); },
+      async *[Symbol.asyncIterator]() { yield JSON.stringify({ viaExt: '@panel', ...body }); },
     };
     await routes.get('/roost/api/quick')(req, res);
     return res;
@@ -1459,7 +1459,7 @@ test('面板 quick：功能开关的读写，以及「关掉功能要真的收�
     const res = { statusCode: 0, setHeader() {}, end(s) { this.body = JSON.parse(s); } };
     const req = {
       headers: { host: '127.0.0.1:8931' },
-      async *[Symbol.asyncIterator]() { yield JSON.stringify(body); },
+      async *[Symbol.asyncIterator]() { yield JSON.stringify({ viaExt: '@panel', ...body }); },
     };
     await routes.get('/roost/api/quick')(req, res);
     return res;
@@ -1570,7 +1570,7 @@ test('面板 quick：配额的读 / 改 / 清零，以及非法值要拒', async
 
   const call = async (body) => {
     const res = { statusCode: 0, setHeader() {}, end(s) { this.body = JSON.parse(s); } };
-    const req = { headers: { host: '127.0.0.1:8931' }, async *[Symbol.asyncIterator]() { yield JSON.stringify(body); } };
+    const req = { headers: { host: '127.0.0.1:8931' }, async *[Symbol.asyncIterator]() { yield JSON.stringify({ viaExt: '@panel', ...body }); } };
     await routes.get('/roost/api/quick')(req, res);
     return res;
   };

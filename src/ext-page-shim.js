@@ -62,6 +62,27 @@ function call(op, arg) {
   });
 }
 
+/**
+ * 自己是谁。页面地址形如 /ext-pages?id=<自己>&file=...，从 query 里读。
+ */
+var SELF = "";
+try { SELF = new URLSearchParams(location.search).get("id") || ""; } catch (e) {}
+
+/**
+ * 把 /ext-pages 的 id 强制成自己。
+ *
+ * 这条路由对沙箱页面是放行的（它要读自己目录下的 JSON / 截图），但不认人：
+ * 任何扩展的页面都能填别人的 id 去读别人的文件。页面里能改的地方只有这一层
+ * （fetch 和 XHR），改不了 <img src>——但图片读不出像素（画布会污染），
+ * 真正的数据外泄通道是 JSON，堵住这里就够了。
+ */
+function pinSelf(abs) {
+  if (!SELF || abs.pathname.indexOf("/roost/api/ext-pages") !== 0) return false;
+  if (abs.searchParams.get("id") === SELF) return false;
+  abs.searchParams.set("id", SELF);
+  return true;
+}
+
 var orig = typeof window.fetch === "function" ? window.fetch.bind(window) : null;
 window.fetch = function (input, init) {
   var url = typeof input === "string" ? input : ((input && input.url) || "");
@@ -73,8 +94,22 @@ window.fetch = function (input, init) {
     return call(String((body && body.op) || ""), (body && body.arg) || {});
   }
   if (!orig) return Promise.reject(new Error("这个页面没有 fetch"));
+  if (abs && pinSelf(abs)) return orig(abs.toString(), init);
   return orig(input, init);
 };
+
+/** XHR 也要管：不补这一段，垫片就只是「防君子」 */
+if (typeof XMLHttpRequest === "function" && XMLHttpRequest.prototype && XMLHttpRequest.prototype.open) {
+  var xhrOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, u) {
+    var args = Array.prototype.slice.call(arguments);
+    try {
+      var abs = new URL(String(u), location.href);
+      if (pinSelf(abs)) args[1] = abs.toString();
+    } catch (e) {}
+    return xhrOpen.apply(this, args);
+  };
+}
 })();</script>`;
 
 /** 把垫片插到页面最前面：有 `<head>` 就紧跟其后，没有就直接拼在最前。 */

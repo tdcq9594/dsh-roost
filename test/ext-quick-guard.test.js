@@ -11,16 +11,31 @@ import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 
-import { guardQuickCall } from '../src/ext-quick-guard.js';
+import { guardQuickCall, PANEL_MARK } from '../src/ext-quick-guard.js';
 import { PAGE_SHIM, injectShim } from '../src/ext-page-shim.js';
 
 /* ---------------- 判权 ---------------- */
 
-test('判权：面板自己的调用不带 viaExt，保持全权', () => {
+test('判权：面板带 @panel，保持全权', () => {
   for (const op of ['model.set', 'memory.purge', 'extensions.market.install']) {
-    const r = guardQuickCall({ op, arg: { a: 1 } });
+    const r = guardQuickCall({ op, arg: { a: 1 }, viaExt: PANEL_MARK });
     assert.equal(r.ok, true, `${op} 面板自己应该能调`);
     assert.deepEqual(r.arg, { a: 1 }, '不该改面板传的参数');
+  }
+});
+
+/**
+ * 「没带标记」必须拒绝，不能默认当面板（2026-11-21 复核）。
+ *
+ * 以前用「`viaExt` 为空」表示面板——任何漏传这个字段的调用都会拿到全权，
+ * 而漏传是很容易犯的错。
+ */
+test('判权：没带标记一律 400，不当面板', () => {
+  for (const viaExt of [undefined, '', '   ', null]) {
+    const r = guardQuickCall({ op: 'model.set', arg: {}, viaExt });
+    assert.equal(r.ok, false, `${JSON.stringify(viaExt)} 应该被拒`);
+    assert.equal(r.status, 400);
+    assert.match(r.why, /缺少调用方标记/);
   }
 });
 
@@ -93,8 +108,11 @@ test('垫片：没有 <head> 时直接拼在最前', () => {
 
 test('垫片：只拦 /roost/api/quick，别的请求原样放行', () => {
   assert.match(PAGE_SHIM, /pathname\.indexOf\("\/roost\/api\/quick"\)/);
-  /** 读自己目录下的 JSON 不能被拦（沙箱后靠 CORS 放行） */
-  assert.equal(/ext-pages/.test(PAGE_SHIM), false, '不该拦 /ext-pages');
+  /**
+   * 读自己目录下的 JSON 不能被**转成 postMessage**（靠 CORS 直连）。
+   * 垫片只把它的 `id` 钉成自己，请求本身照旧走 fetch。
+   */
+  assert.equal(/call\([^)]*ext-pages/.test(PAGE_SHIM), false, '不该把 /ext-pages 转成 postMessage');
 });
 
 test('垫片：20 秒没回音要回超时，别让页面永远等', () => {
@@ -190,4 +208,36 @@ test('垫片：真的把 /roost/api/quick 转成 postMessage，并把回复还�
   const r2 = await win.fetch('/roost/api/ext-pages?id=bili&file=shots/index.json');
   assert.deepEqual(await r2.json(), { raw: 1 });
   assert.equal(origCalls.length, 1, '不该拦 /ext-pages');
+});
+
+/**
+ * `/ext-pages` 对沙箱页面是放行的（要读自己目录下的 JSON / 截图），但它**不认人**：
+ * 任何扩展的页面都能填别人的 id 去读别人的文件。垫片把 id 强制成自己。
+ */
+test('垫片：/ext-pages 的 id 被强制成自己，读不到别人的文件', async () => {
+  const code = PAGE_SHIM.replace(/^<script>/, '').replace(/<\/script>$/, '');
+  const seen = [];
+  const win = {
+    addEventListener: () => {},
+    fetch: async (u) => { seen.push(String(u)); return new Response('{}'); },
+  };
+  // eslint-disable-next-line no-new-func
+  new Function('window', 'parent', 'location', 'Response', 'setTimeout', 'clearTimeout', 'URL', 'URLSearchParams', 'XMLHttpRequest', 'Promise', code)(
+    win, { postMessage: () => {} },
+    { href: 'http://p/roost/api/ext-pages?id=bili&file=ui/index.html', search: '?id=bili&file=ui/index.html' },
+    Response, setTimeout, clearTimeout, URL, URLSearchParams, undefined, Promise,
+  );
+
+  await win.fetch('/roost/api/ext-pages?id=imagegen&file=gallery.json');
+  await win.fetch('/roost/api/ext-pages?id=bili&file=shots/index.json');
+  await win.fetch('https://i0.hdslb.com/x.jpg');
+
+  assert.match(seen[0], /id=bili/, '别人的 id 要被换掉');
+  assert.equal(/imagegen/.test(seen[0]), false, '换掉之后不能还留着别人的 id');
+  assert.match(seen[1], /id=bili/, '自己的 id 原样');
+  assert.equal(seen[2], 'https://i0.hdslb.com/x.jpg', '外站资源不许改');
+});
+
+test('垫片：XHR 也要管（不补就只是防君子）', () => {
+  assert.match(PAGE_SHIM, /XMLHttpRequest\.prototype\.open/, '要覆写 XHR.open');
 });

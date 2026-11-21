@@ -123,8 +123,19 @@ window.__ModuleLoader__.load({
     };
 
     const get = (p) => req(p);
+    /**
+     * `viaExt` 是「谁在调面板 API」的标记：`@panel` = 面板自己的按钮（全权），
+     * 扩展页面转发时是那个扩展的 id（按它的 scope 判权，见 `src/ext-quick-guard.js`）。
+     *
+     * **在 `post()` 统一加**，不靠每个调用点记得写：漏传会被服务端 400。
+     * 放在 spread 之前，`EXT_POST(..., { viaExt: id })` 能覆盖它。
+     */
     const post = (p, body) =>
-      req(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+      req(p, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(p === '/quick' ? { viaExt: '@panel', ...(body || {}) } : (body || {})),
+      });
 
     const clone = (o) => JSON.parse(JSON.stringify(o))
     const setPath = (obj, path, value) => {

@@ -16,20 +16,15 @@
  * （fail-closed）。
  */
 
-import { allowsOp, isSelfOnlyOp } from './ext-quick-scopes.js';
+import { allowsOp, isSelfOnlyOp, SELF_ONLY_OPS } from './ext-quick-scopes.js';
 
-/** 只能操作「自己」的那批 op：`arg.id` 必须是调用方自己。 */
-const SELF_ID_OPS = new Set([
-  'extensions.get',
-  'extensions.usage.save',
-  'extensions.config.get',
-  'extensions.config.save',
-  'extensions.ui.action',
-  'extensions.forms',
-  'extensions.status',
-  'extensions.diagnose',
-  'extensions.buckets',
-]);
+/**
+ * 只能操作「自己」的那批 op：`arg.id` 必须是调用方自己。
+ *
+ * **从 `SELF_ONLY_OPS` 派生**，不要另抄一份——两份清单迟早漂：
+ * 新加一个只碰自己的 op，改了一处忘了另一处，表现是「判权放行但 id 没被纠正」。
+ */
+const SELF_ID_OPS = new Set(SELF_ONLY_OPS);
 
 /**
  * @param {object} o
@@ -39,10 +34,21 @@ const SELF_ID_OPS = new Set([
  * @param {string[]} [o.scopes] 该扩展令牌上**实际授予**的 scope
  * @returns {{ ok:true, arg:any } | { ok:false, status:number, why:string }}
  */
+/**
+ * 面板自己的标记。
+ *
+ * 为什么不用「`viaExt` 为空」表示面板：那样一来，任何**漏传**这个字段的调用
+ * 都会拿到全权，而漏传是很常见的错误。用 `@` 开头是因为扩展 id 的正则是
+ * `/^[a-z][a-z0-9-]{1,31}$/`，撞不上。
+ */
+export const PANEL_MARK = '@panel';
+
 export function guardQuickCall({ op, arg, viaExt = '', scopes = [] } = {}) {
   const id = String(viaExt ?? '').trim();
   /** 面板自己：主人点按钮，一直是全权（这套判权只管扩展页面） */
-  if (!id) return { ok: true, arg };
+  if (id === PANEL_MARK) return { ok: true, arg };
+  /** 没带标记 = 不认识调用方：拒绝，不要默认当面板 */
+  if (!id) return { ok: false, status: 400, why: '缺少调用方标记（面板要带 viaExt=@panel）' };
 
   const verdict = allowsOp(op, scopes);
   if (!verdict.ok) return { ok: false, status: 403, why: verdict.why };

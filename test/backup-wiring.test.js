@@ -93,7 +93,7 @@ async function boot({ stage = null, retentionBackup = null, appliedAt = 0 } = {}
     await h(req, res);
     return res;
   };
-  const quick = (op, arg) => call('/roost/api/quick', { op, arg });
+  const quick = (op, arg) => call('/roost/api/quick', { viaExt: '@panel', op, arg });
   return {
     quick, call, data,
     cfg: () => JSON.parse(readFileSync(join(data, 'config.json'), 'utf8')),

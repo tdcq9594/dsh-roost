@@ -395,6 +395,9 @@ test('接线：/quick 用 guardQuickCall 判扩展页面的调用', () => {
   const block = SRC.slice(at, at + 2600);
 
   assert.match(block, /const viaExt = String\(body\?\.viaExt \|\| ''\)\.trim\(\)/, '要读 viaExt');
+  /** 面板要显式带 @panel：不能把「没带」当成面板（漏传就是全权） */
+  assert.match(block, /if \(viaExt !== PANEL_MARK\)/, '面板标记要显式判');
+  assert.equal(/if \(viaExt\) \{/.test(block), false, '不能「带了才判、不带就放行」');
   assert.match(block, /guardQuickCall\(\{ op, arg, viaExt/, '要过判权');
   assert.match(block, /extClientStore\?\.get\?\.\(/, '按扩展 id 取令牌记录');
   assert.match(block, /extClientStore/, '判据取自令牌存储');
