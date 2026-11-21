@@ -1012,12 +1012,20 @@ function createSqliteStore(file, log) {
      *
      * 磁盘上的旧页要等 `vacuum()` 才真正清掉，这里只标记，不立刻压——
      * VACUUM 会锁库几秒，不能在用户点按钮那条路上跑。
+     *
+     * `aliases`：换过机器人的会话在库里散在好几个 openid 下。**必须一起删**，
+     * 否则用户点了「彻底删除」，旧键下的正文和 `episode.text` 还留着，
+     * 下一条消息她又想起来了——`clearChat` 一直是这么做的，别只改一半。
+     *
      * @returns {number} 删掉几条
      */
-    purgeChat(chatId) {
+    purgeChat(chatId, aliases = []) {
       const d = open();
       if (!d) return 0;
+      const keys = chatKeys(chatId, aliases);
+      if (!keys.length) return 0;
       let n = 0;
+      const ph = marks(keys.length);
       d.exec('BEGIN');
       try {
         /**
@@ -1025,8 +1033,8 @@ function createSqliteStore(file, log) {
          * 一条语句 9ms（见 `deleteFtsMany` 的注释）。先删索引再删行，
          * 同一事务里子查询照样看得到这些行。
          */
-        d.prepare('DELETE FROM journal_fts WHERE jid IN (SELECT id FROM journal WHERE chat_id=?)').run(chatId);
-        n = Number(d.prepare('DELETE FROM journal WHERE chat_id=?').run(chatId).changes || 0);
+        d.prepare(`DELETE FROM journal_fts WHERE jid IN (SELECT id FROM journal WHERE chat_id IN (${ph}))`).run(...keys);
+        n = Number(d.prepare(`DELETE FROM journal WHERE chat_id IN (${ph})`).run(...keys).changes || 0);
         d.exec('COMMIT');
       } catch (e) {
         try {
@@ -1486,11 +1494,13 @@ function createJsonlStore(file, log) {
       };
     },
 
-    /** 同 SQLite 后端：整行删掉，不是抹正文 */
-    purgeChat(chatId) {
+    /** 同 SQLite 后端：整行删掉，不是抹正文。`aliases` 一起删（换过机器人的会话） */
+    purgeChat(chatId, aliases = []) {
       load();
+      const keys = new Set(chatKeys(chatId, aliases));
+      if (!keys.size) return 0;
       const before = rows.length;
-      rows = rows.filter((r) => r.chatId !== chatId);
+      rows = rows.filter((r) => !keys.has(r.chatId));
       const n = before - rows.length;
       if (n) {
         reindex();
@@ -2122,9 +2132,12 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      *   · clearChat —— 抹正文、留行（时间线连续，能看出「这天有过东西」）
      *   · purgeChat —— 行都没了（用户要的是「这些记录不许存在」）
      * 磁盘上的旧页由 `vacuum()` 在巩固时压掉，这里不等。
+     *
+     * `aliases`：与 `clearChat` 同口径——换过机器人的会话散在多个 openid 下，
+     * 「彻底删除」必须一起删，不然旧键下的正文还在、还能被检索到。
      */
-    purgeChat(chatId) {
-      return get().purgeChat(requireChat(chatId, '彻底删日记'));
+    purgeChat(chatId, aliases = []) {
+      return get().purgeChat(requireChat(chatId, '彻底删日记'), aliases);
     },
 
     /** 压库。没删过行时是一次判断就返回，可以放心在定时器里调 */

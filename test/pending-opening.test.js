@@ -268,3 +268,47 @@ test('开场：迁移那次启动也要清理过期条目（`||` 短路会漏掉
   assert.equal(disk.chats.old, undefined, '过期条目必须清掉');
   assert.deepEqual(Object.keys(disk.chats.c1), ['at'], '迁移与清理要一次做完');
 });
+
+/**
+ * `get()` 只看不消费，`clear()` 才删。
+ *
+ * 这条契约是给「模型调用失败不能吃掉开场」用的：host 先 `get()` 拼进这一轮的
+ * prompt，跑成功了才 `clear()`。以前用 `take()`（先删再返回），那一轮一失败
+ * 开场就永久没了，而 `rounds` 已经加过——下一条成功的消息既没开场也没自述。
+ */
+test('开场：get 不消费，clear 才删（失败那一轮要把开场留给下次）', () => {
+  const file = tmpFile();
+  const p = createPendingOpenings({ file });
+  p.set('c1', '开场 A');
+
+  /** 第一轮：拼进 prompt 但模型挂了 → 不 clear */
+  assert.equal(p.get('c1'), '开场 A');
+  assert.equal(p.get('c1'), '开场 A', 'get 不能消费');
+  assert.equal(p.size, 1, '指针还在');
+
+  /** 第二轮成功 → clear */
+  assert.equal(p.clear('c1'), true);
+  assert.equal(p.size, 0);
+  assert.equal(p.get('c1'), '');
+  /** 没有条目时 clear 返回 false，不报错 */
+  assert.equal(p.clear('c1'), false);
+  assert.equal(p.clear(''), false);
+});
+
+test('开场：clear 之后重启也不会再出现', () => {
+  const file = tmpFile();
+  const p = createPendingOpenings({ file });
+  p.set('c1', '开场 A');
+  p.clear('c1');
+  assert.equal(createPendingOpenings({ file, rebuild: fixed('重建') }).get('c1'), '');
+});
+
+test('开场：重建结果缓存回内存（get 不该每条消息都重拼）', () => {
+  const file = tmpFile();
+  createPendingOpenings({ file }).set('c1', '开场 A');
+  let n = 0;
+  const p = createPendingOpenings({ file, rebuild: () => { n += 1; return '重建的'; } });
+  assert.equal(p.get('c1'), '重建的');
+  assert.equal(p.get('c1'), '重建的');
+  assert.equal(n, 1, '第二次要走缓存：get 在每条消息上都会被调');
+});

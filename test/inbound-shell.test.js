@@ -14,7 +14,7 @@ function rig({ queue = {}, replies = [], handled = [] } = {}) {
   const q = createTurnQueue({ now: () => t, unref: false, minBudgetMs: 30_000, ...queue });
   const shell = createInboundShell({
     q,
-    chatOf: (p) => p?.chat?.chatId ?? '',
+    chatIdOf: (p) => p?.chat?.chatId ?? '',
     now: () => t,
     handleTurn: async (p) => {
       handled.push(p.id);
@@ -61,7 +61,7 @@ test('薄壳：忙时入队，不吭声；轮到就跑', async () => {
   const q = createTurnQueue({ now: () => 1_000_000, unref: false });
   const shell = createInboundShell({
     q,
-    chatOf: (p) => p.chat.chatId,
+    chatIdOf: (p) => p.chat.chatId,
     now: () => 1_000_000,
     handleTurn: async (p) => {
       handled.push(p.id);
@@ -93,7 +93,7 @@ test('薄壳：队列满 → 回旧文案，且不进 handleTurn', async () => {
   const q = createTurnQueue({ now: () => 1_000_000, unref: false, maxPending: 1 });
   const shell = createInboundShell({
     q,
-    chatOf: (p) => p.chat.chatId,
+    chatIdOf: (p) => p.chat.chatId,
     now: () => 1_000_000,
     handleTurn: async (p) => {
       handled.push(p.id);
@@ -122,7 +122,7 @@ test('薄壳：预算不够 → 回「没赶上」，且不进 handleTurn', asyn
   const q = createTurnQueue({ now: () => 1_000_000, unref: false });
   const shell = createInboundShell({
     q,
-    chatOf: (p) => p.chat.chatId,
+    chatIdOf: (p) => p.chat.chatId,
     now: () => 1_000_000,
     handleTurn: async (p) => {
       handled.push(p.id);
@@ -156,7 +156,7 @@ test('薄壳：回话失败不影响别的', async () => {
   });
   const shell = createInboundShell({
     q,
-    chatOf: (p) => p.chat.chatId,
+    chatIdOf: (p) => p.chat.chatId,
     now: () => 1_000_000,
     handleTurn: async () => {
       await gate;
@@ -171,4 +171,95 @@ test('薄壳：回话失败不影响别的', async () => {
   release();
   await flush();
   // 没有 unhandled rejection 就算过
+});
+
+/**
+ * 2026-11 线上形态：`host` 把返回**对象**的 `chatOf` 当 `chatIdOf` 传进来。
+ * `String(对象)` 恒为 `"[object Object]"` → 全进程一条 lane，第三个会话的
+ * 消息被「上一条还在想」拒掉且不重试；`isBusy(真实 chatId)` 还恒为 false，
+ * 「主人正在聊就别插话」一起失效。
+ *
+ * 这条用例的桩**故意返回对象**，锁住「对象也不能把会话挤成一条」。
+ */
+test('薄壳：chatIdOf 返回对象时按 .chatId 兜底，会话之间不互相堵', async (t) => {
+  const logs = [];
+  const q = createTurnQueue({ now: () => 1_000_000, unref: false, minBudgetMs: 0, maxPending: 1 });
+  /** 用例里的 handleTurn 永不结束，收尾必须清；放 t.after 里，断言失败也能清掉 */
+  t.after(() => q.dispose());
+  /** 永不结束：把 lane 占住，模拟「上一条还在想」 */
+  const shell = createInboundShell({
+    q,
+    chatIdOf: (p) => ({ chatId: p.chat.chatId, sessionKey: p.chat.chatId }),
+    handleTurn: () => new Promise(() => {}),
+    postReply: async () => {},
+    log: (m) => logs.push(m),
+  });
+
+  for (const id of ['u1', 'u2', 'u3']) shell.onInbound(payload('m-' + id, id));
+
+  const stats = q.stats();
+  assert.equal(stats.lanes, 3, `三个会话应该是三条 lane，实际 ${stats.lanes}`);
+  assert.equal(stats.busy, 3, '三条都在跑');
+  assert.equal(q.isBusy('u1'), true, 'isBusy 必须认得真实 chatId');
+  assert.equal(logs.filter((m) => m.includes('对象形式')).length, 1, '只报一次，不刷屏');
+});
+
+test('薄壳：同一个会话仍然只有一条 lane（兜底不能把隔离搞丢）', async (t) => {
+  const q = createTurnQueue({ now: () => 1_000_000, unref: false, minBudgetMs: 0, maxPending: 1 });
+  t.after(() => q.dispose());
+  const shell = createInboundShell({
+    q,
+    chatIdOf: (p) => ({ chatId: p.chat.chatId }),
+    handleTurn: () => new Promise(() => {}),
+    postReply: async () => {},
+    log: () => {},
+  });
+  shell.onInbound(payload('m1', 'g1'));
+  shell.onInbound(payload('m2', 'g1'));
+  assert.equal(q.stats().lanes, 1, '同一会话共用一个 lane');
+});
+
+/**
+ * 频道：同一 guild 的多个子频道共用一个 DSH 会话（`sessions` 按 sessionKey 存）。
+ * 排队键要是按 chatId 分，它们各占一条 lane 并发跑，撞上 turn 的 busy 锁——
+ * 后一条被回「上一条还在想」且不重试，等于丢消息。
+ */
+test('薄壳：频道子频道按 sessionKey 共用一条 lane', async (t) => {
+  const q = createTurnQueue({ now: () => 1_000_000, unref: false, minBudgetMs: 0, maxPending: 1 });
+  t.after(() => q.dispose());
+  const shell = createInboundShell({
+    q,
+    chatIdOf: (p) => p.chat.chatId,
+    keyOf: (p) => p.chat.sessionKey || p.chat.chatId,
+    handleTurn: () => new Promise(() => {}),
+    postReply: async () => {},
+    log: () => {},
+  });
+
+  const guild = (id, ch) => ({
+    id,
+    chat: { chatId: ch, kind: 'guild', sessionKey: 'guild:g1' },
+    reply: { expiresAt: 1_000_000 + 180_000 },
+  });
+  shell.onInbound(guild('m1', 'ch-A'));
+  shell.onInbound(guild('m2', 'ch-B'));
+
+  assert.equal(q.stats().lanes, 1, '同一个 guild 的子频道必须共用一条 lane');
+});
+
+test('薄壳：没有 chatId 的消息要留一条日志（限频）', () => {
+  const logs = [];
+  const q = createTurnQueue({ now: () => 1_000_000, unref: false, minBudgetMs: 0 });
+  const shell = createInboundShell({
+    q,
+    chatIdOf: () => '',
+    handleTurn: async () => {},
+    postReply: async () => {},
+    now: () => 1_000_000,
+    log: (m) => logs.push(m),
+  });
+  shell.onInbound({ id: 'x' });
+  shell.onInbound({ id: 'y' });
+  assert.equal(logs.filter((m) => m.includes('没有 chatId')).length, 1, '同类日志一分钟一条');
+  q.dispose();
 });

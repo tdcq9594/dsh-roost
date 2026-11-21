@@ -1364,6 +1364,17 @@ const SECRET_PATHS = [
   ['tts', 'apiKey'],
   ['tts', 'gptSovits', 'apiKey'],
   ['tts', 'mimo', 'apiKey'],
+  /**
+   * 备份的远端凭据（2026-11 补）。
+   *
+   * 漏掉的后果不是「面板上看得见」，是**默认权限的扩展也能看见**：
+   * `GET /v1/config` 只要 `state:read`（默认 scope、安装时无需确认），
+   * 返回体走 `publicConfig()` —— 不加进这份名单，Gitee PAT、WebDAV 密码、
+   * 备份口令三份明文原样回给任何装上的扩展。
+   */
+  ['backup', 'remote', 'gitee', 'token'],
+  ['backup', 'remote', 'webdav', 'pass'],
+  ['backup', 'remote', 'passphrase'],
 ];
 
 function valueAt(root, path) {
@@ -1417,12 +1428,18 @@ export function restoreMaskedSecrets(next, stored) {
  * `{"apiKey": ["******"]}`（数组、对象），它既不会被回填、也不会被拦，
  * 会原样写进磁盘，之后每次读配置都拿到一个非字符串的"密钥"，
  * 发请求时拼出 `Bearer ******,******` 这种鬼东西（2026-11-03 审查发现）。
- * 这里统一拍平：非字符串一律当"没设置"。
+ * 这里统一拍平：数组 / 对象一律当"没设置"。
+ *
+ * **数字和布尔要保留**（`String(v)`）：备份口令常被写成 `123456`（纯数字），
+ * 以前 `backup-remote.js` 自己 `String()` 一下就能用；一律清空的话，
+ * 用户保存一次配置就变成「passphrase 没配」，推备份直接失败。
  */
 function coerceSecrets(cfg) {
   for (const path of SECRET_PATHS) {
     const v = valueAt(cfg, path);
-    if (v !== undefined && typeof v !== 'string') putAt(cfg, path, '');
+    if (v === undefined || typeof v === 'string') continue;
+    const scalar = typeof v === 'number' || typeof v === 'boolean';
+    putAt(cfg, path, scalar ? String(v) : '');
   }
   return cfg;
 }

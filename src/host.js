@@ -2742,7 +2742,11 @@ export function apply(ctx) {
     dyn: Number(cfg.recall?.dynMax) || MEMORY_DYN_MAX,
   });
 
-  const memory = personaScope.wrapMemory(createMemory({ capacityOf: () => cfg.memory?.capacity }));
+  const memory = personaScope.wrapMemory(createMemory({
+    capacityOf: () => cfg.memory?.capacity,
+    /** 读盘失败 / 坏文件隔离都要留痕：这类问题以前是静默的 */
+    log: (m) => log.warn(m),
+  }));
   const mood = createMood({ cfgOf: () => cfg.mood });
   /**
    * 两份行为日志（B4 / D3）。**不存消息正文**：心情历史只有数值和原因，
@@ -6603,7 +6607,18 @@ export function apply(ctx) {
        */
       const prevRound = rounds.get(chat.chatId);
       const firstRound = !prevRound || !prevRound.n;
-      const opening = pendingOpening.take(chat.chatId);
+      /**
+       * **先看，不消费**（`get` 而不是 `take`）。
+       *
+       * `take()` 是「先删再返回」，而这段开场要拼进**这一轮**的 prompt；
+       * 模型调用在下面（`turns.run`），它完全可能失败（5xx / 150 秒超时 /
+       * 会话被归档）。以前在这里就 take，那一轮一失败开场就永久没了，
+       * 而 `rounds` 已经加过——下一条**成功**的消息既没有开场也没有自述，
+       * 表现就是「压缩完她突然失忆」。
+       *
+       * 现在跑成功了才 `clear()`（见 `turns.run` 之后），失败就留着下次再用。
+       */
+      const opening = pendingOpening.get(chat.chatId);
       if (opening) {
         text = `${opening}\n\n${text}`;
         log.info(`压缩后的第一条消息带上了开场白（${opening.length} 字）`);
@@ -6737,6 +6752,14 @@ export function apply(ctx) {
         // 插件下载好的图片块，让模型真的看得见图
         images: payload.images ?? [],
       });
+
+      /**
+       * 这一轮**跑成功了**，开场才算真的消费掉。
+       *
+       * 上面是 `get()` 拿的正文（没删），失败会跳到 catch，指针留着——
+       * 下一条消息重新拼一次，不会出现「压缩完第一轮就失忆」。
+       */
+      if (opening) pendingOpening.clear(chat.chatId);
 
       /**
        * 记忆标记在这里处理，**不在 ai-chat 那边**。
@@ -7027,7 +7050,23 @@ export function apply(ctx) {
     q: turnQueue,
     handleTurn,
     postReply,
-    chatOf,
+    /**
+     * ⚠️ 必须传**字符串**。`inbound.js` 的 `chatOf()` 返回的是对象
+     * （`{ chatId, sessionKey, kind, … }`），直接传进去会被 `String()` 成
+     * `"[object Object]"`——全进程挤成一条队列，第三个会话的消息被
+     * 「上一条还在想」拒掉且不重试。2026-11 实测过这个形态。
+     */
+    chatIdOf: (p) => chatOf(p).chatId,
+    /**
+     * 排队键用 **sessionKey**：频道里同一个 guild 的多个子频道共用一个
+     * DSH 会话（`sessions` 按 sessionKey 存），按 chatId 分会各占一条 lane
+     * 并发跑，撞上 turn 的 busy 锁——后一条被回「上一条还在想」且不重试。
+     * 群 / 私聊里 sessionKey 就等于 chatId，没有区别。
+     */
+    keyOf: (p) => {
+      const c = chatOf(p);
+      return c.sessionKey || c.chatId;
+    },
     log: (m) => log.info(m),
   });
 
@@ -8894,7 +8933,12 @@ export function apply(ctx) {
               memory.clearChat(chatId, aliasesOf(chatId));
               let j = 0;
               try {
-                j = journal.purgeChat(chatId);
+                /**
+                 * **带别名**：换过机器人的会话在库里散在好几个 openid 下。
+                 * 只删当前键等于「彻底删除」删了一半，旧键下的正文与
+                 * `episode.text` 原样留着、还能被检索到。
+                 */
+                j = journal.purgeChat(chatId, aliasesOf(chatId));
               } catch (e) {
                 log.warn(`彻底删日记失败：${e.message}`);
               }
@@ -8908,7 +8952,8 @@ export function apply(ctx) {
                */
               let g = { episodes: 0, edges: 0, entities: 0 };
               try {
-                g = graph.purgeChat?.(chatId) || g;
+                /** 同样带别名，理由见上 */
+                g = graph.purgeChat?.(chatId, aliasesOf(chatId)) || g;
               } catch (e) {
                 log.warn(`清图谱失败：${e.message}`);
               }

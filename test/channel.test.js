@@ -397,3 +397,42 @@ test('试运行 / 总开关：文件和语音同样拦在 rpc 之前', async () 
   await ch.sendFile({ target: 'u9', path: '/tmp/a.pdf' });
   assert.equal(calls.length, 1);
 });
+
+/* ---------------- 只发卡片：必须真发出去 ---------------- */
+
+/**
+ * 2026-11 审查发现：`if (!t) return {ok:true, silentOnly:true}` 排在卡片发送
+ * 分支**之前**，于是「只有卡片、没有正文」的消息一条都没发却回 `ok:true`。
+ * 上游按 `ok` 记账 → 面板显示已发送，群里什么都没有。
+ *
+ * 真实来源有两条：模型写 `<skip>` + `<<card: …>>`，以及扩展
+ * `POST /v1/send {card}`（都不带 text）。
+ */
+test('只发卡片（无正文）也要真发 msg.send，不能回 ok 就完事', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm-card' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => true, log: () => {} });
+
+  const card = { type: 'link', title: '标题', desc: '描述', url: 'https://example.com' };
+  const r = await ch.send({ target: 'u9', card });
+
+  assert.equal(calls.length, 1, '必须真打一次 msg.send');
+  assert.equal(calls[0][0], 'msg.send');
+  assert.equal(calls[0][1].msgType, 8, '卡片走 msg_type=8');
+  assert.deepEqual(calls[0][1].card, card);
+  assert.equal(calls[0][1].content, '', '卡片消息正文为空');
+  assert.equal(r.ok, true);
+  assert.equal(r.card, true);
+  assert.notEqual(r.silentOnly, true, '不能标成「只设静默」');
+});
+
+test('既没正文也没卡片时仍然是「只设静默」', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm1' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => true, log: () => {} });
+
+  /** 显式要设静默、但不说话：这条路径要保留 */
+  const r = await ch.send({ target: 'u9', silenceMs: 60_000 });
+  assert.equal(calls.filter(([m]) => m === 'msg.send').length, 0, '不该发消息');
+  assert.equal(r.silentOnly, true);
+});

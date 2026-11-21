@@ -130,3 +130,72 @@ test('开火时机：能力表只由链路触发，构造完不许立刻 refresh
   assert.match(SRC, /reportExtCatalog\(\)/, 'online 时还要把扩展能力清单报给框架（反向联动）');
   assert.match(SRC, /caps\.refresh\(\{ force: true \}\)/, '面板手动刷新要走 force，否则离线时一律静默跳过');
 });
+
+/**
+ * 接线：排队壳拿到的必须是**字符串 chatId**，且排队键要能区分「回给谁」与
+ * 「谁在同一个会话里」。
+ *
+ * 2026-11 实机形态：`host` 把返回对象的 `chatOf` 直接传进 `chatIdOf`，
+ * `String(对象)` 恒为 `"[object Object]"` —— 全进程一条队列，第三个会话的
+ * 消息被「上一条还在想」拒掉且不重试。单测里的桩返回字符串，所以全绿。
+ */
+test('接线：inboundShell 的 chatIdOf 必须返回字符串，且排队键用 sessionKey', () => {
+  const start = SRC.indexOf('const inboundShell = createInboundShell({');
+  assert.ok(start > 0, '找不到 inboundShell 的创建');
+  const block = SRC.slice(start, SRC.indexOf('});', start));
+
+  assert.match(
+    block,
+    /chatIdOf:\s*\(p\)\s*=>\s*chatOf\(p\)\.chatId/,
+    'chatIdOf 必须取 .chatId（直接把 chatOf 传进去会变成 [object Object]）',
+  );
+  assert.ok(
+    !/chatIdOf:\s*chatOf\b/.test(block),
+    '不许把返回对象的 chatOf 直接当 chatIdOf 传',
+  );
+  assert.match(
+    block,
+    /keyOf:\s*\(p\)\s*=>/,
+    '频道里多个子频道共用一个会话，排队键必须是 sessionKey（缺省会按 chatId 分成多条 lane）',
+  );
+  assert.match(block, /c\.sessionKey\s*\|\|\s*c\.chatId/, 'keyOf 要回落到 chatId');
+});
+
+/**
+ * 开场：必须「先看后删」。
+ *
+ * 以前在调模型**之前** `take()`，那一轮一失败开场就永久没了，而 `rounds`
+ * 已经加过 —— 下一条成功的消息既没有开场也没有自述，表现是「压缩完她突然
+ * 失忆」。现在 `get()` 拼进 prompt、`turns.run` 成功后才 `clear()`。
+ */
+test('接线：开场先 get 后 clear，不许在模型调用前 take', () => {
+  assert.ok(
+    !/pendingOpening\.take\(/.test(SRC),
+    'host 里不该再出现 pendingOpening.take（先删再返回，失败就找不回来了）',
+  );
+  const getAt = SRC.indexOf('pendingOpening.get(chat.chatId)');
+  const runAt = SRC.indexOf('const rawReply = await turns.run(');
+  const clearAt = SRC.indexOf('pendingOpening.clear(chat.chatId)');
+  assert.ok(getAt > 0 && runAt > 0 && clearAt > 0, '三处都要在');
+  assert.ok(getAt < runAt, 'get 在模型调用之前（要拼进 prompt）');
+  assert.ok(clearAt > runAt, 'clear 在模型调用成功之后');
+});
+
+/**
+ * 彻底删除：两个 store 都要带别名。
+ *
+ * 换过机器人的会话在库里散在多个 openid 下，只删当前键等于删一半——
+ * 旧键下的日记正文和 `episode.text` 原样留着、还能被检索到。
+ */
+test('接线：memory.purge 要带 aliasesOf 删日记与图谱', () => {
+  assert.match(
+    SRC,
+    /journal\.purgeChat\(chatId,\s*aliasesOf\(chatId\)\)/,
+    '彻底删日记必须带别名键',
+  );
+  assert.match(
+    SRC,
+    /graph\.purgeChat\?\.\(chatId,\s*aliasesOf\(chatId\)\)/,
+    '清图谱也必须带别名键',
+  );
+});

@@ -30,6 +30,14 @@
  *
  * 代价：重启后拼出来的开场与压缩那一刻**不是逐字相同**（这几天新说的话会
  * 一起进去）。这不影响「接着上面聊」的语义，反而更新。
+ *
+ * ## 三个消费方法，别用错
+ *
+ *   · `get()`   —— 只看不删。**生产走这个**：先拼进这一轮的 prompt，
+ *                 模型调用成功了才 `clear()`；失败了指针留着下次再用。
+ *   · `clear()` —— 只删不取，配合 `get()` 收尾。
+ *   · `take()`  —— 取走并删除。单测和「一次性消费、不需要回滚」的场景更顺手，
+ *                 但**别用在模型调用之前**：它先删再返回，那一轮一失败就永久丢了。
  */
 
 import {
@@ -220,7 +228,16 @@ export function createPendingOpenings({
     if (typeof rebuild !== 'function') return '';
     try {
       const t = rebuild(chatId, { at: Number(entry?.at) || 0 });
-      return typeof t === 'string' ? t : '';
+      if (typeof t !== 'string') return '';
+      /**
+       * 重建结果写回内存条目。
+       *
+       * `get()` 在**每条消息**上都会被调一次（见 `host.js` 的开场注入点），
+       * 不缓存的话重启后每条消息都要重跑一遍 `makeOpening`（读日记 + 图谱 +
+       * 约定）。缓存的仍是「这次拼出来的正文」，语义没变，只是别重复拼。
+       */
+      if (entry) entry.text = t;
+      return t;
     } catch (e) {
       /**
        * 每个会话只 warn 一次：`take()` 在**每条消息**的路径上，重建要是持续
@@ -339,6 +356,23 @@ export function createPendingOpenings({
       delete map[chatId];
       save();
       return text;
+    },
+
+    /**
+     * 只删不取。
+     *
+     * 给「先 `get()` 拼进上下文、这一轮跑成功了才确认消费」的调用方用：
+     * 那一轮要是失败（服务商 5xx / 超时），指针留着，下一条消息还能再拼一次。
+     * 用 `take()` 做不到这件事——它是「先删再返回」，失败就再也拿不回来了。
+     *
+     * @returns {boolean} 真的删掉了一条
+     */
+    clear(chatId) {
+      if (prune()) save();
+      if (!map[chatId]) return false;
+      delete map[chatId];
+      save();
+      return true;
     },
 
     get size() {

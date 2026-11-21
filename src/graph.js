@@ -836,18 +836,29 @@ export function createGraph({ file, log = () => {} } = {}) {
    * 墓碑（`suppress`）**故意不删**：那是"这条关系别再记"的指令，
    * 删了之后巩固会把用户明确删掉的关系重新抽回来。
    *
+   * `aliases`：换过机器人的会话在库里散在多个 openid 下，**必须一起删**——
+   * 否则「彻底删除」只删了当前键，旧键下的 `episode.text`（正文拼接）
+   * 和边原样留着，下一条消息她又想起来了。`clearChat` 一直这么删。
+   *
+   * **空 chatId 现在是 no-op**（`chatKeys('')` 返回空表）。以前
+   * `WHERE chat_id=''` 会把跨群那层一起删掉——那不是调用方要的语义，
+   * 而且唯一的调用方（`memory.purge`）已经保证 chatId 非空。
+   *
    * @returns {{episodes:number, edges:number, entities:number}}
    */
-  function purgeChat(chatId) {
+  function purgeChat(chatId, aliases = []) {
     const d = open();
     const zero = { episodes: 0, edges: 0, entities: 0 };
     if (!d) return zero;
+    const keys = chatKeys(chatId, aliases);
+    if (!keys.length) return zero;
+    const ph = keys.map(() => '?').join(',');
     d.exec('BEGIN');
     try {
       /** 顺序：先边（引用实体）、再实体、最后片段 */
-      const edges = Number(d.prepare('DELETE FROM edge WHERE chat_id=?').run(chatId).changes || 0);
-      const entities = Number(d.prepare('DELETE FROM entity WHERE chat_id=?').run(chatId).changes || 0);
-      const episodes = Number(d.prepare('DELETE FROM episode WHERE chat_id=?').run(chatId).changes || 0);
+      const edges = Number(d.prepare(`DELETE FROM edge WHERE chat_id IN (${ph})`).run(...keys).changes || 0);
+      const entities = Number(d.prepare(`DELETE FROM entity WHERE chat_id IN (${ph})`).run(...keys).changes || 0);
+      const episodes = Number(d.prepare(`DELETE FROM episode WHERE chat_id IN (${ph})`).run(...keys).changes || 0);
       d.exec('COMMIT');
       return { episodes, edges, entities };
     } catch (e) {

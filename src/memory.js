@@ -33,7 +33,7 @@
  *   实际无影响——文本相同就是同一条事实，而且我们从不改写已存的文本。
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
 
@@ -366,36 +366,71 @@ function scoreOfAliasFact(meta, now = Date.now()) {
   return scoreOfFact({ ...meta, at: now - capped * DAY_MS }, now);
 }
 
-export function createMemory({ now = () => Date.now(), capacityOf = null } = {}) {
+export function createMemory({ now = () => Date.now(), capacityOf = null, log = () => {} } = {}) {
   const file = () => join(dataDir(), 'memory.json');
   let cache = null;
+  /**
+   * 读盘遇到 ENOENT 之外的错误（EBUSY / EACCES / EIO）时置位。
+   *
+   * 这时**不能**把内存当空、更不能让下一次 `save()` 用空表覆盖整份文件：
+   * Windows 上杀软、编辑器、OneDrive 短暂占用都会给 EBUSY，一次瞬时故障
+   * 就会把 facts / personas / authz 全抹掉（表现是「重启一次记忆就没了」，
+   * 而且没有任何报错）。宁可这一轮不写，等下次启动恢复。
+   *
+   * 与 `pending-opening.js` 同一套处理：读不动 ≠ 空。
+   */
+  let ioFailed = false;
+  /** 上次尝试重读的时刻：读失败后按 5 秒节流重试，别每次访问都去撞坏路径 */
+  let lastRetryAt = 0;
+  const RETRY_MS = 5_000;
 
-  function load() {
-    if (cache) return cache;
-    let raw = {};
+  /**
+   * 坏文件先留一份再降级。
+   *
+   * 只留最近 3 份：一个反复损坏的文件不该每月堆 3 份含聊天原文的小文件。
+   */
+  function quarantine(text, why) {
     try {
-      raw = JSON.parse(readFileSync(file(), 'utf8')) || {};
-    } catch {
-      raw = {};
+      const dir = dataDir();
+      const base = 'memory.json';
+      const bak = join(dir, `${base}.corrupted.${Date.now()}`);
+      writeFileSync(bak, text, 'utf8');
+      const prefix = `${base}.corrupted.`;
+      const all = readdirSync(dir).filter((n) => n.startsWith(prefix)).sort();
+      for (const n of all.slice(0, -3)) {
+        try {
+          unlinkSync(join(dir, n));
+        } catch {
+          /* 清理失败不能拦住启动 */
+        }
+      }
+      log(`记忆文件${why}，已备份到 ${bak}，按空记忆继续`);
+    } catch (e) {
+      log(`记忆文件${why}，备份也失败：${e?.message ?? e}`);
     }
-    if (typeof raw !== 'object' || Array.isArray(raw)) raw = {};
-    const meta = raw.meta && typeof raw.meta === 'object' ? raw.meta : {};
+  }
 
-    /**
-     * **从 `raw` 展开**，不是从空对象重建。
-     *
-     * 以前这里是 `cache = { global, chats, personas }`，白名单漏了 `authz`：
-     * 重启后读不到授权，而下一次 `save()` 还会把盘上那段**抹掉**——
-     * 表现是「重启一次群主动就永久失效」，面板上看不出任何异常。
-     * 展开 raw 之后，别处写进来的字段（现在和以后的）都不会被白名单吃掉。
-     */
-    cache = {
+  /**
+   * 把盘上的原始对象拍成内存形状。
+   *
+   * **从 `raw` 展开**，不是从空对象重建：以前这里是
+   * `cache = { global, chats, personas }`，白名单漏了 `authz`——重启后读不到
+   * 授权，而下一次 `save()` 还会把盘上那段**抹掉**，表现是「重启一次群主动
+   * 就永久失效」。展开 raw 之后，别处写进来的字段都不会被白名单吃掉。
+   */
+  function normalizeMemory(raw) {
+    const meta = raw.meta && typeof raw.meta === 'object' ? raw.meta : {};
+    return {
       ...raw,
       global: Array.isArray(raw.global) ? raw.global.filter((x) => typeof x === 'string' && x) : [],
-      chats: raw.chats && typeof raw.chats === 'object' ? raw.chats : {},
+      /** 数组也是 object：漏判会让字符串键在 `JSON.stringify` 时被丢掉 */
+      chats: raw.chats && typeof raw.chats === 'object' && !Array.isArray(raw.chats) ? raw.chats : {},
       meta: {
         global: meta.global && typeof meta.global === 'object' ? meta.global : {},
-        chats: meta.chats && typeof meta.chats === 'object' ? meta.chats : {},
+        /** 数组也是 object：留着数组会让 `meta.chats[chatId]` 恒为 undefined，权重/有效期一起失效 */
+        chats: meta.chats && typeof meta.chats === 'object' && !Array.isArray(meta.chats)
+          ? meta.chats
+          : {},
       },
       /**
        * 按群的人设覆盖（模型用 `<<persona: 内容>>` 写）。
@@ -404,17 +439,75 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
        * 跟这边的 `personas/*.md` 打架。现在只留一处——
        * 覆盖优先于 personas 文件，清掉就回到文件里那个人格。
        */
-      personas: raw.personas && typeof raw.personas === 'object' ? raw.personas : {},
+      personas: raw.personas && typeof raw.personas === 'object' && !Array.isArray(raw.personas)
+        ? raw.personas
+        : {},
     };
+  }
+
+  function load() {
+    if (cache && !ioFailed) return cache;
+    /**
+     * 读失败过：**不能就此永久放弃**。
+     *
+     * 只认一次失败的话，一次瞬时 EBUSY 会让整个进程再也读不到、也再也不写
+     * （`ioFailed` 挡住 `save()`），表现是「记忆突然全空、怎么改都不落盘」。
+     * 按 5 秒节流重试：锁一解除就自己恢复；网络盘上也不至于每次访问都卡几秒。
+     */
+    if (ioFailed) {
+      if (now() - lastRetryAt < RETRY_MS) return cache || normalizeMemory({});
+      lastRetryAt = now();
+    }
+
+    let text;
+    try {
+      text = readFileSync(file(), 'utf8');
+    } catch (e) {
+      if (e?.code === 'ENOENT') {
+        /** 首次运行：空记忆是**真的**空，可以写 */
+        ioFailed = false;
+        cache = normalizeMemory({});
+        return cache;
+      }
+      /** 读不动 ≠ 空：给空视图但禁止落盘，别把盘上还能救的内容盖掉 */
+      ioFailed = true;
+      lastRetryAt = now();
+      log(`记忆读取失败（${e?.code || e?.message}），本次不写入，稍后自动重试`);
+      cache = cache || normalizeMemory({});
+      return cache;
+    }
+
+    let raw;
+    try {
+      raw = JSON.parse(text) || {};
+    } catch (e) {
+      quarantine(text, `不是合法 JSON（${e?.message ?? e}）`);
+      ioFailed = false;
+      cache = normalizeMemory({});
+      return cache;
+    }
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      quarantine(text, '顶层不是对象');
+      ioFailed = false;
+      cache = normalizeMemory({});
+      return cache;
+    }
+    /** 读成功了：解除禁令（可能是从上次的故障里恢复） */
+    ioFailed = false;
+    cache = normalizeMemory(raw);
     return cache;
   }
 
   function save() {
     const m = load();
+    /** 读盘失败过：这一轮绝不写，避免用空表覆盖盘上还能救的内容 */
+    if (ioFailed) return false;
     try {
       writeJsonAtomic(file(), m);
+      return true;
     } catch {
       /* 写不进去就算了，不能因为存记忆把这一轮弄挂 */
+      return false;
     }
   }
 
@@ -590,6 +683,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null } = {})
      */
     reload() {
       cache = null;
+      /**
+       * 也要清掉读失败标记：`reload()` 就是「请重新读一次盘」的显式请求
+       * （一键改写 / 一键回退之后必调）。不清的话，之前一次瞬时读故障会让
+       * 后面所有 `save()` 继续被拒——用户点了回退，看着成功，实际没落盘。
+       */
+      ioFailed = false;
     },
 
     /**
