@@ -7,6 +7,41 @@
  */
 
 /**
+ * 同一句内容的指纹。
+ *
+ * 合并窗口 + 重试会让同一条消息以不同 id 落两次（id 带 msgId 后缀），
+ * 两路检索（关键词 / 向量）也可能各推一条。按 id 去重挡不住这种，
+ * 最终表现是同一件事在注入里出现两三遍、白占预算。
+ */
+function fingerprintOf(row) {
+  /**
+   * 用 `||` 不用 `??`：digest 行的 `text` 常常是空串（不是 null），
+   * `??` 不会回退到 `digest`，结果整类摘要行都拿不到指纹、去不掉重复。
+   */
+  const s = String(row?.text || row?.digest || '').replace(/\s+/g, '');
+  /**
+   * 带上长度：只取前 80 字会把「前 80 字相同、后面不同」的两段长文误合并。
+   * 长度相同且前 80 字相同，实际是同一句的概率已经足够高。
+   */
+  return s ? `${s.slice(0, 80)}#${s.length}` : '';
+}
+
+/** 按内容指纹去重，保留先到的（分高的那条在前） */
+function dedupeByText(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const h of rows || []) {
+    const fp = fingerprintOf(h);
+    if (fp) {
+      if (seen.has(fp)) continue;
+      seen.add(fp);
+    }
+    out.push(h);
+  }
+  return out;
+}
+
+/**
  * 短句（<12 字）连上一句再搜一次，主结果不足时按**原分补位**。
  *
  * 为什么不乘 0.6：`journal.search()` 是 RRF k=60 名次融合，相邻名次的
@@ -21,19 +56,32 @@
 export async function searchWithShortContext(journal, q, opts = {}, prev = '') {
   const query = String(q ?? '');
   const shortPhrase = [...query].length < 12;
-  const limit = Number(opts.limit) || 3;
-  let hits = await journal.search(query, opts);
+  const limit = Math.max(1, Number(opts.limit) || 3);
+  /**
+   * 多取一倍候选：去重发生在截断之前，如果检索层已经按 `limit` 截过，
+   * 两条重复就会让最终只剩 `limit-1` 条（实测真库 5 条含「晚安」只回 2 条）。
+   * 多取只影响候选池大小，不影响 RRF 名次。
+   */
+  const fetchLimit = Math.max(limit * 2, limit);
+  /**
+   * **先去重再判断要不要补检索**。
+   *
+   * 主检索现在返回最多 `fetchLimit` 条，直接用 `hits.length < limit`
+   * 判断的话几乎永远不成立，短句补检索会整个失效；而「3 条里 2 条重复」
+   * 这种最需要补位的情况，恰恰是原始条数够、去重后不够。
+   */
+  let hits = dedupeByText(await journal.search(query, { ...opts, limit: fetchLimit }));
   let usedPrev = false;
 
   if (shortPhrase && prev && hits.length < limit) {
-    const more = await journal.search(`${prev} ${query}`, opts);
+    const more = await journal.search(`${prev} ${query}`, { ...opts, limit: fetchLimit });
     const seen = new Set(hits.map((h) => h.id));
     const extra = more.filter((h) => !seen.has(h.id));
     if (extra.length) usedPrev = true;
-    hits = [...hits, ...extra].slice(0, limit);
+    hits = dedupeByText([...hits, ...extra]);
   }
 
-  return { hits: hits || [], shortPhrase, usedPrev };
+  return { hits: hits.slice(0, limit), shortPhrase, usedPrev };
 }
 
 /**

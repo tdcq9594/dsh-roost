@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { dataDir } from './config.js';
+import { writeJsonAtomic as writeJsonAtomicShared } from './atomic.js';
 import { mountInstructionFilter, invokeDisposer } from './ext-usage.js';
 
 export const SESSIONS_FILE = 'agent-sessions.json';
@@ -26,10 +27,9 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 
+/** 原子写：实现统一在 `atomic.js`（随机 tmp 名 + 失败清 tmp + 不可序列化直接抛错） */
 function writeJsonAtomic(file, value) {
-  const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, file);
+  return writeJsonAtomicShared(file, value, { newline: true });
 }
 
 const chunkText = (c) => {

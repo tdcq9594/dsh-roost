@@ -21,8 +21,9 @@
  * 念出来、别把别处的事当这个群发生过」；面板能只读查看 + 独立 `profiles.clear`，
  * 按契约**不挂** `memory.clear`（跨群档案，清某一个会话不该抹掉所有人的档案）。
  */
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+import { writeJsonAtomic } from './atomic.js';
 /** 注入前压成单行——理由见 `memory-line.js` 的 `oneLine()`：正文里一个换行
  *  就能在注入块里伪造出一个段落标题。档案是模型写的，一样会带换行。 */
 import { oneLine } from './memory-line.js';
@@ -104,10 +105,7 @@ export function createProfiles({
 
   function save() {
     try {
-      mkdirSync(dirname(file), { recursive: true });
-      const tmp = `${file}.tmp`;
-      writeFileSync(tmp, JSON.stringify(load()), 'utf8');
-      renameSync(tmp, file);
+      writeJsonAtomic(file, load(), { indent: 0 });
     } catch (e) {
       log(`写人物档案失败（不影响聊天）：${e.message}`);
     }

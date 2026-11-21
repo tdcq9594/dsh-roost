@@ -914,3 +914,34 @@ test('sendDraft：force 只顶掉短记自己的 dryRun，顶不掉全局试运�
   assert.notEqual(r2.dryRun, true, 'force 的意义就是让「真发」按钮能越过短记自己的试运行');
   assert.equal(b.calls.filter((c) => c[0] === 'putThread').length, 1);
 });
+
+/**
+ * 「上一篇还在写」不是失败（2026-11 审查）。
+ *
+ * 以前它和真失败一样被 `tick()` 记成「发帖失败，2 分钟后再试（上一篇还在写）」
+ * 并写进 `channel-posts.json` 的 retry，排障时会把「忙」误读成「接口坏了」。
+ */
+test('write：正在写时回 code=BUSY（不是业务失败）', async () => {
+  let release;
+  const a = makePost({
+    systemTurn: () => new Promise((r) => { release = () => r('{"title":"t","text":"x"}') }),
+  });
+  const first = a.post.write();
+  /** 让第一次真的进到 systemTurn */
+  await new Promise((r) => setImmediate(r));
+  const second = await a.post.write();
+  assert.equal(second.ok, false);
+  assert.equal(second.code, 'BUSY', '要能被 tick 识别成「忙」而不是「失败」');
+  release();
+  await first;
+});
+
+test('tick：忙的时候不写重试记录、不占重试档位', async () => {
+  const src = readFileSync(new URL('../src/channel-post.js', import.meta.url), 'utf8');
+  /** 源码级钉一下：`BUSY` 必须在 `r.network` 分支之后、写 retry 之前被拦掉 */
+  const busyAt = src.indexOf("r.code === 'BUSY'");
+  const retryAt = src.indexOf('s2.plan.retry = { ...(s2.plan.retry || {})');
+  assert.ok(busyAt > 0, '找不到 BUSY 分支');
+  assert.ok(retryAt > 0, '找不到写 retry 的位置');
+  assert.ok(busyAt < retryAt, 'BUSY 必须在写 retry 之前 return');
+});

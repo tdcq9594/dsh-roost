@@ -3,7 +3,7 @@
 > 本文件由 `scripts/build-ext-docs.mjs` **从源码生成**，不要手改。
 > 改端点 / scope / 清单字段后跑 `node scripts/build-ext-docs.mjs`，CI 用 `--check` 校验。
 >
-> 对应版本：`1.3.15`
+> 对应版本：`1.3.16`
 
 ## 1. 扩展是什么
 
@@ -109,6 +109,11 @@
 - `session:write`（**敏感**：面板发放要二次确认）
 - `prompt:write`（**敏感**：面板发放要二次确认）
 - `config:write`（**敏感**：面板发放要二次确认）
+- `groups:read`（**敏感**：面板发放要二次确认）
+- `model:write`（**敏感**：面板发放要二次确认）
+- `host:maintenance`（**敏感**：面板发放要二次确认）
+- `memory:purge`（**敏感**：面板发放要二次确认）
+- `ext:manage`（**敏感**：面板发放要二次确认）
 - `group:write`（**敏感**：面板发放要二次确认）
 - `core:write`（**敏感**：面板发放要二次确认）
 - `agent:write`（**敏感**：面板发放要二次确认）
@@ -151,6 +156,7 @@
 | POST | `/v1/proactive/submit` | `proactive:write` | ✅ 可用 | 扩展投递一条素材；宿主过门闸后让模型自己组织语言主动发出 |
 | POST | `/v1/roost.call` | `message:write` | ✅ 可用 | 由宿主代转一次直连协议调用（只读能力 / 插件工具 / `msg.send`）；框架地址与令牌不出宿主，写与管理面不开放 |
 | GET | `/v1/roost.capabilities` | `state:read` | ✅ 可用 | 列框架直连协议（roost-host/1）里可扩展调用的能力：只读方法、框架插件注册的 `tool.*`、发消息；`?filter=` 可按名字筛 |
+| POST | `/v1/roost.read` | `state:read` | ✅ 可用 | 只读版转发：只能调 `runtime.status` 这类只读能力，scope 是 `state:read`，不必申请发消息权限；发消息 / 插件工具仍走 `/v1/roost.call` |
 | POST | `/v1/say` | `say:write` | ✅ 可用 | 让机器人主动说一句；`pending` 表示进审核，不是已发出 |
 | GET | `/v1/self` | `state:read` | ✅ 可用 | 她现在的对外形象（名字 / 签名 / 头像设定）+ 最近 10 条变更历史；不含平台实时状态 |
 | POST | `/v1/self/propose` | `prompt:write` | ✅ 可用 | **提议**改名字 / 签名 / 头像：`{ kind: name / sign / avatar, value }`。响应 `pending:true` = 已发到主人私聊，他点确认按钮才真的改 |

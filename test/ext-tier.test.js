@@ -114,3 +114,35 @@ test('四级元数据与形态枚举完整', () => {
   }
   assert.deepEqual([...FORMS], ['builtin', 'inprocess', 'mcp', 'core']);
 });
+
+/**
+ * 面板页面与进程内运行**也是权限**（2026-11 审查）。
+ *
+ * 以前分级只看 scopes / overrides / form：一个只声明默认 `state:read`、
+ * 但带一个 `ui.page` 的扩展算 L1（无需确认）。而面板页是同源 iframe、
+ * `/quick` 就在同源上——页面里的 JS 能拿主人身份发高权令牌、改配置。
+ * `inprocess` 更直接：代码就在宿主进程里跑。
+ */
+test('分级：带 ui.page 的扩展不能算 L1（同源页面等于主人权限）', () => {
+  const t = deriveTier({ ui: { nav: { label: '小工具' }, page: 'p.html' } });
+  assert.equal(t.level, 3, '有面板页就是最高风险');
+  assert.equal(t.id, 'L3');
+  assert.notEqual(t.confirm, 'none', '必须要求确认');
+  assert.ok(t.reasons.some((r) => r.kind === 'ui' && r.key === 'page'), '要说清为什么');
+  assert.ok(
+    riskLines(t).some((r) => r.text.includes('同源')),
+    '确认清单里要出现「同源」——用户才知道它等于什么',
+  );
+});
+
+test('分级：runtime:inprocess 也要抬到 L3', () => {
+  const t = deriveTier({ ui: { runtime: 'inprocess', entry: 'index.js' } });
+  assert.equal(t.level, 3, '进程内运行能直接读写本机');
+  assert.equal(t.form, 'inprocess');
+  assert.ok(t.reasons.some((r) => r.key === 'inprocess'));
+});
+
+test('分级：没有 ui.page 的普通扩展仍是 L1（别把门关死）', () => {
+  const t = deriveTier({ ui: { nav: { label: '设置页' } } });
+  assert.equal(t.id, 'L1', '只有菜单没有页面，不该抬级');
+});

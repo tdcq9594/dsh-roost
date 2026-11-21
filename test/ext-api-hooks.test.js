@@ -25,7 +25,8 @@ function rig(over = {}) {
   const calls = { send: [], add: [], hasAuthz: [], fire: 0, onInbound: [], agentFor: [], outActions: [] };
   const memory = {
     listRanked: over.listRanked ?? (() => ({ global: ['主人住杭州'], chat: ['这个群管阿离叫小离'] })),
-    add: (...a) => { calls.add.push(a); },
+    /** `over.addResult` 用来模拟「内存改不了盘」（读不动 / 写不进去） */
+    add: (...a) => { calls.add.push(a); return over.addResult; },
     hasAuthz: (chatId, scope) => { calls.hasAuthz.push([chatId, scope]); return over.authz === true; },
   };
   const state = { enabled: true, count: 0, lastAt: 0, ...over.speakState };
@@ -56,6 +57,8 @@ function rig(over = {}) {
     onInbound: (p) => { calls.onInbound.push(p); },
     lastBucketOf: () => 'owner',
     setupOf: () => ({ roostOwner: () => 'u1', ownersConfigured: true }),
+    /** 只在测 roost.* 时给（见文件末尾那两条） */
+    roostOf: over.roostOf,
   });
   return { hooks, calls, memory };
 }
@@ -398,4 +401,46 @@ test('send：三个内容都不给时明确拒绝', async () => {
   assert.equal(r.status, 400);
   assert.match(r.body.message, /至少给一个/);
   assert.equal(calls.send.length, 0);
+});
+
+/**
+ * 记忆没落盘就不能回 `ok:true`（2026-11 复核）。
+ *
+ * `memory.add()` 现在如实返回落盘结果；扩展这条路以前不看它，于是
+ * 「记忆文件正被占用」时扩展拿到假成功，而锁解除后的重读会把内存里那条
+ * 替换掉——数据真的没了。
+ */
+test('memory.write：add 回 false 时要报错，不能谎报成功', async () => {
+  const { hooks } = rig({ addResult: false });
+  const r = await hooks['memory.write']({ body: { chatId: 'g1', fact: '她喜欢下雨天' } });
+  assert.equal(r.status, 503);
+  assert.equal(r.body.ok, false);
+  assert.match(r.body.message, /没记上/);
+});
+
+/**
+ * 能力表要同时报「只读面」和「只能走 roost.call」两批（2026-11 复核）。
+ *
+ * 只报 `readonly` 的话，拿 message:write 的扩展按能力表看不到 `msg.get` /
+ * `identity.resolve` 之类，以为框架没有这个能力——而它们其实是能调的。
+ */
+test('能力表：readonly 与 callableOnly 两份清单都在', () => {
+  const names = ['runtime.status', 'msg.get', 'identity.resolve'];
+  const caps = {
+    has: (n) => names.includes(n),
+    list: () => names.map((name) => ({ name, scope: 'read', desc: `${name} 说明` })),
+    lastAt: () => 123,
+  };
+  const { hooks } = rig({ roostOf: () => ({ caps, rpc: async () => ({}), connected: true }) });
+
+  const r = hooks['roost.capabilities']({ query: {} });
+  assert.equal(r.status, 200);
+  const read = r.body.readonly.map((m) => m.name);
+  const callOnly = r.body.callableOnly.map((m) => m.name);
+
+  assert.ok(read.includes('runtime.status'), '只读面要有无害的那些');
+  assert.equal(read.includes('msg.get'), false, '隐私只读不在只读面');
+  assert.ok(callOnly.includes('msg.get'), '但要出现在 callableOnly 里，扩展才知道能调');
+  assert.ok(callOnly.includes('identity.resolve'));
+  assert.match(r.body.note, /roost\.read/, '说明里要点出两个端点');
 });

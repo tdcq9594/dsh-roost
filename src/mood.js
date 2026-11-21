@@ -35,9 +35,11 @@
  * 低情绪闸门**全是死分支**，跑一年也触发不了一次。
  */
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
+
+import { writeJsonAtomic } from './atomic.js';
 
 /** 3.5：回中性的半衰期与衰减落点可调（`config.mood.halfLifeHours` / `baseline`），默认 4h / 0.5 */
 
@@ -203,10 +205,7 @@ export function createMood(opts = null) {
 
   function save() {
     try {
-      mkdirSync(dataDir(), { recursive: true });
-      const tmp = file() + '.tmp';
-      writeFileSync(tmp, JSON.stringify(load(), null, 2), 'utf8');
-      renameSync(tmp, file());
+      writeJsonAtomic(file(), load());
     } catch {
       /* 存不下就算了，不能因为情绪把这一轮弄挂 */
     }

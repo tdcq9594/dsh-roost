@@ -27,8 +27,10 @@
  * **绝不为了凑素材去读私聊或别的群**。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+import { writeFileAtomic } from './atomic.js';
 
 /* ------------------------------------------------------------------ *
  * 配置
@@ -642,13 +644,8 @@ export function createPostStore({ dirOf, now = () => Date.now(), log = () => {} 
   }
 
   function save(s) {
-    const dir = dirOf();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const f = fileOf();
-    const tmp = `${f}.tmp`;
     const body = { plan: s.plan, history: (s.history || []).slice(0, MAX_HISTORY) };
-    writeFileSync(tmp, JSON.stringify(body, null, 2));
-    renameSync(tmp, f);   // 原子替换：写一半断电也不会留下半个 JSON
+    writeFileAtomic(fileOf(), JSON.stringify(body, null, 2));
     return body;
   }
 
@@ -1039,7 +1036,12 @@ export function createChannelPost({
    * @param {boolean} [o.force]    只忽略短记自己的 dryRun（面板上"真发"按钮）
    */
   async function write({ preview: wantPreview = false, force = false } = {}) {
-    if (busy) return { ok: false, message: '上一篇还在写' };
+    /**
+     * 上一次还在写就**不算失败**：`code:'BUSY'` 让 `tick()` 直接跳过，
+     * 不写重试记录、不占重试档位。以前它和真失败一样被记成「发帖失败，
+     * 2 分钟后再试（上一篇还在写）」，日志会误导排障。
+     */
+    if (busy) return { ok: false, code: 'BUSY', message: '上一篇还在写' };
     busy = true;
     try {
       const cfg = cfgOfPost();
@@ -1211,6 +1213,11 @@ export function createChannelPost({
      */
     if (r && r.network) {
       log('发帖时连不上，这一档留着下一轮再发');
+      return;
+    }
+    /** 上一篇还没写完：不是失败，别写重试记录、别计次 */
+    if (r && r.code === 'BUSY') {
+      log('上一篇还没写完，这一档下一轮再看');
       return;
     }
     const delayMin = RETRY_DELAY_MIN[count - 1];

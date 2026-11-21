@@ -130,3 +130,297 @@ test('开火时机：能力表只由链路触发，构造完不许立刻 refresh
   assert.match(SRC, /reportExtCatalog\(\)/, 'online 时还要把扩展能力清单报给框架（反向联动）');
   assert.match(SRC, /caps\.refresh\(\{ force: true \}\)/, '面板手动刷新要走 force，否则离线时一律静默跳过');
 });
+
+/**
+ * 接线：排队壳拿到的必须是**字符串 chatId**，且排队键要能区分「回给谁」与
+ * 「谁在同一个会话里」。
+ *
+ * 2026-11 实机形态：`host` 把返回对象的 `chatOf` 直接传进 `chatIdOf`，
+ * `String(对象)` 恒为 `"[object Object]"` —— 全进程一条队列，第三个会话的
+ * 消息被「上一条还在想」拒掉且不重试。单测里的桩返回字符串，所以全绿。
+ */
+test('接线：inboundShell 的 chatIdOf 必须返回字符串，且排队键用 sessionKey', () => {
+  const start = SRC.indexOf('const inboundShell = createInboundShell({');
+  assert.ok(start > 0, '找不到 inboundShell 的创建');
+  const block = SRC.slice(start, SRC.indexOf('});', start));
+
+  assert.match(
+    block,
+    /chatIdOf:\s*\(p\)\s*=>\s*chatOf\(p\)\.chatId/,
+    'chatIdOf 必须取 .chatId（直接把 chatOf 传进去会变成 [object Object]）',
+  );
+  assert.ok(
+    !/chatIdOf:\s*chatOf\b/.test(block),
+    '不许把返回对象的 chatOf 直接当 chatIdOf 传',
+  );
+  assert.match(
+    block,
+    /keyOf:\s*\(p\)\s*=>/,
+    '频道里多个子频道共用一个会话，排队键必须是 sessionKey（缺省会按 chatId 分成多条 lane）',
+  );
+  assert.match(block, /c\.sessionKey\s*\|\|\s*c\.chatId/, 'keyOf 要回落到 chatId');
+});
+
+/**
+ * 开场：必须「先看后删」。
+ *
+ * 以前在调模型**之前** `take()`，那一轮一失败开场就永久没了，而 `rounds`
+ * 已经加过 —— 下一条成功的消息既没有开场也没有自述，表现是「压缩完她突然
+ * 失忆」。现在 `get()` 拼进 prompt、`turns.run` 成功后才 `clear()`。
+ */
+test('接线：开场先 get 后 clear，不许在模型调用前 take', () => {
+  assert.ok(
+    !/pendingOpening\.take\(/.test(SRC),
+    'host 里不该再出现 pendingOpening.take（先删再返回，失败就找不回来了）',
+  );
+  const getAt = SRC.indexOf('pendingOpening.get(chat.chatId)');
+  const runAt = SRC.indexOf('const rawReply = await turns.run(');
+  const clearAt = SRC.indexOf('pendingOpening.clear(chat.chatId)');
+  assert.ok(getAt > 0 && runAt > 0 && clearAt > 0, '三处都要在');
+  assert.ok(getAt < runAt, 'get 在模型调用之前（要拼进 prompt）');
+  assert.ok(clearAt > runAt, 'clear 在模型调用成功之后');
+});
+
+/**
+ * 彻底删除：两个 store 都要带别名。
+ *
+ * 换过机器人的会话在库里散在多个 openid 下，只删当前键等于删一半——
+ * 旧键下的日记正文和 `episode.text` 原样留着、还能被检索到。
+ */
+test('接线：memory.purge 要带 aliasesOf 删日记与图谱', () => {
+  assert.match(
+    SRC,
+    /journal\.purgeChat\(chatId,\s*aliasesOf\(chatId\)\)/,
+    '彻底删日记必须带别名键',
+  );
+  assert.match(
+    SRC,
+    /graph\.purgeChat\?\.\(chatId,\s*aliasesOf\(chatId\)\)/,
+    '清图谱也必须带别名键',
+  );
+});
+
+/**
+ * 发送失败不能记账（2026-11 审查）。
+ *
+ * 出站层失败**只回 `{ok:false}`、不抛异常**，所以三处都必须看返回值：
+ * 主回复（失败仍写日记 → 下一轮拿没发出去的话当既定事实）、`qq_send`
+ * （失败仍 `parts += 1` → 主回复分支不再发正文，话彻底消失）、
+ * `qq_send_file`（失败仍占名额与配额）。
+ */
+test('接线：三处发送都要判 ok===false', () => {
+  const mainAt = SRC.indexOf('const sent = await postReply(payload, guardOutbound(reply)');
+  assert.ok(mainAt > 0, '主回复要接返回值');
+  const mainBlock = SRC.slice(mainAt, mainAt + 1200);
+  assert.ok(
+    mainBlock.includes('sent?.ok === false'),
+    '主回复没判失败分支',
+  );
+  assert.ok(
+    mainBlock.indexOf('sent?.ok === false') < mainBlock.indexOf('journalAdd(payload, chat, journalText'),
+    '日记必须在「发送成功」之后写',
+  );
+
+  /**
+   * `qq_send`：失败必须 `return { ok:false }` 且**排在 `st2.parts += 1` 之前**。
+   * 只看「有没有那段文案」不够——文案会改，顺序才是语义。
+   */
+  const sendFailAt = SRC.indexOf('return { ok: false, message: `这句没发出去');
+  assert.ok(sendFailAt > 0, 'qq_send 失败没回 ok:false');
+  /** 失败返回**之后**最近的那次 `st2.parts += 1`（文件里还有别处也累加） */
+  const partsAt = SRC.indexOf('st2.parts += 1', sendFailAt);
+  assert.ok(partsAt > 0, '失败分支后面没有段数累加，说明 qq_send 那段结构变了');
+  assert.ok(sendFailAt < partsAt, '失败分支必须在累加段数之前 return');
+  /** 文件失败在 `filesOk` 里（正文空串时 `ok` 恒 true），必须一并判并回滚 */
+  const fileFailAt = SRC.indexOf('sent?.filesOk === false');
+  assert.ok(fileFailAt > 0, 'qq_send_file 要判 filesOk');
+  const rollbackAt = SRC.indexOf('turnSt.files -= 1', fileFailAt);
+  assert.ok(rollbackAt > 0, 'qq_send_file 失败要回滚 files');
+  assert.ok(rollbackAt - fileFailAt < 800, '回滚要在失败分支里，不能隔太远');
+  assert.ok(SRC.indexOf('q.undo?.()', fileFailAt) < rollbackAt + 400, '配额也要回滚');
+});
+
+/**
+ * 过审送达的主动消息要补写日记。
+ *
+ * 进审核时 `sendOut` 因为 `pending` 跳过 journalAdd；十分钟后结案成 `sent`，
+ * 以前只打一行日志——那句话永远不进日记，下一轮容易再说一遍。
+ */
+test('接线：投递结案成 sent 时要补写日记', () => {
+  const at = SRC.indexOf('for (const it of r.settled || [])');
+  assert.ok(at > 0, '找不到 settled 的处理循环');
+  const block = SRC.slice(at, at + 900);
+  assert.ok(block.includes("it.state !== 'sent'"), '只处理 sent');
+  assert.ok(block.includes('journalAdd('), '要真的写日记');
+  assert.ok(block.includes('delivery:${it.requestId}'), '行 id 要用 requestId 保证幂等');
+});
+
+/**
+ * 「彻底删除 / 清空本会话」必须连压缩开场一起清（2026-11 复核）。
+ *
+ * 开场正文存在内存里（`set()` 写正文，重建结果也会缓存）。日记清了、
+ * 开场还在，下一条消息照样把「刚才说到」里那几句**用户刚删掉的原话**
+ * 拼进 prompt，而这一轮的回复又写回日记——删掉的内容绕一圈又回来了。
+ */
+test('接线：清记忆 / 彻底删除都要清掉压缩开场', () => {
+  const clearCase = SRC.indexOf("case 'memory.clear': {");
+  const purgeCase = SRC.indexOf("case 'memory.purge': {");
+  assert.ok(clearCase > 0 && purgeCase > 0, '两个 case 都要在');
+
+  const clearBlock = SRC.slice(clearCase, purgeCase);
+  const purgeEnd = SRC.indexOf("case 'memory.clearGlobal'", purgeCase);
+  const purgeBlock = SRC.slice(purgeCase, purgeEnd > purgeCase ? purgeEnd : purgeCase + 4000);
+
+  assert.match(clearBlock, /pendingOpening\.clear\(chatId\)/, 'memory.clear 要清开场');
+  assert.match(purgeBlock, /pendingOpening\.clear\(chatId\)/, 'memory.purge 要清开场');
+});
+
+/**
+ * 主回复没发出去时，**文件那件事仍要写日记**。
+ *
+ * 文件是在 `fileOf` 里当场发成功的，失败的只有正文。整条都不写的话，
+ * 她下一轮完全不记得发过这份文件，可能再发一遍。
+ */
+test('接线：主回复失败时 fileNote 仍要单独落日记', () => {
+  const at = SRC.indexOf('主回复没发出去');
+  assert.ok(at > 0, '找不到主回复失败分支');
+  const block = SRC.slice(at, at + 500);
+  assert.match(block, /if \(fileNote\) journalAdd\(/, '失败分支要把文件那件事记下来');
+});
+
+/**
+ * teardown 之后在飞的投递回查不许再写已关闭的 journal。
+ *
+ * `timers.clearAll()` 拦不住已经发出的异步回调；`journal.close()` 只把
+ * `db` 置 null，回调里的 `add()` 会**把库重新打开**，句柄再也关不掉。
+ */
+test('接线：teardown 之后投递回查要放弃', () => {
+  const at = SRC.indexOf('const deliveryTick = () => {');
+  assert.ok(at > 0, '找不到 deliveryTick');
+  const block = SRC.slice(at, at + 1400);
+  assert.match(block, /if \(disposed\) return;/, 'tick 入口要判 disposed');
+  assert.match(block, /\.then\(\(r\) => \{\s*if \(disposed\) return;/, '回调回来也要判');
+});
+
+/**
+ * 「彻底删除 / 清空」要把**所有还留着原文的地方**清干净（2026-11 复核）。
+ *
+ * `closing.json` 存「上次这段聊到：…」的摘要和私聊里那句没回的话（120 字原话），
+ * `delivery.json` 存发出去的正文（60 / 1000 字）。它们每轮 / 每次结案都会被读出来用，
+ * 只清日记等于「删了正文还留着摘要」。
+ */
+test('接线：清记忆 / 彻底删除要连 closing 与 delivery 一起清', () => {
+  const clearCase = SRC.indexOf("case 'memory.clear': {");
+  const purgeCase = SRC.indexOf("case 'memory.purge': {");
+  const clearBlock = SRC.slice(clearCase, purgeCase);
+  const purgeEnd = SRC.indexOf("case 'memory.clearGlobal'", purgeCase);
+  const purgeBlock = SRC.slice(purgeCase, purgeEnd > purgeCase ? purgeEnd : purgeCase + 4000);
+
+  for (const [name, block] of [['memory.clear', clearBlock], ['memory.purge', purgeBlock]]) {
+    /** 三处都要**带别名**：换过机器人的会话散在多个 openid 下 */
+    assert.match(block, /closing\.clear\(chatId,\s*aliasesOf\(chatId\)\)/, `${name} 要清收尾摘要（带别名）`);
+    assert.match(block, /closing\.clearPending\(chatId,\s*aliasesOf\(chatId\)\)/, `${name} 要清「没回的那句话」（带别名）`);
+    assert.match(block, /deliveryTrack\.clearChat\(chatId,\s*aliasesOf\(chatId\)/, `${name} 要清投递账本里的正文（带别名）`);
+  }
+});
+
+/**
+ * 清空记忆后，待审核的那条**结案时不许把原文补回日记**（2026-11 复核）。
+ *
+ * 判据是账本上的 `cleared` 标记，**不能**用「账本里还有没有这条」：
+ * `resolve()` 返回前会 `prune()` 掉超过 2 天的结案条目，那是正常 TTL 回收，
+ * 按存在性判会把该补的那行也一起跳过。
+ */
+test('接线：投递结案补日记要认 cleared 标记', () => {
+  const at = SRC.indexOf('for (const it of r.settled || [])');
+  assert.ok(at > 0, '找不到 settled 循环');
+  const block = SRC.slice(at, at + 1200);
+  assert.match(block, /if \(it\.cleared\) continue;/, '要认 cleared');
+  assert.equal(
+    /deliveryTrack\.get\(it\.requestId\)/.test(block),
+    false,
+    '不能用「账本里还有没有」判：prune 会把正常的也算成被清掉',
+  );
+});
+
+/**
+ * 面板 API 拒绝 opaque origin（2026-11-21）。
+ *
+ * 沙箱 iframe / `data:` / `file:` 页面发来的请求带 `Origin: null`。它们读不到
+ * 响应，但**请求照样会到达服务器并执行**——`/quick` 是 POST，只判「是不是主人」
+ * 挡不住（CSRF 形态）。`/ext-pages` 必须豁免：沙箱页面要能取自己目录下的 JSON。
+ */
+test('接线：面板 API 拒绝 Origin: null，/ext-pages 豁免', () => {
+  const at = SRC.indexOf("const route = (path, handler");
+  assert.ok(at > 0, '找不到 route()');
+  const block = SRC.slice(at, at + 1600);
+
+  assert.match(block, /req\.headers\?\.origin === 'null'/, '要判 Origin: null');
+  assert.match(block, /if \(!skipFence && req\.headers\?\.origin === 'null'\)/, '只在走栅栏的路由上拦');
+  /** 顺序：Origin 判断必须在 fence 之前，否则栅栏先放行了 */
+  assert.ok(
+    block.indexOf("origin === 'null'") < block.indexOf('fence(req)'),
+    'Origin 判断要在 fence 之前',
+  );
+  /** /ext-pages 走 skipFence，天然豁免（路由体很长，窗口要够大） */
+  const ep = SRC.indexOf("route('/ext-pages'");
+  assert.ok(ep > 0, '找不到 /ext-pages');
+  assert.match(SRC.slice(ep, ep + 9000), /skipFence: true/, '/ext-pages 要标 skipFence');
+});
+
+/**
+ * `/ext-pages` 要先验清单指纹再发文件（2026-11-21）。
+ */
+test('接线：/ext-pages 先验指纹', () => {
+  const at = SRC.indexOf("route('/ext-pages'");
+  assert.ok(at > 0, '找不到 /ext-pages');
+  const block = SRC.slice(at, at + 1200);
+  assert.match(block, /manifestStateOf\?\.\(id\)/, '要查指纹');
+  assert.ok(
+    block.indexOf('manifestStateOf') < block.indexOf('normalizeUiSpec'),
+    '指纹要在发文件之前判',
+  );
+});
+
+/**
+ * 扩展页面转发的 `/quick` 要过判权（2026-11-21）。
+ *
+ * `viaExt` 只认父窗口填的：页面在沙箱里，`postMessage` 载荷里的同名字段
+ * 会被父窗口丢掉。判据是**令牌上实际授予的 scope**，不是清单声明——
+ * 主人收回过 scope 时立刻生效。
+ */
+test('接线：/quick 用 guardQuickCall 判扩展页面的调用', () => {
+  const at = SRC.indexOf("route('/quick'");
+  assert.ok(at > 0, '找不到 /quick');
+  const block = SRC.slice(at, at + 2600);
+
+  assert.match(block, /const viaExt = String\(body\?\.viaExt \|\| ''\)\.trim\(\)/, '要读 viaExt');
+  /** 面板要显式带 @panel：不能把「没带」当成面板（漏传就是全权） */
+  assert.match(block, /if \(viaExt !== PANEL_MARK\)/, '面板标记要显式判');
+  assert.equal(/if \(viaExt\) \{/.test(block), false, '不能「带了才判、不带就放行」');
+  assert.match(block, /guardQuickCall\(\{ op, arg, viaExt/, '要过判权');
+  assert.match(block, /extClientStore\?\.get\?\.\(/, '按扩展 id 取令牌记录');
+  assert.match(block, /extClientStore/, '判据取自令牌存储');
+  assert.match(block, /\.scopes/, '读令牌上的 scopes');
+  assert.ok(
+    block.indexOf('guardQuickCall') < block.indexOf('switch (op)'),
+    '判权要在 switch 之前（否则已经执行了）',
+  );
+});
+
+/**
+ * `/ext-pages` 要带沙箱头、放行自己目录的 JSON、并注入垫片（2026-11-21）。
+ */
+test('接线：/ext-pages 带 CSP 沙箱 + CORS + 垫片注入', () => {
+  const at = SRC.indexOf("route('/ext-pages'");
+  const block = SRC.slice(at, at + 7000);
+
+  assert.match(block, /content-security-policy': 'sandbox allow-scripts/, '要发 CSP 沙箱');
+  assert.match(block, /access-control-allow-origin': 'null'/, '只放行 opaque origin');
+  assert.equal(/access-control-allow-origin': '\*'/.test(block), false, '不能写 *（任何网页都能读 localhost）');
+  assert.match(block, /injectShim\(buf\.toString\('utf8'\)\)/, 'HTML 要注入垫片');
+  assert.ok(
+    block.indexOf('injectShim') < block.indexOf('res.end(buf)'),
+    '注入要在发送之前',
+  );
+});

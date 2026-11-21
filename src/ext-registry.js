@@ -26,6 +26,18 @@ import { normalizeConfigSpec } from './ext-config.js';
 export const EXT_ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
 export const EXT_KIND = 'dsh-extension';
 export const SOURCE_FILE = '.source.json';
+
+/**
+ * 清单指纹的存放处：**数据目录下、扩展目录之外**。
+ *
+ * 一开始写在 `.source.json` 里（就在扩展目录内），结果扩展自己改完
+ * `plugin.json` 顺手把指纹一起改掉，校验就白做了——锚点不能放在被保护的
+ * 对象内部。挪出来之后，扩展要同时改两个不同位置的文件才绕得过。
+ *
+ * 注意：这仍然**不是**防恶意进程的安全边界（本机进程哪都能写），
+ * 它防的是「装完之后清单被改了却没人发现」。
+ */
+export const MANIFEST_SHA_FILE = 'ext-manifest-sha.json';
 export const MANIFEST_FILE = 'plugin.json';
 
 /**
@@ -44,12 +56,22 @@ export const EXT_ALLOWED_SCOPES = Object.freeze([
   'message:write', 'say:write', 'state:read', 'context:read',
   'memory:read', 'memory:write', 'proactive:write', 'session:write',
   'prompt:write', 'config:write', 'group:write', 'agent:write', 'core:write',
+  /**
+   * 下面五个覆盖**面板 API（`/quick`）里的管理面**（2026-11-21）。
+   *
+   * 以前那 40 个 op 没有 scope 概念，扩展页面只要同源就能调——等于
+   * 「没声明也能拿到」。现在每个 op 都归到一个 scope 上（见
+   * `ext-quick-scopes.js` 的 `OP_SCOPE`）：声明了就能用，没声明就调不到。
+   */
+  'groups:read', 'model:write', 'host:maintenance', 'memory:purge', 'ext:manage',
 ]);
 
 /** 会对外产生可见动作（说话 / 刷屏 / 改人格 / 开会话 / 改配置 / 管群）的 scope，安装时必须主人点头。 */
 export const EXT_SENSITIVE_SCOPES = Object.freeze([
   'message:write', 'say:write', 'proactive:write', 'session:write', 'prompt:write', 'agent:write',
   'config:write', 'group:write', 'core:write',
+  /** 新增的五个都是敏感项：安装时逐条列出、二次确认 */
+  'groups:read', 'model:write', 'host:maintenance', 'memory:purge', 'ext:manage',
 ]);
 
 /** 去重 + 过滤未知项；结果为空时退回默认（绝不返回「无 scope 但令牌有效」这种半吊子态）。 */
@@ -242,6 +264,27 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
 
   const pathOf = (id) => join(root, id);
   const sourcePathOf = (id) => join(pathOf(id), SOURCE_FILE);
+  const manifestShaPath = () => join(dir, MANIFEST_SHA_FILE);
+
+  function readManifestShas() {
+    try {
+      const j = JSON.parse(fs.readFileSync(manifestShaPath(), 'utf8'));
+      return j && typeof j === 'object' ? j : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeManifestSha(id, sha) {
+    const all = readManifestShas();
+    if (sha) all[id] = sha;
+    else delete all[id];
+    try {
+      fs.writeFileSync(manifestShaPath(), JSON.stringify(all, null, 2) + '\n', 'utf8');
+    } catch (e) {
+      log.warn?.(`清单指纹写不进去（${id}）：${e?.message ?? e}`);
+    }
+  }
 
   /** 有 `.source.json` = 市场装的；没有但目录在 = 用户手写（只读，绝不覆盖）。 */
   function sourceOf(id) {
@@ -443,7 +486,25 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       // 落位后按目标目录名再校验一次，防「目录名与清单 id 不一致」混进来
       const again = validateManifest(readJson(join(staging, MANIFEST_FILE)), { expectedId: id });
       if (!again.ok) throw new Error(again.errors.join('；'));
-      if (source) fs.writeFileSync(join(staging, SOURCE_FILE), JSON.stringify(source, null, 2) + '\n', 'utf8');
+      if (source) {
+        /**
+         * **清单指纹**：安装那一刻 `plugin.json` 的 sha256。
+         *
+         * 防的是「装完自己改清单」：安装时验的是整包 sha256，之后没人再看；
+         * 一个 `mcp` 扩展把自己的 `plugin.json` 改一下加上 `ui.page`，
+         * 运行期 `read()` 重读就生效，分级与安装确认全被绕过。
+         *
+         * 只哈希这一个文件，**不要哈希整个目录**：`config.json`、`.source.json`、
+         * 扩展自己写的 JSON 都不在 bundle 里，整目录哈希会永远对不上。
+         */
+        const manifestSha = createHash('sha256')
+          .update(fs.readFileSync(join(staging, MANIFEST_FILE)))
+          .digest('hex');
+        const srcOut = { ...source, manifestSha };
+        fs.writeFileSync(join(staging, SOURCE_FILE), JSON.stringify(srcOut, null, 2) + '\n', 'utf8');
+        /** 真正的锚点在数据目录下（见 `MANIFEST_SHA_FILE` 的注释） */
+        writeManifestSha(id, manifestSha);
+      }
 
       const hadDest = exists(dest);
       if (hadDest) {
@@ -529,6 +590,8 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝卸载（确认要删就带 force）` };
     }
     rmrf(dest);
+    /** 指纹跟着走：留着的话，同名扩展下次装上会撞上一个对不上的旧指纹 */
+    writeManifestSha(id, '');
     /**
      * 删完要**回读确认**：扩展进程的 cwd 就在这个目录里，Windows 上句柄没退
      * 干净时会「内容删光、目录留着」。**不能提前 return** —— 令牌吊销和密钥清理
@@ -561,9 +624,34 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       : { ok: true, id };
   }
 
+  /**
+   * 清单还是安装时那一份吗。
+   *
+   * `known:false` = 没有指纹（用户手写 / 本地目录装的），无从校验，按放行处理
+   * ——那种场景本来就没有「安装确认」可言，卡住只会打断开发。
+   */
+  function manifestStateOf(id) {
+    /**
+     * 只认**扩展目录之外**那份记录。`.source.json` 里的同名字段只作历史遗留，
+     * 不能当判据——它和 `plugin.json` 在同一个目录里，扩展能一起改。
+     */
+    const want = String(readManifestShas()[id] || '');
+    if (!want) return { ok: true, known: false, why: '' };
+    let got;
+    try {
+      got = createHash('sha256').update(fs.readFileSync(join(pathOf(id), MANIFEST_FILE))).digest('hex');
+    } catch (e) {
+      return { ok: false, known: true, why: `读不到清单：${e?.message ?? e}` };
+    }
+    if (got !== want) {
+      return { ok: false, known: true, why: 'plugin.json 在安装后被改动过（分级与安装确认已失效）' };
+    }
+    return { ok: true, known: true, why: '' };
+  }
+
   return {
     dir, root, list, problems, read, sourceOf, isForeign, install, remove, pathOf,
-    liveUsage, refreshUsage, configSpecOf,
+    liveUsage, refreshUsage, configSpecOf, manifestStateOf,
   };
 }
 

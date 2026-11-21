@@ -20,6 +20,11 @@ export type V1Scope =
   | 'session:write'
   | 'prompt:write'
   | 'config:write'
+  | 'groups:read'
+  | 'model:write'
+  | 'host:maintenance'
+  | 'memory:purge'
+  | 'ext:manage'
   | 'group:write'
   | 'core:write'
   | 'agent:write';
@@ -34,7 +39,12 @@ export type SensitiveScope =
   | 'agent:write'
   | 'config:write'
   | 'group:write'
-  | 'core:write';
+  | 'core:write'
+  | 'groups:read'
+  | 'model:write'
+  | 'host:maintenance'
+  | 'memory:purge'
+  | 'ext:manage';
 
 /** 拒绝诊断的五层来源。 */
 export type RejectionLayer =

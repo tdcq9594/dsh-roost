@@ -57,6 +57,13 @@ const SETTLED = new Set(['sent', 'failed', 'unknown', 'gone']);
 
 /** 每条的正文摘要上限（面板显示用，不存全文） */
 const TEXT_MAX = 60;
+/**
+ * 进日记的那份要长一点。
+ *
+ * `TEXT_MAX` 是**面板列表预览**用的（60 字够看）。但结案成 `sent` 之后要拿它
+ * 补写日记，60 字写进去等于「她记得自己说了半句话」。这里单独留一份长的。
+ */
+const TEXT_FULL_MAX = 1000;
 
 /**
  * @param {object} o
@@ -82,11 +89,24 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
             target: String(x.target ?? ''),
             chatId: String(x.chatId ?? x.target ?? ''),
             text: String(x.text ?? '').slice(0, TEXT_MAX),
+            full: String(x.full ?? x.text ?? '').slice(0, TEXT_FULL_MAX),
             at: Number(x.at) || 0,
             state: String(x.state || 'waiting'),
             code: String(x.code || ''),
             parts: Number(x.parts) || 0,
             checkedAt: Number(x.checkedAt) || 0,
+            /**
+             * 4.5 流水层的人格归因。`note()` 一直写这个字段，但 `load()`
+             * 的映射里没有它——**重启后消失**，下一次 `save()` 还会把它从
+             * 盘上彻底抹掉，于是按人格的送达统计重启即清零。
+             */
+            personaId: String(x.personaId ?? ''),
+            /**
+             * 用户清空过这个会话：正文已抹掉，结案时**不许**再补写日记。
+             * 单看「账本里还有没有这条」判不出来——结案后 `prune()` 也会删，
+             * 而且那是正常的 TTL 回收（2026-11 复核）。
+             */
+            cleared: x.cleared === true,
           })),
       };
     } catch {
@@ -165,6 +185,8 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
       /** 4.5 流水层：只加一个统计标记，requestId 幂等键与 chatId 都不动 */
       personaId: String(personaId || ''),
       text: String(text ?? '').slice(0, TEXT_MAX),
+      /** 补写日记用（见 `TEXT_FULL_MAX`） */
+      full: String(text ?? '').slice(0, TEXT_FULL_MAX),
       at: now(),
       state: 'waiting',
       code: '',
@@ -275,10 +297,57 @@ export function createDeliveryTrack({ file, channelOf, now = () => Date.now(), l
     };
   }
 
+  /**
+   * 彻底删除某个会话：账本里那几条**正文**也别留着。
+   *
+   * 3 天 TTL 只保证「过一阵子会没」，不等于「用户点了彻底删除就没了」。
+   * 这里存着 `text` / `full`（各 60 / 1000 字），是实打实的消息原文。
+   */
+  function clearChat(chatId, aliases = [], { keepPending = false } = {}) {
+    const keys = new Set(
+      [chatId, ...(Array.isArray(aliases) ? aliases : [])].map((k) => String(k ?? '')).filter(Boolean),
+    );
+    if (!keys.size) return 0;
+    const m = load();
+    const before = m.items.length;
+    /**
+     * `chatId` 与 `target` 都可能命中（频道消息两者不同），两个方向都查。
+     *
+     * `keepPending`：「清空本会话记忆」不该把**还在等审核**的记录删掉——
+     * 删了它们再也不会结案，面板「待确认」静默消失。「彻底删除」才全清。
+     */
+    let blanked = 0;
+    m.items = m.items.filter((x) => {
+      if (!keys.has(x.chatId) && !keys.has(x.target)) return true;
+      if (!keepPending || SETTLED.has(x.state)) return false;
+      /**
+       * 还在等审核：留着让它能结案，但**正文抹掉**。
+       * 只留记录不留原文——否则十分钟后结案时，`journalAdd` 又把用户刚要求
+       * 清掉的那句话写回日记（2026-11 复核实测）。
+       */
+      if (x.text || x.full || !x.cleared) blanked += 1;
+      x.text = '';
+      x.full = '';
+      x.cleared = true;
+      return true;
+    });
+    const n = before - m.items.length;
+    /**
+     * **抹正文也要落盘**。
+     *
+     * 以前只按「删了几条」判 `save()`：`keepPending` 时一条都没删（`n === 0`），
+     * 于是内存里抹了、盘上还留着原文——重启后结案照样把原文写回日记，
+     * 而 `cleared` 标记也一起丢了。
+     */
+    if (n || blanked) save();
+    return n;
+  }
+
   return {
     note,
     resolve,
     nextState,
+    clearChat,
     /** 还在等的（面板「待确认」） */
     pending: () => load().items.filter((x) => !SETTLED.has(x.state)),
     /** 全部，新的在前（面板用） */

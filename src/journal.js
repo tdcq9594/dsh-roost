@@ -25,8 +25,9 @@
  *   功能一样、检索退化为线性扫描——日记这条线不能因为环境差异就断掉。
  */
 
-import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, unlinkSync, copyFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { writeFileAtomic } from './atomic.js';
 import {
   indexText,
   indexTerms,
@@ -37,6 +38,20 @@ import {
 } from './tokenize.js';
 
 export const LEVELS = ['critical', 'important', 'normal'];
+
+/**
+ * 可信度三档（与 `memory.js` 的 status 同一套口径）。
+ *
+ * `fact` 是默认值**不落盘**：老库每一行 status 都是空串，字节与升级前一致。
+ * 读取时由 `normRow()` 把空串归一成 `fact`，所以调用方永远拿到三档之一。
+ */
+export const STATUSES = ['fact', 'hearsay', 'guess'];
+
+function normStatus(v) {
+  const s = String(v ?? '');
+  /** `fact` 是默认值，不落盘；只写 hearsay/guess */
+  return STATUSES.includes(s) && s !== 'fact' ? s : '';
+}
 
 /**
  * 抹除后留在行上的占位符。
@@ -255,6 +270,8 @@ function normRow(r) {
      */
     invalidAt: Number(r.invalid_at ?? r.invalidAt ?? 0),
     supersededBy: String(r.superseded_by ?? r.supersededBy ?? ''),
+    /** 空串 = 老数据 = fact；只认 hearsay/guess，别的值一律当 fact */
+    status: r.status === 'hearsay' || r.status === 'guess' ? r.status : 'fact',
   };
 }
 
@@ -279,6 +296,8 @@ function parseList(v) {
 function createSqliteStore(file, log) {
   let db = null;
   let broken = false;
+  /** `close()` 之后置 true：不许再懒打开（见 `open()`） */
+  let closed = false;
   /**
    * 有没有「删过行、但还没 VACUUM」。
    *
@@ -306,6 +325,16 @@ function createSqliteStore(file, log) {
   }
 
   function open() {
+    /**
+     * `close()` 之后**不再重开**。
+     *
+     * 以前 `close()` 只把 `db` 置 null，下一次任何读（`stats()` / `recent()` /
+     * `byDay()`）都会把它重新打开——插件重载时旧实例还有在飞的定时器和请求，
+     * 句柄再也关不掉（Windows 上连库文件都删不掉）。
+     * 这个 store 的每个方法都写了 `const d = open(); if (!d) return …`，
+     * 所以这里返回 null 就是安全的「什么都不做」。
+     */
+    if (closed) return null;
     if (db || broken) return db;
     try {
       ensureDir(file);
@@ -339,7 +368,10 @@ function createSqliteStore(file, log) {
           -- 失效（批次 2）：0 = 有效；被推翻时写失效时刻，并把推翻它的
           -- 消息 id 记进 superseded_by。行、正文、出处一律不删
           invalid_at INTEGER NOT NULL DEFAULT 0,
-          superseded_by TEXT NOT NULL DEFAULT ''
+          superseded_by TEXT NOT NULL DEFAULT '',
+          -- 可信度（v1.3.14 的三档）：fact 是默认值不落盘，老库字节不变。
+          -- hearsay/guess 才写；读取时空串一律归一成 fact。
+          status TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS journal_day ON journal(day);
         CREATE INDEX IF NOT EXISTS journal_chat ON journal(chat_id, at);
@@ -374,6 +406,14 @@ function createSqliteStore(file, log) {
       if (!cols.has('invalid_at')) db.exec('ALTER TABLE journal ADD COLUMN invalid_at INTEGER NOT NULL DEFAULT 0');
       if (!cols.has('superseded_by')) db.exec(`ALTER TABLE journal ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''`);
       /**
+       * `status`（可信度）：**当前没有生产写入方**，落盘一律是 `''` → 归一成
+       * `fact`。留着它是为了让「备份还原」原样带回（`insertRaw` 会写它），
+       * 以及给「听说的 / 本人确认」这条口径留位置；`journal.add({status})`
+       * 也收这个参数，将来哪个调用方知道了直接传即可。
+       * 别在没接上写入方之前把它当成活的——面板和检索读到的永远是 fact。
+       */
+      if (!cols.has('status')) db.exec(`ALTER TABLE journal ADD COLUMN status TEXT NOT NULL DEFAULT ''`);
+      /**
        * FTS5 单独一张表而不是 external content：
        * external content 要靠触发器同步，改一行忘了同步就静默不一致。
        * 这里多存一份切好的词，换来"怎么写都不会错"。
@@ -395,30 +435,49 @@ function createSqliteStore(file, log) {
     insert(row) {
       const d = open();
       if (!d) return null;
-      const r = d
-        .prepare(
-          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(id) DO NOTHING`,
-        )
-        .run(
-          row.id,
-          row.at,
-          row.day,
-          row.chatId,
-          row.sender,
-          row.role,
-          row.text,
-          row.level,
-          row.kind,
-          row.digest ?? null,
-          row.keepUntil ?? 0,
-          row.vec ?? null,
-          row.eventIds?.length ? JSON.stringify(row.eventIds) : null,
-          row.evidence?.length ? JSON.stringify(row.evidence) : null,
-        );
-      if (!r.changes) return false; // 幂等：同一条消息写了两次
-      d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(row.id, indexText(row.text));
+      /**
+       * 行和 FTS 索引放在**一个事务**里。
+       *
+       * 两条独立语句：中间崩溃（断电 / 库被杀）会留下「行在库里、检索永远
+       * 找不到」的残局，而全仓没有 FTS 重建入口（`vacuum()` 只 VACUUM）。
+       */
+      d.exec('BEGIN');
+      let inserted;
+      try {
+        inserted = d
+          .prepare(
+            `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,status)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO NOTHING`,
+          )
+          .run(
+            row.id,
+            row.at,
+            row.day,
+            row.chatId,
+            row.sender,
+            row.role,
+            row.text,
+            row.level,
+            row.kind,
+            row.digest ?? null,
+            row.keepUntil ?? 0,
+            row.vec ?? null,
+            row.eventIds?.length ? JSON.stringify(row.eventIds) : null,
+            row.evidence?.length ? JSON.stringify(row.evidence) : null,
+            normStatus(row.status),
+          );
+        if (inserted.changes) {
+          d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(row.id, indexText(row.text));
+        }
+        d.exec('COMMIT');
+      } catch (e) {
+        try {
+          d.exec('ROLLBACK');
+        } catch {}
+        throw e;
+      }
+      if (!inserted.changes) return false; // 幂等：同一条消息写了两次
       return true;
     },
 
@@ -434,13 +493,21 @@ function createSqliteStore(file, log) {
       const id = String(row?.id ?? '');
       if (!id) return false;
       const at = Number(row.at) || 0;
-      const r = d
-        .prepare(
-          `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,accessed,last_access,invalid_at,superseded_by)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(id) DO NOTHING`,
-        )
-        .run(
+      /**
+       * 和 `insert()` 同一套：行 + FTS 放一个事务里。
+       * 这条是备份还原路径（`backup.js` 逐行调），中途崩了会留下
+       * 「行在库里、检索找不到」且没有重建入口。
+       */
+      d.exec('BEGIN');
+      let r;
+      try {
+        r = d
+          .prepare(
+            `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,accessed,last_access,invalid_at,superseded_by,status)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO NOTHING`,
+          )
+          .run(
           id,
           at,
           String(row.day || dayOf(at)),
@@ -459,10 +526,35 @@ function createSqliteStore(file, log) {
           Number(row.lastAccess) || 0,
           Number(row.invalidAt) || 0,
           String(row.supersededBy ?? ''),
+          normStatus(row.status),
         );
-      if (!r.changes) return false;
-      d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(id, indexText(String(row.text ?? '')));
-      return true;
+        if (r.changes) {
+          d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(id, indexText(String(row.text ?? '')));
+        }
+        d.exec('COMMIT');
+      } catch (e) {
+        try {
+          d.exec('ROLLBACK');
+        } catch {}
+        throw e;
+      }
+      return Boolean(r.changes);
+    },
+
+    /**
+     * 批量记访问：一条 UPDATE 代替 N 次「get + update」。
+     *
+     * 检索一次命中 3–6 条，原实现每条先读一次再写一次（SQLite 上 2N 次
+     * prepare/执行，JSONL 上更是 N 次整文件重写）；日记到几万行时肉眼可见。
+     */
+    touch(ids, at) {
+      const list = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
+      if (!list.length) return;
+      const d = open();
+      if (!d) return;
+      const ph = list.map(() => '?').join(',');
+      d.prepare(`UPDATE journal SET accessed=accessed+1, last_access=? WHERE id IN (${ph})`)
+        .run(Number(at) || Date.now(), ...list);
     },
 
     get(id) {
@@ -493,16 +585,29 @@ function createSqliteStore(file, log) {
       }
       if (!cols.length) return false;
       vals.push(id);
-      d.prepare(`UPDATE journal SET ${cols.join(',')} WHERE id=?`).run(...vals);
       /**
-       * 文本被抹掉（用户说"别记这个"）时必须同步删索引，
-       * 否则 FTS 里还留着原文的词，搜得到一条空记录。
+       * 改行 + 重建索引放一个事务里：中间崩溃会留下「正文改了、索引还是旧的」，
+       * 搜出来的是原文的词、拿到的却是占位符。
        */
-      if (patch.text !== undefined) {
-        d.prepare('DELETE FROM journal_fts WHERE jid=?').run(id);
-        if (String(patch.text).trim()) {
-          d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(id, indexText(patch.text));
+      d.exec('BEGIN');
+      try {
+        d.prepare(`UPDATE journal SET ${cols.join(',')} WHERE id=?`).run(...vals);
+        /**
+         * 文本被抹掉（用户说"别记这个"）时必须同步删索引，
+         * 否则 FTS 里还留着原文的词，搜得到一条空记录。
+         */
+        if (patch.text !== undefined) {
+          d.prepare('DELETE FROM journal_fts WHERE jid=?').run(id);
+          if (String(patch.text).trim()) {
+            d.prepare('INSERT INTO journal_fts(jid, tok) VALUES (?,?)').run(id, indexText(patch.text));
+          }
         }
+        d.exec('COMMIT');
+      } catch (e) {
+        try {
+          d.exec('ROLLBACK');
+        } catch {}
+        throw e;
       }
       return true;
     },
@@ -974,12 +1079,20 @@ function createSqliteStore(file, log) {
      *
      * 磁盘上的旧页要等 `vacuum()` 才真正清掉，这里只标记，不立刻压——
      * VACUUM 会锁库几秒，不能在用户点按钮那条路上跑。
+     *
+     * `aliases`：换过机器人的会话在库里散在好几个 openid 下。**必须一起删**，
+     * 否则用户点了「彻底删除」，旧键下的正文和 `episode.text` 还留着，
+     * 下一条消息她又想起来了——`clearChat` 一直是这么做的，别只改一半。
+     *
      * @returns {number} 删掉几条
      */
-    purgeChat(chatId) {
+    purgeChat(chatId, aliases = []) {
       const d = open();
       if (!d) return 0;
+      const keys = chatKeys(chatId, aliases);
+      if (!keys.length) return 0;
       let n = 0;
+      const ph = marks(keys.length);
       d.exec('BEGIN');
       try {
         /**
@@ -987,8 +1100,8 @@ function createSqliteStore(file, log) {
          * 一条语句 9ms（见 `deleteFtsMany` 的注释）。先删索引再删行，
          * 同一事务里子查询照样看得到这些行。
          */
-        d.prepare('DELETE FROM journal_fts WHERE jid IN (SELECT id FROM journal WHERE chat_id=?)').run(chatId);
-        n = Number(d.prepare('DELETE FROM journal WHERE chat_id=?').run(chatId).changes || 0);
+        d.prepare(`DELETE FROM journal_fts WHERE jid IN (SELECT id FROM journal WHERE chat_id IN (${ph}))`).run(...keys);
+        n = Number(d.prepare(`DELETE FROM journal WHERE chat_id IN (${ph})`).run(...keys).changes || 0);
         d.exec('COMMIT');
       } catch (e) {
         try {
@@ -1026,7 +1139,8 @@ function createSqliteStore(file, log) {
       }
     },
 
-    close() {
+    close({ final = true } = {}) {
+      if (final) closed = true;
       try {
         db?.close();
       } catch {}
@@ -1044,21 +1158,59 @@ function createSqliteStore(file, log) {
 function createJsonlStore(file, log) {
   let rows = null;
   let index = null;
+  /** `close()` 之后不再读盘（和 sqlite store 同一条规矩） */
+  let closed = false;
+  /**
+   * 上次 `load()` 里有几行解析不了。
+   *
+   * 以前逐行 `catch {}`，**一个字都不打**：最后一行写一半（进程被杀）、
+   * 记事本另存成 UTF-16、任意一行坏掉，那一行（或整库）就静默消失，
+   * 而下一次整份重写会把它从磁盘上永久抹掉。
+   */
+  let badLines = 0;
+  let quarantined = false;
+
+  /** 坏行先留一份原文，再允许后面的重写 —— 顺序反了就再也救不回来 */
+  function quarantineIfBad() {
+    if (!badLines || quarantined) return;
+    quarantined = true;
+    try {
+      const bak = `${file}.corrupted.${Date.now()}`;
+      /** **按字节复制**：先按 utf8 读再写回去，UTF-16 那种文件会被替换字符改写，
+       *  「备份原文」就成了假的 */
+      copyFileSync(file, bak);
+      log(`日记里有 ${badLines} 行解析不了，原文已备份到 ${bak}`);
+    } catch (e) {
+      log(`日记坏行备份失败（${badLines} 行）：${e.message}`);
+    }
+  }
 
   function load() {
+    /** `closed` 时给空数组（不是 null）：调用方会直接 `for (const r of rows)` */
+    if (closed) {
+      rows = rows || [];
+      return rows;
+    }
     if (rows) return rows;
     rows = [];
+    badLines = 0;
     try {
       if (existsSync(file)) {
         for (const line of readFileSync(file, 'utf8').split('\n')) {
           if (!line.trim()) continue;
           try {
             rows.push(normRow(JSON.parse(line)));
-          } catch {}
+          } catch {
+            badLines += 1;
+          }
         }
       }
     } catch (e) {
       log(`日记文件读不出来：${e.message}`);
+    }
+    if (badLines) {
+      log(`日记有 ${badLines} 行解析不了（已跳过，原文会先备份）`);
+      quarantineIfBad();
     }
     index = new Map(); // 词 → Set(row 下标)
     rows.forEach((r, i) => {
@@ -1077,10 +1229,30 @@ function createJsonlStore(file, log) {
    * 盘写不进去时照样 `return n`：内存说改好了、盘上没改，重启后旧键复活，
    * 而一键改写那边报的是「成功」。
    */
+  /**
+   * JSONL 落盘前的序列化。
+   *
+   * `fact` 不落盘——和 SQLite 的空串默认同一口径。`normRow()` 读取时
+   * 一定会把空串归一成 fact，所以落盘时删掉它不会丢信息；不删的话，
+   * 一次 rewrite 会把老行全部改写成带 `"status":"fact"`，破坏「升级前后
+   * 字节不变」的承诺。
+   */
+  function jsonOf(r) {
+    const o = { ...r };
+    if (o.status === 'fact') delete o.status;
+    return JSON.stringify(o);
+  }
+
   function rewrite() {
     try {
       ensureDir(file);
-      writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''), 'utf8');
+      /**
+       * **原子写**。以前是 `writeFileSync` 直接盖活文件：写到一半断电/ENOSPC
+       * 会把整份日记截断成半截。同仓 `sessions.js` / `atomic.js` /
+       * `pending-opening.js` 都是随机 tmp + rename，唯独这里没有。
+       */
+      /** 第三个参数是 `{ mode, mkdir }`，别传 `'utf8'`（解构字符串得到 undefined，靠默认值侥幸生效） */
+      writeFileAtomic(file, rows.map(jsonOf).join('\n') + (rows.length ? '\n' : ''));
       return true;
     } catch (e) {
       log(`日记文件写不进去：${e.message}`);
@@ -1109,7 +1281,7 @@ function createJsonlStore(file, log) {
       // 追加而不是整文件重写：白天每条消息都走这条路
       try {
         ensureDir(file);
-        appendFileSync(file, JSON.stringify(normRow(row)) + '\n', 'utf8');
+        appendFileSync(file, jsonOf(normRow(row)) + '\n', 'utf8');
       } catch (e) {
         log(`日记追加失败：${e.message}`);
       }
@@ -1146,6 +1318,22 @@ function createJsonlStore(file, log) {
       if (patch.text !== undefined) reindex();
       rewrite();
       return true;
+    },
+
+    /** 批量记访问：一次 rewrite 代替 N 次「update → rewrite」 */
+    touch(ids, at) {
+      load();
+      const want = new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean));
+      if (!want.size) return;
+      const t = Number(at) || Date.now();
+      let dirty = false;
+      for (const r of rows) {
+        if (!want.has(r.id)) continue;
+        r.accessed = Number(r.accessed || 0) + 1;
+        r.lastAccess = t;
+        dirty = true;
+      }
+      if (dirty) rewrite();
     },
 
     /** 同 SQLite 后端：只写两列，正文 / 出处 / 向量 / 倒排都不动 */
@@ -1418,11 +1606,13 @@ function createJsonlStore(file, log) {
       };
     },
 
-    /** 同 SQLite 后端：整行删掉，不是抹正文 */
-    purgeChat(chatId) {
+    /** 同 SQLite 后端：整行删掉，不是抹正文。`aliases` 一起删（换过机器人的会话） */
+    purgeChat(chatId, aliases = []) {
       load();
+      const keys = new Set(chatKeys(chatId, aliases));
+      if (!keys.size) return 0;
       const before = rows.length;
-      rows = rows.filter((r) => r.chatId !== chatId);
+      rows = rows.filter((r) => !keys.has(r.chatId));
       const n = before - rows.length;
       if (n) {
         reindex();
@@ -1434,7 +1624,9 @@ function createJsonlStore(file, log) {
     /** JSONL 每次 rewrite 都是整文件重写，旧内容已经不在了，没有可压的 */
     vacuum: () => false,
 
-    close() {
+    /** 同 sqlite store：`final:false` = 关完还要接着用（备份前 checkpoint 那种） */
+    close({ final = true } = {}) {
+      if (final) closed = true;
       rows = null;
       index = null;
     },
@@ -1539,6 +1731,8 @@ function perKeyRows(chatId, aliases, take) {
  */
 export function createJournal({ file, embed = null, log = () => {}, now = () => Date.now() } = {}) {
   let store = null;
+  /** `close()` 之后置 true：懒打开会把库重新打开（见 `close()` 的注释） */
+  let closed = false;
 
   function get() {
     if (store) return store;
@@ -1565,9 +1759,15 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
   }
 
   /** 搜到就记一次访问——access_count 是排序的一部分 */
-  function touchIds(ids) {
+  function touchIds(ids, at) {
     const s = get();
-    const t = now();
+    /** 传了 at 就用它（面板/备份重放要按历史时刻记），否则用当前时钟 */
+    const t = Number(at) || now();
+    /** 新后端有批量方法；老后端（或注入的假 store）退回逐条，行为不变 */
+    if (typeof s.touch === 'function') {
+      s.touch(ids, t);
+      return;
+    }
     for (const id of ids || []) {
       const r = s.get(id);
       if (r) s.update(id, { accessed: (r.accessed || 0) + 1, lastAccess: t });
@@ -1603,7 +1803,11 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       eventIds = [],
       /** 原文快照 `[{eventId, at, sender, excerpt}]`。events 7 天后删了，它还留着 */
       evidence = [],
+      /** 可信度：默认 fact（不落盘）；只有 hearsay/guess 才写 */
+      status = '',
     }) {
+      /** 已经 close 了：在飞的回调不许把库重新打开（见 `close()` 的注释） */
+      if (closed) return { added: false, level: 'normal' };
       const t = String(text ?? '').trim();
       if (!t) return { added: false, level: 'normal' };
       const ts = Number(at) || now();
@@ -1623,6 +1827,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         vec: null,
         eventIds: (eventIds || []).map(String).filter(Boolean).slice(0, 50),
         evidence: (evidence || []).slice(0, 50),
+        status: normStatus(status),
       };
       const added = get().insert(row);
       return { added: Boolean(added), level: lv };
@@ -1718,7 +1923,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     },
 
     /** 搜到就记一次访问——access_count 是排序的一部分 */
-    touch: (ids) => touchIds(ids),
+    touch: (ids, at) => touchIds(ids, at),
 
     /**
      * 检索。
@@ -2045,9 +2250,12 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
      *   · clearChat —— 抹正文、留行（时间线连续，能看出「这天有过东西」）
      *   · purgeChat —— 行都没了（用户要的是「这些记录不许存在」）
      * 磁盘上的旧页由 `vacuum()` 在巩固时压掉，这里不等。
+     *
+     * `aliases`：与 `clearChat` 同口径——换过机器人的会话散在多个 openid 下，
+     * 「彻底删除」必须一起删，不然旧键下的正文还在、还能被检索到。
      */
-    purgeChat(chatId) {
-      return get().purgeChat(requireChat(chatId, '彻底删日记'));
+    purgeChat(chatId, aliases = []) {
+      return get().purgeChat(requireChat(chatId, '彻底删日记'), aliases);
     },
 
     /** 压库。没删过行时是一次判断就返回，可以放心在定时器里调 */
@@ -2068,9 +2276,27 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
 
     vecOf: (row) => toVec(row?.vec),
 
-    close() {
-      store?.close();
-      store = null;
+    /**
+     * 关掉后端。
+     *
+     * 关完**不许再被懒打开**：`store = null` 之后 `get()` 见到 null 会重新
+     * `open()`。插件重载时旧实例还有在飞的异步回调（投递回查、发帖、巩固），
+     * 它们 `add()` 一下就把库重新打开，句柄再也关不掉（每次重载漏一个 fd）。
+     */
+    /**
+     * @param {object} [o]
+     * @param {boolean} [o.final] 默认 true = 这是收尾（之后**永不重开**）。
+     *   一键改写 / 备份前要先关句柄让 WAL checkpoint，那种要传 `final:false`——
+     *   关完还得继续用同一个实例（`rekey()` 靠懒打开重新连上）。
+     */
+    close({ final = true } = {}) {
+      if (final) closed = true;
+      store?.close({ final });
+      /**
+       * **不置 null**：`get()` 见 null 会 `createSqliteStore()` 新建一个
+       * （closed=false），下一次任何读就把库重新打开了。留着这个已关闭的
+       * store 引用，它自己会把所有方法变成 no-op。
+       */
     },
   };
 }

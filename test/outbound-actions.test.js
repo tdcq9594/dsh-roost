@@ -359,3 +359,30 @@ test('试运行：关掉之后 <<say>> 照常合成并发送（判据是热读�
   assert.equal(charged.length, 1, '恢复后额度照扣');
   assert.equal(ch.calls.filter((c) => c[0] === 'voice').length, 1);
 });
+
+/**
+ * 文件发送失败必须能传到调用方（2026-11 复核抓到的真问题）。
+ *
+ * `qq_send_file` 走的是 `postReply(payload, '', false, {files})`——正文空串，
+ * 于是 `run()` 里那条正文分支根本不进，`r` 恒为 `{ok:true, sent:false}`。
+ * 以前文件结果被 `log` 一句就丢掉，调用方再怎么判 `ok` 都判不出失败：
+ * `turnSt.files`、配额都不回滚，工具还回 `ok:true`。
+ */
+test('执行：文件发送失败要回 filesOk=false（正文 ok 不受影响）', async () => {
+  const ch = fakeChannel({ sendFile: async () => ({ ok: false, message: '上传失败', network: true }) });
+  const run = createActionRunner({ channel: () => ch });
+  const r = await run({ text: '', target: 'g1', extra: { files: ['C:/tmp/a.png'] } });
+
+  assert.equal(r.filesOk, false, '文件失败要带出来');
+  assert.equal(r.ok, true, '正文那条没发，别把 ok 打成 false（上层会重发正文）');
+  assert.equal(r.fileErrors.length, 1);
+  assert.equal(r.fileErrors[0].network, true, '网络不确定要能识别');
+});
+
+test('执行：文件发成功时 filesOk=true，不留多余字段', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch });
+  const r = await run({ text: '', target: 'g1', extra: { files: ['C:/tmp/a.png'] } });
+  assert.equal(r.filesOk, true);
+  assert.equal(r.fileErrors, undefined);
+});

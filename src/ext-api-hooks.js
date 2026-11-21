@@ -27,7 +27,10 @@ import { extname, join, resolve, sep } from 'node:path';
 import { shouldFire } from './speakup.js';
 import { chatOf, normalizeKind } from './inbound.js';
 import { tuwenProblem } from './tuwen.js';
-import { classifyRoostCall, resolveExtTarget, narrowMsgSend, EXT_ROOST_READONLY, EXT_ROOST_SEND } from './ext-roost.js';
+import {
+  classifyRoostCall, resolveExtTarget, narrowMsgSend,
+  EXT_ROOST_READONLY, EXT_ROOST_CALLABLE, EXT_ROOST_SEND,
+} from './ext-roost.js';
 
 /** 规则本体搬到 `tuwen.js`（模型侧的 `<<card:>>` 也用同一份），这里继续对外导出。 */
 export { tuwenProblem };
@@ -269,8 +272,17 @@ export function createExtApiHooks({
       const fact = String(body?.fact ?? body?.text ?? '').trim().slice(0, MAX_FACT);
       if (!fact) return bad('缺 fact / text');
       const scope = 'chat';
-      try { memory().add(chatId, fact, scope, { w: 1, src: { via: 'ext-api' } }); }
+      let ok = false;
+      try { ok = memory().add(chatId, fact, scope, { w: 1, src: { via: 'ext-api' } }); }
       catch (e) { return bad(`写记忆失败：${e?.message ?? e}`, 500, 'internal'); }
+      /**
+       * `add()` 现在**如实返回落盘结果**：记忆文件读不动 / 写不进去时回 false。
+       * 不看它就会回一个假的 `ok:true`——而那条事实在锁解除后的重读里会被
+       * 盘上内容替换掉，扩展以为记上了，其实什么都没有。
+       */
+      if (ok === false) {
+        return bad('记忆文件正被占用或写不进去，这条没记上，稍后重试', 503, 'internal');
+      }
       return { status: 200, body: { ok: true, chatId, scope, chars: [...fact].length } };
     },
 
@@ -441,8 +453,19 @@ export function createExtApiHooks({
       const filter = String(query?.filter ?? '').trim().toLowerCase();
       const match = (n) => !filter || n.toLowerCase().includes(filter);
       const tools = all.filter((m) => m.name.startsWith('tool.') && match(m.name));
-      const readonly = EXT_ROOST_READONLY.filter((n) => caps.has(n) && match(n))
+      const withDesc = (list) => list
+        .filter((n) => caps.has(n) && match(n))
         .map((n) => ({ name: n, scope: 'read', desc: (all.find((m) => m.name === n)?.desc ?? '') }));
+      /**
+       * 两份清单，别只报短的。
+       *
+       * `readonly` 是 `roost.read`（默认 `state:read`）能调的；身份 / 账本 /
+       * 投递那批在 `callable` 里——它们要 `message:write`，`roost.call` 仍能调。
+       * 只报 `readonly` 的话，拿 message:write 的扩展按能力表看不到 `msg.get`
+       * 之类，以为框架没有这个能力（2026-11 复核）。
+       */
+      const readonly = withDesc(EXT_ROOST_READONLY);
+      const callableOnly = withDesc(EXT_ROOST_CALLABLE).filter((m) => !EXT_ROOST_READONLY.includes(m.name));
       return {
         status: 200,
         body: {
@@ -451,8 +474,10 @@ export function createExtApiHooks({
           updatedAt: caps.lastAt(),
           tools: tools.map((m) => ({ name: m.name, scope: m.scope, desc: m.desc, parameters: m.parameters })),
           readonly,
+          /** 这些**只能**走 `roost.call`（要 message:write） */
+          callableOnly,
           send: EXT_ROOST_SEND.slice(),
-          note: '用 POST /v1/roost.call 调用；写 / 管理面不对扩展开放',
+          note: '用 POST /v1/roost.call 调用；readonly 也可用 /v1/roost.read（只要 state:read）。写 / 管理面不对扩展开放',
         },
       };
     },
@@ -530,6 +555,35 @@ export function createExtApiHooks({
 
       try {
         const data = await link.rpc(method, params);
+        return { status: 200, body: { ok: true, method, data: data ?? null } };
+      } catch (e) {
+        return bad(`协议调用失败（${method}）：${String(e?.message ?? e).slice(0, 180)}`, 502, 'internal');
+      }
+    },
+
+    /**
+     * 只读版：只放 `readonly`，不发消息、不调插件工具。
+     *
+     * 参数不需要 `narrowMsgSend` 那套收窄——只读方法没有目标 / 账本键，
+     * 直接把 `params` 透传给 `link.rpc`。路由层用的是 `state:read`，
+     * 所以扩展读运行状态不必先拿到 `message:write`。
+     */
+    async 'roost.read'({ body }) {
+      const link = typeof roostOf === 'function' ? roostOf() : null;
+      if (!link || typeof link.rpc !== 'function') {
+        return bad('还没连上 roost 外接协议', 503, 'internal');
+      }
+      const method = String(body?.method ?? '').trim();
+      /** `surface:'read'`：`PRIVATE` 那批（身份/账本/投递）在这里要提示改用 roost.call */
+      const verdict = classifyRoostCall(method, link.caps ?? null, { surface: 'read' });
+      if (!verdict.ok) return bad(verdict.why, 403, 'forbidden');
+      if (verdict.kind !== 'readonly') {
+        return bad('roost.read 只接受只读方法；发消息 / 插件工具请用 roost.call', 403, 'forbidden');
+      }
+      const input = body?.params && typeof body.params === 'object' && !Array.isArray(body.params)
+        ? body.params : {};
+      try {
+        const data = await link.rpc(method, input);
         return { status: 200, body: { ok: true, method, data: data ?? null } };
       } catch (e) {
         return bad(`协议调用失败（${method}）：${String(e?.message ?? e).slice(0, 180)}`, 502, 'internal');

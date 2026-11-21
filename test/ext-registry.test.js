@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 import {
   EXT_ID_RE,
@@ -280,4 +281,80 @@ test('install：.old 恢复出手写目录，只有 takeOver 能穿过', (t) => 
   const r2 = reg.install(src, { source: { repo: 'x', version: '1.0.0' }, takeOver: true });
   assert.equal(r2.ok, true, r2.reason);
   assert.equal(fs.existsSync(join(root, 'bili', '.source.json')), true);
+});
+
+/**
+ * 清单指纹（2026-11-21）。
+ *
+ * 装的时候验的是整包 sha256，之后没人再看——一个 `mcp` 扩展把自己的
+ * `plugin.json` 改一下加上 `ui.page`，分级与安装确认就都被绕过了。
+ */
+test('install：记下清单指纹，装完之后改动要能被发现', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  assert.equal(reg.install(src, { source: { repo: 'r', version: '1.0.0' } }).ok, true);
+
+  const src1 = reg.sourceOf('bili');
+  assert.match(String(src1.manifestSha || ''), /^[0-9a-f]{64}$/, '要记下 64 位 sha256');
+  assert.equal(reg.manifestStateOf('bili').ok, true, '刚装完应当一致');
+  assert.equal(reg.manifestStateOf('bili').known, true);
+
+  /** 装完之后改清单：加一个 ui.page（正是要防的形态） */
+  const mf = join(extensionsDir(home), 'bili', 'plugin.json');
+  const m = JSON.parse(fs.readFileSync(mf, 'utf8'));
+  m.ui = { ...(m.ui || {}), page: 'evil.html' };
+  fs.writeFileSync(mf, JSON.stringify(m, null, 2), 'utf8');
+
+  const st = reg.manifestStateOf('bili');
+  assert.equal(st.ok, false, '改动后要判为不可信');
+  assert.match(st.why, /改动/);
+});
+
+test('install：没有 .source.json 的本地扩展不做指纹校验（不打断开发）', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  assert.equal(reg.install(src, { source: null }).ok, true);
+
+  const st = reg.manifestStateOf('bili');
+  assert.equal(st.ok, true);
+  assert.equal(st.known, false, '没有指纹时按放行处理');
+});
+
+/**
+ * 指纹的锚点必须在**扩展目录之外**（2026-11-21 复核）。
+ *
+ * 第一版写在 `.source.json` 里——那个文件和 `plugin.json` 在同一个目录，
+ * 扩展改完清单顺手把指纹一起改掉，校验就白做了。实测能绕过。
+ */
+test('install：连 .source.json 一起改也绕不过指纹', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  assert.equal(reg.install(src, { source: { repo: 'r', version: '1.0.0' } }).ok, true);
+
+  const dir = join(extensionsDir(home), 'bili');
+  const mf = join(dir, 'plugin.json');
+  const m = JSON.parse(fs.readFileSync(mf, 'utf8'));
+  m.ui = { ...(m.ui || {}), page: 'evil.html' };
+  fs.writeFileSync(mf, JSON.stringify(m, null, 2), 'utf8');
+
+  /** 恶意扩展的第二手：把 .source.json 里的指纹也改成新清单的哈希 */
+  const sha = createHash('sha256').update(fs.readFileSync(mf)).digest('hex');
+  const sp = join(dir, '.source.json');
+  const sj = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  sj.manifestSha = sha;
+  fs.writeFileSync(sp, JSON.stringify(sj, null, 2), 'utf8');
+
+  const st = reg.manifestStateOf('bili');
+  assert.equal(st.ok, false, '锚点在数据目录，改 .source.json 不该有用');
+  assert.match(st.why, /改动/);
+});
+
+test('remove：卸载后指纹记录要清掉，别留给下次装的同名扩展', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const reg = createExtRegistry({ dir: home });
+  assert.equal(reg.install(src, { source: { repo: 'r', version: '1.0.0' } }).ok, true);
+  assert.equal(reg.manifestStateOf('bili').known, true);
+
+  assert.equal(reg.remove('bili').ok, true);
+  assert.equal(reg.manifestStateOf('bili').known, false, '记录要跟着走');
 });

@@ -22,6 +22,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 import { dataDir } from './config.js';
+import { writeJsonAtomic as writeJsonAtomicShared } from './atomic.js';
 import { BUCKETS, resolvePolicy } from './capabilities.js';
 import { V1_SCOPES } from './api-v1.js';
 import { USAGE_CHAR_LIMIT } from './ext-usage.js';
@@ -53,6 +54,17 @@ export const LOCALLY_MODIFIED_LABEL = '已本地修改，不再参与更新校�
  */
 export const SENSITIVE_SCOPES = EXT_SENSITIVE_SCOPES;
 
+/**
+ * 客户端令牌列表的每页条数。
+ *
+ * 一个扩展装一个 `ext:<id>` 令牌，装二十个扩展就有二十条，面板每次刷新
+ * 都把整张表拉一遍。默认 20 条：常见的「装了十几个扩展」正好一页看完，
+ * 不用点；上百个的也不会一个响应塞满。
+ */
+export const CLIENT_PAGE_DEFAULT = 20;
+/** 上限挡住 `?limit=100000` 把分页当摆设用 */
+export const CLIENT_PAGE_MAX = 200;
+
 function sha256(s) {
   return createHash('sha256').update(String(s)).digest('hex');
 }
@@ -61,12 +73,16 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 
-/** 原子写：随机 .tmp + rename，坏文件不会留在目录里被扫描器当扩展。 */
+/**
+ * 原子写包装：实现统一在 `atomic.js`（随机 tmp 名 + 失败清 tmp + 不可序列化
+ * 的值直接抛错，不再写出字符串 `"undefined"`）。
+ *
+ * 这里保留薄薄一层是因为调用方还要传 `dir`——`writeJsonAtomic` 自己会建
+ * `dirname(file)`，`dir` 只是历史参数，留着不影响行为。
+ */
 function writeJsonAtomic(file, value, dir) {
   fs.mkdirSync(dir, { recursive: true });
-  const tmp = join(dir, `.${file.split(/[\\/]/).pop()}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, file);
+  return writeJsonAtomicShared(file, value, { newline: true });
 }
 
 /**
@@ -221,6 +237,12 @@ export function createExtPanel({
             scopes: granted,
             overrides: Array.isArray(e.manifest?.overrides) ? e.manifest.overrides : [],
             form: e.manifest?.form,
+            /**
+             * `ui` 也要传：面板页 / 进程内运行本身就是最高风险
+             * （同源 iframe 等于主人权限）。不传的话「已安装」页会把它显示成
+             * L0/L1，而安装确认时算的是 L3 —— 同一个扩展两处不一致。
+             */
+            ui: e.manifest?.ui,
           });
           return { id: t.id, label: t.label, color: t.color, summary: t.summary, risks: riskLines(t) };
         })(),
@@ -419,20 +441,55 @@ export function createExtPanel({
     };
   }
 
-  /** 客户端列表：只回非敏感字段，hash / 明文一律不出后端。 */
-  function clients() {
+  /**
+   * 客户端列表：只回非敏感字段，hash / 明文一律不出后端。
+   *
+   * **分页**：一个扩展一个 `ext:<id>` 令牌，装得多时这张表会很长，一次全给
+   * 前端等于每次刷新都拉整张表。按 `offset/limit` 切，`total` 是过滤后的
+   * 总数，前端据此画「加载更多」。
+   *
+   * **按 `createdAt` 倒序**：`clientStore.list()` 是文件里的追加顺序（新的在
+   * 最后）。分页之后这个顺序会变成「刚发的令牌在最后一页」——发完令牌回列表
+   * 找不到，以为没发出去。倒序之后新建的就在第一条。
+   */
+  function clients({ limit = CLIENT_PAGE_DEFAULT, offset = 0, q = '' } = {}) {
+    const all = clientStore.list().map((c) => ({
+      id: String(c.id ?? ''),
+      name: String(c.name ?? ''),
+      extId: c.extId ? String(c.extId) : '',
+      scopes: Array.isArray(c.scopes) ? [...c.scopes] : [],
+      enabled: c.enabled !== false,
+      createdAt: Number(c.createdAt) || 0,
+      kind: c.extId ? 'ext' : 'panel',
+    }));
+
+    /** 关键词只匹配名字 / id / 扩展 id：这三个是用户在列表里能看见的字段 */
+    const kw = String(q ?? '').trim().toLowerCase();
+    const hit = kw
+      ? all.filter((c) => `${c.name} ${c.id} ${c.extId}`.toLowerCase().includes(kw))
+      : all;
+    /** 同毫秒创建的两条（测试里常见）按 id 兜底，保证顺序稳定 */
+    hit.sort((a, b) => (b.createdAt - a.createdAt) || String(a.id).localeCompare(String(b.id)));
+
+    /**
+     * `limit` / `offset` 一律容错，不抛错也不返回空页：
+     * 非数字、0、负数都当「没给」用默认值——`limit=0` 要回 0 条对谁都没用，
+     * 而回一整页至少能看出「参数传错了」。上限夹到 `CLIENT_PAGE_MAX`。
+     */
+    const n = Math.trunc(Number(limit));
+    const lim = Number.isFinite(n) && n > 0 ? Math.min(CLIENT_PAGE_MAX, n) : CLIENT_PAGE_DEFAULT;
+    /** `offset: Infinity` 也要按 0：`Math.trunc(Infinity)` 还是 Infinity，会原样回给前端 */
+    const m = Math.trunc(Number(offset));
+    const off = Number.isFinite(m) && m > 0 ? m : 0;
+
     return {
       ok: true,
       availableScopes: [...V1_SCOPES],
-      rows: clientStore.list().map((c) => ({
-        id: String(c.id ?? ''),
-        name: String(c.name ?? ''),
-        extId: c.extId ? String(c.extId) : '',
-        scopes: Array.isArray(c.scopes) ? [...c.scopes] : [],
-        enabled: c.enabled !== false,
-        createdAt: Number(c.createdAt) || 0,
-        kind: c.extId ? 'ext' : 'panel',
-      })),
+      rows: hit.slice(off, off + lim),
+      total: hit.length,
+      offset: off,
+      limit: lim,
+      hasMore: off + lim < hit.length,
     };
   }
 

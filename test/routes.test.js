@@ -921,7 +921,7 @@ test('路由：/quick memory.remove 只碰到失效行时说「已作废」而�
   const { call, off } = await bootHost({}, STALE_SEED);
   const r = await call('/quick', {
     method: 'POST',
-    body: { op: 'memory.remove', arg: '表情包', chatId: 'g1' },
+    body: { viaExt: '@panel', op: 'memory.remove', arg: '表情包', chatId: 'g1' },
   });
   assert.equal(r.status, 200);
   assert.equal(r.json.removed, 0, '失效行不该被抹');
@@ -954,7 +954,7 @@ function seedExt(dir, id, withSource = true) {
   if (withSource) writeFileSync(join(d, '.source.json'), JSON.stringify({ repo: 'market', tag: 'v1' }), 'utf8');
 }
 
-const extOp = (call, op, arg = {}) => call('/quick', { method: 'POST', body: { op, arg, chatId: '' } });
+const extOp = (call, op, arg = {}) => call('/quick', { method: 'POST', body: { viaExt: '@panel', op, arg, chatId: '' } });
 
 test('G5-16 /quick 扩展 op 全接线：读清单 / 六档 / 诊断 / 状态都真注册了', async () => {
   const { call, off, dir } = await bootHost({}, {});
@@ -1016,6 +1016,15 @@ test('G5-18 /quick 客户端：发放 / 列表不回 hash / 吊销 / 坏 scope 4
     assert.equal(one.hash, undefined);
     assert.equal(one.token, undefined);
     assert.ok(listed.availableScopes.includes('agent:write'));
+    /**
+     * 分页参数要**真的从 /quick 的 arg 传到聚合层**：只测 `panel.clients()`
+     * 的话，路由漏传参数照样绿，而面板看到的是「永远第一页」。
+     */
+    const paged = (await extOp(call, 'extensions.clients.list', { limit: 1, offset: 0 })).json;
+    assert.equal(paged.limit, 1);
+    assert.equal(paged.rows.length, 1);
+    assert.ok(paged.total >= 1);
+    assert.equal(typeof paged.hasMore, 'boolean');
     const bad = await extOp(call, 'extensions.clients.create', { scopes: ['nope'] });
     assert.equal(bad.status, 400);
     const revoked = await extOp(call, 'extensions.clients.revoke', { id: made.json.id });
@@ -1122,7 +1131,7 @@ test('路由：更新说明取的是当前版本那一段', async () => {
 
 const modelOp = (call, op, arg = {}) => call('/quick', {
   method: 'POST',
-  body: { op, arg, chatId: '' },
+  body: { viaExt: '@panel', op, arg, chatId: '' },
 });
 
 test('路由：model.set 的四个入口各改各的，互不串台', async () => {
@@ -1932,19 +1941,19 @@ test('总开关：关着时七个维护端点也 409，只读的 GET 照常', as
 test('总开关 / 试运行：默认值正确、能从 features.patch 改、改完立刻生效', async () => {
   const { call, off } = await bootHost();
   try {
-    const g = await call('/quick', { method: 'POST', body: { op: 'features.get', arg: {} } });
+    const g = await call('/quick', { method: 'POST', body: { viaExt: '@panel', op: 'features.get', arg: {} } });
     assert.equal(g.json.ok, true);
     assert.equal(g.json.on.botEnabled, true, '总开关缺省就是开（老配置没有这个键）');
     assert.equal(g.json.on.dryRun, false, '试运行默认必须关');
     assert.ok(g.json.groups.some((x) => x.id === 'run'), '「运行」组要下发（页头与能力页共用）');
 
-    const p = await call('/quick', { method: 'POST', body: { op: 'features.patch', arg: { id: 'dryRun', on: true } } });
+    const p = await call('/quick', { method: 'POST', body: { viaExt: '@panel', op: 'features.patch', arg: { id: 'dryRun', on: true } } });
     assert.equal(p.json.ok, true, '试运行要能打开');
-    const g2 = await call('/quick', { method: 'POST', body: { op: 'features.get', arg: {} } });
+    const g2 = await call('/quick', { method: 'POST', body: { viaExt: '@panel', op: 'features.get', arg: {} } });
     assert.equal(g2.json.on.dryRun, true);
 
     /** 关掉总开关后，同一个手动入口立刻变 409——判据是热读的，不用重启 */
-    const off1 = await call('/quick', { method: 'POST', body: { op: 'features.patch', arg: { id: 'botEnabled', on: false } } });
+    const off1 = await call('/quick', { method: 'POST', body: { viaExt: '@panel', op: 'features.patch', arg: { id: 'botEnabled', on: false } } });
     assert.equal(off1.json.ok, true);
     const fired = await call('/speakup/fire', { method: 'POST', body: {} });
     assert.equal(fired.status, 409, '刚关掉就该生效');
@@ -1957,7 +1966,7 @@ test('总开关 / 试运行：默认值正确、能从 features.patch 改、改�
 test('features.patch：没有这个开关就 400，不许静默通过', async () => {
   const { call, off } = await bootHost();
   try {
-    const r = await call('/quick', { method: 'POST', body: { op: 'features.patch', arg: { id: 'nope', on: true } } });
+    const r = await call('/quick', { method: 'POST', body: { viaExt: '@panel', op: 'features.patch', arg: { id: 'nope', on: true } } });
     assert.equal(r.status, 400);
     assert.match(r.json.message, /没有这个开关/);
   } finally {
@@ -1971,40 +1980,72 @@ test('features.patch：没有这个开关就 400，不许静默通过', async ()
  * 为什么只做源码级检查：六个定时器最短 60 秒、最长 10 分钟，跑真的一轮要
  * 几分钟；而这里要防的是**有人以后加定时行为时忘了挂判据**——
  * 那种回归在行为测试里根本看不见（原来的定时器也不会跑）。
- * 逐个对名字定位到那一行，断言同一个包装里调了 `paused()`。
+ * 逐个对**登记时给的标签**定位（`timers.every/after` 的第三个参数），
+ * 断言同一个调用里调了 `paused()`。标签比变量名活得久：变量名在
+ * 「改成 timers 登记」时全没了，标签是给日志看的，改名反而会先被注意到。
  */
-test('全停：八个定时器 + 两个启动补跑都挂了 paused() 判据', async () => {
+test('全停：八个长期定时器 + 自驱心跳 + 投递回查都挂了 paused() 判据', async () => {
   const { readFileSync } = await import('node:fs');
   const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   const lines = host.split('\n');
   /**
-   * 每个 key 的判据可能隔几行（有的中间夹着 `try` 或注释），窗口按 key 给，
+   * 每个 key 的判据可能隔几行（有的中间夹着注释），窗口按 key 给，
    * 不搞一刀切：窗口开太大反而容易把**别的**定时器里的 `paused()` 认成自己的。
+   * 标签带着结尾的 `')`，免得 `'频道发帖'` 把 `'频道发帖补跑'` 也认了。
    */
   const need = [
-    ['const speakTimer = setInterval(', 2],
-    ['const wakeTimer = setInterval(', 2],
-    ['const proactiveTimer = setInterval(', 4],
-    ['const groupTimer = setInterval(', 3],
-    ['const postTimer = setInterval(', 2],
-    ['const consolidateTimer = setInterval(', 2],
-    ['const postBoot = setTimeout(', 2],
-    ['const consolidateBoot = setTimeout(', 2],
-    /**
-     * 这两个是 2026-11-19 自检补的：前者是 `autotelic` 自驱心跳（唯一
-     * 「她自己决定要做事」的模块，自带 `enabled` 开关，最容易以为已经管住），
-     * 后者是投递回查（只问「送到没」，不发新消息，所以最初漏了）。
-     * 两个判据前面都写了多行注释，窗口得放宽。
-     */
-    ['const t = setInterval(() => {', 14],
-    ['const deliveryTick = () => {', 14],
+    ["'主动搭话检查')", 6],
+    ["'互动召回检查')", 6],
+    ["'队列消费')", 6],
+    ["'群主动检查')", 6],
+    ["'频道发帖')", 6],
+    ["'记忆巩固检查')", 6],
+    ["'记忆巩固补跑')", 6],
+    ["'频道发帖补跑')", 6],
   ];
   for (const [key, span] of need) {
     const i = lines.findIndex((l) => l.includes(key));
-    assert.ok(i >= 0, `没找到 ${key}，正则/变量名可能改了`);
+    assert.ok(i >= 0, `没找到 ${key}，标签可能改了`);
+    /** 标签在调用末尾，判据在它前面：往回看 */
+    const block = lines.slice(Math.max(0, i - span + 1), i + 1).join('\n');
+    assert.ok(block.includes('paused()'), `${key} 少了 paused() 判据——总开关关着或断线时它还会跑`);
+  }
+
+  /**
+   * 这两个是 2026-11-19 自检补的：前者是 `autotelic` 自驱心跳（唯一
+   * 「她自己决定要做事」的模块，自带 `enabled` 开关，最容易以为已经管住），
+   * 后者是投递回查（只问「送到没」，不发新消息，所以最初漏了）。
+   *
+   * 它们不是 `timers` 登记的那批（一个在 `ctx.effect` 里、一个是被
+   * `timers.after/every` 直接引用的函数），判据在函数体**内部**，
+   * 所以窗口要往后看。
+   */
+  const needForward = [
+    ['const t = setInterval(() => {', 14],
+    ['const deliveryTick = () => {', 14],
+  ];
+  for (const [key, span] of needForward) {
+    const i = lines.findIndex((l) => l.includes(key));
+    assert.ok(i >= 0, `没找到 ${key}，变量名可能改了`);
     const block = lines.slice(i, i + span).join('\n');
     assert.ok(block.includes('paused()'), `${key} 少了 paused() 判据——总开关关着或断线时它还会跑`);
   }
+
+  /**
+   * 备份是**故意**只看总开关的。
+   *
+   * `paused()` 里含断线冷却（120 秒），而持续断线会把它反复刷新；备份是本地
+   * 操作、云推失败本来也只降级成一条 warn，用 `paused()` 等于「网一直不好就
+   * 整天不备份」。这条防的是有人「统一一下判据」把它改成 `paused()`。
+   */
+  const backupIdx = lines.findIndex((l) => l.includes('const backupTick = '));
+  assert.ok(backupIdx >= 0, '没找到 backupTick 定义');
+  const backupHead = lines.slice(backupIdx, backupIdx + 10).join('\n');
+  assert.match(backupHead, /masterOff\(\)/, '备份的判据要是 masterOff()');
+  assert.ok(
+    !/if \(paused\(\)\) return;/.test(backupHead),
+    '备份别改成 paused()：断线冷却会让整天备份被跳过',
+  );
 
   /**
    * `paused()` 必须是「总开关 **或** 断线冷却」。少了后半个，定时器在断线时

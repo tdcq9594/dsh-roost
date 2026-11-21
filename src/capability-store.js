@@ -12,6 +12,8 @@
 import fs from 'node:fs';
 import { join } from 'node:path';
 
+import { writeFileAtomic } from './atomic.js';
+
 import { normalizeStore, defaultStore, diffSeen, touchSeen } from './capabilities.js';
 
 export function createCapabilityStore({ dir, log = () => {} }) {
@@ -66,11 +68,8 @@ export function createCapabilityStore({ dir, log = () => {} }) {
   }
 
   function write(store) {
-    const tmp = `${file}.tmp`;
     const body = JSON.stringify(normalizeStore(store), null, 2) + '\n';
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(tmp, body, 'utf8');
-    fs.renameSync(tmp, file);
+    writeFileAtomic(file, body);
     cache = { raw: JSON.parse(body), mtime: statMtime() };
     return normalizeStore(cache.raw);
   }
