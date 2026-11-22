@@ -239,3 +239,20 @@ test('gallery_show：把标注建议带出来，让模型自己决定要不要�
   const r = await byName.gallery_show.execute({ seq: '3' });
   assert.deepEqual(r.suggest, { name: '熊猫', meaning: '在笑' });
 });
+
+test('gallery_edit 认 pinned="1"/"0"：固定是「配额满时不淘汰」，跟 enabled 分开', async () => {
+  const { byName, calls } = tools();
+  await byName.gallery_edit.execute({ seq: '3', pinned: '1' });
+  /** 字符串 "1" 要转成布尔 true —— 模型给的都是字符串 */
+  assert.equal(calls[0][2].pinned, true);
+
+  await byName.gallery_edit.execute({ seq: '3', pinned: '0' });
+  assert.equal(calls[1][2].pinned, false);
+
+  /**
+   * 两个字段一起给时不能互相覆盖：停用和固定是两个维度
+   * （停用是「别发这张」，固定是「别删这张」）。
+   */
+  await byName.gallery_edit.execute({ seq: '3', enabled: '0', pinned: '1' });
+  assert.deepEqual(calls[2][2], { enabled: false, pinned: true });
+});

@@ -248,8 +248,10 @@ export function buildGalleryToolDefs({
   const edit = {
     name: 'gallery_edit',
     description:
-      '改一张图的标注：名字、含义、关键词、适合的场合、要避开的场合、分类。'
-      + '整理图库时用——把「未标注」的补上，把放错分类的挪过去。只改你给的那几个字段，别的不动。',
+      '改一张图的标注：名字、含义、关键词、适合的场合、要避开的场合、分类，'
+      + '或者「暂时不用」（enabled）和「固定」（pinned）。'
+      + '整理图库时用——把「未标注」的补上，把放错分类的挪过去。只改你给的那几个字段，别的不动。'
+      + '固定 = 官方素材池配额满时不会被自动淘汰；常用的图值得固定。',
     parameters: {
       seq: { type: 'string', required: true, description: '要改的序号，比如 3 或 #3' },
       name: { type: 'string', description: '短名字，10 字以内' },
@@ -259,6 +261,11 @@ export function buildGalleryToolDefs({
       avoid: { type: 'string', description: '什么场合别发' },
       cat: { type: 'string', description: '分类名。给空串表示挪回未分类' },
       enabled: { type: 'string', description: '填 "0" 表示暂时不用这张（不删）' },
+      pinned: {
+        type: 'string',
+        description: '填 "1" 固定这张（官方素材池配额满时不会被自动淘汰）；"0" 取消固定。'
+          + '常用的图（招牌表情、口头禅）值得固定，被淘汰了下次发要重传',
+      },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -273,6 +280,7 @@ export function buildGalleryToolDefs({
         if (args[k] !== undefined) patch[k] = args[k];
       }
       if (args.enabled !== undefined) patch.enabled = String(args.enabled) !== '0';
+      if (args.pinned !== undefined) patch.pinned = String(args.pinned) === '1';
       if (!Object.keys(patch).length) return { ok: false, message: '没说要改什么' };
       try {
         const r = editOf(seq, patch);

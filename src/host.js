@@ -3829,6 +3829,83 @@ export function apply(ctx) {
     return true;
   });
 
+  /**
+   * ## 官方素材池配额守卫：上传前先腾地方
+   *
+   * 那个池子是**机器人级共享的 100 张**：别的插件、上一次进程、其它实例都往
+   * 同一个池子里放。满了之后每一次上传都失败，而框架报的只有「上传失败」——
+   * 用户看不出是什么占了配额，也不知道该删谁。
+   *
+   * 所以上传前先看一眼：
+   *
+   *   · 够用 → 直接放行（配额缓存 30 秒，不额外打网络）；
+   *   · 不够 → 按「**最久没动过的先走**」淘汰自己的副本，**钉住的一律不碰**。
+   *     只删自己记账过的 `imageId`：别人插件传的东西可能是它们正在引用的。
+   *
+   * 「最久没动过」和「最快过期」是同一件事：从没被发过的图 `lastUsed` 就是
+   * 上传时间，官方按 `expires_at` 回收时也是它们先走。
+   *
+   * 查不到配额（老框架 / 令牌没 manage）时**放行**：这条守卫是「尽量别撞墙」，
+   * 不是「拦住发图」。真撞上了还有框架自己的报错。
+   */
+  const MEDIA_QUOTA_HEADROOM = 2;
+  /** `remaining` 缓存：每张图都 list 一次是白花的往返；-1 = 还没读过 */
+  let mediaQuota = { at: 0, remaining: -1 };
+
+  const ensureMediaQuota = async (need = 1) => {
+    const ch = channels.active();
+    if (!ch || typeof ch.listImages !== 'function' || typeof ch.deleteImage !== 'function') {
+      return { ok: true, skipped: true };
+    }
+    let remaining = mediaQuota.remaining;
+    if (remaining < 0 || Date.now() - mediaQuota.at > 30_000) {
+      const r = await ch.listImages({}).catch(() => null);
+      if (!r || r.ok === false) return { ok: true, skipped: true };
+      remaining = Number(r.remaining) || 0;
+      mediaQuota = { at: Date.now(), remaining };
+      /**
+       * 顺带对账：线上已经没了的（被人删了、按 `expires_at` 回收了），把映射
+       * 清掉。不清的话「线上有就直接用」这条会拿着失效引用去发——群里没图，
+       * 日志只有一句「发送失败」。
+       *
+       * **只在没有下一页时做**：清单分页时「这一页没有」不等于「已经没了」，
+       * 误清会让下次白白重传。
+       */
+      if (Array.isArray(r.images) && !r.nextCursor) {
+        const alive = new Set(r.images.map((x) => x && x.imageId).filter(Boolean));
+        for (const row of gallery.onlineRows()) {
+          if (!row.imageId || alive.has(row.imageId)) continue;
+          gallery.dropRemote(row.imageId);
+          log.warn(`#${row.seq} 的线上副本已经没了（被删或过期），已清掉映射`);
+        }
+      }
+    }
+    if (remaining >= need + MEDIA_QUOTA_HEADROOM) return { ok: true, remaining };
+
+    /** 候选：自己记账过的线上副本、没被钉住，按「最久没动过」升序 */
+    const victims = gallery.onlineRows().filter((x) => !x.pinned);
+    let freed = 0;
+    for (const v of victims) {
+      if (remaining + freed >= need + MEDIA_QUOTA_HEADROOM) break;
+      const d = await ch.deleteImage(v.imageId).catch(() => ({ ok: false }));
+      /** 删不掉（没 manage 权限 / 网络）就试下一张，不中断 */
+      if (!d.ok) continue;
+      gallery.dropRemote(v.imageId);
+      freed += 1;
+      log.warn(`素材池配额不足：淘汰了最久没用的 #${v.seq}（腾出 1 格）`);
+    }
+    mediaQuota = { at: Date.now(), remaining: remaining + freed };
+    if (remaining + freed < need) {
+      return {
+        ok: false,
+        message: `官方素材池满了（剩 ${remaining} 格），没有能自动淘汰的图`
+          + '（都钉住了，或者令牌缺 manage 权限删不掉）——'
+          + '到「表情包 → 官方素材池」手动删几张，或者取消几张图的「固定」',
+      };
+    }
+    return { ok: true, remaining: remaining + freed, freed };
+  };
+
   const outActions = createActionRunner({
     channel: () => channels.active(),
     tts,
@@ -3848,6 +3925,18 @@ export function apply(ctx) {
      * 一堆没发成功的尝试污染，模型会绕开那些其实能用的图。
      */
     onImageUsed: (seq) => gallery.markUsed(seq),
+    /**
+     * 线上副本（官方素材池）：同一张图传过一次，引用就能反复用。
+     *
+     * 图库不是「本地 + 临时车道」两层，而是「本地那份 + 线上那份」。上传后
+     * 默认留着，第二次发就不用重传；配额紧的用户可以在配置里把
+     * `gallery.keepUploads` 设成 `false`，退回「传完就删」。
+     */
+    resolveRemote: (seq) => gallery.remoteOf(seq),
+    markRemote: (seq, info) => gallery.markRemote(seq, info),
+    keepUploadsOf: () => cfg.gallery?.keepUploads !== false,
+    /** 上传前腾配额：满了就按「最久没动过」淘汰，钉住的不碰 */
+    ensureQuota: (need) => ensureMediaQuota(need),
     /**
      * 试运行。`<<say>>` 要先扣语音条额度再调 TTS，两步都在 `channel.sendVoice`
      * 之前——通道层拦不住，得让出站动作层自己跳过。
@@ -12601,6 +12690,22 @@ export function apply(ctx) {
           return send(res, 200, { ok: false, message: '当前通道不支持查官方素材池' });
         }
         const r = await ch.listImages({ cursor: String(u.searchParams.get('cursor') || '') });
+        /**
+         * 把池子里的素材对回图库序号。
+         *
+         * 官方清单里没有 sha256，只有 `image_id` / 文件名 / 上传时间——所以只能
+         * 靠我们自己上传时记下的映射反查。认得的是「图库的线上副本」（显示
+         * `#3`），认不得的是别的插件或本插件记账之前传的：删那种要格外小心，
+         * 前端会单独标出来。
+         */
+        if (r?.ok && Array.isArray(r.images)) {
+          const map = gallery.onlineIndex();
+          r.images = r.images.map((it) => {
+            const seq = Number(map[it.imageId]) || 0;
+            /** `pinned` 只对认得出的有意义：面板据此给「固定 / 取消固定」 */
+            return { ...it, seq, pinned: seq ? gallery.isPinned(seq) : false };
+          });
+        }
         return send(res, 200, r);
       }),
 
@@ -12621,6 +12726,12 @@ export function apply(ctx) {
           return send(res, 400, { ok: false, message: '当前通道不支持删官方素材' });
         }
         const r = await ch.deleteImage(body?.imageId);
+        /**
+         * 删掉的是**线上副本**，本地那张还在图库里（还在清单里、还能重新上传）。
+         * 映射必须一起清：不清的话下一次 `<<image: #3>>` 会拿着失效引用去发，
+         * 平台报错、群里没图，日志只说「发送失败」。
+         */
+        if (r.ok) gallery.dropRemote(body?.imageId);
         return send(res, r.ok ? 200 : 400, r);
       }),
 

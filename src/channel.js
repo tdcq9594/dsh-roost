@@ -439,10 +439,17 @@ export function createRoostHostChannel({
     /**
      * 上传 Markdown 素材图，返回 `qqbot-media://` 引用。
      *
-     * `retain:false` 是**必须的**：占位符是每轮现传现用，若登记成「保留素材」
-     * 会一直占官方 100 张配额，发几十张图就满了（旧 ai-chat 是发完立刻删）。
+     * `retain` 由调用方决定，**默认 `true`**（和框架 `media.markdownImage` 的
+     * 语义一致：可复用、默认保留）：
+     *
+     *   · `true`：这份留在官方素材池里，同一张图下次发直接复用引用，不重传；
+     *   · `false`：一次性素材（`own` 类），官方按有效期回收，适合配额吃紧、
+     *     或调用方自己发完就删的场合。
+     *
+     * 早先这里写死了 `false` 并在出站侧「用完即删」，等于把素材池当临时车道——
+     * 同一张图每发一次白占一格配额、白传一遍，100 张很快见底。
      */
-    async uploadMarkdownImage({ scene = 'c2c', target, path: p, retain = false } = {}) {
+    async uploadMarkdownImage({ scene = 'c2c', target, path: p, retain = true } = {}) {
       if (!p) return { url: '' };
       return await host.rpc('media.markdownImage', {
         scene: scene === 'group' ? 'group' : 'c2c',

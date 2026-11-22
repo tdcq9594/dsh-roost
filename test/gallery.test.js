@@ -676,3 +676,116 @@ test('存图时分类名同样净化：不能把新图写到库外', () => {
     assert.equal(row.cat, 'outside', '分隔符与 `..` 被剥掉，剩一个正常分类名');
   } finally { e.cleanup(); }
 });
+
+/* ---------------- 线上副本（官方素材池那份）+ 固定 ---------------- */
+
+test('线上副本：记下来、读得回、清单里看得见 online', () => {
+  const e = env();
+  try {
+    e.setItems([makeImage(e.root, 'a.png', 'AAA')]);
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+
+    assert.equal(e.gallery.remoteOf(seq), null, '没传过就是 null');
+    assert.equal(e.gallery.rows({})[0].online, false);
+    assert.equal(e.gallery.stats().online, 0);
+
+    e.gallery.markRemote(seq, { imageId: 'img-1', url: 'qqbot-media://abc', ttl: 3600, at: 5000 });
+    const r = e.gallery.remoteOf(seq);
+    assert.equal(r.imageId, 'img-1');
+    assert.equal(r.url, 'qqbot-media://abc');
+    /** ttl=3600 秒 → 过期时间 = 5000 + 3600000；调用方拿它判断「还敢不敢复用」 */
+    assert.equal(r.expireAt, 5000 + 3_600_000);
+
+    assert.equal(e.gallery.rows({})[0].online, true, '工具返回值里要能看见');
+    assert.equal(e.gallery.stats().online, 1);
+  } finally { e.cleanup(); }
+});
+
+test('线上副本没了（被删/过期）：映射清掉，下次发图才会重传', () => {
+  const e = env();
+  try {
+    e.setItems([makeImage(e.root, 'a.png', 'AAA')]);
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+    e.gallery.markRemote(seq, { imageId: 'img-1', url: 'qqbot-media://abc' });
+
+    assert.equal(e.gallery.dropRemote('img-1'), true);
+    /**
+     * 不清的话下次 `<<image: #3>>` 会拿失效引用去发：群里没图，日志只有
+     * 「发送失败」，用户和排查的人都看不出是素材被回收了。
+     */
+    assert.equal(e.gallery.remoteOf(seq), null);
+    assert.equal(e.gallery.rows({})[0].online, false);
+    assert.deepEqual(e.gallery.onlineIndex(), {});
+  } finally { e.cleanup(); }
+});
+
+test('配额清理顺序：最久没动过的先走，最近发过的排最后', () => {
+  const e = env();
+  try {
+    e.setItems([
+      makeImage(e.root, 'a.png', 'A'),
+      makeImage(e.root, 'b.png', 'B'),
+      makeImage(e.root, 'c.png', 'C'),
+    ]);
+    e.gallery.sync({});
+    const [s1, s2, s3] = e.gallery.rows({}).map((r) => r.seq);
+
+    e.gallery.markRemote(s1, { imageId: 'i1', url: 'qqbot-media://1', at: 1000 });
+    e.gallery.markRemote(s2, { imageId: 'i2', url: 'qqbot-media://2', at: 2000 });
+    e.gallery.markRemote(s3, { imageId: 'i3', url: 'qqbot-media://3', at: 3000 });
+    /** `now()` 固定在一个很大的值：发过一次的图 lastUsed 就远大于「只上传没发过」 */
+    e.gallery.markUsed(s3);
+
+    const order = e.gallery.onlineRows().map((x) => x.imageId);
+    /**
+     * `s3` 传得最晚、而且最近刚发过 —— 它必须排在最后。
+     * 只用上传时间排序的话它会排中间，等于「常用的图反而先被淘汰」。
+     */
+    assert.deepEqual(order, ['i1', 'i2', 'i3']);
+  } finally { e.cleanup(); }
+});
+
+test('固定：改了能读回、能进 stats、配额清理候选里排不掉它', () => {
+  const e = env();
+  try {
+    e.setItems([makeImage(e.root, 'a.png', 'A'), makeImage(e.root, 'b.png', 'B')]);
+    e.gallery.sync({});
+    const [s1, s2] = e.gallery.rows({}).map((r) => r.seq);
+    e.gallery.markRemote(s1, { imageId: 'i1', url: 'qqbot-media://1', at: 1000 });
+    e.gallery.markRemote(s2, { imageId: 'i2', url: 'qqbot-media://2', at: 2000 });
+
+    assert.equal(e.gallery.isPinned(s2), false, '默认不固定');
+    assert.equal(e.gallery.edit(s2, { pinned: true }).ok, true);
+    assert.equal(e.gallery.isPinned(s2), true);
+    assert.equal(e.gallery.rows({}).find((r) => r.seq === s2).pinned, true);
+    assert.equal(e.gallery.stats().pinned, 1);
+
+    /** 宿主侧就是这么筛候选的：钉住的直接不参与淘汰 */
+    const victims = e.gallery.onlineRows().filter((x) => !x.pinned).map((x) => x.imageId);
+    assert.deepEqual(victims, ['i1']);
+
+    /** 取消固定之后要能回来，否则「钉错了」就没救 */
+    e.gallery.edit(s2, { pinned: false });
+    assert.deepEqual(e.gallery.onlineRows().filter((x) => !x.pinned).map((x) => x.imageId), ['i1', 'i2']);
+  } finally { e.cleanup(); }
+});
+
+test('固定和停用是两个维度：停用 ≠ 固定，互不覆盖', () => {
+  const e = env();
+  try {
+    e.setItems([makeImage(e.root, 'a.png', 'A')]);
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+
+    e.gallery.edit(seq, { enabled: false, pinned: true });
+    const row = e.gallery.rows({})[0];
+    assert.equal(row.enabled, false, '不发');
+    assert.equal(row.pinned, true, '但也不删');
+
+    /** 只改 enabled 不能顺手把 pinned 清掉 */
+    e.gallery.edit(seq, { enabled: true });
+    assert.equal(e.gallery.rows({})[0].pinned, true);
+  } finally { e.cleanup(); }
+});

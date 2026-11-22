@@ -171,3 +171,96 @@ test('就地插图：正文发成功才记使用', async () => {
   await run({ text: '图 <<image: #3>>', target: 'g1', scene: 'group' });
   assert.deepEqual(seen, [3]);
 });
+
+/* ---------------- 线上副本：有就直接用，别重传 ---------------- */
+
+test('线上已经有副本：直接用引用，**一次上传都不该发生**', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({
+    channel: () => ch,
+    resolveImage: resolve,
+    resolveRemote: (seq) => (seq === 3 ? { imageId: 'i3', url: 'qqbot-media://ready', expireAt: 0 } : null),
+  });
+  await run({ text: '图 <<image: #3>>', target: 'g1', scene: 'group' });
+  assert.equal(ch.calls.filter((c) => c[0] === 'upload').length, 0, '线上有就别再传一遍');
+  const sent = ch.calls.find((c) => c[0] === 'send');
+  assert.ok(JSON.stringify(sent).includes('qqbot-media://ready'), '正文里要用那份现成引用');
+});
+
+test('线上副本快过期：宁可重传，也不拿一个马上失效的引用去发', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({
+    channel: () => ch,
+    resolveImage: resolve,
+    /** 还剩 1 秒过期：发出去的时候多半已经没了 */
+    resolveRemote: () => ({ imageId: 'old', url: 'qqbot-media://old', expireAt: Date.now() + 1000 }),
+  });
+  await run({ text: '图 <<image: #3>>', target: 'g1', scene: 'group' });
+  assert.equal(ch.calls.filter((c) => c[0] === 'upload').length, 1, '该重传');
+  const sent = ch.calls.find((c) => c[0] === 'send');
+  assert.ok(!JSON.stringify(sent).includes('qqbot-media://old'), '失效的那份不能用');
+});
+
+test('默认留着线上副本：上传完不删，并记下映射给下次复用', async () => {
+  const ch = fakeChannel();
+  const deleted = [];
+  const marked = [];
+  ch.deleteImage = async (id) => { deleted.push(id); return { ok: true }; };
+  const run = createActionRunner({
+    channel: () => ch,
+    resolveImage: resolve,
+    markRemote: (seq, info) => marked.push([seq, info.imageId]),
+  });
+  await run({ text: '图 <<image: #3>>', target: 'g1', scene: 'group' });
+  assert.deepEqual(marked, [[3, 'img1']], '要记下来，下次才复用');
+  /**
+   * 以前这里是硬编码 `retain:false` + 发完即删，等于把「图库的线上层」当成
+   * 临时车道：同一张图每发一次白占一格配额、白传一遍。
+   */
+  assert.deepEqual(deleted, [], '留着复用的那份绝不能被删');
+});
+
+test('keepUploadsOf=false 才回到「用完即删」：传完删、也不记映射', async () => {
+  const ch = fakeChannel();
+  const deleted = [];
+  const marked = [];
+  ch.deleteImage = async (id) => { deleted.push(id); return { ok: true }; };
+  const run = createActionRunner({
+    channel: () => ch,
+    resolveImage: resolve,
+    keepUploadsOf: () => false,
+    markRemote: (seq, info) => marked.push([seq, info.imageId]),
+  });
+  await run({ text: '图 <<image: #3>>', target: 'g1', scene: 'group' });
+  assert.deepEqual(deleted, ['img1'], '配额紧的用户选这个模式');
+  /**
+   * 不记映射：这份马上删，记下来只会让下次拿着失效 imageId 去复用。
+   */
+  assert.deepEqual(marked, []);
+});
+
+test('配额守卫说没地方：不上传，占位符摘掉、不把本地路径漏进正文', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({
+    channel: () => ch,
+    resolveImage: resolve,
+    ensureQuota: async () => ({ ok: false, message: '素材池满了' }),
+  });
+  await run({ text: '看图 <<image: #3>>', target: 'g1', scene: 'group' });
+  assert.equal(ch.calls.filter((c) => c[0] === 'upload').length, 0, '注定失败就别传');
+  const sent = ch.calls.find((c) => c[0] === 'send');
+  const body = JSON.stringify(sent || []);
+  assert.doesNotMatch(body, /#3|熊猫\.png|\u0001IMG/, '占位符和路径都不许漏出去');
+});
+
+test('配额守卫抛错也不能把这一轮带崩', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({
+    channel: () => ch,
+    resolveImage: resolve,
+    ensureQuota: async () => { throw new Error('list 挂了'); },
+  });
+  const r = await run({ text: '看图 <<image: #3>>', target: 'g1', scene: 'group' });
+  assert.equal(r.ok, true, '正文照发，只是这张图没插进去');
+  assert.equal(ch.calls.filter((c) => c[0] === 'upload').length, 1, '守卫坏了就按老路走');
+});
