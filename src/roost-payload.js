@@ -279,6 +279,18 @@ export function createPayloadBuilder({
   rpc, log = () => {}, fetchImpl = fetch, vision = true,
   maxImages = DEFAULT_MAX_IMAGES, markdown = true, canSee = null,
   retryDelayMs = null,
+  /**
+   * 图**落盘成功之后**的回调（偷表情用）。
+   *
+   * 挂在这里而不是让宿主事后再扫 `images/` 目录：这里刚好知道「这张图是
+   * 哪条消息、哪个会话来的」，而扫目录只能拿到文件名。而且调用时机天然是
+   * 「消息刚进来」，不需要另起定时器。
+   *
+   * 宿主那边负责所有判断（开关、场景、每小时上限、尺寸），这里只管把
+   * 路径和上下文递过去。**回调抛错不能影响这一轮对话**——偷不到一张图
+   * 不算故障，把用户的正常聊天搞挂才是。
+   */
+  onImageSaved = null,
 } = {}) {
   /** 通道到底走不走 Markdown：@ 标签、图文同条、按钮都跟着它变 */
   const wantMarkdown = () => {
@@ -454,6 +466,22 @@ export function createPayloadBuilder({
             path = '';
           }
           out.push({ data: buf.toString('base64'), mediaType: mime, name, path, index: i });
+          /**
+           * 落盘成功 → 告诉宿主「有这么一张图」。
+           *
+           * 放在 `out.push` 之后：先保证这一轮模型能正常看到图，再看要不要偷。
+           * `path` 为空（落盘失败）就不叫了——那种图没有文件可复制。
+           */
+          if (path && typeof onImageSaved === 'function') {
+            try {
+              const maybe = onImageSaved({ path, name, mime, evt, kind: String(evt?.chat?.kind || '') });
+              if (maybe && typeof maybe.then === 'function') {
+                maybe.catch((e) => log(`收图回调失败（不影响这一轮）：${e?.message ?? e}`));
+              }
+            } catch (e) {
+              log(`收图回调抛错（不影响这一轮）：${e?.message ?? e}`);
+            }
+          }
           saved = true;
         } catch (e) {
           /** fetch 抛错 / arrayBuffer 中途断流，都算可恢复的网络问题 */

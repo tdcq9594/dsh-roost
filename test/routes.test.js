@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 
 const noop = () => () => {};
 
@@ -91,6 +92,11 @@ async function bootHost(cfgPatch = {}, seed = {}) {
     },
     on: () => noop,
   };
+  /**
+   * 想测「宿主给了 llm / 附件服务」这类分支时，从外面补进假 ctx。
+   * 覆盖而不是先建后改：`get` 这类方法在 host 里到处用，只有测试知道要不要给。
+   */
+  Object.assign(fakeCtx, seed.ctx || {});
 
   // 每次 boot 都重新 import，让 config 缓存跟着新的 DSH_ROOST_DATA 走
   const url = new URL('../src/host.js', import.meta.url);
@@ -101,13 +107,36 @@ async function bootHost(cfgPatch = {}, seed = {}) {
   const call = async (path, { method = 'GET', body = null, headers = {} } = {}) => {
     const handler = routes.get('/roost/api' + path.split('?')[0]);
     if (!handler) throw new Error(`路由没注册：${path}`);
-    let out = '';
-    const res = {
-      statusCode: 0,
-      setHeader() {},
-      end(s) {
-        out = s;
+    /**
+     * 假响应要能装**二进制**：缩略图、表情图那几条路由走的是
+     * `createReadStream(file).pipe(res)`，`pipe` 要的是真正的 Writable
+     * （`on` / `once` / `emit` 都得有）。原来只有一个 `end(s)` 的对象，
+     * 测这些路由会得到 `res.writeHead is not a function` 或 `dest.on is not a function`。
+     *
+     * 用 `Writable` 而不是手搓：管道会把流接在上面，手搓的壳子迟早少一个方法。
+     */
+    const chunks = [];
+    const resHeaders = {};
+    const res = new Writable({
+      write(chunk, enc, cb) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, enc));
+        cb();
       },
+    });
+    /** `pipe` 是异步的：handler 返回时文件可能还没读完，等 finish 再取值 */
+    const finished = new Promise((resolve) => {
+      res.once('finish', resolve);
+      res.once('close', resolve);
+    });
+    res.statusCode = 0;
+    res.headers = resHeaders;
+    res.setHeader = (k, v) => { resHeaders[String(k).toLowerCase()] = v; };
+    res.writeHead = (code, headers) => {
+      res.statusCode = Number(code) || res.statusCode;
+      for (const [k, v] of Object.entries(headers || {})) {
+        resHeaders[String(k).toLowerCase()] = v;
+      }
+      return res;
     };
     const req = {
       url: path,
@@ -123,7 +152,32 @@ async function bootHost(cfgPatch = {}, seed = {}) {
       },
     };
     await handler(req, res);
-    return { status: res.statusCode, json: out ? JSON.parse(out) : null };
+    /**
+     * 等响应真的写完。
+     *
+     * `send()` 是同步 `end()`，管道那条是异步读文件——不 wait 的话 `/gallery/thumb`
+     * 拿到的永远是空 body。给个上限：真有路由忘了 end，测试失败而不是永久挂住。
+     */
+    let fallback = null;
+    await Promise.race([
+      finished,
+      new Promise((r) => { fallback = setTimeout(r, 2000); }),
+    ]);
+    if (fallback) clearTimeout(fallback);
+    const raw = Buffer.concat(chunks);
+    /**
+     * JSON 与二进制的分岔：`send()` 走 `end(JSON 字符串)`，图片路由走
+     * `writeHead(200, {'Content-Type': 'image/*'}) + 管道`。老测试只看 `json`，
+     * 图片路由再给一份 `body`（Buffer）和 `headers`。
+     */
+    const isJson = String(resHeaders['content-type'] || '').includes('json')
+      || (!resHeaders['content-type'] && raw.length > 0);
+    return {
+      status: res.statusCode,
+      json: isJson && raw.length ? JSON.parse(raw.toString('utf8')) : null,
+      body: raw,
+      headers: resHeaders,
+    };
   };
 
   return { dir, routes, call, off, logs };
@@ -374,9 +428,25 @@ test('对齐：后端每条路由在前端都有入口', async () => {
    * 排障时要能一眼看出直连通道声明了什么能力、降级退成什么，
    * 而且它有自己的一条断言（`/channels 的能力表如实声明`）。
    *
+   * `/stickers/manage` 与 `/stickers/delete` 是**按文件**那套老接口。
+   * 2026-11-22 面板合成一页之后，前端统一走序号口径（`/gallery` 列、
+   * `/gallery/purge` 删），同一批图不再有两个删除入口。这两条没有跟着删，
+   * 因为它们不是「面板漏接」而是**脚本接口**：按相对路径批量清图、或者
+   * 排障时用 curl 直接看某个分类里有什么，不需要经过图库索引；
+   * 两者各有独立的路由测试（分页统计 / confirm 门禁 / 「未分类」子目录），
+   * 删路由就得删测试，那是拿覆盖换整齐，不划算。
+   *
    * 往这张表里加东西要有同样具体的理由，不许拿它当「先加个接口回头再接」的挡箭牌。
    */
-  const NO_PANEL_ENTRY = ['/channels'];
+  /**
+   * @type {string[]}
+   *
+   * `/stickers/file`（2026-11-22 加入）：按**相对路径**取图的后端实现，对外是
+   * `GET /v1/stickers/file`（`api-v1.js` 里登记着，扩展拿它取字节）。面板自己
+   * 改成按序号取（`/gallery/file?seq=N`）——因为快照会把根目录图的 `rel`
+   * 改写成 `未分类/xxx`，按 rel 取就是 404。接口本身不能删：删了会断扩展。
+   */
+  const NO_PANEL_ENTRY = ['/channels', '/stickers/manage', '/stickers/delete', '/stickers/file'];
 
   const routes = [...host.matchAll(/route\('(\/[a-z/-]+)'/g)].map((m) => m[1]);
   assert.ok(routes.length >= 30, `只解析到 ${routes.length} 条路由，正则可能失效了`);
@@ -2173,4 +2243,487 @@ test('总开关：扩展 /v1/agent.prompt 也拒绝，agent.list 不受影响', 
     /return agentV1\.handleHook\(a\)/,
     '同一 hook 还要放行 agent.list / agent.new / agent.close，不能整条拒掉',
   );
+});
+
+/* ---------------- 2026-11-22 图库与表情库合成一个入口 ---------------- */
+
+test('路由：/gallery 带分类清单，/gallery/edit 认 pinned（那个按钮以前是哑的）', async () => {
+  const { call, off } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(join(s, '开心'), { recursive: true });
+    writeFileSync(join(s, '开心', '猫.png'), 'x');
+    writeFileSync(join(s, '熊猫.png'), 'y');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const list = await call('/gallery?page=1&size=24');
+  assert.equal(list.status, 200);
+  assert.equal(list.json.total, 2);
+  /** 面板的分类下拉读它；以前这条路由不返回，下拉永远是空的 */
+  const names = (list.json.cats || []).map((c) => c.name).sort();
+  assert.deepEqual(names, ['开心', '未分类'].sort());
+
+  const seq = list.json.items[0].seq;
+  const pin = await call('/gallery/edit', { method: 'POST', body: { seq, pinned: true } });
+  assert.equal(pin.status, 200, JSON.stringify(pin.json));
+  assert.equal(pin.json.item.pinned, true);
+
+  const after = await call('/gallery?page=1&size=24');
+  assert.equal(after.json.items.find((x) => x.seq === seq).pinned, true);
+  off?.();
+});
+
+/**
+ * 2026-11-22：「让 AI 整理」点完只显示「跳过 108 张」、一张都没成。
+ *
+ * 三个真凶都在这里加了护栏，这条测最贵的那一个：**模型看不了图**。
+ * 以前每一张都会发出去、立刻失败，跑完用户只看到数字；现在起跑前一次预检，
+ * 直接 400 说清楚，一张调用都不烧。
+ */
+test('路由：/gallery/organize 起跑前查能不能看图，看不了直接 400', async () => {
+  const fakeLlm = {
+    listProviders: () => ['deepseek-account'],
+    listModels: async () => [{ id: 'deepseek-flash' }],
+    resolveModelInfo: async () => ({ inputModalities: ['text'] }),
+    stream: () => { throw new Error('看不了图就该一张都不发，这里不该被调用'); },
+  };
+  const { call, off } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, 'a.png'), 'x');
+    return {
+      stickers: { enabled: true, dir: s },
+      model: { default: { provider: 'deepseek-account', model: 'deepseek-flash' } },
+    };
+  }, { ctx: { get: (k) => (k === 'llm' ? fakeLlm : null) } });
+
+  const r = await call('/gallery/organize', { method: 'POST', body: {} });
+  assert.equal(r.status, 400, JSON.stringify(r.json));
+  assert.equal(r.json.code, 'no-vision');
+  assert.match(r.json.message, /看不了图/);
+  assert.match(r.json.message, /deepseek-flash/, '要说清是哪个模型，不然用户不知道该换谁');
+
+  /** 预检拦住时不该留下一个「在跑」的空任务，否则下次点会撞 409 */
+  const job = await call('/gallery/organize/job');
+  assert.equal(job.json.job, null);
+  off?.();
+});
+
+/**
+ * 「起名用的模型」（对齐 aurabot 的 `stickers.captionModel`）。
+ *
+ * 它解决的是「聊天模型便宜但看不了图，视觉模型贵但能看」这个矛盾：
+ * 用户不该为了给表情起名去把全局聊天模型换成一个贵的视觉模型。
+ * 配了它，就一路用它——预检、真调用、日志都是它。
+ */
+test('路由：配了 captionModel 就用它，聊天模型看不了图也照样整理', async () => {
+  const called = [];
+  const fakeLlm = {
+    listProviders: () => ['p'],
+    listModels: async () => [{ id: 'chat-text' }, { id: 'seer' }],
+    resolveModelInfo: async (_p, m) => ({ inputModalities: m === 'seer' ? ['text', 'image'] : ['text'] }),
+    stream: ({ provider, model }) => {
+      called.push(`${provider}/${model}`);
+      return (async function* gen() {
+        yield { type: 'text-delta', text: '{"name":"猫猫","meaning":"一只橘猫"}' };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      })();
+    },
+  };
+  const { call, off } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    /** 要超过 base64 的 100 字下限，不然会被当成空图过滤掉 */
+    writeFileSync(join(s, 'a.png'), Buffer.alloc(300, 0x41));
+    return {
+      stickers: { enabled: true, dir: s, captionModel: { provider: 'p', model: 'seer' } },
+      /** 聊天模型是纯文本的：没走 captionModel 就会 400 */
+      model: { default: { provider: 'p', model: 'chat-text' } },
+    };
+  }, {
+    ctx: {
+      get: (k) => {
+        if (k === 'llm') return fakeLlm;
+        if (k === 'attachments') return { admitPromptContent: async (c) => c };
+        return null;
+      },
+    },
+  });
+
+  const r = await call('/gallery/organize', { method: 'POST', body: { limit: 1 } });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+
+  let job = null;
+  for (let i = 0; i < 100; i += 1) {
+    const q = await call('/gallery/organize/job');
+    if (q.json?.job && !q.json.job.running) { job = q.json.job; break; }
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  assert.ok(job, '任务该在两秒内结束');
+  assert.equal(job.done, 1, JSON.stringify(job.errors));
+  assert.deepEqual(called, ['p/seer'], '真调用要走 captionModel，不是聊天模型');
+  assert.match(String(job.last), /猫猫/, 'job.last 要留下刚起好的名字，面板靠它显示心跳');
+  off?.();
+});
+
+test('路由：/gallery/organize 默认只给缺描述的，all 连已标注的也叫回来', async () => {
+  const seedGallery = (d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    /** 内容要不一样：图库按 sha256 去重，两张同字节的图只会留下一条记录 */
+    writeFileSync(join(s, 'a.png'), 'aaa');
+    writeFileSync(join(s, 'b.png'), 'bbb');
+    return {
+      stickers: { enabled: true, dir: s },
+      model: { default: { provider: 'fake', model: 'no-llm' } },
+    };
+  };
+
+  /** 第一轮：一张已标注，增量只该拿到剩下那一张 */
+  {
+    const { call, off } = await bootHost(seedGallery);
+    const seq = (await call('/gallery?page=1&size=24')).json.items[0].seq;
+    await call('/gallery/edit', { method: 'POST', body: { seq, name: '甲', meaning: '写好了' } });
+    const r = await call('/gallery/organize', { method: 'POST', body: {} });
+    assert.equal(r.json.total, 1, '已标注的不该重复花钱');
+    off?.();
+  }
+
+  /** 第二轮：勾「全部重做」之后两张都该排进去 */
+  {
+    const { call, off } = await bootHost(seedGallery);
+    const seq = (await call('/gallery?page=1&size=24')).json.items[0].seq;
+    await call('/gallery/edit', { method: 'POST', body: { seq, name: '甲', meaning: '写好了' } });
+    const r = await call('/gallery/organize', { method: 'POST', body: { all: true } });
+    assert.equal(r.json.total, 2, '全部重做要包括已经有描述的那张');
+    assert.equal(r.json.all, true);
+    off?.();
+  }
+});
+
+/**
+ * 连续失败收手：模型没了 / 额度用完 / 网络断了时，一百多张只会一路失败到底，
+ * 跑成几分钟的假进度。这条盯的是「停得住、且说得清为什么停」。
+ */
+test('路由：/gallery/organize 连续失败 5 张自己收手，job 里留下原因', async () => {
+  const { call, off } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    for (let i = 1; i <= 8; i += 1) writeFileSync(join(s, `p${i}.png`), `bytes-${i}`);
+    /**
+     * 有默认模型、但假 ctx 里没有 `llm`：预检那边查不到能力（按未知放行），
+     * 真调用时每一张都报「宿主没有暴露 llm」——正是「一路失败」那种场景。
+     */
+    return {
+      stickers: { enabled: true, dir: s },
+      model: { default: { provider: 'fake', model: 'no-llm' } },
+    };
+  });
+
+  const r = await call('/gallery/organize', { method: 'POST', body: { limit: 8 } });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.total, 8);
+
+  let job = null;
+  for (let i = 0; i < 100; i += 1) {
+    const q = await call('/gallery/organize/job');
+    if (q.json?.job && !q.json.job.running) { job = q.json.job; break; }
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  assert.ok(job, '任务该在 2 秒内结束（失败也是立刻返回）');
+  assert.equal(job.aborted, true, '连续失败要自己收手，不能一路烧完 8 张');
+  assert.ok(job.failed >= 5);
+  assert.match(job.message, /连续失败/, '原因要写进 job.message，面板才有话可念');
+  assert.ok(job.errors.length > 0, 'errors 要留给面板显示');
+  off?.();
+});
+
+test('路由：/gallery/remove 支持一串序号；回收站与恢复都按 seqs 走', async () => {
+  const { call, off, dir } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, 'a.png'), 'a');
+    writeFileSync(join(s, 'b.png'), 'b');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const list = await call('/gallery?page=1&size=24');
+  const seqs = list.json.items.map((x) => x.seq);
+  assert.equal(seqs.length, 2);
+
+  const rm = await call('/gallery/remove', { method: 'POST', body: { seqs } });
+  assert.equal(rm.status, 200, JSON.stringify(rm.json));
+  assert.equal(rm.json.count, 2);
+  /** 撤下是软删：文件必须还在 */
+  assert.equal(existsSync(join(dir, 'stickers', 'a.png')), true);
+
+  assert.equal((await call('/gallery?page=1&size=24')).json.total, 0, '图片区不该再列');
+  assert.equal((await call('/gallery?page=1&size=24&trash=1')).json.total, 2, '回收站里要有');
+
+  const back = await call('/gallery/restore', { method: 'POST', body: { seqs: [seqs[0]] } });
+  assert.equal(back.json.count, 1);
+  assert.equal((await call('/gallery?page=1&size=24')).json.total, 1);
+  off?.();
+});
+
+test('路由：/gallery/purge 要 confirm，删完文件与记录都没了', async () => {
+  const { call, off, dir } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, 'a.png'), 'a');
+    writeFileSync(join(s, 'a.png.tags'), '猫');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const seq = (await call('/gallery?page=1&size=24')).json.items[0].seq;
+
+  const no = await call('/gallery/purge', { method: 'POST', body: { seqs: [seq] } });
+  assert.equal(no.status, 400, '不可逆动作必须显式确认');
+  assert.equal(existsSync(join(dir, 'stickers', 'a.png')), true);
+
+  const yes = await call('/gallery/purge', { method: 'POST', body: { seqs: [seq], confirm: true } });
+  assert.equal(yes.status, 200, JSON.stringify(yes.json));
+  assert.equal(yes.json.count, 1);
+  assert.equal(existsSync(join(dir, 'stickers', 'a.png')), false, '文件要删掉');
+  assert.equal(existsSync(join(dir, 'stickers', 'a.png.tags')), false, '侧车要一起删');
+  /** 连回收站里都不该剩 */
+  assert.equal((await call('/gallery?page=1&size=24&trash=1')).json.total, 0);
+  off?.();
+});
+
+test('路由：面板真删文件之后，图库不留 missing 幽灵', async () => {
+  const { call, off } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, 'a.png'), 'a');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  assert.equal((await call('/gallery?page=1&size=24')).json.total, 1);
+  const del = await call('/stickers/delete', { method: 'POST', body: { files: ['a.png'], confirm: true } });
+  assert.equal(del.status, 200, JSON.stringify(del.json));
+
+  /** 记录也一起忘掉，回收站里不该冒出一条永远恢复不了的 */
+  assert.equal((await call('/gallery?page=1&size=24&trash=1')).json.total, 0);
+  off?.();
+});
+
+test('路由：/gallery?trash=1 只给撤下的图，不混进正常图片', async () => {
+  const { call, off } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, 'a.png'), 'a');
+    writeFileSync(join(s, 'b.png'), 'b');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const list = await call('/gallery?page=1&size=24');
+  assert.equal(list.json.total, 2);
+  const seq = list.json.items[0].seq;
+
+  await call('/gallery/remove', { method: 'POST', body: { seq } });
+
+  /**
+   * 这一条是「回收站分区看起来跟没切一样」的回归护栏。
+   *
+   * 以前这里走 `rows({ includeTrash: true })`——那个参数的意思是「图片**加上**
+   * 回收站」，于是回收站页拿到整库，用户点过去看到的还是那批图，以为回收站空了。
+   */
+  const trash = await call('/gallery?page=1&size=24&trash=1');
+  assert.equal(trash.json.total, 1, '回收站只该有撤下的那一张');
+  assert.deepEqual(trash.json.items.map((x) => x.seq), [seq]);
+
+  /** 图片区反向也不许混进回收站里那张 */
+  const pics = await call('/gallery?page=1&size=24');
+  assert.equal(pics.json.total, 1);
+  assert.notEqual(pics.json.items[0].seq, seq);
+  off?.();
+});
+
+test('路由：/gallery/edit 收 seqs，一次改多张；坏的序号单独报不连累其它', async () => {
+  const { call, off } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, 'a.png'), 'a');
+    writeFileSync(join(s, 'b.png'), 'b');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const seqs = (await call('/gallery?page=1&size=24')).json.items.map((x) => x.seq);
+  assert.equal(seqs.length, 2);
+
+  /** 面板「批量选择 → 改名」走的就是这条路：一个请求改一屏 */
+  const r = await call('/gallery/edit', { method: 'POST', body: { seqs, name: '猫猫', tags: '猫' } });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.count, 2);
+
+  const after = (await call('/gallery?page=1&size=24')).json.items;
+  for (const it of after) {
+    assert.equal(it.name, '猫猫');
+    assert.deepEqual(it.tags, ['猫']);
+  }
+
+  /** 其中一张不存在：改掉能改的，坏的进 failed，别整批失败 */
+  const mix = await call('/gallery/edit', {
+    method: 'POST', body: { seqs: [seqs[0], 9999], name: '换名' },
+  });
+  assert.equal(mix.status, 200, JSON.stringify(mix.json));
+  assert.equal(mix.json.count, 1);
+  assert.equal(mix.json.failed.length, 1);
+  assert.equal(mix.json.failed[0].seq, 9999);
+  off?.();
+});
+
+/* ---------------- 图库缩略图：面板压完回传，服务端只存发 ---------------- */
+
+test('路由：/gallery/thumb 存完能取，只收 image/jpeg 的 dataURL', async () => {
+  const { call, off, dir } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, 'a.png'), 'a');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const seq = (await call('/gallery?page=1&size=24')).json.items[0].seq;
+
+  /** 还没生成：404，面板就退回原图，不是报错 */
+  assert.equal((await call(`/gallery/thumb?seq=${seq}`)).status, 404);
+
+  /**
+   * 只认 JPEG。
+   *
+   * 这条不是吹毛求疵：dataURL 的 MIME 段如果跟着前端走，前端就能写
+   * `<svg onload>` 进数据目录，再由本机浏览器打开——那是一个自造 XSS。
+   */
+  const png = await call('/gallery/thumb', {
+    method: 'POST', body: { seq, data: 'data:image/png;base64,AAAA' },
+  });
+  assert.equal(png.status, 400);
+
+  const good = Buffer.from('fake-jpeg').toString('base64');
+  const ok = await call('/gallery/thumb', {
+    method: 'POST', body: { seq, data: `data:image/jpeg;base64,${good}` },
+  });
+  assert.equal(ok.status, 200, JSON.stringify(ok.json));
+
+  const got = await call(`/gallery/thumb?seq=${seq}`);
+  assert.equal(got.status, 200, JSON.stringify(got.json));
+  /** 缓存文件名是内容哈希，图一变就换文件，所以敢长缓存 */
+  assert.match(String(got.headers?.['cache-control'] || ''), /max-age/);
+
+  /** 列表里也要标出来，面板才不用先探一次 404 */
+  const list = await call('/gallery?page=1&size=24');
+  assert.equal(list.json.items[0].thumb, true);
+  assert.ok(existsSync(join(dir, 'gallery', 'thumbs')), '缓存目录要建在数据目录下');
+  off?.();
+});
+
+test('路由：/gallery/thumb 的 seq 乱填不崩，也不越界读', async () => {
+  const { call, off } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, 'a.png'), 'a');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  assert.equal((await call('/gallery/thumb?seq=9999')).status, 404);
+  assert.equal((await call('/gallery/thumb?seq=../index')).status, 404);
+  const post = await call('/gallery/thumb', {
+    method: 'POST', body: { seq: 9999, data: 'data:image/jpeg;base64,AAAA' },
+  });
+  assert.equal(post.status, 400, '没有这张图就不许存');
+  off?.();
+});
+
+test('路由：/gallery/file 按序号取原图——库里有真「未分类/」目录时也不 404', async () => {
+  const { call, off } = await bootHost((d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(join(s, '未分类'), { recursive: true });
+    /** 根目录一张、真 `未分类/` 里一张。这个组合会把前者的 rel 改写成 `未分类/x` */
+    writeFileSync(join(s, '海妖.png'), 'ROOT-IMG');
+    writeFileSync(join(s, '未分类', '缓存.jpg'), 'SUB-IMG');
+    return { stickers: { enabled: true, dir: s } };
+  });
+
+  const items = (await call('/gallery?page=1&size=24')).json.items;
+  const root = items.find((x) => x.file === '海妖.png');
+  const sub = items.find((x) => x.file === '缓存.jpg');
+  assert.ok(root && sub);
+
+  /**
+   * 主人报的现象是「图片过大会看不到」——其实与大小无关，是这张图 404 了。
+   * 根目录那张的 `rel` 已经被快照改成 `未分类/海妖.png`，按 rel 拼必 404。
+   */
+  const a = await call(`/gallery/file?seq=${root.seq}`);
+  assert.equal(a.status, 200, JSON.stringify(a.json));
+  assert.equal(a.body.toString(), 'ROOT-IMG');
+  assert.match(String(a.headers['content-type']), /image\/png/);
+
+  const b = await call(`/gallery/file?seq=${sub.seq}`);
+  assert.equal(b.status, 200);
+  assert.equal(b.body.toString(), 'SUB-IMG');
+
+  assert.equal((await call('/gallery/file?seq=9999')).status, 404);
+  assert.equal((await call('/gallery/file?seq=../etc/passwd')).status, 404);
+  off?.();
+});
+
+/**
+ * 「整理所选」：面板批量模式里挑几张然后点整理。
+ *
+ * 和「全部重做」的关键差别不只是范围——**手选的不过滤已有描述**。
+ * 这条测试盯的就是那个差别：选了带描述的那张，它必须照样排进去。
+ */
+test('路由：/gallery/organize 传 seqs 只跑选中的，带描述的也跑', async () => {
+  const seedGallery = (d) => {
+    const s = join(d, 'stickers');
+    mkdirSync(s, { recursive: true });
+    writeFileSync(join(s, 'a.png'), 'aaa');
+    writeFileSync(join(s, 'b.png'), 'bbb');
+    return {
+      stickers: { enabled: true, dir: s },
+      model: { default: { provider: 'fake', model: 'no-llm' } },
+    };
+  };
+
+  const { call, off } = await bootHost(seedGallery);
+  const items = (await call('/gallery?page=1&size=24')).json.items;
+  const [a, b] = items.map((x) => x.seq);
+  /** 给 a 写满标注：增量会跳过它，手选必须穿过 */
+  await call('/gallery/edit', { method: 'POST', body: { seq: a, name: '甲', meaning: '写好了' } });
+
+  const r = await call('/gallery/organize', { method: 'POST', body: { seqs: [a] } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.total, 1, '只该有选中的那一张');
+
+  /** 反证：没传 seqs 时同一条记录会被增量跳过 */
+  const inc = await call('/gallery/organize', { method: 'POST', body: {} });
+  /** 增量这时只剩 b（a 已有描述），说明两条路的口径确实不同 */
+  assert.equal(inc.json.total, 1);
+  off?.();
+});
+
+test('路由：/gallery/organize 的 seqs 全是垃圾时明确说「都不能整理」', async () => {
+  const { call, off } = await bootHost(() => ({ stickers: { enabled: false } }));
+  const r = await call('/gallery/organize', { method: 'POST', body: { seqs: [99999] } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.total, 0);
+  assert.match(String(r.json.message), /选中/);
+  off?.();
+});
+
+test('路由：/faces 给出小黄脸码表（面板「表情码表」页的数据源）', async () => {
+  const { call, off } = await bootHost(() => ({}));
+  const r = await call('/faces');
+  assert.equal(r.json.ok, true);
+  assert.ok(r.json.items.length >= 100, `码表太短：${r.json.items?.length}`);
+  for (const x of r.json.items.slice(0, 5)) {
+    assert.equal(typeof x.name, 'string');
+    assert.ok(Number.isInteger(x.id), 'id 要是数字，面板显示 faceId 靠它');
+  }
+  assert.ok(r.json.popular.length >= 20, '常用名单要足够长，否则提示词里列不出几个');
+  /** 常用名单必须是码表的子集：否则提示词教了模型一个发不出去的名字 */
+  const names = new Set(r.json.items.map((x) => x.name));
+  for (const n of r.json.popular) assert.ok(names.has(n), `${n} 不在码表里`);
+  off?.();
 });

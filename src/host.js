@@ -84,11 +84,13 @@ import { pathAllowed, MAX_FILE_BYTES } from './send-file.js';
 import { createStickers } from './stickers.js';
 import { createGallery, GALLERY_HINT } from './gallery.js';
 import { createStickerSync } from './sticker-sync.js';
+import { createStickerPost } from './sticker-post.js';
+import { faceHint, FACE_IDS, POPULAR_FACES } from './face-table.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { registerStickerTools } from './sticker-tools.js';
 import { registerGalleryTools } from './gallery-tools.js';
-import { createOrganizeJob, imageForVision, parseDescribe, DESCRIBE_PROMPT } from './gallery-organize.js';
+import { createOrganizeJob, imageForVision, parseDescribe, onlyFilled, DESCRIBE_PROMPT } from './gallery-organize.js';
 import { fetchImage } from './remote-image.js';
 import { createExternalAnnotations } from './gallery-annotations.js';
 import { createSpeakUp, shouldFire, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
@@ -1463,6 +1465,19 @@ export function apply(ctx) {
     log: (m) => log.warn(m),
   });
 
+  /**
+   * 图库工具挂上没有。决定提示词给哪一段：
+   *
+   *   · 挂上了 → 只讲序号（`GALLERY_HINT`）。模型能调 `gallery_list` 拿到
+   *     `#3`，就不该再教它抄绝对路径；
+   *   · 没挂上 → 退回 `stickers.prompt()` 的路径清单。这是**唯一**还能让
+   *     模型拼出可用路径的东西（DSH 版本差异时工具可能挂不上）。
+   *
+   * 以前两段是拼在一起注入的：同一段系统提示里，一句说「写完整路径」，
+   * 一句说「不要写路径，只写序号」，模型选哪个全看运气。
+   */
+  let galleryToolsOn = false;
+
   /** 缓存图同步：把 images/ 里像表情包的图搬成 `未分类/`。不做内容识别（见 sticker-sync.js 头注释） */
   const stickerSync = createStickerSync({ dataDir: dataDir(), stickers, log: (m) => log.warn(m) });
 
@@ -1915,6 +1930,229 @@ export function apply(ctx) {
    * 一个永远不动的 0%。
    */
   let galleryJob = null;
+
+  /**
+   * 启动一轮「让 AI 整理」。
+   *
+   * 抽成函数是因为有**两个入口**：面板点按钮，和「偷表情」收进新图后自动补一句
+   * （`stickers.steal.autoOrganize`）。以前这段逻辑只活在路由里，第二个入口
+   * 要复用就得整段复制——选模型、预检、建 job 三件事一旦有两份实现，
+   * 迟早出现「面板说能看图、自动整理说看不了」。
+   *
+   * @param {object} [o]
+   * @param {boolean} [o.all]   全部重做（跳过停用的）
+   * @param {number}  [o.limit] 一轮上限，默认 200
+   * @param {number[]|null} [o.seqs] 手选/指定的序号，传了就只跑这些，且不过滤停用
+   * @param {string}  [o.reason] 写进日志的由头（`偷到新图` 之类），空则不写
+   * @returns {Promise<{status:number, body:object}>} 直接交给 `send()`
+   */
+  async function startOrganize({ all = false, limit = 200, seqs = null, reason = '' } = {}) {
+    if (galleryJob?.progress?.().running) {
+      return { status: 409, body: { ok: false, message: '上一轮整理还在跑，等它跑完或先取消' } };
+    }
+    gallery.sync(cfg.stickers);
+    /**
+     * 一轮跑完当前所有待办，`200` 只是兜底（防止库无限增长时一次开出天量任务）。
+     *
+     * 原来这里不勾「全部重做」只给 40 张：那是整理还**看不见进度、不能停、
+     * 失败原因被吞**的时候定的护栏。现在预检、进度条、停下、连败收手都齐了，
+     * 40 只剩副作用——108 张待办要点三次，每次还弹一遍「开始整理 40 张」，
+     * 用户只会以为功能坏了。总调用次数不分批也完全一样。
+     * 对齐 aurabot 的 `captionTargets`：不分批，全量。
+     */
+    const cap = Math.min(200, Math.max(1, Number(limit) || 200));
+    /**
+     * 手选的那几张（面板「整理所选」，或偷图后自动整理传进来的新图）。
+     * 传了就**连已有描述、已停用的也跑**——用户一张张点出来的，
+     * 再拿规则挡回去就是「我明明选了它却一动不动」。
+     */
+    const want = Array.isArray(seqs) && seqs.length ? seqs : null;
+    const todo = gallery.pending({ limit: cap, all, seqs: want });
+    if (!todo.length) {
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          message: want
+            ? '选中的图都不能整理（回收站里、或者文件丢了）'
+            : all
+              ? '没有能整理的图了（回收站里、已停用、文件丢了的都不算）'
+              : '每张图都有名字或描述了，不用再跑',
+          total: 0,
+        },
+      };
+    }
+
+    /**
+     * 用哪个模型看图。
+     *
+     * 优先 `stickers.captionModel`（面板上单独挑的「起名模型」）：整理这活儿
+     * 必须能看图，而聊天模型常常是纯文本的。配了就用它，没配才退回
+     * 「按聊天 / 按类型的顺序」——也就是聊天在用的那个。
+     */
+    const cm = cfg.stickers?.captionModel || {};
+    const cmSel = cm.provider && cm.model
+      ? { provider: String(cm.provider), model: String(cm.model) }
+      : null;
+    /**
+     * 预检和真调用必须用**同一个**选择结果，否则会出现
+     * 「预检说能看图、真调用时换了另一个看不了图的模型」。
+     */
+    const sel = cmSel || pickModelFor({
+      byChat: cfg.model?.byChat,
+      byKind: cfg.model?.byKind,
+      defaultSel: cfg.model?.default,
+      chatId: '',
+      kind: '',
+      globalSel: (() => {
+        try { return ctx?.get?.('agentDefaultModel')?.currentSelection?.() || null; } catch { return null; }
+      })(),
+    });
+    if (!sel) {
+      return { status: 400, body: { ok: false, message: '还没有可用的模型（去「模型」页选一个）' } };
+    }
+    if (typeof modelCatalog?.canSee === 'function') {
+      try {
+        const can = await modelCatalog.canSee(sel.provider, sel.model);
+        if (can === false) {
+          return {
+            status: 400,
+            body: {
+              ok: false,
+              code: 'no-vision',
+              message: cmSel
+                ? `「起名用的模型」（${sel.model}）看不了图：整理要一张张看图起名，`
+                  + '在图库里换一个支持图片输入的模型再点。'
+                : `当前模型（${sel.model}）看不了图：整理要一张张看图起名，`
+                  + '在图库里给「起名用的模型」挑一个能看图的，或去「模型」页换一个。',
+            },
+          };
+        }
+      } catch { /* 能力查不到就不拦，交给上游报错 */ }
+    }
+
+    galleryJob = createOrganizeJob({
+      items: todo,
+      worker: async (it) => {
+        /**
+         * 读图 + 转 base64 在 worker 里做：失败要算这一张的，不能整批挂。
+         *
+         * 优先缩略图（面板生成的那张 320 宽 jpg）：识表情包不需要原图，
+         * 而几 MB 的壁纸转 base64 会顶穿 400 KB 上限、每次整理都白跑一次。
+         */
+        const img = imageForVision(it.path, it.file, { thumbPath: gallery.thumbPath(it.seq) });
+        const ask = (maxTokens) => llmVision({
+          prompt: DESCRIBE_PROMPT,
+          images: [img],
+          maxTokens,
+          /** 有配 `captionModel` 就钉住它，避免和聊天模型的选择漂移 */
+          ...(cmSel ? { sel: cmSel } : {}),
+          /**
+           * `extId` 会被 `llmVision` 拼进 sessionId 做隔离。
+           * 用 `host-gallery` 而不是某个扩展的 id：这条链是宿主自己发起的，
+           * 冒用扩展 id 会让日志和额度统计串到别人头上。
+           */
+          extId: 'host-gallery',
+        });
+        /**
+         * 预算给 800，不是 300。
+         *
+         * 推理型模型会先把预算花在思考上：300 很容易「思考完就没正文了」，
+         * 于是每张都白花一次调用还拿不到标注。aurabot 在同一个坑里留过
+         * 注释（120 会被思考吃光，它用 1000）。
+         */
+        let r = await ask(800);
+        /**
+         * 真遇到空正文（模型看了但一个字没写）再放大到 1200 重试一次。
+         * 只对这一个错误重试：网络失败、图太大、看不了图重试也是一样的结果，
+         * 白白多烧一次额度。
+         */
+        if (!r?.ok && /一个字都没写/.test(String(r?.message ?? ''))) {
+          r = await ask(1200);
+        }
+        if (!r?.ok) throw new Error(r?.message ?? '模型没回话');
+        const patch = parseDescribe(r.text);
+        if (!patch) throw new Error('模型回的不是能用的标注');
+        /**
+         * 空字段不写：全部重做时模型对某张只看得出名字，不能把用户
+         * 手写的含义/场合清成空字符串（清了就找不回来）。
+         */
+        return onlyFilled(patch);
+      },
+      apply: (seq, patch) => gallery.edit(seq, patch),
+      log: (m) => log.warn(m),
+    });
+    void galleryJob.start();
+    log.info(`图库整理开始：${todo.length} 张待补描述${all ? '（全部重做）' : ''}${reason ? `（${reason}）` : ''}`);
+    return { status: 200, body: { ok: true, jobId: galleryJob.id, total: todo.length, all } };
+  }
+
+  /**
+   * 偷表情的滑动窗口：最近一小时内收图的时间戳。
+   *
+   * 只在内存里：重启后清零，多收几张也无害（账本仍然防重复）。
+   * 写盘反而要处理「跨重启的旧时间戳」，收益不抵复杂度。
+   */
+  const stealAt = [];
+
+  /**
+   * 收到图之后：判断该不该偷。
+   *
+   * 三道闸按「越便宜越先判」排：开关 → 场景 → 配额 → 尺寸（最后才读文件头）。
+   * 反过来的话，关着开关时每条消息都要白读一次 64KB 文件头。
+   *
+   * 所有失败都静默（最多一条 warn）：偷表情是**顺手**行为，
+   * 偷不到不该在日志里刷屏，更不该影响用户正常聊天。
+   */
+  function trySteal({ path = '', name = '', kind = '', evt = null } = {}) {
+    try {
+      const st = cfg.stickers?.steal || {};
+      if (st.enabled === false) return;
+      if (!path) return;
+
+      const scope = String(st.scope || 'all');
+      const isGroup = kind === 'group' || kind === 'guild';
+      if (scope === 'private' && isGroup) return;
+      if (scope === 'group' && !isGroup) return;
+
+      const cap = Math.max(1, Math.min(200, Number(st.maxPerHour) || 20));
+      const now = Date.now();
+      while (stealAt.length && now - stealAt[0] > 3_600_000) stealAt.shift();
+      if (stealAt.length >= cap) return;
+
+      const chatId = String(evt?.chat?.chatId || '');
+      const source = `${isGroup ? '群' : '私聊'}${chatId ? ` ${chatId.slice(-6)}` : ''}`;
+      const r = stickerSync.absorbOne(path, {
+        minBytes: st.minBytes,
+        maxEdge: st.maxEdge,
+        maxRatio: st.maxRatio,
+        maxBytes: st.maxBytes,
+      }, { source, stickersCfg: cfg.stickers });
+
+      if (!r.ok) {
+        /** 「已经收过」「不像表情包」是常态，不记日志——不然每条图片消息都刷一条 */
+        if (!/已经收过|不像|太长|边长|太小|太大/.test(String(r.reason || ''))) {
+          log.warn(`偷表情没成功（${name || path}）：${r.reason}`);
+        }
+        return;
+      }
+
+      stealAt.push(now);
+      log.info(`偷到一张表情（${source}）→ ${r.file}`);
+
+      /**
+       * 收进来就整理。**默认关**：偷图是顺手行为，不该顺手花钱。
+       * 开着的话要注意 `startOrganize` 会在「上一轮还在跑」时返回 409，
+       * 那也不报错——下一张图进来时如果闲了，自然会补上。
+       */
+      if (st.autoOrganize === true) {
+        startOrganize({ reason: '偷到新图' }).catch((e) => log.warn(`偷图后自动整理失败：${e?.message ?? e}`));
+      }
+    } catch (e) {
+      log.warn(`偷表情判断出错（不影响对话）：${e?.message ?? e}`);
+    }
+  }
+
   /** 阶段 5：拒绝事件日志 + 面板聚合。两者都是旁路，写失败不影响扩展本体。 */
   extRejections = createRejectionLog({ dir: dataDir(), log });
   const onReject = (entry) => extRejections.record(entry);
@@ -2271,7 +2509,8 @@ export function apply(ctx) {
     getCtx: () => ctx,
     cfgOf: () => cfg,
     modelCatalog,
-    log,
+    /** 这个模块要的是 `(msg) => void`，不是 logger 对象——传错会在成功路径上炸 */
+    log: (m) => log.warn(m),
   });
 
   /**
@@ -3744,6 +3983,17 @@ export function apply(ctx) {
       if (!sel) return null;
       return await modelCatalog.canSee(sel.provider, sel.model);
     },
+    /**
+     * 图落盘之后：顺手判断「这张像不像表情包」。
+     *
+     * 挂在这里而不是另起一个定时器扫 `images/`：只有这条链知道图是
+     * 哪条消息、哪个会话来的（群还是私聊）。扫目录拿不到这个信息，
+     * 也就没法按 `stickers.steal.scope` 区分。
+     *
+     * 所有判断都在 `trySteal()` 里（开关 / 场景 / 每小时上限 / 尺寸），
+     * 这里只是转手——回调和对话主流程必须解耦，偷不到不能影响回复。
+     */
+    onImageSaved: (o) => trySteal(o),
   });
 
   /**
@@ -3776,6 +4026,57 @@ export function apply(ctx) {
     pick: () => 'roost',
     log: (m) => log.warn(m),
   });
+
+  /**
+   * 贴表情：她主动往私聊发一张图库里的图。
+   *
+   * 目标会话复用 `speakUp.chatId`——那本来就是「主人私聊的 openid」，
+   * 再让用户配一遍等于把同一件事问两次。没配就什么都不发，
+   * 报错也只进日志（用户看不见的定时任务不该弹 toast）。
+   *
+   * 挑图规则：只要「有名字或描述」的（`onlyDescribed`）。贴一张自己都
+   * 不知道是什么的图，比不贴更傻——那是用户刚传进来还没整理的东西。
+   */
+  const stickerPost = createStickerPost({
+    dataDir: dataDir(),
+    cfgOf: () => cfg.stickers?.post,
+    log: (m) => log.warn(m),
+    valenceOf: () => {
+      try { return Number(mood.get()?.valence) || 0; } catch { return 0; }
+    },
+    pickSticker: () => {
+      const c = { ...cfg.stickers?.post };
+      let rows = [];
+      try { rows = gallery.rows({}); } catch { return null; }
+      const pool = rows.filter((r) => r.enabled !== false
+        && (!c.onlyDescribed || r.name || r.meaning));
+      if (!pool.length) return null;
+      const pick = pool[Math.floor(Math.random() * pool.length)];
+      if (!pick?.path) return null;
+      return { seq: pick.seq, path: pick.path, name: pick.name || pick.meaning || '' };
+    },
+    sendSticker: async (pick) => {
+      const target = String(cfg.speakUp?.chatId || '').trim();
+      if (!target) return { ok: false, message: '没配主人私聊（「主动搭话」里的 chatId）' };
+      const ch = channels.active();
+      if (!ch || typeof ch.sendFile !== 'function') return { ok: false, message: '当前通道不能发文件' };
+      const r = await ch.sendFile({ scene: 'c2c', target, path: pick.path });
+      /**
+       * 发成功才记一次使用。`usedAt` 会进面板的「最近用过」，
+       * 也是以后做「别连贴同一张」的依据——现在随机挑，理论上可能连着两次
+       * 挑到同一张，有了这个字段就能顺手排掉。
+       */
+      if (r?.ok) {
+        try { gallery.markUsed(pick.seq); } catch { /* 记不上不影响这次发送 */ }
+      }
+      return r;
+    },
+  });
+  /**
+   * 开调度。首次 tick 在十分钟后——「DSH 一启动就收到一张表情」比不发更糟。
+   * `enabled` 默认 false，所以开了面板开关之前它一直空转（每十分钟读一次配置）。
+   */
+  stickerPost.start();
 
   /**
    * 出站动作层：模型写的 image / voice / say / button / silence / retract /
@@ -3900,11 +4201,48 @@ export function apply(ctx) {
         ok: false,
         message: `官方素材池满了（剩 ${remaining} 格），没有能自动淘汰的图`
           + '（都钉住了，或者令牌缺 manage 权限删不掉）——'
-          + '到「表情包 → 官方素材池」手动删几张，或者取消几张图的「固定」',
+          + '到「图库 → 线上」手动删几张，或者取消几张图的「固定」',
       };
     }
     return { ok: true, remaining: remaining + freed, freed };
   };
+
+  /**
+   * 「这一轮是谁在说」。
+   *
+   * `resolveImage` 那层只拿得到一个序号，拿不到会话与轮次；而出站发图的额度
+   * 要按「每群每轮」算。收消息时记一份，出站时读——和 `speaker` 是同一套
+   * 假设（同一时刻只有一轮在跑），不额外建索引。
+   */
+  let liveTurn = { sid: '', chatId: '', bucket: '' };
+
+  /**
+   * 出站发图的额度：`<<image: #3>>` 与 `sticker_pick` 同口径（每群每轮）。
+   *
+   * 为什么非在这里扣一次：`pickOf` 那条路扣过了，但模型完全可以**不调工具**
+   * 直接写 `<<image: #3>>`（它从 `gallery_list` 的返回里记得序号）。那是一条
+   * 不经过 `pickOf` 的免费车道——同一轮发十张也不会被拦。
+   *
+   * 拿不到轮次上下文时**放行**：额度是防刷屏的体验闸，不是安全边界
+   * （见 `quota.js` 头注释），为了一条记账不准就吞掉图，失败方式更糟。
+   */
+  function chargeStickerSend(seq) {
+    const st = liveTurn;
+    if (!st.sid) return { ok: true, skipped: true };
+    const turnKey = qqTurn.get(st.sid)?.id || '';
+    return quota.charge({
+      feature: 'sticker',
+      per: 'chat',
+      id: st.chatId || st.sid,
+      /**
+       * 去重键带上序号：同一条回复被重试时不该重复扣（同一个 key 只认第一次），
+       * 而「一轮发两张不同的图」在额度够时各自记账。
+       */
+      key: `img:${turnKey}:${seq}`,
+      turnKey,
+      bucket: st.bucket,
+    });
+  }
 
   const outActions = createActionRunner({
     channel: () => channels.active(),
@@ -3919,7 +4257,21 @@ export function apply(ctx) {
      * 传完占位符变 `qqbot-media://`，路径从头到尾没进过模型上下文。
      * 传 `cfg.stickers` 是让图库按当前配置的目录同步（用户可能刚加了新目录）。
      */
-    resolveImage: (seq) => gallery.pathOf(seq, cfg.stickers),
+    resolveImage: (seq) => {
+      const path = gallery.pathOf(seq, cfg.stickers);
+      if (!path) return '';
+      /**
+       * 额度在这里扣：模型可以直接写 `<<image: #3>>` 而不调 `sticker_pick`，
+       * 那是唯一能绕过「每群每轮一张」的车道（见 `chargeStickerSend`）。
+       * 扣不过就**不发这张**——把 `#3` 原样发进群里比少一张图糟得多。
+       */
+      const q = chargeStickerSend(seq);
+      if (!q.ok) {
+        log.warn(`#${seq} 这次不发了：${q.message}`);
+        return '';
+      }
+      return path;
+    },
     /**
      * 真的发出去了才记一次使用。发失败也算的话，「最近用过」的排序会被
      * 一堆没发成功的尝试污染，模型会绕开那些其实能用的图。
@@ -6199,16 +6551,34 @@ export function apply(ctx) {
         /** 退路：视觉模型代看。单张 400 KB 上限是 `ext-llm.js` 的硬约束 */
         let img;
         try {
-          img = imageForVision(path, path);
+          /**
+           * 优先缩略图：识一张表情包不需要原图，而原图常有几 MB 的壁纸/截图，
+           * 转 base64 直接顶穿 400 KB。面板打开过图库就会生成缩略图。
+           */
+          img = imageForVision(path, path, { thumbPath: gallery.thumbPath(seq) });
         } catch (e) {
           return { ok: false, message: e?.message ?? String(e) };
         }
+        /**
+         * 和「让 AI 整理」用同一个「起名模型」：用户配它就是为了「看图走这个」，
+         * 这里的场景一模一样（也是拿图换一段文字），没道理走两个模型。
+         * 没配就还是按聊天 / 类型的顺序。
+         */
+        const dm = cfg.stickers?.captionModel || {};
+        const dSel = dm.provider && dm.model
+          ? { provider: String(dm.provider), model: String(dm.model) }
+          : null;
         const r = await llmVision({
           prompt: q
             ? ['这是一张表情包或图片。只按画面上能确定的内容回答，看不出来就说看不出来。', `问题：${q}`].join('\n')
             : DESCRIBE_PROMPT,
           images: [img],
-          maxTokens: 400,
+          /**
+           * 800 而不是 400：推理型模型会先把预算花在思考上，400 很容易
+           * 「思考完正文空了」（图库整理那边踩过同样的坑）。
+           */
+          maxTokens: 800,
+          ...(dSel ? { sel: dSel } : {}),
           extId: 'host-gallery',
         });
         if (!r?.ok) return { ok: false, message: r?.message ?? '视觉模型没回话' };
@@ -6271,6 +6641,12 @@ export function apply(ctx) {
         log: (m) => log.warn(m),
       })
         .then((r) => {
+          /**
+           * 挂上了才是主入口。**只置位、不清零**：注册按会话各走一次，
+           * 后一次失败（会话切换时的偶发）不该把提示词倒退成路径清单——
+           * 那会让模型在同一次运行里换写法。
+           */
+          if (r.ok) galleryToolsOn = true;
           if (r.ok) log.info(`图库工具已挂上：${r.names.join('、')}（${r.mode}）`);
           else log.warn(`图库工具没挂上：${r.reason}`);
           if (r.off) mountOffs.push(r.off);
@@ -6492,24 +6868,51 @@ export function apply(ctx) {
           name: 'roost-stickers',
           order: 901,
           /**
-           * **只给规则，不给清单。**
+           * **只给规则，不给清单**——而且只给**一套**规则。
            *
            * 清单放提示词里的话，每加一张图就换掉整段系统前缀，prompt 缓存全失效
-           * （`stickers.js` 里分类模式那段注释算过这笔账）。规则是固定的几十个字，
-           * 顺手也把「图有编号、发图只写序号」这件事教给模型——不教它就不会用
-           * `gallery_list`，四个工具就全成了死代码。
+           * （`stickers.js` 里分类模式那段注释算过这笔账）。所以图库能用时，
+           * 这里只有固定的几十个字：教它「图有编号、发图只写序号、想找图调
+           * gallery_list」——不教它就不会用，四个工具全成死代码。
+           *
+           * 图库工具**没挂上**时才退回 `stickers.prompt()` 的路径清单。那段是
+           * 兜底，不是主路：它教的是「把绝对路径写进 `<<image: …>>`」，和序号
+           * 那套是互斥的两种写法。以前两段拼在一起注入，同一段系统提示里
+           * 「写完整路径」和「不要写路径」同时存在，模型挑哪个全看运气。
            *
            * 表情包总开关关着时整段都不给：用户关掉的是「配图」这件事本身，
            * 不该只关掉清单、还留着「你可以存图」的引导。
            */
           text: () => {
             if (cfg.stickers?.enabled === false) return '';
-            return [stickers.prompt(cfg.stickers), GALLERY_HINT].filter(Boolean).join('\n\n');
+            if (galleryToolsOn) return GALLERY_HINT;
+            return stickers.prompt(cfg.stickers);
           },
         }),
       );
     } catch (e) {
       log.warn('挂表情包清单失败：', e.message);
+    }
+
+    /**
+     * **小黄脸**：教她用 `【表情: 微笑】`。
+     *
+     * 为什么单独一段而不是拼进上面：用户关掉「表情包」（不配图）不代表
+     * 不许用小黄脸——那是两件事。上面那段会整段消失，这段不该跟着没了。
+     *
+     * 出站编码早就在 `channel.js` 的汇合点上（四条发送路都过），缺的只是
+     * 「模型不知道有这个语法」。这一段的全部作用就是补这句话。
+     */
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-faces',
+          order: 901,
+          text: () => faceHint(),
+        }),
+      );
+    } catch (e) {
+      log.warn('挂小黄脸提示失败：', e.message);
     }
 
     /**
@@ -6806,6 +7209,11 @@ export function apply(ctx) {
 
       // 告诉 AI 谁在说话（软提醒，每轮现读）
       speaker.set(sid, { payload, bucket, system: payload.system || '' });
+      /**
+       * 出站那一层（`resolveImage`）拿不到会话，记一份最近的给它算发图额度。
+       * 和 `speaker` 是同一条假设：同一时刻只有一轮在跑。
+       */
+      liveTurn = { sid, chatId: chat.chatId || '', bucket: bucket || '' };
       // 有人来找，精力和社交意愿回升（不衰减的话会越聊越冷）
       mood.touched();
 
@@ -7802,6 +8210,29 @@ export function apply(ctx) {
       } catch {
         return {};
       }
+    };
+
+    /**
+     * 把本地图片流给响应，**带 error 兜底**。
+     *
+     * `createReadStream(...).pipe(res)` 在文件读失败时会 emit `'error'`：
+     * Windows 上被杀软 / 同步盘独占、权限中途变了、或者路径其实是目录。
+     * 没有监听器时 EventEmitter 会把它抛成 uncaughtException——一个「这张图
+     * 读不出来」级别的错误足以把整个宿主带崩。
+     *
+     * 出错时只能 `destroy` 响应：头部已经发出去了，没法再改成 404。
+     */
+    const pipeImage = (res, abs, { mime, cache = 'private, max-age=60' } = {}) => {
+      res.writeHead(200, {
+        'Content-Type': mime || IMG_MIME[extname(abs).toLowerCase()] || 'application/octet-stream',
+        'Cache-Control': cache,
+      });
+      const rs = createReadStream(abs);
+      rs.on('error', (e) => {
+        log.warn(`发图失败：${abs}（${e?.code || e?.message || '读取中断'}）`);
+        try { res.destroy?.(); } catch {}
+      });
+      rs.pipe(res);
     };
 
     /**
@@ -12535,12 +12966,23 @@ export function apply(ctx) {
         const body = await readBody(req).catch(() => ({}));
         const snap = stickers.snapshot(cfg.stickers);
         const r = removeFiles(snap.roots || [], body?.files, { confirm: body?.confirm === true });
-        if (r.removed.length) stickers.invalidate?.();
+        if (r.removed.length) {
+          stickers.invalidate?.();
+          /**
+           * 文件真删了，图库里的记录一起忘掉。
+           *
+           * 不这么做的话，`sync()` 只会把它们标成 `missing`——那本来是给
+           * 「图被挪走了、挪回来还能用」准备的状态，结果图库面板上删过的图
+           * 会永远留在回收站里，点「恢复」也恢复不出东西。
+           */
+          const n = gallery.forgetPaths(r.removedPaths || []);
+          if (n) log.info(`图库忘了 ${n} 条已删除的记录`);
+        }
         return send(res, r.error ? 400 : 200, r);
       }),
 
       /**
-       * 图库总览：面板「表情包」页的第二段。
+       * 图库总览：面板「表达 → 图库」第 02 节（图片 / 线上 / 回收站共用）。
        *
        * 和 `/stickers/manage` 的区别是**视角**：那个按目录列文件（用户找图用），
        * 这个按序号列图库（看 AI 认得出哪些图、哪些还没描述）。
@@ -12559,7 +13001,12 @@ export function apply(ctx) {
          * 缓存，没有新增文件时这里几乎零成本。
          */
         gallery.sync(cfg.stickers);
-        const rows = gallery.rows({ includeTrash: withTrash });
+        /**
+         * `?trash=1` 是面板的「回收站」分区，要的是**只有回收站的**那份清单。
+         * 以前这里传 `includeTrash: true`——那个参数是「图片带上回收站」，
+         * 于是回收站分区拿到的是一份完整图库，看起来跟没切一样。
+         */
+        const rows = gallery.rows(withTrash ? { trashOnly: true } : {});
         const page = pageOf(
           rows.map((r) => ({ ...r, category: r.cat || '未分类' })),
           {
@@ -12569,14 +13016,78 @@ export function apply(ctx) {
             q: String(u.searchParams.get('q') || ''),
           },
         );
+        /**
+         * 分类清单按**全量**算，不是当前页：下拉里要能选到别的分类。
+         * `pageOf` 只管过滤和切片，不做聚合——以前图库页的分类下拉一直是空的，
+         * 就是因为这条路由没有这个字段（面板读 `data.cats`）。
+         */
+        const byCat = new Map();
+        for (const r of rows) {
+          const c = r.cat || '未分类';
+          byCat.set(c, (byCat.get(c) || 0) + 1);
+        }
+        const cats = [...byCat.entries()]
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count);
         return send(res, 200, {
           ok: true,
           ...page,
+          cats,
           stats: gallery.stats(),
           /** 目录给人看：用户要确认「AI 看的就是这个目录」 */
           dir: stickers.dir(cfg.stickers),
           indexPath: gallery.indexPath,
         });
+      }),
+
+      /**
+       * 图库原图：`GET ?seq=N`。
+       *
+       * **面板显示图片一律走这条**，不走 `/stickers/file?path=rel`。原因很具体：
+       * `snapshot()` 在库里存在一个真名叫 `未分类/` 的目录时，会把根目录那些图的
+       * `rel` 改写成 `未分类/xxx`（为了 `pick('未分类')` 能一起挑到），于是
+       * 面板按 rel 去取图就是 404——用户看到的是一张破图，而文件明明在根目录。
+       *
+       * 序号是数字、`path` 是同步时自己记的绝对路径，中间没有外部输入拼出来的
+       * 片段，比任何「相对路径 + 越界校验」都稳。停用的图也能看（只是不给发）。
+       */
+      route('/gallery/file', (req, res) => {
+        const seq = Number(new URL(req.url || '/', 'http://local').searchParams.get('seq')) || 0;
+        const abs = gallery.filePath(seq);
+        if (!abs) return send(res, 404, { ok: false, message: '没有这张图' });
+        pipeImage(res, abs);
+      }),
+
+      /**
+       * 图库缩略图：`GET ?seq=N` 取，`POST {seq, data}` 存。
+       *
+       * **为什么在浏览器生成**：项目零依赖，服务端没有能解码 PNG/JPEG 的库。
+       * 面板那边用 `createImageBitmap(blob, {resizeWidth})` 在解码阶段就降采样，
+       * 一张 24MB / 5120×2880 的壁纸只解出 320px 宽的位图，再 `toBlob('image/jpeg')`
+       * 回传——服务端只管落盘和发文件。
+       *
+       * 不做的事：不接受路径参数（只认序号，文件名是内容哈希），不信任前端
+       * 传来的 MIME（只收 `image/jpeg` 的 dataURL），不接受超大体积（`saveThumb`
+       * 里有 400KB 上限）。这三条把「面板能把任意文件写进数据目录」堵死。
+       */
+      route('/gallery/thumb', async (req, res) => {
+        if (req.method === 'POST') {
+          const body = await readBody(req).catch(() => ({}));
+          const seq = Number(body?.seq) || 0;
+          const raw = String(body?.data || '');
+          const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(raw);
+          if (!m) return send(res, 400, { ok: false, message: '只收 image/jpeg 的 dataURL' });
+          const r = gallery.saveThumb(seq, Buffer.from(m[1], 'base64'));
+          return send(res, r.ok ? 200 : 400, r);
+        }
+        const seq = Number(new URL(req.url || '/', 'http://local').searchParams.get('seq')) || 0;
+        const file = gallery.thumbPath(seq);
+        if (!file) return send(res, 404, { ok: false, message: '这张还没有缩略图' });
+        /**
+         * 文件名就是内容哈希：图变了就是另一个文件，所以敢长缓存。
+         * 唯一会变的情况是「同一个 sha 的缩略图重压一遍」——内容一样，无所谓。
+         */
+        pipeImage(res, file, { mime: 'image/jpeg', cache: 'private, max-age=604800' });
       }),
 
       /**
@@ -12587,77 +13098,132 @@ export function apply(ctx) {
        */
       route('/gallery/edit', async (req, res) => {
         const body = await readBody(req).catch(() => ({}));
-        const seq = Number(body?.seq) || 0;
-        if (!seq) return send(res, 400, { ok: false, message: '要给一个序号' });
+        /**
+         * 单张走 `seq`（老前端、`gallery_edit` 工具都这样），批量走 `seqs`。
+         *
+         * 面板的「批量选择 → 改名」要一次改一屏十几张。循环发十几个请求也能成，
+         * 但中途出错时用户看到的是「改了一半，剩下的不知道改没改」；服务端一次
+         * 收完，逐张返回失败项，面板能明确说「12 张里 2 张没改成，原因是……」。
+         */
+        const list = Array.isArray(body?.seqs)
+          ? seqListOf({ seqs: body.seqs })
+          : seqListOf({ seq: body?.seq });
+        if (!list.length) return send(res, 400, { ok: false, message: '要给一个序号' });
         const patch = {};
-        for (const k of ['name', 'meaning', 'tags', 'scenes', 'avoid', 'cat', 'enabled']) {
+        /**
+         * `pinned` 必须在这个白名单里。
+         *
+         * 面板的「固定」按钮和素材池那一行都 POST `{ seq, pinned }`，
+         * 而这里漏掉它的话 `gallery.edit()` 收到的是空 patch，回一句
+         * 「没有可改的字段」——按钮看起来能点，实际上永远是失败的。
+         */
+        for (const k of ['name', 'meaning', 'tags', 'scenes', 'avoid', 'cat', 'enabled', 'pinned']) {
           if (body?.[k] !== undefined) patch[k] = body[k];
         }
-        const r = gallery.edit(seq, patch);
-        return send(res, r.ok ? 200 : 400, r);
+        /** `'1'`／`1` 也当 true：`gallery_edit` 工具那条路传的就是字符串 */
+        if (patch.pinned !== undefined) patch.pinned = patch.pinned === true || patch.pinned === '1' || patch.pinned === 1;
+        if (list.length === 1) {
+          const r = gallery.edit(list[0], patch);
+          return send(res, r.ok ? 200 : 400, r);
+        }
+        /**
+         * 逐张调 `gallery.edit()`：它负责回写 `.tags` 侧车和搬分类，绕开它
+         * 就等于「面板改了、提示词里还是旧标签」。失败不中断——改一张失败
+         * 不该让剩下十几张一张都不改。
+         */
+        let count = 0;
+        const failed = [];
+        for (const seq of list) {
+          const r = gallery.edit(seq, patch);
+          if (r.ok) count += 1;
+          else failed.push({ seq, message: r.message || '没改成' });
+        }
+        return send(res, count ? 200 : 400, { ok: count > 0, count, failed });
       }),
+
+      /**
+       * 序号清单：`{seqs:[…]}` 或老的 `{seq}` 都收（见文件末尾 `seqListOf`）。
+       *
+       * 面板合并成一页之后多选撤下要一次提交；单张那条路保持原样，老前端
+       * 只认 `ok`，返回值也留着这两个字段。
+       */
 
       /** 撤下来（进回收站）。文件不动，可以 restore 回来 */
       route('/gallery/remove', async (req, res) => {
         const body = await readBody(req).catch(() => ({}));
-        const r = gallery.remove(Number(body?.seq) || 0);
-        return send(res, r.ok ? 200 : 400, r);
+        const seqs = seqListOf(body);
+        if (!seqs.length) return send(res, 400, { ok: false, message: '要给一个序号' });
+        const done = [];
+        const failed = [];
+        for (const s of seqs) {
+          const r = gallery.remove(s);
+          if (r.ok) done.push(s);
+          else failed.push({ seq: s, message: r.message });
+        }
+        return send(res, done.length ? 200 : 400, {
+          ok: done.length > 0, count: done.length, seqs: done, failed,
+        });
       }),
 
       route('/gallery/restore', async (req, res) => {
         const body = await readBody(req).catch(() => ({}));
-        const r = gallery.restore(Number(body?.seq) || 0);
-        return send(res, r.ok ? 200 : 400, r);
+        const seqs = seqListOf(body);
+        if (!seqs.length) return send(res, 400, { ok: false, message: '要给一个序号' });
+        const done = [];
+        const failed = [];
+        for (const s of seqs) {
+          const r = gallery.restore(s);
+          if (r.ok) done.push(s);
+          else failed.push({ seq: s, message: r.message });
+        }
+        return send(res, done.length ? 200 : 400, {
+          ok: done.length > 0, count: done.length, seqs: done, failed,
+        });
       }),
 
       /**
-       * 「让 AI 看一眼」：给还没描述的图补 name / meaning / scenes。
+       * 彻底删除：**删文件 + 删记录**。回收站里那颗按钮走这条。
        *
-       * **只跑增量的**（`pending()`）：几百张图全跑一遍是几百次视觉调用，
-       * 第二次点应该秒完成。**默认 40 张一轮**，多了会让用户等太久、
-       * 也更容易撞上额度上限。
+       * 全仓唯一删图不可逆的入口，所以必须 `confirm:true`——不是走过场：
+       * 面板那边先让人看清清单（文件名 + 张数），再带着这个标记提交。
+       */
+      route('/gallery/purge', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        if (body?.confirm !== true) {
+          return send(res, 400, { ok: false, message: '彻底删除要显式确认（confirm:true）' });
+        }
+        const seqs = seqListOf(body);
+        if (!seqs.length) return send(res, 400, { ok: false, message: '要给一个序号' });
+        const done = [];
+        const failed = [];
+        for (const s of seqs) {
+          const r = gallery.purge(s);
+          if (r.ok) done.push(s);
+          else failed.push({ seq: s, message: r.message });
+        }
+        return send(res, 200, {
+          ok: failed.length === 0, count: done.length, seqs: done, failed,
+        });
+      }),
+
+      /**
+       * 「让 AI 看一眼」：给图补 name / meaning / scenes / tags。
        *
-       * 一次失败不影响后面：某张图太大、模型抽风，都只算这一张跳过。
+       * 逻辑全在 `startOrganize()`（本文件上方）：面板点按钮、偷图后自动整理
+       * 都走那一份。这里只解析请求体、转发结果——两份实现迟早会漂成
+       * 「面板说能看图、自动整理说看不了」。
+       *
+       *   · 不传        —— 只补还没描述的（增量）
+       *   · {all:true}  —— 全部重做，跳过回收站/停用/丢文件的
+       *   · {seqs:[..]} —— 只跑这几张，**连已有描述和停用的也跑**
        */
       route('/gallery/organize', async (req, res) => {
         const body = await readBody(req).catch(() => ({}));
-        if (galleryJob?.progress?.().running) {
-          return send(res, 409, { ok: false, message: '上一轮整理还在跑，等它跑完或先取消' });
-        }
-        gallery.sync(cfg.stickers);
-        const cap = Math.min(200, Math.max(1, Number(body?.limit) || 40));
-        const todo = gallery.pending({ limit: cap });
-        if (!todo.length) {
-          return send(res, 200, { ok: true, message: '每张图都有名字或描述了，不用再跑', total: 0 });
-        }
-
-        galleryJob = createOrganizeJob({
-          items: todo,
-          worker: async (it) => {
-            /** 读图 + 转 base64 在 worker 里做：失败要算这一张的，不能整批挂 */
-            const img = imageForVision(it.path, it.file);
-            const r = await llmVision({
-              prompt: DESCRIBE_PROMPT,
-              images: [img],
-              maxTokens: 300,
-              /**
-               * `extId` 会被 `llmVision` 拼进 sessionId 做隔离。
-               * 用 `host-gallery` 而不是某个扩展的 id：这条链是宿主自己发起的，
-               * 冒用扩展 id 会让日志和额度统计串到别人头上。
-               */
-              extId: 'host-gallery',
-            });
-            if (!r?.ok) throw new Error(r?.message ?? '模型没回话');
-            const patch = parseDescribe(r.text);
-            if (!patch) throw new Error('模型回的不是能用的标注');
-            return patch;
-          },
-          apply: (seq, patch) => gallery.edit(seq, patch),
-          log: (m) => log.warn(m),
-        });
-        void galleryJob.start();
-        log.info(`图库整理开始：${todo.length} 张待补描述`);
-        return send(res, 200, { ok: true, jobId: galleryJob.id, total: todo.length });
+        const seqs = Array.isArray(body?.seqs)
+          ? body.seqs.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n > 0)
+          : null;
+        const r = await startOrganize({ all: body?.all === true, limit: body?.limit, seqs });
+        return send(res, r.status, r.body);
       }),
 
       route('/gallery/organize/job', (req, res) => {
@@ -12814,16 +13380,8 @@ export function apply(ctx) {
         const snap = stickers.snapshot(cfg.stickers);
         const hit = locate(snap.roots || [], q.get('path'));
         if (!hit) return send(res, 404, { ok: false, message: '没有这张图' });
-        const MIME = {
-          '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-          '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
-        };
-        res.writeHead(200, {
-          'Content-Type': MIME[extname(hit.abs).toLowerCase()] || 'application/octet-stream',
-          /** 短缓存：换图/删图后不该一直看到旧内容 */
-          'Cache-Control': 'private, max-age=60',
-        });
-        createReadStream(hit.abs).pipe(res);
+        /** 短缓存（60s）：换图 / 删图之后不该一直看到旧内容 */
+        pipeImage(res, hit.abs);
       }),
 
       /**
@@ -12849,6 +13407,19 @@ export function apply(ctx) {
       route('/stickers/sync/reset', (req, res) => send(res, 200, stickerSync.reset())),
 
       /**
+       * 小黄脸码表（FaceMap）。只读。
+       *
+       * 为什么要给面板：`face-table.js` 里那 108 个名字一直只在代码里，
+       * 用户看不到「有哪些能用」，也就没法在人格提示词里写对名字。
+       * 面板上点一下复制 `【表情: 微笑】`，比让他去翻源码靠谱。
+       */
+      route('/faces', (req, res) => send(res, 200, {
+        ok: true,
+        popular: POPULAR_FACES.slice(),
+        items: Object.entries(FACE_IDS).map(([name, id]) => ({ name, id })),
+      })),
+
+      /**
        * 缓存图缩略图。
        *
        * 面板是浏览器，读不了 `file://`，预览只能走 HTTP。但**这个端点绝不能
@@ -12863,15 +13434,7 @@ export function apply(ctx) {
         if (!name || !file.startsWith(root) || !existsSync(file)) {
           return send(res, 404, { ok: false, message: '没有这张图' });
         }
-        const MIME = {
-          '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-          '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
-        };
-        res.writeHead(200, {
-          'Content-Type': MIME[extname(name).toLowerCase()] || 'application/octet-stream',
-          'Cache-Control': 'private, max-age=60',
-        });
-        createReadStream(file).pipe(res);
+        pipeImage(res, file);
         return undefined;
       }),
 
@@ -13668,3 +14231,30 @@ export function apply(ctx) {
     throw e;
   }
 }
+
+/**
+ * 面板一次可以提交多个序号：`{seqs:[…]}`，或老前端只发一张的 `{seq}`。
+ *
+ * 面板上「撤下 / 恢复 / 彻底删除」都是多选操作，一次一个请求比分 20 次
+ * 提交稳（中途失败也不会只改了一半却看不出是哪一半）；而单张那条老路径
+ * 必须继续能走——`gallery_edit` 之外的调用方和旧前端都只发 `seq`。
+ *
+ * 写成模块级函数而不是路由里的 `const`：路由表是一个**数组字面量**，
+ * 元素之间用逗号分隔，那里放不下语句。
+ */
+function seqListOf(body) {
+  const raw = Array.isArray(body?.seqs) ? body.seqs : [body?.seq];
+  return raw.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+}
+
+/**
+ * 图片扩展名 → MIME。
+ *
+ * `/stickers/file`（按相对路径）、`/stickers/thumb`（缓存图）、
+ * `/gallery/file`（按序号）三处共用一份：以前各写各的三份表，加格式时
+ * 总有一处忘记改，表现为「别的都正常，就这个格式是 octet-stream」。
+ */
+const IMG_MIME = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+};

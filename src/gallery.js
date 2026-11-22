@@ -30,10 +30,15 @@
  * 项目里已经有两套标注：宿主的 `.tags` 侧车（路径为键）与表情标注扩展的
  * `annotations.json`（sha256 为键）。再建一套 index 就是三套。
  *
- * 处置：**index 是唯一真相，侧车只在两个方向同步一次**——
+ * 处置：**index 是唯一真相，但 `tags` / `scenes` 两项以侧车为准**——
  *   · 入库时读侧车当初始值（用户手写的场合说明不能丢）；
- *   · AI/面板改了标注，回写侧车（`stickers.js` 每轮从侧车生成清单，
- *     不写回去它就会拿着旧标签去猜）。
+ *   · AI/面板改了标注，回写侧车；
+ *   · 反过来，侧车被别处改了（表情库页改标签、补标签、用户手动编辑），
+ *     下一轮 `sync()` 采回来。
+ *
+ * 为什么这两项能「以侧车为准」而不打架：改它们的三条路全都先写侧车
+ * （`edit()` 自己就写），所以侧车永远不会比索引旧。而 `name / meaning / avoid`
+ * 侧车格式里没有位置，只能留在 index——这才是「index 是唯一真相」的范围。
  *
  * 表情标注扩展的 `annotations.json` **只读**（`gallery-annotations.js`）：
  * 它的键也是内容 sha256、字段名也一致，所以新图入库时拿它的标注当初始值，
@@ -157,6 +162,45 @@ const clamp = (s, max = MAX_TEXT) => {
 export function createGallery({ dataDir, stickers = null, log = () => {}, now = Date.now, externalOf = null } = {}) {
   const dir = join(dataDir, 'gallery');
   const indexPath = join(dir, 'index.json');
+  /**
+   * 缩略图缓存目录：`<数据目录>/gallery/thumbs/<内容哈希>.jpg`。
+   *
+   * 键用内容哈希而不是序号：序号会回收、图片会被替换，而哈希天然随内容变。
+   * 图库这里不解码图片（零依赖，没有 sharp/jimp），缩略图由**面板**生成后
+   * 回传——浏览器有 `createImageBitmap` 的降采样解码，比服务端硬解码还省。
+   * 服务端只负责存和发，外加「只认识图库里真有的那张图」这一层校验。
+   */
+  const thumbDir = join(dir, 'thumbs');
+  const thumbPathOf = (sha) => join(thumbDir, `${sha}.jpg`);
+  const hasThumb = (sha) => Boolean(sha) && existsSync(thumbPathOf(sha));
+  const dropThumb = (sha) => {
+    if (!sha) return;
+    const p = thumbPathOf(sha);
+    try { if (existsSync(p)) unlinkSync(p); } catch { /* 删不掉只是多占几十 KB */ }
+  };
+
+  /**
+   * 扫一遍缩略图目录，删掉不再对应任何记录的 jpg。
+   *
+   * 正常路径下 `purge` / `forgetPaths` 会当场删缓存，但有两种情况会留孤儿：
+   *   · 索引版本升级（`INDEX_VERSION` 变了整份重建，旧 sha 的缩略图全成孤儿）；
+   *   · 用户手改 / 删了 `index.json`。
+   * 几十 KB 一个，几百张也就几 MB，但**孤儿永远不会被替换**，只会越积越多。
+   *
+   * 只在 `sync` 真有新增图时扫（见调用处）：那是唯一能产生孤儿形态变化的时机，
+   * 而 readdir 一个目录的成本远小于每轮都扫。
+   */
+  const sweepThumbs = () => {
+    if (!existsSync(thumbDir)) return 0;
+    const keep = new Set(Object.keys(load().items));
+    let n = 0;
+    for (const f of readdirSync(thumbDir)) {
+      if (!f.endsWith('.jpg')) continue;
+      if (keep.has(f.slice(0, -4))) continue;
+      try { unlinkSync(join(thumbDir, f)); n += 1; } catch { /* 下次再试 */ }
+    }
+    return n;
+  };
 
   /**
    * 内容哈希缓存：`路径|mtime|大小` → sha256。
@@ -337,6 +381,8 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
           file: it.file,
           cat: it.cat || '',
           path: it.path,
+          /** 库内相对位置（显示用；取图走 `/gallery/file?seq=N`，见 `filePath`） */
+          rel: it.rel || '',
           /**
            * `name` 空着等 AI 或用户填。
            * 文件名当 name 没意义（`1.png` 当名字等于没名字），宁可显示「未标注」
@@ -367,23 +413,68 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
         continue;
       }
 
-      /** 同一张图换了位置 / 文件名 / 分类：跟着更新，**序号不动** */
+      /**
+       * 同一张图换了位置 / 文件名 / 分类：跟着更新，**序号不动**。
+       *
+       * `rel` 一起跟着改，但它**只用于显示和侧车定位，不再当取图依据**。
+       * `stickers.snapshot()` 在库里存在一个真名叫 `未分类/` 的目录时，会把
+       * **根目录**那些图的 `rel` 改写成 `未分类/xxx`（为了让 `pick('未分类')`
+       * 一起挑到）。因此按 `rel` 拼 `/stickers/file?path=` 会 404——面板上
+       * 是一张破图，显示「图片过大会看不到」，其实是路径错了。
+       * 面板显示走 `/gallery/file?seq=N`（见 `filePath`）。
+       */
       let changed = false;
       if (prev.path !== it.path) { prev.path = it.path; changed = true; }
       if (prev.file !== it.file) { prev.file = it.file; changed = true; }
+      if ((prev.rel || '') !== (it.rel || '')) { prev.rel = it.rel || ''; changed = true; }
       if ((prev.cat || '') !== (it.cat || '')) { prev.cat = it.cat || ''; changed = true; }
       if (prev.bytes !== it.size) { prev.bytes = it.size; changed = true; }
       if (prev.missing) { prev.missing = false; changed = true; }
 
       /**
-       * 侧车只在**图库这边还是空**的时候采。一旦 AI 或用户改过，就以后者为准
-       * ——否则下次扫盘会把 AI 刚写的描述用侧车的旧值覆盖回去，表现为
-       * 「改了没生效」。
+       * ## 侧车是 `tags` / `scenes` 的唯一真相
+       *
+       * 这两项有三个地方能改：面板、`gallery_edit` 工具、以及表情库那边的
+       * 「改标签 / 补标签」。前两条都经 `edit()` **回写侧车**，最后一条直接
+       * 写侧车——所以「以侧车为准」对三方都成立，不需要双向合并。
+       *
+       * 以前只做「索引空了才采」，后果很具体：补标签（规则、免费）写完
+       * 200 张侧车，图库这边一张都没变，那 200 张仍然躺在「让 AI 整理」的
+       * 待办里，再花 200 次视觉调用描述一遍。两份标注互不认账。
+       *
+       * 判据用 `sidecarTags` 而不是 `sidecar`：只写了场合说明的侧车会让
+       * `tags` 退回文件名拆词，拿它覆盖等于把 AI 写过的标签冲掉。
        */
-      if (!prev.scenes && it.usage) { prev.scenes = it.usage; changed = true; }
-      if ((!prev.tags || !prev.tags.length) && Array.isArray(it.tags) && it.tags.length) {
+      if (it.sidecarTags && Array.isArray(it.tags) && it.tags.length) {
+        const tags = it.tags.slice(0, 6);
+        if (JSON.stringify(prev.tags || []) !== JSON.stringify(tags)) {
+          prev.tags = tags;
+          changed = true;
+        }
+      } else if (!it.sidecar && (!prev.tags || !prev.tags.length) && Array.isArray(it.tags) && it.tags.length) {
+        /**
+         * 没有侧车时才拿文件名拆出来的词兜底。
+         *
+         * 有侧车却没写标签（只写了一句话的场合说明）就**不兜底**：那说明用户
+         * 已经动过这张图，文件名拆出来的「a」「(1)」不是他要的标签。
+         */
         prev.tags = it.tags.slice(0, 6);
         changed = true;
+      }
+      /**
+       * 场合：**只在侧车真的写了说明时采**（`it.usage` 非空）。
+       *
+       * 不能按「侧车存在就以它为准」处理空串：侧车可能只写了标签（`猫`，没有
+       * `; 场合`），而这条记录的 `scenes` 是从表情标注扩展的 `annotations.json`
+       * 补进来的。把空串采过来，等于用「侧车没写」覆盖掉「别处写过」。
+       * 空值分不清「用户刚清空」和「这里从来没有」，就不动它。
+       */
+      if (it.sidecar && it.usage) {
+        const scenes = String(it.usage);
+        if ((prev.scenes || '') !== scenes) {
+          prev.scenes = scenes;
+          changed = true;
+        }
       }
       if (changed) touch();
     }
@@ -415,6 +506,10 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     }
 
     flush();
+    /** 有新增图才扫孤儿缩略图：索引重建 / 手改 index 之后不留下永远对不上的缓存 */
+    if (added > 0) {
+      try { sweepThumbs(); } catch { /* 扫不动只是多占几十 KB，不影响同步结果 */ }
+    }
     return { added, total: Object.keys(s.items).length, missing };
   };
 
@@ -828,6 +923,151 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     return { ok: true, item: safeRow(hit.rec) };
   };
 
+  /** 路径比较用的键：Windows 不区分大小写，盘符大小写不一致很常见 */
+  const pathKey = (p) => {
+    const v = String(p ?? '');
+    return process.platform === 'win32' ? v.toLowerCase() : v;
+  };
+
+  /**
+   * 丢掉某个路径的哈希缓存。
+   *
+   * **不丢会被自己的缓存复活**：`hashCache` 的键是 `路径|mtime|size`，文件真删
+   * 之后那一条还在，下一次 `sync()` 直接从缓存拿到哈希——于是「磁盘上已经没有
+   * 这张图」这件事被缓存盖住，记录又被当成新图建回来，`missing` 还是 `false`。
+   * 表现是面板上删掉的图过一会儿自己回来了，而且删不掉。
+   */
+  const dropHashOf = (path) => {
+    const pre = `${path}|`;
+    for (const k of [...hashCache.keys()]) if (k.startsWith(pre)) hashCache.delete(k);
+  };
+
+  /**
+   * 文件**已经被删掉了**（面板批量真删、或用户自己在资源管理器里清了）：
+   * 把这些路径的记录一并忘掉。
+   *
+   * 为什么不留给 `sync()` 标 `missing`：`missing` 是给「暂时找不到、挪回来
+   * 还能用」准备的（网盘掉线、图被挪走）。真正删掉的文件留在索引里就是幽灵
+   * ——用户在图库面板上明明删过一遍，回收站里却还躺着一张永远恢复不了的记录。
+   *
+   * **按绝对路径匹配，不按 `rel`**：多根配置下两个根可能都有 `开心/1.png`，
+   * 按相对名匹配会把另一个盘上那张还在的图一起忘掉。
+   */
+  const forgetPaths = (paths = []) => {
+    const want = new Set((Array.isArray(paths) ? paths : []).map(pathKey).filter(Boolean));
+    if (!want.size) return 0;
+    const s = load();
+    let n = 0;
+    for (const [sha, rec] of Object.entries(s.items)) {
+      if (!want.has(pathKey(rec.path))) continue;
+      dropHashOf(String(rec.path || ''));
+      dropThumb(sha);
+      delete s.items[sha];
+      n += 1;
+    }
+    if (n) {
+      touch();
+      flush();
+    }
+    return n;
+  };
+
+  /**
+   * 彻底删掉一张：删文件（含侧车）+ 删记录。回收站里的「彻底删除」走这条。
+   *
+   * 只有这里会删记录，别的路径都只标 `trash`——序号因此可能出现空洞，那是
+   * 用户明确说「不要了」的代价；留着记录反而让回收站永远清不空。
+   */
+  const purge = (seq) => {
+    const hit = bySeq(seq);
+    if (!hit) return { ok: false, message: `没有 ${seq} 号` };
+    const { sha, rec } = hit;
+    const path = String(rec.path || '');
+    if (path) {
+      for (const p of [path, `${path}${SIDECAR}`]) {
+        try {
+          if (existsSync(p)) unlinkSync(p);
+        } catch (e) {
+          /** 删不掉（Windows 占用 / 权限）就别删记录：留一条能再过一次的记录，
+           *  比「文件还在、图库说没了」好 */
+          return { ok: false, message: `删不掉这个文件：${e?.message ?? e}` };
+        }
+      }
+      /** 缓存不清，下一次 sync 会用它把记录原样建回来（见 `dropHashOf`） */
+      dropHashOf(path);
+    }
+    delete load().items[sha];
+    touch();
+    flush();
+    /** 目录里少了一张：提示词的分类计数要重算 */
+    stickers?.invalidate?.();
+    dropThumb(sha);
+    return { ok: true };
+  };
+
+  /**
+   * 按序号取原图绝对路径（面板显示用），没有就 null。
+   *
+   * **不认 `rel`**：`stickers.snapshot()` 在库里存在一个真名叫 `未分类/` 的
+   * 目录时，会把**根目录**那些图的 `rel` 改写成 `未分类/xxx`（`stickers.js`
+   * 的归并逻辑，本意是让根目录散图能跟 `未分类` 一起被 `pick()` 挑到）。
+   * 那是显示层的归并，不是真实位置——照它取图一律 404，面板上就是破图。
+   * 序号 → 记录 → `path`（同步时记的绝对路径）+ 存在性判断，才是准的；
+   * 数字序号也不给路径穿越留任何口子。
+   */
+  const filePath = (seq) => {
+    const hit = bySeq(seq);
+    if (!hit) return null;
+    const p = String(hit.rec.path || '');
+    if (!p) return null;
+    /**
+     * `isFile()` 而不是 `existsSync()`：记录里的路径如果被换成同名**目录**
+     * （用户手动改建、解压覆盖），`createReadStream` 会 EISDIR，而路由那边
+     * 一旦没接住 'error' 就是 uncaughtException。这里直接判成「没有这张图」。
+     */
+    try {
+      return statSync(p).isFile() ? p : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * 这个序号有没有缩略图缓存，有就返回绝对路径。
+   *
+   * 只按序号查，**不接受前端给路径**：序号 → 记录 → sha → 固定文件名，
+   * 中间没有任何一段是外部输入拼出来的，天然没有路径穿越。
+   */
+  const thumbPath = (seq) => {
+    const hit = bySeq(seq);
+    if (!hit) return null;
+    const p = thumbPathOf(hit.sha);
+    return existsSync(p) ? p : null;
+  };
+
+  /**
+   * 存一张缩略图（面板用 `createImageBitmap` 降采样后回传的 JPEG）。
+   *
+   * 为什么缩略图在浏览器生成：项目零依赖，服务端没有能解码 PNG 的库。
+   * 浏览器这边 `createImageBitmap(blob, {resizeWidth})` 在**解码阶段**就降采样，
+   * 24MB / 5120×2880 的壁纸不会真的按原尺寸进内存——比服务端硬解码还省。
+   * 服务端只做三件事：认序号、挡体积、落盘。
+   */
+  const saveThumb = (seq, buf) => {
+    const hit = bySeq(seq);
+    if (!hit) return { ok: false, message: `没有 ${seq} 号` };
+    if (!buf || !buf.length) return { ok: false, message: '空的' };
+    /** 320px 宽、q0.8 的 JPEG 通常 10~40KB；给到 400KB 已经很宽松 */
+    if (buf.length > 400 * 1024) return { ok: false, message: '缩略图太大（超过 400KB）' };
+    try {
+      mkdirSync(thumbDir, { recursive: true });
+      writeFileSync(thumbPathOf(hit.sha), buf);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, message: String(e?.message || e) };
+    }
+  };
+
   /**
    * 存一张图进库。
    *
@@ -1026,40 +1266,93 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
   };
 
   /**
-   * 「让 AI 整理」要处理哪些图：**只给缺描述的**。
+   * 「让 AI 整理」要处理哪些图：**默认只给缺描述的**。
    *
    * 几百张全跑一遍就是几百次视觉调用，第二次点应该秒完成。所以这一步的产出
    * 是「待办清单」，不是「全部清单」。
+   *
+   * `all` 是「全部重做」：标签起错了、描述不准、模型换了，靠增量永远修不好
+   * （它只挑 name 和 meaning 都为空的）。抄 aurabot 的 `captionTargets({all})`：
+   * 全库重来，但仍然跳过回收站、丢了的文件、以及用户明确停用的。
    */
-  const pending = ({ limit = 40 } = {}) => {
+  const pending = ({ limit = 200, all = false, seqs = null } = {}) => {
+    /**
+     * `seqs` = 用户手选的那几张（面板「整理所选」）。
+     *
+     * 三者和 `all` 的差别：
+     *   · 增量（默认）—— 只挑 name 和 meaning 都为空的；
+     *   · `all`     —— 全库重来，但跳过停用的（那是「这钱我不该花」）；
+     *   · `seqs`    —— **照单执行**，带名字带描述也重跑，停用的也跑。
+     *
+     * 为什么 `seqs` 反而最宽松：用户是一张张点出来的，点之前就知道自己选了哪张。
+     * 这时候再拿「已有描述」或「已停用」去挡，表现就是「我明明选了它，它
+     * 一动不动」——把选择权给了人又偷偷收回去，比不给更气人。
+     *
+     * 只留一条硬约束：`trash` / `missing` 不要。前者面板不给入口，后者根本没文件，
+     * 跑起来必然失败。
+     */
+    const want = Array.isArray(seqs) && seqs.length
+      ? new Set(seqs.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n > 0))
+      : null;
     const s = load();
     return Object.entries(s.items)
-      /**
-       * 停用的（`enabled === false`）不进待办。
-       *
-       * 「让 AI 整理」是**一张一次模型调用**，最贵的那条路。用户明确说了
-       * 「这张暂时不用」，还花钱去给它写描述，写完了也没人看得见——
-       * 等哪天真启用再说，那时它自然会重新出现在待办里。
-       */
-      .filter(([, r]) => !r.trash && !r.missing && r.enabled !== false && !r.meaning && !r.name)
+      .filter(([, r]) => {
+        if (r.trash || r.missing) return false;
+        if (want) return want.has(Number(r.seq));
+        /**
+         * 停用的（`enabled === false`）不进待办。
+         *
+         * 「让 AI 整理」是**一张一次模型调用**，最贵的那条路。用户明确说了
+         * 「这张暂时不用」，还花钱去给它写描述，写完了也没人看得见——
+         * 等哪天真启用再说，那时它自然会重新出现在待办里。`all` 也一样：
+         * 全部重做只扩大「哪些算缺描述」，不该顺手把停用的也翻出来烧钱。
+         */
+        if (r.enabled === false) return false;
+        return all || (!r.meaning && !r.name);
+      })
       .sort((a, b) => a[1].seq - b[1].seq)
-      .slice(0, Math.max(1, Number(limit) || 40))
+      .slice(0, Math.max(1, Number(limit) || 200))
       .map(([sha, r]) => ({ sha, seq: r.seq, path: r.path, file: r.file }));
   };
 
-  /** 面板「图库」页要的完整行（含 path，**只给面板，不给模型**） */
-  const rows = ({ includeTrash = false } = {}) => {
+  /**
+   * 面板「图库」页要的完整行（含 path，**只给面板，不给模型**）。
+   *
+   * 两种口径必须分得开：
+   *   · `trashOnly` —— **只看回收站**。面板的「回收站」分区用它，
+   *     混进正常图片的话那个分区就只是图片区的一份复制，用户点过去会以为
+   *     「回收站里什么都没有」（实际是显示错了内容），还会给没撤下的图
+   *     画一个点了没反应的「恢复」。
+   *   · `includeTrash` —— 图片**加上**回收站。排障、统计这类「全都看」的场合用。
+   *
+   * `missing`（文件已经不在了）两边都不出现：它既不是能发的图，也不是用户
+   * 主动撤下的。清这种记录走 `forgetPaths` / `purge`，不该让用户以为还能恢复。
+   */
+  const rows = ({ includeTrash = false, trashOnly = false } = {}) => {
     const s = load();
-    return Object.values(s.items)
-      .filter((r) => includeTrash || (!r.trash && !r.missing))
-      .sort((a, b) => a.seq - b.seq)
-      .map((r) => ({
+    return Object.entries(s.items)
+      .filter(([, r]) => {
+        if (r.missing) return false;
+        if (trashOnly) return r.trash === true;
+        return includeTrash || r.trash !== true;
+      })
+      .sort((a, b) => a[1].seq - b[1].seq)
+      .map(([sha, r]) => ({
         ...safeRow(r),
         /**
-         * `rel` 是 `/stickers/file` 认的形状（`分类/文件名`）。面板画缩略图要用它：
-         * 那个接口按相对位置在库里定位并做越界校验，不认绝对路径。
+         * 库内相对位置。**只给显示和侧车用，别拿它取图。**
+         *
+         * 快照在有真 `未分类/` 目录时会把根目录图的 `rel` 改成 `未分类/xxx`，
+         * 照它请求 `/stickers/file` 会 404。面板显示一律走 `/gallery/file?seq=N`。
          */
-        rel: r.cat ? `${r.cat}/${r.file}` : r.file,
+        rel: r.rel || (r.cat ? `${r.cat}/${r.file}` : r.file),
+        /**
+         * 面板缩略图缓存有没有这一张。
+         *
+         * 有就直接请求 `/gallery/thumb?seq=N`（几十 KB），没有才回退原图。
+         * 24MB 的壁纸一次性铺满一屏会把面板拖死，这条字段是分流的依据。
+         */
+        thumb: hasThumb(sha),
         path: r.path,
         missing: r.missing === true,
         /**
@@ -1080,8 +1373,14 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
   return {
     dir, indexPath,
     sync, list, pathOf, markUsed, edit, remove, restore, save, stats, pending, rows,
+    /** 文件被删之后清记录：`forgetPaths` 只忘记录，`purge` 连文件一起删 */
+    forgetPaths, purge,
     /** 线上副本（官方素材池）的映射：查 / 记 / 清 / 反查序号 */
     remoteOf, markRemote, dropRemote, onlineIndex, onlineRows, isPinned,
+    /** 缩略图缓存：查路径 / 存一张（面板生成后回传） */
+    thumbPath, saveThumb, thumbDir,
+    /** 面板按序号取原图（不用 `rel`，见 `filePath` 的注释） */
+    filePath,
     /** 测试与面板用：把内存里的索引交出去（只读快照） */
     dump: () => JSON.parse(JSON.stringify(load())),
     /** 资源释放无关紧要（纯同步 IO），留个口子给测试重置 */

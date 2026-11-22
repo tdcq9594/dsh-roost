@@ -127,7 +127,7 @@ const NAV = {
 }
 const TAB_LABEL = {
   overview: '概览', personalize: '个性化', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆', people: '人物',
-  caps: '权限', express: '语音', stickers: '表情包', 'ch-post': '发帖', model: '模型', profile: '资料',
+  caps: '权限', express: '语音', stickers: '图库', 'ch-post': '发帖', model: '模型', profile: '资料',
   ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
   groupchat: '群聊策略', groupadmin: '群管',
   'ch-home': '频道总览', 'ch-policy': '频道策略', 'ch-api': '频道接口', 'ch-diag': '频道排障',
@@ -2542,3 +2542,79 @@ test('页头开关：走 features.get / features.patch，id 与后端注册的�
   assert.match(src, /'botEnabled'/, '总开关的 id 是 botEnabled（避开顶层 enabled 撞名）')
   assert.match(src, /'dryRun'/, '试运行的 id 是 dryRun')
 });
+
+test('前端渲染：图库页有「批量选择」入口，不再靠缩略图上的小复选框', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'stickers'
+  rt.reset()
+
+  const txt = textOf(expand(mod.RoostPage(), rt))
+  /**
+   * 多选原来是每张图左下角一个 14px 的复选框——缩略图才 140px 宽，
+   * 手机上基本点不中。改成显式的「批量选择」开关：打开后整张卡片可点。
+   * 这条只保证入口在；选中态的交互靠真机。
+   */
+  assert.ok(txt.includes('批量选择'), '多选入口要能看见')
+  assert.ok(!txt.includes('全选本页'), '「全选本页」搬进批量条了，不在筛选行常驻')
+  assert.ok(txt.includes('图库'), '导航上要叫「图库」')
+})
+
+/**
+ * 对齐 aurabot 表情包页的那几处入口。
+ *
+ * 只断言「入口在、文案对」：下拉的候选要等 `model.list` 回来（真机才有），
+ * 这里渲染的是首帧，看到的是「跟随聊天模型」那一项 + 「正在查模型…」。
+ */
+test('前端渲染：图库页有「起名用的模型」下拉、上传命名框、刷新', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'stickers'
+  rt.reset()
+
+  const txt = textOf(expand(mod.RoostPage(), rt))
+  /** 工具条不依赖图库数据，首帧就能看到 */
+  assert.ok(txt.includes('刷新'), '往文件夹里丢图之后要有地方重新读')
+  assert.ok(txt.includes('上传'), '上传入口')
+
+  /**
+   * 模型下拉要等 `/gallery` 回来才渲染（首帧整块是「读着…」），所以这几条
+   * 断言源码：文案、默认项、以及它存到哪个配置键。
+   */
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.match(src, /起名用的模型/, '要能单独挑一个视觉模型')
+  assert.match(src, /跟随聊天模型/, '留空 = 跟随聊天模型，得写出来')
+  assert.match(src, /captionModel: \{ provider: v \? p : ''/, '要存回 stickers.captionModel')
+  assert.match(src, /placeholder: '名字（可不填）'/, '上传时可以先填名字')
+})
+
+/**
+ * 偷表情 / 贴表情 / 小黄脸码表这三块。
+ *
+ * 它们只在「图库」独立页出现（`part === 'sticker'`），而且都依赖 `config`
+ * 里的 `stickers.steal` / `stickers.post`——所以断言分两路：
+ * 首帧能看到文案的断文案，要等 `/faces` 的码表断源码。
+ */
+test('前端渲染：偷表情、贴表情、小黄脸码表三个入口都在', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'stickers'
+  rt.reset()
+
+  const txt = textOf(expand(mod.RoostPage(), rt))
+  assert.ok(txt.includes('偷表情'), '偷表情的开关要能看见')
+  assert.ok(txt.includes('同步缓存图'), '手动同步的入口不能因为有了自动偷就被挤掉')
+  assert.ok(txt.includes('贴表情'), '贴表情的开关要能看见')
+
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  /** 三个数字都要能改：只给开关不给参数，等于逼用户去手改 config.json */
+  assert.match(src, /post: \{ maxPerDay: n \}/, '每天几次要能存')
+  assert.match(src, /post: \{ chance: n \/ 100 \}/, '概率用百分比输入、存成 0~1')
+  assert.match(src, /post: \{ minGapMinutes: n \}/, '间隔要能存')
+  /** 偷表情的三项 */
+  assert.match(src, /steal: \{ maxPerHour: n \}/, '每小时上限要能存')
+  assert.match(src, /steal: \{ autoOrganize: on \}/, '顺手起名的勾选要能存')
+  /** 小黄脸码表 */
+  assert.match(src, /小黄脸码表/, '码表要有一页，否则用户不知道有哪些名字')
+  assert.match(src, /【表情: \$\{name\}】/, '点一下要复制出可直接粘的标记')
+})

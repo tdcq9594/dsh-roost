@@ -460,3 +460,34 @@ test('invalidate 立刻丢掉扫描缓存（改完标签提示词要马上变）
   s.invalidate();
   assert.match(s.prompt({}), /b\.png/, 'invalidate 之后必须重新扫');
 });
+
+test('快照标出「侧车存在」「侧车里真有标签」，图库靠它决定要不要采', () => {
+  const L = makeLib({
+    'a.png': 'A',
+    'a.png.tags': '猫, 无语; 被问到蠢问题',
+    'b.png': 'B',
+    'b.png.tags': '; 只有场合说明',
+    'c.png': 'C',
+  });
+  const snap = L.stickers.snapshot({ dir: L.dir });
+  const by = (f) => snap.items.find((it) => it.file === f);
+
+  /**
+   * 三个字段必须分得开：
+   *   · 没有侧车 → 标签是文件名拆的，图库**不许**拿它覆盖 AI 写过的；
+   *   · 有侧车且有标签 → 这是用户写的，图库要采；
+   *   · 有侧车但只有场合 → 标签仍是文件名拆的，场合可以采。
+   */
+  assert.equal(by('a.png').sidecar, true);
+  assert.equal(by('a.png').sidecarTags, true);
+  assert.deepEqual(by('a.png').tags, ['猫', '无语']);
+  assert.equal(by('a.png').usage, '被问到蠢问题');
+
+  assert.equal(by('b.png').sidecar, true);
+  assert.equal(by('b.png').sidecarTags, false, '只有场合时不算有标签');
+  assert.equal(by('b.png').usage, '只有场合说明');
+
+  assert.equal(by('c.png').sidecar, false);
+  assert.equal(by('c.png').sidecarTags, false);
+  assert.deepEqual(by('c.png').tags, ['c']);
+});

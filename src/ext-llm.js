@@ -25,6 +25,13 @@ import { pickModelFor } from './model-pick.js';
 export function createLlmVision({
   getCtx = () => null, cfgOf = () => ({}), modelCatalog = null, log = () => {},
 } = {}) {
+  /**
+   * 调用方可能传进来一个 `{ info, warn }` 的 logger 对象（宿主那边就是这种），
+   * 也可能什么都不传。**这行日志只在看图成功之后才打**，一旦它抛
+   * `log is not a function`，刚看懂的那张图就会被记成失败——所以不能
+   * 信任调用方传对了类型，这里自己兜一层。
+   */
+  const say = typeof log === 'function' ? log : () => {};
   const MAX_IMAGES = 4;
   const MAX_B64 = 400_000;
 
@@ -50,16 +57,28 @@ export function createLlmVision({
     }
 
     const cfg = cfgOf() ?? {};
-    const sel = pickModelFor({
-      byChat: cfg?.model?.byChat,
-      byKind: cfg?.model?.byKind,
-      defaultSel: cfg?.model?.default,
-      chatId: '',
-      kind: '',
-      globalSel: (() => {
-        try { return ctx?.get?.('agentDefaultModel')?.currentSelection?.() || null; } catch { return null; }
-      })(),
-    });
+    /**
+     * 调用方可以指定模型（`body.sel`）：图库整理用的是一个单独的「起名模型」，
+     * 它可能有视觉能力而聊天模型没有。不指定就还是走那套按聊天 / 按类型的顺序。
+     *
+     * 扩展也能传这个字段，但那不算越权——效果等同于它自己调 `llm.stream`
+     * 选这个模型，而模型清单本来就是用户自己配的。
+     */
+    const forced = body?.sel && typeof body.sel === 'object'
+      ? { provider: String(body.sel.provider || '').trim(), model: String(body.sel.model || '').trim() }
+      : null;
+    const sel = forced?.provider && forced?.model
+      ? forced
+      : pickModelFor({
+        byChat: cfg?.model?.byChat,
+        byKind: cfg?.model?.byKind,
+        defaultSel: cfg?.model?.default,
+        chatId: '',
+        kind: '',
+        globalSel: (() => {
+          try { return ctx?.get?.('agentDefaultModel')?.currentSelection?.() || null; } catch { return null; }
+        })(),
+      });
     if (!sel) return { ok: false, message: '还没有可用的模型（去「模型」页选一个）' };
 
     /** 模型看不了图就直说：让它回一句「我看不到图片」毫无价值 */
@@ -95,7 +114,12 @@ export function createLlmVision({
           content,
           source: { kind: 'plugin', plugin: 'dsh-roost' },
         }],
-        maxTokens: Math.max(200, Math.min(1200, Number(body?.maxTokens) || 600)),
+        /**
+         * 上限放到 2500：推理型模型会先把预算花在思考上，1000 出头很容易
+         * 「思考完正文是空的」。图库整理那条链在空正文时会用 1200 重试一次，
+         * 这里不能让 clamp 把它压回去。默认仍是 600。
+         */
+        maxTokens: Math.max(200, Math.min(2500, Number(body?.maxTokens) || 600)),
         temperature: 0.3,
         /**
          * 后台调用没有会话，得自带一个：opencode 那条路由要求请求头，不带就 400。
@@ -117,7 +141,7 @@ export function createLlmVision({
     }
 
     const out = text.trim();
-    log(`扩展 ${String(body?.extId ?? '?')} 看图：${images.length} 张，${out.length} 字，${Date.now() - started}ms`);
+    say(`扩展 ${String(body?.extId ?? '?')} 看图：${images.length} 张，${out.length} 字，${Date.now() - started}ms`);
     if (!out) return { ok: false, message: '模型看了但一个字都没写（可能输出预算被思考吃掉）' };
     return { ok: true, text: out, model: sel.model, ms: Date.now() - started };
   };

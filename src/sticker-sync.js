@@ -26,7 +26,7 @@ import {
   readdirSync, statSync, copyFileSync, mkdirSync, existsSync,
   writeFileSync, readFileSync, openSync, readSync, closeSync,
 } from 'node:fs';
-import { join, extname } from 'node:path';
+import { join, extname, basename } from 'node:path';
 
 import { UNCATEGORIZED } from './stickers.js';
 
@@ -45,6 +45,14 @@ export const SYNC_DEFAULTS = {
 
 /** 入库文件名前缀。序号补零，`缓存_0001.gif` 用户一眼能认出来 */
 const PREFIX = '缓存';
+
+/**
+ * 偷来的图标这个前缀，和手动同步的 `缓存_` 分开。
+ *
+ * 用户要清理时最常问的是「哪些是自动收的」，两个前缀一眼就能分清；
+ * 侧车里还记了来源会话，想追到「这张谁发的」也有据可查。
+ */
+const STEAL_PREFIX = '偷';
 
 /**
  * 只读文件头（前 64KB）就能拿到宽高——项目是零依赖，没有 sharp，
@@ -369,5 +377,76 @@ export function createStickerSync({ dataDir, stickers, log = () => {} }) {
     return { ok: true };
   };
 
-  return { preview, apply, reset, ledgerPath };
+  /**
+   * 收**一张**刚收到的图（偷表情）。
+   *
+   * 和 `apply()` 的区别：那个是「扫整个缓存目录、让用户勾选」，适合事后补；
+   * 这个是消息到达时**顺手**收一张，不扫目录、不等确认、不阻塞对话。
+   *
+   * 调用方（宿主）负责三道闸：总开关、场景（群/私聊）、每小时上限。
+   * 这里只做「这一张到底该不该收」：格式 → 体积 → 尺寸 → 是否收过。
+   *
+   * **复制而不是移动**：`images/` 里那个路径还被这一轮的对话上下文引用着，
+   * 移走就等于让模型刚看到的路径立刻失效。
+   *
+   * @param {string} absPath 缓存图绝对路径（`<数据目录>/images/xxx.png`）
+   * @param {object} [cfg] `stickers.steal` 段（尺寸键名和 `sync` 一样）
+   * @param {{ source?: string, stickersCfg?: object }} [o]
+   *        `source` 写进侧车（哪个会话偷的），`stickersCfg` 用来找表情包根目录
+   * @returns {{ ok: boolean, reason?: string, file?: string, w?: number, h?: number }}
+   */
+  const absorbOne = (absPath, cfg = {}, { source = '', stickersCfg = {} } = {}) => {
+    const name = basename(String(absPath || ''));
+    if (!name) return { ok: false, reason: '没有文件名' };
+    const ext = extname(name).toLowerCase();
+    if (!OK_EXT.has(ext)) return { ok: false, reason: '不是认的图片格式' };
+
+    let st;
+    try {
+      st = statSync(absPath);
+    } catch {
+      return { ok: false, reason: '文件不见了（可能已被清理）' };
+    }
+    if (!st.isFile()) return { ok: false, reason: '不是文件' };
+
+    /** 账本按缓存文件名记账：同一张图在不同轮次被引用时不会重复收 */
+    const done = readLedger();
+    if (done[name]) return { ok: false, reason: '已经收过' };
+
+    const row = { name, path: absPath, size: st.size, w: 0, h: 0 };
+    const head = headOf(absPath);
+    if (head) {
+      const d = dimsOf(head);
+      row.w = d.w;
+      row.h = d.h;
+    }
+    const verdict = judge(row, cfg);
+    if (!verdict.ok) return { ok: false, reason: verdict.reason || '不像表情包' };
+
+    let dir;
+    try {
+      dir = targetDir(stickersCfg, { create: true });
+    } catch (e) {
+      return { ok: false, reason: `建目录失败：${e.message}` };
+    }
+    const target = nextFree(dir, STEAL_PREFIX, ext);
+    try {
+      copyFileSync(absPath, join(dir, target));
+    } catch (e) {
+      return { ok: false, reason: `复制失败：${e.message}` };
+    }
+    try {
+      /**
+       * 侧车记来源。格式和手动同步那批保持一样（`;` 开头的备注不是标签），
+       * 整理回采时不会把它当成用户打的标签。
+       */
+      writeFileSync(join(dir, target + '.tags'), `; 偷来的${source ? `（${source}）` : ''}`);
+    } catch { /* 侧车写不进去不影响图本身 */ }
+
+    done[name] = `${UNCATEGORIZED}/${target}`;
+    writeLedger(done);
+    return { ok: true, file: target, dir, w: row.w, h: row.h, size: row.size };
+  };
+
+  return { preview, apply, reset, absorbOne, ledgerPath };
 }

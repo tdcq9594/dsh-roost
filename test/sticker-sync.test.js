@@ -217,3 +217,70 @@ test('同步：筛选阈值可以调，调了就生效', () => {
   assert.equal(sync.preview({}).willSync, 1);
   assert.equal(sync.preview({ sync: { ...SYNC_DEFAULTS, maxEdge: 500 } }).willSync, 0);
 });
+
+// ── 偷表情（消息到达时收单张）──────────────────────────────────
+//
+// 和上面的「手动同步」是两条路：apply 扫整个缓存目录、等用户勾选；
+// absorbOne 是消息刚进来时顺手收一张。这里钉的是三道最容易出事的判断：
+// 尺寸筛掉截图、账本防重复、落点必须是「未分类」而不是根目录。
+
+test('偷表情：合格的图收进未分类，文件名带「偷_」前缀', () => {
+  const { root, sync } = makeCache({ 'msg-1-1.png': png(240, 240, 80 * 1024) });
+  const r = sync.absorbOne(
+    path.join(root, 'images', 'msg-1-1.png'),
+    SYNC_DEFAULTS,
+    { source: '私聊 123456', stickersCfg: {} },
+  );
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.file, '偷.png');
+
+  const dir = path.join(root, 'stickers', UNCATEGORIZED);
+  assert.ok(fs.existsSync(path.join(dir, '偷.png')), '图要真的落进 未分类/');
+  const side = fs.readFileSync(path.join(dir, '偷.png.tags'), 'utf8');
+  assert.ok(side.includes('偷来的'), side);
+  assert.ok(side.includes('私聊 123456'), '侧车要记来源会话');
+});
+
+test('偷表情：同一张图不会被收第二次（账本按缓存文件名）', () => {
+  const { root, sync } = makeCache({ 'msg-2-1.png': png(240, 240, 80 * 1024) });
+  const p = path.join(root, 'images', 'msg-2-1.png');
+  assert.equal(sync.absorbOne(p, SYNC_DEFAULTS, { stickersCfg: {} }).ok, true);
+  const again = sync.absorbOne(p, SYNC_DEFAULTS, { stickersCfg: {} });
+  assert.equal(again.ok, false);
+  assert.match(again.reason, /收过/);
+
+  const dir = path.join(root, 'stickers', UNCATEGORIZED);
+  const imgs = fs.readdirSync(dir).filter((f) => f.endsWith('.png'));
+  assert.equal(imgs.length, 1, '只应该有一份，不能收第二份');
+});
+
+test('偷表情：截图和壁纸按尺寸挡掉，不占图库', () => {
+  const { root, sync } = makeCache({
+    'shot.png': png(2560, 1600, 900 * 1024),
+    'long.png': png(1469, 161, 80 * 1024),
+  });
+  const a = sync.absorbOne(path.join(root, 'images', 'shot.png'), SYNC_DEFAULTS, { stickersCfg: {} });
+  assert.equal(a.ok, false);
+  assert.match(a.reason, /边长|太长/);
+  const b = sync.absorbOne(path.join(root, 'images', 'long.png'), SYNC_DEFAULTS, { stickersCfg: {} });
+  assert.equal(b.ok, false);
+  assert.match(b.reason, /太长/);
+});
+
+test('偷表情：小到不像表情包的（贴图碎片）不收', () => {
+  const { root, sync } = makeCache({ 'tiny.png': png(64, 64, 900) });
+  const r = sync.absorbOne(path.join(root, 'images', 'tiny.png'), SYNC_DEFAULTS, { stickersCfg: {} });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /太小/);
+});
+
+test('偷表情：不是图片后缀、文件已消失都只返回原因，不抛', () => {
+  const { root, sync } = makeCache({ 'note.txt': Buffer.from('hello') });
+  const a = sync.absorbOne(path.join(root, 'images', 'note.txt'), SYNC_DEFAULTS, { stickersCfg: {} });
+  assert.equal(a.ok, false);
+  assert.match(a.reason, /格式/);
+
+  const b = sync.absorbOne(path.join(root, 'images', 'gone.png'), SYNC_DEFAULTS, { stickersCfg: {} });
+  assert.equal(b.ok, false);
+  assert.match(b.reason, /不见了/);
+});

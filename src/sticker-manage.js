@@ -237,6 +237,8 @@ export function removeFiles(dirs, files, opts = {}) {
   }
 
   const removed = [];
+  /** 删掉的绝对路径。图库要按它清记录——`rel` 在多根配置下会重名，不能当键 */
+  const removedPaths = [];
   const failed = [];
   for (const f of list) {
     const hit = locate(dirs, f);
@@ -252,6 +254,7 @@ export function removeFiles(dirs, files, opts = {}) {
         try { unlinkSync(side); } catch { /* 侧车删不掉不影响图已删的事实 */ }
       }
       removed.push(hit.rel);
+      removedPaths.push(hit.abs);
     } catch (e) {
       failed.push({ file: f, reason: String(e?.message || e) });
     }
@@ -259,6 +262,7 @@ export function removeFiles(dirs, files, opts = {}) {
   return {
     ok: failed.length === 0,
     removed,
+    removedPaths,
     failed,
     message: failed.length
       ? `删了 ${removed.length} 张，${failed.length} 张没删掉`
