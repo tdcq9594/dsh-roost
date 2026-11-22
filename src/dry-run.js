@@ -44,6 +44,23 @@ const PLACEHOLDER_TEXT = new Set(['（已按用户要求遗忘）', '（已清�
 
 const clamp01 = (n) => Math.min(1, Math.max(0, Number.isFinite(n) ? n : 0.5));
 
+/**
+ * 证据账本的归一化，**内联**不 import memory.js（本模块保持纯函数、零副作用）。
+ * 口径与 `memory.js` 的 `evidenceOf` 一致，由 dry-run.test.js 的字段快照锁死。
+ * 默认值：0 条 / 空 / 满信念——老库没有这些字段时逐字节还原。
+ */
+function evidenceOf(e) {
+  const raw = Array.isArray(e?.evidence) ? e.evidence : [];
+  return {
+    proofs: Math.max(0, Number(e?.proofs) || 0),
+    evidence: raw.slice(0, 12),
+    confidence: (() => {
+      const v = Number(e?.confidence);
+      return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1;
+    })(),
+  };
+}
+
 /** 一条记忆的「保留度」，R = e^(−Δt/τ)。两路共用，字段由 normalizeEntry 归一好 */
 export function retentionR(entry, now = Date.now()) {
   const at = Number(entry?.at) || now;
@@ -101,6 +118,11 @@ export function normalizeEntry(raw, target, chatId = '') {
     pin: Number(e.pin) || 0,
     reviewedAt: Number(e.reviewedAt) || 0,
     archivedAt: Number(e.archivedAt) || 0,
+    /**
+     * 证据账本三件套：这一行会一路走到 `memory.insertRaw()`，
+     * 少带一个字段就等于「清理→后悔→还原」把证据悄悄抹掉。
+     */
+    ...evidenceOf(e),
   };
 }
 
