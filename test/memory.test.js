@@ -682,8 +682,11 @@ function fakeMemory() {
   return {
     global,
     chats,
-    add(chatId, fact, scope = 'global') {
+    /** 记录每次 add 的 opts，供证据账本断言（老用例不读，行为不变） */
+    addCalls: [],
+    add(chatId, fact, scope = 'global', opts = {}) {
       const list = scope === 'chat' ? (chats[chatId] = chats[chatId] || []) : global;
+      this.addCalls.push({ chatId, fact, scope, opts });
       if (!list.includes(fact)) list.push(fact);
       return true;
     },
@@ -2586,4 +2589,29 @@ test('证据：清理→还原后证据字段还在（四处白名单）', () =>
   assert.equal(restored.proofs, 2, 'insertRaw 后证据条数不丢');
   assert.equal(restored.confidence, 0.75, 'insertRaw 后置信度不丢');
   assert.equal(restored.evidence.length, 2, 'insertRaw 后出处不丢');
+});
+
+/* ---------------- 证据账本的真实写入点：巩固写约定（2026-11-23） ---------------- */
+
+test('证据：巩固写约定时带 evidence，重提同一约定累计成 reinforce', async () => {
+  const now = Date.now();
+  const day = Y(now);
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const mem = fakeMemory();
+  j.add({ id: 'a1', at: base, chatId: 'g1', sender: '张三', text: '周末一起看电影' });
+
+  const gen = async () => JSON.stringify({
+    summary: '约了周末看电影。',
+    ranks: [], compress: [], triples: [],
+    agreements: ['周末一起看电影'], closed: [],
+  });
+  const c = createConsolidate({ journal: j, graph: null, memory: mem, generate: gen, now: () => now });
+  await c.run({ day });
+
+  const call = mem.addCalls.find((x) => x.fact.includes('周末一起看电影'));
+  assert.ok(call, '约定写进去了');
+  assert.equal(call.opts.evidence?.kind, 'consolidate', '约定写入带证据出处');
+  assert.ok(call.opts.evidence?.detail?.includes(day), '证据带日期便于追溯');
+  assert.equal(call.opts.src?.journalId, 'a1', '原出处照旧保留（不抢 src）');
 });

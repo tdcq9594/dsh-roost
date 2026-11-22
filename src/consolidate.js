@@ -839,6 +839,20 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
             eventIds: list.slice(-20).map((r) => r.id),
             at,
           },
+          /**
+           * 同一份出处同时作为**证据**落进账本（2026-11-23，P0）。
+           *
+           * 约定每天巩固都可能被再抽一次——「周末看电影」今天记、明天又提，
+           * 这应该是 reinforce（证据+1、更牢），而不是每次当新事实写。
+           * `add()` 的重提分支认 `opts.evidence` 才累计；不传就只有 w+0.5，
+           * 看不出"有几条独立出处"。detail 只留日志 id 前缀，不抄原文
+           * （证据账本不是第二个原文库，正文在 journal 里）。
+           */
+          evidence: {
+            kind: 'consolidate',
+            detail: `day:${day} / ${list.length} 条日记`,
+            at,
+          },
         },
       );
       graph?.addEdge?.({ src: '主人', rel: '约定', dst: item.text.slice(0, 40), at, chatId });
