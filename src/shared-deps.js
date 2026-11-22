@@ -23,11 +23,22 @@
  *      被改一下就等于交出了整台机器。白名单是这条链路的唯一闸门。
  */
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { join, delimiter } from 'node:path';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync } from 'node:fs';
+import { join, delimiter, dirname } from 'node:path';
+import { createRequire } from 'node:module';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { dataDir } from './config.js';
 import { registryArgs } from './npm-registry.js';
+
+/**
+ * 本模块所在目录（`src/`）。宿主自己的 `node_modules` 在它的上一级。
+ *
+ * 用 `import.meta.url` 而不是 `process.cwd()`：宿主可能被 DSH 从任意工作目录
+ * 启动，`cwd()` 指向用户的项目目录，拿它拼 `node_modules` 会去翻错地方。
+ */
+const SRC_DIR = dirname(fileURLToPath(import.meta.url));
+const HOST_ROOT = dirname(SRC_DIR);
 
 /**
  * 允许安装的包。加新包前先想清楚：它有没有 postinstall 脚本？
@@ -41,6 +52,7 @@ export const WHITELIST = Object.freeze({
   '@ffmpeg-installer/ffmpeg': {
     range: '^1.1.0',
     size: '~62MB',
+    group: 'media',
     desc: '视频抽帧、音频转码',
   },
   /**
@@ -53,7 +65,30 @@ export const WHITELIST = Object.freeze({
   qrcode: {
     range: '^1.5.4',
     size: '~1.6MB（含传递依赖）',
+    group: 'misc',
     desc: '生成二维码（扫码登录）',
+  },
+  /**
+   * 图片处理：**整块图库增强的地基**（2026-11-22 加）。
+   *
+   * 解锁三件事，都是「没有它就只能糊弄」的：
+   *   · 感知哈希去重（`@jimp/plugin-hash` 自带，不必自己解像素）
+   *   · 真缩略图（现在 `/stickers/thumb` 只是原图直出，大图很费流量）
+   *   · 多图拼长图（两家参考实现都做了，用户感知最强）
+   *
+   * **已经按本文件的规矩验过 postinstall**：`npm view jimp scripts` 只有
+   * lint / test / build / dev / clean，没有 `postinstall` / `install` / `prepare`，
+   * 所以 `--ignore-scripts` 下装得全。主包 3.3MB，连 27 个 `@jimp/*` 子包
+   * 装完约 15~20MB——纯 JS，没有原生二进制，跨平台不用挑平台子包。
+   *
+   * 属于**可选增强**：没装时图库退回「不做去重、缩略图直出原图、不拼图」，
+   * 一条功能都不会因此报错。
+   */
+  jimp: {
+    range: '^1.6.1',
+    size: '~15MB（27 个子包）',
+    group: 'image',
+    desc: '图片处理：感知哈希去重、缩略图、拼长图',
   },
 });
 
@@ -62,6 +97,269 @@ const FFMPEG = '@ffmpeg-installer/ffmpeg';
 /** 装在哪：跟着宿主数据目录，升级/卸载扩展都不动它 */
 export function depsDir() {
   return join(dataDir(), 'deps');
+}
+
+/**
+ * 已安装扩展的目录（宿主启动时、以及每次装/卸扩展后注入）。
+ *
+ * **为什么不在本模块里直接去问 `ext-registry`**：那会让「依赖」这一层依赖
+ * 「扩展注册表」，而注册表自己要用 config、要读磁盘清单；哪天注册表也想
+ * 用一下 ffmpeg，就成了循环依赖。所以走注入——谁手里有清单，谁告诉我。
+ *
+ * 每项 `{ id, dir }`（`dir` 是扩展根目录）。扩展可能以两种布局放依赖：
+ *   · `<dir>/node_modules/<pkg>`      —— 扩展自带 package.json，框架装好的
+ *   · `<dir>/deps/node_modules/<pkg>` —— 宿主注入 `ROOST_DEPS_DIR` 的那份
+ */
+let extDirs = [];
+
+/** 找过的结论缓存：面板可能每秒问一次，别反复读盘 */
+const foundCache = new Map();
+
+/** 已加载的模块（`remove()` 之后要清，否则「卸载了还能用」） */
+const loaded = new Map();
+
+/** 从任意目录解析包用；不占用宿主自己的模块查找路径 */
+const reqAny = createRequire(import.meta.url);
+
+/**
+ * 注入已安装扩展目录，返回生效条数。
+ *
+ * 传 `[]` / `null` 表示清空。**目录变了必须清缓存**——否则「在扩展 A 里
+ * 找到过 jimp」这个结论会一直留着，卸载 A 之后仍然说「有」。
+ */
+export function setExtDirs(list) {
+  extDirs = (Array.isArray(list) ? list : [])
+    .map((x) => ({ id: String(x?.id ?? '').trim(), dir: String(x?.dir ?? '').trim() }))
+    .filter((x) => x.id && x.dir);
+  foundCache.clear();
+  loaded.clear();
+  return extDirs.length;
+}
+
+/** 当前注入的扩展目录（面板要显示「这些目录也找过了」） */
+export function extDirsSnapshot() {
+  return extDirs.map((x) => ({ ...x }));
+}
+
+/**
+ * 所有可能装着包的根目录，**顺序即优先级**。
+ *
+ * 共享目录优先：那是面板装的地方，用户以为「装在这里」。扩展目录排后面
+ * 只作兜底复用，为的是「明明扩展里已经有一份，别再让用户下一遍 15MB」。
+ * 宿主自身排最后：那条只在开发机（仓库根跑过 npm i）上才可能命中。
+ */
+function candidateDirs() {
+  const out = [{ kind: 'shared', id: '', dir: depsDir(), label: '共享依赖目录' }];
+  for (const e of extDirs) {
+    out.push({ kind: 'ext', id: e.id, dir: e.dir, label: `扩展 ${e.id}` });
+    out.push({ kind: 'ext', id: e.id, dir: join(e.dir, 'deps'), label: `扩展 ${e.id} / deps` });
+  }
+  out.push({ kind: 'host', id: '', dir: HOST_ROOT, label: '宿主自身' });
+  return out;
+}
+
+/**
+ * 某个根目录下这个包在不在：在就返回版本号，不在返回空串。
+ *
+ * **只认「能读出 version 的 package.json」**，不认目录存在就算。装到一半
+ * 断电、杀毒隔离都会留下空壳目录；把它判成「已装」比判成「没装」更害人
+ * ——用户点安装没反应，因为面板以为已经好了。
+ */
+function versionAt(dir, name) {
+  try {
+    return String(JSON.parse(readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8')).version ?? '');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 找包：返回第一个装着它的根目录。
+ *
+ * @param {string} name 必须在 WHITELIST 里（不在的一律 null，防止拿它当通用文件探测器）
+ * @param {{fresh?: boolean}} [o] `fresh` 跳过缓存（刚装/刚卸完用）
+ * @returns {{kind:'shared'|'ext'|'host', id:string, dir:string, label:string,
+ *            version:string, path:string}|null}
+ */
+export function findPackage(name, { fresh = false } = {}) {
+  const pkg = String(name ?? '').trim();
+  if (!Object.hasOwn(WHITELIST, pkg)) return null;
+  if (!fresh && foundCache.has(pkg)) return foundCache.get(pkg);
+
+  let hit = null;
+  for (const c of candidateDirs()) {
+    const version = versionAt(c.dir, pkg);
+    if (!version) continue;
+    hit = { ...c, version, path: join(c.dir, 'node_modules', pkg) };
+    break;
+  }
+  foundCache.set(pkg, hit);
+  return hit;
+}
+
+/**
+ * 扫描全部白名单包 × 全部候选目录。
+ *
+ * **给面板画图用**，不是给程序判断用的：程序判断「能不能用」请走
+ * `findPackage()` / `load()`，那两处有同一套优先级和缓存。
+ */
+export function scan() {
+  const dirs = candidateDirs().map((c) => ({ kind: c.kind, id: c.id, dir: c.dir, label: c.label }));
+  const packages = {};
+  for (const [name, meta] of Object.entries(WHITELIST)) {
+    foundCache.delete(name);
+    const hits = [];
+    for (const c of dirs) {
+      const version = versionAt(c.dir, name);
+      if (version) hits.push({ ...c, version });
+    }
+    packages[name] = {
+      ...meta,
+      found: hits[0] ?? null,
+      hits,
+      /**
+       * 只有共享目录那份归面板管。扩展目录/host 目录里的是别人的，
+       * 面板只能显示「在那儿有一份」，不能替它删。
+       */
+      removable: hits.some((x) => x.kind === 'shared'),
+    };
+  }
+  return { dir: depsDir(), dirs, packages };
+}
+
+/**
+ * 加载一个白名单包。**没装、装了但加载失败，都返回 `null`，绝不抛。**
+ *
+ * 调用方一律按「缺这个能力」降级——图库少了 jimp 只是不做去重和缩略图，
+ * 不该让整个面板或一条消息处理崩掉。这也是 `bot/src/ext-deps.js:566` 的姿势。
+ *
+ * 解析用 `reqAny.resolve(pkg, { paths: [命中目录] })`：**从包实际所在的目录
+ * 往上找 node_modules**，而不是靠宿主自己的模块路径。否则「扩展目录里有一份」
+ * 这种情况永远加载不到——那正是本函数支持多目录的意义。
+ */
+export async function load(name, { fresh = false } = {}) {
+  const pkg = String(name ?? '').trim();
+  if (!Object.hasOwn(WHITELIST, pkg)) return null;
+  if (!fresh && loaded.has(pkg)) return loaded.get(pkg);
+  loaded.delete(pkg);
+
+  const hit = findPackage(pkg, { fresh });
+  if (!hit) {
+    loaded.set(pkg, null);
+    return null;
+  }
+
+  let mod = null;
+  try {
+    const abs = reqAny.resolve(pkg, { paths: [hit.dir] });
+    try {
+      mod = reqAny(abs);
+    } catch (e) {
+      const code = String(e?.code ?? '');
+      if (code === 'ERR_REQUIRE_ESM' || code === 'ERR_REQUIRE_ASYNC_MODULE') {
+        /* 双格式包（jimp 就是）也可能只给了 import 入口，这时按 ESM 再试一次 */
+        mod = await import(pathToFileURL(abs).href);
+      } else {
+        throw e;
+      }
+    }
+  } catch {
+    /* 静默：本模块没有日志通道，而「加载失败」的语义就是「当作没有」。
+       真要排查的话，面板的「功能包」页会显示它到底在哪、版本多少。 */
+    mod = null;
+  }
+  loaded.set(pkg, mod);
+  return mod;
+}
+
+/**
+ * 扫「别的运行时目录」——**只读，不装不卸**。
+ *
+ * 宿主有些依赖不走白名单：语音引擎装在自己的 `dataDir/tts-runtime`、
+ * 微软那套在线 TTS 装在自己的 `dataDir/tts-edge`，各有各的安装器与进度条
+ * （`tts-install.js`）。把它们硬塞进这里的安装流程，等于两套 npm 逻辑
+ * 互相踩，还会让「谁在装」有两个真相。
+ *
+ * 所以功能包页只把它们**列出来**：有这个目录、里面有哪些包、去哪管。
+ * 这样用户在一页里能看全「本体到底装了什么」，但动手还是回各自的页面。
+ *
+ * @param {{id:string,label:string,dir:string}[]} list 由 host 决定要看哪些目录
+ */
+export function runtimeScan(list = []) {
+  return (Array.isArray(list) ? list : []).map((x) => {
+    const dir = String(x?.dir ?? '');
+    const nm = join(dir, 'node_modules');
+    /** 顶层条目；`@scope` 展开一层，否则只会看到 `@sherpa` 这种没信息量的名字 */
+    const names = [];
+    try {
+      for (const e of readdirSync(nm, { withFileTypes: true })) {
+        if (e.name.startsWith('.')) continue;
+        if (e.name.startsWith('@') && e.isDirectory()) {
+          try {
+            for (const s of readdirSync(join(nm, e.name), { withFileTypes: true })) {
+              if (s.isDirectory() && !s.name.startsWith('.')) names.push(`${e.name}/${s.name}`);
+            }
+          } catch { /* 权限/竞态：跳过这一个 scope */ }
+          continue;
+        }
+        if (e.isDirectory()) names.push(e.name);
+        if (names.length >= 20) break;
+      }
+    } catch { /* 目录不存在 = 没装，正常 */ }
+    return {
+      id: String(x?.id ?? ''),
+      label: String(x?.label ?? ''),
+      dir,
+      exists: names.length > 0,
+      packages: names.slice(0, 20),
+    };
+  });
+}
+
+/**
+ * 卸载共享目录里的包。
+ *
+ * **只删共享目录那一份**。如果包只存在于扩展目录，返回失败并说明它在哪——
+ * 那是扩展自己的依赖，面板替它删会把扩展弄坏。`name` 必须先过白名单，
+ * 这样拼路径时不可能出现 `../`。
+ */
+export function remove(name) {
+  const pkg = String(name ?? '').trim();
+  if (!Object.hasOwn(WHITELIST, pkg)) {
+    return { ok: false, name: pkg, message: `不在白名单里：${pkg || '(空)'}` };
+  }
+  if (!versionAt(depsDir(), pkg)) {
+    const elsewhere = findPackage(pkg, { fresh: true });
+    return {
+      ok: false,
+      name: pkg,
+      message: elsewhere
+        ? `共享目录里没有，但「${elsewhere.label}」里有一份（${elsewhere.version}）。那份不归面板管，要删得去那个目录`
+        : '共享目录里没有装这个包',
+    };
+  }
+
+  try {
+    rmSync(join(depsDir(), 'node_modules', pkg), { recursive: true, force: true });
+  } catch (e) {
+    return { ok: false, name: pkg, message: `删除失败：${e?.message ?? e}（可能正被占用，重启宿主后再试）` };
+  }
+
+  /**
+   * 从 `package.json` 里摘掉。不摘的话下次装别的包时 npm 会按这份清单把它
+   * 装回来——用户会看到「卸载了，刷新又有了」这种鬼故事。
+   */
+  try {
+    const file = join(depsDir(), 'package.json');
+    const cur = JSON.parse(readFileSync(file, 'utf8'));
+    if (cur?.dependencies && Object.hasOwn(cur.dependencies, pkg)) {
+      delete cur.dependencies[pkg];
+      writeFileSync(file, `${JSON.stringify(cur, null, 2)}\n`, 'utf8');
+    }
+  } catch { /* 手装的包没有 package.json，很正常 */ }
+
+  resetCache();
+  return { ok: true, name: pkg, message: '已卸载' };
 }
 
 /** 平台子包目录名；不认识的平台返回空串 */
@@ -182,9 +480,11 @@ let current = null;
  * 所以 `ready` 恒为 true，面板按 `packages[].available` 逐项显示。
  */
 export function status() {
+  const s = scan();
   const packages = {};
-  for (const [name, meta] of Object.entries(WHITELIST)) {
-    const version = installedVersion(name);
+  for (const [name, info] of Object.entries(s.packages)) {
+    /** 版本来自「第一个命中」，不是只看共享目录——扩展里那份也算能用 */
+    const version = info.found?.version ?? '';
     const binary = name === FFMPEG ? ffmpegBinary({ fresh: true }) : '';
     /**
      * **以二进制为准**，不看版本号：包目录在、`package.json` 也在、
@@ -203,13 +503,29 @@ export function status() {
        * 里其实什么都没有。系统那份单独给，面板可以据此提示「不用再下 62MB」。
        */
       system: name === FFMPEG ? systemFfmpeg() : '',
-      range: meta.range,
-      size: meta.size,
-      desc: meta.desc,
+      range: info.range,
+      size: info.size,
+      /** 面板按它分组（image / media / misc），新增包忘了写就落 misc */
+      group: info.group ?? 'misc',
+      desc: info.desc,
+      /**
+       * 2026-11-22：**这个包是在哪个目录找到的**。
+       *
+       * 面板必须显示它，否则用户看到「已装」却不知道装在哪、能不能卸。
+       * `removable` 只在共享目录里有时为真——扩展目录那份是扩展的，
+       * 面板只能显示、不能删。
+       */
+      found: info.found,
+      hits: info.hits,
+      removable: info.removable,
     };
   }
   return {
-    dir: depsDir(),
+    dir: s.dir,
+    /** 这次扫过的全部根目录，面板列出来让用户知道「自动查找」找过哪儿 */
+    dirs: s.dirs,
+    /** 已注入的扩展目录（`setExtDirs` 那份） */
+    extDirs: extDirsSnapshot(),
     ffmpeg: ffmpegBinary(),
     /** 系统里那份 ffmpeg 的路径；没有就是空串 */
     systemFfmpeg: systemFfmpeg(),
@@ -265,6 +581,31 @@ export function install(name = FFMPEG, {
   const pkg = String(name ?? '').trim();
   if (!Object.hasOwn(WHITELIST, pkg)) {
     return Promise.resolve({ ok: false, name: pkg, message: `不在白名单里：${pkg || '(空)'}` });
+  }
+
+  /**
+   * **自动查找优先于下载**（2026-11-22）。
+   *
+   * 如果这个包已经躺在某个扩展目录里（扩展自带 `package.json`，由框架装好的），
+   * 就直接复用那一份，不再下一遍 15MB——`load()` 本来就会去那些目录找，
+   * 所以「复用」是可用的，不是自欺欺人。
+   *
+   * **ffmpeg 例外**：它能不能用取决于平台子包里的可执行文件，而
+   * `ffmpegBinary()` 只认共享目录；判成「扩展里有」会让面板显示已装、
+   * 实际却找不到 exe。所以 ffmpeg 一律走原来的二进制判定。
+   */
+  if (pkg !== FFMPEG) {
+    const reused = findPackage(pkg, { fresh: true });
+    if (reused && reused.kind !== 'shared') {
+      return Promise.resolve({
+        ok: true,
+        name: pkg,
+        path: reused.path,
+        skipped: true,
+        source: reused.kind,
+        message: `「${reused.label}」里已有一份 ${reused.version}，直接复用，不再下载`,
+      });
+    }
   }
 
   /**
@@ -389,6 +730,9 @@ export function install(name = FFMPEG, {
             });
           }
           log(`共享依赖已就绪：${pkg}${bin ? ` → ${bin}` : ''}`);
+          /** 装完必须让「在哪找到 / 加载过什么」的缓存失效，否则面板仍说没装 */
+          foundCache.delete(pkg);
+          loaded.delete(pkg);
           resolve({ ok: true, name: pkg, path: bin, message: '装好了' });
         },
       );
@@ -412,4 +756,28 @@ export function install(name = FFMPEG, {
 /** 给宿主内部用的便捷判断：ffmpeg 能不能用（以后语音转码、图片处理都能调） */
 export function hasFfmpeg() {
   return Boolean(ffmpegBinary());
+}
+
+/**
+ * 清全部缓存：模块、查找结论、ffmpeg 两条路径判定。
+ *
+ * `install()` / `remove()` 之后必须调。**只清自己那份没用**：Node 的
+ * `require.cache` 还拿着旧模块，表现是「卸载了但还能加载」——面板上
+ * 点了卸载、功能照旧可用，用户会以为是按钮坏了。
+ */
+export function resetCache() {
+  loaded.clear();
+  foundCache.clear();
+  ffmpegCache = undefined;
+  systemFfmpegCache = undefined;
+  try {
+    /**
+     * 只删**共享目录下**的模块缓存，不整个清空、也不碰扩展目录那份：
+     * 宿主自己有模块在跑，清一片会牵连无关代码；而扩展的依赖归扩展管。
+     */
+    const root = depsDir();
+    for (const key of Object.keys(reqAny.cache ?? {})) {
+      if (key.startsWith(root)) delete reqAny.cache[key];
+    }
+  } catch { /* 缓存结构变化不该让卸载失败 */ }
 }
