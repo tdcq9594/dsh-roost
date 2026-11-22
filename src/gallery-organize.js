@@ -180,12 +180,15 @@ export function createOrganizeJob({ items = [], worker, apply, concurrency = MAX
  *
  * 超限直接抛：`ext-llm.js` 那边会把它过滤掉，最后报「没有可用的图片」——
  * 那句话对用户毫无信息量，不如在这里说清「这张图太大」。
+ *
+ * `maxB64` 可放宽：走「直接塞进上下文」那条路时图不必缩到视觉模型的
+ * 400 KB 以内（附件服务自己会归一化），只有转交视觉模型时才受那个上限约束。
  */
-export function imageForVision(path, file = path) {
+export function imageForVision(path, file = path, { maxB64 = MAX_B64 } = {}) {
   const buf = readFileSync(path);
   const data = buf.toString('base64');
-  if (data.length > MAX_B64) {
-    throw new Error(`图太大（base64 ${Math.round(data.length / 1000)}KB，上限 ${MAX_B64 / 1000}KB）`);
+  if (data.length > maxB64) {
+    throw new Error(`图太大（base64 ${Math.round(data.length / 1000)}KB，上限 ${Math.round(maxB64 / 1000)}KB）`);
   }
   return { data, mediaType: mediaTypeOf(file) };
 }

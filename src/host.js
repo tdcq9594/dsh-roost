@@ -89,6 +89,7 @@ import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { registerStickerTools } from './sticker-tools.js';
 import { registerGalleryTools } from './gallery-tools.js';
 import { createOrganizeJob, imageForVision, parseDescribe, DESCRIBE_PROMPT } from './gallery-organize.js';
+import { fetchImage } from './remote-image.js';
 import { createExternalAnnotations } from './gallery-annotations.js';
 import { createSpeakUp, shouldFire, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
 import { createProactiveQueue, createProactiveDispatcher } from './ext-proactive.js';
@@ -6011,7 +6012,128 @@ export function apply(ctx) {
         });
 
       /**
-       * 图库工具：`gallery_list / save / edit / remove`。
+       * 当前这一轮的模型能不能**直接收图**。
+       *
+       * 只认 `llm.resolveModelInfo()`——适配层判断「这个模型收不收图」用的是
+       * 同一份能力表（`dsh-llm-deepseek/src/images.ts`：`inputModalities`
+       * 必须含 `image`，否则抛 `UNSUPPORTED_CONTENT`）。**不去问
+       * `modelCatalog.canSee()`**：那是给「另起一次视觉调用」用的，答错了只是
+       * 白跑一趟；这里答错的后果不对称——
+       *
+       *   把「不能」判成「能」→ 图进了历史，之后**每一轮**请求都被拒，
+       *   整个会话废掉；把「能」判成「不能」→ 最多是走视觉模型代看，慢一点。
+       *
+       * 所以查不到、抛错、字段缺失，一律 false。
+       */
+      const galleryModelSeesImage = async () => {
+        try {
+          const curModel = agent?.model?.current?.();
+          const provider = String(curModel?.provider ?? '');
+          const model = String(curModel?.model ?? '');
+          if (!model) return false;
+          const info = await ctx?.get?.('llm')?.resolveModelInfo?.(provider, model);
+          const mods = info?.inputModalities;
+          return Array.isArray(mods) && mods.includes('image');
+        } catch {
+          return false;
+        }
+      };
+
+      /**
+       * 看一张图。**两条路**，先看能不能直接把图交上去。
+       *
+       * 为什么不一律走「视觉模型代看」：那条路要多花一次调用，而且模型拿到的是
+       * 别人的转述——问「图里的字是什么」时转述经常丢掉细节。当前模型能收图时
+       * 直接把图给它，它自己看最准，还省一次调用。
+       */
+      const galleryShowOf = async ({ seq, ask } = {}) => {
+        const path = gallery.pathOf(seq, cfg.stickers);
+        if (!path) return { ok: false, message: `没有 #${seq} 这张图（可能已撤下，或文件被移走了）` };
+        const q = String(ask ?? '').trim();
+
+        if (await galleryModelSeesImage()) {
+          const att = ctx?.get?.('attachments');
+          if (att && typeof att.admitPromptContent === 'function') {
+            try {
+              /**
+               * 走附件登记那条路：`admitPromptContent` 会把 base64 换成
+               * **内容寻址的引用**（同一个图重复看不会重复存），返回的块很小，
+               * 不会被工具输出的 4 KB 预算剥掉。
+               *
+               * 上限放宽到 ~8 MB 原图：附件服务自己会归一化尺寸，不用先缩到
+               * 视觉模型那个 400 KB。
+               */
+              const img = imageForVision(path, path, { maxB64: 11_000_000 });
+              const [block] = await att.admitPromptContent([
+                { type: 'image', data: img.data, mediaType: img.mediaType },
+              ]);
+              if (block?.attachment) {
+                return {
+                  ok: true,
+                  text: q
+                    ? `#${seq} 的图附在这条消息后面，你自己看。`
+                    : `#${seq} 的图附在这条消息后面，自己看画的是什么。`,
+                  blocks: [block],
+                };
+              }
+            } catch (e) {
+              /** 登记失败（图太大 / 附件服务异常）：退到视觉模型那条路 */
+              log.warn(`#${seq} 没能直接给模型看（${e?.message ?? e}），改用视觉模型代看`);
+            }
+          }
+        }
+
+        /** 退路：视觉模型代看。单张 400 KB 上限是 `ext-llm.js` 的硬约束 */
+        let img;
+        try {
+          img = imageForVision(path, path);
+        } catch (e) {
+          return { ok: false, message: e?.message ?? String(e) };
+        }
+        const r = await llmVision({
+          prompt: q
+            ? ['这是一张表情包或图片。只按画面上能确定的内容回答，看不出来就说看不出来。', `问题：${q}`].join('\n')
+            : DESCRIBE_PROMPT,
+          images: [img],
+          maxTokens: 400,
+          extId: 'host-gallery',
+        });
+        if (!r?.ok) return { ok: false, message: r?.message ?? '视觉模型没回话' };
+        const out = { ok: true, text: r.text };
+        /** 没指定问题就是在「描述画面」：顺手把能直接写进图库的字段解析出来 */
+        if (!q) {
+          const patch = parseDescribe(r.text);
+          if (patch) out.suggest = patch;
+        }
+        return out;
+      };
+
+      /**
+       * 存图。网址那条路**先下载再入库**（SSRF 判断在 `remote-image.js`），
+       * 本地路径 / `last` 直接交给 `gallery.save`——那一层保持同步、不碰网络。
+       */
+      const gallerySaveOf = async (o = {}) => {
+        const from = String(o?.from ?? '').trim();
+        if (!/^https?:\/\//i.test(from)) return gallery.save(o, cfg.stickers);
+        const got = await fetchImage(from, { log: (m) => log.warn(m) });
+        if (!got.ok) return { ok: false, message: `没取到这张图：${got.message}` };
+        /**
+         * 网址末段当**磁盘文件名**（`cat-404.png` → `cat-404`），不当标注：
+         * 拿它当 `name` 会让这些图被 `pending()` 判成「已标注」，
+         * 「让 AI 整理」再也不会碰它们。
+         */
+        let fileName = '';
+        try {
+          const seg = new URL(from).pathname.split('/').filter(Boolean).pop() || '';
+          fileName = decodeURIComponent(seg).replace(/\.[a-z0-9]{1,5}$/i, '');
+        } catch { /* 取不出来就用默认名 */ }
+        const r = gallery.save({ ...o, fileName, buf: got.buf, ext: got.ext, src: 'url' }, cfg.stickers);
+        if (r.ok && !r.dup) log.info(`图库从网址入库 #${r.seq}：${got.bytes} 字节（${got.mime}）`);
+        return r;
+      };
+
+      /**
+       * 图库工具：`gallery_list / show / save / edit / remove`。
        *
        * 和 `sticker_pick` 并存而不是取代它：`sticker_pick` 按分类给路径，是
        * 「工具箱里那张老地图」；序号这层是新路，模型愿意走哪条都行。真要发图，
@@ -6027,9 +6149,11 @@ export function apply(ctx) {
           n: Number.parseInt(String(n ?? ''), 10) || undefined,
           fresh: String(fresh ?? '') === '1',
         }),
-        saveOf: (o) => gallery.save(o, cfg.stickers),
+        saveOf: gallerySaveOf,
         editOf: (seq, patch) => gallery.edit(seq, patch),
         removeOf: (seq) => gallery.remove(seq),
+        showOf: galleryShowOf,
+        turnKeyOf: () => qqTurn.get(cur().sid)?.id || '',
         callerOf: () => cur(),
         log: (m) => log.warn(m),
       })

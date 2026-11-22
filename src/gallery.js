@@ -76,10 +76,11 @@ export const MAX_LIST = 30;
 export const GALLERY_HINT = [
   '【图库】你的图有一个带序号的图库，每张图都有编号、名字和「什么场合用」。',
   '想看有哪些图：调 gallery_list（可以指定分类，也可以只看没见过的）。',
+  '不确定某张图到底画了什么、或者想问它某个细节：调 gallery_show 看一眼——它是真的看图，不是靠文件名猜。',
   '发图时只写序号：`<<image: #3>>`（图和文字同一条）或 `<<image-alone: #3>>`（单独一条）。',
-  '**不要写文件路径，也不要写网址**——宿主会把序号换成图。序号写错这张就不发，'
+  '**发图时**不要写文件路径，也不要写网址——宿主会把序号换成图。序号写错这张就不发，'
     + '不会把奇怪的字符串发进群里。',
-  '看到想留的图（刚收到的图、或主人给的本地文件）用 gallery_save 存进来；'
+  '看到想留的图用 gallery_save 存进来：刚收到的图填 last，本地文件填路径，网上的图填 http(s) 链接；'
     + '整理已有的图用 gallery_edit（改名字/含义/场合）和 gallery_remove（撤下来）。',
 ].join('\n');
 
@@ -547,38 +548,52 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
   /**
    * 存一张图进库。
    *
-   * 来源两种（`from`）：
+   * 来源三种：
    *   · `last` —— 最近一条**入站消息**里的图（`turn.js` 已落到 `<data>/images/`）
    *   · 本地路径 —— 主人或 AI 手上的文件
+   *   · `o.buf` —— 调用方**已经把字节拿到手**了（网址下载走这条）。
    *
-   * `http(s)://` 首版不支持：拉外链要防 SSRF（`127.0.0.1`、`169.254.*`、
-   * 内网段都要拦），那套判断写错了就是把内网探测能力交给模型。等有人真的
-   * 需要再加，现在只说「不支持」。
+   * 网址为什么不在这一层下载：拉外链要先防 SSRF（`127.0.0.1`、`169.254.*`、
+   * 内网段），那套判断放在 `remote-image.js` 里单独测。这一层保持**纯同步**，
+   * 不碰网络——否则每个调用点都要变成 async，测试也得跟着变成异步。
    *
    * **幂等**：同一张图已在库里就返回原序号，不新建。模型会重复保存同一张图
    * （它不记得上次存过），不幂等的话库里很快堆满一模一样的副本。
    */
   const save = (o = {}, cfg = {}) => {
     const from = String(o.from ?? '').trim();
-    if (!from) return { ok: false, message: '要说明图从哪来：from="last" 或一个本地文件路径' };
-    if (/^https?:\/\//i.test(from)) {
-      return { ok: false, message: '暂不支持直接用网址：先把图下载到本地，再用本地路径入库' };
+    const injected = Buffer.isBuffer(o.buf) ? o.buf : null;
+    if (!from && !injected) {
+      return { ok: false, message: '要说明图从哪来：from="last"、一个本地文件路径，或一个图片网址' };
+    }
+    if (!injected && /^https?:\/\//i.test(from)) {
+      /**
+       * 走到这里说明调用方没先下载就把它交进来了。明确报错而不是偷偷把网址
+       * 当文件名——那样 `existsSync` 会失败，报「找不到这个文件」，用户会
+       * 以为自己路径写错了。
+       */
+      return { ok: false, message: '网址要先下载：宿主那边负责取图，这一层只收字节' };
     }
 
+    /** 本地源文件（`copyFileSync` 用）。走 `o.buf` 时为 null */
     let src = '';
-    if (from === 'last') {
-      src = latestInboundImage();
-      if (!src) return { ok: false, message: '最近没有收到图片（10 分钟内）' };
-    } else {
-      src = from;
-      if (!existsSync(src)) return { ok: false, message: `找不到这个文件：${from}` };
+    if (!injected) {
+      if (from === 'last') {
+        src = latestInboundImage();
+        if (!src) return { ok: false, message: '最近没有收到图片（10 分钟内）' };
+      } else {
+        src = from;
+        if (!existsSync(src)) return { ok: false, message: `找不到这个文件：${from}` };
+      }
     }
 
-    let buf;
-    try {
-      buf = readFileSync(src);
-    } catch (e) {
-      return { ok: false, message: `读不了这个文件：${e?.message ?? e}` };
+    let buf = injected;
+    if (!buf) {
+      try {
+        buf = readFileSync(src);
+      } catch (e) {
+        return { ok: false, message: `读不了这个文件：${e?.message ?? e}` };
+      }
     }
     if (!buf.length) return { ok: false, message: '这个文件是空的' };
     const sha = createHash('sha256').update(buf).digest('hex');
@@ -598,14 +613,31 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
 
     /** 落到表情库第一个根目录，分类给了就进子目录 */
     const root = pickSaveRoot(cfg);
-    const ext = extname(src).toLowerCase() || '.png';
+    /**
+     * 扩展名的三个来源，优先级从高到低：
+     *   · `o.ext` —— 网址那条路按**魔数**认出来的（最可信，URL 后缀经常是假的）；
+     *   · 源文件后缀；
+     *   · `.png` 兜底。
+     */
+    const ext = String(o.ext || '').toLowerCase() || (src ? extname(src).toLowerCase() : '') || '.png';
     const cat = clamp(o.cat, 12);
-    const base = safeFileName(o.name) || safeFileName(basename(src, extname(src))) || `gallery_${Date.now().toString(36)}`;
+    const stem = src ? basename(src, extname(src)) : '';
+    /**
+     * 落盘用的文件名，和记录上的 `name`（标注）**是两件事**。
+     *
+     * `o.fileName` 给的是「这张图在磁盘上叫什么」，比如从网址里取出来的
+     * `cat-404.png`；`o.name` 是给模型看的短名。混用会让「自动取了个文件名」
+     * 等于「已经标注过了」——`pending()` 只挑 name 和 meaning 都为空的图，
+     * 拿文件名当 name 会让这些图再也不会被「让 AI 整理」碰到。
+     */
+    const base = safeFileName(o.name) || safeFileName(o.fileName) || safeFileName(stem) || `gallery_${Date.now().toString(36)}`;
     const target = uniquePath(join(cat ? join(root, cat) : root, `${base}${ext}`));
 
     try {
       mkdirSync(dirname(target), { recursive: true });
-      copyFileSync(src, target);
+      /** 有源文件就复制（保留原样的字节与时间），没有就写调用方给的字节 */
+      if (src) copyFileSync(src, target);
+      else writeFileSync(target, buf);
     } catch (e) {
       return { ok: false, message: `复制失败：${e?.message ?? e}` };
     }
@@ -627,7 +659,12 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
       at: now(),
       usedAt: 0,
       hits: 0,
-      src: from === 'last' ? 'inbound' : 'upload',
+      /**
+       * 来源标记（面板/排障用）：`inbound` 刚收到的、`upload` 本地文件、
+       * `url` 从网址取的、`annotations` 只补了标注没进过库。
+       * 调用方可以显式指定，方便区分「从哪儿来的」。
+       */
+      src: String(o.src || '') || (from === 'last' ? 'inbound' : 'upload'),
       trash: false,
       missing: false,
     };

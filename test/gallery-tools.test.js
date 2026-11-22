@@ -1,8 +1,10 @@
-// 图库工具：模型侧的四个手（list / save / edit / remove）。
+// 图库工具：模型侧的五只手（list / show / save / edit / remove）。
 //
-// 两个不能破的边界：
+// 三个不能破的边界：
 //   1. 工具返回值里**不能出现路径或 URL**——「不给链接」是这次需求的底线；
-//   2. 写操作**只给主人**，且 execute 里再验一次（纵深防御）。
+//   2. 写操作**只给主人**，且 execute 里再验一次（纵深防御）；
+//   3. `show` 的图片块必须**原样**进返回内容——那是已登记的附件引用，
+//      丢掉它等于「说好给看图结果只给了句话」。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -130,4 +132,110 @@ test('取不到身份时按「不是主人」处理', async () => {
   });
   const r = await byName.gallery_save.execute({ from: 'last' });
   assert.equal(r.ok, false);
+});
+
+/* ---------------------------- 看图 ---------------------------- */
+
+/** 一个假附件引用。形状照 `admitPromptContent` 的返回，**小得不会触发 4 KB 预算** */
+const REF = { type: 'image', attachment: { attachmentId: 'att_abc123', encodedBytes: 2048 } };
+
+function withShow({ bucket = 'owner', turn = 't1', answer = {}, onCall } = {}) {
+  const calls = [];
+  const t = tools({
+    bucket,
+    over: {
+      turnKeyOf: () => turn,
+      showOf: async (o) => {
+        calls.push(o);
+        if (onCall) return onCall(o);
+        return { ok: true, text: '#3 的图附在这条消息后面，你自己看。', blocks: [REF], ...answer };
+      },
+    },
+  });
+  return { ...t, calls };
+}
+
+test('没给 showOf 就不挂 gallery_show（不留一个永远失败的按钮）', () => {
+  const { byName } = tools();
+  assert.equal(byName.gallery_show, undefined);
+});
+
+test('gallery_show：图片块原样进内容，文字在前', async () => {
+  const { byName } = withShow();
+  const r = await byName.gallery_show.execute({ seq: '#3' });
+  assert.equal(r.ok, true);
+  assert.equal(r.seq, 3);
+
+  const blocks = byName.gallery_show.output.render({}, r);
+  assert.equal(blocks[0].type, 'text');
+  assert.deepEqual(blocks[1], REF, '引用块必须原样带上，不能被改写或丢掉');
+  /**
+   * 附件引用必须小：DSH 有一个 4 KB 工具输出预算，超了会把**所有非文本块**
+   * 丢掉（`ext-usage.js:truncateToolContent`）。如果哪天有人改成塞 base64，
+   * 这条会立刻炸。
+   */
+  assert.ok(JSON.stringify(blocks).length < 4000, '整条返回要远小于 4 KB');
+});
+
+test('gallery_show：没有图片块时只回文字（视觉模型代看那条路）', async () => {
+  const { byName } = withShow({ answer: { blocks: undefined, text: '画面上是一只熊猫在笑' } });
+  const r = await byName.gallery_show.execute({ seq: '3' });
+  const blocks = byName.gallery_show.output.render({}, r);
+  assert.equal(blocks.length, 1);
+  assert.match(blocks[0].text, /熊猫/);
+});
+
+test('gallery_show：群友档拒绝，且不触发看图（那要花钱）', async () => {
+  const { byName, calls } = withShow({ bucket: 'chat' });
+  const r = await byName.gallery_show.execute({ seq: '3' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /主人和管理员/);
+  assert.equal(calls.length, 0);
+});
+
+test('gallery_show：管理员可以看，主人可以看', async () => {
+  for (const bucket of ['admin', 'owner']) {
+    const { byName } = withShow({ bucket });
+    assert.equal((await byName.gallery_show.execute({ seq: '3' })).ok, true, bucket);
+  }
+});
+
+test('gallery_show：一轮最多看两张，第三张拒；换一轮又能看', async () => {
+  /** 轮次键要能中途变，所以用一个盒子而不是闭包常量 */
+  const box = { turn: 'turn-A' };
+  const t = tools({
+    over: {
+      turnKeyOf: () => box.turn,
+      showOf: async () => ({ ok: true, text: 'ok', blocks: [REF] }),
+    },
+  });
+  assert.equal((await t.byName.gallery_show.execute({ seq: '1' })).ok, true);
+  assert.equal((await t.byName.gallery_show.execute({ seq: '2' })).ok, true);
+  const third = await t.byName.gallery_show.execute({ seq: '3' });
+  assert.equal(third.ok, false);
+  assert.match(third.message, /这一轮已经看过/);
+
+  box.turn = 'turn-B';
+  assert.equal((await t.byName.gallery_show.execute({ seq: '3' })).ok, true, '新的一轮不该被上一轮限制');
+});
+
+test('gallery_show：缺序号直接拒，不打 showOf', async () => {
+  const { byName, calls } = withShow();
+  assert.equal((await byName.gallery_show.execute({})).ok, false);
+  assert.equal(calls.length, 0);
+});
+
+test('gallery_show：底层抛错回 ok:false，不把整轮带崩', async () => {
+  const { byName } = withShow({ onCall: () => { throw new Error('附件服务挂了'); } });
+  const r = await byName.gallery_show.execute({ seq: '3' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /附件服务挂了/);
+});
+
+test('gallery_show：把标注建议带出来，让模型自己决定要不要写回', async () => {
+  const { byName } = withShow({
+    answer: { blocks: undefined, suggest: { name: '熊猫', meaning: '在笑' } },
+  });
+  const r = await byName.gallery_show.execute({ seq: '3' });
+  assert.deepEqual(r.suggest, { name: '熊猫', meaning: '在笑' });
 });

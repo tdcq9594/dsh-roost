@@ -186,12 +186,56 @@ test('save 入库并幂等：同一张存两次拿到同一个序号', () => {
   } finally { e.cleanup(); }
 });
 
-test('save 拒绝网址（首版不拉外链，SSRF 防护没做就不开口子）', () => {
+/**
+ * 网址**不在这里下载**。
+ *
+ * 拉外链要先过 SSRF 判断（`remote-image.js`），那是异步 + 网络；这一层保持
+ * 同步，调用方必须先把字节下下来再交 `buf`。这条测试守的是那个分工：谁要是
+ * 图省事把网址直接透传进来，会得到一条明确的报错，而不是一条「找不到文件」
+ * 让人去查路径。
+ */
+test('save 拒绝没下载过的网址（下载归 remote-image.js，这一层只收字节）', () => {
   const e = env();
   try {
     const r = e.gallery.save({ from: 'https://example.com/a.png' }, {});
     assert.equal(r.ok, false);
-    assert.match(r.message, /暂不支持/);
+    assert.match(r.message, /网址要先下载/);
+  } finally { e.cleanup(); }
+});
+
+test('save 收调用方给的字节（网址那条路就是这么进来的）', () => {
+  const e = env();
+  try {
+    const buf = Buffer.from('PNG-BYTES');
+    const r = e.gallery.save({ from: 'https://example.com/a.png', buf, ext: '.png', src: 'url', name: '网图' }, {});
+    assert.equal(r.ok, true);
+    assert.equal(r.item.file, '网图.png');
+    assert.equal(e.gallery.rows({})[0].src, 'url', '来源要标成 url，面板/排障能看出这张是从网上来的');
+    /** 二次入库同一张：幂等，返回原序号 */
+    const again = e.gallery.save({ from: 'https://other.example/b.png', buf, ext: '.png', src: 'url' }, {});
+    assert.equal(again.dup, true);
+    assert.equal(again.seq, r.seq);
+  } finally { e.cleanup(); }
+});
+
+/**
+ * `fileName` 和 `name` 必须分开。
+ *
+ * 从网址入库时会拿 URL 末段当磁盘文件名。如果那也写进 `name`（标注），
+ * `pending()` 会认为这张图「已经有名字」→「让 AI 整理」永远不会碰它，
+ * 图库里堆一堆 `cat-404.png` 但没有任何描述。
+ */
+test('save：fileName 只决定磁盘文件名，不算标注', () => {
+  const e = env();
+  try {
+    const r = e.gallery.save(
+      { from: 'https://x.example/cat-404.png', buf: Buffer.from('PNG-BYTES'), ext: '.png', fileName: 'cat-404', src: 'url' },
+      {},
+    );
+    assert.equal(r.ok, true);
+    assert.equal(r.item.file, 'cat-404.png');
+    assert.equal(r.item.name, '', '文件名不能自动变成标注');
+    assert.equal(e.gallery.pending({}).length, 1, '没标注的图要留在「让 AI 整理」的待办里');
   } finally { e.cleanup(); }
 });
 
