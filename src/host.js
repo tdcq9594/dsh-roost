@@ -4343,9 +4343,43 @@ export function apply(ctx) {
     /** 现读：面板改了「停顿多久算说完」下一批就生效，不用重启 DSH */
     waitSec: () => Number(cfg.roostHost?.merge?.waitSec) || 1.5,
     maxSec: () => Number(cfg.roostHost?.merge?.maxSec) || 6,
+    groupWaitSec: () => Number(cfg.roostHost?.merge?.groupWaitSec) || 5,
+    groupMaxSec: () => Number(cfg.roostHost?.merge?.groupMaxSec) || 15,
+    /**
+     * 照 aurabot：她正忙时不再逐条回「上一条还在想」，而是攒着等这一轮
+     * 结束（handleTurn 的 finally 调 release），私聊则直接 steer 插话。
+     */
+    trackBusy: true,
+    busyMaxMs: () => (Number(cfg.chat?.turnTimeoutSec) || 150) * 1000 + 60_000,
+    onSteer: async (chatId, batch) => {
+      /** 会话的活 agent。拿不到（会话还没建/已销毁）就退回攒批，不硬建 */
+      const sid = sessions.get(chatId);
+      if (!sid) return false;
+      let agent;
+      try {
+        agent = ctx.agents.get(sid) || ctx.agents.get('session-' + sid) || await resolveAgent(sid);
+      } catch {
+        return false;
+      }
+      /**
+       * steer 的文本用合成后的正文（batch.text 已带「谁说的：」标签）。
+       * 图片不在插话里带：steer 走的是纯文本增补，原图已经在当前轮里。
+       */
+      /**
+       * waitReadyMs：merger 置 busy 早于 waiters.set（投递链要走几步），
+       * 突发第二条消息常常先到。给 2 秒轮询窗口等这一轮真正在跑再插话，
+       * 远小于一轮生成耗时，也不会让「攒批」无谓降级。
+       */
+      return turns.steer(agent, batch.text, {
+        chatId,
+        source: { kind: 'roost', chatId },
+        waitReadyMs: 2000,
+      });
+    },
     onFlush: (_chatId, batch) => {
       deliverBatch(batch).catch((e) => notePathError('处理消息', e));
     },
+    log: (m) => log.info(m),
   });
 
   /**
@@ -7893,6 +7927,16 @@ export function apply(ctx) {
       keywordNote.delete(chat.chatId);
       /** 换人格提示每个会话只消费一次；5 分钟后整体过期 */
       switchNote.consume(chat.chatId);
+      /**
+       * 照 aurabot 的 release()：这一轮（含回话落盘）真的结束了，
+       * 把期间攒着的消息合成一批放行。没有攒批时是空操作，多调无害。
+       * 必须放在 finally——出错的轮次也要放开，否则攒批饿死。
+       */
+      try {
+        roostMerger.release(chat.chatId);
+      } catch (e) {
+        log.warn(`放开攒批失败（不影响这一轮）：${e?.message ?? e}`);
+      }
     }
   }
 

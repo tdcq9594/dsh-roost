@@ -72,15 +72,85 @@ function lineOf(evt) {
 }
 
 /**
+ * ## 她还在回上一条时（照 aurabot 的 hub.js）
+ *
+ * 老做法是「排队满了就逐条回『上一条还在想』」——突发 @ 时会刷一屏。
+ * aurabot 没有这句话：它把这一轮期间来的消息**继续攒在 pending 里**，
+ * 等这一轮结束（`release()`）再合成一批交出去；私聊则直接 `steer` 插话。
+ * 这里照搬这套：
+ *   · busy 为真 → 不另开一轮。能 steer（私聊）就插话，否则打 `waiting`
+ *     标记继续攒，**不回任何提示**。
+ *   · `release(chatId)` 在 handleTurn 的 finally 里调，把攒着的交出去。
+ *   · busy 在 **flush 那一刻同步置上**（不是等 task 真的跑起来）——
+ *     deliverBatch 是异步的，两条被 @ 的消息可能都还没到排队那一步，
+ *     靠队列自身的 busy 判断会漏。aurabot 也是 flush 时就置。
+ *   · 一轮卡死 release 永远不来时有看门狗强放，攒批不会饿死。
+ *
+ * `trackBusy` 默认关：老的调用方（和单测）多条 add 仍照旧合批、不受影响；
+ * 只有 host 打开它，才启用「busy 攒批 + release」这套。
+ *
  * @param {object} o
  * @param {number|(()=>number)} [o.waitSec]
  * @param {number|(()=>number)} [o.maxSec]
+ * @param {number|(()=>number)} [o.groupWaitSec]  群聊停顿窗口（缺省同 waitSec）
+ * @param {number|(()=>number)} [o.groupMaxSec]   群聊最长窗口（缺省同 maxSec）
+ * @param {boolean} [o.trackBusy]                 是否启用 busy 攒批（host 打开）
+ * @param {number|(()=>number)} [o.busyMaxMs]     一轮多久没 release 就强放
+ * @param {(chatId:string)=>boolean} [o.busyOf]   额外的 busy 来源（可选）
+ * @param {(chatId:string, batch:object)=>Promise<boolean>|boolean} [o.onSteer]
+ *   私聊插话：返回 true 表示这条已被当前轮接走；false/没有就攒着等 release
  * @param {(chatId:string, batch:object)=>void} o.onFlush
  * @param {()=>number} [o.now]
+ * @param {(msg:string)=>void} [o.log]
  */
-export function createMerger({ waitSec = 1.5, maxSec = 6, onFlush = () => {}, now = () => Date.now() } = {}) {
-  /** chatId → { items, waitTimer, maxTimer, firstAt } */
+export function createMerger({
+  waitSec = 1.5,
+  maxSec = 6,
+  groupWaitSec = null,
+  groupMaxSec = null,
+  trackBusy = false,
+  busyMaxMs = 210_000,
+  busyOf = () => false,
+  onSteer = null,
+  onFlush = () => {},
+  now = () => Date.now(),
+  log = () => {},
+} = {}) {
+  /** chatId → { items, waitTimer, maxTimer, firstAt, notBefore, waiting } */
   const pending = new Map();
+  /** chatId → { at, timer }：flush 置上、release 清掉的一轮锁 */
+  const busy = new Map();
+
+  const busyMax = () => {
+    const n = Number(typeof busyMaxMs === 'function' ? busyMaxMs() : busyMaxMs);
+    return Number.isFinite(n) && n > 0 ? n : 210_000;
+  };
+  const isBusy = (chatId) => busy.has(chatId) || (trackBusy && busyOf(chatId));
+
+  function markBusy(chatId) {
+    if (!trackBusy) return;
+    const entry = { at: now(), timer: null };
+    busy.set(chatId, entry);
+    /**
+     * 看门狗：batch 没走到 handleTurn（quiet.skip / 没 chatId），或这一轮
+     * 真卡死导致 release 不来时，兜底强放——否则攒批永远出不去。
+     */
+    const t = setTimeout(() => {
+      if (busy.get(chatId) !== entry) return;
+      log(`${chatId.slice(0, 8)}：一轮 ${Math.round(busyMax() / 1000)}s 没结束，强放攒批`);
+      clearBusy(chatId);
+      const b = pending.get(chatId);
+      if (b?.waiting) { b.waiting = false; flush(chatId, true); }
+    }, busyMax());
+    t.unref?.();
+    entry.timer = t;
+  }
+
+  function clearBusy(chatId) {
+    const entry = busy.get(chatId);
+    if (entry?.timer) clearTimeout(entry.timer);
+    busy.delete(chatId);
+  }
 
   /**
    * 两个窗口都允许传函数：host 传的是「现读 cfg 的箭头函数」。
@@ -94,22 +164,99 @@ export function createMerger({ waitSec = 1.5, maxSec = 6, onFlush = () => {}, no
     const n = Number(typeof v === 'function' ? v() : v);
     return Number.isFinite(n) && n > 0 ? n : dflt;
   };
-  const waitMs = () => secOf(waitSec, 1.5) * 1000;
-  const maxMs = () => secOf(maxSec, 6) * 1000;
+  const waitMs = (isGroup) => secOf(isGroup && groupWaitSec != null ? groupWaitSec : waitSec, 1.5) * 1000;
+  const maxMs = (isGroup) => secOf(isGroup && groupMaxSec != null ? groupMaxSec : maxSec, 6) * 1000;
 
-  function flush(chatId) {
+  /**
+   * 把这条会话攒着的消息交出去（合成一批）。
+   *
+   * `bypassBusy`：只有 `release()` 会传 true——那一轮已经结束了，busy 锁
+   * 此刻还占着（锁的清除在 task 的 finally，比 release 稍晚），放行时必须
+   * 跳过 busy 判断，否则攒批会被自己挡住、永远交不出去。
+   */
+  function flush(chatId, bypassBusy = false) {
     const b = pending.get(chatId);
-    if (!b) return;
-    pending.delete(chatId);
+    if (!b) return false;
+    const items = b.items.slice();
+    if (!items.length) {
+      pending.delete(chatId);
+      return false;
+    }
     clearTimeout(b.waitTimer);
     clearTimeout(b.maxTimer);
-    const items = b.items.slice();
-    if (!items.length) return;
+
+    /** 她还在回上一条：不另开一轮。能插话就插话，否则继续攒着等 release */
+    if (!bypassBusy && isBusy(chatId)) {
+      /**
+       * 只有私聊才插话（aurabot：`p.chat.kind === 'private'`）。
+       * 群里一插话等于又刷一条，且多人 MixedSenders 语义乱——群里攒批等 release。
+       */
+      const kind = String(items[items.length - 1]?.chat?.kind ?? '');
+      const privateChat = kind === 'c2c' || kind === 'dm';
+      if (onSteer && privateChat) {
+        /**
+         * 先摘掉 pending 再试：steer 成功 = 这条已被当前轮接走；
+         * 失败要原样放回去（连同期间新攒的），等这一轮结束再交。
+         */
+        pending.delete(chatId);
+        Promise.resolve()
+          .then(() => onSteer(chatId, batchOf(items)))
+          .then((ok) => {
+            if (!ok) restoreWaiting(chatId, items);
+            else log(`${chatId.slice(0, 8)}：${items.length} 条消息已插进当前轮`);
+          })
+          .catch((e) => {
+            log(`${chatId.slice(0, 8)}：插话失败，改攒着等这轮结束（${e?.message ?? e}）`);
+            restoreWaiting(chatId, items);
+          });
+        return false;
+      }
+      /** 攒着等 release——不回「还在想」，这是这次要去掉的刷屏根源 */
+      b.waiting = true;
+      pending.set(chatId, b);
+      return false;
+    }
+
+    pending.delete(chatId);
+    markBusy(chatId);
     try {
       onFlush(chatId, batchOf(items));
+      return true;
     } catch {
-      /* 单批失败不能影响后面的消息 */
+      /* 单批失败不能影响后面的消息：锁要退回，否则这一会话永远攒着 */
+      if (trackBusy) clearBusy(chatId);
+      return false;
     }
+  }
+
+  /**
+   * steer 失败后把消息放回去，和这期间新来的合成一批。
+   *
+   * 正常路径：这一轮还在跑（busy 还在），设 `waiting=true` 等 release 放行。
+   * 抢跑路径：steer 是异步的，`release()` 可能已经先跑完并清掉了 busy——
+   *   那一刻 pending 已被摘走，release 扑空；等这里把消息放回去，已经没有
+   *   下一次 release 会再来，守门狗也被 release 一起清了 → 消息永久卡死。
+   *   所以放回后必须复查 busy：已经不在忙就自己 bypass 放行，别干等。
+   */
+  function restoreWaiting(chatId, items) {
+    let b = pending.get(chatId);
+    if (!b) {
+      b = { items: [], waitTimer: null, maxTimer: null, firstAt: now(), notBefore: 0, waiting: false };
+      pending.set(chatId, b);
+    }
+    b.items.unshift(...items);
+    /** 这一轮已经结束（release 抢跑）：直接放行，不要再设 waiting 干等 */
+    if (trackBusy && !isBusy(chatId)) {
+      b.waiting = false;
+      return flush(chatId, true);
+    }
+    b.waiting = true;
+    /** 不再设定时器：这一轮结束会 release；重复设反而会在忙时反复空转 */
+    clearTimeout(b.waitTimer);
+    clearTimeout(b.maxTimer);
+    b.waitTimer = null;
+    b.maxTimer = null;
+    return false;
   }
 
   return {
@@ -118,35 +265,44 @@ export function createMerger({ waitSec = 1.5, maxSec = 6, onFlush = () => {}, no
      *
      * @param {object} evt roost 的 message 事件 data
      * @param {{force?:boolean, delayMs?:number}} [o]
-     *   force   立刻放行（私聊 / 被 @ / 命令）
+     *   force   空闲时立刻放行（私聊 / 被 @ / 命令）；**忙时照样攒批**——
+     *           这是「一次刷一屏还在想」的根因：被 @ 的几条都 force，
+     *           以前各自 onFlush → 各自入队 → 队列满逐条回话
      *   delayMs 冷却期内攒着：压到冷却结束再一起交出去，**不是丢掉**
      */
     add(evt, { force = false, delayMs = 0 } = {}) {
       const chatId = String(evt?.chat?.chatId ?? '');
       if (!chatId) return;
 
-      /** 冷却期攒着的消息不该在这里处理（那是策略层的事），但 force 要立刻走 */
-      if (force) {
-        const held = pending.get(chatId);
-        if (held) {
-          /** 把已经攒着的和这条一起交出去：拆成两轮等于白白多花一次模型调用 */
-          clearTimeout(held.waitTimer);
-          clearTimeout(held.maxTimer);
-          pending.delete(chatId);
-          held.items.push(evt);
-          onFlush(chatId, batchOf(held.items));
-          return;
-        }
-        onFlush(chatId, batchOf([evt]));
-        return;
-      }
+      const kind = String(evt?.chat?.kind ?? '');
+      const isGroup = kind !== 'c2c' && kind !== 'dm';
 
       let b = pending.get(chatId);
       if (!b) {
-        b = { items: [], waitTimer: null, maxTimer: null, firstAt: now(), notBefore: 0 };
+        b = { items: [], waitTimer: null, maxTimer: null, firstAt: now(), notBefore: 0, waiting: false };
         pending.set(chatId, b);
       }
       b.items.push(evt);
+
+      /**
+       * 已经在等这一轮结束的攒批：只往里加消息，不重设窗口。
+       * 窗口定时器早就在第一次撞上 busy 时清掉了，重设反而会在忙时
+       * 反复触发 flush → 反复看见 busy，纯空转。
+       */
+      if (b.waiting) return;
+
+      /**
+       * force（私聊 / 被 @ / 命令）：**无论忙闲都走 flush**——
+       *   · 空闲 → 立刻放行，保持被 @ 的即时性；顺便 markBusy，
+       *     紧随其后的几条才会被判为忙、进入攒批（这是不刷屏的关键）
+       *   · 忙 → flush 内部走 steer / waiting，不再逐条回「还在想」
+       * 以前空闲分支直接 onFlush、不置忙，突发 @ 时每条都当第一条，
+       * 各自入队把队列撑满——正是「一次发一堆还在想」的根因。
+       */
+      if (force) {
+        flush(chatId);
+        return;
+      }
 
       /**
        * 冷却期攒着的消息：别早于 `notBefore` 放行。
@@ -159,14 +315,27 @@ export function createMerger({ waitSec = 1.5, maxSec = 6, onFlush = () => {}, no
 
       /** 每来一条重新计时：说到一半就别急着回 */
       clearTimeout(b.waitTimer);
-      b.waitTimer = setTimeout(() => flush(chatId), Math.max(0, waitMs(), untilNotBefore));
+      b.waitTimer = setTimeout(() => flush(chatId), Math.max(0, waitMs(isGroup), untilNotBefore));
       b.waitTimer.unref?.();
       /** 从第一条算的最长等待，只设一次（但也不能早于冷却结束） */
       if (!b.maxTimer) {
-        const left = Math.max(0, maxMs() - (now() - b.firstAt));
+        const left = Math.max(0, maxMs(isGroup) - (now() - b.firstAt));
         b.maxTimer = setTimeout(() => flush(chatId), Math.max(left, untilNotBefore));
         b.maxTimer.unref?.();
       }
+    },
+
+    /**
+     * 这一轮结束了——把期间攒着的消息合成一批交出去。
+     * host 在 `handleTurn` 的 finally 里调它（aurabot 的 `release()`）。
+     * 没有攒批就是空操作，多调无害。
+     */
+    release(chatId) {
+      if (trackBusy) clearBusy(chatId);
+      const b = pending.get(chatId);
+      if (!b || !b.waiting) return false;
+      b.waiting = false;
+      return flush(chatId, true);
     },
 
     /** 卸载时用：**只清定时器，不触发发送**——插件都卸了，不该再往外说话 */
@@ -176,6 +345,8 @@ export function createMerger({ waitSec = 1.5, maxSec = 6, onFlush = () => {}, no
         clearTimeout(b.maxTimer);
       }
       pending.clear();
+      for (const [, e] of busy) if (e.timer) clearTimeout(e.timer);
+      busy.clear();
     },
 
     /** 正在攒的会话数，面板/测试用 */

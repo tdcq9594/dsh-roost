@@ -1959,7 +1959,7 @@ select.roost-input{color-scheme:dark}
           ),
           h('div', { className: 'roost-note' },
             allReady
-              ? '链路这五项都齐了。剩下两件在 QQ 开放平台手动做：开「接收所有消息」、把机器人拉进群。'
+              ? '链路这五项都齐了。剩下两件手工做：请群主在手机 QQ 里给群开「接收所有消息」、把机器人拉进群。'
               : '缺哪一步在那一页有单独说明和按钮。'),
         ),
 
@@ -2992,15 +2992,17 @@ select.roost-input{color-scheme:dark}
             ),
           ),
 
-          /** 第 5 步：直连配好之后，剩下两件是 QQ 开放平台上的手工操作 */
+          /** 第 5 步：直连配好之后，剩下两件要在群主自己的手机 QQ 里做 */
           h(Step, {
             n: 5, state: pairReady ? 'current' : 'todo', title: '在群里说句话',
             desc: pairReady
-              ? '还差两件手工的事：开放平台开「接收所有消息」，机器人先进群'
+              ? '还差两件手工的事：请群主在最新版手机 QQ 里给群开「接收所有消息」，机器人先进群'
               : '先把第 4 步的一键直连配好',
           },
             pairReady
-              ? h('button', { type: 'button', className: 'roost-btn', onClick: () => window.open('https://q.qq.com', '_blank', 'noopener') }, '开放平台')
+              ? h('div', { className: 'roost-note' },
+                '开法：群主在最新版手机 QQ 里 → 群成员列表点这个机器人（或加机器人入群时点「设置权限」）→ 开启「接收全量消息」。'
+                + '电脑端 QQ 没有这个设置；它不在 q.qq.com，也不是 intents 位。')
               : null,
           ),
 
@@ -3041,7 +3043,7 @@ select.roost-input{color-scheme:dark}
         h(Sec, { title: '常见卡点' },
           h('ul', { className: 'roost-note', style: { margin: 0, paddingLeft: 18 } },
             h('li', null, `启动后马上退出：多半是 AppID / AppSecret 填错了，或端口 ${s.port || ''} 被占`),
-            h('li', null, '群里没反应：开放平台没开「接收所有消息」，或机器人不在群里'),
+            h('li', null, '群里没反应：群主没在手机 QQ 里给群开「接收所有消息」，或机器人不在群里'),
             h('li', null, '群里不接话：检查「设置 → roostHost.decide」的接话模式和冷却是否在挡'),
             h('li', null, '面板一切正常但消息全失败：看「概览 → 直连状态」，seq 不动就是事件没进来'),
             s.accessKeySet === false
@@ -9937,14 +9939,20 @@ select.roost-input{color-scheme:dark}
 
         h(GCard, {
           n: '02', title: '连发合并',
-          desc: '人常常一口气发好几句。等她说完再一起回，而不是一句一回，省调用也少刷屏。私聊、被 @、命令不等待。',
+          desc: '人常常一口气发好几句。等她说完再一起回，而不是一句一回，省调用也少刷屏。她正忙时来的消息会攒着，等这一轮结束合在一起回，不会逐条刷「还在想」。',
         },
-          h(GRow, { label: '对方停顿多久算说完', hint: '从最后一条消息算起；太短会把一句话劈成两半' },
+          h(GRow, { label: '私聊停顿多久算说完', hint: '从最后一条消息算起；太短会把一句话劈成两半' },
             h(GNum, { value: merge.waitSec ?? 1.5, min: 0.5, max: 10, step: 0.5, unit: '秒', disabled: busy,
               onSave: (v) => setMerge('waitSec', v) })),
-          h(GRow, { label: '最多等多久', hint: '对方一直在发，从第一条算也最多等这么久' },
+          h(GRow, { label: '私聊最多等多久', hint: '对方一直在发，从第一条算也最多等这么久' },
             h(GNum, { value: merge.maxSec ?? 6, min: 2, max: 30, unit: '秒', disabled: busy,
               onSave: (v) => setMerge('maxSec', v) })),
+          h(GRow, { label: '群里停顿多久算一段', hint: '群里你一句我一句说得慢，多等一会儿攒齐再回；她正忙时新消息也先攒着' },
+            h(GNum, { value: merge.groupWaitSec ?? 5, min: 1, max: 20, unit: '秒', disabled: busy,
+              onSave: (v) => setMerge('groupWaitSec', v) })),
+          h(GRow, { label: '群里最多等多久', hint: '从这一段第一条算，一直有人发也最多等这么久' },
+            h(GNum, { value: merge.groupMaxSec ?? 15, min: 3, max: 60, unit: '秒', disabled: busy,
+              onSave: (v) => setMerge('groupMaxSec', v) })),
         ),
 
         h(GCard, {
@@ -10024,7 +10032,7 @@ select.roost-input{color-scheme:dark}
             h(GNum, { value: chat.turnTimeoutSec ?? 150, min: 10, max: 900, unit: '秒', disabled: busy,
               onSave: (v) => setChat('turnTimeoutSec', v) })),
           h('div', { className: 'roost-g-note' },
-            '同时最多排几条（queueMax）、剩余时间不够就不开跑（queueMinBudgetSec）在「权限 → 她会做什么」里，两边改的是同一份配置。',
+            '她正忙时来的消息会攒着，等这一轮结束合在一起回，不会逐条刷「还在想」。私聊忙时直接插话进当前轮。',
             h('button', {
               type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
               onClick: () => setTab && setTab('caps'),

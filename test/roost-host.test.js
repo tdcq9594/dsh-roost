@@ -480,6 +480,112 @@ test('合并：dispose 只清定时器，不往外发', async () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* 忙时攒批（照 aurabot）：不再逐条回「上一条还在想」                    */
+/* ------------------------------------------------------------------ */
+
+test('忙时：被 @ 的连发只交第一批，其余攒着等 release 合成一轮', () => {
+  const flushed = [];
+  const steered = [];
+  const m = createMerger({
+    waitSec: 0.05, maxSec: 0.3, trackBusy: true,
+    onFlush: (_id, b) => flushed.push(b),
+    onSteer: (_id, b) => { steered.push(b); return true; },
+  });
+  /** 第一条 @ 立刻放行并置忙 */
+  m.add(mkEvt('第一条', { sender: { name: '甲', openid: 'U1' } }), { force: true });
+  assert.equal(flushed.length, 1, '第一条即时响应');
+  /** 这一轮期间又来 3 条 @：私聊会 steer；这里是群聊没给 steer，先攒着 */
+  m.add(mkEvt('第二条', { sender: { name: '乙', openid: 'U2' } }), { force: true });
+  m.add(mkEvt('第三条', { sender: { name: '丙', openid: 'U3' } }), { force: true });
+  m.add(mkEvt('第四条', { sender: { name: '丁', openid: 'U4' } }), { force: true });
+  assert.equal(flushed.length, 1, '忙时不另开轮，否则就是刷屏');
+  /** 一轮结束 → 三条合成一批 */
+  m.release('G');
+  assert.equal(flushed.length, 2, 'release 把攒批交出去');
+  assert.equal(flushed[1].count, 3, '3 条合成一轮，不是 3 轮');
+  m.dispose();
+});
+
+test('忙时：私聊插话交给 onSteer，不新开一轮', async () => {
+  const flushed = [];
+  const steered = [];
+  const m = createMerger({
+    waitSec: 0.05, maxSec: 0.3, trackBusy: true,
+    onFlush: (_id, b) => flushed.push(b),
+    onSteer: async (_id, b) => { steered.push(b); return true; },
+  });
+  m.add({ ...mkEvt('在'), chat: { chatId: 'U', kind: 'c2c' } }, { force: true });
+  assert.equal(flushed.length, 1);
+  m.add({ ...mkEvt('插一句'), chat: { chatId: 'U', kind: 'c2c' } }, { force: true });
+  /** onSteer 是异步的，等它的 promise 链走完 */
+  await new Promise((r) => setImmediate(r));
+  assert.equal(flushed.length, 1, '插话走 steer，不开新轮');
+  assert.equal(steered.length, 1, '确实调用了 steer');
+  m.dispose();
+});
+
+test('忙时：steer 失败则攒着，release 后仍交出去（不丢消息）', async () => {
+  const flushed = [];
+  const m = createMerger({
+    waitSec: 0.05, maxSec: 0.3, trackBusy: true,
+    onFlush: (_id, b) => flushed.push(b),
+    onSteer: async () => false,
+  });
+  /** 私聊才走 steer——两条都得是 c2c，否则测的是群聊攒批（假阳性） */
+  const dm = (c) => ({ ...mkEvt(c), chat: { chatId: 'G', kind: 'c2c' } });
+  m.add(dm('第一条'), { force: true });
+  m.add(dm('插话失败这条'), { force: true });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(flushed.length, 1, 'steer 失败没开新轮');
+  m.release('G');
+  assert.equal(flushed.length, 2);
+  assert.equal(flushed[1].count, 1, '失败的消息在 release 后补交');
+  m.dispose();
+});
+
+test('忙时：steer 失败且 release 抢跑，消息也能放行（不永久卡死）', async () => {
+  /**
+   * 回归：steer 是异步的，release 可能在它返回前就跑完并清掉 busy。
+   * 那一刻 pending 已被 steer 摘走，release 扑空；旧实现 restoreWaiting
+   * 把消息放回后设 waiting=true，却再没有下一次 release，守门狗也被清掉
+   * → 消息永久卡死（实测 size 恒为 1）。修法：放回时复查 busy，已空闲就放行。
+   */
+  const flushed = [];
+  let m;
+  m = createMerger({
+    waitSec: 0.05, maxSec: 0.3, trackBusy: true,
+    onFlush: (_id, b) => flushed.push(b),
+    onSteer: async () => {
+      /** 模拟这一轮先结束：release 在 steer 返回前抢跑 */
+      m.release('G');
+      return false;
+    },
+  });
+  const dm = (c) => ({ ...mkEvt(c), chat: { chatId: 'G', kind: 'c2c' } });
+  m.add(dm('第一条'), { force: true });
+  m.add(dm('插话失败这条'), { force: true });
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(flushed.length, 2, '抢跑也要把失败的消息放行，不能卡在 pending');
+  assert.equal(m.size, 0, 'pending 必须清空');
+  m.dispose();
+});
+
+test('忙时：群聊窗口用 groupWaitSec / groupMaxSec（可配）', async () => {
+  const flushed = [];
+  const m = createMerger({
+    waitSec: 0.02, maxSec: 0.05, groupWaitSec: 0.12, groupMaxSec: 0.3,
+    onFlush: (_id, b) => flushed.push(b),
+  });
+  m.add(mkEvt('群里一句'));
+  await new Promise((r) => setTimeout(r, 70));
+  assert.equal(flushed.length, 0, '群聊停顿窗口更长，70ms 还不该放行');
+  await new Promise((r) => setTimeout(r, 90));
+  assert.equal(flushed.length, 1, '群聊窗口到点放行');
+  m.dispose();
+});
+
+/* ------------------------------------------------------------------ */
 /* 接话策略（从 ai-chat 搬过来的那一层）                                */
 /* ------------------------------------------------------------------ */
 
