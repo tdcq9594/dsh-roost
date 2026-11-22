@@ -218,16 +218,13 @@ export const FEATURES = [
   },
   {
     id: 'queueMax',
-    label: '同一会话最多排几条',
-    desc: '她还在想上一条时，后面这几条排队等着；设 0 = 不排队，直接回「上一条还在想」',
+    label: '同一会话的串行缓冲',
+    desc: '正常情况用不到：她正忙时的消息先在合并层攒着，等这一轮结束合成一批，不再逐条回「还在想」；这里只兜底极端并发。设 0 = 不缓冲。',
     source: 'config',
     path: ['chat', 'queueMax'],
     /**
-     * 非布尔项。默认 2：实测单轮中位 2–3 秒，第二条最多等几秒，
-     * 成本远小于「连发三条丢两条」。
-     *
-     * `min: 0` 是特意留的——`turnqueue.js` 里 `maxPending <= 0`
-     * 就是「全部拒绝入队」，正好等于关掉排队、回到旧行为。
+     * 非布尔项。并行攒批已由 roost-merge 的 busy/release 接管，
+     * 这里退化成最后一道串行缓冲，默认留 2 即可。`min: 0` 保留兼容。
      */
     kind: 'number',
     min: 0,
@@ -715,7 +712,7 @@ export const FEATURE_GROUPS = [
   { id: 'run', label: '运行', ids: ['botEnabled', 'dryRun'] },
   { id: 'talk', label: '怎么说话', ids: ['qqTools', 'stickers', 'voice'] },
   { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'graphAdjacent', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact'] },
-  { id: 'queue', label: '消息来不及回的时候', ids: ['queueMax', 'queueMinBudgetSec'] },
+  { id: 'queue', label: '消息来不及回的时候（高级）', ids: ['queueMax', 'queueMinBudgetSec'] },
   { id: 'proactive', label: '会不会主动找你', ids: ['speakUp', 'awake'] },
   { id: 'work', label: '干不干活', ids: ['sendFile', 'personaCommand'] },
   {

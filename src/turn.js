@@ -409,8 +409,55 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
     throw lastErr;
   }
 
+  /**
+   * 私聊插话（照 aurabot 的 steer）：把新消息塞进**正在跑的那一轮**，
+   * 不新开 turn/end。DSH 原生支持 `agent.steer()`——aurabot 作为同类 DSH
+   * 插件已经在用（`chat/hub.js` 的 pushToSession），dsh-roost 拿到的 agent
+   * 是同一个类型，同样能用。
+   *
+   * 三个前提缺一就返回 false，让调用方退回「攒着等这一轮结束再开新轮」：
+   *   · 拿得到 sid
+   *   · agent 真的有 steer（老版本 DSH 没有 → 自动降级）
+   *   · 这一轮真的在跑（waiters 有它）——空闲时 steer 不会开新轮，等于丢消息
+   *
+   * `waitReadyMs`：忙时插话有个时序坑——merger 在 flush 那一刻就置了 busy，
+   * 但 waiters.set 要等投递链（deliverBatch → handleTurn → run → attempt）
+   * 走完才发生。突发第二条消息往往先到，若立刻判 waiters 就会白降级成攒批，
+   * 体感上「私聊插话」几乎永不触发。给一个短轮询窗口等锁就绪，超时再降级。
+   * 默认 0：老调用方（和单测）不传就没有等待，行为不变。
+   *
+   * @returns {Promise<boolean>} 插话成功与否（成功则这条消息已被这一轮接走）
+   */
+  async function steer(agent, text, { chatId = '', source = { kind: 'roost' }, waitReadyMs = 0 } = {}) {
+    const sid = agent?.session?.id ?? agent?.sessionId;
+    if (!sid) return false;
+    if (typeof agent.steer !== 'function') return false;
+    const key = String(sid);
+    if (!waiters.has(key) && Number(waitReadyMs) > 0) {
+      const deadline = Date.now() + Number(waitReadyMs);
+      while (!waiters.has(key) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    if (!waiters.has(key)) return false;
+    const message = {
+      id: randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text: String(text ?? '') }],
+      source: { ...source, chatId },
+    };
+    try {
+      await agent.steer(message);
+      return true;
+    } catch (e) {
+      logger.warn(`插话失败（这轮结束后照常处理）：${e?.message ?? e}`);
+      return false;
+    }
+  }
+
   return {
     run,
+    steer,
     /**
      * 这个会话有没有一轮在跑。
      *
