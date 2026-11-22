@@ -208,33 +208,49 @@ function fakePkg(root, name, version) {
   return p;
 }
 
-test('jimp 进白名单：归 image 组、锁 1.x（不能用 latest）', async () => {
+/**
+ * 白名单本身的自检：**每条都得是「真装了会有人用」的东西**。
+ *
+ * 这条曾经断言 `jimp` 在名单里、归 `image` 组。问题是那三件事（感知哈希去重 /
+ * 缩略图 / 拼长图）一件都没实现，`load()` 全仓没有调用方——面板给出一个 15MB
+ * 的「安装」按钮，点完什么都不变。测试当时护着的是「广告位别被删」。
+ *
+ * 现在改成护着**该有的形状**：元数据齐全、版本不许放 `latest`（白名单是靠
+ * 人工核对过 postinstall 的，`latest` 等于放弃这个保证）。
+ */
+test('白名单：元数据齐全、版本锁范围而不是 latest', async () => {
   const d = await fresh();
-  assert.ok(Object.hasOwn(d.WHITELIST, 'jimp'), 'jimp 不在白名单，面板就装不了');
-  assert.equal(d.WHITELIST.jimp.group, 'image');
-  assert.match(d.WHITELIST.jimp.range, /^\^1\./);
+  const names = Object.keys(d.WHITELIST);
+  assert.ok(names.length > 0, '一条都没有，面板就没东西可装');
+  for (const name of names) {
+    const m = d.WHITELIST[name];
+    assert.ok(m.range && m.range !== 'latest', `${name}：range 不能是 latest`);
+    assert.ok(m.size, `${name}：缺 size，面板显示不出「要下多少」`);
+    assert.ok(m.group, `${name}：缺 group，面板分不了组`);
+    assert.ok(m.desc, `${name}：缺 desc，用户不知道装它干嘛`);
+  }
 });
 
 test('注入扩展目录：自动找到、能加载、安装直接复用（不再下一遍 15MB）', sandbox(async (dir) => {
   const d = await fresh();
   const extRoot = join(dir, 'extensions', 'ext-a');
-  fakePkg(extRoot, 'jimp', '9.9.9');
+  fakePkg(extRoot, 'qrcode', '9.9.9');
 
   assert.equal(d.setExtDirs([{ id: 'ext-a', dir: extRoot }]), 1);
 
-  const hit = d.findPackage('jimp');
+  const hit = d.findPackage('qrcode');
   assert.equal(hit.kind, 'ext');
   assert.equal(hit.id, 'ext-a');
   assert.equal(hit.version, '9.9.9');
 
   const s = d.scan();
-  assert.equal(s.packages.jimp.found.label, '扩展 ext-a');
-  assert.equal(s.packages.jimp.removable, false, '扩展那份不归面板删');
+  assert.equal(s.packages.qrcode.found.label, '扩展 ext-a');
+  assert.equal(s.packages.qrcode.removable, false, '扩展那份不归面板删');
 
-  const mod = await d.load('jimp', { fresh: true });
+  const mod = await d.load('qrcode', { fresh: true });
   assert.equal(mod.ver, '9.9.9', 'load 必须能从扩展目录解析出来');
 
-  const r = await d.install('jimp');
+  const r = await d.install('qrcode');
   assert.equal(r.ok, true);
   assert.equal(r.skipped, true, '该复用而不是下载');
   assert.equal(r.source, 'ext');
@@ -243,10 +259,10 @@ test('注入扩展目录：自动找到、能加载、安装直接复用（不�
 test('卸载扩展那份：拒绝，并说清它在哪个目录', sandbox(async (dir) => {
   const d = await fresh();
   const extRoot = join(dir, 'extensions', 'ext-a');
-  const p = fakePkg(extRoot, 'jimp', '9.9.9');
+  const p = fakePkg(extRoot, 'qrcode', '9.9.9');
   d.setExtDirs([{ id: 'ext-a', dir: extRoot }]);
 
-  const r = d.remove('jimp');
+  const r = d.remove('qrcode');
   assert.equal(r.ok, false);
   assert.match(r.message, /扩展 ext-a/);
   assert.ok(existsSync(p), '替扩展删依赖会把扩展弄坏，必须原样留着');
@@ -255,30 +271,30 @@ test('卸载扩展那份：拒绝，并说清它在哪个目录', sandbox(async 
 test('共享目录优先于扩展目录；删掉共享那份后自动回落扩展那份', sandbox(async (dir) => {
   const d = await fresh();
   const extRoot = join(dir, 'extensions', 'ext-a');
-  fakePkg(extRoot, 'jimp', '9.9.9');
-  fakePkg(join(dir, 'deps'), 'jimp', '1.6.1');
+  fakePkg(extRoot, 'qrcode', '9.9.9');
+  fakePkg(join(dir, 'deps'), 'qrcode', '1.5.4');
   d.setExtDirs([{ id: 'ext-a', dir: extRoot }]);
 
-  const hit = d.findPackage('jimp', { fresh: true });
+  const hit = d.findPackage('qrcode', { fresh: true });
   assert.equal(hit.kind, 'shared', '共享目录是面板装的地方，必须优先');
-  assert.equal(hit.version, '1.6.1');
-  assert.equal(d.scan().packages.jimp.removable, true);
+  assert.equal(hit.version, '1.5.4');
+  assert.equal(d.scan().packages.qrcode.removable, true);
 
-  assert.equal(d.remove('jimp').ok, true);
+  assert.equal(d.remove('qrcode').ok, true);
 
-  const back = d.findPackage('jimp', { fresh: true });
+  const back = d.findPackage('qrcode', { fresh: true });
   assert.equal(back.kind, 'ext', '删完不能变成「没有」，扩展那份还是能用');
 }));
 
 test('清空扩展目录：查找缓存必须一起失效', sandbox(async (dir) => {
   const d = await fresh();
   const extRoot = join(dir, 'extensions', 'ext-a');
-  fakePkg(extRoot, 'jimp', '9.9.9');
+  fakePkg(extRoot, 'qrcode', '9.9.9');
   d.setExtDirs([{ id: 'ext-a', dir: extRoot }]);
-  assert.equal(d.findPackage('jimp').kind, 'ext');
+  assert.equal(d.findPackage('qrcode').kind, 'ext');
 
   d.setExtDirs([]);
-  assert.equal(d.findPackage('jimp'), null, '卸载扩展后不能还记着「有」');
+  assert.equal(d.findPackage('qrcode'), null, '卸载扩展后不能还记着「有」');
   assert.equal(d.extDirsSnapshot().length, 0);
 }));
 
@@ -294,14 +310,14 @@ test('白名单外 / 空名字：一律 null（别拿它当通用文件探测器
 test('包在但入口坏掉：load 返回 null，不抛给调用方', sandbox(async (dir) => {
   const d = await fresh();
   const extRoot = join(dir, 'extensions', 'ext-b');
-  const p = join(extRoot, 'node_modules', 'jimp');
+  const p = join(extRoot, 'node_modules', 'qrcode');
   mkdirSync(p, { recursive: true });
   /** 有 package.json（所以算「装了」），但 main 指向不存在的文件 */
-  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'jimp', version: '0.0.1', main: 'nope.js' }));
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'qrcode', version: '0.0.1', main: 'nope.js' }));
   d.setExtDirs([{ id: 'ext-b', dir: extRoot }]);
 
-  assert.equal(d.findPackage('jimp', { fresh: true }).version, '0.0.1');
-  assert.equal(await d.load('jimp', { fresh: true }), null, '坏了就当没有，别让图库整条链崩');
+  assert.equal(d.findPackage('qrcode', { fresh: true }).version, '0.0.1');
+  assert.equal(await d.load('qrcode', { fresh: true }), null, '坏了就当没有，别让图库整条链崩');
 }));
 
 /* ---------------- 其他运行时目录：只读列出 ---------------- */
