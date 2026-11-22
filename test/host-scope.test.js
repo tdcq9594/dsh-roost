@@ -209,7 +209,12 @@ test('接线：memory.purge 要带 aliasesOf 删日记与图谱', () => {
  * `qq_send_file`（失败仍占名额与配额）。
  */
 test('接线：三处发送都要判 ok===false', () => {
-  const mainAt = SRC.indexOf('const sent = await postReply(payload, guardOutbound(reply)');
+  /**
+   * 锚点跟着 2026-11-22 的改动走了：`guardOutbound` 现在要带上本轮 chat
+   * （leak-guard 只比对本会话的静态段，读全局会话会把别群的内容当复读删）。
+   * 这里锁的仍是「主回复必须接住返回值」，不是那串参数本身。
+   */
+  const mainAt = SRC.indexOf('const sent = await postReply(payload, guardOutbound(reply, chat)');
   assert.ok(mainAt > 0, '主回复要接返回值');
   const mainBlock = SRC.slice(mainAt, mainAt + 1200);
   assert.ok(

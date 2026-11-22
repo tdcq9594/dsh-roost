@@ -211,6 +211,46 @@ test('路由：memory.enabled 开着时同一份数据会注入（对照组）',
   off?.();
 });
 
+/**
+ * 跨会话串味（2026-11-22 修）。
+ *
+ * 原来 `/mind` 固定读全局 `lastScene`——「最后说话的那个会话」。
+ * 面板上选着甲群、看到的是刚说过话的乙群的场景与记忆；
+ * 更要紧的是注入链路本身也读它，并发时甲群的提示词里会出现乙群的内容。
+ * 这里锁两件事：指定了 chatId 就必须只看它；没说过话的会话不许借别人的。
+ */
+test('路由：/mind?chatId= 只看指定会话，不跟「最后说话的那个」走', async () => {
+  const seed = {
+    memory: {
+      global: ['主人住在杭州'],
+      chats: { g1: ['甲群管张三叫鱼头'], g2: ['乙群管李四叫包子'] },
+      personas: {},
+    },
+  };
+  const { call, off } = await bootHost({}, seed);
+
+  const a = await call('/mind?chatId=g1');
+  assert.equal(a.status, 200);
+  assert.match(a.json.memoryStaticText, /鱼头/, 'g1 自己的事实要出现');
+  assert.doesNotMatch(a.json.memoryStaticText, /包子/, 'g2 的事实一个字都不能带过来');
+  assert.match(a.json.memoryStaticText, /主人住在杭州/, '全局事实两个会话都该有');
+
+  const b = await call('/mind?chatId=g2');
+  assert.match(b.json.memoryStaticText, /包子/);
+  assert.doesNotMatch(b.json.memoryStaticText, /鱼头/, '反过来同样不能串');
+  off?.();
+});
+
+test('路由：/mind 指定没说过话的会话时明说没有场景，不拿别人的顶上', async () => {
+  const { call, off } = await bootHost({}, SEED);
+  const r = await call('/mind?chatId=nobody');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.scene, null, '没说过话就没有场景快照');
+  assert.equal(r.json.sceneMissing, true, '面板要能说出「这个会话还没有过消息」');
+  assert.doesNotMatch(r.json.memoryStaticText || '', /鱼头/, '不能借 g1 的事实');
+  off?.();
+});
+
 test('路由：/channels 的能力表如实声明（直连通道也不许虚报）', async () => {
   const { call, off } = await bootHost();
   const r = await call('/channels');
