@@ -8310,7 +8310,23 @@ export function apply(ctx) {
                 results.push(r);
               }
               if (results.length === 1) return send(res, results[0].ok ? 200 : 500, results[0]);
-              return send(res, 200, { ok: results.every((r) => r.ok), results });
+              /**
+               * 批量：逐项结果留在 `results` 里，但**必须带一句 `message`**。
+               *
+               * 面板的 toast 只认 `r.message`，没有就统一显示「操作失败」——
+               * 用户看到「装了 5 个、有 3 个没成」，却不知道是网络问题、还是
+               * 这个包在注册表里根本不存在。逐项原因一次都没到他眼前过。
+               */
+              const bad = results.filter((r) => !r.ok);
+              return send(res, 200, {
+                ok: bad.length === 0,
+                results,
+                message: bad.length
+                  ? `${bad.length} 项没装上：${bad
+                    .map((r) => `${r.name || '（未指名）'}（${r.message || '未知原因'}）`)
+                    .join('；')}`
+                  : `${results.length} 项都装好了`,
+              });
             }
             /**
              * 卸载共享目录里的包。
