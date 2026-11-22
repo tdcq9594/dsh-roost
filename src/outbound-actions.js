@@ -44,6 +44,17 @@ const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)(?:[?#].*)?$/i;
 const VOICE_EXT = /\.(silk|amr|mp3|wav|ogg|m4a)(?:[?#].*)?$/i;
 const SOURCE_PREFIX = /^(?:[a-z][a-z0-9+.-]*:\/\/|\\\\|\/|[a-z]:[\\/]|\.{1,2}[\\/])/i;
 
+/**
+ * 图库序号：`#3`。
+ *
+ * **这是模型唯一该抄的东西**。绝对路径带盘符、中文、空格、括号，抄错一个字符
+ * 就是「图没发出去」而界面上毫无提示；`#3` 只有两个字符，抄不错。
+ *
+ * 只认纯序号：`#3` 对，`#3.png`、`#3,#5` 都不对——多图一次一张，和
+ * `MAX_MEDIA` 的口径一致；带后缀说明模型在猜，猜的不能当真的。
+ */
+const SEQ_SOURCE = /^#(\d{1,6})$/;
+
 /** 单轮最多发几个独立媒体，和旧 ai-chat 的 MAX_MEDIA 一致 */
 export const MAX_MEDIA = 3;
 /** 单轮最多几张官方图文卡片：一张占一整屏，多来几张就是刷屏 */
@@ -205,11 +216,18 @@ export function buildPickKeyboard(picks, nonce, { max = 4, perRow = 2 } = {}) {
 /**
  * 解析正文里的动作标记。
  *
- * @returns {{text:string, actions:Array<{type:string,value?:string}>, wantSkip:boolean}}
+ * @param {string} raw
+ * @param {object} [opts]
+ * @param {(seq:number) => string} [opts.resolveImage]
+ *        图库序号 → 真实路径。**返回空串表示解析失败**（号不存在 / 已进回收站 /
+ *        文件已删），此时占位符整段摘掉并记日志，绝不留 `#3` 在正文里。
+ *        不注入时 `#3` 一律按「不是地址」处理——老调用方行为不变。
+ * @returns {{text:string, actions:Array<{type:string,value?:string,seq?:number}>, wantSkip:boolean}}
  */
-export function parseOutboundActions(raw) {
+export function parseOutboundActions(raw, opts = {}) {
   const actions = [];
   let out = String(raw ?? '');
+  const resolveImage = typeof opts?.resolveImage === 'function' ? opts.resolveImage : null;
 
   /** `<skip>` 先摘：它影响「这条要不要发」，不是动作 */
   const wantSkip = /<skip>/i.test(out);
@@ -273,13 +291,46 @@ export function parseOutboundActions(raw) {
     });
   }
 
+  /**
+   * 标记值 → 可发送的路径。
+   *
+   * 三种写法：绝对路径 / `file://` 原样用；`#3` 查图库；其它（模型偶尔写
+   * 「图片路径」这种占位词）当无效。返回 `{path, seq}`，`path` 为空表示解析失败
+   * ——失败原因分两种，`seq` 非 0 说明是序号没查到，值得记日志给用户看。
+   */
+  const sourceOf = (v) => {
+    const s = normalizeSource(String(v ?? '').trim());
+    /**
+     * `#` 打头的一律按图库序号处理，**先于**「像不像路径」判断。
+     *
+     * 否则 `#3.png` 会被 `IMAGE_EXT` 认成相对文件名（`.png` 结尾），一路
+     * 走到 `uploadMarkdownImage` 才失败——日志里是「文件不存在」而不是
+     * 「序号写错了」，用户根本查不到原因。带后缀说明模型在猜，猜的不算。
+     */
+    if (s.startsWith('#')) {
+      const m = SEQ_SOURCE.exec(s);
+      if (!m) return null;
+      const seq = Number(m[1]);
+      const path = resolveImage ? String(resolveImage(seq) || '') : '';
+      return { path, seq };
+    }
+    if (looksLikeSource(s)) return { path: s, seq: 0 };
+    return null;
+  };
+
   /** `<<image-alone: 路径>>`：单图单独发；值不像路径就只摘掉，别把占位词留群里 */
   {
     const ranges = codeRanges(out);
     out = out.replace(/<<image-alone[:：]\s*([^<>]*?)>>/gi, (m, v, offset) => {
       if (inCode(offset, ranges)) return m;
-      const p = normalizeSource(String(v ?? '').trim());
-      if (looksLikeSource(p)) actions.push({ type: 'imageAlone', value: p });
+      const hit = sourceOf(v);
+      if (!hit) return '';
+      if (!hit.path) {
+        /** 序号没查到：留一条动作让执行器记日志，用户才知道「图为什么没发」 */
+        if (hit.seq) actions.push({ type: 'imageMiss', value: `#${hit.seq}` });
+        return '';
+      }
+      actions.push({ type: 'imageAlone', value: hit.path, ...(hit.seq ? { seq: hit.seq } : {}) });
       return '';
     });
   }
@@ -293,10 +344,14 @@ export function parseOutboundActions(raw) {
     let n = 0;
     out = out.replace(/<<image[:：]\s*([^<>]*?)>>/gi, (m, v, offset) => {
       if (inCode(offset, ranges)) return m;
-      const p = normalizeSource(String(v ?? '').trim());
-      if (!looksLikeSource(p)) return '';
+      const hit = sourceOf(v);
+      if (!hit) return '';
+      if (!hit.path) {
+        if (hit.seq) actions.push({ type: 'imageMiss', value: `#${hit.seq}` });
+        return '';
+      }
       const key = `\u0001IMG${n++}\u0001`;
-      actions.push({ type: 'inlineImage', value: p, key });
+      actions.push({ type: 'inlineImage', value: hit.path, key, ...(hit.seq ? { seq: hit.seq } : {}) });
       return key;
     });
   }
@@ -331,6 +386,16 @@ export function parseOutboundActions(raw) {
 export function createActionRunner({
   channel, tts = null, quota = null, picks = null, onPick = null, log = () => {},
   dryRunOf = () => false,
+  /**
+   * `#3` → 真实路径。宿主把图库的 `pathOf` 注进来；不注时 `<<image: #3>>`
+   * 按无效值处理（和以前一样摘掉），老调用方行为不变。
+   */
+  resolveImage = null,
+  /**
+   * 图真的发出去了之后回调序号。**只在成功后调**：发失败不该算一次使用，
+   * 否则「用过 -3」的排序会被失败的尝试污染，模型会绕开根本没发出去的图。
+   */
+  onImageUsed = null,
 } = {}) {
   /** 试运行：正文 / 文件 / 语音的发送在通道层已经拦了，这里只管**发送之前**那几步 */
   const isDry = () => dryRunOf() === true;
@@ -371,8 +436,23 @@ export function createActionRunner({
     requestId = '', senderId = '', bucket = '', onSent = () => {},
   } = {}) {
     const ch = channel();
-    const { text: body0, actions, wantSkip } = parseOutboundActions(text);
+    const { text: body0, actions, wantSkip } = parseOutboundActions(text, { resolveImage });
     let body = body0;
+
+    /** 序号解析失败的图：必须留一句日志，否则用户只看到「图没发出来」 */
+    for (const a of actions.filter((x) => x.type === 'imageMiss')) {
+      log(`图库里的 ${a.value} 用不了（号不存在 / 已进回收站 / 文件已删），这张已跳过`);
+    }
+
+    /** 图发成功才记一次使用（见 `onImageUsed` 的说明） */
+    const used = (a) => {
+      if (!a?.seq || typeof onImageUsed !== 'function') return;
+      try {
+        onImageUsed(a.seq);
+      } catch (e) {
+        log(`记图库使用失败（不影响发送）：${e?.message ?? e}`);
+      }
+    };
 
     /** 本轮之前自己发的最后一条，`<<retract>>` 撤的是它 */
     const previous = lastSent.get(target) ?? null;
@@ -396,6 +476,7 @@ export function createActionRunner({
         if (!/^qqbot-media:\/\//i.test(url)) throw new Error('没拿到素材引用');
         body = body.split(a.key).join(`![](${url})`);
         uploaded.push(String(r?.imageId ?? ''));
+        used(a);
       } catch (e) {
         /** 失败只把占位符删掉，绝不留本地路径 */
         body = body.split(a.key).join('');
@@ -607,7 +688,7 @@ export function createActionRunner({
           /** 合成成功但发失败了，把刚扣的额度退回去——那次语音并没有真的出去 */
           if (sent && sent.ok === false && q?.undo) q.undo();
         }
-        if (sent?.ok) { mediaSent += 1; onSent(); }
+        if (sent?.ok) { mediaSent += 1; onSent(); used(a); }
         else if (sent) log(`${a.type} 没发出去：${sent?.message ?? '未知原因'}`);
       } catch (e) {
         /** 语音没开 / 文件不存在 / 上传失败：和旧实现一样不打断这一轮 */

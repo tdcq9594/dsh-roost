@@ -16669,6 +16669,254 @@ select.roost-input{color-scheme:dark}
     }
 
     /**
+     * 图库：AI 用的那份「带序号的图」。
+     *
+     * 和上面「表情库」的区别要一眼看出来：那张按**文件**列（用户找图、改标签、
+     * 删文件），这张按**序号**列（AI 认得出哪张、认不出哪张）。所以这里最要紧的
+     * 三样是：`#序号`、有没有描述、以及「让 AI 整理」那个按钮。
+     *
+     * 「让 AI 整理」是**增量**的：只挑 `name` 和 `meaning` 都为空的图去问模型。
+     * 几百张全跑一遍是几百次视觉调用，第一次点可能要等，第二次点应该秒完成。
+     * 所以按钮文案要诚实说明「每张问一次模型」——不然用户会以为卡住了。
+     */
+    function GalleryCard({ toast, n = '03' }) {
+      const [data, setData] = useState(null)
+      const [page, setPage] = useState(1)
+      const [cat, setCat] = useState('')
+      const [q, setQ] = useState('')
+      const [trash, setTrash] = useState(false)
+      const [busy, setBusy] = useState(false)
+      const [job, setJob] = useState(null)
+      const [editFor, setEditFor] = useState(0)
+      const [draft, setDraft] = useState({})
+
+      const load = useCallback(async (p = page) => {
+        const qs = new URLSearchParams({ page: String(p), size: '24' })
+        if (cat) qs.set('category', cat)
+        if (q.trim()) qs.set('q', q.trim())
+        if (trash) qs.set('trash', '1')
+        const r = await get('/gallery?' + qs.toString())
+        if (r.ok === false) return toast(r.message || '读不到图库')
+        setData(r)
+      }, [page, cat, q, trash])
+
+      useEffect(() => { load(page) }, [page, cat, trash])
+
+      /** 整理进度：任务在跑时每 500ms 问一次（一张是一次模型调用，比补标签慢得多） */
+      useEffect(() => {
+        if (!job?.running) return undefined
+        const t = setInterval(async () => {
+          const r = await get('/gallery/organize/job')
+          if (r?.job) {
+            setJob(r.job)
+            if (!r.job.running) {
+              toast(`整理完成：补上 ${r.job.done} 张，跳过 ${r.job.failed} 张`)
+              load(1)
+            }
+          }
+        }, 500)
+        return () => clearInterval(t)
+      }, [job?.running])
+
+      const organize = async () => {
+        setBusy(true)
+        const r = await post('/gallery/organize', {})
+        setBusy(false)
+        if (r.ok === false) return toast(r.message || '启动失败')
+        if (!r.total) return toast(r.message || '每张都有描述了')
+        setJob({ running: true, total: r.total, done: 0, failed: 0, percent: 0 })
+        toast(`开始整理 ${r.total} 张（每张问一次模型，会慢一点）`)
+      }
+
+      const cancelJob = async () => {
+        const r = await post('/gallery/organize/cancel', {})
+        setJob(r.job || null)
+        toast(r.message || '已停下')
+        load(page)
+      }
+
+      const saveEdit = async () => {
+        const r = await post('/gallery/edit', { seq: editFor, ...draft })
+        if (r.ok === false) return toast(r.message || '没存上')
+        setEditFor(0)
+        setDraft({})
+        toast('标注已更新')
+        load(page)
+      }
+
+      const toTrash = async (seq) => {
+        const r = await post('/gallery/remove', { seq })
+        if (r.ok === false) return toast(r.message || '没撤下来')
+        toast(`#${seq} 已移入回收站（文件还在）`)
+        load(page)
+      }
+
+      const back = async (seq) => {
+        const r = await post('/gallery/restore', { seq })
+        if (r.ok === false) return toast(r.message || '恢复不了')
+        toast(`#${seq} 已恢复`)
+        load(page)
+      }
+
+      const stats = data?.stats || {}
+      return h(Sec, {
+        n, title: '图库（AI 用的）',
+        right: h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+          h('label', {
+            className: 'roost-muted',
+            style: { fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 },
+          },
+            h('input', { type: 'checkbox', checked: trash, onChange: (e) => { setTrash(e.target.checked); setPage(1) } }),
+            '看回收站'),
+          h('button', {
+            type: 'button', className: 'roost-btn roost-btn-primary',
+            disabled: busy || job?.running,
+            onClick: organize,
+          }, job?.running ? '整理中…' : '让 AI 整理')),
+      },
+        !data
+          ? h('div', { className: 'roost-empty' }, '读着…')
+          : h('div', null,
+            h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+              `共 ${stats.total} 张 · 还没描述 ${stats.untagged} 张`
+              + ` · 回收站 ${stats.trash} · 下一个序号 #${stats.nextSeq}`
+              + (data.dir ? ` · 目录 ${data.dir}` : '')),
+
+            h('div', { className: 'roost-note', style: { fontSize: 11, marginBottom: 8, opacity: .75 } },
+              'AI 发图时只写序号（如 <<image: #3>>），路径由宿主去换。'
+              + '这里能改的是它判断「该不该发这张」的依据：名字、含义、场合。'),
+
+            job?.running
+              ? h('div', { style: { marginBottom: 8 } },
+                h('div', { className: 'roost-note', style: { fontSize: 11.5, marginBottom: 4 } },
+                  `整理中 ${job.done + job.failed} / ${job.total}（${job.percent}%）`
+                  + (job.note ? ` · ${job.note}` : '')),
+                h('div', { style: { height: 6, borderRadius: 3, background: 'rgba(128,128,128,.2)' } },
+                  h('div', {
+                    style: {
+                      height: '100%', borderRadius: 3, width: `${job.percent}%`,
+                      background: 'var(--ok, #2a9d5c)', transition: 'width .3s',
+                    },
+                  })),
+                h('button', { type: 'button', className: 'roost-btn', style: { marginTop: 6 }, onClick: cancelJob }, '停下'))
+              : null,
+
+            h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' } },
+              h('select', {
+                className: 'roost-input', style: { width: 'auto' }, value: cat,
+                onChange: (e) => { setCat(e.target.value); setPage(1) },
+              },
+                h('option', { value: '' }, '全部分类'),
+                (data.cats || []).map((c) => h('option', { key: c.name, value: c.name }, `${c.name}（${c.count}）`))),
+              h('input', {
+                className: 'roost-input', style: { width: 160 }, placeholder: '搜文件名 / 描述', value: q,
+                onChange: (e) => setQ(e.target.value),
+                onKeyDown: (e) => { if (e.key === 'Enter') { setPage(1); load(1) } },
+              }),
+              h('button', { type: 'button', className: 'roost-btn', onClick: () => { setPage(1); load(1) } }, '搜'),
+              h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
+                `第 ${data.page} / ${data.pages} 页 · ${data.total} 张`)),
+
+            data.items.length === 0
+              ? h('div', { className: 'roost-empty' },
+                trash ? '回收站是空的' : '图库还是空的：往表情目录丢几张图，或让 AI 自己存（gallery_save）')
+              : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 8 } },
+                data.items.map((it) => {
+                  const id = Number(it.seq) || 0
+                  const editing = editFor === id
+                  return h('div', {
+                    key: id,
+                    style: {
+                      border: `1px solid ${editing ? 'var(--accent, #4a7)' : 'rgba(128,128,128,.25)'}`,
+                      borderRadius: 8, padding: 6, fontSize: 11,
+                      opacity: trash ? .55 : 1,
+                    },
+                  },
+                    h('div', { style: { position: 'relative' } },
+                      h('img', {
+                        /** 走 API 前缀 + 相对路径：`/stickers/file` 会在服务端再校验一次越界 */
+                        src: API + '/stickers/file?path=' + encodeURIComponent(it.rel || it.file),
+                        alt: it.file, loading: 'lazy',
+                        style: { width: '100%', height: 80, objectFit: 'contain', borderRadius: 4, background: 'rgba(128,128,128,.08)' },
+                      }),
+                      h('span', {
+                        style: {
+                          position: 'absolute', top: 2, left: 2, padding: '0 4px', borderRadius: 4,
+                          fontSize: 10.5, fontWeight: 600, background: 'rgba(0,0,0,.55)', color: '#fff',
+                        },
+                      }, `#${id}`)),
+
+                    h('div', {
+                      title: it.file,
+                      style: { marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                    }, it.name || it.file),
+
+                    h('div', {
+                      className: 'roost-muted',
+                      style: { fontSize: 10.5, minHeight: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                      title: it.meaning || it.scenes || '',
+                    }, it.meaning || it.scenes || '还没描述'),
+
+                    h('div', { style: { display: 'flex', gap: 4, marginTop: 4 } },
+                      editing
+                        ? null
+                        : h('button', {
+                            type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
+                            onClick: () => {
+                              setEditFor(id)
+                              setDraft({ name: it.name || '', meaning: it.meaning || '', scenes: it.scenes || '' })
+                            },
+                          }, '改'),
+                      h('button', {
+                        type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px', marginLeft: 'auto' },
+                        onClick: () => (trash ? back(id) : toTrash(id)),
+                      }, trash ? '恢复' : '撤下')),
+
+                    editing
+                      ? h('div', { style: { marginTop: 4, display: 'flex', flexDirection: 'column', gap: 3 } },
+                        h('input', {
+                          className: 'roost-input', placeholder: '短名（10 字内）', value: draft.name || '',
+                          style: { fontSize: 10.5, padding: '2px 4px' },
+                          onChange: (e) => setDraft((d) => ({ ...d, name: e.target.value })),
+                        }),
+                        h('input', {
+                          className: 'roost-input', placeholder: '这是什么、什么感觉', value: draft.meaning || '',
+                          style: { fontSize: 10.5, padding: '2px 4px' },
+                          onChange: (e) => setDraft((d) => ({ ...d, meaning: e.target.value })),
+                        }),
+                        h('input', {
+                          className: 'roost-input', placeholder: '什么场合发', value: draft.scenes || '',
+                          style: { fontSize: 10.5, padding: '2px 4px' },
+                          onChange: (e) => setDraft((d) => ({ ...d, scenes: e.target.value })),
+                        }),
+                        h('div', { style: { display: 'flex', gap: 4 } },
+                          h('button', {
+                            type: 'button', className: 'roost-btn roost-btn-primary',
+                            style: { fontSize: 10.5, padding: '1px 6px' },
+                            onClick: saveEdit,
+                          }, '存'),
+                          h('button', {
+                            type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
+                            onClick: () => { setEditFor(0); setDraft({}) },
+                          }, '取消')))
+                      : null,
+                  )
+                })),
+
+            h('div', { style: { display: 'flex', gap: 6, marginTop: 10, alignItems: 'center' } },
+              h('button', {
+                type: 'button', className: 'roost-btn', disabled: data.page <= 1,
+                onClick: () => setPage(data.page - 1),
+              }, '上一页'),
+              h('button', {
+                type: 'button', className: 'roost-btn', disabled: data.page >= data.pages,
+                onClick: () => setPage(data.page + 1),
+              }, '下一页')),
+          ),
+      )
+    }
+
+    /**
      * A3（第二轮对照）：「听」这一条腿终于有面板了。
      * 官方 Bot API 直接把语音转成文字（asrText），不用配 ASR、不用 Key；
      * 以前只能从提示词里猜「她听没听清」，现在排障能看见刚才转成了什么。
@@ -16750,6 +16998,11 @@ select.roost-input{color-scheme:dark}
         }),
         /** 5.12：库管理只出现在独立的「表情包」页，别把表达页撑成两屏 */
         part === 'sticker' ? h(StickerManageCard, { toast, n: '02' }) : null,
+        /**
+         * 图库紧跟库管理：前者按文件、后者按序号，是同一批图的两种视角，
+         * 放隔壁才能来回对照「AI 认不认得出这张」。
+         */
+        part === 'sticker' ? h(GalleryCard, { toast, n: '03' }) : null,
         part === 'voice'
           ? h('div', { className: 'roost-note' }, '表情包在「表达 → 表情包」那一页。')
           : null,
