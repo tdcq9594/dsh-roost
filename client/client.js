@@ -18392,11 +18392,16 @@ select.roost-input{color-scheme:dark}
             /**
              * 二维码走宿主路由读仓库里的图（随包发布），不内联进 client.js。
              * 白底是必要的：二维码图片本身透明，深色主题下会糊成一片。
+             *
+             * **只给宽、高留 auto**：这张是 QQ 的群分享卡片（1005×1305，竖版，
+             * 上面还有群头像和群名），不是正方形二维码。以前写死 `width:168;
+             * height:168` 会把它横压竖拉——定位方块变成椭圆，扫码成功率跟着掉，
+             * 而「图糊了」看起来像图片质量问题，没人会想到是 CSS 比例。
              */
             h('img', {
               src: API + '/community-qr',
               alt: '交流群二维码',
-              style: { width: 168, height: 168, borderRadius: 6, flex: '0 0 auto', background: '#fff' },
+              style: { width: 168, height: 'auto', borderRadius: 6, flex: '0 0 auto', background: '#fff' },
             }),
             h('div', { style: { minWidth: 200 } },
               h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },

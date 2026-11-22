@@ -15,6 +15,9 @@
  * 设计上刻意对齐旧 ai-chat 的语义，保证「原有体验不变」：
  *   · `<<image: 路径>>`      就地插图 → 上传 Markdown 素材，换成 `![](qqbot-media://…)`
  *   · `<<image-alone: 路径>>` 单独发一条图（正文先发、图后发）
+ *   · 两者都能带显示尺寸：`<<image: #3|320x200>>`（末尾 `|宽x高`）。
+ *     只写一边时另一边按**原图比例**补（读文件头，不猜）；两边都写就照写
+ *     显示，允许放大、缩小、变形。见 `parseImageSize` / `sizeBoxOf`。
  *   · `<<voice: 路径>>`      单独发一条语音
  *   · `<<say: 文本>>`        宿主 TTS 合成后发语音条（没开语音就静默跳过）
  *   · `<<button: 标签|指令>>` 挂到本条 Markdown 的 keyboard（type:2 指令型）
@@ -39,6 +42,7 @@ import path from 'node:path';
 
 import { parseCardValue, tuwenProblem } from './tuwen.js';
 import { encodeButtonData } from './roost-interaction.js';
+import { dimsOfPath } from './image-size.js';
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)(?:[?#].*)?$/i;
 const VOICE_EXT = /\.(silk|amr|mp3|wav|ogg|m4a)(?:[?#].*)?$/i;
@@ -64,6 +68,104 @@ const hasExt = (v, re) => re.test(v) || re.test(String(v).split(/[?#]/)[0]);
  * `MAX_MEDIA` 的口径一致；带后缀说明模型在猜，猜的不能当真的。
  */
 const SEQ_SOURCE = /^#(\d{1,6})$/;
+
+/* ---------------- 显示尺寸 ---------------- */
+
+/**
+ * 尺寸位：`320x200` / `320×200` / `320*200` / `320x` / `x200`，允许带 `px`。
+ *
+ * **必须有一个分隔符**：只写 `320` 不算尺寸——文件名、序号都可能正好是数字，
+ * 拿它当尺寸会把「`<<image: #1>>` 后面跟了一个数字」误判成尺寸，那张图反而
+ * 按奇怪的比例显示。
+ */
+const SIZE_SPEC = /^(\d{1,5})?\s*(?:px)?\s*[x×*]\s*(\d{1,5})?\s*(?:px)?$/i;
+
+/**
+ * 上限。官方尺寸位取值是 5 位数，但真有人写 `99999x99999` 只会得到一张
+ * 加载不出来的图；4096 已经超过任何正常显示需求（手机屏宽普遍 1080~1440）。
+ */
+const SIZE_MAX = 4096;
+
+/**
+ * 解析尺寸位。写不出来（`宽高都不给`、只有分隔符、含非法字符）返回 `null`。
+ *
+ * 只给一边时另一边是 **0**，表示「按原图比例算」——这一步要读图才知道真实
+ * 比例，所以放在执行器里做（见 `sizeBoxOf`），解析层保持纯函数。
+ *
+ * @param {string} spec 比如 `320x200`、`320x`、`x200`
+ * @returns {{w:number,h:number}|null} `w`/`h` 为 0 表示这一边不指定
+ */
+export function parseImageSize(spec) {
+  const s = String(spec ?? '').trim();
+  if (!s) return null;
+  const m = SIZE_SPEC.exec(s);
+  if (!m) return null;
+  const clampN = (v) => {
+    const n = Math.floor(Number(v) || 0);
+    return n > 0 ? Math.min(n, SIZE_MAX) : 0;
+  };
+  const w = clampN(m[1]);
+  const h = clampN(m[2]);
+  if (!w && !h) return null;
+  return { w, h };
+}
+
+/**
+ * 把标记值拆成「来源 + 尺寸」。
+ *
+ * 两种写法都认：
+ *   · `#3|320x200`、`D:/a.png|320x` —— **竖线**是首选。Windows 文件名里没有
+ *     `|`，路径带空格也不会被拆错；
+ *   · `#3 320x200` —— 空格分隔只对**序号**生效。路径里空格太常见
+ *     （`C:/Program Files/a.png`），按空格拆会把路径本身切断。
+ *
+ * 竖线后面不是合法尺寸时（`#3|abc`）整段当值原样返回，交给 `sourceOf` 判——
+ * 结果是「序号写法不对」，日志会明确说清，而不是静默当成尺寸吃掉了。
+ *
+ * @returns {{value:string, size:{w:number,h:number}|null}}
+ */
+export function splitImageSize(raw) {
+  const s = String(raw ?? '').trim();
+  const bar = /^(.*?)\s*[|｜]\s*([^|｜]*)$/.exec(s);
+  if (bar) {
+    const size = parseImageSize(bar[2]);
+    return size ? { value: bar[1].trim(), size } : { value: s, size: null };
+  }
+  const seq = /^(#\d{1,6})\s+(.+)$/.exec(s);
+  if (seq) {
+    const size = parseImageSize(seq[2]);
+    if (size) return { value: seq[1], size };
+  }
+  return { value: s, size: null };
+}
+
+/**
+ * 拼 markdown 图片的尺寸位：` #320px #200px`。
+ *
+ * 只给一边时**读原图算另一边**（`dimsOfPath` 只看文件头 64KB）。这是
+ * `<<image: #3|320x>>` 能用的关键：模型不必知道原图比例，也能得到一个
+ * 不变形的尺寸。
+ *
+ * 读不出原图尺寸（格式不认 / 文件读不了）时返回空串，调用方退回不含尺寸的
+ * `![](url)`——框架会按 480 宽兜底，**绝不猜一个比例把图压变形**。
+ *
+ * @param {{w:number,h:number}} size
+ * @param {string} p 本地图片路径
+ * @returns {string}
+ */
+export function sizeBoxOf(size, p) {
+  let w = Math.floor(Number(size?.w) || 0);
+  let h = Math.floor(Number(size?.h) || 0);
+  if ((!w || !h) && p) {
+    const real = dimsOfPath(p);
+    if (real.w > 0 && real.h > 0) {
+      if (w && !h) h = Math.max(1, Math.round((real.h * w) / real.w));
+      else if (h && !w) w = Math.max(1, Math.round((real.w * h) / real.h));
+    }
+  }
+  if (!w || !h) return '';
+  return ` #${w}px #${h}px`;
+}
 
 /** 单轮最多发几个独立媒体，和旧 ai-chat 的 MAX_MEDIA 一致 */
 export const MAX_MEDIA = 3;
@@ -232,7 +334,7 @@ export function buildPickKeyboard(picks, nonce, { max = 4, perRow = 2 } = {}) {
  *        图库序号 → 真实路径。**返回空串表示解析失败**（号不存在 / 已进回收站 /
  *        文件已删），此时占位符整段摘掉并记日志，绝不留 `#3` 在正文里。
  *        不注入时 `#3` 一律按「不是地址」处理——老调用方行为不变。
- * @returns {{text:string, actions:Array<{type:string,value?:string,seq?:number}>, wantSkip:boolean}}
+ * @returns {{text:string, actions:Array<{type:string,value?:string,seq?:number,size?:{w:number,h:number}}>, wantSkip:boolean}}
  */
 export function parseOutboundActions(raw, opts = {}) {
   const actions = [];
@@ -345,7 +447,9 @@ export function parseOutboundActions(raw, opts = {}) {
     const ranges = codeRanges(out);
     out = out.replace(/<<image-alone[:：]\s*([^<>]*?)>>/gi, (m, v, offset) => {
       if (inCode(offset, ranges)) return m;
-      const hit = sourceOf(v);
+      /** `#3|320x` 先拆尺寸，再按剩下的值认来源 */
+      const sp = splitImageSize(v);
+      const hit = sourceOf(sp.value);
       if (!hit) return '';
       if (!hit.path) {
         /** 序号没查到 / 写法不对：留一条动作让执行器记日志，用户才知道「图为什么没发」 */
@@ -353,7 +457,11 @@ export function parseOutboundActions(raw, opts = {}) {
         if (miss) actions.push(miss);
         return '';
       }
-      actions.push({ type: 'imageAlone', value: hit.path, ...(hit.seq ? { seq: hit.seq } : {}) });
+      actions.push({
+        type: 'imageAlone', value: hit.path,
+        ...(hit.seq ? { seq: hit.seq } : {}),
+        ...(sp.size ? { size: sp.size } : {}),
+      });
       return '';
     });
   }
@@ -367,7 +475,8 @@ export function parseOutboundActions(raw, opts = {}) {
     let n = 0;
     out = out.replace(/<<image[:：]\s*([^<>]*?)>>/gi, (m, v, offset) => {
       if (inCode(offset, ranges)) return m;
-      const hit = sourceOf(v);
+      const sp = splitImageSize(v);
+      const hit = sourceOf(sp.value);
       if (!hit) return '';
       if (!hit.path) {
         const miss = missOf(hit);
@@ -375,7 +484,11 @@ export function parseOutboundActions(raw, opts = {}) {
         return '';
       }
       const key = `\u0001IMG${n++}\u0001`;
-      actions.push({ type: 'inlineImage', value: hit.path, key, ...(hit.seq ? { seq: hit.seq } : {}) });
+      actions.push({
+        type: 'inlineImage', value: hit.path, key,
+        ...(hit.seq ? { seq: hit.seq } : {}),
+        ...(sp.size ? { size: sp.size } : {}),
+      });
       return key;
     });
   }
@@ -410,6 +523,13 @@ export function parseOutboundActions(raw, opts = {}) {
 export function createActionRunner({
   channel, tts = null, quota = null, picks = null, onPick = null, log = () => {},
   dryRunOf = () => false,
+  /**
+   * Markdown 通道是否可用（宿主注入，热读）。只有带尺寸的独立图会问它：
+   * 那条路把图换成 `![](…)` 交给 markdown 通道，**面板把 markdown 关掉时
+   * 这段会当纯文本发进群里**（`![](…)` 原样可见）。关着就退回富媒体——
+   * 图还能发，只是尺寸按原图。
+   */
+  markdownOf = () => true,
   /**
    * `#3` → 真实路径。宿主把图库的 `pathOf` 注进来；不注时 `<<image: #3>>`
    * 按无效值处理（和以前一样摘掉），老调用方行为不变。
@@ -533,6 +653,53 @@ export function createActionRunner({
     const usedAfterSend = [];
     /** 整轮媒体预算：就地插图 + 后面的独立图 / 语音 / 念出来的话 合计不超 MAX_MEDIA */
     let inlineUsed = 0;
+
+    /**
+     * 图 → 可发送的 `qqbot-media://` 引用。**就地插图和带尺寸的独立图共用**：
+     *
+     *   1. 图库里的图先看线上有没有副本（同一张图第二次发不用重传，省一格配额）；
+     *      **快过期的不用**——宁可重传，也不要拿一个马上失效的引用去发，
+     *      那种失败在群里表现成「图没出来」，日志只有一句「发送失败」。
+     *   2. 没有就上传，必要时先确认配额（满了以后每次上传都失败，而错误只有
+     *      「上传失败」四个字）。
+     *
+     * 抽出来的原因很实际：两条路各写一遍的话，「配额不足怎么报」和
+     * 「用完即删要不要记待删」迟早只改到一处。
+     *
+     * 失败**抛错**，由调用方决定是删占位符还是跳过这条——两处的善后不一样。
+     */
+    const resolveMediaUrl = async (a) => {
+      /** 「用完即删」模式下不存在可复用的副本：那份每次都会被删掉 */
+      const keep = keepUploadsOf() !== false;
+      if (keep && a.seq && typeof resolveRemote === 'function') {
+        const hit = resolveRemote(a.seq);
+        const u = String(hit?.url ?? '').trim();
+        /** `expireAt` 为 0 表示官方没给 ttl，无从判断，按「还能用」处理 */
+        const exp = Number(hit?.expireAt) || 0;
+        const soon = exp > 0 && Date.now() > exp - 60_000;
+        if (!soon && /^qqbot-media:\/\//i.test(u)) {
+          log(`#${a.seq} 复用了线上副本（没重传）`);
+          return u;
+        }
+        if (soon) log(`#${a.seq} 的线上副本快过期了，这次重新上传`);
+      }
+      if (typeof ensureQuota === 'function') {
+        const g = await ensureQuota(1).catch(() => ({ ok: true }));
+        if (g && g.ok === false) throw new Error(g.message || '官方素材池配额不足');
+      }
+      const r = await ch.uploadMarkdownImage({ scene, target, path: a.value, retain: keep });
+      const url = String(r?.url ?? '').trim();
+      if (!/^qqbot-media:\/\//i.test(url)) throw new Error('没拿到素材引用');
+      /**
+       * 只有「留着」才记映射：`keep=false` 时这份马上要删，记下来只会让
+       * 下次拿着一个失效的 `imageId` 去复用。
+       */
+      if (keep && a.seq && typeof markRemote === 'function') markRemote(a.seq, r);
+      /** 只有「用完即删」模式才记进待删列表；留着复用的那份绝不能删 */
+      if (!keep) uploaded.push(String(r?.imageId ?? ''));
+      return url;
+    };
+
     for (const a of actions.filter((x) => x.type === 'inlineImage')) {
       if (inlineUsed >= MAX_MEDIA) {
         /** 超预算的占位符直接删掉，绝不能把本地路径留在正文里 */
@@ -542,55 +709,15 @@ export function createActionRunner({
       }
       inlineUsed += 1;
       try {
+        const url = await resolveMediaUrl(a);
         /**
-         * 先看线上有没有副本。
-         *
-         * 图库的「线上层」就是官方素材池：同一张图传过一次，`qqbot-media://`
-         * 引用就能反复用。复用省掉一次 3~5 秒的上传，也省一格 100 张的配额。
-         * 引用可能被人在面板删掉、也可能按 `expires_at` 自己过期，所以只在
-         * 拿得到时才用；拿不到就走下面的上传。
+         * 尺寸位：模型显式写了就照它写（`sizeBoxOf` 负责只给一边时按原图
+         * 比例补另一边）。没写就留 `![](url)`，由框架按 480 宽兜底——
+         * 那套逻辑在框架侧（`md-image.js`），两处都补会算出两个值。
          */
-        let url = '';
-        let reused = false;
-        /** 「用完即删」模式下不存在可复用的副本：那份每次都会被删掉 */
-        const keep = keepUploadsOf() !== false;
-        if (keep && a.seq && typeof resolveRemote === 'function') {
-          const hit = resolveRemote(a.seq);
-          const u = String(hit?.url ?? '').trim();
-          /**
-           * **快过期的别复用**：宁可重传一次（几秒），也不要拿一个马上失效的
-           * 引用去发——那种失败在群里表现成「图没出来」，日志只有一句
-           * 「发送失败」，用户和排查者都看不出是素材没了。
-           * `expireAt` 为 0 表示官方没给 ttl，无从判断，按「还能用」处理。
-           */
-          const exp = Number(hit?.expireAt) || 0;
-          const soon = exp > 0 && Date.now() > exp - 60_000;
-          if (!soon && /^qqbot-media:\/\//i.test(u)) {
-            url = u;
-            reused = true;
-          } else if (soon) {
-            log(`#${a.seq} 的线上副本快过期了，这次重新上传`);
-          }
-        }
-        if (!url) {
-          if (typeof ensureQuota === 'function') {
-            const g = await ensureQuota(1).catch(() => ({ ok: true }));
-            if (g && g.ok === false) throw new Error(g.message || '官方素材池配额不足');
-          }
-          const r = await ch.uploadMarkdownImage({ scene, target, path: a.value, retain: keep });
-          url = String(r?.url ?? '').trim();
-          if (!/^qqbot-media:\/\//i.test(url)) throw new Error('没拿到素材引用');
-          /**
-           * 只有「留着」才记映射：`keep=false` 时这份马上要删，记下来只会让
-           * 下次拿着一个失效的 `imageId` 去复用。
-           */
-          if (keep && a.seq && typeof markRemote === 'function') markRemote(a.seq, r);
-          /** 只有「用完即删」模式才记进待删列表；留着复用的那份绝不能删 */
-          if (!keep) uploaded.push(String(r?.imageId ?? ''));
-        }
-        body = body.split(a.key).join(`![](${url})`);
+        const box = a.size ? sizeBoxOf(a.size, a.value) : '';
+        body = body.split(a.key).join(box ? `![图片${box}](${url})` : `![](${url})`);
         if (a.seq) usedAfterSend.push(a);
-        if (reused) log(`就地插图 #${a.seq} 复用了线上副本（没重传）`);
       } catch (e) {
         /** 失败只把占位符删掉，绝不留本地路径 */
         body = body.split(a.key).join('');
@@ -763,7 +890,36 @@ export function createActionRunner({
       }
       try {
         let sent = null;
-        if (a.type === 'imageAlone' && typeof ch.sendFile === 'function') {
+        if (a.type === 'imageAlone' && a.size && markdownOf() !== false) {
+          /**
+           * **带尺寸的独立图走 markdown，不走富媒体。**
+           *
+           * `sendFile` 是 `msg_type=7` 富媒体，官方没有尺寸字段，只能按原图
+           * 铺满——一张 1080×4000 的长图在手机上要划好几屏。而「单独发一条图」
+           * 恰恰是表情包最常用的形态，尺寸在这条路上比就地插图更该生效。
+           *
+           * 所以模型写了 `|宽x高` 就换成「一条只有 markdown 图片的消息」：
+           * 视觉上仍是单独一张图，尺寸由 `![… #wpx #hpx](url)` 决定。
+           */
+          const url = await resolveMediaUrl(a);
+          const box = sizeBoxOf(a.size, a.value);
+          sent = await ch.send({
+            scene, kind, target,
+            text: box ? `![图片${box}](${url})` : `![](${url})`,
+            markdown: true, msgId, receivedAt, eventId, isWakeup,
+          });
+          /**
+           * 这条消息**只有图**：官方拒 markdown 时通道的降级是「`plainOf()`
+           * 之后重发纯文本」，而纯文本里图被剥得一个字不剩（见 `channel.js`），
+           * 等于整条丢掉。退回富媒体——图至少发得出去，代价是尺寸按原图。
+           */
+          if (sent && sent.ok === false && typeof ch.sendFile === 'function') {
+            log(`带尺寸的独立图没发出去（markdown 被拒？），改按原图重发：${sent.message ?? '未知原因'}`);
+            sent = await ch.sendFile({ scene, target, path: a.value, msgId, receivedAt, eventId, isWakeup });
+          }
+        } else if (a.type === 'imageAlone' && typeof ch.sendFile === 'function') {
+          /** markdown 关着时带尺寸的图也落到这里（上一支进不来），尺寸没生效要说一声 */
+          if (a.size) log('markdown 关着，这张按原图发（尺寸没生效）');
           sent = await ch.sendFile({ scene, target, path: a.value, msgId, receivedAt, eventId, isWakeup });
         } else if (a.type === 'voice' && typeof ch.sendVoice === 'function') {
           sent = await ch.sendVoice({ scene, target, path: a.value, msgId, receivedAt, eventId, isWakeup });

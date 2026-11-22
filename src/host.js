@@ -4316,6 +4316,12 @@ export function apply(ctx) {
      * 之前——通道层拦不住，得让出站动作层自己跳过。
      */
     dryRunOf: () => dryRunOn(),
+    /**
+     * 面板「markdown」开关，热读。带尺寸的独立图靠 markdown 通道显示尺寸，
+     * 关掉时那条消息会变成群里可见的 `![](qqbot-media://…)` 纯文本——所以
+     * 出站动作层要能问到这里。判据与建通道时那条一致（`cfg.roostHost.markdown`）。
+     */
+    markdownOf: () => cfg.roostHost?.markdown !== false,
     log: (m) => log.warn(m),
   });
 
