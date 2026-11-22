@@ -86,7 +86,15 @@ test('头像：force 无视 TTL，重新下载', async (t) => {
 test('头像：过期后自然重新下载', async (t) => {
   const dir = tmpDir(t);
   const img = await fakeImage(t);
-  /** ttlMs=0 → 每次都已过期，等价于「等了一天」 */
+  /**
+   * `ttlMs=0` → 每次都已过期，等价于「等了一天」。
+   *
+   * 这是整组用例里最尖的一条：`mtimeMs` 带亚毫秒小数，同一毫秒内写完再读，
+   * `Date.now() - at` 会是负数，没取整就会被当成「还没过期」。CI 上它曾随机
+   * 只打了一次图床（Node 22 过 / Node 24 挂），修法见 `avatar-cache.js` 里
+   * `aged` 那段注释。**别把这条改成 ttlMs=1 加 sleep 绕过去**——那等于把
+   * 「精确到毫秒」这个语义丢了。
+   */
   const av = createAvatarCache({ dir, ttlMs: 0 });
 
   await av.pathOf({ openid: 'U1', url: img.url });

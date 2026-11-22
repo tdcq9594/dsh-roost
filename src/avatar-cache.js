@@ -119,7 +119,19 @@ export function createAvatarCache({ dir, ttlMs = AVATAR_TTL_MS, timeoutMs = 5000
     const hit = await locate(key);
     const old = hit ? abs(hit.file) : '';
 
-    if (hit && !force && Date.now() - hit.at < ttlMs) return old;
+    /**
+     * **`hit.at` 要取整再比。**
+     *
+     * `statSync().mtimeMs` 是浮点（Linux 上带亚毫秒精度，比如 `1763000000000.7`），
+     * 而 `Date.now()` 只有整毫秒。同一毫秒内写完再读，`Date.now() - at` 会是
+     * **负数**，于是 `负数 < ttlMs(0)` 成立——`ttlMs: 0`（每次都该重下）被当成
+     * 命中，`force` 之外的「过期刷新」也会被推迟不到 1 ms。
+     *
+     * 这不是理论问题：CI 上「过期后自然重新下载」那条用例就因此随机只打了一次
+     * 图床（Node 22 过、Node 24 挂）。取整之后语义是精确的「已过多少整毫秒」。
+     */
+    const aged = Date.now() - Math.floor(hit?.at ?? 0);
+    if (hit && !force && aged < ttlMs) return old;
 
     const src = String(url || '').trim();
     /** 没有新地址：有旧图就给旧的（force 也没得更） */
