@@ -40,7 +40,7 @@ export function observe(text, { owner = false } = {}) {
  *
  * 所以这里只给一句软提示，让她自己少写/多写标记——不改变已经生成的任何内容，
  * 也不需要往 `/r/reply` 回包加字段（省掉跨进程握手）。delay 乘子严禁用于
- * 被动回复（群窗口 5 分钟），要抖只能抖 awake 的主动间隔。
+ * 被动回复（群窗口 60 分钟），要抖只能抖 awake 的主动间隔。
  */
 export function behaviorHint(m, enabled = false) {
   if (!enabled) return '';

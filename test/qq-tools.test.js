@@ -266,9 +266,10 @@ test('qq_send：超过上限就拒，并说清还剩几段', async () => {
  * ——模型只发 3 段，后面两格白浪费。反过来配置成 2 时更糟：模型按 3 组织内容，
  * 第 3 段被工具拒掉且不报错，用户只觉得「话说一半没了」。
  */
-test('段数上限：配置值受会话被动回复硬上限约束', () => {
+test('段数上限：群放开到 50，私聊仍是官方的 4', () => {
   assert.equal(maxPartsOf({ qqTools: { maxParts: 5 } }, 'group'), 5);
-  assert.equal(maxPartsOf({ qqTools: { maxParts: 8 } }, 'group'), 5);
+  assert.equal(maxPartsOf({ qqTools: { maxParts: 50 } }, 'group'), 50);
+  assert.equal(maxPartsOf({ qqTools: { maxParts: 99 } }, 'group'), 50);
   assert.equal(maxPartsOf({ qqTools: { maxParts: 99 } }, 'c2c'), 4);
   assert.equal(maxPartsOf({ qqTools: { maxParts: 5 } }, 'c2c'), 4);
   assert.equal(maxPartsOf({ qqTools: { maxParts: 0 } }, 'group'), MAX_PARTS);
