@@ -579,3 +579,82 @@ test('改分类不会把图搬到别的根目录（多目录配置）', () => {
     assert.equal(existsSync(join(e.root, '搞笑', 'b.png')), false, '不能被搬到第一个根');
   } finally { e.cleanup() }
 });
+
+test('一次同时改名字和分类：两件都生效，分类是真挪', () => {
+  const e = env();
+  try {
+    const it = makeImage(e.root, '开心/a.png', 'AAA');
+    e.setItems([it]);
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+
+    const r = e.gallery.edit(seq, { cat: '搞笑', name: '熊猫大笑', tags: ['开心'] });
+    assert.equal(r.ok, true);
+    assert.ok(existsSync(join(e.root, '搞笑', 'a.png')));
+    assert.equal(r.item.cat, '搞笑');
+    assert.equal(r.item.name, '熊猫大笑');
+    assert.deepEqual(r.item.tags, ['开心'], '标签要和搬移一起落地');
+  } finally { e.cleanup() }
+});
+
+test('面板要能看见「停用」：rows 吐 enabled、stats 数得出来', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    const b = makeImage(e.root, 'b.png', 'BBB');
+    e.setItems([a, b]);
+    e.gallery.sync({});
+    const [r1] = e.gallery.rows({});
+    assert.equal(r1.enabled, true, '默认是启用的');
+
+    e.gallery.edit(r1.seq, { enabled: false });
+    const row = e.gallery.rows({}).find((r) => r.seq === r1.seq);
+    /**
+     * `pathOf` 已经会挡住停用的图（发不出去）。面板拿不到这个字段的话，
+     * 那张图和正常的没区别——用户只会觉得「她怎么从来不发这张」。
+     */
+    assert.equal(row.enabled, false);
+    assert.equal(e.gallery.stats().paused, 1);
+    assert.equal(e.gallery.stats().total, 2, '停用不等于消失，总数还是 2');
+  } finally { e.cleanup() }
+});
+
+test('分类名带 `../` 不能把图挪出图库（`clamp` 挡不住分隔符）', () => {
+  const e = env();
+  try {
+    const it = makeImage(e.root, '开心/a.png', 'AAA');
+    e.setItems([it]);
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+
+    /**
+     * `clamp` 只折叠空白、按字数截断——`../../evil` 会原样拼进
+     * `join(root, cat)`。模型在提示词里看到「往上两级」这种话，或者用户
+     * 手输分类时带了斜杠，图就被搬到库外目录，面板上还显示「改成功了」。
+     */
+    const r = e.gallery.edit(seq, { cat: '../../evil' });
+    assert.equal(r.ok, true, '净化后按「未分类」处理，不该整次失败');
+
+    const escaped = join(e.root, '..', '..', 'evil');
+    assert.equal(existsSync(escaped), false, '库外不能建出目录');
+    /** 净化掉分隔符后剩 `evil`（点被去掉），落在根目录下 */
+    assert.ok(existsSync(join(e.root, 'evil', 'a.png')) || existsSync(join(e.root, 'a.png')), '文件要还在库里');
+    assert.equal(e.gallery.rows({})[0].cat.includes('/'), false);
+    assert.equal(e.gallery.rows({})[0].cat.includes('..'), false);
+  } finally { e.cleanup(); }
+});
+
+test('存图时分类名同样净化：不能把新图写到库外', () => {
+  const e = env();
+  try {
+    const src = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([src]);
+    const r = e.gallery.save({ from: src.path, cat: '../../outside' });
+    assert.equal(r.ok, true);
+    assert.equal(existsSync(join(e.root, '..', '..', 'outside')), false, '库外不能有目录');
+    /** `safeRow` 故意不吐 path（工具返回值不能带路径），落盘位置从 `rows()` 查 */
+    const row = e.gallery.rows({}).find((x) => x.seq === r.seq);
+    assert.ok(row.path.startsWith(e.root), '落盘路径必须在图库根之内');
+    assert.equal(row.cat, 'outside', '分隔符与 `..` 被剥掉，剩一个正常分类名');
+  } finally { e.cleanup(); }
+});

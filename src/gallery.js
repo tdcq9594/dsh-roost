@@ -592,19 +592,27 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     const touched = [];
     const set = (k, v) => { rec[k] = v; touched.push(k); };
 
-    if (patch.name !== undefined) set('name', str(patch.name, 20));
-    if (patch.meaning !== undefined) set('meaning', str(patch.meaning, 80));
-    if (patch.scenes !== undefined) set('scenes', str(patch.scenes, 60));
-    if (patch.avoid !== undefined) set('avoid', str(patch.avoid, 40));
+    /**
+     * **分类放最前面**：它是唯一会失败的一步（文件被占用、跨盘、目标目录建不出来），
+     * 放在其它字段之后的话，失败时前面的 `name / tags` 已经改进内存里的 `rec` 了，
+     * 而这条 `return` 不会 `flush()`——改动留在内存里，等下一次谁触发落盘就
+     * 悄悄写进去。用户看到「挪分类失败」，但名字其实已经被改了。
+     */
     if (patch.cat !== undefined) {
-      const want = str(patch.cat, 12);
+      /** 和 `save()` 用同一个净化：分类名直接拼路径，`clamp` 挡不住 `../` */
+      const want = safeCat(patch.cat);
       /** 分类没变就别动文件：`edit({cat: 原值})` 不该产生一次磁盘搬移 */
       if (want !== (rec.cat || '')) {
         const moved = moveToCat(rec, want);
         if (!moved.ok) return { ok: false, message: moved.message };
-        touched.push('cat');
       }
+      /** 走到这里说明意图是「改分类」，哪怕 `moveToCat` 判定文件已在目标位置 */
+      touched.push('cat');
     }
+    if (patch.name !== undefined) set('name', str(patch.name, 20));
+    if (patch.meaning !== undefined) set('meaning', str(patch.meaning, 80));
+    if (patch.scenes !== undefined) set('scenes', str(patch.scenes, 60));
+    if (patch.avoid !== undefined) set('avoid', str(patch.avoid, 40));
     if (patch.enabled !== undefined) set('enabled', patch.enabled !== false);
     if (patch.tags !== undefined) {
       const tags = (Array.isArray(patch.tags) ? patch.tags : String(patch.tags).split(/[,，、\s]+/))
@@ -736,7 +744,8 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
      *   · `.png` 兜底。
      */
     const ext = String(o.ext || '').toLowerCase() || (src ? extname(src).toLowerCase() : '') || '.png';
-    const cat = clamp(o.cat, 12);
+    /** 分类名会拼进路径，必须过 `safeCat`（见该函数注释：`clamp` 挡不住 `../`） */
+    const cat = safeCat(o.cat);
     const stem = src ? basename(src, extname(src)) : '';
     /**
      * 落盘用的文件名，和记录上的 `name`（标注）**是两件事**。
@@ -843,6 +852,8 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
       trash: all.filter((r) => r.trash).length,
       missing: all.filter((r) => r.missing && !r.trash).length,
       untagged: live.filter((r) => !r.meaning && !r.name).length,
+      /** 被 `gallery_edit` 设成 `enabled=0` 的：还在库里，但发不出去 */
+      paused: live.filter((r) => r.enabled === false).length,
       /** 下一个可用号，面板显示「已发到 #12」让人心里有数 */
       nextSeq: s.seq,
       bytes: live.reduce((n, r) => n + (Number(r.bytes) || 0), 0),
@@ -879,6 +890,15 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
         rel: r.cat ? `${r.cat}/${r.file}` : r.file,
         path: r.path,
         missing: r.missing === true,
+        /**
+         * 面板必须知道「这张被停了」。
+         *
+         * `pathOf()` 现在真的会挡住 `enabled === false`（AI 用 `gallery_edit`
+         * 的 `enabled=0` 能设），但 `rows()` 原来不吐这个字段——面板上那张图
+         * 和正常的没区别，用户会一直奇怪「为什么她从来不发这张」。
+         * 不放进 `safeRow`：那是给模型的，清单里本来就过滤掉了停用的行。
+         */
+        enabled: r.enabled !== false,
         src: r.src,
         at: r.at,
         usedAt: r.usedAt,
@@ -902,6 +922,28 @@ function safeFileName(s) {
     .replace(/^\.+/, '')
     .trim();
   return [...v].slice(0, 40).join('');
+}
+
+/**
+ * 分类名清理。**分类名会直接拼进路径**（`<根>/<分类>/<文件>`），所以它必须
+ * 和文件名一样严。
+ *
+ * 原来这里用的是 `clamp`——只折叠空白、按字数截断，分隔符原样留着。于是
+ * `cat: '../../evil'` 会变成 `join(root, '../../evil')`：`mkdirSync` 在图库
+ * 外面建目录、`renameSync` 把图挪过去。模型手一抖（或提示词里出现「往上两级」
+ * 这种话）就能把用户的图搬出库外，而且面板上看是「分类改成功了」。
+ *
+ * 返回空串 = 当「未分类」处理，不报错：分类写坏不该让整次编辑失败。
+ */
+function safeCat(s) {
+  const v = String(s ?? '').trim()
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '')
+    .replace(/\.{2,}/g, '')
+    .replace(/^[\s.]+|[\s.]+$/g, '');
+  if (!v) return '';
+  /** Windows 上建不出来的保留名，当分类用只会得到「挪失败」 */
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(v)) return '';
+  return [...v].slice(0, 12).join('');
 }
 
 /** 同名就加 `_2`、`_3`…… 不问用户，也不覆盖已有文件 */

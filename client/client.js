@@ -16779,6 +16779,7 @@ select.roost-input{color-scheme:dark}
           : h('div', null,
             h('div', { className: 'roost-note', style: { marginBottom: 8 } },
               `共 ${stats.total} 张 · 还没描述 ${stats.untagged} 张`
+              + (stats.paused ? ` · 停用 ${stats.paused}` : '')
               + ` · 回收站 ${stats.trash} · 下一个序号 #${stats.nextSeq}`
               + (data.dir ? ` · 目录 ${data.dir}` : '')),
 
@@ -16824,12 +16825,19 @@ select.roost-input{color-scheme:dark}
                 data.items.map((it) => {
                   const id = Number(it.seq) || 0
                   const editing = editFor === id
+                  /**
+                   * AI 可以用 `gallery_edit` 的 `enabled=0` 把一张图「停下」。
+                   * 停了之后 `pathOf()` 会挡住它、永远发不出去——面板上要是
+                   * 和正常的没区别，用户只会觉得「怎么从来不发这张」。
+                   */
+                  const paused = it.enabled === false
                   return h('div', {
                     key: id,
+                    title: paused ? '已停用：她不会发这张（把 enabled 改回 1 可恢复）' : undefined,
                     style: {
-                      border: `1px solid ${editing ? 'var(--accent, #4a7)' : 'rgba(128,128,128,.25)'}`,
+                      border: `1px ${paused ? 'dashed' : 'solid'} ${editing ? 'var(--accent, #4a7)' : 'rgba(128,128,128,.25)'}`,
                       borderRadius: 8, padding: 6, fontSize: 11,
-                      opacity: trash ? .55 : 1,
+                      opacity: trash ? .55 : (paused ? .6 : 1),
                     },
                   },
                     h('div', { style: { position: 'relative' } },
@@ -16844,7 +16852,15 @@ select.roost-input{color-scheme:dark}
                           position: 'absolute', top: 2, left: 2, padding: '0 4px', borderRadius: 4,
                           fontSize: 10.5, fontWeight: 600, background: 'rgba(0,0,0,.55)', color: '#fff',
                         },
-                      }, `#${id}`)),
+                      }, `#${id}`),
+                      paused
+                        ? h('span', {
+                            style: {
+                              position: 'absolute', top: 2, right: 2, padding: '0 4px', borderRadius: 4,
+                              fontSize: 10, fontWeight: 600, background: 'rgba(200,120,0,.85)', color: '#fff',
+                            },
+                          }, '停用')
+                        : null),
 
                     h('div', {
                       title: it.file,
