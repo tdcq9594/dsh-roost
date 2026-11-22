@@ -18435,7 +18435,14 @@ select.roost-input{color-scheme:dark}
       }
 
       const rescan = () => call('sharedDeps.scan', {}, '已重新扫过一遍')
-      const install = (name) => call('sharedDeps.install', { name }, `开始安装 ${name}（可能要等一会儿）`)
+      /**
+       * `opts` 目前只有一个用法：ffmpeg 的「用系统那份」（`preferSystem`）。
+       * 别的包不接受这个参数——它只影响 ffmpeg 的判定分支。
+       */
+      const install = (name, opts) => call(
+        'sharedDeps.install', { name, ...(opts || {}) },
+        opts?.preferSystem ? `改用系统里的 ${name}，不再下载` : `开始安装 ${name}（可能要等一会儿）`,
+      )
       const remove = (name) => {
         if (!window.confirm(`卸载 ${name}？\n\n用到它的功能会退回简版（图库不去重、缩略图直出原图之类），数据本身不会丢。`)) return
         call('sharedDeps.remove', { name }, `已卸载 ${name}`)
@@ -18496,6 +18503,14 @@ select.roost-input{color-scheme:dark}
             p.system
               ? h('div', { style: { fontSize: 11, opacity: 0.6, marginTop: 3 } }, `系统 PATH 里已有：${p.system}`)
               : null,
+            /**
+             * 来源说明：用户最常问的两句是「npm 装不上还有别的办法吗」和
+             * 「为什么 ffmpeg 不能也内置」。直接把答案写在卡片上。
+             */
+            h('div', { style: { fontSize: 11, opacity: 0.5, marginTop: 3, lineHeight: 1.6 } },
+              name === '@ffmpeg-installer/ffmpeg'
+                ? 'npm 装不上时会引导用系统 ffmpeg；这个包不进内置镜像（8 个平台子包、上百 MB）'
+                : 'npm 装不上时会自动改用市场内置包，不需要 npm'),
           ),
           h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginLeft: 'auto', flexWrap: 'wrap' } },
             installing
@@ -18508,6 +18523,20 @@ select.roost-input{color-scheme:dark}
                   type: 'button', className: 'roost-btn', disabled: isBusy,
                   onClick: () => install(name),
                 }, isBusy ? '处理中…' : (p.found ? '重新安装' : '安装'))
+              : null,
+            /**
+             * ffmpeg 专属：系统里那份能用、又没有可执行文件时，允许直接采纳。
+             *
+             * 为什么不自动采纳：扩展是通过受管块里的 `ROOST_DEPS_DIR` 找
+             * `<deps>/node_modules/@ffmpeg-installer/<plat>/ffmpeg.exe` 的，系统
+             * PATH 上那份它看不见。让用户自己选，才不会出现「面板说好了、
+             * 扩展说没装」。
+             */
+            p.system && !p.available
+              ? h('button', {
+                  type: 'button', className: 'roost-btn', disabled: isBusy,
+                  onClick: () => install(name, { preferSystem: true }),
+                }, '用系统那份')
               : null,
             p.removable
               ? h('button', {

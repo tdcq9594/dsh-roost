@@ -67,7 +67,7 @@ import { createExtMemoryEdit } from './ext-memory-edit.js';
 import { createExtObserve } from './ext-observe.js';
 import { createExtAct } from './ext-act.js';
 import { createExtPatch } from './ext-patch.js';
-import { createExtMarket } from './ext-market.js';
+import { createExtMarket, marketGuardOpts } from './ext-market.js';
 import { pickModelFor, pickReasoningEffort, pickEffortFor } from './model-pick.js';
 import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
@@ -8798,11 +8798,24 @@ export function apply(ctx) {
                 : [];
               const targets = many.length ? many : [one];
               const results = [];
+              /**
+               * 当前生效的市场索引地址：npm 装不上时从这里取内置包。
+               *
+               * 用 `extMarket.sourceInfo()` 而不是自己拼——用户在面板上换过源
+               * （github / gitee / 自建），依赖包必须跟着同一个源走，否则会出现
+               * 「扩展从镜像装、依赖又去连被墙的官方 raw」这种怪状态。
+               */
+              const marketIndexUrl = extMarket.sourceInfo?.().indexUrl || '';
               for (const name of targets) {
                 const r = await sharedDeps.install(name || undefined, {
                   log: (m) => log.info?.(m),
                   /** 和自更新共用同一个源配置，面板里改一处就够了 */
                   registry: cfg.update?.registry || '',
+                  /** npm 失败后的备选源（市场仓 `deps/`），与扩展市场同一地址、同一套 SSRF 放行 */
+                  indexUrl: marketIndexUrl,
+                  guard: marketIndexUrl ? marketGuardOpts(cfg.security?.ssrf, marketIndexUrl) : {},
+                  /** 面板上「用系统那份 ffmpeg」带这个标记 */
+                  preferSystem: arg?.preferSystem === true,
                 });
                 log.info(`共享依赖安装${r.ok ? '完成' : '失败'}：${r.name} ${r.message}`);
                 results.push(r);

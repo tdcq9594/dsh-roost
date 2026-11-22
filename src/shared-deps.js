@@ -30,6 +30,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { dataDir } from './config.js';
 import { registryArgs } from './npm-registry.js';
+import { installFromMirror } from './mirror-deps.js';
 
 /**
  * 本模块所在目录（`src/`）。宿主自己的 `node_modules` 在它的上一级。
@@ -553,21 +554,44 @@ function npmEnv() {
 }
 
 /**
+ * ffmpeg 装不上时补的一句引导。
+ *
+ * 它**不进镜像**（8 个平台子包、全平台上百 MB、GPL 再分发要带源码获取方式），
+ * 所以镜像回退对它注定是「absent」。面板上只剩「安装失败：<npm 原始原因>」
+ * 时用户不知道该往哪走——这里有系统那份就告诉他能直接用，没有就告诉他怎么装。
+ *
+ * @param {string} pkg
+ * @returns {string} 以「。」开头，直接拼在失败文案末尾
+ */
+function ffmpegHint(pkg) {
+  if (pkg !== FFMPEG) return '';
+  const sys = systemFfmpeg({ fresh: true });
+  return sys
+    ? `。系统里已有 ffmpeg（${sys}），可以在面板上选「用系统那份」跳过下载`
+    : '。可以先用包管理器装一个系统 ffmpeg（apt / brew / choco），宿主会用它';
+}
+
+/**
  * 安装白名单里的包。
  *
  * 返回 `{ ok, name, path, message, skipped }`，**不抛**：装失败的原因要原样
  * 带回面板，抛出去只会变成一句「500 内部错误」。
  *
  * @param {string} [name]
- * @param {{log?: Function, timeoutMs?: number, registry?: string, preferSystem?: boolean}} [o]
+ * @param {{log?: Function, timeoutMs?: number, registry?: string, preferSystem?: boolean,
+ *   indexUrl?: string, guard?: object}} [o]
  *   `registry` 来自配置 `update.registry`，空则由 npm-registry 自己解析；
- *   `preferSystem` 为真时，系统 PATH 上已有 ffmpeg 就直接复用、不下载。
+ *   `preferSystem` 为真时，系统 PATH 上已有 ffmpeg 就直接复用、不下载；
+ *   `indexUrl` 是当前生效的市场索引地址（npm 失败时从这里取内置包），
+ *   `guard` 是同一套 SSRF 选项（自建镜像要能放行内网/回环）。
  */
 export function install(name = FFMPEG, {
   log = () => {},
   timeoutMs = 300_000,
   registry = '',
   preferSystem = false,
+  indexUrl = '',
+  guard = {},
 } = {}) {
   const pkg = String(name ?? '').trim();
   if (!Object.hasOwn(WHITELIST, pkg)) {
@@ -683,7 +707,7 @@ export function install(name = FFMPEG, {
      * 「在装」和「没动」——用户要的就是这个。
      */
     current = { name: pkg, startedAt: Date.now(), step: '' };
-    return await new Promise((resolve) => {
+    const npmResult = await new Promise((resolve) => {
       const child = execFile(
         npm,
         /**
@@ -735,6 +759,58 @@ export function install(name = FFMPEG, {
       child?.stdout?.on?.('data', keep);
       child?.stderr?.on?.('data', keep);
     });
+
+    if (npmResult.ok) return npmResult;
+
+    /**
+     * ## npm 失败之后：市场仓的 `deps/`
+     *
+     * 这条路**完全不碰 npm**，所以「没装 npm」「registry 被墙」「装完
+     * require 起来还是报错」这三种都救得回来。镜像里只有解包就能跑的包
+     * （`qrcode` / `ws` / `silk-wasm`）；**没有 ffmpeg**（8 个平台子包、
+     * 上百 MB、GPL 再分发），那个只能引导用户用系统那份。
+     *
+     * 没给 `indexUrl` 就不试（老调用方 / 单测），保持原来的行为。
+     */
+    if (!indexUrl) return npmResult;
+
+    log(`npm 装不上 ${pkg}，改试市场内置包`);
+    const m = await installFromMirror({
+      names: [pkg],
+      whitelist: WHITELIST,
+      dir,
+      indexUrl,
+      guard,
+    });
+    if (m.installed.length) {
+      const hit = m.installed[0];
+      /** 装完必须让「在哪找到 / 加载过什么」的缓存失效，否则面板仍说没装 */
+      foundCache.delete(pkg);
+      loaded.delete(pkg);
+      resetCache();
+      log(`市场内置包装好了：${pkg}@${hit.version}`);
+      return {
+        ok: true,
+        name: pkg,
+        source: 'mirror',
+        mirror: hit,
+        message: `npm 装不上（${String(npmResult.message ?? '').replace(/^安装失败：/, '')}），已改用市场内置包 ${pkg}@${hit.version}`,
+      };
+    }
+
+    /**
+     * 镜像也没有 / 版本太旧 / 校验失败：**两边的理由都要带给面板**。
+     * 只留一句「安装失败」，用户就失去了「换源再试」还是「装系统版」的判断依据。
+     */
+    const mirrorWhy = [
+      ...m.errors,
+      ...m.absent.map((n) => `市场镜像里没有 ${n}`),
+    ].join('；');
+    return {
+      ok: false,
+      name: pkg,
+      message: `${npmResult.message}${mirrorWhy ? `；${mirrorWhy}` : ''}${ffmpegHint(pkg)}`,
+    };
   };
 
   const task = chain.then(run, run).finally(() => inflight.delete(pkg));
