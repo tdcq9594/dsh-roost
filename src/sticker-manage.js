@@ -177,7 +177,19 @@ export function pageOf(items, { page = 1, size = PAGE_SIZE, category = '', q = '
     if (category && catOf(it) !== category) return false;
     const kw = String(q ?? '').trim().toLowerCase();
     if (!kw) return true;
-    const hay = [it?.file, it?.rel, catOf(it), ...(it?.tags || [])].join(' ').toLowerCase();
+    /**
+     * 搜索域按**卡片上看得见的字**来定。
+     *
+     * 表情库的行只有 `file / rel / 分类 / 标签`；图库那边还多 `name / meaning /
+     * scenes`（面板上直接显示这几段）。不带上它们，用户按自己刚写的中文描述
+     * 搜是搜不到的——面板上明明写着「搜文件名 / 描述」，行为不符。
+     *
+     * 表情库的行没有这几个字段，拼进去是空串，不影响原有匹配。
+     */
+    const hay = [
+      it?.file, it?.rel, catOf(it), it?.name, it?.meaning, it?.scenes,
+      ...(it?.tags || []),
+    ].join(' ').toLowerCase();
     return hay.includes(kw);
   });
 

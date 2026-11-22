@@ -436,3 +436,112 @@ test('既没正文也没卡片时仍然是「只设静默」', async () => {
   assert.equal(calls.filter(([m]) => m === 'msg.send').length, 0, '不该发消息');
   assert.equal(r.silentOnly, true);
 });
+
+/* ---------------- 官方素材池：用完即删 + 配额可见 ---------------- */
+
+/**
+ * `outbound-actions.js` 末尾的「用完即删」守卫是
+ * `typeof ch.deleteImage === 'function'`——很长一段时间里本模块从没导出过
+ * 这个方法，于是每发一张 `<<image:>>` 就白占一格官方配额（共 100 张）。
+ * 这条测试是那个洞的护栏：**方法必须存在、必须真的打协议**。
+ */
+test('deleteImage：真的调 media.image.delete，且带 confirm', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { ok: true } } };
+  const ch = createRoostHostChannel({ host, log: () => {} });
+
+  assert.equal(typeof ch.deleteImage, 'function', '出站那条守卫靠它，缺了就是静默泄漏');
+  const r = await ch.deleteImage('img_123');
+  assert.deepEqual(r, { ok: true });
+  assert.equal(calls[0][0], 'media.image.delete');
+  assert.equal(calls[0][1].imageId, 'img_123');
+  /** 框架侧不带 confirm 会抛 forbidden，这一条不能省 */
+  assert.equal(calls[0][1].confirm, true);
+});
+
+test('deleteImage：没有 manage 权限不抛，且只提醒一次', async () => {
+  const logs = [];
+  let n = 0;
+  const host = {
+    rpc: async () => {
+      n += 1;
+      throw Object.assign(new Error('需要 manage 权限'), { code: 'NO_SCOPE' });
+    },
+  };
+  const ch = createRoostHostChannel({ host, log: (m) => logs.push(m) });
+
+  /** 失败要返回对象而不是抛——抛出去会打断「正文已发」的那一轮 */
+  const r1 = await ch.deleteImage('a');
+  assert.equal(r1.ok, false);
+  assert.equal(r1.code, 'NO_SCOPE');
+
+  /** 连删三张只该有一行日志：每张都刷，用户会当成 bug */
+  await ch.deleteImage('b');
+  await ch.deleteImage('c');
+  assert.equal(n, 3);
+  assert.equal(logs.filter((m) => m.includes('manage')).length, 1);
+});
+
+test('deleteImage：空 id 直接返回，不打协议', async () => {
+  let n = 0;
+  const host = { rpc: async () => { n += 1; return {} } };
+  const ch = createRoostHostChannel({ host, log: () => {} });
+  const r = await ch.deleteImage('');
+  assert.equal(r.ok, false);
+  assert.equal(n, 0);
+});
+
+test('listImages：字段归一，老框架没 remaining 时自己算', async () => {
+  const host = {
+    rpc: async (m) => {
+      assert.equal(m, 'media.image.list');
+      return { images: [{ imageId: 'i1', fileName: 'a.png' }], total: 7, quota: 100 };
+    },
+  };
+  const ch = createRoostHostChannel({ host, log: () => {} });
+  const r = await ch.listImages({ cursor: 'c1' });
+  assert.equal(r.ok, true);
+  assert.equal(r.images.length, 1);
+  assert.equal(r.remaining, 93, '老框架不给 remaining，要按 quota-total 算出来');
+});
+
+test('listImages：remaining 字段是 null 时不能读成「剩 0 张」', async () => {
+  /**
+   * `Number(null)` 是 0 且 `Number.isFinite(0)` 为真 —— 只判 `isFinite` 的话，
+   * 字段缺失/为 null 会被当成「配额已满」，面板标红并提示用户去删素材，
+   * 而实际一格没占。
+   */
+  const host = {
+    rpc: async () => ({ images: [], total: 3, quota: 100, remaining: null }),
+  };
+  const ch = createRoostHostChannel({ host, log: () => {} });
+  const r = await ch.listImages();
+  assert.equal(r.remaining, 97, 'null 要按 quota-total 回算');
+});
+
+test('listImages：NOT_FOUND 说的是「框架旧」，不是「连不上」', async () => {
+  const host = { rpc: async () => { throw Object.assign(new Error('not found'), { code: 'NOT_FOUND' }) } };
+  const ch = createRoostHostChannel({ host, log: () => {} });
+  const r = await ch.listImages();
+  assert.equal(r.ok, false);
+  assert.match(r.message, /框架版本/, '两种情况的处理完全不同：升级 vs 查网络');
+  assert.equal(r.quota, 100, '读不到也要给配额，面板才能画进度条');
+});
+
+/**
+ * 出站层的回归：删素材失败不能影响「正文已经发出去了」这个结论。
+ * 以前那段是死代码（方法不存在），现在真的会跑，得确认它不把 ok 顶掉。
+ */
+test('出站：删素材失败不影响这一轮的成功判定', async () => {
+  const { createActionRunner } = await import('../src/outbound-actions.js');
+  const sent = [];
+  const ch = {
+    send: async (p) => { sent.push(p); return { ok: true, id: 'm1' } },
+    deleteImage: async () => { throw new Error('删不掉') },
+    uploadMarkdownImage: async () => ({ url: 'qqbot-media://abc', imageId: 'img1' }),
+  };
+  const runner = createActionRunner({ channel: () => ch, log: () => {} });
+  const r = await runner({ scene: 'c2c', target: 'u1', text: '看这张 <<image: D:/a.png>>' });
+  assert.equal(r.ok, true, '图删不掉是配额的小事，不该让整轮判失败');
+  assert.equal(sent.length, 1);
+});

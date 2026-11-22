@@ -44,6 +44,27 @@ const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)(?:[?#].*)?$/i;
 const VOICE_EXT = /\.(silk|amr|mp3|wav|ogg|m4a)(?:[?#].*)?$/i;
 const SOURCE_PREFIX = /^(?:[a-z][a-z0-9+.-]*:\/\/|\\\\|\/|[a-z]:[\\/]|\.{1,2}[\\/])/i;
 
+/**
+ * 后缀判断：**先试原样，再试剥掉 `?query` / `#frag` 的部分**。
+ *
+ * 原来只测剥掉之后的部分，于是文件名里合法地带 `#`（`图#1.png`，`safeFileName`
+ * 明确允许）会被切成 `图`、后缀判断失败，这张图**静默不发**——`continue` 连
+ * 日志都没有，用户只看到少一张图。反过来 `a.png?v=2` 这种带缓存参数的链接
+ * 又必须剥了才认。两种写法都得支持，所以两条路都试。
+ */
+const hasExt = (v, re) => re.test(v) || re.test(String(v).split(/[?#]/)[0]);
+
+/**
+ * 图库序号：`#3`。
+ *
+ * **这是模型唯一该抄的东西**。绝对路径带盘符、中文、空格、括号，抄错一个字符
+ * 就是「图没发出去」而界面上毫无提示；`#3` 只有两个字符，抄不错。
+ *
+ * 只认纯序号：`#3` 对，`#3.png`、`#3,#5` 都不对——多图一次一张，和
+ * `MAX_MEDIA` 的口径一致；带后缀说明模型在猜，猜的不能当真的。
+ */
+const SEQ_SOURCE = /^#(\d{1,6})$/;
+
 /** 单轮最多发几个独立媒体，和旧 ai-chat 的 MAX_MEDIA 一致 */
 export const MAX_MEDIA = 3;
 /** 单轮最多几张官方图文卡片：一张占一整屏，多来几张就是刷屏 */
@@ -205,11 +226,18 @@ export function buildPickKeyboard(picks, nonce, { max = 4, perRow = 2 } = {}) {
 /**
  * 解析正文里的动作标记。
  *
- * @returns {{text:string, actions:Array<{type:string,value?:string}>, wantSkip:boolean}}
+ * @param {string} raw
+ * @param {object} [opts]
+ * @param {(seq:number) => string} [opts.resolveImage]
+ *        图库序号 → 真实路径。**返回空串表示解析失败**（号不存在 / 已进回收站 /
+ *        文件已删），此时占位符整段摘掉并记日志，绝不留 `#3` 在正文里。
+ *        不注入时 `#3` 一律按「不是地址」处理——老调用方行为不变。
+ * @returns {{text:string, actions:Array<{type:string,value?:string,seq?:number}>, wantSkip:boolean}}
  */
-export function parseOutboundActions(raw) {
+export function parseOutboundActions(raw, opts = {}) {
   const actions = [];
   let out = String(raw ?? '');
+  const resolveImage = typeof opts?.resolveImage === 'function' ? opts.resolveImage : null;
 
   /** `<skip>` 先摘：它影响「这条要不要发」，不是动作 */
   const wantSkip = /<skip>/i.test(out);
@@ -273,13 +301,59 @@ export function parseOutboundActions(raw) {
     });
   }
 
+  /**
+   * 标记值 → 可发送的路径。
+   *
+   * 三种写法：绝对路径 / `file://` 原样用；`#3` 查图库；其它（模型偶尔写
+   * 「图片路径」这种占位词）当无效。返回 `{path, seq, bad}`，`path` 为空表示
+   * 解析失败——失败原因分三种，`seq` 非 0 是「号不存在」，`bad` 非空是
+   * 「`#` 打头但写法不对」，两种都值得记日志给用户看。
+   */
+  const sourceOf = (v) => {
+    const s = normalizeSource(String(v ?? '').trim());
+    /**
+     * `#` 打头的一律按图库序号处理，**先于**「像不像路径」判断。
+     *
+     * 否则 `#3.png` 会被 `IMAGE_EXT` 认成相对文件名（`.png` 结尾），一路
+     * 走到 `uploadMarkdownImage` 才失败——日志里是「文件不存在」而不是
+     * 「序号写错了」，用户根本查不到原因。带后缀说明模型在猜，猜的不算。
+     *
+     * 格式不对时返回 `bad` 而不是 `null`：`null` 在调用方等价于「这个标记
+     * 根本不该存在」，会连日志一起静默掉。而「写了 `#3.png`」是**模型犯的
+     * 具体错误**，得让它本人（下一轮的提示词里）和用户都看得见。
+     */
+    if (s.startsWith('#')) {
+      const m = SEQ_SOURCE.exec(s);
+      if (!m) return { path: '', seq: 0, bad: s };
+      const seq = Number(m[1]);
+      const path = resolveImage ? String(resolveImage(seq) || '') : '';
+      return { path, seq };
+    }
+    if (looksLikeSource(s)) return { path: s, seq: 0 };
+    return null;
+  };
+
+  /** 序号没查到 / 写法不对：统一推一条动作，两个标记走同一套日志 */
+  const missOf = (hit) => {
+    if (hit.seq) return { type: 'imageMiss', value: `#${hit.seq}` };
+    if (hit.bad) return { type: 'imageBad', value: hit.bad };
+    return null;
+  };
+
   /** `<<image-alone: 路径>>`：单图单独发；值不像路径就只摘掉，别把占位词留群里 */
   {
     const ranges = codeRanges(out);
     out = out.replace(/<<image-alone[:：]\s*([^<>]*?)>>/gi, (m, v, offset) => {
       if (inCode(offset, ranges)) return m;
-      const p = normalizeSource(String(v ?? '').trim());
-      if (looksLikeSource(p)) actions.push({ type: 'imageAlone', value: p });
+      const hit = sourceOf(v);
+      if (!hit) return '';
+      if (!hit.path) {
+        /** 序号没查到 / 写法不对：留一条动作让执行器记日志，用户才知道「图为什么没发」 */
+        const miss = missOf(hit);
+        if (miss) actions.push(miss);
+        return '';
+      }
+      actions.push({ type: 'imageAlone', value: hit.path, ...(hit.seq ? { seq: hit.seq } : {}) });
       return '';
     });
   }
@@ -293,10 +367,15 @@ export function parseOutboundActions(raw) {
     let n = 0;
     out = out.replace(/<<image[:：]\s*([^<>]*?)>>/gi, (m, v, offset) => {
       if (inCode(offset, ranges)) return m;
-      const p = normalizeSource(String(v ?? '').trim());
-      if (!looksLikeSource(p)) return '';
+      const hit = sourceOf(v);
+      if (!hit) return '';
+      if (!hit.path) {
+        const miss = missOf(hit);
+        if (miss) actions.push(miss);
+        return '';
+      }
       const key = `\u0001IMG${n++}\u0001`;
-      actions.push({ type: 'inlineImage', value: p, key });
+      actions.push({ type: 'inlineImage', value: hit.path, key, ...(hit.seq ? { seq: hit.seq } : {}) });
       return key;
     });
   }
@@ -331,6 +410,16 @@ export function parseOutboundActions(raw) {
 export function createActionRunner({
   channel, tts = null, quota = null, picks = null, onPick = null, log = () => {},
   dryRunOf = () => false,
+  /**
+   * `#3` → 真实路径。宿主把图库的 `pathOf` 注进来；不注时 `<<image: #3>>`
+   * 按无效值处理（和以前一样摘掉），老调用方行为不变。
+   */
+  resolveImage = null,
+  /**
+   * 图真的发出去了之后回调序号。**只在成功后调**：发失败不该算一次使用，
+   * 否则「用过 -3」的排序会被失败的尝试污染，模型会绕开根本没发出去的图。
+   */
+  onImageUsed = null,
 } = {}) {
   /** 试运行：正文 / 文件 / 语音的发送在通道层已经拦了，这里只管**发送之前**那几步 */
   const isDry = () => dryRunOf() === true;
@@ -371,8 +460,34 @@ export function createActionRunner({
     requestId = '', senderId = '', bucket = '', onSent = () => {},
   } = {}) {
     const ch = channel();
-    const { text: body0, actions, wantSkip } = parseOutboundActions(text);
+    const { text: body0, actions, wantSkip } = parseOutboundActions(text, { resolveImage });
     let body = body0;
+
+    /** 序号解析失败的图：必须留一句日志，否则用户只看到「图没发出来」 */
+    for (const a of actions.filter((x) => x.type === 'imageMiss')) {
+      log(`图库里的 ${a.value} 用不了（号不存在 / 已进回收站 / 已停用 / 文件已删），这张已跳过`);
+    }
+    /**
+     * `<<image: #3.png>>` 这种写法：序号部分合法，但整段不是纯数字。
+     *
+     * 以前这里返回 `null`，占位符被摘掉、日志一个字都不写——用户只看到
+     * 「图没发」，模型下一轮还在用同样的写法。现在明确说清正确写法。
+     */
+    for (const a of actions.filter((x) => x.type === 'imageBad')) {
+      /** 值来自模型，可能很长还带换行：日志里压成一行、截断，别把日志刷烂 */
+      const shown = String(a.value ?? '').replace(/\s+/g, ' ').trim();
+      log(`图库序号写法不对：「${shown.length > 40 ? `${shown.slice(0, 40)}…` : shown}」——只能写 #3 这种纯数字（不要加后缀），这张已跳过`);
+    }
+
+    /** 图发成功才记一次使用（见 `onImageUsed` 的说明） */
+    const used = (a) => {
+      if (!a?.seq || typeof onImageUsed !== 'function') return;
+      try {
+        onImageUsed(a.seq);
+      } catch (e) {
+        log(`记图库使用失败（不影响发送）：${e?.message ?? e}`);
+      }
+    };
 
     /** 本轮之前自己发的最后一条，`<<retract>>` 撤的是它 */
     const previous = lastSent.get(target) ?? null;
@@ -380,6 +495,11 @@ export function createActionRunner({
 
     /** 1. 就地插图：上传成 Markdown 素材，占位符换成安全引用 */
     const uploaded = [];
+    /**
+     * 就地插图里带序号的，**等消息真发出去**才记使用。
+     * 原来在上传成功那一刻就记，而上传成功 ≠ 发出去（见下面第 3 步之后的说明）。
+     */
+    const usedAfterSend = [];
     /** 整轮媒体预算：就地插图 + 后面的独立图 / 语音 / 念出来的话 合计不超 MAX_MEDIA */
     let inlineUsed = 0;
     for (const a of actions.filter((x) => x.type === 'inlineImage')) {
@@ -396,6 +516,7 @@ export function createActionRunner({
         if (!/^qqbot-media:\/\//i.test(url)) throw new Error('没拿到素材引用');
         body = body.split(a.key).join(`![](${url})`);
         uploaded.push(String(r?.imageId ?? ''));
+        if (a.seq) usedAfterSend.push(a);
       } catch (e) {
         /** 失败只把占位符删掉，绝不留本地路径 */
         body = body.split(a.key).join('');
@@ -471,6 +592,16 @@ export function createActionRunner({
       log('这一轮是 <skip>：不发消息');
     }
 
+    /**
+     * 就地插图的使用记录，**等正文那条真的发成功**之后才记。
+     *
+     * 上传成功不等于发出去：通道报错、静默跳过、正文被拦，这几种情况下图已经
+     * 挂在服务器上而群里什么都没有。记错了的后果是排序被污染——`hits*2` 会把
+     * 根本没露面的图顶上来，模型下一轮还选它。独立图（`imageAlone`）那条路
+     * 本来就是在 `sent?.ok` 之后记的，这里对齐。
+     */
+    if (r?.sent) for (const a of usedAfterSend) used(a);
+
     /** 4. 这一轮要发的文件（原来就在 send() 里，搬过来保持顺序） */
     const files = Array.isArray(extra?.files) ? extra.files.map(String).filter(Boolean) : [];
     /**
@@ -538,8 +669,8 @@ export function createActionRunner({
     const media = actions.filter((a) => ['imageAlone', 'voice', 'say'].includes(a.type));
     for (const a of media) {
       if (inlineUsed + mediaSent >= MAX_MEDIA) break;
-      if (a.type === 'imageAlone' && !IMAGE_EXT.test(a.value.split(/[?#]/)[0])) continue;
-      if (a.type === 'voice' && !VOICE_EXT.test(a.value.split(/[?#]/)[0])) continue;
+      if (a.type === 'imageAlone' && !hasExt(a.value, IMAGE_EXT)) continue;
+      if (a.type === 'voice' && !hasExt(a.value, VOICE_EXT)) continue;
       if (seen(target, a.type, a.value)) continue;
       /**
        * 试运行：`<<say>>` 在真正发送之前还有两步副作用——按人扣语音条额度
@@ -607,7 +738,7 @@ export function createActionRunner({
           /** 合成成功但发失败了，把刚扣的额度退回去——那次语音并没有真的出去 */
           if (sent && sent.ok === false && q?.undo) q.undo();
         }
-        if (sent?.ok) { mediaSent += 1; onSent(); }
+        if (sent?.ok) { mediaSent += 1; onSent(); used(a); }
         else if (sent) log(`${a.type} 没发出去：${sent?.message ?? '未知原因'}`);
       } catch (e) {
         /** 语音没开 / 文件不存在 / 上传失败：和旧实现一样不打断这一轮 */

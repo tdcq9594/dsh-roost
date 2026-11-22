@@ -217,6 +217,11 @@ export function createRoostHostChannel({
   const isDry = () => dryRunOf() === true;
   /** 总开关；宿主那侧是 `() => isOff(cfg.enabled)` */
   const isMasterOff = () => masterOffOf() === true;
+  /**
+   * 「没 manage 权限」只提醒一次（见 `deleteImage`）。
+   * 放在工厂闭包里而不是模块级：换令牌 / 重建通道后应该重新提醒一次。
+   */
+  let deleteScopeWarned = false;
 
   return {
     name: 'roost',
@@ -290,7 +295,13 @@ export function createRoostHostChannel({
        */
       const t = encodeFaceTags(clamped.text, (name) => log(`表情名没能匹配（已从正文删掉）：${name}`));
       if (clamped.cut) {
-        log(`正文 ${raw.length} 字超过单条上限 ${MAX_OUTBOUND_TEXT}，已截断到 ${t.length} 字`);
+        /**
+         * 报**编码前**的长度（`clamped.text`）。用 `t.length` 会说谎：
+         * `【表情: 呲牙】` 是 7 个字，编码成一个 `0x14` + 一个码元后只剩 2，
+         * 日志会写「截断到 12 字」而用户看到的是 40 字——按这个数去查
+         * 「为什么截这么短」永远查不到。
+         */
+        log(`正文 ${raw.length} 字超过单条上限 ${MAX_OUTBOUND_TEXT}，已截断到 ${clamped.text.length} 字`);
       }
       const hasCard = Boolean(card && typeof card === 'object');
       if (!target) return { ok: false, message: '缺 target' };
@@ -505,6 +516,96 @@ export function createRoostHostChannel({
       } catch (e) {
         log(`roost 发语音失败：${e?.message ?? e}`);
         return { ok: false, message: e?.message ?? String(e) };
+      }
+    },
+
+    /**
+     * 官方 Markdown 素材池清单（机器人级，上限 100 张）。
+     *
+     * 这是**共享**资源：别的插件、上一次进程、其它通道都往同一个池子里放。
+     * 所以这里只读不删，删要走 `deleteImage` 且由人显式确认。
+     *
+     * 只读档（`read`），不会因为令牌没 manage 就失败——面板至少要能
+     * 看见「配额被谁占了」，哪怕他暂时删不了。
+     */
+    async listImages({ cursor = '' } = {}) {
+      try {
+        const r = await host.rpc('media.image.list', { cursor: String(cursor ?? '') });
+        return {
+          ok: true,
+          images: Array.isArray(r?.images) ? r.images : [],
+          nextCursor: String(r?.nextCursor ?? ''),
+          total: Number(r?.total) || 0,
+          quota: Number(r?.quota) || 100,
+          /**
+           * 老的框架不带 remaining，按 total/quota 自己算一遍。
+           *
+           * **先判 `null`，不能只判 `isFinite(Number(...))`**：`Number(null)` 是
+           * `0` 且 `isFinite(0)` 为真，字段缺失时会被读成「剩 0 张」——面板显示
+           * 「已满」并标红，用户以为素材池爆了，其实一格没占。
+           */
+          remaining: r?.remaining != null && Number.isFinite(Number(r.remaining))
+            ? Number(r.remaining)
+            : Math.max(0, (Number(r?.quota) || 100) - (Number(r?.total) || 0)),
+        };
+      } catch (e) {
+        const code = String(e?.code ?? '');
+        return {
+          ok: false,
+          code,
+          images: [],
+          total: 0,
+          quota: 100,
+          remaining: 0,
+          /**
+           * NOT_FOUND 说明框架版本旧、还没有这套接口。**别报成「连不上」**：
+           * 那是两种完全不同的处理（升级 vs 查网络）。
+           */
+          message: code === 'NOT_FOUND'
+            ? '当前框架版本没有素材池接口（升级框架后可用）'
+            : `查不了素材池：${e?.message ?? e}`,
+        };
+      }
+    },
+
+    /**
+     * 删掉刚上传的 Markdown 素材，把官方配额还回去。
+     *
+     * `outbound-actions.js` 早就写了「用完即删」，但那里的守卫是
+     * `typeof ch.deleteImage === 'function'`——本文件从来没导出过这个方法，
+     * 于是那段一直是空转：每发一张 `<<image:>>` 就白占一格官方配额
+     * （机器人级共 100 张），直到官方按 `expires_at` 自己回收。发图勤的群
+     * 一天就能把配额顶满，顶满之后**所有**发图都会失败，报错还是
+     * 「上传失败」这种查不到原因的话。
+     *
+     * 和 `retract` 一样不抛：`media.image.delete` 在框架侧是 `manage` 档，
+     * token 没配 manage 会 403 / `NO_SCOPE`。删不掉只是少回收一格，
+     * 绝不该影响已经发出去的那条消息。
+     *
+     * 顺带一提，`uploadMarkdownImage` 传的是 `retain:false`（own 类），
+     * 官方会自己过期回收；这个方法是**提前**回收，不是唯一保险。
+     */
+    async deleteImage(imageId) {
+      const id = String(imageId ?? '').trim();
+      if (!id) return { ok: false, message: '缺 imageId' };
+      try {
+        await host.rpc('media.image.delete', { imageId: id, confirm: true });
+        return { ok: true };
+      } catch (e) {
+        const code = String(e?.code ?? '');
+        /**
+         * 权限不足只说一次。每张图都刷一行「没权限」，用户会以为是 bug；
+         * 实际是他从没在框架侧给这个令牌开 manage。
+         */
+        if (code === 'NO_SCOPE') {
+          if (!deleteScopeWarned) {
+            deleteScopeWarned = true;
+            log('发完即删素材需要 manage 权限，当前令牌没有——素材会由官方按有效期自行回收');
+          }
+          return { ok: false, code, message: '令牌没有 manage 权限' };
+        }
+        log(`清理素材失败（不影响发送）：${e?.message ?? e}`);
+        return { ok: false, code, message: e?.message ?? String(e) };
       }
     },
 

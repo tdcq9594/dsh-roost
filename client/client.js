@@ -16669,6 +16669,427 @@ select.roost-input{color-scheme:dark}
     }
 
     /**
+     * 图库：AI 用的那份「带序号的图」。
+     *
+     * 和上面「表情库」的区别要一眼看出来：那张按**文件**列（用户找图、改标签、
+     * 删文件），这张按**序号**列（AI 认得出哪张、认不出哪张）。所以这里最要紧的
+     * 三样是：`#序号`、有没有描述、以及「让 AI 整理」那个按钮。
+     *
+     * 「让 AI 整理」是**增量**的：只挑 `name` 和 `meaning` 都为空的图去问模型。
+     * 几百张全跑一遍是几百次视觉调用，第一次点可能要等，第二次点应该秒完成。
+     * 所以按钮文案要诚实说明「每张问一次模型」——不然用户会以为卡住了。
+     */
+    function GalleryCard({ toast, n = '03' }) {
+      const [data, setData] = useState(null)
+      const [page, setPage] = useState(1)
+      const [cat, setCat] = useState('')
+      const [q, setQ] = useState('')
+      const [trash, setTrash] = useState(false)
+      const [busy, setBusy] = useState(false)
+      const [job, setJob] = useState(null)
+      const [editFor, setEditFor] = useState(0)
+      const [draft, setDraft] = useState({})
+
+      const load = useCallback(async (p = page) => {
+        const qs = new URLSearchParams({ page: String(p), size: '24' })
+        if (cat) qs.set('category', cat)
+        if (q.trim()) qs.set('q', q.trim())
+        if (trash) qs.set('trash', '1')
+        const r = await get('/gallery?' + qs.toString())
+        if (r.ok === false) return toast(r.message || '读不到图库')
+        setData(r)
+      }, [page, cat, q, trash])
+
+      useEffect(() => { load(page) }, [page, cat, trash])
+
+      /** 整理进度：任务在跑时每 500ms 问一次（一张是一次模型调用，比补标签慢得多） */
+      useEffect(() => {
+        if (!job?.running) return undefined
+        const t = setInterval(async () => {
+          const r = await get('/gallery/organize/job')
+          if (r?.job) {
+            setJob(r.job)
+            if (!r.job.running) {
+              toast(`整理完成：补上 ${r.job.done} 张，跳过 ${r.job.failed} 张`)
+              load(1)
+            }
+          }
+        }, 500)
+        return () => clearInterval(t)
+      }, [job?.running])
+
+      const organize = async () => {
+        setBusy(true)
+        const r = await post('/gallery/organize', {})
+        setBusy(false)
+        if (r.ok === false) return toast(r.message || '启动失败')
+        if (!r.total) return toast(r.message || '每张都有描述了')
+        setJob({ running: true, total: r.total, done: 0, failed: 0, percent: 0 })
+        toast(`开始整理 ${r.total} 张（每张问一次模型，会慢一点）`)
+      }
+
+      const cancelJob = async () => {
+        const r = await post('/gallery/organize/cancel', {})
+        setJob(r.job || null)
+        toast(r.message || '已停下')
+        load(page)
+      }
+
+      const saveEdit = async () => {
+        const r = await post('/gallery/edit', { seq: editFor, ...draft })
+        if (r.ok === false) return toast(r.message || '没存上')
+        setEditFor(0)
+        setDraft({})
+        toast('标注已更新')
+        load(page)
+      }
+
+      const toTrash = async (seq) => {
+        const r = await post('/gallery/remove', { seq })
+        if (r.ok === false) return toast(r.message || '没撤下来')
+        toast(`#${seq} 已移入回收站（文件还在）`)
+        load(page)
+      }
+
+      const back = async (seq) => {
+        const r = await post('/gallery/restore', { seq })
+        if (r.ok === false) return toast(r.message || '恢复不了')
+        toast(`#${seq} 已恢复`)
+        load(page)
+      }
+
+      /**
+       * 停用 / 启用。
+       *
+       * `enabled=0` 是唯一个**只有 AI 会主动设**的状态（`gallery_edit`）。
+       * 原来面板只画出「停用」角标、不给开关——用户看得见却改不回来，
+       * 只能反过来求 AI 改，而「让 AI 改」本身就要碰运气。两个方向都给按钮。
+       */
+      const togglePause = async (seq, next) => {
+        const r = await post('/gallery/edit', { seq, enabled: next })
+        if (r.ok === false) return toast(r.message || '没改过来')
+        toast(next ? `#${seq} 已启用` : `#${seq} 已停用（还在库里，只是不发）`)
+        load(page)
+      }
+
+      const stats = data?.stats || {}
+      return h(Sec, {
+        n, title: '图库（AI 用的）',
+        right: h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+          h('label', {
+            className: 'roost-muted',
+            style: { fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 },
+          },
+            h('input', { type: 'checkbox', checked: trash, onChange: (e) => { setTrash(e.target.checked); setPage(1) } }),
+            '看回收站'),
+          h('button', {
+            type: 'button', className: 'roost-btn roost-btn-primary',
+            disabled: busy || job?.running,
+            onClick: organize,
+          }, job?.running ? '整理中…' : '让 AI 整理')),
+      },
+        !data
+          ? h('div', { className: 'roost-empty' }, '读着…')
+          : h('div', null,
+            h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+              `共 ${stats.total} 张 · 还没描述 ${stats.untagged} 张`
+              + (stats.paused ? ` · 停用 ${stats.paused}` : '')
+              + ` · 回收站 ${stats.trash} · 下一个序号 #${stats.nextSeq}`
+              + (data.dir ? ` · 目录 ${data.dir}` : '')),
+
+            h('div', { className: 'roost-note', style: { fontSize: 11, marginBottom: 8, opacity: .75 } },
+              'AI 发图时只写序号（如 <<image: #3>>），路径由宿主去换。'
+              + '这里能改的是它判断「该不该发这张」的依据：名字、含义、场合。'),
+
+            job?.running
+              ? h('div', { style: { marginBottom: 8 } },
+                h('div', { className: 'roost-note', style: { fontSize: 11.5, marginBottom: 4 } },
+                  `整理中 ${job.done + job.failed} / ${job.total}（${job.percent}%）`
+                  + (job.note ? ` · ${job.note}` : '')),
+                h('div', { style: { height: 6, borderRadius: 3, background: 'rgba(128,128,128,.2)' } },
+                  h('div', {
+                    style: {
+                      height: '100%', borderRadius: 3, width: `${job.percent}%`,
+                      background: 'var(--ok, #2a9d5c)', transition: 'width .3s',
+                    },
+                  })),
+                h('button', { type: 'button', className: 'roost-btn', style: { marginTop: 6 }, onClick: cancelJob }, '停下'))
+              : null,
+
+            h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' } },
+              h('select', {
+                className: 'roost-input', style: { width: 'auto' }, value: cat,
+                onChange: (e) => { setCat(e.target.value); setPage(1) },
+              },
+                h('option', { value: '' }, '全部分类'),
+                (data.cats || []).map((c) => h('option', { key: c.name, value: c.name }, `${c.name}（${c.count}）`))),
+              h('input', {
+                className: 'roost-input', style: { width: 160 }, placeholder: '搜文件名 / 描述', value: q,
+                onChange: (e) => setQ(e.target.value),
+                onKeyDown: (e) => { if (e.key === 'Enter') { setPage(1); load(1) } },
+              }),
+              h('button', { type: 'button', className: 'roost-btn', onClick: () => { setPage(1); load(1) } }, '搜'),
+              h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
+                `第 ${data.page} / ${data.pages} 页 · ${data.total} 张`)),
+
+            data.items.length === 0
+              ? h('div', { className: 'roost-empty' },
+                trash ? '回收站是空的' : '图库还是空的：往表情目录丢几张图，或让 AI 自己存（gallery_save）')
+              : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 8 } },
+                data.items.map((it) => {
+                  const id = Number(it.seq) || 0
+                  const editing = editFor === id
+                  /**
+                   * AI 可以用 `gallery_edit` 的 `enabled=0` 把一张图「停下」。
+                   * 停了之后 `pathOf()` 会挡住它、永远发不出去——面板上要是
+                   * 和正常的没区别，用户只会觉得「怎么从来不发这张」。
+                   */
+                  const paused = it.enabled === false
+                  return h('div', {
+                    key: id,
+                    title: paused ? '已停用：她不会发这张（点「启用」可恢复）' : undefined,
+                    style: {
+                      border: `1px ${paused ? 'dashed' : 'solid'} ${editing ? 'var(--accent, #4a7)' : 'rgba(128,128,128,.25)'}`,
+                      borderRadius: 8, padding: 6, fontSize: 11,
+                      opacity: trash ? .55 : (paused ? .6 : 1),
+                    },
+                  },
+                    h('div', { style: { position: 'relative' } },
+                      h('img', {
+                        /** 走 API 前缀 + 相对路径：`/stickers/file` 会在服务端再校验一次越界 */
+                        src: API + '/stickers/file?path=' + encodeURIComponent(it.rel || it.file),
+                        alt: it.file, loading: 'lazy',
+                        style: { width: '100%', height: 80, objectFit: 'contain', borderRadius: 4, background: 'rgba(128,128,128,.08)' },
+                      }),
+                      h('span', {
+                        style: {
+                          position: 'absolute', top: 2, left: 2, padding: '0 4px', borderRadius: 4,
+                          fontSize: 10.5, fontWeight: 600, background: 'rgba(0,0,0,.55)', color: '#fff',
+                        },
+                      }, `#${id}`),
+                      paused
+                        ? h('span', {
+                            style: {
+                              position: 'absolute', top: 2, right: 2, padding: '0 4px', borderRadius: 4,
+                              fontSize: 10, fontWeight: 600, background: 'rgba(200,120,0,.85)', color: '#fff',
+                            },
+                          }, '停用')
+                        : null),
+
+                    h('div', {
+                      title: it.file,
+                      style: { marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                    }, it.name || it.file),
+
+                    h('div', {
+                      className: 'roost-muted',
+                      style: { fontSize: 10.5, minHeight: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                      title: it.meaning || it.scenes || '',
+                    }, it.meaning || it.scenes || '还没描述'),
+
+                    h('div', { style: { display: 'flex', gap: 4, marginTop: 4 } },
+                      editing
+                        ? null
+                        : h('button', {
+                            type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
+                            onClick: () => {
+                              setEditFor(id)
+                              setDraft({ name: it.name || '', meaning: it.meaning || '', scenes: it.scenes || '' })
+                            },
+                          }, '改'),
+                      /**
+                       * 回收站里不给「停用」：那张已经不在清单里了，再标一层
+                       * 「停用」只会让人以为恢复之后还得手动启用一次。
+                       */
+                      trash
+                        ? null
+                        : h('button', {
+                            type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
+                            /** `paused` 是当前状态，按钮要写的是「按下去会变成什么」 */
+                            onClick: () => togglePause(id, paused),
+                            title: paused ? '恢复使用：她可以再发这张' : '停用：还在库里，但不会发出去',
+                          }, paused ? '启用' : '停用'),
+                      h('button', {
+                        type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px', marginLeft: 'auto' },
+                        onClick: () => (trash ? back(id) : toTrash(id)),
+                      }, trash ? '恢复' : '撤下')),
+
+                    editing
+                      ? h('div', { style: { marginTop: 4, display: 'flex', flexDirection: 'column', gap: 3 } },
+                        h('input', {
+                          className: 'roost-input', placeholder: '短名（10 字内）', value: draft.name || '',
+                          style: { fontSize: 10.5, padding: '2px 4px' },
+                          onChange: (e) => setDraft((d) => ({ ...d, name: e.target.value })),
+                        }),
+                        h('input', {
+                          className: 'roost-input', placeholder: '这是什么、什么感觉', value: draft.meaning || '',
+                          style: { fontSize: 10.5, padding: '2px 4px' },
+                          onChange: (e) => setDraft((d) => ({ ...d, meaning: e.target.value })),
+                        }),
+                        h('input', {
+                          className: 'roost-input', placeholder: '什么场合发', value: draft.scenes || '',
+                          style: { fontSize: 10.5, padding: '2px 4px' },
+                          onChange: (e) => setDraft((d) => ({ ...d, scenes: e.target.value })),
+                        }),
+                        h('div', { style: { display: 'flex', gap: 4 } },
+                          h('button', {
+                            type: 'button', className: 'roost-btn roost-btn-primary',
+                            style: { fontSize: 10.5, padding: '1px 6px' },
+                            onClick: saveEdit,
+                          }, '存'),
+                          h('button', {
+                            type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
+                            onClick: () => { setEditFor(0); setDraft({}) },
+                          }, '取消')))
+                      : null,
+                  )
+                })),
+
+            h('div', { style: { display: 'flex', gap: 6, marginTop: 10, alignItems: 'center' } },
+              h('button', {
+                type: 'button', className: 'roost-btn', disabled: data.page <= 1,
+                onClick: () => setPage(data.page - 1),
+              }, '上一页'),
+              h('button', {
+                type: 'button', className: 'roost-btn', disabled: data.page >= data.pages,
+                onClick: () => setPage(data.page + 1),
+              }, '下一页')),
+          ),
+      )
+    }
+
+    /**
+     * 官方 Markdown 素材池（`/v2/media-images`，机器人级共享，上限 100 张）。
+     *
+     * 这一节存在的唯一理由是**排障**。`<<image:>>` 发图会先传到官方图床，
+     * 正常几秒内就删（`outbound-actions.js` 末尾那段）。漏下来的只有三种情况：
+     * 进程崩在「上传完 / 还没删」之间、令牌缺 manage 权限、删除请求自己失败。
+     * 漏一张白占一格，漏满 100 张之后**所有**发图都失败，而报错只有
+     * 「上传失败」四个字——以前用户完全看不到这个池子，也就无从判断是不是满了。
+     */
+    function MediaPoolCard({ toast, n = '04' }) {
+      const [data, setData] = useState(null)
+      const [busy, setBusy] = useState(false)
+
+      const load = useCallback(async (cursor = '') => {
+        setBusy(true)
+        try {
+          const qs = cursor ? '?cursor=' + encodeURIComponent(cursor) : ''
+          const r = await get('/stickers/media' + qs)
+          setData((prev) => {
+            /**
+             * 翻页时把已加载的拼进来，**按 imageId 去重**：翻页途中若有新素材
+             * 传上来，游标会错位、同一条出现两次，React 的重复 key 会把整个
+             * 列表渲染坏（不是只多一行）。
+             */
+            if (!cursor || !prev?.images?.length) return r
+            const seen = new Set(prev.images.map((x) => x.imageId))
+            return {
+              ...r,
+              images: [...prev.images, ...(r.images || []).filter((x) => !seen.has(x.imageId))],
+            }
+          })
+        } catch {
+          setData({ ok: false, message: '连不上面板后端（宿主可能刚重启）' })
+        } finally { setBusy(false) }
+      }, [])
+
+      useEffect(() => { load('') }, [load])
+
+      const del = async (it) => {
+        const name = it.fileName || it.imageId
+        if (!window.confirm(
+          `删掉素材「${name}」？\n\n`
+          + '删了配额立刻还回来。这个池子是机器人级共享的——若别的插件正在引用它，'
+          + '那条引用会失效（已经发出去的消息不受影响，平台发送时已转存副本）。',
+        )) return
+        const r = await post('/stickers/media/delete', { imageId: it.imageId, confirm: true })
+        if (r.ok === false) return toast(r.message || '删不掉')
+        toast('已删掉，配额还回来了')
+        load('')
+      }
+
+      /** 时间戳可能缺失或为 0：别渲染成 1970，那比空白更让人困惑 */
+      const when = (ms) => {
+        const v = Number(ms) || 0
+        if (!v) return '未知'
+        try { return new Date(v).toLocaleString('zh-CN') } catch { return '未知' }
+      }
+
+      const quota = Number(data?.quota) || 100
+      const total = Number(data?.total) || 0
+      const remaining = Number.isFinite(Number(data?.remaining))
+        ? Number(data.remaining)
+        : Math.max(0, quota - total)
+      const used = Math.max(0, quota - remaining)
+      const pct = quota ? Math.min(100, Math.round((used / quota) * 100)) : 0
+      const rows = Array.isArray(data?.images) ? data.images : []
+
+      return h(Sec, {
+        n, title: '官方素材池（发图用的临时车道）',
+        right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: busy, onClick: () => load(''),
+        }, busy ? '读取中…' : '刷新'),
+      },
+        h('div', { className: 'roost-note' },
+          '发图时先把图传到官方图床、拿到 qqbot-media:// 引用发出去，正常几秒内就删掉。'
+          + '这里列的是**没删掉的残留**——要么进程崩在中间、要么令牌缺 manage 权限、要么删除请求自己失败了。'),
+
+        !data
+          ? h('div', { className: 'roost-empty' }, '读着…')
+          : data.ok === false
+            ? h('div', { className: 'roost-empty' }, data.message || '读不到素材池')
+            : h('div', null,
+              h('div', { className: 'roost-note', style: { marginBottom: 6 } },
+                `已用 ${used} / ${quota} · 还剩 ${remaining} 张`
+                + (used >= quota ? ' · 满了：新图会传不上去，删几张再试' : '')),
+
+              h('div', { style: { height: 6, borderRadius: 3, background: 'rgba(128,128,128,.2)', marginBottom: 10 } },
+                h('div', {
+                  style: {
+                    height: '100%', borderRadius: 3, width: `${pct}%`,
+                    background: used >= quota ? 'var(--danger, #c0392b)' : 'var(--ok, #2a9d5c)',
+                    transition: 'width .3s',
+                  },
+                })),
+
+              rows.length === 0
+                ? h('div', { className: 'roost-empty' },
+                  '池子是空的，说明每次都删干净了——这是正常状态')
+                : h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 260 } },
+                  rows.map((it) => h('div', {
+                    key: it.imageId || it.fileName,
+                    className: 'roost-item',
+                    style: { alignItems: 'center' },
+                  },
+                    it.previewUrl
+                      ? h('img', {
+                          src: it.previewUrl, alt: it.fileName, loading: 'lazy',
+                          /** 预签名链接是短时效的，只当缩略图用，不缓存也不写盘 */
+                          style: { width: 34, height: 34, objectFit: 'cover', borderRadius: 4, flex: '0 0 auto' },
+                        })
+                      : null,
+                    h('span', { className: 't', style: { minWidth: 0 } },
+                      it.fileName || '(没文件名)',
+                      h('span', { className: 'd' },
+                        ` · 传于 ${when(it.createdAt)}`
+                        + (it.expiresAt ? ` · 到期 ${when(it.expiresAt)}` : ''))),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      style: { fontSize: 11, padding: '1px 8px', marginLeft: 'auto', flex: '0 0 auto' },
+                      onClick: () => del(it),
+                    }, '删')))),
+
+              data.nextCursor
+                ? h('button', {
+                    type: 'button', className: 'roost-btn', disabled: busy,
+                    style: { marginTop: 8 }, onClick: () => load(data.nextCursor),
+                  }, busy ? '读取中…' : '加载更多')
+                : null),
+      )
+    }
+
+    /**
      * A3（第二轮对照）：「听」这一条腿终于有面板了。
      * 官方 Bot API 直接把语音转成文字（asrText），不用配 ASR、不用 Key；
      * 以前只能从提示词里猜「她听没听清」，现在排障能看见刚才转成了什么。
@@ -16750,6 +17171,16 @@ select.roost-input{color-scheme:dark}
         }),
         /** 5.12：库管理只出现在独立的「表情包」页，别把表达页撑成两屏 */
         part === 'sticker' ? h(StickerManageCard, { toast, n: '02' }) : null,
+        /**
+         * 图库紧跟库管理：前者按文件、后者按序号，是同一批图的两种视角，
+         * 放隔壁才能来回对照「AI 认不认得出这张」。
+         */
+        part === 'sticker' ? h(GalleryCard, { toast, n: '03' }) : null,
+        /**
+         * 素材池排最后：它讲的是「发图的临时车道」，属于排障信息，
+         * 正常状态应该是空的。用户找图、改标注不会走到这里。
+         */
+        part === 'sticker' ? h(MediaPoolCard, { toast, n: '04' }) : null,
         part === 'voice'
           ? h('div', { className: 'roost-note' }, '表情包在「表达 → 表情包」那一页。')
           : null,

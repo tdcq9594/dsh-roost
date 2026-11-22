@@ -624,5 +624,17 @@ export function createStickers({ dataDir, log = () => {}, cacheMs = 3000, maxSca
     return best ? best.path : null;
   };
 
-  return { dir, dirs, list, categories, prompt, pick, resolve, snapshot, tagsOf };
+  /**
+   * 立刻丢掉扫描缓存。
+   *
+   * 面板改标签、AI 改标注（`gallery.edit` 会回写侧车）、上传一张图之后都要调：
+   * 不调的话最多有 `cacheMs`（3 秒）的窗口里，提示词拿的还是旧标签/旧清单，
+   * 表现是「改了没生效」。以前 `host.js` 里十几处写了 `stickers.invalidate?.()`
+   * ——可选链让它一直是个空操作，因为本模块从来没导出过这个方法。
+   */
+  const invalidate = () => {
+    cache = null;
+  };
+
+  return { dir, dirs, list, categories, prompt, pick, resolve, snapshot, tagsOf, invalidate };
 }
