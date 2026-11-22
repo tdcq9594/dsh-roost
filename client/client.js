@@ -17373,6 +17373,251 @@ select.roost-input{color-scheme:dark}
       return h(ModelBlock, { toast, currentChatId, config, saveCfg })
     }
 
+    /**
+     * 功能包（2026-11-22，能力组第三页）
+     *
+     * 解决的问题很具体：宿主有些能力得靠外部依赖（图片处理、音频转码），
+     * 以前只有扩展 API 能触发安装，装在哪、装没装、能不能卸，用户没地方看。
+     *
+     * 这页做三件事：**看见、装上、卸掉**。另外把「自动查找找过哪儿」摊开——
+     * 用户把包手动拷进某个扩展目录时，能一眼确认面板到底认没认出来。
+     *
+     * 和「扩展」组的区别：扩展是**功能**的单位，这里是**依赖**的单位。
+     * 一个包可能被多个功能用（ffmpeg 既转码又抽帧），所以不挂在某个扩展下面。
+     */
+    const DEP_GROUPS = [
+      ['image', '图片处理', '图库去重、缩略图、拼长图——没装就退回简版，不会报错'],
+      ['media', '媒体处理', '视频抽帧、音频转码'],
+      ['misc', '其他', '按需装的小件'],
+    ]
+
+    /**
+     * 一个包的来源徽章。
+     *
+     * 必须说清「能用」到底是哪一份在起作用：共享目录那份面板能卸，扩展
+     * 自带的那份不能（删了会把扩展弄坏）。只写「已安装」会让用户去点一个
+     * 不存在的卸载按钮。
+     */
+    function depSourceOf(p) {
+      const f = p && p.found
+      if (!f) return { text: '未安装', kind: 'off' }
+      /**
+       * 包目录在、可执行文件不在（ffmpeg 特有的半坏状态：杀毒隔离、
+       * 装一半断了）。说「已装」会让用户以为能转码，实际一跑就报错。
+       */
+      if (p.available === false) return { text: `包在但不可用（${f.version}）`, kind: 'off' }
+      if (f.kind === 'shared') return { text: `已装 ${f.version}`, kind: 'shared' }
+      if (f.kind === 'ext') return { text: `由扩展 ${f.id} 提供 ${f.version}`, kind: 'other' }
+      return { text: `宿主自带 ${f.version}`, kind: 'other' }
+    }
+
+    function DepsTab({ toast, quick, setTab }) {
+      const [st, setSt] = useState(null)
+      const [err, setErr] = useState('')
+      const [busy, setBusy] = useState('')
+
+      const load = useCallback(async () => {
+        try {
+          const r = await quick('sharedDeps.status')
+          if (r && r.ok === false) { setErr(r.message || '读依赖状态失败'); return }
+          setSt(r)
+          setErr('')
+        } catch (e) {
+          setErr(e?.message || '读依赖状态失败')
+        }
+      }, [quick])
+
+      useEffect(() => { load() }, [load])
+
+      /**
+       * 安装中轮询：npm 是几十秒到几分钟的事，服务端把进度放在 `installing`
+       * 里（谁问都答同一份真相）。装完 `installing` 变 null，这个 effect 自己停。
+       */
+      useEffect(() => {
+        if (!st || !st.installing) return undefined
+        const t = setTimeout(load, 1500)
+        return () => clearTimeout(t)
+      }, [st, load])
+
+      const call = async (op, arg, okMsg) => {
+        const key = String(arg?.name || (arg?.names ? 'batch' : 'scan'))
+        setBusy(key)
+        try {
+          const r = await quick(op, arg)
+          toast?.(r && r.ok === false ? (r.message || '操作失败') : (okMsg || '好了'))
+          await load()
+        } catch (e) {
+          toast?.(e?.message || '操作失败')
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const rescan = () => call('sharedDeps.scan', {}, '已重新扫过一遍')
+      const install = (name) => call('sharedDeps.install', { name }, `开始安装 ${name}（可能要等一会儿）`)
+      const remove = (name) => {
+        if (!window.confirm(`卸载 ${name}？\n\n用到它的功能会退回简版（图库不去重、缩略图直出原图之类），数据本身不会丢。`)) return
+        call('sharedDeps.remove', { name }, `已卸载 ${name}`)
+      }
+      const installGroup = (names) => {
+        if (!names.length) return
+        call('sharedDeps.install', { names }, `开始安装 ${names.length} 个包，装完会自动刷新`)
+      }
+
+      if (err && !st) {
+        return h(Sec, { n: '01', title: '功能包' },
+          h('p', { style: { fontSize: 12.5, opacity: 0.8 } }, err),
+          h('button', { type: 'button', className: 'roost-btn', onClick: load }, '重试'),
+        )
+      }
+      if (!st) return h('div', { style: { padding: 16, fontSize: 12.5, opacity: 0.7 } }, '正在读依赖状态…')
+
+      const packages = st.packages || {}
+      const groups = {}
+      for (const [name, p] of Object.entries(packages)) {
+        const g = (p && p.group) || 'misc'
+        if (!groups[g]) groups[g] = []
+        groups[g].push([name, p])
+      }
+
+      const card = (name, p) => {
+        const src = depSourceOf(p)
+        const installing = st.installing && st.installing.name === name
+        /** ffmpeg 特殊：包在但二进制不在，也算「不能安装来完成」——要重装 */
+        const needReinstall = name === '@ffmpeg-installer/ffmpeg' && !p.available
+        const canInstall = !p.found || needReinstall
+        const isBusy = busy === name || Boolean(installing)
+        return h('div', {
+          key: name,
+          style: {
+            border: '1px solid var(--border, rgba(128,128,128,.22))',
+            borderRadius: 10, padding: '10px 12px', marginBottom: 8,
+            display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap',
+          },
+        },
+          h('div', { style: { flex: '1 1 230px', minWidth: 0 } },
+            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              h('b', { style: { fontSize: 13 } }, name),
+              h('span', {
+                style: {
+                  fontSize: 11, padding: '1px 7px', borderRadius: 999,
+                  border: '1px solid var(--border, rgba(128,128,128,.3))',
+                  opacity: src.kind === 'off' ? 0.55 : 0.95,
+                },
+              }, src.text),
+            ),
+            h('div', { style: { fontSize: 12, opacity: 0.75, marginTop: 4 } }, p.desc || ''),
+            h('div', { style: { fontSize: 11, opacity: 0.55, marginTop: 2 } },
+              [p.size, p.range ? `版本 ${p.range}` : ''].filter(Boolean).join(' · ')),
+            p.found && p.found.kind !== 'shared'
+              ? h('div', { style: { fontSize: 11, opacity: 0.6, marginTop: 3 } }, `位置：${p.found.dir || ''}`)
+              : null,
+            p.system
+              ? h('div', { style: { fontSize: 11, opacity: 0.6, marginTop: 3 } }, `系统 PATH 里已有：${p.system}`)
+              : null,
+          ),
+          h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginLeft: 'auto', flexWrap: 'wrap' } },
+            installing
+              ? h('span', { style: { fontSize: 11.5, opacity: 0.75 } },
+                  `安装中 ${Math.round((st.installing.elapsedMs || 0) / 1000)}s`
+                  + (st.installing.step ? ` · ${st.installing.step}` : ''))
+              : null,
+            canInstall
+              ? h('button', {
+                  type: 'button', className: 'roost-btn', disabled: isBusy,
+                  onClick: () => install(name),
+                }, isBusy ? '处理中…' : (p.found ? '重新安装' : '安装'))
+              : null,
+            p.removable
+              ? h('button', {
+                  type: 'button', className: 'roost-btn', disabled: isBusy,
+                  onClick: () => remove(name),
+                }, '卸载')
+              : null,
+          ),
+        )
+      }
+
+      return h('div', null,
+        h(Sec, {
+          n: '01', title: '查找范围',
+          right: h('button', {
+            type: 'button', className: 'roost-btn', disabled: busy === 'scan', onClick: rescan,
+          }, busy === 'scan' ? '扫描中…' : '重新扫描'),
+        },
+          h('div', { style: { fontSize: 12.5, lineHeight: 1.95, wordBreak: 'break-all' } },
+            h('div', null,
+              h('span', { style: { opacity: 0.7 } }, '共享依赖目录：'),
+              h('code', { style: { fontSize: 11.5 } }, st.dir || '')),
+            (st.dirs || []).map((d, i) => h('div', { key: `${d.kind}-${i}` },
+              h('span', { style: { opacity: 0.7 } }, `${d.label}：`),
+              h('code', { style: { fontSize: 11.5 } }, d.dir || ''))),
+          ),
+          h('p', { style: { fontSize: 11.5, opacity: 0.6, marginTop: 6, lineHeight: 1.7 } },
+            '装的只有一处（共享目录），但判断「有没有」会按上面的顺序找一遍：'
+            + '扩展自带的那份、宿主自带的那份都算数，不会让你重复下载。'
+            + '标着「由扩展 X 提供」的包不归这里管，删了会把那个扩展弄坏。'),
+        ),
+        (st.runtimes || []).length
+          ? h(Sec, { n: '02', title: '其他运行时（只读）' },
+              h('p', { style: { fontSize: 11.5, opacity: 0.6, margin: '0 0 8px', lineHeight: 1.7 } },
+                '这两个目录装的是语音引擎，有各自的安装器和进度条。这里只让你看见'
+                + '「本体一共装了什么」，装和卸请回「语音」页——两套 npm 同时接管会互相踩。'),
+              (st.runtimes || []).map((r) => h('div', {
+                key: r.id,
+                style: {
+                  border: '1px solid var(--border, rgba(128,128,128,.22))',
+                  borderRadius: 10, padding: '10px 12px', marginBottom: 8,
+                  display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap',
+                },
+              },
+                h('div', { style: { flex: '1 1 230px', minWidth: 0 } },
+                  h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                    h('b', { style: { fontSize: 13 } }, r.label || r.id),
+                    h('span', {
+                      style: {
+                        fontSize: 11, padding: '1px 7px', borderRadius: 999,
+                        border: '1px solid var(--border, rgba(128,128,128,.3))',
+                        opacity: r.exists ? 0.95 : 0.55,
+                      },
+                    }, r.exists
+                      ? `已装 ${r.packages.length}${r.packages.length >= 20 ? '+' : ''} 个包`
+                      : '未安装'),
+                  ),
+                  h('div', { style: { fontSize: 11, opacity: 0.6, marginTop: 3, wordBreak: 'break-all' } }, r.dir || ''),
+                  r.exists
+                    ? h('div', { style: { fontSize: 11, opacity: 0.6, marginTop: 3, wordBreak: 'break-all' } },
+                        r.packages.join('、') + (r.packages.length >= 20 ? ' …' : ''))
+                    : null,
+                ),
+                h('div', { style: { marginLeft: 'auto' } },
+                  h('button', {
+                    type: 'button', className: 'roost-btn', onClick: () => setTab?.('express'),
+                  }, '去语音页')),
+              )),
+            )
+          : null,
+        ...DEP_GROUPS.filter(([g]) => (groups[g] || []).length).map(([g, label, hint], i) => {
+          const list = groups[g]
+          const missing = list.filter(([, p]) => !p.found).map(([n]) => n)
+          return h(Sec, {
+            key: g,
+            n: String(i + 3).padStart(2, '0'),
+            title: label,
+            right: missing.length
+              ? h('button', {
+                  type: 'button', className: 'roost-primary', disabled: busy === 'batch',
+                  onClick: () => installGroup(missing),
+                }, busy === 'batch' ? '安装中…' : `安装全部 ${missing.length} 个`)
+              : null,
+          },
+            h('p', { style: { fontSize: 11.5, opacity: 0.6, margin: '0 0 8px' } }, hint),
+            list.map(([name, p]) => card(name, p)),
+          )
+        }),
+      )
+    }
+
     /** 更新：版本与更新说明 + 反馈群。属于「这台机器怎么维护」，不跟聊天设置混。 */
     /**
      * 5.7 模拟测试：假主人 / 假群友发一句，逐步显示每一层怎么处理。
@@ -18328,6 +18573,8 @@ select.roost-input{color-scheme:dark}
       ['express', '语音'],
       ['stickers', '表情包'],
       ['model', '模型'],
+      /* 功能包：依赖是「能力」的前置条件，不是扩展（一个包可能被多个功能用） */
+      ['deps', '功能包'],
       /* 扩展：独立成组，和 aurabot 的「模块」对齐 */
       ['ext', '已安装'],
       ['ext-market', '市场'],
@@ -18610,7 +18857,7 @@ select.roost-input{color-scheme:dark}
        */
       { id: 'channel', label: '群与频道', icon: 'M4 6.5h16M4 12h10M4 17.5h7M17.5 15.5l3 2-3 2',
         tabs: ['groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag'] },
-      { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model'] },
+      { id: 'power', label: '能力', icon: 'M12 3.2 4.8 6v5.6c0 4.4 3 7.7 7.2 9.2 4.2-1.5 7.2-4.8 7.2-9.2V6L12 3.2zM8.8 12l2.2 2.2 4.2-4.4', tabs: ['caps', 'model', 'deps'] },
       { id: 'mods', label: '扩展', icon: 'M4 9.5 5.5 4h13L20 9.5M4 9.5a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0 2.7 2.7 0 0 0 5.3 0M5.5 12.5V20h13v-7.5M10 20v-4.5h4V20', tabs: ['ext', 'ext-market', 'ext-api'] },
       { id: 'system', label: '系统', icon: 'M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1M15 5v4M9 10v4M17 15v4', tabs: ['connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
     ]
@@ -19807,6 +20054,8 @@ select.roost-input{color-scheme:dark}
             /** 视觉能力那一行要读写 config，所以把 config / saveCfg 一起给过去 */
             ? h(ModelTab, { toast, currentChatId: mem?.chatId || '', config, saveCfg })
             : null,
+          /** 功能包：宿主自己的可选依赖（图片处理/转码），装哪、装没装、能不能卸都在这儿 */
+          tab === 'deps' ? h(DepsTab, { toast, quick, setTab }) : null,
           tab === 'update' ? h(UpdateTab, { toast }) : null,
           /** 5.7：模拟测试页——只调纯函数接口，一条都不真发 */
           tab === 'sim' ? h(SimTab, { toast }) : null,
