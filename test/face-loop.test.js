@@ -21,10 +21,25 @@ import { createRoostHostChannel } from '../src/channel.js';
 
 test('码表：名字与 id 双向一致，没有重复 id', () => {
   const names = Object.keys(FACE_IDS);
-  assert.ok(names.length >= 180, `条目太少（${names.length}），可能是提取时截断了`);
+  assert.ok(names.length >= 280, `条目太少（${names.length}），可能是提取时截断了`);
   assert.equal(Object.keys(FACE_NAMES).length, names.length, '反向表大小应与正向一致');
   for (const [name, id] of Object.entries(FACE_IDS)) {
     assert.equal(FACE_NAMES[id], name, `${name}(${id}) 反查不一致`);
+  }
+});
+
+// 这 17 条是从真实账本入站样本里反解出来的（`<faceId="187",ext="幽灵">` 一类），
+// 是平台事实。**改码表前先看这里**：2026-11-22 之前老经典表情段整段用了
+// 「面板顺序号」，102 条错位（惊讶写成 33、流汗写成 2），就是被这组样本抓出来的。
+test('码表：真实入站样本逐条对齐（平台事实，别再凭记忆改）', () => {
+  const samples = [
+    [0, '惊讶'], [3, '发呆'], [5, '流泪'], [27, '流汗'], [124, '好'],
+    [178, '斜眼笑'], [182, '笑哭'], [187, '幽灵'], [262, '脑阔疼'],
+    [264, '捂脸'], [265, '辣眼睛'], [272, '呵呵哒'], [298, '元宝'],
+    [319, '比心'], [343, '我方了'], [344, '大怨种'], [427, '偷感'],
+  ];
+  for (const [id, name] of samples) {
+    assert.equal(FACE_NAMES[id], name, `faceId=${id} 应为「${name}」`);
   }
 });
 
@@ -33,13 +48,13 @@ test('码表：名字与 id 双向一致，没有重复 id', () => {
 test('入站：新格式带 ext，解不出文字就查表', () => {
   assert.equal(
     decodeFaceTags('哈哈<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">'),
-    '哈哈【表情: 呲牙】',
+    '哈哈【表情: 惊讶】',
     'ext 是 {"text":""}，应退回码表',
   );
 });
 
 test('入站：老格式没有 ext 也要认', () => {
-  assert.equal(decodeFaceTags('<faceType=1,faceId="23">'), '【表情: 微笑】');
+  assert.equal(decodeFaceTags('<faceType=1,faceId="14">'), '【表情: 微笑】');
 });
 
 test('入站：ext.text 优先于码表（官方改过 id 含义时以它为准）', () => {
@@ -47,19 +62,19 @@ test('入站：ext.text 优先于码表（官方改过 id 含义时以它为准�
   assert.equal(
     decodeFaceTags(`<faceType=6,faceId="0",ext="${ext}">`),
     '【表情: 坏笑】',
-    'id=0 查表是「呲牙」，ext 说坏笑就该用坏笑',
+    'id=0 查表是「惊讶」，ext 说坏笑就该用坏笑',
   );
 });
 
 test('入站：属性顺序不同、未知 id 都不能漏', () => {
-  assert.equal(decodeFaceTags('<faceId="23",faceType=1>'), '【表情: 微笑】', '顺序变了也要认');
+  assert.equal(decodeFaceTags('<faceId="14",faceType=1>'), '【表情: 微笑】', '顺序变了也要认');
   assert.equal(decodeFaceTags('<faceType=6,faceId="99999">'), '【表情】', '查不到给无名字，不留原文');
 });
 
 test('入站：一条消息多个表情逐个转', () => {
   assert.equal(
-    decodeFaceTags('<faceType=1,faceId="0"><faceType=1,faceId="23">'),
-    '【表情: 呲牙】【表情: 微笑】',
+    decodeFaceTags('<faceType=1,faceId="0"><faceType=1,faceId="14">'),
+    '【表情: 惊讶】【表情: 微笑】',
   );
 });
 
@@ -106,11 +121,11 @@ test('出站：连续多个标记一起清', () => {
 
 test('合并器：纯表情消息不会变成空正文（否则模型收到空白）', () => {
   const evt = { content: '<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">' };
-  assert.equal(textOf(evt), '【表情: 呲牙】');
+  assert.equal(textOf(evt), '【表情: 惊讶】');
 });
 
 test('合并器：表情夹在文字里照常拼接', () => {
-  assert.equal(textOf({ content: '早<faceType=1,faceId="23">' }), '早【表情: 微笑】');
+  assert.equal(textOf({ content: '早<faceType=1,faceId="14">' }), '早【表情: 微笑】');
 });
 
 /* ---------------- 集成：出站 ---------------- */
