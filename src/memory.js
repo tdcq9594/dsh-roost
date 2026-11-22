@@ -183,8 +183,15 @@ export function canSupersede(nextStatus, oldStatus) {
  * 的满信念；只有明确传来 weaken/contradict 才往下调。这样升级是纯增量。
  */
 export const EVIDENCE_RELATIONS = Object.freeze(['reinforce', 'weaken', 'contradict', 'neutral']);
+/**
+ * 证据趋势的档位。照搬 Hindsight `engine/reflect/observations.py` 的 Trend，
+ * 不改阈值、不改窗口——对面踩过坑的取舍直接用，别自己设计。
+ */
+export const EVIDENCE_TRENDS = Object.freeze(['new', 'strengthening', 'stable', 'weakening', 'stale']);
 const ALPHA = 0.25;
 const EVIDENCE_MAX = 12;
+const TREND_RECENT_DAYS = 30;
+const TREND_OLD_DAYS = 90;
 
 /** 归一化：老数据没有这些字段时给默认，不写回盘 */
 export function evidenceOf(meta) {
@@ -218,6 +225,42 @@ export function applyEvidence(prev, relation, item = null) {
     evidence,
     confidence: clamp01(cur.confidence + delta),
   };
+}
+
+/**
+ * 证据趋势：由证据时间戳分布**算出来**，不是谁判定的动作。
+ *
+ * 逐行照搬 Hindsight `compute_trend()`（30/90 天窗口、密度比 1.5 / 0.5）：
+ *   没有近期证据 → stale；全在近期 → new；近期密度是早期的 1.5 倍以上 →
+ *   strengthening；不到一半 → weakening；其余 stable。
+ *
+ * 为什么这样就能解"weaken 没有调用方"：旧证据自然变稀疏，趋势自己会掉，
+ * 不需要有人显式调用 weaken。这是对面成熟的地方——bet on it，不自己设计。
+ *
+ * 纯函数，不写盘、不依赖模型。`confidence` 是显式判定信号（对标它的 opinion
+ * 网络），`trend` 是算出来的观察信号（对标 observation 网络），两者正交并存。
+ */
+export function trendOf(evidence, now = Date.now(), { recentDays = TREND_RECENT_DAYS, oldDays = TREND_OLD_DAYS } = {}) {
+  const rows = Array.isArray(evidence) ? evidence : [];
+  if (!rows.length) return 'stale';
+  const ts = rows.map((e) => Number(e?.at) || 0).filter((n) => n > 0);
+  if (!ts.length) return 'stale';
+  const nowMs = Number(now) > 0 ? Number(now) : Date.now();
+  const recentCut = nowMs - recentDays * DAY_MS;
+  const oldCut = nowMs - oldDays * DAY_MS;
+  const recent = ts.filter((t) => t > recentCut);
+  const old = ts.filter((t) => t < oldCut);
+  const middle = ts.filter((t) => t >= oldCut && t <= recentCut);
+  if (!recent.length) return 'stale';
+  if (!old.length && !middle.length) return 'new';
+  const recentDensity = recentDays > 0 ? recent.length / recentDays : 0;
+  const olderPeriod = oldDays - recentDays;
+  const olderDensity = olderPeriod > 0 ? (old.length + middle.length) / olderPeriod : 0;
+  if (!olderDensity) return 'new';
+  const ratio = recentDensity / olderDensity;
+  if (ratio > 1.5) return 'strengthening';
+  if (ratio < 0.5) return 'weakening';
+  return 'stable';
 }
 
 /** 把算出的证据字段写进 meta；默认值删掉不落盘（老库字节一致） */
@@ -888,6 +931,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
             brightness: brightnessOf(x, Date.now()),
             /** 证据账本：老库给默认（0 条 / 满信念），不写回盘 */
             ...evidenceOf(x),
+            /** 趋势是算出来的（对标 Hindsight 的 computed_field），不存在盘上 */
+            trend: trendOf(evidenceOf(x).evidence),
           };
         });
       const c = collectChat(m, chatId, aliases);

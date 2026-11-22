@@ -844,12 +844,21 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
            *
            * 约定每天巩固都可能被再抽一次——「周末看电影」今天记、明天又提，
            * 这应该是 reinforce（证据+1、更牢），而不是每次当新事实写。
-           * `add()` 的重提分支认 `opts.evidence` 才累计；不传就只有 w+0.5，
-           * 看不出"有几条独立出处"。detail 只留日志 id 前缀，不抄原文
-           * （证据账本不是第二个原文库，正文在 journal 里）。
+           *
+           * 形状**对齐 Hindsight 的 ObservationEvidence**：`journalId` =
+           * 它的 memory_id（可回查原文），`quote` = 原文引用（它的 exact
+           * quote 契约，可核验）。`detail` 只留摘要。
+           * quote 取日记里提到这句约定的那条（short/截断到 120 字），
+           * 不是抄整段日记——正文仍在 journal，这里只留能核到出处的一句。
            */
           evidence: {
             kind: 'consolidate',
+            journalId: String(list[list.length - 1]?.id || ''),
+            quote: (() => {
+              const needle = item.text.slice(0, 12);
+              const hit = [...list].reverse().find((r) => String(r?.text || '').includes(needle));
+              return String(hit?.text || list[list.length - 1]?.text || '').slice(0, 120);
+            })(),
             detail: `day:${day} / ${list.length} 条日记`,
             at,
           },

@@ -22,7 +22,7 @@ import { createJournal, classify, dayOf, scoreOf, cosine, DEFAULT_KEEP_DAYS, ERA
 import { createGraph } from '../src/graph.js';
 import {
   createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc, strongerStatus, canSupersede,
-  evidenceOf, applyEvidence,
+  evidenceOf, applyEvidence, trendOf,
 } from '../src/memory.js';
 import {
   createConsolidate,
@@ -2614,4 +2614,45 @@ test('证据：巩固写约定时带 evidence，重提同一约定累计成 rein
   assert.equal(call.opts.evidence?.kind, 'consolidate', '约定写入带证据出处');
   assert.ok(call.opts.evidence?.detail?.includes(day), '证据带日期便于追溯');
   assert.equal(call.opts.src?.journalId, 'a1', '原出处照旧保留（不抢 src）');
+});
+
+/* ---------------- 证据趋势：照搬 Hindsight compute_trend（2026-11-23） ---------------- */
+
+test('趋势：空证据 = stale，全在近期 = new', () => {
+  const now = Date.now();
+  const DAY2 = 86_400_000;
+  assert.equal(trendOf([], now), 'stale');
+  assert.equal(trendOf([{ at: now }], now), 'new');
+  assert.equal(trendOf([{ at: now - 29 * DAY2 }, { at: now - 1 * DAY2 }], now), 'new');
+  assert.equal(trendOf([{ at: now - 100 * DAY2 }], now), 'stale', '没有近期证据就 stale');
+});
+
+test('趋势：近30天密度 / 前60天密度 → 五档（阈值 1.5 / 0.5 照抄对面）', () => {
+  const now = Date.now();
+  const D = 86_400_000;
+  /** older 分布在 40..85 天前（都在 31-90 的 older 段），密度比 = (recent/30)/(older/60) = 2*recent/older */
+  const evidence = (recent, older) => [
+    ...Array.from({ length: recent }, (_, i) => ({ at: now - (i + 1) * D })),
+    ...Array.from({ length: older }, (_, i) => ({ at: now - (40 + i * 5) * D })),
+  ];
+  assert.equal(trendOf(evidence(4, 2), now), 'strengthening', '4/30 vs 2/60 = 4 倍 > 1.5');
+  assert.equal(trendOf(evidence(2, 4), now), 'stable', '2/30 vs 4/60 = 1 倍，落在 [0.5,1.5]');
+  assert.equal(trendOf(evidence(1, 8), now), 'weakening', '1/30 vs 8/60 = 0.25 < 0.5');
+});
+
+test('趋势：证据条目带 journalId/quote 能穿过证据账本与四处白名单', async () => {
+  const m = freshFacts();
+  m.add('g1', '约定：周末一起看电影', 'global', {
+    evidence: {
+      kind: 'consolidate', journalId: 'msg-42', quote: '我们周末一起去看电影吧', detail: 'day:X', at: Date.now(),
+    },
+  });
+  const full = m.listFull('g1').global[0];
+  assert.equal(full.evidence[0].journalId, 'msg-42', 'journalId 可回查原文（对标 memory_id）');
+  assert.equal(full.evidence[0].quote, '我们周末一起去看电影吧', 'quote 可核验');
+  assert.equal(full.trend, 'new', '新证据是 new 趋势');
+
+  const entries = m.retention.entries().filter((e) => e.text === '约定：周末一起看电影');
+  assert.equal(entries[0].evidence[0].journalId, 'msg-42', 'retention.entries 带 journalId');
+  assert.equal(entries[0].evidence[0].quote, '我们周末一起去看电影吧');
 });
