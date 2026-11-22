@@ -161,6 +161,29 @@ test('任务：空列表立刻结束，percent 是 100 不是 0', async () => {
   assert.equal(p.percent, 100);
 });
 
+test('任务：跳过的也算走完，percent 必须到 100', async () => {
+  /**
+   * 只按 `done` 算的话，跳过 3 张成功 7 张会停在 70% 就结束，
+   * 面板看着像没跑完——用户会反复点「整理」。
+   */
+  const items = Array.from({ length: 10 }, (_, i) => ({ seq: i + 1 }));
+  const job = createOrganizeJob({
+    items,
+    worker: async (it) => {
+      if (it.seq <= 3) throw new Error('看不了这张');
+      return { name: `图${it.seq}` };
+    },
+    apply: () => {},
+    concurrency: 1,
+    maxStreak: 99,
+  });
+  await job.start();
+  const p = job.progress();
+  assert.equal(p.done, 7);
+  assert.equal(p.failed, 3);
+  assert.equal(p.percent, 100, 'failed 也是处理过的，不能卡在 70%');
+});
+
 test('任务：跑完留下人话文案，面板不用自己拼数字', async () => {
   const job = createOrganizeJob({
     items: [{ seq: 1 }, { seq: 2 }],

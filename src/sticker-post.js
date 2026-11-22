@@ -29,7 +29,6 @@ import { join, dirname } from 'node:path';
 /** 默认配置。`config.js` 里有一份同样的默认值，这里兜底是为了单测能脱离配置跑 */
 export const POST_DEFAULTS = {
   enabled: false,
-  onlyPrivate: true,
   chance: 0.25,
   maxPerDay: 3,
   minGapMinutes: 90,

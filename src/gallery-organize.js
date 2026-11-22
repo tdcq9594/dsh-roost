@@ -146,7 +146,16 @@ export function createOrganizeJob({
   const snapshot = () => ({
     ...state,
     errors: state.errors.slice(0, 5),
-    percent: state.total ? Math.round((state.done / state.total) * 100) : 100,
+    /**
+     * 进度按「处理过的」算，**不是只算成功的**。
+     *
+     * 只算 `done` 的话，跳过 3 张、成功 7 张时进度条停在 70% 就结束了，
+     * 看着像任务没跑完。`failed` 也是走完的一张——它可能没补上标注，
+     * 但这一张确实不再需要处理了。
+     */
+    percent: state.total
+      ? Math.min(100, Math.round(((state.done + state.failed) / state.total) * 100))
+      : 100,
   });
 
   const one = async () => {
