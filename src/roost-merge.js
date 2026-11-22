@@ -15,6 +15,8 @@
  * 语义一样，但少一层 Promise 挂起，卸载时也不会有永远等着的 handler。
  */
 
+import { decodeFaceTags } from './face-table.js';
+
 /** 一批消息里，附件要跨条合并——用户先发图、再补一句话，图不能凭空消失 */
 function batchOf(items) {
   const last = items[items.length - 1];
@@ -38,9 +40,15 @@ function batchOf(items) {
  * **纯语音 / 纯图片消息的 `content` 是空串**，内容全在 attachments 里
  * （语音看 `asrText`，官方白给的转写）。不看这里的话，用户发一段语音
  * 模型收到的是空字符串。
+ *
+ * 表情在这一层就转成 `【表情: 名字】`，**不能留到渲染层**：
+ * journal、记忆、摘要、决策全都从这份 text 派生，晚一步转，历史里就
+ * 永久存着 `<faceType=6,faceId="0" ext="…">` 原文，模型只能照着抄。
+ * dsh-qqbot 在 `middleware-setup.ts` 里也标了同一件事
+ * （"若解析放后面, 历史里存的就是原文"）。
  */
 export function textOf(evt) {
-  const said = String(evt?.content ?? '').trim();
+  const said = decodeFaceTags(String(evt?.content ?? '')).trim();
   if (said) return said;
   return (evt?.attachments ?? [])
     .map((a) => String(a?.asrText ?? '').trim())

@@ -21,6 +21,15 @@
  *   stream: 'c2c'   —— 流式消息只支持单聊（50 QPS），群聊没有
  *   retract: '2min' —— 群聊撤回限 2 分钟，单聊也有限制
  */
+/**
+ * 表情标记 → QQ 私有协议控制字符。
+ *
+ * 这是本文件唯一的外部依赖：`face-table.js` 是纯函数 + 纯数据，
+ * 不 import 任何东西，所以不会形成循环。放在这里而不是各调用方，
+ * 是因为「发出去的那一步」只有一个（见 `send()` 里的说明）。
+ */
+import { encodeFaceTags } from './face-table.js';
+
 /** 框架协议认可的四种会话类型（与 bot/src/host/dispatch.js 的 CHAT_KINDS 一致） */
 const SEND_KINDS = new Set(['group', 'c2c', 'guild', 'dm']);
 
@@ -267,7 +276,19 @@ export function createRoostHostChannel({
        * 切点尽量落在句子/段落边界，别把一句话砍成两半。
        */
       const clamped = clampOutbound(raw);
-      const t = clamped.text;
+      /**
+       * 表情标记转真表情（`【表情: 呲牙】` → `0x14` + id）。
+       *
+       * 为什么在这里：注释里那句「四条出站路唯一的汇合点」——主动消息、
+       * 主回复、`qq_send`、扩展 `/v1/message` 全经过这个 `send()`。
+       * 放 `outbound-clean.js` 只有 `qq_send` 那条生效，主回复会漏。
+       *
+       * 顺序必须是「先截断、后编码」：截断按人眼字数算（`【表情: 呲牙】`
+       * 算 7 个字），编码后只剩 2 个码元。反过来的话，编码后的控制字符
+       * 会被 `clampOutbound` 当成普通字符数一遍，长度算不准。
+       * 代价是截断点可能落在标记中间——`encodeFaceTags` 末尾会清掉残缺尾巴。
+       */
+      const t = encodeFaceTags(clamped.text, (name) => log(`表情名没能匹配（已从正文删掉）：${name}`));
       if (clamped.cut) {
         log(`正文 ${raw.length} 字超过单条上限 ${MAX_OUTBOUND_TEXT}，已截断到 ${t.length} 字`);
       }
