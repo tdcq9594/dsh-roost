@@ -85,7 +85,6 @@ import { createStickers } from './stickers.js';
 import { createGallery, GALLERY_HINT } from './gallery.js';
 import { createStickerSync } from './sticker-sync.js';
 import { createStickerPost } from './sticker-post.js';
-import { faceHint, FACE_IDS, POPULAR_FACES } from './face-table.js';
 import { registerMemoryTools } from './tools.js';
 import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { registerStickerTools } from './sticker-tools.js';
@@ -6895,27 +6894,6 @@ export function apply(ctx) {
     }
 
     /**
-     * **小黄脸**：教她用 `【表情: 微笑】`。
-     *
-     * 为什么单独一段而不是拼进上面：用户关掉「表情包」（不配图）不代表
-     * 不许用小黄脸——那是两件事。上面那段会整段消失，这段不该跟着没了。
-     *
-     * 出站编码早就在 `channel.js` 的汇合点上（四条发送路都过），缺的只是
-     * 「模型不知道有这个语法」。这一段的全部作用就是补这句话。
-     */
-    try {
-      offs.push(
-        agent.ctx.systemPrompt.context({
-          name: 'roost-faces',
-          order: 901,
-          text: () => faceHint(),
-        }),
-      );
-    } catch (e) {
-      log.warn('挂小黄脸提示失败：', e.message);
-    }
-
-    /**
      * **场景**：告诉 AI「你现在在哪个群 / 这是私聊 / 刚说话的是谁」。
      *
      * 为什么需要：`chat.name` 一直传给了宿主，但从来没进过提示词——
@@ -13405,19 +13383,6 @@ export function apply(ctx) {
 
       /** 账本清零：删过图之后想让它们重新同步一次 */
       route('/stickers/sync/reset', (req, res) => send(res, 200, stickerSync.reset())),
-
-      /**
-       * 小黄脸码表（FaceMap）。只读。
-       *
-       * 为什么要给面板：`face-table.js` 里那 108 个名字一直只在代码里，
-       * 用户看不到「有哪些能用」，也就没法在人格提示词里写对名字。
-       * 面板上点一下复制 `【表情: 微笑】`，比让他去翻源码靠谱。
-       */
-      route('/faces', (req, res) => send(res, 200, {
-        ok: true,
-        popular: POPULAR_FACES.slice(),
-        items: Object.entries(FACE_IDS).map(([name, id]) => ({ name, id })),
-      })),
 
       /**
        * 缓存图缩略图。

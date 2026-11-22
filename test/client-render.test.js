@@ -2589,13 +2589,15 @@ test('前端渲染：图库页有「起名用的模型」下拉、上传命名�
 })
 
 /**
- * 偷表情 / 贴表情 / 小黄脸码表这三块。
+ * 偷表情 / 贴表情两块。
  *
  * 它们只在「图库」独立页出现（`part === 'sticker'`），而且都依赖 `config`
  * 里的 `stickers.steal` / `stickers.post`——所以断言分两路：
- * 首帧能看到文案的断文案，要等 `/faces` 的码表断源码。
+ * 首帧能看到文案的断文案，要等 `/stickers` 的数据断源码。
+ *
+ * 小黄脸码表页**已下线**（出站不再发小黄脸），所以这里反过来钉住它不回来。
  */
-test('前端渲染：偷表情、贴表情、小黄脸码表三个入口都在', () => {
+test('前端渲染：偷表情、贴表情入口都在，小黄脸码表页不再出现', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   store['roost.tab'] = 'stickers'
@@ -2614,7 +2616,6 @@ test('前端渲染：偷表情、贴表情、小黄脸码表三个入口都在',
   /** 偷表情的三项 */
   assert.match(src, /steal: \{ maxPerHour: n \}/, '每小时上限要能存')
   assert.match(src, /steal: \{ autoOrganize: on \}/, '顺手起名的勾选要能存')
-  /** 小黄脸码表 */
-  assert.match(src, /小黄脸码表/, '码表要有一页，否则用户不知道有哪些名字')
-  assert.match(src, /【表情: \$\{name\}】/, '点一下要复制出可直接粘的标记')
+  /** 码表页不能回来：留着只会引导用户复制一个发不出去的标记 */
+  assert.doesNotMatch(src, /FaceMap/, '码表页已下线，别留入口')
 })
