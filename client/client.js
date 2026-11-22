@@ -1959,7 +1959,7 @@ select.roost-input{color-scheme:dark}
           ),
           h('div', { className: 'roost-note' },
             allReady
-              ? '链路这五项都齐了。剩下两件在 QQ 开放平台手动做：开「接收所有消息」、把机器人拉进群。'
+              ? '链路这五项都齐了。剩下两件手工做：请群主在手机 QQ 里给群开「接收所有消息」、把机器人拉进群。'
               : '缺哪一步在那一页有单独说明和按钮。'),
         ),
 
@@ -2992,15 +2992,17 @@ select.roost-input{color-scheme:dark}
             ),
           ),
 
-          /** 第 5 步：直连配好之后，剩下两件是 QQ 开放平台上的手工操作 */
+          /** 第 5 步：直连配好之后，剩下两件要在群主自己的手机 QQ 里做 */
           h(Step, {
             n: 5, state: pairReady ? 'current' : 'todo', title: '在群里说句话',
             desc: pairReady
-              ? '还差两件手工的事：开放平台开「接收所有消息」，机器人先进群'
+              ? '还差两件手工的事：请群主在最新版手机 QQ 里给群开「接收所有消息」，机器人先进群'
               : '先把第 4 步的一键直连配好',
           },
             pairReady
-              ? h('button', { type: 'button', className: 'roost-btn', onClick: () => window.open('https://q.qq.com', '_blank', 'noopener') }, '开放平台')
+              ? h('div', { className: 'roost-note' },
+                '开法：群主在最新版手机 QQ 里 → 群成员列表点这个机器人（或加机器人入群时点「设置权限」）→ 开启「接收全量消息」。'
+                + '电脑端 QQ 没有这个设置；它不在 q.qq.com，也不是 intents 位。')
               : null,
           ),
 
@@ -3041,7 +3043,7 @@ select.roost-input{color-scheme:dark}
         h(Sec, { title: '常见卡点' },
           h('ul', { className: 'roost-note', style: { margin: 0, paddingLeft: 18 } },
             h('li', null, `启动后马上退出：多半是 AppID / AppSecret 填错了，或端口 ${s.port || ''} 被占`),
-            h('li', null, '群里没反应：开放平台没开「接收所有消息」，或机器人不在群里'),
+            h('li', null, '群里没反应：群主没在手机 QQ 里给群开「接收所有消息」，或机器人不在群里'),
             h('li', null, '群里不接话：检查「设置 → roostHost.decide」的接话模式和冷却是否在挡'),
             h('li', null, '面板一切正常但消息全失败：看「概览 → 直连状态」，seq 不动就是事件没进来'),
             s.accessKeySet === false
