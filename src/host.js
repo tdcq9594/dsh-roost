@@ -12368,6 +12368,15 @@ export function apply(ctx) {
       route('/gallery', (req, res) => {
         const u = new URL(req.url || '/', 'http://local');
         const withTrash = u.searchParams.get('trash') === '1';
+        /**
+         * **必须先同步再读。** `rows()` 只从 `index.json` 读，不扫目录——不调
+         * 这一行，「用户把 200 张图丢进目录 → 打开面板」看到的是「图库还是空的」，
+         * 一直到模型碰巧调一次 `gallery_list` 才好。第一次用就是坏的。
+         *
+         * 代价可忽略：`stickers.snapshot()` 有 3 秒缓存，哈希按 `mtime+size`
+         * 缓存，没有新增文件时这里几乎零成本。
+         */
+        gallery.sync(cfg.stickers);
         const rows = gallery.rows({ includeTrash: withTrash });
         const page = pageOf(
           rows.map((r) => ({ ...r, category: r.cat || '未分类' })),

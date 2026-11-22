@@ -505,6 +505,20 @@ test('listImages：字段归一，老框架没 remaining 时自己算', async ()
   assert.equal(r.remaining, 93, '老框架不给 remaining，要按 quota-total 算出来');
 });
 
+test('listImages：remaining 字段是 null 时不能读成「剩 0 张」', async () => {
+  /**
+   * `Number(null)` 是 0 且 `Number.isFinite(0)` 为真 —— 只判 `isFinite` 的话，
+   * 字段缺失/为 null 会被当成「配额已满」，面板标红并提示用户去删素材，
+   * 而实际一格没占。
+   */
+  const host = {
+    rpc: async () => ({ images: [], total: 3, quota: 100, remaining: null }),
+  };
+  const ch = createRoostHostChannel({ host, log: () => {} });
+  const r = await ch.listImages();
+  assert.equal(r.remaining, 97, 'null 要按 quota-total 回算');
+});
+
 test('listImages：NOT_FOUND 说的是「框架旧」，不是「连不上」', async () => {
   const host = { rpc: async () => { throw Object.assign(new Error('not found'), { code: 'NOT_FOUND' }) } };
   const ch = createRoostHostChannel({ host, log: () => {} });

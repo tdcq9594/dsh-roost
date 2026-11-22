@@ -55,18 +55,26 @@ export function externalAnnotationPaths({ launcherDir = '', roostDataDir = '' } 
   return out;
 }
 
-/** 值归一：字符串截断、数组只留字符串、对象一律丢掉 */
+/**
+ * 值归一：字符串截断、数组只留字符串、对象一律丢掉。
+ *
+ * **上限照抄图库自己的口径**（`gallery.js` 的 `clamp`：名字 20 / 含义 80 /
+ * 场合 60 / 规避 40，标签 6 个）。这里是外部文件，宽容一点读进来没问题，
+ * 但**不能带着超限的值进 index**：那些值会被补位进新记录，而 `lineOf` 一行
+ * 清单就变成几百字，模型每次 `gallery_list` 都在读一段废字。
+ * 要放宽就把两边一起改，别只改这一头。
+ */
 function pick(ann) {
   const s = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
   const tags = Array.isArray(ann?.tags)
-    ? ann.tags.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim().slice(0, 24)).slice(0, 8)
+    ? ann.tags.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim().slice(0, 24)).slice(0, 6)
     : [];
   return {
-    name: s(ann?.name, 60),
-    meaning: s(ann?.meaning, 300),
+    name: s(ann?.name, 20),
+    meaning: s(ann?.meaning, 80),
     tags,
-    scenes: s(ann?.scenes, 200),
-    avoid: s(ann?.avoid, 200),
+    scenes: s(ann?.scenes, 60),
+    avoid: s(ann?.avoid, 40),
   };
 }
 

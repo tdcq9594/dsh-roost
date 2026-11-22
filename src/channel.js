@@ -295,7 +295,13 @@ export function createRoostHostChannel({
        */
       const t = encodeFaceTags(clamped.text, (name) => log(`表情名没能匹配（已从正文删掉）：${name}`));
       if (clamped.cut) {
-        log(`正文 ${raw.length} 字超过单条上限 ${MAX_OUTBOUND_TEXT}，已截断到 ${t.length} 字`);
+        /**
+         * 报**编码前**的长度（`clamped.text`）。用 `t.length` 会说谎：
+         * `【表情: 呲牙】` 是 7 个字，编码成一个 `0x14` + 一个码元后只剩 2，
+         * 日志会写「截断到 12 字」而用户看到的是 40 字——按这个数去查
+         * 「为什么截这么短」永远查不到。
+         */
+        log(`正文 ${raw.length} 字超过单条上限 ${MAX_OUTBOUND_TEXT}，已截断到 ${clamped.text.length} 字`);
       }
       const hasCard = Boolean(card && typeof card === 'object');
       if (!target) return { ok: false, message: '缺 target' };
@@ -531,8 +537,14 @@ export function createRoostHostChannel({
           nextCursor: String(r?.nextCursor ?? ''),
           total: Number(r?.total) || 0,
           quota: Number(r?.quota) || 100,
-          /** 老的框架不带 remaining，按 total/quota 自己算一遍 */
-          remaining: Number.isFinite(Number(r?.remaining))
+          /**
+           * 老的框架不带 remaining，按 total/quota 自己算一遍。
+           *
+           * **先判 `null`，不能只判 `isFinite(Number(...))`**：`Number(null)` 是
+           * `0` 且 `isFinite(0)` 为真，字段缺失时会被读成「剩 0 张」——面板显示
+           * 「已满」并标红，用户以为素材池爆了，其实一格没占。
+           */
+          remaining: r?.remaining != null && Number.isFinite(Number(r.remaining))
             ? Number(r.remaining)
             : Math.max(0, (Number(r?.quota) || 100) - (Number(r?.total) || 0)),
         };

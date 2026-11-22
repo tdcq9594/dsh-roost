@@ -51,10 +51,11 @@
 import { createHash } from 'node:crypto';
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, copyFileSync, readdirSync, statSync,
+  unlinkSync,
 } from 'node:fs';
 import { join, basename, extname, dirname } from 'node:path';
 
-import { writeSidecar } from './sticker-manage.js';
+import { writeSidecar, SIDECAR } from './sticker-manage.js';
 
 /** 索引格式版本。字段变了就 +1，老文件整份弃用（重建比迁移省事） */
 export const INDEX_VERSION = 1;
@@ -259,6 +260,23 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     }
 
     const alive = new Set();
+    /**
+     * 读不出字节的文件（被占用 / 杀软正在扫 / 权限）。
+     *
+     * 它们**不是**「已删除」，只是这一轮算不出哈希——所以既不算活，也绝不能
+     * 标成 `missing`。标错一次的表现是：那张图当场发不出去（`pathOf` 见到
+     * `missing` 就返回空串），而文件明明还在。Windows 上杀软扫大图很常见。
+     */
+    const unreadable = new Set();
+    /**
+     * 路径 → 已有记录的 sha。读不出字节时靠它在「不重算哈希」的前提下认出
+     * 「这是哪条记录」，从而把它排除在 `missing` 判定之外。每轮现建，条目数
+     * 和图库张数同级（几百），代价可忽略。
+     */
+    const knownByPath = new Map();
+    for (const [sha, rec] of Object.entries(s.items)) {
+      if (rec.path) knownByPath.set(rec.path, sha);
+    }
     let added = 0;
 
     /**
@@ -282,7 +300,21 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
 
     for (const it of snap.items ?? []) {
       const sha = shaOf(it.path, it.size, it.mtime);
-      if (!sha) continue;
+      if (!sha) {
+        /**
+         * 这一轮算不出哈希，但**不代表文件没了**。按路径找回原记录、加进
+         * `unreadable`，下面标 `missing` 时整条跳过——它既不算活也不算死，
+         * 保持上一轮的状态。
+         *
+         * 为什么非这么处理：`shaOf` 读失败也返回空串，和「文件不存在」共用一个
+         * 返回值。如果不区分，一次瞬时读失败就会让那张图当场发不出去
+         * （`pathOf` 见 `missing` 返回空串），而文件明明还在。Windows 上杀软
+         * 扫大图、同步盘正上传，都会造成这一两秒的占用。
+         */
+        const prevSha = knownByPath.get(it.path);
+        if (prevSha) unreadable.add(prevSha);
+        continue;
+      }
       alive.add(sha);
       const prev = s.items[sha];
 
@@ -303,7 +335,9 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
           name: ext?.name || '',
           meaning: ext?.meaning || '',
           /** 侧车标签是用户手写的，拿来当初始值最合适（见文件头「两套标注」） */
-          tags: Array.isArray(it.tags) && it.tags.length ? it.tags.slice(0, 6) : (ext?.tags ?? []),
+          tags: Array.isArray(it.tags) && it.tags.length
+            ? it.tags.slice(0, 6)
+            : (Array.isArray(ext?.tags) ? ext.tags.slice(0, 6) : []),
           scenes: it.usage || ext?.scenes || '',
           avoid: ext?.avoid || '',
           enabled: true,
@@ -353,8 +387,11 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     let missing = 0;
     const blind = Array.isArray(snap.missing) && snap.missing.length > 0;
     if (blind) log(`图库同步时 ${snap.missing.length} 个目录读不到，本次不标记缺失`);
+    if (unreadable.size) log(`图库同步时 ${unreadable.size} 张图这次读不出字节（被占用？），本次不标记缺失`);
     for (const [sha, rec] of Object.entries(s.items)) {
       if (blind) break;
+      /** 读不出字节的那些：这一轮不给它下结论（见上面 `unreadable` 的说明） */
+      if (unreadable.has(sha)) continue;
       const isGone = !alive.has(sha);
       if (Boolean(rec.missing) !== isGone) {
         rec.missing = isGone;
@@ -437,15 +474,19 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
   /**
    * 序号 → 真实路径。**出站解析专用，绝不出现在工具返回值里**。
    *
-   * 已进回收站 / 文件已消失的返回空串，调用方按「发不出去」处理并记日志
-   * ——绝不能把 `#3` 这串原样发进群里。
+   * 已进回收站 / 文件已消失 / 被 `gallery_edit` 关掉的返回空串，调用方按
+   * 「发不出去」处理并记日志——绝不能把 `#3` 这串原样发进群里。
+   *
+   * `enabled === false` 也必须挡在这一层。它原来只影响 `list()`，模型从历史里
+   * 记得序号就能照发——面板上那张图明明已经「停用」，群里却出现，是最难解释的
+   * 那种不一致。
    */
   const pathOf = (seq, cfg = {}) => {
     sync(cfg);
     const hit = bySeq(seq);
     if (!hit) return '';
     const { rec } = hit;
-    if (rec.trash || rec.missing) return '';
+    if (rec.trash || rec.missing || rec.enabled === false) return '';
     if (!rec.path || !existsSync(rec.path)) return '';
     return rec.path;
   };
@@ -465,6 +506,73 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     touch();
     flush();
     return true;
+  };
+
+  /**
+   * 把记录对应的文件真挪到新分类目录，并同步 `path` / `file` / `cat`。
+   *
+   * **只改 `rec.cat` 是不行的**：`sync()` 每轮都拿磁盘上的目录名覆盖 `rec.cat`，
+   * 下一次同步就把这次编辑静默撤销；中间那几秒 `rel` 还指向不存在的路径，
+   * 面板缩略图直接 404。工具描述写的是「把放错分类的挪过去」——那就得真挪。
+   *
+   * 叫 `moveToCat` 而不是 `rename`：它同时负责侧车跟随与扫描缓存失效，不是
+   * 单纯的 `renameSync` 包装。
+   *
+   * @returns {{ok:boolean, message?:string}} 失败时调用方**不要**改 `rec.cat`，
+   *   否则会出现「索引说在新分类、文件还在旧分类」的分裂状态。
+   */
+  const moveToCat = (rec, cat) => {
+    if (!rec.path) return { ok: false, message: '这条记录没有文件路径（可能还没扫到）' };
+    /**
+     * 这条记录**当前所在的那个根**，从 `path` 反推，不能用 `pickSaveRoot()`。
+     *
+     * `pickSaveRoot()` 给的是配置里的第一个根；图可能躺在第二个根里（多目录
+     * 配置的常见用法：一个自用、一个收图）。拿第一个根当目标，等于「改个分类
+     * 把文件搬到了另一块磁盘」，用户会看到图从自己那个目录里凭空消失。
+     *
+     * `stickers.js` 只扫一层，所以路径形状是确定的：带分类的记录是
+     * `<根>/<分类>/<文件>`，没分类的是 `<根>/<文件>`。
+     */
+    const parent = dirname(rec.path);
+    const curCat = rec.cat || '';
+    const root = (curCat && basename(parent) === curCat) ? dirname(parent) : parent;
+    const target = uniquePath(join(cat ? join(root, cat) : root, rec.file || basename(rec.path)));
+    if (target === rec.path) { rec.cat = cat; return { ok: true }; }
+
+    try {
+      mkdirSync(dirname(target), { recursive: true });
+      try {
+        renameSync(rec.path, target);
+      } catch (e) {
+        /**
+         * 跨盘 rename 会抛 `EXDEV`（表情库在 D 盘、临时目录在 C 盘之类）。
+         * 复制再删等价，只是慢一点；两条都失败才真算失败。
+         */
+        if (e?.code !== 'EXDEV') throw e;
+        copyFileSync(rec.path, target);
+        unlinkSync(rec.path);
+      }
+    } catch (e) {
+      return { ok: false, message: `挪到「${cat || UNCAT()}」失败：${e?.message ?? e}` };
+    }
+
+    /**
+     * 侧车跟着走。`stickers.js` 按**路径**找侧车（`${abs}.tags`），不搬就等于
+     * 把用户手写的标签留在旧目录，新位置的图变成「未标注」。
+     */
+    try {
+      const from = `${rec.path}${SIDECAR}`;
+      if (existsSync(from)) renameSync(from, `${target}${SIDECAR}`);
+    } catch (e) {
+      log(`侧车没跟着挪（${rec.file}）：${e?.message ?? e}`);
+    }
+
+    rec.path = target;
+    rec.file = basename(target);
+    rec.cat = cat;
+    /** 提示词里的分类是扫描结果，挪完不清缓存最多还差 3 秒 */
+    stickers?.invalidate?.();
+    return { ok: true };
   };
 
   /**
@@ -488,7 +596,15 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     if (patch.meaning !== undefined) set('meaning', str(patch.meaning, 80));
     if (patch.scenes !== undefined) set('scenes', str(patch.scenes, 60));
     if (patch.avoid !== undefined) set('avoid', str(patch.avoid, 40));
-    if (patch.cat !== undefined) set('cat', str(patch.cat, 12));
+    if (patch.cat !== undefined) {
+      const want = str(patch.cat, 12);
+      /** 分类没变就别动文件：`edit({cat: 原值})` 不该产生一次磁盘搬移 */
+      if (want !== (rec.cat || '')) {
+        const moved = moveToCat(rec, want);
+        if (!moved.ok) return { ok: false, message: moved.message };
+        touched.push('cat');
+      }
+    }
     if (patch.enabled !== undefined) set('enabled', patch.enabled !== false);
     if (patch.tags !== undefined) {
       const tags = (Array.isArray(patch.tags) ? patch.tags : String(patch.tags).split(/[,，、\s]+/))

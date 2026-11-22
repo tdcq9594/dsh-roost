@@ -44,8 +44,17 @@ test('没注入图库时 #3 一律摘掉：老调用方行为不变，也不残�
 });
 
 test('`#3.png` 不算序号：模型在猜的时候不能当真的', () => {
-  const { actions } = parseOutboundActions('<<image: #3.png>>', { resolveImage: resolve });
-  assert.equal(actions.length, 0);
+  const { text, actions } = parseOutboundActions('<<image: #3.png>>', { resolveImage: resolve });
+  assert.equal(actions.filter((x) => x.type === 'inlineImage').length, 0, '不能真发图');
+  /**
+   * 但**必须留一条 `imageBad`**。原来的实现这里返回 `null`，占位符被摘掉、
+   * 日志一个字都不写：用户只看到「图没发」，模型下一轮还在用同样的写法。
+   * 「什么都没发生」是最难查的那种失败。
+   */
+  const bad = actions.filter((x) => x.type === 'imageBad');
+  assert.equal(bad.length, 1);
+  assert.equal(bad[0].value, '#3.png');
+  assert.doesNotMatch(text, /#3\.png/, '标记本身不能漏进正文');
 });
 
 test('`#3,#5` 不算序号：一次一张，和 MAX_MEDIA 口径一致', () => {
@@ -119,4 +128,46 @@ test('序号解析失败会记日志，用户能看出图为什么没发', async
   await run({ text: '这个 <<image: #77>> 看看', target: 'g1', scene: 'group' });
   assert.ok(logs.some((m) => m.includes('#77')), `日志里要有 #77，实际：${logs.join(' | ')}`);
   assert.equal(ch.calls.filter((c) => c[0] === 'upload').length, 0);
+});
+
+test('文件名里带 `#` 的图照样发得出去（`图#1.png` 不能被当成查询串切掉）', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch, resolveImage: resolve });
+  const weird = PATH.replace(/\.png$/, '#1.png');
+  const { actions } = parseOutboundActions(`<<image-alone: ${weird}>>`, { resolveImage: resolve });
+  assert.equal(actions.filter((x) => x.type === 'imageAlone').length, 1, '解析阶段就要认出这是图');
+  await run({ text: `<<image-alone: ${weird}>>`, target: 'g1', scene: 'group' });
+  assert.ok(ch.calls.some((c) => c[0] === 'file'), '要真的走发送，而不是静默 continue');
+});
+
+test('就地插图：正文没发出去就不记使用（上传成功 ≠ 发出去）', async () => {
+  const seen = [];
+  const calls = [];
+  const run = createActionRunner({
+    channel: () => ({
+      async uploadMarkdownImage(p) { calls.push(['upload', p]); return { url: 'qqbot-media://abc', imageId: 'i1' }; },
+      async send() { calls.push(['send']); return { ok: false, message: '通道限频' }; },
+      async deleteImage() { return { ok: true }; },
+    }),
+    resolveImage: resolve,
+    onImageUsed: (seq) => seen.push(seq),
+  });
+  await run({ text: '图 <<image: #3>>', target: 'g1', scene: 'group' });
+  assert.deepEqual(seen, [], '发失败不能污染热度排序');
+  assert.ok(calls.some((c) => c[0] === 'upload'), '上传确实发生了——所以「忘记回滚」才是个真问题');
+});
+
+test('就地插图：正文发成功才记使用', async () => {
+  const seen = [];
+  const run = createActionRunner({
+    channel: () => ({
+      async uploadMarkdownImage() { return { url: 'qqbot-media://abc', imageId: 'i1' }; },
+      async send() { return { ok: true, id: 'm1' }; },
+      async deleteImage() { return { ok: true }; },
+    }),
+    resolveImage: resolve,
+    onImageUsed: (seq) => seen.push(seq),
+  });
+  await run({ text: '图 <<image: #3>>', target: 'g1', scene: 'group' });
+  assert.deepEqual(seen, [3]);
 });

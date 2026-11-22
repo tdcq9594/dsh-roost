@@ -474,3 +474,108 @@ test('外部标注：扩展抛错不影响本家同步', () => {
     assert.equal(g.rows({})[0].name, '');
   } finally { e.cleanup() }
 });
+
+test('改分类会真挪文件：下一轮同步不会把编辑撤销', () => {
+  const e = env();
+  try {
+    const it = makeImage(e.root, '开心/a.png', 'AAA');
+    e.setItems([it]);
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+
+    const r = e.gallery.edit(seq, { cat: '搞笑' });
+    assert.equal(r.ok, true);
+
+    const moved = join(e.root, '搞笑', 'a.png');
+    assert.ok(existsSync(moved), '文件要真的挪到新分类目录');
+    assert.equal(existsSync(it.path), false, '旧位置不该还留着');
+
+    /**
+     * 关键回归：`sync()` 每轮拿**磁盘目录名**覆盖 `rec.cat`。只改索引不搬文件
+     * 的话，这里会看到分类被顶回「开心」——用户会以为「改了没生效」。
+     */
+    e.setItems([{ ...it, path: moved, file: 'a.png', cat: '搞笑', rel: '搞笑/a.png' }]);
+    e.gallery.sync({});
+    const row = e.gallery.rows({})[0];
+    assert.equal(row.cat, '搞笑');
+    assert.equal(row.rel, '搞笑/a.png');
+  } finally { e.cleanup() }
+});
+
+test('改分类同时把侧车带走（否则新位置读不到旧标签）', () => {
+  const e = env();
+  try {
+    const it = makeImage(e.root, '开心/b.png', 'BBB');
+    e.setItems([it]);
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+    e.gallery.edit(seq, { tags: ['开心'], scenes: '夸人时' });
+
+    const before = `${it.path}.tags`;
+    assert.ok(existsSync(before), '侧车先写在旧位置');
+
+    e.gallery.edit(seq, { cat: '搞笑' });
+    assert.equal(existsSync(before), false, '旧侧车不能留在原地变孤儿');
+    assert.ok(existsSync(join(e.root, '搞笑', 'b.png.tags')), '侧车要跟着图走');
+  } finally { e.cleanup() }
+});
+
+test('停用的图发不出去——不是只从清单里消失', () => {
+  const e = env();
+  try {
+    const it = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([it]);
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+
+    assert.ok(e.gallery.pathOf(seq, {}), '没停用时能发');
+
+    e.gallery.edit(seq, { enabled: false });
+    assert.equal(e.gallery.list({}, {}).items.length, 0, '清单里看不到');
+    /**
+     * 模型从历史里记得这个序号，`<<image: #N>>` 照样会来解析。
+     * 面板上写着「停用」、群里却出现了那张图，是最难解释的那种不一致。
+     */
+    assert.equal(e.gallery.pathOf(seq, {}), '', '停用了就绝不能发出去');
+  } finally { e.cleanup() }
+});
+
+test('单张图这次读不出字节，不能被标成「已消失」', () => {
+  const e = env();
+  try {
+    const it = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([it]);
+    e.gallery.sync({});
+    assert.equal(e.gallery.rows({}).length, 1);
+
+    /**
+     * 造一个「路径还在、字节读不出来」的状态：把文件换成同名目录。
+     * `readFileSync` 会抛 EISDIR —— 和 Windows 上杀软占着文件同类。
+     * `mtime` 必须换一个值，否则 `shaOf` 的 `path|mtime|size` 缓存会直接命中。
+     */
+    rmSync(it.path);
+    mkdirSync(it.path);
+    e.setItems([{ ...it, mtime: 999 }]);
+
+    const r = e.gallery.sync({});
+    assert.equal(r.missing, 0, '不能记成缺失');
+    assert.equal(e.gallery.rows({}).length, 1, '也不该从面板上消失');
+    assert.ok(e.gallery.pathOf(e.gallery.rows({})[0].seq, {}), '这张仍然可发');
+  } finally { e.cleanup() }
+});
+
+test('改分类不会把图搬到别的根目录（多目录配置）', () => {
+  const e = env();
+  try {
+    /** 第二个根：和 `dir()` 返回的第一个根不是同一处 */
+    const rootB = join(e.dataDir, 'stickers-b');
+    const it = makeImage(rootB, '开心/b.png', 'BBB');
+    e.setItems([it]);
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+
+    assert.equal(e.gallery.edit(seq, { cat: '搞笑' }).ok, true);
+    assert.ok(existsSync(join(rootB, '搞笑', 'b.png')), '要留在原来的根里');
+    assert.equal(existsSync(join(e.root, '搞笑', 'b.png')), false, '不能被搬到第一个根');
+  } finally { e.cleanup() }
+});
