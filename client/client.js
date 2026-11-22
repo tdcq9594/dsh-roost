@@ -9939,14 +9939,20 @@ select.roost-input{color-scheme:dark}
 
         h(GCard, {
           n: '02', title: '连发合并',
-          desc: '人常常一口气发好几句。等她说完再一起回，而不是一句一回，省调用也少刷屏。私聊、被 @、命令不等待。',
+          desc: '人常常一口气发好几句。等她说完再一起回，而不是一句一回，省调用也少刷屏。她正忙时来的消息会攒着，等这一轮结束合在一起回，不会逐条刷「还在想」。',
         },
-          h(GRow, { label: '对方停顿多久算说完', hint: '从最后一条消息算起；太短会把一句话劈成两半' },
+          h(GRow, { label: '私聊停顿多久算说完', hint: '从最后一条消息算起；太短会把一句话劈成两半' },
             h(GNum, { value: merge.waitSec ?? 1.5, min: 0.5, max: 10, step: 0.5, unit: '秒', disabled: busy,
               onSave: (v) => setMerge('waitSec', v) })),
-          h(GRow, { label: '最多等多久', hint: '对方一直在发，从第一条算也最多等这么久' },
+          h(GRow, { label: '私聊最多等多久', hint: '对方一直在发，从第一条算也最多等这么久' },
             h(GNum, { value: merge.maxSec ?? 6, min: 2, max: 30, unit: '秒', disabled: busy,
               onSave: (v) => setMerge('maxSec', v) })),
+          h(GRow, { label: '群里停顿多久算一段', hint: '群里你一句我一句说得慢，多等一会儿攒齐再回；她正忙时新消息也先攒着' },
+            h(GNum, { value: merge.groupWaitSec ?? 5, min: 1, max: 20, unit: '秒', disabled: busy,
+              onSave: (v) => setMerge('groupWaitSec', v) })),
+          h(GRow, { label: '群里最多等多久', hint: '从这一段第一条算，一直有人发也最多等这么久' },
+            h(GNum, { value: merge.groupMaxSec ?? 15, min: 3, max: 60, unit: '秒', disabled: busy,
+              onSave: (v) => setMerge('groupMaxSec', v) })),
         ),
 
         h(GCard, {
@@ -10026,7 +10032,7 @@ select.roost-input{color-scheme:dark}
             h(GNum, { value: chat.turnTimeoutSec ?? 150, min: 10, max: 900, unit: '秒', disabled: busy,
               onSave: (v) => setChat('turnTimeoutSec', v) })),
           h('div', { className: 'roost-g-note' },
-            '同时最多排几条（queueMax）、剩余时间不够就不开跑（queueMinBudgetSec）在「权限 → 她会做什么」里，两边改的是同一份配置。',
+            '她正忙时来的消息会攒着，等这一轮结束合在一起回，不会逐条刷「还在想」。私聊忙时直接插话进当前轮。',
             h('button', {
               type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
               onClick: () => setTab && setTab('caps'),
