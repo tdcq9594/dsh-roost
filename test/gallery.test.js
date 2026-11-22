@@ -1102,3 +1102,61 @@ test('pending 的 seqs 里放回收站中的图：不收，免得拿没有语义
     assert.deepEqual(r.map((x) => x.seq), [a]);
   } finally { e.cleanup(); }
 });
+
+/* ---------------- 原图尺寸（2026-11-22） ---------------- */
+
+/**
+ * 造一个只有头部正确的 PNG：`dimsOf` 能读出宽高。
+ *
+ * 为什么这条要紧：模型发图时能指定显示大小（`<<image: #3|320x>>`），只给一边
+ * 时另一边按**原图比例**算。图库里不记尺寸，模型就只能瞎猜比例，图被压扁。
+ */
+function fakePng(w, h, bytes = 64) {
+  const b = Buffer.alloc(Math.max(bytes, 33), 0);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+  b.writeUInt32BE(13, 8);
+  b.write('IHDR', 12);
+  b.writeUInt32BE(w, 16);
+  b.writeUInt32BE(h, 20);
+  return b;
+}
+
+test('入库记下原图宽高：清单和工具返回值里都有尺寸', () => {
+  const e = env();
+  try {
+    e.setItems([makeImage(e.root, '开心/a.png', fakePng(320, 240))]);
+    const r = e.gallery.list({}, {});
+    assert.equal(r.items[0].w, 320);
+    assert.equal(r.items[0].h, 240);
+    assert.match(r.text, /#1  a\.png  320×240/, '清单里文件名后面跟原图尺寸');
+  } finally { e.cleanup(); }
+});
+
+test('老索引没有 w/h：同步补上，不重建、不丢标注', () => {
+  const e = env();
+  try {
+    e.setItems([makeImage(e.root, 'a.png', fakePng(100, 50))]);
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+    e.gallery.edit(seq, { name: '猫', meaning: '无语' });
+
+    /** 模拟旧版本写下的索引：字段删掉，版本号不动 */
+    const raw = JSON.parse(readFileSync(e.gallery.indexPath, 'utf8'));
+    for (const rec of Object.values(raw.items)) { delete rec.w; delete rec.h; }
+    writeFileSync(e.gallery.indexPath, JSON.stringify(raw));
+    e.gallery.reset();
+
+    const r = e.gallery.list({}, {});
+    assert.equal(r.items[0].w, 100, '尺寸补回来了');
+    assert.equal(r.items[0].name, '猫', '标注没被重建冲掉');
+  } finally { e.cleanup(); }
+});
+
+test('save 用调用方给的字节算尺寸，不回读磁盘', () => {
+  const e = env();
+  try {
+    const r = e.gallery.save({ from: '', buf: fakePng(200, 120), ext: '.png', name: '网图' }, {});
+    assert.equal(r.item.w, 200);
+    assert.equal(r.item.h, 120);
+  } finally { e.cleanup(); }
+});

@@ -5,12 +5,16 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { createRoostHostChannel } from '../src/channel.js';
 import { stripUnknown, stripUnclosed, markerRe, VALUE_MARKERS } from '../src/markers.js';
 import {
   parseOutboundActions, parseDurationMs, parseButton, buildKeyboard,
   createActionRunner, looksLikeSource, normalizeSource,
+  parseImageSize, splitImageSize,
 } from '../src/outbound-actions.js';
 
 /* ---------------- 解析 ---------------- */
@@ -385,4 +389,158 @@ test('执行：文件发成功时 filesOk=true，不留多余字段', async () =
   const r = await run({ text: '', target: 'g1', extra: { files: ['C:/tmp/a.png'] } });
   assert.equal(r.filesOk, true);
   assert.equal(r.fileErrors, undefined);
+});
+
+/* ---------------- 显示尺寸（2026-11-22） ---------------- */
+
+/**
+ * 造一个只有头部正确的 PNG：`dimsOf` 能读出宽高，体积随便填。
+ *
+ * 只给宽 / 只给高时，「另一边」必须按**真实比例**算出来——拿不到原图尺寸
+ * 就只能不写尺寸（退回 480 宽兜底），猜一个比例等于把图压变形。
+ */
+function fakePng(w, h, bytes = 64) {
+  const b = Buffer.alloc(Math.max(bytes, 33), 0);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+  b.writeUInt32BE(13, 8);
+  b.write('IHDR', 12);
+  b.writeUInt32BE(w, 16);
+  b.writeUInt32BE(h, 20);
+  return b;
+}
+
+test('尺寸：常见写法都认，只写一边时另一边是 0（表示按原图比例）', () => {
+  assert.deepEqual(parseImageSize('320x200'), { w: 320, h: 200 });
+  assert.deepEqual(parseImageSize('320×200'), { w: 320, h: 200 });
+  assert.deepEqual(parseImageSize('320*200'), { w: 320, h: 200 });
+  assert.deepEqual(parseImageSize('320px x 200px'), { w: 320, h: 200 });
+  assert.deepEqual(parseImageSize(' 320 X 200 '), { w: 320, h: 200 });
+  assert.deepEqual(parseImageSize('320x'), { w: 320, h: 0 });
+  assert.deepEqual(parseImageSize('x200'), { w: 0, h: 200 });
+  /** 没有分隔符就不是尺寸：`320` 可能是文件名或序号的一部分 */
+  assert.equal(parseImageSize('320'), null);
+  assert.equal(parseImageSize('x'), null);
+  assert.equal(parseImageSize('320xabc'), null);
+  /** 离谱的大数收口，不把 `99999` 原样交给平台 */
+  assert.equal(parseImageSize('99999x1').w, 4096);
+});
+
+test('尺寸：竖线拆值；路径里的空格不会被当分隔符', () => {
+  assert.deepEqual(splitImageSize('#3|320x200'), { value: '#3', size: { w: 320, h: 200 } });
+  assert.deepEqual(splitImageSize('#3 320x'), { value: '#3', size: { w: 320, h: 0 } });
+  const spaced = splitImageSize('C:/Program Files/a.png|320x');
+  assert.equal(spaced.value, 'C:/Program Files/a.png', '路径原样，空格不动');
+  assert.deepEqual(spaced.size, { w: 320, h: 0 });
+  /** 路径里的空格不拆 */
+  assert.deepEqual(splitImageSize('C:/a b.png'), { value: 'C:/a b.png', size: null });
+  /** 竖线后面不是尺寸：整段留给 sourceOf 判，日志会说是写法不对 */
+  assert.deepEqual(splitImageSize('#3|abc'), { value: '#3|abc', size: null });
+});
+
+test('尺寸：两个数都写就照写的来（可以放大、缩小、变形）', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch });
+  await run({ text: '看 <<image: C:/pic/a.png|320x200>> 这张', target: 'g1' });
+  const p = ch.calls.find((c) => c[0] === 'send')[1];
+  assert.match(p.text, /!\[图片 #320px #200px\]\(qqbot-media:\/\/abc\)/);
+  assert.doesNotMatch(p.text, /C:\/pic/);
+});
+
+test('尺寸：只给宽时按原图比例补高（读文件头，不猜）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-size-'));
+  const p = join(dir, 'a.png');
+  writeFileSync(p, fakePng(400, 300));
+  try {
+    const ch = fakeChannel();
+    const run = createActionRunner({ channel: () => ch });
+    await run({ text: `看 <<image: ${p}|200x>> 这张`, target: 'g1' });
+    const sent = ch.calls.find((c) => c[0] === 'send')[1];
+    assert.match(sent.text, /#200px #150px/, '400×300 按 200 宽算，高应是 150');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('尺寸：读不出原图宽高就退回不带尺寸（框架按 480 兜底）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-size-'));
+  const p = join(dir, 'a.png');
+  writeFileSync(p, 'not really a png');
+  try {
+    const ch = fakeChannel();
+    const run = createActionRunner({ channel: () => ch });
+    await run({ text: `看 <<image: ${p}|200x>> 这张`, target: 'g1' });
+    const sent = ch.calls.find((c) => c[0] === 'send')[1];
+    assert.match(sent.text, /!\[\]\(qqbot-media:\/\/abc\)/, '不知道比例就别写尺寸');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('尺寸：独立图带尺寸改走 markdown 单条，不走富媒体', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-size-'));
+  const p = join(dir, 'a.png');
+  writeFileSync(p, fakePng(600, 600));
+  try {
+    const ch = fakeChannel();
+    const run = createActionRunner({ channel: () => ch });
+    await run({ text: `给你 <<image-alone: ${p}|240x240>>`, target: 'g1' });
+    assert.equal(ch.calls.filter((c) => c[0] === 'file').length, 0, '富媒体没有尺寸字段，不能走它');
+    const sends = ch.calls.filter((c) => c[0] === 'send');
+    assert.equal(sends.length, 2, '正文一条 + 图一条');
+    assert.match(sends[1][1].text, /!\[图片 #240px #240px\]\(qqbot-media:\/\/abc\)/);
+    assert.equal(sends[1][1].markdown, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('尺寸：图库序号也能带尺寸（序号换成路径后照样生效）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-size-'));
+  const p = join(dir, 'a.png');
+  writeFileSync(p, fakePng(1000, 500));
+  try {
+    const ch = fakeChannel();
+    const used = [];
+    const run = createActionRunner({
+      channel: () => ch,
+      resolveImage: (seq) => (seq === 3 ? p : ''),
+      onImageUsed: (seq) => used.push(seq),
+    });
+    await run({ text: '看 <<image: #3|480x240>> 这张', target: 'g1' });
+    const sent = ch.calls.find((c) => c[0] === 'send')[1];
+    assert.match(sent.text, /#480px #240px/);
+    assert.deepEqual(used, [3], '发成功要记一次使用');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('尺寸：markdown 关着时退回富媒体，不能把 ![]() 当纯文本发进群', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-size-'));
+  const p = join(dir, 'a.png');
+  writeFileSync(p, fakePng(600, 600));
+  try {
+    const ch = fakeChannel();
+    const logs = [];
+    const run = createActionRunner({
+      channel: () => ch,
+      markdownOf: () => false,
+      log: (m) => logs.push(m),
+    });
+    await run({ text: `给你 <<image-alone: ${p}|240x240>>`, target: 'g1' });
+    /** 正文那条照发；不能发的是**带 `![]()` 的**那条——它在群里就是一段文字 */
+    assert.equal(ch.calls.filter((c) => c[0] === 'send' && /!\[/.test(c[1].text)).length, 0,
+      'markdown 关着时不能把 ![]() 发出去');
+    assert.equal(ch.calls.filter((c) => c[0] === 'file').length, 1, '退回富媒体，图还能发出去');
+    assert.ok(logs.some((l) => /markdown 关着/.test(l)), '尺寸没生效要留一句日志');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('尺寸：markdown 被拒时改按原图重发，图不能整条丢掉', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-size-'));
+  const p = join(dir, 'a.png');
+  writeFileSync(p, fakePng(600, 600));
+  try {
+    const ch = fakeChannel();
+    /**
+     * 模拟官方拒 markdown：真实通道会先 `plainOf()` 再降级重发，
+     * 而这条消息只有图，剥完是空的，于是返回 `ok:false`。
+     */
+    ch.send = async (x) => { ch.calls.push(['send', x]); return { ok: false, message: 'markdown 被拒' }; };
+    const run = createActionRunner({ channel: () => ch });
+    await run({ text: `给你 <<image-alone: ${p}|240x240>>`, target: 'g1' });
+    assert.equal(ch.calls.filter((c) => c[0] === 'file').length, 1, '要退回富媒体');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

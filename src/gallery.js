@@ -61,6 +61,7 @@ import {
 import { join, basename, extname, dirname } from 'node:path';
 
 import { writeSidecar, SIDECAR } from './sticker-manage.js';
+import { dimsOf, dimsOfPath } from './image-size.js';
 
 /** 索引格式版本。字段变了就 +1，老文件整份弃用（重建比迁移省事） */
 export const INDEX_VERSION = 1;
@@ -78,14 +79,38 @@ export const MAX_LIST = 30;
  * 但**必须有**：不告诉模型「图有编号」，它就不会去调 `gallery_list`，
  * 四个工具全变死代码——这个项目已经在这件事上踩过一次
  * （见 `tools.js` 头注释「功能写好了没人调 = 死代码」）。
+ *
+ * ## 两种来源必须分开说（2026-11-22 修）
+ *
+ * 旧文案是一句「**发图时**不要写文件路径，也不要写网址」。它想说的是「图库里
+ * 的图别抄路径」，但写在「发图时」这个总前提下面，把另一条合法用法一起禁掉了：
+ * 主人说「把刚才那个文件发我」，模型手上只有 `D:\out\报表.xlsx` 旁边那张
+ * `D:\out\chart.png`，按这句话它就不敢写路径，只能回一句「我发不了文件」。
+ *
+ * 现在按**来源**分两条：图库里的图写序号（宿主知道真路径），系统上的文件写
+ * 路径（模型手上就是它）。两者宿主都认，不冲突。
+ *
+ * ## 尺寸为什么也要教
+ *
+ * QQ 的 markdown 图片语法带尺寸位，不给就由宿主兜底（等比缩到 480 宽）。模型
+ * 不知道这件事时，两个后果都很难看：想强调的图被缩得看不清，或者把 1000×300
+ * 的长条也按 480 宽发出去（在手机上是一条细线）。清单里带原图宽高（`lineOf`），
+ * 这里教怎么写，它就能自己决定放多大。
  */
 export const GALLERY_HINT = [
-  '【图库】你的图有一个带序号的图库，每张图都有编号、名字和「什么场合用」。',
-  '想看有哪些图：调 gallery_list（可以指定分类，也可以只看没见过的）。',
+  '【图库】你的图有一个带序号的图库，每张图都有编号、名字、原图尺寸和「什么场合用」。',
+  '想看有哪些图：调 gallery_list（可以指定分类，也可以只看没见过的）；'
+    + '每行文件名后面那个「宽×高」就是原图尺寸。',
   '不确定某张图到底画了什么、或者想问它某个细节：调 gallery_show 看一眼——它是真的看图，不是靠文件名猜。',
-  '发图时只写序号：`<<image: #3>>`（图和文字同一条）或 `<<image-alone: #3>>`（单独一条）。',
-  '**发图时**不要写文件路径，也不要写网址——宿主会把序号换成图。序号写错这张就不发，'
-    + '不会把奇怪的字符串发进群里。',
+  '发图：**图库里的图只写序号**——`<<image: #3>>`（图和文字同一条）或 `<<image-alone: #3>>`（单独一条）。'
+    + '图库的真路径你看不到也不用知道，宿主会换。',
+  '**系统上的文件**（主人要的截图、报表、你自己生成的图）反过来，直接写路径：'
+    + '`<<image: D:/out/chart.png>>` 或 `<<image-alone: /home/user/a.png>>`——路径和序号都认。',
+  '发图时都要带上显示大小：在末尾加 `|宽x高`，比如 `<<image: #3|320x>>`（宽 320，高按原图比例自动算）。'
+    + '只写宽最省事、比例不会错；想大一点写 480~600，小一点写 160~240。'
+    + '只写高用 `|x200`。要特意变形（压扁、拉长）就两个都写：`|320x200`。',
+  '不写尺寸也发得出去，但两条路不一样：`<<image:>>` 不写由宿主按原图等比缩到 480 宽（小图不放大）；'
+    + '`<<image-alone:>>` 不写就是原图富媒体消息，尺寸完全不受控，长图会铺满好几屏——单独发图尤其要写。',
   '看到想留的图用 gallery_save 存进来：刚收到的图填 last，本地文件填路径，网上的图填 http(s) 链接；'
     + '整理已有的图用 gallery_edit（改名字/含义/场合）和 gallery_remove（撤下来）。',
 ].join('\n');
@@ -116,6 +141,18 @@ const safeRow = (rec) => ({
   avoid: rec.avoid || '',
   hits: Number(rec.hits) || 0,
   bytes: Number(rec.bytes) || 0,
+  /**
+   * 原图宽高。给模型看的意义：**它得知道这张能不能放大、会不会压扁**。
+   *
+   * 发图时可以带尺寸（`<<image: #3|320x200>>`），只给一个数时另一半按原图
+   * 比例补。模型不知道原大小的话，「这张是 200×200 的方图」和「这张是
+   * 1000×300 的长条」在它眼里一样——于是要么全写同一个尺寸把长条压成方块，
+   * 要么不敢写、全靠宿主缩到 480 宽。
+   *
+   * 读不出来是 0（旧索引还没补、或格式不认），清单里就不显示尺寸。
+   */
+  w: Number(rec.w) || 0,
+  h: Number(rec.h) || 0,
   trash: rec.trash === true,
   /**
    * 固定 = 线上副本永不被自动清理。常用的图（口头禅、招牌表情）钉住之后，
@@ -132,10 +169,11 @@ const safeRow = (rec) => ({
 });
 
 /**
- * 一行清单：`#3  开心_001.png  熊猫大笑 · 笑得很夸张 · 夸人、接玩笑`
+ * 一行清单：`#3  开心_001.png  320×240  熊猫大笑 · 笑得很夸张 · 夸人、接玩笑`
  *
- * 三段各有分工：序号是模型要抄的，文件名是它向人提及时用的，描述是它
- * 判断该不该发的依据。缺哪段就跳过哪段，不留空占位（`· ·` 很干扰阅读）。
+ * 四段各有分工：序号是模型要抄的，文件名是它向人提及时用的，尺寸是它决定
+ * 「怎么显示」的依据（见 `safeRow` 的 `w/h`），描述是它判断该不该发的依据。
+ * 缺哪段就跳过哪段，不留空占位（`· ·` 很干扰阅读）。
  */
 export function lineOf(rec) {
   const bits = [];
@@ -143,7 +181,10 @@ export function lineOf(rec) {
   if (rec.meaning) bits.push(rec.meaning);
   const rest = [rec.scenes, Array.isArray(rec.tags) ? rec.tags.join('/') : ''].filter(Boolean);
   if (rest.length) bits.push(rest.join(' · '));
-  return `#${rec.seq}  ${rec.file}${bits.length ? `  ${bits.join(' · ')}` : '  未标注'}`;
+  const w = Math.floor(Number(rec.w) || 0);
+  const h = Math.floor(Number(rec.h) || 0);
+  const size = w > 0 && h > 0 ? `  ${w}×${h}` : '';
+  return `#${rec.seq}  ${rec.file}${size}${bits.length ? `  ${bits.join(' · ')}` : '  未标注'}`;
 }
 
 /** 截断到 MAX_TEXT，超了加省略号。中文按字算，别用字节 */
@@ -280,6 +321,15 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     }
   };
 
+  /**
+   * 路径 → 原图宽高。读不出来是 `{0,0}`，调用方按「不知道」处理。
+   *
+   * 只读文件头 64KB（`image-size.js` 的 `dimsOfPath`），代价和一次 `stat` 同级。
+   * **不做缓存**：调用点只有「新记录入库」和「老记录补字段」，两者都只发生
+   * 一次；每轮都读的场合是零。
+   */
+  const sizeOfPath = (p) => dimsOfPath(p);
+
   const bySeq = (seq) => {
     const s = load();
     if (!seqMap) {
@@ -376,6 +426,7 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
 
       if (!prev) {
         const ext = extBySha?.get(sha) ?? null;
+        const dims = sizeOfPath(it.path);
         s.items[sha] = {
           seq: s.seq++,
           file: it.file,
@@ -400,6 +451,9 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
           avoid: ext?.avoid || '',
           enabled: true,
           bytes: it.size,
+          /** 原图宽高。模型靠它决定发图时怎么写尺寸（见 `safeRow` 的 `w/h`） */
+          w: dims.w,
+          h: dims.h,
           at: now(),
           usedAt: 0,
           hits: 0,
@@ -430,6 +484,22 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
       if ((prev.cat || '') !== (it.cat || '')) { prev.cat = it.cat || ''; changed = true; }
       if (prev.bytes !== it.size) { prev.bytes = it.size; changed = true; }
       if (prev.missing) { prev.missing = false; changed = true; }
+
+      /**
+       * 老索引没有 `w/h`（这个字段是后加的）。**不 bump `INDEX_VERSION`**：
+       * 那会让整库重建、所有标注一次丢光，只为一个能现场算出来的字段不值得。
+       *
+       * 补一次就够：尺寸跟着**内容**走，而内容一变 sha 就变、记录就是新的了；
+       * 换路径 / 改名 / 换分类都不会改内容，也就不会改尺寸。
+       */
+      if (!(Number(prev.w) > 0) || !(Number(prev.h) > 0)) {
+        const dims = sizeOfPath(it.path);
+        if (dims.w > 0 && dims.h > 0) {
+          prev.w = dims.w;
+          prev.h = dims.h;
+          changed = true;
+        }
+      }
 
       /**
        * ## 侧车是 `tags` / `scenes` 的唯一真相
@@ -1167,6 +1237,11 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     }
 
     const s = load();
+    /**
+     * 尺寸直接用手上这份字节算，**不回读刚落盘的文件**：字节是现成的，
+     * 读一遍磁盘只是多一次 IO；而且刚写完的文件在 Windows 上偶尔还被占用。
+     */
+    const dims = dimsOf(buf);
     const rec = {
       seq: s.seq++,
       file: basename(target),
@@ -1182,6 +1257,8 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
       /** 新图不固定：用户觉得常用再去面板（或让 AI）钉住 */
       pinned: o.pinned === true,
       bytes: buf.length,
+      w: dims.w,
+      h: dims.h,
       at: now(),
       usedAt: 0,
       hits: 0,

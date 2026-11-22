@@ -24,11 +24,12 @@
 
 import {
   readdirSync, statSync, copyFileSync, mkdirSync, existsSync,
-  writeFileSync, readFileSync, openSync, readSync, closeSync,
+  writeFileSync, readFileSync,
 } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 
 import { UNCATEGORIZED } from './stickers.js';
+import { dimsOfPath } from './image-size.js';
 
 /** 认的图片格式，跟 stickers.js 的 OK_EXT 保持一致 */
 const OK_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
@@ -55,63 +56,10 @@ const PREFIX = '缓存';
 const STEAL_PREFIX = '偷';
 
 /**
- * 只读文件头（前 64KB）就能拿到宽高——项目是零依赖，没有 sharp，
- * 全部靠手解 PNG/GIF/JPEG/WebP 的固定偏移。
- *
- * 读不出尺寸不报错，返回 0：调用方按「体积过关就放行」处理，
- * 因为 WebP/BMP 的偏移各版本有差异，为了一个边缘格式卡死整批不值得。
+ * 宽高读取搬到了 `image-size.js`（`gallery.js` 与出站补尺寸也要用同一份）。
+ * 这里 re-export 保持老调用方（测试、面板）的 import 路径不变。
  */
-export function dimsOf(buf) {
-  if (!buf || buf.length < 24) return { w: 0, h: 0 };
-  /** PNG：89 50 4E 47，IHDR 的宽高在 16 / 20，大端 */
-  if (buf[0] === 0x89 && buf[1] === 0x50) {
-    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
-  }
-  /** GIF：GIF8，逻辑屏幕描述符在 6 / 8，小端 */
-  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) {
-    return { w: buf.readUInt16LE(6), h: buf.readUInt16LE(8) };
-  }
-  /** JPEG：扫到 SOF0/SOF2 才拿到宽高（段里高在前、宽在后） */
-  if (buf[0] === 0xff && buf[1] === 0xd8) {
-    let i = 2;
-    while (i < buf.length - 9) {
-      if (buf[i] !== 0xff) { i++; continue; }
-      const m = buf[i + 1];
-      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
-        return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
-      }
-      const len = buf.readUInt16BE(i + 2);
-      if (len < 2) break;
-      i += 2 + len;
-    }
-  }
-  /** WebP：RIFF....WEBP + 变体标记 */
-  if (buf.length >= 30 && buf[0] === 0x52 && buf[1] === 0x49 && buf[8] === 0x57) {
-    const fmt = buf.toString('ascii', 12, 16);
-    if (fmt === 'VP8X') return { w: 1 + buf.readUIntLE(24, 3), h: 1 + buf.readUIntLE(27, 3) };
-    if (fmt === 'VP8 ') return { w: buf.readUInt16LE(26) & 0x3fff, h: buf.readUInt16LE(28) & 0x3fff };
-    if (fmt === 'VP8L') {
-      const b = buf.readUInt32LE(21);
-      return { w: (b & 0x3fff) + 1, h: ((b >>> 14) & 0x3fff) + 1 };
-    }
-  }
-  return { w: 0, h: 0 };
-}
-
-/** 头 64KB。JPEG 的 SOF 段一般在头几百字节内，够用 */
-function headOf(p, n = 64 * 1024) {
-  let fd;
-  try {
-    fd = openSync(p, 'r');
-    const buf = Buffer.alloc(n);
-    const len = readSync(fd, buf, 0, n, 0);
-    return buf.subarray(0, len);
-  } catch {
-    return null;
-  } finally {
-    if (fd !== undefined) try { closeSync(fd); } catch {}
-  }
-}
+export { dimsOf, headOf } from './image-size.js';
 
 /** 单张判定。返回 reason 是为了让面板能说清「为什么跳过这张」 */
 export function judge(item, cfg = {}) {
@@ -270,12 +218,9 @@ export function createStickerSync({ dataDir, stickers, log = () => {} }) {
         items.push(row);
         continue;
       }
-      const head = headOf(p);
-      if (head) {
-        const d = dimsOf(head);
-        row.w = d.w;
-        row.h = d.h;
-      }
+      const d = dimsOfPath(p);
+      row.w = d.w;
+      row.h = d.h;
       Object.assign(row, judge(row, cfg?.sync || {}));
       items.push(row);
     }
@@ -414,12 +359,9 @@ export function createStickerSync({ dataDir, stickers, log = () => {} }) {
     if (done[name]) return { ok: false, reason: '已经收过' };
 
     const row = { name, path: absPath, size: st.size, w: 0, h: 0 };
-    const head = headOf(absPath);
-    if (head) {
-      const d = dimsOf(head);
-      row.w = d.w;
-      row.h = d.h;
-    }
+    const d = dimsOfPath(absPath);
+    row.w = d.w;
+    row.h = d.h;
     const verdict = judge(row, cfg);
     if (!verdict.ok) return { ok: false, reason: verdict.reason || '不像表情包' };
 
