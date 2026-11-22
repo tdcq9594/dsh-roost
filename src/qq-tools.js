@@ -64,8 +64,12 @@ const SEND_BLOCKED = ['say', 'button', 'silence'];
 const DOWNSTREAM_RE = new RegExp(`<<\\s*(?:${SEND_BLOCKED.join('|')})\\b`, 'i');
 const INLINE_IMAGE_RE = /!\[[^\]]*\]\([^)]*\)/;
 
-/** 单轮最多发几段。QQ 被动回复同一条消息只让回 5 次（msg_seq 1–5），留余量 */
-export const MAX_PARTS = 3;
+/**
+ * 单轮最多发几段。官方 2026-11-17 起群消息在开发者为群主 / 管理员时每条可达 50 次，
+ * 且框架侧已不再本地拦截、超限自动改发主动；这里放开到 50。
+ * 单聊官方仍是 4 次，由 `maxPartsOf()` 按会话类型夹住。
+ */
+export const MAX_PARTS = 50;
 
 /**
  * 段数上限的唯一来源。
@@ -75,15 +79,16 @@ export const MAX_PARTS = 3;
  * 浪费两格；配置小于 3 时更糟——模型按 3 组织内容，第 3 段被工具拒掉，
  * 用户只觉得「话说一半没了」，而且不报错（2026-11 外部实测）。
  *
- * 上限夹到 8：再大就会撞「被动回复 5 次」的硬顶，调上去也没用。
+ * 群 / guild 的硬上限为 50（官方 2026-11-17 新口径）；c2c / dm 仍是官方的 4 次。
+ * 超限由框架改发主动消息，不再靠这里的低上限提前拦。
  *
  * @param {object} [cfg] 完整配置（只读 `qqTools.maxParts`）
- * @param {string} [kind='group'] 会话类型；被动回复硬上限是群 5 / 私聊 4
+ * @param {string} [kind='group'] 会话类型；群 50 / 私聊 4
  * @returns {number}
  */
 export function maxPartsOf(cfg, kind = 'group') {
-  /** 一对一场景（c2c / 频道私信）按 4 段保守处理；guild 与群聊同档 */
-  const hardMax = (kind === 'c2c' || kind === 'dm') ? 4 : 5;
+  /** 一对一场景官方仍是每条消息 4 次；其余按 50 放开 */
+  const hardMax = (kind === 'c2c' || kind === 'dm') ? 4 : 50;
   const n = Number(cfg?.qqTools?.maxParts);
   return Number.isFinite(n) && n > 0 ? Math.min(n, hardMax) : Math.min(MAX_PARTS, hardMax);
 }

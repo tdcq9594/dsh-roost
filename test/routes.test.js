@@ -912,7 +912,7 @@ test('配置：不带 mode 的局部提交只改提交的那几项', async () =>
     const full = await h.call('/config?mode=full', { method: 'POST', body: { tts: { enabled: true } } });
     assert.equal(full.status, 200);
     const after = JSON.parse(readFileSync(join(h.dir, 'config.json'), 'utf8'));
-    assert.equal(after.qqTools.maxParts, 3, '整份模式：没提交的回落到默认');
+    assert.equal(after.qqTools.maxParts, 50, '整份模式：没提交的回落到默认');
     assert.equal(after.tts.enabled, true, '整份模式也照常写入提交的值');
   } finally {
     h.off?.();
