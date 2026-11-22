@@ -12978,6 +12978,9 @@ select.roost-input{color-scheme:dark}
         + 'awareness.mood / silence 只影响她「知不知道」自己的状态，不触发动作；'
         + 'proactive.enabled 允许她在主动搭话那一轮顺手改，fields 决定能动哪几项'],
       ['stickers', '表情包', '图放哪、要不要注入'],
+      ['gallery', '图库', 'keepUploads：发图时往官方素材池传的那份留不留。'
+        + '默认 true＝留着复用（同一张图第二次发不重传、不占新配额）；'
+        + 'false＝用完即删，只在配额特别紧（多个插件共用一个机器人）时才值得'],
       ['guild', '频道', 'enabled：频道总开关，**默认关**。关着时只在 dsh-roost 入口丢弃频道事件，不动框架的 intents 订阅（框架照常收、照常推给别的插件）；'
         + 'sessionMode：guild = 一个频道一个会话（同一频道的子频道/论坛/公告共用）、channel = 一个子频道一个会话；频道私信固定一人一个。'
         + 'intentsPreset：面板勾选的订阅位预设；overrides：按频道覆写，键用 guild:<guildId>'],
@@ -16772,6 +16775,14 @@ select.roost-input{color-scheme:dark}
         load(page)
       }
 
+      /** 固定 / 取消固定：挡的是「配额满时自动淘汰」，不影响发不发 */
+      const togglePin = async (seq, next) => {
+        const r = await post('/gallery/edit', { seq, pinned: next })
+        if (r.ok === false) return toast(r.message || '没改过来')
+        toast(next ? `#${seq} 已固定：配额满也不会淘汰它` : `#${seq} 已取消固定`)
+        load(page)
+      }
+
       const stats = data?.stats || {}
       return h(Sec, {
         n, title: '图库（AI 用的）',
@@ -16794,6 +16805,8 @@ select.roost-input{color-scheme:dark}
             h('div', { className: 'roost-note', style: { marginBottom: 8 } },
               `共 ${stats.total} 张 · 还没描述 ${stats.untagged} 张`
               + (stats.paused ? ` · 停用 ${stats.paused}` : '')
+              + (stats.pinned ? ` · 固定 ${stats.pinned}` : '')
+              + (stats.online ? ` · 线上 ${stats.online}` : '')
               + ` · 回收站 ${stats.trash} · 下一个序号 #${stats.nextSeq}`
               + (data.dir ? ` · 目录 ${data.dir}` : '')),
 
@@ -16874,6 +16887,18 @@ select.roost-input{color-scheme:dark}
                               fontSize: 10, fontWeight: 600, background: 'rgba(200,120,0,.85)', color: '#fff',
                             },
                           }, '停用')
+                        : null,
+                      /**
+                       * 固定 = 官方素材池配额满时不会被自动淘汰。和「停用」是两个
+                       * 维度（停用是别发，固定是别删），所以两个角标可以同时出现。
+                       */
+                      it.pinned
+                        ? h('span', {
+                            style: {
+                              position: 'absolute', top: paused ? 20 : 2, right: 2, padding: '0 4px', borderRadius: 4,
+                              fontSize: 10, fontWeight: 600, background: 'rgba(60,120,220,.85)', color: '#fff',
+                            },
+                          }, '固定')
                         : null),
 
                     h('div', {
@@ -16909,6 +16934,19 @@ select.roost-input{color-scheme:dark}
                             onClick: () => togglePause(id, paused),
                             title: paused ? '恢复使用：她可以再发这张' : '停用：还在库里，但不会发出去',
                           }, paused ? '启用' : '停用'),
+                      /**
+                       * 固定：挡的是「配额满时自动淘汰」，不是「发不发」。
+                       * 回收站里也不给——那张都撤下了，钉它没有意义。
+                       */
+                      trash
+                        ? null
+                        : h('button', {
+                            type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
+                            onClick: () => togglePin(id, !!it.pinned),
+                            title: it.pinned
+                              ? '取消固定：配额满时可能被淘汰'
+                              : '固定：配额满时不会淘汰它（发图也不用重传）',
+                          }, it.pinned ? '取消固定' : '固定'),
                       h('button', {
                         type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px', marginLeft: 'auto' },
                         onClick: () => (trash ? back(id) : toTrash(id)),
@@ -16999,13 +17037,24 @@ select.roost-input{color-scheme:dark}
       const del = async (it) => {
         const name = it.fileName || it.imageId
         if (!window.confirm(
-          `删掉素材「${name}」？\n\n`
-          + '删了配额立刻还回来。这个池子是机器人级共享的——若别的插件正在引用它，'
-          + '那条引用会失效（已经发出去的消息不受影响，平台发送时已转存副本）。',
+          `删掉线上副本「${name}」？\n\n`
+          + '配额立刻还回来，本地那张图还在图库里（下次发它会重新上传）。\n'
+          + '这个池子是机器人级共享的——若别的插件正在引用它，那条引用会失效'
+          + '（已经发出去的消息不受影响，平台发送时已转存副本）。',
         )) return
         const r = await post('/stickers/media/delete', { imageId: it.imageId, confirm: true })
         if (r.ok === false) return toast(r.message || '删不掉')
         toast('已删掉，配额还回来了')
+        load('')
+      }
+
+      /** 固定 / 取消固定：钉住的图配额满时不会被自动淘汰 */
+      const pin = async (it, next) => {
+        const r = await post('/gallery/edit', { seq: it.seq, pinned: next })
+        if (r.ok === false) return toast(r.message || '改不了固定状态')
+        toast(next
+          ? `#${it.seq} 已固定：配额满时不会淘汰它`
+          : `#${it.seq} 已取消固定`)
         load('')
       }
 
@@ -17026,14 +17075,16 @@ select.roost-input{color-scheme:dark}
       const rows = Array.isArray(data?.images) ? data.images : []
 
       return h(Sec, {
-        n, title: '官方素材池（发图用的临时车道）',
+        n, title: '官方素材池（图库的线上层）',
         right: h('button', {
           type: 'button', className: 'roost-btn', disabled: busy, onClick: () => load(''),
         }, busy ? '读取中…' : '刷新'),
       },
         h('div', { className: 'roost-note' },
-          '发图时先把图传到官方图床、拿到 qqbot-media:// 引用发出去，正常几秒内就删掉。'
-          + '这里列的是**没删掉的残留**——要么进程崩在中间、要么令牌缺 manage 权限、要么删除请求自己失败了。'),
+          '图库里每张图发第一次时，会往官方图床上传一份、拿 qqbot-media:// 引用发出去。'
+          + '这份**默认留着**——同一张图第二次发直接复用，不重传、不占新配额。'
+          + '配额是机器人级共享的 100 张：不够时按「最久没动过的先走」自动淘汰，'
+          + '**钉住的图不淘汰**。'),
 
         !data
           ? h('div', { className: 'roost-empty' }, '读着…')
@@ -17042,7 +17093,9 @@ select.roost-input{color-scheme:dark}
             : h('div', null,
               h('div', { className: 'roost-note', style: { marginBottom: 6 } },
                 `已用 ${used} / ${quota} · 还剩 ${remaining} 张`
-                + (used >= quota ? ' · 满了：新图会传不上去，删几张再试' : '')),
+                + (used >= quota
+                  ? ' · 满了：这时会先淘汰最久没动过的；都钉住了就得手动删'
+                  : '')),
 
               h('div', { style: { height: 6, borderRadius: 3, background: 'rgba(128,128,128,.2)', marginBottom: 10 } },
                 h('div', {
@@ -17055,7 +17108,7 @@ select.roost-input{color-scheme:dark}
 
               rows.length === 0
                 ? h('div', { className: 'roost-empty' },
-                  '池子是空的，说明每次都删干净了——这是正常状态')
+                  '线上还没有图——第一次发图时会自动传一份过来')
                 : h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 260 } },
                   rows.map((it) => h('div', {
                     key: it.imageId || it.fileName,
@@ -17070,13 +17123,33 @@ select.roost-input{color-scheme:dark}
                         })
                       : null,
                     h('span', { className: 't', style: { minWidth: 0 } },
+                      /** 认得出来就是图库里的某张（`#3`）；认不出是别的插件传的 */
+                      it.seq ? `#${it.seq} ` : '',
                       it.fileName || '(没文件名)',
                       h('span', { className: 'd' },
                         ` · 传于 ${when(it.createdAt)}`
-                        + (it.expiresAt ? ` · 到期 ${when(it.expiresAt)}` : ''))),
+                        + (it.expiresAt ? ` · 到期 ${when(it.expiresAt)}` : '')
+                        + (it.seq ? '' : ' · 不是图库传的'))),
+                    /**
+                     * 认得出的（图库自己传的）才给「固定」——别人插件传的图我们没有
+                     * 它的记录，钉了也没地方存。固定 = 配额满时自动淘汰不碰它。
+                     */
+                    it.seq
+                      ? h('button', {
+                          type: 'button', className: 'roost-btn',
+                          style: { fontSize: 11, padding: '1px 8px', marginLeft: 'auto', flex: '0 0 auto' },
+                          title: it.pinned
+                            ? '已固定：配额满时不会自动淘汰它（点一下取消）'
+                            : '固定：配额满时不会自动淘汰它',
+                          onClick: () => pin(it, !it.pinned),
+                        }, it.pinned ? '已固定' : '固定')
+                      : null,
                     h('button', {
                       type: 'button', className: 'roost-btn',
-                      style: { fontSize: 11, padding: '1px 8px', marginLeft: 'auto', flex: '0 0 auto' },
+                      style: {
+                        fontSize: 11, padding: '1px 8px', flex: '0 0 auto',
+                        marginLeft: it.seq ? 4 : 'auto',
+                      },
                       onClick: () => del(it),
                     }, '删')))),
 

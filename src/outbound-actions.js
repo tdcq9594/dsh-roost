@@ -420,6 +420,37 @@ export function createActionRunner({
    * 否则「用过 -3」的排序会被失败的尝试污染，模型会绕开根本没发出去的图。
    */
   onImageUsed = null,
+  /**
+   * `#3` 在图库里的**线上副本**（官方素材池那份）：`seq → { imageId, url }`。
+   *
+   * 有就直接拿 `qqbot-media://` 引用发，省一次上传（几秒）也省一次配额占用；
+   * 没有就照常上传。注不进来时退化成「每次都传」，行为跟以前一致。
+   */
+  resolveRemote = null,
+  /** 上传成功后记下线上副本，下次发同一张就不重传。 */
+  markRemote = null,
+  /**
+   * 上传后**是否留着**这份线上副本。默认 `true`。
+   *
+   * 框架 `media.markdownImage` 的默认语义本来就是「可复用、默认保留」，我们
+   * 以前写死了 `retain:false` + 发完即删，把它降级成临时车道——于是同一张图
+   * 每发一次就白占一格配额、白传一遍。配额紧（100 张机器人级共享）时才该
+   * 用 `false`，那是**一种模式**，不是唯一做法。
+   *
+   * 收函数而不是布尔：宿主配置是热的，用户在面板改完不该等重启。
+   */
+  keepUploadsOf = () => true,
+  /**
+   * 上传前腾配额（宿主注入）。
+   *
+   * 官方素材池是机器人级共享的 100 张，满了以后**每一次上传都失败**，而错误
+   * 只有「上传失败」四个字。宿主那边会按「最久没动过的先走」淘汰自己的副本
+   * （钉住的不碰）；这里只负责在撞墙之前问一句。
+   *
+   * 返回 `{ ok:false, message }` 时**不要上传**：上传必然失败，而占位符会先被
+   * 摘掉，用户只会看到「图没了」。抛出把原因带到日志里。
+   */
+  ensureQuota = null,
 } = {}) {
   /** 试运行：正文 / 文件 / 语音的发送在通道层已经拦了，这里只管**发送之前**那几步 */
   const isDry = () => dryRunOf() === true;
@@ -511,12 +542,55 @@ export function createActionRunner({
       }
       inlineUsed += 1;
       try {
-        const r = await ch.uploadMarkdownImage({ scene, target, path: a.value, retain: false });
-        const url = String(r?.url ?? '').trim();
-        if (!/^qqbot-media:\/\//i.test(url)) throw new Error('没拿到素材引用');
+        /**
+         * 先看线上有没有副本。
+         *
+         * 图库的「线上层」就是官方素材池：同一张图传过一次，`qqbot-media://`
+         * 引用就能反复用。复用省掉一次 3~5 秒的上传，也省一格 100 张的配额。
+         * 引用可能被人在面板删掉、也可能按 `expires_at` 自己过期，所以只在
+         * 拿得到时才用；拿不到就走下面的上传。
+         */
+        let url = '';
+        let reused = false;
+        /** 「用完即删」模式下不存在可复用的副本：那份每次都会被删掉 */
+        const keep = keepUploadsOf() !== false;
+        if (keep && a.seq && typeof resolveRemote === 'function') {
+          const hit = resolveRemote(a.seq);
+          const u = String(hit?.url ?? '').trim();
+          /**
+           * **快过期的别复用**：宁可重传一次（几秒），也不要拿一个马上失效的
+           * 引用去发——那种失败在群里表现成「图没出来」，日志只有一句
+           * 「发送失败」，用户和排查者都看不出是素材没了。
+           * `expireAt` 为 0 表示官方没给 ttl，无从判断，按「还能用」处理。
+           */
+          const exp = Number(hit?.expireAt) || 0;
+          const soon = exp > 0 && Date.now() > exp - 60_000;
+          if (!soon && /^qqbot-media:\/\//i.test(u)) {
+            url = u;
+            reused = true;
+          } else if (soon) {
+            log(`#${a.seq} 的线上副本快过期了，这次重新上传`);
+          }
+        }
+        if (!url) {
+          if (typeof ensureQuota === 'function') {
+            const g = await ensureQuota(1).catch(() => ({ ok: true }));
+            if (g && g.ok === false) throw new Error(g.message || '官方素材池配额不足');
+          }
+          const r = await ch.uploadMarkdownImage({ scene, target, path: a.value, retain: keep });
+          url = String(r?.url ?? '').trim();
+          if (!/^qqbot-media:\/\//i.test(url)) throw new Error('没拿到素材引用');
+          /**
+           * 只有「留着」才记映射：`keep=false` 时这份马上要删，记下来只会让
+           * 下次拿着一个失效的 `imageId` 去复用。
+           */
+          if (keep && a.seq && typeof markRemote === 'function') markRemote(a.seq, r);
+          /** 只有「用完即删」模式才记进待删列表；留着复用的那份绝不能删 */
+          if (!keep) uploaded.push(String(r?.imageId ?? ''));
+        }
         body = body.split(a.key).join(`![](${url})`);
-        uploaded.push(String(r?.imageId ?? ''));
         if (a.seq) usedAfterSend.push(a);
+        if (reused) log(`就地插图 #${a.seq} 复用了线上副本（没重传）`);
       } catch (e) {
         /** 失败只把占位符删掉，绝不留本地路径 */
         body = body.split(a.key).join('');

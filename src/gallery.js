@@ -112,6 +112,18 @@ const safeRow = (rec) => ({
   hits: Number(rec.hits) || 0,
   bytes: Number(rec.bytes) || 0,
   trash: rec.trash === true,
+  /**
+   * 固定 = 线上副本永不被自动清理。常用的图（口头禅、招牌表情）钉住之后，
+   * 配额满了也只会淘汰没钉的那些，不会「发着发着发现那张最常发的没了」。
+   */
+  pinned: rec.pinned === true,
+  /**
+   * 线上（官方素材池）有没有副本。
+   *
+   * 给模型看的意义：同一张图第二次发不用再传一遍，也不占新配额。它不需要
+   * 知道 imageId / URL，只要知道「这张已经在线上」就够了。
+   */
+  online: !!(rec.remote && rec.remote.imageId),
 });
 
 /**
@@ -509,6 +521,148 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
   };
 
   /**
+   * ## 线上副本（官方素材池里的那一份）
+   *
+   * 图库有两种存放位置，不是「本地 + 临时车道」：
+   *
+   *   · **本地**：源文件在表情目录，`sha256` 是主键，永远是真相；
+   *   · **线上**：官方机器人级图床（`/v2/media-images`，100 张共享配额）。
+   *     发图时把本地那份传上去，拿 `qqbot-media://` 引用发出去。
+   *
+   * 线上那份**默认留着**（框架 `media.markdownImage` 的默认语义就是「可复用、
+   * 默认保留」）。留着的好处是同一张图第二次发不用重传——省几秒、也省一次
+   * 配额占用。**「传完就删」只是一种模式**（配额紧张时省配额），不是唯一正确
+   * 做法；本文件把它做成可配的 `keepUploads`。
+   *
+   * 映射存在索引里而不是另外一张表：`imageId` 是这张图在线上那次上传的
+   * 身份，跟着记录走最自然；记录被彻底删掉时映射一起消失，不会留下悬空引用。
+   */
+
+  /** 这张图的线上副本（没传过 / 传过但被删了 → null） */
+  const remoteOf = (seq) => {
+    const hit = bySeq(seq);
+    const r = hit?.rec?.remote;
+    if (!r || !r.imageId) return null;
+    const at = Number(r.at) || 0;
+    const ttl = Number(r.ttl) || 0;
+    return {
+      imageId: r.imageId,
+      url: r.url || '',
+      at,
+      /**
+       * 什么时候过期：官方给 `ttl` 才估得出来，没给就是 `0`（不知道）。
+       *
+       * 调用方拿它决定「还敢不敢复用」——拿一个马上失效的 `qqbot-media://`
+       * 去发，结果是群里没图、日志只有一句「发送失败」。
+       */
+      expireAt: ttl > 0 ? at + ttl * 1000 : 0,
+    };
+  };
+
+  /**
+   * 记下「这张图已经传到线上」。
+   *
+   * `url` 是 `qqbot-media://` 引用（长期有效，可写进下一条消息）；`ttl` 是
+   * 官方给的存活秒数，留着给面板判断「是不是快到期了」，不影响复用。
+   */
+  const markRemote = (seq, info = {}) => {
+    const imageId = String(info.imageId ?? '').trim();
+    if (!imageId) return false;
+    const hit = bySeq(seq);
+    if (!hit) return false;
+    hit.rec.remote = {
+      imageId,
+      url: String(info.url ?? ''),
+      at: Number(info.at) || now(),
+      ttl: Number(info.ttl) || 0,
+    };
+    touch();
+    flush();
+    return true;
+  };
+
+  /**
+   * 线上那份没了（面板删了素材 / 平台按有效期回收）→ 清掉映射。
+   *
+   * **不清的话后果很具体**：下次 `<<image: #3>>` 会拿一个已经失效的
+   * `qqbot-media://` 去发，平台报错、群里没图，而日志只说「发送失败」。
+   */
+  const dropRemote = (imageId) => {
+    const id = String(imageId ?? '').trim();
+    if (!id) return false;
+    const s = load();
+    let touchedAny = false;
+    for (const rec of Object.values(s.items)) {
+      if (rec?.remote?.imageId !== id) continue;
+      delete rec.remote;
+      touchedAny = true;
+    }
+    if (touchedAny) {
+      touch();
+      flush();
+    }
+    return touchedAny;
+  };
+
+  /** `imageId → seq`：面板把池子里的素材对回图库序号（认不出的就是别人传的） */
+  const onlineIndex = () => {
+    const s = load();
+    const out = {};
+    for (const rec of Object.values(s.items)) {
+      const id = rec?.remote?.imageId;
+      if (id) out[id] = rec.seq;
+    }
+    return out;
+  };
+
+  /**
+   * 配额清理用的候选清单：**已经是线上副本的那些图**，最该走的排在最前。
+   *
+   * 排序口径是「**最久没动过的先走**」（`lastUsed` 升序），不是「先传的先走」：
+   *
+   *   · 一张经常被发的图，即使传得早也不该因为「老」被淘汰；
+   *   · 从没被发过的图 `lastUsed` 就等于上传时间，于是「最先过期」的自然
+   *     排在最前——和官方按 `expires_at` 回收的先后一致；
+   *   · 用户问「为什么删了这张」时，答案是「它最久没被用过」，一句话能说清。
+   *
+   * 常用的图靠 `pinned` 挡，不靠排序；混在一起会让用户算不清「为什么这张
+   * 留下来了」。
+   */
+  const onlineRows = () => {
+    const s = load();
+    const out = [];
+    for (const rec of Object.values(s.items)) {
+      if (!rec?.remote?.imageId) continue;
+      /**
+       * 回收站里的也进来：那张已经不发了，线上副本白占一格配额，最该先走。
+       * 恢复之后第一次发会重新上传，代价只是一次传输。
+       */
+      const at = Number(rec.remote.at) || 0;
+      const usedAt = Number(rec.usedAt) || 0;
+      out.push({
+        seq: rec.seq,
+        imageId: rec.remote.imageId,
+        at,
+        usedAt,
+        /**
+         * 「最后一次被动过」：发过就按 `usedAt`，从没发过就按上传时间。
+         * 两者取最大——只用 `at` 会把「传得早但天天发」的图排到最前面，
+         * 只用 `usedAt` 会让从没发过的图（`usedAt=0`）全部并列排最前。
+         */
+        lastUsed: Math.max(at, usedAt),
+        pinned: rec.pinned === true,
+      });
+    }
+    return out.sort((a, b) => a.lastUsed - b.lastUsed || a.seq - b.seq);
+  };
+
+  /** 这张图是不是被钉住了（配额清理的豁免名单） */
+  const isPinned = (seq) => {
+    const hit = bySeq(seq);
+    return hit?.rec?.pinned === true;
+  };
+
+  /**
    * 把记录对应的文件真挪到新分类目录，并同步 `path` / `file` / `cat`。
    *
    * **只改 `rec.cat` 是不行的**：`sync()` 每轮都拿磁盘上的目录名覆盖 `rec.cat`，
@@ -614,6 +768,11 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     if (patch.scenes !== undefined) set('scenes', str(patch.scenes, 60));
     if (patch.avoid !== undefined) set('avoid', str(patch.avoid, 40));
     if (patch.enabled !== undefined) set('enabled', patch.enabled !== false);
+    /**
+     * 固定：只影响「配额满时自动淘汰」，不影响能不能发。
+     * 和 `enabled` 是两个维度——停用是「别发这张」，固定是「别删这张」。
+     */
+    if (patch.pinned !== undefined) set('pinned', patch.pinned === true);
     if (patch.tags !== undefined) {
       const tags = (Array.isArray(patch.tags) ? patch.tags : String(patch.tags).split(/[,，、\s]+/))
         .map((t) => String(t ?? '').trim())
@@ -780,6 +939,8 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
       scenes: clamp(o.scenes, 60),
       avoid: clamp(o.avoid, 40),
       enabled: true,
+      /** 新图不固定：用户觉得常用再去面板（或让 AI）钉住 */
+      pinned: o.pinned === true,
       bytes: buf.length,
       at: now(),
       usedAt: 0,
@@ -854,6 +1015,10 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
       untagged: live.filter((r) => !r.meaning && !r.name).length,
       /** 被 `gallery_edit` 设成 `enabled=0` 的：还在库里，但发不出去 */
       paused: live.filter((r) => r.enabled === false).length,
+      /** 钉住的：配额满时自动清理不碰它们 */
+      pinned: live.filter((r) => r.pinned === true).length,
+      /** 已传到官方素材池（线上有副本）的张数 */
+      online: live.filter((r) => r.remote && r.remote.imageId).length,
       /** 下一个可用号，面板显示「已发到 #12」让人心里有数 */
       nextSeq: s.seq,
       bytes: live.reduce((n, r) => n + (Number(r.bytes) || 0), 0),
@@ -915,6 +1080,8 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
   return {
     dir, indexPath,
     sync, list, pathOf, markUsed, edit, remove, restore, save, stats, pending, rows,
+    /** 线上副本（官方素材池）的映射：查 / 记 / 清 / 反查序号 */
+    remoteOf, markRemote, dropRemote, onlineIndex, onlineRows, isPinned,
     /** 测试与面板用：把内存里的索引交出去（只读快照） */
     dump: () => JSON.parse(JSON.stringify(load())),
     /** 资源释放无关紧要（纯同步 IO），留个口子给测试重置 */
