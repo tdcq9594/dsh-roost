@@ -9,7 +9,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, delimiter } from 'node:path';
 
@@ -190,3 +190,144 @@ test('已经装好的纯 JS 包：预检直接复用，不再跑一遍 npm', san
   assert.equal(r.skipped, true);
   assert.equal(r.source, 'managed');
 }));
+
+/* ---------------- 功能包：自动查找与扩展目录（2026-11-22） ---------------- */
+
+/**
+ * 造一个「像被 npm 装过」的包：目录 + package.json + **能 require 的入口**。
+ *
+ * 只写 package.json 不够——`load()` 会真的去 require 那个入口，文件不在就
+ * 变成「装了但加载失败」，测出来的结论会和真实环境不一样（真实装好的包
+ * 入口一定在）。
+ */
+function fakePkg(root, name, version) {
+  const p = join(root, 'node_modules', name);
+  mkdirSync(p, { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name, version, main: 'index.js' }));
+  writeFileSync(join(p, 'index.js'), `module.exports = { ver: ${JSON.stringify(version)} };\n`);
+  return p;
+}
+
+test('jimp 进白名单：归 image 组、锁 1.x（不能用 latest）', async () => {
+  const d = await fresh();
+  assert.ok(Object.hasOwn(d.WHITELIST, 'jimp'), 'jimp 不在白名单，面板就装不了');
+  assert.equal(d.WHITELIST.jimp.group, 'image');
+  assert.match(d.WHITELIST.jimp.range, /^\^1\./);
+});
+
+test('注入扩展目录：自动找到、能加载、安装直接复用（不再下一遍 15MB）', sandbox(async (dir) => {
+  const d = await fresh();
+  const extRoot = join(dir, 'extensions', 'ext-a');
+  fakePkg(extRoot, 'jimp', '9.9.9');
+
+  assert.equal(d.setExtDirs([{ id: 'ext-a', dir: extRoot }]), 1);
+
+  const hit = d.findPackage('jimp');
+  assert.equal(hit.kind, 'ext');
+  assert.equal(hit.id, 'ext-a');
+  assert.equal(hit.version, '9.9.9');
+
+  const s = d.scan();
+  assert.equal(s.packages.jimp.found.label, '扩展 ext-a');
+  assert.equal(s.packages.jimp.removable, false, '扩展那份不归面板删');
+
+  const mod = await d.load('jimp', { fresh: true });
+  assert.equal(mod.ver, '9.9.9', 'load 必须能从扩展目录解析出来');
+
+  const r = await d.install('jimp');
+  assert.equal(r.ok, true);
+  assert.equal(r.skipped, true, '该复用而不是下载');
+  assert.equal(r.source, 'ext');
+}));
+
+test('卸载扩展那份：拒绝，并说清它在哪个目录', sandbox(async (dir) => {
+  const d = await fresh();
+  const extRoot = join(dir, 'extensions', 'ext-a');
+  const p = fakePkg(extRoot, 'jimp', '9.9.9');
+  d.setExtDirs([{ id: 'ext-a', dir: extRoot }]);
+
+  const r = d.remove('jimp');
+  assert.equal(r.ok, false);
+  assert.match(r.message, /扩展 ext-a/);
+  assert.ok(existsSync(p), '替扩展删依赖会把扩展弄坏，必须原样留着');
+}));
+
+test('共享目录优先于扩展目录；删掉共享那份后自动回落扩展那份', sandbox(async (dir) => {
+  const d = await fresh();
+  const extRoot = join(dir, 'extensions', 'ext-a');
+  fakePkg(extRoot, 'jimp', '9.9.9');
+  fakePkg(join(dir, 'deps'), 'jimp', '1.6.1');
+  d.setExtDirs([{ id: 'ext-a', dir: extRoot }]);
+
+  const hit = d.findPackage('jimp', { fresh: true });
+  assert.equal(hit.kind, 'shared', '共享目录是面板装的地方，必须优先');
+  assert.equal(hit.version, '1.6.1');
+  assert.equal(d.scan().packages.jimp.removable, true);
+
+  assert.equal(d.remove('jimp').ok, true);
+
+  const back = d.findPackage('jimp', { fresh: true });
+  assert.equal(back.kind, 'ext', '删完不能变成「没有」，扩展那份还是能用');
+}));
+
+test('清空扩展目录：查找缓存必须一起失效', sandbox(async (dir) => {
+  const d = await fresh();
+  const extRoot = join(dir, 'extensions', 'ext-a');
+  fakePkg(extRoot, 'jimp', '9.9.9');
+  d.setExtDirs([{ id: 'ext-a', dir: extRoot }]);
+  assert.equal(d.findPackage('jimp').kind, 'ext');
+
+  d.setExtDirs([]);
+  assert.equal(d.findPackage('jimp'), null, '卸载扩展后不能还记着「有」');
+  assert.equal(d.extDirsSnapshot().length, 0);
+}));
+
+test('白名单外 / 空名字：一律 null（别拿它当通用文件探测器）', sandbox(async () => {
+  const d = await fresh();
+  assert.equal(d.findPackage('../../etc/passwd'), null);
+  assert.equal(d.findPackage('shell'), null);
+  assert.equal(d.findPackage(''), null);
+  assert.equal(await d.load('shell'), null);
+  assert.equal(d.remove('shell').ok, false);
+}));
+
+test('包在但入口坏掉：load 返回 null，不抛给调用方', sandbox(async (dir) => {
+  const d = await fresh();
+  const extRoot = join(dir, 'extensions', 'ext-b');
+  const p = join(extRoot, 'node_modules', 'jimp');
+  mkdirSync(p, { recursive: true });
+  /** 有 package.json（所以算「装了」），但 main 指向不存在的文件 */
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'jimp', version: '0.0.1', main: 'nope.js' }));
+  d.setExtDirs([{ id: 'ext-b', dir: extRoot }]);
+
+  assert.equal(d.findPackage('jimp', { fresh: true }).version, '0.0.1');
+  assert.equal(await d.load('jimp', { fresh: true }), null, '坏了就当没有，别让图库整条链崩');
+}));
+
+/* ---------------- 其他运行时目录：只读列出 ---------------- */
+
+test('runtimeScan：能列出别的运行时装了什么，@scope 要展开一层', sandbox(async (dir) => {
+  const d = await fresh();
+  const tts = join(dir, 'tts-runtime');
+  const scoped = join(tts, 'node_modules', '@sherpa', 'engine');
+  mkdirSync(scoped, { recursive: true });
+  writeFileSync(join(scoped, 'package.json'), JSON.stringify({ name: '@sherpa/engine', version: '1.0.0' }));
+
+  const r = d.runtimeScan([
+    { id: 'tts', label: '语音引擎', dir: tts },
+    { id: 'none', label: '没装的那个', dir: join(dir, 'nope') },
+  ]);
+
+  assert.equal(r[0].exists, true);
+  assert.deepEqual(r[0].packages, ['@sherpa/engine'], '不展开的话只会看到 @sherpa，没有信息量');
+  assert.equal(r[1].exists, false);
+  assert.deepEqual(r[1].packages, []);
+}));
+
+test('runtimeScan：空 / null / 脏数据都不抛', async () => {
+  const d = await fresh();
+  assert.deepEqual(d.runtimeScan(), []);
+  assert.deepEqual(d.runtimeScan(null), []);
+  assert.equal(d.runtimeScan([{}])[0].exists, false);
+  assert.equal(d.runtimeScan([{}])[0].dir, '');
+});

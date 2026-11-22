@@ -24,8 +24,16 @@ const HOST = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
 function quickOps() {
   const at = HOST.indexOf("route('/quick'");
   assert.ok(at > 0, '找不到 /quick 路由');
-  const end = HOST.indexOf('不认识的 op', at);
-  const body = HOST.slice(at, end > 0 ? end : at + 60_000);
+  /**
+   * 扫描到**下一个路由**为止（没有了就扫到文件末尾）。
+   *
+   * 以前写死 `at + 60_000`：这个数字一开始够用，但 `/quick` 的 handler
+   * 加几十行就会把末尾几个 op 挤出窗口，报出来的却是「登记项在 /quick 里
+   * 已经不存在了」——错的是窗口，不是 op 表。2026-11-22 加 sharedDeps
+   * 的三个 op 时正好撞上，所以改成按结构划界，不再靠魔法数字。
+   */
+  const nextRoute = HOST.indexOf("route('", at + 10);
+  const body = HOST.slice(at, nextRoute > at ? nextRoute : HOST.length);
   return [...new Set([...body.matchAll(/case '([a-zA-Z.]+)':/g)].map((m) => m[1]))];
 }
 

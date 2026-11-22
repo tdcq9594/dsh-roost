@@ -59,7 +59,14 @@ const MODEL_WRITE_OPS = Object.freeze([
 /** 宿主维护：备份还原 / 共享依赖。 */
 const HOST_MAINT_OPS = Object.freeze([
   'backup.restoreRetention', 'backup.cancelRestore',
-  'sharedDeps.status', 'sharedDeps.install',
+  /**
+   * 共享依赖（功能包）：装 / 卸 / 查 / 扫都在这一组。
+   *
+   * `remove` 和 `install` 同级：都是「改这台机器的依赖」，不是读一下就走。
+   * `scan` 虽然只读，但它和 `status` 一样暴露宿主目录结构，归在同一道闸门
+   * 比单独开一个 scope 更好审——扩展要「看看有什么」也得先说清用途。
+   */
+  'sharedDeps.status', 'sharedDeps.install', 'sharedDeps.remove', 'sharedDeps.scan',
 ]);
 
 /** 不可逆的删除类。 */

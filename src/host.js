@@ -1849,6 +1849,30 @@ export function apply(ctx) {
   });
 
   /**
+   * 把已安装扩展的目录交给共享依赖层（2026-11-22）。
+   *
+   * 为什么需要：扩展可能自己带 `package.json`（由框架装好 node_modules），
+   * 也可能有宿主注入过 `ROOST_DEPS_DIR` 的 `deps/`。这些目录里如果已经有
+   * jimp / ffmpeg，面板不该再让用户下一遍——「功能包」页要能看见并复用。
+   *
+   * **必须在装/卸扩展后重来一次**：清单变了，缓存里「在哪找到」的结论就过期。
+   * 失败只记日志，不让它影响扩展装卸本身（依赖发现是锦上添花）。
+   */
+  const syncSharedDepsDirs = () => {
+    try {
+      const list = extRegistry.list()
+        .map((m) => ({ id: m.id, dir: extRegistry.pathOf(m.id) }))
+        .filter((x) => x.id && x.dir);
+      sharedDeps.setExtDirs(list);
+      return list.length;
+    } catch (e) {
+      log.warn(`同步扩展目录到共享依赖失败：${e?.message ?? e}`);
+      return 0;
+    }
+  };
+  syncSharedDepsDirs();
+
+  /**
    * 5.12 补标签任务：**只放内存**。
    *
    * 落盘会留下「上次那个任务到底跑完没有」的悬案——重启后没人接着跑，
@@ -8027,16 +8051,65 @@ export function apply(ctx) {
              * 也不占扩展 scope——否则存量扩展得为装个 ffmpeg 重新授权一遍。
              */
             case 'sharedDeps.status': {
-              return send(res, 200, { ok: true, ...sharedDeps.status() });
-            }
-            case 'sharedDeps.install': {
-              const r = await sharedDeps.install(String(arg?.name ?? '').trim() || undefined, {
-                log: (m) => log.info?.(m),
-                /** 和自更新共用同一个源配置，面板里改一处就够了 */
-                registry: cfg.update?.registry || '',
+              return send(res, 200, {
+                ok: true,
+                ...sharedDeps.status(),
+                /**
+                 * 别的运行时目录（语音引擎、在线 TTS）：**只读列出**。
+                 *
+                 * 它们有自己的安装器与进度（`tts-install.js`），接管过来就是
+                 * 两套 npm 逻辑互相踩。功能包页只负责让用户「一页看全本体
+                 * 装了什么」，动手还是回语音页。
+                 */
+                runtimes: sharedDeps.runtimeScan([
+                  { id: 'tts', label: '语音引擎（原生，本地）', dir: join(dataDir(), 'tts-runtime') },
+                  { id: 'tts-edge', label: '语音（微软在线）', dir: join(dataDir(), 'tts-edge') },
+                ]),
               });
-              log.info(`共享依赖安装${r.ok ? '完成' : '失败'}：${r.name} ${r.message}`);
-              return send(res, r.ok ? 200 : 500, r);
+            }
+            /**
+             * 装一个或一批（2026-11-22 支持批量）。
+             *
+             * `names`（数组）给「整组装」用：面板上一个「安装图片处理包」
+             * 只发一次请求，服务端串行跑完。**一个失败不中止后面的**——
+             * 网络抖一下就全放弃，用户还得一个个重点，结果里逐项报更清楚。
+             *
+             * `name` 保留单数形态：扩展 API 与老调用方还在用，不能改语义。
+             */
+            case 'sharedDeps.install': {
+              const one = String(arg?.name ?? '').trim();
+              const many = Array.isArray(arg?.names)
+                ? arg.names.map((x) => String(x ?? '').trim()).filter(Boolean)
+                : [];
+              const targets = many.length ? many : [one];
+              const results = [];
+              for (const name of targets) {
+                const r = await sharedDeps.install(name || undefined, {
+                  log: (m) => log.info?.(m),
+                  /** 和自更新共用同一个源配置，面板里改一处就够了 */
+                  registry: cfg.update?.registry || '',
+                });
+                log.info(`共享依赖安装${r.ok ? '完成' : '失败'}：${r.name} ${r.message}`);
+                results.push(r);
+              }
+              if (results.length === 1) return send(res, results[0].ok ? 200 : 500, results[0]);
+              return send(res, 200, { ok: results.every((r) => r.ok), results });
+            }
+            /**
+             * 卸载共享目录里的包。
+             *
+             * **只动共享目录那一份**：包如果来自某个扩展的目录，`remove()`
+             * 会返回失败并说明在哪——那是扩展的依赖，面板替它删会把扩展弄坏。
+             */
+            case 'sharedDeps.remove': {
+              const r = sharedDeps.remove(String(arg?.name ?? '').trim());
+              log.info(`共享依赖卸载${r.ok ? '完成' : '失败'}：${r.name} ${r.message}`);
+              return send(res, r.ok ? 200 : 400, r);
+            }
+            /** 重新扫描：用户手动往目录里拷了包，或想确认「自动查找」到底找过哪儿 */
+            case 'sharedDeps.scan': {
+              syncSharedDepsDirs();
+              return send(res, 200, { ok: true, ...sharedDeps.scan() });
             }
             /**
              * 阶段 6 市场：索引 → 下载校验 → 原子落位 → 权限组 → 受管块。
@@ -8076,11 +8149,15 @@ export function apply(ctx) {
                 ...(arg?.takeOver === true ? { takeOver: true } : {}),
                 ...(arg?.confirmTier !== undefined ? { confirmTier: arg.confirmTier } : {}),
               });
+              /** 新装的扩展可能自带依赖，让「功能包」页立刻能看见并复用 */
+              if (r.ok) syncSharedDepsDirs();
               return send(res, r.ok ? 200 : 400, r);
             }
             case 'extensions.market.remove': {
               /** 手写目录要 `force`（市场会先整目录备份再删），面板二次确认后带 */
               const r = extMarket.remove(arg?.id, { force: arg?.force === true });
+              /** 删掉之后「在那个扩展目录里找到过 jimp」的结论必须失效 */
+              if (r.ok) syncSharedDepsDirs();
               return send(res, r.ok ? 200 : 400, r);
             }
             case 'extensions.market.updates': {
