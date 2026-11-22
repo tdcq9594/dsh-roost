@@ -544,3 +544,19 @@ test('尺寸：markdown 被拒时改按原图重发，图不能整条丢掉', as
     assert.equal(ch.calls.filter((c) => c[0] === 'file').length, 1, '要退回富媒体');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('尺寸：只写高时按原图比例补宽（和文字齐平的 `|x24` 走这条）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-size-'));
+  const p = join(dir, 'a.png');
+  writeFileSync(p, fakePng(400, 300));
+  try {
+    const ch = fakeChannel();
+    const run = createActionRunner({ channel: () => ch });
+    await run({ text: `这样<<image: ${p}|x150>>就夹在字里了`, target: 'g1' });
+    const sent = ch.calls.find((c) => c[0] === 'send')[1];
+    /** 400×300 按 150 高算，宽应是 200 */
+    assert.match(sent.text, /#200px #150px/);
+    /** 行内插图：图仍在原位置，前后文字都还在同一条里 */
+    assert.match(sent.text, /^这样!\[.*\]\(qqbot-media:\/\/abc\)就夹在字里了$/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
