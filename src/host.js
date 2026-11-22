@@ -278,6 +278,7 @@ import {
   createTagJob, statsOf, PAGE_SIZE,
 } from './sticker-manage.js';
 import { createTtsInstaller } from './tts-install.js';
+import { createOnnxInstaller } from './onnx-install.js';
 import { createTurnScenes } from './turn-scene.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -930,6 +931,19 @@ export function apply(ctx) {
     registry: () => cfg.update?.registry || '',
     /** 装完马上把模型读进内存，用户第一次说话就不用等那 5 秒 */
     onDone: () => { tts.warmup().catch(() => {}); },
+  });
+
+  /**
+   * 通用 ONNX 运行时安装器（本地 embedding / rerank / decide 的前置）。
+   *
+   * 和 ttsInstaller 分开：它装的是 115MB 的 onnxruntime-node，
+   * 一天点一次都不算多，混进 TTS 的状态机只会让两条安装互相占用 busy。
+   * 同样落到数据目录 `onnx-runtime/`，插件更新不会覆盖。
+   */
+  const onnxInstaller = createOnnxInstaller({
+    dataDir,
+    log: (m) => log.info(m),
+    registry: () => cfg.update?.registry || '',
   });
 
   /**
@@ -8883,6 +8897,8 @@ export function apply(ctx) {
                 runtimes: sharedDeps.runtimeScan([
                   { id: 'tts', label: '语音引擎（原生，本地）', dir: join(dataDir(), 'tts-runtime') },
                   { id: 'tts-edge', label: '语音（微软在线）', dir: join(dataDir(), 'tts-edge') },
+                  /** 本地 ONNX 运行时（记忆增强前置），装/卸走 onnx.* 独立 op */
+                  { id: 'onnx', label: 'ONNX 运行时（本地记忆增强）', dir: join(dataDir(), 'onnx-runtime') },
                 ]),
               });
             }
@@ -8958,6 +8974,31 @@ export function apply(ctx) {
             case 'sharedDeps.scan': {
               syncSharedDepsDirs();
               return send(res, 200, { ok: true, ...sharedDeps.scan() });
+            }
+            /**
+             * 本地 ONNX 运行时（记忆增强前置）。装/卸只有面板显式点击才到这里，
+             * 和 sharedDeps 的白名单机制分开——onnxruntime-node 有 postinstall，
+             * 走的是 tts-install 那套「手工下 tgz 解压」的独立安装器。
+             */
+            case 'onnx.status': {
+              return send(res, 200, {
+                ok: true,
+                ready: onnxInstaller.ready(),
+                install: onnxInstaller.status(),
+                usage: onnxInstaller.usage(),
+              });
+            }
+            case 'onnx.install': {
+              const r = onnxInstaller.start();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.cancel': {
+              const r = onnxInstaller.cancel();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.uninstall': {
+              const r = onnxInstaller.uninstall();
+              return send(res, r.ok ? 200 : 409, r);
             }
             /**
              * 阶段 6 市场：索引 → 下载校验 → 原子落位 → 权限组 → 受管块。
