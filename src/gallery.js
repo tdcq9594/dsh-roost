@@ -869,7 +869,14 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
   const pending = ({ limit = 40 } = {}) => {
     const s = load();
     return Object.entries(s.items)
-      .filter(([, r]) => !r.trash && !r.missing && !r.meaning && !r.name)
+      /**
+       * 停用的（`enabled === false`）不进待办。
+       *
+       * 「让 AI 整理」是**一张一次模型调用**，最贵的那条路。用户明确说了
+       * 「这张暂时不用」，还花钱去给它写描述，写完了也没人看得见——
+       * 等哪天真启用再说，那时它自然会重新出现在待办里。
+       */
+      .filter(([, r]) => !r.trash && !r.missing && r.enabled !== false && !r.meaning && !r.name)
       .sort((a, b) => a[1].seq - b[1].seq)
       .slice(0, Math.max(1, Number(limit) || 40))
       .map(([sha, r]) => ({ sha, seq: r.seq, path: r.path, file: r.file }));

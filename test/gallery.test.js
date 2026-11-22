@@ -403,6 +403,24 @@ test('pending 只给缺描述的，按序号排', () => {
   } finally { e.cleanup(); }
 });
 
+test('停用的图不进「让 AI 整理」的待办（一张一次模型调用，别为不用的图花钱）', () => {
+  const e = env();
+  try {
+    e.setItems([makeImage(e.root, 'a.png', 'A'), makeImage(e.root, 'b.png', 'B')]);
+    e.gallery.sync({});
+    assert.equal(e.gallery.pending().length, 2);
+
+    e.gallery.edit(1, { enabled: false });
+    const left = e.gallery.pending();
+    assert.equal(left.length, 1);
+    assert.equal(left[0].seq, 2, '停用那张不该再被拿去问模型');
+
+    /** 启用之后要能自己回到待办里，不需要用户记得再点一次「整理」 */
+    e.gallery.edit(1, { enabled: true });
+    assert.equal(e.gallery.pending().length, 2);
+  } finally { e.cleanup(); }
+});
+
 /* ---------------- 与表情标注扩展的对接（只补位，不覆盖） ---------------- */
 
 /**

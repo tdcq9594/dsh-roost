@@ -6048,7 +6048,7 @@ export function apply(ctx) {
        */
       const galleryShowOf = async ({ seq, ask } = {}) => {
         const path = gallery.pathOf(seq, cfg.stickers);
-        if (!path) return { ok: false, message: `没有 #${seq} 这张图（可能已撤下，或文件被移走了）` };
+        if (!path) return { ok: false, message: `没有 #${seq} 这张图（可能已撤下、被停用，或文件被移走了）` };
         const q = String(ask ?? '').trim();
 
         if (await galleryModelSeesImage()) {

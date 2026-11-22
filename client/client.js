@@ -16758,6 +16758,20 @@ select.roost-input{color-scheme:dark}
         load(page)
       }
 
+      /**
+       * 停用 / 启用。
+       *
+       * `enabled=0` 是唯一个**只有 AI 会主动设**的状态（`gallery_edit`）。
+       * 原来面板只画出「停用」角标、不给开关——用户看得见却改不回来，
+       * 只能反过来求 AI 改，而「让 AI 改」本身就要碰运气。两个方向都给按钮。
+       */
+      const togglePause = async (seq, next) => {
+        const r = await post('/gallery/edit', { seq, enabled: next })
+        if (r.ok === false) return toast(r.message || '没改过来')
+        toast(next ? `#${seq} 已启用` : `#${seq} 已停用（还在库里，只是不发）`)
+        load(page)
+      }
+
       const stats = data?.stats || {}
       return h(Sec, {
         n, title: '图库（AI 用的）',
@@ -16833,7 +16847,7 @@ select.roost-input{color-scheme:dark}
                   const paused = it.enabled === false
                   return h('div', {
                     key: id,
-                    title: paused ? '已停用：她不会发这张（把 enabled 改回 1 可恢复）' : undefined,
+                    title: paused ? '已停用：她不会发这张（点「启用」可恢复）' : undefined,
                     style: {
                       border: `1px ${paused ? 'dashed' : 'solid'} ${editing ? 'var(--accent, #4a7)' : 'rgba(128,128,128,.25)'}`,
                       borderRadius: 8, padding: 6, fontSize: 11,
@@ -16883,6 +16897,18 @@ select.roost-input{color-scheme:dark}
                               setDraft({ name: it.name || '', meaning: it.meaning || '', scenes: it.scenes || '' })
                             },
                           }, '改'),
+                      /**
+                       * 回收站里不给「停用」：那张已经不在清单里了，再标一层
+                       * 「停用」只会让人以为恢复之后还得手动启用一次。
+                       */
+                      trash
+                        ? null
+                        : h('button', {
+                            type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
+                            /** `paused` 是当前状态，按钮要写的是「按下去会变成什么」 */
+                            onClick: () => togglePause(id, paused),
+                            title: paused ? '恢复使用：她可以再发这张' : '停用：还在库里，但不会发出去',
+                          }, paused ? '启用' : '停用'),
                       h('button', {
                         type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px', marginLeft: 'auto' },
                         onClick: () => (trash ? back(id) : toTrash(id)),
