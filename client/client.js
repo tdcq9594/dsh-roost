@@ -14334,72 +14334,6 @@ select.roost-input{color-scheme:dark}
      * `n` 是分节编号：留在「表达」页时它是 02（排在语音后面）；
      * 2026-11-13 拆成独立页之后它是 01（一页就这一节）。
      */
-    /**
-     * 小黄脸码表（FaceMap）。
-     *
-     * 这页存在的唯一理由：出站编码器早就支持 `【表情: 微笑】`，但用户不知道
-     * 有哪 108 个名字、也记不住拼法。点一下复制，粘进人格提示词就能用。
-     *
-     * 搜索框不是装饰：108 个名字平铺一屏，找「白眼」得扫半天。
-     */
-    function FaceMapCard({ toast, n = '03' }) {
-      const [data, setData] = useState(null)
-      const [q, setQ] = useState('')
-
-      useEffect(() => {
-        let dead = false
-        ;(async () => {
-          const r = await get('/faces')
-          if (!dead && r?.ok !== false) setData(r)
-        })()
-        return () => { dead = true }
-      }, [])
-
-      const items = data?.items || []
-      const kw = q.trim()
-      const shown = kw ? items.filter((x) => String(x.name).includes(kw)) : items
-
-      const copy = (name) => {
-        const text = `【表情: ${name}】`
-        try {
-          navigator.clipboard?.writeText(text)
-          toast(`已复制 ${text}`)
-        } catch {
-          toast(`复制失败，手动写 ${text}`)
-        }
-      }
-
-      return h(Sec, {
-        n,
-        title: '小黄脸码表',
-        right: h('input', {
-          className: 'roost-input', placeholder: '搜名字', value: q,
-          style: { width: 120, fontSize: 12 },
-          onChange: (e) => setQ(e.target.value),
-        }),
-      },
-        h('div', { className: 'roost-note' },
-          '正文里写 【表情: 微笑】 这种标记，发出去会变成真的 QQ 表情（四条发送路都会转）。点一下复制，粘进人格提示词就能让她用。'),
-        data === null
-          ? h('div', { className: 'roost-empty' }, '读取中…')
-          : shown.length === 0
-            ? h('div', { className: 'roost-empty' }, `没有叫「${kw}」的表情`)
-            : h('div', {
-              style: {
-                display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6,
-                maxHeight: 280, overflowY: 'auto', paddingRight: 4,
-              },
-            },
-              shown.map((x) => h('button', {
-                key: x.name,
-                type: 'button', className: 'roost-btn',
-                style: { fontSize: 12, padding: '2px 8px' },
-                title: `faceId ${x.id} · 点一下复制【表情: ${x.name}】`,
-                onClick: () => copy(x.name),
-              }, x.name))),
-      )
-    }
-
     function StickerDirsCard({ config, stickers, saveCfg, toast, reload, n = '02' }) {
       /** 服务端 → 编辑态。老服务端只回 `dir` 一个字符串，也要能显示 */
       const fromServer = (s) => {
@@ -18228,11 +18162,6 @@ select.roost-input{color-scheme:dark}
          * 三个页面、两套删除语义。合并之后按钮一件没少，但用户只需要记一个词。
          */
         part === 'sticker' ? h(GalleryPage, { toast, config, saveCfg }) : null,
-        /**
-         * 小黄脸码表放在图库之后：它是「怎么让回复带表情」的参考页，
-         * 不是库管理。只在独立的「图库」页出现，老入口 part='all' 不塞进来。
-         */
-        part === 'sticker' ? h(FaceMapCard, { toast }) : null,
         part === 'voice'
           ? h('div', { className: 'roost-note' }, '配图在「表达 → 图库」那一页。')
           : null,

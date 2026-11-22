@@ -2712,18 +2712,11 @@ test('路由：/gallery/organize 的 seqs 全是垃圾时明确说「都不能�
   off?.();
 });
 
-test('路由：/faces 给出小黄脸码表（面板「表情码表」页的数据源）', async () => {
-  const { call, off } = await bootHost(() => ({}));
-  const r = await call('/faces');
-  assert.equal(r.json.ok, true);
-  assert.ok(r.json.items.length >= 100, `码表太短：${r.json.items?.length}`);
-  for (const x of r.json.items.slice(0, 5)) {
-    assert.equal(typeof x.name, 'string');
-    assert.ok(Number.isInteger(x.id), 'id 要是数字，面板显示 faceId 靠它');
-  }
-  assert.ok(r.json.popular.length >= 20, '常用名单要足够长，否则提示词里列不出几个');
-  /** 常用名单必须是码表的子集：否则提示词教了模型一个发不出去的名字 */
-  const names = new Set(r.json.items.map((x) => x.name));
-  for (const n of r.json.popular) assert.ok(names.has(n), `${n} 不在码表里`);
-  off?.();
+test('路由：/faces 已下线（不再发小黄脸，面板也没有入口）', async () => {
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  /** 留着这张表只会让用户以为「有 108 个可选」，实际一个也发不出去 */
+  assert.doesNotMatch(host, /route\('\/faces'/, '码表路由该删干净');
+  assert.doesNotMatch(client, /get\('\/faces'/, '面板不该再去要码表');
 });
