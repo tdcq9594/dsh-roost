@@ -440,3 +440,23 @@ test('多目录：同名文件不会被当成「刚发过的那张」', () => {
   assert.ok(first.ok && second.ok);
   assert.notEqual(second.items[0].path, first.items[0].path);
 });
+
+/**
+ * `invalidate()` 以前只存在于调用方（`host.js` 里十几处 `stickers.invalidate?.()`），
+ * 本模块从来没导出过——可选链把它变成了空操作，于是「面板改完标签，提示词还是旧的」
+ * 要等 3 秒缓存自然过期。这条测试是那个洞的护栏：**必须真的清缓存**。
+ */
+test('invalidate 立刻丢掉扫描缓存（改完标签提示词要马上变）', () => {
+  const lib = makeLib({ '开心/a.png': 'x' });
+  /** 缓存 1 小时：不调 invalidate 就永远不会重新扫 */
+  const s = createStickers({ dataDir: lib.root, cacheMs: 3_600_000, now: () => Date.now() });
+  const before = s.prompt({});
+  assert.match(before, /a\.png|开心/);
+
+  fs.writeFileSync(path.join(lib.dir, '开心', 'b.png'), 'y');
+  assert.doesNotMatch(s.prompt({}), /b\.png/, '缓存还在，新图不该立刻出现');
+
+  assert.equal(typeof s.invalidate, 'function', 'host.js 里那些调用点靠这个方法才有意义');
+  s.invalidate();
+  assert.match(s.prompt({}), /b\.png/, 'invalidate 之后必须重新扫');
+});
