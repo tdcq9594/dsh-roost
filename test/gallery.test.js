@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -356,4 +357,76 @@ test('pending 只给缺描述的，按序号排', () => {
     assert.equal(left.length, 1);
     assert.equal(left[0].seq, 2);
   } finally { e.cleanup(); }
+});
+
+/* ---------------- 与表情标注扩展的对接（只补位，不覆盖） ---------------- */
+
+/**
+ * 扩展（`sticker-reply`）用同一个东西当键——内容 sha256，字段名也一模一样。
+ * 所以已经标过的图不该在图库里显示成「未描述」，否则用户以为白标了，
+ * 「让 AI 整理」还会重复花钱去问同一张图。
+ */
+test('外部标注：新入库的图带上扩展标过的名字与含义', () => {
+  const e = env();
+  try {
+    const it = makeImage(e.root, '开心/a.png', 'AAA');
+    /** 用真正的 sha 当键，模拟扩展那边已经标过这张图 */
+    const sha = createHash('sha256').update(readFileSync(it.path)).digest('hex');
+    e.setItems([it]);
+
+    const g = createGallery({
+      dataDir: e.dataDir,
+      stickers: { snapshot: () => ({ items: [it], cats: [], roots: [e.root] }), dir: () => e.root },
+      externalOf: () => ({
+        bySha: new Map([[sha, { name: '眨眼玫瑰', meaning: '叼着玫瑰使眼色', tags: ['撩'], scenes: '打趣', avoid: '正式场合' }]]),
+        path: 'x',
+      }),
+    });
+    g.sync({});
+    const row = g.rows({})[0];
+    assert.equal(row.name, '眨眼玫瑰');
+    assert.equal(row.meaning, '叼着玫瑰使眼色');
+    assert.equal(row.scenes, '打趣');
+    assert.equal(row.src, 'annotations', '来源要标出来，排障时能看出描述哪来的');
+  } finally { e.cleanup() }
+});
+
+test('外部标注：已经入库的记录不会被回填（用户在图库里改过的不许被顶回去）', () => {
+  const e = env();
+  try {
+    const it = makeImage(e.root, '开心/b.png', 'BBB');
+    e.setItems([it]);
+    /** 第一轮没有扩展标注：入库时是空的 */
+    e.gallery.sync({});
+    const seq = e.gallery.rows({})[0].seq;
+    e.gallery.edit(seq, { name: '我自己改的名字' });
+
+    /** 第二轮扩展那边有标注了——也不该覆盖 */
+    const g2 = createGallery({
+      dataDir: e.dataDir,
+      stickers: { snapshot: () => ({ items: [it], cats: [], roots: [e.root] }), dir: () => e.root },
+      externalOf: () => {
+        const sha = createHash('sha256').update(readFileSync(it.path)).digest('hex');
+        return { bySha: new Map([[sha, { name: '扩展的旧名字', meaning: '扩展的旧含义' }]]), path: 'x' };
+      },
+    });
+    g2.sync({});
+    assert.equal(g2.rows({})[0].name, '我自己改的名字');
+  } finally { e.cleanup() }
+});
+
+test('外部标注：扩展抛错不影响本家同步', () => {
+  const e = env();
+  try {
+    const it = makeImage(e.root, 'c.png', 'CCC');
+    const g = createGallery({
+      dataDir: e.dataDir,
+      stickers: { snapshot: () => ({ items: [it], cats: [], roots: [e.root] }), dir: () => e.root },
+      externalOf: () => { throw new Error('文件坏了') },
+      log: () => {},
+    });
+    const r = g.sync({});
+    assert.equal(r.added, 1, '扩展的锅不该让图库一张都扫不进来');
+    assert.equal(g.rows({})[0].name, '');
+  } finally { e.cleanup() }
 });

@@ -34,8 +34,12 @@
  *   · 入库时读侧车当初始值（用户手写的场合说明不能丢）；
  *   · AI/面板改了标注，回写侧车（`stickers.js` 每轮从侧车生成清单，
  *     不写回去它就会拿着旧标签去猜）。
- * 插件的 `annotations.json` 首版不碰：那是扩展自己的文件，回写等于两个进程
- * 抢同一个文件，谁最后写谁赢，用户会看到标注随机丢失。
+ *
+ * 表情标注扩展的 `annotations.json` **只读**（`gallery-annotations.js`）：
+ * 它的键也是内容 sha256、字段名也一致，所以新图入库时拿它的标注当初始值，
+ * 已经标过的图不用再花钱让 AI 看一遍。但**绝不回写**——那是另一个进程在写的
+ * 文件，两边都写就是抢，谁最后落盘谁赢，用户会看到标注随机丢失。
+ * 同理，已经入库的记录不会被它回填：图库这边改过的不许被顶回旧值。
  *
  * ## 为什么回收站是标记不是目录
  *
@@ -136,7 +140,7 @@ const clamp = (s, max = MAX_TEXT) => {
  * @param {(m:string)=>void} [o.log]
  * @param {() => number} [o.now] 注入时钟，测试用
  */
-export function createGallery({ dataDir, stickers = null, log = () => {}, now = Date.now } = {}) {
+export function createGallery({ dataDir, stickers = null, log = () => {}, now = Date.now, externalOf = null } = {}) {
   const dir = join(dataDir, 'gallery');
   const indexPath = join(dir, 'index.json');
 
@@ -256,6 +260,25 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
     const alive = new Set();
     let added = 0;
 
+    /**
+     * 表情标注扩展的标注表（只读）。**每轮同步读一次**，不是每张图读一次；
+     * 内部按文件 mtime 缓存，没变就不重读。
+     *
+     * 用它的时机只有一个：新建记录时当初始值。已经在图库里的记录**绝不**
+     * 拿它回填——那会把用户在图库里改过的标注顶回旧值（扩展那边不会知道
+     * 这里改过）。宁可少补一次，也不能覆盖。
+     */
+    let extBySha = null;
+    if (typeof externalOf === 'function') {
+      try {
+        extBySha = externalOf()?.bySha ?? null;
+      } catch (e) {
+        /** 扩展的文件坏了 / 权限不对：跳过，不影响本家同步 */
+        log(`表情标注扩展的标注没用上：${e?.message ?? e}`);
+        extBySha = null;
+      }
+    }
+
     for (const it of snap.items ?? []) {
       const sha = shaOf(it.path, it.size, it.mtime);
       if (!sha) continue;
@@ -263,6 +286,7 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
       const prev = s.items[sha];
 
       if (!prev) {
+        const ext = extBySha?.get(sha) ?? null;
         s.items[sha] = {
           seq: s.seq++,
           file: it.file,
@@ -272,19 +296,22 @@ export function createGallery({ dataDir, stickers = null, log = () => {}, now = 
            * `name` 空着等 AI 或用户填。
            * 文件名当 name 没意义（`1.png` 当名字等于没名字），宁可显示「未标注」
            * ——那是个明确信号：这里缺东西，值得补。
+           *
+           * 但有别的来源就先采：侧车（用户手写）> 标注扩展（用户标过）> 空。
            */
-          name: '',
-          meaning: '',
+          name: ext?.name || '',
+          meaning: ext?.meaning || '',
           /** 侧车标签是用户手写的，拿来当初始值最合适（见文件头「两套标注」） */
-          tags: Array.isArray(it.tags) ? it.tags.slice(0, 6) : [],
-          scenes: it.usage || '',
-          avoid: '',
+          tags: Array.isArray(it.tags) && it.tags.length ? it.tags.slice(0, 6) : (ext?.tags ?? []),
+          scenes: it.usage || ext?.scenes || '',
+          avoid: ext?.avoid || '',
           enabled: true,
           bytes: it.size,
           at: now(),
           usedAt: 0,
           hits: 0,
-          src: 'scan',
+          /** 标出来源，面板/排障时能一眼看出「这描述哪来的」 */
+          src: ext ? 'annotations' : 'scan',
           trash: false,
           missing: false,
         };

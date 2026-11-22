@@ -89,6 +89,7 @@ import { registerQqTools, buildAtPrefix } from './qq-tools.js';
 import { registerStickerTools } from './sticker-tools.js';
 import { registerGalleryTools } from './gallery-tools.js';
 import { createOrganizeJob, imageForVision, parseDescribe, DESCRIBE_PROMPT } from './gallery-organize.js';
+import { createExternalAnnotations } from './gallery-annotations.js';
 import { createSpeakUp, shouldFire, DEFAULTS as SPEAKUP_DEFAULTS } from './speakup.js';
 import { createProactiveQueue, createProactiveDispatcher } from './ext-proactive.js';
 import { createWakeupLedger, wakeupPlan, wakeupCycleOf, WAKEUP_DEFAULTS, WAKEUP_WINDOWS } from './wakeup.js';
@@ -1447,7 +1448,19 @@ export function apply(ctx) {
    * 图库只是**在它上面叠一层带标注的索引**（`<data>/gallery/index.json`）。
    * 所以 `stickers` 注入给它，让它自己去扫——图库不重复实现扫盘。
    */
-  const gallery = createGallery({ dataDir: dataDir(), stickers, log: (m) => log.warn(m) });
+  const gallery = createGallery({
+    dataDir: dataDir(),
+    stickers,
+    /**
+     * 表情标注扩展（`sticker-reply`）的标注，**只读**。
+     *
+     * 人家已经标过的图不该在图库里显示成「未描述」——那会让用户以为白标了，
+     * 也让「让 AI 整理」重复花钱去问同一张图。键都是内容 sha256、字段名
+     * 也一样，所以只补位、不转换。回写绝对不做（两个进程抢同一个 JSON）。
+     */
+    externalOf: createExternalAnnotations({ roostDataDir: dataDir(), log: (m) => log.warn(m) }),
+    log: (m) => log.warn(m),
+  });
 
   /** 缓存图同步：把 images/ 里像表情包的图搬成 `未分类/`。不做内容识别（见 sticker-sync.js 头注释） */
   const stickerSync = createStickerSync({ dataDir: dataDir(), stickers, log: (m) => log.warn(m) });
