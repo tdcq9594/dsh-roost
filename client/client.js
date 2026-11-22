@@ -17971,11 +17971,43 @@ select.roost-input{color-scheme:dark}
         load('')
       }
 
+      /**
+       * 官方素材池的时间戳统一成**毫秒**。
+       *
+       * `created_at` / `expires_at` 官方给的是**秒**（框架原样透传成
+       * `createdAt` / `expiresAt`），以前这里直接 `new Date(v)`，于是
+       * 「到期」显示成 1970/1/22 04:52 —— 秒数被当成毫秒了。
+       * 按量级判断而不是写死乘 1000：哪天框架改成毫秒、或者某个通道
+       * 给的就是毫秒，两种都认，不会反着错一次。
+       */
+      const msOf = (v) => {
+        const n = Number(v) || 0
+        if (!n) return 0
+        return n < 1e12 ? n * 1000 : n
+      }
+
       /** 时间戳可能缺失或为 0：别渲染成 1970，那比空白更让人困惑 */
       const when = (ms) => {
-        const v = Number(ms) || 0
+        const v = msOf(ms)
         if (!v) return '未知'
         try { return new Date(v).toLocaleString('zh-CN') } catch { return '未知' }
+      }
+
+      /**
+       * 到期时间给**剩余天数**，不给绝对时间。
+       *
+       * 这张图还能用多久，一眼就知道该不该重新上传；绝对时间还得自己在心里
+       * 减一遍。已经过期就明说「已过期」，不显示负数；算出来超过十年
+       * （>3650 天）基本是数据不对，宁可说「未知」也不硬编一个数。
+       */
+      const daysLeft = (ms) => {
+        const v = msOf(ms)
+        if (!v) return '到期未知'
+        const diff = v - Date.now()
+        if (diff <= 0) return '已过期'
+        const d = Math.ceil(diff / 86_400_000)
+        if (d > 3650) return '到期未知'
+        return d === 1 ? '还剩 1 天' : `还剩 ${d} 天`
       }
 
       const quota = Number(data?.quota) || 100
@@ -18041,7 +18073,7 @@ select.roost-input{color-scheme:dark}
                       it.fileName || '(没文件名)',
                       h('span', { className: 'd' },
                         ` · 传于 ${when(it.createdAt)}`
-                        + (it.expiresAt ? ` · 到期 ${when(it.expiresAt)}` : '')
+                        + (it.expiresAt ? ` · ${daysLeft(it.expiresAt)}` : '')
                         + (it.seq ? '' : ' · 不是图库传的'))),
                     /**
                      * 认得出的（图库自己传的）才给「固定」——别人插件传的图我们没有
