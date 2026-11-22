@@ -63,7 +63,7 @@ export function buildOutputPrompt({
   mounted,
   denied,
   registeredNames = null,
-  maxParts = 3,
+  maxParts = 50,
   ttsEnabled = false,
 } = {}) {
   if (!mounted?.ok) return '';

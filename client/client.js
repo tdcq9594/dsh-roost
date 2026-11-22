@@ -10584,9 +10584,9 @@ select.roost-input{color-scheme:dark}
             h('p', { className: 'roost-g-desc' },
               '频道没有群聊「每秒 5 条」那条限制（那是文字子频道的发送侧限制，'
               + '框架出站调度器已经按 kind 处理），分段数仍受这里控制。'),
-            h(GRow, { label: '一条回复最多分几段', hint: 'qqTools.maxParts；频道默认 5、私信 4' },
+            h(GRow, { label: '一条回复最多分几段', hint: 'qqTools.maxParts；群 50（官方 2026-11-17 起）、私聊 4；超限时框架改发主动' },
               h(GNum, {
-                value: qqTools.maxParts ?? 4, min: 1, max: 10, unit: '段', disabled: busy,
+                value: qqTools.maxParts ?? 50, min: 1, max: 50, unit: '段', disabled: busy,
                 onSave: (v) => put({ qqTools: { maxParts: v } }),
               })))),
 
