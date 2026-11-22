@@ -39,6 +39,20 @@
  * 为什么不按目录分开成「库A / 库B」让模型选：那是把用户的目录结构泄漏给模型，
  * 模型每轮都要先问「你从哪个盘找」，而且同一个「开心」在两个盘里会让它纠结。
  * 目录是用户的组织方式，不该变成模型的决策负担。
+ *
+ * ## 它现在的角色：文件层 + 兜底
+ *
+ * 对模型说话的主入口是**图库**（`gallery.js`）：带序号的索引，模型只写
+ * `<<image: #3>>`，路径和 URL 从头到尾不进上下文。这个模块退回两件事——
+ *
+ *   · **扫盘**：图库的文件发现就是调这里的 `snapshot()`，目录、分类、侧车
+ *     只有一份实现；
+ *   · **兜底**：图库工具没挂上（DSH 版本差异）时，`prompt()` 的路径清单是
+ *     唯一还能让模型拼出可用路径的东西。
+ *
+ * 两段提示词**不再同时注入**（`host.js` 那边按「图库工具挂上没有」二选一）。
+ * 以前它们拼在一段系统提示里：一句教「写完整路径」，一句教「只写序号，
+ * 不要写路径」，模型挑哪个全看运气。
  */
 
 import { readdirSync, statSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
@@ -197,7 +211,8 @@ function scan(root, { maxBytes, limit = MAX_SCAN, state = { scanned: 0, truncate
      * 抛异常，几百张时每次扫盘都要付出这个代价。existsSync 一次系统调用更便宜。
      */
     const sidePath = p + SIDECAR;
-    const side = existsSync(sidePath) ? parseSidecar(readText(sidePath)) : null;
+    const hasSidecar = existsSync(sidePath);
+    const side = hasSidecar ? parseSidecar(readText(sidePath)) : null;
     const fromName = tagsOf(name);
     items.push({
       file: name,
@@ -208,6 +223,19 @@ function scan(root, { maxBytes, limit = MAX_SCAN, state = { scanned: 0, truncate
       root,
       tags: side?.tags?.length ? side.tags : fromName,
       usage: side?.usage || '',
+      /**
+       * 侧车存在与否，是「这张图被手写整理过」的唯一凭据。
+       *
+       * `tags` 在没有侧车时会退回文件名拆词（`熊猫_笑.png` → 熊猫、笑），
+       * 两者混在一起，图库那边就分不清「这标签是用户写的，还是从文件名猜的」。
+       * 分不清只能按「索引空了才采」处理，于是面板上补完标签，图库那边永远
+       * 不认——同一张图会被再花钱描述一遍（见 `gallery.js` 的 `sync()`）。
+       *
+       * `sidecarTags` 单独标：只写了场合说明（`; 有人装可爱时`）的侧车会让
+       * `tags` 退回文件名拆词，拿它覆盖索引等于把 AI 写过的标签冲掉。
+       */
+      sidecar: hasSidecar,
+      sidecarTags: !!(side?.tags?.length),
       size: st.size,
       mtime: st.mtimeMs,
     });

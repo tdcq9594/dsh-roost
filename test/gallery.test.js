@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -403,6 +403,48 @@ test('pending 只给缺描述的，按序号排', () => {
   } finally { e.cleanup(); }
 });
 
+/**
+ * `all` = 「全部重做」。
+ *
+ * 为什么要有：整理是增量的，只挑 name 和 meaning 都为空的。描述写歪了、
+ * 标签全是文件名拆出来的词、换了更会看图的模型——这些情况增量永远够不着，
+ * 用户只能一张张手改。全量重来时仍然跳过停用和回收站（那是不该花钱的两类）。
+ */
+test('pending({ all }) 把已标注的也叫回来，但仍跳过停用的', () => {
+  const e = env();
+  try {
+    e.setItems([makeImage(e.root, 'a.png', 'A'), makeImage(e.root, 'b.png', 'B')]);
+    e.gallery.sync({});
+    e.gallery.edit(1, { name: '甲', meaning: '写好了' });
+
+    assert.equal(e.gallery.pending().length, 1, '增量只给没描述的');
+    assert.equal(e.gallery.pending({ all: true }).length, 2, '全部重做要把已标注的也算上');
+
+    e.gallery.edit(2, { enabled: false });
+    const all = e.gallery.pending({ all: true });
+    assert.equal(all.length, 1, '停用的不该被全部重做翻出来烧钱');
+    assert.equal(all[0].seq, 1);
+  } finally { e.cleanup(); }
+});
+
+test('pending 默认一次给 200 张，不再卡在 40', () => {
+  const e = env();
+  try {
+    const items = [];
+    /** 内容必须各不相同：图库按 sha256 去重 */
+    for (let i = 1; i <= 45; i += 1) items.push(makeImage(e.root, `p${i}.png`, `content-${i}`));
+    e.setItems(items);
+    e.gallery.sync({});
+
+    /**
+     * 45 张一轮跑完。原来默认 40，用户有 108 张待办就得不理解地点三次，
+     * 每次还弹一遍「开始整理 40 张」——看起来像功能坏了。
+     */
+    assert.equal(e.gallery.pending().length, 45, '默认不该再截到 40');
+    assert.equal(e.gallery.pending({ limit: 3 }).length, 3, '显式 limit 仍然生效');
+  } finally { e.cleanup(); }
+});
+
 test('停用的图不进「让 AI 整理」的待办（一张一次模型调用，别为不用的图花钱）', () => {
   const e = env();
   try {
@@ -787,5 +829,276 @@ test('固定和停用是两个维度：停用 ≠ 固定，互不覆盖', () => 
     /** 只改 enabled 不能顺手把 pinned 清掉 */
     e.gallery.edit(seq, { enabled: true });
     assert.equal(e.gallery.rows({})[0].pinned, true);
+  } finally { e.cleanup(); }
+});
+
+/* ---------------- 合并「表情库 / 图库」之后新增的口径 ---------------- */
+
+test('侧车改了标签和场合，下一轮同步认账（补标签之后图库不能还说未标注）', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([a]);
+    e.gallery.sync({});
+    assert.deepEqual(e.gallery.list({}, {}).items[0].tags, [], '入库时没标签');
+
+    /**
+     * 面板「补标签」/ 表情库那边改标签写的都是侧车，图库下一轮要采回来。
+     * 以前只做「索引空了才采」，补完 200 张这里一张都不变。
+     */
+    e.setItems([{ ...a, tags: ['猫', '无语'], usage: '被问到蠢问题', sidecar: true, sidecarTags: true }]);
+    e.gallery.sync({});
+    const row = e.gallery.list({}, {}).items[0];
+    assert.deepEqual(row.tags, ['猫', '无语']);
+    assert.equal(row.scenes, '被问到蠢问题');
+  } finally { e.cleanup(); }
+});
+
+test('只写了场合说明的侧车不冲掉 AI 写的标签', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([a]);
+    e.gallery.sync({});
+    e.gallery.edit(1, { tags: ['AI 标过'] });
+
+    /**
+     * 用户后来又手写了一句场合（`; 有人装可爱时`），侧车里的 tags 为空。
+     * 这时 `stickers.snapshot` 的 `tags` 会退回文件名拆词——拿它覆盖
+     * 等于把 AI 的标签冲成「a」，所以判据必须是 `sidecarTags`。
+     */
+    e.setItems([{
+      ...a, tags: ['a'], usage: '有人装可爱时', sidecar: true, sidecarTags: false,
+    }]);
+    e.gallery.sync({});
+    const row = e.gallery.list({}, {}).items[0];
+    assert.deepEqual(row.tags, ['AI 标过'], '标签要留着');
+    assert.equal(row.scenes, '有人装可爱时', '场合要跟着侧车');
+  } finally { e.cleanup(); }
+});
+
+test('彻底删除：文件、侧车、记录一起没，序号不再存在', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([a]);
+    e.gallery.sync({});
+    writeFileSync(`${a.path}.tags`, '猫\n', 'utf8');
+
+    const r = e.gallery.purge(1);
+    assert.equal(r.ok, true);
+    assert.equal(existsSync(a.path), false, '文件要删掉');
+    assert.equal(existsSync(`${a.path}.tags`), false, '侧车要一起删');
+    assert.equal(e.gallery.pathOf(1), '', '序号不该再解析出路径');
+    assert.equal(Object.keys(e.gallery.dump().items).length, 0, '记录也要删');
+  } finally { e.cleanup(); }
+});
+
+test('forgetPaths 只忘指定路径的记录：多根下同名的另一张不受影响', () => {
+  const e = env();
+  const rootB = join(e.dataDir, 'stickers-b');
+  mkdirSync(rootB, { recursive: true });
+  try {
+    const a = makeImage(e.root, '开心/1.png', 'AAA');
+    const b = makeImage(rootB, '开心/1.png', 'BBB');
+    e.setItems([a, b]);
+    e.gallery.sync({});
+    assert.equal(e.gallery.rows({}).length, 2);
+
+    /** 面板按绝对路径清理：`rel` 在多根配置下会重名，不能当键 */
+    assert.equal(e.gallery.forgetPaths([a.path]), 1);
+    const left = e.gallery.rows({});
+    assert.equal(left.length, 1);
+    assert.equal(left[0].path, b.path, '另一块盘上那张要留着');
+  } finally { e.cleanup(); }
+});
+
+/* ---------------- 缩略图缓存（面板生成，服务端只存发） ---------------- */
+
+test('缩略图：存完之后 rows 标 thumb，thumbPath 按序号取得到', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([a]);
+    e.gallery.sync({});
+
+    assert.equal(e.gallery.rows({})[0].thumb, false, '一开始没有');
+    assert.equal(e.gallery.thumbPath(1), null);
+
+    const r = e.gallery.saveThumb(1, Buffer.from('fake-jpeg-bytes'));
+    assert.equal(r.ok, true);
+    assert.equal(e.gallery.rows({})[0].thumb, true, '存完就要标出来，面板才走缓存');
+    assert.ok(existsSync(e.gallery.thumbPath(1)), '文件要真落盘');
+    assert.equal(e.gallery.thumbPath(1).endsWith('.jpg'), true);
+  } finally { e.cleanup(); }
+});
+
+test('缩略图：没有这张图 / 空内容都拒，不落盘', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([a]);
+    e.gallery.sync({});
+
+    assert.equal(e.gallery.saveThumb(999, Buffer.from('x')).ok, false, '序号不存在要拒');
+    assert.equal(e.gallery.saveThumb(1, Buffer.alloc(0)).ok, false, '空内容要拒');
+    assert.equal(e.gallery.rows({})[0].thumb, false);
+  } finally { e.cleanup(); }
+});
+
+test('缩略图：超过 400KB 拒收——前端压错了不该把数据目录塞满', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([a]);
+    e.gallery.sync({});
+    const big = Buffer.alloc(401 * 1024, 1);
+    const r = e.gallery.saveThumb(1, big);
+    assert.equal(r.ok, false);
+    assert.match(r.message, /太大/);
+    assert.equal(e.gallery.thumbPath(1), null);
+  } finally { e.cleanup(); }
+});
+
+test('缩略图：彻底删除和忘记录都会清缓存（不留孤儿文件）', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    const b = makeImage(e.root, 'b.png', 'BBB');
+    e.setItems([a, b]);
+    e.gallery.sync({});
+    e.gallery.saveThumb(1, Buffer.from('t1'));
+    e.gallery.saveThumb(2, Buffer.from('t2'));
+
+    e.gallery.purge(1);
+    assert.equal(e.gallery.thumbPath(1), null, '记录没了，缓存也得走');
+
+    e.gallery.forgetPaths([b.path]);
+    assert.equal(e.gallery.rows({}).length, 0);
+    /** 目录里不该剩任何 .jpg：键是内容哈希，记录一没就再也对不上了 */
+    const left = readdirSync(e.gallery.thumbDir).filter((f) => f.endsWith('.jpg'));
+    assert.deepEqual(left, []);
+  } finally { e.cleanup(); }
+});
+
+
+test('filePath 按序号取原图：rel 被快照污染成「未分类/…」也照样取得到', () => {
+  const e = env();
+  try {
+    /**
+     * 真实场景（2026-11-22 主人报障）：库里既有根目录的图，又有一个真名叫
+     * `未分类/` 的子目录。`stickers.snapshot()` 会把**根目录**那些图的
+     * `rel` 改写成 `未分类/海妖.png`（为了 `pick('未分类')` 能一起挑到），
+     * 但文件其实在根目录 —— 照 rel 取图就是 404，面板上显示成破图。
+     */
+    const a = makeImage(e.root, '海妖.png', 'AAA');
+    a.rel = '未分类/海妖.png';
+    a.cat = '未分类';
+    e.setItems([a]);
+    e.gallery.sync({});
+
+    const seq = e.gallery.rows({})[0].seq;
+    assert.equal(e.gallery.filePath(seq), a.path, '要按 path 取，不能按 rel');
+    assert.equal(existsSync(e.gallery.filePath(seq)), true);
+  } finally { e.cleanup(); }
+});
+
+test('filePath：序号不存在或文件已被删都返回 null，不给调用方一个假路径', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([a]);
+    e.gallery.sync({});
+    assert.equal(e.gallery.filePath(999), null);
+    /** 文件被外部删掉但还没 sync：照 null 处理，路由回 404 而不是 500 */
+    rmSync(a.path);
+    assert.equal(e.gallery.filePath(1), null);
+  } finally { e.cleanup(); }
+});
+
+test('孤儿缩略图：下次同步有新增图时被清掉，正常那张留着', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([a]);
+    e.gallery.sync({});
+    e.gallery.saveThumb(1, Buffer.from('t'));
+
+    /** 手塞一个对不上任何记录的（模拟索引重建 / 手改 index.json 留下的） */
+    writeFileSync(join(e.gallery.thumbDir, 'deadbeef.jpg'), 'x');
+
+    const b = makeImage(e.root, 'b.png', 'BBB');
+    e.setItems([a, b]);
+    e.gallery.sync({});
+
+    assert.equal(existsSync(join(e.gallery.thumbDir, 'deadbeef.jpg')), false, '孤儿要清');
+    assert.ok(existsSync(e.gallery.thumbPath(1)), '图还在，缩略图不能跟着没');
+  } finally { e.cleanup(); }
+});
+
+test('filePath：原路径变成一个同名目录时判「没有这张图」，不让读流出 EISDIR', () => {
+  const e = env();
+  try {
+    const a = makeImage(e.root, 'a.png', 'AAA');
+    e.setItems([a]);
+    e.gallery.sync({});
+
+    /** 用户手动改建 / 解压覆盖：`a.png` 现在是个目录 */
+    rmSync(a.path, { force: true });
+    mkdirSync(a.path, { recursive: true });
+
+    assert.equal(e.gallery.filePath(1), null);
+  } finally { e.cleanup(); }
+});
+
+test('pending 传 seqs 时照单执行：带描述、已停用的也跑', () => {
+  const e = env();
+  try {
+    e.setItems([
+      makeImage(e.root, 'a.png', 'A'),
+      makeImage(e.root, 'b.png', 'B'),
+      makeImage(e.root, 'c.png', 'C'),
+    ]);
+    e.gallery.sync({});
+    const rows = e.gallery.rows({});
+    const [a, b, c] = rows.map((r) => r.seq);
+
+    /** 给 a 写上描述 + 停用 b：这两种在增量/全量里都会被过滤，手选必须穿过 */
+    e.gallery.edit(a, { name: '猫猫', meaning: '一只猫' });
+    e.gallery.edit(b, { enabled: 0 });
+
+    const picked = e.gallery.pending({ seqs: [a, b] });
+    assert.deepEqual(picked.map((x) => x.seq), [a, b], '选中的要一张不少，且不被增量规则过滤');
+    assert.ok(!picked.some((x) => x.seq === c), '没选中的不能混进来');
+
+    /** 增量仍然只挑没描述的 */
+    const inc = e.gallery.pending({});
+    assert.ok(!inc.some((x) => x.seq === a), '增量不该再挑已有描述的');
+  } finally { e.cleanup(); }
+});
+
+test('pending 的 seqs 里混进垃圾值只忽略，不整批失败', () => {
+  const e = env();
+  try {
+    e.setItems([makeImage(e.root, 'a.png', 'A'), makeImage(e.root, 'b.png', 'B')]);
+    e.gallery.sync({});
+    const [a] = e.gallery.rows({}).map((r) => r.seq);
+    /** 前端可能传来字符串数字、0、负数、NaN，甚至非数组 */
+    const r1 = e.gallery.pending({ seqs: [String(a), 0, -1, 'x', null] });
+    assert.deepEqual(r1.map((x) => x.seq), [a], '只有真序号留下');
+    assert.equal(e.gallery.pending({ seqs: [] }).length, 2, '空数组 = 没指定，走增量');
+    assert.equal(e.gallery.pending({ seqs: 'nope' }).length, 2, '非数组也不该抛');
+  } finally { e.cleanup(); }
+});
+
+test('pending 的 seqs 里放回收站中的图：不收，免得拿没有语义的东西去烧调用', () => {
+  const e = env();
+  try {
+    e.setItems([makeImage(e.root, 'a.png', 'A'), makeImage(e.root, 'b.png', 'B')]);
+    e.gallery.sync({});
+    const [a, b] = e.gallery.rows({}).map((r) => r.seq);
+    e.gallery.remove(b);
+    const r = e.gallery.pending({ seqs: [a, b] });
+    assert.deepEqual(r.map((x) => x.seq), [a]);
   } finally { e.cleanup(); }
 });

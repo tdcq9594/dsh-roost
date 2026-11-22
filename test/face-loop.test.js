@@ -135,3 +135,31 @@ test('通道 send：试运行也要先编码（日志里的字数才是真会发
   /** 7 个字的表情标记编码后只剩 2 个码元；日志按编码后的长度报，才对得上实际发出去的内容 */
   assert.ok(logs.some((m) => m.includes('（2 字）')), `试运行日志应报编码后的长度，实际：${logs.join(' | ')}`);
 });
+
+// ── 夹小黄脸的提示词 ─────────────────────────────────────────
+//
+// 出站编码器（`encodeFaceTags`）早就能把 `【表情: 微笑】` 变成真表情，
+// 但提示词里从来没教过这个语法——功能一直是空转的。这一段补的就是那句话，
+// 所以测试要钉住「教了语法」和「举的例子全都发得出去」。
+
+test('小黄脸提示词：教了标记语法，且只给表里真有的名字', async () => {
+  const { faceHint, FACE_IDS, POPULAR_FACES } = await import('../src/face-table.js');
+  const hint = faceHint();
+  assert.ok(hint.includes('【表情:'), '必须出现那个标记的写法，否则模型学不会');
+  assert.ok(hint.includes('最多带一两个'), '要限次数，不然每句尾巴都挂一个');
+
+  /** 每个列出来的名字都得能编码，否则模型照着写会被整段删掉 */
+  const listed = POPULAR_FACES.filter((n) => hint.includes(n));
+  assert.ok(listed.length >= 20, `名单太短（${listed.length}）`);
+  for (const n of listed) {
+    assert.ok(Object.hasOwn(FACE_IDS, n), `${n} 不在码表里，写进提示词就是骗模型`);
+  }
+});
+
+test('小黄脸提示词：max 能收窄名单', async () => {
+  const { faceHint } = await import('../src/face-table.js');
+  const short = faceHint({ max: 3 });
+  const { POPULAR_FACES } = await import('../src/face-table.js');
+  const hit = POPULAR_FACES.filter((n) => short.includes(n));
+  assert.equal(hit.length, 3);
+});

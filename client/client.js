@@ -34,6 +34,14 @@ window.__ModuleLoader__.load({
     const inject = ['slots']
     const PANEL_ID = 'roost'
     const API = '/roost/api'
+    /**
+     * 超过这个大小才走「缩略图」那条路。
+     *
+     * 小图直接给浏览器，省一次 fetch + 重编码；大图（壁纸、长截图）一屏铺
+     * 二十张会把面板拖死——先降采样成 320px 宽的 JPEG 再显示，顺手存到
+     * 服务端，下次打开就是几十 KB。
+     */
+    const THUMB_MIN = 700 * 1024
     /** 首次创建工作区的默认名字；只影响「还叫目录名」的那些，用户改过的不动 */
     const DEFAULT_WORKSPACE_TITLE = 'Roost·QQ'
 
@@ -12977,7 +12985,7 @@ select.roost-input{color-scheme:dark}
         + 'avatar.anyPath 决定本机图片能不能超出数据目录（默认允许，关掉后只能用数据目录里的图当头像）；'
         + 'awareness.mood / silence 只影响她「知不知道」自己的状态，不触发动作；'
         + 'proactive.enabled 允许她在主动搭话那一轮顺手改，fields 决定能动哪几项'],
-      ['stickers', '表情包', '图放哪、要不要注入'],
+      ['stickers', '图库', '图放哪、要不要注入；线上那份留不留'],
       ['gallery', '图库', 'keepUploads：发图时往官方素材池传的那份留不留。'
         + '默认 true＝留着复用（同一张图第二次发不重传、不占新配额）；'
         + 'false＝用完即删，只在配额特别紧（多个插件共用一个机器人）时才值得'],
@@ -14326,6 +14334,72 @@ select.roost-input{color-scheme:dark}
      * `n` 是分节编号：留在「表达」页时它是 02（排在语音后面）；
      * 2026-11-13 拆成独立页之后它是 01（一页就这一节）。
      */
+    /**
+     * 小黄脸码表（FaceMap）。
+     *
+     * 这页存在的唯一理由：出站编码器早就支持 `【表情: 微笑】`，但用户不知道
+     * 有哪 108 个名字、也记不住拼法。点一下复制，粘进人格提示词就能用。
+     *
+     * 搜索框不是装饰：108 个名字平铺一屏，找「白眼」得扫半天。
+     */
+    function FaceMapCard({ toast, n = '03' }) {
+      const [data, setData] = useState(null)
+      const [q, setQ] = useState('')
+
+      useEffect(() => {
+        let dead = false
+        ;(async () => {
+          const r = await get('/faces')
+          if (!dead && r?.ok !== false) setData(r)
+        })()
+        return () => { dead = true }
+      }, [])
+
+      const items = data?.items || []
+      const kw = q.trim()
+      const shown = kw ? items.filter((x) => String(x.name).includes(kw)) : items
+
+      const copy = (name) => {
+        const text = `【表情: ${name}】`
+        try {
+          navigator.clipboard?.writeText(text)
+          toast(`已复制 ${text}`)
+        } catch {
+          toast(`复制失败，手动写 ${text}`)
+        }
+      }
+
+      return h(Sec, {
+        n,
+        title: '小黄脸码表',
+        right: h('input', {
+          className: 'roost-input', placeholder: '搜名字', value: q,
+          style: { width: 120, fontSize: 12 },
+          onChange: (e) => setQ(e.target.value),
+        }),
+      },
+        h('div', { className: 'roost-note' },
+          '正文里写 【表情: 微笑】 这种标记，发出去会变成真的 QQ 表情（四条发送路都会转）。点一下复制，粘进人格提示词就能让她用。'),
+        data === null
+          ? h('div', { className: 'roost-empty' }, '读取中…')
+          : shown.length === 0
+            ? h('div', { className: 'roost-empty' }, `没有叫「${kw}」的表情`)
+            : h('div', {
+              style: {
+                display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6,
+                maxHeight: 280, overflowY: 'auto', paddingRight: 4,
+              },
+            },
+              shown.map((x) => h('button', {
+                key: x.name,
+                type: 'button', className: 'roost-btn',
+                style: { fontSize: 12, padding: '2px 8px' },
+                title: `faceId ${x.id} · 点一下复制【表情: ${x.name}】`,
+                onClick: () => copy(x.name),
+              }, x.name))),
+      )
+    }
+
     function StickerDirsCard({ config, stickers, saveCfg, toast, reload, n = '02' }) {
       /** 服务端 → 编辑态。老服务端只回 `dir` 一个字符串，也要能显示 */
       const fromServer = (s) => {
@@ -14337,6 +14411,41 @@ select.roost-input{color-scheme:dark}
       const [dirty, setDirty] = useState(false)
       const [busy, setBusy] = useState(false)
       const [syncOpen, setSyncOpen] = useState(false)
+
+      /**
+       * 偷表情的配置（`stickers.steal`）：总开关、范围、每小时上限、顺手起名。
+       *
+       * `capDraft` 单独存一份字符串：数字框每敲一个字符就 saveCfg 会把
+       * 「20」→「2」的中间态也存进去，用户删完重打时等于一路在改配置。
+       * 改成失焦才算一次。
+       */
+      const steal = config?.stickers?.steal || {}
+      const [capDraft, setCapDraft] = useState(() => String(steal.maxPerHour ?? 20))
+      useEffect(() => { setCapDraft(String(steal.maxPerHour ?? 20)) }, [steal.maxPerHour])
+
+      /**
+       * 贴表情（`stickers.post`）。三个数字都先存草稿、失焦才提交：
+       * 「每天最多 3 次」里那个 3 改成 30 的过程中会经过「空 → 3 → 30」，
+       * 每次按键都 saveCfg 等于在配置里跳一遍。
+       *
+       * 概率在界面上用百分比（25），存进配置是 0.25——用户不该看到小数。
+       */
+      /**
+       * 名字刻意不叫 `post`：外层有个同名的请求函数（`post(path, body)`），
+       * 这里再叫 `post` 会遮蔽它——以后在这个组件里加一个保存动作，
+       * 报的错会是「post is not a function」，而且看着完全不像变量遮蔽。
+       */
+      const postCfg = config?.stickers?.post || {}
+      const postDraftOf = (p) => ({
+        maxPerDay: String(p.maxPerDay ?? 3),
+        chance: String(Math.round((Number(p.chance) || 0) * 100)),
+        minGapMinutes: String(p.minGapMinutes ?? 90),
+      })
+      const [postDraft, setPostDraft] = useState(() => postDraftOf(postCfg))
+      useEffect(
+        () => { setPostDraft(postDraftOf(config?.stickers?.post || {})) },
+        [postCfg.maxPerDay, postCfg.chance, postCfg.minGapMinutes],
+      )
 
       /** 「未分类」里有多少张：同步进来的图都先落这儿，提醒用户自己分类 */
       const uncat = (stickers?.categories || []).find((c) => c.name === '未分类')
@@ -14408,7 +14517,7 @@ select.roost-input{color-scheme:dark}
       return h('div', null,
         h(Sec, {
         n,
-        title: '表情包',
+        title: '表情包目录',
         right: h('div', { style: { display: 'flex', gap: 10, alignItems: 'center' } },
           h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 } },
             h(Switch, {
@@ -14480,6 +14589,156 @@ select.roost-input{color-scheme:dark}
             onClick: () => setSyncOpen(true),
           }, '同步缓存图'),
         ),
+        /**
+         * 偷表情：聊天里别人发的图自动收进「未分类」。
+         *
+         * 放在这一页而不是图库页：它和「目录」是同一件事——都在决定
+         * **库里的图从哪来**。图库页管「已有的图怎么整理」，这页管「怎么进来」。
+         *
+         * 原料就是「同步缓存图」看到的那个 `images/` 目录：图本来就会为
+         * 「让模型看一眼」下到那里，这里只是多一步「顺手复制进库」。
+         */
+        h('div', {
+          className: 'roost-note',
+          style: {
+            marginTop: 10, paddingTop: 10,
+            borderTop: '1px solid rgba(128,128,128,.18)',
+            display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
+          },
+        },
+          h(Switch, {
+            on: steal.enabled !== false,
+            label: '偷表情',
+            onToggle: async (on) => {
+              const r = await saveCfg({ stickers: { steal: { enabled: on } } })
+              toast(r?.ok === false ? (r.message || '没改成') : (on ? '开始偷表情了' : '已停止偷表情'))
+            },
+          }),
+          h('strong', null, '偷表情'),
+          h('select', {
+            className: 'roost-input',
+            style: { width: 'auto', fontSize: 12 },
+            value: steal.scope || 'all',
+            onChange: async (e) => {
+              const v = e.target.value
+              const r = await saveCfg({ stickers: { steal: { scope: v } } })
+              toast(r?.ok === false
+                ? (r.message || '没改成')
+                : (v === 'all' ? '群和私聊都收' : v === 'private' ? '只在私聊收' : '只在群里收'))
+            },
+          },
+            h('option', { value: 'all' }, '群和私聊'),
+            h('option', { value: 'private' }, '只私聊'),
+            h('option', { value: 'group' }, '只在群'),
+          ),
+          h('span', { style: { fontSize: 12 } }, '每小时最多'),
+          h('input', {
+            className: 'roost-input', type: 'number', min: 1, max: 200,
+            value: capDraft,
+            style: { width: 64, fontSize: 12 },
+            onChange: (e) => setCapDraft(e.target.value),
+            onBlur: async () => {
+              const n = Math.max(1, Math.min(200, Number(capDraft) || 20))
+              setCapDraft(String(n))
+              if (n === Number(steal.maxPerHour ?? 20)) return
+              const r = await saveCfg({ stickers: { steal: { maxPerHour: n } } })
+              toast(r?.ok === false ? (r.message || '没存上') : `每小时最多收 ${n} 张`)
+            },
+          }),
+          h('span', { style: { fontSize: 12 } }, '张'),
+          h('label', {
+            style: { display: 'flex', gap: 4, alignItems: 'center', fontSize: 12, cursor: 'pointer' },
+            title: '收进来就让她起名。每张一次模型调用，和上面的每小时上限是同一个数。',
+          },
+            h('input', {
+              type: 'checkbox',
+              checked: steal.autoOrganize === true,
+              onChange: async (e) => {
+                const on = e.target.checked
+                const r = await saveCfg({ stickers: { steal: { autoOrganize: on } } })
+                toast(r?.ok === false
+                  ? (r.message || '没存上')
+                  : (on ? '收进来就起名（每张一次模型调用）' : '收进来先堆着，你自己点整理'))
+              },
+            }),
+            '顺手让 AI 起名'),
+        ),
+        h('div', { className: 'roost-note', style: { marginTop: 4 } },
+          '只收当前这条消息里对方主动发的图，按尺寸挑（边长 1024 以内、长宽比 1.8 以内，5KB~1MB），'
+          + '能切掉截图和壁纸。收进来的图落在「未分类」，文件名以「偷_」开头，侧车记着是哪个会话。'),
+        h('div', { className: 'roost-note', style: { marginTop: 2 } },
+          '前提：她得先「看图」才会把图下到本地——「接入」页的图片上限设成 0，偷表情就一张也收不到。'),
+        /**
+         * 贴表情：她主动发一张图。
+         *
+         * 这是唯一「没人问她、她自己往外发图」的行为，所以默认关、只发私聊。
+         * 三个数字都用草稿 + 失焦提交，理由见上面 `postDraft` 的注释。
+         */
+        h('div', {
+          className: 'roost-note',
+          style: {
+            marginTop: 10, paddingTop: 10,
+            borderTop: '1px solid rgba(128,128,128,.18)',
+            display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+          },
+        },
+          h(Switch, {
+            on: postCfg.enabled === true,
+            label: '贴表情',
+            onToggle: async (on) => {
+              const r = await saveCfg({ stickers: { post: { enabled: on } } })
+              toast(r?.ok === false ? (r.message || '没改成') : (on ? '她会主动贴图了（只发私聊）' : '已停止贴表情'))
+            },
+          }),
+          h('strong', null, '贴表情'),
+          h('span', { style: { fontSize: 12 } }, '每天'),
+          h('input', {
+            className: 'roost-input', type: 'number', min: 1, max: 20,
+            value: postDraft.maxPerDay,
+            style: { width: 56, fontSize: 12 },
+            onChange: (e) => setPostDraft({ ...postDraft, maxPerDay: e.target.value }),
+            onBlur: async () => {
+              const n = Math.max(1, Math.min(20, Number(postDraft.maxPerDay) || 3))
+              setPostDraft((d) => ({ ...d, maxPerDay: String(n) }))
+              if (n === Number(postCfg.maxPerDay ?? 3)) return
+              const r = await saveCfg({ stickers: { post: { maxPerDay: n } } })
+              toast(r?.ok === false ? (r.message || '没存上') : `每天最多贴 ${n} 次`)
+            },
+          }),
+          h('span', { style: { fontSize: 12 } }, '次 · 命中'),
+          h('input', {
+            className: 'roost-input', type: 'number', min: 1, max: 100,
+            value: postDraft.chance,
+            style: { width: 56, fontSize: 12 },
+            onChange: (e) => setPostDraft({ ...postDraft, chance: e.target.value }),
+            onBlur: async () => {
+              const n = Math.max(1, Math.min(100, Number(postDraft.chance) || 25))
+              setPostDraft((d) => ({ ...d, chance: String(n) }))
+              if (n === Math.round((Number(postCfg.chance) || 0) * 100)) return
+              const r = await saveCfg({ stickers: { post: { chance: n / 100 } } })
+              toast(r?.ok === false ? (r.message || '没存上') : `每次命中 ${n}%`)
+            },
+          }),
+          h('span', { style: { fontSize: 12 } }, '% · 至少隔'),
+          h('input', {
+            className: 'roost-input', type: 'number', min: 5, max: 1440,
+            value: postDraft.minGapMinutes,
+            style: { width: 64, fontSize: 12 },
+            onChange: (e) => setPostDraft({ ...postDraft, minGapMinutes: e.target.value }),
+            onBlur: async () => {
+              const n = Math.max(5, Math.min(1440, Number(postDraft.minGapMinutes) || 90))
+              setPostDraft((d) => ({ ...d, minGapMinutes: String(n) }))
+              if (n === Number(postCfg.minGapMinutes ?? 90)) return
+              const r = await saveCfg({ stickers: { post: { minGapMinutes: n } } })
+              toast(r?.ok === false ? (r.message || '没存上') : `两次至少隔 ${n} 分钟`)
+            },
+          }),
+          h('span', { style: { fontSize: 12 } }, '分钟'),
+        ),
+        h('div', { className: 'roost-note', style: { marginTop: 4 } },
+          postCfg.enabled === true && !config?.speakUp?.chatId
+            ? '还差一步：这个开关只往「主人私聊」发，去「主动搭话」里填上 chatId，否则一张也发不出去。'
+            : '只发私聊（和主动搭话同一个会话），群里不会主动贴；9~23 点之外不贴（要改时段去 config.json 的 stickers.post.awakeFrom），心情差时概率打折。贴的都是「已经有名字或描述」的图。'),
         /**
          * 「未分类」里的图是同步进来的，没有语义标签——模型只认分类名。
          * 所以这行不是装饰，是提醒：不分类的话它们基本用不上。
@@ -16425,285 +16684,328 @@ select.roost-input{color-scheme:dark}
      * tab key `express` 保持不变，老 `localStorage['roost.tab']` 照样落在语音这页。
      */
     /**
-     * 5.12 表情库管理：分页浏览、改标签、规则补标签、多选批删、上传。
+     * 图库：**一个入口，三个分区**。
      *
-     * 为什么单独一张卡而不是塞进 `StickerDirsCard`：那张卡回答「图从哪来」，
-     * 这张回答「库里都有什么、怎么整理」。混在一起会让「改个路径」和
-     * 「删二十张图」挤在同一屏，误触成本太高。
+     * 合并前这里是三块卡：「表情库」（按文件列，上传 / 批删 / 补标签）、
+     * 「图库」（按序号列，回收站 / 固定 / 让 AI 整理）、「官方素材池」（线上层）。
+     * 同一批图三个页面、两套删除语义、两套标注入口——用户得记住「改标签去 A 页、
+     * 改名字去 B 页」，而模型那边还同时收到两套互斥的发图写法。
      *
-     * 删除是本页唯一不可逆的动作，所以：勾选 → 二次确认弹窗列清单 →
-     * 才发请求。没有「一键清空」这种按钮。
+     * 现在只剩这一个组件，三个分区：
+     *
+     *   · **图片**：序号 + 文件名 + 描述。上传、补标签、让 AI 整理、改标注、
+     *     停用、固定、多选撤下，全在这一屏；
+     *   · **线上**：官方素材池。发过的图默认留一份，第二次发不重传；
+     *   · **回收站**：撤下的图。能恢复，也能彻底删除（真删文件）。
+     *
+     * **能力一件没少**：每个按钮还是原来那个接口，只是换了位置。删除语义收敛成
+     * 一条线——图片区「撤下」进回收站（可恢复），回收站「彻底删除」才真删文件。
      */
-    function StickerManageCard({ toast, n = '02' }) {
-      const [data, setData] = useState(null)
-      const [page, setPage] = useState(1)
-      const [size, setSize] = useState(24)
-      const [cat, setCat] = useState('')
-      const [q, setQ] = useState('')
-      const [picked, setPicked] = useState([])
-      const [busy, setBusy] = useState(false)
-      const [job, setJob] = useState(null)
-      const [tagFor, setTagFor] = useState('')
-      const [tagDraft, setTagDraft] = useState('')
-
-      const load = useCallback(async (p = page) => {
-        const qs = new URLSearchParams({ page: String(p), size: String(size) })
-        if (cat) qs.set('category', cat)
-        if (q.trim()) qs.set('q', q.trim())
-        const r = await get('/stickers/manage?' + qs.toString())
-        if (r.ok === false) return toast(r.message || '读不到表情库')
-        setData(r)
-        setPicked([])
-      }, [page, size, cat, q])
-
-      useEffect(() => { load(page) }, [page, size, cat])
-
-      /** 补标签进度：任务在跑时每 400ms 问一次，跑完停 */
-      useEffect(() => {
-        if (!job?.running) return undefined
-        const t = setInterval(async () => {
-          const r = await get('/stickers/tags/job')
-          if (r?.job) {
-            setJob(r.job)
-            if (!r.job.running) {
-              toast(`补标签完成：${r.job.done} 张，失败 ${r.job.failed} 张`)
-              load(1)
-            }
-          }
-        }, 400)
-        return () => clearInterval(t)
-      }, [job?.running])
-
-      const fill = async (all) => {
-        setBusy(true)
-        const r = await post('/stickers/tags/fill', { all })
-        setBusy(false)
-        if (r.ok === false) return toast(r.message || '启动失败')
-        if (!r.total) return toast(r.message || '都已有标签')
-        setJob({ running: true, total: r.total, done: 0, percent: 0, failed: 0 })
-        toast(`开始补 ${r.total} 张`)
-      }
-
-      const cancelJob = async () => {
-        const r = await post('/stickers/tags/cancel', {})
-        setJob(r.job || null)
-        toast(r.message || '已取消')
-        load(page)
-      }
-
-      const saveTags = async (file) => {
-        const tags = tagDraft.split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean)
-        const r = await post('/stickers/tags', { file, tags })
-        if (r.ok === false) return toast(r.message || '没存上')
-        setTagFor('')
-        toast('标签已更新')
-        load(page)
-      }
-
-      const remove = async () => {
-        if (!picked.length) return toast('先勾几张')
-        /** 不可逆动作：说清张数再确认，别只问「确定吗」 */
-        if (!window.confirm(`要删除 ${picked.length} 张图吗？\n\n这会直接删掉文件（连同 .tags 标签文件），没有回收站。`)) return
-        setBusy(true)
-        const r = await post('/stickers/delete', { files: picked, confirm: true })
-        setBusy(false)
-        toast(r.message || (r.ok ? '已删除' : '没删成'))
-        load(1)
-      }
-
-      const upload = async (fileList) => {
-        const f = fileList?.[0]
-        if (!f) return
-        if (f.size > 10 * 1024 * 1024) return toast('单张最多 10MB')
-        setBusy(true)
-        const data64 = await new Promise((resolve, reject) => {
-          const fr = new FileReader()
-          fr.onload = () => resolve(String(fr.result || ''))
-          fr.onerror = () => reject(new Error('读不了这个文件'))
-          fr.readAsDataURL(f)
-        }).catch((e) => { toast(e.message); return '' })
-        if (!data64) { setBusy(false); return }
-        const r = await post('/stickers/upload', { name: f.name, data: data64, category: cat })
-        setBusy(false)
-        toast(r.message || (r.ok ? '已上传' : '没传上去'))
-        if (r.ok) load(1)
-      }
-
-      const toggle = (rel) => setPicked((cur) => (cur.includes(rel) ? cur.filter((x) => x !== rel) : [...cur, rel]))
-      const fmt = (n) => {
-        const v = Number(n) || 0
-        if (v < 1024) return `${v} B`
-        if (v < 1024 * 1024) return `${(v / 1024).toFixed(0)} KB`
-        return `${(v / 1024 / 1024).toFixed(1)} MB`
-      }
-
-      /** `data` 在但 `stats` 缺（老服务端/中间层返回 {}）时别整页崩进 RenderBoundary */
-      const stats = data?.stats || {}
-      return h(Sec, {
-        n, title: '表情库',
-        right: h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-          h('label', { className: 'roost-btn', style: { cursor: 'pointer' } },
-            busy ? '处理中…' : '上传一张',
-            h('input', {
-              type: 'file', accept: 'image/*', style: { display: 'none' },
-              onChange: (e) => { upload(e.target.files); e.target.value = '' },
-            })),
-          h('button', {
-            type: 'button', className: 'roost-btn', disabled: busy || job?.running,
-            onClick: () => fill(false),
-          }, '补标签'),
-          h('button', {
-            type: 'button', className: 'roost-btn', disabled: busy || !picked.length,
-            onClick: remove,
-          }, picked.length ? `删除 ${picked.length} 张` : '删除')),
-      },
-        !data
-          ? h('div', { className: 'roost-empty' }, '读着…')
-          : h('div', null,
-            h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-              `共 ${stats.total} 张（${fmt(stats.bytes)}）· 已打标签 ${stats.tagged} · 未打 ${stats.untagged}`,
-              (data.missing || []).length ? ` · ${data.missing.length} 个目录打不开` : ''),
-
-            job?.running
-              ? h('div', { style: { marginBottom: 8 } },
-                h('div', { className: 'roost-note', style: { fontSize: 11.5, marginBottom: 4 } },
-                  `补标签中 ${job.done} / ${job.total}（${job.percent}%）`),
-                h('div', { style: { height: 6, borderRadius: 3, background: 'rgba(128,128,128,.2)' } },
-                  h('div', {
-                    style: {
-                      height: '100%', borderRadius: 3, width: `${job.percent}%`,
-                      background: 'var(--ok, #2a9d5c)', transition: 'width .3s',
-                    },
-                  })),
-                h('button', { type: 'button', className: 'roost-btn', style: { marginTop: 6 }, onClick: cancelJob }, '停下'))
-              : null,
-
-            h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' } },
-              h('select', {
-                className: 'roost-input', style: { width: 'auto' }, value: cat,
-                onChange: (e) => { setCat(e.target.value); setPage(1) },
-              },
-                h('option', { value: '' }, '全部分类'),
-                (data.categories || []).map((c) => h('option', { key: c.name, value: c.name }, `${c.name}（${c.count}）`))),
-              h('input', {
-                className: 'roost-input', style: { width: 160 }, placeholder: '搜文件名 / 标签', value: q,
-                onChange: (e) => setQ(e.target.value),
-                onKeyDown: (e) => { if (e.key === 'Enter') { setPage(1); load(1) } },
-              }),
-              h('button', { type: 'button', className: 'roost-btn', onClick: () => { setPage(1); load(1) } }, '搜'),
-              h('select', {
-                className: 'roost-input', style: { width: 'auto' }, value: size,
-                onChange: (e) => { setSize(Number(e.target.value)); setPage(1) },
-              }, [12, 24, 48, 96].map((v) => h('option', { key: v, value: v }, `每页 ${v}`))),
-              h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
-                `第 ${data.page} / ${data.pages} 页 · 显示 ${data.items.length} / ${data.total}`)),
-
-            data.items.length === 0
-              ? h('div', { className: 'roost-empty' }, '这个筛选下没有图')
-              : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(120px,1fr))', gap: 8 } },
-                data.items.map((it) => {
-                  const rel = it.rel || it.file
-                  const on = picked.includes(rel)
-                  return h('div', {
-                    key: rel,
-                    style: {
-                      border: `1px solid ${on ? 'var(--ok, #2a9d5c)' : 'rgba(128,128,128,.25)'}`,
-                      borderRadius: 8, padding: 6, fontSize: 11,
-                      background: on ? 'rgba(42,157,92,.08)' : 'transparent',
-                    },
-                  },
-                    h('div', { style: { position: 'relative' } },
-                      h('img', {
-                        /** 走 API 前缀 + 相对路径：`locate()` 会在服务端再校验一次越界 */
-                        src: API + '/stickers/file?path=' + encodeURIComponent(rel),
-                        alt: it.file, loading: 'lazy',
-                        style: { width: '100%', height: 80, objectFit: 'contain', borderRadius: 4, background: 'rgba(128,128,128,.08)' },
-                      }),
-                      h('input', {
-                        type: 'checkbox', checked: on, onChange: () => toggle(rel),
-                        style: { position: 'absolute', top: 2, left: 2 },
-                      })),
-                    h('div', {
-                      title: it.file,
-                      style: { marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-                    }, it.file),
-                    h('div', { className: 'roost-muted', style: { fontSize: 10.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                      (it.tags || []).join(' / ') || '没标签'),
-                    h('div', { style: { display: 'flex', gap: 4, marginTop: 4 } },
-                      h('button', {
-                        type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
-                        onClick: () => { setTagFor(tagFor === rel ? '' : rel); setTagDraft((it.tags || []).join(', ')) },
-                      }, tagFor === rel ? '取消' : '改标签'),
-                      h('span', { className: 'roost-muted', style: { fontSize: 10, marginLeft: 'auto' } }, fmt(it.size))),
-                    tagFor === rel
-                      ? h('div', { style: { marginTop: 4 } },
-                        h('input', {
-                          className: 'roost-input', value: tagDraft, placeholder: '开心, 猫',
-                          style: { fontSize: 11, padding: '2px 4px' },
-                          onChange: (e) => setTagDraft(e.target.value),
-                          onKeyDown: (e) => { if (e.key === 'Enter') saveTags(rel) },
-                        }),
-                        h('button', {
-                          type: 'button', className: 'roost-btn roost-btn-primary',
-                          style: { fontSize: 10.5, marginTop: 3, padding: '1px 6px' },
-                          onClick: () => saveTags(rel),
-                        }, '存'))
-                      : null,
-                  )
-                })),
-
-            h('div', { style: { display: 'flex', gap: 6, marginTop: 10, alignItems: 'center' } },
-              h('button', {
-                type: 'button', className: 'roost-btn', disabled: data.page <= 1,
-                onClick: () => setPage(data.page - 1),
-              }, '上一页'),
-              h('button', {
-                type: 'button', className: 'roost-btn', disabled: data.page >= data.pages,
-                onClick: () => setPage(data.page + 1),
-              }, '下一页'),
-              data.items.length
-                ? h('button', {
-                  type: 'button', className: 'roost-btn', style: { marginLeft: 'auto' },
-                  onClick: () => setPicked(picked.length === data.items.length ? [] : data.items.map((x) => x.rel || x.file)),
-                }, picked.length === data.items.length ? '取消全选' : '全选本页')
-                : null),
-          ),
+    function GalleryPage({ toast, config, saveCfg }) {
+      const [view, setView] = useState('pics')
+      const tabs = [['pics', '图片'], ['online', '线上'], ['trash', '回收站']]
+      const hint = view === 'online'
+        ? '官方图床那份：发过的图默认留一份，第二次发不用重传；配额满了按「最久没动过」淘汰，固定的不碰。'
+        : view === 'trash'
+          ? '撤下的图文件还在，点「恢复」就能回来；「彻底删除」才会真删文件，恢复不了。'
+          : '她发图只写序号，路径由宿主去换。上传、改标注、补标签、固定、停用都在这儿。'
+      return h('div', null,
+        h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 } },
+          tabs.map(([k, label]) => h('button', {
+            key: k,
+            type: 'button',
+            className: 'roost-btn' + (view === k ? ' roost-btn-primary' : ''),
+            onClick: () => setView(k),
+          }, label)),
+          h('span', { className: 'roost-note', style: { margin: 0, flex: '1 1 220px' } }, hint)),
+        view === 'online'
+          ? h(MediaPoolCard, { toast, n: '02' })
+          /**
+           * `key={view}`：换分区 = 换一份清单，页码 / 搜索 / 分类 / 勾选全部归零。
+           *
+           * 不加 key 的话组件实例会被复用：在图片区翻到第 3 页再点回收站，
+           * 请求带的是 `page=3`，而回收站可能只有 1 页——`pageOf` 会把页码夹回去，
+           * 但中间那一瞬是「回收站是空的」，看着就像没内容。更烦的是搜索词和
+           * 分类筛选会跨区带过去，回收站里搜不到东西也说不清为什么。
+           */
+          : h(GalleryCard, { key: view, toast, n: '02', view, config, saveCfg }),
       )
     }
 
     /**
-     * 图库：AI 用的那份「带序号的图」。
+     * 图库里「一屏图」的那块（图片 / 回收站共用，`view` 决定看哪边）。
      *
-     * 和上面「表情库」的区别要一眼看出来：那张按**文件**列（用户找图、改标签、
-     * 删文件），这张按**序号**列（AI 认得出哪张、认不出哪张）。所以这里最要紧的
-     * 三样是：`#序号`、有没有描述、以及「让 AI 整理」那个按钮。
+     * 按**序号**列：序号是模型唯一要抄的东西，也是它认得出哪张、认不出哪张的
+     * 依据。所以最要紧的三样是 `#序号`、有没有描述、以及「让 AI 整理」那个按钮。
      *
      * 「让 AI 整理」是**增量**的：只挑 `name` 和 `meaning` 都为空的图去问模型。
      * 几百张全跑一遍是几百次视觉调用，第一次点可能要等，第二次点应该秒完成。
      * 所以按钮文案要诚实说明「每张问一次模型」——不然用户会以为卡住了。
      */
-    function GalleryCard({ toast, n = '03' }) {
+    function GalleryCard({ toast, n = '02', view = 'pics', config, saveCfg }) {
       const [data, setData] = useState(null)
       const [page, setPage] = useState(1)
+      /** 每页几张：原来「表情库」那张卡有 12/24/48/96，合并后保留 */
+      const [size, setSize] = useState(24)
       const [cat, setCat] = useState('')
       const [q, setQ] = useState('')
-      const [trash, setTrash] = useState(false)
+      /**
+       * 回收站不再是一个页内 checkbox，而是外层分区（`view === 'trash'`）。
+       *
+       * 以前「表情库」和「图库」是两页，各有各的删除语义（真删文件 / 进回收站）；
+       * 合成一页之后只剩一套：图片区「撤下」= 进回收站，回收站里「彻底删除」
+       * 才真删文件。同一个东西只有一个删除入口，误触成本才降得下来。
+       */
+      const trash = view === 'trash'
       const [busy, setBusy] = useState(false)
       const [job, setJob] = useState(null)
+      /**
+       * 「全部重做」：连已经有名字/描述的一起重跑。
+       *
+       * 为什么需要它：整理是增量的，只挑「name 和 meaning 都为空」的图。
+       * 但描述写歪了、标签全是文件名拆出来的词、换了更会看图的模型——
+       * 这些情况下增量永远够不着那张图，用户只能一张张手改。
+       */
+      const [redoAll, setRedoAll] = useState(false)
       const [editFor, setEditFor] = useState(0)
       const [draft, setDraft] = useState({})
+      /** 多选：存序号（撤下 / 彻底删除都按序号提交，不走相对路径） */
+      const [picked, setPicked] = useState([])
+      /**
+       * 批量模式。
+       *
+       * 原来是每张图左下角一个小复选框——缩略图只有 140px 宽，那个框既难点
+       * （14px 见方）又和「停用 / 固定」角标挤在一起，手机上基本点不中。
+       * 改成显式开关：打开之后整张卡片就是目标，点哪儿都算选中；同时把
+       * 「改 / 停用 / 固定 / 撤下」这些单张按钮藏起来——批量的时候它们
+       * 只会被误触，用户已经用不到「这一张」的语义了。
+       */
+      const [selecting, setSelecting] = useState(false)
+      /** 批量改名弹层：统一改名字前缀 / 标签，名字可自动加序号 */
+      const [bulk, setBulk] = useState(null)
+      /** 补标签任务（规则补全，沿用 `/stickers/tags/job` 那条通道） */
+      const [tagJob, setTagJob] = useState(null)
+      /**
+       * 缩略图：`seq → objectURL`（本次会话现生成的那份）。
+       *
+       * 服务端已经有缓存的不进这里，直接用 `/gallery/thumb?seq=N`（长缓存）。
+       * 这里存的是「刚用 canvas 压出来的」，它的价值在于**当场就能显示**，
+       * 不用等回传落盘再取一遍。
+       */
+      const [thumbs, setThumbs] = useState({})
+      /**
+       * `thumbs` 的同步镜像。
+       *
+       * `load()` 里要「把不在新一页的 objectURL 释放掉」，但它在 `useCallback`
+       * 里，闭包拿到的 `thumbs` 可能是旧的。**不能**把释放写进 `setThumbs`
+       * 的 updater——updater 必须是纯函数（严格模式下会跑两遍），revoke 这种
+       * 副作用放进去等于赌「重复调用无害」。所以用一个 ref 跟着 state 走。
+       */
+      const thumbsRef = useRef({})
+      /** state 是唯一真相，ref 每次渲染后跟一份（见上面的说明） */
+      useEffect(() => { thumbsRef.current = thumbs }, [thumbs])
+      /**
+       * 已经排进生成队列的序号。
+       *
+       * `data` 一变（翻页、同步、随便刷一下）下面的 effect 就会重跑，
+       * 没有这个集合会把同一张大图反复解码——那是整页最贵的一步。
+       */
+      const thumbQueued = useRef(new Set())
+      /**
+       * 「起名用的模型」下拉的候选清单。`null` = 还在读（要逐个 provider 问
+       * 能力，慢），`[]` = 读不到——面板退回「跟随聊天模型」一项。
+       */
+      const [models, setModels] = useState(null)
+      /** 上传时统一填的名字（只对单张有效；多张时各用各的原文件名） */
+      const [newName, setNewName] = useState('')
+
+      /**
+       * 整理进度里「上次看到第几张」。
+       *
+       * aurabot 每跑 5 张就把列表刷一次（新起的名字能早点看到）。这里也这么干，
+       * 但只在 `running` 期间——跑完那一次由 `load(1)` 负责，别重复请求。
+       */
+      const seenDone = useRef(0)
 
       const load = useCallback(async (p = page) => {
-        const qs = new URLSearchParams({ page: String(p), size: '24' })
+        const qs = new URLSearchParams({ page: String(p), size: String(size) })
         if (cat) qs.set('category', cat)
         if (q.trim()) qs.set('q', q.trim())
         if (trash) qs.set('trash', '1')
         const r = await get('/gallery?' + qs.toString())
         if (r.ok === false) return toast(r.message || '读不到图库')
         setData(r)
-      }, [page, cat, q, trash])
+        /** 翻页 / 换筛选之后旧的勾选不该留着：那张已经不在这一页了 */
+        setPicked([])
+        /**
+         * 上一批「现压的 objectURL」已经没有任何 `<img>` 引用了。不 revoke 就是
+         * 只增不减的内存（几百张虽只几 MB，但永远不还）。
+         *
+         * 顺手把它们从「已排队」里放掉：如果那一张其实**没回传成功**（宿主没重启、
+         * 写入失败），回到这一页时才会重新压一次；回传成功的那些 `it.thumb` 已经是
+         * true，不会再进队列，不会白跑。
+         *
+         * 释放写在 updater **外面**：updater 要能被重复调用（严格模式会跑两遍），
+         * 里面做 revoke 就是赌「重复释放无害」。
+         */
+        const prev = thumbsRef.current || {}
+        const keep = new Set(r.items.map((x) => Number(x.seq)))
+        const next = {}
+        for (const [k, v] of Object.entries(prev)) {
+          if (keep.has(Number(k))) {
+            next[k] = v
+            continue
+          }
+          if (String(v).startsWith('blob:')) {
+            try { URL.revokeObjectURL(v) } catch { /* 已经释放过 */ }
+          }
+          thumbQueued.current.delete(Number(k))
+        }
+        thumbsRef.current = next
+        setThumbs(next)
+      }, [page, size, cat, q, trash])
 
-      useEffect(() => { load(page) }, [page, cat, trash])
+      useEffect(() => { load(page) }, [page, size, cat, q, trash])
+
+      /**
+       * 面板刚打开时接上宿主里还在跑的后台任务。
+       *
+       * 对齐 aurabot 的 `caption-status` 初次查询：整理 / 补标签都是宿主侧的
+       * 后台任务，用户关掉面板再打开时它们可能才跑到一半。不查这一次的话，
+       * 按钮看起来「还能再点」（点了 409），进度条和失败原因也全丢了。
+       */
+      useEffect(() => {
+        let live = true
+        get('/gallery/organize/job').then((r) => {
+          if (live && r?.job?.running) {
+            seenDone.current = Number(r.job.done) || 0
+            setJob(r.job)
+          }
+        }).catch(() => {})
+        get('/stickers/tags/job').then((r) => {
+          if (live && r?.job?.running) setTagJob(r.job)
+        }).catch(() => {})
+        return () => { live = false }
+      }, [])
+
+      /**
+       * 「起名用的模型」的候选清单。
+       *
+       * 走 `model.list`（和「模型」页同一份缓存）：它要逐个 provider 问能力，
+       * 慢但不常变。只在图片区拉一次，回收站里用不到。
+       */
+      useEffect(() => {
+        if (view !== 'pics') return undefined
+        let live = true
+        post('/quick', { op: 'model.list', arg: {}, chatId: '' })
+          .then((r) => {
+            if (!live) return
+            setModels(r && r.ok !== false && Array.isArray(r.list) ? r.list : [])
+          })
+          .catch(() => { if (live) setModels([]) })
+        return () => { live = false }
+      }, [view])
+
+      /**
+       * 把一张大图压成 320px 宽的 JPEG，回传服务端，返回本次会话可用的 URL。
+       *
+       * `createImageBitmap(blob, { resizeWidth })` 是**解码阶段降采样**：
+       * 5120×2880 的 PNG 不会先铺成 59MB 的位图再缩，内存和耗时都是零头。
+       * 少数浏览器不认这个参数，退回整幅解码——也就是原来的行为，不更糟。
+       */
+      const makeThumb = async (it) => {
+        /**
+         * 取原图优先走新接口（按序号，稳）。
+         *
+         * 退回旧接口是为了**面板热更新、宿主还没重启**那段时间：新路由在旧进程里
+         * 不存在，会 404，而面板脚本是每次从磁盘读的，用户刷新就拿到了新脚本。
+         * 不兜底的话表现是「大图全是占位，点也点不开」，比改之前还差。
+         */
+        let res = await fetch(API + '/gallery/file?seq=' + encodeURIComponent(it.seq))
+        if (!res.ok) {
+          res = await fetch(API + '/stickers/file?path=' + encodeURIComponent(it.rel || it.file))
+        }
+        if (!res.ok) throw new Error('取不到原图')
+        const blob = await res.blob()
+        let bmp
+        try {
+          bmp = await createImageBitmap(blob, { resizeWidth: 320, resizeQuality: 'low' })
+        } catch {
+          bmp = await createImageBitmap(blob)
+        }
+        const canvas = document.createElement('canvas')
+        /**
+         * 长截图（`320×12000` 那种）只限宽不行：`resizeWidth: 320` 出来还是
+         * 一条 12000px 高的位图，`toBlob` 出来几百 KB，直接被宿主 400KB 拒收，
+         * 于是每次打开面板都白压一遍。等比塞进 320×1280 的框里。
+         */
+        const scale = Math.min(1, 320 / bmp.width, 1280 / bmp.height)
+        canvas.width = Math.max(1, Math.round(bmp.width * scale))
+        canvas.height = Math.max(1, Math.round(bmp.height * scale))
+        const ctx = canvas.getContext('2d')
+        /**
+         * JPEG 没有透明通道。表情包大半是透明 PNG，直接画到空白 canvas 上
+         * 再压 JPEG，透明区会变成黑块（看起来像图坏了）。先铺白底。
+         */
+        ctx.fillStyle = '#fff'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height)
+        bmp.close?.()
+        const out = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82))
+        if (!out) return ''
+        const data = await new Promise((resolve) => {
+          const fr = new FileReader()
+          fr.onload = () => resolve(String(fr.result || ''))
+          fr.onerror = () => resolve('')
+          fr.readAsDataURL(out)
+        })
+        /** 存不上（宿主没重启）不影响这次显示：objectURL 是本地那份 */
+        if (data) await post('/gallery/thumb', { seq: it.seq, data })
+        return URL.createObjectURL(out)
+      }
+
+      /**
+       * 给本页缺缩略图的大图排队生成，**同时只跑两个**。
+       *
+       * 并发全开的话二十张大图一起解码，主线程反而卡住；两个既能让首屏
+       * 尽快有图，也不会把面板顶住。生成完一张就 `setThumbs` 一张。
+       */
+      useEffect(() => {
+        if (typeof createImageBitmap !== 'function') return undefined
+        const need = (data?.items || []).filter((it) => !it.thumb && !thumbs[it.seq]
+          && Number(it.bytes) >= THUMB_MIN && !thumbQueued.current.has(it.seq))
+        if (!need.length) return undefined
+        let stop = false
+        const queue = [...need]
+        const worker = async () => {
+          while (queue.length && !stop) {
+            const it = queue.shift()
+            thumbQueued.current.add(it.seq)
+            try {
+              const url = await makeThumb(it)
+              /** 压不出来（canvas 内存不够 / 这个格式浏览器解不了）：放回队列，下次再试 */
+              if (!url) { thumbQueued.current.delete(it.seq); continue }
+              /** 翻页了（stop）：这张算出来了也没人会显示，直接释放，别留个孤儿 blob */
+              if (stop) { try { URL.revokeObjectURL(url) } catch { /* 已释放 */ } continue }
+              /**
+               * 用 ref 当「下一份」的来源，而不是 `setThumbs((cur) => ...)`：
+               * 后面 `load()` 要靠 ref 决定哪些需要 revoke，两边必须是同一份。
+               */
+              thumbsRef.current = { ...thumbsRef.current, [it.seq]: url }
+              setThumbs(thumbsRef.current)
+            } catch {
+              /**
+               * 失败（宿主还没重启、刚好被占用、浏览器解不了这个格式）就把它
+               * 从「已排队」里放掉：下一次 `data` 变化还能再试一次。
+               * 留在集合里的话，这张图这一整场都不会再尝试，只能刷新页面。
+               */
+              thumbQueued.current.delete(it.seq)
+            }
+          }
+        }
+        Promise.all([worker(), worker()])
+        return () => { stop = true }
+      }, [data])
 
       /** 整理进度：任务在跑时每 500ms 问一次（一张是一次模型调用，比补标签慢得多） */
       useEffect(() => {
@@ -16713,27 +17015,59 @@ select.roost-input{color-scheme:dark}
           if (r?.job) {
             setJob(r.job)
             if (!r.job.running) {
-              toast(`整理完成：补上 ${r.job.done} 张，跳过 ${r.job.failed} 张`)
-              load(1)
+              /**
+               * 念后端给的 `message`：它分得清「跑完了」「你按了停」「连续失败
+               * 自己收手了」三种结局，并带上第一张失败原因。面板自己拼
+               * 「补上 N 张」的话，用户永远不知道那 N 张为什么没补上。
+               */
+              toast(r.job.message || `整理完成：补上 ${r.job.done} 张，跳过 ${r.job.failed} 张`)
+              /**
+               * 跑完就把「全部重做」放掉：勾着不放的话，下一次随手点整理
+               * 会再花一整轮钱（几十到两百次模型调用）。想重做再勾一次，
+               * 这个动作本身就该是有意识的。
+               */
+              setRedoAll(false)
+              reloadFirst()
+            } else if ((Number(r.job.done) || 0) - seenDone.current >= 5) {
+              /**
+               * 每成功 5 张刷一次列表（抄 aurabot）。
+               *
+               * 只在跑的时候刷：新起的名字当场出现在卡片上，用户才敢相信
+               * 这一轮真在干活；只看进度条动数字的话，图一张没变很像卡死。
+               */
+              seenDone.current = Number(r.job.done) || 0
+              load(page)
             }
           }
         }, 500)
         return () => clearInterval(t)
-      }, [job?.running])
+      }, [job?.running, page])
 
-      const organize = async () => {
+      /**
+       * 启动整理。
+       *
+       * `seqs` 是「整理所选」：用户在批量模式里挑出来的那几张。传了就只跑它们，
+       * 而且**连已有描述、已停用的也跑**——点选就是明确的意图，再拿规则挡回去
+       * 会表现成「我明明选了它却一动不动」。不传走增量 / 全部重做。
+       */
+      const organize = async (seqs = null) => {
         setBusy(true)
-        const r = await post('/gallery/organize', {})
+        const body = Array.isArray(seqs) && seqs.length ? { seqs } : { all: redoAll }
+        const r = await post('/gallery/organize', body)
         setBusy(false)
         if (r.ok === false) return toast(r.message || '启动失败')
         if (!r.total) return toast(r.message || '每张都有描述了')
-        setJob({ running: true, total: r.total, done: 0, failed: 0, percent: 0 })
-        toast(`开始整理 ${r.total} 张（每张问一次模型，会慢一点）`)
+        seenDone.current = 0
+        setJob({ running: true, total: r.total, done: 0, failed: 0, percent: 0, all: r.all })
+        const what = Array.isArray(seqs) && seqs.length ? `选中的 ${r.total} 张` : `${r.total} 张${r.all ? '（全部重做）' : ''}`
+        toast(`开始整理${what}（每张问一次模型，会慢一点）`)
       }
 
       const cancelJob = async () => {
         const r = await post('/gallery/organize/cancel', {})
         setJob(r.job || null)
+        /** 停下也放掉「全部重做」：下一轮该从增量继续，不该又全量烧一遍 */
+        setRedoAll(false)
         toast(r.message || '已停下')
         load(page)
       }
@@ -16783,50 +17117,550 @@ select.roost-input{color-scheme:dark}
         load(page)
       }
 
+      /**
+       * 补标签任务：任务在跑时每 400ms 问一次，跑完停。
+       *
+       * 这条通道原本挂在「表情库」那张按文件列的卡上。合并之后按钮搬到这里，
+       * 通道和进度口径没变——补的是 `.tags` 侧车，而图库现在按侧车回采
+       * `tags / scenes`（`gallery.js` 的 `sync()`），补完这一页会跟着变。
+       */
+      useEffect(() => {
+        if (!tagJob?.running) return undefined
+        const t = setInterval(async () => {
+          const r = await get('/stickers/tags/job')
+          if (r?.job) {
+            setTagJob(r.job)
+            if (!r.job.running) {
+              toast(`补标签完成：${r.job.done} 张，失败 ${r.job.failed} 张`)
+              /** 页码一起归位：否则在第 3 页跑完，数据是第一页、页码还写着 3 */
+              reloadFirst()
+            }
+          }
+        }, 400)
+        return () => clearInterval(t)
+      }, [tagJob?.running])
+
+      const fill = async (all) => {
+        setBusy(true)
+        const r = await post('/stickers/tags/fill', { all })
+        setBusy(false)
+        if (r.ok === false) return toast(r.message || '启动失败')
+        if (!r.total) return toast(r.message || '都已有标签')
+        setTagJob({ running: true, total: r.total, done: 0, percent: 0, failed: 0 })
+        toast(`开始补 ${r.total} 张`)
+      }
+
+      const cancelTagJob = async () => {
+        const r = await post('/stickers/tags/cancel', {})
+        setTagJob(r.job || null)
+        toast(r.message || '已取消')
+        load(page)
+      }
+
+      /**
+       * 上传：落在当前筛选的分类里（没筛就进根目录），和原来表情库页同一个接口。
+       *
+       * 对齐 aurabot 的两点：**一次可选多张**（逐张发，一张失败不拖累别的）、
+       * **单张时能填名字**。名字在这里是**文件名**（roost 的文件系统才是真相，
+       * 不像 aurabot 按 md5 存库），所以保留原扩展名，只换前面那段。
+       */
+      const upload = async (fileList) => {
+        const list = [...(fileList || [])]
+        if (!list.length) return
+        setBusy(true)
+        const want = String(newName).trim().slice(0, 20)
+        let ok = 0
+        const errs = []
+        for (const f of list) {
+          if (f.size > 10 * 1024 * 1024) { errs.push(`${f.name} 超过 10MB`); continue }
+          let data64 = ''
+          try {
+            data64 = await new Promise((resolve, reject) => {
+              const fr = new FileReader()
+              fr.onload = () => resolve(String(fr.result || ''))
+              fr.onerror = () => reject(new Error('读不了这个文件'))
+              fr.readAsDataURL(f)
+            })
+          } catch (e) {
+            errs.push(`${f.name}：${e.message}`)
+            continue
+          }
+          if (!data64) continue
+          /**
+           * 多张时不套用统一名字：十张全叫「猫猫」只会被后端一路加序号，
+           * 反而比原名更难认。要统一命名用批量「改名」（改标注，不动文件）。
+           */
+          const ext = (/\.[a-z0-9]+$/i.exec(f.name) || [''])[0]
+          const nm = list.length === 1 && want ? want + ext : f.name
+          const r = await post('/stickers/upload', { name: nm, data: data64, category: cat })
+          if (r.ok) ok += 1
+          else errs.push(`${f.name}：${r.message || '没传上去'}`)
+        }
+        setBusy(false)
+        setNewName('')
+        toast(errs.length
+          ? `${ok ? `加好 ${ok} 张；` : ''}${errs.slice(0, 2).join('；')}${errs.length > 2 ? '…' : ''}`
+          : `已上传 ${ok} 张`)
+        if (ok) reloadFirst()
+      }
+
+      const togglePick = (seq) => setPicked((cur) => (cur.includes(seq) ? cur.filter((x) => x !== seq) : [...cur, seq]))
+
+      /** 批量撤下：进回收站，**文件不动**（真删在回收站里，见 `purgePicked`） */
+      const removePicked = async () => {
+        if (!picked.length) return toast('先勾几张')
+        setBusy(true)
+        const r = await post('/gallery/remove', { seqs: picked })
+        setBusy(false)
+        toast(r.ok ? `已撤下 ${r.count} 张（在回收站，可以恢复）` : (r.message || '没撤下来'))
+        setPicked([])
+        load(page)
+      }
+
+      /** 批量恢复：回收站里勾几张一起拿回来（单张那颗「恢复」还在） */
+      const restorePicked = async () => {
+        if (!picked.length) return toast('先勾几张')
+        setBusy(true)
+        const r = await post('/gallery/restore', { seqs: picked })
+        setBusy(false)
+        toast(r.ok ? `已恢复 ${r.count} 张` : (r.message || '恢复不了'))
+        setPicked([])
+        load(page)
+      }
+
+      /** 彻底删除：删文件 + 删记录。全仓唯一不可逆的删图入口，先说清张数 */
+      const purgePicked = async () => {
+        if (!picked.length) return toast('先勾几张')
+        const n = picked.length
+        if (!window.confirm(
+          `彻底删除 ${n} 张图？\n\n`
+          + '会直接删掉文件（连同 .tags 标签文件）和它们的序号，没有回收站，恢复不了。\n\n'
+          + '只想让它别再发这张，用「撤下」。',
+        )) return
+        setBusy(true)
+        const r = await post('/gallery/purge', { seqs: picked, confirm: true })
+        setBusy(false)
+        toast(r.failed?.length
+          ? `删了 ${r.count} 张，${r.failed.length} 张没删掉（${r.failed[0].message}）`
+          : `已彻底删除 ${r.count} 张`)
+        setPicked([])
+        /** 删完可能不够一页了：页码跟着回第一页，不然停在空页上看着像没删成功 */
+        reloadFirst()
+      }
+
+      const purgeOne = async (seq) => {
+        if (!window.confirm(`彻底删除 #${seq}？\n\n会删掉文件本身，恢复不了。`)) return
+        setBusy(true)
+        const r = await post('/gallery/purge', { seqs: [seq], confirm: true })
+        setBusy(false)
+        toast(r.ok ? `#${seq} 已彻底删除` : (r.failed?.[0]?.message || r.message || '没删掉'))
+        setPicked((cur) => cur.filter((x) => x !== seq))
+        load(page)
+      }
+
+      /**
+       * 批量改名。
+       *
+       * 两个字段都能留空，所以「只改名字」「只改标签」都是同一条路。
+       * 勾了「后加序号」每张名字都不一样，只能顺序发（编号要按序号排，
+       * 不能按点击顺序）；不勾就一次提交整批，服务端逐张改、返回失败清单。
+       *
+       * 改的是**标注**（`name` / `tags`），不是磁盘上的文件名——文件名是
+       * `rel` 的组成部分，改了会影响缩略图接口和侧车定位，不该在批量里做。
+       */
+      const bulkRename = async () => {
+        const prefix = String(bulk?.prefix ?? '').trim()
+        const tags = String(bulk?.tags ?? '').trim()
+        if (!prefix && !tags) return toast('名字和标签都空着，没什么可改的')
+        const seqs = [...picked].sort((a, b) => a - b)
+        setBusy(true)
+        let done = 0
+        const failed = []
+        if (prefix && bulk?.numbered) {
+          for (let i = 0; i < seqs.length; i += 1) {
+            const patch = { seq: seqs[i], name: `${prefix} ${i + 1}` }
+            if (tags) patch.tags = tags
+            const r = await post('/gallery/edit', patch)
+            if (r.ok === false) failed.push({ seq: seqs[i], message: r.message || '没改成' })
+            else done += 1
+          }
+        } else {
+          const patch = { seqs }
+          if (prefix) patch.name = prefix
+          if (tags) patch.tags = tags
+          const r = await post('/gallery/edit', patch)
+          done = Number(r.count) || 0
+          for (const f of (r.failed || [])) failed.push(f)
+          if (!done && !failed.length) failed.push({ message: r.message || '没改成' })
+        }
+        setBusy(false)
+        setBulk(null)
+        toast(failed.length
+          ? `改了 ${done} 张，${failed.length} 张没改成（${failed[0].message}）`
+          : `已改 ${done} 张`)
+        load(page)
+      }
+
       const stats = data?.stats || {}
-      return h(Sec, {
-        n, title: '图库（AI 用的）',
-        right: h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-          h('label', {
-            className: 'roost-muted',
-            style: { fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 },
+      /** 本页全部序号：给「全选本页」用。只选这一页，不做「全选全库」——太容易误伤 */
+      const pageSeqs = (data?.items || []).map((it) => Number(it.seq) || 0).filter(Boolean)
+      const secTitle = view === 'trash' ? '回收站' : '图片'
+      /**
+       * 回到第一页并重读。
+       *
+       * `setPage(1)` 在页码本来就是 1 时不会触发那个 `load` effect（React 会跳过
+       * 同值更新），所以那种情况得自己再读一次。统一走这个函数，省掉「数据停在
+       * 第一页、页码还写着第 3 页」这类只在特定页数下才出现的错位。
+       */
+      const reloadFirst = () => { if (page === 1) load(1); else setPage(1) }
+      /**
+       * 「起名用的模型」的当前值和落库动作。
+       *
+       * 空字符串 = 跟随聊天模型（默认）。存到 `stickers.captionModel`，
+       * 只有图库整理这条链读它，聊天不受影响——这正是它存在的理由。
+       */
+      const cm = config?.stickers?.captionModel || {}
+      const cmKey = cm.provider && cm.model ? `${cm.provider}::${cm.model}` : ''
+      const cmHit = models && cmKey
+        ? models.find((m) => `${m.provider}::${m.model}` === cmKey)
+        : null
+      const setCm = (v) => {
+        const [p, ...rest] = String(v || '').split('::')
+        saveCfg?.({
+          stickers: {
+            captionModel: { provider: v ? p : '', model: v ? rest.join('::') : '' },
           },
-            h('input', { type: 'checkbox', checked: trash, onChange: (e) => { setTrash(e.target.checked); setPage(1) } }),
-            '看回收站'),
-          h('button', {
-            type: 'button', className: 'roost-btn roost-btn-primary',
-            disabled: busy || job?.running,
-            onClick: organize,
-          }, job?.running ? '整理中…' : '让 AI 整理')),
+        })
+      }
+      return h(Sec, {
+        n, title: secTitle,
+        /**
+         * 批量模式下头部的单张动作全收起来：上传、补标签、让 AI 整理都是
+         * 「对整库做一件事」，和「我正在挑几张」是两种心态，放一起会点错。
+         */
+        right: h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+          selecting
+            ? h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => { setSelecting(false); setPicked([]); setBulk(null) },
+            }, '退出批量')
+            : null,
+          selecting || view !== 'pics'
+            ? null
+            : h('input', {
+              className: 'roost-input', style: { width: 118 }, placeholder: '名字（可不填）',
+              value: newName, maxLength: 20,
+              title: '只传一张时用它当文件名（保留原扩展名）；传多张就各用原名',
+              onChange: (e) => setNewName(e.target.value),
+            }),
+          selecting || view !== 'pics'
+            ? null
+            : h('label', { className: 'roost-btn', style: { cursor: 'pointer' } },
+              busy ? '处理中…' : '上传',
+              h('input', {
+                type: 'file', accept: 'image/*', multiple: true, style: { display: 'none' },
+                onChange: (e) => { upload(e.target.files); e.target.value = '' },
+              })),
+          selecting || view !== 'pics'
+            ? null
+            : h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy || tagJob?.running,
+              title: '按分类名和文件名补 .tags：规则算，不调模型，免费',
+              onClick: () => fill(false),
+            }, tagJob?.running ? '补标签中…' : '补标签'),
+          selecting || view !== 'pics'
+            ? null
+            : h('label', {
+              /**
+               * 放在「让 AI 整理」左边：勾选框读起来像个前缀，点按钮时才生效。
+               * 单独放按钮右边的话，人点完才发现有个没勾的框，会以为整理没覆盖全。
+               */
+              className: 'roost-muted',
+              title: '连已经有名字/描述的一起重跑（会重新花模型调用）。'
+                + '描述写歪了、标签全是文件名拆的词、换了更会看图的模型时用',
+              style: {
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                fontSize: 11.5, cursor: job?.running ? 'default' : 'pointer',
+                opacity: job?.running ? .5 : 1,
+              },
+            },
+              h('input', {
+                type: 'checkbox', checked: redoAll, disabled: Boolean(job?.running),
+                onChange: (e) => setRedoAll(e.target.checked),
+              }),
+              '全部重做'),
+          selecting
+            ? null
+            : view === 'pics'
+              ? h('button', {
+                type: 'button', className: 'roost-btn roost-btn-primary',
+                disabled: busy || job?.running,
+                title: redoAll
+                  ? '全部重做：会重新描述每一张（回收站、停用、文件丢了的不算）'
+                  : '只补还没名字和描述的图；每张问一次模型',
+                onClick: () => organize(),
+              }, job?.running ? '整理中…' : '让 AI 整理')
+              : h('button', {
+                type: 'button', className: 'roost-btn', disabled: busy || !picked.length,
+                onClick: purgePicked,
+              }, picked.length ? `彻底删除 ${picked.length} 张` : '彻底删除'),
+          /**
+           * 批量选择是这一页唯一的「多张」入口。它不变灰、不加 primary：
+           * 常态下这里没有选中的东西，主按钮应该留给「上传 / 整理」。
+           */
+          selecting
+            ? null
+            : h('button', {
+              type: 'button', className: 'roost-btn',
+              disabled: !pageSeqs.length,
+              title: '打开后点图片就能选，可以一次撤下 / 改名 / 删除',
+              onClick: () => { setSelecting(true); setBulk(null); setEditFor(0) },
+            }, '批量选择'),
+          /**
+           * 刷新：`load()` 每次都会让宿主重扫目录（快照有 3 秒缓存，翻页不痛）。
+           * 用户往文件夹里直接丢图之后，这是唯一能立刻看见它们的地方。
+           */
+          selecting
+            ? null
+            : h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy,
+              title: '重新读一遍目录：刚往文件夹里丢的图会出现在这里',
+              onClick: () => load(page),
+            }, '刷新')),
       },
         !data
           ? h('div', { className: 'roost-empty' }, '读着…')
           : h('div', null,
             h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-              `共 ${stats.total} 张 · 还没描述 ${stats.untagged} 张`
-              + (stats.paused ? ` · 停用 ${stats.paused}` : '')
-              + (stats.pinned ? ` · 固定 ${stats.pinned}` : '')
-              + (stats.online ? ` · 线上 ${stats.online}` : '')
-              + ` · 回收站 ${stats.trash} · 下一个序号 #${stats.nextSeq}`
-              + (data.dir ? ` · 目录 ${data.dir}` : '')),
+              /**
+               * 回收站里不能说「共 N 张」：那个数是**全库**的（`stats()` 的口径），
+               * 而这一屏只列撤下的那几张，两个数字对不上会让人以为列表没刷。
+               */
+              trash
+                ? `回收站 ${stats.trash} 张 · 文件都还在，点「恢复」就能回来；「彻底删除」才真删`
+                : `共 ${stats.total} 张 · 还没描述 ${stats.untagged} 张`
+                  + (stats.paused ? ` · 停用 ${stats.paused}` : '')
+                  + (stats.pinned ? ` · 固定 ${stats.pinned}` : '')
+                  + (stats.online ? ` · 线上 ${stats.online}` : '')
+                  + ` · 回收站 ${stats.trash} · 下一个序号 #${stats.nextSeq}`
+                  + (data.dir ? ` · 目录 ${data.dir}` : '')),
 
-            h('div', { className: 'roost-note', style: { fontSize: 11, marginBottom: 8, opacity: .75 } },
-              'AI 发图时只写序号（如 <<image: #3>>），路径由宿主去换。'
-              + '这里能改的是它判断「该不该发这张」的依据：名字、含义、场合。'),
+            /** 回收站里不谈标注：这一屏能做的只有恢复和彻底删除 */
+            trash
+              ? null
+              : h('div', { className: 'roost-note', style: { fontSize: 11, marginBottom: 8, opacity: .75 } },
+                'AI 发图时只写序号（如 <<image: #3>>），路径由宿主去换。'
+                + '这里能改的是它判断「该不该发这张」的依据：名字、含义、场合。'),
 
-            job?.running
+            tagJob?.running
               ? h('div', { style: { marginBottom: 8 } },
                 h('div', { className: 'roost-note', style: { fontSize: 11.5, marginBottom: 4 } },
-                  `整理中 ${job.done + job.failed} / ${job.total}（${job.percent}%）`
-                  + (job.note ? ` · ${job.note}` : '')),
-                h('div', { style: { height: 6, borderRadius: 3, background: 'rgba(128,128,128,.2)' } },
-                  h('div', {
+                  `补标签中 ${tagJob.done + tagJob.failed} / ${tagJob.total}（${tagJob.percent}%）`
+                  + ' · 按分类名和文件名写 .tags，不调模型'),
+                h('button', { type: 'button', className: 'roost-btn', onClick: cancelTagJob }, '停下'))
+              : null,
+
+            /**
+             * 批量操作条：只在批量模式下出现，**常驻**（没选也显示）。
+             *
+             * 以前是「选中了才冒出这条」，于是用户得先猜「怎么才能多选」。
+             * 现在打开批量模式就先看到这条，上面写清「点图片就能选」，
+             * 三个动作（撤下 / 改名 / 删除）位置固定，不随选中数跳动。
+             *
+             * 图片区的「撤下」= 进回收站（可恢复）；「删除」是最右边那个不可逆的，
+             * 有确认框兜着。回收站里把「撤下」换成「恢复」。
+             */
+            selecting
+              ? h('div', {
+                className: 'roost-note',
+                style: {
+                  marginBottom: 8, padding: '6px 8px', borderRadius: 6,
+                  background: 'rgba(74,170,119,.10)',
+                  border: '1px solid rgba(74,170,119,.35)',
+                  display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+                },
+              },
+                h('strong', null, picked.length ? `已选 ${picked.length} 张` : '点图片就能选中'),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  disabled: !pageSeqs.length,
+                  onClick: () => setPicked(picked.length === pageSeqs.length ? [] : pageSeqs),
+                }, picked.length === pageSeqs.length && pageSeqs.length ? '取消全选' : '全选本页'),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  disabled: !pageSeqs.length,
+                  title: '本页没选中的全部选上，已选的取消',
+                  onClick: () => setPicked((cur) => pageSeqs.filter((s) => !cur.includes(s))),
+                }, '反选'),
+                view === 'pics'
+                  ? h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: busy || !picked.length, onClick: removePicked,
+                    title: '从图库撤下，进回收站；文件不动，可以恢复',
+                  }, `撤下 ${picked.length || ''}`.trim())
+                  : h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: busy || !picked.length, onClick: restorePicked,
+                    title: '拿回图库，恢复之后她可以再发',
+                  }, `恢复 ${picked.length || ''}`.trim()),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  disabled: busy || job?.running || !picked.length,
+                  /**
+                   * 只整理选中的这几张。和「让 AI 整理」的差别不只是范围：
+                   * 手选的**不再过滤**已有描述 / 已停用——点选就是明确意图。
+                   * 这样「这张起名起歪了，重来一次」终于有地方点了。
+                   */
+                  title: '只整理选中的这几张；已经有名字的也会重跑',
+                  onClick: () => organize(picked),
+                }, `整理所选 ${picked.length || ''}`.trim()),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  disabled: busy || !picked.length,
+                  title: '给这几张统一改名字 / 标签，留空的字段不动',
+                  onClick: () => setBulk({ prefix: '', tags: '', numbered: true }),
+                }, '改名'),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  disabled: busy || !picked.length, onClick: purgePicked,
+                  title: '删文件 + 删序号，不可恢复',
+                }, '删除'),
+                h('span', { style: { flex: '1 1 auto' } }),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  onClick: () => { setSelecting(false); setPicked([]); setBulk(null) },
+                }, '退出批量'))
+              : null,
+
+            /** 批量改名：留空 = 不动，所以一次只改名字或只改标签也行 */
+            bulk
+              ? h('div', {
+                className: 'roost-note',
+                style: {
+                  marginBottom: 8, padding: '8px 10px', borderRadius: 6,
+                  border: '1px solid rgba(128,128,128,.35)',
+                  display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap',
+                },
+              },
+                h('span', null, `给这 ${picked.length} 张改名`),
+                h('input', {
+                  className: 'roost-input', style: { width: 150 }, placeholder: '名字（留空不改）',
+                  value: bulk.prefix,
+                  onChange: (e) => setBulk((b) => ({ ...b, prefix: e.target.value })),
+                }),
+                h('label', { style: { display: 'flex', alignItems: 'center', gap: 4, fontSize: 11.5 } },
+                  h('input', {
+                    type: 'checkbox', checked: bulk.numbered,
+                    onChange: (e) => setBulk((b) => ({ ...b, numbered: e.target.checked })),
+                  }),
+                  '后加序号'),
+                h('input', {
+                  className: 'roost-input', style: { width: 170 }, placeholder: '标签，逗号分隔（留空不改）',
+                  value: bulk.tags,
+                  onChange: (e) => setBulk((b) => ({ ...b, tags: e.target.value })),
+                }),
+                h('button', {
+                  type: 'button', className: 'roost-btn roost-btn-primary',
+                  disabled: busy, onClick: bulkRename,
+                }, '存'),
+                h('button', {
+                  type: 'button', className: 'roost-btn', onClick: () => setBulk(null),
+                }, '取消'),
+                h('span', { style: { fontSize: 11, opacity: .7, flex: '1 1 100%' } },
+                  '名字最多 20 字；勾了「后加序号」会按序号排成「猫猫 1、猫猫 2…」，'
+                  + '免得几张图同名。这里改的是 AI 用来判断「该不该发」的标注，不是文件名。'))
+              : null,
+
+            /**
+             * 「起名用的模型」。
+             *
+             * 放这儿和整理进度连成一条因果链：用什么模型 → 这一轮跑成什么样。
+             * 不在批量模式显示：批量时用户在处理选中的几张，改模型是「换整库
+             * 的工具」，两件事不该同屏。
+             */
+            view === 'pics' && !selecting
+              ? h('div', {
+                className: 'roost-note',
+                style: {
+                  marginBottom: 8, display: 'flex', gap: 6,
+                  alignItems: 'center', flexWrap: 'wrap', fontSize: 11.5,
+                },
+              },
+                h('span', null, '起名用的模型'),
+                h('select', {
+                  className: 'roost-input', style: { width: 'auto', maxWidth: 280 },
+                  value: cmKey,
+                  disabled: Boolean(job?.running),
+                  title: '「让 AI 整理」看图用哪个模型。空 = 跟随聊天模型；整理必须能看图',
+                  onChange: (e) => setCm(e.target.value),
+                },
+                  h('option', { value: '' }, '跟随聊天模型'),
+                  /**
+                   * 配了、但清单里已经没有这个模型（换了 provider、退了登录）。
+                   * 不补这一项的话，原生 select 会把显示回退到第一项「跟随聊天模型」，
+                   * 而配置里其实还指着那个失效的模型——用户以为已经改回来了。
+                   */
+                  cmKey && models && models.length && !cmHit
+                    ? h('option', { value: cmKey }, `${cm.model}（已不在模型清单里）`)
+                    : null,
+                  (models || []).map((m) => h('option', {
+                    key: `${m.provider}::${m.model}`,
+                    value: `${m.provider}::${m.model}`,
+                  }, `${m.name || m.model}`
+                    + (m.vision === true ? '（能看图）' : m.vision === false ? '（不看图）' : '')))),
+                models === null ? h('span', null, '正在查模型…') : null,
+                /**
+                 * 选到看不了图的当场警告：不然用户会点完整理、看到
+                 * 「连续失败 5 张」才发现，那一轮还白花了 5 次调用。
+                 */
+                cmHit && cmHit.vision === false
+                  ? h('span', { style: { color: '#c8752a' } }, '这个模型看不了图，整理会被整批跳过')
+                  : null)
+              : null,
+
+            job
+              ? h('div', { style: { marginBottom: 8 } },
+                job.running
+                  ? h('div', null,
+                    h('div', { className: 'roost-note', style: { fontSize: 11.5, marginBottom: 4 } },
+                      `整理中 ${job.done + job.failed} / ${job.total}（${job.percent}%）`
+                      + (job.note ? ` · ${job.note}` : '')
+                      /** 心跳：刚起好的名字。没有它，进度条只是在动数字 */
+                      + (job.last ? ` · 刚起好 ${job.last}` : '')),
+                    h('div', { style: { height: 6, borderRadius: 3, background: 'rgba(128,128,128,.2)' } },
+                      h('div', {
+                        style: {
+                          height: '100%', borderRadius: 3, width: `${job.percent}%`,
+                          background: 'var(--ok, #2a9d5c)', transition: 'width .3s',
+                        },
+                      })),
+                    h('button', { type: 'button', className: 'roost-btn', style: { marginTop: 6 }, onClick: cancelJob }, '停下'))
+                  : h('div', {
+                    /**
+                     * 结果留在页面上，不只是一闪而过的 toast。
+                     *
+                     * 「补上 0 张」这种结果最需要解释：用户要点开看一眼
+                     * 到底是模型看不了图、图太大、还是模型回的话解析不了。
+                     * 以前这里跑完就消失，等于把失败原因丢掉了。
+                     */
+                    className: 'roost-note',
                     style: {
-                      height: '100%', borderRadius: 3, width: `${job.percent}%`,
-                      background: 'var(--ok, #2a9d5c)', transition: 'width .3s',
+                      fontSize: 11.5, padding: '6px 8px', borderRadius: 6,
+                      background: job.failed ? 'rgba(200,120,40,.10)' : 'rgba(42,157,92,.10)',
                     },
-                  })),
-                h('button', { type: 'button', className: 'roost-btn', style: { marginTop: 6 }, onClick: cancelJob }, '停下'))
+                  },
+                    h('div', { style: { display: 'flex', gap: 8, alignItems: 'flex-start' } },
+                      h('span', { style: { flex: 1 } },
+                        job.message || `补上 ${job.done} 张，跳过 ${job.failed} 张`),
+                      h('button', {
+                        type: 'button', className: 'roost-btn', style: { padding: '0 6px' },
+                        onClick: () => setJob(null),
+                      }, '知道了')),
+                    job.errors?.length
+                      ? h('div', { style: { marginTop: 4, opacity: .8 } },
+                        job.errors.slice(0, 3).map((e, i) => h('div', { key: i },
+                          `#${e.seq} ${e.file}：${e.reason}`)))
+                      : null))
               : null,
 
             h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' } },
@@ -16842,6 +17676,16 @@ select.roost-input{color-scheme:dark}
                 onKeyDown: (e) => { if (e.key === 'Enter') { setPage(1); load(1) } },
               }),
               h('button', { type: 'button', className: 'roost-btn', onClick: () => { setPage(1); load(1) } }, '搜'),
+              h('select', {
+                className: 'roost-input', style: { width: 'auto' }, value: size,
+                onChange: (e) => { setSize(Number(e.target.value)); setPage(1) },
+              }, [12, 24, 48, 96].map((v) => h('option', { key: v, value: v }, `每页 ${v}`))),
+              /**
+               * 「全选本页」搬进批量条了。
+               *
+               * 它原来靠复选框才有意义：不在批量模式时点它，选中的东西
+               * 屏幕上没有任何反馈（复选框已经去掉了），用户只会以为按钮坏了。
+               */
               h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
                 `第 ${data.page} / ${data.pages} 页 · ${data.total} 张`)),
 
@@ -16858,28 +17702,132 @@ select.roost-input{color-scheme:dark}
                    * 和正常的没区别，用户只会觉得「怎么从来不发这张」。
                    */
                   const paused = it.enabled === false
+                  /** 批量模式下的选中态：靠边框和底色说，不用复选框 */
+                  const hit = selecting && picked.includes(id)
+                  /**
+                   * 原图地址：缩略图那条路挂了时的最终退路。
+                   *
+                   * **按序号取**，不按 `rel`：库里有真 `未分类/` 目录时，快照会把
+                   * 根目录图的 `rel` 改写成 `未分类/xxx`，照它取图就是 404（破图）。
+                   */
+                  const origUrl = API + '/gallery/file?seq=' + id
+                  /**
+                   * 旧接口兜底。宿主没重启时 `/gallery/file` 还不存在（面板脚本是
+                   * 每次从磁盘读的，会先拿到新代码），退回按相对路径取——那条路
+                   * 在「有真 `未分类/` 目录」时可能 404，但总比点不开强。
+                   */
+                  const legacyUrl = API + '/stickers/file?path='
+                    + encodeURIComponent(it.rel || it.file)
+                  /**
+                   * 缩略图优先。
+                   *
+                   *   1. 本次会话刚压出来的（objectURL，立刻能看）；
+                   *   2. 服务端已缓存（`it.thumb`，几十 KB、长缓存）；
+                   *   3. 小图直接给原图；
+                   *   4. 大图又还没压好 → 空字符串，走下面的占位块。
+                   *
+                   * 第 4 条是这次报障的根子：以前一屏二十张各按原尺寸解码，
+                   * 混进两张 24MB 壁纸就把面板拖住了，图显示成破图/半截。
+                   */
+                  /**
+                   * `v` 是内容版本（字节数），服务端不看，只为**打穿浏览器缓存**。
+                   *
+                   * 缩略图那条是 `max-age=604800`（7 天）。正常情况下同一个 seq
+                   * 永远是同一张图（序号单调递增不回收），所以敢长缓存；但如果
+                   * 用户删过 `index.json`（或索引版本升级重建），seq 会从 1 重新
+                   * 分配，这时 `?seq=1` 在浏览器里还是**七天前那张图**。
+                   * 带上字节数，新图基本一定换 URL。
+                   */
+                  const ver = Number(it.bytes) || 0
+                  const thumbUrl = thumbs[id]
+                    || (it.thumb ? API + '/gallery/thumb?seq=' + id + '&v=' + ver : '')
+                  const src = thumbUrl || (Number(it.bytes) >= THUMB_MIN ? '' : origUrl)
+                  const bigLabel = `${(Number(it.bytes) / 1048576).toFixed(1)} MB`
                   return h('div', {
                     key: id,
-                    title: paused ? '已停用：她不会发这张（点「启用」可恢复）' : undefined,
+                    /**
+                     * 整张卡片就是点击目标。
+                     *
+                     * 缩略图只有 140px 宽，原来那个 14px 的复选框在手机上
+                     * 基本点不中，还和「停用 / 固定」角标抢位置。批量模式
+                     * 打开后点哪儿都算选中，命中面积就是整块卡片。
+                     */
+                    onClick: selecting ? () => togglePick(id) : undefined,
+                    role: selecting ? 'button' : undefined,
+                    'aria-pressed': selecting ? hit : undefined,
+                    title: selecting
+                      ? (hit ? `取消选择 #${id}` : `选中 #${id}`)
+                      : (paused ? '已停用：她不会发这张（点「启用」可恢复）' : undefined),
                     style: {
-                      border: `1px ${paused ? 'dashed' : 'solid'} ${editing ? 'var(--accent, #4a7)' : 'rgba(128,128,128,.25)'}`,
+                      cursor: selecting ? 'pointer' : 'default',
+                      border: `1px ${paused ? 'dashed' : 'solid'} ${hit || editing ? 'var(--accent, #4a7)' : 'rgba(128,128,128,.25)'}`,
                       borderRadius: 8, padding: 6, fontSize: 11,
-                      opacity: trash ? .55 : (paused ? .6 : 1),
+                      background: hit ? 'rgba(74,170,119,.14)' : undefined,
+                      /** 选中时描一圈，缩略图再暗也不至于看不出选了哪张 */
+                      boxShadow: hit ? '0 0 0 2px rgba(74,170,119,.45)' : undefined,
+                      /** 回收站里的图淡一点（表示已撤下），但别淡到看不清是什么 */
+                      opacity: hit ? 1 : (trash ? .68 : (paused ? .6 : 1)),
                     },
                   },
                     h('div', { style: { position: 'relative' } },
-                      h('img', {
-                        /** 走 API 前缀 + 相对路径：`/stickers/file` 会在服务端再校验一次越界 */
-                        src: API + '/stickers/file?path=' + encodeURIComponent(it.rel || it.file),
-                        alt: it.file, loading: 'lazy',
-                        style: { width: '100%', height: 80, objectFit: 'contain', borderRadius: 4, background: 'rgba(128,128,128,.08)' },
-                      }),
+                      src
+                        ? h('img', {
+                          src,
+                          alt: it.file, loading: 'lazy', decoding: 'async',
+                          style: { width: '100%', height: 80, objectFit: 'contain', borderRadius: 4, background: 'rgba(128,128,128,.08)' },
+                          /**
+                           * 三级兜底：缩略图 → 新接口原图 → 旧接口原图。
+                           *
+                           * 第二级 404 的典型场景是宿主还没重启（新路由不在旧进程里）；
+                           * 第三级再不行就留一张破图——那说明文件真的没了。
+                           */
+                          onError: () => {
+                            if (src === legacyUrl) return
+                            const next = src === origUrl ? legacyUrl : origUrl
+                            thumbsRef.current = { ...thumbsRef.current, [id]: next }
+                            setThumbs(thumbsRef.current)
+                          },
+                        })
+                        : h('div', {
+                          /**
+                           * 大图还没压好：先占位，不加载原图。
+                           *
+                           * 点一下 = 不等缩略图了，直接看原图（24MB 会慢一两秒，
+                           * 但那是用户自己选的）。批量模式下点击归选中，不拦。
+                           */
+                          'aria-label': `大图 ${bigLabel}`,
+                          onClick: selecting ? undefined : (e) => {
+                            e.stopPropagation()
+                            thumbsRef.current = { ...thumbsRef.current, [id]: origUrl }
+                            setThumbs(thumbsRef.current)
+                          },
+                          title: selecting ? undefined : '点一下直接看原图（缩略图还在生成）',
+                          style: {
+                            width: '100%', height: 80, borderRadius: 4,
+                            background: 'rgba(128,128,128,.08)',
+                            display: 'flex', flexDirection: 'column',
+                            alignItems: 'center', justifyContent: 'center', gap: 2,
+                            fontSize: 10.5, opacity: .72,
+                            cursor: selecting ? 'inherit' : 'pointer',
+                          },
+                        },
+                          h('span', null, '大图'),
+                          h('span', null, bigLabel)),
                       h('span', {
                         style: {
                           position: 'absolute', top: 2, left: 2, padding: '0 4px', borderRadius: 4,
                           fontSize: 10.5, fontWeight: 600, background: 'rgba(0,0,0,.55)', color: '#fff',
                         },
                       }, `#${id}`),
+                      /** 选中标记：只是个角标，不是可点控件（点它等于点卡片） */
+                      hit
+                        ? h('span', {
+                          style: {
+                            position: 'absolute', bottom: 2, left: 2, padding: '0 5px', borderRadius: 4,
+                            fontSize: 10, fontWeight: 600, background: 'rgba(42,157,92,.92)', color: '#fff',
+                          },
+                        }, '已选')
+                        : null,
                       paused
                         ? h('span', {
                             style: {
@@ -16912,14 +17860,29 @@ select.roost-input{color-scheme:dark}
                       title: it.meaning || it.scenes || '',
                     }, it.meaning || it.scenes || '还没描述'),
 
-                    h('div', { style: { display: 'flex', gap: 4, marginTop: 4 } },
+                    /**
+                     * 批量模式下把单张按钮全收起来（改 / 停用 / 固定 / 撤下 / 彻底删除）。
+                     *
+                     * 这时候用户的心智是「我在挑几张一起处理」，单张按钮只会被误触；
+                     * 而且整卡点击是选中，按钮上的点击还得 stopPropagation 才不会
+                     * 顺手把这张也选上——藏掉比逐个处理事件更干净。
+                     */
+                    selecting
+                      ? null
+                      : h('div', { style: { display: 'flex', gap: 4, marginTop: 4 } },
                       editing
                         ? null
                         : h('button', {
                             type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
                             onClick: () => {
                               setEditFor(id)
-                              setDraft({ name: it.name || '', meaning: it.meaning || '', scenes: it.scenes || '' })
+                              setDraft({
+                                name: it.name || '',
+                                meaning: it.meaning || '',
+                                scenes: it.scenes || '',
+                                /** 标签原来只能在「表情库」那张卡里改，合并后搬进这个弹层 */
+                                tags: (it.tags || []).join(', '),
+                              })
                             },
                           }, '改'),
                       /**
@@ -16950,7 +17913,18 @@ select.roost-input{color-scheme:dark}
                       h('button', {
                         type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px', marginLeft: 'auto' },
                         onClick: () => (trash ? back(id) : toTrash(id)),
-                      }, trash ? '恢复' : '撤下')),
+                      }, trash ? '恢复' : '撤下'),
+                      /**
+                       * 回收站里那颗「彻底删除」——全仓唯一不可逆的删图入口。
+                       * 图片区不把它放在单张上（那儿是「撤下」），只在多选条里
+                       * 留一个显式按钮，误触成本才够高。
+                       */
+                      trash
+                        ? h('button', {
+                          type: 'button', className: 'roost-btn', style: { fontSize: 10.5, padding: '1px 6px' },
+                          onClick: () => purgeOne(id),
+                        }, '彻底删除')
+                        : null),
 
                     editing
                       ? h('div', { style: { marginTop: 4, display: 'flex', flexDirection: 'column', gap: 3 } },
@@ -16968,6 +17942,11 @@ select.roost-input{color-scheme:dark}
                           className: 'roost-input', placeholder: '什么场合发', value: draft.scenes || '',
                           style: { fontSize: 10.5, padding: '2px 4px' },
                           onChange: (e) => setDraft((d) => ({ ...d, scenes: e.target.value })),
+                        }),
+                        h('input', {
+                          className: 'roost-input', placeholder: '标签，逗号分隔（如 猫, 无语）', value: draft.tags || '',
+                          style: { fontSize: 10.5, padding: '2px 4px' },
+                          onChange: (e) => setDraft((d) => ({ ...d, tags: e.target.value })),
                         }),
                         h('div', { style: { display: 'flex', gap: 4 } },
                           h('button', {
@@ -17075,7 +18054,7 @@ select.roost-input{color-scheme:dark}
       const rows = Array.isArray(data?.images) ? data.images : []
 
       return h(Sec, {
-        n, title: '官方素材池（图库的线上层）',
+        n, title: '线上（官方素材池）',
         right: h('button', {
           type: 'button', className: 'roost-btn', disabled: busy, onClick: () => load(''),
         }, busy ? '读取中…' : '刷新'),
@@ -17242,20 +18221,20 @@ select.roost-input{color-scheme:dark}
           config, stickers, saveCfg, toast, reload,
           n: part === 'sticker' ? '01' : '02',
         }),
-        /** 5.12：库管理只出现在独立的「表情包」页，别把表达页撑成两屏 */
-        part === 'sticker' ? h(StickerManageCard, { toast, n: '02' }) : null,
         /**
-         * 图库紧跟库管理：前者按文件、后者按序号，是同一批图的两种视角，
-         * 放隔壁才能来回对照「AI 认不认得出这张」。
+         * 图库是**一个**入口：图片 / 线上 / 回收站三个分区。
+         *
+         * 以前这里是三张卡（表情库按文件、图库按序号、官方素材池），同一批图
+         * 三个页面、两套删除语义。合并之后按钮一件没少，但用户只需要记一个词。
          */
-        part === 'sticker' ? h(GalleryCard, { toast, n: '03' }) : null,
+        part === 'sticker' ? h(GalleryPage, { toast, config, saveCfg }) : null,
         /**
-         * 素材池排最后：它讲的是「发图的临时车道」，属于排障信息，
-         * 正常状态应该是空的。用户找图、改标注不会走到这里。
+         * 小黄脸码表放在图库之后：它是「怎么让回复带表情」的参考页，
+         * 不是库管理。只在独立的「图库」页出现，老入口 part='all' 不塞进来。
          */
-        part === 'sticker' ? h(MediaPoolCard, { toast, n: '04' }) : null,
+        part === 'sticker' ? h(FaceMapCard, { toast }) : null,
         part === 'voice'
-          ? h('div', { className: 'roost-note' }, '表情包在「表达 → 表情包」那一页。')
+          ? h('div', { className: 'roost-note' }, '配图在「表达 → 图库」那一页。')
           : null,
       )
     }
@@ -18644,7 +19623,7 @@ select.roost-input{color-scheme:dark}
       /* 能力：她能干什么 */
       ['caps', '权限'],
       ['express', '语音'],
-      ['stickers', '表情包'],
+      ['stickers', '图库'],
       ['model', '模型'],
       /* 功能包：依赖是「能力」的前置条件，不是扩展（一个包可能被多个功能用） */
       ['deps', '功能包'],
@@ -18851,7 +19830,7 @@ select.roost-input{color-scheme:dark}
       people: '人物 熟人 档案 印象 人物墙',
       caps: '权限 能力 授权 工具 限额',
       express: '语音 表达 声音 tts 念出来 试听 预览',
-      stickers: '表情包 表情 贴纸',
+      stickers: '图库 表情包 表情 贴纸 图片 素材池 回收站',
       model: '模型 价格 用量 金额 花费',
       ext: '扩展 已安装 插件',
       'ext-market': '市场 扩展市场 插件市场 安装',
