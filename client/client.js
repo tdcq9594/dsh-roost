@@ -18361,22 +18361,51 @@ select.roost-input{color-scheme:dark}
       )
       return h('div', null,
         h(Sec, { n: '01', title: '版本' },
-          row('当前版本', ver?.current || ver?.version || '（没读到，稍后刷新）'),
+          /**
+           * 字段名是 `own`（运行中版本）/ `installed`（磁盘上那份），
+           * 以前读的是 `current` / `version`——`updater.check()` 从来不返回
+           * 这两个名字，于是这块永远显示「没读到」，而「最新版本」是好的
+           * （那个字段确实叫 `latest`）。
+           */
+          row('当前版本', ver?.own || ver?.installed || '（没读到，稍后刷新）'),
+          ver?.installed && ver?.own && ver.installed !== ver.own
+            ? row('已装版本', `${ver.installed}（重启后生效）`)
+            : null,
           ver?.latest ? row('最新版本', ver.latest + (ver.hasUpdate ? '（有新版，去「更新」页装）' : '（已是最新）')) : null,
         ),
         h(Sec, { n: '02', title: '仓库与许可' },
           row('GitHub', h('a', { href: 'https://github.com/roost-qq/dsh-roost', target: '_blank', rel: 'noreferrer' }, 'roost-qq/dsh-roost')),
           row('Gitee', h('a', { href: 'https://gitee.com/tdcq9594/dsh-roost', target: '_blank', rel: 'noreferrer' }, 'tdcq9594/dsh-roost')),
+          /**
+           * 许可改过一次：**本仓**（dsh-roost 这一层）已经换成 AGPL-3.0，
+           * 旧文案还写着「自写协议 v2.0，非 OSI 许可」——那是框架
+           * qq-bot-roost 的协议，两层不是同一个。照旧文案写会误导：
+           * AGPL 明确允许商用，义务是「改过的版本对外提供服务要公开源码」。
+           */
           h('div', { className: 'roost-note' },
-            '永久免费，禁止收费与商业使用（自写协议 v2.0，非 OSI 许可）。'
-            + '框架本体是 qq-bot-roost，这一层是把它接进 DSH 的插件。'),
+            'dsh-roost 以 AGPL-3.0 发布（OSI 认可的开源许可）：可以免费使用、修改、再分发；'
+            + '改过的版本只要对外提供服务，就必须一并公开源码。'
+            + '框架本体 qq-bot-roost 是另一套协议（永久免费、禁止收费与商业使用），这一层是把它接进 DSH 的插件。'),
         ),
         h(Sec, { n: '03', title: '交流反馈群' },
-          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-            h('span', null, 'QQ 群 1130901545'),
-            h('button', { type: 'button', className: 'roost-btn', onClick: () => copy('1130901545') }, '复制群号'),
+          h('div', { style: { display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' } },
+            /**
+             * 二维码走宿主路由读仓库里的图（随包发布），不内联进 client.js。
+             * 白底是必要的：二维码图片本身透明，深色主题下会糊成一片。
+             */
+            h('img', {
+              src: API + '/community-qr',
+              alt: '交流群二维码',
+              style: { width: 168, height: 168, borderRadius: 6, flex: '0 0 auto', background: '#fff' },
+            }),
+            h('div', { style: { minWidth: 200 } },
+              h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                h('span', null, 'QQ 群 1130901545'),
+                h('button', { type: 'button', className: 'roost-btn', onClick: () => copy('1130901545') }, '复制群号'),
+              ),
+              h('div', { className: 'roost-note' }, '手机扫码进群；出问题先看「排障」页的日志，再来群里问。'),
+            ),
           ),
-          h('div', { className: 'roost-note' }, '出问题先看「排障」页的日志，再来群里问。'),
         ),
       )
     }

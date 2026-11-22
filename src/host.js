@@ -14003,6 +14003,22 @@ export function apply(ctx) {
       }),
 
       /**
+       * 交流群二维码（关于页用）。
+       *
+       * 图片**随包发布**（`package.json` 的 `files` 里有 `docs`），不内联进
+       * 前端：base64 会让 `client.js` 多出几十 KB，而这张图只在关于页看一眼。
+       * 路径写死、不接任何用户输入，所以没有穿越面；读不到时明确说
+       * 「没随包发布」，而不是给一个破图。
+       */
+      route('/community-qr', (req, res) => {
+        const abs = join(import.meta.dirname, '..', 'docs', 'images', 'qq-group.jpg');
+        if (!existsSync(abs)) {
+          return send(res, 404, { ok: false, message: '二维码没有随包发布（docs/images/qq-group.jpg 缺失）' });
+        }
+        return pipeImage(res, abs, { mime: 'image/jpeg', cache: 'private, max-age=86400' });
+      }),
+
+      /**
        * 检查更新。
        *
        * **默认只读后台快照**（`updater.watch()` 启动后 10 秒查一次，之后 6 小时一次）：
