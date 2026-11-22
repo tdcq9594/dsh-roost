@@ -16917,6 +16917,137 @@ select.roost-input{color-scheme:dark}
     }
 
     /**
+     * 官方 Markdown 素材池（`/v2/media-images`，机器人级共享，上限 100 张）。
+     *
+     * 这一节存在的唯一理由是**排障**。`<<image:>>` 发图会先传到官方图床，
+     * 正常几秒内就删（`outbound-actions.js` 末尾那段）。漏下来的只有三种情况：
+     * 进程崩在「上传完 / 还没删」之间、令牌缺 manage 权限、删除请求自己失败。
+     * 漏一张白占一格，漏满 100 张之后**所有**发图都失败，而报错只有
+     * 「上传失败」四个字——以前用户完全看不到这个池子，也就无从判断是不是满了。
+     */
+    function MediaPoolCard({ toast, n = '04' }) {
+      const [data, setData] = useState(null)
+      const [busy, setBusy] = useState(false)
+
+      const load = useCallback(async (cursor = '') => {
+        setBusy(true)
+        try {
+          const qs = cursor ? '?cursor=' + encodeURIComponent(cursor) : ''
+          const r = await get('/stickers/media' + qs)
+          setData((prev) => {
+            /**
+             * 翻页时把已加载的拼进来，**按 imageId 去重**：翻页途中若有新素材
+             * 传上来，游标会错位、同一条出现两次，React 的重复 key 会把整个
+             * 列表渲染坏（不是只多一行）。
+             */
+            if (!cursor || !prev?.images?.length) return r
+            const seen = new Set(prev.images.map((x) => x.imageId))
+            return {
+              ...r,
+              images: [...prev.images, ...(r.images || []).filter((x) => !seen.has(x.imageId))],
+            }
+          })
+        } catch {
+          setData({ ok: false, message: '连不上面板后端（宿主可能刚重启）' })
+        } finally { setBusy(false) }
+      }, [])
+
+      useEffect(() => { load('') }, [load])
+
+      const del = async (it) => {
+        const name = it.fileName || it.imageId
+        if (!window.confirm(
+          `删掉素材「${name}」？\n\n`
+          + '删了配额立刻还回来。这个池子是机器人级共享的——若别的插件正在引用它，'
+          + '那条引用会失效（已经发出去的消息不受影响，平台发送时已转存副本）。',
+        )) return
+        const r = await post('/stickers/media/delete', { imageId: it.imageId, confirm: true })
+        if (r.ok === false) return toast(r.message || '删不掉')
+        toast('已删掉，配额还回来了')
+        load('')
+      }
+
+      /** 时间戳可能缺失或为 0：别渲染成 1970，那比空白更让人困惑 */
+      const when = (ms) => {
+        const v = Number(ms) || 0
+        if (!v) return '未知'
+        try { return new Date(v).toLocaleString('zh-CN') } catch { return '未知' }
+      }
+
+      const quota = Number(data?.quota) || 100
+      const total = Number(data?.total) || 0
+      const remaining = Number.isFinite(Number(data?.remaining))
+        ? Number(data.remaining)
+        : Math.max(0, quota - total)
+      const used = Math.max(0, quota - remaining)
+      const pct = quota ? Math.min(100, Math.round((used / quota) * 100)) : 0
+      const rows = Array.isArray(data?.images) ? data.images : []
+
+      return h(Sec, {
+        n, title: '官方素材池（发图用的临时车道）',
+        right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: busy, onClick: () => load(''),
+        }, busy ? '读取中…' : '刷新'),
+      },
+        h('div', { className: 'roost-note' },
+          '发图时先把图传到官方图床、拿到 qqbot-media:// 引用发出去，正常几秒内就删掉。'
+          + '这里列的是**没删掉的残留**——要么进程崩在中间、要么令牌缺 manage 权限、要么删除请求自己失败了。'),
+
+        !data
+          ? h('div', { className: 'roost-empty' }, '读着…')
+          : data.ok === false
+            ? h('div', { className: 'roost-empty' }, data.message || '读不到素材池')
+            : h('div', null,
+              h('div', { className: 'roost-note', style: { marginBottom: 6 } },
+                `已用 ${used} / ${quota} · 还剩 ${remaining} 张`
+                + (used >= quota ? ' · 满了：新图会传不上去，删几张再试' : '')),
+
+              h('div', { style: { height: 6, borderRadius: 3, background: 'rgba(128,128,128,.2)', marginBottom: 10 } },
+                h('div', {
+                  style: {
+                    height: '100%', borderRadius: 3, width: `${pct}%`,
+                    background: used >= quota ? 'var(--danger, #c0392b)' : 'var(--ok, #2a9d5c)',
+                    transition: 'width .3s',
+                  },
+                })),
+
+              rows.length === 0
+                ? h('div', { className: 'roost-empty' },
+                  '池子是空的，说明每次都删干净了——这是正常状态')
+                : h('div', { className: 'roost-list roost-scroll', style: { maxHeight: 260 } },
+                  rows.map((it) => h('div', {
+                    key: it.imageId || it.fileName,
+                    className: 'roost-item',
+                    style: { alignItems: 'center' },
+                  },
+                    it.previewUrl
+                      ? h('img', {
+                          src: it.previewUrl, alt: it.fileName, loading: 'lazy',
+                          /** 预签名链接是短时效的，只当缩略图用，不缓存也不写盘 */
+                          style: { width: 34, height: 34, objectFit: 'cover', borderRadius: 4, flex: '0 0 auto' },
+                        })
+                      : null,
+                    h('span', { className: 't', style: { minWidth: 0 } },
+                      it.fileName || '(没文件名)',
+                      h('span', { className: 'd' },
+                        ` · 传于 ${when(it.createdAt)}`
+                        + (it.expiresAt ? ` · 到期 ${when(it.expiresAt)}` : ''))),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      style: { fontSize: 11, padding: '1px 8px', marginLeft: 'auto', flex: '0 0 auto' },
+                      onClick: () => del(it),
+                    }, '删')))),
+
+              data.nextCursor
+                ? h('button', {
+                    type: 'button', className: 'roost-btn', disabled: busy,
+                    style: { marginTop: 8 }, onClick: () => load(data.nextCursor),
+                  }, busy ? '读取中…' : '加载更多')
+                : null),
+      )
+    }
+
+    /**
      * A3（第二轮对照）：「听」这一条腿终于有面板了。
      * 官方 Bot API 直接把语音转成文字（asrText），不用配 ASR、不用 Key；
      * 以前只能从提示词里猜「她听没听清」，现在排障能看见刚才转成了什么。
@@ -17003,6 +17134,11 @@ select.roost-input{color-scheme:dark}
          * 放隔壁才能来回对照「AI 认不认得出这张」。
          */
         part === 'sticker' ? h(GalleryCard, { toast, n: '03' }) : null,
+        /**
+         * 素材池排最后：它讲的是「发图的临时车道」，属于排障信息，
+         * 正常状态应该是空的。用户找图、改标注不会走到这里。
+         */
+        part === 'sticker' ? h(MediaPoolCard, { toast, n: '04' }) : null,
         part === 'voice'
           ? h('div', { className: 'roost-note' }, '表情包在「表达 → 表情包」那一页。')
           : null,

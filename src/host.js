@@ -12344,6 +12344,48 @@ export function apply(ctx) {
       }),
 
       /**
+       * 官方 Markdown 素材池（`/v2/media-images`，机器人级共享，上限 100 张）。
+       *
+       * **为什么要让它可见**：`<<image:>>` 每发一张就要往官方图床上传一张。
+       * `outbound-actions.js` 末尾有「用完即删」，但那条路只在三种情况会漏：
+       * 进程崩溃、`media.image.delete` 没权限（令牌缺 manage）、删除请求本身
+       * 网络失败。漏下来的素材会一直占到 `expires_at`。配额 100 是**所有插件
+       * 共用的**，满了之后每一次发图都失败，而报错只是「上传失败」——
+       * 用户根本看不出是什么东西占了配额，也不知道该删谁。
+       *
+       * 这条路由只读。删除单独一条，且要 `confirm`（见下）。
+       */
+      route('/stickers/media', async (req, res) => {
+        const u = new URL(req.url || '/', 'http://local');
+        const ch = channels.active();
+        if (!ch || typeof ch.listImages !== 'function') {
+          return send(res, 200, { ok: false, message: '当前通道不支持查官方素材池' });
+        }
+        const r = await ch.listImages({ cursor: String(u.searchParams.get('cursor') || '') });
+        return send(res, 200, r);
+      }),
+
+      /**
+       * 删一张官方素材，把配额还回去。
+       *
+       * **这是共享池子**：删掉的可能是别的插件正在用的图（引用会立刻失效，
+       * 已发出的消息不受影响——平台发送时已转存副本）。所以必须
+       * `confirm:true`，前端负责把人看清清单这一步做实。
+       */
+      route('/stickers/media/delete', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        if (body?.confirm !== true) {
+          return send(res, 400, { ok: false, message: '删素材不可恢复，要带 confirm: true' });
+        }
+        const ch = channels.active();
+        if (!ch || typeof ch.deleteImage !== 'function') {
+          return send(res, 400, { ok: false, message: '当前通道不支持删官方素材' });
+        }
+        const r = await ch.deleteImage(body?.imageId);
+        return send(res, r.ok ? 200 : 400, r);
+      }),
+
+      /**
        * 上传一张图。
        *
        * 收 base64 而不是 multipart：面板这边只有 `fetch`，用 FormData 也能做，
