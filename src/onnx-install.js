@@ -84,6 +84,18 @@ export const HF_REGISTRIES = Object.freeze([
 export const hfFileUrl = (modelId, file, registry = HF_REGISTRIES[0]) =>
   `${registry}/${modelId}/resolve/main/${file}`;
 
+/**
+ * 本地 rerank 模型。抄 Hindsight 默认 `DEFAULT_RERANKER_LOCAL_MODEL =
+ * "hindsight-ai/hs-rerank-1"`；cross-encoder，pair(query,doc) → logit。
+ * 模型 160MB + tokenizer 34MB（比 embedding 的 470MB 轻）。
+ */
+export const RERANK_MODEL_ID = 'hindsight-ai/hs-rerank-1';
+export const RERANK_FILES = Object.freeze([
+  ['onnx/model.onnx', 'model.onnx'],
+  ['tokenizer.json', 'tokenizer.json'],
+  ['tokenizer_config.json', 'tokenizer_config.json'],
+]);
+
 /** 找 tar：Windows 优先系统自带 bsdtar（-C C:\ 不会当成远程主机），退回 GNU 补 --force-local */
 async function resolveTar() {
   const winTar = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');

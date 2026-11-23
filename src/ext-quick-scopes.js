@@ -70,6 +70,7 @@ const HOST_MAINT_OPS = Object.freeze([
   /** 本地 ONNX 运行时（记忆增强前置）：装/卸/查/取消，和共享依赖同级维护面 */
   'onnx.status', 'onnx.install', 'onnx.cancel', 'onnx.uninstall',
   'onnx.modelInstall', 'onnx.modelCancel', 'onnx.modelUninstall',
+  'onnx.rerankInstall', 'onnx.rerankCancel', 'onnx.rerankUninstall',
 ]);
 
 /** 不可逆的删除类。 */

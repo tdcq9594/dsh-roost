@@ -278,9 +278,10 @@ import {
   createTagJob, statsOf, PAGE_SIZE,
 } from './sticker-manage.js';
 import { createTtsInstaller } from './tts-install.js';
-import { createOnnxInstaller } from './onnx-install.js';
+import { createOnnxInstaller, RERANK_FILES, RERANK_MODEL_ID } from './onnx-install.js';
 import { createModelInstaller } from './onnx-model-install.js';
 import { createLocalEmbedder } from './local-embed.js';
+import { createLocalReranker } from './local-rerank.js';
 import { createTurnScenes } from './turn-scene.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -958,6 +959,20 @@ export function apply(ctx) {
     dataDir,
     log: (m) => log.info(m),
   });
+
+  /**
+   * 本地 cross-encoder rerank（hs-rerank-1）：和 embedding 模型各自独立安装、
+   * 各自状态机。运行时复用 onnx-runtime，只多下 160MB 模型 + 34MB tokenizer。
+   */
+  const rerankModelInstaller = createModelInstaller({
+    dataDir,
+    log: (m) => log.info(m),
+    modelId: RERANK_MODEL_ID,
+    dirName: 'hs-rerank-1',
+    files: RERANK_FILES,
+    label: '本地 rerank 模型（hs-rerank-1）',
+  });
+  const localReranker = createLocalReranker({ dataDir, log: (m) => log.warn(m) });
 
   /**
    * GPT-SoVITS 的一键启动。
@@ -3351,7 +3366,7 @@ export function apply(ctx) {
     let hits = rec.hits;
     let rerankMode = 'off';
     try {
-      const rr = await rerankHits(q, hits, { cfg, embedder, now: Date.now() });
+      const rr = await rerankHits(q, hits, { cfg, embedder, localReranker, now: Date.now() });
       hits = rr.hits;
       rerankMode = rr.mode;
     } catch (e) {
@@ -9020,6 +9035,13 @@ export function apply(ctx) {
                   install: onnxModelInstaller.status(),
                   usage: onnxModelInstaller.usage(),
                 },
+                /** 本地 rerank 模型（hs-rerank-1）：第三套独立状态 */
+                rerankModel: {
+                  ready: rerankModelInstaller.ready(),
+                  modelId: rerankModelInstaller.modelId(),
+                  install: rerankModelInstaller.status(),
+                  usage: rerankModelInstaller.usage(),
+                },
               });
             }
             case 'onnx.install': {
@@ -9045,6 +9067,19 @@ export function apply(ctx) {
             }
             case 'onnx.modelUninstall': {
               const r = onnxModelInstaller.uninstall();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            /** 本地 rerank 模型（第三套状态机，和 embedding 模型互不占用） */
+            case 'onnx.rerankInstall': {
+              const r = rerankModelInstaller.start();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.rerankCancel': {
+              const r = rerankModelInstaller.cancel();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.rerankUninstall': {
+              const r = rerankModelInstaller.uninstall();
               return send(res, r.ok ? 200 : 409, r);
             }
             /**

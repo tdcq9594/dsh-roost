@@ -477,6 +477,11 @@ export const DEFAULTS = {
       /** 相关性占多少，剩下给 RRF 原名次 */
       weight: 0.6,
       useVector: true,
+      /**
+       * 本地 cross-encoder 重排（默认关）。装好 hs-rerank-1 模型后打开，
+       * 比向量余弦准；没装/算不出来自动回落向量或规则。
+       */
+      useLocal: false,
     },
     /** 关键词 / 向量各取多少条进融合（原写死 40） */
     perPath: 40,

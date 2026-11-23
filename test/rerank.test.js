@@ -82,3 +82,43 @@ test('配置默认值：默认关、权重 0.6、允许向量', () => {
   assert.equal(RERANK_DEFAULTS.weight, 0.6);
   assert.equal(RERANK_DEFAULTS.useVector, true);
 });
+
+test('本地模式：配了 localReranker 走 cross-encoder，优先级高于向量', async () => {
+  const hits = [
+    { text: '无关的一条', at: NOW },
+    { text: '主人搬到上海了', at: NOW },
+  ];
+  let called = 0;
+  const fakeLocal = {
+    ready: () => true,
+    score: async (q, texts) => { called += 1; return texts.map((t) => (t.includes('上海') ? 0.95 : 0.1)); },
+  };
+  const out = await rerankHits('搬哪', hits, {
+    cfg: { recall: { rerank: { enabled: true, useLocal: true } } },
+    localReranker: fakeLocal,
+    embedder: { enabled: () => true, one: async () => { throw new Error('不该走向量'); } },
+    now: NOW,
+  });
+  assert.equal(called, 1);
+  assert.equal(out.mode, 'local');
+  assert.ok(out.hits[0].text.includes('上海'), 'cross-encoder 分高的排前面');
+});
+
+test('本地模式：模型没装好 / 算不出来时回落向量或规则，不抛', async () => {
+  const hits = [{ text: '搬家', at: NOW }, { text: '天气', at: NOW }];
+  const notReady = { ready: () => false, score: async () => null };
+  const out = await rerankHits('搬哪', hits, {
+    cfg: { recall: { rerank: { enabled: true, useLocal: true, useVector: false } } },
+    localReranker: notReady,
+    now: NOW,
+  });
+  assert.equal(out.mode, 'rule', '本地没好就回落规则');
+
+  const broken = { ready: () => true, score: async () => { throw new Error('模拟失败'); } };
+  const out2 = await rerankHits('搬哪', hits, {
+    cfg: { recall: { rerank: { enabled: true, useLocal: true, useVector: false } } },
+    localReranker: broken,
+    now: NOW,
+  });
+  assert.equal(out2.mode, 'rule', '本地抛错也回落，不让召回崩');
+});

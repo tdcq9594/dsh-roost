@@ -18,7 +18,9 @@ import { dirname, join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
-import { EMBED_FILES, EMBED_MODEL_ID, HF_REGISTRIES, hfFileUrl } from './onnx-install.js';
+import {
+  EMBED_FILES, EMBED_MODEL_ID, HF_REGISTRIES, RERANK_FILES, RERANK_MODEL_ID, hfFileUrl,
+} from './onnx-install.js';
 
 const PHASE = Object.freeze({ IDLE: 'idle', DOWNLOAD: 'download', DONE: 'done', ERROR: 'error' });
 
@@ -45,6 +47,14 @@ export function createModelInstaller({
   log = () => {},
   /** HuggingFace 源覆盖：传数组换顺序（如用户自己有镜像），默认 hf-mirror → 官方 */
   registries = () => HF_REGISTRIES,
+  /**
+   * 模型规格。默认 e5-small（老调用方不传，行为不变）；rerank 传自己的一套。
+   * 每个模型一个 installer 实例、各自状态机与目录，互不占用 busy。
+   */
+  modelId = EMBED_MODEL_ID,
+  dirName = 'e5-small',
+  files = EMBED_FILES,
+  label = '本地 embedding 模型（e5-small）',
 } = {}) {
   let state = {
     running: false, phase: PHASE.IDLE,
@@ -53,7 +63,7 @@ export function createModelInstaller({
   };
   let controller = null;
 
-  const modelDir = () => join(dataDir(), 'onnx-models', 'e5-small');
+  const modelDir = () => join(dataDir(), 'onnx-models', dirName);
 
   function snapshot() {
     const percent = state.total > 0
@@ -65,7 +75,7 @@ export function createModelInstaller({
 
   /** 三个文件都在才算装好（光有 model.onnx 没 tokenizer 照样跑不了） */
   function ready() {
-    return EMBED_FILES.every(([, name]) => existsSync(join(modelDir(), name)));
+    return files.every(([, name]) => existsSync(join(modelDir(), name)));
   }
 
   async function download(url, dest, signal) {
@@ -118,10 +128,10 @@ export function createModelInstaller({
 
     const regs = registries();
     const sources = Array.isArray(regs) && regs.length ? regs : HF_REGISTRIES;
-    for (const [remote, name] of EMBED_FILES) {
+    for (const [remote, name] of files) {
       set({ phase: PHASE.DOWNLOAD, message: `下载 ${name}…`, received: 0, total: 0 });
       const dest = join(tmp, name);
-      const urls = sources.map((r) => hfFileUrl(EMBED_MODEL_ID, remote, r));
+      const urls = sources.map((r) => hfFileUrl(modelId, remote, r));
       await downloadFromAny(urls, dest, signal);
       /** 空文件不算装好（hf-mirror 偶尔返回 0 字节，实测踩到过） */
       if (!existsSync(dest) || !statSync(dest).size) throw new Error(`${name} 下载为空，换个源再试`);
@@ -130,7 +140,7 @@ export function createModelInstaller({
     const target = modelDir();
     rmSync(target, { recursive: true, force: true });
     renameSync(tmp, target);
-    set({ phase: PHASE.DONE, message: '装好了：本地 embedding 模型（e5-small）', running: false, finishedAt: Date.now() });
+    set({ phase: PHASE.DONE, message: `装好了：${label}`, running: false, finishedAt: Date.now() });
     log('本地 embedding 模型安装完成');
   }
 
@@ -138,7 +148,7 @@ export function createModelInstaller({
     ready,
     status: snapshot,
     modelDir,
-    modelId: () => EMBED_MODEL_ID,
+    modelId: () => modelId,
 
     start() {
       if (state.running) return { ok: false, reason: 'busy', message: '已经有安装任务在跑' };
@@ -181,7 +191,7 @@ export function createModelInstaller({
     /** 模型文件就绪后，local-embed.js 用这里拿路径 */
     paths() {
       const dir = modelDir();
-      return Object.fromEntries(EMBED_FILES.map(([remote, name]) => [remote, join(dir, name)]));
+      return Object.fromEntries(files.map(([remote, name]) => [remote, join(dir, name)]));
     },
 
     usage() {
