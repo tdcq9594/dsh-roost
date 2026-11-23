@@ -4842,6 +4842,19 @@ select.roost-input{color-scheme:dark}
         const r = await quick('memory.vector.status')
         setVecStatus(r?.ok === false ? { err: r.message || '状态读取失败' } : r)
       }
+      /** G2：test 真发请求看 dims/ms，rebuild 只重算向量不改正文；都是显式点才跑 */
+      const [vecOp, setVecOp] = useState(null)
+      const doVecOp = async (op) => {
+        setVecOp({ busy: true, op })
+        try {
+          const r = await quick(op)
+          setVecOp({ op, result: r })
+          toast(r?.ok === false ? (r.message || '没成功') : (op === 'memory.vector.test'
+            ? `连通：${r.dims} 维 / ${r.ms}ms`
+            : `重建完成：补算 ${r.done || 0} 条`))
+          if (op === 'memory.vector.rebuild' && r?.ok) loadVecStatus()
+        } catch (e) { toast(e.message); setVecOp(null) }
+      }
       const [q, setQ] = useState('')
       const [hits, setHits] = useState(null)
       const [fact, setFact] = useState('')
@@ -5940,9 +5953,24 @@ select.roost-input{color-scheme:dark}
               : vecStatus
                 ? h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
                     vecStatus.summary
-                    + (vecStatus.rerank?.mode !== 'off' ? ` · 重排：${vecStatus.rerank.mode === 'local' ? '本地模型' : '规则'}` : ''),
+                    + (vecStatus.rerank?.mode !== 'off' ? ` · 重排：${vecStatus.rerank.mode === 'local' ? '本地模型' : '规则'}` : '')
+                    + ` · 索引 ${vecStatus.vector?.indexed ?? 0}/${vecStatus.vector?.total ?? 0}`,
                     ...(vecStatus.warnings || []).map((w, i) => h('div', { key: i, style: { color: 'var(--warn, #d9a441)', fontSize: 11.5 } }, '⚠ ' + w)))
                 : null),
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 } },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: vecOp?.busy,
+              title: '真发一条短文本到向量模型，看维度与耗时；不写进索引',
+              onClick: () => doVecOp('memory.vector.test'),
+            }, vecOp?.busy && vecOp.op === 'memory.vector.test' ? '测试中…' : '测试向量'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: vecOp?.busy,
+              title: '按当前模型指纹重新补算日记向量；只改向量列，不改正文/联想',
+              onClick: () => doVecOp('memory.vector.rebuild'),
+            }, vecOp?.busy && vecOp.op === 'memory.vector.rebuild' ? '重建中…' : '重建索引'),
+            vecOp?.result && !vecOp.result.ok
+              ? h('span', { style: { color: 'var(--bad)', fontSize: 11.5 } }, vecOp.result.message || '失败')
+              : null),
           /**
            * 重排候选（Reranker）：默认关。配了向量就按语义相似度重排，
            * 没配就按「关键词命中 + 新鲜度」确定性重排。开关放这里，

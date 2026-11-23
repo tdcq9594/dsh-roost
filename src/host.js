@@ -83,6 +83,7 @@ import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { projectRecallPreview } from './recall-preview.js';
 import { vectorStatus } from './vector-status.js';
+import { TEST_TEXT, testResult, rebuildBatch } from './vector-ops.js';
 import { rerankHits } from './rerank.js';
 import { isDangerousCommand, createConfirmGate, dangerScanArgs } from './safety.js';
 import { createClosing, shouldNotePending } from './closing.js';
@@ -10138,6 +10139,8 @@ export function apply(ctx) {
             case 'memory.vector.status': {
               const e = cfg.memory?.embedding || null;
               try {
+                /** G2：索引进度用 journal 现成统计（withVec=已索引，total=总量），语义等价对方的 indexed/total */
+                const js = journal.stats();
                 return send(res, 200, {
                   ok: true,
                   ...vectorStatus({
@@ -10148,10 +10151,67 @@ export function apply(ctx) {
                     remoteConfigured: Boolean(e?.model && e?.baseUrl && e?.apiKey),
                     rerankEnabled: cfg.recall?.rerank?.enabled === true || cfg.recall?.rerank?.useLocal === true,
                     localRerankReady: typeof localReranker?.ready === 'function' ? localReranker.ready() : false,
+                    dims: 0, // 维度靠 test 实测（status 不额外读向量行，避免 IO）
+                    indexed: js.withVec || 0,
+                    total: js.total || 0,
+                    lastError: '',
                   }),
                 });
               } catch (err) {
                 return send(res, 200, { ok: false, message: `状态读取失败：${err?.message || err}` });
+              }
+            }
+
+            /**
+             * G2 vectorTest：真发一条短文本到 embedding，返回 dims/ms，不写索引。
+             * 对齐对方 `/memory/vector/test`——连通性测试必须真发请求，不能 mock。
+             */
+            case 'memory.vector.test': {
+              try {
+                if (typeof embedder?.one !== 'function' || !embedder.enabled()) {
+                  return send(res, 200, { ok: false, message: '向量没启用或模型未就绪，测试不了；先看状态' });
+                }
+                const text = String(arg?.text || TEST_TEXT).slice(0, 200);
+                const t = Date.now();
+                const vec = await embedder.one(text);
+                return send(res, 200, { ok: true, ...testResult(vec, Date.now() - t), text });
+              } catch (err) {
+                return send(res, 200, { ok: false, message: `向量测试失败：${err?.message || err}` });
+              }
+            }
+
+            /**
+             * G2 vectorRebuild：分批重算向量索引（只改 journal 行 vec，不碰正文/assoc）。
+             * 对齐对方 reset+sync；我方没有独立索引表，所以是"按模型指纹补算"。
+             * 传 model 指纹给 noVec，连"有向量但换过模型"的一起重算。
+             */
+            case 'memory.vector.rebuild': {
+              try {
+                if (typeof embedder?.enabled !== 'function' || !embedder.enabled()) {
+                  return send(res, 200, { ok: false, message: '向量没启用或模型未就绪，无法重建索引' });
+                }
+                const model = String(embedder.modelId?.() || '');
+                const batchSize = Math.max(1, Math.min(100, Number(arg?.batchSize) || 20));
+                const maxBatches = Math.max(1, Math.min(500, Number(arg?.maxBatches) || 50));
+                let done = 0, failed = 0, batches = 0;
+                for (let i = 0; i < maxBatches; i++) {
+                  const pending = typeof journal.noVec === 'function' ? journal.noVec(batchSize, { model }) : [];
+                  if (!pending.length) break;
+                  const r = await rebuildBatch({
+                    rows: pending,
+                    embed: embedder,
+                    setVec: (id, vec, m) => journal.setVec(id, vec, m),
+                    model,
+                  });
+                  done += r.done; failed += r.failed; batches++;
+                  if (r.done === 0) break; // 整批失败（模型挂了），别空转
+                }
+                return send(res, 200, {
+                  ok: true, done, failed, batches, model,
+                  message: `重建完成：补算 ${done} 条，失败 ${failed} 条（只动向量，不改正文/联想）`,
+                });
+              } catch (err) {
+                return send(res, 200, { ok: false, message: `重建失败：${err?.message || err}` });
               }
             }
 

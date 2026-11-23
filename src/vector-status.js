@@ -41,6 +41,11 @@ export function vectorStatus(s = {}) {
       localWanted,
       localReady,
       remoteConfigured: remote,
+      /** G2：对齐对方 vectorStatus 的索引进度四字段（缺省 0，老调用方不受影响） */
+      dims: Math.max(0, Number(s.dims) || 0),
+      indexed: Math.max(0, Number(s.indexed) || 0),
+      total: Math.max(0, Number(s.total) || 0),
+      lastError: String(s.lastError || ''),
     },
     rerank: {
       enabled: s.rerankEnabled === true,

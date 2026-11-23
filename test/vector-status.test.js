@@ -54,3 +54,15 @@ test('纯函数不改入参', () => {
   vectorStatus(s);
   assert.equal(JSON.stringify(s), snap);
 });
+
+test('G2：索引进度四字段（dims/indexed/total/lastError），缺省为 0 兼容老调用', () => {
+  const r = vectorStatus({ dims: 384, indexed: 10, total: 100, lastError: 'boom' });
+  assert.equal(r.vector.dims, 384);
+  assert.equal(r.vector.indexed, 10);
+  assert.equal(r.vector.total, 100);
+  assert.equal(r.vector.lastError, 'boom');
+  const old = vectorStatus({});
+  assert.equal(old.vector.dims, 0);
+  assert.equal(old.vector.indexed, 0);
+  assert.equal(old.vector.lastError, '');
+});
