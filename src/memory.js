@@ -819,6 +819,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
        */
       if (!FACT_KINDS.includes(next.kind) && FACT_KINDS.includes(opts.kind)) next.kind = opts.kind;
       if (!Number.isFinite(Number(next.occurredAt)) && Number(opts.occurredAt) > 0) next.occurredAt = Number(opts.occurredAt);
+      /** 显式指令重提仍是指令（不会因为再提一次就降级成普通事实） */
+      if (opts.directive === true) next.directive = true;
       /**
        * 重提＝一次 reinforce 证据。调用方给了 `opts.evidence`（出处摘要）才累计；
        * 老调用点不传，行为与字节都不变。跨级顶替护栏不受影响——证据只动
@@ -851,6 +853,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       /** 双时态：只在调用方明确给时才落盘，老调用方字节不变 */
       ...(FACT_KINDS.includes(opts.kind) && opts.kind !== 'world' ? { kind: opts.kind } : {}),
       ...(Number(opts.occurredAt) > 0 ? { occurredAt: Number(opts.occurredAt) } : {}),
+      /** E1 显式指令："记住不要做X"当硬规则注入，不混在普通事实里被淘汰 */
+      ...(opts.directive === true ? { directive: true } : {}),
     };
     /** 新建就带出处＝第一条证据；老调用点不传 evidence，这一行是空操作 */
     if (opts.evidence) writeEvidence(fresh, applyEvidence({}, 'reinforce', opts.evidence));
@@ -1060,6 +1064,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
             /** A2 双时态：种类 + 事发时间（缺省回退到 at，老库表现不变） */
             kind: kindOf(x),
             occurredAt: occurredOf(x, Number(x.at) || 0),
+            /** E1 显式指令：面板/注入都要认得出 */
+            directive: x.directive === true,
             pin: clamp01(x.pin),
             archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : null,
             reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : null,
@@ -1515,6 +1521,7 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
               /** A2 双时态：同 status 的教训——不导出，清理→还原就把它们抹掉 */
               kind: kindOf(x),
               occurredAt: occurredOf(x, Number(x.at) || 0),
+              directive: x.directive === true,
               pin: clamp01(x.pin),
               reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : 0,
               archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : 0,
@@ -1630,6 +1637,7 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       /** A2 双时态：默认 world / 无 occurredAt 不落盘，老库还原逐字节一致 */
       if (FACT_KINDS.includes(row.kind) && row.kind !== 'world') meta.kind = row.kind;
       if (Number(row.occurredAt) > 0) meta.occurredAt = Number(row.occurredAt);
+      if (row.directive === true) meta.directive = true;
       if (Number(row.pin) > 0) meta.pin = clamp01(row.pin);
       if (Number(row.reviewedAt) > 0) meta.reviewedAt = Number(row.reviewedAt);
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);

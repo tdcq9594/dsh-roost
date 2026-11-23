@@ -2794,3 +2794,23 @@ test('B1-2 重提带证据会升档；老调用点（不传 evidence）不动', 
   const meta = readRaw().meta.global['常提起的事'];
   assert.equal(meta.tier, 'long', '证据够了自动升档');
 });
+
+test('E1 显式指令：单独标记、重提不降级、还原不丢', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-directive-'));
+  const m = createMemory();
+  m.add('g1', '别叫我小名', 'global', { directive: true });
+  m.add('g1', '普通事实');
+  assert.equal(readRaw().meta.global['别叫我小名'].directive, true);
+  assert.equal(readRaw().meta.global['普通事实'].directive, undefined, '普通事实不标');
+  /** 重提仍是指令 */
+  m.add('g1', '别叫我小名', 'global', {});
+  assert.equal(readRaw().meta.global['别叫我小名'].directive, true);
+  const row = m.listFull('g1').global.find((x) => x.text === '别叫我小名');
+  assert.equal(row.directive, true, 'listFull 要输出');
+  const entry = m.retention.entries().find((x) => x.text === '别叫我小名');
+  assert.equal(entry.directive, true, 'entries 要导出');
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-directive-restore-'));
+  const m2 = createMemory();
+  assert.equal(m2.insertRaw(entry), true);
+  assert.equal(m2.listFull('g1').global[0].directive, true, '还原不丢');
+});

@@ -73,3 +73,10 @@ test('B3 接线：过时提醒只在 deep 段注入，且只标注不改正文',
   assert.match(host, /别当准信/, '措辞是提醒模型拿不准就问，不是改写结论');
   assert.match(host, /!x\.until && !x\.archivedAt/, '已取代/归档的不提醒');
 });
+
+test('E1 接线：显式指令段在 deep 注入、排在事实之前', () => {
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.match(host, /directiveSec = /, '要有指令段');
+  assert.match(host, /rules, directiveSec, factsGlobal/, '指令排在普通事实之前');
+  assert.match(host, /她交代过的规矩/, '措辞是规矩不是建议');
+});

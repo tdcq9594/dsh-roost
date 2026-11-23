@@ -5341,9 +5341,19 @@ export function apply(ctx) {
      * 让模型知道"这条可能过时了，拿不准就问"，而不是替它改写结论。
      */
     let staleSec = '';
+    let directiveSec = '';
     if (deep) {
       try {
         const full = memory.listFull(chatId, aliasesOf(chatId));
+        /**
+         * E1 显式指令：置顶注入，不随普通事实参与 6 条/3 条的截断——
+         * "记住不要做X"被挤掉就等于没记住。
+         */
+        const rules = [...(full.global || []), ...(full.chat || [])]
+          .filter((x) => x.directive === true && !x.until && !x.archivedAt)
+          .slice(0, 8)
+          .map((x) => `· ${oneLine(x.text)}`);
+        if (rules.length) directiveSec = `【她交代过的规矩】\n${rules.join('\n')}`;
         const weak = [...(full.global || []), ...(full.chat || [])]
           .filter((x) => (x.trend === 'stale' || x.trend === 'weakening') && !x.until && !x.archivedAt)
           .slice(0, 5)
@@ -5395,7 +5405,7 @@ export function apply(ctx) {
      * facts 是硬事实，自述是软状态。
      */
     const sections = deep
-      ? [rules, factsGlobal, factsChat, staleSec, selfSec, profilesSec, digestSec, topSec, graphSec]
+      ? [rules, directiveSec, factsGlobal, factsChat, staleSec, selfSec, profilesSec, digestSec, topSec, graphSec]
       : [rules, factsGlobal, factsChat, profilesSec];
 
     const body = fitBudget(sections, deep ? recallBudgets().deep : recallBudgets().res);
