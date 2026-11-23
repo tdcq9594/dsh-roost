@@ -5,7 +5,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -163,6 +163,49 @@ test('审批：面板开了就攒待批；回「发 1」才放行；不是主人
   assert.equal(queue.state().queued, 1);
 
   assert.equal(queue.handleOwnerReply({ text: '发 1', isOwner: true }).handled, false, '没待批了就别吞正常聊天');
+}));
+
+test('首次读档：文件不存在就建空队列文件，不再刷「读档失败」日志', () => withDir((dir) => {
+  const file = join(dir, 'ext-proactive.json');
+  assert.equal(existsSync(file), false, '前置：目录是空的');
+  const logs = [];
+  const queue = createProactiveQueue({ dir, cfgOf: cfgOf(), log: (m) => logs.push(m) });
+
+  assert.ok(existsSync(file), 'ENOENT 应当场建一份空状态，而不是只有内存');
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { day: '', sentToday: 0, items: [], history: [] });
+  assert.deepEqual(logs, [], '首次启动是正常状态，不该记失败日志');
+
+  /** 模拟定时 drain 反反复复读：文件已经在，不该再冒出一条日志 */
+  for (let i = 0; i < 3; i += 1) queue.state();
+  assert.deepEqual(logs, [], '每分钟 state()/drain() 都不该再刷日志');
+}));
+
+test('读档失败：非 ENOENT 记一条，反复读不刷屏；修好后又坏能再报', () => withDir((dir) => {
+  const file = join(dir, 'ext-proactive.json');
+  writeFileSync(file, '{坏掉的 JSON');
+  const logs = [];
+  const queue = createProactiveQueue({ dir, cfgOf: cfgOf(), log: (m) => logs.push(m) });
+  assert.equal(logs.length, 1, '真读坏要记一条，不能被静默吞掉');
+  assert.match(logs[0], /读档失败/);
+
+  /** 模拟定时 drain 每分钟 state() 一次：同一种错误不许重复刷 */
+  for (let i = 0; i < 3; i += 1) queue.state();
+  assert.equal(logs.length, 1, '同一个错误只记一条');
+
+  /** 错误换了（文件位置变成目录 → EISDIR）要能再报，别被上一条 key 永久静默 */
+  rmSync(file);
+  mkdirSync(file);
+  queue.state();
+  assert.equal(logs.length, 2, '错误类型变了要重新报');
+
+  /** 修好了 → 再坏 → 又要报，否则运维修完又坏时永远没日志 */
+  rmSync(file, { recursive: true, force: true });
+  writeFileSync(file, JSON.stringify({ day: '', sentToday: 0, items: [], history: [] }));
+  queue.state();
+  assert.equal(logs.length, 2);
+  writeFileSync(file, '{又坏了');
+  queue.state();
+  assert.equal(logs.length, 3, '修好后重坏要重新报');
 }));
 
 test('落盘：换一个实例队列还在；跨天把额度归零', () => withDir((dir) => {
