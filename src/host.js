@@ -3841,13 +3841,18 @@ export function apply(ctx) {
     onState: (state, detail) => {
       if (state === 'error') log.warn(`外接协议：${detail || state}`);
       /**
-       * 连上之后拉一次能力表（框架版本不同，可用的方法不一样），并把
-       * 「我装了哪些扩展」报给框架，让框架插件能反向调过来。
+       * 连上之后拉一次能力表（框架版本不同，可用的方法不一样）。
+       * 扩展清单**不在这里报**：pump() 在连接建立之前就会把状态置成 online，
+       * 失败重连也会走到这里，拿它上报会刷框架日志。改由 onReady 真连通后做。
        */
-      if (state === 'online') {
-        refreshCaps();
-        void reportExtCatalog().catch(() => {});
-      }
+      if (state === 'online') refreshCaps();
+    },
+    /**
+     * 只在真正收到 welcome / SSE 200 之后上报一次扩展清单。
+     * 上报前还会比对签名，内容没变就不再 RPC（见 reportExtCatalog）。
+     */
+    onReady: () => {
+      void reportExtCatalog().catch(() => {});
     },
     log: (m) => log.warn(`[roost-host] ${m}`),
     /** 事件通道：auto = 装了 ws 就 WS、没装就 SSE；RPC 恒走 HTTP */
@@ -4674,13 +4679,36 @@ export function apply(ctx) {
     return out;
   }
 
+  /** 上次成功上报的清单签名与时间；签名相同就不必再打扰框架的日志 */
+  let lastCatalogSig = null;
+  let lastCatalogAt = 0;
+  let catalogInFlight = false;
+  /**
+   * 框架重启后它那份清单是空的，而 DSH 这边的签名没变。
+   * 完全跳过会让它永久为空（直到下一次装卸扩展），所以隔一段时间补报一次。
+   */
+  const CATALOG_REPORT_TTL_MS = 10_000;
+
   async function reportExtCatalog() {
+    if (catalogInFlight) return;
+    const extensions = extCatalog();
+    const sig = JSON.stringify(extensions);
+    if (sig === lastCatalogSig && Date.now() - lastCatalogAt < CATALOG_REPORT_TTL_MS) return;
+    catalogInFlight = true;
     try {
-      const r = await roost.rpc('ext.register', { extensions: extCatalog() });
-      if (r?.ok === false) log.warn(`上报扩展能力清单被框架拒了：${r?.message ?? ''}`);
+      const r = await roost.rpc('ext.register', { extensions });
+      if (r?.ok === false) {
+        log.warn(`上报扩展能力清单被框架拒了：${r?.message ?? ''}`);
+        return;
+      }
+      /** 只有成功才记签名：失败留着下次重连重试 */
+      lastCatalogSig = sig;
+      lastCatalogAt = Date.now();
     } catch (e) {
       /** 老框架没有 ext.register：不算故障，反向联动这一版不可用而已 */
       log.warn(`上报扩展能力清单失败（框架可能较旧）：${e?.message ?? e}`);
+    } finally {
+      catalogInFlight = false;
     }
   }
 
