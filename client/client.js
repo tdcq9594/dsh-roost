@@ -5549,6 +5549,39 @@ select.roost-input{color-scheme:dark}
               },
             }),
             '重排候选（默认关：配了向量走向量，否则按关键词 + 新鲜度）'),
+          /** 本地 ONNX 开关：模型装好后在这里开，不开就是零影响（默认关） */
+          h('label', {
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 6 },
+            title: '要先在「功能包 → 本地智能」装好 e5-small 模型；装好不开也不影响任何行为',
+          },
+            h('input', {
+              type: 'checkbox',
+              checked: config?.memory?.embeddingLocal === true,
+              disabled: Boolean(busy) || !saveCfg,
+              onChange: async (e) => {
+                const on = Boolean(e.target.checked)
+                const r = await saveCfg({ memory: { ...(config?.memory || {}), embeddingLocal: on } })
+                toast(r?.ok === false ? (r.message || '没存上') : (on ? '本地向量已开，下一轮生效' : '本地向量已关'))
+              },
+            }),
+            '本地向量（装好 e5-small 后开，不用外部 API）'),
+          h('label', {
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 6 },
+            title: '要先在「功能包 → 本地智能」装好 hs-rerank-1 模型；优先于向量重排',
+          },
+            h('input', {
+              type: 'checkbox',
+              checked: config?.recall?.rerank?.useLocal === true,
+              disabled: Boolean(busy) || !saveCfg,
+              onChange: async (e) => {
+                const on = Boolean(e.target.checked)
+                const r = await saveCfg({
+                  recall: { rerank: { ...(config?.recall?.rerank || {}), useLocal: on } },
+                })
+                toast(r?.ok === false ? (r.message || '没存上') : (on ? '本地重排已开，下一轮生效' : '本地重排已关'))
+              },
+            }),
+            '本地重排（装好 hs-rerank-1 后开，比向量准）'),
           h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
             h('input', {
               className: 'roost-input', style: { flex: '1 1 260px' },
@@ -18473,9 +18506,16 @@ select.roost-input{color-scheme:dark}
 
       const load = useCallback(async () => {
         try {
-          const r = await quick('sharedDeps.status')
+          const [r, ox] = await Promise.all([
+            quick('sharedDeps.status'),
+            quick('onnx.status'),
+          ])
           if (r && r.ok === false) { setErr(r.message || '读依赖状态失败'); return }
-          setSt(r)
+          /**
+           * ONNX 状态并进来单独用（不塞 st.runtimes——那是语音页只读展示）。
+           * onnx.status 失败不算墙：站点老版本可能没这个 op，不影响功能包页。
+           */
+          setSt({ ...r, onnx: ox && ox.ok !== false ? ox : null })
           setErr('')
         } catch (e) {
           setErr(e?.message || '读依赖状态失败')
@@ -18487,15 +18527,19 @@ select.roost-input{color-scheme:dark}
       /**
        * 安装中轮询：npm 是几十秒到几分钟的事，服务端把进度放在 `installing`
        * 里（谁问都答同一份真相）。装完 `installing` 变 null，这个 effect 自己停。
+       * ONNX 的三套安装器各自有 `install.running`，任一在跑就继续轮询。
        */
+      const onnxBusy = (ox) => Boolean(ox && (
+        ox.install?.running || ox.model?.install?.running || ox.rerankModel?.install?.running
+      ))
       useEffect(() => {
-        if (!st || !st.installing) return undefined
+        if (!st || (!st.installing && !onnxBusy(st.onnx))) return undefined
         const t = setTimeout(load, 1500)
         return () => clearTimeout(t)
       }, [st, load])
 
-      const call = async (op, arg, okMsg) => {
-        const key = String(arg?.name || (arg?.names ? 'batch' : 'scan'))
+      const call = async (op, arg, okMsg, keyOverride) => {
+        const key = keyOverride || String(arg?.name || (arg?.names ? 'batch' : 'scan'))
         setBusy(key)
         try {
           const r = await quick(op, arg)
@@ -18524,6 +18568,78 @@ select.roost-input{color-scheme:dark}
       const installGroup = (names) => {
         if (!names.length) return
         call('sharedDeps.install', { names }, `开始安装 ${names.length} 个包，装完会自动刷新`)
+      }
+
+      /**
+       * ONNX 一行：运行时 / embedding 模型 / rerank 模型共用一套渲染。
+       * op 三件套（install / cancel / uninstall）服务端已接好，这里只管按钮。
+       * 进度直接读服务端 `install`（percent / message / error），前端不算。
+       */
+      const onnxRow = (key, label, hint, spec, ops) => {
+        const install = spec?.install || {}
+        const running = Boolean(install.running)
+        const isBusy = busy === key || running
+        const bytes = spec?.usage?.bytes || 0
+        const sizeText = bytes > 0 ? ` · 已占 ${(bytes / 1048576).toFixed(0)} MB` : ''
+        const statusText = running
+          ? (install.message || '安装中…') + (install.total > 0 ? ` ${install.percent || 0}%` : '')
+          : install.error ? `失败：${install.error}`
+            : spec?.ready ? `已装好${sizeText}` : '未安装'
+        return h('div', {
+          key,
+          style: {
+            border: '1px solid var(--border, rgba(128,128,128,.22))',
+            borderRadius: 10, padding: '10px 12px', marginBottom: 8,
+            display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap',
+          },
+        },
+          h('div', { style: { flex: '1 1 320px', minWidth: 0 } },
+            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              h('b', { style: { fontSize: 13 } }, label),
+              h('span', {
+                style: {
+                  fontSize: 11, padding: '1px 7px', borderRadius: 999,
+                  border: '1px solid var(--border, rgba(128,128,128,.3))',
+                  opacity: running ? 0.95 : (spec?.ready ? 0.95 : 0.55),
+                },
+              }, statusText),
+            ),
+            h('div', { style: { fontSize: 11, opacity: 0.6, marginTop: 3, wordBreak: 'break-all' } }, hint),
+            running && install.total > 0
+              ? h('div', {
+                style: {
+                  marginTop: 6, height: 4, borderRadius: 2,
+                  background: 'var(--border, rgba(128,128,128,.2))', overflow: 'hidden',
+                },
+              }, h('div', {
+                style: {
+                  height: '100%', width: `${install.percent || 0}%`,
+                  background: 'var(--accent, #4a90d9)', transition: 'width .4s',
+                },
+              }))
+              : null,
+          ),
+          h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 6, flexWrap: 'wrap' } },
+            running
+              ? h('button', {
+                type: 'button', className: 'roost-btn', disabled: busy === key,
+                onClick: () => call(ops.cancel, {}, '已取消', key),
+              }, '取消')
+              : h('button', {
+                type: 'button', className: 'roost-btn', disabled: isBusy,
+                onClick: () => call(ops.install, {}, `开始下载${label}（可能要等一会儿）`, key),
+              }, spec?.ready ? '重新安装' : '一键安装'),
+            spec?.ready && !running
+              ? h('button', {
+                type: 'button', className: 'roost-btn', disabled: isBusy,
+                onClick: () => {
+                  if (!window.confirm(`卸载${label}？\n\n用到它的功能会退回原样（本地向量/重排关掉），数据本身不会丢。`)) return
+                  call(ops.uninstall, {}, `已卸载${label}`, key)
+                },
+              }, '卸载')
+              : null,
+          ),
+        )
       }
 
       if (err && !st) {
@@ -18642,12 +18758,13 @@ select.roost-input{color-scheme:dark}
             + '扩展自带的那份、宿主自带的那份都算数，不会让你重复下载。'
             + '标着「由扩展 X 提供」的包不归这里管，删了会把那个扩展弄坏。'),
         ),
-        (st.runtimes || []).length
-          ? h(Sec, { n: '02', title: '其他运行时（只读）' },
+        /** 语音运行时只读展示；ONNX 那两项有自己的安装区块，不在这里（也别再跳语音页） */
+        (st.runtimes || []).filter((r) => !String(r.id || '').startsWith('onnx')).length
+          ? h(Sec, { n: '02', title: '语音运行时（只读）' },
               h('p', { style: { fontSize: 11.5, opacity: 0.6, margin: '0 0 8px', lineHeight: 1.7 } },
                 '这两个目录装的是语音引擎，有各自的安装器和进度条。这里只让你看见'
                 + '「本体一共装了什么」，装和卸请回「语音」页——两套 npm 同时接管会互相踩。'),
-              (st.runtimes || []).map((r) => h('div', {
+              (st.runtimes || []).filter((r) => !String(r.id || '').startsWith('onnx')).map((r) => h('div', {
                 key: r.id,
                 style: {
                   border: '1px solid var(--border, rgba(128,128,128,.22))',
@@ -18681,12 +18798,30 @@ select.roost-input{color-scheme:dark}
               )),
             )
           : null,
+        /** 本地 ONNX 能力：运行时 + 两个模型，各自安装/卸载/进度（不再误跳语音页） */
+        st.onnx
+          ? h(Sec, { n: '03', title: '本地智能（可选，按需安装）' },
+              h('p', { style: { fontSize: 11.5, opacity: 0.6, margin: '0 0 10px', lineHeight: 1.7 } },
+                '本地向量和重排的模型，不依赖任何外部 API。装好后到「记忆配置 → 召回预览与参数」'
+                + '打开「本地向量 / 本地重排」开关才生效（默认关，不开零影响）。'
+                + '运行时约 300 MB、embedding 模型约 450 MB、重排模型约 190 MB，按需装。'),
+              onnxRow('onnx-runtime', 'ONNX 运行时',
+                '推理引擎，两个本地模型的共同前置', st.onnx,
+                { install: 'onnx.install', cancel: 'onnx.cancel', uninstall: 'onnx.uninstall' }),
+              onnxRow('onnx-embed', '本地 embedding 模型（e5-small）',
+                '中文向量；装好后在「记忆配置」开本地向量开关', st.onnx.model,
+                { install: 'onnx.modelInstall', cancel: 'onnx.modelCancel', uninstall: 'onnx.modelUninstall' }),
+              onnxRow('onnx-rerank', '本地重排模型（hs-rerank-1）',
+                'cross-encoder；装好后在「记忆配置」开本地重排开关', st.onnx.rerankModel,
+                { install: 'onnx.rerankInstall', cancel: 'onnx.rerankCancel', uninstall: 'onnx.rerankUninstall' }),
+            )
+          : null,
         ...DEP_GROUPS.filter(([g]) => (groups[g] || []).length).map(([g, label, hint], i) => {
           const list = groups[g]
           const missing = list.filter(([, p]) => !p.found).map(([n]) => n)
           return h(Sec, {
             key: g,
-            n: String(i + 3).padStart(2, '0'),
+            n: String(i + 4).padStart(2, '0'),
             title: label,
             right: missing.length
               ? h('button', {
