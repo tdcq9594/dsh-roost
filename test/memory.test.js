@@ -3090,6 +3090,7 @@ test('待跟进：没这条事实时明确报错，不静默成功', () => {
 test('待跟进：默认关、扩展接口有登记、注入只在 live 时记账（接线断言）', async () => {
   const { DEFAULTS } = await import('../src/config.js');
   assert.equal(DEFAULTS.memory.followUp.enabled, false, '新能力默认关，不改变说话方式');
+  assert.deepEqual(DEFAULTS.memory.followUp.allowChats, [], '白名单默认空=不限制，与升级前逐字一致');
 
   const { scopeOfOp } = await import('../src/ext-quick-scopes.js');
   const s = scopeOfOp('memory.followUp');
@@ -3102,6 +3103,11 @@ test('待跟进：默认关、扩展接口有登记、注入只在 live 时记�
   assert.match(host, /memory\.markFollowUpAsked\(/, '出站成功后要记账');
   /** 面板预览那条路不能带 live：预览一次就烧一次机会是不可接受的 */
   assert.doesNotMatch(host, /memoryStatic\(panelChat, forced, \{ live: true \}\)/, '面板预览不许记账');
+  /** 借鉴护栏 + 白名单 + 空 question 跳过（对齐借鉴项目 followUpHint 口径） */
+  assert.match(host, /别查户口、别催/, '提示词要有"别查户口别催"护栏');
+  assert.match(host, /仍可沉默/, '提示词要有"可沉默"护栏，不逼问');
+  assert.match(host, /followUp\?\.allowChats/, '注入前要按白名单过滤会话');
+  assert.match(host, /due\.find\(/, '空 question 的要跳过，挑第一条有问题的');
 });
 
 test('清理→还原：E1/E2/A2/E3 字段和日记的 digest/向量都要活着回来', async () => {

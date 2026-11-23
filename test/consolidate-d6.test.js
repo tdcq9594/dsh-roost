@@ -312,6 +312,10 @@ test('E2：约定上的 followUp 只在合法时保留，没有就不加键（�
     { text: '明天买牛奶', op: 'add', old: '', status: 'fact' });
   const a = normalizeAgreement({ text: '下周三前给他答复', followUp: { inDays: 4, question: '问一句答复' } });
   assert.deepEqual(a.followUp, { inDays: 4, question: '问一句答复' });
+  /** 借鉴口径：必须有明确问题才问；模型漏填 question 时用约定文本兜底，不留空串 */
+  const noQ = normalizeAgreement({ text: '下周三前给他答复', followUp: { inDays: 4 } });
+  assert.ok(noQ.followUp.question.includes('下周三前给他答复'), 'question 空时按约定文本兜底');
+  assert.ok(noQ.followUp.question.length > 0, '兜底后一定非空，注入端才认');
   assert.equal(normalizeAgreement({ text: 'x', followUp: { inDays: 0 } }).followUp, undefined, 'inDays=0 当没写');
   assert.equal(normalizeAgreement({ text: 'x', followUp: { inDays: 9999 } }).followUp, undefined, '离谱的当没写');
   assert.equal('followUp' in normalizeAgreement('明天买牛奶'), false, '没有时连键都不出现');

@@ -217,7 +217,14 @@ export function normalizeAgreement(raw) {
   const inDays = Number(fu?.inDays);
   const res = { text, op, old, status };
   if (Number.isFinite(inDays) && inDays > 0 && inDays <= 365) {
-    res.followUp = { inDays, question: String(fu?.question ?? '').trim().slice(0, 40) };
+    /**
+     * question 空时用约定文本兜底（对齐借鉴"必须有明确问题才问"）：
+     * 注入端只认非空 question，这里若留空，自动提炼的跟进就被静默跳过。
+     * 兜底成一句能问出口的话，不拿空串挂一条永远不生效的跟进。
+     */
+    const asked = String(fu?.question ?? '').trim().slice(0, 40);
+    const fallback = `「${text.slice(0, 30)}」后来怎么样了`;
+    res.followUp = { inDays, question: asked || fallback.slice(0, 40) };
   }
   return res;
 }
