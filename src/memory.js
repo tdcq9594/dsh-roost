@@ -862,7 +862,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
          * 同级的照旧取代，人工入口（`<<remember>>`、面板手记）恒为 fact。
          */
         if (!canSupersede(nextStatus, om?.status)) continue;
-        metaMap[other] = { ...om, until: t };
+        /**
+         * 阶段8：除了打 until，再记下"被哪一条顶掉"——存新条目的稳定 id
+         * （factIdOf 由正文派生，不落正文副本，省空间）。没有它时，
+         * memory-history 只能靠相似度推断配对、不能宣称因果链（见该文件头注释）。
+         */
+        metaMap[other] = { ...om, until: t, supersededBy: factIdOf(f) };
       }
     };
 
@@ -884,7 +889,7 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
         /** 重提一次不降级（听说的再听一遍还是听说的）；明确说了一次算确认，可升到 fact */
         status: strongerStatus(old?.status, nextStatus),
       };
-      if (next.until) next.until = null;
+      if (next.until) { next.until = null; next.supersededBy = null; }
       /**
        * 双时态：重提不改"这是什么种类 / 事发何时"——它们是事实的属性，
        * 不是每次陈述的属性。只在原来缺失时补一次（老库升级）。
@@ -1757,6 +1762,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
               pin: clamp01(x.pin),
               reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : 0,
               archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : 0,
+              /** 阶段8：被哪条事实顶替（新条目稳定 id）；清理→还原不能丢，否则真链断了 */
+              supersededBy: String(x.supersededBy || ''),
               /**
                * E2 待跟进：**必须一起导出**。
                * 不导出的话，「清理 → 后悔 → 还原」之后这条事实回来了，
@@ -1889,6 +1896,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (Number(row.pin) > 0) meta.pin = clamp01(row.pin);
       if (Number(row.reviewedAt) > 0) meta.reviewedAt = Number(row.reviewedAt);
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);
+      /** 阶段8：还原被取代指针（空不落盘，老库逐字节一致） */
+      if (row.supersededBy) meta.supersededBy = String(row.supersededBy);
       /** E2 待跟进：同样默认不落盘，还原后与升级前的老库逐字节一致 */
       if (row.followUp && Number(row.followUp.at) > 0) {
         meta.followUp = {

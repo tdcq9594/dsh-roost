@@ -4,15 +4,15 @@
  *
  * Hindsight 的 `/memories/{id}/history` 是**双时态快照序列**（valid_from /
  * valid_until），每条快照名正言顺地是"同一条记忆的上一版"。
- * 我们不一样：facts 是字符串数组，`supersede()` 只给旧条目的 meta 打
- * `until`，**没有指向新条目的指针**（核对结论，见归档方案 B1）。
  *
- * 所以这里不宣称"演变链"——那是撒谎。我们做的是：
- *   1. 按 `until` 找出被取代过的旧说法（真事实，板上钉钉）；
- *   2. 用与 `supersede()` **同一套判据**（相似度 + 非矛盾 + 时间相邻）
- *      把旧说法跟当前条目做**推断配对**，并明确标 `inferred: true`；
- *   3. 证据只做只读投影，不改存储、不新建 observation 实体
- *      （evidence 已经内嵌 quote/journalId，再建一份就是双份真相）。
+ * 阶段8 起我方也写真链：`supersede()` 除了给旧条目打 `until`，还会写
+ * `supersededBy = 新条目的稳定 id`（factIdOf 由正文派生，不落正文副本）。
+ * 所以本模块优先按指针给出**确凿的因果演变链**（mode:'linked', inferred:false）；
+ * 老库/未升级数据没有这个字段，则退回原推断路径（mode:'inferred',
+ * inferred:true），并诚实注明"不等于因果链"。两种模式不混着说。
+ *
+ * 证据只做只读投影，不改存储、不新建 observation 实体
+ * （evidence 已经内嵌 quote/journalId，再建一份就是双份真相）。
  *
  * 核对补记：Hindsight 的 `ObservationEvidence{quote,relevance}` 是**死代码**
  * （全仓只有定义处引用），它线上 based_on 只有 id/text/type/context。
@@ -86,29 +86,42 @@ export function historyOf(rows, key, opts = {}) {
   const anchor = Number(cur.until) > 0 ? Number(cur.until) : Number(cur.at) || now;
   const text = String(cur.text ?? '');
 
-  const earlier = (Array.isArray(rows) ? rows : [])
-    .filter((r) => r && r !== cur && Number(r.until) > 0 && String(r.text ?? '') !== text)
-    .map((r) => {
-      const other = String(r.text ?? '');
-      const sim = similarityOf(other, text);
-      return { row: r, sim, gap: Math.abs(Number(r.until) - anchor) };
-    })
-    /** 同一批 supersede 的判据：相似 + 不矛盾；时间只是排序权重，不是硬门槛 */
-    .filter((x) => x.sim >= PAIR_SIM && !conflicting(x.row.text, text))
-    .sort((a, b) => (a.gap - b.gap) || (b.sim - a.sim))
-    .slice(0, limit)
-    .map(({ row, sim, gap }) => ({
-      text: String(row.text ?? ''),
-      id: String(row.id ?? ''),
-      until: Number(row.until),
-      at: Number(row.at) || 0,
-      evidence: projectEvidence(row),
-      trend: String(row.trend ?? ''),
-      /** 时间落在配对窗内 = 同一轮取代的可能性更高；窗外也可能相关，只是弱 */
-      adjacent: gap <= windowMs,
-      similarity: Number(sim.toFixed(3)),
-      inferred: true,
-    }));
+  const all = Array.isArray(rows) ? rows : [];
+  const curId = String(cur.id ?? '');
+  /**
+   * 阶段8：真链优先。新库在 supersede() 时给旧条目写了 `supersededBy = 新条目 id`，
+   * 有指针就是板上钉钉的因果，不再靠相似度猜。老库没这个字段，退回原推断路径，
+   * 行为逐字节不变（见下方 else 分支与 inferred:true）。
+   */
+  const linked = all.filter((r) => r && r !== cur && curId && String(r.supersededBy ?? '') === curId);
+  const inferredMode = linked.length === 0;
+  const candidates = inferredMode
+    ? all
+      .filter((r) => r && r !== cur && Number(r.until) > 0 && String(r.text ?? '') !== text)
+      .map((r) => {
+        const other = String(r.text ?? '');
+        const sim = similarityOf(other, text);
+        return { row: r, sim, gap: Math.abs(Number(r.until) - anchor) };
+      })
+      /** 同一批 supersede 的判据：相似 + 不矛盾；时间只是排序权重，不是硬门槛 */
+      .filter((x) => x.sim >= PAIR_SIM && !conflicting(x.row.text, text))
+      .sort((a, b) => (a.gap - b.gap) || (b.sim - a.sim))
+    : linked.map((r) => ({ row: r, sim: similarityOf(String(r.text ?? ''), text), gap: Math.abs(Number(r.until) - anchor) }))
+      .sort((a, b) => (a.gap - b.gap) || (b.sim - a.sim));
+
+  const earlier = candidates.slice(0, limit).map(({ row, sim, gap }) => ({
+    text: String(row.text ?? ''),
+    id: String(row.id ?? ''),
+    until: Number(row.until),
+    at: Number(row.at) || 0,
+    evidence: projectEvidence(row),
+    trend: String(row.trend ?? ''),
+    /** 时间落在配对窗内 = 同一轮取代的可能性更高；窗外也可能相关，只是弱 */
+    adjacent: gap <= windowMs,
+    similarity: Number(sim.toFixed(3)),
+    /** 真链（有 supersededBy 指针）= 板上钉钉；推断配对才标 inferred */
+    inferred: inferredMode,
+  }));
 
   return {
     found: true,
@@ -122,9 +135,13 @@ export function historyOf(rows, key, opts = {}) {
     proofs: Number(cur.proofs) || 0,
     trend: String(cur.trend ?? ''),
     earlier,
-    note: earlier.length
-      ? '此前说法按相似度与时间相邻推断（没有任何"谁取代谁"的指针），仅供核对，不等于因果演变链。'
-      : '没有找到可推断的此前说法。',
+    /** 真链和推断要说清楚，别拿推断冒充因果、也别拿因果说成推断 */
+    mode: inferredMode ? 'inferred' : 'linked',
+    note: !earlier.length
+      ? '没有找到此前说法。'
+      : inferredMode
+        ? '此前说法按相似度与时间相邻推断（老库没有"谁取代谁"的指针），仅供核对，不等于因果演变链。'
+        : '此前说法由 supersededBy 指针直接关联（新库在取代时就记下了），是确凿的因果演变链。',
   };
 }
 

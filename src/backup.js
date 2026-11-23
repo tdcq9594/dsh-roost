@@ -626,6 +626,8 @@ export function restoreRetentionRows({ payload, memory, journal }) {
       pin: Number(raw.pin) || 0,
       reviewedAt: Number(raw.reviewedAt) || 0,
       archivedAt: Number(raw.archivedAt) || 0,
+      /** 阶段8：被取代指针，跟着 retention.entries() 走，漏了还原就断链 */
+      supersededBy: String(raw.supersededBy || ''),
       /** 标签：跟着 `retention.entries()` 走，漏一个还原就丢归类 */
       tags: Array.isArray(raw.tags) ? raw.tags : [],
       /** 证据账本三件套：跟着 `retention.entries()` 走，漏一个还原就丢证据 */
