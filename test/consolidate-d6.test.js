@@ -14,7 +14,7 @@ import { createJournal } from '../src/journal.js';
 import { createMemory } from '../src/memory.js';
 import {
   createConsolidate, buildPrompt, yesterdayOf,
-  normalizeAgreement, planAgreementOp, MAX_PROMPT_FACTS,
+  normalizeAgreement, planAgreementOp, MAX_PROMPT_FACTS, pickRows,
 } from '../src/consolidate.js';
 
 const noop = () => {};
@@ -207,7 +207,7 @@ test('D2：同一批连续格式错误 3 次后跳过，不再每天阻塞；成
   const day = yesterdayOf(Date.now());
   const base = Date.parse(`${day}T10:00:00`);
   const j = createJournal({ file: join(data, 'j.sqlite'), log: noop });
-  j.add({ id: 'a', at: base, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '随便聊聊' });
+  j.add({ id: 'a', at: base, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '今天聊了一些工作上的事，还提到下周的安排' });
 
   /** 内存版 badBatches，模拟 host 的注入 */
   const counts = new Map();
@@ -233,6 +233,45 @@ test('D2：同一批连续格式错误 3 次后跳过，不再每天阻塞；成
   await c.run({ day }); // 第 4 次
   assert.equal(called, callsBefore, '连续失败 3 次后不再调模型（跳过该批）');
 
+  try { j.close(); } catch {}
+  if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA; else process.env.DSH_ROOST_DATA = oldEnv;
+});
+
+/* ---------------- D1 前置分流 ---------------- */
+
+test('D1：pickRows 默认不筛；skipChatter 只筛极短闲聊；原文不受影响', () => {
+  const rows = [
+    { id: 'a', at: 1, role: 'user', level: 'normal', text: '嗯嗯' },
+    { id: 'b', at: 2, role: 'user', level: 'normal', text: '我养了只猫' },
+    { id: 'c', at: 3, role: 'user', level: 'important', text: '好' },
+    { id: 'd', at: 4, role: 'user', level: 'normal', text: '哈哈' },
+  ];
+  const all = pickRows(rows);
+  assert.equal(all.length, 4, '默认不筛，行为不变');
+  const skipped = pickRows(rows, { skipChatter: true });
+  assert.deepEqual(skipped.map((x) => x.row.id), ['b', 'c'],
+    '纯语气词("嗯嗯"/"哈哈") 被筛掉；有信息的短句和 important 都留');
+});
+
+test('D1：整批都是极短闲聊时不调模型（省一次调用）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-chatter-'));
+  const data = join(dir, 'data');
+  mkdirSync(data, { recursive: true });
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = data;
+  const day = yesterdayOf(Date.now());
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(data, 'j.sqlite'), log: noop });
+  j.add({ id: 'a', at: base, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '嗯' });
+  j.add({ id: 'b', at: base + 1000, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '哦' });
+  let called = 0;
+  const c = createConsolidate({
+    journal: j, graph: null, memory: createMemory(),
+    generate: async () => { called += 1; return '{}'; },
+    aliasesOf: () => [], log: noop, now: () => Date.now(),
+  });
+  await c.run({ day });
+  assert.equal(called, 0, '全是极短闲聊，不该调模型');
   try { j.close(); } catch {}
   if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA; else process.env.DSH_ROOST_DATA = oldEnv;
 });

@@ -97,9 +97,18 @@ export function mechanicalDigest(text, max = 40) {
 /**
  * 按"等级高 + 时间新"挑要喂给模型的条目，并压到字数上限。
  */
-export function pickRows(rows, { maxRows = MAX_ROWS, maxChars = MAX_INPUT_CHARS } = {}) {
+export function pickRows(rows, { maxRows = MAX_ROWS, maxChars = MAX_INPUT_CHARS, skipChatter = false } = {}) {
   const W = { critical: 3, important: 2, normal: 1 };
-  const sorted = [...rows].sort(
+  /**
+   * D1 前置分流（对齐 Hindsight triage 的 chatter 短路）：
+   * 只筛**纯语气词**（嗯/哦/好/哈哈…），不按长度猜——
+   * "我养了只猫"只有 5 个字却是真信息，按长度筛会误伤（实测踩到过）。
+   * 只筛喂给模型的那份，原文仍留在库里、仍参与检索。
+   * 默认关：老调用方的输入不变。
+   */
+  const CHATTER_RE = /^(?:嗯+|哦+|噢+|啊+|好(?:的|吧|呀)?|对(?:的|呀)?|是(?:的|啊)?|在(?:的|呢)?|行(?:吧|的)?|可以|收到|哈哈*|呵呵*|嘿+|唉+|哇+|谢谢|多谢|辛苦了|没事|没关系|晚安|早安|早上好|晚上好)[。！!~～,，.…\s]*$/;
+  const chatter = (r) => skipChatter && r?.level === 'normal' && CHATTER_RE.test(String(r?.text ?? '').trim());
+  const sorted = [...rows].filter((r) => !chatter(r)).sort(
     (a, b) => (W[b.level] ?? 1) - (W[a.level] ?? 1) || b.at - a.at,
   );
   const out = [];
@@ -463,7 +472,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
 
       for (const [chatId, list] of todo) {
         stats.chats += 1;
-        const items = pickRows(list);
+        /** D1：极短闲聊不送模型复核（原文仍在库），剩下的才进 prompt */
+        const items = pickRows(list, { skipChatter: true });
         const chatName = list.find((r) => r.chatId === chatId)?.chatId?.slice(0, 8) || '';
         /**
          * L3 候选在这轮就算好：条件不成立时 `buildPrompt` 不带第 7 项，
@@ -472,7 +482,11 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         const revocation = l3Candidates(list);
         let plan = null;
 
-        if (generate) {
+        /**
+         * D1：全是闲聊（items 空）且没有 L3 候选时，不调模型——
+         * 没有可复核的东西，这一轮省一次调用，直接走机械压缩。
+         */
+        if (generate && (items.length || revocation)) {
           try {
             const prompt = buildPrompt({
               day: target, chatName, items, revocation,
