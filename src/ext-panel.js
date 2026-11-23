@@ -238,12 +238,15 @@ export function createExtPanel({
             overrides: Array.isArray(e.manifest?.overrides) ? e.manifest.overrides : [],
             form: e.manifest?.form,
             /**
-             * `ui` 也要传：面板页 / 进程内运行本身就是最高风险
-             * （同源 iframe 等于主人权限）。不传的话「已安装」页会把它显示成
-             * L0/L1，而安装确认时算的是 L3 —— 同一个扩展两处不一致。
+             * `ui` 也要传：面板页 / 进程内运行算敏感 L2。不传的话「已安装」页
+             * 会把它显示成 L0/L1，和安装确认时算的 L2 对不上。
              */
             ui: e.manifest?.ui,
-          });
+            /**
+             * 审核状态从落盘的 `.source.json` 取（安装时写入、来自索引），
+             * 不认清单里作者自填的 verified。缺了它「市场 L2、已装页 L3」又会对不上。
+             */
+          }, { verified: src?.verified });
           return { id: t.id, label: t.label, color: t.color, summary: t.summary, risks: riskLines(t) };
         })(),
       };

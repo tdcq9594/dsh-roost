@@ -107,7 +107,8 @@ export function createFormRegistry({
         builtin: false, enabled: !disabled.has(id), removable: true,
         point: '', note: '', dir: String(row?.dir ?? ''),
         source: row?.source ?? 'local', foreign: Boolean(row?.foreign),
-        tier: deriveTier(m), at: now(),
+        /** 审核状态只从落盘的 .source.json 取，和市场卡片 / 已装页算同一个等级 */
+        tier: deriveTier(m, { verified: row?.source?.verified }), at: now(),
       });
     }
 
