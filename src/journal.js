@@ -144,8 +144,13 @@ export function startOfDay(day) {
  * 一条日记的"该不该被注入"的分值。
  *
  * 重要性 × 时间衰减 + 访问频率，压过的再打六折：
- *   · 半衰期取 30 天——一个月前的重要事还留三成，不会突然消失
+ *   · 衰减时间常数 30 天——一个月前的重要事还留三成，不会突然消失
  *   · access 用 log1p 压一下，免得一条被反复搜到的旧事永远霸榜
+ *
+ * **越常被想起越耐遗忘**（对齐 aurabot 的 `strength = 1 + min(10, hitDays)`）：
+ * 衰减时间常数随 access 拉长，最多 30 → 75 天。
+ * 强度用**已经衰减过、封顶 1.5 的 access**，而不是 `accessed` 原始次数——
+ * 原始次数只增不减，拿它当强度等于永久加冕，下面那条 45 天淡出的护栏就白设了。
  *
  * **访问加分自己也衰减（45 天半衰期）**。不衰减的话它是永久加冕：
  * access 封顶 1.5，而重要性衰减到地板只降到 0.35×2=0.70，
@@ -160,7 +165,6 @@ export function scoreOf(row, now = Date.now()) {
   const w = LEVEL_W[row.level] ?? 1;
   const at = Number(row.at || 0);
   const ageDays = Math.max(0, (now - at) / DAY);
-  const decay = Math.exp(-ageDays / 30);
 
   const accessed = Number(row.accessed || 0);
   let access = 0;
@@ -169,6 +173,10 @@ export function scoreOf(row, now = Date.now()) {
     const sinceDays = Math.max(0, (now - last) / DAY);
     access = Math.min(1.5, Math.log1p(accessed) / 2) * Math.exp(-sinceDays / 45);
   }
+
+  /** 强度上限 2.5 = 时间常数最多 75 天；久没被想起的条目 access 已淡出，强度自然回落到 1 */
+  const strength = 1 + access;
+  const decay = Math.exp(-ageDays / (30 * strength));
 
   let s = w * (0.35 + 0.65 * decay) + access;
   if (row.digest) s *= 0.6;

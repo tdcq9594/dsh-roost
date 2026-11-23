@@ -2932,3 +2932,30 @@ test('日记（JSONL）：换模型后旧向量也进重算队列，补完收敛
   assert.deepEqual(j.noVec(10, { model: 'http:new' }), [], '补完收敛（JSONL 也要能读到指纹）');
   assert.equal(j.get('a').vecModel, 'http:new');
 });
+
+test('日记：常被想起的条目衰减更慢（衰减时间常数被 access 拉长）', () => {
+  const now = Date.now();
+  const base = { at: now - 150 * DAY, level: 'important', digest: null };
+  const hot = scoreOf({ ...base, accessed: 20, lastAccess: now - DAY }, now);
+  const never = scoreOf({ ...base, accessed: 0, lastAccess: 0 }, now);
+  /** 单纯加 access 最多 +1.5；差值超过它，说明 decay 项也被拉长了 */
+  assert.ok(hot - never > 1.5, `衰减该变慢，不只是加分：差 ${hot - never}`);
+});
+
+test('日记：久没被想起的高频条目不被延长（护栏还在，不搞永久加冕）', () => {
+  const now = Date.now();
+  /** 注意 sinceDays 被 `max(lastAccess, at)` 夹住，所以要取"够老"的条目才看得出淡出 */
+  const base = { at: now - 400 * DAY, level: 'important', digest: null };
+  /** 一年前搜过 20 次、之后再没碰过：access 已淡出，强度该回落到 1 */
+  const stale = scoreOf({ ...base, accessed: 20, lastAccess: now - 365 * DAY }, now);
+  const never = scoreOf({ ...base, accessed: 0, lastAccess: 0 }, now);
+  assert.ok(stale - never < 0.01, `淡出后不该还耐遗忘：差 ${stale - never}`);
+});
+
+test('日记：强度有上限（搜一万次和二十次一样，不会无限延长）', () => {
+  const now = Date.now();
+  const base = { at: now - 150 * DAY, level: 'important', digest: null };
+  const many = scoreOf({ ...base, accessed: 10_000, lastAccess: now - DAY }, now);
+  const some = scoreOf({ ...base, accessed: 20, lastAccess: now - DAY }, now);
+  assert.ok(Math.abs(many - some) < 1e-9, `强度封顶后两者应相同：${many} vs ${some}`);
+});
