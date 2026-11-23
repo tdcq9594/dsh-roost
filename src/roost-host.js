@@ -89,6 +89,7 @@ async function defaultLoadWs() {
  * @param {(data:object, frame:object)=>void} [o.onNotice]     其他事件（入群、审核结果…）
  * @param {(frame:object)=>void} [o.onGap]                     补拉缺口
  * @param {(state:string, detail:string)=>void} [o.onState]    连接状态变化
+ * @param {(frame:object|null)=>void} [o.onReady]               真正连通（收到 welcome / SSE 200），不是「正在连」
  * @param {(m:string)=>void} [o.log]
  * @param {typeof fetch} [o.fetchImpl] 测试替换用
  * @param {'auto'|'sse'|'ws'} [o.transport] 事件通道；RPC 恒走 HTTP
@@ -101,6 +102,12 @@ export function createRoostHost({
   onNotice = () => {},
   onGap = () => {},
   onState = () => {},
+  /**
+   * 真正连通后才回调。**不要**把它挂在 onState('online') 上：
+   * pump() 在连接建立之前就把状态置成 online（重连补拉 seq>0 时），
+   * 失败重连也会触发，拿它上报能力清单会刷屏。
+   */
+  onReady = () => {},
   log = () => {},
   fetchImpl = fetch,
   transport = 'auto',
@@ -161,6 +168,18 @@ export function createRoostHost({
       onState(next, detail);
     } catch (e) {
       log(`onState 回调抛错（已吞）：${e?.message ?? e}`);
+    }
+  }
+
+  /**
+   * 连通回调和状态回调分开：状态会在「还没连上」时先置 online（见 pump），
+   * 而能力清单上报只该在 welcome / SSE 200 之后做。回调抛错不影响收流。
+   */
+  function notifyReady(frame) {
+    try {
+      onReady(frame);
+    } catch (e) {
+      log(`onReady 回调抛错（已吞）：${e?.message ?? e}`);
     }
   }
 
@@ -258,6 +277,7 @@ export function createRoostHost({
     if (frame.type === 'welcome') {
       welcome = frame;
       setState('online');
+      notifyReady(frame);
       return;
     }
     if (frame.type === 'heartbeat') return;
@@ -493,6 +513,8 @@ export function createRoostHost({
         }
         attempt = 0;
         setState('online');
+        /** SSE 也会收到 welcome；这里是兜底，极端情况下 welcome 帧丢了仍能上报一次 */
+        notifyReady(welcome);
         await readStream(res.body);
         if (!running) break;
         setState('reconnecting', '事件流被服务端关闭');
