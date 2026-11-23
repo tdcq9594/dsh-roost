@@ -44,6 +44,8 @@ const STATE_READ_OPS = Object.freeze([
   'capabilities.get', 'capabilities.preview',
   'features.get', 'features.preview',
   'recall.log',
+  /** 3.4 向量/重排状态：只读状态查询 */
+  'memory.vector.status',
   'backup.list',
   /** A2 记忆统计快照：只读聚合，和 `/v1/state` 同口径 */
   'stats.snapshot',
@@ -127,6 +129,12 @@ export const OP_SCOPE = Object.freeze({
   'mind.refresh': 'memory:write',
   'mind.clear': 'memory:write',
   'persona.set': 'prompt:write',
+  /** 阶段6：人物墙人工编辑/不再记住——改的是档案，归 prompt:write */
+  'persona.edit': 'prompt:write',
+  'persona.noMemory': 'prompt:write',
+  /** 阶段7：群印象档案读写，改的是独立档案文件，归 prompt:write */
+  'chatprofile.save': 'prompt:write',
+  'chatprofile.clear': 'prompt:write',
   'groups.list': 'groups:read',
 });
 

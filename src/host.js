@@ -56,6 +56,7 @@ import { createHistoryRing } from './history-ring.js';
 import { memoryLines, oneLine, followUpAllowed, followUpSection } from './memory-line.js';
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
+import { createGroupChatProfiles } from './group-chat-profile.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
 import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
 import { guardQuickCall, PANEL_MARK } from './ext-quick-guard.js';
@@ -78,6 +79,8 @@ import { createExtMarket, marketGuardOpts } from './ext-market.js';
 import { pickModelFor, pickReasoningEffort, pickEffortFor } from './model-pick.js';
 import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
+import { projectRecallPreview } from './recall-preview.js';
+import { vectorStatus } from './vector-status.js';
 import { rerankHits } from './rerank.js';
 import { isDangerousCommand, createConfirmGate, dangerScanArgs } from './safety.js';
 import { createClosing, shouldNotePending } from './closing.js';
@@ -3147,6 +3150,11 @@ export function apply(ctx) {
    * 两边都不碰消息热链路，也不动 prompt cache。
    */
   const profiles = createProfiles({ file: join(dataDir(), 'profiles.json'), log: (m) => log.warn(m) });
+  /**
+   * 群印象档案：按 chatId 存气氛/常聊什么/印象，独立 chat-profiles.json。
+   * 和 profiles 一样不进人格隔离（数据本身是"这个群什么样"），默认不注入。
+   */
+  const chatProfiles = createGroupChatProfiles({ file: join(dataDir(), 'chat-profiles.json'), log: (m) => log.warn(m) });
   /** 每个会话上一句用户原话：短句（<12 字）补检索用，只在内存里 */
   const recentUserText = new Map();
   /** B1 节流：同一段聊天别每句都推一次心情 */
@@ -10114,6 +10122,31 @@ export function apply(ctx) {
             case 'recall.log':
               return send(res, 200, { ok: true, rows: recallLog.list(Math.min(200, Math.max(1, Number(arg?.limit) || 50))) });
 
+            /**
+             * 3.4 向量/重排状态（对齐 aurabot vector/status + rerank/status）。
+             * 只读：告诉用户"开关开了到底生效没、走本地还是远程"。
+             * 解决开关开着但模型没装好静默回落关键词、面板看不出来的痛点。
+             */
+            case 'memory.vector.status': {
+              const e = cfg.memory?.embedding || null;
+              try {
+                return send(res, 200, {
+                  ok: true,
+                  ...vectorStatus({
+                    embedEnabled: typeof embedder.enabled === 'function' ? embedder.enabled() : false,
+                    embedModelId: typeof embedder.modelId === 'function' ? embedder.modelId() : '',
+                    localEmbedWanted: cfg.memory?.embeddingLocal === true,
+                    localEmbedReady: typeof localEmbedder?.ready === 'function' ? localEmbedder.ready() : false,
+                    remoteConfigured: Boolean(e?.model && e?.baseUrl && e?.apiKey),
+                    rerankEnabled: cfg.recall?.rerank?.enabled === true || cfg.recall?.rerank?.useLocal === true,
+                    localRerankReady: typeof localReranker?.ready === 'function' ? localReranker.ready() : false,
+                  }),
+                });
+              } catch (err) {
+                return send(res, 200, { ok: false, message: `状态读取失败：${err?.message || err}` });
+              }
+            }
+
             /** B4：心情历史属行为日志，独立清空，不随记忆清；当前心情不动 */
             case 'mood.history.clear':
               moodHistory.clear();
@@ -10133,12 +10166,56 @@ export function apply(ctx) {
               profiles.clear();
               return send(res, 200, { ok: true, message: '熟人小档案清了' });
 
+            /**
+             * 阶段6：群印象档案（对齐 aurabot /memory/chats/save）。
+             * 按 chatId 存气氛/常聊什么/印象；只写独立 chat-profiles.json，
+             * 默认不注入，面板点了才保存。
+             */
+            case 'chatprofile.save': {
+              const chatId = String(arg?.chatId ?? '').trim();
+              if (!chatId) return send(res, 400, { ok: false, message: '缺群 chatId' });
+              const r = chatProfiles.save(chatId, {
+                vibe: arg?.vibe, topics: arg?.topics, impression: arg?.impression,
+              });
+              return send(res, 200, r);
+            }
+
+            /** 阶段6：清空某个群的印象档案（不动记忆本体） */
+            case 'chatprofile.clear': {
+              const chatId = String(arg?.chatId ?? '').trim();
+              if (!chatId) return send(res, 400, { ok: false, message: '缺群 chatId' });
+              const ok = chatProfiles.clear(chatId);
+              return send(res, 200, { ok, message: ok ? '这个群的印象清了' : '没找到这个群' });
+            }
+
             /** E4：撤销某人的雷区（保留印象/相处）——写错了要能单独撤掉 */
             case 'profiles.clearDislikes': {
               const key = String(arg ?? '').trim();
               if (!key) return send(res, 400, { ok: false, message: '要撤谁的雷区？给个 key' });
               const ok = profiles.clearDislikes(key);
               return send(res, 200, { ok, message: ok ? '雷区撤了' : '没找到这个人的雷区' });
+            }
+
+            /**
+             * 阶段6：人物墙人工编辑（对齐 aurabot /persona/person/save）。
+             * 只覆盖显式给的字段（印象/相处/雷区/称呼/标签），模型其余字段留着。
+             * 主人判定用 ownerAliases，拿不到就不拦讨厌标签（避免误判主人）。
+             */
+            case 'persona.edit': {
+              const key = String(arg?.key ?? '').trim();
+              if (!key) return send(res, 400, { ok: false, message: '缺人物 key' });
+              const owners = Array.isArray(cfg.ownerAliases) ? cfg.ownerAliases.map((x) => String(x).trim().toLowerCase()) : [];
+              const isOwner = owners.includes(key.toLowerCase());
+              const r = profiles.edit(key, arg?.patch ?? arg ?? {}, { isOwner });
+              return send(res, 200, r);
+            }
+
+            /** 阶段6：不再记住某人（只标记不删档案，撤回来还在） */
+            case 'persona.noMemory': {
+              const key = String(arg?.key ?? '').trim();
+              if (!key) return send(res, 400, { ok: false, message: '缺人物 key' });
+              const ok = profiles.setNoMemory(key, arg?.enabled !== false);
+              return send(res, 200, { ok, message: ok ? (arg?.enabled === false ? '恢复记住这个人' : '不再记住这个人') : '没找到这个人' });
             }
 
             /**
@@ -10779,6 +10856,12 @@ export function apply(ctx) {
               linkLimit: Number(cfg.recall?.linkLimit) || 5,
               hits: Number(cfg.memory?.hits) || 3,
             },
+            /**
+             * 3.4 结构化投影（对齐 aurabot /memory/assoc/preview 的 hop/via/counts）。
+             * 现有 hits 保持原样（面板已在用），另开一份给要"第几跳/从谁联想"的展示用。
+             * hop 只有 0（直接）/1（经实体联想）——我方实体路就一跳，不编造多跳。
+             */
+            projection: projectRecallPreview(r),
           });
         } catch (e) {
           return send(res, 200, { ok: false, message: `预览失败：${e.message}` });
@@ -10995,11 +11078,25 @@ export function apply(ctx) {
             /** 4.1：key（openid 或归户名）随行返回，人物墙点详情要用 */
             key: r.key || '',
             name: r.name || r.key,
+            alias: r.alias || '',
             impression: r.impression || '',
             tips: r.tips || '',
+            dislikes: r.dislikes || '',
+            /** 阶段6：人工标签 + 不再记住标记，面板列表用得上 */
+            tags: Array.isArray(r.tags) ? r.tags : [],
+            noMemory: Boolean(r.noMemory),
             at: r.at,
           })),
           profilesEnabled: cfg.profiles?.enabled === true,
+          /** 阶段6：群印象档案（按 chatId 的气氛/常聊什么/印象），默认不注入 */
+          chatProfiles: chatProfiles.recent(50).map((r) => ({
+            chatId: r.chatId || '',
+            name: r.name || '',
+            vibe: r.vibe || '',
+            topics: r.topics || '',
+            impression: r.impression || '',
+            at: Number(r.at) || 0,
+          })),
           authz: memory.authz(chatId),
           personaOverride: memory.getPersonaOverride(chatId, aliasesOf(chatId)),
         });
@@ -11231,10 +11328,16 @@ export function apply(ctx) {
             person: {
               key,
               name,
+              alias: row?.alias || '',
               openid: row?.openid || (row?.key !== name ? row?.key : '') || '',
               impression: row?.impression || '',
               tips: row?.tips || '',
               dislikes: row?.dislikes || '',
+              tags: Array.isArray(row?.tags) ? row.tags : [],
+              noMemory: Boolean(row?.noMemory),
+              /** 阶段6：互动数从 journal 现算（不冗余存 profiles）；只数真人发言 */
+              interactions: journal.listChat(chatId, 500, aliasesOf(chatId))
+                .filter((r) => r.role === 'user' && r.sender && (r.sender === key || r.sender === row?.openid)).length,
               at: Number(row?.at) || 0,
               lastAt,
             },

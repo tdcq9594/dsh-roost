@@ -4782,6 +4782,12 @@ select.roost-input{color-scheme:dark}
         )
       }
 
+      /** 3.4 向量/重排状态：开关开了到底生效没，点一下看，别靠猜 */
+      const [vecStatus, setVecStatus] = useState(null)
+      const loadVecStatus = async () => {
+        const r = await quick('memory.vector.status')
+        setVecStatus(r?.ok === false ? { err: r.message || '状态读取失败' } : r)
+      }
       const [q, setQ] = useState('')
       const [hits, setHits] = useState(null)
       const [fact, setFact] = useState('')
@@ -5281,7 +5287,8 @@ select.roost-input{color-scheme:dark}
          */
         h(Sec, { title: '翻一翻', defaultOpen: false },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-            '跨「事实 + 日记」一起搜，搜到就能就地改、归档或作废。'),
+            '跨「事实 + 日记」一起搜，搜到就能就地改、归档或作废。日记那半边在开了向量（本地或远程）后也走语义，' +
+            '像「最近睡不好」能带出「经常熬夜」；事实那半边仍是关键词匹配。'),
           h('div', { style: { display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' } },
             h('input', {
               className: 'roost-input',
@@ -5801,6 +5808,17 @@ select.roost-input{color-scheme:dark}
         h(Sec, { n: '05', title: '召回预览与参数' },
           h('div', { className: 'roost-note', style: { marginTop: 0 } },
             '输入一句话，看真实召回会命中什么、为什么命中。这是预演：不计入「被想起」，不影响排序。'),
+          /** 3.4 status：对齐对面 vector/status，解决"开关开了没生效却不知道" */
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 } },
+            h('button', { type: 'button', className: 'roost-btn', onClick: loadVecStatus }, '看向量/重排状态'),
+            vecStatus?.err
+              ? h('span', { style: { color: 'var(--bad)', fontSize: 11.5 } }, vecStatus.err)
+              : vecStatus
+                ? h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
+                    vecStatus.summary
+                    + (vecStatus.rerank?.mode !== 'off' ? ` · 重排：${vecStatus.rerank.mode === 'local' ? '本地模型' : '规则'}` : ''),
+                    ...(vecStatus.warnings || []).map((w, i) => h('div', { key: i, style: { color: 'var(--warn, #d9a441)', fontSize: 11.5 } }, '⚠ ' + w)))
+                : null),
           /**
            * 重排候选（Reranker）：默认关。配了向量就按语义相似度重排，
            * 没配就按「关键词命中 + 新鲜度」确定性重排。开关放这里，
@@ -5881,11 +5899,21 @@ select.roost-input{color-scheme:dark}
                     ? h('div', { className: 'roost-note' }, '这一句点到的实体：' + pvResult.entities.join('、'))
                     : null,
                   (pvResult.hits || []).length
-                    ? pvResult.hits.map((x) => h('div', { key: x.rank, className: 'roost-item' },
-                        h('span', { className: 'd' }, `#${x.rank} · ${x.when || '—'} · ${x.level || ''}`),
-                        h('span', { className: 't' }, x.text || '—'),
-                        h('span', { className: 'd' }, (x.why || '未标原因') + (Number.isFinite(x.score) ? ` · 分 ${x.score.toFixed(4)}` : ''))))
+                    ? pvResult.hits.map((x, i) => {
+                        /** 结构化投影（对齐对面 assoc/preview）：直接 / 经谁联想一跳 */
+                        const p = pvResult.projection?.items?.[i]
+                        return h('div', { key: x.rank, className: 'roost-item' },
+                          h('span', { className: 'd' },
+                            `#${x.rank} · ${x.when || '—'} · ${x.level || ''}`
+                            + (p?.hop ? ` · ${p.hop} 跳联想（经「${p.via}」）` : p ? ' · 直接命中' : '')),
+                          h('span', { className: 't' }, x.text || '—'),
+                          h('span', { className: 'd' }, (x.why || '未标原因') + (Number.isFinite(x.score) ? ` · 分 ${x.score.toFixed(4)}` : '')))
+                      })
                     : h('div', { className: 'roost-empty' }, '没命中。换个说法再试，或检查下面的参数。'),
+                  pvResult.projection?.counts
+                    ? h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginTop: 4 } },
+                        `直接命中 ${pvResult.projection.counts.direct} 条 · 联想带出 ${pvResult.projection.counts.hop1} 条（我方联想只有一跳）`)
+                    : null,
                 )
               : null,
           h('div', { className: 'roost-note', style: { marginTop: 12 } },
@@ -6927,7 +6955,21 @@ select.roost-input{color-scheme:dark}
       const profiles = mem?.profiles || []
       const events = mem?.events || []
       const gp = mem?.graph
+      const chatProfiles = mem?.chatProfiles || []
       const goMemory = () => { if (setTab) setTab('memory') }
+      /** 阶段6：群印象编辑态，按群 chatId 打开；切页不持久化，关掉就丢草稿 */
+      const [chatEditId, setChatEditId] = useState('')
+      const [chatEditForm, setChatEditForm] = useState(null)
+      const [chatEditBusy, setChatEditBusy] = useState(false)
+      const saveChatProfile = async (chatId) => {
+        if (!chatEditForm) return
+        setChatEditBusy(true)
+        try {
+          const r = await quick('chatprofile.save', { chatId, ...chatEditForm })
+          toast(r?.message || '已保存', r?.ok === false ? 'err' : 'ok')
+          if (r?.ok !== false) { setChatEditId(''); setChatEditForm(null); reload && reload() }
+        } finally { setChatEditBusy(false) }
+      }
       const shortTime = (at) => new Date(at).toLocaleString('zh-CN', {
         month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
       })
@@ -6940,6 +6982,42 @@ select.roost-input{color-scheme:dark}
       const [picked, setPicked] = useState(null)
       const [detail, setDetail] = useState(null)
       const [detailBusy, setDetailBusy] = useState(false)
+      /** 阶段6：人物档案编辑闭环。切人/切会话都要清空，免得 A 的表单串到 B */
+      const [editForm, setEditForm] = useState(null)
+      const [editBusy, setEditBusy] = useState(false)
+      const [editTagInput, setEditTagInput] = useState('')
+      const startEdit = (p) => {
+        setEditForm({
+          name: p?.name || '',
+          alias: p?.alias || '',
+          impression: p?.impression || '',
+          tips: p?.tips || '',
+          dislikes: p?.dislikes || '',
+          tags: [...(p?.tags || [])],
+        })
+        setEditTagInput('')
+      }
+      const saveEdit = async () => {
+        if (!editForm || !picked) return
+        setEditBusy(true)
+        try {
+          const key = picked.key || picked.name
+          const r = await quick('persona.edit', { key, patch: editForm })
+          toast(r?.message || (r?.ok ? '已保存' : '没存上'), r?.ok === false ? 'err' : 'ok')
+          if (r?.ok !== false) {
+            setEditForm(null)
+            await openPerson(picked) // 重读详情，刷新四栏
+            if (reload) reload()
+          }
+        } finally { setEditBusy(false) }
+      }
+      const toggleNoMemory = async (on) => {
+        if (!picked) return
+        const key = picked.key || picked.name
+        const r = await quick('persona.noMemory', { key, enabled: !on })
+        toast(r?.message || '已更新', r?.ok === false ? 'err' : 'ok')
+        if (r?.ok !== false) { await openPerson(picked); if (reload) reload() }
+      }
       const stateWordOf = (at) => {
         if (!at) return '没记过时间'
         const d = (Date.now() - at) / DAY
@@ -6956,6 +7034,7 @@ select.roost-input{color-scheme:dark}
         if (!p) return
         setPicked(p)
         setDetail(null)
+        setEditForm(null) // 切人必清表单，免得 A 群草稿串到 B 群
         setDetailBusy(true)
         try {
           const r = await get('/person?key=' + encodeURIComponent(p.key || p.name)
@@ -7027,16 +7106,77 @@ select.roost-input{color-scheme:dark}
                   ? null
                   : h('div', null,
                       h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-                        '写操作（删关系、撤销屏蔽、清档案）都在「记忆」页，这里只读。'),
+                        '档案可以在这里改（印象/称呼/相处/雷区/标签）；关系与日记的逐条操作仍在「记忆」页。'),
                       h('div', { style: { display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' } },
                         h('div', null,
-                          h('div', { className: 'roost-diag-h' }, '档案'),
-                          detail.person?.impression || detail.person?.tips || detail.person?.dislikes
-                            ? h('div', { className: 'roost-note' },
-                                (detail.person.impression || '（没有印象）')
-                                + (detail.person.tips ? `（相处：${detail.person.tips}）` : '')
-                                + (detail.person.dislikes ? `（别踩：${detail.person.dislikes}）` : ''))
-                            : h('div', { className: 'roost-empty' }, '档案里还没写过这个人')),
+                          h('div', { className: 'roost-diag-h' },
+                            '档案',
+                            h('button', {
+                              type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+                              onClick: () => (editForm ? setEditForm(null) : startEdit(detail.person)),
+                            }, editForm ? '收起' : '编辑'),
+                          ),
+                          editForm
+                            ? h('div', null,
+                                ...[
+                                  ['impression', '印象'], ['alias', '称呼'], ['tips', '相处建议'], ['dislikes', '雷区（别踩）'],
+                                ].map(([k, label]) => h('label', { key: k, style: { display: 'block', marginBottom: 6, fontSize: 12 } },
+                                  label,
+                                  h('input', {
+                                    className: 'roost-input', value: editForm[k] || '',
+                                    style: { display: 'block', width: '100%', marginTop: 2 },
+                                    onChange: (e) => setEditForm({ ...editForm, [k]: e.target.value }),
+                                  }))),
+                                h('div', { style: { fontSize: 12, marginTop: 6 } }, '标签',
+                                  h('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 } },
+                                    editForm.tags.map((t, i) => h('button', {
+                                      key: i, type: 'button', className: 'roost-btn',
+                                      onClick: () => setEditForm({ ...editForm, tags: editForm.tags.filter((_, j) => j !== i) }),
+                                    }, t + ' ×')),
+                                    ['喜欢', '讨厌'].filter((t) => !editForm.tags.includes(t)).map((t) => h('button', {
+                                      key: t, type: 'button', className: 'roost-btn',
+                                      onClick: () => setEditForm({
+                                        ...editForm,
+                                        tags: [...editForm.tags.filter((x) => x !== (t === '喜欢' ? '讨厌' : '喜欢')), t],
+                                      }),
+                                    }, '+ ' + t)),
+                                  ),
+                                  h('div', { style: { display: 'flex', gap: 4, marginTop: 4 } },
+                                    h('input', {
+                                      className: 'roost-input', value: editTagInput, placeholder: '自定义标签（回车）',
+                                      onChange: (e) => setEditTagInput(e.target.value),
+                                      onKeyDown: (e) => {
+                                        if (e.key !== 'Enter') return
+                                        const t = editTagInput.trim()
+                                        if (t && !editForm.tags.includes(t)) setEditForm({ ...editForm, tags: [...editForm.tags, t] })
+                                        setEditTagInput('')
+                                      },
+                                    })),
+                                ),
+                                h('button', {
+                                  type: 'button', className: 'roost-btn roost-primary', disabled: editBusy,
+                                  style: { marginTop: 8 }, onClick: saveEdit,
+                                }, editBusy ? '保存中…' : '保存'),
+                                h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 10, fontSize: 12 } },
+                                  h('input', {
+                                    type: 'checkbox', checked: Boolean(detail.person?.noMemory),
+                                    onChange: (e) => toggleNoMemory(e.target.checked),
+                                  }),
+                                  '不再记住这个人（撤回来档案还在）'),
+                              )
+                            : h('div', null,
+                                detail.person?.impression || detail.person?.tips || detail.person?.dislikes || detail.person?.alias || (detail.person?.tags || []).length
+                                  ? h('div', { className: 'roost-note' },
+                                      (detail.person.alias ? `称呼：${detail.person.alias}；` : '')
+                                      + (detail.person.impression || '（没有印象）')
+                                      + (detail.person.tips ? `（相处：${detail.person.tips}）` : '')
+                                      + (detail.person.dislikes ? `（别踩：${detail.person.dislikes}）` : '')
+                                      + ((detail.person.tags || []).length ? ` [${detail.person.tags.join('、')}]` : ''))
+                                  : h('div', { className: 'roost-empty' }, '档案里还没写过这个人'),
+                                detail.person?.noMemory
+                                  ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } }, '已标记「不再记住」')
+                                  : null),
+                        ),
                         h('div', null,
                           h('div', { className: 'roost-diag-h' }, '关系'),
                           (detail.edges || []).length
@@ -7131,6 +7271,58 @@ select.roost-input{color-scheme:dark}
               reload()
             },
           }),
+        ),
+
+        /** 阶段6：群印象用无编号总览卡（人物页 01–05 编号被测试钉死，不插节） */
+        h(Sec, { title: `群印象（${chatProfiles.length}）` },
+          h('div', { className: 'roost-note', style: { marginTop: 0 } },
+            '她对每个群的印象：气氛、常聊什么、整体印象。默认不进提示词，只是面板里可查可改的资料。'),
+          chatProfiles.length
+            ? h('div', { style: { display: 'grid', gap: 8 } },
+                chatProfiles.map((c) => h('div', { key: c.chatId, className: 'roost-item' },
+                  h('div', { style: { flex: '1 1 auto', minWidth: 0 } },
+                    h('b', null, c.name || c.chatId),
+                    h('div', { className: 'roost-note', style: { margin: 0 } },
+                      (c.vibe ? `气氛：${c.vibe}` : '（还没写下气氛）')
+                      + (c.topics ? ` · 常聊：${c.topics}` : '')
+                      + (c.impression ? ` · 印象：${c.impression}` : '')),
+                    chatEditId === c.chatId
+                      ? h('div', null,
+                          ...[['vibe', '气氛'], ['topics', '常聊什么'], ['impression', '印象']].map(([k, label]) => h('label', {
+                            key: k, style: { display: 'block', marginTop: 4, fontSize: 12 },
+                          }, label,
+                            h('input', {
+                              className: 'roost-input', value: chatEditForm?.[k] || '',
+                              style: { display: 'block', width: '100%', marginTop: 2 },
+                              onChange: (e) => setChatEditForm({ ...chatEditForm, [k]: e.target.value }),
+                            }))),
+                          h('button', {
+                            type: 'button', className: 'roost-btn roost-primary', disabled: chatEditBusy, style: { marginTop: 6 },
+                            onClick: () => saveChatProfile(c.chatId),
+                          }, chatEditBusy ? '保存中…' : '保存'),
+                          h('button', {
+                            type: 'button', className: 'roost-btn', style: { marginLeft: 6 },
+                            onClick: () => { setChatEditId(''); setChatEditForm(null) },
+                          }, '取消'),
+                          h(ConfirmLink, {
+                            label: '清空这个群的印象', confirmLabel: '确认清空',
+                            onConfirm: async () => {
+                              const r = await quick('chatprofile.clear', { chatId: c.chatId })
+                              toast(r?.message || '清了'); setChatEditId(''); setChatEditForm(null); reload && reload()
+                            },
+                          }),
+                        )
+                      : null,
+                  ),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: () => {
+                      if (chatEditId === c.chatId) { setChatEditId(''); setChatEditForm(null) }
+                      else { setChatEditId(c.chatId); setChatEditForm({ vibe: c.vibe || '', topics: c.topics || '', impression: c.impression || '' }) }
+                    },
+                  }, chatEditId === c.chatId ? '收起' : '编辑'),
+                )))
+            : h('div', { className: 'roost-empty' }, '还没写下群印象。'),
         ),
 
         /** 事实 / 日记 / 召回记录仍只在记忆页：那是「记了什么」，不是「记得谁」 */
