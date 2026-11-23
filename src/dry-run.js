@@ -91,7 +91,13 @@ export function normalizeEntry(raw, target, chatId = '') {
   };
   if (target === 'journal') {
     const accessed = Math.max(0, Number(e.accessed) || 0);
+    /**
+     * **先铺原始字段、再覆盖算出来的**：这份 entry 会一路走到
+     * `journal.insertRaw()` 当还原源，白名单式重建漏一个就丢一个
+     * （`digest` / `vec` / `vecModel` / `evidence` / `keepUntil` …）。
+     */
     return {
+      ...e,
       ...base,
       level: String(e.level || 'normal'),
       kind: String(e.kind || 'chat'),
@@ -101,6 +107,8 @@ export function normalizeEntry(raw, target, chatId = '') {
     };
   }
   return {
+    /** 同上：facts 也走 `insertRaw()`，E1/E2/E3 的字段不能被白名单吃掉 */
+    ...e,
     ...base,
     w: Number(e.w) > 0 ? Number(e.w) : 1,
     src: e.src || null,

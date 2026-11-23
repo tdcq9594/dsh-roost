@@ -157,3 +157,19 @@ test('做梦：明天想做的事会写成种子，自驱能读到；最近几�
   assert.ok(list[0].text.includes('去查查上海的天气'));
   try { j.close(); } catch {}
 });
+
+test('做梦：日期只认 YYYY-MM-DD（防目录穿越）', async () => {
+  fresh();
+  const j = createJournal({ file: join(process.env.DSH_ROOST_DATA, 'j.sqlite') });
+  const d = createDream({ journal: j, self: createSelf(), generate: async () => '{}' });
+  /**
+   * `day` 来自 /quick 的 arg.day，扩展也能传。以前直接拼进路径：
+   * `../../evil` 会写到数据目录外面。
+   */
+  const r = await d.run({ day: '../../evil' });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /日期不合法/);
+  assert.equal(d.text('../../evil'), '', '读也不能穿越');
+  assert.equal(d.due('../../evil'), false, '非法日期不当"该做梦"');
+  try { j.close(); } catch {}
+});

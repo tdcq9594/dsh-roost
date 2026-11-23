@@ -430,3 +430,43 @@ test('recentChat / removeEntity 也要物理化（漏登记会静默失效）', 
   assert.deepEqual(calls[1].args[1].aliases, ['ACCOUNT_ALIAS'],
     '写操作不追加旧键（删除不跨键，和 forget / purgeChat 同款）');
 });
+
+test('实体热度 touchEntities 也要物理化（下标写错 = 热度恒 0）', () => {
+  const s = scope({ enabled: true, policy: 'shared', personaId: 'lazycat' });
+  const { store, calls } = fakeStore(['touchEntities']);
+  const phys = CHAT + SCOPE_JOIN + 'lazycat';
+  /**
+   * 回归：`touchEntities(names, {chatId, aliases})` 的 chatId 在**下标 1**。
+   * 以前登记成 'obj:2'，`chatAt` 取到 undefined → 整条规则被跳过 →
+   * 人格隔离开启后按逻辑键 UPDATE，命中 0 行，热度永远是 0（静默失效）。
+   */
+  s.wrapGraph(store).touchEntities(['张三'], { chatId: CHAT, aliases: ['ACCOUNT_ALIAS'] });
+  assert.equal(calls[0].args[1].chatId, phys, '必须换成物理键，否则加热度加不到');
+  assert.deepEqual(calls[0].args[1].aliases, ['ACCOUNT_ALIAS'], '写操作不追加旧键');
+});
+
+test('待跟进四个方法也要物理化（漏登记 = 永不注入 / 永远找不到）', () => {
+  const s = scope({ enabled: true, policy: 'shared', personaId: 'lazycat' });
+  const { store, calls } = fakeStore(['setFollowUp', 'dueFollowUps', 'markFollowUpAsked', 'clearFollowUp']);
+  const phys = CHAT + SCOPE_JOIN + 'lazycat';
+  const m = s.wrapMemory(store);
+
+  /** setFollowUp(chatId, fact, opts, scope, aliases) */
+  m.setFollowUp(CHAT, '他下周三考试', { inDays: 1 }, 'chat', ['ACCOUNT_ALIAS']);
+  assert.equal(calls[0].args[0], phys, '写要落物理键');
+  assert.deepEqual(calls[0].args[4], ['ACCOUNT_ALIAS'], '写不追加旧键');
+
+  /** dueFollowUps(chatId, aliases, opts)：读要带旧键 */
+  m.dueFollowUps(CHAT, ['ACCOUNT_ALIAS']);
+  assert.equal(calls[1].args[0], phys);
+  assert.deepEqual(calls[1].args[1], ['ACCOUNT_ALIAS', CHAT], '读要能读到旧键下的');
+
+  /** markFollowUpAsked(chatId, fact, aliases) */
+  m.markFollowUpAsked(CHAT, '他下周三考试', ['ACCOUNT_ALIAS']);
+  assert.equal(calls[2].args[0], phys);
+  assert.deepEqual(calls[2].args[2], ['ACCOUNT_ALIAS']);
+
+  /** clearFollowUp 同上 */
+  m.clearFollowUp(CHAT, '他下周三考试', ['ACCOUNT_ALIAS']);
+  assert.equal(calls[3].args[0], phys);
+});

@@ -43,7 +43,19 @@ const NOTE_CHARS = 200;
 const SEED_DAYS = 7;
 
 const dreamsDir = () => join(dataDir(), 'dreams');
-const dreamFile = (day) => join(dreamsDir(), `${day}.md`);
+/**
+ * 日期只认 `YYYY-MM-DD`。
+ *
+ * `day` 来自 `/quick` 的 `arg.day`（扩展/面板都能传），直接拼进路径就是
+ * 目录穿越：`day:'../../evil'` → 写到数据目录外面。这里**白名单**，
+ * 不合法一律当空，调用方据此拒绝。
+ */
+export const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const safeDay = (day) => {
+  const d = String(day ?? '').trim();
+  return DAY_RE.test(d) ? d : '';
+};
+const dreamFile = (day) => join(dreamsDir(), `${safeDay(day)}.md`);
 const seedsFile = () => join(dataDir(), 'dream-seeds.json');
 
 /**
@@ -175,9 +187,12 @@ export function createDream({
   now = () => Date.now(),
   log = () => {},
 } = {}) {
+  /** 同一天只跑一次；同时只允许一个在跑（面板手动 + 凌晨自动可能撞上） */
+  let running = false;
+
   /** 这一天做过梦没有（一天最多一次，看文件在不在） */
   function due(day) {
-    const d = String(day ?? '').trim();
+    const d = safeDay(day);
     if (!d) return false;
     try { return !existsSync(dreamFile(d)); } catch { return true; }
   }
@@ -240,9 +255,24 @@ export function createDream({
    * @param {{day?:string}} [o] 不给就做"昨天"（巩固跑的是昨天，梦跟着同一天）
    */
   async function run({ day = '' } = {}) {
-    const d = String(day ?? '').trim();
-    if (!d) return { ok: false, reason: '没给日期' };
+    const d = safeDay(day);
+    if (!d) return { ok: false, reason: '日期不合法（要 YYYY-MM-DD）' };
+    /**
+     * 面板手动触发和凌晨自动可能撞上：两次一起跑会共用同一个后台会话，
+     * `restrictTurnTools` 的工具掩码会互相覆盖（后一次的 `cut.off()` 把前一次
+     * 的掩码撤掉），也会白烧一次模型调用。这里直接挡住。
+     */
+    if (running) return { ok: false, reason: '上一次做梦还没跑完' };
     if (!due(d)) return { ok: false, reason: '这天已经做过梦了' };
+    running = true;
+    try {
+      return await runOnce(d);
+    } finally {
+      running = false;
+    }
+  }
+
+  async function runOnce(d) {
 
     const m = collect(d);
     /** 一点素材都没有就别写文件——否则这天被标记成"做过了"，明天也补不回来 */
@@ -322,7 +352,9 @@ export function createDream({
 
   /** 读某天的梦（面板用） */
   function text(day) {
-    try { return readFileSync(dreamFile(String(day ?? '').trim()), 'utf8'); } catch { return ''; }
+    const d = safeDay(day);
+    if (!d) return '';
+    try { return readFileSync(dreamFile(d), 'utf8'); } catch { return ''; }
   }
 
   /** 最近几天的梦（面板用） */

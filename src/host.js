@@ -3503,6 +3503,12 @@ export function apply(ctx) {
         try {
           cut.off?.();
         } catch {}
+        /**
+         * 后台会话（巩固/做梦）也会走 `memoryStatic`，可能往 `followPending`
+         * 里记一条——但它永远不会有"回复发出去"那一步，留着就是一条永不
+         * 消费的残留；关掉开关后哪天它被误当真实会话，还会凭空记一次"问过了"。
+         */
+        followPending.delete(consolidateChat);
       }
   };
 
@@ -5448,7 +5454,8 @@ export function apply(ctx) {
       : '';
 
     /**
-     * 待跟进（默认关）：到点该问的事，facts 之后单独一行。
+     * 待跟进（默认关）：到点该问的事，排在**事实之前**（和指令同档：
+     * 都是"这轮要做的事"，预算紧时先砍事实也别砍它）。
      *
      * **只提示、不替模型决定问不问**——注进提示词，它自己挑时机自然地接。
      * 不参与 `listRanked` 排序、不占 facts 名额，避免变相加冕。

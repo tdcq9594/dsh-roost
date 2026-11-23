@@ -80,6 +80,8 @@ const isActive = (r) => Number(r?.invalidAt ?? 0) === 0;
 const LEVEL_W = { critical: 3, important: 2, normal: 1 };
 
 const DAY = 86_400_000;
+/** 补向量时"近期"的窗口：这段内的先补（新内容才是检索最需要的） */
+const NOVEC_RECENT_DAYS = 14;
 
 /** 到期天数：普通 3 天、重要 21 天。critical 不进这个表 */
 export const DEFAULT_KEEP_DAYS = { normal: 3, important: 21 };
@@ -523,8 +525,8 @@ function createSqliteStore(file, log) {
       try {
         r = d
           .prepare(
-            `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,event_ids,evidence,accessed,last_access,invalid_at,superseded_by,status)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            `INSERT INTO journal(id,at,day,chat_id,sender,role,text,level,kind,digest,keep_until,vec,vec_model,event_ids,evidence,accessed,last_access,invalid_at,superseded_by,status)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO NOTHING`,
           )
           .run(
@@ -540,6 +542,14 @@ function createSqliteStore(file, log) {
           row.digest == null ? null : String(row.digest),
           Number(row.keepUntil) || 0,
           asVec(row.vec),
+          /**
+           * 模型指纹必须一起还原。
+           *
+           * 漏了它：还原后的行 `vec_model=''`，而 `withVec({model})` 只取
+           * `vec_model = ?` —— 向量全在，语义检索却一条都取不到，
+           * 要等回填按天补（每天 20 条）才能慢慢恢复。
+           */
+          String(row.vecModel ?? ''),
           row.eventIds?.length ? JSON.stringify(row.eventIds) : null,
           row.evidence?.length ? JSON.stringify(row.evidence) : null,
           Number(row.accessed) || 0,
@@ -1092,10 +1102,23 @@ function createSqliteStore(file, log) {
       const args = [];
       if (dim > 0) { conds.push('length(vec)/4 <> ?'); args.push(dim); }
       if (model) { conds.push("COALESCE(vec_model, '') <> ?"); args.push(model); }
-      return d
-        .prepare(`SELECT * FROM journal WHERE (${conds.join(' OR ')}) AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL} ORDER BY at ASC LIMIT ?`)
-        .all(...args, ERASED, CLEARED, limit)
-        .map(normRow);
+      const where = `(${conds.join(' OR ')}) AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL}`;
+      /**
+       * **近期优先，老积压兜底**（2026-11-23 自检修）。
+       *
+       * 原来只有 `ORDER BY at ASC`：积压 10 万行时，每天补 20 条最老的，
+       * 新聊的内容要等十几年才轮得到——而检索最需要的恰恰是近期记忆。
+       * 现在一半名额给最近 14 天（新的先补），一半给老积压（迟早能补完）。
+       */
+      const half = Math.max(1, Math.floor(limit / 2));
+      const recentSince = Date.now() - NOVEC_RECENT_DAYS * DAY;
+      const recent = d
+        .prepare(`SELECT * FROM journal WHERE ${where} AND at >= ? ORDER BY at DESC LIMIT ?`)
+        .all(...args, ERASED, CLEARED, recentSince, half);
+      const rest = d
+        .prepare(`SELECT * FROM journal WHERE ${where} AND at < ? ORDER BY at ASC LIMIT ?`)
+        .all(...args, ERASED, CLEARED, recentSince, Math.max(0, limit - recent.length));
+      return [...recent, ...rest].map(normRow);
     },
 
     /**
@@ -1675,16 +1698,21 @@ function createJsonlStore(file, log) {
       const wantDim = Number(o.dim) || 0;
       const wantModel = String(o.model || '');
       const dimOf = (r) => { const v = toVec(r.vec); return v ? v.length : 0; };
-      return load()
+      const recentSince = Date.now() - NOVEC_RECENT_DAYS * DAY;
+      const pending = load()
         .filter((r) => isActive(r) && r.text !== ERASED && r.text !== CLEARED)
         .filter((r) => {
           if (!r.vec) return true;
           if (wantDim > 0 && dimOf(r) !== wantDim) return true;
           if (wantModel && String(r.vecModel || '') !== wantModel) return true;
           return false;
-        })
-        .sort((a, b) => a.at - b.at)
-        .slice(0, limit);
+        });
+      /** 与 sqlite 版同口径：近期优先（新的先补），老积压兜底 */
+      const half = Math.max(1, Math.floor(limit / 2));
+      const recent = pending.filter((r) => r.at >= recentSince).sort((a, b) => b.at - a.at).slice(0, half);
+      const old = pending.filter((r) => r.at < recentSince).sort((a, b) => a.at - b.at)
+        .slice(0, Math.max(0, limit - recent.length));
+      return [...recent, ...old];
     },
 
     /** 同 SQLite 后端：到期待压的条目，最该压的在前 */

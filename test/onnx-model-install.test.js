@@ -88,3 +88,35 @@ test('usage：没装时 0 字节', () => {
   const inst = createModelInstaller({ dataDir: () => dataDirOf() });
   assert.equal(inst.usage().bytes, 0);
 });
+
+test('模型安装：下载完真能装上（暂存目录不能放在目标目录里）', async () => {
+  const data = dataDirOf();
+  const installer = createModelInstaller({
+    dataDir: () => data,
+    modelId: 'test/model',
+    dirName: 'e5-small',
+    label: '测试模型',
+    files: [['onnx/model.onnx', 'model.onnx'], ['tokenizer.json', 'tokenizer.json']],
+    /** 假下载：每源都直接给字节，不碰网络 */
+    fetchImpl: async () => new Response(Buffer.from('fake-weights'), {
+      status: 200,
+      headers: { 'content-length': String('fake-weights'.length) },
+    }),
+  });
+
+  const r = installer.start();
+  assert.equal(r.ok, true, '要能开始');
+  for (let i = 0; i < 200 && installer.status().running; i += 1) {
+    await new Promise((res) => setTimeout(res, 10));
+  }
+
+  const s = installer.status();
+  /**
+   * 回归：tmp 以前放在 modelDir 内部，收尾 `rmSync(target)` 把 tmp 一起删掉，
+   * rename 必然 ENOENT —— 下完一百多 MB 才失败，旧模型还没了。
+   */
+  assert.equal(s.phase, 'done', `要装成功，实际：${s.phase} ${s.error || ''}`);
+  assert.equal(installer.ready(), true);
+  assert.ok(existsSync(join(data, 'onnx-models', 'e5-small', 'model.onnx')), '文件要落到目标目录');
+  assert.equal(existsSync(join(data, 'onnx-models', '.tmp-e5-small')), false, '暂存目录要清掉');
+});

@@ -350,9 +350,20 @@ export function applyEvidence(prev, relation, item = null) {
  */
 export function trendOf(evidence, now = Date.now(), { recentDays = TREND_RECENT_DAYS, oldDays = TREND_OLD_DAYS } = {}) {
   const rows = Array.isArray(evidence) ? evidence : [];
-  if (!rows.length) return 'stale';
+  /**
+   * **没有证据 ≠ 证据变弱**（2026-11-23 自检修 P0）。
+   *
+   * 以前这里返回 `stale`，而 `listRanked({skipStale:true})` 会把 stale 的
+   * 从 facts 段整个剔掉、`staleSec` 还会把它们标成"别当准信"。结果：
+   * 老库（v1.4.0 及以前）的事实一条证据都没有 → **每个会话首轮（deep）
+   * 的 facts 段直接是空的**，只剩最多 5 条"可能过时"的提醒。
+   *
+   * 证据账本是后加的，没记过证据不代表这条事实可疑——那只是"没统计"。
+   * 所以没证据给 `unknown`（不参与"过时"判定），有证据但全是老的才给 stale。
+   */
+  if (!rows.length) return 'unknown';
   const ts = rows.map((e) => Number(e?.at) || 0).filter((n) => n > 0);
-  if (!ts.length) return 'stale';
+  if (!ts.length) return 'unknown';
   const nowMs = Number(now) > 0 ? Number(now) : Date.now();
   const recentCut = nowMs - recentDays * DAY_MS;
   const oldCut = nowMs - oldDays * DAY_MS;
@@ -1711,6 +1722,18 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
               pin: clamp01(x.pin),
               reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : 0,
               archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : 0,
+              /**
+               * E2 待跟进：**必须一起导出**。
+               * 不导出的话，「清理 → 后悔 → 还原」之后这条事实回来了，
+               * 但「到点该问一句」悄悄没了——用户看不出哪里少了东西。
+               */
+              followUp: x.followUp && Number(x.followUp.at) > 0
+                ? {
+                  at: Number(x.followUp.at),
+                  tries: Math.max(0, Number(x.followUp.tries) || 0),
+                  ...(x.followUp.question ? { question: String(x.followUp.question).slice(0, 60) } : {}),
+                }
+                : null,
               /** 证据账本三个字段：漏一个，清理→还原就把证据抹掉（同 status 的教训） */
               ...evidenceOf(x),
             });
@@ -1829,6 +1852,14 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (Number(row.pin) > 0) meta.pin = clamp01(row.pin);
       if (Number(row.reviewedAt) > 0) meta.reviewedAt = Number(row.reviewedAt);
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);
+      /** E2 待跟进：同样默认不落盘，还原后与升级前的老库逐字节一致 */
+      if (row.followUp && Number(row.followUp.at) > 0) {
+        meta.followUp = {
+          at: Number(row.followUp.at),
+          tries: Math.max(0, Number(row.followUp.tries) || 0),
+          ...(row.followUp.question ? { question: String(row.followUp.question).slice(0, 60) } : {}),
+        };
+      }
       /** 证据账本：默认值不落盘，还原后与升级前的老库逐字节一致 */
       writeEvidence(meta, evidenceOf(row));
       list.push(text);

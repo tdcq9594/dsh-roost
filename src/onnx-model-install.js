@@ -64,6 +64,14 @@ export function createModelInstaller({
   let controller = null;
 
   const modelDir = () => join(dataDir(), 'onnx-models', dirName);
+  /**
+   * 下载暂存目录：**必须是 modelDir 的兄弟，不能放它里面**。
+   *
+   * 收尾是 `rmSync(target)` 再 `renameSync(tmp, target)`；tmp 要是在 target 内部，
+   * rmSync 会把它一起删掉，rename 必然 ENOENT——模型下完一百多 MB 才失败，
+   * 而且旧模型已经被删了。单测只覆盖 ready/busy/cancel，抓不到这条。
+   */
+  const tmpDir = () => join(dataDir(), 'onnx-models', `.tmp-${dirName}`);
 
   function snapshot() {
     const percent = state.total > 0
@@ -122,7 +130,7 @@ export function createModelInstaller({
 
   /** 装模型。先落 .tmp，三个文件齐了再整体 rename 顶替 */
   async function run(signal) {
-    const tmp = join(modelDir(), '.tmp');
+    const tmp = tmpDir();
     rmSync(tmp, { recursive: true, force: true });
     mkdirSync(tmp, { recursive: true });
 
@@ -170,7 +178,7 @@ export function createModelInstaller({
           finishedAt: Date.now(),
         });
         if (!aborted) log(`本地 embedding 模型安装失败：${e?.message || e}`);
-        rmSync(join(modelDir(), '.tmp'), { recursive: true, force: true });
+        rmSync(tmpDir(), { recursive: true, force: true });
         controller = null;
       });
       return { ok: true, started: true };

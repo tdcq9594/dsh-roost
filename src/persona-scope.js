@@ -138,6 +138,16 @@ export const PLAN = {
     setPersonaOverride: [0, null, 'write'], setAuthz: [0, null, 'write'],
     remove: [0, null, 'write'], clearChat: [0, null, 'write'],
     editFact: [0, null, 'write'],
+    /**
+     * E2 待跟进：签名分别是
+     *   `setFollowUp(chatId, fact, opts, scope, aliases)` → 别名在**第 5 个**参数
+     *   `dueFollowUps(chatId, aliases, opts)`             → 别名在**第 2 个**
+     *   `markFollowUpAsked(chatId, fact, aliases)`        → 别名在**第 3 个**
+     *   `clearFollowUp(chatId, fact, aliases)`            → 同上
+     * 漏登记 → 人格隔离开启后读逻辑键恒空（待跟进永不注入）、写也写不到。
+     */
+    setFollowUp: [0, 4, 'write'], dueFollowUps: [0, 1, 'read'],
+    markFollowUpAsked: [0, 2, 'write'], clearFollowUp: [0, 2, 'write'],
   },
   journal: {
     /** 对外写方法是 add；insert / searchTerms / withVec 是底层内部方法，不暴露，不用包 */
@@ -168,9 +178,10 @@ export const PLAN = {
      * 人格隔离开启后二跳会恒返回空，且 `recallFor` 的 catch 只打 debug。
      */
     adjacentJournalIds: ['obj:1', 'obj:1', 'read'],
-    /** C3：召回后给实体加热度。chatId/aliases 在**第二参数** `{chatId, aliases}`，
-     *  漏登记 → 人格隔离开启后按逻辑键 UPDATE，命中 0 行，热度恒 0（静默失效）。 */
-    touchEntities: ['obj:2', 'obj:2', 'write'],
+    /** C3：召回后给实体加热度。chatId/aliases 在**第二参数** `{chatId, aliases}`
+     *  （下标 1，0 是 names 数组）。
+     *  漏登记或下标写错 → 人格隔离开启后按逻辑键 UPDATE，命中 0 行，热度恒 0（静默失效）。 */
+    touchEntities: ['obj:1', 'obj:1', 'write'],
     edgesAsOf: ['obj:1', 'obj:1', 'read'], episodes: ['obj:0', null, 'write'],
     /**
      * `removeEntity(ref, {chatId, aliases})`：面板删实体走这里。

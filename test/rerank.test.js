@@ -140,3 +140,24 @@ test('只开 useLocal（没开 enabled 总闸）也要真重排——面板文�
   assert.equal(out.mode, 'local', 'useLocal 就该隐含 enabled');
   assert.ok(out.hits[0].text.includes('上海'));
 });
+
+test('向量重排：本地 embedder 返回 Float32Array 也要生效（曾经静默回落规则）', async () => {
+  /**
+   * 回归：`embed.one()` 返回 Float32Array，旧代码用 `Array.isArray` 判，
+   * 于是永远返回 null → 生产上一直回落 `mode:'rule'`，面板却显示重排开着。
+   */
+  const fake = {
+    enabled: () => true,
+    one: async () => Float32Array.from([1, 0, 0]),
+    many: async (texts) => texts.map((t) => (t.includes('猫')
+      ? Float32Array.from([1, 0, 0])
+      : Float32Array.from([0, 1, 0]))),
+  };
+  const hits = [
+    { id: 'a', text: '今天天气不错', score: 0.9 },
+    { id: 'b', text: '我家猫生病了', score: 0.1 },
+  ];
+  const out = await vectorRerank('猫', hits, { embedder: fake });
+  assert.ok(out, 'Float32Array 不能让它返回 null');
+  assert.equal(out[0].id, 'b', '语义更近的该排前面');
+});

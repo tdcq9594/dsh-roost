@@ -61,8 +61,15 @@ export function freshness(at, now = Date.now()) {
   return 1 / (1 + days / 7);
 }
 
+/**
+ * 余弦相似度。
+ *
+ * **必须接受 `Float32Array`**：本地 ONNX 出来的向量是 Float32Array，
+ * 用 `Array.isArray` 判会一律返回 0——重排静默失效，永远回落规则。
+ * 只要求"有 length、能按下标取"，普通数组和 typed array 都过。
+ */
 const cosine = (a, b) => {
-  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return 0;
+  if (!a || !b || typeof a.length !== 'number' || typeof b.length !== 'number' || a.length !== b.length) return 0;
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i += 1) {
     dot += a[i] * b[i];
@@ -113,9 +120,10 @@ export async function vectorRerank(query, hits, { embedder, weight = RERANK_DEFA
   if (typeof embedder.enabled === 'function' && !embedder.enabled()) return null;
   const texts = list.map((h) => String(h?.text ?? h?.digest ?? '').slice(0, 800));
   const qv = await embedder.one(String(query ?? ''));
-  if (!Array.isArray(qv) || !qv.length) return null;
+  /** 同 cosine：本地 embedder 返回 Float32Array，别用 Array.isArray 判 */
+  if (!qv || typeof qv.length !== 'number' || !qv.length) return null;
   const vecs = await embedder.many(texts);
-  if (!Array.isArray(vecs) || vecs.length !== texts.length) return null;
+  if (!vecs || typeof vecs.length !== 'number' || vecs.length !== texts.length) return null;
   const rel = vecs.map((v) => Math.max(0, cosine(qv, v)));
   return mix(list, rel, weight);
 }
