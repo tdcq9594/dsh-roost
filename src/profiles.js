@@ -31,6 +31,8 @@ import { oneLine } from './memory-line.js';
 export const PROFILE_MAX = 50;
 export const IMPRESSION_MAX = 80;
 export const TIPS_MAX = 120;
+/** E4：讨厌/雷区。比印象更敏感——只在模型明确提炼到才写，渲染时单独标"别踩" */
+export const DISLIKES_MAX = 80;
 export const PROFILE_LINES_MAX = 3;
 
 /** 按码点截，别把 emoji 的 surrogate pair 切一半（budget.js 的 clipForBudget 同款顾虑） */
@@ -126,14 +128,15 @@ export function createProfiles({
   }
 
   function render(limit) {
-    const list = load().filter((r) => r.impression || r.tips);
+    const list = load().filter((r) => r.impression || r.tips || r.dislikes);
     const picked = limit > 0 ? list.slice(-limit).reverse() : [...list].reverse();
     if (!picked.length) return '';
     const lines = picked.map((r) => {
       const name = clipChars(r.name || r.key, 24);
       const imp = clipChars(r.impression || '', IMPRESSION_MAX);
       const tips = clipChars(r.tips || '', TIPS_MAX);
-      return `· ${name}：${oneLine(imp)}${tips ? `（相处：${oneLine(tips)}）` : ''}`;
+      const bad = clipChars(r.dislikes || '', DISLIKES_MAX);
+      return `· ${name}：${oneLine(imp)}${tips ? `（相处：${oneLine(tips)}）` : ''}${bad ? `（别踩：${oneLine(bad)}）` : ''}`;
     });
     return `${HEADER}\n${lines.join('\n')}`;
   }
@@ -143,23 +146,26 @@ export function createProfiles({
      * 记一笔。`openid` 优先于显示名当键；`aliases` 传 aliasesOf(chatId)。
      * 开关关着时由调用方决定不调这里——本模块不偷偷读配置（单一真相在 config）。
      */
-    note({ who = '', openid = '', impression = '', tips = '', aliases = [], current = '' } = {}) {
+    note({ who = '', openid = '', impression = '', tips = '', dislikes = '', aliases = [], current = '' } = {}) {
       const key = canonicalKey(openid || who, aliases, current);
       if (!key) return 0;
       const all = load();
       const imp = accumulate('', impression, IMPRESSION_MAX);
       const tip = accumulate('', tips, TIPS_MAX);
-      if (!imp && !tip) return 0;
+      const bad = accumulate('', dislikes, DISLIKES_MAX);
+      if (!imp && !tip && !bad) return 0;
       const name = clipChars(String(who || openid || key).trim(), 24) || key;
       const cur = all.find((r) => r.key === key);
       if (cur) {
         cur.name = name || cur.name;
         cur.impression = accumulate(cur.impression, impression, IMPRESSION_MAX);
         cur.tips = accumulate(cur.tips, tips, TIPS_MAX);
+        /** E4：只有真的提炼到讨厌项才写，空串不覆盖已有的 */
+        if (bad) cur.dislikes = accumulate(cur.dislikes, dislikes, DISLIKES_MAX);
         cur.at = now();
         cur.hits = Number(cur.hits || 0) + 1;
       } else {
-        all.push({ key, name, impression: imp, tips: tip, at: now(), hits: 1 });
+        all.push({ key, name, impression: imp, tips: tip, dislikes: bad, at: now(), hits: 1 });
       }
       if (all.length > max) all.splice(0, all.length - max);
       /** 当天注入文本保持不变；新增的明天才进稳定段 */
@@ -193,6 +199,23 @@ export function createProfiles({
       const next = cur.filter((r) => String(r.key ?? '').trim().toLowerCase() !== k);
       if (next.length === cur.length) return false;
       rows = next;
+      renderCache = null;
+      save();
+      return true;
+    },
+
+    /**
+     * E4：撤销某个人的"雷区"（dislikes），保留印象/相处。
+     * 为什么要单独可撤：雷区是模型提炼的主观判断，写错了会一直注入
+     * "别踩：…"、还会被下一轮提炼喂回 prompt 自我强化（aurabot 用 tombstone 防这个）。
+     * 这里做最小版：清掉这一项，下一轮提炼就不会再看到它。
+     */
+    clearDislikes(key) {
+      const k = String(key ?? '').trim().toLowerCase();
+      if (!k) return false;
+      const row = load().find((r) => String(r.key ?? '').trim().toLowerCase() === k);
+      if (!row || !row.dislikes) return false;
+      delete row.dislikes;
       renderCache = null;
       save();
       return true;

@@ -362,6 +362,7 @@ function createSqliteStore(file, log) {
           accessed INTEGER NOT NULL DEFAULT 0,
           last_access INTEGER NOT NULL DEFAULT 0,
           vec BLOB,
+          vec_model TEXT NOT NULL DEFAULT '',
           -- 场景片段（阶段 4）：这条记忆是从哪几条消息来的，以及原文快照
           event_ids TEXT,
           evidence TEXT,
@@ -413,6 +414,12 @@ function createSqliteStore(file, log) {
        * 别在没接上写入方之前把它当成活的——面板和检索读到的永远是 fact。
        */
       if (!cols.has('status')) db.exec(`ALTER TABLE journal ADD COLUMN status TEXT NOT NULL DEFAULT ''`);
+      /**
+       * C4 模型指纹：向量是哪个模型算的。换模型（哪怕维度相同）时，
+       * 旧向量不能被当成新模型的候选——同维度不同模型余弦能算但语义错位，
+       * 比"没向量"更糟（静默给出错误相似度）。
+       */
+      if (!cols.has('vec_model')) db.exec(`ALTER TABLE journal ADD COLUMN vec_model TEXT NOT NULL DEFAULT ''`);
       /**
        * FTS5 单独一张表而不是 external content：
        * external content 要靠触发器同步，改一行忘了同步就静默不一致。
@@ -564,6 +571,41 @@ function createSqliteStore(file, log) {
       return r ? normRow(r) : null;
     },
 
+    /**
+     * A3 撤回级联：从一批 journal id 里挑出**仍然有效**的（invalid_at=0）。
+     * 用途：图谱联想拿到的 id 可能指向已被改口作废的日记——那些边不该再
+     * 参与召回，否则旧说法会被"想起"第二次。
+     */
+    activeIds(ids) {
+      const list = [...new Set((ids || []).filter(Boolean).map(String))];
+      if (!list.length) return [];
+      const d = open();
+      if (!d) return [];
+      const sql = `SELECT id FROM journal WHERE id IN (${marks(list.length)}) AND ${NOT_INVALIDATED_SQL}`;
+      const alive = new Set(d.prepare(sql).all(...list).map((r) => String(r.id)));
+      return list.filter((id) => alive.has(id));
+    },
+
+    /**
+     * C1 时间臂：取 [from,to) 内最近的日记，作为**独立候选**。
+     * 和 from/to 过滤的区别：过滤只在命中里筛，时间臂是即使关键词不匹配
+     * 也把那段时间的事拉进来（"上个月聊了什么"没有关键词可搜）。
+     */
+    inRange({ from = 0, to = 0, limit = 20, chatId = '', aliases = [] } = {}) {
+      const d = open();
+      if (!d || !(Number(to) > Number(from))) return [];
+      const keys = chatId ? chatKeys(chatId, aliases) : [];
+      const where = ['at >= ?', 'at < ?', NOT_INVALIDATED_SQL];
+      const args = [from, to];
+      if (keys.length) {
+        where.push(`chat_id IN (${marks(keys.length)})`);
+        args.push(...keys);
+      }
+      args.push(Math.max(1, Number(limit) || 20));
+      const sql = `SELECT * FROM journal WHERE ${where.join(' AND ')} ORDER BY at DESC LIMIT ?`;
+      return d.prepare(sql).all(...args).map(normRow);
+    },
+
     update(id, patch) {
       const d = open();
       if (!d) return false;
@@ -576,6 +618,7 @@ function createSqliteStore(file, log) {
         accessed: 'accessed',
         lastAccess: 'last_access',
         vec: 'vec',
+        vecModel: 'vec_model',
         text: 'text',
       };
       for (const [k, col] of Object.entries(map)) {
@@ -984,14 +1027,26 @@ function createSqliteStore(file, log) {
       }
     },
 
-    withVec({ chatId = '', limit = 2000, aliases = [] } = {}) {
+    withVec({ chatId = '', limit = 2000, aliases = [], dim = 0, model = '' } = {}) {
       const d = open();
       if (!d) return [];
       const keys = chatId ? chatKeys(chatId, aliases) : [];
+      /**
+       * C4 模型/维度校验（对齐 aurabot vector-store 的 model 指纹）：
+       *   · 传了 model → 只取同模型的向量。**同维度不同模型**余弦能算但语义
+       *     错位，比"没向量"更糟，所以不能只按维度判。
+       *   · 传了 dim → 再挡一层维度不符（老库 vec_model 为空时兜底）。
+       * blob 是纯 Float32，字节数 / 4 = 维度。
+       */
+      const clauses = [];
+      const args = [];
+      if (model) { clauses.push('vec_model = ?'); args.push(String(model)); }
+      if (Number(dim) > 0) { clauses.push('length(vec)/4 = ?'); args.push(Number(dim)); }
+      const extra = clauses.length ? ` AND ${clauses.join(' AND ')}` : '';
       const sql = keys.length
-        ? `SELECT * FROM journal WHERE vec IS NOT NULL AND (chat_id IN (${marks(keys.length)}) OR chat_id='') AND ${NOT_INVALIDATED_SQL} ORDER BY at DESC LIMIT ?`
-        : `SELECT * FROM journal WHERE vec IS NOT NULL AND ${NOT_INVALIDATED_SQL} ORDER BY at DESC LIMIT ?`;
-      return d.prepare(sql).all(...(keys.length ? [...keys, limit] : [limit])).map(normRow);
+        ? `SELECT * FROM journal WHERE vec IS NOT NULL AND (chat_id IN (${marks(keys.length)}) OR chat_id='') AND ${NOT_INVALIDATED_SQL}${extra} ORDER BY at DESC LIMIT ?`
+        : `SELECT * FROM journal WHERE vec IS NOT NULL AND ${NOT_INVALIDATED_SQL}${extra} ORDER BY at DESC LIMIT ?`;
+      return d.prepare(sql).all(...(keys.length ? [...keys, ...args, limit] : [...args, limit])).map(normRow);
     },
 
     /** 还没有向量的条目（巩固时批量补算，白天不花这个钱） */
@@ -1002,13 +1057,19 @@ function createSqliteStore(file, log) {
      * 「（已按用户要求遗忘）」。不排除的话，巩固会给这个占位符重新算一遍
      * 向量，等于把抹掉的那行重新塞回语义检索里。
      */
-    noVec(limit = 64) {
+    noVec(limit = 64, dim = 0) {
       const d = open();
       if (!d) return [];
+      /**
+       * C4：传了 dim 就**连维度不符的旧向量一起收**——换模型后它们被 withVec
+       * 排除在检索外，但若不重算就会永远留在库里占地方、且语义检索静默丢历史。
+       * 先补**老**条目：按 DESC 取的话最新的先补，最老的永远轮不到。
+       */
+      const vecCond = Number(dim) > 0 ? '(vec IS NULL OR length(vec)/4 <> ?)' : 'vec IS NULL';
+      const args = Number(dim) > 0 ? [Number(dim), ERASED, CLEARED, limit] : [ERASED, CLEARED, limit];
       return d
-        /** 先补**老**条目的向量：按 DESC 取的话，最新的先补，最老的永远轮不到 */
-        .prepare(`SELECT * FROM journal WHERE vec IS NULL AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL} ORDER BY at ASC LIMIT ?`)
-        .all(ERASED, CLEARED, limit)
+        .prepare(`SELECT * FROM journal WHERE ${vecCond} AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL} ORDER BY at ASC LIMIT ?`)
+        .all(...args)
         .map(normRow);
     },
 
@@ -1316,6 +1377,24 @@ function createJsonlStore(file, log) {
       return load().find((r) => r.id === id) || null;
     },
 
+    /** A3 撤回级联：同 sqlite 版——按 invalid_at 过滤活动 id */
+    activeIds(ids) {
+      const alive = new Map(load().map((r) => [String(r.id), !Number(r.invalidAt)]));
+      return [...new Set((ids || []).filter(Boolean).map(String))].filter((id) => alive.get(id) === true);
+    },
+
+    /** C1 时间臂：同 sqlite 版——取窗内最近的活动日记 */
+    inRange({ from = 0, to = 0, limit = 20, chatId = '', aliases = [] } = {}) {
+      if (!(Number(to) > Number(from))) return [];
+      const keys = chatId ? chatKeys(chatId, aliases) : [];
+      return load()
+        .filter((r) => Number(r.at) >= from && Number(r.at) < to && !Number(r.invalidAt))
+        /** 与 sqlite 版同口径：全局(chat_id='')条目不进本群时间臂 */
+        .filter((r) => !keys.length || keys.includes(r.chatId))
+        .sort((a, b) => Number(b.at) - Number(a.at))
+        .slice(0, Math.max(1, Number(limit) || 20));
+    },
+
     update(id, patch) {
       load();
       const r = rows.find((x) => x.id === id);
@@ -1550,18 +1629,28 @@ function createJsonlStore(file, log) {
         .map(([i]) => rows[i]);
     },
 
-    withVec({ chatId = '', limit = 2000, aliases = [] } = {}) {
+    withVec({ chatId = '', limit = 2000, aliases = [], dim = 0, model = '' } = {}) {
       const keys = chatId ? chatKeys(chatId, aliases) : [];
+      /** C4：同模型 + 同维度才要（同维度不同模型会语义错位），与 sqlite 版同口径 */
+      const dimOf = (r) => {
+        const v = toVec(r.vec);
+        return v ? v.length : 0;
+      };
       return load()
         .filter((r) => isActive(r) && r.vec && (!keys.length || keys.includes(r.chatId) || r.chatId === ''))
+        .filter((r) => !model || String(r.vecModel || '') === String(model))
+        .filter((r) => !(Number(dim) > 0) || dimOf(r) === Number(dim))
         .sort((a, b) => b.at - a.at)
         .slice(0, limit);
     },
 
-    noVec(limit = 64) {
-      // 同 SQLite 后端：占位符不补算向量；先补**老**条目（DESC 会让最老的永远轮不到）
+    noVec(limit = 64, dim = 0) {
+      /** 同 SQLite 后端：占位符不补算；传 dim 时连维度不符的旧向量也收（换模型重算） */
+      const wantDim = Number(dim) > 0 ? Number(dim) : 0;
+      const dimOf = (r) => { const v = toVec(r.vec); return v ? v.length : 0; };
       return load()
-        .filter((r) => isActive(r) && !r.vec && r.text !== ERASED && r.text !== CLEARED)
+        .filter((r) => isActive(r) && r.text !== ERASED && r.text !== CLEARED)
+        .filter((r) => (!r.vec) || (wantDim > 0 && dimOf(r) !== wantDim))
         .sort((a, b) => a.at - b.at)
         .slice(0, limit);
     },
@@ -1843,6 +1932,10 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     },
 
     get: (id) => get().get(id),
+    /** A3 撤回级联：过滤掉已被改口作废的日记 id */
+    activeIds: (ids) => get().activeIds(ids),
+    /** C1 时间臂：窗内最近的活动日记（关键词不匹配时也能补位） */
+    inRange: (opts) => get().inRange(opts),
 
     /**
      * `aliases` 是**换机器人之后**才有的东西：旧 openid 下的日记也该读得到。
@@ -1965,7 +2058,9 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
        * 时间定位（src/temporal.js）：只收 [from, to) 内的日记。
        * 不传就不过滤——解析不出时间词时行为与以前逐字一致。
        */
-      from = 0, to = 0 } = {}) {
+      from = 0, to = 0,
+      /** C2：显式打开才做"每路保底一条"，默认关——老调用方的名次不变 */
+      interleave = false } = {}) {
       /** 时间窗生效条件严格成对，避免只传一个把范围搜飞 */
       const hasWindow = Number(from) > 0 && Number(to) > Number(from);
       const inWindow = (r) => !hasWindow || (Number(r?.at) >= from && Number(r?.at) < to);
@@ -2031,7 +2126,9 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         try {
           const qv = await embed.one(query);
           if (qv) {
-            const cands = s.withVec({ chatId, aliases });
+            /** C4：按查询向量维度筛候选，换模型后旧维度向量不参与 */
+            /** C4：按当前模型 + 维度筛候选，换模型后旧向量不参与 */
+            const cands = s.withVec({ chatId, aliases, dim: qv.length, model: embed.modelId?.() || '' });
             const scored = [];
             for (const r of cands) {
               if (!inWindow(r)) continue;
@@ -2053,6 +2150,24 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         }
       }
 
+      /**
+       * C1 时间臂（Hindsight 的第四路）：时窗内最近的日记，即使关键词不匹配
+       * 也进来当候选。权重 0.3（低于关键词 1 / 实体 0.5）——它是"那段时间的
+       * 背景"，不是直接证据。只在解析出时间词时跑，平时零开销。
+       */
+      let temporalHits = [];
+      if (hasWindow) {
+        try {
+          temporalHits = s.inRange({ from, to, limit: per, chatId, aliases });
+          temporalHits.forEach((r, i) => {
+            bump(r.id, i, 0.3);
+            if (!byId.has(r.id)) byId.set(r.id, r);
+          });
+        } catch (e) {
+          log(`时间臂检索失败，只用其它路：${e?.message || e}`);
+        }
+      }
+
       const vecRank = new Map(vecHits.map(({ r }, i) => [r.id, i]));
       const out = [...ranks.entries()]
         .map(([id, score]) => {
@@ -2067,6 +2182,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
               kw.some((k) => k.id === id) ? '关键词' : '',
               /** 3.4：实体路命中的标出「从谁联想来」，预览和决策链都能看懂 */
               entityNames?.get?.(id) ? `经「${entityNames.get(id)}」联想` : '',
+              /** C1 时间臂：告诉用户这条是"那段时间"带进来的，不是关键词命中 */
+              temporalHits.some((r) => r.id === id) ? '那段时间' : '',
             ]
               .filter(Boolean)
               .join('+'),
@@ -2076,6 +2193,34 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         .filter(Boolean)
         .sort((a, b) => b.score - a.score)
         .slice(0, limit);
+
+      /**
+       * C2 interleave（对齐 Hindsight fusion.py）：每路若各有候选，
+       * 保证在 top-N 里至少露一条，免得强路把弱路全挤掉。
+       * 默认关：老调用方的名次不变；只有显式打开才做保底。
+       */
+      if (interleave && out.length >= limit && limit > 1) {
+        const present = new Set(out.map((r) => String(r.id)));
+        const channels = [kw, vecHits.map((v) => v.r), temporalHits];
+        /** 实体路也算一路（有 entityNames 注入时） */
+        if (entityNames?.size) channels.push([...entityNames.keys()].map((id) => byId.get(id)).filter(Boolean));
+        /** 被替换出去的不能再被下一路当 fresh 捞回来（否则两路保底互相抵消） */
+        const evicted = new Set();
+        for (const list of channels) {
+          if (!list.length) continue;
+          /** 找这一路里既没进 top-N、也不是刚被挤掉的最优候选 */
+          const fresh = list.find((r) => !present.has(String(r.id)) && !evicted.has(String(r.id)));
+          if (!fresh) continue;
+          const pick = fresh;
+          if (!pick || !byId.has(String(pick.id))) continue;
+          const weakest = out[out.length - 1];
+          const evictedId = String(weakest.id);
+          evicted.add(evictedId);
+          present.delete(evictedId);
+          out[out.length - 1] = { ...pick, score: weakest.score + 1e-9, why: `${weakest.why ? `${weakest.why}+` : ''}保底` };
+          present.add(String(pick.id));
+        }
+      }
 
       /** 3.4：预览不计入「被想起」——检索命中才算访问，试一下不算 */
       if (touch !== false && out.length) touchIds(out.map((r) => r.id));
@@ -2287,11 +2432,14 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     /* ---- 向量：巩固时补算，白天只算查询那一条 ---- */
 
     /** 还没算向量的条目（主循环在 consolidate 里） */
-    noVec: (limit) => get().noVec(limit),
+    noVec: (limit, dim) => get().noVec(limit, dim),
+    /** C4：带维度过滤的向量候选（调试/测试用，检索内部走 store 直连） */
+    withVec: (opts) => get().withVec(opts),
 
-    setVec(id, vec) {
+    setVec(id, vec, model = '') {
       if (!vec) return false;
-      return get().update(id, { vec: toBlob(vec) });
+      /** model 一起落库：换模型后旧向量据此失效（同维度也不会被误用） */
+      return get().update(id, { vec: toBlob(vec), vecModel: String(model || '') });
     },
 
     vecOf: (row) => toVec(row?.vec),

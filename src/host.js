@@ -36,6 +36,7 @@ import { createQuota, shouldCharge, QUOTA_DEFAULTS } from './quota.js';
 import { createSetup } from './setup.js';
 import { maxPartsOf, shouldRegisterQqTools } from './qq-tools.js';
 import { createMemory, W_EXPLICIT } from './memory.js';
+import { buildMindModel, renderMindModel } from './mind-model.js';
 import { createJournal } from './journal.js';
 import { createLedgerReader } from './ledger-read.js';
 import { createChannelPost, normalizePostCfg, guide, humanError, pickErrorCode, shareUrlOf } from './channel-post.js';
@@ -3275,8 +3276,23 @@ export function apply(ctx) {
    * 检索 / 记忆工具），分散着写必然漏一处 —— 漏在写日记上是"关着还照记"，
    * 漏在注入上是"关了还照说"，两种都很难在面板上看出来。
    */
-  const memoryOff = (chatId) => {
+  const memoryOff = (chatId, senderId = '') => {
     if (cfg.memory?.enabled === false) return true;
+    /**
+     * E6 按人关（noUsers）：这个人说的话一律**不再记**。
+     *
+     * 语义边界（有意如此）：关的是"继续记他"，不是"抹掉过去"。
+     * 已有的历史记忆仍可被想起——真要清历史用 memory.remove / profiles.forget。
+     * 不做读层过滤，是因为"不记"和"忘掉"是两个诉求，混在一起会让用户
+     * 以为配了 noUsers 就自动清空，结果发现旧记忆还在反而更困惑。
+     */
+    const noUsers = cfg.memory?.noUsers;
+    const sid = String(senderId || '');
+    /**
+     * 主人永远豁免：把主人误配进 noUsers 会让「记住我住杭州」这种身份事实
+     * 一条都记不下来，而且面板上完全看不出原因。对齐 aurabot 的 isOwner 豁免。
+     */
+    if (sid && sid !== String(ownerId() || '') && Array.isArray(noUsers) && noUsers.includes(sid)) return true;
     const off = cfg.memory?.offChats;
     if (!Array.isArray(off) || !off.length) return false;
     const id = String(chatId || '');
@@ -3317,22 +3333,23 @@ export function apply(ctx) {
         .filter((e) => e.name && e.name.length >= 2 && q.includes(e.name));
       for (const e of named) {
         entities.push(e.name);
-        const ids = graph.linkedJournalIds(e.name, {
+        const ids = journal.activeIds(graph.linkedJournalIds(e.name, {
           chatId,
           limit: Number(cfg.recall?.linkLimit) || 5,
           aliases: aliasesOf(chatId),
-        });
+        }));
+        /** A3 撤回级联：基于已作废日记的边不再参与召回，否则旧说法被"想起"第二次 */
         for (const id of ids) if (!entityNames.has(id)) entityNames.set(id, e.name);
         /**
          * 再扩一跳：顺着这个人的邻接实体（他身边的人 / 参与的事）找日记。
          * 只在开关打开时走——这一层是猜测性联想，图和边脏的时候会很吵。
          */
         if (!adjacentOn) continue;
-        const near = graph.adjacentJournalIds(e.name, {
+        const near = journal.activeIds(graph.adjacentJournalIds(e.name, {
           chatId,
           limit: Number(cfg.recall?.adjacentLimit) || 3,
           aliases: aliasesOf(chatId),
-        });
+        }));
         for (const id of near) {
           /** 已经靠直接关联进来的不降级：先到先得，一跳优先 */
           if (entityNames.has(id)) continue;
@@ -3340,6 +3357,11 @@ export function apply(ctx) {
           entityWeights.set(id, 0.3);
         }
       }
+      /**
+       * C3：这些实体这次真的被"想起来"了（有日记命中），记一次热度。
+       * 只算真命中的（entities 里 push 过的），不是查询里随便提到的名字。
+       */
+      if (entities.length) graph.touchEntities(entities, { chatId, aliases: aliasesOf(chatId) });
     } catch (e) {
       log.debug(`实体路跳过：${e.message}`);
     }
@@ -3415,6 +3437,8 @@ export function apply(ctx) {
     /** D7：实例常驻，开关实时读 cfg（能力页改了不用重启） */
     profiles,
     profilesEnabled: () => cfg.profiles?.enabled === true,
+    /** 巩固时补算日记向量（之前漏了这一步，语义检索的向量路一直是空的） */
+    embed: embedder,
     log: (m) => log.info(m),
     generate: async (prompt) => {
       const consolidateChat = cfg.memory?.consolidateChat || 'consolidate';
@@ -5305,9 +5329,12 @@ export function apply(ctx) {
      * `annotate:true` 只在这一处开：转述的事带上「（听说的）」，
      * 别的调用方（扩展读接口、巩固的对照清单）拿到的仍是原文。
      */
-    const m = memory.listRanked(chatId, aliasesOf(chatId), { annotate: true });
     const st = memState.get(chatId) || {};
     const deep = typeof deepOverride === 'boolean' ? deepOverride : Boolean(st.deep);
+    /** E1：deep 时 directive 单独置顶注入，这里跳过避免重复占预算 */
+    const m = memory.listRanked(chatId, aliasesOf(chatId), {
+      annotate: true, skipDirective: deep, skipStale: deep,
+    });
 
     /**
      * 认人认群的顺序写在这里，是因为模型只从这一段知道「号码比 openid 稳」。
@@ -5361,6 +5388,35 @@ export function apply(ctx) {
       ? `【这个群特有的事】\n${lines(deep ? m.chat : m.chat.slice(0, 3))}`
       : '';
 
+    /**
+     * B3 stale 刷新提醒：证据走弱/陈旧的事实不该当硬事实用。
+     * 只在 deep 段注入（省 token），且只点出条目、不改它们的正文——
+     * 让模型知道"这条可能过时了，拿不准就问"，而不是替它改写结论。
+     */
+    let staleSec = '';
+    let directiveSec = '';
+    if (deep) {
+      try {
+        const full = memory.listFull(chatId, aliasesOf(chatId));
+        /**
+         * E1 显式指令：置顶注入，不随普通事实参与 6 条/3 条的截断——
+         * "记住不要做X"被挤掉就等于没记住。
+         */
+        const rules = [...(full.global || []), ...(full.chat || [])]
+          .filter((x) => x.directive === true && !x.until && !x.archivedAt)
+          .slice(0, 8)
+          .map((x) => `· ${oneLine(x.text)}`);
+        if (rules.length) directiveSec = `【她交代过的规矩】\n${rules.join('\n')}`;
+        const weak = [...(full.global || []), ...(full.chat || [])]
+          .filter((x) => (x.trend === 'stale' || x.trend === 'weakening') && !x.until && !x.archivedAt)
+          .slice(0, 5)
+          .map((x) => `· ${oneLine(x.text)}（${x.trend === 'stale' ? '久没再提起' : '证据在变少'}，别当准信）`);
+        if (weak.length) staleSec = `【可能过时，拿不准就问】\n${weak.join('\n')}`;
+      } catch (e) {
+        log.debug(`过时提醒跳过：${e?.message || e}`);
+      }
+    }
+
     let digestSec = '';
     let topSec = '';
     let graphSec = '';
@@ -5402,7 +5458,7 @@ export function apply(ctx) {
      * facts 是硬事实，自述是软状态。
      */
     const sections = deep
-      ? [rules, factsGlobal, factsChat, selfSec, profilesSec, digestSec, topSec, graphSec]
+      ? [rules, directiveSec, factsGlobal, factsChat, staleSec, selfSec, profilesSec, digestSec, topSec, graphSec]
       : [rules, factsGlobal, factsChat, profilesSec];
 
     const body = fitBudget(sections, deep ? recallBudgets().deep : recallBudgets().res);
@@ -9949,8 +10005,40 @@ export function apply(ctx) {
               profiles.clear();
               return send(res, 200, { ok: true, message: '熟人小档案清了' });
 
+            /** E4：撤销某人的雷区（保留印象/相处）——写错了要能单独撤掉 */
+            case 'profiles.clearDislikes': {
+              const key = String(arg ?? '').trim();
+              if (!key) return send(res, 400, { ok: false, message: '要撤谁的雷区？给个 key' });
+              const ok = profiles.clearDislikes(key);
+              return send(res, 200, { ok, message: ok ? '雷区撤了' : '没找到这个人的雷区' });
+            }
+
             case 'memory.list':
               return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId, aliasesOf(chatId)) });
+
+            /**
+             * B2 心智模型树：把"她现在相信什么"按实体组织成可导航的树 + markdown。
+             * 只读，不改记忆；面板/扩展都能用，导出后也能当 prompt 上下文。
+             */
+            case 'mind.model': {
+              try {
+                const full = memory.listFull(chatId, aliasesOf(chatId));
+                const entities = graph.entities({ chatId, limit: 50, aliases: aliasesOf(chatId) })
+                  .map((e) => e.name).filter(Boolean);
+                const tree = buildMindModel([...(full.global || []), ...(full.chat || [])], entities);
+                return send(res, 200, {
+                  ok: true,
+                  chatId,
+                  groups: tree.groups.length,
+                  total: tree.total,
+                  staleCount: tree.staleCount,
+                  tree,
+                  markdown: renderMindModel(tree),
+                });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: `心智模型读不出来：${e?.message || e}` });
+              }
+            }
 
             /**
              * 这个会话「不记也不读」的开关（纯净模式）。
@@ -10854,6 +10942,7 @@ export function apply(ctx) {
               openid: row?.openid || (row?.key !== name ? row?.key : '') || '',
               impression: row?.impression || '',
               tips: row?.tips || '',
+              dislikes: row?.dislikes || '',
               at: Number(row?.at) || 0,
               lastAt,
             },

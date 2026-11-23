@@ -158,3 +158,29 @@ test('D7：档案正文注入前压成单行（防伪造段落标题）', (t) =>
   /** 存储不动：面板里还是原文 */
   assert.match(p.recent()[0].impression, /\n/, '落盘原文不该被压平');
 });
+
+test('E4 画像雷区：dislikes 单独成字段、渲染标"别踩"、空串不覆盖已有', (t) => {
+  const { file } = fresh(t);
+  const p = createProfiles({ file });
+  p.note({ who: '小明', openid: 'o1', impression: '爱聊游戏', tips: '直接点', dislikes: '别叫他小名' });
+  const row = p.recent(10).find((r) => r.key === 'o1');
+  assert.equal(row.dislikes, '别叫他小名');
+  const txt = p.text({ enabled: true, day: '2026-11-23' });
+  assert.ok(txt.includes('别踩：别叫他小名'), '渲染要标出雷区');
+  /** 只写印象、不写 dislikes：不能把已有雷区抹掉 */
+  p.note({ who: '小明', openid: 'o1', impression: '喜欢篮球' });
+  assert.equal(p.recent(10).find((r) => r.key === 'o1').dislikes, '别叫他小名', '空串不覆盖');
+});
+
+test('E4 雷区可单独撤销：清 dislikes 保留印象/相处', (t) => {
+  const { file } = fresh(t);
+  const p = createProfiles({ file });
+  p.note({ who: '小明', openid: 'o1', impression: '爱聊游戏', tips: '直接点', dislikes: '别叫他小名' });
+  assert.equal(p.clearDislikes('o1'), true, '撤掉雷区');
+  const row = p.recent(10).find((r) => r.key === 'o1');
+  assert.equal(row.dislikes, undefined, '雷区没了');
+  assert.equal(row.impression, '爱聊游戏', '印象保留');
+  assert.equal(row.tips, '直接点', '相处保留');
+  assert.ok(!p.text({ enabled: true, day: '2026-11-23' }).includes('别踩'), '注入里不再有雷区');
+  assert.equal(p.clearDislikes('o1'), false, '已经没了，再撤返回 false');
+});

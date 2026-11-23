@@ -22,7 +22,8 @@ import { createJournal, classify, dayOf, scoreOf, cosine, DEFAULT_KEEP_DAYS, ERA
 import { createGraph } from '../src/graph.js';
 import {
   createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc, strongerStatus, canSupersede,
-  evidenceOf, applyEvidence, trendOf,
+  evidenceOf, applyEvidence, trendOf, MEMORY_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS,
+  kindOf, occurredOf, FACT_KINDS, growTier, isValidAt,
 } from '../src/memory.js';
 import {
   createConsolidate,
@@ -2655,4 +2656,230 @@ test('趋势：证据条目带 journalId/quote 能穿过证据账本与四处白
   const entries = m.retention.entries().filter((e) => e.text === '约定：周末一起看电影');
   assert.equal(entries[0].evidence[0].journalId, 'msg-42', 'retention.entries 带 journalId');
   assert.equal(entries[0].evidence[0].quote, '我们周末一起去看电影吧');
+});
+
+/* ---------------- A1：schema 版本化（2026-11-23，对齐 aurabot 的迁移校验） ---------------- */
+
+test('A1-1 新建记忆写盘带 schemaVersion；重启读回来不报错', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-schema-'));
+  const m = createMemory();
+  m.add('g1', '住在杭州');
+  const raw = JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'memory.json'), 'utf8'));
+  assert.equal(raw.schemaVersion, MEMORY_SCHEMA_VERSION, '写盘要打版本号');
+  assert.deepEqual(createMemory().list('g1').global, ['住在杭州'], '重启读回一致');
+});
+
+test('A1-2 老库无 schemaVersion：按 v1 读、内容不丢、下次 save 补上版本', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-schema-old-'));
+  process.env.DSH_ROOST_DATA = dir;
+  /** 模拟升级前的库：没有任何版本字段 */
+  writeFileSync(join(dir, 'memory.json'), JSON.stringify({
+    global: ['老记忆'], chats: { g1: ['本群老记忆'] }, meta: { global: {}, chats: {} },
+  }), 'utf8');
+  const m = createMemory();
+  assert.deepEqual(m.list('g1').global, ['老记忆'], '老库要能读');
+  m.add('g1', '新记忆'); // 触发 save
+  const raw = JSON.parse(readFileSync(join(dir, 'memory.json'), 'utf8'));
+  assert.equal(raw.schemaVersion, MEMORY_SCHEMA_VERSION, 'save 时补版本');
+  assert.ok(raw.global.includes('老记忆'), '迁移不丢原内容');
+});
+
+test('A1-3 高版本文件被隔离：按空记忆继续、不写回、原件留 .corrupted 备份', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-schema-future-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const future = JSON.stringify({ schemaVersion: 999, global: ['未来的记忆'] });
+  writeFileSync(join(dir, 'memory.json'), future, 'utf8');
+  const m = createMemory();
+  assert.deepEqual(m.list('g1').global, [], '高版本当空记忆，绝不猜读');
+  assert.equal(m.add('g1', '新写的'), false, '高版本隔离后禁止写盘（保护未来版本数据）');
+  const raw = JSON.parse(readFileSync(join(dir, 'memory.json'), 'utf8'));
+  assert.deepEqual(raw.global, ['未来的记忆'], '盘上的高版本文件一字未动');
+  const dirs = readdirSync(dir).filter((n) => n.startsWith('memory.json.corrupted.'));
+  assert.equal(dirs.length, 1, '原件被隔离备份');
+  assert.equal(readFileSync(join(dir, dirs[0]), 'utf8'), future, '备份是原封不动的高版本数据');
+});
+
+test('A1-4 写前留 .prev 快照，回滚有退路', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-schema-snap-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const m = createMemory();
+  m.add('g1', '第一版');
+  m.add('g1', '第二版');
+  const prev = JSON.parse(readFileSync(join(dir, 'memory.json.prev'), 'utf8'));
+  assert.ok(prev.global.includes('第一版'), '快照是上一次写入前的内容');
+  assert.ok(!prev.global.includes('第二版'), '快照不该含本次新内容');
+  assert.ok(SUPPORTED_SCHEMA_VERSIONS.includes(1), 'v1 永远在支持列表里');
+});
+
+/* ---------------- A2：双时态 + 种类（对齐 Hindsight world/experience/observation） ---------------- */
+
+test('A2-1 kindOf/occurredOf：老库默认 world、事发时间回退到 at', () => {
+  assert.equal(kindOf({}), 'world', '老库没 kind 一律当 world');
+  assert.equal(kindOf({ kind: '乱写' }), 'world', '非法值也当 world');
+  assert.equal(kindOf({ kind: 'observation' }), 'observation');
+  assert.deepEqual([...FACT_KINDS], ['world', 'experience', 'observation']);
+  assert.equal(occurredOf({}), 0, '都没有就是 0');
+  assert.equal(occurredOf({ at: 123 }), 123, '没 occurredAt 回退到 at');
+  assert.equal(occurredOf({ at: 123, occurredAt: 456 }), 456, '有事发时间用它');
+});
+
+test('A2-2 add 带 kind/occurredAt 才落盘；老调用方字节不变', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-kind-'));
+  const m = createMemory();
+  m.add('g1', '普通事实');
+  m.add('g1', '我上周搬到杭州', 'global', { kind: 'experience', occurredAt: 1000 });
+  const raw = readRaw();
+  assert.equal(raw.meta.global['普通事实'].kind, undefined, '老调用方不写 kind');
+  assert.equal(raw.meta.global['普通事实'].occurredAt, undefined, '老调用方不写 occurredAt');
+  assert.equal(raw.meta.global['我上周搬到杭州'].kind, 'experience', '传了就落盘');
+  assert.equal(raw.meta.global['我上周搬到杭州'].occurredAt, 1000);
+  assert.equal(raw.meta.global['我上周搬到杭州'].at > 0, true, '陈述时间照常记录');
+});
+
+test('A2-3 listFull annotate 输出双时态；retention 还原不丢', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-kind-restore-'));
+  const m = createMemory();
+  m.add('g1', '他好像喜欢杭州', 'global', { kind: 'observation', occurredAt: 222 });
+  const full = m.listFull('g1');
+  const row = full.global.find((x) => x.text === '他好像喜欢杭州');
+  assert.equal(row.kind, 'observation');
+  assert.equal(row.occurredAt, 222);
+  assert.ok(row.at > 0, '陈述时间仍在');
+
+  /** 清理 → 还原：双时态必须跟着回来（同 status 的教训） */
+  const entry = m.retention.entries().find((x) => x.text === '他好像喜欢杭州');
+  assert.equal(entry.kind, 'observation', 'entries 要导出 kind');
+  assert.equal(entry.occurredAt, 222, 'entries 要导出 occurredAt');
+  /** 干净的新库还原（等价于清理后从备份插回） */
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-kind-restore2-'));
+  const m2 = createMemory();
+  assert.equal(m2.insertRaw(entry), true);
+  const back = m2.listFull('g1').global.find((x) => x.text === '他好像喜欢杭州');
+  assert.equal(back.kind, 'observation', '还原后种类不丢');
+  assert.equal(back.occurredAt, 222, '还原后事发时间不丢');
+});
+
+test('A2-4 重提不改种类与事发时间（事实属性，不随陈述变）', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-kind-reinforce-'));
+  const m = createMemory();
+  m.add('g1', '我上周搬家', 'global', { kind: 'experience', occurredAt: 999 });
+  m.add('g1', '我上周搬家', 'global', { kind: 'world', occurredAt: 111 });
+  const meta = readRaw().meta.global['我上周搬家'];
+  assert.equal(meta.kind, 'experience', '重提不能把亲历改成客观事实');
+  assert.equal(meta.occurredAt, 999, '事发时间不随重提变');
+});
+
+/* ---------------- B1：按证据自动升档（对齐 aurabot growTier，信号换成 evidence） ---------------- */
+
+test('B1-1 growTier：2 条证据 short→long，4 条 long→core，core 永不降', () => {
+  assert.equal(growTier({ tier: 'short', evidence: [{}, {}] }), 'long');
+  assert.equal(growTier({ tier: 'short', w: 2 }), 'long', '权重够也升');
+  assert.equal(growTier({ tier: 'long', evidence: [{}, {}, {}, {}] }), 'core');
+  assert.equal(growTier({ tier: 'long', w: 4 }), 'core');
+  assert.equal(growTier({ tier: 'core', evidence: [] }), 'core', '永久层不降级');
+  assert.equal(growTier({ tier: 'short', evidence: [{}] }), 'short', '证据不够不动');
+});
+
+test('B1-2 重提带证据会升档；老调用点（不传 evidence）不动', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-grow-'));
+  const m = createMemory();
+  m.add('g1', '常提起的事', 'global', { tier: 'short' });
+  assert.equal(readRaw().meta.global['常提起的事'].tier, 'short');
+  /** 老调用点：重提不传 evidence —— 保持 short */
+  m.add('g1', '常提起的事');
+  assert.equal(readRaw().meta.global['常提起的事'].tier, 'short', '不传证据不该升档');
+  /** 两次带证据的重提 → 2 条证据 → 升到 long */
+  m.add('g1', '常提起的事', 'global', { evidence: { kind: 'chat', detail: '第一次确认' } });
+  m.add('g1', '常提起的事', 'global', { evidence: { kind: 'chat', detail: '第二次确认' } });
+  const meta = readRaw().meta.global['常提起的事'];
+  assert.equal(meta.tier, 'long', '证据够了自动升档');
+});
+
+test('E1 显式指令：单独标记、重提不降级、还原不丢', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-directive-'));
+  const m = createMemory();
+  m.add('g1', '别叫我小名', 'global', { directive: true });
+  m.add('g1', '普通事实');
+  assert.equal(readRaw().meta.global['别叫我小名'].directive, true);
+  assert.equal(readRaw().meta.global['普通事实'].directive, undefined, '普通事实不标');
+  /** 重提仍是指令 */
+  m.add('g1', '别叫我小名', 'global', {});
+  assert.equal(readRaw().meta.global['别叫我小名'].directive, true);
+  const row = m.listFull('g1').global.find((x) => x.text === '别叫我小名');
+  assert.equal(row.directive, true, 'listFull 要输出');
+  const entry = m.retention.entries().find((x) => x.text === '别叫我小名');
+  assert.equal(entry.directive, true, 'entries 要导出');
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-directive-restore-'));
+  const m2 = createMemory();
+  assert.equal(m2.insertRaw(entry), true);
+  assert.equal(m2.listFull('g1').global[0].directive, true, '还原不丢');
+});
+
+test('E3 条目级时效：没有效期永远有效；区间外不算有效；过期分数打折但不删', () => {
+  const NOW = 1_700_000_000_000;
+  assert.equal(isValidAt({}, NOW), true, '老库没有时效字段，永远有效');
+  assert.equal(isValidAt({ validFrom: 100, validUntil: 200 }, NOW), false, '过了有效期');
+  assert.equal(isValidAt({ validFrom: NOW + 1000 }, NOW), false, '还没到生效时间');
+  assert.equal(isValidAt({ validFrom: NOW - 1000, validUntil: NOW + 1000 }, NOW), true);
+
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-valid-'));
+  const m = createMemory({ now: () => NOW });
+  m.add('g1', '限时的事', 'global', { validFrom: NOW - 1000, validUntil: NOW + 1000 });
+  const live = m.listRanked('g1');
+  assert.ok(live.global.includes('限时的事'));
+  const meta = readRaw().meta.global['限时的事'];
+  assert.equal(meta.validFrom, NOW - 1000);
+  assert.equal(meta.validUntil, NOW + 1000, '时效要落盘');
+  assert.equal(m.listFull('g1').global[0].validUntil, NOW + 1000, 'listFull 要输出');
+  /** 过期后分数打折（不删） */
+  const future = scoreOfFact(meta, NOW + 5000);
+  const fresh = scoreOfFact(meta, NOW);
+  assert.ok(future < fresh, '过期后分数下降但不消失');
+});
+
+/* ---------------- 自检修复：3 个 P1 的回归测试 ---------------- */
+
+test('自检-A1：高版本隔离后 add/save 都不写盘（保护未来版本数据）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-schema-future2-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const future = JSON.stringify({ schemaVersion: 999, global: ['未来的记忆'] });
+  writeFileSync(join(dir, 'memory.json'), future, 'utf8');
+  const m = createMemory();
+  assert.equal(m.add('g1', '新写的'), false);
+  assert.equal(readFileSync(join(dir, 'memory.json'), 'utf8'), future, '盘上文件一字未动');
+});
+
+test('自检-B1：被反驳到低信念不会升档（反驳不是加强）', () => {
+  assert.equal(growTier({ tier: 'long', evidence: [{}, {}, {}, {}], confidence: 0.2 }), 'long',
+    '反驳 4 次、信念很低，不能升到 core');
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-weaken-tier-'));
+  const m = createMemory();
+  m.add('g1', '被证伪的事', 'global', { tier: 'long' });
+  for (let i = 0; i < 4; i += 1) {
+    m.recordEvidence('g1', '被证伪的事', 'weaken', { kind: 'chat', detail: `反证${i}` });
+  }
+  assert.equal(readRaw().meta.global['被证伪的事'].tier, 'long', '反驳不升档');
+});
+
+test('自检-E3：未来才生效的事实不进 list/listRanked，过期不进', () => {
+  const NOW = 1_700_000_000_000;
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-valid-filter-'));
+  const m = createMemory({ now: () => NOW });
+  m.add('g1', '未来的事', 'global', { validFrom: NOW + 10_000 });
+  m.add('g1', '过期的事', 'global', { validUntil: NOW - 10_000 });
+  m.add('g1', '现在的事', 'global', { validFrom: NOW - 10_000, validUntil: NOW + 10_000 });
+  assert.deepEqual(m.list('g1').global, ['现在的事'], '时效外两条都不算活事实');
+  assert.deepEqual(m.listRanked('g1').global, ['现在的事'], '注入也只取有效期内的');
+});
+
+test('自检-A2：retention 还原老库不会凭空多 occurredAt', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-occ-restore-'));
+  const m = createMemory();
+  m.add('g1', '没写事发时间的事');
+  const entry = m.retention.entries().find((x) => x.text === '没写事发时间的事');
+  assert.equal(entry.occurredAt, 0, 'entries 导出原始 0，不用 at 回退');
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-occ-restore2-'));
+  const m2 = createMemory();
+  m2.insertRaw(entry);
+  assert.equal(readRaw().meta.global['没写事发时间的事'].occurredAt, undefined, '还原后仍没有 occurredAt');
 });

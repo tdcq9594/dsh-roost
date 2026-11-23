@@ -14,7 +14,7 @@ import { createJournal } from '../src/journal.js';
 import { createMemory } from '../src/memory.js';
 import {
   createConsolidate, buildPrompt, yesterdayOf,
-  normalizeAgreement, planAgreementOp, MAX_PROMPT_FACTS,
+  normalizeAgreement, planAgreementOp, MAX_PROMPT_FACTS, pickRows,
 } from '../src/consolidate.js';
 
 const noop = () => {};
@@ -194,4 +194,79 @@ test('D6：dry-run 列出每条处置明细，且一个字都不写盘', async (
   assert.match(r.agreementOps[2].reason, /不猜/);
   assert.equal(JSON.stringify(s.facts()), before, 'dry 不许碰 memory.json');
   assert.equal(r.outdated, 0, 'dry 不执行作废');
+});
+
+/* ---------------- D1 前置分流 ---------------- */
+
+test('D1：pickRows 默认不筛；skipChatter 只筛极短闲聊；原文不受影响', () => {
+  const rows = [
+    { id: 'a', at: 1, role: 'user', level: 'normal', text: '嗯嗯' },
+    { id: 'b', at: 2, role: 'user', level: 'normal', text: '我养了只猫' },
+    { id: 'c', at: 3, role: 'user', level: 'important', text: '好' },
+    { id: 'd', at: 4, role: 'user', level: 'normal', text: '哈哈' },
+  ];
+  const all = pickRows(rows);
+  assert.equal(all.length, 4, '默认不筛，行为不变');
+  const skipped = pickRows(rows, { skipChatter: true });
+  assert.deepEqual(skipped.map((x) => x.row.id), ['b', 'c'],
+    '纯语气词("嗯嗯"/"哈哈") 被筛掉；有信息的短句和 important 都留');
+});
+
+test('D1：整批都是极短闲聊时不调模型（省一次调用）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-chatter-'));
+  const data = join(dir, 'data');
+  mkdirSync(data, { recursive: true });
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = data;
+  const day = yesterdayOf(Date.now());
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(data, 'j.sqlite'), log: noop });
+  j.add({ id: 'a', at: base, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '嗯' });
+  j.add({ id: 'b', at: base + 1000, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '哦' });
+  let called = 0;
+  const c = createConsolidate({
+    journal: j, graph: null, memory: createMemory(),
+    generate: async () => { called += 1; return '{}'; },
+    aliasesOf: () => [], log: noop, now: () => Date.now(),
+  });
+  await c.run({ day });
+  assert.equal(called, 0, '全是极短闲聊，不该调模型');
+  try { j.close(); } catch {}
+  if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA; else process.env.DSH_ROOST_DATA = oldEnv;
+});
+
+/* ---------------- 向量补算（PR#41 漏掉的整步） ---------------- */
+
+test('巩固会补算日记向量并落库（之前 journal.vec 永远是 NULL）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-vecfill-'));
+  const data = join(dir, 'data');
+  mkdirSync(data, { recursive: true });
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = data;
+  const day = yesterdayOf(Date.now());
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(data, 'j.sqlite'), log: noop });
+  j.add({ id: 'a', at: base, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '今天聊了搬家的事' });
+
+  /** 假 embedder：固定 4 维向量 + 模型指纹 */
+  let manyCalls = 0;
+  const fakeEmbed = {
+    enabled: () => true,
+    modelId: () => 'local:test',
+    many: async (texts) => { manyCalls += 1; return texts.map(() => [1, 0, 0, 0]); },
+  };
+  const c = createConsolidate({
+    journal: j, graph: null, memory: createMemory(), generate: null,
+    aliasesOf: () => [], log: noop, now: () => Date.now(), embed: fakeEmbed,
+  });
+  const r = await c.run({ day });
+  assert.ok(manyCalls >= 1, '巩固要真的调 embed.many 补向量');
+  assert.ok(r.needVec >= 1, `至少补了原始日记那条（实际 ${r.needVec}）`);
+  const row = j.withVec({ chatId: 'g1', model: 'local:test' })[0];
+  assert.ok(row, '补的向量要能被同模型的 withVec 读到');
+  /** 换个模型指纹就读不到了（同维度也不混用） */
+  assert.equal(j.withVec({ chatId: 'g1', model: 'http:other' }).length, 0, '换模型后旧向量不参与');
+
+  try { j.close(); } catch {}
+  if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA; else process.env.DSH_ROOST_DATA = oldEnv;
 });

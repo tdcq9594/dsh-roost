@@ -97,9 +97,22 @@ export function mechanicalDigest(text, max = 40) {
 /**
  * 按"等级高 + 时间新"挑要喂给模型的条目，并压到字数上限。
  */
-export function pickRows(rows, { maxRows = MAX_ROWS, maxChars = MAX_INPUT_CHARS } = {}) {
+export function pickRows(rows, { maxRows = MAX_ROWS, maxChars = MAX_INPUT_CHARS, skipChatter = false } = {}) {
   const W = { critical: 3, important: 2, normal: 1 };
-  const sorted = [...rows].sort(
+  /**
+   * D1 前置分流（对齐 Hindsight triage 的 chatter 短路）：
+   * 只筛**纯语气词**（嗯/哦/好/哈哈…），不按长度猜——
+   * "我养了只猫"只有 5 个字却是真信息，按长度筛会误伤（实测踩到过）。
+   * 只筛喂给模型的那份，原文仍留在库里、仍参与检索。
+   * 默认关：老调用方的输入不变。
+   */
+  /**
+   * 只收**纯语气词/寒暄**。"可以/收到/行/对/好的"是应答，可能承载决定
+   * （"周六爬山？"—"可以"就是答应），筛掉会漏记约定——这类一律不筛。
+   */
+  const CHATTER_RE = /^(?:嗯+|哦+|噢+|啊+|呃+|额+|唉+|哈+|呵+|嘿+|哇+|呀+|嘛+|呗+|谢谢|多谢|辛苦了|没事|没关系|晚安|早安|早上好|晚上好|在吗|在不在)[。！!~～,，.…\s?？]*$/;
+  const chatter = (r) => skipChatter && r?.level === 'normal' && CHATTER_RE.test(String(r?.text ?? '').trim());
+  const sorted = [...rows].filter((r) => !chatter(r)).sort(
     (a, b) => (W[b.level] ?? 1) - (W[a.level] ?? 1) || b.at - a.at,
   );
   const out = [];
@@ -234,7 +247,8 @@ export function buildPrompt({ day, chatName, items, revocation = null, facts = [
     ' "triples":[{"s":"...","rel":"...","o":"...","scope":"global"}],',
     ' "agreements":["...", {"text":"...","op":"update","old":"..."}],"closed":[]',
     revocation ? ',"revoked":[]' : '',
-    withProfiles ? ',"profiles":[{"who":"显示名","openid":"拿不到就留空","impression":"一小句","tips":"一小句"}]' : '',
+    /** dislikes 用方括号表示可选——写进模板当必填会诱导模型硬凑雷区 */
+    withProfiles ? ',"profiles":[{"who":"显示名","openid":"拿不到就留空","impression":"一小句","tips":"一小句","dislikes":"（可选，没有就不写这个键）"}]' : '',
     '}',
   ].join('');
   return [
@@ -284,7 +298,7 @@ export function buildPrompt({ day, chatName, items, revocation = null, facts = [
      */
     ...(withProfiles ? [
       '8. profiles：今天**明显看得出来**的、对某个人的印象和跟他相处要注意什么，给',
-      '   [{"who":"显示名","openid":"他的 openid（拿不到就留空）","impression":"一小句印象","tips":"一小句相处建议"}]；',
+      '   [{"who":"显示名","openid":"他的 openid（拿不到就留空）","impression":"一小句印象","tips":"一小句相处建议","dislikes":"他明确讨厌/忌讳的（没有就留空）"}]；',
       '   · 只写当天真有依据的，别猜、别把群里的玩笑当结论，也别写身份事实（那是 triples 的活）',
       '   · 已有的档案列在下面，改口就照实写新的一条，别重复',
       '   · 没有就给空数组——宁可漏，也别编一个出来',
@@ -359,7 +373,13 @@ export function buildSelfPrompt({ day, said = [], corrected = [] } = {}) {
  * @param {object} [o.self]   createSelf() 的返回（第五层：自我叙述）
  * @param {(p:string)=>Promise<string>} [o.generate] 没给就只做机械压缩
  */
-export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false } = {}) {
+export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false,
+  /**
+   * 补算日记向量用（可选）。不传 = 不补（纯关键词）。
+   * 之前这里只报 `stats.needVec` 数、注释说"由宿主填充"，但宿主从没调过——
+   * 结果 journal.vec 永远是 NULL，语义检索的向量路实际是死的。
+   */
+  embed = null } = {}) {
   /**
    * D7：开关判据留在 host（config 是唯一真相），这里只认「有没有实例 + 开没开」。
    * 传函数是为了运行时改配置能立刻生效，不用重启 DSH。
@@ -448,7 +468,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
 
       for (const [chatId, list] of todo) {
         stats.chats += 1;
-        const items = pickRows(list);
+        /** D1：极短闲聊不送模型复核（原文仍在库），剩下的才进 prompt */
+        const items = pickRows(list, { skipChatter: true });
         const chatName = list.find((r) => r.chatId === chatId)?.chatId?.slice(0, 8) || '';
         /**
          * L3 候选在这轮就算好：条件不成立时 `buildPrompt` 不带第 7 项，
@@ -457,7 +478,11 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         const revocation = l3Candidates(list);
         let plan = null;
 
-        if (generate) {
+        /**
+         * D1：全是闲聊（items 空）且没有 L3 候选时，不调模型——
+         * 没有可复核的东西，这一轮省一次调用，直接走机械压缩。
+         */
+        if (generate && (items.length || revocation)) {
           try {
             const prompt = buildPrompt({
               day: target, chatName, items, revocation,
@@ -533,8 +558,28 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         }
       }
 
-      /** 顺手补向量的位置：这里只报数，实际补算由宿主在填充向量后调 setVec */
-      stats.needVec = journal.noVec(20).length;
+      /**
+       * 补算日记向量（本地 embedding 免费；HTTP 模型由 embed.enabled() 把关）。
+       * 不补的话 journal.vec 永远是 NULL，journal.search 的向量路永远空——
+       * 语义检索形同虚设（PR#41 就是漏了这一步）。
+       * 用模型指纹一起落库，换模型后旧向量自动失效、被这里重新补算。
+       */
+      stats.needVec = 0;
+      try {
+        if (embed?.enabled?.()) {
+          const model = String(embed.modelId?.() || '');
+          const pending = journal.noVec(20, 0);
+          if (pending.length) {
+            const vecs = await embed.many(pending.map((r) => String(r.text || '')));
+            if (Array.isArray(vecs) && vecs.length === pending.length) {
+              pending.forEach((r, i) => { if (vecs[i]) journal.setVec(r.id, vecs[i], model); });
+              stats.needVec = pending.length;
+            }
+          }
+        }
+      } catch (e) {
+        log(`补算向量失败：${e?.message || e}`);
+      }
     } catch (e) {
       stats.ok = false;
       stats.reason = e?.message ?? String(e);
@@ -637,8 +682,9 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
   function profilesForPrompt() {
     if (!profOn() || !profiles?.recent) return null;
     try {
+      /** 把已有雷区也告诉模型——不告诉它就会重复写、且没法"改口"覆盖旧的 */
       const lines = profiles.recent(6).map((r) =>
-        `· ${r.name || r.key}（${r.key}）：${r.impression || ''}${r.tips ? `；相处：${r.tips}` : ''}`);
+        `· ${r.name || r.key}（${r.key}）：${r.impression || ''}${r.tips ? `；相处：${r.tips}` : ''}${r.dislikes ? `；雷区：${r.dislikes}` : ''}`);
       return { enabled: true, lines };
     } catch {
       return { enabled: true, lines: [] };
@@ -884,6 +930,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
             openid: String(p?.openid ?? '').slice(0, 64),
             impression: String(p?.impression ?? ''),
             tips: String(p?.tips ?? ''),
+            /** E4：只写他明确表达过的雷区，模型没给就空串（不覆盖已有） */
+            dislikes: String(p?.dislikes ?? ''),
             /** 换机器人后 openid 变了，归到同一条档案（报告 §15.1-D） */
             aliases: aliasesOf(chatId),
             /** 私聊里说话人 openid === chatId，靠它把新 openid 也归户 */

@@ -33,7 +33,7 @@
  *   实际无影响——文本相同就是同一条事实，而且我们从不改写已存的文本。
  */
 
-import { readFileSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, unlinkSync, copyFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
 
@@ -42,6 +42,28 @@ import { writeJsonAtomic } from './atomic.js';
 /** 一条最多 200 字，每层最多 40 条（比原来的 20 条放宽，跨群后量会涨） */
 const FACT_MAX = 200;
 const FACTS_MAX = 40;
+
+/**
+ * 记忆文件的 schema 版本（A1，对齐 aurabot 的版本化迁移）。
+ *
+ * 为什么需要：记忆是全系统唯一的"她记得什么"真相源，以前只有原子改名
+ * （写不坏），但没有版本——升级加了字段后，老库/新库混在一起没法校验，
+ * 也没法在迁移前留一份可回滚的快照。
+ *
+ * 约定：
+ *   · 老文件没有 `schemaVersion` → 当 v1 读（老库逐字节兼容，不强制升级）
+ *   · 下次 save() 时打上当前版本（懒升级，不惊动只读启动）
+ *   · 文件版本 > 当前支持 → 隔离（quarantine）+ 空视图，绝不写回
+ *   · 迁移函数从 v1 逐级跑上来，每级只做一件事
+ */
+export const MEMORY_SCHEMA_VERSION = 1;
+/** v(n) → v(n+1)：入参是整份对象，返回迁移后的对象；保持纯函数便于单测 */
+const SCHEMA_MIGRATIONS = Object.freeze({
+  // 1: (raw) => ({ ...raw, newField: default }),  // 将来加字段时在这里追加
+});
+export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze(
+  [1, ...Object.keys(SCHEMA_MIGRATIONS).map(Number)],
+);
 
 /** 权重的天花板：同一件事被反复提到会加分，但别让它无限涨 */
 const W_MAX = 5;
@@ -75,7 +97,18 @@ export function scoreOfFact(meta, now = Date.now()) {
   const base = tier === 'core' ? w : w * 0.5 ** (days / (HALF_LIFE_DAYS * (TIER_DECAY[tier] || 1)));
   let score = meta?.until ? base * HISTORY_WEIGHT : base;
   if (meta?.archivedAt) score *= ARCHIVE_WEIGHT;
+  /** E3 条目级时效：过了 validUntil 不删、保留历史，但不再当硬事实注入 */
+  if (Number(meta?.validUntil) > 0 && Number(meta.validUntil) <= now) score *= HISTORY_WEIGHT;
   return score;
+}
+
+/** E3：一条事实在 now 是否处于有效期内（没有有效期 = 永远有效） */
+export function isValidAt(meta, now = Date.now()) {
+  const from = Number(meta?.validFrom);
+  const until = Number(meta?.validUntil);
+  if (Number.isFinite(from) && from > 0 && now < from) return false;
+  if (Number.isFinite(until) && until > 0 && now >= until) return false;
+  return true;
 }
 
 /**
@@ -112,6 +145,33 @@ export const FACT_TIERS = Object.freeze(['short', 'long', 'core']);
 export const TIER_DECAY = Object.freeze({ short: 0.5, long: 1, core: 0 });
 /** 归档的条目不注入，但留在库里可恢复；和 until 一样占名额时打折 */
 export const ARCHIVE_WEIGHT = 0.25;
+
+/**
+ * B1 自动升档（对齐 aurabot growTier，但信号不同）：
+ *   aurabot 用 hitDays（被检索命中的天数）；我们**故意不记 accessed**
+ *   （"注入即加冕"——见上面 listRanked 的注释），所以改用 evidence 条数：
+ *   每一条独立证据就是一次真实确认，不是"被自己读到"的假信号。
+ *
+ * 规则：short→long 需 2 条证据或 w≥2；long→core 需 4 条证据或 w≥4。
+ * core 永不降级（aurabot 的 strongerTier 语义——永久层只升不降）。
+ * 纯函数：不写盘，调用方在写入路径决定何时落。
+ */
+export function growTier(meta) {
+  const cur = FACT_TIERS.includes(meta?.tier) ? meta.tier : 'long';
+  if (cur === 'core') return 'core';
+  /**
+   * 信念强度护栏：被反驳到快不信了（confidence<0.5）不许升档。
+   * 否则"反驳 4 次"会因为证据条数够了反而升到 core（永久不衰减）——
+   * 那等于把"越被证伪越当真"，和证据账本的语义正好相反。
+   */
+  const confidence = Number(meta?.confidence);
+  if (Number.isFinite(confidence) && confidence < 0.5) return cur;
+  const ev = Array.isArray(meta?.evidence) ? meta.evidence.length : 0;
+  const w = Number(meta?.w) > 0 ? Number(meta.w) : 1;
+  if (cur === 'short' && (ev >= 2 || w >= 2)) return 'long';
+  if (cur === 'long' && (ev >= 4 || w >= 4)) return 'core';
+  return cur;
+}
 
 /* ---------------- 可信度分级（2026-11-18） ----------------
  * 修的问题：群聊里"张三说他下周三出差"这种**转述**，和主人亲口说的
@@ -194,6 +254,42 @@ const TREND_RECENT_DAYS = 30;
 const TREND_OLD_DAYS = 90;
 
 /** 归一化：老数据没有这些字段时给默认，不写回盘 */
+/* ---------------- 双时态 + 记忆种类（A2，对齐 Hindsight 的 world/experience/observation） ---------------- */
+
+/**
+ * 一条事实"是什么种类"。照 Hindsight `retain/types.py` 的三分：
+ *   world       客观事实（"他住在杭州"）——默认，老库一律当这个
+ *   experience  亲历（"我上周搬到杭州"）——是第一人称经历
+ *   observation 观察/判断（"他好像喜欢杭州"）——带主观色彩，容易被推翻
+ *
+ * 为什么分开：三种的可信度演化规则不同（observation 最脆，world 最稳），
+ * 而且检索时可以按种类过滤。默认 world 保证老库逐字节不变。
+ */
+export const FACT_KINDS = Object.freeze(['world', 'experience', 'observation']);
+
+/** 归一化种类；非法/缺省一律 world（老库兼容） */
+export function kindOf(meta) {
+  const k = String(meta?.kind ?? '');
+  return FACT_KINDS.includes(k) ? k : 'world';
+}
+
+/**
+ * 双时态：
+ *   at          = 陈述/记录时间（这条记忆**什么时候进的库**）——所有旧逻辑都用它
+ *   occurredAt  = 事发时间（这件事**实际什么时候发生的**）——可选，老库没有
+ *
+ * Hindsight 把这两个分开（occurred_start/end vs mentioned_at），因为
+ * "上周说的那场三年前的搬家"里，两个时间差了三年。我们让 occurredAt
+ * 可选、缺省回退到 at——这样老逻辑不用改，新能力只在有值时生效。
+ */
+export function occurredOf(meta, fallback) {
+  const t = Number(meta?.occurredAt);
+  if (Number.isFinite(t) && t > 0) return t;
+  /** 没给 fallback 时自动回退到 meta.at——"没写事发时间"就是"事发即记录" */
+  const f = fallback === undefined ? Number(meta?.at) : Number(fallback);
+  return Number.isFinite(f) && f > 0 ? f : 0;
+}
+
 export function evidenceOf(meta) {
   const raw = Array.isArray(meta?.evidence) ? meta.evidence : [];
   return {
@@ -525,6 +621,25 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
    * 授权，而下一次 `save()` 还会把盘上那段**抹掉**，表现是「重启一次群主动
    * 就永久失效」。展开 raw 之后，别处写进来的字段都不会被白名单吃掉。
    */
+  /**
+   * 版本校验 + 逐级迁移。返回迁移后的对象，或 null（版本过高/非法，调用方隔离）。
+   * 无 schemaVersion 的老库当 v1——这是"只增不减"的底线。
+   */
+  function migrateSchema(raw) {
+    const v = raw.schemaVersion === undefined ? 1 : Number(raw.schemaVersion);
+    if (!Number.isInteger(v) || v < 1) return null;
+    /** 高版本文件绝不能读：用旧代码写回去会静默丢掉新版本字段 */
+    if (v > MEMORY_SCHEMA_VERSION) return null;
+    let out = { ...raw };
+    for (let from = v; from < MEMORY_SCHEMA_VERSION; from += 1) {
+      const step = SCHEMA_MIGRATIONS[from];
+      if (typeof step !== 'function') return null;
+      out = step(out) || out;
+    }
+    out.schemaVersion = MEMORY_SCHEMA_VERSION;
+    return out;
+  }
+
   function normalizeMemory(raw) {
     const meta = raw.meta && typeof raw.meta === 'object' ? raw.meta : {};
     return {
@@ -599,9 +714,24 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       cache = normalizeMemory({});
       return cache;
     }
+    /** schema 版本校验：高版本/非法版本隔离，老库无版本按 v1 迁移上来 */
+    const migrated = migrateSchema(raw);
+    if (!migrated) {
+      quarantine(text, `schema 版本不认识（${String(raw.schemaVersion)}，支持 1..${MEMORY_SCHEMA_VERSION}）`);
+      /**
+       * 高版本文件：给空视图**但禁止写盘**。
+       * 若这里设 ioFailed=false，之后任意 add()/save() 会用 v1 空库覆盖
+       * 盘上的高版本文件——原件虽在 .corrupted 备份里，但新版本升级回来
+       * 读到的是被降级的空库。"绝不写回"就靠这个标志守住。
+       */
+      ioFailed = true;
+      lastRetryAt = now();
+      cache = normalizeMemory({});
+      return cache;
+    }
     /** 读成功了：解除禁令（可能是从上次的故障里恢复） */
     ioFailed = false;
-    cache = normalizeMemory(raw);
+    cache = normalizeMemory(migrated);
     return cache;
   }
 
@@ -610,7 +740,16 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
     /** 读盘失败过：这一轮绝不写，避免用空表覆盖盘上还能救的内容 */
     if (ioFailed) return false;
     try {
-      writeJsonAtomic(file(), m);
+      /**
+       * 写前留一份快照（只留一份 .prev），回滚/迁移出错时能拿回上一版。
+       * 首次运行（文件还不存在）没有可快照的内容，跳过。
+       * 快照失败不拦住正常写——它是保险，不是命门。
+       */
+      try {
+        if (existsSync(file())) copyFileSync(file(), `${file()}.prev`);
+      } catch { /* 快照写不下去也要继续写正本 */ }
+      /** 老库/首次运行没有版本字段，写盘时补上（懒升级，只读启动不惊动） */
+      writeJsonAtomic(file(), { ...m, schemaVersion: MEMORY_SCHEMA_VERSION });
       return true;
     } catch {
       /* 写不进去就算了，不能因为存记忆把这一轮弄挂 */
@@ -700,11 +839,28 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       };
       if (next.until) next.until = null;
       /**
+       * 双时态：重提不改"这是什么种类 / 事发何时"——它们是事实的属性，
+       * 不是每次陈述的属性。只在原来缺失时补一次（老库升级）。
+       */
+      if (!FACT_KINDS.includes(next.kind) && FACT_KINDS.includes(opts.kind)) next.kind = opts.kind;
+      if (!Number.isFinite(Number(next.occurredAt)) && Number(opts.occurredAt) > 0) next.occurredAt = Number(opts.occurredAt);
+      /** 显式指令重提仍是指令（不会因为再提一次就降级成普通事实） */
+      if (opts.directive === true) next.directive = true;
+      /**
        * 重提＝一次 reinforce 证据。调用方给了 `opts.evidence`（出处摘要）才累计；
        * 老调用点不传，行为与字节都不变。跨级顶替护栏不受影响——证据只动
        * confidence，不动 status（`canSupersede` 仍在 supersede() 里守）。
        */
-      if (opts.evidence) writeEvidence(next, applyEvidence(old, 'reinforce', opts.evidence));
+      if (opts.evidence) {
+        writeEvidence(next, applyEvidence(old, 'reinforce', opts.evidence));
+        /**
+         * B1 自动升档：证据够了就往深一级走（short→long→core）。
+         * 只在真有证据写进来时判——老调用点不传 evidence，这一行不执行，
+         * 行为与字节都不变；也不会出现"被注入就升档"的加冕。
+         */
+        const grown = growTier(next);
+        if (grown !== (FACT_TIERS.includes(next.tier) ? next.tier : 'long')) next.tier = grown;
+      }
       /** fact 是默认值，不落盘——老库、普通事实的字节与升级前完全一致 */
       if (next.status === 'fact') delete next.status;
       metaMap[f] = next;
@@ -719,6 +875,14 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       ...(opts.pin !== undefined ? { pin: clamp01(opts.pin) } : {}),
       ...(FACT_TIERS.includes(opts.tier) ? { tier: opts.tier } : {}),
       ...(nextStatus && nextStatus !== 'fact' ? { status: nextStatus } : {}),
+      /** 双时态：只在调用方明确给时才落盘，老调用方字节不变 */
+      ...(FACT_KINDS.includes(opts.kind) && opts.kind !== 'world' ? { kind: opts.kind } : {}),
+      ...(Number(opts.occurredAt) > 0 ? { occurredAt: Number(opts.occurredAt) } : {}),
+      /** E1 显式指令："记住不要做X"当硬规则注入，不混在普通事实里被淘汰 */
+      ...(opts.directive === true ? { directive: true } : {}),
+      /** E3 条目级时效：只在显式给时落盘，老调用方字节不变 */
+      ...(Number(opts.validFrom) > 0 ? { validFrom: Number(opts.validFrom) } : {}),
+      ...(Number(opts.validUntil) > 0 ? { validUntil: Number(opts.validUntil) } : {}),
     };
     /** 新建就带出处＝第一条证据；老调用点不传 evidence，这一行是空操作 */
     if (opts.evidence) writeEvidence(fresh, applyEvidence({}, 'reinforce', opts.evidence));
@@ -821,7 +985,11 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       const m = load();
       const c = collectChat(m, chatId, aliases);
       const alive = (arr, mm) =>
-        (Array.isArray(arr) ? arr : []).filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt);
+        (Array.isArray(arr) ? arr : [])
+          .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt)
+          /** E3 时效：还没生效 / 已过期的条目不当"活事实"给调用方 */
+          /** 用注入的 now，不直接用 Date.now()——测试/补跑历史时口径才一致 */
+          .filter((text) => isValidAt(mm?.[text], now()));
       return {
         global: alive(m.global, m.meta.global),
         chat: alive(c.list, c.meta),
@@ -852,6 +1020,13 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
      */
     listRanked(chatId, aliases = [], opts = {}) {
       const annotate = opts?.annotate === true;
+      /**
+       * E1：deep 段会单独置顶注入 directive，这里就要跳过，免得同一条说两遍。
+       * 默认 false——非 deep 时 directive 仍当普通事实，不会凭空消失。
+       */
+      const skipDirective = opts?.skipDirective === true;
+      /** B3：deep 段单独提示"可能过时"，普通 facts 段就别再说一遍 */
+      const skipStale = opts?.skipStale === true;
       const m = load();
       const t = now();
       /**
@@ -875,7 +1050,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
            * 老库一条 status 都没有，白名单会把它们一次性全滤掉——升级即失忆。
            */
           .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt
-            && statusOf(mm?.[text]) !== 'guess')
+            && isValidAt(mm?.[text], t)
+            && statusOf(mm?.[text]) !== 'guess'
+            && !(skipDirective && mm?.[text]?.directive === true)
+            && !(skipStale && ['stale', 'weakening'].includes(trendOf(evidenceOf(mm?.[text]).evidence, t))))
           .map((text, i) => {
             const meta = mm?.[text];
             const alias = Boolean(noDecay?.has(text));
@@ -925,6 +1103,14 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
             speaker: String(x.src?.speaker ?? ''),
             /** 以下都是可选扩展字段，老库没有时给默认，不写回磁盘 */
             tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
+            /** A2 双时态：种类 + 事发时间（缺省回退到 at，老库表现不变） */
+            kind: kindOf(x),
+            occurredAt: occurredOf(x, Number(x.at) || 0),
+            /** E1 显式指令：面板/注入都要认得出 */
+            directive: x.directive === true,
+            /** E3 时效区间 */
+            validFrom: Number(x.validFrom) > 0 ? Number(x.validFrom) : null,
+            validUntil: Number(x.validUntil) > 0 ? Number(x.validUntil) : null,
             pin: clamp01(x.pin),
             archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : null,
             reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : null,
@@ -961,6 +1147,15 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (!EVIDENCE_RELATIONS.includes(relation)) return { ok: false, why: 'bad_relation' };
       const next = applyEvidence(hit.mm[hit.text], relation, evidence);
       writeEvidence(hit.mm[hit.text], next);
+      /**
+       * B1：只有 reinforce 才升档。weaken/contradict 虽然也记一条证据，
+       * 但那是"反证变多"，不该让这条事实更深——否则越被反驳越永久。
+       */
+      if (relation === 'reinforce') {
+        const target = hit.mm[hit.text];
+        const grown = growTier(target);
+        if (grown !== (FACT_TIERS.includes(target.tier) ? target.tier : 'long')) target.tier = grown;
+      }
       save();
       return { ok: true, confidence: next.confidence, proofs: next.proofs };
     },
@@ -1373,6 +1568,14 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
                */
               status: statusOf(x),
               tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
+              /** A2 双时态：同 status 的教训——不导出，清理→还原就把它们抹掉 */
+              kind: kindOf(x),
+              /** 导出原始值，不用 occurredOf 的 at 回退——否则老库还原会凭空多一个字段 */
+              occurredAt: Number(x.occurredAt) > 0 ? Number(x.occurredAt) : 0,
+              directive: x.directive === true,
+              /** E3 时效区间 */
+              validFrom: Number(x.validFrom) > 0 ? Number(x.validFrom) : null,
+              validUntil: Number(x.validUntil) > 0 ? Number(x.validUntil) : null,
               pin: clamp01(x.pin),
               reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : 0,
               archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : 0,
@@ -1485,6 +1688,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
        */
       if (FACT_STATUSES.includes(row.status) && row.status !== 'fact') meta.status = row.status;
       if (FACT_TIERS.includes(row.tier) && row.tier !== 'long') meta.tier = row.tier;
+      /** A2 双时态：默认 world / 无 occurredAt 不落盘，老库还原逐字节一致 */
+      if (FACT_KINDS.includes(row.kind) && row.kind !== 'world') meta.kind = row.kind;
+      if (Number(row.occurredAt) > 0) meta.occurredAt = Number(row.occurredAt);
+      if (row.directive === true) meta.directive = true;
+      if (Number(row.validFrom) > 0) meta.validFrom = Number(row.validFrom);
+      if (Number(row.validUntil) > 0) meta.validUntil = Number(row.validUntil);
       if (Number(row.pin) > 0) meta.pin = clamp01(row.pin);
       if (Number(row.reviewedAt) > 0) meta.reviewedAt = Number(row.reviewedAt);
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);

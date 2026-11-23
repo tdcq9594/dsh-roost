@@ -168,3 +168,61 @@ test('P1 邻接：开关默认关，记忆关着时也关，面板能看见', ()
   const groups = visibleGroups();
   assert.ok(groups.some((g) => g.ids.includes('graphAdjacent')), '不可见就等于没做');
 });
+
+/* ---------------- C3 召回热度 ---------------- */
+
+test('C3 touchEntities：命中次数累加，entities 按热度优先', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const t = Date.now();
+  g.addEpisode({ at: t, chatId: G1, text: '张三李四', journalId: 'j1' });
+  g.addEdge({ src: '张三', rel: '认识', dst: '李四', chatId: G1, at: t });
+  g.addEpisode({ at: t + 1, chatId: G1, text: '王五', journalId: 'j2' });
+  g.addEdge({ src: '王五', rel: '在', dst: '杭州', chatId: G1, at: t + 1 });
+
+  /** 张三被联想命中 3 次 */
+  assert.equal(g.touchEntities(['张三'], { chatId: G1 }), 1);
+  g.touchEntities(['张三'], { chatId: G1 });
+  g.touchEntities(['张三'], { chatId: G1 });
+  const list = g.entities({ chatId: G1, limit: 10 });
+  const zhang = list.find((e) => e.name === '张三');
+  assert.equal(zhang.hits, 3, '命中次数累加');
+  /** 热度不跨时间压过更新的实体（见下一条测试）——只保证同 last_seen 时排前面 */
+  assert.ok(list.some((e) => e.name === '王五'), '更新的实体不能被热度挤掉');
+
+  /** 不存在的实体不炸 */
+  assert.equal(g.touchEntities(['不存在的人'], { chatId: G1 }), 0);
+  /** 空输入不炸 */
+  assert.equal(g.touchEntities([], { chatId: G1 }), 0);
+});
+
+test('C3 热度不能把新实体挤出候选窗口（hits 只是加分，不是唯一排序键）', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const t = Date.now();
+  /** 造 3 个老实体，有热度但**召回时间也停在过去**（at 指定为过去） */
+  for (let i = 0; i < 3; i += 1) {
+    g.addEpisode({ at: t - 10_000, chatId: G1, text: `老${i}`, journalId: `jo${i}` });
+    g.addEdge({ src: `老${i}`, rel: '在', dst: '杭州', chatId: G1, at: t - 10_000 });
+    for (let k = 0; k < 5; k += 1) g.touchEntities([`老${i}`], { chatId: G1, at: t - 10_000 });
+  }
+  /** 一个全新的实体（hits=0，但 last_seen 最新） */
+  g.addEpisode({ at: t, chatId: G1, text: '新人', journalId: 'jn' });
+  g.addEdge({ src: '新人', rel: '在', dst: '上海', chatId: G1, at: t });
+  const list = g.entities({ chatId: G1, limit: 3 });
+  assert.ok(list.some((e) => e.name === '新人'), '新实体要在候选窗口里，不能被高热度老实体全挤掉');
+});
+
+test('C3 last_hit：老实体被反复召回后能靠召回时间排到前面', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const t = Date.now();
+  g.addEpisode({ at: t - 100_000, chatId: G1, text: '老实体', journalId: 'j1' });
+  g.addEdge({ src: '老实体', rel: '在', dst: '杭州', chatId: G1, at: t - 100_000 });
+  g.addEpisode({ at: t, chatId: G1, text: '新实体', journalId: 'j2' });
+  g.addEdge({ src: '新实体', rel: '在', dst: '上海', chatId: G1, at: t });
+  /** 刚创建时新实体在前 */
+  assert.equal(g.entities({ chatId: G1, limit: 5 })[0].name, '新实体');
+  /** 老实体此刻被召回一次（last_hit=现在），就该排到前面 */
+  g.touchEntities(['老实体'], { chatId: G1, at: t + 1000 });
+  const top = g.entities({ chatId: G1, limit: 5 })[0];
+  assert.equal(top.name, '老实体', '召回时间刷新后老实体靠前');
+  assert.ok(top.lastHit > 0, 'lastHit 要能读出来');
+});

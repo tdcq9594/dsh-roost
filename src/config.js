@@ -356,6 +356,8 @@ export const DEFAULTS = {
      * "关了还照说"，两种在面板上都看不出来。
      */
     offChats: [],
+    /** E6 按人关记忆：这里的 openid（QQ 号也行，由调用方归一）说的话一律不记 */
+    noUsers: [],
     /** 到期天数：普通几天后压成半句，重要两三周后压成一句。critical 永不到期 */
     keepDays: { normal: 3, important: 21 },
     /**

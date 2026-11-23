@@ -26,6 +26,8 @@ import { join } from 'node:path';
 export const QUERY_PREFIX = 'query: ';
 export const PASSAGE_PREFIX = 'passage: ';
 const MAX_TOKENS = 512;
+/** 模型指纹：写进 journal.vec_model，换模型时旧向量据此失效（同维度也不会混用） */
+export const LOCAL_EMBED_MODEL_ID = 'local:e5-small';
 
 /**
  * mean pooling + L2 normalize。纯函数，输入都是普通数组/类数组。
@@ -205,6 +207,8 @@ export function createLocalEmbedder({
     ready,
     enabled: () => ready(),
     minScore: () => 0.4,
+    /** 模型指纹（写向量时一起落库，换模型据此判旧向量失效） */
+    modelId: () => LOCAL_EMBED_MODEL_ID,
 
     /**
      * 本地算向量；不可用返回 null（让调用方回落关键词，同 embed.js 的契约）。

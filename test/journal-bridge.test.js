@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -122,4 +122,26 @@ test('journal 抛错不炸这一轮，但要留一条 warn', () => {
   assert.doesNotThrow(() => bridge.add({ id: 'm' }, { chatId: 'g1' }, 'hi', 'user'));
   assert.equal(warns.length, 1);
   assert.match(warns[0], /日记没写进去/);
+});
+
+test('E6 按人关：memoryOff 收到 sender.id，被关的人说的话不记', () => {
+  const added = [];
+  const journal = { add: (row) => { added.push(row); return { added: true }; } };
+  const log = { debug() {}, info() {}, warn() {} };
+  /** 模拟 host 的 memoryOff：noUsers 里的人在列就关 */
+  const noUsers = ['openid-blocked'];
+  const bridge = createJournalBridge({
+    journal,
+    memoryOff: (chatId, senderId) => noUsers.includes(String(senderId || '')),
+    log,
+  });
+  bridge.add({ id: 'm1', sender: { id: 'openid-blocked' } }, { chatId: 'c1' }, '不想被记的话', 'user');
+  assert.equal(added.length, 0, '被按人关的发送者不写日记');
+  bridge.add({ id: 'm2', sender: { id: 'openid-normal' } }, { chatId: 'c1' }, '正常的话', 'user');
+  assert.equal(added.length, 1, '没被关的照记');
+});
+
+test('E6 主人豁免：主人被误配进 noUsers 也不停记（源码断言）', () => {
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.match(host, /sid !== String\(ownerId\(\)/, 'noUsers 判定要排除主人');
 });

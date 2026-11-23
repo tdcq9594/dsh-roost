@@ -89,6 +89,7 @@ export function createGraph({ file, log = () => {} } = {}) {
           aliases_json TEXT NOT NULL DEFAULT '[]',
           first_seen INTEGER NOT NULL DEFAULT 0,
           last_seen INTEGER NOT NULL DEFAULT 0,
+          last_hit INTEGER NOT NULL DEFAULT 0,
           kind TEXT NOT NULL DEFAULT 'thing',
           chat_id TEXT NOT NULL DEFAULT ''
         );
@@ -147,6 +148,17 @@ export function createGraph({ file, log = () => {} } = {}) {
       db.exec(
         'CREATE UNIQUE INDEX IF NOT EXISTS edge_alive ON edge(src_id, rel, dst_id) WHERE valid_to IS NULL',
       );
+      /**
+       * C3 召回热度：entity.hits 记"被联想命中几次"。
+       * 老库没有这列时补上（ALTER 是 O(1) 元数据操作）。
+       * 为什么不用 last_seen 当热度：那是写入时间，会把"刚创建"当成"常用"。
+       */
+      try {
+        const cols = new Set(db.prepare('PRAGMA table_info(entity)').all().map((c) => String(c.name)));
+        if (!cols.has('hits')) db.exec('ALTER TABLE entity ADD COLUMN hits INTEGER NOT NULL DEFAULT 0');
+        /** C3：上次被召回的时间（对齐 aurabot 的 lastHit），排序用 max(last_seen,last_hit) */
+        if (!cols.has('last_hit')) db.exec('ALTER TABLE entity ADD COLUMN last_hit INTEGER NOT NULL DEFAULT 0');
+      } catch { /* 迁移失败不拦启动，热度退化成 0 */ }
       return db;
     } catch (e) {
       broken = true;
@@ -545,7 +557,14 @@ export function createGraph({ file, log = () => {} } = {}) {
     const d = open();
     if (!d) return [];
     const scope = chatScope(chatId, aliases, 'chat_id');
-    const sql = `SELECT * FROM entity WHERE 1=1${scope.sql} ORDER BY last_seen DESC LIMIT ?`;
+    /**
+     * C3：热度是**加分项**，不能当唯一排序键——否则高热度旧实体会占满候选
+     * 窗口，新实体永远进不来（实体路漏召回，审查实测踩过）。
+     * 排序：`max(last_seen, last_hit)` 主导（对齐 aurabot 的 max(at,lastHit)）。
+     * 常被想起的老实体靠 last_hit 往前排，但不像"hits 折算成时间"那样
+     * 把刚创建的新实体挤出窗口（审查实测踩过的坑）；hits 只做同刻次序。
+     */
+    const sql = `SELECT * FROM entity WHERE 1=1${scope.sql} ORDER BY MAX(last_seen, last_hit) DESC, hits DESC LIMIT ?`;
     return d.prepare(sql)
       .all(...scope.args, limit)
       .map((r) => ({
@@ -560,8 +579,35 @@ export function createGraph({ file, log = () => {} } = {}) {
         })(),
         firstSeen: Number(r.first_seen || 0),
         lastSeen: Number(r.last_seen || 0),
+        lastHit: Number(r.last_hit || 0),
+        hits: Number(r.hits || 0),
         kind: String(r.kind || 'thing'),
       }));
+  }
+
+  /**
+    * C3：给一批实体记一次"被联想命中"（召回时调）。
+   * 同时刷 hits（次数）和 last_hit（时间）——不改 last_seen，后者是写入时间。
+   * 为什么要刷 last_hit：只加次数的话，老实体反复被想起也永远排在
+   * 刚创建的新实体后面（排序按 last_seen），热度等于没用。
+   * 对齐 aurabot 的 `max(at, lastHit)` 口径。
+   * 失败静默：热度是锦上添花，不能因为它让召回失败。
+   */
+  function touchEntities(names, { chatId = '', aliases = [], at = Date.now() } = {}) {
+    const d = open();
+    if (!d) return 0;
+    const keys = [...new Set((names || []).map((n) => normKey(String(n ?? ''))).filter(Boolean))];
+    if (!keys.length) return 0;
+    const scope = chatScope(chatId, aliases, 'chat_id');
+    const marks = keys.map(() => '?').join(',');
+    try {
+      const r = d.prepare(`UPDATE entity SET hits=hits+1, last_hit=? WHERE key IN (${marks})${scope.sql}`)
+        .run(Number(at) || Date.now(), ...keys, ...scope.args);
+      return Number(r.changes) || 0;
+    } catch (e) {
+      log(`实体热度更新失败：${e.message}`);
+      return 0;
+    }
   }
 
   /**
@@ -954,6 +1000,7 @@ export function createGraph({ file, log = () => {} } = {}) {
     edgesAsOf,
     endedEdges,
     entities,
+    touchEntities,
     episodes,
     linkedJournalIds,
     /** P1：命中实体的邻接实体牵涉的日记（二跳，默认关，见 `features.graphAdjacent`） */
