@@ -2641,3 +2641,15 @@ test('功能包页：ONNX 有独立安装区块，不再误跳语音页；开关
   assert.match(src, /embeddingLocal: on/, '本地向量开关要能存')
   assert.match(src, /useLocal: on/, '本地重排开关要能存')
 })
+
+test('记忆页：证据趋势/条数/出处明细可见（阶段1 算出的不能只躺在数据里）', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  /** 事实列表行：非默认趋势要标出来，多条证据要显条数 */
+  assert.match(src, /const TREND_LABEL = \{ strengthening:/, '趋势档位标签要在事实列表可见')
+  assert.match(src, /`\$\{evCount\} 条佐证`/, '多条证据要显条数')
+  /** 星图详情：带上趋势/证据/信念字段，并能展开看出处（原文 id + 引文） */
+  assert.match(src, /trend: String\(f\.trend \|\| ''\)/, '星点要带趋势字段')
+  assert.match(src, /看证据（\$\{detail\.evidence\.length\}）/, '星点详情要有看证据按钮')
+  assert.match(src, /原文 \$\{ev\.journalId\}/, '证据要能回查原文 id')
+  assert.match(src, /ev\.quote/, '证据要显示引文')
+})

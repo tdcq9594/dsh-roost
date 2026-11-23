@@ -4721,6 +4721,16 @@ select.roost-input{color-scheme:dark}
          */
         if (d.status === 'hearsay') parts.push(s?.speaker ? `听说·${s.speaker}说的` : '听说的')
         else if (d.status === 'guess') parts.push('猜的 · 不注入')
+        /**
+         * 证据趋势（阶段1 算出来的一直没露出来）：只在"非默认态"显示，
+         * 免得每条事实都挂个"稳定"变成噪音。走弱/陈旧是真正值得看到的——
+         * 它解释了"为什么这条慢慢不注入了"，对齐 Hindsight 的可解释性。
+         */
+        const TREND_LABEL = { strengthening: '增强中', weakening: '走弱', stale: '陈旧' }
+        if (TREND_LABEL[d.trend]) parts.push(TREND_LABEL[d.trend])
+        /** 证据条数：多条独立出处才算"被反复印证"，1 条不标 */
+        const evCount = Array.isArray(d.evidence) ? d.evidence.length : 0
+        if (evCount >= 2) parts.push(`${evCount} 条佐证`)
         return parts.join(' · ')
       }
 
@@ -5848,6 +5858,10 @@ select.roost-input{color-scheme:dark}
             pin: Number(f.pin) || 0,
             archivedAt: Number(f.archivedAt) || 0,
             reviewedAt: Number(f.reviewedAt) || 0,
+            /** 证据演化（阶段1 算好的）：星点详情里展示趋势与出处，别让它在 UI 层丢掉 */
+            trend: String(f.trend || ''),
+            confidence: Number.isFinite(Number(f.confidence)) ? Number(f.confidence) : 1,
+            evidence: Array.isArray(f.evidence) ? f.evidence : [],
             /** 亮度直接用后端算好的（w×30 天半衰期 + pin + 复习 + 层级），不再前端另算一套 */
             trueBrightness: Number(f.brightness) > 0 ? Number(f.brightness) : 0,
           });
@@ -6310,6 +6324,7 @@ select.roost-input{color-scheme:dark}
       const fmt = (at) => at ? new Date(at).toLocaleDateString('zh-CN') : '没记时间'
       /** 逐条编辑：编辑文字 / 改重要度 / 复习 / 层级 / 归档恢复，共用一个路由 */
       const [edit, setEdit] = useState(null)
+      const [showEvidence, setShowEvidence] = useState(false)
       const [factBusy, setFactBusy] = useState(false)
       /** 非事实节点（日记/实体/档案）的操作中状态 */
       const [nodeBusy, setNodeBusy] = useState(false)
@@ -6504,7 +6519,10 @@ select.roost-input{color-scheme:dark}
                 + (detail.kind === 'fact' ? ` · 层级 ${({ short: '临时', long: '长期', core: '永久' })[detail.tier] || '长期'}` : '')
                 + (detail.kind === 'fact' && detail.pin > 0 ? ` · 重要度 ${Math.round(detail.pin * 100)}%` : '')
                 + (detail.reviewedAt ? ` · 复习于 ${fmt(detail.reviewedAt)}` : '')
-                + (detail.archived ? ' · 已归档/被取代，不参与注入' : '')),
+                + (detail.archived ? ' · 已归档/被取代，不参与注入' : '')
+                + ({ strengthening: ' · 证据增强中', weakening: ' · 证据走弱', stale: ' · 证据陈旧' }[detail.trend] || '')
+                + (detail.kind === 'fact' && Number(detail.confidence) < 0.99
+                  ? ` · 信念 ${Math.round(Number(detail.confidence) * 100)}%` : '')),
               detail.kind === 'fact'
                 ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
                     h('button', {
@@ -6560,6 +6578,25 @@ select.roost-input{color-scheme:dark}
                           ? '删掉后这条关系线也会消失，巩固时不会再抽回来。'
                           : '只删这条档案，不动聊天记录。'),
                   ),
+              /** 证据明细：阶段1 算出的 evidence 一直没露出来，这里让用户能核对出处 */
+              detail.kind === 'fact' && Array.isArray(detail.evidence) && detail.evidence.length
+                ? h('div', { style: { marginBottom: 6 } },
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: () => setShowEvidence(!showEvidence),
+                    }, showEvidence ? '收起证据' : `看证据（${detail.evidence.length}）`),
+                    showEvidence
+                      ? h('div', { style: { marginTop: 6, fontSize: 11.5, lineHeight: 1.8 } },
+                          detail.evidence.map((ev, i) => h('div', {
+                            key: i, className: 'roost-muted',
+                            style: { paddingLeft: 8, borderLeft: '2px solid var(--line)', marginBottom: 3 },
+                          },
+                            `${ev.kind || '证据'} · ${fmt(ev.at)}`
+                            + (ev.journalId ? ` · 原文 ${ev.journalId}` : '')
+                            + (ev.quote ? ` · 「${String(ev.quote).slice(0, 60)}」` : ''))))
+                      : null,
+                  )
+                : null,
               detail.kind === 'fact' && edit
                 ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
                     h('input', {
