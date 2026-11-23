@@ -579,6 +579,26 @@ function createSqliteStore(file, log) {
       return list.filter((id) => alive.has(id));
     },
 
+    /**
+     * C1 时间臂：取 [from,to) 内最近的日记，作为**独立候选**。
+     * 和 from/to 过滤的区别：过滤只在命中里筛，时间臂是即使关键词不匹配
+     * 也把那段时间的事拉进来（"上个月聊了什么"没有关键词可搜）。
+     */
+    inRange({ from = 0, to = 0, limit = 20, chatId = '', aliases = [] } = {}) {
+      const d = open();
+      if (!d || !(Number(to) > Number(from))) return [];
+      const keys = chatId ? chatKeys(chatId, aliases) : [];
+      const where = ['at >= ?', 'at < ?', NOT_INVALIDATED_SQL];
+      const args = [from, to];
+      if (keys.length) {
+        where.push(`chat_id IN (${marks(keys.length)})`);
+        args.push(...keys);
+      }
+      args.push(Math.max(1, Number(limit) || 20));
+      const sql = `SELECT * FROM journal WHERE ${where.join(' AND ')} ORDER BY at DESC LIMIT ?`;
+      return d.prepare(sql).all(...args).map(normRow);
+    },
+
     update(id, patch) {
       const d = open();
       if (!d) return false;
@@ -1337,6 +1357,17 @@ function createJsonlStore(file, log) {
       return [...new Set((ids || []).filter(Boolean).map(String))].filter((id) => alive.get(id) === true);
     },
 
+    /** C1 时间臂：同 sqlite 版——取窗内最近的活动日记 */
+    inRange({ from = 0, to = 0, limit = 20, chatId = '', aliases = [] } = {}) {
+      if (!(Number(to) > Number(from))) return [];
+      const keys = chatId ? chatKeys(chatId, aliases) : [];
+      return load()
+        .filter((r) => Number(r.at) >= from && Number(r.at) < to && !Number(r.invalidAt))
+        .filter((r) => !keys.length || keys.includes(r.chatId) || r.chatId === '')
+        .sort((a, b) => Number(b.at) - Number(a.at))
+        .slice(0, Math.max(1, Number(limit) || 20));
+    },
+
     update(id, patch) {
       load();
       const r = rows.find((x) => x.id === id);
@@ -1866,6 +1897,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     get: (id) => get().get(id),
     /** A3 撤回级联：过滤掉已被改口作废的日记 id */
     activeIds: (ids) => get().activeIds(ids),
+    /** C1 时间臂：窗内最近的活动日记（关键词不匹配时也能补位） */
+    inRange: (opts) => get().inRange(opts),
 
     /**
      * `aliases` 是**换机器人之后**才有的东西：旧 openid 下的日记也该读得到。
@@ -1988,7 +2021,9 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
        * 时间定位（src/temporal.js）：只收 [from, to) 内的日记。
        * 不传就不过滤——解析不出时间词时行为与以前逐字一致。
        */
-      from = 0, to = 0 } = {}) {
+      from = 0, to = 0,
+      /** C2：显式打开才做"每路保底一条"，默认关——老调用方的名次不变 */
+      interleave = false } = {}) {
       /** 时间窗生效条件严格成对，避免只传一个把范围搜飞 */
       const hasWindow = Number(from) > 0 && Number(to) > Number(from);
       const inWindow = (r) => !hasWindow || (Number(r?.at) >= from && Number(r?.at) < to);
@@ -2076,6 +2111,24 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         }
       }
 
+      /**
+       * C1 时间臂（Hindsight 的第四路）：时窗内最近的日记，即使关键词不匹配
+       * 也进来当候选。权重 0.3（低于关键词 1 / 实体 0.5）——它是"那段时间的
+       * 背景"，不是直接证据。只在解析出时间词时跑，平时零开销。
+       */
+      let temporalHits = [];
+      if (hasWindow) {
+        try {
+          temporalHits = s.inRange({ from, to, limit: per, chatId, aliases });
+          temporalHits.forEach((r, i) => {
+            bump(r.id, i, 0.3);
+            if (!byId.has(r.id)) byId.set(r.id, r);
+          });
+        } catch (e) {
+          log(`时间臂检索失败，只用其它路：${e?.message || e}`);
+        }
+      }
+
       const vecRank = new Map(vecHits.map(({ r }, i) => [r.id, i]));
       const out = [...ranks.entries()]
         .map(([id, score]) => {
@@ -2090,6 +2143,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
               kw.some((k) => k.id === id) ? '关键词' : '',
               /** 3.4：实体路命中的标出「从谁联想来」，预览和决策链都能看懂 */
               entityNames?.get?.(id) ? `经「${entityNames.get(id)}」联想` : '',
+              /** C1 时间臂：告诉用户这条是"那段时间"带进来的，不是关键词命中 */
+              temporalHits.some((r) => r.id === id) ? '那段时间' : '',
             ]
               .filter(Boolean)
               .join('+'),
@@ -2099,6 +2154,30 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         .filter(Boolean)
         .sort((a, b) => b.score - a.score)
         .slice(0, limit);
+
+      /**
+       * C2 interleave（对齐 Hindsight fusion.py）：每路若各有候选，
+       * 保证在 top-N 里至少露一条，免得强路把弱路全挤掉。
+       * 默认关：老调用方的名次不变；只有显式打开才做保底。
+       */
+      if (interleave && out.length >= limit && limit > 1) {
+        const present = new Set(out.map((r) => String(r.id)));
+        const channels = [kw, vecHits.map((v) => v.r), temporalHits];
+        /** 实体路也算一路（有 entityNames 注入时） */
+        if (entityNames?.size) channels.push([...entityNames.keys()].map((id) => byId.get(id)).filter(Boolean));
+        for (const list of channels) {
+          if (!list.length) continue;
+          /** 找这一路里**还没进 top-N**的最优候选（有些路会和其它路重叠） */
+          const fresh = list.find((r) => !present.has(String(r.id)));
+          if (!fresh) continue;
+          const pick = fresh;
+          if (!pick || !byId.has(String(pick.id))) continue;
+          const weakest = out[out.length - 1];
+          present.delete(String(weakest.id));
+          out[out.length - 1] = { ...pick, score: weakest.score + 1e-9, why: `${weakest.why ? `${weakest.why}+` : ''}保底` };
+          present.add(String(pick.id));
+        }
+      }
 
       /** 3.4：预览不计入「被想起」——检索命中才算访问，试一下不算 */
       if (touch !== false && out.length) touchIds(out.map((r) => r.id));

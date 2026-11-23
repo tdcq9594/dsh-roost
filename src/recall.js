@@ -91,13 +91,28 @@ export async function searchWithShortContext(journal, q, opts = {}, prev = '') {
  * 后者已经在日记里，再抄一份就变成第二个记忆库。
  */
 export function recallRow(chatId, q, hits, { shortPhrase = false, usedPrev = false } = {}) {
+  const list = Array.isArray(hits) ? hits : [];
+  /**
+   * C5 trace：把每条的 `why` 聚合成"哪一路贡献了几条"。
+   * `why` 本来就是逐条来源标记（关键词 / 向量#N / 那段时间 / 经X联想），
+   * 这里只做计数——不新增存储、不改 why 的语义。
+   */
+  const channels = { keyword: 0, vector: 0, entity: 0, temporal: 0 };
+  for (const h of list) {
+    const why = String(h?.why ?? '');
+    if (why.includes('关键词')) channels.keyword += 1;
+    if (why.includes('向量#')) channels.vector += 1;
+    if (why.includes('联想')) channels.entity += 1;
+    if (why.includes('那段时间')) channels.temporal += 1;
+  }
   return {
     chatId: String(chatId ?? ''),
     queryLen: [...String(q ?? '')].length,
     shortPhrase,
     usedPrev,
-    shown: (hits || []).length,
-    items: (hits || []).map((h) => ({ id: h.id, score: h.score, why: h.why })),
+    shown: list.length,
+    channels,
+    items: list.map((h) => ({ id: h.id, score: h.score, why: h.why })),
   };
 }
 

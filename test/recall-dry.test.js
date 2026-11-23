@@ -186,3 +186,55 @@ test('A3 接线：图谱联想（一跳/二跳）都经过 activeIds 过滤', ()
   assert.ok(filtered >= 2, `一跳和二跳都要过滤失效日记，实际 ${filtered} 处`);
   assert.match(host, /A3 撤回级联/, '要有说明为什么过滤');
 });
+
+test('C1 时间臂：关键词不匹配时，窗内日记仍作为"那段时间"候选进来', async () => {
+  const { done } = fresh();
+  const { createJournal } = await import('../src/journal.js');
+  const NOW = new Date(2026, 10, 23, 12, 0, 0).getTime();
+  const DAY = 86_400_000;
+  try {
+    const j = createJournal({ file: join(process.env.DSH_ROOST_DATA, 'journal.sqlite') });
+    /** 窗内一条，但文本完全不含查询词"烧烤" */
+    j.add({ id: 'in-window', chatId: 'g1', text: '上周去看了场电影', at: NOW - 3 * DAY });
+    j.add({ id: 'out-window', chatId: 'g1', text: '烧烤真好吃', at: NOW - 60 * DAY });
+
+    const r = await j.search('烧烤', {
+      chatId: 'g1', limit: 5, from: NOW - 7 * DAY, to: NOW + DAY,
+    });
+    assert.ok(r.some((x) => x.id === 'in-window'), '时间臂要把窗内日记带进来');
+    assert.ok(r.find((x) => x.id === 'in-window').why.includes('那段时间'), '命中原因要标出来');
+    assert.ok(!r.some((x) => x.id === 'out-window'), '窗外那条不该回来');
+
+    /** 没有时间词时，时间臂不跑：关键词只捞到窗外那条 */
+    const plain = await j.search('烧烤', { chatId: 'g1', limit: 5 });
+    assert.deepEqual(plain.map((x) => x.id), ['out-window'], '无时间窗时行为不变');
+  } finally {
+    done();
+  }
+});
+
+test('C2 interleave：显式打开时每路保底一条；默认关时名次不变', async () => {
+  const { done } = fresh();
+  const { createJournal } = await import('../src/journal.js');
+  const NOW = new Date(2026, 10, 23, 12, 0, 0).getTime();
+  const DAY = 86_400_000;
+  try {
+    const j = createJournal({ file: join(process.env.DSH_ROOST_DATA, 'journal.sqlite') });
+    /** 三条都在窗内；关键词只命中前两条，时间臂还能捞到第三条 */
+    j.add({ id: 'kw1', chatId: 'g1', text: '咖啡很好喝', at: NOW - 2 * DAY });
+    j.add({ id: 'kw2', chatId: 'g1', text: '咖啡和茶', at: NOW - 3 * DAY });
+    j.add({ id: 'time1', chatId: 'g1', text: '上周看了电影', at: NOW - 1 * DAY });
+    const opts = { chatId: 'g1', limit: 2, from: NOW - 7 * DAY, to: NOW + DAY };
+
+    /** 默认关：只有关键词两条，时间臂那条被挤掉 */
+    const plain = await j.search('咖啡', opts);
+    assert.deepEqual(plain.map((x) => x.id).sort(), ['kw1', 'kw2']);
+
+    /** 打开：时间臂保底进 top-2 */
+    const mixed = await j.search('咖啡', { ...opts, interleave: true });
+    assert.ok(mixed.some((x) => x.id === 'time1'), '弱路要保底一条');
+    assert.ok(mixed.find((x) => x.id === 'time1').why.includes('保底'));
+  } finally {
+    done();
+  }
+});

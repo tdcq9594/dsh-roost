@@ -159,3 +159,15 @@ test('去重：主结果重复导致不足时仍触发短句补检索', async ()
   assert.equal(r.usedPrev, true);
   assert.deepEqual(r.hits.map((h) => h.id), ['a', 'c']);
 });
+
+test('C5 trace：recallRow 聚合各路贡献数，空命中也返回全零', () => {
+  const row = recallRow('g1', '住在杭州', [
+    { id: 'a', score: 0.1, why: '关键词' },
+    { id: 'b', score: 0.2, why: '向量#1+关键词' },
+    { id: 'c', score: 0.3, why: '经「小明」联想+那段时间' },
+  ]);
+  assert.deepEqual(row.channels, { keyword: 2, vector: 1, entity: 1, temporal: 1 });
+  assert.equal(row.shown, 3);
+  const empty = recallRow('g1', '', []);
+  assert.deepEqual(empty.channels, { keyword: 0, vector: 0, entity: 0, temporal: 0 });
+});
