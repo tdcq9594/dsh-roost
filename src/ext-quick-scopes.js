@@ -129,6 +129,9 @@ export const OP_SCOPE = Object.freeze({
   'mind.refresh': 'memory:write',
   'mind.clear': 'memory:write',
   'persona.set': 'prompt:write',
+  /** 阶段6：人物墙人工编辑/不再记住——改的是档案，归 prompt:write */
+  'persona.edit': 'prompt:write',
+  'persona.noMemory': 'prompt:write',
   'groups.list': 'groups:read',
 });
 
