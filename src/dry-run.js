@@ -132,6 +132,8 @@ export function normalizeEntry(raw, target, chatId = '') {
     pin: Number(e.pin) || 0,
     reviewedAt: Number(e.reviewedAt) || 0,
     archivedAt: Number(e.archivedAt) || 0,
+    /** 阶段8：被取代指针，白名单漏了就在 dry-run→还原链上断链 */
+    supersededBy: String(e.supersededBy || ''),
     /**
      * 证据账本三件套：这一行会一路走到 `memory.insertRaw()`，
      * 少带一个字段就等于「清理→后悔→还原」把证据悄悄抹掉。
