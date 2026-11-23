@@ -542,8 +542,12 @@ export function createExtMarket({
       const mine = local.get(e.id);
       const installedHash = mine?.source?.sha256 ?? '';
       const declaredHash = entryHash(e);
-      /** 等级由索引里的原始声明现算：作者不能在清单里自填等级 */
-      const tier = deriveTier(e);
+      /**
+       * 等级由索引里的原始声明现算：作者不能在清单里自填等级。
+       * verified 也只认索引（build-index 从维护者的 verified.json 灌入），
+       * 审核过的扩展在这里就要按 L2 封顶，和安装确认算出同一个等级。
+       */
+      const tier = deriveTier(e, { verified: e.verified });
       return {
         id: e.id,
         name: e.name ?? e.id,
@@ -816,7 +820,8 @@ export function createExtMarket({
       setPhase('scopes', '正在检查权限声明', key);
       const staged = readJson(join(staging, MANIFEST_FILE));
       const sens = sensitiveScopesOf(staged);
-      const derived = deriveTier(staged);
+      /** 审核状态只从索引条目取（清单自填不认），和市场卡片算同一个等级 */
+      const derived = deriveTier(staged, { verified: entry.verified });
       if ((derived.level >= 2 || sens.length) && confirmScopes !== true) {
         return {
           ok: false,
@@ -857,6 +862,11 @@ export function createExtMarket({
         branch: idx.branch ?? 'main',
         path: entry.path ?? '',
         sha256: verifiedHash,
+        /**
+         * 审核状态跟着落盘（只从索引取，不认清单自填）。已装页要复算同一个
+         * 等级，缺了它的话「市场 L2、已装页 L3」又会对不上。
+         */
+        verified: entry.verified ?? '',
         installedAt: now(),
       };
       const r = await installWithBusyRetry(staging, source, key, { takeOver });
