@@ -104,6 +104,7 @@ export const OP_SCOPE = Object.freeze({
   ...Object.fromEntries(MEMORY_WRITE_OPS.map((o) => [o, 'memory:write'])),
 
   'memory.list': 'memory:read',
+  'mind.model': 'memory:read',
   'persona.set': 'prompt:write',
   'groups.list': 'groups:read',
 });

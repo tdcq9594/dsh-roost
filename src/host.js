@@ -36,6 +36,7 @@ import { createQuota, shouldCharge, QUOTA_DEFAULTS } from './quota.js';
 import { createSetup } from './setup.js';
 import { maxPartsOf, shouldRegisterQqTools } from './qq-tools.js';
 import { createMemory, W_EXPLICIT } from './memory.js';
+import { buildMindModel, renderMindModel } from './mind-model.js';
 import { createJournal } from './journal.js';
 import { createLedgerReader } from './ledger-read.js';
 import { createChannelPost, normalizePostCfg, guide, humanError, pickErrorCode, shareUrlOf } from './channel-post.js';
@@ -9924,6 +9925,30 @@ export function apply(ctx) {
 
             case 'memory.list':
               return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId, aliasesOf(chatId)) });
+
+            /**
+             * B2 心智模型树：把"她现在相信什么"按实体组织成可导航的树 + markdown。
+             * 只读，不改记忆；面板/扩展都能用，导出后也能当 prompt 上下文。
+             */
+            case 'mind.model': {
+              try {
+                const full = memory.listFull(chatId, aliasesOf(chatId));
+                const entities = graph.entities({ chatId, limit: 50, aliases: aliasesOf(chatId) })
+                  .map((e) => e.name).filter(Boolean);
+                const tree = buildMindModel([...(full.global || []), ...(full.chat || [])], entities);
+                return send(res, 200, {
+                  ok: true,
+                  chatId,
+                  groups: tree.groups.length,
+                  total: tree.total,
+                  staleCount: tree.staleCount,
+                  tree,
+                  markdown: renderMindModel(tree),
+                });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: `心智模型读不出来：${e?.message || e}` });
+              }
+            }
 
             /**
              * 这个会话「不记也不读」的开关（纯净模式）。
