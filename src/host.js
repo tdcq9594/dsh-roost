@@ -282,6 +282,7 @@ import { createOnnxInstaller, RERANK_FILES, RERANK_MODEL_ID } from './onnx-insta
 import { createModelInstaller } from './onnx-model-install.js';
 import { createLocalEmbedder } from './local-embed.js';
 import { createLocalReranker } from './local-rerank.js';
+import { parseTemporal } from './temporal.js';
 import { createTurnScenes } from './turn-scene.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -3342,9 +3343,18 @@ export function apply(ctx) {
     } catch (e) {
       log.debug(`实体路跳过：${e.message}`);
     }
+    /**
+     * 时间定位（src/temporal.js）：查询里的时间词转成日期窗。
+     * 解析不出来就返回 null —— 不加窗、不改查询，行为与以前逐字一致。
+     */
+    const temporal = parseTemporal(q);
+    const searchQ = temporal?.rest && temporal.rest.trim() ? temporal.rest : q;
     const opts = {
       chatId,
       limit: Number(cfg.memory?.hits) || 3,
+      /** 时间窗：只收这个范围的日记（keyword/向量/实体三路都过滤） */
+      from: temporal?.from || 0,
+      to: temporal?.to || 0,
       entityJournalIds: [...entityNames.keys()],
       entityNames,
       /** P1：弱关联的融合权重（缺省 0.5，只覆盖邻接那批） */
@@ -3357,7 +3367,7 @@ export function apply(ctx) {
     };
     /** D4：短句连上一句补检索，按原分补位、不乘系数（见 recall.js） */
     const prev = dry ? '' : (recentUserText.get(chatId) || '');
-    const rec = await searchWithShortContext(journal, q, opts, prev);
+    const rec = await searchWithShortContext(journal, searchQ, opts, prev);
     /**
      * 重排候选（可选，默认关）。放在 RRF 融合之后、记召回日志之前：
      * 日志要记「她最终先想起哪几条」，记重排前的顺序就是错的。
@@ -3377,7 +3387,13 @@ export function apply(ctx) {
       /** D3：召回日志只留结构化字段，连检索词都不落盘 */
       recallLog.push(recallRow(chatId, q, hits, rec));
     }
-    return { hits, rec: { ...rec, rerank: rerankMode }, entities };
+    /** temporal 只给面板解释用（「上个月」被解析成哪段），不落盘、不进召回日志 */
+    return {
+      hits,
+      rec: { ...rec, rerank: rerankMode },
+      entities,
+      temporal: temporal ? { label: temporal.label, from: temporal.from, to: temporal.to, rest: temporal.rest } : null,
+    };
   };
 
 
@@ -10339,6 +10355,8 @@ export function apply(ctx) {
             ok: true,
             dry: true,
             entities: r.entities,
+            /** 时间定位：让「上个月说的」这种查询的过滤依据可见（解析不出就是 null） */
+            temporal: r.temporal || null,
             hits: (r.hits || []).map((h, i) => ({
               rank: i + 1,
               score: h.score,

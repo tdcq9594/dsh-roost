@@ -5607,6 +5607,12 @@ select.roost-input{color-scheme:dark}
             : pvResult
               ? h('div', { style: { marginTop: 8 } },
                   pvResult.note ? h('div', { className: 'roost-note' }, pvResult.note) : null,
+                  pvResult.temporal
+                    ? h('div', { className: 'roost-note' },
+                        `时间定位：认出「${pvResult.temporal.label}」`
+                        + `（${new Date(pvResult.temporal.from).toLocaleDateString('zh-CN')}`
+                        + ` ~ ${new Date(pvResult.temporal.to).toLocaleDateString('zh-CN')}），只在这个范围里找。`)
+                    : null,
                   (pvResult.entities || []).length
                     ? h('div', { className: 'roost-note' }, '这一句点到的实体：' + pvResult.entities.join('、'))
                     : null,
