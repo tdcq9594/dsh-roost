@@ -243,7 +243,7 @@ export function buildPrompt({ day, chatName, items, revocation = null, facts = [
     ' "triples":[{"s":"...","rel":"...","o":"...","scope":"global"}],',
     ' "agreements":["...", {"text":"...","op":"update","old":"..."}],"closed":[]',
     revocation ? ',"revoked":[]' : '',
-    withProfiles ? ',"profiles":[{"who":"显示名","openid":"拿不到就留空","impression":"一小句","tips":"一小句"}]' : '',
+    withProfiles ? ',"profiles":[{"who":"显示名","openid":"拿不到就留空","impression":"一小句","tips":"一小句","dislikes":"一小句雷区"}]' : '',
     '}',
   ].join('');
   return [
@@ -293,7 +293,7 @@ export function buildPrompt({ day, chatName, items, revocation = null, facts = [
      */
     ...(withProfiles ? [
       '8. profiles：今天**明显看得出来**的、对某个人的印象和跟他相处要注意什么，给',
-      '   [{"who":"显示名","openid":"他的 openid（拿不到就留空）","impression":"一小句印象","tips":"一小句相处建议"}]；',
+      '   [{"who":"显示名","openid":"他的 openid（拿不到就留空）","impression":"一小句印象","tips":"一小句相处建议","dislikes":"他明确讨厌/忌讳的（没有就留空）"}]；',
       '   · 只写当天真有依据的，别猜、别把群里的玩笑当结论，也别写身份事实（那是 triples 的活）',
       '   · 已有的档案列在下面，改口就照实写新的一条，别重复',
       '   · 没有就给空数组——宁可漏，也别编一个出来',
@@ -921,6 +921,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
             openid: String(p?.openid ?? '').slice(0, 64),
             impression: String(p?.impression ?? ''),
             tips: String(p?.tips ?? ''),
+            /** E4：只写他明确表达过的雷区，模型没给就空串（不覆盖已有） */
+            dislikes: String(p?.dislikes ?? ''),
             /** 换机器人后 openid 变了，归到同一条档案（报告 §15.1-D） */
             aliases: aliasesOf(chatId),
             /** 私聊里说话人 openid === chatId，靠它把新 openid 也归户 */
