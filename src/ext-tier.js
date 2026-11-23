@@ -83,6 +83,21 @@ export const CORE_POINTS = Object.freeze({
 /** 与 ext-registry.js 的 EXT_DEFAULT_SCOPES 一致，由 test/ext-tier.test.js 守门。 */
 export const DEFAULT_SCOPES = Object.freeze(['memory:write', 'state:read']);
 
+/**
+ * 「审核过」只认索引里的 verified（由维护者的 verified.json 灌入，插件自填不认）。
+ * `self` 是作者自证、空是没列出 —— 两者都算未审核。
+ *
+ * 审核状态给的是**等级上限**：审核过的（official/reviewed）无论声明什么权限，
+ * 最高只到 L2；没审核的照常算，可以抬到 L3。风险明细照旧逐条列出，
+ * 不因为封顶就把「它会做什么」藏起来。
+ */
+export function isReviewed(verified) {
+  return verified === 'official' || verified === 'reviewed';
+}
+
+/** 审核过的扩展的等级天花板。 */
+export const REVIEWED_MAX_LEVEL = 2;
+
 export const TIERS = Object.freeze({
   L0: {
     level: 0, label: '只读', badge: 'safe', color: 'green', confirm: 'none',
@@ -113,6 +128,7 @@ function listOf(v) {
  * 从扩展清单推导权限等级。
  *
  * @param {object} manifest `plugin.json` 或 index.json 条目（原始声明）
+ * @param {{verified?: string}} [opts] 审核状态，**必须来自索引**（插件自填不认）
  * @returns {{
  *   id: 'L0'|'L1'|'L2'|'L3', level: number, label: string,
  *   form: string, formLabel: string, scopes: string[], overrides: string[],
@@ -120,7 +136,7 @@ function listOf(v) {
  *   unknownScopes: string[], summary: string, confirm: string,
  * }}
  */
-export function deriveTier(manifest = {}) {
+export function deriveTier(manifest = {}, { verified } = {}) {
   const declared = Array.isArray(manifest?.scopes) ? manifest.scopes : null;
   /** 没写 scopes 的老扩展会拿到默认权限，展示要按实际会拿到的算，别虚低 */
   const scopes = listOf(declared ?? DEFAULT_SCOPES);
@@ -164,37 +180,48 @@ export function deriveTier(manifest = {}) {
     level = Math.max(level, 3);
   }
   /**
-   * **面板页面 / 进程内运行也是权限**（2026-11 审查补）。
+   * 面板页面 / 进程内运行是权限，但**本身就按敏感 L2 算，不再是 L3**（2026-11 调整）。
    *
-   * 以前分级只看 `scopes` / `overrides` / `form`，于是「只声明默认
-   * `state:read`、但带一个 `ui.page`」的扩展算 L1（无需确认）。而面板页
-   * 是**同源 iframe**、`/quick` 就在同源上：页面里的 JS 能拿主人身份调
-   * `extensions.clients.create` 发高权令牌、改配置。`inprocess` 更直接——
-   * 代码就在宿主进程里跑。两种都按最高风险算。
+   * 早期把「同源 iframe」当成和「接管内置记忆」同级的最高风险，于是官方
+   * 扩展只要带个设置页就被弹 L3 二次确认，主人误以为要出大事。实际上：
+   *   · 面板页虽然同源、能调管理面，但它和 scopes 里明写的 config:write /
+   *     model:write 本是同一类「改配置」能力，够不着「关闭内置功能」；
+   *   · inprocess 是运行形态，代码在宿主进程里跑，风险类似，同样归敏感。
+   * 两者都保留逐条告知（用户仍看得到「同源」「读写本机」），只是等级停在 L2。
+   * 真正到 L3 的只有 overrides / form:core / 未知声明这些「接管内置功能」。
    */
   if (manifest?.ui?.page) {
     reasons.push({
-      kind: 'ui', key: 'page', level: 3,
-      text: '会在面板里开一个页面：页面与面板同源，等于拿到主人的全部操作权限',
+      kind: 'ui', key: 'page', level: 2,
+      text: '会在面板里开一个页面：页面与面板同源，能调用面板的管理接口',
     });
-    level = Math.max(level, 3);
+    level = Math.max(level, 2);
   }
   if (form === 'inprocess') {
     reasons.push({
-      kind: 'form', key: 'inprocess', level: 3,
+      kind: 'form', key: 'inprocess', level: 2,
       text: '在宿主进程内运行：能直接读写本机文件、进程与密钥',
     });
-    level = Math.max(level, 3);
+    level = Math.max(level, 2);
   }
   if (!FORMS.includes(rawForm) && rawForm) {
     reasons.push({ kind: 'form', key: rawForm, level: 3, text: `未知运行形态「${rawForm}」` });
     level = Math.max(level, 3);
   }
 
-  const id = TIER_IDS[level];
+  /**
+   * 审核过的扩展给等级封顶（2026-11 调整）：我们自己做的 / 我们复核过的
+   * 最高只到 L2，就算声明了 `core:write` 或 overrides 也不弹 L3 二次确认。
+   * 没列出的（含 self 作者自证）不封顶，照常可以到 L3。
+   *
+   * 只压最终等级，**不改 reasons**：风险明细里「将接管内置记忆」照旧列出来，
+   * 用户仍然知道它能干什么，只是不再被当成需要手打扩展名的未知程序。
+   */
+  const capped = isReviewed(verified) ? Math.min(level, REVIEWED_MAX_LEVEL) : level;
+  const id = TIER_IDS[capped];
   const t = TIERS[id];
   return {
-    id, level, label: t.label, badge: t.badge, color: t.color,
+    id, level: capped, label: t.label, badge: t.badge, color: t.color,
     confirm: t.confirm, summary: t.summary,
     form, formLabel: FORM_INFO[form].label, formNote: FORM_INFO[form].note,
     scopes, overrides, reasons, unknownScopes,
