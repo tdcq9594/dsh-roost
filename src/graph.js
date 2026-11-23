@@ -554,8 +554,19 @@ export function createGraph({ file, log = () => {} } = {}) {
     const d = open();
     if (!d) return [];
     const scope = chatScope(chatId, aliases, 'chat_id');
-    /** C3：被联想命中的次数也算热度——常用的实体更该优先被想起来 */
-    const sql = `SELECT * FROM entity WHERE 1=1${scope.sql} ORDER BY hits DESC, last_seen DESC LIMIT ?`;
+    /**
+     * C3：热度是**加分项**，不能当唯一排序键——否则 40 个高热度旧实体会
+     * 占满候选窗口，hits=0 的新实体永远进不来（实体路漏召回）。
+     * 用 last_seen 主导（新实体天然靠前），hits 只做同时间的次序微调。
+     */
+    /**
+     * 排序 = last_seen + 热度加成，热度**封顶且权重小**：
+     * 排序：last_seen 主导，hits 只做**同时间**的次序微调。
+     * 任何"把 hits 折算成时间相加"的方案都会让高热度旧实体压过刚出现的新实体
+     * （审查时实测：按天/按小时/按分钟折算，新实体都被挤出候选窗口）。
+     * 所以 hits 不参与跨时间比较——新实体永远能进窗口，热度只帮"同一刻创建"的排先后。
+     */
+    const sql = `SELECT * FROM entity WHERE 1=1${scope.sql} ORDER BY last_seen DESC, hits DESC LIMIT ?`;
     return d.prepare(sql)
       .all(...scope.args, limit)
       .map((r) => ({

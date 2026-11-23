@@ -168,6 +168,9 @@ export const PLAN = {
      * 人格隔离开启后二跳会恒返回空，且 `recallFor` 的 catch 只打 debug。
      */
     adjacentJournalIds: ['obj:1', 'obj:1', 'read'],
+    /** C3：召回后给实体加热度。chatId/aliases 在**第二参数** `{chatId, aliases}`，
+     *  漏登记 → 人格隔离开启后按逻辑键 UPDATE，命中 0 行，热度恒 0（静默失效）。 */
+    touchEntities: ['obj:2', 'obj:2', 'write'],
     edgesAsOf: ['obj:1', 'obj:1', 'read'], episodes: ['obj:0', null, 'write'],
     /**
      * `removeEntity(ref, {chatId, aliases})`：面板删实体走这里。

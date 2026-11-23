@@ -1045,13 +1045,19 @@ function createSqliteStore(file, log) {
      * 「（已按用户要求遗忘）」。不排除的话，巩固会给这个占位符重新算一遍
      * 向量，等于把抹掉的那行重新塞回语义检索里。
      */
-    noVec(limit = 64) {
+    noVec(limit = 64, dim = 0) {
       const d = open();
       if (!d) return [];
+      /**
+       * C4：传了 dim 就**连维度不符的旧向量一起收**——换模型后它们被 withVec
+       * 排除在检索外，但若不重算就会永远留在库里占地方、且语义检索静默丢历史。
+       * 先补**老**条目：按 DESC 取的话最新的先补，最老的永远轮不到。
+       */
+      const vecCond = Number(dim) > 0 ? '(vec IS NULL OR length(vec)/4 <> ?)' : 'vec IS NULL';
+      const args = Number(dim) > 0 ? [Number(dim), ERASED, CLEARED, limit] : [ERASED, CLEARED, limit];
       return d
-        /** 先补**老**条目的向量：按 DESC 取的话，最新的先补，最老的永远轮不到 */
-        .prepare(`SELECT * FROM journal WHERE vec IS NULL AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL} ORDER BY at ASC LIMIT ?`)
-        .all(ERASED, CLEARED, limit)
+        .prepare(`SELECT * FROM journal WHERE ${vecCond} AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL} ORDER BY at ASC LIMIT ?`)
+        .all(...args)
         .map(normRow);
     },
 
@@ -1625,10 +1631,13 @@ function createJsonlStore(file, log) {
         .slice(0, limit);
     },
 
-    noVec(limit = 64) {
-      // 同 SQLite 后端：占位符不补算向量；先补**老**条目（DESC 会让最老的永远轮不到）
+    noVec(limit = 64, dim = 0) {
+      /** 同 SQLite 后端：占位符不补算；传 dim 时连维度不符的旧向量也收（换模型重算） */
+      const wantDim = Number(dim) > 0 ? Number(dim) : 0;
+      const dimOf = (r) => { const v = toVec(r.vec); return v ? v.length : 0; };
       return load()
-        .filter((r) => isActive(r) && !r.vec && r.text !== ERASED && r.text !== CLEARED)
+        .filter((r) => isActive(r) && r.text !== ERASED && r.text !== CLEARED)
+        .filter((r) => (!r.vec) || (wantDim > 0 && dimOf(r) !== wantDim))
         .sort((a, b) => a.at - b.at)
         .slice(0, limit);
     },
@@ -2409,7 +2418,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     /* ---- 向量：巩固时补算，白天只算查询那一条 ---- */
 
     /** 还没算向量的条目（主循环在 consolidate 里） */
-    noVec: (limit) => get().noVec(limit),
+    noVec: (limit, dim) => get().noVec(limit, dim),
     /** C4：带维度过滤的向量候选（调试/测试用，检索内部走 store 直连） */
     withVec: (opts) => get().withVec(opts),
 

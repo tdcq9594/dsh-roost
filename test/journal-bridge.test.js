@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -139,4 +139,9 @@ test('E6 按人关：memoryOff 收到 sender.id，被关的人说的话不记', 
   assert.equal(added.length, 0, '被按人关的发送者不写日记');
   bridge.add({ id: 'm2', sender: { id: 'openid-normal' } }, { chatId: 'c1' }, '正常的话', 'user');
   assert.equal(added.length, 1, '没被关的照记');
+});
+
+test('E6 主人豁免：主人被误配进 noUsers 也不停记（源码断言）', () => {
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.match(host, /sid !== String\(ownerId\(\)/, 'noUsers 判定要排除主人');
 });

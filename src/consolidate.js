@@ -106,7 +106,11 @@ export function pickRows(rows, { maxRows = MAX_ROWS, maxChars = MAX_INPUT_CHARS,
    * 只筛喂给模型的那份，原文仍留在库里、仍参与检索。
    * 默认关：老调用方的输入不变。
    */
-  const CHATTER_RE = /^(?:嗯+|哦+|噢+|啊+|好(?:的|吧|呀)?|对(?:的|呀)?|是(?:的|啊)?|在(?:的|呢)?|行(?:吧|的)?|可以|收到|哈哈*|呵呵*|嘿+|唉+|哇+|谢谢|多谢|辛苦了|没事|没关系|晚安|早安|早上好|晚上好)[。！!~～,，.…\s]*$/;
+  /**
+   * 只收**纯语气词/寒暄**。"可以/收到/行/对/好的"是应答，可能承载决定
+   * （"周六爬山？"—"可以"就是答应），筛掉会漏记约定——这类一律不筛。
+   */
+  const CHATTER_RE = /^(?:嗯+|哦+|噢+|啊+|呃+|额+|唉+|哈+|呵+|嘿+|哇+|呀+|嘛+|呗+|谢谢|多谢|辛苦了|没事|没关系|晚安|早安|早上好|晚上好|在吗|在不在)[。！!~～,，.…\s?？]*$/;
   const chatter = (r) => skipChatter && r?.level === 'normal' && CHATTER_RE.test(String(r?.text ?? '').trim());
   const sorted = [...rows].filter((r) => !chatter(r)).sort(
     (a, b) => (W[b.level] ?? 1) - (W[a.level] ?? 1) || b.at - a.at,
@@ -243,7 +247,8 @@ export function buildPrompt({ day, chatName, items, revocation = null, facts = [
     ' "triples":[{"s":"...","rel":"...","o":"...","scope":"global"}],',
     ' "agreements":["...", {"text":"...","op":"update","old":"..."}],"closed":[]',
     revocation ? ',"revoked":[]' : '',
-    withProfiles ? ',"profiles":[{"who":"显示名","openid":"拿不到就留空","impression":"一小句","tips":"一小句","dislikes":"一小句雷区"}]' : '',
+    /** dislikes 用方括号表示可选——写进模板当必填会诱导模型硬凑雷区 */
+    withProfiles ? ',"profiles":[{"who":"显示名","openid":"拿不到就留空","impression":"一小句","tips":"一小句","dislikes":"（可选，没有就不写这个键）"}]' : '',
     '}',
   ].join('');
   return [
@@ -368,15 +373,7 @@ export function buildSelfPrompt({ day, said = [], corrected = [] } = {}) {
  * @param {object} [o.self]   createSelf() 的返回（第五层：自我叙述）
  * @param {(p:string)=>Promise<string>} [o.generate] 没给就只做机械压缩
  */
-export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false,
-  /**
-   * D2 坏批退避：记录"这一批连续失败几次"的持久化接口（由 host 注入）。
-   * `{ fails(key), bump(key), clear(key) }`；不传 = 不退避（老行为）。
-   * 为什么不自己读文件：consolidate 是纯函数式模块，持久化归 host 管。
-   */
-  badBatches = null } = {}) {
-  /** 同一批连续失败多少次就跳过（对齐 aurabot 的 BAD_BATCH_LIMIT=3） */
-  const BAD_BATCH_LIMIT = 3;
+export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false } = {}) {
   /**
    * D7：开关判据留在 host（config 是唯一真相），这里只认「有没有实例 + 开没开」。
    * 传函数是为了运行时改配置能立刻生效，不用重启 DSH。
@@ -456,14 +453,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         groups.get(k).push(r);
       }
 
-      const badKey = (cid) => `${target}:${cid || 'global'}`;
-      /** D2：连续失败达上限的批次跳过，别让一条脏数据每天阻塞巩固 */
-      const isBad = (cid) => Boolean(badBatches) && Number(badBatches.fails(badKey(cid)) || 0) >= BAD_BATCH_LIMIT;
-      const todo = [...groups.entries()]
-        .filter(([cid]) => !done(target, cid) && !isBad(cid))
-        .slice(0, MAX_CHATS_PER_RUN);
-      const badSkipped = [...groups.keys()].filter((cid) => !done(target, cid) && isBad(cid));
-      if (badSkipped.length) log(`巩固 ${target}：${badSkipped.length} 个批次连续失败已跳过`);
+      const todo = [...groups.entries()].filter(([cid]) => !done(target, cid)).slice(0, MAX_CHATS_PER_RUN);
       stats.skipped = [...groups.keys()].filter((cid) => done(target, cid));
       if (groups.size > MAX_CHATS_PER_RUN) {
         stats.truncated = [...groups.keys()].slice(MAX_CHATS_PER_RUN);
@@ -508,14 +498,6 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
             if (!plan) {
               log(`巩固 ${target}/${chatName}：模型输出不是 JSON，退回机械压缩`);
               stats.errors.push('模型输出解析失败');
-              /**
-               * D2：**只有格式错误才累计**坏批计数。网络/超时是偶发，
-               * 累计会让一次抖动把这一批永久跳过（对齐 aurabot：网络错误照抛重试）。
-               */
-              if (badBatches) badBatches.bump(badKey(chatId));
-            } else if (badBatches) {
-              /** 这次成功了：清掉历史失败计数，别让旧的失败拖累它 */
-              badBatches.clear(badKey(chatId));
             }
           } catch (e) {
             log(`巩固 ${target}/${chatName} 调模型失败：${e.message}`);
@@ -674,8 +656,9 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
   function profilesForPrompt() {
     if (!profOn() || !profiles?.recent) return null;
     try {
+      /** 把已有雷区也告诉模型——不告诉它就会重复写、且没法"改口"覆盖旧的 */
       const lines = profiles.recent(6).map((r) =>
-        `· ${r.name || r.key}（${r.key}）：${r.impression || ''}${r.tips ? `；相处：${r.tips}` : ''}`);
+        `· ${r.name || r.key}（${r.key}）：${r.impression || ''}${r.tips ? `；相处：${r.tips}` : ''}${r.dislikes ? `；雷区：${r.dislikes}` : ''}`);
       return { enabled: true, lines };
     } catch {
       return { enabled: true, lines: [] };

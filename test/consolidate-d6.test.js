@@ -196,47 +196,6 @@ test('D6：dry-run 列出每条处置明细，且一个字都不写盘', async (
   assert.equal(r.outdated, 0, 'dry 不执行作废');
 });
 
-/* ---------------- D2 坏批退避 ---------------- */
-
-test('D2：同一批连续格式错误 3 次后跳过，不再每天阻塞；成功一次就清零', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'roost-bad-'));
-  const data = join(dir, 'data');
-  mkdirSync(data, { recursive: true });
-  const oldEnv = process.env.DSH_ROOST_DATA;
-  process.env.DSH_ROOST_DATA = data;
-  const day = yesterdayOf(Date.now());
-  const base = Date.parse(`${day}T10:00:00`);
-  const j = createJournal({ file: join(data, 'j.sqlite'), log: noop });
-  j.add({ id: 'a', at: base, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '今天聊了一些工作上的事，还提到下周的安排' });
-
-  /** 内存版 badBatches，模拟 host 的注入 */
-  const counts = new Map();
-  const badBatches = {
-    fails: (k) => counts.get(k) || 0,
-    bump: (k) => counts.set(k, (counts.get(k) || 0) + 1),
-    clear: (k) => counts.delete(k),
-  };
-  let called = 0;
-  /** 模型永远输出非 JSON（格式错） */
-  const c = createConsolidate({
-    journal: j, graph: null, memory: createMemory(), generate: async () => { called += 1; return '这不是 JSON'; },
-    aliasesOf: () => [], log: noop, now: () => Date.now(), badBatches,
-  });
-
-  await c.run({ day });
-  assert.equal(called, 1, '第 1 次照常调模型');
-  assert.equal(counts.get(`${day}:g1`), 1, '格式错记一次');
-
-  await c.run({ day });
-  await c.run({ day });
-  const callsBefore = called;
-  await c.run({ day }); // 第 4 次
-  assert.equal(called, callsBefore, '连续失败 3 次后不再调模型（跳过该批）');
-
-  try { j.close(); } catch {}
-  if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA; else process.env.DSH_ROOST_DATA = oldEnv;
-});
-
 /* ---------------- D1 前置分流 ---------------- */
 
 test('D1：pickRows 默认不筛；skipChatter 只筛极短闲聊；原文不受影响', () => {

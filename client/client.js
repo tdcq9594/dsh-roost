@@ -5447,7 +5447,7 @@ select.roost-input{color-scheme:dark}
           (mem?.profiles || []).length
             ? h('div', { style: { display: 'grid', gap: 4, marginBottom: 8 } },
                 (mem.profiles || []).map((p, i) => h('div', { key: i, className: 'roost-note' },
-                  '· ' + p.name + '：' + (p.impression || '') + (p.tips ? `（相处：${p.tips}）` : ''))))
+                  '· ' + p.name + '：' + (p.impression || '') + (p.tips ? `（相处：${p.tips}）` : '') + (p.dislikes ? `（别踩：${p.dislikes}）` : ''))))
             : h('div', { className: 'roost-note', style: { marginBottom: 8 } }, '还没写过人物档案。'),
           h(ConfirmLink, {
             label: '清空人物档案', confirmLabel: '确认清空档案',
@@ -6767,10 +6767,11 @@ select.roost-input{color-scheme:dark}
                       h('div', { style: { display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' } },
                         h('div', null,
                           h('div', { className: 'roost-diag-h' }, '档案'),
-                          detail.person?.impression || detail.person?.tips
+                          detail.person?.impression || detail.person?.tips || detail.person?.dislikes
                             ? h('div', { className: 'roost-note' },
                                 (detail.person.impression || '（没有印象）')
-                                + (detail.person.tips ? `（相处：${detail.person.tips}）` : ''))
+                                + (detail.person.tips ? `（相处：${detail.person.tips}）` : '')
+                                + (detail.person.dislikes ? `（别踩：${detail.person.dislikes}）` : ''))
                             : h('div', { className: 'roost-empty' }, '档案里还没写过这个人')),
                         h('div', null,
                           h('div', { className: 'roost-diag-h' }, '关系'),
@@ -6803,7 +6804,7 @@ select.roost-input{color-scheme:dark}
           profiles.length
             ? h('div', { style: { display: 'grid', gap: 4, marginBottom: 8 } },
                 profiles.map((p, i) => h('div', { key: i, className: 'roost-note' },
-                  '· ' + p.name + '：' + (p.impression || '') + (p.tips ? `（相处：${p.tips}）` : ''))))
+                  '· ' + p.name + '：' + (p.impression || '') + (p.tips ? `（相处：${p.tips}）` : '') + (p.dislikes ? `（别踩：${p.dislikes}）` : ''))))
             : h('div', { className: 'roost-empty', style: { marginBottom: 8 } }, '还没写过人物档案。'),
           h(ConfirmLink, {
             label: '清空人物档案', confirmLabel: '确认清空档案', disabled: busy,

@@ -3279,13 +3279,20 @@ export function apply(ctx) {
   const memoryOff = (chatId, senderId = '') => {
     if (cfg.memory?.enabled === false) return true;
     /**
-     * E6 按人关（noUsers）：这个人说的话一律不记。
-     * 只在**写入侧**判——他说的不进库，自然也不会被召回；
-     * 已有的历史记忆仍可见（关的是"继续记他"，不是"抹掉过去"）。
+     * E6 按人关（noUsers）：这个人说的话一律**不再记**。
+     *
+     * 语义边界（有意如此）：关的是"继续记他"，不是"抹掉过去"。
+     * 已有的历史记忆仍可被想起——真要清历史用 memory.remove / profiles.forget。
+     * 不做读层过滤，是因为"不记"和"忘掉"是两个诉求，混在一起会让用户
+     * 以为配了 noUsers 就自动清空，结果发现旧记忆还在反而更困惑。
      */
     const noUsers = cfg.memory?.noUsers;
     const sid = String(senderId || '');
-    if (sid && Array.isArray(noUsers) && noUsers.includes(sid)) return true;
+    /**
+     * 主人永远豁免：把主人误配进 noUsers 会让「记住我住杭州」这种身份事实
+     * 一条都记不下来，而且面板上完全看不出原因。对齐 aurabot 的 isOwner 豁免。
+     */
+    if (sid && sid !== String(ownerId() || '') && Array.isArray(noUsers) && noUsers.includes(sid)) return true;
     const off = cfg.memory?.offChats;
     if (!Array.isArray(off) || !off.length) return false;
     const id = String(chatId || '');
@@ -3430,27 +3437,6 @@ export function apply(ctx) {
     /** D7：实例常驻，开关实时读 cfg（能力页改了不用重启） */
     profiles,
     profilesEnabled: () => cfg.profiles?.enabled === true,
-    /**
-     * D2 坏批退避：把"这批连续格式错误几次"记到一个小 JSON。
-     * 只是防脏数据每天阻塞巩固，丢了不致命——读坏就当空。
-     */
-    badBatches: (() => {
-      const file = () => join(dataDir(), 'consolidate-state.json');
-      let cache = null;
-      const read = () => {
-        if (cache) return cache;
-        try { cache = JSON.parse(readFileSync(file(), 'utf8')) || {}; } catch { cache = {}; }
-        return cache;
-      };
-      const write = () => {
-        try { writeFileSync(file(), JSON.stringify(cache || {}), 'utf8'); } catch { /* 记不下就算了 */ }
-      };
-      return {
-        fails: (k) => Number(read()[k]?.fails || 0),
-        bump: (k) => { const s = read(); s[k] = { fails: Number(s[k]?.fails || 0) + 1, at: Date.now() }; write(); },
-        clear: (k) => { const s = read(); if (s[k]) { delete s[k]; write(); } },
-      };
-    })(),
     log: (m) => log.info(m),
     generate: async (prompt) => {
       const consolidateChat = cfg.memory?.consolidateChat || 'consolidate';
@@ -10946,6 +10932,7 @@ export function apply(ctx) {
               openid: row?.openid || (row?.key !== name ? row?.key : '') || '',
               impression: row?.impression || '',
               tips: row?.tips || '',
+              dislikes: row?.dislikes || '',
               at: Number(row?.at) || 0,
               lastAt,
             },

@@ -186,10 +186,27 @@ test('C3 touchEntities：命中次数累加，entities 按热度优先', () => {
   const list = g.entities({ chatId: G1, limit: 10 });
   const zhang = list.find((e) => e.name === '张三');
   assert.equal(zhang.hits, 3, '命中次数累加');
-  assert.equal(list[0].name, '张三', '热度高的排前面（即使 last_seen 不是最新）');
+  /** 热度不跨时间压过更新的实体（见下一条测试）——只保证同 last_seen 时排前面 */
+  assert.ok(list.some((e) => e.name === '王五'), '更新的实体不能被热度挤掉');
 
   /** 不存在的实体不炸 */
   assert.equal(g.touchEntities(['不存在的人'], { chatId: G1 }), 0);
   /** 空输入不炸 */
   assert.equal(g.touchEntities([], { chatId: G1 }), 0);
+});
+
+test('C3 热度不能把新实体挤出候选窗口（hits 只是加分，不是唯一排序键）', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const t = Date.now();
+  /** 造 3 个老实体，全都有高热度 */
+  for (let i = 0; i < 3; i += 1) {
+    g.addEpisode({ at: t - 10_000, chatId: G1, text: `老${i}`, journalId: `jo${i}` });
+    g.addEdge({ src: `老${i}`, rel: '在', dst: '杭州', chatId: G1, at: t - 10_000 });
+    for (let k = 0; k < 5; k += 1) g.touchEntities([`老${i}`], { chatId: G1 });
+  }
+  /** 一个全新的实体（hits=0，但 last_seen 最新） */
+  g.addEpisode({ at: t, chatId: G1, text: '新人', journalId: 'jn' });
+  g.addEdge({ src: '新人', rel: '在', dst: '上海', chatId: G1, at: t });
+  const list = g.entities({ chatId: G1, limit: 3 });
+  assert.ok(list.some((e) => e.name === '新人'), '新实体要在候选窗口里，不能被高热度老实体全挤掉');
 });
