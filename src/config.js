@@ -367,7 +367,10 @@ export const DEFAULTS = {
      *
      * `allowChats`：白名单，只在这些会话注入【该问的事】（借鉴项目只惦记
      * 主人/speakup 私聊）。留空 = 不限制，与升级前逐字一致；想收紧就把
-     * 允许的 chatId 填进去。注入的提示词带护栏（只问一件、别催、可沉默）。
+     * 允许的 chatId 填进去——填**面板会话列表里的 chatId（QQ 官方 openid）**，
+     * 不是裸 QQ 号（官方事件不给 QQ 号，聊天里那个 uin 不匹配）。
+     * 换机器人留下的旧 openid（别名）也算。注入提示词带护栏（只问一件、
+     * 别催、可沉默），没有明确 question 的跟进一律跳过。
      */
     followUp: { enabled: false, allowChats: [] },
     /**
