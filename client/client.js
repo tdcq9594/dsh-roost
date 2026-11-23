@@ -4597,6 +4597,26 @@ select.roost-input{color-scheme:dark}
        * 只挂载时拉一次的话，标题写着 B 群、下面列的还是 A 群的召回。
        */
       useEffect(() => { loadRecall() }, [mem?.chatId])
+      /**
+       * A2 记忆统计快照：纯读，按需拉（点「看统计」才查，不默认打接口）。
+       * 数字全来自 stats.snapshot 的聚合，不在前端另算一套口径。
+       */
+      const [statsSnap, setStatsSnap] = useState(null)
+      const [statsErr, setStatsErr] = useState('')
+      const [statsBusy, setStatsBusy] = useState(false)
+      const loadStats = async () => {
+        setStatsBusy(true)
+        try {
+          const r = await quick('stats.snapshot', { period: 7 })
+          setStatsErr(r?.ok === false ? (r.message || '统计读取失败') : '')
+          setStatsSnap(r?.ok === false ? null : r)
+        } catch (e) {
+          setStatsErr(e.message)
+          setStatsSnap(null)
+        } finally {
+          setStatsBusy(false)
+        }
+      }
       const [q, setQ] = useState('')
       const [hits, setHits] = useState(null)
       const [fact, setFact] = useState('')
@@ -4910,7 +4930,44 @@ select.roost-input{color-scheme:dark}
          */
         /** A7：页首这几张是「总览入口」，不参与 01–07 的编号；说清就不会像漏页 */
         h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-          '下面三张（记忆星图 / 分层与遗忘 / 翻一翻）是总览入口，不参与编号；从「01 事实」起才是主流程。'),
+          '下面几张（记忆统计 / 记忆星图 / 分层与遗忘 / 翻一翻）是总览入口，不参与编号；从「01 事实」起才是主流程。'),
+        /**
+         * A2 统计快照：对齐 Hindsight /stats + timeseries 的展示形态。
+         * 只读、按需拉；7 天时序用最朴素的柱状，不引图表库（零依赖铁律）。
+         */
+        h(Sec, { title: '记忆统计', right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: statsBusy, onClick: loadStats,
+        }, statsBusy ? '读…' : '看统计') },
+          statsErr
+            ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } }, statsErr)
+            : !statsSnap
+              ? h('div', { className: 'roost-empty' }, '点「看统计」拉一张快照（只读，不改记忆）')
+              : (() => {
+                  const f = statsSnap.facts || {}, j = statsSnap.journal || {}, g = statsSnap.graph || {}
+                  const cells = [
+                    ['事实', `${f.live ?? 0} / ${f.total ?? 0}`, '活的 / 存储总数'],
+                    ['日记', `${j.total ?? 0}`, `压缩 ${j.compressionRate ?? 0}`],
+                    ['实体 · 边', `${g.entities ?? 0} · ${g.edges ?? 0}`, g.enabled ? '' : '图谱未启用'],
+                    ['近 7 天新增', `${(statsSnap.timeseries || []).reduce((a, d) => a + (d.count || 0), 0)} 条`, '按天见下'],
+                  ]
+                  const max = Math.max(1, ...(statsSnap.timeseries || []).map((d) => d.count || 0))
+                  return h('div', {},
+                    h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10 } },
+                      cells.map(([k, v, hint]) => h('div', { key: k, className: 'roost-item', style: { flex: '1 1 120px' } },
+                        h('div', { className: 'roost-muted', style: { fontSize: 11 } }, k),
+                        h('div', { style: { fontSize: 16, fontWeight: 600 } }, v),
+                        hint ? h('div', { className: 'roost-muted', style: { fontSize: 10.5 } }, hint) : null))),
+                    h('div', { className: 'roost-note', style: { marginBottom: 6 } }, '每天新增日记（近 7 天）'),
+                    h('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 4, height: 64 } },
+                      (statsSnap.timeseries || []).map((d) => h('div', {
+                        key: d.day, title: `${d.day}：${d.count} 条`,
+                        style: { flex: 1, height: Math.max(2, Math.round((d.count || 0) / max * 56)), background: 'var(--accent)', borderRadius: 2 },
+                      }))),
+                    h('div', { style: { display: 'flex', gap: 4, marginTop: 3 } },
+                      (statsSnap.timeseries || []).map((d) => h('span', { key: d.day, className: 'roost-muted', style: { flex: 1, fontSize: 9, textAlign: 'center' } }, d.day.slice(5)))))
+                })(),
+        ),
+
         h(Sec, { title: '记忆星图' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '把事实、日记、人物与关系画成一片星空，可切 2D / 3D，点星能看详情和编辑。',
@@ -19613,6 +19670,63 @@ select.roost-input{color-scheme:dark}
       )
     }
 
+    /**
+     * A1 审计查询：对齐 Hindsight `/audit-logs` 的「谁在什么时候动了什么」。
+     * 和上面的应用日志分开——那份是排查流程，这份是追责台账（白名单字段）。
+     * 只读、按需拉，默认不查（打开排障页不该顺手翻审计）。
+     */
+    function AuditPanel({ quick }) {
+      const [op, setOp] = useState('')
+      const [limit, setLimit] = useState(50)
+      const [rows, setRows] = useState(null)
+      const [err, setErr] = useState('')
+      const [busy, setBusy] = useState(false)
+      const load = async () => {
+        setBusy(true)
+        try {
+          const r = await quick('audit.query', { op: op.trim(), limit: Number(limit) || 50 })
+          setErr(r?.ok === false ? (r.message || '审计读取失败') : '')
+          setRows(r?.ok === false ? [] : r)
+        } catch (e) {
+          setErr(e.message)
+          setRows([])
+        } finally {
+          setBusy(false)
+        }
+      }
+      /** 不参与编号（和记忆页的「记忆星图」同范式）：编号只给主流程，01 仍归「最近的动静」 */
+      return h(Sec, { title: '操作审计', right: h('button', {
+        type: 'button', className: 'roost-btn', disabled: busy, onClick: load,
+      }, busy ? '查…' : '查询') },
+        h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+          '只记面板写操作的时间、操作名、会话与身份摘要，**不记参数内容**。查自己不写日志（免自污染）。'),
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 } },
+          h('input', {
+            className: 'roost-input', placeholder: '操作名，如 memory.clear（留空=全部）',
+            value: op, onChange: (e) => setOp(e.target.value), style: { flex: '1 1 200px' },
+          }),
+          h('select', {
+            className: 'roost-input', value: limit, onChange: (e) => setLimit(Number(e.target.value)), style: { width: 'auto' },
+          }, [20, 50, 100, 200].map((n) => h('option', { key: n, value: n }, `${n} 条`)))),
+        err
+          ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } }, err)
+          : !rows
+            ? h('div', { className: 'roost-empty' }, '点「查询」看最近的审计记录')
+            : rows.rows?.length === 0
+              ? h('div', { className: 'roost-empty' }, '还没有审计记录')
+              : h('div', { className: 'roost-list roost-scroll' },
+                  h('div', { className: 'roost-note', style: { margin: '0 0 6px' } },
+                    `窗口内 ${rows.rows.length} / ${rows.total} 条` + (rows.truncated ? ' · 只扫了最近 256 KB，更早的看不到' : '')),
+                  rows.rows.map((r, i) => h('div', { key: i, className: 'roost-item' },
+                    h('span', { className: 'd' }, r.at ? new Date(r.at).toLocaleString() : ''),
+                    h('span', { className: 't' },
+                      h('span', { style: { fontWeight: 600 } }, r.op || '?'),
+                      r.chatId ? h('span', { className: 'roost-muted' }, ` · ${r.chatId}`) : null,
+                      r.peer ? h('span', { className: 'roost-muted' }, ` · ${r.peer}${r.peerId ? ':' + r.peerId : ''}`) : null,
+                      r.note ? h('span', { className: 'roost-muted' }, ` · ${r.note}`) : null))))
+      )
+    }
+
     /* ---------------- 治理 ---------------- */
 
     /**
@@ -21403,6 +21517,7 @@ select.roost-input{color-scheme:dark}
             : null,
           tab === 'logs'
             ? h('div', { className: 'roost-diag' },
+                h(AuditPanel, { quick }),
                 h(LogsTab, {
                 logs,
                 auto: logAuto,

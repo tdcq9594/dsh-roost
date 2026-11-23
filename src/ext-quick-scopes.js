@@ -45,6 +45,8 @@ const STATE_READ_OPS = Object.freeze([
   'features.get', 'features.preview',
   'recall.log',
   'backup.list',
+  /** A2 记忆统计快照：只读聚合，和 `/v1/state` 同口径 */
+  'stats.snapshot',
 ]);
 
 /** 调教类：改模型 / 配额 / 能力档位 / 保留策略。 */
@@ -71,6 +73,11 @@ const HOST_MAINT_OPS = Object.freeze([
   'onnx.status', 'onnx.install', 'onnx.cancel', 'onnx.uninstall',
   'onnx.modelInstall', 'onnx.modelCancel', 'onnx.modelUninstall',
   'onnx.rerankInstall', 'onnx.rerankCancel', 'onnx.rerankUninstall',
+  /**
+   * A1 审计日志查询：虽然只读，但含 chatId / peer / peerId（谁在什么时候动了什么），
+   * 比 `memory:read` 更敏感——和备份还原同归 host:maintenance，最小授权。
+   */
+  'audit.query',
 ]);
 
 /** 不可逆的删除类。 */

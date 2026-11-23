@@ -37,6 +37,8 @@ import { createSetup } from './setup.js';
 import { shouldRegisterQqTools } from './qq-tools.js';
 import { createMemory, W_EXPLICIT } from './memory.js';
 import { buildMindModel, renderMindModel } from './mind-model.js';
+import { queryAudit } from './audit-query.js';
+import { statsSnapshot, dayOf as localDayOf } from './stats-snapshot.js';
 import { createJournal } from './journal.js';
 import { createLedgerReader } from './ledger-read.js';
 import { createChannelPost, normalizePostCfg, guide, humanError, pickErrorCode, shareUrlOf } from './channel-post.js';
@@ -8928,7 +8930,9 @@ export function apply(ctx) {
          * 只记意图不记结果——失败时用户能看到 toast，这里要的是可追溯。
          * `memory.list` 是纯读，跳过，否则翻一次记忆就多一行噪音。
          */
-        if (op && op !== 'memory.list' && op !== 'capabilities.get' && op !== 'capabilities.preview' && op !== 'features.get' && op !== 'features.preview' && op !== 'quota.get' && op !== 'backup.list') audit({ op, chatId, peer: who.kind, peerId: who.id });
+        if (op && op !== 'memory.list' && op !== 'capabilities.get' && op !== 'capabilities.preview' && op !== 'features.get' && op !== 'features.preview' && op !== 'quota.get' && op !== 'backup.list'
+          /* A1：审计查询/统计快照本身是纯读，且查审计会写审计=自己污染自己 */
+          && op !== 'audit.query' && op !== 'stats.snapshot') audit({ op, chatId, peer: who.kind, peerId: who.id });
 
         try {
           switch (op) {
@@ -10174,6 +10178,57 @@ export function apply(ctx) {
 
             case 'memory.list':
               return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId, aliasesOf(chatId)) });
+
+            /**
+             * A1 审计日志查询（只读）。对齐 Hindsight `/audit-logs` 的过滤+分页口径，
+             * 但只走面板 quick——审计含 chatId/peer，不给扩展 `/v1` 开端点。
+             * 纯读：`audit.query()` 不写盘，上面还把它排除在审计之外（免自污染）。
+             */
+            case 'audit.query': {
+              try {
+                return send(res, 200, {
+                  ok: true,
+                  ...queryAudit({
+                    since: arg?.since, until: arg?.until,
+                    op: arg?.op, chatId: arg?.chatId,
+                    limit: arg?.limit, offset: arg?.offset,
+                  }),
+                });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: `审计日志读不出来：${e?.message ?? e}` });
+              }
+            }
+
+            /**
+             * A2 记忆统计快照（只读）。对齐 Hindsight `/stats` + timeseries 的展示形态。
+             * 按天时序从 journal 的 `day` 索引逐天读（索引在，7 天 7 次查询），
+             * **不新增 store 方法**——也就不用碰 personaScope PLAN（铁律：新增 store
+             * 方法必须登记，否则人格隔离下静默失效）。
+             */
+            case 'stats.snapshot': {
+              try {
+                const period = Math.min(30, Math.max(1, Number(arg?.period) || 7));
+                const days = [];
+                for (let i = period - 1; i >= 0; i -= 1) {
+                  // 本地日，和 journal 的 dayOf() 同口径——UTC 会把凌晨的对话算到前一天
+                  const key = localDayOf(Date.now() - i * 86400000);
+                  days.push({ day: key, count: journal.byDay(key).length });
+                }
+                const full = memory.listFull(chatId, aliasesOf(chatId));
+                return send(res, 200, {
+                  ok: true,
+                  ...statsSnapshot({
+                    global: full.global, chat: full.chat,
+                    journal: journal.stats(),
+                    graph: graph.stats(),
+                    usage: usage.summary({ days: period, pricing: config?.usage?.pricing }),
+                    days, period,
+                  }),
+                });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: `统计读不出来：${e?.message ?? e}` });
+              }
+            }
 
             /**
              * B2 心智模型树：把"她现在相信什么"按实体组织成可导航的树 + markdown。
