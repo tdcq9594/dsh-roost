@@ -37,10 +37,18 @@ const execFileAsync = promisify(execFile);
 export const ONNX_NODE_VERSION = '1.31.1';
 export const ONNX_COMMON_VERSION = '1.31.1';
 
-/** 要装的两个包（名字 + 版本）。onnxruntime-node 依赖 common，两个都手工落位 */
+/** 版本固定：跟 latest 走等于把「上游发新版」变成用户的安装失败 */
+export const TOKENIZERS_VERSION = '0.2.0';
+
+/**
+ * 要装的三个包（名字 + 版本）。
+ *   onnxruntime-node 依赖 common；tokenizers 是纯 JS/WASM（8.3kB gzip，
+ *   无 postinstall），用来读 HuggingFace 的 tokenizer.json 做中文分词。
+ */
 export const ONNX_PACKAGES = Object.freeze([
   ['onnxruntime-common', ONNX_COMMON_VERSION],
   ['onnxruntime-node', ONNX_NODE_VERSION],
+  ['@huggingface/tokenizers', TOKENIZERS_VERSION],
 ]);
 
 const PHASE = Object.freeze({
@@ -217,14 +225,18 @@ export function createOnnxInstaller({
 
     for (const [name, version] of ONNX_PACKAGES) {
       set({ phase: PHASE.DOWNLOAD, message: `下载 ${name}…`, received: 0, total: 0 });
-      const tgz = join(tmp, `${name}.tgz`);
+      /** scoped 包名带 `/`，不能当文件名——照 tts-install 的 edge 分支替换掉 */
+      const tgz = join(tmp, `${name.replace(/[\\/@]/g, '_')}.tgz`);
       await downloadFromAny(candidates(name, version), tgz, signal);
 
       set({ phase: PHASE.EXTRACT, message: `解压 ${name}…` });
       await untar(tar, tgz, tmp);
       const unpacked = join(tmp, 'package');
       if (!existsSync(unpacked)) throw new Error(`${name} 压缩包结构不对（没有 package 目录）`);
-      renameSync(unpacked, join(tmp, 'node_modules', name));
+      /** scoped 包落到 node_modules/@scope/name，父目录要先建（同 tts-install edge） */
+      const dest = join(tmp, 'node_modules', ...name.split('/'));
+      mkdirSync(dirname(dest), { recursive: true });
+      renameSync(unpacked, dest);
       rmSync(tgz, { force: true });
     }
 

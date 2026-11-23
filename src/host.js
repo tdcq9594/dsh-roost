@@ -280,6 +280,7 @@ import {
 import { createTtsInstaller } from './tts-install.js';
 import { createOnnxInstaller } from './onnx-install.js';
 import { createModelInstaller } from './onnx-model-install.js';
+import { createLocalEmbedder } from './local-embed.js';
 import { createTurnScenes } from './turn-scene.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -3133,9 +3134,21 @@ export function apply(ctx) {
   /* ---------------- 日记 / 图谱 / 巩固 ---------------- */
 
   /** 向量（可选）。没配 `memory.embedding` 时 enabled() 是 false，检索自动只用关键词 */
+  /**
+   * 本地 embedding（可选）：只有 `memory.embeddingLocal: true` 且模型装好才生效，
+   * 默认关——不装模型的人不该被拖进 470MB 下载、也不改任何现有行为。
+   * 装好但没开时 local.enabled() 仍可能为 true，所以这里用配置做总闸。
+   */
+  const localEmbedder = createLocalEmbedder({
+    dataDir,
+    log: (m) => log.warn(m),
+  });
+
   const embedder = createEmbedder({
     cfgOf: () => cfg.memory?.embedding,
     log: (m) => log.warn(m),
+    /** getter：每轮现读配置开关，面板改了下一轮生效，不用重启 */
+    localOf: () => (cfg.memory?.embeddingLocal === true ? localEmbedder : null),
   });
 
   /**

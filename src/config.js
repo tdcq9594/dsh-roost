@@ -391,6 +391,12 @@ export const DEFAULTS = {
      */
     embedding: null,
     /**
+     * 本地 embedding 总开关（默认关）。装好 e5-small 模型后打开它，
+     * 检索的向量那一路就走本地 ONNX，不需要任何外部 API / 凭证。
+     * 模型没装好时即使打开也安静回落纯关键词，不报错。
+     */
+    embeddingLocal: false,
+    /**
      * 可选过期策略（调研报告 D11）。
      *
      * 2026-11-08 主人拍板「两类都做，让用户自由开关」→ 拆成**两路各自一个

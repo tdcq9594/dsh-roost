@@ -5,16 +5,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  createOnnxInstaller, ONNX_NODE_VERSION, ONNX_COMMON_VERSION, ONNX_PACKAGES,
+  createOnnxInstaller, ONNX_NODE_VERSION, ONNX_COMMON_VERSION, TOKENIZERS_VERSION, ONNX_PACKAGES,
 } from '../src/onnx-install.js';
 import { tgzUrl } from '../src/npm-registry.js';
 
 const dataDirOf = () => mkdtempSync(join(tmpdir(), 'roost-onnx-'));
 
-test('ONNX 版本固定，两个包都声明（不跟 latest）', () => {
+test('ONNX 版本固定，三个包都声明（不跟 latest）', () => {
   assert.match(ONNX_NODE_VERSION, /^\d+\.\d+\.\d+$/);
   assert.match(ONNX_COMMON_VERSION, /^\d+\.\d+\.\d+$/);
-  assert.deepEqual(ONNX_PACKAGES.map(([n]) => n), ['onnxruntime-common', 'onnxruntime-node']);
+  assert.match(TOKENIZERS_VERSION, /^\d+\.\d+\.\d+$/);
+  assert.deepEqual(ONNX_PACKAGES.map(([n]) => n), [
+    'onnxruntime-common', 'onnxruntime-node', '@huggingface/tokenizers',
+  ]);
 });
 
 test('npm tgz URL 用现成的 tgzUrl（不另造）：非 scoped 直链', () => {
