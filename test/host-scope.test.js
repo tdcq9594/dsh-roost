@@ -127,7 +127,18 @@ test('开火时机：能力表只由链路触发，构造完不许立刻 refresh
     /if \(state === 'online'\)[\s\S]{0,400}?refreshCaps\(\)/,
     'online 进线时必须补拉一次',
   );
-  assert.match(SRC, /reportExtCatalog\(\)/, 'online 时还要把扩展能力清单报给框架（反向联动）');
+  assert.match(
+    SRC,
+    /onReady:\s*\(\)\s*=>\s*\{[\s\S]{0,200}?reportExtCatalog\(\)/,
+    '扩展清单改在真连通（onReady）时上报，不再挂 onState online',
+  );
+  assert.doesNotMatch(
+    SRC,
+    /if \(state === 'online'\) \{[^}]*reportExtCatalog\(\)/,
+    'onState online 不能再上报：pump 在连接建立前就置 online，失败重连会刷框架日志',
+  );
+  assert.match(SRC, /sig === lastCatalogSig/, '清单签名没变时不重复 RPC');
+  assert.match(SRC, /catalogInFlight/, '并发上报要挡住，不能让一次抖动打出多条');
   assert.match(SRC, /caps\.refresh\(\{ force: true \}\)/, '面板手动刷新要走 force，否则离线时一律静默跳过');
 });
 
