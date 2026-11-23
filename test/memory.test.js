@@ -23,7 +23,7 @@ import { createGraph } from '../src/graph.js';
 import {
   createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc, strongerStatus, canSupersede,
   evidenceOf, applyEvidence, trendOf, MEMORY_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS,
-  kindOf, occurredOf, FACT_KINDS,
+  kindOf, occurredOf, FACT_KINDS, growTier,
 } from '../src/memory.js';
 import {
   createConsolidate,
@@ -2767,4 +2767,30 @@ test('A2-4 重提不改种类与事发时间（事实属性，不随陈述变）
   const meta = readRaw().meta.global['我上周搬家'];
   assert.equal(meta.kind, 'experience', '重提不能把亲历改成客观事实');
   assert.equal(meta.occurredAt, 999, '事发时间不随重提变');
+});
+
+/* ---------------- B1：按证据自动升档（对齐 aurabot growTier，信号换成 evidence） ---------------- */
+
+test('B1-1 growTier：2 条证据 short→long，4 条 long→core，core 永不降', () => {
+  assert.equal(growTier({ tier: 'short', evidence: [{}, {}] }), 'long');
+  assert.equal(growTier({ tier: 'short', w: 2 }), 'long', '权重够也升');
+  assert.equal(growTier({ tier: 'long', evidence: [{}, {}, {}, {}] }), 'core');
+  assert.equal(growTier({ tier: 'long', w: 4 }), 'core');
+  assert.equal(growTier({ tier: 'core', evidence: [] }), 'core', '永久层不降级');
+  assert.equal(growTier({ tier: 'short', evidence: [{}] }), 'short', '证据不够不动');
+});
+
+test('B1-2 重提带证据会升档；老调用点（不传 evidence）不动', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-grow-'));
+  const m = createMemory();
+  m.add('g1', '常提起的事', 'global', { tier: 'short' });
+  assert.equal(readRaw().meta.global['常提起的事'].tier, 'short');
+  /** 老调用点：重提不传 evidence —— 保持 short */
+  m.add('g1', '常提起的事');
+  assert.equal(readRaw().meta.global['常提起的事'].tier, 'short', '不传证据不该升档');
+  /** 两次带证据的重提 → 2 条证据 → 升到 long */
+  m.add('g1', '常提起的事', 'global', { evidence: { kind: 'chat', detail: '第一次确认' } });
+  m.add('g1', '常提起的事', 'global', { evidence: { kind: 'chat', detail: '第二次确认' } });
+  const meta = readRaw().meta.global['常提起的事'];
+  assert.equal(meta.tier, 'long', '证据够了自动升档');
 });

@@ -135,6 +135,26 @@ export const TIER_DECAY = Object.freeze({ short: 0.5, long: 1, core: 0 });
 /** 归档的条目不注入，但留在库里可恢复；和 until 一样占名额时打折 */
 export const ARCHIVE_WEIGHT = 0.25;
 
+/**
+ * B1 自动升档（对齐 aurabot growTier，但信号不同）：
+ *   aurabot 用 hitDays（被检索命中的天数）；我们**故意不记 accessed**
+ *   （"注入即加冕"——见上面 listRanked 的注释），所以改用 evidence 条数：
+ *   每一条独立证据就是一次真实确认，不是"被自己读到"的假信号。
+ *
+ * 规则：short→long 需 2 条证据或 w≥2；long→core 需 4 条证据或 w≥4。
+ * core 永不降级（aurabot 的 strongerTier 语义——永久层只升不降）。
+ * 纯函数：不写盘，调用方在写入路径决定何时落。
+ */
+export function growTier(meta) {
+  const cur = FACT_TIERS.includes(meta?.tier) ? meta.tier : 'long';
+  if (cur === 'core') return 'core';
+  const ev = Array.isArray(meta?.evidence) ? meta.evidence.length : 0;
+  const w = Number(meta?.w) > 0 ? Number(meta.w) : 1;
+  if (cur === 'short' && (ev >= 2 || w >= 2)) return 'long';
+  if (cur === 'long' && (ev >= 4 || w >= 4)) return 'core';
+  return cur;
+}
+
 /* ---------------- 可信度分级（2026-11-18） ----------------
  * 修的问题：群聊里"张三说他下周三出差"这种**转述**，和主人亲口说的
  * "我下周三出差"以前在库里长得一模一样，同样的 `w`、同样进 system 常驻。
@@ -804,7 +824,16 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
        * 老调用点不传，行为与字节都不变。跨级顶替护栏不受影响——证据只动
        * confidence，不动 status（`canSupersede` 仍在 supersede() 里守）。
        */
-      if (opts.evidence) writeEvidence(next, applyEvidence(old, 'reinforce', opts.evidence));
+      if (opts.evidence) {
+        writeEvidence(next, applyEvidence(old, 'reinforce', opts.evidence));
+        /**
+         * B1 自动升档：证据够了就往深一级走（short→long→core）。
+         * 只在真有证据写进来时判——老调用点不传 evidence，这一行不执行，
+         * 行为与字节都不变；也不会出现"被注入就升档"的加冕。
+         */
+        const grown = growTier(next);
+        if (grown !== (FACT_TIERS.includes(next.tier) ? next.tier : 'long')) next.tier = grown;
+      }
       /** fact 是默认值，不落盘——老库、普通事实的字节与升级前完全一致 */
       if (next.status === 'fact') delete next.status;
       metaMap[f] = next;
@@ -1067,6 +1096,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (!EVIDENCE_RELATIONS.includes(relation)) return { ok: false, why: 'bad_relation' };
       const next = applyEvidence(hit.mm[hit.text], relation, evidence);
       writeEvidence(hit.mm[hit.text], next);
+      /** B1：巩固证据够了也升档（同一口径，不只在 add 路径生效） */
+      const target = hit.mm[hit.text];
+      const grown = growTier(target);
+      if (grown !== (FACT_TIERS.includes(target.tier) ? target.tier : 'long')) target.tier = grown;
       save();
       return { ok: true, confidence: next.confidence, proofs: next.proofs };
     },
