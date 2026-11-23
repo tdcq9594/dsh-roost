@@ -2619,3 +2619,37 @@ test('前端渲染：偷表情、贴表情入口都在，小黄脸码表页不�
   /** 码表页不能回来：留着只会引导用户复制一个发不出去的标记 */
   assert.doesNotMatch(src, /FaceMap/, '码表页已下线，别留入口')
 })
+
+test('功能包页：ONNX 有独立安装区块，不再误跳语音页；开关能存', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  /** ONNX 三套各自的安装/取消/卸载 op 都接上了 */
+  for (const op of [
+    'onnx.install', 'onnx.cancel', 'onnx.uninstall',
+    'onnx.modelInstall', 'onnx.modelCancel', 'onnx.modelUninstall',
+    'onnx.rerankInstall', 'onnx.rerankCancel', 'onnx.rerankUninstall',
+  ]) {
+    assert.ok(src.includes(`'${op}'`), `ONNX 区块缺了 ${op}`)
+  }
+  /** 独立区块 + 从语音只读列表里滤掉 ONNX（否则每行都挂"去语音页"） */
+  assert.match(src, /title: '本地智能/, 'ONNX 该有自己的区块标题')
+  assert.match(src, /\.filter\(\(r\) => !String\(r\.id \|\| ''\)\.startsWith\('onnx'\)\)/, 'ONNX 不该混进语音运行时列表')
+  /** load() 把 onnx.status 并进来；轮询兼容三套安装器 */
+  assert.match(src, /quick\('onnx\.status'\)/, '功能包页要读 onnx 状态')
+  assert.match(src, /ox\.model\?\.install\?\.running/, 'embedding 安装中也要轮询')
+  assert.match(src, /ox\.rerankModel\?\.install\?\.running/, 'rerank 安装中也要轮询')
+  /** 装完能开：两个开关都要能存进配置 */
+  assert.match(src, /embeddingLocal: on/, '本地向量开关要能存')
+  assert.match(src, /useLocal: on/, '本地重排开关要能存')
+})
+
+test('记忆页：证据趋势/条数/出处明细可见（阶段1 算出的不能只躺在数据里）', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  /** 事实列表行：非默认趋势要标出来，多条证据要显条数 */
+  assert.match(src, /const TREND_LABEL = \{ strengthening:/, '趋势档位标签要在事实列表可见')
+  assert.match(src, /`\$\{evCount\} 条佐证`/, '多条证据要显条数')
+  /** 星图详情：带上趋势/证据/信念字段，并能展开看出处（原文 id + 引文） */
+  assert.match(src, /trend: String\(f\.trend \|\| ''\)/, '星点要带趋势字段')
+  assert.match(src, /看证据（\$\{detail\.evidence\.length\}）/, '星点详情要有看证据按钮')
+  assert.match(src, /原文 \$\{ev\.journalId\}/, '证据要能回查原文 id')
+  assert.match(src, /ev\.quote/, '证据要显示引文')
+})

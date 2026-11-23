@@ -164,6 +164,113 @@ export function canSupersede(nextStatus, oldStatus) {
   return STATUS_RANK[statusOf({ status: nextStatus })] >= STATUS_RANK[statusOf({ status: oldStatus })];
 }
 
+/* ---------------- 证据账本（2026-11-23，P0） ---------------- */
+
+/**
+ * 一条信念的"证据强度"，与 `w`（重要性）、`accessed`（被想起次数）**三者正交**。
+ *
+ * 为什么不合并：`w` 是"这事多重要"，`accessed` 是"被检索到几次"（检索效用），
+ * 而 `confidence` 是"有几条独立证据撑着"（认知强度）。一条被反复提起的
+ * 转述（accessed 高、confidence 低）和一条主人强调过三次的事（都高）不是一回事。
+ * 合并成一个数＝让频次冒充证据——`scoreOf` 防的"永久加冕"会换个名字复发。
+ *
+ * 存 `meta[正文]` 的三个旁路字段，**全部默认值不落盘**：
+ *   proofs     独立证据条数（默认 0）
+ *   evidence   出处摘要数组（默认 []，每条 {kind,at,detail}，detail 只留短句不抄原文）
+ *   confidence 0..1 信念强度（默认 1，满信念；老库/普通事实字节不变）
+ *
+ * 为什么默认 confidence=1 而不是 0.5：老数据没有这个字段，一律当"我就是这么记的"
+ * 的满信念；只有明确传来 weaken/contradict 才往下调。这样升级是纯增量。
+ */
+export const EVIDENCE_RELATIONS = Object.freeze(['reinforce', 'weaken', 'contradict', 'neutral']);
+/**
+ * 证据趋势的档位。照搬 Hindsight `engine/reflect/observations.py` 的 Trend，
+ * 不改阈值、不改窗口——对面踩过坑的取舍直接用，别自己设计。
+ */
+export const EVIDENCE_TRENDS = Object.freeze(['new', 'strengthening', 'stable', 'weakening', 'stale']);
+const ALPHA = 0.25;
+const EVIDENCE_MAX = 12;
+const TREND_RECENT_DAYS = 30;
+const TREND_OLD_DAYS = 90;
+
+/** 归一化：老数据没有这些字段时给默认，不写回盘 */
+export function evidenceOf(meta) {
+  const raw = Array.isArray(meta?.evidence) ? meta.evidence : [];
+  return {
+    proofs: Math.max(0, Number(meta?.proofs) || 0),
+    evidence: raw.slice(0, EVIDENCE_MAX),
+    confidence: clamp01(meta?.confidence ?? 1),
+  };
+}
+
+/**
+ * 四档证据关系 → 新的证据强度。纯函数，可单测。
+ *
+ * reinforce +α / weaken −α / contradict −2α / neutral 不动；全部夹在 [0,1]。
+ * `proofs` 只在带来新出处时 +1（`evidence` 有内容），neutral 不算新证据。
+ *
+ * 这里**不改 status、不改 w**：跨级顶替护栏（`canSupersede`）仍由 `addInto` 守，
+ * 证据只影响置信度，不动"谁能关掉谁"——否则信源判断会被绕过。
+ */
+export function applyEvidence(prev, relation, item = null) {
+  const cur = evidenceOf(prev);
+  const rel = EVIDENCE_RELATIONS.includes(relation) ? relation : 'neutral';
+  const delta = rel === 'reinforce' ? ALPHA : rel === 'weaken' ? -ALPHA : rel === 'contradict' ? -2 * ALPHA : 0;
+  const withItem = item && typeof item === 'object' && Object.keys(item).length > 0;
+  const evidence = withItem
+    ? [...cur.evidence, { ...item, at: Number(item.at) > 0 ? Number(item.at) : Date.now() }].slice(-EVIDENCE_MAX)
+    : cur.evidence;
+  return {
+    proofs: cur.proofs + (withItem ? 1 : 0),
+    evidence,
+    confidence: clamp01(cur.confidence + delta),
+  };
+}
+
+/**
+ * 证据趋势：由证据时间戳分布**算出来**，不是谁判定的动作。
+ *
+ * 逐行照搬 Hindsight `compute_trend()`（30/90 天窗口、密度比 1.5 / 0.5）：
+ *   没有近期证据 → stale；全在近期 → new；近期密度是早期的 1.5 倍以上 →
+ *   strengthening；不到一半 → weakening；其余 stable。
+ *
+ * 为什么这样就能解"weaken 没有调用方"：旧证据自然变稀疏，趋势自己会掉，
+ * 不需要有人显式调用 weaken。这是对面成熟的地方——bet on it，不自己设计。
+ *
+ * 纯函数，不写盘、不依赖模型。`confidence` 是显式判定信号（对标它的 opinion
+ * 网络），`trend` 是算出来的观察信号（对标 observation 网络），两者正交并存。
+ */
+export function trendOf(evidence, now = Date.now(), { recentDays = TREND_RECENT_DAYS, oldDays = TREND_OLD_DAYS } = {}) {
+  const rows = Array.isArray(evidence) ? evidence : [];
+  if (!rows.length) return 'stale';
+  const ts = rows.map((e) => Number(e?.at) || 0).filter((n) => n > 0);
+  if (!ts.length) return 'stale';
+  const nowMs = Number(now) > 0 ? Number(now) : Date.now();
+  const recentCut = nowMs - recentDays * DAY_MS;
+  const oldCut = nowMs - oldDays * DAY_MS;
+  const recent = ts.filter((t) => t > recentCut);
+  const old = ts.filter((t) => t < oldCut);
+  const middle = ts.filter((t) => t >= oldCut && t <= recentCut);
+  if (!recent.length) return 'stale';
+  if (!old.length && !middle.length) return 'new';
+  const recentDensity = recentDays > 0 ? recent.length / recentDays : 0;
+  const olderPeriod = oldDays - recentDays;
+  const olderDensity = olderPeriod > 0 ? (old.length + middle.length) / olderPeriod : 0;
+  if (!olderDensity) return 'new';
+  const ratio = recentDensity / olderDensity;
+  if (ratio > 1.5) return 'strengthening';
+  if (ratio < 0.5) return 'weakening';
+  return 'stable';
+}
+
+/** 把算出的证据字段写进 meta；默认值删掉不落盘（老库字节一致） */
+function writeEvidence(meta, next) {
+  if (next.proofs > 0) meta.proofs = next.proofs; else delete meta.proofs;
+  if (next.evidence.length) meta.evidence = next.evidence; else delete meta.evidence;
+  if (next.confidence < 1) meta.confidence = next.confidence; else delete meta.confidence;
+  return meta;
+}
+
 /** 正文 → 稳定短 id（djb2）；同一句话永远同一个 id，编辑后自然换新 id */
 export function factIdOf(text) {
   let h = 5381;
@@ -592,6 +699,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
         status: strongerStatus(old?.status, nextStatus),
       };
       if (next.until) next.until = null;
+      /**
+       * 重提＝一次 reinforce 证据。调用方给了 `opts.evidence`（出处摘要）才累计；
+       * 老调用点不传，行为与字节都不变。跨级顶替护栏不受影响——证据只动
+       * confidence，不动 status（`canSupersede` 仍在 supersede() 里守）。
+       */
+      if (opts.evidence) writeEvidence(next, applyEvidence(old, 'reinforce', opts.evidence));
       /** fact 是默认值，不落盘——老库、普通事实的字节与升级前完全一致 */
       if (next.status === 'fact') delete next.status;
       metaMap[f] = next;
@@ -601,12 +714,15 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
 
     list.push(f);
     /** 面板「加一颗」可以直接给重要度与层级（可选；老调用方不传，行为不变） */
-    metaMap[f] = {
+    const fresh = {
       w: Number(opts.w) > 0 ? Number(opts.w) : 1, at: t, src,
       ...(opts.pin !== undefined ? { pin: clamp01(opts.pin) } : {}),
       ...(FACT_TIERS.includes(opts.tier) ? { tier: opts.tier } : {}),
       ...(nextStatus && nextStatus !== 'fact' ? { status: nextStatus } : {}),
     };
+    /** 新建就带出处＝第一条证据；老调用点不传 evidence，这一行是空操作 */
+    if (opts.evidence) writeEvidence(fresh, applyEvidence({}, 'reinforce', opts.evidence));
+    metaMap[f] = fresh;
     supersede();
 
     /**
@@ -813,6 +929,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
             archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : null,
             reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : null,
             brightness: brightnessOf(x, Date.now()),
+            /** 证据账本：老库给默认（0 条 / 满信念），不写回盘 */
+            ...evidenceOf(x),
+            /** 趋势是算出来的（对标 Hindsight 的 computed_field），不存在盘上 */
+            trend: trendOf(evidenceOf(x).evidence),
           };
         });
       const c = collectChat(m, chatId, aliases);
@@ -823,11 +943,35 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
     },
 
     /**
+     * 给一条已存在的记忆记一次证据判定（显式入口，供巩固 / 未来的 decide 模型用）。
+     *
+     * 为什么单独开方法而不是塞进 `add()`：`weaken` / `contradict` 要改的是
+     * **已有**信念的置信度，不是新记一条事实。走 `add()` 会触发 supersede/
+     * 容量淘汰那一整套，语义不对。这里只按 (scope,chatId,正文) 精确定位一条，
+     * 改证据字段，不动 w / status / until。
+     *
+     * 同样守跨级护栏的定位口径：只认完全相等，不猜、不模糊匹配（同 locateFact）。
+     *
+     * @returns {{ok:boolean, why?:string, confidence?:number, proofs?:number}}
+     */
+    recordEvidence(chatId, text, relation, evidence = null, scope = 'global') {
+      const m = load();
+      const hit = locateFact(m, { scope, chatId, text });
+      if (!hit) return { ok: false, why: 'not_found' };
+      if (!EVIDENCE_RELATIONS.includes(relation)) return { ok: false, why: 'bad_relation' };
+      const next = applyEvidence(hit.mm[hit.text], relation, evidence);
+      writeEvidence(hit.mm[hit.text], next);
+      save();
+      return { ok: true, confidence: next.confidence, proofs: next.proofs };
+    },
+
+    /**
      * 记一条。
      *
      * @param {'global'|'chat'} scope 默认 global —— 用户说"记住 XX"多半是关于他自己
-     * @param {{w?:number, status?:'fact'|'hearsay'|'guess', src?:{journalId?:string, eventIds?:string[], speaker?:string, at?:number}, at?:number}} [opts]
+     * @param {{w?:number, status?:'fact'|'hearsay'|'guess', src?:{journalId?:string, eventIds?:string[], speaker?:string, at?:number}, at?:number, evidence?:{kind?:string,detail?:string,at?:number}}} [opts]
      *   `status` 不传 = `fact`（手记、`<<remember>>`、老调用点都是这一档）
+     *   `evidence` 传了才累计证据账本（重提=reinforce），老调用点不传行为不变
      */
     add(chatId, fact, scope = 'global', opts = {}) {
       const m = load();
@@ -1232,6 +1376,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
               pin: clamp01(x.pin),
               reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : 0,
               archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : 0,
+              /** 证据账本三个字段：漏一个，清理→还原就把证据抹掉（同 status 的教训） */
+              ...evidenceOf(x),
             });
           }
         };
@@ -1342,6 +1488,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (Number(row.pin) > 0) meta.pin = clamp01(row.pin);
       if (Number(row.reviewedAt) > 0) meta.reviewedAt = Number(row.reviewedAt);
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);
+      /** 证据账本：默认值不落盘，还原后与升级前的老库逐字节一致 */
+      writeEvidence(meta, evidenceOf(row));
       list.push(text);
       mm[text] = meta;
       /** 同 `add()`：还原进内存但没落盘，要如实回 false（备份还原靠它判断） */
