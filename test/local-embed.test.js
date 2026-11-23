@@ -66,10 +66,13 @@ test('createLocalEmbedder：注入假 session/tokenizer，端到端算中文向�
   };
   /** 假 session：按输入张量形状回一段可预测的 [batch,seq,hidden] */
   const fakeOrt = { Tensor: class { constructor(type, data, dims) { Object.assign(this, { type, data, dims }); } } };
+  let lastFeeds = null;
   const fakeSession = {
     ort: fakeOrt,
-    getInputs: () => [{ name: 'input_ids' }, { name: 'attention_mask' }],
+    /** 真实 onnxruntime-node 是 inputNames 属性（没有 getInputs()），E2E 抓到过这个坑 */
+    inputNames: ['input_ids', 'attention_mask', 'token_type_ids'],
     async run(feeds) {
+      lastFeeds = feeds;
       const [b, s] = feeds.input_ids.dims;
       const hidden = 3;
       const data = new Float32Array(b * s * hidden);
@@ -90,6 +93,8 @@ test('createLocalEmbedder：注入假 session/tokenizer，端到端算中文向�
   /** 每个 token 的向量都是 [1,2,3]，mean pool 后归一化 → [1,2,3]/√14 */
   assert.ok(close(vecs[0][0], 1 / Math.sqrt(14)), `v=${[...vecs[0]]}`);
   assert.ok(close(vecs[1][2], 3 / Math.sqrt(14)));
+  /** 回归：模型声明了 token_type_ids 就必须喂，否则真 E2E 会报 missing in feeds */
+  assert.deepEqual(Object.keys(lastFeeds).sort(), ['attention_mask', 'input_ids', 'token_type_ids']);
   const single = await inst.one('你好');
   assert.equal(single.length, 3);
 });

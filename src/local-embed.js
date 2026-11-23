@@ -145,9 +145,16 @@ export function createLocalEmbedder({
     /** JS tokenizers 的 encode 返回 {ids, attention_mask}；按 ONNX 输入名喂张量 */
     const ort = session.ort;
     if (!ort?.Tensor) throw new Error('ONNX 运行时没挂 Tensor 构造器（loadSession 不兼容）');
-    const inputNames = (session.getInputs?.() || []).map((x) => x.name);
+    /**
+     * 输入名从 `session.inputNames` 读（onnxruntime-node 真实 API，实测）。
+     * Hindsight 是 Python 版才有 getInputs()，JS 版没有——别照抄它那个。
+     */
+    const inputNames = Array.isArray(session.inputNames)
+      ? session.inputNames
+      : (session.getInputs?.() || []).map((x) => x.name);
     const idsName = inputNames.find((n) => /input_ids|ids/.test(n)) || 'input_ids';
     const maskName = inputNames.find((n) => /attention_mask|mask/.test(n)) || 'attention_mask';
+    /** e5-small 实测需要 token_type_ids；模型声明了就一定要喂，否则 session.run 报错 */
     const typeName = inputNames.find((n) => /token_type/.test(n));
     const maxLen = Math.max(...encoded.map((e) => e.ids.length));
     const pad = (arr) => {
