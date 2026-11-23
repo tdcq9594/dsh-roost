@@ -373,7 +373,13 @@ export function buildSelfPrompt({ day, said = [], corrected = [] } = {}) {
  * @param {object} [o.self]   createSelf() 的返回（第五层：自我叙述）
  * @param {(p:string)=>Promise<string>} [o.generate] 没给就只做机械压缩
  */
-export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false } = {}) {
+export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false,
+  /**
+   * 补算日记向量用（可选）。不传 = 不补（纯关键词）。
+   * 之前这里只报 `stats.needVec` 数、注释说"由宿主填充"，但宿主从没调过——
+   * 结果 journal.vec 永远是 NULL，语义检索的向量路实际是死的。
+   */
+  embed = null } = {}) {
   /**
    * D7：开关判据留在 host（config 是唯一真相），这里只认「有没有实例 + 开没开」。
    * 传函数是为了运行时改配置能立刻生效，不用重启 DSH。
@@ -552,8 +558,28 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         }
       }
 
-      /** 顺手补向量的位置：这里只报数，实际补算由宿主在填充向量后调 setVec */
-      stats.needVec = journal.noVec(20).length;
+      /**
+       * 补算日记向量（本地 embedding 免费；HTTP 模型由 embed.enabled() 把关）。
+       * 不补的话 journal.vec 永远是 NULL，journal.search 的向量路永远空——
+       * 语义检索形同虚设（PR#41 就是漏了这一步）。
+       * 用模型指纹一起落库，换模型后旧向量自动失效、被这里重新补算。
+       */
+      stats.needVec = 0;
+      try {
+        if (embed?.enabled?.()) {
+          const model = String(embed.modelId?.() || '');
+          const pending = journal.noVec(20, 0);
+          if (pending.length) {
+            const vecs = await embed.many(pending.map((r) => String(r.text || '')));
+            if (Array.isArray(vecs) && vecs.length === pending.length) {
+              pending.forEach((r, i) => { if (vecs[i]) journal.setVec(r.id, vecs[i], model); });
+              stats.needVec = pending.length;
+            }
+          }
+        }
+      } catch (e) {
+        log(`补算向量失败：${e?.message || e}`);
+      }
     } catch (e) {
       stats.ok = false;
       stats.reason = e?.message ?? String(e);

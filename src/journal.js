@@ -362,6 +362,7 @@ function createSqliteStore(file, log) {
           accessed INTEGER NOT NULL DEFAULT 0,
           last_access INTEGER NOT NULL DEFAULT 0,
           vec BLOB,
+          vec_model TEXT NOT NULL DEFAULT '',
           -- 场景片段（阶段 4）：这条记忆是从哪几条消息来的，以及原文快照
           event_ids TEXT,
           evidence TEXT,
@@ -413,6 +414,12 @@ function createSqliteStore(file, log) {
        * 别在没接上写入方之前把它当成活的——面板和检索读到的永远是 fact。
        */
       if (!cols.has('status')) db.exec(`ALTER TABLE journal ADD COLUMN status TEXT NOT NULL DEFAULT ''`);
+      /**
+       * C4 模型指纹：向量是哪个模型算的。换模型（哪怕维度相同）时，
+       * 旧向量不能被当成新模型的候选——同维度不同模型余弦能算但语义错位，
+       * 比"没向量"更糟（静默给出错误相似度）。
+       */
+      if (!cols.has('vec_model')) db.exec(`ALTER TABLE journal ADD COLUMN vec_model TEXT NOT NULL DEFAULT ''`);
       /**
        * FTS5 单独一张表而不是 external content：
        * external content 要靠触发器同步，改一行忘了同步就静默不一致。
@@ -611,6 +618,7 @@ function createSqliteStore(file, log) {
         accessed: 'accessed',
         lastAccess: 'last_access',
         vec: 'vec',
+        vecModel: 'vec_model',
         text: 'text',
       };
       for (const [k, col] of Object.entries(map)) {
@@ -1019,22 +1027,26 @@ function createSqliteStore(file, log) {
       }
     },
 
-    withVec({ chatId = '', limit = 2000, aliases = [], dim = 0 } = {}) {
+    withVec({ chatId = '', limit = 2000, aliases = [], dim = 0, model = '' } = {}) {
       const d = open();
       if (!d) return [];
       const keys = chatId ? chatKeys(chatId, aliases) : [];
       /**
-       * C4 维度校验：只取与当前查询向量同维度的条目。
-       * 换过 embedding 模型（维度变了）时，旧向量和新的不可比——
-       * cosine 对长度不等的两个向量返回 0，不筛的话它们白占候选名额。
+       * C4 模型/维度校验（对齐 aurabot vector-store 的 model 指纹）：
+       *   · 传了 model → 只取同模型的向量。**同维度不同模型**余弦能算但语义
+       *     错位，比"没向量"更糟，所以不能只按维度判。
+       *   · 传了 dim → 再挡一层维度不符（老库 vec_model 为空时兜底）。
        * blob 是纯 Float32，字节数 / 4 = 维度。
        */
-      const dimClause = Number(dim) > 0 ? ' AND length(vec)/4 = ?' : '';
-      const dimArgs = Number(dim) > 0 ? [Number(dim)] : [];
+      const clauses = [];
+      const args = [];
+      if (model) { clauses.push('vec_model = ?'); args.push(String(model)); }
+      if (Number(dim) > 0) { clauses.push('length(vec)/4 = ?'); args.push(Number(dim)); }
+      const extra = clauses.length ? ` AND ${clauses.join(' AND ')}` : '';
       const sql = keys.length
-        ? `SELECT * FROM journal WHERE vec IS NOT NULL AND (chat_id IN (${marks(keys.length)}) OR chat_id='') AND ${NOT_INVALIDATED_SQL}${dimClause} ORDER BY at DESC LIMIT ?`
-        : `SELECT * FROM journal WHERE vec IS NOT NULL AND ${NOT_INVALIDATED_SQL}${dimClause} ORDER BY at DESC LIMIT ?`;
-      return d.prepare(sql).all(...(keys.length ? [...keys, ...dimArgs, limit] : [...dimArgs, limit])).map(normRow);
+        ? `SELECT * FROM journal WHERE vec IS NOT NULL AND (chat_id IN (${marks(keys.length)}) OR chat_id='') AND ${NOT_INVALIDATED_SQL}${extra} ORDER BY at DESC LIMIT ?`
+        : `SELECT * FROM journal WHERE vec IS NOT NULL AND ${NOT_INVALIDATED_SQL}${extra} ORDER BY at DESC LIMIT ?`;
+      return d.prepare(sql).all(...(keys.length ? [...keys, ...args, limit] : [...args, limit])).map(normRow);
     },
 
     /** 还没有向量的条目（巩固时批量补算，白天不花这个钱） */
@@ -1617,15 +1629,16 @@ function createJsonlStore(file, log) {
         .map(([i]) => rows[i]);
     },
 
-    withVec({ chatId = '', limit = 2000, aliases = [], dim = 0 } = {}) {
+    withVec({ chatId = '', limit = 2000, aliases = [], dim = 0, model = '' } = {}) {
       const keys = chatId ? chatKeys(chatId, aliases) : [];
-      /** C4：维度不符的旧向量跳过（换模型后不可比），与 sqlite 版同口径 */
+      /** C4：同模型 + 同维度才要（同维度不同模型会语义错位），与 sqlite 版同口径 */
       const dimOf = (r) => {
         const v = toVec(r.vec);
         return v ? v.length : 0;
       };
       return load()
         .filter((r) => isActive(r) && r.vec && (!keys.length || keys.includes(r.chatId) || r.chatId === ''))
+        .filter((r) => !model || String(r.vecModel || '') === String(model))
         .filter((r) => !(Number(dim) > 0) || dimOf(r) === Number(dim))
         .sort((a, b) => b.at - a.at)
         .slice(0, limit);
@@ -2114,7 +2127,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
           const qv = await embed.one(query);
           if (qv) {
             /** C4：按查询向量维度筛候选，换模型后旧维度向量不参与 */
-            const cands = s.withVec({ chatId, aliases, dim: qv.length });
+            /** C4：按当前模型 + 维度筛候选，换模型后旧向量不参与 */
+            const cands = s.withVec({ chatId, aliases, dim: qv.length, model: embed.modelId?.() || '' });
             const scored = [];
             for (const r of cands) {
               if (!inWindow(r)) continue;
@@ -2422,9 +2436,10 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     /** C4：带维度过滤的向量候选（调试/测试用，检索内部走 store 直连） */
     withVec: (opts) => get().withVec(opts),
 
-    setVec(id, vec) {
+    setVec(id, vec, model = '') {
       if (!vec) return false;
-      return get().update(id, { vec: toBlob(vec) });
+      /** model 一起落库：换模型后旧向量据此失效（同维度也不会被误用） */
+      return get().update(id, { vec: toBlob(vec), vecModel: String(model || '') });
     },
 
     vecOf: (row) => toVec(row?.vec),

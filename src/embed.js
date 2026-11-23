@@ -114,6 +114,17 @@ export function createEmbedder({ cfgOf, log = () => {}, localOf = null } = {}) {
 
     minScore: () => (localNow()?.enabled?.() ? localNow().minScore() : (read()?.minScore ?? 0.4)),
 
+    /**
+     * 当前生效的模型指纹（写向量时落库）。本地/HTTP 前缀区分，避免
+     * "本地 384 维" 和 "某 HTTP 模型 384 维" 被当成同一套向量混用。
+     */
+    modelId: () => {
+      const local = localNow();
+      if (local?.enabled?.()) return String(local.modelId?.() || 'local');
+      const cfg = read();
+      return cfg ? `http:${cfg.model || 'unknown'}` : '';
+    },
+
     async many(texts, opts = {}) {
       const local = localNow();
       if (local?.enabled?.()) {
