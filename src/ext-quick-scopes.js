@@ -88,6 +88,8 @@ const MEMORY_WRITE_OPS = Object.freeze([
   'memory.clear',
   /** 待跟进：设/撤某条事实的到期提醒（只动 meta，不加内容） */
   'memory.followUp',
+  /** 做梦：跑一次（写 dreams/*.md + 自述，不碰 facts） */
+  'memory.dream',
   /** E4：撤销某人雷区（改，不是清库） */
   'profiles.clearDislikes',
   'graph.suppress', 'graph.unsuppress', 'graph.close',
@@ -108,6 +110,8 @@ export const OP_SCOPE = Object.freeze({
   ...Object.fromEntries(MEMORY_WRITE_OPS.map((o) => [o, 'memory:write'])),
 
   'memory.list': 'memory:read',
+  /** 读：最近的梦（只读，不该要写权限） */
+  'memory.dream.list': 'memory:read',
   'mind.model': 'memory:read',
   'persona.set': 'prompt:write',
   'groups.list': 'groups:read',

@@ -42,7 +42,8 @@ import { createLedgerReader } from './ledger-read.js';
 import { createChannelPost, normalizePostCfg, guide, humanError, pickErrorCode, shareUrlOf } from './channel-post.js';
 import { createGraph } from './graph.js';
 import { createSelf } from './self.js';
-import { createConsolidate } from './consolidate.js';
+import { createConsolidate, yesterdayOf } from './consolidate.js';
+import { createDream } from './dream.js';
 import { createEmbedder } from './embed.js';
 import { createMood, normalizeFeedback, feedbackArgsOf } from './mood.js';
 import { observe, moodPrompt } from './mood-observe.js';
@@ -3436,21 +3437,13 @@ export function apply(ctx) {
   /** 巩固会话配成真人会话时只警告一次，别每晚刷屏 */
   const warnedConsolidate = new Set();
 
-  const consolidate = createConsolidate({
-    journal,
-    graph,
-    memory,
-    self,
-    aliasesOf,
-    /** D7：实例常驻，开关实时读 cfg（能力页改了不用重启） */
-    profiles,
-    profilesEnabled: () => cfg.profiles?.enabled === true,
-    /** E2 待跟进：开关实时读 cfg（面板改了不用重启） */
-    followUpEnabled: () => cfg.memory?.followUp?.enabled === true,
-    /** 巩固时补算日记向量（之前漏了这一步，语义检索的向量路一直是空的） */
-    embed: embedder,
-    log: (m) => log.info(m),
-    generate: async (prompt) => {
+  /**
+   * 后台模型调用：巩固与做梦共用。
+   *
+   * 同一个内部会话（`consolidateChat`），不碰任何 QQ 会话的上下文；
+   * `source.kind` 区分用途，日志/审计能看出这一轮是整理还是自省。
+   */
+  const backgroundGenerate = async (prompt, opts = {}) => {
       const consolidateChat = cfg.memory?.consolidateChat || 'consolidate';
       /**
        * 默认的 `consolidate` 是独立标识，不会和任何真人会话抢锁。
@@ -3504,14 +3497,52 @@ export function apply(ctx) {
       if (!cut.ok && !cut.nothing) log.warn(`巩固收工具失败：${cut.reason}`);
       try {
         return await withOwnerSpeaker(agent, () =>
-          turns.run(agent, prompt, { source: { kind: 'roost-consolidate' } }),
+          turns.run(agent, prompt, { source: { kind: opts.source || 'roost-consolidate' } }),
         );
       } finally {
         try {
           cut.off?.();
         } catch {}
       }
+  };
+
+  const consolidate = createConsolidate({
+    journal,
+    graph,
+    memory,
+    self,
+    aliasesOf,
+    /** D7：实例常驻，开关实时读 cfg（能力页改了不用重启） */
+    profiles,
+    profilesEnabled: () => cfg.profiles?.enabled === true,
+    /** E2 待跟进：开关实时读 cfg（面板改了不用重启） */
+    followUpEnabled: () => cfg.memory?.followUp?.enabled === true,
+    /** 巩固时补算日记向量（之前漏了这一步，语义检索的向量路一直是空的） */
+    embed: embedder,
+    log: (m) => log.info(m),
+    generate: backgroundGenerate,
+  });
+
+  /**
+   * 做梦（默认关）：巩固之后趁夜里自省一次。
+   *
+   * 素材全部来自已有存储（当天摘要 / 今天记下的 facts / 自驱账本 / 上一次自述），
+   * 不新增任何采集，也不主动发消息。
+   */
+  const dream = createDream({
+    journal,
+    memory,
+    self,
+    generate: backgroundGenerate,
+    /** 自驱账本的一天统计；没开自驱就给空串（梦不依赖它） */
+    statsOf: () => {
+      try {
+        const t = autotelic.status()?.today;
+        if (!t?.total) return '';
+        return `立项 ${t.projects} 次、推进 ${t.steps} 次、被拦 ${t.denies} 次`;
+      } catch { return ''; }
     },
+    log: (m) => log.info(m),
   });
 
   /**
@@ -3698,6 +3729,24 @@ export function apply(ctx) {
         );
       } else {
         log.warn(`巩固 ${day} 没跑成：${r.reason}`);
+      }
+      /**
+       * 做梦（默认关）：巩固整理完之后再自省一次。
+       *
+       * 独立 try：梦失败不该影响巩固的结果（巩固已经落盘了）。
+       * 顺序也不能反——梦读的是巩固刚写好的当天摘要。
+       */
+      if (cfg.memory?.dream?.enabled === true) {
+        try {
+          const dm = await dream.run({ day });
+          if (dm.ok) {
+            log.info(`做梦 ${day} 完成：${dm.reflection} 条反思、${dm.tomorrow} 条明天想做的事（${dm.mode}）`);
+          } else {
+            log.info(`做梦 ${day} 跳过：${dm.reason}`);
+          }
+        } catch (e) {
+          log.warn(`做梦出错：${e?.message ?? e}`);
+        }
       }
     } catch (e) {
       log.warn(`巩固出错：${e?.message ?? e}`);
@@ -10085,6 +10134,26 @@ export function apply(ctx) {
               } catch (e) {
                 return send(res, 500, { ok: false, message: `设待跟进失败：${e?.message ?? e}` });
               }
+            }
+
+            /**
+             * 做梦：手动做一次（默认关，面板上点一下就能试）。
+             * 和凌晨那条自动路径共用 `dream.run`，一天最多一次（看文件在不在）。
+             */
+            case 'memory.dream': {
+              const day = String(arg?.day || '').trim() || yesterdayOf(Date.now());
+              try {
+                const dm = await dream.run({ day });
+                return send(res, dm.ok ? 200 : 400, dm);
+              } catch (e) {
+                return send(res, 500, { ok: false, message: `做梦失败：${e?.message ?? e}` });
+              }
+            }
+
+            /** 读：最近的梦（面板「梦」页） */
+            case 'memory.dream.list': {
+              const n = Math.min(30, Math.max(1, Number(arg?.limit) || 7));
+              return send(res, 200, { ok: true, dreams: dream.recent(n) });
             }
 
             case 'memory.list':
