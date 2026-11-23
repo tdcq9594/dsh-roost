@@ -6968,6 +6968,42 @@ select.roost-input{color-scheme:dark}
       const [picked, setPicked] = useState(null)
       const [detail, setDetail] = useState(null)
       const [detailBusy, setDetailBusy] = useState(false)
+      /** 阶段6：人物档案编辑闭环。切人/切会话都要清空，免得 A 的表单串到 B */
+      const [editForm, setEditForm] = useState(null)
+      const [editBusy, setEditBusy] = useState(false)
+      const [editTagInput, setEditTagInput] = useState('')
+      const startEdit = (p) => {
+        setEditForm({
+          name: p?.name || '',
+          alias: p?.alias || '',
+          impression: p?.impression || '',
+          tips: p?.tips || '',
+          dislikes: p?.dislikes || '',
+          tags: [...(p?.tags || [])],
+        })
+        setEditTagInput('')
+      }
+      const saveEdit = async () => {
+        if (!editForm || !picked) return
+        setEditBusy(true)
+        try {
+          const key = picked.key || picked.name
+          const r = await quick('persona.edit', { key, patch: editForm })
+          toast(r?.message || (r?.ok ? '已保存' : '没存上'), r?.ok === false ? 'err' : 'ok')
+          if (r?.ok !== false) {
+            setEditForm(null)
+            await openPerson(picked) // 重读详情，刷新四栏
+            if (reload) reload()
+          }
+        } finally { setEditBusy(false) }
+      }
+      const toggleNoMemory = async (on) => {
+        if (!picked) return
+        const key = picked.key || picked.name
+        const r = await quick('persona.noMemory', { key, enabled: !on })
+        toast(r?.message || '已更新', r?.ok === false ? 'err' : 'ok')
+        if (r?.ok !== false) { await openPerson(picked); if (reload) reload() }
+      }
       const stateWordOf = (at) => {
         if (!at) return '没记过时间'
         const d = (Date.now() - at) / DAY
@@ -6984,6 +7020,7 @@ select.roost-input{color-scheme:dark}
         if (!p) return
         setPicked(p)
         setDetail(null)
+        setEditForm(null) // 切人必清表单，免得 A 群草稿串到 B 群
         setDetailBusy(true)
         try {
           const r = await get('/person?key=' + encodeURIComponent(p.key || p.name)
@@ -7055,16 +7092,77 @@ select.roost-input{color-scheme:dark}
                   ? null
                   : h('div', null,
                       h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-                        '写操作（删关系、撤销屏蔽、清档案）都在「记忆」页，这里只读。'),
+                        '档案可以在这里改（印象/称呼/相处/雷区/标签）；关系与日记的逐条操作仍在「记忆」页。'),
                       h('div', { style: { display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' } },
                         h('div', null,
-                          h('div', { className: 'roost-diag-h' }, '档案'),
-                          detail.person?.impression || detail.person?.tips || detail.person?.dislikes
-                            ? h('div', { className: 'roost-note' },
-                                (detail.person.impression || '（没有印象）')
-                                + (detail.person.tips ? `（相处：${detail.person.tips}）` : '')
-                                + (detail.person.dislikes ? `（别踩：${detail.person.dislikes}）` : ''))
-                            : h('div', { className: 'roost-empty' }, '档案里还没写过这个人')),
+                          h('div', { className: 'roost-diag-h' },
+                            '档案',
+                            h('button', {
+                              type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
+                              onClick: () => (editForm ? setEditForm(null) : startEdit(detail.person)),
+                            }, editForm ? '收起' : '编辑'),
+                          ),
+                          editForm
+                            ? h('div', null,
+                                ...[
+                                  ['impression', '印象'], ['alias', '称呼'], ['tips', '相处建议'], ['dislikes', '雷区（别踩）'],
+                                ].map(([k, label]) => h('label', { key: k, style: { display: 'block', marginBottom: 6, fontSize: 12 } },
+                                  label,
+                                  h('input', {
+                                    className: 'roost-input', value: editForm[k] || '',
+                                    style: { display: 'block', width: '100%', marginTop: 2 },
+                                    onChange: (e) => setEditForm({ ...editForm, [k]: e.target.value }),
+                                  }))),
+                                h('div', { style: { fontSize: 12, marginTop: 6 } }, '标签',
+                                  h('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 } },
+                                    editForm.tags.map((t, i) => h('button', {
+                                      key: i, type: 'button', className: 'roost-btn',
+                                      onClick: () => setEditForm({ ...editForm, tags: editForm.tags.filter((_, j) => j !== i) }),
+                                    }, t + ' ×')),
+                                    ['喜欢', '讨厌'].filter((t) => !editForm.tags.includes(t)).map((t) => h('button', {
+                                      key: t, type: 'button', className: 'roost-btn',
+                                      onClick: () => setEditForm({
+                                        ...editForm,
+                                        tags: [...editForm.tags.filter((x) => x !== (t === '喜欢' ? '讨厌' : '喜欢')), t],
+                                      }),
+                                    }, '+ ' + t)),
+                                  ),
+                                  h('div', { style: { display: 'flex', gap: 4, marginTop: 4 } },
+                                    h('input', {
+                                      className: 'roost-input', value: editTagInput, placeholder: '自定义标签（回车）',
+                                      onChange: (e) => setEditTagInput(e.target.value),
+                                      onKeyDown: (e) => {
+                                        if (e.key !== 'Enter') return
+                                        const t = editTagInput.trim()
+                                        if (t && !editForm.tags.includes(t)) setEditForm({ ...editForm, tags: [...editForm.tags, t] })
+                                        setEditTagInput('')
+                                      },
+                                    })),
+                                ),
+                                h('button', {
+                                  type: 'button', className: 'roost-btn roost-primary', disabled: editBusy,
+                                  style: { marginTop: 8 }, onClick: saveEdit,
+                                }, editBusy ? '保存中…' : '保存'),
+                                h('label', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 10, fontSize: 12 } },
+                                  h('input', {
+                                    type: 'checkbox', checked: Boolean(detail.person?.noMemory),
+                                    onChange: (e) => toggleNoMemory(e.target.checked),
+                                  }),
+                                  '不再记住这个人（撤回来档案还在）'),
+                              )
+                            : h('div', null,
+                                detail.person?.impression || detail.person?.tips || detail.person?.dislikes || detail.person?.alias || (detail.person?.tags || []).length
+                                  ? h('div', { className: 'roost-note' },
+                                      (detail.person.alias ? `称呼：${detail.person.alias}；` : '')
+                                      + (detail.person.impression || '（没有印象）')
+                                      + (detail.person.tips ? `（相处：${detail.person.tips}）` : '')
+                                      + (detail.person.dislikes ? `（别踩：${detail.person.dislikes}）` : '')
+                                      + ((detail.person.tags || []).length ? ` [${detail.person.tags.join('、')}]` : ''))
+                                  : h('div', { className: 'roost-empty' }, '档案里还没写过这个人'),
+                                detail.person?.noMemory
+                                  ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } }, '已标记「不再记住」')
+                                  : null),
+                        ),
                         h('div', null,
                           h('div', { className: 'roost-diag-h' }, '关系'),
                           (detail.edges || []).length

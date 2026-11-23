@@ -10169,6 +10169,28 @@ export function apply(ctx) {
             }
 
             /**
+             * 阶段6：人物墙人工编辑（对齐 aurabot /persona/person/save）。
+             * 只覆盖显式给的字段（印象/相处/雷区/称呼/标签），模型其余字段留着。
+             * 主人判定用 ownerAliases，拿不到就不拦讨厌标签（避免误判主人）。
+             */
+            case 'persona.edit': {
+              const key = String(arg?.key ?? '').trim();
+              if (!key) return send(res, 400, { ok: false, message: '缺人物 key' });
+              const owners = Array.isArray(cfg.ownerAliases) ? cfg.ownerAliases.map((x) => String(x).trim().toLowerCase()) : [];
+              const isOwner = owners.includes(key.toLowerCase());
+              const r = profiles.edit(key, arg?.patch ?? arg ?? {}, { isOwner });
+              return send(res, 200, r);
+            }
+
+            /** 阶段6：不再记住某人（只标记不删档案，撤回来还在） */
+            case 'persona.noMemory': {
+              const key = String(arg?.key ?? '').trim();
+              if (!key) return send(res, 400, { ok: false, message: '缺人物 key' });
+              const ok = profiles.setNoMemory(key, arg?.enabled !== false);
+              return send(res, 200, { ok, message: ok ? (arg?.enabled === false ? '恢复记住这个人' : '不再记住这个人') : '没找到这个人' });
+            }
+
+            /**
              * 待跟进：给某条事实设 / 撤「到点该问一句」。
              * 只动 meta、不新增事实内容，所以 `scope:'global'` 也允许
              * （跟 `memory.write` 不许写全局的理由不同）。
@@ -11028,8 +11050,13 @@ export function apply(ctx) {
             /** 4.1：key（openid 或归户名）随行返回，人物墙点详情要用 */
             key: r.key || '',
             name: r.name || r.key,
+            alias: r.alias || '',
             impression: r.impression || '',
             tips: r.tips || '',
+            dislikes: r.dislikes || '',
+            /** 阶段6：人工标签 + 不再记住标记，面板列表用得上 */
+            tags: Array.isArray(r.tags) ? r.tags : [],
+            noMemory: Boolean(r.noMemory),
             at: r.at,
           })),
           profilesEnabled: cfg.profiles?.enabled === true,
@@ -11264,10 +11291,16 @@ export function apply(ctx) {
             person: {
               key,
               name,
+              alias: row?.alias || '',
               openid: row?.openid || (row?.key !== name ? row?.key : '') || '',
               impression: row?.impression || '',
               tips: row?.tips || '',
               dislikes: row?.dislikes || '',
+              tags: Array.isArray(row?.tags) ? row.tags : [],
+              noMemory: Boolean(row?.noMemory),
+              /** 阶段6：互动数从 journal 现算（不冗余存 profiles）；只数真人发言 */
+              interactions: journal.listChat(chatId, 500, aliasesOf(chatId))
+                .filter((r) => r.role === 'user' && r.sender && (r.sender === key || r.sender === row?.openid)).length,
               at: Number(row?.at) || 0,
               lastAt,
             },

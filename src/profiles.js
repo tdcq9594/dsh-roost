@@ -34,6 +34,14 @@ export const TIPS_MAX = 120;
 /** E4：讨厌/雷区。比印象更敏感——只在模型明确提炼到才写，渲染时单独标"别踩" */
 export const DISLIKES_MAX = 80;
 export const PROFILE_LINES_MAX = 3;
+/**
+ * 人物墙人工标签（对齐 aurabot /persona/person/save）：最多 8 个、每个 8 字。
+ * '喜欢'/'讨厌' 是一对互斥的特殊标签（面板可一键打），其余自由填。
+ * 主人不能被打'讨厌'——和对方同一条护栏。
+ */
+export const PERSON_TAGS_MAX = 8;
+export const PERSON_TAG_LEN = 8;
+export const SPECIAL_TAGS = Object.freeze(['喜欢', '讨厌']);
 
 /** 按码点截，别把 emoji 的 surrogate pair 切一半（budget.js 的 clipForBudget 同款顾虑） */
 export function clipChars(s, max) {
@@ -91,6 +99,21 @@ export function accumulate(prev, add, max) {
 /** 默认关时一个字都不给（等价基线由接线测试锁死） */
 export function shouldInjectProfiles({ enabled } = {}) {
   return enabled === true;
+}
+
+/**
+ * 人工标签规范化 + 校验（对齐 aurabot 的护栏，含互斥与"不能讨厌主人"）。
+ * @returns {{ok:true, tags:string[]} | {ok:false, message:string}}
+ */
+export function normalizePersonTags(raw, { isOwner = false } = {}) {
+  const list = Array.isArray(raw) ? raw : String(raw ?? '').split(/[,，]/);
+  const tags = list.map((t) => String(t ?? '').trim()).filter(Boolean);
+  if (tags.length > PERSON_TAGS_MAX) return { ok: false, message: `标签最多 ${PERSON_TAGS_MAX} 个` };
+  if (tags.some((t) => Array.from(t).length > PERSON_TAG_LEN)) return { ok: false, message: `每个标签最多 ${PERSON_TAG_LEN} 个字` };
+  if (new Set(tags).size !== tags.length) return { ok: false, message: '标签不能重复' };
+  if (tags.includes('喜欢') && tags.includes('讨厌')) return { ok: false, message: '喜欢和讨厌不能同时选' };
+  if (isOwner && tags.includes('讨厌')) return { ok: false, message: '不能讨厌主人' };
+  return { ok: true, tags };
 }
 
 const HEADER = '【熟人小档案】（只是印象，别原样念出来；别把别处的事当这个群发生过）';
@@ -199,6 +222,55 @@ export function createProfiles({
       const next = cur.filter((r) => String(r.key ?? '').trim().toLowerCase() !== k);
       if (next.length === cur.length) return false;
       rows = next;
+      renderCache = null;
+      save();
+      return true;
+    },
+
+    /**
+     * 人物墙人工编辑（对齐 aurabot /persona/person/save）。
+     * 只覆盖 patch 里显式给的字段，模型提炼的其余字段原样留着；
+     * 用户主动改 → 当场作废当日渲染缓存（隐私优先于 prompt cache）。
+     * @returns {{ok:boolean, message:string}}
+     */
+    edit(key, patch = {}, { isOwner = false } = {}) {
+      const k = String(key ?? '').trim().toLowerCase();
+      if (!k) return { ok: false, message: '缺人物 key' };
+      const all = load();
+      const row = all.find((r) => String(r.key ?? '').trim().toLowerCase() === k);
+      if (!row) return { ok: false, message: '还没有这个人的档案' };
+      const fields = ['alias', 'impression', 'tips', 'dislikes'];
+      const has = (f) => Object.prototype.hasOwnProperty.call(patch, f);
+      if (!fields.some(has) && !has('tags') && !has('name')) return { ok: false, message: '没有要保存的内容' };
+      let tags;
+      if (has('tags')) {
+        const r = normalizePersonTags(patch.tags, { isOwner });
+        if (!r.ok) return { ok: false, message: r.message };
+        tags = r.tags;
+      }
+      for (const f of fields) {
+        if (!has(f)) continue;
+        const max = f === 'impression' ? IMPRESSION_MAX : f === 'tips' ? TIPS_MAX : f === 'dislikes' ? DISLIKES_MAX : 24;
+        const v = clipChars(String(patch[f] ?? '').trim(), max);
+        if (f === 'impression' || f === 'tips' || f === 'dislikes') row[f] = accumulate('', v, max);
+        else row[f] = v;
+      }
+      if (has('name')) row.name = clipChars(String(patch.name ?? '').trim(), 24) || row.name;
+      if (tags !== undefined) { row.tags = tags; row.tagsBy = 'owner'; }
+      row.at = now();
+      renderCache = null;
+      save();
+      return { ok: true, message: '人物印象已保存' };
+    },
+
+    /** 不再记住某人：面板开关，只标记不删档案（撤回来还在） */
+    setNoMemory(key, enabled = true) {
+      const k = String(key ?? '').trim().toLowerCase();
+      if (!k) return false;
+      const row = load().find((r) => String(r.key ?? '').trim().toLowerCase() === k);
+      if (!row) return false;
+      if (enabled) row.noMemory = true;
+      else delete row.noMemory;
       renderCache = null;
       save();
       return true;
