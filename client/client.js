@@ -4655,6 +4655,44 @@ select.roost-input{color-scheme:dark}
       }
 
       /**
+       * §1.10 Gist 两档：旧摘要 → 一句第一人称印象 → 结晶永久记忆。
+       * 独立文件、默认不注入、面板手动触发；预览/生成/结晶都走显式按钮。
+       */
+      const [gistImps, setGistImps] = useState([])
+      const [gistCands, setGistCands] = useState([])
+      const [gistPreview, setGistPreview] = useState(null)
+      const [gistBusy, setGistBusy] = useState(false)
+      const loadGist = async () => {
+        setGistBusy(true)
+        try {
+          const r = await quick('gist.impression.list', {})
+          if (r?.ok === false) { toast(r.message || '读印象失败'); return }
+          setGistImps(r?.impressions || [])
+          setGistCands(r?.candidates || [])
+        } catch (e) { toast(e.message) }
+        finally { setGistBusy(false) }
+      }
+      const doGist = async (op, arg, msg) => {
+        setGistBusy(true)
+        try {
+          const r = await quick(op, arg || {})
+          if (r?.ok === false) { toast(r.message || '没成功'); return r }
+          if (op === 'gist.impression.generate' && arg?.dry) {
+            setGistPreview(r)
+            toast(typeof msg === 'function' ? msg(r) : msg)
+          } else if (op === 'gist.impression.generate') {
+            const ok = (r?.results || []).filter((x) => x.ok).length
+            toast(`生成完成：${ok} 组印象${(r.results || []).length > ok ? '，部分失败' : ''}`)
+          } else {
+            toast(typeof msg === 'function' ? msg(r) : msg)
+          }
+          if (!arg?.dry) await loadGist()
+          return r
+        } catch (e) { toast(e.message); return null }
+        finally { setGistBusy(false) }
+      }
+
+      /**
        * A3 标签：筛选框 + 行内编辑。
        * 筛选在前端做（factsDetail 已带 tags），不新开 quick op——
        * 后端 listFull/listRanked 的 opts.tags 供内部召回用，两条路互不干扰。
@@ -5194,6 +5232,55 @@ select.roost-input{color-scheme:dark}
                   mindPrev.markdown || '（空）'),
               )
             : null,
+        ),
+
+        h(Sec, { title: '印象沉淀', right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: gistBusy, onClick: loadGist,
+        }, gistBusy ? '…' : '看印象') },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '把够旧的每日摘要压成一句第一人称印象（只留感受和结论），被反复想起的还能结晶成永久记忆。',
+            '独立存放、默认不注入每轮对话；点按钮才跑，不碰每日摘要本身。'),
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: gistBusy,
+              onClick: () => doGist('gist.impression.generate', { dry: true, days: 180, maxGroups: 4 }, '预览好了（没写盘）'),
+            }, '预览要压的摘要'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: gistBusy,
+              onClick: () => doGist('gist.impression.generate', { days: 180, maxGroups: 4, force: true }, null),
+            }, '生成印象'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: gistBusy,
+              onClick: () => doGist('gist.impression.crystallize', { days: 180 }, (r) => `结晶了 ${r?.added || 0} 条`),
+            }, '结晶永久记忆'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: gistBusy,
+              onClick: () => doGist('gist.impression.clear', {}, '印象清了'),
+            }, '清空印象'),
+          ),
+          gistPreview
+            ? h('details', { style: { marginBottom: 8 } },
+                h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer' } },
+                  `预览 · ${gistPreview.groups?.length || 0} 组待压`),
+                (gistPreview.groups || []).map((g) => h('div', { key: g.sourceKey, className: 'roost-item', style: { marginTop: 4 } },
+                  h('span', { className: 'd' }, `${g.chatId || '全局'} · ${g.count} 条${g.done ? ' · 已压过' : ''}`),
+                  h('pre', { className: 'roost-pre', style: { maxHeight: 120, overflow: 'auto', whiteSpace: 'pre-wrap', marginTop: 2 } }, g.prompt || ''),
+                )),
+              )
+            : null,
+          h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 6 } },
+            `已沉淀 ${gistImps.length} 条印象${gistCands.length ? ` · ${gistCands.length} 条可结晶` : ''}`),
+          gistImps.length
+            ? gistImps.map((x) => h('div', { key: x.id, className: 'roost-item', style: { marginBottom: 4 } },
+                h('span', { className: 't' }, x.text || '—'),
+                h('span', { className: 'd' }, `${x.hits || 0} 次想起${x.crystallizedAt ? ' · 已结晶' : ''}`),
+                x.crystallizedAt ? null : h('button', {
+                  type: 'button', className: 'roost-btn', disabled: gistBusy,
+                  title: '印象不自动注入，只能靠你显式标记「又想起了」；攒够 3 次且够旧，才能结晶成永久记忆',
+                  onClick: () => doGist('gist.impression.hit', { id: x.id }, '记了一次想起'),
+                }, '又想起 +1'),
+              ))
+            : h('div', { className: 'roost-empty' }, '还没有印象。点「预览要压的摘要」看看有哪些旧摘要能压。'),
         ),
 
         h(Sec, { title: '记忆星图' },

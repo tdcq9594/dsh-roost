@@ -57,6 +57,7 @@ import { memoryLines, oneLine, followUpAllowed, followUpSection } from './memory
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { createGroupChatProfiles } from './group-chat-profile.js';
+import { createImpressionStore, buildImpressionPrompt, cleanImpression, crystallizeCandidates, IMPRESSION_MIN_HITS } from './gist-impression.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
 import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
 import { guardQuickCall, PANEL_MARK } from './ext-quick-guard.js';
@@ -3155,6 +3156,8 @@ export function apply(ctx) {
    * 和 profiles 一样不进人格隔离（数据本身是"这个群什么样"），默认不注入。
    */
   const chatProfiles = createGroupChatProfiles({ file: join(dataDir(), 'chat-profiles.json'), log: (m) => log.warn(m) });
+  /** Gist 两档低风险版：独立印象文件，不进 journal/memory/personaScope，默认不注入 */
+  const impressionStore = createImpressionStore({ file: join(dataDir(), 'impressions.json'), log: (m) => log.warn(m) });
   /** 每个会话上一句用户原话：短句（<12 字）补检索用，只在内存里 */
   const recentUserText = new Map();
   /** B1 节流：同一段聊天别每句都推一次心情 */
@@ -8949,7 +8952,9 @@ export function apply(ctx) {
          */
         if (op && op !== 'memory.list' && op !== 'capabilities.get' && op !== 'capabilities.preview' && op !== 'features.get' && op !== 'features.preview' && op !== 'quota.get' && op !== 'backup.list'
           /* A1：审计查询/统计快照本身是纯读，且查审计会写审计=自己污染自己 */
-          && op !== 'audit.query' && op !== 'stats.snapshot') audit({ op, chatId, peer: who.kind, peerId: who.id });
+          && op !== 'audit.query' && op !== 'stats.snapshot'
+          /* §1.10：印象列表是纯读翻看，不记审计噪音；generate/crystallize/clear 是写入意图，保留 */
+          && op !== 'gist.impression.list') audit({ op, chatId, peer: who.kind, peerId: who.id });
 
         try {
           switch (op) {
@@ -10407,6 +10412,132 @@ export function apply(ctx) {
               const id = String(arg?.id || '');
               const n = mindModelStore.clear(id);
               return send(res, 200, { ok: true, cleared: n, message: id ? '这条心智模型快照清了' : '心智模型快照全清了' });
+            }
+
+            /**
+             * Gist 两档低风险版（aurabot §1.10）：旧 digest → 一句第一人称印象 → 结晶永久记忆。
+             * 不碰 consolidate 每日写入、不改 digest id、不动 journal retention。
+             * 全部显式点才跑；默认不注入任何 prompt。
+             */
+            case 'gist.impression.list': {
+              const imps = impressionStore.list();
+              const candidates = crystallizeCandidates(imps, Date.now(), {
+                minHits: Number(arg?.minHits) || IMPRESSION_MIN_HITS,
+                days: Number(arg?.days) || 180,
+              });
+              return send(res, 200, { ok: true, impressions: imps, candidates });
+            }
+
+            /**
+             * 「又想起了」——印象不注入 prompt，没有自动 touch 时机，
+             * 所以 hits 只能靠用户显式点（跟星图「还记得」同一个哲学）。
+             * 没有这个 op，hits 恒为 0、结晶永远 added:0——整个结晶半段是空壳。
+             */
+            case 'gist.impression.hit': {
+              const id = String(arg?.id || '');
+              if (!id) return send(res, 400, { ok: false, message: '要给哪条印象记一次想起？' });
+              const r = impressionStore.hit(id);
+              if (!r.ok) return send(res, 404, { ok: false, message: '没找到这条印象' });
+              return send(res, 200, { ok: true, id, hits: r.hits });
+            }
+
+            case 'gist.impression.generate': {
+              /**
+               * 收旧 digest：扫最近 days+30 天，筛够旧的 digest 行，按 chatId 分组。
+               * 干跑（dry）只返回要喂给模型的摘要与 prompt，不调模型、不写盘。
+               */
+              const days = Math.max(1, Number(arg?.days) || 180);
+              const maxGroups = Math.max(1, Math.min(10, Number(arg?.maxGroups) || 4));
+              const cutoff = Date.now() - days * 86400_000;
+              const groups = new Map();
+              for (let back = 0; back <= days + 30; back++) {
+                const day = dayKey(Date.now() - back * 86400_000);
+                let rows = [];
+                try { rows = journal.byDay(day) || []; } catch { continue; }
+                for (const r of rows) {
+                  if (r?.kind !== 'digest' || !(Number(r.at) <= cutoff)) continue;
+                  // 分组键用**真实** chatId：空串就是全局，不能占位成字面 'global'——
+                  // 否则 impressions 存 chatId='global'，结晶时写进 m.chats['global'] 伪会话，
+                  // 没有任何真实群会读到，等于死记忆。
+                  const key = String(r.chatId || '');
+                  const text = String(r.text || '').trim();
+                  if (!text) continue;
+                  if (!groups.has(key)) groups.set(key, []);
+                  const arr = groups.get(key);
+                  if (arr.length < 40) arr.push(text);
+                }
+              }
+              const picked = [...groups.entries()].slice(0, maxGroups)
+                // sourceKey 只是稳定键（哨兵 __global），不写进任何记忆；chatId 保持真实空串
+                .map(([chatId, texts]) => ({ chatId, texts, sourceKey: `gist:${chatId || '__global'}` }));
+              if (!picked.length) {
+                return send(res, 200, { ok: false, message: `最近没有超过 ${days} 天的旧摘要可压`, groups: [] });
+              }
+              const dry = arg?.dry === true;
+              if (dry) {
+                return send(res, 200, {
+                  ok: true, dry: true,
+                  groups: picked.map((g) => ({
+                    chatId: g.chatId, sourceKey: g.sourceKey, count: g.texts.length,
+                    done: impressionStore.doneOf(g.sourceKey),
+                    prompt: buildImpressionPrompt(g.texts),
+                  })),
+                });
+              }
+              // backgroundGenerate 总存在；没配模型时 turns.run 会抛错，逐组 catch 报 ok:false，
+              // 不静默降级也不写盘（跟 mind.refresh 的失败口径一致）。
+              const results = [];
+              const force = arg?.force === true;
+              for (const g of picked) {
+                /**
+                 * 默认跳过已压过的组（省模型调用）；但面板「生成印象」是显式动作，
+                 * 传 force=true 就重算——否则 done 一旦落盘就永远无法针对新摘要更新，
+                 * 只能先清空（连旧印象一起丢）。upsert 同 sourceKey 是覆盖，重算安全。
+                 */
+                if (!force && impressionStore.doneOf(g.sourceKey)) {
+                  results.push({ chatId: g.chatId, sourceKey: g.sourceKey, skipped: true, reason: 'already-done' });
+                  continue;
+                }
+                try {
+                  const prompt = buildImpressionPrompt(g.texts);
+                  const raw = await backgroundGenerate(prompt, { source: 'roost-gist-impression' });
+                  const text = cleanImpression(raw);
+                  if (!text) {
+                    results.push({ chatId: g.chatId, sourceKey: g.sourceKey, ok: false, reason: 'empty-output' });
+                    continue;
+                  }
+                  const r = impressionStore.upsert({ sourceKey: g.sourceKey, text, at: Date.now(), chatId: g.chatId });
+                  results.push({ chatId: g.chatId, sourceKey: g.sourceKey, ok: r.ok, text, updated: r.updated });
+                } catch (e) {
+                  results.push({ chatId: g.chatId, sourceKey: g.sourceKey, ok: false, reason: e?.message || String(e) });
+                }
+              }
+              return send(res, 200, { ok: true, results });
+            }
+
+            case 'gist.impression.crystallize': {
+              const minHits = Math.max(1, Number(arg?.minHits) || IMPRESSION_MIN_HITS);
+              const days = Math.max(0, Number(arg?.days) || 180);
+              const candidates = crystallizeCandidates(impressionStore.list(), Date.now(), { minHits, days });
+              const dry = arg?.dry === true;
+              if (!candidates.length) return send(res, 200, { ok: true, candidates: [], added: 0, message: '还没有够旧且被反复想起的印象' });
+              const results = [];
+              for (const c of candidates) {
+                if (!dry) {
+                  // 写回来源会话：A 群印象只进 A 群，不塞 global 污染 B 群召回。
+                  const chat = String(c.chatId || '');
+                  const ok = memory.add(chat, c.text, chat ? 'chat' : 'global', { w: 1, src: 'gist-impression' });
+                  if (!ok) { results.push({ id: c.id, ok: false, reason: 'add-failed' }); continue; }
+                  impressionStore.markCrystallized(c.id, { at: Date.now() });
+                }
+                results.push({ id: c.id, text: c.text, chatId: c.chatId, ok: true, dry });
+              }
+              return send(res, 200, { ok: true, dry, results, added: results.filter((r) => r.ok).length });
+            }
+
+            case 'gist.impression.clear': {
+              impressionStore.clear();
+              return send(res, 200, { ok: true, message: '印象清了（不碰日记摘要和记忆）' });
             }
 
             /**
