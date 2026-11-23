@@ -3430,6 +3430,27 @@ export function apply(ctx) {
     /** D7：实例常驻，开关实时读 cfg（能力页改了不用重启） */
     profiles,
     profilesEnabled: () => cfg.profiles?.enabled === true,
+    /**
+     * D2 坏批退避：把"这批连续格式错误几次"记到一个小 JSON。
+     * 只是防脏数据每天阻塞巩固，丢了不致命——读坏就当空。
+     */
+    badBatches: (() => {
+      const file = () => join(dataDir(), 'consolidate-state.json');
+      let cache = null;
+      const read = () => {
+        if (cache) return cache;
+        try { cache = JSON.parse(readFileSync(file(), 'utf8')) || {}; } catch { cache = {}; }
+        return cache;
+      };
+      const write = () => {
+        try { writeFileSync(file(), JSON.stringify(cache || {}), 'utf8'); } catch { /* 记不下就算了 */ }
+      };
+      return {
+        fails: (k) => Number(read()[k]?.fails || 0),
+        bump: (k) => { const s = read(); s[k] = { fails: Number(s[k]?.fails || 0) + 1, at: Date.now() }; write(); },
+        clear: (k) => { const s = read(); if (s[k]) { delete s[k]; write(); } },
+      };
+    })(),
     log: (m) => log.info(m),
     generate: async (prompt) => {
       const consolidateChat = cfg.memory?.consolidateChat || 'consolidate';

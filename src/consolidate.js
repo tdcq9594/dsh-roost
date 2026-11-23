@@ -359,7 +359,15 @@ export function buildSelfPrompt({ day, said = [], corrected = [] } = {}) {
  * @param {object} [o.self]   createSelf() 的返回（第五层：自我叙述）
  * @param {(p:string)=>Promise<string>} [o.generate] 没给就只做机械压缩
  */
-export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false } = {}) {
+export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false,
+  /**
+   * D2 坏批退避：记录"这一批连续失败几次"的持久化接口（由 host 注入）。
+   * `{ fails(key), bump(key), clear(key) }`；不传 = 不退避（老行为）。
+   * 为什么不自己读文件：consolidate 是纯函数式模块，持久化归 host 管。
+   */
+  badBatches = null } = {}) {
+  /** 同一批连续失败多少次就跳过（对齐 aurabot 的 BAD_BATCH_LIMIT=3） */
+  const BAD_BATCH_LIMIT = 3;
   /**
    * D7：开关判据留在 host（config 是唯一真相），这里只认「有没有实例 + 开没开」。
    * 传函数是为了运行时改配置能立刻生效，不用重启 DSH。
@@ -439,7 +447,14 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         groups.get(k).push(r);
       }
 
-      const todo = [...groups.entries()].filter(([cid]) => !done(target, cid)).slice(0, MAX_CHATS_PER_RUN);
+      const badKey = (cid) => `${target}:${cid || 'global'}`;
+      /** D2：连续失败达上限的批次跳过，别让一条脏数据每天阻塞巩固 */
+      const isBad = (cid) => Boolean(badBatches) && Number(badBatches.fails(badKey(cid)) || 0) >= BAD_BATCH_LIMIT;
+      const todo = [...groups.entries()]
+        .filter(([cid]) => !done(target, cid) && !isBad(cid))
+        .slice(0, MAX_CHATS_PER_RUN);
+      const badSkipped = [...groups.keys()].filter((cid) => !done(target, cid) && isBad(cid));
+      if (badSkipped.length) log(`巩固 ${target}：${badSkipped.length} 个批次连续失败已跳过`);
       stats.skipped = [...groups.keys()].filter((cid) => done(target, cid));
       if (groups.size > MAX_CHATS_PER_RUN) {
         stats.truncated = [...groups.keys()].slice(MAX_CHATS_PER_RUN);
@@ -479,6 +494,14 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
             if (!plan) {
               log(`巩固 ${target}/${chatName}：模型输出不是 JSON，退回机械压缩`);
               stats.errors.push('模型输出解析失败');
+              /**
+               * D2：**只有格式错误才累计**坏批计数。网络/超时是偶发，
+               * 累计会让一次抖动把这一批永久跳过（对齐 aurabot：网络错误照抛重试）。
+               */
+              if (badBatches) badBatches.bump(badKey(chatId));
+            } else if (badBatches) {
+              /** 这次成功了：清掉历史失败计数，别让旧的失败拖累它 */
+              badBatches.clear(badKey(chatId));
             }
           } catch (e) {
             log(`巩固 ${target}/${chatName} 调模型失败：${e.message}`);
