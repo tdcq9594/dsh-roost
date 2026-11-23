@@ -89,6 +89,7 @@ export function createGraph({ file, log = () => {} } = {}) {
           aliases_json TEXT NOT NULL DEFAULT '[]',
           first_seen INTEGER NOT NULL DEFAULT 0,
           last_seen INTEGER NOT NULL DEFAULT 0,
+          last_hit INTEGER NOT NULL DEFAULT 0,
           kind TEXT NOT NULL DEFAULT 'thing',
           chat_id TEXT NOT NULL DEFAULT ''
         );
@@ -155,6 +156,8 @@ export function createGraph({ file, log = () => {} } = {}) {
       try {
         const cols = new Set(db.prepare('PRAGMA table_info(entity)').all().map((c) => String(c.name)));
         if (!cols.has('hits')) db.exec('ALTER TABLE entity ADD COLUMN hits INTEGER NOT NULL DEFAULT 0');
+        /** C3：上次被召回的时间（对齐 aurabot 的 lastHit），排序用 max(last_seen,last_hit) */
+        if (!cols.has('last_hit')) db.exec('ALTER TABLE entity ADD COLUMN last_hit INTEGER NOT NULL DEFAULT 0');
       } catch { /* 迁移失败不拦启动，热度退化成 0 */ }
       return db;
     } catch (e) {
@@ -555,18 +558,13 @@ export function createGraph({ file, log = () => {} } = {}) {
     if (!d) return [];
     const scope = chatScope(chatId, aliases, 'chat_id');
     /**
-     * C3：热度是**加分项**，不能当唯一排序键——否则 40 个高热度旧实体会
-     * 占满候选窗口，hits=0 的新实体永远进不来（实体路漏召回）。
-     * 用 last_seen 主导（新实体天然靠前），hits 只做同时间的次序微调。
+     * C3：热度是**加分项**，不能当唯一排序键——否则高热度旧实体会占满候选
+     * 窗口，新实体永远进不来（实体路漏召回，审查实测踩过）。
+     * 排序：`max(last_seen, last_hit)` 主导（对齐 aurabot 的 max(at,lastHit)）。
+     * 常被想起的老实体靠 last_hit 往前排，但不像"hits 折算成时间"那样
+     * 把刚创建的新实体挤出窗口（审查实测踩过的坑）；hits 只做同刻次序。
      */
-    /**
-     * 排序 = last_seen + 热度加成，热度**封顶且权重小**：
-     * 排序：last_seen 主导，hits 只做**同时间**的次序微调。
-     * 任何"把 hits 折算成时间相加"的方案都会让高热度旧实体压过刚出现的新实体
-     * （审查时实测：按天/按小时/按分钟折算，新实体都被挤出候选窗口）。
-     * 所以 hits 不参与跨时间比较——新实体永远能进窗口，热度只帮"同一刻创建"的排先后。
-     */
-    const sql = `SELECT * FROM entity WHERE 1=1${scope.sql} ORDER BY last_seen DESC, hits DESC LIMIT ?`;
+    const sql = `SELECT * FROM entity WHERE 1=1${scope.sql} ORDER BY MAX(last_seen, last_hit) DESC, hits DESC LIMIT ?`;
     return d.prepare(sql)
       .all(...scope.args, limit)
       .map((r) => ({
@@ -581,17 +579,21 @@ export function createGraph({ file, log = () => {} } = {}) {
         })(),
         firstSeen: Number(r.first_seen || 0),
         lastSeen: Number(r.last_seen || 0),
+        lastHit: Number(r.last_hit || 0),
         hits: Number(r.hits || 0),
         kind: String(r.kind || 'thing'),
       }));
   }
 
   /**
-   * C3：给一批实体记一次"被联想命中"（召回时调）。
-   * 只动 hits，不改 last_seen——后者是写入时间，语义不同。
+    * C3：给一批实体记一次"被联想命中"（召回时调）。
+   * 同时刷 hits（次数）和 last_hit（时间）——不改 last_seen，后者是写入时间。
+   * 为什么要刷 last_hit：只加次数的话，老实体反复被想起也永远排在
+   * 刚创建的新实体后面（排序按 last_seen），热度等于没用。
+   * 对齐 aurabot 的 `max(at, lastHit)` 口径。
    * 失败静默：热度是锦上添花，不能因为它让召回失败。
    */
-  function touchEntities(names, { chatId = '', aliases = [] } = {}) {
+  function touchEntities(names, { chatId = '', aliases = [], at = Date.now() } = {}) {
     const d = open();
     if (!d) return 0;
     const keys = [...new Set((names || []).map((n) => normKey(String(n ?? ''))).filter(Boolean))];
@@ -599,7 +601,8 @@ export function createGraph({ file, log = () => {} } = {}) {
     const scope = chatScope(chatId, aliases, 'chat_id');
     const marks = keys.map(() => '?').join(',');
     try {
-      const r = d.prepare(`UPDATE entity SET hits=hits+1 WHERE key IN (${marks})${scope.sql}`).run(...keys, ...scope.args);
+      const r = d.prepare(`UPDATE entity SET hits=hits+1, last_hit=? WHERE key IN (${marks})${scope.sql}`)
+        .run(Number(at) || Date.now(), ...keys, ...scope.args);
       return Number(r.changes) || 0;
     } catch (e) {
       log(`实体热度更新失败：${e.message}`);

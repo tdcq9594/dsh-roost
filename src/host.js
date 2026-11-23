@@ -10005,6 +10005,14 @@ export function apply(ctx) {
               profiles.clear();
               return send(res, 200, { ok: true, message: '熟人小档案清了' });
 
+            /** E4：撤销某人的雷区（保留印象/相处）——写错了要能单独撤掉 */
+            case 'profiles.clearDislikes': {
+              const key = String(arg ?? '').trim();
+              if (!key) return send(res, 400, { ok: false, message: '要撤谁的雷区？给个 key' });
+              const ok = profiles.clearDislikes(key);
+              return send(res, 200, { ok, message: ok ? '雷区撤了' : '没找到这个人的雷区' });
+            }
+
             case 'memory.list':
               return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId, aliasesOf(chatId)) });
 

@@ -86,6 +86,8 @@ const MEMORY_PURGE_OPS = Object.freeze([
 const MEMORY_WRITE_OPS = Object.freeze([
   'memory.remove', 'memory.mute', 'memory.unmute',
   'memory.clear',
+  /** E4：撤销某人雷区（改，不是清库） */
+  'profiles.clearDislikes',
   'graph.suppress', 'graph.unsuppress', 'graph.close',
   'extensions.memory.clear',
 ]);

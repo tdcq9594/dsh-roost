@@ -204,6 +204,23 @@ export function createProfiles({
       return true;
     },
 
+    /**
+     * E4：撤销某个人的"雷区"（dislikes），保留印象/相处。
+     * 为什么要单独可撤：雷区是模型提炼的主观判断，写错了会一直注入
+     * "别踩：…"、还会被下一轮提炼喂回 prompt 自我强化（aurabot 用 tombstone 防这个）。
+     * 这里做最小版：清掉这一项，下一轮提炼就不会再看到它。
+     */
+    clearDislikes(key) {
+      const k = String(key ?? '').trim().toLowerCase();
+      if (!k) return false;
+      const row = load().find((r) => String(r.key ?? '').trim().toLowerCase() === k);
+      if (!row || !row.dislikes) return false;
+      delete row.dislikes;
+      renderCache = null;
+      save();
+      return true;
+    },
+
     /** 独立清空入口（契约 §3④）；隐私优先，当场作废渲染缓存 */
     clear() {
       rows = [];
