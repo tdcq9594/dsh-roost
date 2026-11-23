@@ -23,7 +23,7 @@ import { createGraph } from '../src/graph.js';
 import {
   createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc, strongerStatus, canSupersede,
   evidenceOf, applyEvidence, trendOf, MEMORY_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS,
-  kindOf, occurredOf, FACT_KINDS, growTier,
+  kindOf, occurredOf, FACT_KINDS, growTier, isValidAt,
 } from '../src/memory.js';
 import {
   createConsolidate,
@@ -2813,4 +2813,26 @@ test('E1 显式指令：单独标记、重提不降级、还原不丢', () => {
   const m2 = createMemory();
   assert.equal(m2.insertRaw(entry), true);
   assert.equal(m2.listFull('g1').global[0].directive, true, '还原不丢');
+});
+
+test('E3 条目级时效：没有效期永远有效；区间外不算有效；过期分数打折但不删', () => {
+  const NOW = 1_700_000_000_000;
+  assert.equal(isValidAt({}, NOW), true, '老库没有时效字段，永远有效');
+  assert.equal(isValidAt({ validFrom: 100, validUntil: 200 }, NOW), false, '过了有效期');
+  assert.equal(isValidAt({ validFrom: NOW + 1000 }, NOW), false, '还没到生效时间');
+  assert.equal(isValidAt({ validFrom: NOW - 1000, validUntil: NOW + 1000 }, NOW), true);
+
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-valid-'));
+  const m = createMemory({ now: () => NOW });
+  m.add('g1', '限时的事', 'global', { validFrom: NOW - 1000, validUntil: NOW + 1000 });
+  const live = m.listRanked('g1');
+  assert.ok(live.global.includes('限时的事'));
+  const meta = readRaw().meta.global['限时的事'];
+  assert.equal(meta.validFrom, NOW - 1000);
+  assert.equal(meta.validUntil, NOW + 1000, '时效要落盘');
+  assert.equal(m.listFull('g1').global[0].validUntil, NOW + 1000, 'listFull 要输出');
+  /** 过期后分数打折（不删） */
+  const future = scoreOfFact(meta, NOW + 5000);
+  const fresh = scoreOfFact(meta, NOW);
+  assert.ok(future < fresh, '过期后分数下降但不消失');
 });

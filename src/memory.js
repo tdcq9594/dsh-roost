@@ -97,7 +97,18 @@ export function scoreOfFact(meta, now = Date.now()) {
   const base = tier === 'core' ? w : w * 0.5 ** (days / (HALF_LIFE_DAYS * (TIER_DECAY[tier] || 1)));
   let score = meta?.until ? base * HISTORY_WEIGHT : base;
   if (meta?.archivedAt) score *= ARCHIVE_WEIGHT;
+  /** E3 条目级时效：过了 validUntil 不删、保留历史，但不再当硬事实注入 */
+  if (Number(meta?.validUntil) > 0 && Number(meta.validUntil) <= now) score *= HISTORY_WEIGHT;
   return score;
+}
+
+/** E3：一条事实在 now 是否处于有效期内（没有有效期 = 永远有效） */
+export function isValidAt(meta, now = Date.now()) {
+  const from = Number(meta?.validFrom);
+  const until = Number(meta?.validUntil);
+  if (Number.isFinite(from) && from > 0 && now < from) return false;
+  if (Number.isFinite(until) && until > 0 && now >= until) return false;
+  return true;
 }
 
 /**
@@ -855,6 +866,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       ...(Number(opts.occurredAt) > 0 ? { occurredAt: Number(opts.occurredAt) } : {}),
       /** E1 显式指令："记住不要做X"当硬规则注入，不混在普通事实里被淘汰 */
       ...(opts.directive === true ? { directive: true } : {}),
+      /** E3 条目级时效：只在显式给时落盘，老调用方字节不变 */
+      ...(Number(opts.validFrom) > 0 ? { validFrom: Number(opts.validFrom) } : {}),
+      ...(Number(opts.validUntil) > 0 ? { validUntil: Number(opts.validUntil) } : {}),
     };
     /** 新建就带出处＝第一条证据；老调用点不传 evidence，这一行是空操作 */
     if (opts.evidence) writeEvidence(fresh, applyEvidence({}, 'reinforce', opts.evidence));
@@ -1066,6 +1080,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
             occurredAt: occurredOf(x, Number(x.at) || 0),
             /** E1 显式指令：面板/注入都要认得出 */
             directive: x.directive === true,
+            /** E3 时效区间 */
+            validFrom: Number(x.validFrom) > 0 ? Number(x.validFrom) : null,
+            validUntil: Number(x.validUntil) > 0 ? Number(x.validUntil) : null,
             pin: clamp01(x.pin),
             archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : null,
             reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : null,
@@ -1522,6 +1539,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
               kind: kindOf(x),
               occurredAt: occurredOf(x, Number(x.at) || 0),
               directive: x.directive === true,
+            /** E3 时效区间 */
+            validFrom: Number(x.validFrom) > 0 ? Number(x.validFrom) : null,
+            validUntil: Number(x.validUntil) > 0 ? Number(x.validUntil) : null,
               pin: clamp01(x.pin),
               reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : 0,
               archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : 0,
@@ -1638,6 +1658,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (FACT_KINDS.includes(row.kind) && row.kind !== 'world') meta.kind = row.kind;
       if (Number(row.occurredAt) > 0) meta.occurredAt = Number(row.occurredAt);
       if (row.directive === true) meta.directive = true;
+      if (Number(row.validFrom) > 0) meta.validFrom = Number(row.validFrom);
+      if (Number(row.validUntil) > 0) meta.validUntil = Number(row.validUntil);
       if (Number(row.pin) > 0) meta.pin = clamp01(row.pin);
       if (Number(row.reviewedAt) > 0) meta.reviewedAt = Number(row.reviewedAt);
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);
