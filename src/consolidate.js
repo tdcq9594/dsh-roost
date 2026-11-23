@@ -568,7 +568,12 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       try {
         if (embed?.enabled?.()) {
           const model = String(embed.modelId?.() || '');
-          const pending = journal.noVec(20, 0);
+          /**
+           * 传 model：连"有向量但模型指纹不符/为空"的也一起补。
+           * 只传 0（老写法）时只捡 `vec IS NULL`，换过模型的旧向量被 withVec
+           * 排除在检索外却永远不进队列——语义检索静默丢历史，且不报错。
+           */
+          const pending = journal.noVec(20, { model });
           if (pending.length) {
             const vecs = await embed.many(pending.map((r) => String(r.text || '')));
             if (Array.isArray(vecs) && vecs.length === pending.length) {

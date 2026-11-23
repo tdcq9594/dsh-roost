@@ -259,6 +259,11 @@ function normRow(r) {
     lastAccess: Number(r.last_access ?? r.lastAccess ?? 0),
     /** 统一过 asVec：JSONL 读回来的数字键对象也要还原成可用字节视图 */
     vec: asVec(r.vec),
+    /**
+     * 向量模型指纹。两个名字都认（SQLite 蛇形 / JSONL 驼峰），同 invalidAt 的理由：
+     * 漏映射会让 noVec 永远判"模型不符"→ 每轮都重算全库，永不收敛。
+     */
+    vecModel: String(r.vec_model ?? r.vecModel ?? ''),
     /** 这条记忆从哪几条消息来（阶段 4）。解析失败当空数组，不让坏数据拖垮整行 */
     eventIds: parseList(r.event_ids ?? r.eventIds),
     /** 原文快照 `[{eventId, at, sender, excerpt}]`，events 删了它也还在 */
@@ -1057,19 +1062,31 @@ function createSqliteStore(file, log) {
      * 「（已按用户要求遗忘）」。不排除的话，巩固会给这个占位符重新算一遍
      * 向量，等于把抹掉的那行重新塞回语义检索里。
      */
-    noVec(limit = 64, dim = 0) {
+    noVec(limit = 64, opts = 0) {
       const d = open();
       if (!d) return [];
       /**
-       * C4：传了 dim 就**连维度不符的旧向量一起收**——换模型后它们被 withVec
-       * 排除在检索外，但若不重算就会永远留在库里占地方、且语义检索静默丢历史。
+       * 传 dim / model 就**连"有向量但不可用"的一起收**，两类都要重算：
+       *  · 维度不符（换过 embedding 模型，cosine 对长度不等的向量无意义）
+       *  · 模型指纹不符或为空（老数据没记模型，无法确认可比）
+       * 它们被 withVec 排除在检索外——不重算就永远沉在库里，语义检索静默丢历史。
+       * 只按 dim 判不够：同维度换模型（如两个 384 维模型）会被漏掉。
+       *
        * 先补**老**条目：按 DESC 取的话最新的先补，最老的永远轮不到。
+       *
+       * @param {number} limit 一次最多取几条
+       * @param {number|{dim?:number, model?:string}} opts 第二参传数字按 dim 兼容老调用
        */
-      const vecCond = Number(dim) > 0 ? '(vec IS NULL OR length(vec)/4 <> ?)' : 'vec IS NULL';
-      const args = Number(dim) > 0 ? [Number(dim), ERASED, CLEARED, limit] : [ERASED, CLEARED, limit];
+      const o = typeof opts === 'object' && opts !== null ? opts : { dim: opts };
+      const dim = Number(o.dim) || 0;
+      const model = String(o.model || '');
+      const conds = ['vec IS NULL'];
+      const args = [];
+      if (dim > 0) { conds.push('length(vec)/4 <> ?'); args.push(dim); }
+      if (model) { conds.push("COALESCE(vec_model, '') <> ?"); args.push(model); }
       return d
-        .prepare(`SELECT * FROM journal WHERE ${vecCond} AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL} ORDER BY at ASC LIMIT ?`)
-        .all(...args)
+        .prepare(`SELECT * FROM journal WHERE (${conds.join(' OR ')}) AND text<>? AND text<>? AND ${NOT_INVALIDATED_SQL} ORDER BY at ASC LIMIT ?`)
+        .all(...args, ERASED, CLEARED, limit)
         .map(normRow);
     },
 
@@ -1644,13 +1661,20 @@ function createJsonlStore(file, log) {
         .slice(0, limit);
     },
 
-    noVec(limit = 64, dim = 0) {
-      /** 同 SQLite 后端：占位符不补算；传 dim 时连维度不符的旧向量也收（换模型重算） */
-      const wantDim = Number(dim) > 0 ? Number(dim) : 0;
+    noVec(limit = 64, opts = 0) {
+      /** 同 SQLite 后端：占位符不补算；传 dim/model 时连"有向量但不可用"的一起收 */
+      const o = typeof opts === 'object' && opts !== null ? opts : { dim: opts };
+      const wantDim = Number(o.dim) || 0;
+      const wantModel = String(o.model || '');
       const dimOf = (r) => { const v = toVec(r.vec); return v ? v.length : 0; };
       return load()
         .filter((r) => isActive(r) && r.text !== ERASED && r.text !== CLEARED)
-        .filter((r) => (!r.vec) || (wantDim > 0 && dimOf(r) !== wantDim))
+        .filter((r) => {
+          if (!r.vec) return true;
+          if (wantDim > 0 && dimOf(r) !== wantDim) return true;
+          if (wantModel && String(r.vecModel || '') !== wantModel) return true;
+          return false;
+        })
         .sort((a, b) => a.at - b.at)
         .slice(0, limit);
     },
@@ -2432,7 +2456,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     /* ---- 向量：巩固时补算，白天只算查询那一条 ---- */
 
     /** 还没算向量的条目（主循环在 consolidate 里） */
-    noVec: (limit, dim) => get().noVec(limit, dim),
+    noVec: (limit, opts) => get().noVec(limit, opts),
     /** C4：带维度过滤的向量候选（调试/测试用，检索内部走 store 直连） */
     withVec: (opts) => get().withVec(opts),
 

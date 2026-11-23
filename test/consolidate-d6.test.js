@@ -270,3 +270,37 @@ test('巩固会补算日记向量并落库（之前 journal.vec 永远是 NULL�
   try { j.close(); } catch {}
   if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA; else process.env.DSH_ROOST_DATA = oldEnv;
 });
+
+test('巩固会重算"换过模型"的旧向量（否则它们被检索排除却永不更新）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-reembed-'));
+  const data = join(dir, 'data');
+  mkdirSync(data, { recursive: true });
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = data;
+  const day = yesterdayOf(Date.now());
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(data, 'j.sqlite'), log: noop });
+  j.add({ id: 'a', at: base, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '这条是旧模型算的向量' });
+  /** 同维度、不同模型：cosine 能算但语义错位，必须重算 */
+  j.setVec('a', [9, 9, 9, 9], 'http:old-model');
+
+  const seen = [];
+  const fakeEmbed = {
+    enabled: () => true,
+    modelId: () => 'local:test',
+    many: async (texts) => { seen.push(...texts); return texts.map(() => [1, 0, 0, 0]); },
+  };
+  const c = createConsolidate({
+    journal: j, graph: null, memory: createMemory(), generate: null,
+    aliasesOf: () => [], log: noop, now: () => Date.now(), embed: fakeEmbed,
+  });
+  await c.run({ day });
+
+  assert.ok(seen.some((t) => t.includes('旧模型算的向量')), '旧模型的行要重新送去算向量');
+  const row = j.get('a');
+  assert.equal(row.vecModel, 'local:test', '模型指纹要更新成当前模型');
+  assert.deepEqual(Array.from(j.vecOf(row) || []), [1, 0, 0, 0], '向量要真的被覆盖');
+
+  try { j.close(); } catch {}
+  if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA; else process.env.DSH_ROOST_DATA = oldEnv;
+});
