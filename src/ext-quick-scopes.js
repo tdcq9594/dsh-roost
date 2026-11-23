@@ -44,6 +44,8 @@ const STATE_READ_OPS = Object.freeze([
   'capabilities.get', 'capabilities.preview',
   'features.get', 'features.preview',
   'recall.log',
+  /** 3.4 向量/重排状态：只读状态查询 */
+  'memory.vector.status',
   'backup.list',
   /** A2 记忆统计快照：只读聚合，和 `/v1/state` 同口径 */
   'stats.snapshot',

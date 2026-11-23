@@ -78,6 +78,8 @@ import { createExtMarket, marketGuardOpts } from './ext-market.js';
 import { pickModelFor, pickReasoningEffort, pickEffortFor } from './model-pick.js';
 import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
+import { projectRecallPreview } from './recall-preview.js';
+import { vectorStatus } from './vector-status.js';
 import { rerankHits } from './rerank.js';
 import { isDangerousCommand, createConfirmGate, dangerScanArgs } from './safety.js';
 import { createClosing, shouldNotePending } from './closing.js';
@@ -10114,6 +10116,31 @@ export function apply(ctx) {
             case 'recall.log':
               return send(res, 200, { ok: true, rows: recallLog.list(Math.min(200, Math.max(1, Number(arg?.limit) || 50))) });
 
+            /**
+             * 3.4 向量/重排状态（对齐 aurabot vector/status + rerank/status）。
+             * 只读：告诉用户"开关开了到底生效没、走本地还是远程"。
+             * 解决开关开着但模型没装好静默回落关键词、面板看不出来的痛点。
+             */
+            case 'memory.vector.status': {
+              const e = cfg.memory?.embedding || null;
+              try {
+                return send(res, 200, {
+                  ok: true,
+                  ...vectorStatus({
+                    embedEnabled: typeof embedder.enabled === 'function' ? embedder.enabled() : false,
+                    embedModelId: typeof embedder.modelId === 'function' ? embedder.modelId() : '',
+                    localEmbedWanted: cfg.memory?.embeddingLocal === true,
+                    localEmbedReady: typeof localEmbedder?.ready === 'function' ? localEmbedder.ready() : false,
+                    remoteConfigured: Boolean(e?.model && e?.baseUrl && e?.apiKey),
+                    rerankEnabled: cfg.recall?.rerank?.enabled === true || cfg.recall?.rerank?.useLocal === true,
+                    localRerankReady: typeof localReranker?.ready === 'function' ? localReranker.ready() : false,
+                  }),
+                });
+              } catch (err) {
+                return send(res, 200, { ok: false, message: `状态读取失败：${err?.message || err}` });
+              }
+            }
+
             /** B4：心情历史属行为日志，独立清空，不随记忆清；当前心情不动 */
             case 'mood.history.clear':
               moodHistory.clear();
@@ -10779,6 +10806,12 @@ export function apply(ctx) {
               linkLimit: Number(cfg.recall?.linkLimit) || 5,
               hits: Number(cfg.memory?.hits) || 3,
             },
+            /**
+             * 3.4 结构化投影（对齐 aurabot /memory/assoc/preview 的 hop/via/counts）。
+             * 现有 hits 保持原样（面板已在用），另开一份给要"第几跳/从谁联想"的展示用。
+             * hop 只有 0（直接）/1（经实体联想）——我方实体路就一跳，不编造多跳。
+             */
+            projection: projectRecallPreview(r),
           });
         } catch (e) {
           return send(res, 200, { ok: false, message: `预览失败：${e.message}` });

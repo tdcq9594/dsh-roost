@@ -4782,6 +4782,12 @@ select.roost-input{color-scheme:dark}
         )
       }
 
+      /** 3.4 向量/重排状态：开关开了到底生效没，点一下看，别靠猜 */
+      const [vecStatus, setVecStatus] = useState(null)
+      const loadVecStatus = async () => {
+        const r = await quick('memory.vector.status')
+        setVecStatus(r?.ok === false ? { err: r.message || '状态读取失败' } : r)
+      }
       const [q, setQ] = useState('')
       const [hits, setHits] = useState(null)
       const [fact, setFact] = useState('')
@@ -5281,7 +5287,8 @@ select.roost-input{color-scheme:dark}
          */
         h(Sec, { title: '翻一翻', defaultOpen: false },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-            '跨「事实 + 日记」一起搜，搜到就能就地改、归档或作废。'),
+            '跨「事实 + 日记」一起搜，搜到就能就地改、归档或作废。日记那半边在开了向量（本地或远程）后也走语义，' +
+            '像「最近睡不好」能带出「经常熬夜」；事实那半边仍是关键词匹配。'),
           h('div', { style: { display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' } },
             h('input', {
               className: 'roost-input',
@@ -5801,6 +5808,17 @@ select.roost-input{color-scheme:dark}
         h(Sec, { n: '05', title: '召回预览与参数' },
           h('div', { className: 'roost-note', style: { marginTop: 0 } },
             '输入一句话，看真实召回会命中什么、为什么命中。这是预演：不计入「被想起」，不影响排序。'),
+          /** 3.4 status：对齐对面 vector/status，解决"开关开了没生效却不知道" */
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 } },
+            h('button', { type: 'button', className: 'roost-btn', onClick: loadVecStatus }, '看向量/重排状态'),
+            vecStatus?.err
+              ? h('span', { style: { color: 'var(--bad)', fontSize: 11.5 } }, vecStatus.err)
+              : vecStatus
+                ? h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
+                    vecStatus.summary
+                    + (vecStatus.rerank?.mode !== 'off' ? ` · 重排：${vecStatus.rerank.mode === 'local' ? '本地模型' : '规则'}` : ''),
+                    ...(vecStatus.warnings || []).map((w, i) => h('div', { key: i, style: { color: 'var(--warn, #d9a441)', fontSize: 11.5 } }, '⚠ ' + w)))
+                : null),
           /**
            * 重排候选（Reranker）：默认关。配了向量就按语义相似度重排，
            * 没配就按「关键词命中 + 新鲜度」确定性重排。开关放这里，
@@ -5881,11 +5899,21 @@ select.roost-input{color-scheme:dark}
                     ? h('div', { className: 'roost-note' }, '这一句点到的实体：' + pvResult.entities.join('、'))
                     : null,
                   (pvResult.hits || []).length
-                    ? pvResult.hits.map((x) => h('div', { key: x.rank, className: 'roost-item' },
-                        h('span', { className: 'd' }, `#${x.rank} · ${x.when || '—'} · ${x.level || ''}`),
-                        h('span', { className: 't' }, x.text || '—'),
-                        h('span', { className: 'd' }, (x.why || '未标原因') + (Number.isFinite(x.score) ? ` · 分 ${x.score.toFixed(4)}` : ''))))
+                    ? pvResult.hits.map((x, i) => {
+                        /** 结构化投影（对齐对面 assoc/preview）：直接 / 经谁联想一跳 */
+                        const p = pvResult.projection?.items?.[i]
+                        return h('div', { key: x.rank, className: 'roost-item' },
+                          h('span', { className: 'd' },
+                            `#${x.rank} · ${x.when || '—'} · ${x.level || ''}`
+                            + (p?.hop ? ` · ${p.hop} 跳联想（经「${p.via}」）` : p ? ' · 直接命中' : '')),
+                          h('span', { className: 't' }, x.text || '—'),
+                          h('span', { className: 'd' }, (x.why || '未标原因') + (Number.isFinite(x.score) ? ` · 分 ${x.score.toFixed(4)}` : '')))
+                      })
                     : h('div', { className: 'roost-empty' }, '没命中。换个说法再试，或检查下面的参数。'),
+                  pvResult.projection?.counts
+                    ? h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginTop: 4 } },
+                        `直接命中 ${pvResult.projection.counts.direct} 条 · 联想带出 ${pvResult.projection.counts.hop1} 条（我方联想只有一跳）`)
+                    : null,
                 )
               : null,
           h('div', { className: 'roost-note', style: { marginTop: 12 } },
