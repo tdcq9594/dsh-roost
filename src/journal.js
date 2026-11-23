@@ -937,11 +937,13 @@ function createSqliteStore(file, log) {
     },
 
     /** FTS 检索：bm25 排序（越小越相关，所以 ORDER BY 直接升序） */
-    searchTerms(terms, { chatId = '', limit = 40, crossCritical = false, aliases = [] } = {}) {
+    searchTerms(terms, { chatId = '', limit = 40, crossCritical = false, aliases = [], from = 0, to = 0 } = {}) {
       const d = open();
       if (!d) return [];
       const expr = matchExpr(terms);
       if (!expr) return [];
+      /** 时间窗下推到 SQL：必须在 LIMIT 之前，否则热门词被近 40 条占满，窗内的一条都进不来 */
+      const hasWindow = Number(from) > 0 && Number(to) > Number(from);
       try {
         /**
          * `crossCritical` 让**别的群里的 critical 条目**也参与命中。
@@ -955,6 +957,10 @@ function createSqliteStore(file, log) {
          */
         let where = `journal_fts MATCH ? AND j.${NOT_INVALIDATED_SQL}`;
         const args = [expr];
+        if (hasWindow) {
+          where += ' AND j.at >= ? AND j.at < ?';
+          args.push(from, to);
+        }
         /**
          * 别名键也一起查：换过机器人之后，旧日记还在旧 `chat_id` 下面。
          * 不带上的话 AI「主动想起来」时永远搜不到以前的事——
@@ -1522,14 +1528,17 @@ function createJsonlStore(file, log) {
       return n;
     },
 
-    searchTerms(terms, { chatId = '', limit = 40, crossCritical = false, aliases = [] } = {}) {
+    searchTerms(terms, { chatId = '', limit = 40, crossCritical = false, aliases = [], from = 0, to = 0 } = {}) {
       load();
       const keys = chatId ? chatKeys(chatId, aliases) : [];
+      /** 与 sqlite 版同口径：时间窗在 limit 之前过滤 */
+      const hasWindow = Number(from) > 0 && Number(to) > Number(from);
       const hit = new Map(); // 下标 → 命中词数
       for (const t of terms) {
         for (const i of index.get(t) || []) {
           const r = rows[i];
           if (!isActive(r)) continue;
+          if (hasWindow && !(Number(r.at) >= from && Number(r.at) < to)) continue;
           // 跨群只放 critical 进来（身份事实），群内梗仍然拦住；别名键等同于当前键
           if (keys.length && !keys.includes(r.chatId) && r.chatId !== '' && !(crossCritical && r.level === 'critical')) continue;
           hit.set(i, (hit.get(i) || 0) + 1);
@@ -1951,7 +1960,15 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
        * P1：Map<journalId, 融合权重>。不传 = 全部按 0.5（第一跳）。
        * 邻接联想（二跳）传 0.3，低于直接关联——它只是补位，不该盖过直接证据。
        */
-      entityWeights = null } = {}) {
+      entityWeights = null,
+      /**
+       * 时间定位（src/temporal.js）：只收 [from, to) 内的日记。
+       * 不传就不过滤——解析不出时间词时行为与以前逐字一致。
+       */
+      from = 0, to = 0 } = {}) {
+      /** 时间窗生效条件严格成对，避免只传一个把范围搜飞 */
+      const hasWindow = Number(from) > 0 && Number(to) > Number(from);
+      const inWindow = (r) => !hasWindow || (Number(r?.at) >= from && Number(r?.at) < to);
       const terms = queryTerms(query);
       const entIds = [...new Set((entityJournalIds || []).filter(Boolean))];
       // 有实体路也能搜（查询词为空但提到了某个人）
@@ -1960,7 +1977,9 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
 
       const per = Math.max(1, Number(perPath) || 40);
       const kw = terms.length
-        ? s.searchTerms(terms, { chatId, limit: per, crossCritical, aliases }).filter((r) => passesCoverage(terms, indexTerms(r.text)))
+        ? s.searchTerms(terms, { chatId, limit: per, crossCritical, aliases, from, to })
+          .filter(inWindow)
+          .filter((r) => passesCoverage(terms, indexTerms(r.text)))
         : [];
       const ranks = new Map();
       /**
@@ -1987,7 +2006,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
       const addEntity = (id, i, w) => {
         const row = byId.get(id) || s.get(id);
         /** `get()` 故意不过滤（写路径与溯源要用），实体路这里得自己挡一道 */
-        if (!row || !isActive(row)) return;
+        if (!row || !isActive(row) || !inWindow(row)) return;
         byId.set(id, row);
         bump(id, i, w);
       };
@@ -2015,6 +2034,7 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
             const cands = s.withVec({ chatId, aliases });
             const scored = [];
             for (const r of cands) {
+              if (!inWindow(r)) continue;
               const v = toVec(r.vec);
               if (!v) continue;
               const cos = cosine(qv, v);

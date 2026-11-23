@@ -20,7 +20,10 @@ import {
 } from '../src/tokenize.js';
 import { createJournal, classify, dayOf, scoreOf, cosine, DEFAULT_KEEP_DAYS, ERASED } from '../src/journal.js';
 import { createGraph } from '../src/graph.js';
-import { createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc, strongerStatus, canSupersede } from '../src/memory.js';
+import {
+  createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc, strongerStatus, canSupersede,
+  evidenceOf, applyEvidence, trendOf,
+} from '../src/memory.js';
 import {
   createConsolidate,
   parseJsonLoose,
@@ -30,6 +33,7 @@ import {
   buildPrompt,
 } from '../src/consolidate.js';
 import { createEmbedder } from '../src/embed.js';
+import { restoreRetentionRows } from '../src/backup.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'roost-mem-'));
 const DAY = 86_400_000;
@@ -678,8 +682,11 @@ function fakeMemory() {
   return {
     global,
     chats,
-    add(chatId, fact, scope = 'global') {
+    /** 记录每次 add 的 opts，供证据账本断言（老用例不读，行为不变） */
+    addCalls: [],
+    add(chatId, fact, scope = 'global', opts = {}) {
       const list = scope === 'chat' ? (chats[chatId] = chats[chatId] || []) : global;
+      this.addCalls.push({ chatId, fact, scope, opts });
       if (!list.includes(fact)) list.push(fact);
       return true;
     },
@@ -2467,4 +2474,185 @@ test('日记（JSONL 后端）：close({final:false}) 之后还能继续用', ()
   assert.equal(j.rekey(['old'], 'uin1'), 1, 'rekey 不能抛');
   assert.deepEqual(j.scanChats().map((x) => x.chatId), ['uin1']);
   j.close();
+});
+
+/* ---------------- 证据账本（2026-11-23，P0） ---------------- */
+
+test('证据：默认不落盘，老库字节不变；listFull 给归一化默认', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  const raw = readRaw();
+  const meta = raw.meta.global['主人住在杭州'];
+  assert.equal(meta.proofs, undefined, '默认 proofs 不落盘');
+  assert.equal(meta.evidence, undefined, '默认 evidence 不落盘');
+  assert.equal(meta.confidence, undefined, '满信念不落盘');
+  const full = m.listFull('g1').global[0];
+  assert.equal(full.proofs, 0);
+  assert.deepEqual(full.evidence, []);
+  assert.equal(full.confidence, 1);
+});
+
+test('证据：四档更新 reinforce/weaken/contradict/neutral 与夹紧', () => {
+  assert.equal(applyEvidence({}, 'reinforce').confidence, 1, '满信念 reinforce 不溢出');
+  assert.equal(applyEvidence({}, 'weaken').confidence, 0.75);
+  assert.equal(applyEvidence({}, 'contradict').confidence, 0.5);
+  assert.equal(applyEvidence({}, 'neutral').confidence, 1, 'neutral 不动');
+  assert.equal(applyEvidence({}, 'not_a_relation').confidence, 1, '未知关系按 neutral');
+  const low = applyEvidence({ confidence: 0.1 }, 'contradict');
+  assert.equal(low.confidence, 0, '下限夹紧');
+});
+
+test('证据：带出处才 proofs+1，出处条数封顶 12', () => {
+  let e = {};
+  for (let i = 0; i < 15; i += 1) e = applyEvidence(e, 'reinforce', { kind: 'journal', detail: `第${i}次`, at: 1000 + i });
+  assert.equal(e.proofs, 15);
+  assert.equal(e.evidence.length, 12, '出处封顶，先来的被挤掉');
+  assert.equal(e.evidence[0].detail, '第3次');
+  assert.equal(applyEvidence(e, 'reinforce').proofs, 15, '没带出处不涨条数');
+});
+
+test('证据：重提同一句＝一次 reinforce（带 evidence 才累计）', () => {
+  const m = freshFacts();
+  m.add('g1', '主人养了只猫叫年糕', 'global', { evidence: { kind: 'manual', detail: '主人亲口说的', at: 100 } });
+  m.add('g1', '主人养了只猫叫年糕', 'global', { evidence: { kind: 'journal', detail: '又一次提到', at: 200 } });
+  const full = m.listFull('g1').global[0];
+  assert.equal(full.proofs, 2, '两次带出处的写入＝两条证据');
+  assert.equal(full.evidence.length, 2);
+  assert.equal(full.confidence, 1, 'reinforce 在满信念上不溢出');
+});
+
+test('证据：老调用点不传 evidence，字节与升级前一致', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  m.add('g1', '主人住在杭州'); // 重提两次
+  const meta = readRaw().meta.global['主人住在杭州'];
+  assert.equal(meta.proofs, undefined);
+  assert.equal(meta.evidence, undefined);
+  assert.equal(meta.confidence, undefined);
+});
+
+test('证据：recordEvidence 精确改置信度，不动 w/status/until', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州', 'global', { status: 'hearsay', w: 3 });
+  const before = readRaw().meta.global['主人住在杭州'];
+  const r = m.recordEvidence('g1', '主人住在杭州', 'weaken', { kind: 'journal', detail: '有人否认', at: 300 });
+  assert.equal(r.ok, true);
+  assert.equal(r.confidence, 0.75);
+  assert.equal(r.proofs, 1);
+  const after = readRaw().meta.global['主人住在杭州'];
+  assert.equal(after.w, before.w, '重要性不动');
+  assert.equal(after.status, before.status, 'status 不动（跨级护栏不受影响）');
+  assert.equal(after.until, undefined, '不作废');
+  assert.equal(after.confidence, 0.75);
+  assert.equal(after.evidence[0].detail, '有人否认');
+});
+
+test('证据：recordEvidence 找不到 / 关系非法都失败，不改盘', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州');
+  assert.deepEqual(m.recordEvidence('g1', '不存在的事', 'reinforce'), { ok: false, why: 'not_found' });
+  assert.deepEqual(m.recordEvidence('g1', '主人住在杭州', 'bogus'), { ok: false, why: 'bad_relation' });
+  assert.equal(readRaw().meta.global['主人住在杭州'].proofs, undefined, '失败路径不写盘');
+});
+
+test('证据：清理→还原后证据字段还在（四处白名单）', () => {
+  const m = freshFacts();
+  m.add('g1', '主人住在杭州', 'global', { evidence: { kind: 'manual', detail: '主人说的', at: 100 } });
+  m.recordEvidence('g1', '主人住在杭州', 'weaken', { kind: 'journal', detail: '有争议', at: 200 });
+
+  const entries = m.retention.entries().filter((e) => e.text === '主人住在杭州');
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].proofs, 2, 'retention.entries 带出证据');
+  assert.equal(entries[0].confidence, 0.75);
+  assert.equal(entries[0].evidence.length, 2);
+
+  /** 用假 store 接住 restore 的 row（同 backup.test.js 的手法）：验白名单贯通 */
+  const rows = [];
+  const fakeMemory = {
+    retention: { entries: () => [] },
+    insertRaw: (row) => { rows.push(row); return true; },
+  };
+  const result = restoreRetentionRows({
+    payload: { facts: entries, journal: [] },
+    memory: fakeMemory, journal: { get: () => null, insertRaw: () => true },
+  });
+  assert.equal(result.facts, 1, '一条事实被还原');
+  const row = rows[0];
+  assert.equal(row.proofs, 2, '还原 row 带证据条数');
+  assert.equal(row.confidence, 0.75, '还原 row 带置信度');
+  assert.equal(row.evidence.length, 2, '还原 row 带出处');
+
+  /** 再从 row 走到真 store 的 insertRaw，确认写入盘后字段不丢 */
+  const m2 = freshFacts();
+  m2.insertRaw(row);
+  const restored = m2.listFull('g1').global.find((x) => x.text === '主人住在杭州');
+  assert.equal(restored.proofs, 2, 'insertRaw 后证据条数不丢');
+  assert.equal(restored.confidence, 0.75, 'insertRaw 后置信度不丢');
+  assert.equal(restored.evidence.length, 2, 'insertRaw 后出处不丢');
+});
+
+/* ---------------- 证据账本的真实写入点：巩固写约定（2026-11-23） ---------------- */
+
+test('证据：巩固写约定时带 evidence，重提同一约定累计成 reinforce', async () => {
+  const now = Date.now();
+  const day = Y(now);
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const mem = fakeMemory();
+  j.add({ id: 'a1', at: base, chatId: 'g1', sender: '张三', text: '周末一起看电影' });
+
+  const gen = async () => JSON.stringify({
+    summary: '约了周末看电影。',
+    ranks: [], compress: [], triples: [],
+    agreements: ['周末一起看电影'], closed: [],
+  });
+  const c = createConsolidate({ journal: j, graph: null, memory: mem, generate: gen, now: () => now });
+  await c.run({ day });
+
+  const call = mem.addCalls.find((x) => x.fact.includes('周末一起看电影'));
+  assert.ok(call, '约定写进去了');
+  assert.equal(call.opts.evidence?.kind, 'consolidate', '约定写入带证据出处');
+  assert.ok(call.opts.evidence?.detail?.includes(day), '证据带日期便于追溯');
+  assert.equal(call.opts.src?.journalId, 'a1', '原出处照旧保留（不抢 src）');
+});
+
+/* ---------------- 证据趋势：照搬 Hindsight compute_trend（2026-11-23） ---------------- */
+
+test('趋势：空证据 = stale，全在近期 = new', () => {
+  const now = Date.now();
+  const DAY2 = 86_400_000;
+  assert.equal(trendOf([], now), 'stale');
+  assert.equal(trendOf([{ at: now }], now), 'new');
+  assert.equal(trendOf([{ at: now - 29 * DAY2 }, { at: now - 1 * DAY2 }], now), 'new');
+  assert.equal(trendOf([{ at: now - 100 * DAY2 }], now), 'stale', '没有近期证据就 stale');
+});
+
+test('趋势：近30天密度 / 前60天密度 → 五档（阈值 1.5 / 0.5 照抄对面）', () => {
+  const now = Date.now();
+  const D = 86_400_000;
+  /** older 分布在 40..85 天前（都在 31-90 的 older 段），密度比 = (recent/30)/(older/60) = 2*recent/older */
+  const evidence = (recent, older) => [
+    ...Array.from({ length: recent }, (_, i) => ({ at: now - (i + 1) * D })),
+    ...Array.from({ length: older }, (_, i) => ({ at: now - (40 + i * 5) * D })),
+  ];
+  assert.equal(trendOf(evidence(4, 2), now), 'strengthening', '4/30 vs 2/60 = 4 倍 > 1.5');
+  assert.equal(trendOf(evidence(2, 4), now), 'stable', '2/30 vs 4/60 = 1 倍，落在 [0.5,1.5]');
+  assert.equal(trendOf(evidence(1, 8), now), 'weakening', '1/30 vs 8/60 = 0.25 < 0.5');
+});
+
+test('趋势：证据条目带 journalId/quote 能穿过证据账本与四处白名单', async () => {
+  const m = freshFacts();
+  m.add('g1', '约定：周末一起看电影', 'global', {
+    evidence: {
+      kind: 'consolidate', journalId: 'msg-42', quote: '我们周末一起去看电影吧', detail: 'day:X', at: Date.now(),
+    },
+  });
+  const full = m.listFull('g1').global[0];
+  assert.equal(full.evidence[0].journalId, 'msg-42', 'journalId 可回查原文（对标 memory_id）');
+  assert.equal(full.evidence[0].quote, '我们周末一起去看电影吧', 'quote 可核验');
+  assert.equal(full.trend, 'new', '新证据是 new 趋势');
+
+  const entries = m.retention.entries().filter((e) => e.text === '约定：周末一起看电影');
+  assert.equal(entries[0].evidence[0].journalId, 'msg-42', 'retention.entries 带 journalId');
+  assert.equal(entries[0].evidence[0].quote, '我们周末一起去看电影吧');
 });

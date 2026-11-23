@@ -391,6 +391,12 @@ export const DEFAULTS = {
      */
     embedding: null,
     /**
+     * 本地 embedding 总开关（默认关）。装好 e5-small 模型后打开它，
+     * 检索的向量那一路就走本地 ONNX，不需要任何外部 API / 凭证。
+     * 模型没装好时即使打开也安静回落纯关键词，不报错。
+     */
+    embeddingLocal: false,
+    /**
      * 可选过期策略（调研报告 D11）。
      *
      * 2026-11-08 主人拍板「两类都做，让用户自由开关」→ 拆成**两路各自一个
@@ -471,6 +477,11 @@ export const DEFAULTS = {
       /** 相关性占多少，剩下给 RRF 原名次 */
       weight: 0.6,
       useVector: true,
+      /**
+       * 本地 cross-encoder 重排（默认关）。装好 hs-rerank-1 模型后打开，
+       * 比向量余弦准；没装/算不出来自动回落向量或规则。
+       */
+      useLocal: false,
     },
     /** 关键词 / 向量各取多少条进融合（原写死 40） */
     perPath: 40,

@@ -20,7 +20,9 @@ const trimSlash = (s) => String(s ?? '').trim().replace(/\/+$/, '');
  * @param {() => object|null} o.cfgOf  返回 `{ model, baseUrl, apiKey, batch, minScore }`；空=不启用
  * @param {(m:string)=>void} [o.log]
  */
-export function createEmbedder({ cfgOf, log = () => {} } = {}) {
+export function createEmbedder({ cfgOf, log = () => {}, localOf = null } = {}) {
+  /** 本地 embedder 每轮现取（配置开关变了下一轮就生效），没注入就是 null */
+  const localNow = () => (typeof localOf === 'function' ? localOf() : null);
   /** 配置读完缓存住：每轮都解析一遍没意义，改配置会重建实例 */
   let conf = undefined;
 
@@ -102,21 +104,39 @@ export function createEmbedder({ cfgOf, log = () => {} } = {}) {
     return out;
   }
 
+  /**
+   * 本地模型优先：配置了 `memory.embeddingLocal` 且模型装好了，就用本地
+   * （不需外部 API / 凭证）；否则走原来的 OpenAI 兼容 `/embeddings`。
+   * 本地没装好时 `enabled()` 为 false，检索自动回落纯关键词——和以前一样安静。
+   */
   return {
-    /** 配了没有。上层据此决定要不要走向量这一路 */
-    enabled: () => Boolean(read()),
+    enabled: () => (localNow()?.enabled?.() ? true : Boolean(read())),
 
-    /** 余弦门槛，给检索那边对齐 */
-    minScore: () => read()?.minScore ?? 0.4,
+    minScore: () => (localNow()?.enabled?.() ? localNow().minScore() : (read()?.minScore ?? 0.4)),
 
-    /** 批量算。没配返回 null（不是抛错——没配是正常状态） */
     async many(texts, opts = {}) {
+      const local = localNow();
+      if (local?.enabled?.()) {
+        const r = await local.many(texts, opts);
+        if (r) return r;
+        /** 本地算不出来 ≠ 回退 HTTP：HTTP 多半也没配，回落关键词即可 */
+        return null;
+      }
       if (!read()) return null;
       return call(texts, opts.signal);
     },
 
-    /** 单条。算不出来就返回 null，让调用方回落关键词 */
     async one(text, opts = {}) {
+      const local = localNow();
+      if (local?.enabled?.()) {
+        try {
+          const r = await local.one(text, opts);
+          return r ?? null;
+        } catch (e) {
+          log(`本地向量算不出来：${e.message}`);
+          return null;
+        }
+      }
       if (!read()) return null;
       try {
         const r = await call([text], opts.signal);

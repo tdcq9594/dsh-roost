@@ -121,13 +121,45 @@ export async function vectorRerank(query, hits, { embedder, weight = RERANK_DEFA
 }
 
 /**
- * 统一入口：关着就原样返回，开着按可用能力选模式。
- * @returns {{hits:Array, mode:'off'|'rule'|'vector'}}
+ * 本地 cross-encoder 重排。复用 embedding 那套 onnxruntime-node + tokenizers，
+ * pair(query, doc) 直接打相关性分——比向量余弦准（它看的是两段的关系）。
+ * 模型没装好 / 算不出来返回 null，让调用方回落向量或规则。
+ * @param {{ready?:Function, score?:Function}} localReranker
  */
-export async function rerankHits(query, hits, { cfg = {}, embedder = null, now = Date.now() } = {}) {
+export async function localRerank(query, hits, { localReranker, weight = RERANK_DEFAULTS.weight } = {}) {
+  const list = Array.isArray(hits) ? hits : [];
+  if (list.length < 2 || !localReranker || typeof localReranker.score !== 'function') return null;
+  if (typeof localReranker.ready === 'function' && !localReranker.ready()) return null;
+  const texts = list.map((h) => String(h?.text ?? h?.digest ?? '').slice(0, 2000));
+  const scores = await localReranker.score(String(query ?? ''), texts);
+  if (!Array.isArray(scores) || scores.length !== texts.length) return null;
+  return mix(list, scores, weight);
+}
+
+/**
+ * 统一入口：关着就原样返回，开着按可用能力选模式。
+ * 优先级：本地 cross-encoder（最准）→ 向量 → 规则。
+ * @returns {{hits:Array, mode:'off'|'rule'|'vector'|'local'}}
+ */
+export async function rerankHits(query, hits, { cfg = {}, embedder = null, localReranker = null, now = Date.now() } = {}) {
   const c = { ...RERANK_DEFAULTS, ...(cfg?.recall?.rerank || {}) };
   const list = Array.isArray(hits) ? hits : [];
-  if (c.enabled !== true || list.length < 2) return { hits: list, mode: 'off' };
+  /**
+   * `useLocal: true` 本身就是"我要重排"的明确意图——面板文案也是这么写的
+   * （装好模型开本地重排开关就生效）。不能要求用户再开一个 enabled 总闸，
+   * 否则只开 useLocal 会静默不生效，面板却说已经开了。
+   */
+  const enabled = c.enabled === true || c.useLocal === true;
+  if (!enabled || list.length < 2) return { hits: list, mode: 'off' };
+  /** 本地 cross-encoder 优先：配了模型就用，没装/算不出来安静回落 */
+  if (c.useLocal === true) {
+    try {
+      const out = await localRerank(query, list, { localReranker, weight: c.weight });
+      if (out) return { hits: out, mode: 'local' };
+    } catch {
+      /* 本地模型抖了就回落，别让召回整轮失败 */
+    }
+  }
   if (c.useVector !== false) {
     try {
       const out = await vectorRerank(query, list, { embedder, weight: c.weight });

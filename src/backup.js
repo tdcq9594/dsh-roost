@@ -606,6 +606,13 @@ export function restoreRetentionRows({ payload, memory, journal }) {
       pin: Number(raw.pin) || 0,
       reviewedAt: Number(raw.reviewedAt) || 0,
       archivedAt: Number(raw.archivedAt) || 0,
+      /** 证据账本三件套：跟着 `retention.entries()` 走，漏一个还原就丢证据 */
+      proofs: Math.max(0, Number(raw.proofs) || 0),
+      evidence: Array.isArray(raw.evidence) ? raw.evidence.slice(0, 12) : [],
+      confidence: (() => {
+        const v = Number(raw.confidence);
+        return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1;
+      })(),
     };
     if (!row.text) { skipped += 1; continue; }
     const key = JSON.stringify([row.scope, row.chatId, row.text]);

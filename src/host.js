@@ -278,6 +278,11 @@ import {
   createTagJob, statsOf, PAGE_SIZE,
 } from './sticker-manage.js';
 import { createTtsInstaller } from './tts-install.js';
+import { createOnnxInstaller, RERANK_FILES, RERANK_MODEL_ID } from './onnx-install.js';
+import { createModelInstaller } from './onnx-model-install.js';
+import { createLocalEmbedder } from './local-embed.js';
+import { createLocalReranker } from './local-rerank.js';
+import { parseTemporal } from './temporal.js';
 import { createTurnScenes } from './turn-scene.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -931,6 +936,44 @@ export function apply(ctx) {
     /** 装完马上把模型读进内存，用户第一次说话就不用等那 5 秒 */
     onDone: () => { tts.warmup().catch(() => {}); },
   });
+
+  /**
+   * 通用 ONNX 运行时安装器（本地 embedding / rerank / decide 的前置）。
+   *
+   * 和 ttsInstaller 分开：它装的是 115MB 的 onnxruntime-node，
+   * 一天点一次都不算多，混进 TTS 的状态机只会让两条安装互相占用 busy。
+   * 同样落到数据目录 `onnx-runtime/`，插件更新不会覆盖。
+   */
+  const onnxInstaller = createOnnxInstaller({
+    dataDir,
+    log: (m) => log.info(m),
+    registry: () => cfg.update?.registry || '',
+  });
+
+  /**
+   * 本地 embedding 模型（e5-small，中文可用）的下载器。
+   *
+   * 和运行时分开：运行时 115MB 从 npm、模型 135MB 从 HuggingFace，
+   * 两套源、两个按钮、两个状态机——混在一起一个失败就拖另一个。
+   */
+  const onnxModelInstaller = createModelInstaller({
+    dataDir,
+    log: (m) => log.info(m),
+  });
+
+  /**
+   * 本地 cross-encoder rerank（hs-rerank-1）：和 embedding 模型各自独立安装、
+   * 各自状态机。运行时复用 onnx-runtime，只多下 160MB 模型 + 34MB tokenizer。
+   */
+  const rerankModelInstaller = createModelInstaller({
+    dataDir,
+    log: (m) => log.info(m),
+    modelId: RERANK_MODEL_ID,
+    dirName: 'hs-rerank-1',
+    files: RERANK_FILES,
+    label: '本地 rerank 模型（hs-rerank-1）',
+  });
+  const localReranker = createLocalReranker({ dataDir, log: (m) => log.warn(m) });
 
   /**
    * GPT-SoVITS 的一键启动。
@@ -3107,9 +3150,21 @@ export function apply(ctx) {
   /* ---------------- 日记 / 图谱 / 巩固 ---------------- */
 
   /** 向量（可选）。没配 `memory.embedding` 时 enabled() 是 false，检索自动只用关键词 */
+  /**
+   * 本地 embedding（可选）：只有 `memory.embeddingLocal: true` 且模型装好才生效，
+   * 默认关——不装模型的人不该被拖进 470MB 下载、也不改任何现有行为。
+   * 装好但没开时 local.enabled() 仍可能为 true，所以这里用配置做总闸。
+   */
+  const localEmbedder = createLocalEmbedder({
+    dataDir,
+    log: (m) => log.warn(m),
+  });
+
   const embedder = createEmbedder({
     cfgOf: () => cfg.memory?.embedding,
     log: (m) => log.warn(m),
+    /** getter：每轮现读配置开关，面板改了下一轮生效，不用重启 */
+    localOf: () => (cfg.memory?.embeddingLocal === true ? localEmbedder : null),
   });
 
   /**
@@ -3288,9 +3343,18 @@ export function apply(ctx) {
     } catch (e) {
       log.debug(`实体路跳过：${e.message}`);
     }
+    /**
+     * 时间定位（src/temporal.js）：查询里的时间词转成日期窗。
+     * 解析不出来就返回 null —— 不加窗、不改查询，行为与以前逐字一致。
+     */
+    const temporal = parseTemporal(q);
+    const searchQ = temporal?.rest && temporal.rest.trim() ? temporal.rest : q;
     const opts = {
       chatId,
       limit: Number(cfg.memory?.hits) || 3,
+      /** 时间窗：只收这个范围的日记（keyword/向量/实体三路都过滤） */
+      from: temporal?.from || 0,
+      to: temporal?.to || 0,
       entityJournalIds: [...entityNames.keys()],
       entityNames,
       /** P1：弱关联的融合权重（缺省 0.5，只覆盖邻接那批） */
@@ -3303,7 +3367,7 @@ export function apply(ctx) {
     };
     /** D4：短句连上一句补检索，按原分补位、不乘系数（见 recall.js） */
     const prev = dry ? '' : (recentUserText.get(chatId) || '');
-    const rec = await searchWithShortContext(journal, q, opts, prev);
+    const rec = await searchWithShortContext(journal, searchQ, opts, prev);
     /**
      * 重排候选（可选，默认关）。放在 RRF 融合之后、记召回日志之前：
      * 日志要记「她最终先想起哪几条」，记重排前的顺序就是错的。
@@ -3312,7 +3376,7 @@ export function apply(ctx) {
     let hits = rec.hits;
     let rerankMode = 'off';
     try {
-      const rr = await rerankHits(q, hits, { cfg, embedder, now: Date.now() });
+      const rr = await rerankHits(q, hits, { cfg, embedder, localReranker, now: Date.now() });
       hits = rr.hits;
       rerankMode = rr.mode;
     } catch (e) {
@@ -3323,7 +3387,13 @@ export function apply(ctx) {
       /** D3：召回日志只留结构化字段，连检索词都不落盘 */
       recallLog.push(recallRow(chatId, q, hits, rec));
     }
-    return { hits, rec: { ...rec, rerank: rerankMode }, entities };
+    /** temporal 只给面板解释用（「上个月」被解析成哪段），不落盘、不进召回日志 */
+    return {
+      hits,
+      rec: { ...rec, rerank: rerankMode },
+      entities,
+      temporal: temporal ? { label: temporal.label, from: temporal.from, to: temporal.to, rest: temporal.rest } : null,
+    };
   };
 
 
@@ -8911,6 +8981,10 @@ export function apply(ctx) {
                 runtimes: sharedDeps.runtimeScan([
                   { id: 'tts', label: '语音引擎（原生，本地）', dir: join(dataDir(), 'tts-runtime') },
                   { id: 'tts-edge', label: '语音（微软在线）', dir: join(dataDir(), 'tts-edge') },
+                  /** 本地 ONNX 运行时（记忆增强前置），装/卸走 onnx.* 独立 op */
+                  { id: 'onnx', label: 'ONNX 运行时（本地记忆增强）', dir: join(dataDir(), 'onnx-runtime') },
+                  /** embedding 模型权重，从 HuggingFace 下，装/卸走 onnx.model-* op */
+                  { id: 'onnx-model', label: '本地 embedding 模型（e5-small）', dir: join(dataDir(), 'onnx-models') },
                 ]),
               });
             }
@@ -8986,6 +9060,71 @@ export function apply(ctx) {
             case 'sharedDeps.scan': {
               syncSharedDepsDirs();
               return send(res, 200, { ok: true, ...sharedDeps.scan() });
+            }
+            /**
+             * 本地 ONNX 运行时（记忆增强前置）。装/卸只有面板显式点击才到这里，
+             * 和 sharedDeps 的白名单机制分开——onnxruntime-node 有 postinstall，
+             * 走的是 tts-install 那套「手工下 tgz 解压」的独立安装器。
+             */
+            case 'onnx.status': {
+              return send(res, 200, {
+                ok: true,
+                ready: onnxInstaller.ready(),
+                install: onnxInstaller.status(),
+                usage: onnxInstaller.usage(),
+                /** 本地 embedding 模型（e5-small）：独立于运行时的另一套状态 */
+                model: {
+                  ready: onnxModelInstaller.ready(),
+                  modelId: onnxModelInstaller.modelId(),
+                  install: onnxModelInstaller.status(),
+                  usage: onnxModelInstaller.usage(),
+                },
+                /** 本地 rerank 模型（hs-rerank-1）：第三套独立状态 */
+                rerankModel: {
+                  ready: rerankModelInstaller.ready(),
+                  modelId: rerankModelInstaller.modelId(),
+                  install: rerankModelInstaller.status(),
+                  usage: rerankModelInstaller.usage(),
+                },
+              });
+            }
+            case 'onnx.install': {
+              const r = onnxInstaller.start();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.cancel': {
+              const r = onnxInstaller.cancel();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.uninstall': {
+              const r = onnxInstaller.uninstall();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            /** 本地 embedding 模型（从 HuggingFace/hf-mirror 下，和 npm 运行时分开） */
+            case 'onnx.modelInstall': {
+              const r = onnxModelInstaller.start();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.modelCancel': {
+              const r = onnxModelInstaller.cancel();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.modelUninstall': {
+              const r = onnxModelInstaller.uninstall();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            /** 本地 rerank 模型（第三套状态机，和 embedding 模型互不占用） */
+            case 'onnx.rerankInstall': {
+              const r = rerankModelInstaller.start();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.rerankCancel': {
+              const r = rerankModelInstaller.cancel();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.rerankUninstall': {
+              const r = rerankModelInstaller.uninstall();
+              return send(res, r.ok ? 200 : 409, r);
             }
             /**
              * 阶段 6 市场：索引 → 下载校验 → 原子落位 → 权限组 → 受管块。
@@ -10244,6 +10383,8 @@ export function apply(ctx) {
             ok: true,
             dry: true,
             entities: r.entities,
+            /** 时间定位：让「上个月说的」这种查询的过滤依据可见（解析不出就是 null） */
+            temporal: r.temporal || null,
             hits: (r.hits || []).map((h, i) => ({
               rank: i + 1,
               score: h.score,
