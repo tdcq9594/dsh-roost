@@ -2883,3 +2883,52 @@ test('自检-A2：retention 还原老库不会凭空多 occurredAt', () => {
   m2.insertRaw(entry);
   assert.equal(readRaw().meta.global['没写事发时间的事'].occurredAt, undefined, '还原后仍没有 occurredAt');
 });
+
+test('日记：换模型后旧向量进重算队列（同维度也不混用），补完即收敛', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  const now = Date.now();
+  j.add({ id: 'a', at: now, chatId: 'g1', text: '旧模型算的' });
+  j.add({ id: 'b', at: now + 1, chatId: 'g1', text: '新模型算的' });
+  j.add({ id: 'c', at: now + 2, chatId: 'g1', text: '从没算过' });
+  j.add({ id: 'd', at: now + 3, chatId: 'g1', text: '老数据没记模型' });
+  j.setVec('a', [1, 0, 0], 'http:old-model');
+  j.setVec('b', [1, 0, 0], 'http:new-model');
+  j.setVec('d', [1, 0, 0]); // 不传 model = 老数据，指纹空
+
+  /** 不传 opts：老行为不变，只补 NULL */
+  assert.deepEqual(j.noVec(10).map((r) => r.id), ['c'], '不传 opts 只捡 NULL');
+
+  /** 传 model：旧模型 + 空指纹都要重算，同模型跳过 */
+  assert.deepEqual(j.noVec(10, { model: 'http:new-model' }).map((r) => r.id), ['a', 'c', 'd'],
+    '旧模型和空指纹进队列；同模型不重算');
+
+  /** 补完就收敛：重算过的不再被挑出来（否则每轮都重算全库）；c 还没算过，仍在队列 */
+  j.setVec('a', [0, 1, 0], 'http:new-model');
+  j.setVec('d', [0, 1, 0], 'http:new-model');
+  assert.deepEqual(j.noVec(10, { model: 'http:new-model' }).map((r) => r.id), ['c'],
+    '重算过的收敛掉，只剩真正缺向量的');
+});
+
+test('日记：vec_model 能读回来（漏映射会让每轮都判"模型不符"）', () => {
+  const j = createJournal({ file: join(tmp(), 'j.sqlite') });
+  j.add({ id: 'a', at: Date.now(), chatId: 'g1', text: '有模型指纹' });
+  j.setVec('a', [1, 0, 0], 'local:e5-small');
+  assert.equal(j.get('a').vecModel, 'local:e5-small');
+});
+
+test('日记（JSONL）：换模型后旧向量也进重算队列，补完收敛', () => {
+  const dir = tmp();
+  const blocker = join(dir, 'blocked');
+  writeFileSync(blocker, 'x');
+  const j = createJournal({ file: join(blocker, 'journal.sqlite'), log: () => {} });
+  assert.equal(j.backend(), 'jsonl');
+  const now = Date.now();
+  j.add({ id: 'a', at: now, chatId: 'g1', text: '旧模型' });
+  j.add({ id: 'b', at: now + 1, chatId: 'g1', text: '新模型' });
+  j.setVec('a', [1, 0, 0], 'http:old');
+  j.setVec('b', [1, 0, 0], 'http:new');
+  assert.deepEqual(j.noVec(10, { model: 'http:new' }).map((r) => r.id), ['a'], '旧模型进队列');
+  j.setVec('a', [1, 0, 0], 'http:new');
+  assert.deepEqual(j.noVec(10, { model: 'http:new' }), [], '补完收敛（JSONL 也要能读到指纹）');
+  assert.equal(j.get('a').vecModel, 'http:new');
+});
