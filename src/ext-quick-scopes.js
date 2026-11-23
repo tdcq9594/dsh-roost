@@ -128,6 +128,12 @@ export const OP_SCOPE = Object.freeze({
   'mind.snapshot': 'memory:read',
   'mind.refresh': 'memory:write',
   'mind.clear': 'memory:write',
+  /** §1.10 Gist 两档：读印象只读；generate/crystallize/clear 写独立文件，归 memory:write */
+  'gist.impression.list': 'memory:read',
+  'gist.impression.hit': 'memory:write',
+  'gist.impression.generate': 'memory:write',
+  'gist.impression.crystallize': 'memory:write',
+  'gist.impression.clear': 'memory:write',
   'persona.set': 'prompt:write',
   /** 阶段6：人物墙人工编辑/不再记住——改的是档案，归 prompt:write */
   'persona.edit': 'prompt:write',
