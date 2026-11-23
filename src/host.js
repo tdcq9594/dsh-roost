@@ -3254,6 +3254,14 @@ export function apply(ctx) {
    * text() 只负责读。
    */
   const memState = new Map();
+  /**
+   * 这一轮真正注入给模型的待跟进（chatId → 事实原文）。
+   *
+   * 只在 `live` 注入时写（真实回复路径），面板预览不写；回复真的发出去之后
+   * 才 `markFollowUpAsked` 记账。否则「预览一次就烧掉一次机会」，
+   * 而模型可能根本没问。
+   */
+  const followPending = new Map();
 
   /**
    * 每个会话聊到第几轮了 —— 用来算"这次要不要全量重注记忆"。
@@ -5306,7 +5314,7 @@ export function apply(ctx) {
    * 都是为了这件事。反过来看，把每轮都变的检索命中塞进 system prompt，
    * 等于每轮主动作废一次缓存。
    */
-  function memoryStatic(chat = null, deepOverride = null) {
+  function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
     /**
      * **会话由调用方给，不在这里猜**（2026-11-22）。
      *
@@ -5389,6 +5397,28 @@ export function apply(ctx) {
       : '';
 
     /**
+     * 待跟进（默认关）：到点该问的事，facts 之后单独一行。
+     *
+     * **只提示、不替模型决定问不问**——注进提示词，它自己挑时机自然地接。
+     * 不参与 `listRanked` 排序、不占 facts 名额，避免变相加冕。
+     * `live` 才记「这一轮注入了哪条」，出站成功后由 `markFollowUpAsked` 记账；
+     * 面板预览（不带 live）不会消耗次数。
+     */
+    let followSec = '';
+    if (cfg.memory?.followUp?.enabled === true) {
+      try {
+        const due = memory.dueFollowUps(chatId, aliasesOf(chatId), { limit: 1 });
+        if (due.length) {
+          const d = due[0];
+          followSec = `【该问的事】\n· ${oneLine(d.question || d.text)}`;
+          if (live) followPending.set(chatId, d.text);
+        }
+      } catch (e) {
+        log.debug(`待跟进跳过：${e?.message || e}`);
+      }
+    }
+
+    /**
      * B3 stale 刷新提醒：证据走弱/陈旧的事实不该当硬事实用。
      * 只在 deep 段注入（省 token），且只点出条目、不改它们的正文——
      * 让模型知道"这条可能过时了，拿不准就问"，而不是替它改写结论。
@@ -5458,8 +5488,8 @@ export function apply(ctx) {
      * facts 是硬事实，自述是软状态。
      */
     const sections = deep
-      ? [rules, directiveSec, factsGlobal, factsChat, staleSec, selfSec, profilesSec, digestSec, topSec, graphSec]
-      : [rules, factsGlobal, factsChat, profilesSec];
+      ? [rules, directiveSec, followSec, factsGlobal, factsChat, staleSec, selfSec, profilesSec, digestSec, topSec, graphSec]
+      : [rules, followSec, factsGlobal, factsChat, profilesSec];
 
     const body = fitBudget(sections, deep ? recallBudgets().deep : recallBudgets().res);
     // 一句都没有（新装的、什么都没聊过）就别占地方
@@ -5532,8 +5562,8 @@ export function apply(ctx) {
   }
 
   /** 两段拼起来（调试接口和面板用；真正注入是分开走的，别在这里合并回去） */
-  function memoryText(chat = null, deepOverride = null) {
-    return [memoryStatic(chat, deepOverride), memoryDynamic(lastBucket, chat)].filter(Boolean).join('\n\n');
+  function memoryText(chat = null, deepOverride = null, opts = {}) {
+    return [memoryStatic(chat, deepOverride, opts), memoryDynamic(lastBucket, chat)].filter(Boolean).join('\n\n');
   }
 
   /**
@@ -7175,7 +7205,9 @@ export function apply(ctx) {
            * 否则 system prompt 每轮都不一样，prompt cache 轮轮作废。
            * `freezeSystem: false` 可以退回旧行为（全塞 system prompt）。
            */
-          text: () => (cfg.memory?.freezeSystem === false ? memoryText(chat) : memoryStatic(chat)),
+          text: () => (cfg.memory?.freezeSystem === false
+            ? memoryText(chat, null, { live: true })
+            : memoryStatic(chat, null, { live: true })),
         }),
       );
     } catch (e) {
@@ -7926,6 +7958,22 @@ export function apply(ctx) {
           if (fileNote) journalAdd({ ...payload, id: `${payload.id}:file` }, chat, fileNote, 'bot');
         } else {
           journalAdd(payload, chat, journalText, 'bot');
+        }
+
+        /**
+         * 待跟进的账记在「真的发出去了」之后：这一轮注入过哪条，就记一次。
+         * 没发出去不记——模型可能根本没机会问，不能白烧一次机会。
+         */
+        if (sent?.ok !== false) {
+          const pending = followPending.get(chat.chatId);
+          if (pending) {
+            followPending.delete(chat.chatId);
+            try {
+              memory.markFollowUpAsked(chat.chatId, pending, aliasesOf(chat.chatId));
+            } catch (e) {
+              log.debug(`待跟进记账失败：${e?.message || e}`);
+            }
+          }
         }
       }
 
@@ -10011,6 +10059,30 @@ export function apply(ctx) {
               if (!key) return send(res, 400, { ok: false, message: '要撤谁的雷区？给个 key' });
               const ok = profiles.clearDislikes(key);
               return send(res, 200, { ok, message: ok ? '雷区撤了' : '没找到这个人的雷区' });
+            }
+
+            /**
+             * 待跟进：给某条事实设 / 撤「到点该问一句」。
+             * 只动 meta、不新增事实内容，所以 `scope:'global'` 也允许
+             * （跟 `memory.write` 不许写全局的理由不同）。
+             */
+            case 'memory.followUp': {
+              const fact = String(arg?.fact ?? arg?.text ?? body?.fact ?? '').trim();
+              if (!fact) return send(res, 400, { ok: false, message: '要跟进哪条事实？' });
+              if (!chatId) return send(res, 400, { ok: false, message: '缺 chatId，先选一个会话' });
+              const scope = arg?.scope === 'global' ? 'global' : 'chat';
+              try {
+                const r = arg?.cancel === true
+                  ? memory.clearFollowUp(chatId, fact, aliasesOf(chatId))
+                  : memory.setFollowUp(chatId, fact, {
+                    at: Number(arg?.at) || 0,
+                    inDays: Number(arg?.inDays) || 0,
+                    question: String(arg?.question ?? ''),
+                  }, scope, aliasesOf(chatId));
+                return send(res, r.ok ? 200 : 400, r);
+              } catch (e) {
+                return send(res, 500, { ok: false, message: `设待跟进失败：${e?.message ?? e}` });
+              }
             }
 
             case 'memory.list':

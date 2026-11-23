@@ -287,6 +287,36 @@ export function createExtApiHooks({
     },
 
     /**
+     * 写：给某条已存在的事实设 / 撤「待跟进」。
+     *
+     * 只动那条事实 meta 上的一个字段，不新增事实内容——所以允许 `scope:'global'`
+     * （跟 `memory.write` 不许写全局的理由不同：这里没法往全局塞新东西，
+     * 最多让一条**已经存在**的全局事实到点被问一句）。
+     * body: `{ chatId|target, fact|text, inDays|at, question }`；`cancel:true` 撤销。
+     */
+    async 'memory.followUp'({ body, query }) {
+      const chatId = targetOf(body, query);
+      if (!chatId) return bad('缺 chatId / target');
+      const fact = String(body?.fact ?? body?.text ?? '').trim().slice(0, MAX_FACT);
+      if (!fact) return bad('缺 fact / text');
+      const scope = body?.scope === 'global' ? 'global' : 'chat';
+      try {
+        if (body?.cancel === true) {
+          const r = memory().clearFollowUp(chatId, fact, aliasesOf(chatId));
+          return r.ok ? { status: 200, body: { ok: true, ...r } } : bad(r.message || '没撤成');
+        }
+        const r = memory().setFollowUp(chatId, fact, {
+          at: Number(body?.at) || 0,
+          inDays: Number(body?.inDays) || 0,
+          question: String(body?.question ?? ''),
+        }, scope, aliasesOf(chatId));
+        return r.ok ? { status: 200, body: { ok: true, ...r } } : bad(r.message || '没设成');
+      } catch (e) {
+        return bad(`设待跟进失败：${e?.message ?? e}`, 500, 'internal');
+      }
+    },
+
+    /**
      * 让机器人主动说一句。
      *
      * 群场景**必须**真算 `group_push` 授权：`channel.send()` 的默认值是 `true`，

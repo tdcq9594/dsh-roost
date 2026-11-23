@@ -76,6 +76,18 @@ const HALF_LIFE_DAYS = 30;
 const DAY_MS = 86_400_000;
 
 /**
+ * 待跟进（followUp）：一条事实到点了该问一句。
+ *
+ * 最多问 3 次，问完隔 1 / 3 / 7 天再提，问满就清掉（对齐 aurabot 的
+ * `FOLLOW_UP_DELAYS` 节奏）。次数记账在**回复真的发出去之后**，
+ * 不在拼提示词时——否则面板预览一次注入就烧掉一次机会。
+ */
+export const FOLLOW_UP_MAX = 3;
+export const FOLLOW_UP_DELAYS = Object.freeze([1, 3, 7]);
+/** 问句本身别太长，注入时只占一行 */
+const FOLLOW_UP_Q_MAX = 60;
+
+/**
  * 一条事实「该不该留」的分数：重要度 × 时间衰减。
  *
  * 没有元数据（老数据）时按 `w=1`、不衰减算 —— 于是全部同分，淘汰退化成
@@ -760,6 +772,29 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
   const clean = (f) => String(f ?? '').trim().slice(0, FACT_MAX);
 
   /**
+   * 在 global / 本会话（含别名键）里找一条事实。
+   *
+   * 待跟进要能"先按本会话找、找不到再找全局"，所以返回命中的那一层，
+   * 而不是只回一个文本。`key` 既认原文也认 id（面板给的是 id）。
+   *
+   * @returns {{list:string[], mm:object, text:string, chatId:string}|null}
+   */
+  function findFact(m, chatId, scope, key, aliases = []) {
+    const k = String(key ?? '').trim();
+    if (!k) return null;
+    const pairs = scope === 'global'
+      ? [[m.global, m.meta.global, 'global']]
+      : (chatId ? [chatId, ...(Array.isArray(aliases) ? aliases : [])] : [])
+          .map((c) => [m.chats[c], m.meta.chats[c], c]);
+    for (const [list, mm, c] of pairs) {
+      if (!Array.isArray(list) || !mm) continue;
+      const text = list.find((t) => t === k || factIdOf(t) === k);
+      if (text) return { list, mm, text, chatId: c };
+    }
+    return null;
+  }
+
+  /**
    * 往一层里放一条，必要时按分数淘汰。
    *
    * @param {string[]} list
@@ -1402,6 +1437,103 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
         archivedAt: meta.archivedAt || null,
         brightness: brightnessOf(meta),
       };
+    },
+
+    /**
+     * 待跟进：这条事实到点了该问一句（比如「他下周三考试」→ 周四问结果）。
+     *
+     * 为什么挂在 fact 的 meta 上、不另开一张提醒表：问的是"那条事实的结果"，
+     * 事实被删 / 被取代 / 过期，跟进就该跟着消失，不该留下一张孤立的提醒。
+     *
+     * @param {string} fact 事实原文（或 id）
+     * @param {{at?:number, inDays?:number, question?:string}} opts `at` 绝对时间戳，`inDays` 相对天数
+     */
+    setFollowUp(chatId, fact, { at = 0, inDays = 0, question = '' } = {}, scope = 'global', aliases = []) {
+      const when = Number(at) > 0
+        ? Number(at)
+        : (Number(inDays) > 0 ? now() + Number(inDays) * DAY_MS : 0);
+      if (!(when > 0)) return { ok: false, message: '没说什么时候问（给 at 或 inDays）' };
+      const m = load();
+      const hit = findFact(m, chatId, scope, fact, aliases);
+      if (!hit) return { ok: false, message: '没找到这条事实（先记住，再设跟进）' };
+      const q = String(question ?? '').trim().slice(0, FOLLOW_UP_Q_MAX);
+      hit.mm[hit.text] = {
+        ...(hit.mm[hit.text] || {}),
+        followUp: { at: when, tries: 0, ...(q ? { question: q } : {}) },
+      };
+      if (!save()) return { ok: false, message: '记忆文件正被占用或写不进去，稍后重试' };
+      return { ok: true, text: hit.text, at: when, question: q, scope: hit.chatId === 'global' ? 'global' : 'chat' };
+    },
+
+    /**
+     * 到点该问的（按到期时间从早到晚）。
+     *
+     * **只读、幂等**：面板预览注入不会消耗次数，消耗发生在回复真正发出之后。
+     * 历史（`until`）/ 归档 / 已过时效 / 只是猜的，一律不追问。
+     */
+    dueFollowUps(chatId, aliases = [], { at = 0, limit = 3 } = {}) {
+      const m = load();
+      const t = Number(at) > 0 ? Number(at) : now();
+      const keys = chatId ? [chatId, ...(Array.isArray(aliases) ? aliases : [])] : [];
+      const out = [];
+      const collect = (list, mm, scope, cid) => {
+        if (!Array.isArray(list) || !mm) return;
+        for (const text of list) {
+          const meta = mm[text];
+          const f = meta?.followUp;
+          if (!f || !(Number(f.at) > 0) || Number(f.at) > t) continue;
+          if (Number(f.tries) >= FOLLOW_UP_MAX) continue;
+          if (meta.until || meta.archivedAt) continue;
+          if (!isValidAt(meta, t)) continue;
+          if (statusOf(meta) === 'guess') continue;
+          out.push({
+            text,
+            scope,
+            chatId: cid,
+            question: String(f.question || ''),
+            at: Number(f.at),
+            tries: Number(f.tries) || 0,
+          });
+        }
+      };
+      collect(m.global, m.meta.global, 'global', 'global');
+      for (const c of keys) collect(m.chats[c], m.meta.chats[c], 'chat', c);
+      out.sort((a, b) => a.at - b.at || a.text.localeCompare(b.text));
+      return Number(limit) > 0 ? out.slice(0, Number(limit)) : out;
+    },
+
+    /**
+     * 记一次「问过了」：`tries+1`，按 1/3/7 天顺延；问满 3 次就清掉。
+     *
+     * 只在**回复真的发出去之后**调。在拼提示词时调的话，模型没问也算一次，
+     * 三次机会在同一轮里就烧完了。
+     */
+    markFollowUpAsked(chatId, fact, aliases = []) {
+      const m = load();
+      const hit = findFact(m, chatId, 'chat', fact, aliases) || findFact(m, chatId, 'global', fact, aliases);
+      if (!hit) return { ok: false, message: '没找到这条事实' };
+      const meta = { ...(hit.mm[hit.text] || {}) };
+      const f = meta.followUp;
+      if (!f) return { ok: false, message: '这条没有待跟进' };
+      const tries = Number(f.tries || 0) + 1;
+      if (tries >= FOLLOW_UP_MAX) delete meta.followUp;
+      else meta.followUp = { ...f, tries, at: now() + FOLLOW_UP_DELAYS[tries - 1] * DAY_MS };
+      hit.mm[hit.text] = meta;
+      if (!save()) return { ok: false, message: '记忆文件正被占用或写不进去' };
+      return { ok: true, text: hit.text, tries, done: tries >= FOLLOW_UP_MAX };
+    },
+
+    /** 撤销 / 已经问到了：只删跟进，事实本身留着 */
+    clearFollowUp(chatId, fact, aliases = []) {
+      const m = load();
+      const hit = findFact(m, chatId, 'chat', fact, aliases) || findFact(m, chatId, 'global', fact, aliases);
+      if (!hit) return { ok: false, message: '没找到这条事实' };
+      const meta = { ...(hit.mm[hit.text] || {}) };
+      if (!meta.followUp) return { ok: false, message: '这条没有待跟进' };
+      delete meta.followUp;
+      hit.mm[hit.text] = meta;
+      if (!save()) return { ok: false, message: '记忆文件正被占用或写不进去' };
+      return { ok: true, text: hit.text };
     },
 
     /**

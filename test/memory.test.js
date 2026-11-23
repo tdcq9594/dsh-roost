@@ -2959,3 +2959,117 @@ test('日记：强度有上限（搜一万次和二十次一样，不会无限�
   const some = scoreOf({ ...base, accessed: 20, lastAccess: now - DAY }, now);
   assert.ok(Math.abs(many - some) < 1e-9, `强度封顶后两者应相同：${many} vs ${some}`);
 });
+
+/* ---------------- 待跟进 followUp ---------------- */
+
+function freshMemoryAt(clock) {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-follow-'));
+  return createMemory({ now: () => clock.t });
+}
+
+test('待跟进：到期才提示；问一次顺延 1/3 天，问满 3 次自动清掉', () => {
+  const clock = { t: Date.parse('2026-11-23T10:00:00') };
+  const m = freshMemoryAt(clock);
+  m.add('g1', '他下周三有考试', 'chat');
+  const r = m.setFollowUp('g1', '他下周三有考试', { inDays: 3, question: '考试考得怎么样' }, 'chat');
+  assert.equal(r.ok, true, '设上了');
+
+  assert.deepEqual(m.dueFollowUps('g1'), [], '没到点不提示');
+
+  clock.t += 3 * DAY + 1000;
+  const due = m.dueFollowUps('g1');
+  assert.equal(due.length, 1);
+  assert.equal(due[0].question, '考试考得怎么样');
+  assert.equal(due[0].tries, 0);
+
+  /** 只读、幂等：面板预览注入多少次都不消耗次数 */
+  assert.deepEqual(m.dueFollowUps('g1'), due, '读两次结果一样');
+  assert.equal(m.dueFollowUps('g1')[0].tries, 0, '读不改状态');
+
+  assert.equal(m.markFollowUpAsked('g1', '他下周三有考试').tries, 1);
+  assert.deepEqual(m.dueFollowUps('g1'), [], '问完当天不再提');
+
+  clock.t += DAY + 1000;
+  assert.equal(m.dueFollowUps('g1').length, 1, '隔一天再提');
+  m.markFollowUpAsked('g1', '他下周三有考试');
+  clock.t += 3 * DAY + 1000;
+  assert.equal(m.dueFollowUps('g1').length, 1, '第二次之后隔 3 天');
+
+  const third = m.markFollowUpAsked('g1', '他下周三有考试');
+  assert.equal(third.done, true, '第三次问完就清掉');
+  clock.t += 30 * DAY;
+  assert.deepEqual(m.dueFollowUps('g1'), [], '清掉后永不再提');
+  assert.ok(m.list('g1').chat.includes('他下周三有考试'), '只清跟进，事实还在');
+});
+
+test('待跟进：可以撤销，事实本身不受影响', () => {
+  const clock = { t: Date.parse('2026-11-23T10:00:00') };
+  const m = freshMemoryAt(clock);
+  m.add('g1', '他养了只猫叫豆豆', 'chat');
+  m.setFollowUp('g1', '他养了只猫叫豆豆', { inDays: 1 }, 'chat');
+  assert.equal(m.clearFollowUp('g1', '他养了只猫叫豆豆').ok, true);
+  clock.t += 2 * DAY;
+  assert.deepEqual(m.dueFollowUps('g1'), [], '撤销后不再提示');
+  assert.ok(m.list('g1').chat.includes('他养了只猫叫豆豆'), '事实没被删');
+  assert.equal(m.clearFollowUp('g1', '他养了只猫叫豆豆').ok, false, '再撤返回失败');
+});
+
+test('待跟进：历史/归档/过时效/只是猜的，一律不追问', () => {
+  const clock = { t: Date.parse('2026-11-23T10:00:00') };
+  const m = freshMemoryAt(clock);
+  /** 被后来的说法取代（until）：用 supersede 显式打标记，别靠相似度碰运气 */
+  m.add('g1', '他住在杭州', 'chat');
+  m.supersede('g1', '杭州', { at: clock.t });
+  m.setFollowUp('g1', '他住在杭州', { inDays: 1 }, 'chat');
+  /** 归档的 */
+  m.add('g1', '他以前养过一只狗', 'chat');
+  m.editFact('g1', 'chat', '他以前养过一只狗', { archivedAt: clock.t });
+  m.setFollowUp('g1', '他以前养过一只狗', { inDays: 1 }, 'chat');
+  /** 猜的 */
+  m.add('g1', '他大概喜欢猫', 'chat', { status: 'guess' });
+  m.setFollowUp('g1', '他大概喜欢猫', { inDays: 1 }, 'chat');
+  /** 已过时效 */
+  m.add('g1', '他这周在出差', 'chat', { validUntil: clock.t + DAY });
+  m.setFollowUp('g1', '他这周在出差', { inDays: 2 }, 'chat');
+
+  clock.t += 3 * DAY;
+  const due = m.dueFollowUps('g1').map((x) => x.text);
+  assert.deepEqual(due, [], `这些都不该追问，实际：${JSON.stringify(due)}`);
+});
+
+test('待跟进：全局事实也能设，且按会话别名能找到', () => {
+  const clock = { t: Date.parse('2026-11-23T10:00:00') };
+  const m = freshMemoryAt(clock);
+  m.add('', '主人的生日是三月五号', 'global');
+  assert.equal(m.setFollowUp('', '主人的生日是三月五号', { inDays: 1 }, 'global').ok, true);
+  clock.t += 2 * DAY;
+  const due = m.dueFollowUps('g1');
+  assert.equal(due.length, 1, '全局的到点该提示');
+  assert.equal(due[0].scope, 'global');
+});
+
+test('待跟进：没这条事实时明确报错，不静默成功', () => {
+  const clock = { t: Date.parse('2026-11-23T10:00:00') };
+  const m = freshMemoryAt(clock);
+  const r = m.setFollowUp('g1', '根本没记过的事', { inDays: 1 }, 'chat');
+  assert.equal(r.ok, false);
+  assert.match(r.message, /没找到/);
+  assert.equal(m.setFollowUp('g1', '他下周三有考试', {}, 'chat').ok, false, '没说时间也要报错');
+});
+
+test('待跟进：默认关、扩展接口有登记、注入只在 live 时记账（接线断言）', async () => {
+  const { DEFAULTS } = await import('../src/config.js');
+  assert.equal(DEFAULTS.memory.followUp.enabled, false, '新能力默认关，不改变说话方式');
+
+  const { scopeOfOp } = await import('../src/ext-quick-scopes.js');
+  const s = scopeOfOp('memory.followUp');
+  assert.equal(s.ok, true, '扩展要能调这个 op');
+  assert.equal(s.scope, 'memory:write', '只要求记忆写权限');
+
+  const { readFileSync } = await import('node:fs');
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.match(host, /\{ live: true \}/, '真实回复路径要带 live');
+  assert.match(host, /memory\.markFollowUpAsked\(/, '出站成功后要记账');
+  /** 面板预览那条路不能带 live：预览一次就烧一次机会是不可接受的 */
+  assert.doesNotMatch(host, /memoryStatic\(panelChat, forced, \{ live: true \}\)/, '面板预览不许记账');
+});

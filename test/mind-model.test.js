@@ -77,7 +77,8 @@ test('B3 接线：过时提醒只在 deep 段注入，且只标注不改正文',
 test('E1 接线：显式指令段在 deep 注入、排在事实之前', () => {
   const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   assert.match(host, /directiveSec = /, '要有指令段');
-  assert.match(host, /rules, directiveSec, factsGlobal/, '指令排在普通事实之前');
+  /** 待跟进也是"提醒"，跟指令一样排在普通事实之前；规矩 → 该问的事 → 事实 */
+  assert.match(host, /rules, directiveSec, followSec, factsGlobal/, '指令和待跟进都排在普通事实之前');
   assert.match(host, /她交代过的规矩/, '措辞是规矩不是建议');
 });
 
