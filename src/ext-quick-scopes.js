@@ -86,6 +86,8 @@ const MEMORY_PURGE_OPS = Object.freeze([
 const MEMORY_WRITE_OPS = Object.freeze([
   'memory.remove', 'memory.mute', 'memory.unmute',
   'memory.clear',
+  /** 待跟进：设/撤某条事实的到期提醒（只动 meta，不加内容） */
+  'memory.followUp',
   /** E4：撤销某人雷区（改，不是清库） */
   'profiles.clearDislikes',
   'graph.suppress', 'graph.unsuppress', 'graph.close',

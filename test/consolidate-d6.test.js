@@ -304,3 +304,77 @@ test('巩固会重算"换过模型"的旧向量（否则它们被检索排除却
   try { j.close(); } catch {}
   if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA; else process.env.DSH_ROOST_DATA = oldEnv;
 });
+
+/* ---------------- E2 待跟进：巩固时自动提炼 ---------------- */
+
+test('E2：约定上的 followUp 只在合法时保留，没有就不加键（老输出形状不变）', () => {
+  assert.deepEqual(normalizeAgreement('明天买牛奶'),
+    { text: '明天买牛奶', op: 'add', old: '', status: 'fact' });
+  const a = normalizeAgreement({ text: '下周三前给他答复', followUp: { inDays: 4, question: '问一句答复' } });
+  assert.deepEqual(a.followUp, { inDays: 4, question: '问一句答复' });
+  assert.equal(normalizeAgreement({ text: 'x', followUp: { inDays: 0 } }).followUp, undefined, 'inDays=0 当没写');
+  assert.equal(normalizeAgreement({ text: 'x', followUp: { inDays: 9999 } }).followUp, undefined, '离谱的当没写');
+  assert.equal('followUp' in normalizeAgreement('明天买牛奶'), false, '没有时连键都不出现');
+});
+
+test('E2：开关关着时 prompt 完全不提 followUp；开着才教', async () => {
+  const mk = async (enabled) => {
+    const dir = mkdtempSync(join(tmpdir(), `roost-fu-${enabled ? 'on' : 'off'}-`));
+    const data = join(dir, 'data');
+    mkdirSync(data, { recursive: true });
+    const oldEnv = process.env.DSH_ROOST_DATA;
+    process.env.DSH_ROOST_DATA = data;
+    const day = yesterdayOf(Date.now());
+    const base = Date.parse(`${day}T10:00:00`);
+    const j = createJournal({ file: join(data, 'j.sqlite'), log: noop });
+    j.add({ id: 'a', at: base, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '他答应下周三前给我答复' });
+    let seen = '';
+    const c = createConsolidate({
+      journal: j, graph: null, memory: createMemory(),
+      generate: async (p) => { seen = p; return '{}'; },
+      aliasesOf: () => [], log: noop, now: () => Date.now(), followUpEnabled: enabled,
+    });
+    await c.run({ day });
+    try { j.close(); } catch {}
+    if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA; else process.env.DSH_ROOST_DATA = oldEnv;
+    return seen;
+  };
+  const off = await mk(false);
+  const on = await mk(true);
+  assert.ok(!off.includes('followUp'), '关着时 prompt 里不该出现 followUp');
+  assert.ok(on.includes('"followUp"'), '开着时要给出形状');
+  assert.ok(on.includes('inDays'), '要说明 inDays 从今天算');
+});
+
+test('E2：巩固把约定上的 followUp 真挂到那条约定上', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-fu-apply-'));
+  const data = join(dir, 'data');
+  mkdirSync(data, { recursive: true });
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = data;
+  const day = yesterdayOf(Date.now());
+  const base = Date.parse(`${day}T10:00:00`);
+  const j = createJournal({ file: join(data, 'j.sqlite'), log: noop });
+  j.add({ id: 'a', at: base, chatId: 'g1', sender: '甲', role: 'user', kind: 'chat', text: '他答应下周三前给我答复' });
+
+  const memory = createMemory();
+  const c = createConsolidate({
+    journal: j, graph: null, memory,
+    generate: async () => JSON.stringify({
+      summary: '他答应下周三前给答复',
+      agreements: [{ text: '下周三前给他答复', followUp: { inDays: 4, question: '问一句答复给了没' } }],
+    }),
+    aliasesOf: () => [], log: noop, now: () => Date.now(), followUpEnabled: true,
+  });
+  const r = await c.run({ day });
+  assert.equal(r.followUps, 1, '统计里要算一条');
+
+  /** 用未来的时间点看它是不是真到期了 */
+  const due = memory.dueFollowUps('g1', [], { at: Date.now() + 5 * 86400000 });
+  assert.equal(due.length, 1, '到期该被捞出来');
+  assert.equal(due[0].question, '问一句答复给了没');
+  assert.match(due[0].text, /^约定：下周三前给他答复/, '挂在那条约定上');
+
+  try { j.close(); } catch {}
+  if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA; else process.env.DSH_ROOST_DATA = oldEnv;
+});
