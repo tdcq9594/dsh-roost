@@ -127,3 +127,26 @@ test('时间定位：journal.search 的 from/to 只收范围内的日记，不�
     done();
   }
 });
+
+test('时间窗必须在 LIMIT 之前生效：热门词命中 >perPath 也不漏掉窗内老日记', async () => {
+  const { done } = fresh();
+  const { createJournal } = await import('../src/journal.js');
+  const NOW = new Date(2026, 10, 23, 12, 0, 0).getTime();
+  const DAY = 86_400_000;
+  try {
+    const j = createJournal({ file: join(process.env.DSH_ROOST_DATA, 'journal.sqlite') });
+    /** 50 条近期"杭州"（把 perPath=5 的候选占满）+ 1 条 40 天前的老日记 */
+    for (let i = 0; i < 50; i++) {
+      j.add({ id: `recent${i}`, chatId: 'g1', text: `杭州今天的新闻${i}`, at: NOW - i * 60_000 });
+    }
+    j.add({ id: 'old', chatId: 'g1', text: '杭州那次搬家', at: NOW - 40 * DAY });
+
+    /** 只找 45~30 天前：只能命中 old。若窗口在 LIMIT 之后才过滤，这里会是 []。 */
+    const r = await j.search('杭州', {
+      chatId: 'g1', limit: 5, perPath: 5, from: NOW - 45 * DAY, to: NOW - 30 * DAY,
+    });
+    assert.deepEqual(r.map((x) => x.id), ['old'], '窗口要下推到 SQL，不能被近期 50 条挤掉');
+  } finally {
+    done();
+  }
+});

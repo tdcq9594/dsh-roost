@@ -240,6 +240,8 @@ export function createOnnxInstaller({
       /** scoped 包名带 `/`，不能当文件名——照 tts-install 的 edge 分支替换掉 */
       const tgz = join(tmp, `${name.replace(/[\\/@]/g, '_')}.tgz`);
       await downloadFromAny(candidates(name, version), tgz, signal);
+      /** 镜像偶尔返回 0 字节 tgz，先挡住——否则 untar 报看不懂的错，多源换源也用不上 */
+      if (!existsSync(tgz) || !statSync(tgz).size) throw new Error(`${name} 下载为空，换个源再试`);
 
       set({ phase: PHASE.EXTRACT, message: `解压 ${name}…` });
       await untar(tar, tgz, tmp);
@@ -252,6 +254,11 @@ export function createOnnxInstaller({
       rmSync(tgz, { force: true });
     }
 
+    /**
+     * 解压阶段用户点了取消：此时 signal 已 aborted，但 untar 不认 signal。
+     * 必须在删旧装新之前检查——否则取消后旧版被删、界面还报"装好了"。
+     */
+    if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     const target = nodeModules();
     rmSync(target, { recursive: true, force: true });
     renameSync(join(tmp, 'node_modules'), target);

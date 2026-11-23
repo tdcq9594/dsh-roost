@@ -122,3 +122,21 @@ test('本地模式：模型没装好 / 算不出来时回落向量或规则，�
   });
   assert.equal(out2.mode, 'rule', '本地抛错也回落，不让召回崩');
 });
+
+test('只开 useLocal（没开 enabled 总闸）也要真重排——面板文案就是这么承诺的', async () => {
+  const hits = [
+    { text: '无关的一条', at: NOW },
+    { text: '主人搬到上海了', at: NOW },
+  ];
+  const fakeLocal = {
+    ready: () => true,
+    score: async (q, texts) => texts.map((t) => (t.includes('上海') ? 0.95 : 0.1)),
+  };
+  const out = await rerankHits('搬哪', hits, {
+    cfg: { recall: { rerank: { useLocal: true } } },
+    localReranker: fakeLocal,
+    now: NOW,
+  });
+  assert.equal(out.mode, 'local', 'useLocal 就该隐含 enabled');
+  assert.ok(out.hits[0].text.includes('上海'));
+});

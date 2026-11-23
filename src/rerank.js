@@ -144,7 +144,13 @@ export async function localRerank(query, hits, { localReranker, weight = RERANK_
 export async function rerankHits(query, hits, { cfg = {}, embedder = null, localReranker = null, now = Date.now() } = {}) {
   const c = { ...RERANK_DEFAULTS, ...(cfg?.recall?.rerank || {}) };
   const list = Array.isArray(hits) ? hits : [];
-  if (c.enabled !== true || list.length < 2) return { hits: list, mode: 'off' };
+  /**
+   * `useLocal: true` 本身就是"我要重排"的明确意图——面板文案也是这么写的
+   * （装好模型开本地重排开关就生效）。不能要求用户再开一个 enabled 总闸，
+   * 否则只开 useLocal 会静默不生效，面板却说已经开了。
+   */
+  const enabled = c.enabled === true || c.useLocal === true;
+  if (!enabled || list.length < 2) return { hits: list, mode: 'off' };
   /** 本地 cross-encoder 优先：配了模型就用，没装/算不出来安静回落 */
   if (c.useLocal === true) {
     try {

@@ -137,6 +137,8 @@ export function createModelInstaller({
       if (!existsSync(dest) || !statSync(dest).size) throw new Error(`${name} 下载为空，换个源再试`);
     }
 
+    /** 同上：下载完/解压中点取消，不能在 aborted 后删旧装新还报"装好了" */
+    if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     const target = modelDir();
     rmSync(target, { recursive: true, force: true });
     renameSync(tmp, target);

@@ -67,7 +67,7 @@ test('N天前 / N周前 / N个月前 / 最近N天', () => {
   assert.equal(ymd(parseTemporal('两个月前的事', NOW).to), '2026-10-01');
   const r = parseTemporal('最近7天的对话', NOW);
   assert.equal(r.label, '最近7天');
-  assert.equal(r.to, NOW);
+  assert.equal(r.to, NOW + 1, '「至今」要含今天全天');
   assert.ok(r.from < r.to);
 });
 
@@ -89,3 +89,11 @@ test('接线：recallFor 解析时间词并把范围传给检索，预览能显�
   const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
   assert.match(client, /时间定位：认出/, '预览面板要显示解析出的时间窗')
 })
+
+test('「N天前至今」要含今天：to 必须晚于今天的任一时点', () => {
+  const t = parseTemporal('三天前说的', NOW);
+  assert.ok(t.to > NOW, 'to 要是 now+1，不能是今天零点（否则今天全天被排除）');
+  /** 今天早上 10 点的日记应该落在窗内 */
+  const thisMorning = new Date(2026, 10, 18, 10, 0, 0).getTime();
+  assert.ok(thisMorning >= t.from && thisMorning < t.to, '今天早上说的要能命中');
+});

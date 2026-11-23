@@ -102,7 +102,7 @@ const RULES = [
       const n = cnNumber(m[1]);
       if (!n || n < 1) return null;
       const d = new Date(now);
-      return { from: new Date(d.getFullYear() - n, d.getMonth(), d.getDate()).getTime(), to: now, label: `${m[1]}年前` };
+      return { from: new Date(d.getFullYear() - n, d.getMonth(), d.getDate()).getTime(), to: now + 1, label: `${m[1]}年前至今` };
     },
   },
   {
@@ -111,7 +111,8 @@ const RULES = [
       const n = cnNumber(m[1]);
       if (!n || n < 1) return null;
       const from = addDays(startOfDay(now), -7 * n);
-      return { from, to: addDays(from, 7 * n), label: `${m[1]}周前至今` };
+      /** 「至今」要含今天全天，to=now+1 才不会把今天的日记排除在外 */
+      return { from, to: now + 1, label: `${m[1]}周前至今` };
     },
   },
   {
@@ -120,7 +121,8 @@ const RULES = [
       const n = cnNumber(m[1]);
       if (!n || n < 1) return null;
       const from = addDays(startOfDay(now), -n);
-      return { from, to: addDays(from, n), label: `${m[1]}天前至今` };
+      /** 同上：「至今」含今天，to 不能用今天零点（会漏掉今天说的话） */
+      return { from, to: now + 1, label: `${m[1]}天前至今` };
     },
   },
   /** 上个粒度：上个月 / 上月 / 上周 / 上个星期 / 去年 */
@@ -155,7 +157,7 @@ const RULES = [
       const n = cnNumber(m[1]);
       if (!n || n < 1) return null;
       const from = addDays(startOfDay(now), -(n - 1));
-      return { from, to: now, label: `最近${m[1]}天` };
+      return { from, to: now + 1, label: `最近${m[1]}天` };
     },
   },
 ];

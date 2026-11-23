@@ -164,3 +164,42 @@ test('embed.js：配置了 localOf 但开关中途关掉，下一轮就回落（
   on = false;
   assert.equal(embed.enabled(), false, 'getter 每轮现读，开关关了立刻生效');
 });
+
+test('E5 非对称前缀：one() 加 query: ，many() 加 passage: ，不重复加', async () => {
+  const { createLocalEmbedder } = await import('../src/local-embed.js');
+  const dir = dataDirOf();
+  const md = join(dir, 'onnx-models', 'e5-small');
+  mkdirSync(md, { recursive: true });
+  writeFileSync(join(md, 'model.onnx'), 'x');
+  writeFileSync(join(md, 'tokenizer.json'), '{}');
+  const seen = [];
+  const fakeTokenizer = {
+    encode(text) {
+      seen.push(text);
+      const ids = [...text].map((c) => c.charCodeAt(0) % 100 + 1);
+      return { ids, attention_mask: ids.map(() => 1) };
+    },
+  };
+  const ort = { Tensor: class { constructor(t, d, dims) { Object.assign(this, { type: t, data: d, dims }); } } };
+  const session = {
+    ort,
+    inputNames: ['input_ids', 'attention_mask'],
+    async run(feeds) {
+      const [b, s] = feeds.input_ids.dims;
+      const data = new Float32Array(b * s * 2);
+      for (let i = 0; i < data.length; i += 1) data[i] = (i % 2) + 1;
+      return { last_hidden_state: { data } };
+    },
+  };
+  const inst = createLocalEmbedder({
+    dataDir: () => dir,
+    loadSession: async () => session,
+    loadTokenizer: () => fakeTokenizer,
+  });
+  await inst.one('住在杭州');
+  await inst.many(['搬家到杭州']);
+  await inst.many(['query: 已经加过前缀']);
+  assert.equal(seen[0], 'query: 住在杭州', 'one = 查询');
+  assert.equal(seen[1], 'passage: 搬家到杭州', 'many = 文档');
+  assert.equal(seen[2], 'query: 已经加过前缀', '已有前缀不重复加');
+});

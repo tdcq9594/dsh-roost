@@ -187,14 +187,32 @@ export function createLocalEmbedder({
     });
   }
 
+  /**
+   * E5 是**非对称**模型：查询要 "query: "、文档要 "passage: " 前缀，
+   * 少了前缀检索质量明显掉（Hindsight 的 OnnxEmbeddings 默认 query_prefix/
+   * passage_prefix 就是这个）。前缀在这里加，调用方（embed.js / vectorRerank）
+   * 无感——它们本来就按 one=查询、many=文档 的语义调。
+   * 已经有前缀的不重复加（调用方自己加过的情况）。
+   */
+  const withPrefix = (text, prefix) => {
+    const s = String(text ?? '');
+    /** 任一种 E5 前缀都算"已加过"——调用方可能按查询语义传进来 */
+    if (s.startsWith(QUERY_PREFIX) || s.startsWith(PASSAGE_PREFIX)) return s;
+    return prefix + s;
+  };
+
   return {
     ready,
     enabled: () => ready(),
     minScore: () => 0.4,
 
-    /** 本地算向量；不可用返回 null（让调用方回落关键词，同 embed.js 的契约） */
+    /**
+     * 本地算向量；不可用返回 null（让调用方回落关键词，同 embed.js 的契约）。
+     * 默认按文档编码（passage:）；传 `{asQuery:true}` 按查询编码。
+     */
     async many(texts, opts = {}) {
-      const list = (texts || []).map((t) => String(t ?? ''));
+      const prefix = opts.asQuery ? QUERY_PREFIX : PASSAGE_PREFIX;
+      const list = (texts || []).map((t) => withPrefix(t, prefix));
       if (!list.length) return [];
       if (!ready() || !(await ensure())) return null;
       try {
@@ -210,8 +228,9 @@ export function createLocalEmbedder({
       }
     },
 
+    /** 单条 = 查询语义（journal 与 vectorRerank 都是拿它算 query 向量） */
     async one(text, opts = {}) {
-      const r = await this.many([text], opts);
+      const r = await this.many([text], { ...opts, asQuery: true });
       return r?.[0] ?? null;
     },
   };
