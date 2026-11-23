@@ -83,6 +83,45 @@ export function pickExtensions(index) {
   return list.filter(isExtensionEntry);
 }
 
+/**
+ * 索引条目声明的「各族哈希」。
+ *
+ * 2026-11-22 的坑：索引按 algo2（排除文档）重算，运行中的 1.4.0 还按 algo1
+ * 校验，带 README 的包一律 sha256 不匹配。插件仓现在双写：
+ *   · `sha256`    —— algo1，老版本 1.4.0 认这个，保证旧用户装得上；
+ *   · `sha256_v2` —— algo2，新版本优先用这个，文档/运行时状态不进指纹。
+ * 旧索引只有 `sha256` 且值是 algo2，新安装器两个算法都算一遍、认任一匹配，
+ * 过渡期不会把用户卡在「索引刚换、客户端还没升」的窗口里。
+ */
+export function entryHashes(entry) {
+  const out = { legacy: '', current: '' };
+  const v1 = String(entry?.sha256 ?? '').toLowerCase();
+  const v2 = String(entry?.sha256_v2 ?? '').toLowerCase();
+  if (/^[0-9a-f]{64}$/.test(v1)) out.legacy = v1;
+  if (/^[0-9a-f]{64}$/.test(v2)) out.current = v2;
+  return out;
+}
+
+/** 用于展示 / 更新判定的权威哈希：新字段在就用新的，否则退回老字段。 */
+function entryHash(entry) {
+  const { legacy, current } = entryHashes(entry);
+  return current || legacy;
+}
+
+/**
+ * 已装实例记录的 sha256 是否等于索引声明的**任一算法**结果。
+ *
+ * 老版本 1.4.0 装扩展时 `.source.sha256` 记的是 algo1 值；索引双写后权威值
+ * 变成 algo2。两个哈希是针对同一份磁盘内容算的，不该因为算法换代就误判成
+ * 「有新版 / 需要重装」——用户装的代码一个字都没变。
+ */
+function installedMatchesDeclared(installed, entry) {
+  const sha = String(installed ?? '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(sha)) return false;
+  const { legacy, current } = entryHashes(entry);
+  return sha === current || sha === legacy;
+}
+
 /** 撤回：顶层 `revoked:[id]`，或条目上 `revoked:true` / `revoked:[version]`。 */
 export function isRevoked(index, entry) {
   const top = Array.isArray(index?.revoked) ? index.revoked : [];
@@ -502,6 +541,7 @@ export function createExtMarket({
     const rows = pickExtensions(idx).map((e) => {
       const mine = local.get(e.id);
       const installedHash = mine?.source?.sha256 ?? '';
+      const declaredHash = entryHash(e);
       /** 等级由索引里的原始声明现算：作者不能在清单里自填等级 */
       const tier = deriveTier(e);
       return {
@@ -509,7 +549,7 @@ export function createExtMarket({
         name: e.name ?? e.id,
         description: e.shortDesc ?? e.description ?? '',
         version: e.version ? String(e.version) : '',
-        sha256: e.sha256 ? String(e.sha256) : '',
+        sha256: declaredHash,
         path: e.path ? String(e.path) : '',
         transport: e.transport === 'streamable-http' ? 'streamable-http' : 'stdio',
         author: e.author ? String(e.author) : '',
@@ -521,7 +561,7 @@ export function createExtMarket({
         verified: e.verified ? String(e.verified) : '',
         installed: Boolean(mine),
         foreign: Boolean(mine?.foreign),
-        updateAvailable: Boolean(mine && e.sha256 && installedHash && installedHash !== e.sha256),
+        updateAvailable: Boolean(mine && declaredHash && installedHash && !installedMatchesDeclared(installedHash, e)),
         revoked: isRevoked(idx, e),
         label: isRevoked(idx, e) ? '已撤回，拒绝安装' : '',
         /** 市场卡片徽章 + 风险明细（主人 2026-11-14 要求「按权限等级明确告知风险」） */
@@ -709,11 +749,11 @@ export function createExtMarket({
      * 想照着索引重新铺一遍」的场景，前端必须二次确认才给。
      * 短路不跳过撤回 / foreign / 哈希校验 —— 它只是不重复下载与落位。
      */
-    const wantSha = String(entry.sha256 ?? '').toLowerCase();
+    const wantSha = entryHash(entry);
     const installedSha = typeof registry.list === 'function'
       ? String(registry.list().find((x) => x.id === key)?.source?.sha256 ?? '').toLowerCase()
       : '';
-    if (!force && /^[0-9a-f]{64}$/.test(wantSha) && installedSha === wantSha) {
+    if (!force && /^[0-9a-f]{64}$/.test(wantSha) && installedMatchesDeclared(installedSha, entry)) {
       return {
         ok: true, id: key, alreadyLatest: true,
         message: `扩展「${key}」已是最新版（${wantSha.slice(0, 12)}…），无需重复安装`,
@@ -735,11 +775,12 @@ export function createExtMarket({
     };
     try {
       /**
-       * **必须有 sha256。** 缺了就无法校验内容，等于「索引说什么就装什么」；
+       * **必须有一个合法 sha256。** 缺了就无法校验内容，等于「索引说什么就装什么」；
        * `build-index.mjs` 对扩展一定会算哈希，所以拒掉不会误伤合法条目。
        */
-      const want = String(entry.sha256 ?? '').toLowerCase();
-      if (!/^[0-9a-f]{64}$/.test(want)) throw new Error('索引条目缺 sha256，拒绝安装（无法校验内容）');
+      const { legacy, current } = entryHashes(entry);
+      const want = current || legacy;
+      if (!want) throw new Error('索引条目缺 sha256，拒绝安装（无法校验内容）');
       await downloadPkg(entry, staging, {
         repo: idx.repo,
         branch: idx.branch ?? 'main',
@@ -750,9 +791,17 @@ export function createExtMarket({
           `已下载 ${formatBytes(got)}${total ? ` / ${formatBytes(total)}` : ''}`, key),
       });
       setPhase('verify', '正在校验目录哈希', key);
-      const got = await hashDir(staging);
-      if (got !== want) {
-        throw new Error(`目录哈希与索引不一致（索引 ${want.slice(0, 12)}…，实际 ${got.slice(0, 12)}…）`);
+      /** 先按新算法算；索引只有老字段时再按 algo1 算一遍，兼容旧镜像与 1.4.0 的索引。 */
+      const gotNew = await hashDir(staging);
+      let verifiedHash = '';
+      if (gotNew === current || gotNew === legacy) {
+        verifiedHash = gotNew;
+      } else if (legacy) {
+        const gotOld = await hashDir(staging, { algo: 1 });
+        if (gotOld === legacy) verifiedHash = gotOld;
+      }
+      if (!verifiedHash) {
+        throw new Error(`目录哈希与索引不一致（索引 ${want.slice(0, 12)}…，实际 ${gotNew.slice(0, 12)}…）`);
       }
       /**
        * 分级确认（2026-11-14 全放开配套）。
@@ -807,7 +856,7 @@ export function createExtMarket({
         repo: idx.repo ?? '',
         branch: idx.branch ?? 'main',
         path: entry.path ?? '',
-        sha256: entry.sha256 ?? '',
+        sha256: verifiedHash,
         installedAt: now(),
       };
       const r = await installWithBusyRetry(staging, source, key, { takeOver });
@@ -835,6 +884,8 @@ export function createExtMarket({
         message: warnings.length ? `已安装，但有 ${warnings.length} 项没接上：${warnings[0]}` : '已安装，下一条消息生效',
       };
     } catch (e) {
+      /** 安装失败必须进日志环：面板只拿得到返回值，用户点一次就忘，报错却要能事后追。 */
+      log.error?.(`安装扩展 ${key} 失败：${e?.message ?? e}`);
       return { ok: false, reason: 'install_failed', message: `安装失败：${e?.message ?? e}`, warnings };
     } finally {
       resume();                    // 幂等：正常路径已写回就不再动
@@ -926,8 +977,9 @@ export function createExtMarket({
       if (!mine) continue;
       if (isRevoked(idx, e)) { try { revoke(e.id, { reason: '索引标记 revoked' }); } catch { /* 旁路 */ } continue; }
       const cur = mine.source?.sha256 ?? '';
-      if (e.sha256 && cur && String(e.sha256).toLowerCase() !== String(cur).toLowerCase()) {
-        rows.push({ id: e.id, name: e.name ?? e.id, sha256: String(e.sha256), installed: cur });
+      const declared = entryHash(e);
+      if (declared && cur && !installedMatchesDeclared(cur, e)) {
+        rows.push({ id: e.id, name: e.name ?? e.id, sha256: declared, installed: cur });
       }
     }
     return { ok: true, rows };

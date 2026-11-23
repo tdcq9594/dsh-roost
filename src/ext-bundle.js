@@ -25,9 +25,44 @@ import path from 'node:path';
 import crypto, { randomBytes } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 
-/** 不参与哈希的东西：依赖目录、缓存、VCS/IDE 元数据（每台机器都不一样） */
-const SKIP_DIRS = new Set(['node_modules', '.venv', 'venv', '__pycache__', '.git', '.idea', '.vscode']);
-const SKIP_FILES = new Set(['.deps.json', '.DS_Store', 'Thumbs.db']);
+/**
+ * 哈希算法版本。算法或跳过规则一改就 +1，并与插件仓
+ * `scripts/hashdir.mjs` 同步标记；两边不一致时索引会由一边生成、另一边校验，
+ * 装任何带 README 的扩展都会 sha256 对不上（issue #37）。
+ *
+ * 2 = 2026-11-21 起排除纯文档（.md / LICENSE），以及运行时状态文件。
+ */
+export const HASH_ALGO = 2;
+
+/** algo1 的老跳过表：1.4.0 及以前就是这几项，留着校验旧索引的 `sha256`。 */
+const LEGACY_SKIP_DIRS = ['node_modules', '.venv', 'venv', '__pycache__', '.git', '.idea', '.vscode'];
+const LEGACY_SKIP_FILES = ['.deps.json', '.DS_Store', 'Thumbs.db'];
+
+/** algo2 的跳过表：运行时状态不进指纹，且绝不落盘（见 writeFiles 的 rejectSkips）。 */
+const SKIP_DIRS = new Set([
+  ...LEGACY_SKIP_DIRS,
+  /** 0.5.x 旧依赖位置；装过旧版没清理的机器不该因此校验失败 */
+  'deps',
+  /** 图库抽帧目录，内容每次运行都不同 */
+  'shots',
+]);
+const SKIP_FILES = new Set([
+  ...LEGACY_SKIP_FILES,
+  /** 面板数据 / 扫码二维码 / 会话 cookie：运行时生成 */
+  'ui-data.json', 'qr.png', 'cookie.txt',
+  /** 各类运行时账本：随时在变 */
+  'replies.json', 'replied.json', 'pending.json', 'history.json', 'seen.json',
+]);
+
+/**
+ * 纯文档不进内容指纹：改 README / LICENSE 不该逼维护者重算索引。
+ * **只从哈希里排除，不进 SKIP_FILES** —— 后者会让 `writeFiles(..., { rejectSkips: true })`
+ * 把带文档的合法包整体拒装（issue #37）。
+ */
+function isDocFile(name) {
+  const lower = name.toLowerCase();
+  return lower.endsWith('.md') || /^(license|licence|copying)(\.[a-z0-9]+)?$/.test(lower);
+}
 
 /** 文本文件 CRLF 折成 LF；二进制原样（判定依据同 git：有没有 NUL 字节） */
 function normalize(buf) {
@@ -36,7 +71,9 @@ function normalize(buf) {
   return Buffer.from(buf.toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
 }
 
-async function collect(root) {
+async function collect(root, algo) {
+  const dirs = algo >= 2 ? SKIP_DIRS : new Set(LEGACY_SKIP_DIRS);
+  const files = algo >= 2 ? SKIP_FILES : new Set(LEGACY_SKIP_FILES);
   const out = [];
   const walk = async (dir, prefix) => {
     let items;
@@ -47,10 +84,10 @@ async function collect(root) {
     }
     for (const it of items) {
       if (it.isDirectory()) {
-        if (SKIP_DIRS.has(it.name)) continue;
+        if (dirs.has(it.name)) continue;
         await walk(path.join(dir, it.name), prefix ? `${prefix}/${it.name}` : it.name);
       } else if (it.isFile()) {
-        if (SKIP_FILES.has(it.name)) continue;
+        if (files.has(it.name) || (algo >= 2 && isDocFile(it.name))) continue;
         out.push(prefix ? `${prefix}/${it.name}` : it.name);
       }
       // 符号链接一律跳过：可能指向仓库外，内容不稳定
@@ -62,9 +99,13 @@ async function collect(root) {
 
 /**
  * 目录内容哈希。**不要改这里的拼接格式**：`rel\0len\0content\0` 是三方共用契约。
+ *
+ * `algo: 1` 是老算法（1.4.0），只为校验旧索引 / 让老用户装得上扩展而保留；
+ * 默认用 `HASH_ALGO`（2）。索引同时带 `sha256`（algo1）和 `sha256_v2` 时，
+ * 安装器两个都认，见 ext-market.js。
  */
-export async function hashDir(dir) {
-  const files = await collect(dir);
+export async function hashDir(dir, { algo = HASH_ALGO } = {}) {
+  const files = await collect(dir, algo);
   const h = crypto.createHash('sha256');
   for (const rel of files) {
     const buf = normalize(await fsp.readFile(path.join(dir, rel)));
