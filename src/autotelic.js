@@ -39,6 +39,7 @@ import { writeJsonAtomic } from './atomic.js';
 import {
   appendLedger, readLedger, verifyChain, dayStats, ledgerPath, GENESIS,
 } from './autotelic-ledger.js';
+import { readDreamSeeds } from './dream.js';
 
 export const STATE_FILE = 'autotelic-state.json';
 
@@ -295,8 +296,14 @@ export function createAutotelic({
   function preview() {
     const c = cfg();
     const { rows } = ledger();
-    const picked = pickProject(c.seeds.map((text) => ({ text })), { history: rows, now: now() });
-    return { ok: true, ...picked, seeds: c.seeds, canRun: gate(now()) };
+    /**
+     * 种子的两个来源：配置里手写的 + 最近几天梦里写的「明天想做的事」。
+     * 梦那边默认关，关着时 `readDreamSeeds()` 恒为空——这里行为不变。
+     * 只读，不改 autotelic 的任何开关：想让它真立项，还得自己把自驱打开。
+     */
+    const seeds = [...new Set([...(Array.isArray(c.seeds) ? c.seeds : []), ...readDreamSeeds(3)])];
+    const picked = pickProject(seeds.map((text) => ({ text })), { history: rows, now: now() });
+    return { ok: true, ...picked, seeds, canRun: gate(now()) };
   }
 
   /** 立项：只记账，不跑模型 */
