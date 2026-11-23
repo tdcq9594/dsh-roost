@@ -440,3 +440,40 @@ test('接线：/ext-pages 带 CSP 沙箱 + CORS + 垫片注入', () => {
     '注入要在发送之前',
   );
 });
+
+/**
+ * 2026-11-23 实机：点「记忆统计」报 `config is not defined`。
+ *
+ * host 的配置变量叫 `cfg`（`let cfg = loadConfig()`），我在 stats.snapshot 里
+ * 顺手写成 `config?.usage?.pricing` —— 语法合法、node --check 过、纯函数单测
+ * 全绿（stats-snapshot.test.js 根本不经过 host），只有真点按钮才 ReferenceError。
+ * 这类作用域错跟上面 onInbound 那条是同一类，照例静态钉住。
+ */
+test('作用域：新增 quick op 里不能出现未定义的 config（要用 cfg）', () => {
+  const lines = SRC.split(/\r?\n/);
+  const bad = [];
+  for (const [i, line] of lines.entries()) {
+    /** 只看代码行，注释里举例的 config 不算 */
+    if (/^\s*(\*|\/\/|\/\*)/.test(line)) continue;
+    if (/\bconfig\s*\?/.test(line)) bad.push(`${i + 1}: ${line.trim()}`);
+  }
+  assert.deepEqual(bad, [], `发现 config?. 误用（host 里变量是 cfg）：\n${bad.join('\n')}`);
+  /** 同时确认 stats.snapshot 确实用了 cfg 读 pricing（防止两条都被删掉蒙混过关） */
+  const atStats = lines.findIndex((l) => l.trim() === "case 'stats.snapshot': {");
+  assert.ok(atStats >= 0, '找不到 stats.snapshot op');
+  const block = lines.slice(atStats, atStats + 30).join('\n');
+  assert.match(block, /pricing:\s*cfg\?\.usage\?\.pricing/, '统计快照要用 cfg 读定价');
+});
+
+/**
+ * 2026-11-23：心智模型模型模式从"双重闸"简化为面板单一开关。
+ * 双重闸（config + 调用方 useModel）实测没人能开——面板从不传 useModel，
+ * 配置开着也走不到模型分支。现在面板 checkbox 直接写 config，后端只读它。
+ */
+test('接线：mind.refresh 用单一配置开关，不再要求 arg.useModel', () => {
+  const at = lines.findIndex((l) => l.trim() === "case 'mind.refresh': {");
+  assert.ok(at >= 0, '找不到 mind.refresh op');
+  const block = lines.slice(at, at + 30).join('\n');
+  assert.match(block, /cfg\.memory\?\.mindModel\?\.modelRefresh === true/, '要读面板开关');
+  assert.doesNotMatch(block, /arg\?\.useModel/, '不能再靠调用方传 useModel（面板从不传）');
+});

@@ -37,6 +37,11 @@ import { createSetup } from './setup.js';
 import { shouldRegisterQqTools } from './qq-tools.js';
 import { createMemory, W_EXPLICIT } from './memory.js';
 import { buildMindModel, renderMindModel } from './mind-model.js';
+import { historyOf, listSuperseded } from './memory-history.js';
+import { createMindModelStore } from './mind-model-store.js';
+import { refreshMindModel } from './mind-model-refresh.js';
+import { queryAudit } from './audit-query.js';
+import { statsSnapshot, dayOf as localDayOf } from './stats-snapshot.js';
 import { createJournal } from './journal.js';
 import { createLedgerReader } from './ledger-read.js';
 import { createChannelPost, normalizePostCfg, guide, humanError, pickErrorCode, shareUrlOf } from './channel-post.js';
@@ -3212,6 +3217,12 @@ export function apply(ctx) {
    * 为了跟自述一致而表演，而不是自然地活着。
    */
   const self = createSelf({ log: (m) => log.warn(m) });
+
+  /**
+   * B2 心智模型快照：独立文件（mind-model.json），不进 journal、不进 self.json，
+   * 只有面板显式 refresh 才写——默认关逐字不变（文件都不存在）。
+   */
+  const mindModelStore = createMindModelStore({ log: (m) => log.warn(m) });
 
   /**
    * 账号迁移：从**记忆数据**出发找「认不出号码」的旧 openid。
@@ -8928,7 +8939,9 @@ export function apply(ctx) {
          * 只记意图不记结果——失败时用户能看到 toast，这里要的是可追溯。
          * `memory.list` 是纯读，跳过，否则翻一次记忆就多一行噪音。
          */
-        if (op && op !== 'memory.list' && op !== 'capabilities.get' && op !== 'capabilities.preview' && op !== 'features.get' && op !== 'features.preview' && op !== 'quota.get' && op !== 'backup.list') audit({ op, chatId, peer: who.kind, peerId: who.id });
+        if (op && op !== 'memory.list' && op !== 'capabilities.get' && op !== 'capabilities.preview' && op !== 'features.get' && op !== 'features.preview' && op !== 'quota.get' && op !== 'backup.list'
+          /* A1：审计查询/统计快照本身是纯读，且查审计会写审计=自己污染自己 */
+          && op !== 'audit.query' && op !== 'stats.snapshot') audit({ op, chatId, peer: who.kind, peerId: who.id });
 
         try {
           switch (op) {
@@ -10176,6 +10189,78 @@ export function apply(ctx) {
               return send(res, 200, { ok: true, chatId, muted: memoryOff(chatId), ...memory.list(chatId, aliasesOf(chatId)) });
 
             /**
+             * B1 历史说法 + 证据引文（只读投影）。
+             * facts 没有"谁取代谁"的指针，earlier 是**推断**不是因果链——
+             * 投影层如实标 inferred / adjacent，面板文案照此写，别冒充 Hindsight 的快照序列。
+             */
+            case 'memory.history': {
+              const scope = arg?.scope === 'chat' ? 'chat' : 'global';
+              const full = memory.listFull(chatId, aliasesOf(chatId));
+              const rows = full[scope] || [];
+              const key = String(arg?.id ?? arg?.text ?? '').trim();
+              return send(res, 200, {
+                ok: true,
+                chatId,
+                scope,
+                ...(key
+                  ? { detail: historyOf(rows, key, { now: Date.now(), limit: 20 }) }
+                  : { superseded: listSuperseded(rows, { limit: 20 }) }),
+              });
+            }
+
+            /**
+             * A1 审计日志查询（只读）。对齐 Hindsight `/audit-logs` 的过滤+分页口径，
+             * 但只走面板 quick——审计含 chatId/peer，不给扩展 `/v1` 开端点。
+             * 纯读：`audit.query()` 不写盘，上面还把它排除在审计之外（免自污染）。
+             */
+            case 'audit.query': {
+              try {
+                return send(res, 200, {
+                  ok: true,
+                  ...queryAudit({
+                    since: arg?.since, until: arg?.until,
+                    op: arg?.op, chatId: arg?.chatId,
+                    limit: arg?.limit, offset: arg?.offset,
+                  }),
+                });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: `审计日志读不出来：${e?.message ?? e}` });
+              }
+            }
+
+            /**
+             * A2 记忆统计快照（只读）。对齐 Hindsight `/stats` + timeseries 的展示形态。
+             * 按天时序从 journal 的 `day` 索引逐天读（索引在，7 天 7 次查询），
+             * **不新增 store 方法**——也就不用碰 personaScope PLAN（铁律：新增 store
+             * 方法必须登记，否则人格隔离下静默失效）。
+             */
+            case 'stats.snapshot': {
+              try {
+                const period = Math.min(30, Math.max(1, Number(arg?.period) || 7));
+                const days = [];
+                for (let i = period - 1; i >= 0; i -= 1) {
+                  // 本地日，和 journal 的 dayOf() 同口径——UTC 会把凌晨的对话算到前一天
+                  const key = localDayOf(Date.now() - i * 86400000);
+                  days.push({ day: key, count: journal.byDay(key).length });
+                }
+                const full = memory.listFull(chatId, aliasesOf(chatId));
+                return send(res, 200, {
+                  ok: true,
+                  ...statsSnapshot({
+                    global: full.global, chat: full.chat,
+                    journal: journal.stats(),
+                    graph: graph.stats(),
+                    /** cfg 是 host 内的配置变量（886 行）；写成 config 会在运行时 ReferenceError */
+                    usage: usage.summary({ days: period, pricing: cfg?.usage?.pricing }),
+                    days, period,
+                  }),
+                });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: `统计读不出来：${e?.message ?? e}` });
+              }
+            }
+
+            /**
              * B2 心智模型树：把"她现在相信什么"按实体组织成可导航的树 + markdown。
              * 只读，不改记忆；面板/扩展都能用，导出后也能当 prompt 上下文。
              */
@@ -10197,6 +10282,54 @@ export function apply(ctx) {
               } catch (e) {
                 return send(res, 200, { ok: false, message: `心智模型读不出来：${e?.message || e}` });
               }
+            }
+
+            /**
+             * B2 心智模型快照：脱离纯投影的"持续演进"形态（默认关、显式操作）。
+             *
+             * 读快照（mind.snapshot）、刷新（mind.refresh）、清空（mind.clear）三件事
+             * 分开：读不写盘，刷新才落 mind-model.json，清空独立于 memory.clear。
+             * refresh 默认走纯投影（mechanical，零模型调用）；面板勾「用模型整理语言」
+             * 即写 `cfg.memory.mindModel.modelRefresh:true`，之后刷新自动用模型。
+             */
+            case 'mind.snapshot': {
+              try {
+                const id = String(arg?.id || 'default');
+                const snap = mindModelStore.get(id);
+                return send(res, 200, { ok: true, id, snapshot: snap });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: `快照读不出来：${e?.message ?? e}` });
+              }
+            }
+
+            case 'mind.refresh': {
+              try {
+                const full = memory.listFull(chatId, aliasesOf(chatId));
+                const entities = graph.entities({ chatId, limit: 50, aliases: aliasesOf(chatId) })
+                  .map((e) => e.name).filter(Boolean);
+                /**
+                 * 单一开关：面板「用模型整理语言」checkbox 直接写 config.memory.mindModel.modelRefresh。
+                 * 勾选 = 主人显式授权，不用调用方再传 useModel（双重闸太难用，实测没人能开）。
+                 * 默认关（config.js 无该字段即 false）：不勾选就纯机械投影、零模型调用。
+                 */
+                const useModel = cfg.memory?.mindModel?.modelRefresh === true;
+                const r = await refreshMindModel({
+                  full, entities, store: mindModelStore,
+                  id: String(arg?.id || 'default'),
+                  mode: arg?.mode === 'delta' ? 'delta' : 'full',
+                  dry: arg?.dry === true, useModel,
+                  generate: useModel ? (p) => backgroundGenerate(p, { source: 'roost-mind-refresh' }) : null,
+                });
+                return send(res, r.ok ? 200 : 400, { ok: r.ok, ...r });
+              } catch (e) {
+                return send(res, 500, { ok: false, message: `刷新失败：${e?.message ?? e}` });
+              }
+            }
+
+            case 'mind.clear': {
+              const id = String(arg?.id || '');
+              const n = mindModelStore.clear(id);
+              return send(res, 200, { ok: true, cleared: n, message: id ? '这条心智模型快照清了' : '心智模型快照全清了' });
             }
 
             /**
@@ -11167,6 +11300,15 @@ export function apply(ctx) {
             break;
           case 'review': patch.reviewedAt = Date.now(); break;
           case 'tier': patch.tier = b?.tier; break;
+          /**
+           * 标签：走同一个 editFact 写入口。接受数组或逗号分隔字符串（面板输入框），
+           * 归一化在 memory.js 的 normalizeTags 收口，空数组 = 清空。
+           */
+          case 'tags':
+            patch.tags = Array.isArray(b?.tags)
+              ? b.tags
+              : String(b?.tags ?? '').split(/[,，]/);
+            break;
           case 'archive': patch.archivedAt = Date.now(); break;
           case 'restore': patch.archivedAt = 0; break;
           default:

@@ -110,6 +110,12 @@ export function normalizeEntry(raw, target, chatId = '') {
     /** 同上：facts 也走 `insertRaw()`，E1/E2/E3 的字段不能被白名单吃掉 */
     ...e,
     ...base,
+    /**
+     * 标签也走 `insertRaw()`：`...e` 已经带过来了，这里显式写一遍是
+     * 为了把"四处白名单"的契约钉住（免得以后 base 加字段时误删）。
+     * 保持原样数组，归一化交给 insertRaw，避免还原链改数据形状。
+     */
+    tags: Array.isArray(e.tags) ? e.tags : [],
     w: Number(e.w) > 0 ? Number(e.w) : 1,
     src: e.src || null,
     until: Number(e.until) > 0 ? Number(e.until) : 0,
