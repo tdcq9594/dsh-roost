@@ -6955,7 +6955,21 @@ select.roost-input{color-scheme:dark}
       const profiles = mem?.profiles || []
       const events = mem?.events || []
       const gp = mem?.graph
+      const chatProfiles = mem?.chatProfiles || []
       const goMemory = () => { if (setTab) setTab('memory') }
+      /** 阶段6：群印象编辑态，按群 chatId 打开；切页不持久化，关掉就丢草稿 */
+      const [chatEditId, setChatEditId] = useState('')
+      const [chatEditForm, setChatEditForm] = useState(null)
+      const [chatEditBusy, setChatEditBusy] = useState(false)
+      const saveChatProfile = async (chatId) => {
+        if (!chatEditForm) return
+        setChatEditBusy(true)
+        try {
+          const r = await quick('chatprofile.save', { chatId, ...chatEditForm })
+          toast(r?.message || '已保存', r?.ok === false ? 'err' : 'ok')
+          if (r?.ok !== false) { setChatEditId(''); setChatEditForm(null); reload && reload() }
+        } finally { setChatEditBusy(false) }
+      }
       const shortTime = (at) => new Date(at).toLocaleString('zh-CN', {
         month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
       })
@@ -7257,6 +7271,58 @@ select.roost-input{color-scheme:dark}
               reload()
             },
           }),
+        ),
+
+        /** 阶段6：群印象用无编号总览卡（人物页 01–05 编号被测试钉死，不插节） */
+        h(Sec, { title: `群印象（${chatProfiles.length}）` },
+          h('div', { className: 'roost-note', style: { marginTop: 0 } },
+            '她对每个群的印象：气氛、常聊什么、整体印象。默认不进提示词，只是面板里可查可改的资料。'),
+          chatProfiles.length
+            ? h('div', { style: { display: 'grid', gap: 8 } },
+                chatProfiles.map((c) => h('div', { key: c.chatId, className: 'roost-item' },
+                  h('div', { style: { flex: '1 1 auto', minWidth: 0 } },
+                    h('b', null, c.name || c.chatId),
+                    h('div', { className: 'roost-note', style: { margin: 0 } },
+                      (c.vibe ? `气氛：${c.vibe}` : '（还没写下气氛）')
+                      + (c.topics ? ` · 常聊：${c.topics}` : '')
+                      + (c.impression ? ` · 印象：${c.impression}` : '')),
+                    chatEditId === c.chatId
+                      ? h('div', null,
+                          ...[['vibe', '气氛'], ['topics', '常聊什么'], ['impression', '印象']].map(([k, label]) => h('label', {
+                            key: k, style: { display: 'block', marginTop: 4, fontSize: 12 },
+                          }, label,
+                            h('input', {
+                              className: 'roost-input', value: chatEditForm?.[k] || '',
+                              style: { display: 'block', width: '100%', marginTop: 2 },
+                              onChange: (e) => setChatEditForm({ ...chatEditForm, [k]: e.target.value }),
+                            }))),
+                          h('button', {
+                            type: 'button', className: 'roost-btn roost-primary', disabled: chatEditBusy, style: { marginTop: 6 },
+                            onClick: () => saveChatProfile(c.chatId),
+                          }, chatEditBusy ? '保存中…' : '保存'),
+                          h('button', {
+                            type: 'button', className: 'roost-btn', style: { marginLeft: 6 },
+                            onClick: () => { setChatEditId(''); setChatEditForm(null) },
+                          }, '取消'),
+                          h(ConfirmLink, {
+                            label: '清空这个群的印象', confirmLabel: '确认清空',
+                            onConfirm: async () => {
+                              const r = await quick('chatprofile.clear', { chatId: c.chatId })
+                              toast(r?.message || '清了'); setChatEditId(''); setChatEditForm(null); reload && reload()
+                            },
+                          }),
+                        )
+                      : null,
+                  ),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: () => {
+                      if (chatEditId === c.chatId) { setChatEditId(''); setChatEditForm(null) }
+                      else { setChatEditId(c.chatId); setChatEditForm({ vibe: c.vibe || '', topics: c.topics || '', impression: c.impression || '' }) }
+                    },
+                  }, chatEditId === c.chatId ? '收起' : '编辑'),
+                )))
+            : h('div', { className: 'roost-empty' }, '还没写下群印象。'),
         ),
 
         /** 事实 / 日记 / 召回记录仍只在记忆页：那是「记了什么」，不是「记得谁」 */
