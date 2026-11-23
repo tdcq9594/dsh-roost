@@ -3317,22 +3317,23 @@ export function apply(ctx) {
         .filter((e) => e.name && e.name.length >= 2 && q.includes(e.name));
       for (const e of named) {
         entities.push(e.name);
-        const ids = graph.linkedJournalIds(e.name, {
+        const ids = journal.activeIds(graph.linkedJournalIds(e.name, {
           chatId,
           limit: Number(cfg.recall?.linkLimit) || 5,
           aliases: aliasesOf(chatId),
-        });
+        }));
+        /** A3 撤回级联：基于已作废日记的边不再参与召回，否则旧说法被"想起"第二次 */
         for (const id of ids) if (!entityNames.has(id)) entityNames.set(id, e.name);
         /**
          * 再扩一跳：顺着这个人的邻接实体（他身边的人 / 参与的事）找日记。
          * 只在开关打开时走——这一层是猜测性联想，图和边脏的时候会很吵。
          */
         if (!adjacentOn) continue;
-        const near = graph.adjacentJournalIds(e.name, {
+        const near = journal.activeIds(graph.adjacentJournalIds(e.name, {
           chatId,
           limit: Number(cfg.recall?.adjacentLimit) || 3,
           aliases: aliasesOf(chatId),
-        });
+        }));
         for (const id of near) {
           /** 已经靠直接关联进来的不降级：先到先得，一跳优先 */
           if (entityNames.has(id)) continue;

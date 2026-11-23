@@ -564,6 +564,21 @@ function createSqliteStore(file, log) {
       return r ? normRow(r) : null;
     },
 
+    /**
+     * A3 撤回级联：从一批 journal id 里挑出**仍然有效**的（invalid_at=0）。
+     * 用途：图谱联想拿到的 id 可能指向已被改口作废的日记——那些边不该再
+     * 参与召回，否则旧说法会被"想起"第二次。
+     */
+    activeIds(ids) {
+      const list = [...new Set((ids || []).filter(Boolean).map(String))];
+      if (!list.length) return [];
+      const d = open();
+      if (!d) return [];
+      const sql = `SELECT id FROM journal WHERE id IN (${marks(list.length)}) AND ${NOT_INVALIDATED_SQL}`;
+      const alive = new Set(d.prepare(sql).all(...list).map((r) => String(r.id)));
+      return list.filter((id) => alive.has(id));
+    },
+
     update(id, patch) {
       const d = open();
       if (!d) return false;
@@ -1316,6 +1331,12 @@ function createJsonlStore(file, log) {
       return load().find((r) => r.id === id) || null;
     },
 
+    /** A3 撤回级联：同 sqlite 版——按 invalid_at 过滤活动 id */
+    activeIds(ids) {
+      const alive = new Map(load().map((r) => [String(r.id), !Number(r.invalidAt)]));
+      return [...new Set((ids || []).filter(Boolean).map(String))].filter((id) => alive.get(id) === true);
+    },
+
     update(id, patch) {
       load();
       const r = rows.find((x) => x.id === id);
@@ -1843,6 +1864,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     },
 
     get: (id) => get().get(id),
+    /** A3 撤回级联：过滤掉已被改口作废的日记 id */
+    activeIds: (ids) => get().activeIds(ids),
 
     /**
      * `aliases` 是**换机器人之后**才有的东西：旧 openid 下的日记也该读得到。

@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -149,4 +149,40 @@ test('时间窗必须在 LIMIT 之前生效：热门词命中 >perPath 也不漏
   } finally {
     done();
   }
+});
+
+test('A3 撤回级联：activeIds 只留未失效的日记 id，失效的行不回召回', async () => {
+  const { done } = fresh();
+  const { createJournal } = await import('../src/journal.js');
+  try {
+    const j = createJournal({ file: join(process.env.DSH_ROOST_DATA, 'journal.sqlite') });
+    j.add({ id: 'old-saying', chatId: 'g1', text: '他住在杭州' });
+    j.add({ id: 'new-saying', chatId: 'g1', text: '他搬到上海了' });
+    j.add({ id: 'neutral', chatId: 'g1', text: '无关的事' });
+
+    assert.deepEqual(
+      j.activeIds(['old-saying', 'new-saying', 'neutral', 'not-exist']),
+      ['old-saying', 'new-saying', 'neutral'],
+      '未失效的都留下，不存在的去掉',
+    );
+
+    /** 改口：旧说法被作废 */
+    j.invalidate(['old-saying'], { at: Date.now(), supersededBy: 'new-saying' });
+    assert.deepEqual(
+      j.activeIds(['old-saying', 'new-saying', 'neutral']),
+      ['new-saying', 'neutral'],
+      '作废的那条不再"活动"——图谱联想拿到它也会被滤掉',
+    );
+    assert.equal(j.get('old-saying').supersededBy, 'new-saying', '溯源仍在');
+    assert.equal(j.get('old-saying').text, '他住在杭州', '原文不删');
+  } finally {
+    done();
+  }
+});
+
+test('A3 接线：图谱联想（一跳/二跳）都经过 activeIds 过滤', () => {
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const filtered = (host.match(/journal\.activeIds\(/g) || []).length;
+  assert.ok(filtered >= 2, `一跳和二跳都要过滤失效日记，实际 ${filtered} 处`);
+  assert.match(host, /A3 撤回级联/, '要有说明为什么过滤');
 });
