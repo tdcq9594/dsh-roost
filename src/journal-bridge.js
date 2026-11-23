@@ -320,7 +320,8 @@ export function createJournalBridge({ journal, memoryOff, log }) {
    *   当对话素材提炼成事实/摘要。
    */
   function add(payload, chat, text, role, { kind = 'chat' } = {}) {
-    if (memoryOff(chat?.chatId)) return;
+    /** E6：把发送者也交给 memoryOff——按人关时他的话不记 */
+    if (memoryOff(chat?.chatId, String(payload?.sender?.id ?? ''))) return;
     try {
       const base = String(payload?.id ?? '').trim();
       /**

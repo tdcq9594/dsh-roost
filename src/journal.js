@@ -1019,14 +1019,22 @@ function createSqliteStore(file, log) {
       }
     },
 
-    withVec({ chatId = '', limit = 2000, aliases = [] } = {}) {
+    withVec({ chatId = '', limit = 2000, aliases = [], dim = 0 } = {}) {
       const d = open();
       if (!d) return [];
       const keys = chatId ? chatKeys(chatId, aliases) : [];
+      /**
+       * C4 维度校验：只取与当前查询向量同维度的条目。
+       * 换过 embedding 模型（维度变了）时，旧向量和新的不可比——
+       * cosine 对长度不等的两个向量返回 0，不筛的话它们白占候选名额。
+       * blob 是纯 Float32，字节数 / 4 = 维度。
+       */
+      const dimClause = Number(dim) > 0 ? ' AND length(vec)/4 = ?' : '';
+      const dimArgs = Number(dim) > 0 ? [Number(dim)] : [];
       const sql = keys.length
-        ? `SELECT * FROM journal WHERE vec IS NOT NULL AND (chat_id IN (${marks(keys.length)}) OR chat_id='') AND ${NOT_INVALIDATED_SQL} ORDER BY at DESC LIMIT ?`
-        : `SELECT * FROM journal WHERE vec IS NOT NULL AND ${NOT_INVALIDATED_SQL} ORDER BY at DESC LIMIT ?`;
-      return d.prepare(sql).all(...(keys.length ? [...keys, limit] : [limit])).map(normRow);
+        ? `SELECT * FROM journal WHERE vec IS NOT NULL AND (chat_id IN (${marks(keys.length)}) OR chat_id='') AND ${NOT_INVALIDATED_SQL}${dimClause} ORDER BY at DESC LIMIT ?`
+        : `SELECT * FROM journal WHERE vec IS NOT NULL AND ${NOT_INVALIDATED_SQL}${dimClause} ORDER BY at DESC LIMIT ?`;
+      return d.prepare(sql).all(...(keys.length ? [...keys, ...dimArgs, limit] : [...dimArgs, limit])).map(normRow);
     },
 
     /** 还没有向量的条目（巩固时批量补算，白天不花这个钱） */
@@ -1603,10 +1611,16 @@ function createJsonlStore(file, log) {
         .map(([i]) => rows[i]);
     },
 
-    withVec({ chatId = '', limit = 2000, aliases = [] } = {}) {
+    withVec({ chatId = '', limit = 2000, aliases = [], dim = 0 } = {}) {
       const keys = chatId ? chatKeys(chatId, aliases) : [];
+      /** C4：维度不符的旧向量跳过（换模型后不可比），与 sqlite 版同口径 */
+      const dimOf = (r) => {
+        const v = toVec(r.vec);
+        return v ? v.length : 0;
+      };
       return load()
         .filter((r) => isActive(r) && r.vec && (!keys.length || keys.includes(r.chatId) || r.chatId === ''))
+        .filter((r) => !(Number(dim) > 0) || dimOf(r) === Number(dim))
         .sort((a, b) => b.at - a.at)
         .slice(0, limit);
     },
@@ -2090,7 +2104,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         try {
           const qv = await embed.one(query);
           if (qv) {
-            const cands = s.withVec({ chatId, aliases });
+            /** C4：按查询向量维度筛候选，换模型后旧维度向量不参与 */
+            const cands = s.withVec({ chatId, aliases, dim: qv.length });
             const scored = [];
             for (const r of cands) {
               if (!inWindow(r)) continue;
@@ -2395,6 +2410,8 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
 
     /** 还没算向量的条目（主循环在 consolidate 里） */
     noVec: (limit) => get().noVec(limit),
+    /** C4：带维度过滤的向量候选（调试/测试用，检索内部走 store 直连） */
+    withVec: (opts) => get().withVec(opts),
 
     setVec(id, vec) {
       if (!vec) return false;

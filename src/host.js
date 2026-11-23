@@ -3276,8 +3276,16 @@ export function apply(ctx) {
    * 检索 / 记忆工具），分散着写必然漏一处 —— 漏在写日记上是"关着还照记"，
    * 漏在注入上是"关了还照说"，两种都很难在面板上看出来。
    */
-  const memoryOff = (chatId) => {
+  const memoryOff = (chatId, senderId = '') => {
     if (cfg.memory?.enabled === false) return true;
+    /**
+     * E6 按人关（noUsers）：这个人说的话一律不记。
+     * 只在**写入侧**判——他说的不进库，自然也不会被召回；
+     * 已有的历史记忆仍可见（关的是"继续记他"，不是"抹掉过去"）。
+     */
+    const noUsers = cfg.memory?.noUsers;
+    const sid = String(senderId || '');
+    if (sid && Array.isArray(noUsers) && noUsers.includes(sid)) return true;
     const off = cfg.memory?.offChats;
     if (!Array.isArray(off) || !off.length) return false;
     const id = String(chatId || '');
@@ -3342,6 +3350,11 @@ export function apply(ctx) {
           entityWeights.set(id, 0.3);
         }
       }
+      /**
+       * C3：这些实体这次真的被"想起来"了（有日记命中），记一次热度。
+       * 只算真命中的（entities 里 push 过的），不是查询里随便提到的名字。
+       */
+      if (entities.length) graph.touchEntities(entities, { chatId, aliases: aliasesOf(chatId) });
     } catch (e) {
       log.debug(`实体路跳过：${e.message}`);
     }

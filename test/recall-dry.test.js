@@ -259,3 +259,24 @@ test('自检-C2：interleave 被挤掉的条目不会被下一路重新捞回', 
     done();
   }
 });
+
+test('C4 维度校验：换模型后不同维度的旧向量不参与检索', async () => {
+  const { done } = fresh();
+  const { createJournal } = await import('../src/journal.js');
+  try {
+    const j = createJournal({ file: join(process.env.DSH_ROOST_DATA, 'journal.sqlite') });
+    j.add({ id: 'a', chatId: 'g1', text: '杭州搬家' });
+    j.add({ id: 'b', chatId: 'g1', text: '上海搬家' });
+    /** 给 a 一个 3 维向量、b 一个 4 维向量（模拟换模型前后） */
+    j.setVec('a', [0.6, 0.8, 0]);
+    j.setVec('b', [0.5, 0.5, 0.5, 0.5]);
+    const only3 = j.withVec({ chatId: 'g1', dim: 3 });
+    assert.deepEqual(only3.map((r) => r.id), ['a'], '只取 3 维的');
+    const only4 = j.withVec({ chatId: 'g1', dim: 4 });
+    assert.deepEqual(only4.map((r) => r.id), ['b'], '只取 4 维的');
+    const all = j.withVec({ chatId: 'g1' });
+    assert.equal(all.length, 2, '不传 dim 时都返回（老行为）');
+  } finally {
+    done();
+  }
+});

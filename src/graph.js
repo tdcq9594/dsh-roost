@@ -147,6 +147,15 @@ export function createGraph({ file, log = () => {} } = {}) {
       db.exec(
         'CREATE UNIQUE INDEX IF NOT EXISTS edge_alive ON edge(src_id, rel, dst_id) WHERE valid_to IS NULL',
       );
+      /**
+       * C3 召回热度：entity.hits 记"被联想命中几次"。
+       * 老库没有这列时补上（ALTER 是 O(1) 元数据操作）。
+       * 为什么不用 last_seen 当热度：那是写入时间，会把"刚创建"当成"常用"。
+       */
+      try {
+        const cols = new Set(db.prepare('PRAGMA table_info(entity)').all().map((c) => String(c.name)));
+        if (!cols.has('hits')) db.exec('ALTER TABLE entity ADD COLUMN hits INTEGER NOT NULL DEFAULT 0');
+      } catch { /* 迁移失败不拦启动，热度退化成 0 */ }
       return db;
     } catch (e) {
       broken = true;
@@ -545,7 +554,8 @@ export function createGraph({ file, log = () => {} } = {}) {
     const d = open();
     if (!d) return [];
     const scope = chatScope(chatId, aliases, 'chat_id');
-    const sql = `SELECT * FROM entity WHERE 1=1${scope.sql} ORDER BY last_seen DESC LIMIT ?`;
+    /** C3：被联想命中的次数也算热度——常用的实体更该优先被想起来 */
+    const sql = `SELECT * FROM entity WHERE 1=1${scope.sql} ORDER BY hits DESC, last_seen DESC LIMIT ?`;
     return d.prepare(sql)
       .all(...scope.args, limit)
       .map((r) => ({
@@ -560,8 +570,30 @@ export function createGraph({ file, log = () => {} } = {}) {
         })(),
         firstSeen: Number(r.first_seen || 0),
         lastSeen: Number(r.last_seen || 0),
+        hits: Number(r.hits || 0),
         kind: String(r.kind || 'thing'),
       }));
+  }
+
+  /**
+   * C3：给一批实体记一次"被联想命中"（召回时调）。
+   * 只动 hits，不改 last_seen——后者是写入时间，语义不同。
+   * 失败静默：热度是锦上添花，不能因为它让召回失败。
+   */
+  function touchEntities(names, { chatId = '', aliases = [] } = {}) {
+    const d = open();
+    if (!d) return 0;
+    const keys = [...new Set((names || []).map((n) => normKey(String(n ?? ''))).filter(Boolean))];
+    if (!keys.length) return 0;
+    const scope = chatScope(chatId, aliases, 'chat_id');
+    const marks = keys.map(() => '?').join(',');
+    try {
+      const r = d.prepare(`UPDATE entity SET hits=hits+1 WHERE key IN (${marks})${scope.sql}`).run(...keys, ...scope.args);
+      return Number(r.changes) || 0;
+    } catch (e) {
+      log(`实体热度更新失败：${e.message}`);
+      return 0;
+    }
   }
 
   /**
@@ -954,6 +986,7 @@ export function createGraph({ file, log = () => {} } = {}) {
     edgesAsOf,
     endedEdges,
     entities,
+    touchEntities,
     episodes,
     linkedJournalIds,
     /** P1：命中实体的邻接实体牵涉的日记（二跳，默认关，见 `features.graphAdjacent`） */

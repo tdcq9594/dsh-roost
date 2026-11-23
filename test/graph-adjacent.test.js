@@ -168,3 +168,28 @@ test('P1 邻接：开关默认关，记忆关着时也关，面板能看见', ()
   const groups = visibleGroups();
   assert.ok(groups.some((g) => g.ids.includes('graphAdjacent')), '不可见就等于没做');
 });
+
+/* ---------------- C3 召回热度 ---------------- */
+
+test('C3 touchEntities：命中次数累加，entities 按热度优先', () => {
+  const g = createGraph({ file: join(tmp(), 'g.sqlite') });
+  const t = Date.now();
+  g.addEpisode({ at: t, chatId: G1, text: '张三李四', journalId: 'j1' });
+  g.addEdge({ src: '张三', rel: '认识', dst: '李四', chatId: G1, at: t });
+  g.addEpisode({ at: t + 1, chatId: G1, text: '王五', journalId: 'j2' });
+  g.addEdge({ src: '王五', rel: '在', dst: '杭州', chatId: G1, at: t + 1 });
+
+  /** 张三被联想命中 3 次 */
+  assert.equal(g.touchEntities(['张三'], { chatId: G1 }), 1);
+  g.touchEntities(['张三'], { chatId: G1 });
+  g.touchEntities(['张三'], { chatId: G1 });
+  const list = g.entities({ chatId: G1, limit: 10 });
+  const zhang = list.find((e) => e.name === '张三');
+  assert.equal(zhang.hits, 3, '命中次数累加');
+  assert.equal(list[0].name, '张三', '热度高的排前面（即使 last_seen 不是最新）');
+
+  /** 不存在的实体不炸 */
+  assert.equal(g.touchEntities(['不存在的人'], { chatId: G1 }), 0);
+  /** 空输入不炸 */
+  assert.equal(g.touchEntities([], { chatId: G1 }), 0);
+});
