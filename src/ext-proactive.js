@@ -104,12 +104,16 @@ export function renderPrompt(item) {
 export function createProactiveQueue({ dir = '', cfgOf = () => ({}), now = () => Date.now(), log = () => {} } = {}) {
   const path = dir ? join(dir, FILE) : '';
   let st = { day: '', sentToday: 0, items: [], history: [] };
+  /** 上次记过的读档错误类型（code / name）。同一种只记一次，别让定时 drain 每分钟刷一条 */
+  let lastLoadError = '';
 
   function load() {
     if (!path) return;
     try {
       const raw = JSON.parse(readFileSync(path, 'utf8'));
       if (raw && Array.isArray(raw.items)) {
+        /** 读好了就清掉：以后再真读坏要能重新报一次，不能被上一次的 key 永久静默 */
+        lastLoadError = '';
         st = {
           day: String(raw.day || ''),
           sentToday: Number(raw.sentToday) || 0,
@@ -118,7 +122,32 @@ export function createProactiveQueue({ dir = '', cfgOf = () => ({}), now = () =>
         };
       }
     } catch (e) {
-      log(`主动消息队列读档失败，按空队列启动：${e?.message ?? e}`);
+      if (e?.code === 'ENOENT') {
+        /**
+         * 新装 / 空队列还没落过盘 —— 这是正常状态，直接建一份初始空状态。
+         *
+         * 不能只静默不建：save() 只在 submit / settle 这些写操作时跑，队列空
+         * 就永远没文件；而 state() / 定时 drain 每分钟都 load() 一次，日志会
+         * 一直报「读档失败」把诊断页刷屏。建一次文件就从根上消掉 ENOENT。
+         *
+         * 建文件失败（目录不可写）也别记日志：那属于「盘上暂时留不下」，内存
+         * 空队列照用；真到要写素材时 save() 自己会报「落盘失败」，这里再记
+         * 就是同一个毛病换一条文案继续刷。
+         */
+        try { writeJsonAtomic(path, st); } catch { /* 交给后续 save() 报错 */ }
+        return;
+      }
+      /**
+       * 去重只按错误类型（code / name），不按 message：
+       * JSON.parse 的 message 带 `position N`，坏点被挪一下文案就变，按 message
+       * 去重会形同虚设（实测四种坏点记四条）。同一类错误修好后重坏也要能再报
+       * ——读档成功时清 key，见上面 load() 的 success 分支。
+       */
+      const key = String(e?.code || e?.name || 'unknown');
+      if (key !== lastLoadError) {
+        lastLoadError = key;
+        log(`主动消息队列读档失败，按空队列启动：${e?.message ?? e}`);
+      }
     }
   }
 
