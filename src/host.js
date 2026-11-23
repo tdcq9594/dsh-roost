@@ -56,6 +56,7 @@ import { createHistoryRing } from './history-ring.js';
 import { memoryLines, oneLine, followUpAllowed, followUpSection } from './memory-line.js';
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
+import { createGroupChatProfiles } from './group-chat-profile.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
 import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
 import { guardQuickCall, PANEL_MARK } from './ext-quick-guard.js';
@@ -3149,6 +3150,11 @@ export function apply(ctx) {
    * 两边都不碰消息热链路，也不动 prompt cache。
    */
   const profiles = createProfiles({ file: join(dataDir(), 'profiles.json'), log: (m) => log.warn(m) });
+  /**
+   * 群印象档案：按 chatId 存气氛/常聊什么/印象，独立 chat-profiles.json。
+   * 和 profiles 一样不进人格隔离（数据本身是"这个群什么样"），默认不注入。
+   */
+  const chatProfiles = createGroupChatProfiles({ file: join(dataDir(), 'chat-profiles.json'), log: (m) => log.warn(m) });
   /** 每个会话上一句用户原话：短句（<12 字）补检索用，只在内存里 */
   const recentUserText = new Map();
   /** B1 节流：同一段聊天别每句都推一次心情 */
@@ -10160,6 +10166,28 @@ export function apply(ctx) {
               profiles.clear();
               return send(res, 200, { ok: true, message: '熟人小档案清了' });
 
+            /**
+             * 阶段6：群印象档案（对齐 aurabot /memory/chats/save）。
+             * 按 chatId 存气氛/常聊什么/印象；只写独立 chat-profiles.json，
+             * 默认不注入，面板点了才保存。
+             */
+            case 'chatprofile.save': {
+              const chatId = String(arg?.chatId ?? '').trim();
+              if (!chatId) return send(res, 400, { ok: false, message: '缺群 chatId' });
+              const r = chatProfiles.save(chatId, {
+                vibe: arg?.vibe, topics: arg?.topics, impression: arg?.impression,
+              });
+              return send(res, 200, r);
+            }
+
+            /** 阶段6：清空某个群的印象档案（不动记忆本体） */
+            case 'chatprofile.clear': {
+              const chatId = String(arg?.chatId ?? '').trim();
+              if (!chatId) return send(res, 400, { ok: false, message: '缺群 chatId' });
+              const ok = chatProfiles.clear(chatId);
+              return send(res, 200, { ok, message: ok ? '这个群的印象清了' : '没找到这个群' });
+            }
+
             /** E4：撤销某人的雷区（保留印象/相处）——写错了要能单独撤掉 */
             case 'profiles.clearDislikes': {
               const key = String(arg ?? '').trim();
@@ -11060,6 +11088,15 @@ export function apply(ctx) {
             at: r.at,
           })),
           profilesEnabled: cfg.profiles?.enabled === true,
+          /** 阶段6：群印象档案（按 chatId 的气氛/常聊什么/印象），默认不注入 */
+          chatProfiles: chatProfiles.recent(50).map((r) => ({
+            chatId: r.chatId || '',
+            name: r.name || '',
+            vibe: r.vibe || '',
+            topics: r.topics || '',
+            impression: r.impression || '',
+            at: Number(r.at) || 0,
+          })),
           authz: memory.authz(chatId),
           personaOverride: memory.getPersonaOverride(chatId, aliasesOf(chatId)),
         });
