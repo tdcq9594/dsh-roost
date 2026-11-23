@@ -38,6 +38,7 @@ import { join } from 'node:path';
 import { dataDir } from './config.js';
 
 import { writeJsonAtomic } from './atomic.js';
+import { normalizeTags, matchTags } from './tags.js';
 
 /** 一条最多 200 字，每层最多 40 条（比原来的 20 条放宽，跨群后量会涨） */
 const FACT_MAX = 200;
@@ -893,6 +894,15 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       /** 显式指令重提仍是指令（不会因为再提一次就降级成普通事实） */
       if (opts.directive === true) next.directive = true;
       /**
+       * 标签：只在调用方明确给时改，没给就保留原标签（重提一句不该悄悄抹掉归类）。
+       * 给空数组 = 显式清空（面板清标签用），此时删字段保持老库字节不变。
+       */
+      if (Array.isArray(opts.tags)) {
+        const nt = normalizeTags(opts.tags);
+        if (nt.length) next.tags = nt;
+        else delete next.tags;
+      }
+      /**
        * 重提＝一次 reinforce 证据。调用方给了 `opts.evidence`（出处摘要）才累计；
        * 老调用点不传，行为与字节都不变。跨级顶替护栏不受影响——证据只动
        * confidence，不动 status（`canSupersede` 仍在 supersede() 里守）。
@@ -929,6 +939,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       /** E3 条目级时效：只在显式给时落盘，老调用方字节不变 */
       ...(Number(opts.validFrom) > 0 ? { validFrom: Number(opts.validFrom) } : {}),
       ...(Number(opts.validUntil) > 0 ? { validUntil: Number(opts.validUntil) } : {}),
+      /** 标签：默认 [] 不落盘，老库与旧调用方字节不变 */
+      ...(normalizeTags(opts.tags).length ? { tags: normalizeTags(opts.tags) } : {}),
     };
     /** 新建就带出处＝第一条证据；老调用点不传 evidence，这一行是空操作 */
     if (opts.evidence) writeEvidence(fresh, applyEvidence({}, 'reinforce', opts.evidence));
@@ -1099,7 +1111,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
             && isValidAt(mm?.[text], t)
             && statusOf(mm?.[text]) !== 'guess'
             && !(skipDirective && mm?.[text]?.directive === true)
-            && !(skipStale && ['stale', 'weakening'].includes(trendOf(evidenceOf(mm?.[text]).evidence, t))))
+            && !(skipStale && ['stale', 'weakening'].includes(trendOf(evidenceOf(mm?.[text]).evidence, t)))
+            /** 标签过滤：不传 opts.tags 时 matchTags 恒 true，注入路径逐字不变 */
+            && matchTags(mm?.[text]?.tags, opts?.tags, opts?.tagsMode))
           .map((text, i) => {
             const meta = mm?.[text];
             const alias = Boolean(noDecay?.has(text));
@@ -1128,7 +1142,7 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
      *
      * `until` 有值 = 这条被后来的说法取代了，仍然留着但不注入。
      */
-    listFull(chatId, aliases = []) {
+    listFull(chatId, aliases = [], opts = {}) {
       const m = load();
       const one = (list, mm) =>
         (Array.isArray(list) ? list : []).map((text) => {
@@ -1165,12 +1179,22 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
             ...evidenceOf(x),
             /** 趋势是算出来的（对标 Hindsight 的 computed_field），不存在盘上 */
             trend: trendOf(evidenceOf(x).evidence),
+            /** 标签：老库没有就是空数组，不写回盘（面板据此显示/筛选） */
+            tags: normalizeTags(x.tags),
           };
         });
       const c = collectChat(m, chatId, aliases);
+      /**
+       * 按标签筛的是**事实层**（不是日记表，那是另一套存储）。
+       * 不传 opts.tags 就原样返回全量——面板默认视图逐字不变。
+       */
+      const pick = (rows) => {
+        const wanted = normalizeTags(opts?.tags);
+        return wanted.length ? rows.filter((r) => matchTags(r.tags, wanted, opts?.tagsMode)) : rows;
+      };
       return {
-        global: one(m.global, m.meta.global),
-        chat: one(c.list, c.meta),
+        global: pick(one(m.global, m.meta.global)),
+        chat: pick(one(c.list, c.meta)),
       };
     },
 
@@ -1426,6 +1450,16 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       const meta = { ...(mm[text] || {}) };
       if (patch.pin !== undefined) meta.pin = clamp01(patch.pin);
       if (patch.tier !== undefined) meta.tier = patch.tier;
+      /**
+       * 标签：空数组 = 清空（删字段，老库字节不变）。
+       * 复用 editFact 而不是新开 setTags——新 store 方法要登记 personaScope PLAN，
+       * 漏登记在人格隔离开启后会写到逻辑键、静默失效。
+       */
+      if (patch.tags !== undefined) {
+        const nt = normalizeTags(patch.tags);
+        if (nt.length) meta.tags = nt;
+        else delete meta.tags;
+      }
       if (patch.reviewedAt !== undefined) {
         meta.reviewedAt = Number(patch.reviewedAt) > 0 ? Number(patch.reviewedAt) : Date.now();
       }
@@ -1447,6 +1481,7 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
         tier: meta.tier || 'long', pin: meta.pin || 0,
         archivedAt: meta.archivedAt || null,
         brightness: brightnessOf(meta),
+        tags: normalizeTags(meta.tags),
       };
     },
 
@@ -1736,6 +1771,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
                 : null,
               /** 证据账本三个字段：漏一个，清理→还原就把证据抹掉（同 status 的教训） */
               ...evidenceOf(x),
+              /** 标签：同 status 的教训——不导出，清理→后悔→还原就把归类抹掉 */
+              tags: normalizeTags(x.tags),
             });
           }
         };
@@ -1862,6 +1899,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       }
       /** 证据账本：默认值不落盘，还原后与升级前的老库逐字节一致 */
       writeEvidence(meta, evidenceOf(row));
+      /** 标签：空数组不落盘，老库还原逐字节一致 */
+      const tags = normalizeTags(row.tags);
+      if (tags.length) meta.tags = tags;
       list.push(text);
       mm[text] = meta;
       /** 同 `add()`：还原进内存但没落盘，要如实回 false（备份还原靠它判断） */

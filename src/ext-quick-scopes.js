@@ -117,9 +117,15 @@ export const OP_SCOPE = Object.freeze({
   ...Object.fromEntries(MEMORY_WRITE_OPS.map((o) => [o, 'memory:write'])),
 
   'memory.list': 'memory:read',
+  /** B1：单条事实的历史说法 + 证据引文（只读投影，不改存储） */
+  'memory.history': 'memory:read',
   /** 读：最近的梦（只读，不该要写权限） */
   'memory.dream.list': 'memory:read',
   'mind.model': 'memory:read',
+  /** B2：读快照只读；refresh/clear 写的是独立 mind-model.json，归 memory:write */
+  'mind.snapshot': 'memory:read',
+  'mind.refresh': 'memory:write',
+  'mind.clear': 'memory:write',
   'persona.set': 'prompt:write',
   'groups.list': 'groups:read',
 });

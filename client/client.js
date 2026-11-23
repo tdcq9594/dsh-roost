@@ -4617,6 +4617,171 @@ select.roost-input{color-scheme:dark}
           setStatsBusy(false)
         }
       }
+      /**
+       * B2 心智模型快照：读现有投影 / 读落盘快照 / 刷新 / 清空。
+       * 都按需拉；刷新默认纯投影不调模型，模型改写是双重开关（默认关）。
+       */
+      const [mindPrev, setMindPrev] = useState(null)
+      const [mindSnap, setMindSnap] = useState(null)
+      const [mindBusy, setMindBusy] = useState(false)
+      const [mindErr, setMindErr] = useState('')
+      const loadMindPreview = async () => {
+        setMindBusy(true)
+        try {
+          const r = await quick('mind.model')
+          setMindErr(r?.ok === false ? (r.message || '预览失败') : '')
+          setMindPrev(r?.ok === false ? null : r)
+        } catch (e) { setMindErr(e.message); setMindPrev(null) }
+        finally { setMindBusy(false) }
+      }
+      const loadMindSnapshot = async () => {
+        const r = await quick('mind.snapshot', { id: 'default' })
+        setMindSnap(r?.ok === false ? null : (r?.snapshot || null))
+      }
+      const doMindRefresh = async (opts = {}) => {
+        setMindBusy(true)
+        try {
+          const r = await quick('mind.refresh', { id: 'default', mode: opts.mode || 'full', dry: Boolean(opts.dry) })
+          toast(r?.ok === false ? (r.message || '刷新失败') : (opts.dry ? '预览好了（没写盘）' : '快照已更新'))
+          if (r?.ok && !opts.dry) await loadMindSnapshot()
+          return r
+        } catch (e) { toast(e.message); return null }
+        finally { setMindBusy(false) }
+      }
+      const doMindClear = async () => {
+        const r = await quick('mind.clear', { id: 'default' })
+        toast(r?.ok === false ? (r.message || '没清掉') : '心智模型快照清了')
+        if (r?.ok) setMindSnap(null)
+      }
+
+      /**
+       * A3 标签：筛选框 + 行内编辑。
+       * 筛选在前端做（factsDetail 已带 tags），不新开 quick op——
+       * 后端 listFull/listRanked 的 opts.tags 供内部召回用，两条路互不干扰。
+       */
+      const [tagFilter, setTagFilter] = useState('')
+      const [tagEdit, setTagEdit] = useState(null) // { scope, text, value }
+      const splitTags = (v) => String(v ?? '').split(/[,，]/).map((x) => x.trim()).filter(Boolean)
+      const tagsOf = (scope, text) => {
+        const d = (mem?.factsDetail?.[scope] || []).find((x) => x.text === text)
+        return Array.isArray(d?.tags) ? d.tags : []
+      }
+      const tagHit = (scope, text) => {
+        const wanted = splitTags(tagFilter).map((x) => x.toLowerCase())
+        if (!wanted.length) return true
+        const have = tagsOf(scope, text).map((x) => String(x).toLowerCase())
+        return wanted.every((w) => have.includes(w))
+      }
+      const saveTags = async (scope, text, value) => {
+        const r = await post('/memory/fact', {
+          action: 'tags', scope, chatId: mem?.chatId || '', key: text, tags: splitTags(value),
+        })
+        toast(r?.ok === false ? (r.message || '没存上') : '标签已更新')
+        if (r?.ok) { setTagEdit(null); if (reload) reload() }
+      }
+      /**
+       * B1 历史/证据：点「史」才拉（只读 quick op），不默认打接口。
+       * 后端明确标了 earlier 是推断不是因果链，面板文案照写，别冒充"演变链"。
+       */
+      const [historyKey, setHistoryKey] = useState('') // `${scope}\u0000${text}`
+      const [historyData, setHistoryData] = useState(null)
+      const [historyBusy, setHistoryBusy] = useState(false)
+      /**
+       * 切会话必须收起历史：否则标题写着 B 群、下面还挂着 A 群展开的证据引文。
+       * 同一条先例见上面 loadRecall 的 useEffect（阶段 1 踩过一次）。
+       */
+      useEffect(() => {
+        setHistoryKey('')
+        setHistoryData(null)
+      }, [mem?.chatId])
+      const loadHistory = async (scope, text) => {
+        setHistoryBusy(true)
+        try {
+          const r = await quick('memory.history', { scope, text, chatId: mem?.chatId || '' })
+          setHistoryData(r?.ok === false ? { err: r.message || '读不出来' } : (r?.detail || null))
+        } catch (e) {
+          setHistoryData({ err: e.message })
+        } finally { setHistoryBusy(false) }
+      }
+      const historyPanel = (scope, text) => {
+        const d = historyData
+        if (!d) return null
+        if (d.err) return h('div', { className: 'roost-note', style: { color: 'var(--bad)' } }, d.err)
+        if (!d.found) return h('div', { className: 'roost-empty' }, '这条已经不在库里了')
+        const evRow = (e, k) => h('div', { key: k, style: { fontSize: 11, marginBottom: 2 } },
+          e.hasQuote ? `引文：${e.quote}` : `摘要：${e.quote}`,
+          e.journalId ? ` · 来源 ${e.journalId}` : '',
+          e.at ? ` · ${new Date(e.at).toLocaleDateString('zh-CN')}` : '')
+        return h('div', { style: { marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--line)' } },
+          h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 4 } },
+            `证据 ${d.evidence.length} 条 · 佐证 ${d.proofs} 条 · 置信度 ${Number(d.confidence).toFixed(2)}`),
+          d.evidence.length
+            ? h('div', {}, d.evidence.map(evRow))
+            : h('div', { className: 'roost-muted', style: { fontSize: 11 } }, '这条没有可核验的证据引文'),
+          d.earlier.length
+            ? h('div', { style: { marginTop: 8 } },
+                h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 2 } },
+                  `此前说法 ${d.earlier.length} 条（推断，非因果链）`),
+                d.earlier.map((x, k) => h('div', { key: k, style: { fontSize: 11, marginBottom: 4 } },
+                  x.text,
+                  h('span', { className: 'roost-muted' },
+                    ` · 于 ${new Date(x.until).toLocaleDateString('zh-CN')} 被取代`
+                    + (x.adjacent ? ' · 时间相邻' : '')
+                    + ` · 相似度 ${x.similarity}`),
+                )),
+              )
+            : null,
+          h('div', { className: 'roost-muted', style: { fontSize: 10, marginTop: 6 } }, d.note),
+        )
+      }
+      /** 事实行：标签行内编辑 + 历史展开 + 原「删」入口。两层列表共用，免得两处改漏一处。 */
+      const factRow = (scope, f, i) => {
+        const editing = tagEdit && tagEdit.scope === scope && tagEdit.text === f
+        const hk = `${scope}\u0000${f}`
+        const open = historyKey === hk
+        return h('div', { key: i, className: 'roost-item', style: { flexWrap: 'wrap' } },
+          h('span', { className: 't', style: { flex: 1, minWidth: 0 } }, f),
+          !editing
+            ? h('span', { className: 'roost-muted', style: { fontSize: 11, flexShrink: 0 } }, factMeta(scope, f))
+            : null,
+          editing
+            ? [
+                h('input', {
+                  key: 'in', className: 'roost-input', value: tagEdit.value,
+                  placeholder: '标签，逗号分隔；留空=清空',
+                  style: { flex: 1, minWidth: 120 },
+                  onChange: (e) => setTagEdit({ ...tagEdit, value: e.target.value }),
+                }),
+                h('button', { key: 'save', type: 'button', className: 'roost-btn', onClick: () => saveTags(scope, f, tagEdit.value) }, '存'),
+                h('button', { key: 'cancel', type: 'button', className: 'roost-btn', onClick: () => setTagEdit(null) }, '消'),
+              ]
+            : [
+                h('button', {
+                  key: 'his', type: 'button', className: 'roost-btn',
+                  title: '看这条事实的证据引文与此前说法（只读）',
+                  onClick: async () => {
+                    if (open) { setHistoryKey(''); setHistoryData(null); return }
+                    setHistoryKey(hk); setHistoryData(null); await loadHistory(scope, f)
+                  },
+                }, historyBusy && open ? '…' : (open ? '收' : '史')),
+                h('button', {
+                  key: 'tag', type: 'button', className: 'roost-btn',
+                  title: '给这条事实打标签，之后可按标签筛',
+                  onClick: () => setTagEdit({ scope, text: f, value: tagsOf(scope, f).join(', ') }),
+                }, '标'),
+                h(ConfirmLink, {
+                  key: 'del', label: '删', confirmLabel: '确认删除',
+                  onConfirm: async () => {
+                    const r = await quick('memory.remove', f)
+                    toast(r.message || '删了')
+                    reload()
+                  },
+                }),
+              ],
+          open ? h('div', { style: { flexBasis: '100%' } }, historyPanel(scope, f)) : null,
+        )
+      }
+
       const [q, setQ] = useState('')
       const [hits, setHits] = useState(null)
       const [fact, setFact] = useState('')
@@ -4751,6 +4916,8 @@ select.roost-input{color-scheme:dark}
         /** 证据条数：多条独立出处才算"被反复印证"，1 条不标 */
         const evCount = Array.isArray(d.evidence) ? d.evidence.length : 0
         if (evCount >= 2) parts.push(`${evCount} 条佐证`)
+        /** 阶段 2 标签：跟在出处后面，不另起一行（老库没有 tags = 不显示） */
+        if (Array.isArray(d.tags) && d.tags.length) parts.push(d.tags.map((t) => '#' + t).join(' '))
         return parts.join(' · ')
       }
 
@@ -4930,7 +5097,7 @@ select.roost-input{color-scheme:dark}
          */
         /** A7：页首这几张是「总览入口」，不参与 01–07 的编号；说清就不会像漏页 */
         h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-          '下面几张（记忆统计 / 记忆星图 / 分层与遗忘 / 翻一翻）是总览入口，不参与编号；从「01 事实」起才是主流程。'),
+          '下面几张（记忆统计 / 心智模型 / 记忆星图 / 分层与遗忘 / 翻一翻）是总览入口，不参与编号；从「01 事实」起才是主流程。'),
         /**
          * A2 统计快照：对齐 Hindsight /stats + timeseries 的展示形态。
          * 只读、按需拉；7 天时序用最朴素的柱状，不引图表库（零依赖铁律）。
@@ -4966,6 +5133,61 @@ select.roost-input{color-scheme:dark}
                     h('div', { style: { display: 'flex', gap: 4, marginTop: 3 } },
                       (statsSnap.timeseries || []).map((d) => h('span', { key: d.day, className: 'roost-muted', style: { flex: 1, fontSize: 9, textAlign: 'center' } }, d.day.slice(5)))))
                 })(),
+        ),
+
+        /**
+         * B2 心智模型：纯投影（mind.model）随时可看，落盘快照（mind.snapshot）
+         * 要点「刷新快照」才写 mind-model.json——默认关逐字不变。
+         */
+        h(Sec, { title: '心智模型', right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: mindBusy, onClick: loadMindPreview,
+        }, mindBusy ? '…' : '看当前投影') },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '「当前投影」是实时从活事实算出的树，不落盘；「快照」要点刷新才写进独立文件，',
+            '不进日记、不进自述，也不会自动注入每轮对话。'),
+          /** 模型改写：一个开关搞定（勾上=授权，刷新自动用模型；默认关=纯机械零调用） */
+          h('label', {
+            style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 12 },
+            title: '勾上后「刷新快照 / 预览刷新」会调后台模型帮忙重组语言；不勾则纯机械投影，零模型调用',
+          },
+            h('input', {
+              type: 'checkbox',
+              checked: config?.memory?.mindModel?.modelRefresh === true,
+              disabled: Boolean(busy),
+              onChange: async (e) => {
+                const on = Boolean(e.target.checked)
+                if (!saveCfg) { toast('配置不可写，没存上'); return }
+                const memory = { ...(config?.memory || {}) }
+                memory.mindModel = { ...(memory.mindModel || {}), modelRefresh: on }
+                const r = await saveCfg({ memory })
+                toast(r?.ok === false ? (r.message || '没存上') : (on ? '模型整理已开，刷新时会调用后台模型' : '模型整理已关，回到纯机械投影'))
+              },
+            }),
+            '用模型整理语言（默认关；开着刷新会调用后台模型，仅写入快照、不进日记）'),
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
+            h('button', { type: 'button', className: 'roost-btn', disabled: mindBusy, onClick: () => doMindRefresh({ dry: true }) }, '预览刷新'),
+            h('button', { type: 'button', className: 'roost-btn', disabled: mindBusy, onClick: () => doMindRefresh({}) }, '刷新快照'),
+            h('button', { type: 'button', className: 'roost-btn', disabled: mindBusy, onClick: loadMindSnapshot }, '看快照'),
+            h('button', { type: 'button', className: 'roost-btn', disabled: mindBusy, onClick: doMindClear }, '清空快照'),
+          ),
+          mindErr ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } }, mindErr) : null,
+          mindSnap
+            ? h('div', {},
+                h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 4 } },
+                  `落盘快照 · ${new Date(mindSnap.at || 0).toLocaleString('zh-CN')} · ${mindSnap.mode}`
+                  + (mindSnap.history?.length ? ` · 历史 ${mindSnap.history.length} 份` : '')),
+                h('pre', { className: 'roost-pre', style: { maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' } },
+                  mindSnap.markdown || '（空）'),
+              )
+            : h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 6 } }, '还没有落盘快照'),
+          mindPrev
+            ? h('details', { style: { marginTop: 8 } },
+                h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer' } },
+                  `当前投影 · ${mindPrev.total} 条 / ${mindPrev.groups} 组 / ${mindPrev.staleCount} 条待核实`),
+                h('pre', { className: 'roost-pre', style: { maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', marginTop: 6 } },
+                  mindPrev.markdown || '（空）'),
+              )
+            : null,
         ),
 
         h(Sec, { title: '记忆星图' },
@@ -5159,27 +5381,25 @@ select.roost-input{color-scheme:dark}
                 : `出处：最近 ${ev.rows} 条日记里一条事件 id 都没有 —— 出处只能记到时间（框架没开事件账本，或事件里没带 eventId）。`,
             )
           })(),
+          /** A3 标签筛选：逗号分隔=全部命中；大小写不敏感，跟后端 matchTags 同口径 */
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 } },
+            h('span', { className: 'roost-muted', style: { fontSize: 12, flexShrink: 0 } }, '按标签筛'),
+            h('input', {
+              className: 'roost-input', value: tagFilter,
+              placeholder: '如 work, 重要（逗号=都要）',
+              style: { flex: 1, minWidth: 0 },
+              onChange: (e) => setTagFilter(e.target.value),
+            }),
+            tagFilter ? h('button', { type: 'button', className: 'roost-btn', onClick: () => setTagFilter('') }, '清') : null,
+          ),
           h('div', { style: { marginBottom: 10 } },
             h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 4 } }, '通用（跨群）'),
-            (mem?.global || []).length
+            (mem?.global || []).some((f) => tagHit('global', f))
               ? h('div', { className: 'roost-list' },
-                  mem.global.map((f, i) =>
-                    h('div', { key: i, className: 'roost-item' },
-                      h('span', { className: 't' }, f),
-                      h('span', { className: 'roost-muted', style: { fontSize: 11, flexShrink: 0 } },
-                        factMeta('global', f)),
-                      h(ConfirmLink, {
-                        label: '删', confirmLabel: '确认删除',
-                        onConfirm: async () => {
-                          const r = await quick('memory.remove', f)
-                          toast(r.message || '删了')
-                          reload()
-                        },
-                      }),
-                    ),
-                  ),
+                  mem.global.filter((f) => tagHit('global', f)).map((f, i) => factRow('global', f, i)),
                 )
-              : h('div', { className: 'roost-empty' }, '还没有跨群记忆'),
+              : h('div', { className: 'roost-empty' },
+                  tagFilter ? '没有带这些标签的跨群事实' : '还没有跨群记忆'),
           ),
 
           h('div', { style: { marginBottom: 10 } },
@@ -5192,25 +5412,12 @@ select.roost-input{color-scheme:dark}
                * 「群」会和上面的标签打架。
                */
               canChat ? `本会话特有 · ${sceneName}` : '本会话特有（还没有活跃会话，先聊一句才会有）'),
-            (mem?.chat || []).length
+            (mem?.chat || []).some((f) => tagHit('chat', f))
               ? h('div', { className: 'roost-list' },
-                  mem.chat.map((f, i) =>
-                    h('div', { key: i, className: 'roost-item' },
-                      h('span', { className: 't' }, f),
-                      h('span', { className: 'roost-muted', style: { fontSize: 11, flexShrink: 0 } },
-                        factMeta('chat', f)),
-                      h(ConfirmLink, {
-                        label: '删', confirmLabel: '确认删除',
-                        onConfirm: async () => {
-                          const r = await quick('memory.remove', f)
-                          toast(r.message || '删了')
-                          reload()
-                        },
-                      }),
-                    ),
-                  ),
+                  mem.chat.filter((f) => tagHit('chat', f)).map((f, i) => factRow('chat', f, i)),
                 )
-              : h('div', { className: 'roost-empty' }, canChat ? '这个群还没特有记忆' : '—'),
+              : h('div', { className: 'roost-empty' },
+                  tagFilter ? '没有带这些标签的本会话事实' : (canChat ? '这个群还没特有记忆' : '—')),
           ),
 
           /**

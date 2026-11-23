@@ -385,6 +385,14 @@ export const DEFAULTS = {
      * 不主动发消息，也不进消息热链路。
      */
     dream: { enabled: false },
+    /**
+     * B2 心智模型快照的模型改写（阶段 4）：默认关。
+     *
+     * 即使打开，也还要调用方显式 useModel 才会调后台模型——两道闸。
+     * 关着时 refresh 走纯机械投影（零模型调用、不进 journal），
+     * 快照只落 mind-model.json，不回灌 self/facts。
+     */
+    mindModel: { modelRefresh: false },
     /** 到期天数：普通几天后压成半句，重要两三周后压成一句。critical 永不到期 */
     keepDays: { normal: 3, important: 21 },
     /**
