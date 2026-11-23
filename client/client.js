@@ -4618,6 +4618,22 @@ select.roost-input{color-scheme:dark}
         }
       }
       /**
+       * G10 来源统计：纯读，点「看来源」才查。按记忆来源（扩展/面板/工具）分组，
+       * 注意不是社交平台——面板文案要说清，别让人误以为是 B站/抖音统计。
+       */
+      const [srcStats, setSrcStats] = useState(null)
+      const [srcBusy, setSrcBusy] = useState(false)
+      const loadSrcStats = async () => {
+        setSrcBusy(true)
+        try {
+          const r = await quick('stats.sources')
+          setSrcStats(r?.ok === false ? null : r)
+          if (r?.ok === false) toast(r.message || '来源统计读不出来')
+        } catch (e) { toast(e.message); setSrcStats(null) }
+        finally { setSrcBusy(false) }
+      }
+
+      /**
        * B2 心智模型快照：读现有投影 / 读落盘快照 / 刷新 / 清空。
        * 都按需拉；刷新默认纯投影不调模型，模型改写是双重开关（默认关）。
        */
@@ -5177,6 +5193,27 @@ select.roost-input{color-scheme:dark}
                     h('div', { style: { display: 'flex', gap: 4, marginTop: 3 } },
                       (statsSnap.timeseries || []).map((d) => h('span', { key: d.day, className: 'roost-muted', style: { flex: 1, fontSize: 9, textAlign: 'center' } }, d.day.slice(5)))))
                 })(),
+        ),
+
+        h(Sec, { title: '来源统计', right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: srcBusy, onClick: loadSrcStats,
+        }, srcBusy ? '读…' : '看来源') },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '各来源记了多少条——扩展写进去的记忆是不是真进来了，点一下看。',
+            '这是「哪个来源」（扩展 id / 面板 / 工具），不是「B站/抖音」社交平台；已忘内容不计。'),
+          !srcStats
+            ? h('div', { className: 'roost-empty' }, '点「看来源」拉一张统计（只读，不改记忆）')
+            : (srcStats.sources || []).length
+              ? h('div', {},
+                  h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                    (srcStats.sources || []).map((s) => h('div', { key: s.source, className: 'roost-item', style: { flex: '1 1 140px' } },
+                      h('div', { style: { fontWeight: 600 } }, s.label || s.source),
+                      h('div', { className: 'roost-muted', style: { fontSize: 11 } },
+                        `扩展记忆 ${s.extFacts ?? 0} · 流水 ${s.episodes ?? 0} · 摘要 ${s.digest ?? 0}`),
+                      h('div', { className: 'roost-muted', style: { fontSize: 10.5 } }, `合计 ${s.total ?? 0} 条`),
+                    ))),
+                )
+              : h('div', { className: 'roost-empty' }, '还没有可统计的记忆来源'),
         ),
 
         /**

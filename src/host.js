@@ -58,6 +58,7 @@ import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { createGroupChatProfiles } from './group-chat-profile.js';
 import { createImpressionStore, buildImpressionPrompt, cleanImpression, crystallizeCandidates, IMPRESSION_MIN_HITS } from './gist-impression.js';
+import { sourceStats } from './source-stats.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
 import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
 import { guardQuickCall, PANEL_MARK } from './ext-quick-guard.js';
@@ -8954,7 +8955,9 @@ export function apply(ctx) {
           /* A1：审计查询/统计快照本身是纯读，且查审计会写审计=自己污染自己 */
           && op !== 'audit.query' && op !== 'stats.snapshot'
           /* §1.10：印象列表是纯读翻看，不记审计噪音；generate/crystallize/clear 是写入意图，保留 */
-          && op !== 'gist.impression.list') audit({ op, chatId, peer: who.kind, peerId: who.id });
+          && op !== 'gist.impression.list'
+          /* G10：来源统计纯读，不记审计噪音 */
+          && op !== 'stats.sources') audit({ op, chatId, peer: who.kind, peerId: who.id });
 
         try {
           switch (op) {
@@ -10339,6 +10342,32 @@ export function apply(ctx) {
                 });
               } catch (e) {
                 return send(res, 200, { ok: false, message: `统计读不出来：${e?.message ?? e}` });
+              }
+            }
+
+            /**
+             * G10 来源统计（对齐 aurabot platformStats，用我方 src 维度）。
+             * 纯只读：读扩展记忆的 src + journal 的 kind，不写盘、不注入。
+             * 注意语义：我方是「来源=哪个扩展/面板/工具」，不是「社交平台」。
+             */
+            case 'stats.sources': {
+              try {
+                const extRows = extMemoryStore.listAll();
+                /** 显示名是锦上添花：panel 读不到就退回原始 extId，不能拖垮主统计 */
+                const labels = {};
+                try {
+                  for (const e of extPanel.usageRows()) {
+                    if (e?.id && e?.name) labels[e.id] = e.name;
+                    if (e?.id) labels[`ext:${e.id}`] = e.name;
+                  }
+                } catch { /* 展示名拿不到不影响计数 */ }
+                return send(res, 200, {
+                  ok: true,
+                  sources: sourceStats({ extRows, labels }),
+                  note: '按记忆来源统计（扩展/面板/工具）；不是社交平台来源。已忘内容不计。',
+                });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: `来源统计读不出来：${e?.message ?? e}` });
               }
             }
 
