@@ -10552,7 +10552,6 @@ select.roost-input{color-scheme:dark}
     function ChannelPolicyTab({ config, saveCfg, saveAll, toast, setTab, chats }) {
       const g = config?.guild || {}
       const decide = config?.roostHost?.decide || {}
-      const qqTools = config?.qqTools || {}
       const overrides = g.overrides || {}
       const list = (chats || []).filter((c) => c.kind === 'guild')
       const [busy, setBusy] = useState(false)
@@ -10660,12 +10659,8 @@ select.roost-input{color-scheme:dark}
           h('div', { className: 'roost-g-card' },
             h('p', { className: 'roost-g-desc' },
               '频道没有群聊「每秒 5 条」那条限制（那是文字子频道的发送侧限制，'
-              + '框架出站调度器已经按 kind 处理），分段数仍受这里控制。'),
-            h(GRow, { label: '一条回复最多分几段', hint: 'qqTools.maxParts；群 50（官方 2026-11-17 起）、私聊 4；超限时框架改发主动' },
-              h(GNum, {
-                value: qqTools.maxParts ?? 50, min: 1, max: 50, unit: '段', disabled: busy,
-                onSave: (v) => put({ qqTools: { maxParts: v } }),
-              })))),
+              + '框架出站调度器已经按 kind 处理）。`qq_send` 不设段数硬上限，'
+              + '提示词只说明一次一段、按需多次；超过官方被动回话次数时由框架改发主动消息。'))),
 
         /**
          * 04：把「富媒体限制」和「事件订阅」并成一张参考卡。
@@ -13078,7 +13073,7 @@ select.roost-input{color-scheme:dark}
         + 'sessionMode：guild = 一个频道一个会话（同一频道的子频道/论坛/公告共用）、channel = 一个子频道一个会话；频道私信固定一人一个。'
         + 'intentsPreset：面板勾选的订阅位预设；overrides：按频道覆写，键用 guild:<guildId>'],
       ['permissions', '权限', '主人/管理员/成员各能用什么工具'],
-      ['qqTools', 'QQ 工具', '给 AI 的工具总开关、单次最多分几段发（maxParts）'],
+      ['qqTools', 'QQ 工具', '给 AI 的工具总开关；`qq_send` 不设段数硬上限、按需要分段，旧配置里的 maxParts 已作废'],
       ['quota', '次数限制', '语音/发文件/表情包的额度覆盖。默认值在代码里（quota.js 的 QUOTA_DEFAULTS），'
         + '这里只填要改的；日常用「权限」页调，这里是手改的口子'],
       ['sendFile', '发文件', '能发哪些文件：restrictPaths 默认关＝全盘都能发；'

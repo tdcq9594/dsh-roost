@@ -8,7 +8,8 @@
  *   不能说一半停下看看对方反应、也不能说完就明确退场。
  *
  *   改成工具之后：
- *     · `qq_send` 调一次 = 一段话。调几次由它自己定（上限 3 段）
+ *     · `qq_send` 调一次 = 一段话，按需要可以分多次
+ *       （代码不设硬上限；提示词只说明用法，不写「不限」也不下节约指令）
  *     · `qq_close` = 明确收尾，不用再在正文里夹 `<<close:>>` 标记
  *     · 两者都不调 = 这一轮不说话（真正的"看了但不接"）
  *
@@ -16,16 +17,18 @@
  *   那是**主动消息**，私聊有 20 条/分、群里还要 `group_push` 授权，
  *   而我们正处在「对方刚说完话」的被动窗口里，用主动接口既浪费配额
  *   又可能被官方拒。所以这里走 `postReply(..., done:false)` ——
- *   同一个事件的多段回话，ai-chat 那边原生支持（`bridge.js` 的 `MAX_PARTS`）。
+ *   同一个事件的多段回话由宿主逐条投递。
  *
- * **调几次就发几条**：`qq_send` 每调一次是一段，ai-chat 那边拿到的是
- * `parts` 数组（`bridge.js` 的 `MAX_PARTS`），会**逐条 `replyNow` 发出去**，
+ * **调一次就是一条独立消息**：`qq_send` 每调一次是一段，宿主按段发出去，
  * 不是拼成一段。这条链路 2026-10 改的，改之前多段会被 `planChunks` 合并
  * （它只在超过 1800 字时才切），"分两句说"等于没分。
  *
- * 上限对齐官方硬限制（群聊 5 次 / 单聊 4 次，见框架 `outbound.js` 的
- * `PASSIVE_MAX_REPLIES`）：ai-chat 侧预算按 `maxSegmentsOf(msg)` 分场景取，
- * `MAX_SEGMENTS = 5` 只是群聊口径兼段数硬顶；这里默认 3 是留余量。
+ * 段数不设本地上限。官方 2026-11-17 起群消息在开发者为群主 / 管理员时每条可达
+ * 50 次，框架侧超限会自动改发主动消息；单聊官方仍是 4 次回话，同样由框架改发
+ * 主动消息。dsh-roost 再卡一道只会把话说一半：2026-11 实测配置写着 3 段时，
+ * 第 4 段被工具拒掉，而模型写在正文里的收尾又不会再发——用户只看到半截话。
+ * 所以这里彻底不拦，由模型和平台额度自己收口。
+ * 提示词只做中性描述：一次一段、按需多次。不写「不限」，也不额外下节约指令。
  */
 
 import { loadDefineTool, shapeTool } from './tools.js';
@@ -65,33 +68,9 @@ const DOWNSTREAM_RE = new RegExp(`<<\\s*(?:${SEND_BLOCKED.join('|')})\\b`, 'i');
 const INLINE_IMAGE_RE = /!\[[^\]]*\]\([^)]*\)/;
 
 /**
- * 单轮最多发几段。官方 2026-11-17 起群消息在开发者为群主 / 管理员时每条可达 50 次，
- * 且框架侧已不再本地拦截、超限自动改发主动；这里放开到 50。
- * 单聊官方仍是 4 次，由 `maxPartsOf()` 按会话类型夹住。
+ * `qqTools.maxParts` 已作废：老配置里可能还躺着 `3` / `50`，读到也忽略。
+ * 段数不再由 dsh-roost 限制（理由见文件头）；下次保存配置时该键会被 pruneTo 清掉。
  */
-export const MAX_PARTS = 50;
-
-/**
- * 段数上限的唯一来源。
- *
- * 工具（`qq_send` 的拒绝判据 + 描述）和提示词里的「一轮最多 N 段」
- * **必须用同一个值**。以前提示词写死 3、这里读配置：配置大于 3 时模型白
- * 浪费两格；配置小于 3 时更糟——模型按 3 组织内容，第 3 段被工具拒掉，
- * 用户只觉得「话说一半没了」，而且不报错（2026-11 外部实测）。
- *
- * 群 / guild 的硬上限为 50（官方 2026-11-17 新口径）；c2c / dm 仍是官方的 4 次。
- * 超限由框架改发主动消息，不再靠这里的低上限提前拦。
- *
- * @param {object} [cfg] 完整配置（只读 `qqTools.maxParts`）
- * @param {string} [kind='group'] 会话类型；群 50 / 私聊 4
- * @returns {number}
- */
-export function maxPartsOf(cfg, kind = 'group') {
-  /** 一对一场景官方仍是每条消息 4 次；其余按 50 放开 */
-  const hardMax = (kind === 'c2c' || kind === 'dm') ? 4 : 50;
-  const n = Number(cfg?.qqTools?.maxParts);
-  return Number.isFinite(n) && n > 0 ? Math.min(n, hardMax) : Math.min(MAX_PARTS, hardMax);
-}
 
 /**
  * 这个会话该不该挂 QQ 动作工具。
@@ -465,13 +444,11 @@ function buildSearchDef({ caller, searchOf }) {
  */
 export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null }) {
   const caller = () => callerOf?.() || { chatId: '', kind: '', said: '', hasPayload: false, bucket: '' };
-  const maxParts = () => maxPartsOf(cfgOf?.(), caller().kind);
 
   const send = {
     name: 'qq_send',
     description:
-      '把一段话发出去。想分两句说就调两次（每次一段），想只回一句就调一次。'
-      + '一轮上限按当前会话和配置执行，超额会被拒；以本轮系统提示中的具体段数为准。'
+      '把一段话发出去。一次调用发一段，可以按需要分多次调用；每调用一次就是一条独立消息。'
       + '**调过这个工具之后，回复正文就不会再自动发出去了**（正文只当思考用）——'
       + '所以要么调工具、要么直接写正文，别两边都写。不想说话就一次都别调。'
       /**
@@ -563,13 +540,6 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
       }
 
       const st = stateOf?.() || { parts: 0 };
-      if (st.parts >= maxParts()) {
-        return {
-          ok: false,
-          message: `这一轮已经发了 ${st.parts} 段，上限 ${maxParts()} 段。剩下的并进上一段，或者别说了。`,
-        };
-      }
-
       try {
         /**
          * 每次 `qq_send` 调用生成一个幂等键（阶段 5）。

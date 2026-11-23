@@ -38,12 +38,12 @@ test('提示词：报挂上却没挂 qq_send 时也不注入', () => {
  */
 test('原有提示词逐句保留（重构快照）', () => {
   const text = buildOutputPrompt({
-    mounted: MOUNTED, denied: null, registeredNames: ALL, maxParts: 3, ttsEnabled: true,
+    mounted: MOUNTED, denied: null, registeredNames: ALL, ttsEnabled: true,
   });
   const original = [
     '【发言方式】',
     '你手上有这几个工具：`qq_send`（发一段话）、`qq_close`（给这段对话收尾），以及（装了的话）`qq_send_file`（发一个文件）。',
-    '· 想说话就调 `qq_send`，调几次由你定（一轮最多 3 段）。**别把要发的话写进正文**。',
+    '· 想说话就调 `qq_send`，一次发一段，按需要可以分多次。**别把要发的话写进正文**。',
     '· 调过 `qq_send` 之后，你回复的正文**不会**再发出去——正文只当思考用。',
     '· 聊到自然结束、对方要走的时候，用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后可以不说话。',
     '· 一个工具都不调时，正文会照常发出去（旧方式）。**不要又调工具又写正文**——那样只发工具那条，正文会被丢掉。',
@@ -55,12 +55,14 @@ test('原有提示词逐句保留（重构快照）', () => {
   }
 });
 
-test('提示词：正常轮讲全三个工具，段数上限与语音开关都生效', () => {
+test('提示词：正常轮讲全三个工具，分段说明与语音开关都生效', () => {
   const text = buildOutputPrompt({
-    mounted: MOUNTED, denied: null, registeredNames: ALL, maxParts: 5, ttsEnabled: true,
+    mounted: MOUNTED, denied: null, registeredNames: ALL, ttsEnabled: true,
   });
   assert.ok(text.includes('qq_send') && text.includes('qq_close') && text.includes('qq_send_file'));
-  assert.ok(text.includes('一轮最多 5 段'));
+  assert.ok(text.includes('一次发一段，按需要可以分多次'), '中性描述分段用法');
+  assert.doesNotMatch(text, /段数不限|调几次发几条|别刷屏/, '既不写「不限」，也不下节约指令');
+  assert.doesNotMatch(text, /一轮最多 \d+ 段/, '文件仍是「一轮最多一个」，别误伤');
   assert.ok(text.includes('<<say'), '语音开着要说明语音条只能写正文');
 });
 
@@ -74,7 +76,7 @@ test('提示词：只关「发文件」时保留分段发言，但两处文件�
   const text = buildOutputPrompt({
     mounted: MOUNTED, denied: ['qq_send_file'], registeredNames: ALL,
   });
-  assert.ok(text.includes('一轮最多'), '分段发言要留着');
+  assert.ok(text.includes('一次发一段，按需要可以分多次'), '分段发言要留着');
   assert.ok(!text.includes('qq_send_file'), '不许再教模型调被收走的文件工具');
 });
 
