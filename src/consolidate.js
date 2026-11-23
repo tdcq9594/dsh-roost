@@ -206,7 +206,20 @@ export function normalizeAgreement(raw) {
   const status = String(o.status ?? '').toLowerCase() === 'hearsay' ? 'hearsay' : 'fact';
   if (!text) return { text: '', op: 'add', old: '', status: 'fact' };
   if (!old && op !== 'add') return { text, op: 'add', old: '', status, degraded: '缺 old 定位词' };
-  return { text, op, old, status };
+  /**
+   * 待跟进（可选）：约定带一个「该问结果」的时点。
+   *
+   * **没有就不加这个键**——老输出没有它，加上 `followUp: null` 会让
+   * 老测试的 deepEqual 全挂，也等于给所有用户改了巩固输出形状。
+   * `inDays` 限 1~365：模型偶尔会写 0 或 9999，那种当没写。
+   */
+  const fu = o.followUp && typeof o.followUp === 'object' ? o.followUp : null;
+  const inDays = Number(fu?.inDays);
+  const res = { text, op, old, status };
+  if (Number.isFinite(inDays) && inDays > 0 && inDays <= 365) {
+    res.followUp = { inDays, question: String(fu?.question ?? '').trim().slice(0, 40) };
+  }
+  return res;
 }
 
 /**
@@ -231,7 +244,7 @@ export function planAgreementOp(item, facts = []) {
   return { ...base, will: 'supersede', reason: `唯一定位「${hits[0]}」`, match: hits[0] };
 }
 
-export function buildPrompt({ day, chatName, items, revocation = null, facts = [], profiles = null }) {
+export function buildPrompt({ day, chatName, items, revocation = null, facts = [], profiles = null, followUp = false }) {
   const factLines = (Array.isArray(facts) ? facts : [])
     .map((f) => String(f ?? '').trim()).filter(Boolean)
     .slice(0, MAX_PROMPT_FACTS)
@@ -245,7 +258,7 @@ export function buildPrompt({ day, chatName, items, revocation = null, facts = [
   const fmt = [
     '{"summary":"...","ranks":[["id","level"]],"compress":[{"id":"...","digest":"..."}],',
     ' "triples":[{"s":"...","rel":"...","o":"...","scope":"global"}],',
-    ' "agreements":["...", {"text":"...","op":"update","old":"..."}],"closed":[]',
+    ` "agreements":["...", {"text":"...","op":"update","old":"..."${followUp ? ',"followUp":{"inDays":4,"question":"问一句结果"}' : ''}}],"closed":[]`,
     revocation ? ',"revoked":[]' : '',
     /** dislikes 用方括号表示可选——写进模板当必填会诱导模型硬凑雷区 */
     withProfiles ? ',"profiles":[{"who":"显示名","openid":"拿不到就留空","impression":"一小句","tips":"一小句","dislikes":"（可选，没有就不写这个键）"}]' : '',
@@ -290,6 +303,16 @@ export function buildPrompt({ day, chatName, items, revocation = null, facts = [
      */
     '   · 若这条约定**不是你亲耳听当事人说的**（是别人转述、或记录里说"某某说他…"），',
     '     在对象里加 "status":"hearsay"；是本人说的、或拿不准，就**不要写**这个键（默认当本人说的）。',
+    /**
+     * 待跟进（E2，默认关）：只教"有明确时点"的那一类，不教它给每件事排提醒。
+     * 关着时这段整块不出现，prompt 与未上线前逐字节一致。
+     */
+    ...(followUp ? [
+      '   · 这条约定如果**有该问结果的时点**（他答应下周三前给答复、他下周考试、他这周去面试），',
+      '     在对象里加 "followUp":{"inDays":4,"question":"问一句答复"}；没有就不写这个键。',
+      '     · inDays 从今天算起（明天=1），最多 365；question 一句话、20 字以内，写"问什么"不是"问不问"',
+      '     · 只在**真有时点**时写：长期习惯、泛泛的喜好不要加，否则会天天追问',
+    ] : []),
     '6. closed：以前答应过、今天明显已经办完的约定，给 [{"s":"主语","rel":"约定","o":"那件事"}]；没有就给空数组',
     /**
      * D7 第 8 项：把「对一个人的印象」交给每天这次巩固顺带提炼。
@@ -379,13 +402,21 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
    * 之前这里只报 `stats.needVec` 数、注释说"由宿主填充"，但宿主从没调过——
    * 结果 journal.vec 永远是 NULL，语义检索的向量路实际是死的。
    */
-  embed = null } = {}) {
+  embed = null,
+  /**
+   * 待跟进（E2，默认关）：开着时 prompt 多教模型一个可选的 `followUp` 键，
+   * 约定上挂「到点该问一句」。关着时 prompt 与未上线前逐字节一致。
+   */
+  followUpEnabled = false } = {}) {
   /**
    * D7：开关判据留在 host（config 是唯一真相），这里只认「有没有实例 + 开没开」。
    * 传函数是为了运行时改配置能立刻生效，不用重启 DSH。
    */
   const profOn = () => Boolean(profiles) && (typeof profilesEnabled === 'function'
     ? profilesEnabled() === true : profilesEnabled === true);
+  /** 待跟进：同样运行时读开关 */
+  const fuOn = () => (typeof followUpEnabled === 'function'
+    ? followUpEnabled() === true : followUpEnabled === true);
   /** 上一次的结果，面板和 /consolidate 接口读它 */
   let last = null;
   let running = false;
@@ -430,6 +461,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       selfSkip: '',
       /** D7：这次巩固写下的熟人档案条数（默认关时恒 0） */
       profiles: 0,
+      /** E2：这次挂上的待跟进条数（默认关时恒 0） */
+      followUps: 0,
       /** D6：dry-run 预览会列出每条约定的处置计划；另记护栏退化/作废的次数 */
       agreementOps: [],
       fallback: 0,
@@ -488,6 +521,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
               day: target, chatName, items, revocation,
               facts: factsForPrompt(chatId),
               profiles: profilesForPrompt(),
+              followUp: fuOn(),
             });
             let raw = await generate(prompt);
             plan = parseJsonLoose(raw);
@@ -512,7 +546,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         }
 
         const res = apply({ day: target, chatId, list, plan, dry, revocation });
-        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'revoked', 'digests', 'suppressed', 'fallback', 'outdated', 'updated', 'profiles']) {
+        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'revoked', 'digests', 'suppressed', 'fallback', 'outdated', 'updated', 'profiles', 'followUps']) {
           stats[k] += res[k] || 0;
         }
         stats.agreementOps.push(...(res.agreementOps || []));
@@ -697,7 +731,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
   }
 
   function apply({ day, chatId, list, plan, dry, revocation = null }) {
-    const out = { ranked: 0, compressed: 0, triples: 0, agreements: 0, closed: 0, revoked: 0, digests: 0, suppressed: 0, agreementOps: [], fallback: 0, outdated: 0, updated: 0, profiles: 0 };
+    const out = { ranked: 0, compressed: 0, triples: 0, agreements: 0, closed: 0, revoked: 0, digests: 0, suppressed: 0, agreementOps: [], fallback: 0, outdated: 0, updated: 0, profiles: 0, followUps: 0 };
     const byId = new Map(list.map((r) => [r.id, r]));
     const at = list.length ? list[list.length - 1].at : now();
 
@@ -820,6 +854,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       /** dry-run 只算不写：把每条会怎么处置摆出来，面板/CLI 能直接看 */
       if (dry) {
         out.agreements += item.op === 'outdated' ? 0 : 1;
+        if (fuOn() && item.followUp) out.followUps += 1;
         continue;
       }
       /**
@@ -917,6 +952,27 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       );
       graph?.addEdge?.({ src: '主人', rel: '约定', dst: item.text.slice(0, 40), at, chatId });
       out.agreements += 1;
+      /**
+       * 待跟进（E2，默认关）：约定带「该问结果的时点」就顺手挂上。
+       *
+       * 用**刚写进去的那串原文**做键（`约定：…`），不靠模型回述——
+       * 模型回述一定会改写几个字，按文本找必然找不到，跟进静默丢失。
+       */
+      if (fuOn() && item.followUp) {
+        try {
+          const r = memory?.setFollowUp?.(
+            chatId,
+            `约定：${item.text.slice(0, 160)}`,
+            item.followUp,
+            chatId ? 'chat' : 'global',
+            aliasesOf(chatId),
+          );
+          if (r?.ok) out.followUps += 1;
+          else log(`待跟进没挂上：${r?.message || '未知原因'}`);
+        } catch (e) {
+          log(`设待跟进失败：${e?.message || e}`);
+        }
+      }
     }
 
     /* 4.5 D7：熟人小档案 —— 每天巩固顺带提炼，天级写入，不进消息热链路 */
