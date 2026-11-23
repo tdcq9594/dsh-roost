@@ -65,3 +65,11 @@ test('B2 接线：host 提供 mind.model 只读 op，scope 表登记为 memory:r
   assert.match(host, /buildMindModel\(/, 'op 要真调建树，不能空壳');
   assert.match(scopes, /'mind\.model': 'memory:read'/, 'scope 要登记，否则扩展调不到');
 });
+
+test('B3 接线：过时提醒只在 deep 段注入，且只标注不改正文', () => {
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.match(host, /if \(deep\) \{[\s\S]*staleSec =/, '只在 deep 段算过时提醒');
+  assert.match(host, /factsChat, staleSec, selfSec/, '过时提醒排在事实之后');
+  assert.match(host, /别当准信/, '措辞是提醒模型拿不准就问，不是改写结论');
+  assert.match(host, /!x\.until && !x\.archivedAt/, '已取代/归档的不提醒');
+});

@@ -5335,6 +5335,25 @@ export function apply(ctx) {
       ? `【这个群特有的事】\n${lines(deep ? m.chat : m.chat.slice(0, 3))}`
       : '';
 
+    /**
+     * B3 stale 刷新提醒：证据走弱/陈旧的事实不该当硬事实用。
+     * 只在 deep 段注入（省 token），且只点出条目、不改它们的正文——
+     * 让模型知道"这条可能过时了，拿不准就问"，而不是替它改写结论。
+     */
+    let staleSec = '';
+    if (deep) {
+      try {
+        const full = memory.listFull(chatId, aliasesOf(chatId));
+        const weak = [...(full.global || []), ...(full.chat || [])]
+          .filter((x) => (x.trend === 'stale' || x.trend === 'weakening') && !x.until && !x.archivedAt)
+          .slice(0, 5)
+          .map((x) => `· ${oneLine(x.text)}（${x.trend === 'stale' ? '久没再提起' : '证据在变少'}，别当准信）`);
+        if (weak.length) staleSec = `【可能过时，拿不准就问】\n${weak.join('\n')}`;
+      } catch (e) {
+        log.debug(`过时提醒跳过：${e?.message || e}`);
+      }
+    }
+
     let digestSec = '';
     let topSec = '';
     let graphSec = '';
@@ -5376,7 +5395,7 @@ export function apply(ctx) {
      * facts 是硬事实，自述是软状态。
      */
     const sections = deep
-      ? [rules, factsGlobal, factsChat, selfSec, profilesSec, digestSec, topSec, graphSec]
+      ? [rules, factsGlobal, factsChat, staleSec, selfSec, profilesSec, digestSec, topSec, graphSec]
       : [rules, factsGlobal, factsChat, profilesSec];
 
     const body = fitBudget(sections, deep ? recallBudgets().deep : recallBudgets().res);
