@@ -23,6 +23,7 @@ import { createGraph } from '../src/graph.js';
 import {
   createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc, strongerStatus, canSupersede,
   evidenceOf, applyEvidence, trendOf, MEMORY_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS,
+  kindOf, occurredOf, FACT_KINDS,
 } from '../src/memory.js';
 import {
   createConsolidate,
@@ -2708,4 +2709,62 @@ test('A1-4 写前留 .prev 快照，回滚有退路', () => {
   assert.ok(prev.global.includes('第一版'), '快照是上一次写入前的内容');
   assert.ok(!prev.global.includes('第二版'), '快照不该含本次新内容');
   assert.ok(SUPPORTED_SCHEMA_VERSIONS.includes(1), 'v1 永远在支持列表里');
+});
+
+/* ---------------- A2：双时态 + 种类（对齐 Hindsight world/experience/observation） ---------------- */
+
+test('A2-1 kindOf/occurredOf：老库默认 world、事发时间回退到 at', () => {
+  assert.equal(kindOf({}), 'world', '老库没 kind 一律当 world');
+  assert.equal(kindOf({ kind: '乱写' }), 'world', '非法值也当 world');
+  assert.equal(kindOf({ kind: 'observation' }), 'observation');
+  assert.deepEqual([...FACT_KINDS], ['world', 'experience', 'observation']);
+  assert.equal(occurredOf({}), 0, '都没有就是 0');
+  assert.equal(occurredOf({ at: 123 }), 123, '没 occurredAt 回退到 at');
+  assert.equal(occurredOf({ at: 123, occurredAt: 456 }), 456, '有事发时间用它');
+});
+
+test('A2-2 add 带 kind/occurredAt 才落盘；老调用方字节不变', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-kind-'));
+  const m = createMemory();
+  m.add('g1', '普通事实');
+  m.add('g1', '我上周搬到杭州', 'global', { kind: 'experience', occurredAt: 1000 });
+  const raw = readRaw();
+  assert.equal(raw.meta.global['普通事实'].kind, undefined, '老调用方不写 kind');
+  assert.equal(raw.meta.global['普通事实'].occurredAt, undefined, '老调用方不写 occurredAt');
+  assert.equal(raw.meta.global['我上周搬到杭州'].kind, 'experience', '传了就落盘');
+  assert.equal(raw.meta.global['我上周搬到杭州'].occurredAt, 1000);
+  assert.equal(raw.meta.global['我上周搬到杭州'].at > 0, true, '陈述时间照常记录');
+});
+
+test('A2-3 listFull annotate 输出双时态；retention 还原不丢', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-kind-restore-'));
+  const m = createMemory();
+  m.add('g1', '他好像喜欢杭州', 'global', { kind: 'observation', occurredAt: 222 });
+  const full = m.listFull('g1');
+  const row = full.global.find((x) => x.text === '他好像喜欢杭州');
+  assert.equal(row.kind, 'observation');
+  assert.equal(row.occurredAt, 222);
+  assert.ok(row.at > 0, '陈述时间仍在');
+
+  /** 清理 → 还原：双时态必须跟着回来（同 status 的教训） */
+  const entry = m.retention.entries().find((x) => x.text === '他好像喜欢杭州');
+  assert.equal(entry.kind, 'observation', 'entries 要导出 kind');
+  assert.equal(entry.occurredAt, 222, 'entries 要导出 occurredAt');
+  /** 干净的新库还原（等价于清理后从备份插回） */
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-kind-restore2-'));
+  const m2 = createMemory();
+  assert.equal(m2.insertRaw(entry), true);
+  const back = m2.listFull('g1').global.find((x) => x.text === '他好像喜欢杭州');
+  assert.equal(back.kind, 'observation', '还原后种类不丢');
+  assert.equal(back.occurredAt, 222, '还原后事发时间不丢');
+});
+
+test('A2-4 重提不改种类与事发时间（事实属性，不随陈述变）', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-kind-reinforce-'));
+  const m = createMemory();
+  m.add('g1', '我上周搬家', 'global', { kind: 'experience', occurredAt: 999 });
+  m.add('g1', '我上周搬家', 'global', { kind: 'world', occurredAt: 111 });
+  const meta = readRaw().meta.global['我上周搬家'];
+  assert.equal(meta.kind, 'experience', '重提不能把亲历改成客观事实');
+  assert.equal(meta.occurredAt, 999, '事发时间不随重提变');
 });

@@ -216,6 +216,42 @@ const TREND_RECENT_DAYS = 30;
 const TREND_OLD_DAYS = 90;
 
 /** 归一化：老数据没有这些字段时给默认，不写回盘 */
+/* ---------------- 双时态 + 记忆种类（A2，对齐 Hindsight 的 world/experience/observation） ---------------- */
+
+/**
+ * 一条事实"是什么种类"。照 Hindsight `retain/types.py` 的三分：
+ *   world       客观事实（"他住在杭州"）——默认，老库一律当这个
+ *   experience  亲历（"我上周搬到杭州"）——是第一人称经历
+ *   observation 观察/判断（"他好像喜欢杭州"）——带主观色彩，容易被推翻
+ *
+ * 为什么分开：三种的可信度演化规则不同（observation 最脆，world 最稳），
+ * 而且检索时可以按种类过滤。默认 world 保证老库逐字节不变。
+ */
+export const FACT_KINDS = Object.freeze(['world', 'experience', 'observation']);
+
+/** 归一化种类；非法/缺省一律 world（老库兼容） */
+export function kindOf(meta) {
+  const k = String(meta?.kind ?? '');
+  return FACT_KINDS.includes(k) ? k : 'world';
+}
+
+/**
+ * 双时态：
+ *   at          = 陈述/记录时间（这条记忆**什么时候进的库**）——所有旧逻辑都用它
+ *   occurredAt  = 事发时间（这件事**实际什么时候发生的**）——可选，老库没有
+ *
+ * Hindsight 把这两个分开（occurred_start/end vs mentioned_at），因为
+ * "上周说的那场三年前的搬家"里，两个时间差了三年。我们让 occurredAt
+ * 可选、缺省回退到 at——这样老逻辑不用改，新能力只在有值时生效。
+ */
+export function occurredOf(meta, fallback) {
+  const t = Number(meta?.occurredAt);
+  if (Number.isFinite(t) && t > 0) return t;
+  /** 没给 fallback 时自动回退到 meta.at——"没写事发时间"就是"事发即记录" */
+  const f = fallback === undefined ? Number(meta?.at) : Number(fallback);
+  return Number.isFinite(f) && f > 0 ? f : 0;
+}
+
 export function evidenceOf(meta) {
   const raw = Array.isArray(meta?.evidence) ? meta.evidence : [];
   return {
@@ -758,6 +794,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       };
       if (next.until) next.until = null;
       /**
+       * 双时态：重提不改"这是什么种类 / 事发何时"——它们是事实的属性，
+       * 不是每次陈述的属性。只在原来缺失时补一次（老库升级）。
+       */
+      if (!FACT_KINDS.includes(next.kind) && FACT_KINDS.includes(opts.kind)) next.kind = opts.kind;
+      if (!Number.isFinite(Number(next.occurredAt)) && Number(opts.occurredAt) > 0) next.occurredAt = Number(opts.occurredAt);
+      /**
        * 重提＝一次 reinforce 证据。调用方给了 `opts.evidence`（出处摘要）才累计；
        * 老调用点不传，行为与字节都不变。跨级顶替护栏不受影响——证据只动
        * confidence，不动 status（`canSupersede` 仍在 supersede() 里守）。
@@ -777,6 +819,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       ...(opts.pin !== undefined ? { pin: clamp01(opts.pin) } : {}),
       ...(FACT_TIERS.includes(opts.tier) ? { tier: opts.tier } : {}),
       ...(nextStatus && nextStatus !== 'fact' ? { status: nextStatus } : {}),
+      /** 双时态：只在调用方明确给时才落盘，老调用方字节不变 */
+      ...(FACT_KINDS.includes(opts.kind) && opts.kind !== 'world' ? { kind: opts.kind } : {}),
+      ...(Number(opts.occurredAt) > 0 ? { occurredAt: Number(opts.occurredAt) } : {}),
     };
     /** 新建就带出处＝第一条证据；老调用点不传 evidence，这一行是空操作 */
     if (opts.evidence) writeEvidence(fresh, applyEvidence({}, 'reinforce', opts.evidence));
@@ -983,6 +1028,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
             speaker: String(x.src?.speaker ?? ''),
             /** 以下都是可选扩展字段，老库没有时给默认，不写回磁盘 */
             tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
+            /** A2 双时态：种类 + 事发时间（缺省回退到 at，老库表现不变） */
+            kind: kindOf(x),
+            occurredAt: occurredOf(x, Number(x.at) || 0),
             pin: clamp01(x.pin),
             archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : null,
             reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : null,
@@ -1431,6 +1479,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
                */
               status: statusOf(x),
               tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
+              /** A2 双时态：同 status 的教训——不导出，清理→还原就把它们抹掉 */
+              kind: kindOf(x),
+              occurredAt: occurredOf(x, Number(x.at) || 0),
               pin: clamp01(x.pin),
               reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : 0,
               archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : 0,
@@ -1543,6 +1594,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
        */
       if (FACT_STATUSES.includes(row.status) && row.status !== 'fact') meta.status = row.status;
       if (FACT_TIERS.includes(row.tier) && row.tier !== 'long') meta.tier = row.tier;
+      /** A2 双时态：默认 world / 无 occurredAt 不落盘，老库还原逐字节一致 */
+      if (FACT_KINDS.includes(row.kind) && row.kind !== 'world') meta.kind = row.kind;
+      if (Number(row.occurredAt) > 0) meta.occurredAt = Number(row.occurredAt);
       if (Number(row.pin) > 0) meta.pin = clamp01(row.pin);
       if (Number(row.reviewedAt) > 0) meta.reviewedAt = Number(row.reviewedAt);
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);
