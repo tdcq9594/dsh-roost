@@ -55,6 +55,13 @@ const SKIP = [
   /** 市场安装的暂存目录（`.market-tmp/<id>`）：随时可重建，没必要进包；
    *  Windows 目录被占用时 rm 会静默失败，留残留也不该被备份带走。 */
   '.market-tmp',
+  /**
+   * 本地 ONNX 运行时与模型（e5-small 135MB + hs-rerank 160MB + 运行时几十 MB）。
+   * 它们是**可重装的下载物**，不是用户数据：打进备份会让包体轻松超过
+   * 云盘（Gitee / WebDAV 常见 100MB）上限，定时备份从此一直失败。
+   * 换机器重装一次就行，别拿备份带宽换。
+   */
+  'onnx-runtime', 'onnx-models',
 ];
 
 /**
@@ -603,6 +610,19 @@ export function restoreRetentionRows({ payload, memory, journal }) {
        */
       status: String(raw.status || 'fact'),
       tier: String(raw.tier || 'long'),
+      /** A2 双时态 / E1 指令 / E3 时效 / E2 待跟进：跟 `retention.entries()` 走 */
+      kind: String(raw.kind || 'world'),
+      occurredAt: Number(raw.occurredAt) || 0,
+      directive: raw.directive === true,
+      validFrom: Number(raw.validFrom) > 0 ? Number(raw.validFrom) : 0,
+      validUntil: Number(raw.validUntil) > 0 ? Number(raw.validUntil) : 0,
+      followUp: raw.followUp && Number(raw.followUp.at) > 0
+        ? {
+          at: Number(raw.followUp.at),
+          tries: Math.max(0, Number(raw.followUp.tries) || 0),
+          ...(raw.followUp.question ? { question: String(raw.followUp.question).slice(0, 60) } : {}),
+        }
+        : null,
       pin: Number(raw.pin) || 0,
       reviewedAt: Number(raw.reviewedAt) || 0,
       archivedAt: Number(raw.archivedAt) || 0,

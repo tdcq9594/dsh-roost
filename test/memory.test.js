@@ -1748,13 +1748,23 @@ test('巩固：compressDue 只写 digest、不动原文，压过的下一轮不�
   })();
 });
 
-test('日记：补向量先补最老的（DESC 会让老条目永远轮不到）', () => {
+test('日记：补向量近期优先（新内容才是检索最需要的），老积压也补', () => {
   const j = createJournal({ file: join(tmp(), 'j.sqlite') });
   const now = Date.now();
-  for (let i = 0; i < 3; i += 1) j.add({ id: 'v' + i, at: now + i, chatId: 'g1', text: '向量' + i });
-  j.setVec('v2', [1, 0, 0]);
+  /** 两条很老的（30 天前）+ 两条新的 */
+  j.add({ id: 'o0', at: now - 30 * DAY, chatId: 'g1', text: '很老的0' });
+  j.add({ id: 'o1', at: now - 29 * DAY, chatId: 'g1', text: '很老的1' });
+  j.add({ id: 'n0', at: now - 60_000, chatId: 'g1', text: '新的0' });
+  j.add({ id: 'n1', at: now, chatId: 'g1', text: '新的1' });
+  j.setVec('n1', [1, 0, 0]);
+  /**
+   * 以前是 `ORDER BY at ASC`（最老优先）：积压 10 万行时每天补 20 条最老的，
+   * 新聊的内容要等十几年才轮得到。现在近期优先、老积压兜底。
+   */
   const ids = j.noVec(10).map((r) => r.id);
-  assert.deepEqual(ids, ['v0', 'v1'], '老的在前面；已经有向量的不再出现');
+  assert.equal(ids[0], 'n0', '近期先补');
+  assert.ok(ids.includes('o0') && ids.includes('o1'), '老积压也在这轮里');
+  assert.ok(!ids.includes('n1'), '已经有向量的不再出现');
 });
 
 test('日记：老库打开时会补上 journal_due 索引', () => {
@@ -2619,13 +2629,33 @@ test('证据：巩固写约定时带 evidence，重提同一约定累计成 rein
 
 /* ---------------- 证据趋势：照搬 Hindsight compute_trend（2026-11-23） ---------------- */
 
-test('趋势：空证据 = stale，全在近期 = new', () => {
+test('趋势：没证据 = unknown（不是 stale），有证据但全是老的才 stale', () => {
   const now = Date.now();
   const DAY2 = 86_400_000;
-  assert.equal(trendOf([], now), 'stale');
+  /**
+   * 回归：曾经这里返回 stale，而 deep 注入会剔掉 stale —— 老库一条证据都没有，
+   * 于是每个会话首轮的 facts 段直接是空的。
+   */
+  assert.equal(trendOf([], now), 'unknown', '没证据只是没统计，不代表可疑');
+  assert.equal(trendOf([{}], now), 'unknown', '有行没时间也算没统计');
   assert.equal(trendOf([{ at: now }], now), 'new');
   assert.equal(trendOf([{ at: now - 29 * DAY2 }, { at: now - 1 * DAY2 }], now), 'new');
-  assert.equal(trendOf([{ at: now - 100 * DAY2 }], now), 'stale', '没有近期证据就 stale');
+  assert.equal(trendOf([{ at: now - 100 * DAY2 }], now), 'stale', '有证据但全是老的 → stale');
+});
+
+test('趋势：deep 注入（skipStale）不能把"没证据的老事实"整段剔掉', () => {
+  const m = createMemory();
+  m.add('g1', '主人住在杭州', 'chat');
+  m.add('g1', '他养了只猫叫豆豆', 'chat');
+  /** 只写一条带"老证据"的，它才该被 skipStale 挡掉 */
+  m.add('g1', '他以前在上海工作', 'chat', { evidence: { kind: 'consolidate', quote: '在上海', at: Date.now() - 200 * DAY } });
+
+  const normal = m.listRanked('g1', [], {});
+  const deep = m.listRanked('g1', [], { skipStale: true });
+  assert.ok(normal.chat.length >= 3, '普通注入三条都在');
+  assert.equal(deep.chat.length, 2, 'deep 只挡掉"有证据但全是老的"那条');
+  assert.ok(deep.chat.includes('主人住在杭州'), '没证据的事实必须还在');
+  assert.ok(!deep.chat.includes('他以前在上海工作'), '有老证据的仍按 B3 挡掉');
 });
 
 test('趋势：近30天密度 / 前60天密度 → 五档（阈值 1.5 / 0.5 照抄对面）', () => {
@@ -2898,8 +2928,8 @@ test('日记：换模型后旧向量进重算队列（同维度也不混用）�
   /** 不传 opts：老行为不变，只补 NULL */
   assert.deepEqual(j.noVec(10).map((r) => r.id), ['c'], '不传 opts 只捡 NULL');
 
-  /** 传 model：旧模型 + 空指纹都要重算，同模型跳过 */
-  assert.deepEqual(j.noVec(10, { model: 'http:new-model' }).map((r) => r.id), ['a', 'c', 'd'],
+  /** 传 model：旧模型 + 空指纹都要重算，同模型跳过（顺序现在是近期优先，不比顺序） */
+  assert.deepEqual(j.noVec(10, { model: 'http:new-model' }).map((r) => r.id).sort(), ['a', 'c', 'd'],
     '旧模型和空指纹进队列；同模型不重算');
 
   /** 补完就收敛：重算过的不再被挑出来（否则每轮都重算全库）；c 还没算过，仍在队列 */
@@ -3072,4 +3102,54 @@ test('待跟进：默认关、扩展接口有登记、注入只在 live 时记�
   assert.match(host, /memory\.markFollowUpAsked\(/, '出站成功后要记账');
   /** 面板预览那条路不能带 live：预览一次就烧一次机会是不可接受的 */
   assert.doesNotMatch(host, /memoryStatic\(panelChat, forced, \{ live: true \}\)/, '面板预览不许记账');
+});
+
+test('清理→还原：E1/E2/A2/E3 字段和日记的 digest/向量都要活着回来', async () => {
+  const { normalizeEntry } = await import('../src/dry-run.js');
+  const { mkdtempSync: mk } = await import('node:fs');
+  const { tmpdir: td } = await import('node:os');
+
+  /** 第一份：造一条"什么扩展字段都占全"的事实 + 一条带 digest/向量的日记 */
+  process.env.DSH_ROOST_DATA = mk(join(td(), 'roost-purge-a-'));
+  const m1 = createMemory();
+  const j1 = createJournal({ file: join(process.env.DSH_ROOST_DATA, 'j.sqlite') });
+  m1.add('g1', '别在群里提工资', 'chat', {
+    w: 2, directive: true, kind: 'experience', validUntil: Date.now() + 30 * DAY,
+  });
+  m1.setFollowUp('g1', '别在群里提工资', { inDays: 2, question: '还提过吗' }, 'chat');
+  j1.add({ id: 'r1', at: Date.now(), chatId: 'g1', text: '原始正文', level: 'important' });
+  /** digest 是压缩写的，`add()` 不收——用 compress 模拟"压过了" */
+  j1.compress('r1', '压过的一句');
+  j1.setVec('r1', [1, 0, 0, 0], 'local:e5-small');
+
+  /** 走真实链路：entries/listChat → normalizeEntry → 备份 payload */
+  const payload = {
+    facts: m1.retention.entries().map((e) => normalizeEntry(e, 'facts', e.chatId)),
+    journal: j1.listChat('', 0).map((r) => normalizeEntry(r, 'journal', r.chatId)),
+  };
+  try { j1.close(); } catch {}
+
+  /** 第二份：还原 */
+  process.env.DSH_ROOST_DATA = mk(join(td(), 'roost-purge-b-'));
+  const m2 = createMemory();
+  const j2 = createJournal({ file: join(process.env.DSH_ROOST_DATA, 'j.sqlite') });
+  const r = restoreRetentionRows({ payload, memory: m2, journal: j2 });
+  assert.equal(r.facts, 1, '事实还原了');
+
+  const f = m2.listFull('g1').chat.find((x) => x.text === '别在群里提工资');
+  assert.ok(f, '事实要回来');
+  assert.equal(f.directive, true, 'E1 硬规则不能丢');
+  assert.equal(f.kind, 'experience', 'A2 种类不能丢');
+  assert.ok(f.validUntil > 0, 'E3 时效不能丢');
+  const due = m2.dueFollowUps('g1', [], { at: Date.now() + 3 * DAY });
+  assert.equal(due.length, 1, 'E2 待跟进不能丢');
+  assert.equal(due[0].question, '还提过吗');
+
+  const row = j2.get('r1');
+  assert.ok(row, '日记要回来');
+  assert.equal(row.digest, '压过的一句', 'digest 不能丢（丢了会重新压缩）');
+  assert.equal(row.vecModel, 'local:e5-small', '向量指纹不能丢（丢了语义检索取不到）');
+  assert.ok(j2.vecOf(row) && j2.vecOf(row).length === 4, '向量本身也要回来');
+
+  try { j2.close(); } catch {}
 });
