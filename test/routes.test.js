@@ -886,8 +886,8 @@ test('单删也会级联清 byChat', async () => {
  * 面板只提交自己那几项时，**不能把别的字段抹成默认值**。
  *
  * 2026-11 外部实测：DSH 的通用设置页保存一次，`speakUp.prompt`（105 字→空）、
- * `qqTools.maxParts`（5→3）、`persona.name`（杏奈→默认）、`tts.provider` 四项
- * 同时变回默认。用户能看到的只是「她变了个人」，日志里一个字都没有。
+ * `persona.name`（杏奈→默认）、`tts.provider` 三项同时变回默认。
+ * 用户能看到的只是「她变了个人」，日志里一个字都没有。
  *
  * 根因：路由默认走「整份替换」，而 `saveConfig` 的基线是 DEFAULTS ——
  * 没提交的键就是「删掉」，一律回落默认。现在默认改成局部合并。
@@ -895,7 +895,7 @@ test('单删也会级联清 byChat', async () => {
 test('配置：不带 mode 的局部提交只改提交的那几项', async () => {
   const h = await bootHost({
     speakUp: { enabled: true, prompt: '恋人设定', minIntervalMinutes: 60, maxIntervalMinutes: 180, maxPerDay: 5 },
-    qqTools: { enabled: true, maxParts: 5 },
+    qqTools: { enabled: true },
     persona: { name: '杏奈' },
   });
   try {
@@ -904,7 +904,7 @@ test('配置：不带 mode 的局部提交只改提交的那几项', async () =>
     const disk = JSON.parse(readFileSync(join(h.dir, 'config.json'), 'utf8'));
     assert.equal(disk.speakUp.prompt, '恋人设定', '没提交的 prompt 不许被抹');
     assert.equal(disk.speakUp.maxPerDay, 5, '同一个段里没提交的键也要保住');
-    assert.equal(disk.qqTools.maxParts, 5, '没提交的 maxParts 不许被抹');
+    assert.equal(disk.qqTools.enabled, true, '没提交的 qqTools.enabled 不许被抹');
     assert.equal(disk.persona.name, '杏奈', '没提交的 persona.name 不许被抹');
     assert.equal(disk.tts.enabled, false, '提交了的要生效');
 
@@ -912,7 +912,7 @@ test('配置：不带 mode 的局部提交只改提交的那几项', async () =>
     const full = await h.call('/config?mode=full', { method: 'POST', body: { tts: { enabled: true } } });
     assert.equal(full.status, 200);
     const after = JSON.parse(readFileSync(join(h.dir, 'config.json'), 'utf8'));
-    assert.equal(after.qqTools.maxParts, 50, '整份模式：没提交的回落到默认');
+    assert.equal(after.qqTools.enabled, true, '整份模式：没提交的回落到默认');
     assert.equal(after.tts.enabled, true, '整份模式也照常写入提交的值');
   } finally {
     h.off?.();

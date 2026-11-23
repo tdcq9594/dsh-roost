@@ -55,7 +55,6 @@ export function registeredToolNames(agent) {
  * @param {{ok:boolean}} [opts.mounted] 这个 agent 的挂载结果
  * @param {Set<string>|string[]|null} [opts.denied] 本轮实际被收走的工具名
  * @param {Set<string>|null} [opts.registeredNames] schemas() 报的注册清单
- * @param {number} [opts.maxParts] 一轮最多几段
  * @param {boolean} [opts.ttsEnabled] 语音是否开启
  * @returns {string}
  */
@@ -63,7 +62,6 @@ export function buildOutputPrompt({
   mounted,
   denied,
   registeredNames = null,
-  maxParts = 50,
   ttsEnabled = false,
 } = {}) {
   if (!mounted?.ok) return '';
@@ -87,7 +85,7 @@ export function buildOutputPrompt({
       + (!fileDenied && fileRegistered
         ? '，以及（装了的话）`qq_send_file`（发一个文件）。'
         : '。'),
-    `· 想说话就调 \`qq_send\`，调几次由你定（一轮最多 ${maxParts} 段）。**别把要发的话写进正文**。`,
+    '· 想说话就调 `qq_send`，一次发一段，按需要可以分多次。**别把要发的话写进正文**。',
     '· 调过 `qq_send` 之后，你回复的正文**不会**再发出去——正文只当思考用。',
     '· 聊到自然结束、对方要走的时候，用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后可以不说话。',
     '· 一个工具都不调时，正文会照常发出去（旧方式）。**不要又调工具又写正文**——那样只发工具那条，正文会被丢掉。',

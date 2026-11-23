@@ -34,7 +34,7 @@ import { createCapabilityStore } from './capability-store.js';
 import { createExtGroups } from './ext-groups.js';
 import { createQuota, shouldCharge, QUOTA_DEFAULTS } from './quota.js';
 import { createSetup } from './setup.js';
-import { maxPartsOf, shouldRegisterQqTools } from './qq-tools.js';
+import { shouldRegisterQqTools } from './qq-tools.js';
 import { createMemory, W_EXPLICIT } from './memory.js';
 import { buildMindModel, renderMindModel } from './mind-model.js';
 import { createJournal } from './journal.js';
@@ -2584,7 +2584,7 @@ export function apply(ctx) {
      *
      * 为什么默认反过来：**外部的设置页不一定知道要带参数**。DSH 的通用设置页
      * 只提交它渲染出来的那几项，旧默认（整份替换）会顺手把 `speakUp.prompt`、
-     * `qqTools.maxParts`、`persona.name`、`tts.provider` 一起抹成默认值
+     * `qqTools.enabled`、`persona.name`、`tts.provider` 一起抹成默认值
      * ——用户看到的是「升级后她变了个人」，日志里却一个字都没有
      * （2026-11 外部实测，四项同时被抹）。
      *
@@ -7081,8 +7081,6 @@ export function apply(ctx) {
             denied: qqToolRegistry.deniedOf(agent),
             /** 注册清单只作跨版本兜底；本轮能不能用由 denied 决定 */
             registeredNames: registeredToolNames(agent),
-            /** 段数上限和 qq-tools.js 共用同一个值 */
-            maxParts: maxPartsOf(cfg, chat.kind),
             ttsEnabled: cfg.tts?.enabled === true,
           }),
         }),

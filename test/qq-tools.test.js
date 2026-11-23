@@ -1,12 +1,12 @@
 // QQ 动作工具（`qq_send` / `qq_close`）的测试。
 //
-// 这两个工具出错的表现都是**社交事故**：段数没上限就是刷屏，
+// 这两个工具出错的表现都是**社交事故**：权限判错就是越权说话，
 // 收尾判错就是「问题没答完就跑了」。所以断言盯拒绝路径，不盯成功路径的措辞。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildQqToolDefs, buildAtPrefix, MAX_PARTS, AT_ID_RE, maxPartsOf, shouldRegisterQqTools } from '../src/qq-tools.js';
+import { buildQqToolDefs, buildAtPrefix, AT_ID_RE, shouldRegisterQqTools } from '../src/qq-tools.js';
 
 /**
  * 造一套工具，返回 { send, close } 和记账用的箱子。
@@ -17,7 +17,8 @@ function make({
   kind = 'c2c',
   said = '',
   hasPayload = true,
-  maxParts = MAX_PARTS,
+  /** 老配置形状：段数上限已作废，传进来也必须被忽略 */
+  cfg = {},
   sendFails = false,
   note = '',
   /**
@@ -86,7 +87,7 @@ function make({
           return postThreadOf(q);
         }
       : undefined,
-    cfgOf: () => ({ qqTools: { maxParts } }),
+    cfgOf: () => cfg,
     stateOf: () => ({ parts: box.parts }),
   });
 
@@ -215,7 +216,7 @@ test('qq_send：放行 image / image-alone / voice，只拦 button / silence', a
 });
 
 test('qq_send：卡片也放行（它是独立一条消息，不占 markdown 分段）', async () => {
-  /** 另造一套：上面那个 box 已经把 3 段额度用满了 */
+  /** 另造一套：不设硬上限，前面的用例发了多少段都不影响这里 */
   const { send, box } = make();
   const text = '<<card: 标题|描述|https://a.com/x|https://a.com/p.png>>';
   const r = await send.execute({ text });
@@ -249,34 +250,27 @@ test('qq_send：标准 markdown 图片必须拦（否则本地绝对路径发进
   assert.equal(link.ok, true, '普通 markdown 链接不能误伤');
 });
 
-test('qq_send：超过上限就拒，并说清还剩几段', async () => {
-  const { send, box } = make({ maxParts: 2 });
-  await send.execute({ text: '一' });
-  await send.execute({ text: '二' });
-  const r = await send.execute({ text: '三' });
-  assert.equal(r.ok, false);
-  assert.match(r.message, /上限 2 段/);
-  assert.equal(box.sent.length, 2, '超限那次不该发出去');
+/**
+ * 段数不设本地上限：第 4 段、第 51 段都要照发。
+ *
+ * 2026-11 实测的坏味道是：配置写着 3，第 4 段被工具拒掉，模型改写在正文里
+ * 的收尾又不会投递，用户只看到半截话。取消上限后由框架按平台额度改发主动消息。
+ */
+test('qq_send：不设硬上限，第 4 段和第 51 段都照发', async () => {
+  const { send, box } = make({ kind: 'group' });
+  for (let i = 1; i <= 60; i += 1) {
+    const r = await send.execute({ text: `第${i}段` });
+    assert.equal(r.ok, true, `第 ${i} 段不该被拒`);
+    assert.equal(r.part, i, '段号要连续，方便模型知道自己说到第几段');
+  }
+  assert.equal(box.sent.length, 60);
 });
 
-/**
- * 段数上限的唯一来源：提示词与工具必须读到同一个值。
- *
- * 2026-11 外部实测：提示词里写死「一轮最多 3 段」，而这里读配置（对方配的是 5）
- * ——模型只发 3 段，后面两格白浪费。反过来配置成 2 时更糟：模型按 3 组织内容，
- * 第 3 段被工具拒掉且不报错，用户只觉得「话说一半没了」。
- */
-test('段数上限：群放开到 50，私聊仍是官方的 4', () => {
-  assert.equal(maxPartsOf({ qqTools: { maxParts: 5 } }, 'group'), 5);
-  assert.equal(maxPartsOf({ qqTools: { maxParts: 50 } }, 'group'), 50);
-  assert.equal(maxPartsOf({ qqTools: { maxParts: 99 } }, 'group'), 50);
-  assert.equal(maxPartsOf({ qqTools: { maxParts: 99 } }, 'c2c'), 4);
-  assert.equal(maxPartsOf({ qqTools: { maxParts: 5 } }, 'c2c'), 4);
-  assert.equal(maxPartsOf({ qqTools: { maxParts: 0 } }, 'group'), MAX_PARTS);
-  assert.equal(maxPartsOf({ qqTools: { maxParts: -3 } }, 'group'), MAX_PARTS);
-  assert.equal(maxPartsOf({ qqTools: { maxParts: 'abc' } }, 'group'), MAX_PARTS);
-  assert.equal(maxPartsOf({}, 'group'), MAX_PARTS);
-  assert.equal(maxPartsOf(undefined, 'group'), MAX_PARTS);
+test('qq_send：工具描述中性说明分段用法，不出现「不限 / 上限 / 节约」字样', () => {
+  const { send } = make();
+  assert.match(send.description, /一次调用发一段，可以按需要分多次调用/);
+  assert.match(send.description, /每调用一次就是一条独立消息/);
+  assert.doesNotMatch(send.description, /段数不限|调几次发几条|上限|别刷屏|能一段说完就别分/);
 });
 
 test('qq_send：这一轮没有 payload 时拒（不该发生，但别静默）', async () => {
@@ -293,11 +287,15 @@ test('qq_send：底层发送失败要把原因带出去', async () => {
   assert.match(r.message, /通道断了/);
 });
 
-test('qq_send：maxParts 配成 0 或负数时退回默认值（不能变成"永远发不出去"）', async () => {
-  const { send, box } = make({ maxParts: 0 });
-  const r = await send.execute({ text: '一' });
-  assert.equal(r.ok, true);
-  assert.equal(box.sent.length, 1);
+test('qq_send：老配置里的 maxParts（3 / 0 / -1 / 99）一律忽略', async () => {
+  for (const maxParts of [3, 0, -1, 99]) {
+    const { send, box } = make({ cfg: { qqTools: { maxParts } } });
+    for (let i = 0; i < 5; i += 1) {
+      const r = await send.execute({ text: `第${i + 1}段` });
+      assert.equal(r.ok, true, `maxParts=${maxParts} 时第 ${i + 1} 段不该被拒`);
+    }
+    assert.equal(box.sent.length, 5);
+  }
 });
 
 /* ---------------- qq_send 的 at 参数 ---------------- */
