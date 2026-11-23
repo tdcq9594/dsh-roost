@@ -22,7 +22,7 @@ import { createJournal, classify, dayOf, scoreOf, cosine, DEFAULT_KEEP_DAYS, ERA
 import { createGraph } from '../src/graph.js';
 import {
   createMemory, scoreOfFact, W_EXPLICIT, normalizeSrc, strongerStatus, canSupersede,
-  evidenceOf, applyEvidence, trendOf,
+  evidenceOf, applyEvidence, trendOf, MEMORY_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS,
 } from '../src/memory.js';
 import {
   createConsolidate,
@@ -2655,4 +2655,57 @@ test('趋势：证据条目带 journalId/quote 能穿过证据账本与四处白
   const entries = m.retention.entries().filter((e) => e.text === '约定：周末一起看电影');
   assert.equal(entries[0].evidence[0].journalId, 'msg-42', 'retention.entries 带 journalId');
   assert.equal(entries[0].evidence[0].quote, '我们周末一起去看电影吧');
+});
+
+/* ---------------- A1：schema 版本化（2026-11-23，对齐 aurabot 的迁移校验） ---------------- */
+
+test('A1-1 新建记忆写盘带 schemaVersion；重启读回来不报错', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-schema-'));
+  const m = createMemory();
+  m.add('g1', '住在杭州');
+  const raw = JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'memory.json'), 'utf8'));
+  assert.equal(raw.schemaVersion, MEMORY_SCHEMA_VERSION, '写盘要打版本号');
+  assert.deepEqual(createMemory().list('g1').global, ['住在杭州'], '重启读回一致');
+});
+
+test('A1-2 老库无 schemaVersion：按 v1 读、内容不丢、下次 save 补上版本', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-schema-old-'));
+  process.env.DSH_ROOST_DATA = dir;
+  /** 模拟升级前的库：没有任何版本字段 */
+  writeFileSync(join(dir, 'memory.json'), JSON.stringify({
+    global: ['老记忆'], chats: { g1: ['本群老记忆'] }, meta: { global: {}, chats: {} },
+  }), 'utf8');
+  const m = createMemory();
+  assert.deepEqual(m.list('g1').global, ['老记忆'], '老库要能读');
+  m.add('g1', '新记忆'); // 触发 save
+  const raw = JSON.parse(readFileSync(join(dir, 'memory.json'), 'utf8'));
+  assert.equal(raw.schemaVersion, MEMORY_SCHEMA_VERSION, 'save 时补版本');
+  assert.ok(raw.global.includes('老记忆'), '迁移不丢原内容');
+});
+
+test('A1-3 高版本文件被隔离：按空记忆继续、不写回、原件留 .corrupted 备份', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-schema-future-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const future = JSON.stringify({ schemaVersion: 999, global: ['未来的记忆'] });
+  writeFileSync(join(dir, 'memory.json'), future, 'utf8');
+  const m = createMemory();
+  assert.deepEqual(m.list('g1').global, [], '高版本当空记忆，绝不猜读');
+  m.add('g1', '新写的'); // 尝试写
+  const raw = JSON.parse(readFileSync(join(dir, 'memory.json'), 'utf8'));
+  assert.deepEqual(raw.global, ['新写的'], '隔离后新写覆盖，不会残留未来数据');
+  const dirs = readdirSync(dir).filter((n) => n.startsWith('memory.json.corrupted.'));
+  assert.equal(dirs.length, 1, '原件被隔离备份');
+  assert.equal(readFileSync(join(dir, dirs[0]), 'utf8'), future, '备份是原封不动的高版本数据');
+});
+
+test('A1-4 写前留 .prev 快照，回滚有退路', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-schema-snap-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const m = createMemory();
+  m.add('g1', '第一版');
+  m.add('g1', '第二版');
+  const prev = JSON.parse(readFileSync(join(dir, 'memory.json.prev'), 'utf8'));
+  assert.ok(prev.global.includes('第一版'), '快照是上一次写入前的内容');
+  assert.ok(!prev.global.includes('第二版'), '快照不该含本次新内容');
+  assert.ok(SUPPORTED_SCHEMA_VERSIONS.includes(1), 'v1 永远在支持列表里');
 });

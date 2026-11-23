@@ -33,7 +33,7 @@
  *   实际无影响——文本相同就是同一条事实，而且我们从不改写已存的文本。
  */
 
-import { readFileSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, unlinkSync, copyFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
 
@@ -42,6 +42,28 @@ import { writeJsonAtomic } from './atomic.js';
 /** 一条最多 200 字，每层最多 40 条（比原来的 20 条放宽，跨群后量会涨） */
 const FACT_MAX = 200;
 const FACTS_MAX = 40;
+
+/**
+ * 记忆文件的 schema 版本（A1，对齐 aurabot 的版本化迁移）。
+ *
+ * 为什么需要：记忆是全系统唯一的"她记得什么"真相源，以前只有原子改名
+ * （写不坏），但没有版本——升级加了字段后，老库/新库混在一起没法校验，
+ * 也没法在迁移前留一份可回滚的快照。
+ *
+ * 约定：
+ *   · 老文件没有 `schemaVersion` → 当 v1 读（老库逐字节兼容，不强制升级）
+ *   · 下次 save() 时打上当前版本（懒升级，不惊动只读启动）
+ *   · 文件版本 > 当前支持 → 隔离（quarantine）+ 空视图，绝不写回
+ *   · 迁移函数从 v1 逐级跑上来，每级只做一件事
+ */
+export const MEMORY_SCHEMA_VERSION = 1;
+/** v(n) → v(n+1)：入参是整份对象，返回迁移后的对象；保持纯函数便于单测 */
+const SCHEMA_MIGRATIONS = Object.freeze({
+  // 1: (raw) => ({ ...raw, newField: default }),  // 将来加字段时在这里追加
+});
+export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze(
+  [1, ...Object.keys(SCHEMA_MIGRATIONS).map(Number)],
+);
 
 /** 权重的天花板：同一件事被反复提到会加分，但别让它无限涨 */
 const W_MAX = 5;
@@ -525,6 +547,25 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
    * 授权，而下一次 `save()` 还会把盘上那段**抹掉**，表现是「重启一次群主动
    * 就永久失效」。展开 raw 之后，别处写进来的字段都不会被白名单吃掉。
    */
+  /**
+   * 版本校验 + 逐级迁移。返回迁移后的对象，或 null（版本过高/非法，调用方隔离）。
+   * 无 schemaVersion 的老库当 v1——这是"只增不减"的底线。
+   */
+  function migrateSchema(raw) {
+    const v = raw.schemaVersion === undefined ? 1 : Number(raw.schemaVersion);
+    if (!Number.isInteger(v) || v < 1) return null;
+    /** 高版本文件绝不能读：用旧代码写回去会静默丢掉新版本字段 */
+    if (v > MEMORY_SCHEMA_VERSION) return null;
+    let out = { ...raw };
+    for (let from = v; from < MEMORY_SCHEMA_VERSION; from += 1) {
+      const step = SCHEMA_MIGRATIONS[from];
+      if (typeof step !== 'function') return null;
+      out = step(out) || out;
+    }
+    out.schemaVersion = MEMORY_SCHEMA_VERSION;
+    return out;
+  }
+
   function normalizeMemory(raw) {
     const meta = raw.meta && typeof raw.meta === 'object' ? raw.meta : {};
     return {
@@ -599,9 +640,17 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       cache = normalizeMemory({});
       return cache;
     }
+    /** schema 版本校验：高版本/非法版本隔离，老库无版本按 v1 迁移上来 */
+    const migrated = migrateSchema(raw);
+    if (!migrated) {
+      quarantine(text, `schema 版本不认识（${String(raw.schemaVersion)}，支持 1..${MEMORY_SCHEMA_VERSION}）`);
+      ioFailed = false;
+      cache = normalizeMemory({});
+      return cache;
+    }
     /** 读成功了：解除禁令（可能是从上次的故障里恢复） */
     ioFailed = false;
-    cache = normalizeMemory(raw);
+    cache = normalizeMemory(migrated);
     return cache;
   }
 
@@ -610,7 +659,16 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
     /** 读盘失败过：这一轮绝不写，避免用空表覆盖盘上还能救的内容 */
     if (ioFailed) return false;
     try {
-      writeJsonAtomic(file(), m);
+      /**
+       * 写前留一份快照（只留一份 .prev），回滚/迁移出错时能拿回上一版。
+       * 首次运行（文件还不存在）没有可快照的内容，跳过。
+       * 快照失败不拦住正常写——它是保险，不是命门。
+       */
+      try {
+        if (existsSync(file())) copyFileSync(file(), `${file()}.prev`);
+      } catch { /* 快照写不下去也要继续写正本 */ }
+      /** 老库/首次运行没有版本字段，写盘时补上（懒升级，只读启动不惊动） */
+      writeJsonAtomic(file(), { ...m, schemaVersion: MEMORY_SCHEMA_VERSION });
       return true;
     } catch {
       /* 写不进去就算了，不能因为存记忆把这一轮弄挂 */
