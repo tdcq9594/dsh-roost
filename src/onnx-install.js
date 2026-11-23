@@ -51,6 +51,31 @@ const PHASE = Object.freeze({
   ERROR: 'error',
 });
 
+/**
+ * 本地 embedding 模型。照抄 Hindsight 的默认 ONNX 配置
+ * （`DEFAULT_EMBEDDINGS_ONNX_MODEL_ID = intfloat/multilingual-e5-small`），
+ * 多语言、中文可用、384 维。三个文件缺一不可：
+ *   model.onnx           ONNX 权重（~118MB）
+ *   tokenizer.json      分词器（~17MB，多语言词表大）
+ *   tokenizer_config.json 分词器元数据（~450B）
+ *
+ * 模型/分词器**不在 npm 包里**，走 HuggingFace 下载；国内走 hf-mirror。
+ */
+export const EMBED_MODEL_ID = 'intfloat/multilingual-e5-small';
+export const EMBED_FILES = Object.freeze([
+  ['onnx/model.onnx', 'model.onnx'],
+  ['tokenizer.json', 'tokenizer.json'],
+  ['tokenizer_config.json', 'tokenizer_config.json'],
+]);
+/** HuggingFace 下载源（国内镜像优先，官方兜底）——沿用 tts-install 的多源换源思路 */
+export const HF_REGISTRIES = Object.freeze([
+  'https://hf-mirror.com',
+  'https://huggingface.co',
+]);
+
+export const hfFileUrl = (modelId, file, registry = HF_REGISTRIES[0]) =>
+  `${registry}/${modelId}/resolve/main/${file}`;
+
 /** 找 tar：Windows 优先系统自带 bsdtar（-C C:\ 不会当成远程主机），退回 GNU 补 --force-local */
 async function resolveTar() {
   const winTar = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');

@@ -279,6 +279,7 @@ import {
 } from './sticker-manage.js';
 import { createTtsInstaller } from './tts-install.js';
 import { createOnnxInstaller } from './onnx-install.js';
+import { createModelInstaller } from './onnx-model-install.js';
 import { createTurnScenes } from './turn-scene.js';
 import { createGptSovits } from './gpt-sovits.js';
 import {
@@ -944,6 +945,17 @@ export function apply(ctx) {
     dataDir,
     log: (m) => log.info(m),
     registry: () => cfg.update?.registry || '',
+  });
+
+  /**
+   * 本地 embedding 模型（e5-small，中文可用）的下载器。
+   *
+   * 和运行时分开：运行时 115MB 从 npm、模型 135MB 从 HuggingFace，
+   * 两套源、两个按钮、两个状态机——混在一起一个失败就拖另一个。
+   */
+  const onnxModelInstaller = createModelInstaller({
+    dataDir,
+    log: (m) => log.info(m),
   });
 
   /**
@@ -8899,6 +8911,8 @@ export function apply(ctx) {
                   { id: 'tts-edge', label: '语音（微软在线）', dir: join(dataDir(), 'tts-edge') },
                   /** 本地 ONNX 运行时（记忆增强前置），装/卸走 onnx.* 独立 op */
                   { id: 'onnx', label: 'ONNX 运行时（本地记忆增强）', dir: join(dataDir(), 'onnx-runtime') },
+                  /** embedding 模型权重，从 HuggingFace 下，装/卸走 onnx.model-* op */
+                  { id: 'onnx-model', label: '本地 embedding 模型（e5-small）', dir: join(dataDir(), 'onnx-models') },
                 ]),
               });
             }
@@ -8986,6 +9000,13 @@ export function apply(ctx) {
                 ready: onnxInstaller.ready(),
                 install: onnxInstaller.status(),
                 usage: onnxInstaller.usage(),
+                /** 本地 embedding 模型（e5-small）：独立于运行时的另一套状态 */
+                model: {
+                  ready: onnxModelInstaller.ready(),
+                  modelId: onnxModelInstaller.modelId(),
+                  install: onnxModelInstaller.status(),
+                  usage: onnxModelInstaller.usage(),
+                },
               });
             }
             case 'onnx.install': {
@@ -8998,6 +9019,19 @@ export function apply(ctx) {
             }
             case 'onnx.uninstall': {
               const r = onnxInstaller.uninstall();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            /** 本地 embedding 模型（从 HuggingFace/hf-mirror 下，和 npm 运行时分开） */
+            case 'onnx.modelInstall': {
+              const r = onnxModelInstaller.start();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.modelCancel': {
+              const r = onnxModelInstaller.cancel();
+              return send(res, r.ok ? 200 : 409, r);
+            }
+            case 'onnx.modelUninstall': {
+              const r = onnxModelInstaller.uninstall();
               return send(res, r.ok ? 200 : 409, r);
             }
             /**
