@@ -5279,9 +5279,12 @@ export function apply(ctx) {
      * `annotate:true` 只在这一处开：转述的事带上「（听说的）」，
      * 别的调用方（扩展读接口、巩固的对照清单）拿到的仍是原文。
      */
-    const m = memory.listRanked(chatId, aliasesOf(chatId), { annotate: true });
     const st = memState.get(chatId) || {};
     const deep = typeof deepOverride === 'boolean' ? deepOverride : Boolean(st.deep);
+    /** E1：deep 时 directive 单独置顶注入，这里跳过避免重复占预算 */
+    const m = memory.listRanked(chatId, aliasesOf(chatId), {
+      annotate: true, skipDirective: deep, skipStale: deep,
+    });
 
     /**
      * 认人认群的顺序写在这里，是因为模型只从这一段知道「号码比 openid 稳」。

@@ -2691,9 +2691,9 @@ test('A1-3 高版本文件被隔离：按空记忆继续、不写回、原件留
   writeFileSync(join(dir, 'memory.json'), future, 'utf8');
   const m = createMemory();
   assert.deepEqual(m.list('g1').global, [], '高版本当空记忆，绝不猜读');
-  m.add('g1', '新写的'); // 尝试写
+  assert.equal(m.add('g1', '新写的'), false, '高版本隔离后禁止写盘（保护未来版本数据）');
   const raw = JSON.parse(readFileSync(join(dir, 'memory.json'), 'utf8'));
-  assert.deepEqual(raw.global, ['新写的'], '隔离后新写覆盖，不会残留未来数据');
+  assert.deepEqual(raw.global, ['未来的记忆'], '盘上的高版本文件一字未动');
   const dirs = readdirSync(dir).filter((n) => n.startsWith('memory.json.corrupted.'));
   assert.equal(dirs.length, 1, '原件被隔离备份');
   assert.equal(readFileSync(join(dir, dirs[0]), 'utf8'), future, '备份是原封不动的高版本数据');
@@ -2835,4 +2835,51 @@ test('E3 条目级时效：没有效期永远有效；区间外不算有效；�
   const future = scoreOfFact(meta, NOW + 5000);
   const fresh = scoreOfFact(meta, NOW);
   assert.ok(future < fresh, '过期后分数下降但不消失');
+});
+
+/* ---------------- 自检修复：3 个 P1 的回归测试 ---------------- */
+
+test('自检-A1：高版本隔离后 add/save 都不写盘（保护未来版本数据）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-schema-future2-'));
+  process.env.DSH_ROOST_DATA = dir;
+  const future = JSON.stringify({ schemaVersion: 999, global: ['未来的记忆'] });
+  writeFileSync(join(dir, 'memory.json'), future, 'utf8');
+  const m = createMemory();
+  assert.equal(m.add('g1', '新写的'), false);
+  assert.equal(readFileSync(join(dir, 'memory.json'), 'utf8'), future, '盘上文件一字未动');
+});
+
+test('自检-B1：被反驳到低信念不会升档（反驳不是加强）', () => {
+  assert.equal(growTier({ tier: 'long', evidence: [{}, {}, {}, {}], confidence: 0.2 }), 'long',
+    '反驳 4 次、信念很低，不能升到 core');
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-weaken-tier-'));
+  const m = createMemory();
+  m.add('g1', '被证伪的事', 'global', { tier: 'long' });
+  for (let i = 0; i < 4; i += 1) {
+    m.recordEvidence('g1', '被证伪的事', 'weaken', { kind: 'chat', detail: `反证${i}` });
+  }
+  assert.equal(readRaw().meta.global['被证伪的事'].tier, 'long', '反驳不升档');
+});
+
+test('自检-E3：未来才生效的事实不进 list/listRanked，过期不进', () => {
+  const NOW = 1_700_000_000_000;
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-valid-filter-'));
+  const m = createMemory({ now: () => NOW });
+  m.add('g1', '未来的事', 'global', { validFrom: NOW + 10_000 });
+  m.add('g1', '过期的事', 'global', { validUntil: NOW - 10_000 });
+  m.add('g1', '现在的事', 'global', { validFrom: NOW - 10_000, validUntil: NOW + 10_000 });
+  assert.deepEqual(m.list('g1').global, ['现在的事'], '时效外两条都不算活事实');
+  assert.deepEqual(m.listRanked('g1').global, ['现在的事'], '注入也只取有效期内的');
+});
+
+test('自检-A2：retention 还原老库不会凭空多 occurredAt', () => {
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-occ-restore-'));
+  const m = createMemory();
+  m.add('g1', '没写事发时间的事');
+  const entry = m.retention.entries().find((x) => x.text === '没写事发时间的事');
+  assert.equal(entry.occurredAt, 0, 'entries 导出原始 0，不用 at 回退');
+  process.env.DSH_ROOST_DATA = mkdtempSync(join(tmpdir(), 'roost-occ-restore2-'));
+  const m2 = createMemory();
+  m2.insertRaw(entry);
+  assert.equal(readRaw().meta.global['没写事发时间的事'].occurredAt, undefined, '还原后仍没有 occurredAt');
 });

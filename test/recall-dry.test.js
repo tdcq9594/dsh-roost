@@ -238,3 +238,24 @@ test('C2 interleave：显式打开时每路保底一条；默认关时名次不�
     done();
   }
 });
+
+test('自检-C2：interleave 被挤掉的条目不会被下一路重新捞回', async () => {
+  const { done } = fresh();
+  const { createJournal } = await import('../src/journal.js');
+  const NOW = Date.now();
+  const DAY = 86_400_000;
+  try {
+    const j = createJournal({ file: join(process.env.DSH_ROOST_DATA, 'journal.sqlite') });
+    j.add({ id: 'kw1', chatId: 'g1', text: '咖啡一杯', at: NOW - DAY });
+    j.add({ id: 'kw2', chatId: 'g1', text: '咖啡两杯', at: NOW - 2 * DAY });
+    j.add({ id: 'time1', chatId: 'g1', text: '那天看了电影', at: NOW - 3 * DAY });
+    const r = await j.search('咖啡', {
+      chatId: 'g1', limit: 2, from: NOW - 7 * DAY, to: NOW + DAY, interleave: true,
+    });
+    const ids = r.map((x) => x.id);
+    assert.equal(new Set(ids).size, ids.length, '不能重复捞回刚被挤掉的条目');
+    assert.equal(ids.length, 2);
+  } finally {
+    done();
+  }
+});

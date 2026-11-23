@@ -159,6 +159,13 @@ export const ARCHIVE_WEIGHT = 0.25;
 export function growTier(meta) {
   const cur = FACT_TIERS.includes(meta?.tier) ? meta.tier : 'long';
   if (cur === 'core') return 'core';
+  /**
+   * 信念强度护栏：被反驳到快不信了（confidence<0.5）不许升档。
+   * 否则"反驳 4 次"会因为证据条数够了反而升到 core（永久不衰减）——
+   * 那等于把"越被证伪越当真"，和证据账本的语义正好相反。
+   */
+  const confidence = Number(meta?.confidence);
+  if (Number.isFinite(confidence) && confidence < 0.5) return cur;
   const ev = Array.isArray(meta?.evidence) ? meta.evidence.length : 0;
   const w = Number(meta?.w) > 0 ? Number(meta.w) : 1;
   if (cur === 'short' && (ev >= 2 || w >= 2)) return 'long';
@@ -711,7 +718,14 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
     const migrated = migrateSchema(raw);
     if (!migrated) {
       quarantine(text, `schema 版本不认识（${String(raw.schemaVersion)}，支持 1..${MEMORY_SCHEMA_VERSION}）`);
-      ioFailed = false;
+      /**
+       * 高版本文件：给空视图**但禁止写盘**。
+       * 若这里设 ioFailed=false，之后任意 add()/save() 会用 v1 空库覆盖
+       * 盘上的高版本文件——原件虽在 .corrupted 备份里，但新版本升级回来
+       * 读到的是被降级的空库。"绝不写回"就靠这个标志守住。
+       */
+      ioFailed = true;
+      lastRetryAt = now();
       cache = normalizeMemory({});
       return cache;
     }
@@ -971,7 +985,11 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       const m = load();
       const c = collectChat(m, chatId, aliases);
       const alive = (arr, mm) =>
-        (Array.isArray(arr) ? arr : []).filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt);
+        (Array.isArray(arr) ? arr : [])
+          .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt)
+          /** E3 时效：还没生效 / 已过期的条目不当"活事实"给调用方 */
+          /** 用注入的 now，不直接用 Date.now()——测试/补跑历史时口径才一致 */
+          .filter((text) => isValidAt(mm?.[text], now()));
       return {
         global: alive(m.global, m.meta.global),
         chat: alive(c.list, c.meta),
@@ -1002,6 +1020,13 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
      */
     listRanked(chatId, aliases = [], opts = {}) {
       const annotate = opts?.annotate === true;
+      /**
+       * E1：deep 段会单独置顶注入 directive，这里就要跳过，免得同一条说两遍。
+       * 默认 false——非 deep 时 directive 仍当普通事实，不会凭空消失。
+       */
+      const skipDirective = opts?.skipDirective === true;
+      /** B3：deep 段单独提示"可能过时"，普通 facts 段就别再说一遍 */
+      const skipStale = opts?.skipStale === true;
       const m = load();
       const t = now();
       /**
@@ -1025,7 +1050,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
            * 老库一条 status 都没有，白名单会把它们一次性全滤掉——升级即失忆。
            */
           .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt
-            && statusOf(mm?.[text]) !== 'guess')
+            && isValidAt(mm?.[text], t)
+            && statusOf(mm?.[text]) !== 'guess'
+            && !(skipDirective && mm?.[text]?.directive === true)
+            && !(skipStale && ['stale', 'weakening'].includes(trendOf(evidenceOf(mm?.[text]).evidence, t))))
           .map((text, i) => {
             const meta = mm?.[text];
             const alias = Boolean(noDecay?.has(text));
@@ -1119,10 +1147,15 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (!EVIDENCE_RELATIONS.includes(relation)) return { ok: false, why: 'bad_relation' };
       const next = applyEvidence(hit.mm[hit.text], relation, evidence);
       writeEvidence(hit.mm[hit.text], next);
-      /** B1：巩固证据够了也升档（同一口径，不只在 add 路径生效） */
-      const target = hit.mm[hit.text];
-      const grown = growTier(target);
-      if (grown !== (FACT_TIERS.includes(target.tier) ? target.tier : 'long')) target.tier = grown;
+      /**
+       * B1：只有 reinforce 才升档。weaken/contradict 虽然也记一条证据，
+       * 但那是"反证变多"，不该让这条事实更深——否则越被反驳越永久。
+       */
+      if (relation === 'reinforce') {
+        const target = hit.mm[hit.text];
+        const grown = growTier(target);
+        if (grown !== (FACT_TIERS.includes(target.tier) ? target.tier : 'long')) target.tier = grown;
+      }
       save();
       return { ok: true, confidence: next.confidence, proofs: next.proofs };
     },
@@ -1537,11 +1570,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
               tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
               /** A2 双时态：同 status 的教训——不导出，清理→还原就把它们抹掉 */
               kind: kindOf(x),
-              occurredAt: occurredOf(x, Number(x.at) || 0),
+              /** 导出原始值，不用 occurredOf 的 at 回退——否则老库还原会凭空多一个字段 */
+              occurredAt: Number(x.occurredAt) > 0 ? Number(x.occurredAt) : 0,
               directive: x.directive === true,
-            /** E3 时效区间 */
-            validFrom: Number(x.validFrom) > 0 ? Number(x.validFrom) : null,
-            validUntil: Number(x.validUntil) > 0 ? Number(x.validUntil) : null,
+              /** E3 时效区间 */
+              validFrom: Number(x.validFrom) > 0 ? Number(x.validFrom) : null,
+              validUntil: Number(x.validUntil) > 0 ? Number(x.validUntil) : null,
               pin: clamp01(x.pin),
               reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : 0,
               archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : 0,

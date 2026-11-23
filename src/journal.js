@@ -1363,7 +1363,8 @@ function createJsonlStore(file, log) {
       const keys = chatId ? chatKeys(chatId, aliases) : [];
       return load()
         .filter((r) => Number(r.at) >= from && Number(r.at) < to && !Number(r.invalidAt))
-        .filter((r) => !keys.length || keys.includes(r.chatId) || r.chatId === '')
+        /** 与 sqlite 版同口径：全局(chat_id='')条目不进本群时间臂 */
+        .filter((r) => !keys.length || keys.includes(r.chatId))
         .sort((a, b) => Number(b.at) - Number(a.at))
         .slice(0, Math.max(1, Number(limit) || 20));
     },
@@ -2165,15 +2166,19 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
         const channels = [kw, vecHits.map((v) => v.r), temporalHits];
         /** 实体路也算一路（有 entityNames 注入时） */
         if (entityNames?.size) channels.push([...entityNames.keys()].map((id) => byId.get(id)).filter(Boolean));
+        /** 被替换出去的不能再被下一路当 fresh 捞回来（否则两路保底互相抵消） */
+        const evicted = new Set();
         for (const list of channels) {
           if (!list.length) continue;
-          /** 找这一路里**还没进 top-N**的最优候选（有些路会和其它路重叠） */
-          const fresh = list.find((r) => !present.has(String(r.id)));
+          /** 找这一路里既没进 top-N、也不是刚被挤掉的最优候选 */
+          const fresh = list.find((r) => !present.has(String(r.id)) && !evicted.has(String(r.id)));
           if (!fresh) continue;
           const pick = fresh;
           if (!pick || !byId.has(String(pick.id))) continue;
           const weakest = out[out.length - 1];
-          present.delete(String(weakest.id));
+          const evictedId = String(weakest.id);
+          evicted.add(evictedId);
+          present.delete(evictedId);
           out[out.length - 1] = { ...pick, score: weakest.score + 1e-9, why: `${weakest.why ? `${weakest.why}+` : ''}保底` };
           present.add(String(pick.id));
         }

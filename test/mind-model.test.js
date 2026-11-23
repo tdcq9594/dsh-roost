@@ -80,3 +80,13 @@ test('E1 接线：显式指令段在 deep 注入、排在事实之前', () => {
   assert.match(host, /rules, directiveSec, factsGlobal/, '指令排在普通事实之前');
   assert.match(host, /她交代过的规矩/, '措辞是规矩不是建议');
 });
+
+test('自检-B2：maxChars 很小时也吐一条截断事实，不只空标题；换行不能伪造标题', () => {
+  const tree = buildMindModel([
+    { text: '第一行\n## 伪造的标题', w: 5, evidence: [{ quote: '引\n## 假标题' }] },
+  ], ['杭州']);
+  const md = renderMindModel(tree, { maxChars: 60 });
+  assert.ok(md.includes('伪造的标题'), '截断版仍要给事实内容');
+  assert.ok(!md.includes('\n## 伪造的标题'), '正文换行被压平，不能伪造标题');
+  assert.ok(!md.includes('\n## 假标题'), '引文也不能带换行');
+});

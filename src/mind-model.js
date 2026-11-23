@@ -18,6 +18,8 @@
  */
 
 import { FACT_KINDS } from './memory.js';
+/** 防注入：事实正文来自模型/用户，带换行就能伪造 markdown 标题或条目 */
+import { oneLine } from './memory-line.js';
 
 const OTHER = '其他';
 
@@ -57,7 +59,8 @@ export function buildMindModel(facts = [], entities = []) {
     const quotes = (Array.isArray(f?.evidence) ? f.evidence : [])
       .filter((e) => e && typeof e === 'object')
       .map((e) => ({
-        quote: String(e.quote ?? '').slice(0, 120),
+        /** 证据有两种形状：带 quote 的可核验引文 / 只有 detail 的短摘要 */
+        quote: String(e.quote ?? e.detail ?? '').slice(0, 120),
         journalId: String(e.journalId ?? ''),
         at: Number(e.at) || 0,
       }))
@@ -89,18 +92,36 @@ export function buildMindModel(facts = [], entities = []) {
  */
 export function renderMindModel(tree, { maxChars = 4000, title = '她现在相信什么' } = {}) {
   const out = [`# ${title}`, '', `共 ${tree.total} 条，${tree.staleCount} 条待核实。`, ''];
+  const headerLines = out.length;
   for (const g of tree.groups || []) {
-    const block = [`## ${g.entity}`, ''];
+    const block = [`## ${oneLine(g.entity)}`, ''];
     for (const f of g.facts) {
       const note = TREND_NOTE[f.trend] ? `（${TREND_NOTE[f.trend]}）` : '';
       const kind = f.kind !== 'world' ? ` [${f.kind}]` : '';
-      block.push(`- ${f.text}${kind}${note}`);
-      for (const q of f.quotes) block.push(`  - 证据：${q.quote}${q.journalId ? ` (${q.journalId})` : ''}`);
+      block.push(`- ${oneLine(f.text)}${kind}${note}`);
+      for (const q of f.quotes) {
+        block.push(`  - 证据：${oneLine(q.quote)}${q.journalId ? ` (${oneLine(q.journalId)})` : ''}`);
+      }
     }
     block.push('');
     const candidate = out.concat(block).join('\n');
-    if (candidate.length > maxChars && out.length > 3) break;
+    /**
+     * 超预算时跳过**这一组**、继续试后面的小组——不能用 break：
+     * 第一组超了就 break 会把后面所有组连带丢光（只剩标题）。
+     */
+    if (candidate.length > maxChars) continue;
     out.push(...block);
+  }
+  /** 一组都放不下时，至少给一条截断的事实，别只吐个空标题 */
+  if (out.length === headerLines && (tree.groups || []).length) {
+    const first = tree.groups[0].facts[0];
+    if (first) {
+      /** 预留量按当前头部实际长度算，不写死 80（maxChars 很小时会截成空串） */
+      const used = out.join('\n').length + `## ${oneLine(tree.groups[0].entity)}`.length + 8;
+      const room = Math.max(12, maxChars - used);
+      const line = `- ${oneLine(first.text).slice(0, room)}…（已截断）`;
+      out.push(`## ${oneLine(tree.groups[0].entity)}`, '', line);
+    }
   }
   return out.join('\n').trimEnd();
 }
