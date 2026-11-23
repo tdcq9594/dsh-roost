@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 
 import {
   deriveTier, riskLines, installNotice, TIERS, FORMS, SCOPE_INFO, DEFAULT_SCOPES,
+  isReviewed, REVIEWED_MAX_LEVEL,
 } from '../src/ext-tier.js';
 import { EXT_DEFAULT_SCOPES, EXT_ALLOWED_SCOPES } from '../src/ext-registry.js';
 import { V1_SCOPES } from '../src/api-v1.js';
@@ -116,33 +117,98 @@ test('四级元数据与形态枚举完整', () => {
 });
 
 /**
- * 面板页面与进程内运行**也是权限**（2026-11 审查）。
+ * 面板页面与进程内运行**也是权限**，但按敏感 L2 算（2026-11 调整）。
  *
- * 以前分级只看 scopes / overrides / form：一个只声明默认 `state:read`、
- * 但带一个 `ui.page` 的扩展算 L1（无需确认）。而面板页是同源 iframe、
- * `/quick` 就在同源上——页面里的 JS 能拿主人身份发高权令牌、改配置。
- * `inprocess` 更直接：代码就在宿主进程里跑。
+ * 早期把同源 iframe 当成和「接管内置记忆」同级的最高风险（L3），导致官方
+ * 扩展带个设置页就被弹「手打扩展名」的二次确认。实际上 ui.page / inprocess
+ * 和 scopes 里的 config:write 是同一类「能改配置 / 读写本机」能力，够不着
+ * 「关闭内置功能」，所以两者都降到 L2（勾选确认），风险明细仍逐条列出。
  */
-test('分级：带 ui.page 的扩展不能算 L1（同源页面等于主人权限）', () => {
+test('分级：带 ui.page 的扩展算 L2（同源页面是敏感，不是核心接管）', () => {
   const t = deriveTier({ ui: { nav: { label: '小工具' }, page: 'p.html' } });
-  assert.equal(t.level, 3, '有面板页就是最高风险');
-  assert.equal(t.id, 'L3');
-  assert.notEqual(t.confirm, 'none', '必须要求确认');
-  assert.ok(t.reasons.some((r) => r.kind === 'ui' && r.key === 'page'), '要说清为什么');
+  assert.equal(t.level, 2, '有面板页是敏感级');
+  assert.equal(t.id, 'L2');
+  assert.equal(t.confirm, 'checkbox', '勾选确认即可，不用手打扩展名');
+  assert.ok(t.reasons.some((r) => r.kind === 'ui' && r.key === 'page' && r.level === 2), '要说清为什么');
   assert.ok(
     riskLines(t).some((r) => r.text.includes('同源')),
-    '确认清单里要出现「同源」——用户才知道它等于什么',
+    '确认清单里仍要出现「同源」——用户才知道它能做什么',
   );
 });
 
-test('分级：runtime:inprocess 也要抬到 L3', () => {
+test('分级：runtime:inprocess 抬到 L2', () => {
   const t = deriveTier({ ui: { runtime: 'inprocess', entry: 'index.js' } });
-  assert.equal(t.level, 3, '进程内运行能直接读写本机');
+  assert.equal(t.level, 2, '进程内运行是敏感级');
+  assert.equal(t.id, 'L2');
   assert.equal(t.form, 'inprocess');
-  assert.ok(t.reasons.some((r) => r.key === 'inprocess'));
+  assert.ok(t.reasons.some((r) => r.key === 'inprocess' && r.level === 2));
 });
 
 test('分级：没有 ui.page 的普通扩展仍是 L1（别把门关死）', () => {
   const t = deriveTier({ ui: { nav: { label: '设置页' } } });
   assert.equal(t.id, 'L1', '只有菜单没有页面，不该抬级');
+});
+
+/**
+ * 审核封顶（2026-11）：审核过的扩展无论声明什么权限，最高只到 L2。
+ * verified 只认索引灌入的 official/reviewed；self（作者自证）和空值都算未审核。
+ */
+test('审核封顶：只有 official/reviewed 算审核过，self / 空值不算', () => {
+  assert.equal(isReviewed('official'), true);
+  assert.equal(isReviewed('reviewed'), true);
+  assert.equal(isReviewed('self'), false, '作者自证不算审核');
+  assert.equal(isReviewed(undefined), false, '没列出不算审核');
+  assert.equal(REVIEWED_MAX_LEVEL, 2);
+});
+
+test('审核过的扩展：核心接管声明也封顶 L2，风险明细不隐藏', () => {
+  const core = { form: 'core', scopes: ['core:write'], overrides: ['memory'] };
+  const unverified = deriveTier(core);
+  assert.equal(unverified.id, 'L3', '未审核的照常是 L3');
+  assert.equal(unverified.confirm, 'type-name');
+
+  for (const v of ['official', 'reviewed']) {
+    const t = deriveTier(core, { verified: v });
+    assert.equal(t.id, 'L2', `${v} 封顶 L2`);
+    assert.equal(t.level, 2);
+    assert.equal(t.confirm, 'checkbox', '不用手打扩展名');
+    assert.ok(
+      t.reasons.some((r) => r.kind === 'override' && r.level === 3),
+      '封顶不隐藏风险：接管内置记忆仍要列在确认清单里',
+    );
+  }
+  assert.equal(deriveTier(core, { verified: 'self' }).id, 'L3', 'self 自证不封顶');
+});
+
+test('审核封顶同样压住未知 scope / 未知形态的 L3', () => {
+  assert.equal(deriveTier({ scopes: ['root:all'] }).id, 'L3');
+  assert.equal(deriveTier({ scopes: ['root:all'] }, { verified: 'official' }).id, 'L2');
+  assert.equal(deriveTier({ form: 'wasm' }).id, 'L3');
+  assert.equal(deriveTier({ form: 'wasm' }, { verified: 'reviewed' }).id, 'L2');
+});
+
+/**
+ * 市场卡片 / 安装确认 / 已装页三处一致（2026-11-23 issue 的市场分级不一致）。
+ *
+ * 三处的数据来源不同：市场卡片读索引条目，安装确认读下载来的 plugin.json，
+ * 已装页读实际授予的 scope。但同一扩展必须显示出同一个等级。索引里带着
+ * ui / scopes / form 原始声明（由 build-index 灌入），所以只要喂同一份声明
+ * + 同一个 verified，三处 deriveTier 必然同值。这里守住这条契约。
+ */
+test('市场卡片与安装确认：同一扩展的索引条目和清单算出同一等级', () => {
+  /** 模拟 build-index 输出的索引条目：只带分级用的原始声明子集 */
+  const indexEntry = {
+    id: 'voice-reply', verified: 'official',
+    scopes: [], form: undefined,
+    ui: { page: 'page.html', runtime: 'inprocess' },
+  };
+  /** 模拟 plugin.json：同样的声明（外加一堆和分级无关的配置） */
+  const manifest = {
+    id: 'voice-reply', scopes: [], usage: '...',
+    ui: { page: 'page.html', runtime: 'inprocess', actions: [{ id: 'status' }] },
+  };
+  const fromIndex = deriveTier(indexEntry, { verified: indexEntry.verified });
+  const fromManifest = deriveTier(manifest, { verified: indexEntry.verified });
+  assert.equal(fromIndex.id, fromManifest.id, '市场和安装的等级必须一致');
+  assert.equal(fromIndex.id, 'L2', '带设置页的官方扩展是 L2');
 });

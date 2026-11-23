@@ -18,10 +18,11 @@ import { createExtRegistry, SOURCE_FILE, MANIFEST_FILE } from '../src/ext-regist
 import {
   createExtMarket, assertSafeIndexUrl, isExtensionEntry, pickExtensions, isRevoked,
   indexUrlFor, assertSafeTarballUrl, MARKET_SOURCES, DEFAULT_EXT_REPO, DEFAULT_EXT_INDEX_URL,
+  entryHashes,
 } from '../src/ext-market.js';
 import { FW_REPO, EXT_REPO, PERSONA_REPO, GITEE_PERSONA_REPO, giteeRepoOf } from '../src/repo.js';
 import {
-  hashDir, untar, extractTarGz, pickSubtree, safeRelPath, writeFiles,
+  hashDir, untar, extractTarGz, pickSubtree, safeRelPath, writeFiles, HASH_ALGO,
 } from '../src/ext-bundle.js';
 
 const HOMES = [];
@@ -94,15 +95,29 @@ function writeTree(root, files) {
 // ---------------------------------------------------------------- ext-bundle
 
 test('G6-1 目录哈希与插件仓 hashdir.mjs 同值（三方契约）', async () => {
+  assert.equal(HASH_ALGO, 2, '框架侧算法标记必须与插件仓 scripts/hashdir.mjs 一致');
   const d = tmpHome();
   writeTree(d, {
     'a.txt': 'hello\n',
     'sub/b.txt': 'world\r\n',
     'node_modules/x.js': 'skip\n',
     '.DS_Store': 'meta\n',
+    /** algo2 新规则：纯文档、旧依赖 / 抽帧目录、运行时状态都不进指纹 */
+    'README.md': 'doc\n',
+    'docs/guide.MD': 'more\n',
+    'LICENSE': 'MIT\n',
+    'licence.txt': 'x\n',
+    'COPYING.md': 'x\n',
+    'shots/a.png': 'x',
+    'deps/old.js': 'x',
+    'ui-data.json': '{}',
+    'seen.json': '{}',
   });
   // 期望值由插件仓 scripts/hashdir.mjs 对同一夹具算出；两份实现漂移即红。
-  assert.equal(await hashDir(d), 'ef4635c55daa711eb072ee741c6f86313945e8dd8a300581acbfc8ef95f9b791');
+  assert.equal(await hashDir(d), 'ef4635c55daa711eb072ee741c6f86313945e8dd8a300581acbfc8ef95f9b791',
+    'algo2 默认：新增的文档 / 运行时文件全被排除，哈希应与老夹具相同');
+  assert.equal(await hashDir(d, { algo: 1 }), '7b7394aa843b8533d61930ec6cc68f49c8a38a3d05729828badabeeda4601b33',
+    'algo1：只排依赖 / VCS 元数据，文档与运行时文件仍计入（老版本 1.4.0 的口径）');
 });
 
 test('G6-2 tar.gz 解包：剥顶层、取子树、长路径 prefix 也认', () => {
@@ -176,6 +191,26 @@ test('G6-4c 市场落盘拒绝「不参与哈希」的目录，否则 sha256 可
     () => writeFiles(dest, new Map([['__pycache__/m.pyc', Buffer.from('x')]]), { rejectSkips: true }),
     /不参与哈希/,
   );
+  // algo2 新跳过项同样不许落盘（否则往这些路径塞 payload 可绕过 sha256）
+  for (const badPath of ['deps/old.js', 'shots/a.png', 'ui-data.json', 'seen.json', 'cookie.txt']) {
+    await assert.rejects(
+      () => writeFiles(dest, new Map([[badPath, Buffer.from('x')]]), { rejectSkips: true }),
+      /不参与哈希/, badPath,
+    );
+  }
+  /**
+   * issue #37 的核心回归：纯文档**只从哈希里排除，不进 SKIP_FILES**。
+   * 若把 README / LICENSE 塞进跳过表，这里就会拒装所有带文档的合法包。
+   */
+  const docDest = join(d, 'docs-out');
+  const nDocs = await writeFiles(docDest, new Map([
+    ['plugin.json', Buffer.from('{}')],
+    ['README.md', Buffer.from('# doc')],
+    ['LICENSE', Buffer.from('MIT')],
+    ['docs/guide.MD', Buffer.from('more')],
+  ]), { rejectSkips: true });
+  assert.equal(nDocs, 4, '带文档的合法包必须能落盘');
+  assert.equal(fs.existsSync(join(docDest, 'README.md')), true);
   // 不带 rejectSkips 时保持原行为（普通落盘用途）
   const n = await writeFiles(dest, new Map([['a.txt', Buffer.from('a')]]));
   assert.equal(n, 1);
@@ -247,7 +282,7 @@ function rig({ rows, indexExtra = {}, opts = {} } = {}) {
     capStore: opts.capStore ?? null,
     /** 配置 getter（数据源 / 备份保留天数），默认「没配」 */
     marketCfg: opts.marketCfg ?? (() => ({})),
-    log: { info: () => {}, warn: () => {} },
+    log: opts.log ?? { info: () => {}, warn: () => {}, error: () => {} },
   });
   return { dir, registry, market, groups, blocks };
 }
@@ -267,6 +302,82 @@ test('G6-8 一键装：哈希校验 → 原子落位 → .source.json → 权限
   assert.equal(fs.existsSync(join(r.dir, '.market-tmp', 'bili')), false, '暂存目录要清掉');
 });
 
+/** 带 README 的包：algo1 与 algo2 哈希必然不同，是双写兼容的关键夹具。 */
+function filesWithDoc(id) {
+  return { ...filesFor(id), 'README.md': '# 说明\n' };
+}
+async function hashesWithDoc(id) {
+  const d = tmpHome();
+  writeTree(d, filesWithDoc(id));
+  return { v1: await hashDir(d, { algo: 1 }), v2: await hashDir(d) };
+}
+function rigWithDoc({ rows, opts = {} } = {}) {
+  return rig({
+    rows,
+    opts: {
+      ...opts,
+      download: opts.download
+        ?? (async (entry, dest) => { writeTree(dest, filesWithDoc(entry.id)); return 3; }),
+    },
+  });
+}
+
+test('G6-8c 双哈希字段解析：legacy / current 分离，非法值忽略', () => {
+  const v1 = 'a'.repeat(64), v2 = 'b'.repeat(64);
+  assert.deepEqual(entryHashes({ sha256: v1, sha256_v2: v2 }), { legacy: v1, current: v2 });
+  assert.deepEqual(entryHashes({ sha256: v1 }), { legacy: v1, current: '' });
+  assert.deepEqual(entryHashes({ sha256_v2: v2 }), { legacy: '', current: v2 });
+  assert.deepEqual(entryHashes({ sha256: 'bad', sha256_v2: 'also bad' }), { legacy: '', current: '' });
+  assert.deepEqual(entryHashes({}), { legacy: '', current: '' });
+});
+
+test('G6-8d 双写索引 + 带 README 的包：新旧索引形态都能装', async () => {
+  const { v1, v2 } = await hashesWithDoc('bili');
+  assert.notEqual(v1, v2, '夹具必须让两算法结果不同，否则测不出兼容');
+
+  // 双写：新版认 sha256_v2，落位记录权威哈希
+  const both = rigWithDoc({ rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: v1, sha256_v2: v2 }] });
+  const a = await both.market.install('bili');
+  assert.equal(a.ok, true, a.message);
+  const srcA = JSON.parse(fs.readFileSync(join(both.registry.pathOf('bili'), SOURCE_FILE), 'utf8'));
+  assert.equal(srcA.sha256, v2, '记录权威（algo2）哈希，供新版更新判定');
+
+  // 只有 sha256 且是 algo1 值：旧镜像 / 1.4.0 口径，新版要能降级校验
+  const legacy = rigWithDoc({ rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: v1 }] });
+  const b = await legacy.market.install('bili');
+  assert.equal(b.ok, true, b.message);
+
+  // 只有 sha256 但值是 algo2：过渡期「索引刚换、老字段被覆盖」的窗口
+  const trans = rigWithDoc({ rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: v2 }] });
+  const c = await trans.market.install('bili');
+  assert.equal(c.ok, true, c.message);
+});
+
+test('G6-8e 旧版 1.4.0 装的扩展（记录 algo1）不会被误判成需重装 / 有更新', async () => {
+  const { v1, v2 } = await hashesWithDoc('bili');
+  let downloads = 0;
+  const r = rigWithDoc({
+    rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: v1, sha256_v2: v2 }],
+    opts: { download: async (entry, dest) => { downloads++; writeTree(dest, filesWithDoc(entry.id)); return 3; } },
+  });
+  await r.market.install('bili');
+  assert.equal(downloads, 1);
+
+  // 模拟存量：旧版装的时候 source.sha256 记的是 algo1 值
+  const srcPath = join(r.registry.pathOf('bili'), SOURCE_FILE);
+  fs.writeFileSync(srcPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(srcPath, 'utf8')), sha256: v1 }), 'utf8');
+
+  const up = await r.market.detectUpdates();
+  assert.deepEqual(up.rows, [], 'algo1 哈希命中 legacy 字段，代码没变就不该报更新');
+  const listed = await r.market.list();
+  assert.equal(listed.rows.find((x) => x.id === 'bili').updateAvailable, false);
+
+  const again = await r.market.install('bili');
+  assert.equal(again.ok, true);
+  assert.equal(again.alreadyLatest, true, '已装且哈希匹配任一字段 → 直接短路，不重复下载');
+  assert.equal(downloads, 1, '没有触发第二次下载');
+});
+
 test('G6-8b 索引条目缺 sha256：拒绝安装，不能「索引说什么就装什么」', async () => {
   const r = rig({ rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili' }] });
   const out = await r.market.install('bili');
@@ -282,6 +393,20 @@ test('G6-9 哈希不匹配：拒绝落位，扩展目录不存在', async () => 
   assert.match(out.message, /目录哈希与索引不一致/);
   assert.equal(r.registry.read('bili'), null);
   assert.equal(fs.existsSync(r.registry.pathOf('bili')), false);
+});
+
+test('G6-9b 安装失败写进日志环（log.error），面板可事后追', async () => {
+  const errors = [];
+  const r = rig({
+    rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: 'f'.repeat(64) }],
+    opts: { log: { info: () => {}, warn: () => {}, error: (m) => errors.push(m) } },
+  });
+  const out = await r.market.install('bili');
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, 'install_failed');
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /安装扩展 bili 失败/);
+  assert.match(errors[0], /目录哈希与索引不一致/);
 });
 
 test('G6-10 撤回条目拒装；foreign 目录一律拒，市场没有 force 后门', async () => {
