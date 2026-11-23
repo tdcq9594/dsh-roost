@@ -3090,6 +3090,7 @@ test('待跟进：没这条事实时明确报错，不静默成功', () => {
 test('待跟进：默认关、扩展接口有登记、注入只在 live 时记账（接线断言）', async () => {
   const { DEFAULTS } = await import('../src/config.js');
   assert.equal(DEFAULTS.memory.followUp.enabled, false, '新能力默认关，不改变说话方式');
+  assert.deepEqual(DEFAULTS.memory.followUp.allowChats, [], '白名单默认空=不限制，与升级前逐字一致');
 
   const { scopeOfOp } = await import('../src/ext-quick-scopes.js');
   const s = scopeOfOp('memory.followUp');
@@ -3102,6 +3103,15 @@ test('待跟进：默认关、扩展接口有登记、注入只在 live 时记�
   assert.match(host, /memory\.markFollowUpAsked\(/, '出站成功后要记账');
   /** 面板预览那条路不能带 live：预览一次就烧一次机会是不可接受的 */
   assert.doesNotMatch(host, /memoryStatic\(panelChat, forced, \{ live: true \}\)/, '面板预览不许记账');
+  /**
+   * 护栏 / 白名单 / 空 question 跳过的**文案与逻辑**都在 memory-line.test.js
+   * 里对纯函数做真行为断言（文本断言防不住"代码在、功能没接线"）。
+   * 这里只查接线：host 确实调了那两个纯函数、且取全量（limit 0）不让空
+   * question 僵尸挤掉有效跟进。
+   */
+  assert.match(host, /followUpAllowed\(/, '白名单判断要接纯函数');
+  assert.match(host, /followUpSection\(/, '注入段拼装要接纯函数');
+  assert.match(host, /dueFollowUps\(chatId, aliases, \{ limit: 0 \}\)/, '要取全量再挑，别在下游先 limit');
 });
 
 test('清理→还原：E1/E2/A2/E3 字段和日记的 digest/向量都要活着回来', async () => {

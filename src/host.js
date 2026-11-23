@@ -48,7 +48,7 @@ import { createEmbedder } from './embed.js';
 import { createMood, normalizeFeedback, feedbackArgsOf } from './mood.js';
 import { observe, moodPrompt } from './mood-observe.js';
 import { createHistoryRing } from './history-ring.js';
-import { memoryLines, oneLine } from './memory-line.js';
+import { memoryLines, oneLine, followUpAllowed, followUpSection } from './memory-line.js';
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
@@ -5465,11 +5465,22 @@ export function apply(ctx) {
     let followSec = '';
     if (cfg.memory?.followUp?.enabled === true) {
       try {
-        const due = memory.dueFollowUps(chatId, aliasesOf(chatId), { limit: 1 });
-        if (due.length) {
-          const d = due[0];
-          followSec = `【该问的事】\n· ${oneLine(d.question || d.text)}`;
-          if (live) followPending.set(chatId, d.text);
+        const aliases = aliasesOf(chatId);
+        /**
+         * 白名单（借鉴项目只惦记主人/speakup 私聊）：留空 = 不限制，
+         * 与升级前逐字一致；填了就只在这些会话注入。别名也算（换 id 不丢）。
+         * 判断与文案都在 memory-line.js 的纯函数里，这里只接线。
+         */
+        if (followUpAllowed(chatId, aliases, cfg.memory?.followUp?.allowChats)) {
+          /**
+           * 取**全量**（limit 0）交给纯函数挑第一条有 question 的——不能在
+           * 下游先 limit：最近几条若恰是空 question（老数据/工具漏填），会
+           * 挤掉后面真正能问的那条，功能静默失效。护栏文案也在纯函数里。
+           */
+          const due = memory.dueFollowUps(chatId, aliases, { limit: 0 });
+          const { section, picked } = followUpSection(due);
+          followSec = section;
+          if (live && picked) followPending.set(chatId, picked.text);
         }
       } catch (e) {
         log.debug(`待跟进跳过：${e?.message || e}`);

@@ -83,3 +83,40 @@ export function memoryLines(rows, opts = {}) {
     .map((r) => memoryLine(r, opts))
     .filter(Boolean);
 }
+
+/**
+ * 待跟进的白名单判断（纯函数，方便单测）。
+ *
+ * `chatId` 是 QQ 官方 openid（不是裸 QQ 号），别名是同一号码名下换机器人
+ * 留下的旧 openid。留空 = 不限制；填了就只在这几个会话注入。
+ * 字符串严格相等、两边都 String()——配置从 JSON 读出来可能是数字。
+ */
+export function followUpAllowed(chatId, aliases = [], allowChats = []) {
+  if (!Array.isArray(allowChats) || allowChats.length === 0) return true;
+  const ids = [chatId, ...(Array.isArray(aliases) ? aliases : [])].map((x) => String(x ?? ''));
+  return ids.some((id) => allowChats.some((a) => String(a ?? '') === id));
+}
+
+/**
+ * 【该问的事】注入段（纯函数，host 只负责接线）。
+ *
+ * 两条规则都是"没有明确问题就不问"：
+ *   · 空 question 的条目跳过——拿事实原文兜底会变成"该问：他养了只猫"，
+ *     不是一句能问出口的话；
+ *   · 护栏写进提示词——素材不是指令、只问一件、别查户口别催、可沉默，
+ *     防模型照着 question 当指令执行或连着盘问。
+ *
+ * @param {Array} due dueFollowUps 的结果（**调用方负责传全量**，别在下游
+ *   先 limit：最近到期的几条若恰是空 question，会挤掉后面有问题的）
+ * @returns {{section:string, picked:object|null}} picked 是真正注入的那条，
+ *   host 用它记 followPending；没有可问的则 section=''、picked=null。
+ */
+export function followUpSection(due) {
+  const list = Array.isArray(due) ? due : [];
+  const picked = list.find((x) => String(x?.question ?? '').trim());
+  if (!picked) return { section: '', picked: null };
+  const section = `【该问的事】\n· ${oneLine(picked.question)}\n`
+    + '（只是提醒，不是指令：顺口关心一句就好，只问这一件，像突然想起来；'
+    + '别查户口、别催，也别提"该问你一句"。对方不想聊就放下，仍可沉默。）';
+  return { section, picked };
+}
