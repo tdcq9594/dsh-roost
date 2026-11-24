@@ -17443,7 +17443,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 设置页：扩展清单 + usage 预览编辑 + 两个凭据状态。 */
-    function ExtSettingsBlock({ toast, part = 'all' }) {
+    function ExtSettingsBlock({ toast, part = 'all', reloadExtPages }) {
       /**
        * 市场 / 已安装拆成两页（2026-11-12，与 aurabot 的「模块」组对齐）。
        *
@@ -17551,6 +17551,7 @@ window.__ModuleLoader__.load({
           }
           toast(r.message || (r.ok ? '完成' : '失败'))
           await load()
+          if (reloadExtPages) await reloadExtPages()
           if (market) await loadMarket(true, marketFilters())
         } finally {
           stopProgress()
@@ -17576,6 +17577,7 @@ window.__ModuleLoader__.load({
           })
           toast(r.message || (r.ok ? '完成' : '失败'))
           await load()
+          if (reloadExtPages) await reloadExtPages()
           if (market) await loadMarket(true, marketFilters())
         } finally {
           stopProgress()
@@ -17600,6 +17602,7 @@ window.__ModuleLoader__.load({
           const r = await EXT_POST('extensions.market.revoke', { id, reason: 'panel' })
           toast(r.message || (r.ok ? '已停用' : '停用失败'))
           await load()
+          if (reloadExtPages) await reloadExtPages()
           await loadMarket(true, marketFilters())
         } finally {
           setMarketBusy('')
@@ -20901,9 +20904,9 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ExtTab({ quick, toast, extPages, setTab }) {
+    function ExtTab({ quick, toast, extPages, setTab, reloadExtPages }) {
       return h('div', null,
-        h(ExtSettingsBlock, { toast, part: 'installed' }),
+        h(ExtSettingsBlock, { toast, part: 'installed', reloadExtPages }),
         h(ExtPagesIndexCard, { extPages, setTab }),
         h(ExtCapsBlock, { quick, toast }),
         h(ExtWizardBlock, { toast }),
@@ -20911,8 +20914,8 @@ window.__ModuleLoader__.load({
     }
 
     /** 市场：能装什么、装 / 更新 / 停用 */
-    function ExtMarketTab({ toast }) {
-      return h(ExtSettingsBlock, { toast, part: 'market' })
+    function ExtMarketTab({ toast, reloadExtPages }) {
+      return h(ExtSettingsBlock, { toast, part: 'market', reloadExtPages })
     }
 
     /** 接口：给独立会话发 /v1 客户端令牌 */
@@ -22404,14 +22407,22 @@ window.__ModuleLoader__.load({
        * 页名、分组、字段白名单，数据另外单独拉 `/extensions/ui/data`。
        */
       const [extPages, setExtPages] = useState([])
-      useEffect(() => {
-        let alive = true
-        ;(async () => {
+      /**
+       * 装 / 卸扩展后要重拉一次扩展页清单。
+       *
+       * 以前只有挂载时拉一遍：市场里装完新扩展，导航里没有它的页、扩展索引卡
+       * 也不显示，必须整页刷新才出现——用户看到的就是「页面挂载不及时」。
+       * 服务端 `/extensions/ui` 是现读清单，不需要重启 DSH，前端补这一下即可。
+       */
+      const extPagesAlive = useRef(true)
+      useEffect(() => () => { extPagesAlive.current = false }, [])
+      const reloadExtPages = useCallback(async () => {
+        try {
           const r = await get('/extensions/ui')
-          if (alive && Array.isArray(r?.pages)) setExtPages(r.pages)
-        })()
-        return () => { alive = false }
+          if (extPagesAlive.current && Array.isArray(r?.pages)) setExtPages(r.pages)
+        } catch {}
       }, [])
+      useEffect(() => { reloadExtPages() }, [reloadExtPages])
       /** 静态页 + 扩展页。只用于渲染导航，不改 `TABS` 本身 */
       /**
        * 要藏起来的页（自动 + 用户手动），导航 / Alt+K / 一级组全读这一份。
@@ -23205,8 +23216,8 @@ window.__ModuleLoader__.load({
             /** 2.8 名单要读 config.awake.groups / 写回整份，还要展示框架侧主人状态 */
             config, saveCfg, setupSt, setTab,
           }) : null,
-          tab === 'ext' ? h(ExtTab, { quick, toast, extPages, setTab }) : null,
-          tab === 'ext-market' ? h(ExtMarketTab, { toast }) : null,
+          tab === 'ext' ? h(ExtTab, { quick, toast, extPages, setTab, reloadExtPages }) : null,
+          tab === 'ext-market' ? h(ExtMarketTab, { toast, reloadExtPages }) : null,
           tab === 'ext-api' ? h(ExtApiTab, { toast }) : null,
           /** 6.1：扩展声明的页面。tab key 形如 `ext:<id>`，不在静态 TABS 里 */
           String(tab).startsWith('ext:')

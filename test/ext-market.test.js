@@ -451,6 +451,21 @@ test('G6-12 卸载：删目录 + 清权限组 + 受管块重算不留悬空条�
   assert.deepEqual(r.blocks, [{ ids: [], apply: true }], '卸载后受管块应为空');
 });
 
+test('G6-12b registry 的 partial 提示要透到面板，不能被「已卸载」盖掉', async () => {
+  const sha = await shaFor('bili');
+  const r = rig({ rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: sha }] });
+  await r.market.install('bili');
+  r.registry.remove = () => ({
+    ok: true, id: 'bili', partial: true,
+    message: '扩展 bili 的文件已删除，但目录还在（扩展进程可能仍在运行）',
+  });
+  const out = r.market.remove('bili');
+  assert.equal(out.ok, true);
+  assert.equal(out.partial, true);
+  assert.match(out.message, /目录还在/, '空壳残留必须让用户看见');
+  assert.ok(r.groups.some((g) => g.remove === 'bili'), '收尾清理仍要做');
+});
+
 test('G6-13 更新按目录哈希判，不看 version', async () => {
   const sha = await shaFor('bili');
   const r = rig({ rows: [{ id: 'bili', kind: 'dsh-extension', path: 'plugins/bili', sha256: sha }] });

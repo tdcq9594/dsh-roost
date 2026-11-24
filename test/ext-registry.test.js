@@ -23,8 +23,11 @@ import {
   credentialRef,
   validateManifest,
   createExtRegistry,
+  createClientStore,
+  createExtSecrets,
   extensionsDir,
   secretsDir,
+  MANIFEST_SHA_FILE,
 } from '../src/ext-registry.js';
 
 function tmpHome(t) {
@@ -147,6 +150,84 @@ test('空目录（卸载残留）不算用户手写：能重新安装，也能�
   // 卸掉之后目录应当整个消失，不留残骸
   assert.equal(reg.remove('bili').ok, true);
   assert.equal(fs.existsSync(empty), false);
+});
+
+test('remove：Windows 删内容留空壳抛 EPERM 时仍吊销令牌并如实回 partial', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const clientStore = createClientStore({ dir: home });
+  const secrets = createExtSecrets({ dir: home });
+  assert.equal(createExtRegistry({ dir: home }).install(src, { source: { repo: 'm', version: '1.0.0' } }).ok, true);
+  const issued = secrets.issue('bili', clientStore, { scopes: ['message:write'] });
+  assert.ok(issued.token, '前提：令牌已签发');
+  assert.ok(clientStore.get('ext:bili'), '前提：令牌记录已建立');
+
+  const warn = [];
+  const reg = createExtRegistry({
+    dir: home, secrets, clientStore, log: { warn: (m) => warn.push(m) },
+    /** Windows 现场：文件内容删光、目录被进程 cwd 占住，rmSync 抛 EPERM */
+    rmrfSync(p) {
+      fs.rmSync(p, { recursive: true, force: true });
+      fs.mkdirSync(p, { recursive: true });
+      const e = new Error("EPERM: operation not permitted, rmdir '\\\\?\\C:\\...\\extensions\\bili'");
+      e.code = 'EPERM';
+      throw e;
+    },
+  });
+  const out = reg.remove('bili');
+  assert.equal(out.ok, true, '文件确实删掉了，不该当成整个卸载失败');
+  assert.equal(out.partial, true);
+  assert.match(out.message, /目录还在/);
+  assert.match(out.message, /空壳.*自动清掉/, '空壳才说重启会自动清');
+  assert.equal(fs.existsSync(join(extensionsDir(home), 'bili', 'plugin.json')), false);
+  assert.equal(clientStore.get('ext:bili'), null, '空壳残留不能留下仍可验证的高权令牌');
+  assert.equal(JSON.parse(fs.readFileSync(join(home, MANIFEST_SHA_FILE), 'utf8')).bili, undefined);
+  assert.deepEqual(reg.list().map((x) => x.id), []);
+  assert.ok(warn.some((m) => m.includes('EPERM')), '删不掉的原因要记进日志');
+});
+
+test('remove：目录里还有文件时不能说「重启会自动清掉」', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const clientStore = createClientStore({ dir: home });
+  const secrets = createExtSecrets({ dir: home });
+  assert.equal(createExtRegistry({ dir: home }).install(src, { source: { repo: 'm', version: '1.0.0' } }).ok, true);
+  secrets.issue('bili', clientStore);
+  const reg = createExtRegistry({
+    dir: home, secrets, clientStore,
+    rmrfSync(p) {
+      fs.rmSync(join(p, 'plugin.json'), { force: true });
+      const e = new Error('EPERM'); e.code = 'EPERM'; throw e;
+    },
+  });
+  const out = reg.remove('bili');
+  assert.equal(out.ok, true);
+  assert.equal(out.partial, true);
+  assert.match(out.message, /手动删除/);
+  assert.equal(out.message.includes('自动清掉'), false, '非空残留重启也清不掉，别骗用户');
+  assert.equal(clientStore.get('ext:bili'), null);
+});
+
+test('remove：文件真没删动时报错且不吊销令牌', (t) => {
+  const { home, src } = staged(t, 'bili');
+  const clientStore = createClientStore({ dir: home });
+  const secrets = createExtSecrets({ dir: home });
+  assert.equal(createExtRegistry({ dir: home }).install(src, { source: { repo: 'm', version: '1.0.0' } }).ok, true);
+  secrets.issue('bili', clientStore);
+
+  const reg = createExtRegistry({
+    dir: home, secrets, clientStore,
+    rmrfSync() {
+      const e = new Error('EACCES: permission denied');
+      e.code = 'EACCES';
+      throw e;
+    },
+  });
+  const out = reg.remove('bili');
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, 'remove_failed');
+  assert.equal(out.code, 'EACCES');
+  assert.match(out.message, /令牌未吊销/);
+  assert.ok(clientStore.get('ext:bili'), '扩展还在，令牌必须留着');
+  assert.equal(fs.existsSync(join(extensionsDir(home), 'bili', 'plugin.json')), true);
 });
 
 test('用户手写目录（有 plugin.json 但没有 .source.json）仍然只读', (t) => {

@@ -3105,6 +3105,33 @@ test('已安装页每行有停用/卸载入口；市场 danger 按钮文字不�
     '主文字色规则要在 danger 之前，armed 白字在之后')
 })
 
+test('装/卸扩展后立即重拉扩展页清单，不等整页刷新', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes('const reloadExtPages = useCallback(async () => {'),
+    '扩展页清单要抽成可复用的刷新函数')
+  const reload = src.slice(src.indexOf('const reloadExtPages'), src.indexOf('useEffect(() => { reloadExtPages() }'))
+  assert.ok(reload.includes("get('/extensions/ui')"), '刷新要现读服务端清单')
+  assert.ok(src.includes('useEffect(() => { reloadExtPages() }, [reloadExtPages])'),
+    '首次挂载仍要拉一遍')
+  /* 市场页/已安装页两条入口都要接到这个回调，否则在那一页装完仍旧不刷新 */
+  assert.ok(src.includes("h(ExtSettingsBlock, { toast, part: 'installed', reloadExtPages })"))
+  assert.ok(src.includes("h(ExtSettingsBlock, { toast, part: 'market', reloadExtPages })"))
+  assert.ok(src.includes('h(ExtTab, { quick, toast, extPages, setTab, reloadExtPages })'))
+  assert.ok(src.includes('h(ExtMarketTab, { toast, reloadExtPages })'))
+  /* 三处动作各自断言，别只数出现次数（注释里写一句也能把计数凑够） */
+  const between = (a, b) => {
+    const s = src.indexOf(a)
+    return src.slice(s, src.indexOf(b, s + a.length))
+  }
+  assert.ok(between('const marketAct = async', 'const confirmScopeAct').includes('if (reloadExtPages) await reloadExtPages()'),
+    '安装 / 卸载后要刷新')
+  assert.ok(between('const confirmScopeAct = async', 'const checkUpdates').includes('if (reloadExtPages) await reloadExtPages()'),
+    '授权确认后的安装要刷新')
+  assert.ok(between('const revokeMarket = async', 'const load = async').includes('if (reloadExtPages) await reloadExtPages()'),
+    '停用后要刷新')
+  assert.ok(reload.includes('extPagesAlive.current'), '页面卸载后的迟到响应不能再写 state')
+})
+
 test('接入步骤：普通分节 + 状态徽章，不再有左侧圆圈和竖线轨道', () => {
   const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
   // 主人 2026-11-24 明确不要这套进度条：长步骤会把 rail 拉断，反而更乱

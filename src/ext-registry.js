@@ -275,7 +275,11 @@ function pruneLeftoverDir(p) {
   return { skip: true };
 }
 
-export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = null, clientStore = null } = {}) {
+export function createExtRegistry({
+  dir = dataDir(), log = () => {}, secrets = null, clientStore = null,
+  /** 只给 remove() 测试注入：模拟 Windows 上「内容删光但目录删不掉」的 IO 现场 */
+  rmrfSync = rmrf,
+} = {}) {
   const root = extensionsDir(dir);
 
   /**
@@ -625,7 +629,38 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
     if (isForeign(id) && !force) {
       return { ok: false, reason: `目录 ${id} 是用户手写的扩展，拒绝卸载（确认要删就带 force）` };
     }
-    rmrf(dest);
+    /**
+     * Windows 上扩展进程以自己的目录当 cwd：`rmSync` 常常**删光内容、却删不掉
+     * 目录本身**并抛 EPERM。以前这里直接让异常穿出去，结果是：
+     *   · 面板只弹一条 `EPERM ...`，看起来像「卸载失败」；
+     *   · 令牌 / api.clients / 权限组 / 清单指纹**一个都没清**——扩展已经没了，
+     *     旧令牌却还挂着高权 scope（实测 bili 卸载后 ext:bili 仍在）。
+     * 现在先吞掉 IO 异常，再看现场：清单没了＝文件确实删掉了，按 partial 走完
+     * 所有吊销并如实告诉用户「文件已删、目录还在」；清单还在＝真没删动，
+     * 报失败且**不吊销**（否则一个还能跑的扩展会被当场废掉）。
+     */
+    let rmError = null;
+    try {
+      rmrfSync(dest);
+    } catch (e) {
+      rmError = e;
+    }
+    /**
+     * 认「清单还在不在」而不是信 rmSync 的错误码：EBUSY/EPERM 既可能是
+     * 「删光内容留空壳」（该收尾），也可能是「压根没权限动」（不能吊销令牌）。
+     * 只有明确 ENOENT 才算清单没了；其它读不到一律按「还在」保守处理。
+     */
+    let manifestGone = false;
+    try { fs.statSync(join(dest, MANIFEST_FILE)); }
+    catch (e) { manifestGone = e?.code === 'ENOENT' || e?.code === 'ENOTDIR'; }
+    if (rmError && !manifestGone) {
+      return {
+        ok: false,
+        reason: 'remove_failed',
+        code: rmError?.code || '',
+        message: `扩展 ${id} 的文件没能删除（${rmError?.code || rmError?.message || '未知错误'}），令牌未吊销，可重试或重启 DSH 后再卸载`,
+      };
+    }
     /** 指纹跟着走：留着的话，同名扩展下次装上会撞上一个对不上的旧指纹 */
     writeManifestSha(id, '');
     /**
@@ -634,6 +669,7 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
      * 必须照做（扩展已经没了，旧令牌绝不能还能验），所以只记个标记，最后一起报。
      */
     const leftoverDir = exists(dest);
+    if (rmError) log.warn?.(`扩展 ${id} 的目录删不掉（${rmError?.code || rmError?.message || '未知错误'}），清单已不在，按部分卸载处理`);
     usageCache.delete(id);
     /**
      * 配置里的密钥存在**扩展目录之外**（`secrets/<id>.config.json`），
@@ -650,14 +686,22 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       // secrets 文件删了但客户端记录没删 = 旧令牌还能 verify，必须报出来。
       if (!clientStore) log.warn?.(`扩展 ${id} 缺 clientStore，api.clients 记录未删除`);
     }
-    return leftoverDir
-      ? {
+    if (leftoverDir) {
+      /** 空壳下一轮扫描会自动清；非空残留别说「重启就好」，那是骗人 */
+      let leftoverFiles = -1;
+      try { leftoverFiles = fs.readdirSync(dest).length; } catch { /* 读不到就按有残留说 */ }
+      return {
         ok: true,
         id,
         partial: true,
-        message: `扩展 ${id} 的文件已删除，但目录还在（扩展进程可能仍在运行）。重启 DSH 后会清掉；在此之前它不会出现在已装列表里。`,
-      }
-      : { ok: true, id };
+        message: `扩展 ${id} 的文件已删除，但目录还在（扩展进程可能仍在运行）。`
+          + (leftoverFiles === 0
+            ? '这是空壳，重启 DSH 后会自动清掉；'
+            : '目录里还有残留文件，重启也清不掉，可手动删除；')
+          + '在此之前它不会出现在已装列表里，令牌与权限已一并撤销。',
+      };
+    }
+    return { ok: true, id };
   }
 
   /**
