@@ -13,9 +13,10 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer as createNetServer } from 'node:net';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createLease } from './lease.js';
 import { Readable } from 'node:stream';
@@ -134,6 +135,83 @@ function alivePid(pid) {
   } catch (e) {
     return e.code === 'EPERM';
   }
+}
+
+/**
+ * `/healthz` 身份指纹。口径必须与框架 `src/web/server.js` 的 `healthDirHash`
+ * 完全一致：路径规范化后取 sha256 前 12 位。
+ *
+ * 规范化两件事（框架侧同样处理）：`resolve` 去掉尾斜杠 / `.` / `..`，
+ * Windows 盘符统一大写。任何一边改了算法，探活就会全部判成「别家的 Roost」，
+ * 所以两边各有一条测试钉死同一口径。
+ */
+export function healthDirHash(dir) {
+  const normalized = resolve(String(dir || ''))
+    .replace(/^([a-z]):/, (_, drive) => drive.toUpperCase() + ':');
+  return createHash('sha256').update(normalized).digest('hex').slice(0, 12);
+}
+
+/** 框架实例表里的心跳文件名（20 位小写十六进制 + .beat） */
+const BEAT_NAME = /^[a-f0-9]{20}\.beat$/;
+/** 与框架 `instance.js` 的 STALE_MS 一致：10 秒刷一次，30 秒没刷就算死 */
+const BEAT_STALE_MS = 30_000;
+
+/**
+ * 实例记录的心跳还新鲜吗。
+ * `true`=新鲜 / `false`=明确停跳或文件没了 / `null`=老记录没有心跳字段。
+ *
+ * 心跳文件是框架每 10 秒刷的 mtime，进程被强杀也不会自己消失——所以
+ * 「PID 还在」但心跳停了，就是 PID 被系统复用给了别的程序，不能再认成
+ * Roost。这正是 `alivePid()` 单独做不到的事。
+ */
+function beatFresh(rec, dir) {
+  if (!rec?.beat || typeof rec.beat !== 'string' || !BEAT_NAME.test(rec.beat)) return null;
+  try {
+    const age = Date.now() - statSync(join(dir, 'data', 'instance-beats', rec.beat)).mtimeMs;
+    return age <= BEAT_STALE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 一条实例记录还算不算「活着的 Roost」。
+ *
+ * 拆成纯函数（判活可注入）是为了单测 PID 复用：真机上复现要等系统把某个已死
+ * PID 分给别的程序，而这里只要造一个「PID 存在、心跳停跳」的记录即可。
+ */
+export function instanceAlive(rec, dir, alive = alivePid) {
+  if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return false;
+  const pid = Number(rec.pid);
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  /** 心跳明确停跳：PID 哪怕还在（被复用），也不认 */
+  if (beatFresh(rec, dir) === false) return false;
+  return alive(pid);
+}
+
+/**
+ * 老框架降级校验：`/healthz` 没有 dirHash 时，pid 必须出现在本目录实例表里。
+ *
+ * 全新安装还没配机器人时实例表是空的，这时无从判断身份，保持旧行为放过——
+ * 否则「刚装好、还没填 AppID」会被判成没在跑，用户卡在第一步。
+ * 新框架一律走 dirHash 严格校验，不进这条降级路。
+ */
+function pidInLocalInstances(pid, dir) {
+  let data;
+  try {
+    data = JSON.parse(readFileSync(join(dir, 'data', 'instances.json'), 'utf8'));
+  } catch {
+    return true; // 没有实例表 = 新装，无从校验
+  }
+  const recs = data && typeof data === 'object' ? Object.values(data) : [];
+  if (!recs.length) return true;
+  /** 实例表里有记录了才需要 pid；老框架的探活响应可能压根不带 pid */
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  return recs.some((rec) => {
+    if (Number(rec?.pid) !== pid) return false;
+    const fresh = beatFresh(rec, dir);
+    return fresh === null ? alivePid(pid) : fresh;
+  });
 }
 
 export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
@@ -463,7 +541,24 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
         body = raw ? JSON.parse(raw) : null;
       } catch {}
       // 端口被别的 HTTP 服务占着时会返回别的 JSON，靠 bots 字段认出来
-      return body && Array.isArray(body.bots) ? body : null;
+      if (!body || !Array.isArray(body.bots)) return null;
+      /**
+       * 再认身份：**端口上这份 Roost 是不是配置目录那份？**
+       *
+       * 以前到上一步就完了，于是另一个目录的 Roost 占着候选端口（尤其兜底
+       * 15207）也会被认成「本目录在跑」；`activePort` 跟着漂过去，之后
+       * `api()` / `webuiUrl()` 全打到那份实例，配置、密钥、机器人列表跟着串，
+       * 界面还看起来一切正常。
+       *
+       * 新框架回 `dirHash`（代码根哈希），不匹配一律不认。老框架没有这个
+       * 字段，退回 `pid` + 本目录实例表，见 `pidInLocalInstances()`。
+       */
+      if (body.dirHash) {
+        if (body.dirHash !== healthDirHash(dirOf())) return null;
+      } else if (!pidInLocalInstances(body.pid, dirOf())) {
+        return null;
+      }
+      return body;
     } catch {
       return null;
     }
@@ -769,7 +864,13 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
    *
    * **为什么用实例表而不是 HTTP 探活**：端口可能刚改过、可能被别的程序占着、
    * 密钥可能刚设置过——探不通不等于没在跑。而实例表是 Roost 自己写的，
-   * 里面记的 pid 还活着，就说明那个 Roost 真的在跑。这条判断不依赖网络。
+   * 这条判断不依赖网络。
+   *
+   * **判活用心跳，不再只看 PID**：框架每 10 秒刷一次 `instance-beats/<hash>.beat`
+   * 的 mtime，30 秒不刷就算死。以前只看 `process.kill(pid, 0)`，被回收的 PID
+   * 一旦分给别的程序就误报「已有 Roost 在跑」并拒绝启动；心跳文件不会跟着
+   * 复用，所以它能分出「真在跑」和「PID 撞了」。老记录没有 beat 字段时仍按
+   * PID 判活，兼容旧框架。
    *
    * @returns {Array<{appId:string, pid:number}>} 可能为空
    */
@@ -781,11 +882,10 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       return []; // 没这个文件、或写坏了 —— 当作没有实例
     }
     if (!data || typeof data !== 'object') return [];
+    const dir = dirOf();
     const out = [];
     for (const [appId, rec] of Object.entries(data)) {
-      const pid = Number(rec?.pid);
-      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
-      if (alivePid(pid)) out.push({ appId, pid });
+      if (instanceAlive(rec, dir)) out.push({ appId, pid: Number(rec.pid) });
     }
     return out;
   }

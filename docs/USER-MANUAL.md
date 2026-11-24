@@ -36,14 +36,14 @@
 - 📣 **能 @ 人**：`qq_send` 的 `at` 参数（填 `sender` 就是刚说话的人，也可以填 openid）。群里每条消息头带 `[昵称 (openid)]`，**标签由宿主拼**——模型不碰那串 id 的语法，抄错了也没机会发出去。私聊 / 非第一段 / markdown 关着时会自动降级并告诉模型为什么
 - 📝 **频道发帖**：`qq_post_thread`——往频道里的一个**论坛版块**发一篇有标题的帖子（一直留着，不是聊天消息）。每天几篇、时间窗内随机、两两隔开；发出去要过平台审核，所以面板上是「已提交 / 已上线 / 没看到」三态，「已提交」不等于「能看见」。**发到哪个版块只能你在面板里定**，模型改不了；`askFirst` 开着时她写好只落到面板待发，你点「发」才真发
 - 🗜️ **上下文压缩**：到阈值（群 85% / 私聊 75%）开新会话 + 摘要开场，旧会话保留可回查；压之前那一刻的**缓存命中率**记在面板和日志里，阈值该往上还是往下调用它判断
-- 📱 **侧栏面板**：七个一级分组（概览 / 人设 / 表达 / 群与频道 / 能力 / 扩展 / 系统），组内两行导航；菜单顺序与显隐、强调色、动效在「概览 → 个性化」里改，接入向导与账号迁移从按钮打开整页弹窗
+- 📱 **侧栏面板**：七个一级分组（概览 / 人设 / 表达 / 群与频道 / 能力 / 扩展 / 系统），组内两行导航；菜单顺序与显隐（扩展页跟着它声明的分组一起排/一起藏）、强调色、卡片背景（颜色 / 透明度，默认 50%）、扩展页跟随主题、动效在「概览 → 个性化」里改，接入向导与账号迁移从按钮打开整页弹窗
 - 🧬 **人格四段式**：人格文件分性格 / 开场白 / 说话示例 / 世界书四段。世界书一行一条 `触发词 | 内容`，**命中才注入**；开场白给主动搭话一个语气锚；近处指令贴在离历史最近的位置，聊到几十轮人设也不被冲淡
 - 🔄 **人格库一键更新**：人格放在独立仓库 [dsh-roost-personas](https://github.com/roost-qq/dsh-roost-personas)，改完推一个 commit，面板点一下就拿到——**不用发版**。只覆盖没改过的，你改过和自建的一个不碰
 - ⬆️ **本体自更新**：设置页顶部查最新版、一键装。走 DSH 自己的 `pluginManager`（失败会回滚 `package.json` + `pnpm-lock.yaml`），装完提示重启。开发机（符号链接装的）自动禁用
 - 🎭 **双人格 preset**：私聊（`roost-private`）/ 群聊（`roost-social`）各一套提示词
 - 🖼️ **图库**：图丢进目录就能用——文件名或侧车 `.tags` 当标签，子目录即分类，**加图不会冲掉提示词缓存**。每张图一个短序号加描述，她按序号发图（`<<image: #3>>`，看不到路径）、自己存图（含网址）、**真的看一眼**再决定、自己整理。图库工具挂不上时才退回「给路径」那套，两套写法不会同时出现在提示词里
 - 🗂️ **官方图文卡片**：模型写 `<<card: 标题|描述|https://链接|https://图片>>` 就能发出一张带封面、标题和跳转的卡片（`msg_type=8`）。四项必填、链接和封面必须是 https，一轮最多一张；扩展也能通过 `/v1/send { card }` 发同一张卡片（详见「图文卡片」）
-- 🔊 **语音合成（选装，默认关）**：五种 provider 任选 —— **本地模型**（一键装 23MB 引擎 + 30MB 模型，完全离线）、**微软在线朗读**（免费、不要 Key，一键装 0.4MB 依赖）、OpenAI 兼容 `/audio/speech`、本地 GPT-SoVITS 原生 API、**小米 MiMo**（`mimo-v2.5-tts`，音频从 `chat/completions` 里以 base64 回）。**语速一份 `tts.speed` 五个 provider 共用**（MiMo 本身不支持语速，会忽略），切换时不用重填。不配就完全静默——不请求上游、不加载模型、不占提示词；配好后模型才能用 `<<say: 内容>>` 发语音条（转 silk 和发送由框架外接协议完成）
+- 🔊 **语音合成（选装，默认关）**：十二种声音来源任选 —— 内置五家：**本地模型**（一键装 23MB 引擎 + 30MB 模型，完全离线）、**微软在线朗读**（免费、不要 Key，一键装 0.4MB 依赖）、OpenAI 兼容 `/audio/speech`、本地 GPT-SoVITS 原生 API、**小米 MiMo**（`mimo-v2.5-tts`，音频从 `chat/completions` 里以 base64 回）；另七种：**自动兜底**（微软不行换 Windows 自带）、**本地 CosyVoice**、**豆包语音（火山）**、**Fish Audio**、**Breeze**、**MiniMax**、**Windows 自带**。**语速**：内置五家共用 `tts.speed`（MiMo 不支持，会忽略）；火山与 MiniMax 用各自的 `volcano.speedRatio` / `minimax.speed`。不配就完全静默——不请求上游、不加载模型、不占提示词；配好后模型才能用 `<voice>要念的内容</voice>` 发语音条（合成与按人限次在这里做，转 silk 和发送由框架外接协议完成；失败自动改发文字）
 - 🔑 **账号迁移**：把 QQ号 / 群号和 openid 对上，换机器人（换 AppID）后旧记忆照样读得到。支持批量追加 openid、群成员 QQ号登记（需本人提供）、昵称候选提示，以及「一键改写」——把某号码名下所有旧键合并到号码键后删掉（带备份与一键回退）。**昵称候选只提示不自动绑**：官方不给 QQ号，自动猜会把别人的记忆串过来。**绑定完全自愿、非必需**，不绑定不影响任何功能（详见「账号迁移」章节的声明）
 
 ---
@@ -211,16 +211,16 @@ GPL 再分发要带源码获取方式，不值得塞进仓库。所以 ffmpeg �
   "speakUp": { /* 私聊排期：间隔/免打扰/每日上限 */ },
   "persona": { "current": "default", "byChat": {} },
   "stickers": { "enabled": true, "dir": "" },
-  "tts": {                  // 选装，默认关；面板「设置 → 语音合成」有专用表单
+  "tts": {                  // 选装，默认关；面板「语音」页有专用表单
     "enabled": false,
-    "provider": "openai",   // sherpa（本地离线）| edge（微软在线）| openai | gpt-sovits | mimo（小米）
-    "speed": 1,             // 五个 provider 共用的语速，0.5–2，1 是原速（mimo 忽略）
+    "provider": "openai",   // auto | edge | sherpa | gpt-sovits | cosyvoice | volcano | fish-free | breeze | minimax | openai | mimo | windows
+    "speed": 1,             // 内置五家共用，0.5–2，1 是原速（mimo 忽略）；火山/MiniMax 用各自配置里的 speedRatio/speed
     "baseUrl": "",          // openai: 含版本前缀，如 https://api.openai.com/v1
     "apiKey": "",           // 面板里显示成 ******，原样保存不会覆盖真值
     "model": "",            // openai: tts-1
     "voice": "",            // openai: alloy
     "timeoutSec": 30,
-    "maxChars": 300,        // 太长的会被 QQ 语音条截断，不如发文字
+    "maxChars": 300,        // 超过这个字数不合成，改发文字；语音条另有 60 秒时长上限
     "mimo": {               // provider=mimo 时才用；它没有 /audio/speech
       "baseUrl": "https://api.xiaomimimo.com/v1",
       "apiKey": "",         // 必填；有 Key 就算配好，地址和模型不用管
@@ -239,6 +239,7 @@ GPL 再分发要带源码获取方式，不值得塞进仓库。所以 ffmpeg �
     },
     "gptSovits": {          // provider=gpt-sovits 时才用
       "installDir": "",     // 含 api_v2.py 的那层，填了才能在面板一键启动
+      "autoStart": false,   // 随 DSH 启动 GPT 进程；仅 provider=gpt-sovits 且 installDir 已填时生效
       "model": "",          // 扫描出来的角色名；留空 = 用 tts_infer.yaml 里已加载的
       "gptWeights": "",     // 手填权重路径，优先于按角色名自动配对
       "sovitsWeights": "",  // 两个都填最稳；只填一个时面板会警告另一半仍是猜的
@@ -249,7 +250,38 @@ GPL 再分发要带源码获取方式，不值得塞进仓库。所以 ffmpeg �
       "promptLanguage": "中文",
       "textLanguage": "中文",
       "apiVersion": "v1",   // v1=api.py / v2=api_v2.py
-      "endpointPath": "/"
+      "endpointPath": "/",
+      "textSplitMethod": "cut5",  // 以下六项仅 v2 生效
+      "fragmentInterval": 0.3,
+      "topK": 15,
+      "topP": 1,
+      "temperature": 1,
+      "batchSize": 1,
+      "semanticCache": false,     // 一键启动时换用语义缓存适配器
+      "freeze": false             // 复用上次语义结果（需语义缓存服务）
+    },
+    "cosyvoice": {          // provider=cosyvoice；本地 FastAPI，url / 采样率按服务实际配置
+      "url": "http://127.0.0.1:50000",
+      "mode": "sft",        // sft 用 spkId；instruct 用 instruct 文本
+      "spkId": "中文女",
+      "sampleRate": 22050   // 流式裸 PCM 才用来包头
+    },
+    "volcano": {            // provider=volcano；音色决定 1.0/2.0 资源版本
+      "apiKey": "",
+      "voiceType": "zh_female_vv_uranus_bigtts",
+      "speedRatio": 1
+    },
+    "fishApiKey": "",       // provider=fish-free；配 fishReferenceId 选音色
+    "fishReferenceId": "",
+    "breeze": {             // provider=breeze；cloud 填 key + voiceId，local 填 url
+      "mode": "cloud",
+      "key": "",
+      "voiceId": ""
+    },
+    "minimax": {            // provider=minimax；海外账号把 baseUrl 改成 api.minimax.io
+      "apiKey": "",
+      "voiceId": "Chinese (Mandarin)_Soft_Girl",
+      "speed": 1
     }
   },
   "channel": { "current": "roost" }
@@ -282,11 +314,14 @@ GPL 再分发要带源码获取方式，不值得塞进仓库。所以 ffmpeg �
 - 加载模型要一两分钟，期间面板会显示日志尾部；插件重载时会把进程一起带走
 - **选的就是配置文件里已加载的角色时会跳过切换**：v2 切一次权重等于重新加载一遍模型，没必要白等一轮。切换失败时面板红字写明「现在实际生效的是谁」，不会显示「正常」却放着别的音色
 - **音色不对时优先手填权重**：自动配对靠文件名猜角色名，权重一多（比如十几个）很容易把不同 epoch / 不同角色的 GPT 和 SoVITS 配错一对。填了 `gptWeights` / `sovitsWeights` 就以它为准；只填一个时面板会警告另一半仍是自动配对的。另外**参考音频也要和模型配套**，音色主要由它决定
+- **换角色不用重启**：服务运行中在「角色」下拉里换一个，会立刻调 `/set_*_weights` 切过去（加载要一两分钟，面板会提示）；下次合成发现角色变了也会自动补切。没选角色时一次都不切，沿用服务启动时加载好的模型
+- **v2 推理参数**：面板可调 `text_split_method`（cut0–cut5）、`fragment_interval`、`top_k`、`top_p`、`temperature`、`batch_size`，默认值和 GPT-SoVITS WebUI 一致；v1 接口没有这些字段，填了也不发。v2 合成固定要 WAV（避开 mp3 二次有损），SILK 由框架外接协议编码；QQ 语音只认 SILK 容器，不限采样率
+- **语义缓存（可选，v2 only）**：一键启动时勾选「启用语义缓存」，宿主会用随仓库分发的适配器脚本（ISC，版权见脚本头）包住原版 `api_v2.py`，只缓存最近一次完整推理的 GPT 语义 token。再勾「复用上次语义结果」，同一段文本改语速 / 换音色就能跳过 GPT 采样。**没勾第一项却勾了第二项时会给出明确提示**，不会静默失败；原版服务不支持这个路由
 
 **微软在线朗读（`provider=edge`）**：不用填地址、不用填 Key，选一个音色就能用。
 
 - 依赖是三个纯 JS 包（约 0.4MB），点「一键安装依赖」装到 `数据目录/tts-edge/node_modules`——**不进插件目录**，DSH 更新插件不会冲掉；也刻意和本地模型的 `tts-runtime` 分开，两边不会互相删
-- 输出 mp3，宿主自己转 silk。要念的**文本会发到微软的服务器**，介意隐私就用本地模型
+- 输出 mp3，由框架外接协议转成 silk 再发。要念的**文本会发到微软的服务器**，介意隐私就用本地模型
 - `@andresaya/edge-tts` 是 GPL-3.0，只下载到你自己的数据目录，**不随插件分发**
 - 卸载本地模型后不会再刷「预热失败」：没装是正常状态，装了但加载不起来才是故障
 
@@ -298,7 +333,14 @@ GPL 再分发要带源码获取方式，不值得塞进仓库。所以 ffmpeg �
 - 只传 `apiKey` 也算配好；模型默认 `mimo-v2.5-tts`，音色默认 `mimo_default`（预置还有冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean）
 - 请求 mp3 并按魔数校验，回来的不是音频就报错，不当 mp3 硬发
 
-**语速**：`tts.speed` 一份配置，五个 provider 共用，范围 0.5–2。
+**其余七种声音来源**：面板「语音」页按卡片选，不用手写配置全文。
+
+- **自动 / Windows 自带**：`auto` 先试微软朗读，失败换 Windows 自带；`windows` 用系统语音合成，离线可用但机械感重一些，都不用填 Key
+- **本地 CosyVoice**：填自建 FastAPI 地址；`sft` 用 `spkId`，`instruct` 用一段描述语音的文本；流式裸 PCM 靠 `sampleRate` 补 WAV 头
+- **豆包语音（火山）/ Fish Audio / Breeze / MiniMax**：云端接口，只需 API Key（Breeze 本地模式填自建地址），音色分别用 `voiceType` / `fishReferenceId` / `voiceId` / `voiceId` 选；密钥和 MiMo 的 Key 一样只进密钥库，不回给扩展
+- **语速**：火山 / MiniMax 用各自配置里的 `speedRatio` / `speed`，其他新来源的接口没有语速字段
+
+**语速**：内置五家共用 `tts.speed`，范围 0.5–2；火山与 MiniMax 各用自己的 `volcano.speedRatio` / `minimax.speed`。
 
 | provider | 映射成 |
 |---|---|
@@ -307,8 +349,11 @@ GPL 再分发要带源码获取方式，不值得塞进仓库。所以 ffmpeg �
 | GPT-SoVITS v2 | `speed_factor`；**v1 接口没有语速参数，不支持** |
 | 微软朗读 | `rate: '+20%'` 这种百分比字符串 |
 | 小米 MiMo | **不支持**，接口没有对应字段，配了也会忽略 |
+| 豆包（火山） | `volcano.speedRatio` → `audio_params.speech_rate` |
+| MiniMax | `minimax.speed` → `voice_setting.speed` |
+| CosyVoice / Fish Audio / Breeze / Windows 自带 | **不支持**，接口没有对应字段 |
 
-以前只有 `sherpa.speed`，现在统一到 `tts.speed`；老配置会自动迁移，不用手动改。
+以前只有 `sherpa.speed`，现在内置五家统一到 `tts.speed`；老配置会自动迁移，不用手动改。
 
 ---
 

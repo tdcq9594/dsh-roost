@@ -233,6 +233,9 @@ window.__ModuleLoader__.load({
   --radius-card:14px;
   --shadow-card:0 1px 2px color-mix(in srgb,currentColor 5%,transparent),
     0 6px 18px color-mix(in srgb,currentColor 7%,transparent);
+  /** 卡片底默认口径：宿主主题底色 + 强调色淡混，再让底色半透（50%）。
+      个性化页选了颜色/透明度后，根节点会注入 --roost-card-fill 覆盖它。 */
+  --card-fill:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) 50%,transparent));
 }
 /**
  * 用户自选的强调色（个性化页）。
@@ -251,9 +254,8 @@ window.__ModuleLoader__.load({
 /**
  * 关动效（个性化页的开关）。
  *
- * 用一条通配规则兜住全部：分节入场、切页淡入、.roost-node.current::after
- * 那个 2.4s 无限呼吸、以及所有按钮/选项卡过渡。逐条列会漏——现有三段
- * prefers-reduced-motion 就漏了呼吸圈和 .roost-fade。
+ * 用一条通配规则兜住全部：分节入场、切页淡入、以及所有按钮/选项卡过渡。
+ * 逐条列会漏——早期按类名列举就漏过 .roost-fade。
  */
 .roost-root.no-anim *,
 .roost-root.no-anim *::before,
@@ -281,10 +283,14 @@ window.__ModuleLoader__.load({
 .roost-swatch.host span{background:linear-gradient(135deg,#39404d 50%,#24272e 50%)}
 .roost-swatch[data-on="1"]{border-color:var(--dsw-alias-label-primary,#e6e7eb)}
 .roost-swatch:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* 卡片背景设置：颜色块与透明度滑杆 */
+.roost-pf-color{width:44px;height:30px;padding:2px;border:1px solid var(--line);border-radius:8px;
+  background:var(--field);cursor:pointer}
+.roost-pf-alpha{width:150px;accent-color:var(--accent);cursor:pointer}
 /* 首次接入向导：全屏遮罩，窄侧栏里也要能滚、不能把按钮挤出屏幕 */
 /* 垂直也居中：卡片贴顶会在大屏上留下半屏空白，看着像没加载完 */
 .roost-wizard{display:flex;align-items:center;justify-content:center;width:100%;height:100%;overflow:auto;padding:20px;box-sizing:border-box}
-.roost-wizard-card{width:100%;max-width:720px;padding:24px 28px;border:1px solid var(--line);border-radius:14px;background:var(--surface);box-shadow:0 12px 40px color-mix(in srgb, currentColor 8%, transparent);box-sizing:border-box}
+.roost-wizard-card{width:100%;max-width:720px;padding:24px 28px;border:1px solid var(--line);border-radius:14px;background:var(--roost-card-fill,var(--card-fill));box-shadow:0 12px 40px color-mix(in srgb, currentColor 8%, transparent);box-sizing:border-box}
 .roost-wizard-card .roost-pill.on{border-color:var(--accent);color:var(--accent)}
 .roost-wiz-body{min-height:260px;margin-top:16px}
 /* 链路对比：旧版划掉、新版高亮，一眼看出少了哪一层 */
@@ -362,6 +368,40 @@ window.__ModuleLoader__.load({
 }
 .roost-input::placeholder{opacity:.5}
 .roost-input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+/* ── 语音 provider 卡片网格（对标 aurabot 的选声音交互）──────────
+   点整张卡=选中声音；右上角图钉=置顶（独立存 localStorage，不进配置草稿）。
+   只做「卡片 + 置顶 + 收起」，不分「发语音/听语音/扩展服务」小页——
+   选中后的字段仍在本卡下方原地展开，跟原来的单页结构保持一致。 */
+.voice-choices{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:8px;width:100%}
+.voice-choice{
+  position:relative;min-height:74px;padding:10px 12px;border-radius:12px;cursor:pointer;
+  border:1px solid var(--line);background:var(--field);text-align:left;
+  display:flex;flex-direction:column;gap:3px;font:inherit;color:inherit;
+  transition:border-color .16s ease,background .16s ease,box-shadow .16s ease;
+}
+.voice-choice:hover:not(:disabled){border-color:var(--accent)}
+.voice-choice:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.voice-choice.on{
+  border-color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 8%,var(--field));
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent);
+}
+.voice-choice .vc-name{font-size:12.5px;font-weight:650;padding-right:18px}
+.voice-choice .vc-desc{font-size:11px;line-height:1.45;color:var(--dsw-alias-label-secondary,inherit);opacity:.92}
+.voice-choice-pin{
+  position:absolute;right:5px;top:5px;width:18px;height:18px;padding:2px;
+  border:0;border-radius:5px;background:transparent;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  color:inherit;opacity:.45;line-height:0;
+}
+.voice-choice-pin:hover{opacity:.85}
+.voice-choice-pin.on{opacity:1;color:var(--accent)}
+.voice-choice-more{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  min-height:74px;padding:10px;border-radius:12px;border:1px dashed var(--line);
+  background:transparent;color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;font:inherit;font-size:11.5px;
+}
+.voice-choice-more:hover{border-color:var(--accent)}
 /* ── 两层导航（2026-11-12）─────────────────────────────────
    一级是分组（图标 + 名字，淡底药丸），二级是组内页面（下划线）。
    **两层必须用两种选中态**：都用底块会看成同一层，反而比原来那排更乱。
@@ -404,7 +444,21 @@ window.__ModuleLoader__.load({
   background:color-mix(in srgb,var(--accent) 14%,transparent)}
 /* 分节头：编号徽标 + 标题 + 操作槽 + 折叠开关，下边框代替原先标题右侧的细线。
    整页按 8pt 网格走，标题/正文/说明只留三级字阶。 */
-.roost-sec{margin:24px 0 0;animation:roost-sec-in .28s cubic-bezier(.2,.8,.2,1) backwards}
+/* 2026-11-24 主人改口径：所有页的「分节卡片」都用同一张底，不再只给数据页。
+   范围刻意收窄：只加在 .roost-sec 这一层真正的卡片容器上；
+   按钮、输入框、导航、内联标签，以及嵌在卡片里的 .roost-g-card / .roost-stat /
+   .roost-metric 都不硬套——它们已有自己的底色或本就该透明。
+   个别不适合做卡片的分节可以加 .roost-plain 显式退出。
+   卡片只作用在 background 层，不用 opacity——里面文字和数据保持不透明。 */
+.roost-sec:not(.roost-plain){margin:24px 0 0;padding:14px 16px 16px;
+  border:1px solid var(--line-soft);border-radius:var(--radius-card);
+  background:var(--roost-card-fill,var(--card-fill));box-shadow:var(--shadow-card);
+  animation:roost-sec-in .28s cubic-bezier(.2,.8,.2,1) backwards}
+/* 透明度拉满 = 全透明：连描边和投影一起撤掉。只把 background 放透明的话，
+   卡片仍留一圈边和一层阴影，看着就像没生效（主人 2026-11-24 反馈）。 */
+.roost-root.card-transparent .roost-sec:not(.roost-plain),
+.roost-root.card-transparent .roost-wizard-card{
+  background:transparent;border-color:transparent;box-shadow:none}
 .roost-sec:first-child{margin-top:2px}
 .roost-sec:nth-child(2){animation-delay:.04s}
 .roost-sec:nth-child(3){animation-delay:.08s}
@@ -412,7 +466,7 @@ window.__ModuleLoader__.load({
 .roost-sec:nth-child(n+5){animation-delay:.16s}
 @keyframes roost-sec-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .roost-sec-h{display:flex;align-items:center;gap:10px;margin-bottom:12px;min-height:26px;
-  padding-bottom:8px;border-bottom:1px solid var(--line-soft)}
+  padding-bottom:0}
 /* 排障页把 日志 / 上下文 / 会话 三块拼一页：后两块原本各自从 01 起编号，
    一屏出现三个「01」像渲染坏了。用分区标题代替编号。 */
 .roost-diag-part{margin-top:16px;border-top:1px solid var(--line-soft);padding-top:10px}
@@ -478,33 +532,15 @@ window.__ModuleLoader__.load({
 .roost-mood-k{flex:0 0 42px;font-size:11.5px;color:var(--dsw-alias-label-secondary, inherit)}
 .roost-mood-w{flex:0 0 46px;text-align:right;font-size:11.5px;font-variant-numeric:tabular-nums}
 
-.roost-node{
-  position:relative;flex:0 0 26px;height:26px;border-radius:50%;display:flex;
-  align-items:center;justify-content:center;font-family:ui-monospace,Menlo,Consolas,monospace;
-  font-size:11px;font-weight:700;
-  transition:transform .18s cubic-bezier(.2,.8,.2,1),background .18s,border-color .18s;
-}
-.roost-node.done{background:var(--ok);border:1px solid var(--ok);color:#04150e}
-.roost-node.todo{border:1px dashed var(--line);opacity:.55}
-.roost-node.current{border:1px solid var(--warn);color:var(--warn)}
-.roost-node.bad{border:1px solid var(--bad);color:var(--bad)}
-.roost-node.current::after{
-  content:'';position:absolute;inset:-4px;border-radius:50%;
-  border:1px solid var(--warn);opacity:.5;
-  animation:roost-breathe 2.4s cubic-bezier(.4,0,.6,1) infinite;
-}
-@keyframes roost-breathe{
-  0%{transform:scale(.92);opacity:.5}
-  50%{transform:scale(1.14);opacity:0}
-  100%{transform:scale(.92);opacity:0}
-}
-.roost-step{display:flex;gap:14px;padding:0 0 20px;position:relative}
-.roost-step:last-child{padding-bottom:2px}
-.roost-rail{position:absolute;left:12.5px;top:28px;bottom:2px;width:1px;background:var(--line-soft)}
-.roost-step:last-child .roost-rail{display:none}
-.roost-step.done .roost-rail{background:var(--ok);opacity:.4}
-.roost-body{flex:1;min-width:0;padding-top:2px}
-.roost-title{font-weight:600;font-size:13px}
+/* 接入步骤：普通分节 + 标题行状态徽章，不再有左侧圆圈和竖线轨道。
+   省掉轨道是因为长步骤会把线拉断，视觉上比没有更乱。 */
+.roost-step{padding:14px 0 16px;border-top:1px solid var(--line-soft)}
+.roost-step:first-child{padding-top:2px;border-top:0}
+.roost-step-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.roost-step-n{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;
+  color:var(--dsw-alias-label-secondary, inherit);opacity:.6;font-variant-numeric:tabular-nums}
+.roost-title{font-weight:600;font-size:13.5px}
+.roost-step-actions{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
 .roost-fade{animation:roost-in .22s cubic-bezier(.2,.8,.2,1)}
 @keyframes roost-in{from{opacity:0}to{opacity:1}}
 @keyframes roost-in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
@@ -1047,9 +1083,11 @@ window.__ModuleLoader__.load({
 .roost-fact-x:hover{opacity:1;color:var(--bad);background:var(--hover)}
 .roost-fact-x:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 @media (hover:none){.roost-fact-x{opacity:.65}}
-/* 危险动作：默认低饱和红，二次确认后实心红——和普通按钮明确区分 */
-/* 危险动作：平时和普通按钮一样（列表里挂一排红框非常吵），点一下才变红 */
-.roost-btn.danger{color:inherit;border-color:var(--line)}
+/* 危险动作：平时和普通按钮一样（列表里挂一排红框非常吵），点一下才变红。
+   这里只改边框、不要写 color:inherit——那会盖掉上面「能按的按钮用主文字色」，
+   继承到淡色父级后卸载/重装按钮看着像禁用（主人 2026-11-24 反馈）。
+   真禁用由 .roost-btn:disabled 的 opacity 负责，armed 由下面的白字负责。 */
+.roost-btn.danger{border-color:var(--line)}
 .roost-btn.armed{background:var(--bad);border-color:var(--bad);color:#fff}
 .roost-link{border:none;background:transparent;color:var(--accent);font:inherit;font-size:11.5px;
   cursor:pointer;padding:0 2px;text-decoration:underline;text-underline-offset:2px}
@@ -1107,8 +1145,8 @@ window.__ModuleLoader__.load({
  */
 .roost-g-card{
   --g-tint:color-mix(in srgb, var(--accent) 9%, transparent);
-  /* 2026-11-13 主人：卡片背景不好看，去掉。群聊页与其它页统一成
-     「分节标题 + 上边线分隔」，不再套一层带边框的灰底方块。
+  /* 卡片底由外层 .roost-sec 统一提供：2026-11-24 主人恢复所有页的卡片背景，
+     群聊页不再单独套一层，免得「卡片里再套卡片」。
      --g-tint 仍保留：下面的提示块/日志行还要用它。 */
   border:0;border-radius:0;background:transparent;padding:0;
 }
@@ -1158,12 +1196,8 @@ window.__ModuleLoader__.load({
 .roost-empty{padding:9px 12px;border-left:2px solid var(--tone-foam-2);
   border-radius:0 8px 8px 0;background:var(--tone-foam)}
 .roost-tab[data-on="1"]::after{background:var(--tone-deep)}
-.is-data-view .roost-sec{margin-top:14px;padding:14px 16px 16px;
-  border:1px solid var(--line-soft);border-radius:var(--radius-card);
-  /* 卡片底吃两层：宿主主题底色 + 自选强调色的极淡混入，再让底色本身透一点。
-     只给 background 做 alpha，不用 opacity——里面的文字和数据要保持不透明。 */
-  background:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) 50%,transparent));
-  box-shadow:var(--shadow-card)}
+/* 卡片底已在 .roost-sec 上全局生效（2026-11-24 主人改为所有页统一），
+   数据页的不同只在下面这些展示令牌：竖线、指标块、星图。 */
 .is-data-view .roost-sec:first-child{margin-top:2px}
 .is-data-view .roost-sec-h{border-bottom:0;margin-bottom:10px;padding-bottom:6px}
 .is-data-view .roost-sec-t{position:relative;padding-left:11px}
@@ -1812,21 +1846,29 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 分步：编号节点 + 竖线 + 标题说明 + 右侧动作 */
-    const Step = ({ n, state, title, desc, children, extra }) =>
-      h('div', { className: 'roost-step ' + (state || 'todo') },
-        h('div', { className: 'roost-node ' + (state || 'todo') },
-          state === 'done' ? '✓' : state === 'bad' ? '!' : n),
-        h('div', { className: 'roost-rail' }),
-        h('div', { className: 'roost-body' },
-          h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' } },
-            h('div', { className: 'roost-title' }, title),
-            children ? h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 6, flexWrap: 'wrap' } }, children) : null,
-          ),
-          h('div', { className: 'roost-note', style: { marginTop: 2 } }, desc),
-          extra || null,
+    /**
+     * 接入步骤：普通分节 + 标题行状态徽章。
+     * 主人 2026-11-24 明确不要左侧圆圈 + 竖线那套进度条：长步骤会把线拉断，反而乱。
+     */
+    const STEP_STATE = {
+      done: { cls: 'ok', label: '已完成' },
+      current: { cls: 'warn', label: '进行中' },
+      bad: { cls: 'bad', label: '待处理' },
+      todo: { cls: '', label: '待完成' },
+    }
+    const Step = ({ n, state, title, desc, children, extra }) => {
+      const st = STEP_STATE[state] || STEP_STATE.todo
+      return h('div', { className: 'roost-step ' + (state || 'todo') },
+        h('div', { className: 'roost-step-h' },
+          h('span', { className: 'roost-step-n' }, String(n).padStart(2, '0')),
+          h('span', { className: 'roost-title' }, title),
+          h('span', { className: 'roost-pill' + (st.cls ? ' ' + st.cls : '') }, st.label),
+          children ? h('div', { className: 'roost-step-actions' }, children) : null,
         ),
+        h('div', { className: 'roost-note', style: { marginTop: 4 } }, desc),
+        extra || null,
       )
+    }
 
     /**
      * 二次确认的行内按钮：删/清这类不可逆动作都要过一次。
@@ -3007,7 +3049,7 @@ window.__ModuleLoader__.load({
                 }, '安装'),
           ),
             pathOpen
-              ? h('div', { style: { marginTop: -6, marginBottom: 16, paddingLeft: 40 } },
+              ? h('div', { style: { marginTop: 6, marginBottom: 4 } },
                   h('div', { className: 'roost-note', style: { marginBottom: 6 } },
                     s.installed
                       ? '换到别的目录（里面要有 src/main.js）。改完要重启 Roost 才生效'
@@ -3065,14 +3107,14 @@ window.__ModuleLoader__.load({
             desc: hasCreds ? '已配置' : '推荐扫码；扫码用不了就在下面手动填',
           }),
             hasCreds
-              ? h('div', { style: { marginTop: -6, marginBottom: 16, paddingLeft: 40, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              ? h('div', { style: { marginTop: 6, marginBottom: 4, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
                   h('div', { className: 'roost-mono' },
                     (s.bots || []).map((b) => `${b.name || b.id}（${b.appId || '无 AppID'}）`).join('、')),
                   h('button', { type: 'button', className: 'roost-link', onClick: () => copy((s.bots || []).map((b) => b.appId).filter(Boolean).join(' ')) }, '复制 AppID'),
                   switchHint(),
                 )
               : mode === 'manual'
-                ? h('div', { style: { marginTop: -6, marginBottom: 16, paddingLeft: 40, maxWidth: 470 } },
+                ? h('div', { style: { marginTop: 6, marginBottom: 4, maxWidth: 470 } },
                     h('input', { className: 'roost-input', placeholder: 'AppID', value: appId, onChange: (e) => setAppId(e.target.value), onKeyDown: enter(saveBot), style: { marginBottom: 8 } }),
                     h('input', { className: 'roost-input', placeholder: 'AppSecret', type: 'password', value: secret, onChange: (e) => setSecret(e.target.value), onKeyDown: enter(saveBot), style: { marginBottom: 8 } }),
                     h('button', {
@@ -14158,7 +14200,7 @@ window.__ModuleLoader__.load({
       ['chat', '会话', '一轮最多等多久；上游 502/429 时的补重试（attempts 是「补几次」，budgetSec 是整轮总预算）'],
       ['workspace', '工作区', '机器人会话挂哪个工作区：dir 留空单开、__default__ 用默认'],
       ['server', '服务', '端口与密钥'],
-      ['tts', '语音合成', '默认关闭；在「表达 → 语音合成」那张卡里改（也可以在这里手改）'],
+      ['tts', '语音合成', '默认关闭；在「语音」页的「语音合成」卡里改（也可以在这里手改）'],
       ['setup', '接入', '装在哪、用哪种接入方式'],
       ['update', '更新源', 'npm 源（registry）。留空跟随 pnpm 配置的源（国内常是镜像，同步有延迟）；'
         + '版本检查会同时问官方源、取较新者，装包仍优先走你配的源'],
@@ -14763,12 +14805,68 @@ window.__ModuleLoader__.load({
        * 让对齐测试误报。对象写法没有这个歧义。
        */
       const PROVIDERS = [
-        { id: 'edge', label: '微软在线朗读（免费 · 不用 Key · 一键配好）' },
-        { id: 'sherpa', label: '本地模型（离线，可一键安装）' },
-        { id: 'openai', label: 'OpenAI 兼容（/audio/speech）' },
-        { id: 'gpt-sovits', label: 'GPT-SoVITS 原生 API（本地）' },
-        { id: 'mimo', label: '小米 MiMo（chat/completions 出音频）' },
+        { id: 'auto', label: '自动（先微软朗读，不行用 Windows 声音）', desc: '不用挑，先在线后本地', icon: '✨' },
+        { id: 'edge', label: '微软 edge-tts', desc: '在线，音色自然（免 Key）', icon: '🌐' },
+        { id: 'sherpa', label: '本地模型', desc: '离线可装，不联网、不花钱', icon: '📦' },
+        { id: 'gpt-sovits', label: '本地 GPT-SoVITS', desc: '用自己准备的录音定音色', icon: '🎙' },
+        { id: 'cosyvoice', label: '本地 CosyVoice', desc: '自己部署的 CosyVoice 服务，可克隆音色', icon: '🗣️' },
+        { id: 'volcano', label: '豆包语音（火山）', desc: '只填 API Key，选个音色就行', icon: '🔥' },
+        { id: 'fish-free', label: 'Fish Audio', desc: 'S2.1 Pro Free，可选音色', icon: '🐟' },
+        { id: 'breeze', label: 'Breeze 语音', desc: '云端或自建，填 Key + 音色 id', icon: '🌬' },
+        { id: 'minimax', label: 'MiniMax 语音', desc: '在线，音色多，支持情绪', icon: '🎭' },
+        { id: 'openai', label: '其他 HTTP 接口', desc: 'OpenAI 兼容 /audio/speech', icon: '🔌' },
+        { id: 'mimo', label: '小米 MiMo', desc: 'chat/completions 出音频', icon: '💡' },
+        { id: 'windows', label: 'Windows 自带', desc: '离线可用，机械感重一些', icon: '🖥' },
       ]
+      /**
+       * GPT-SoVITS 语种选项：对齐扩展「语音回复」。
+       * 老配置存的是「中文 / 日语」这类中文词，下拉值统一折算成 API 码，
+       * 但**不改草稿里已有的值**——保存时原样交回服务端，langCode() 两边都认。
+       */
+      const GPT_LANGS = [
+        { id: 'zh', label: '中文' },
+        { id: 'ja', label: '日语' },
+        { id: 'en', label: '英语' },
+        { id: 'auto', label: '自动识别' },
+        { id: 'yue', label: '粤语' },
+        { id: 'ko', label: '韩语' },
+      ]
+      const GPT_LANG_ALIAS = { 中文: 'zh', 汉语: 'zh', 普通话: 'zh', 日文: 'ja', 日语: 'ja', 英文: 'en', 英语: 'en', 自动: 'auto', 粤语: 'yue', 韩语: 'ko' }
+      const gptLang = (x) => GPT_LANG_ALIAS[String(x ?? '').trim()] || String(x ?? 'zh')
+      const langSelect = (label, path, opts = {}) =>
+        h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: opts.flex || '1 1 200px' } },
+          h('span', { className: 'roost-note', style: { margin: 0 } }, label),
+          h(Dropdown, {
+            className: 'roost-input',
+            value: gptLang(v(path, 'zh')),
+            onChange: (e) => put(path, e.target.value),
+          }, GPT_LANGS.map((o) => h('option', { key: o.id, value: o.id }, o.label))),
+        )
+      /** 卡片右上角图钉：置顶存本地偏好，不进配置草稿（切声音不丢置顶） */
+      const PIN_KEY = 'roost.tts.pinnedProviders'
+      const [pins, setPins] = useState(() => {
+        try {
+          const v = JSON.parse(localStorage.getItem(PIN_KEY) || '[]')
+          return Array.isArray(v) ? v.filter((x) => PROVIDERS.some((p) => p.id === x)).slice(0, 4) : []
+        } catch { return [] }
+      })
+      const [moreSources, setMoreSources] = useState(false)
+      /** 当前真正生效的声音（已保存的），默认置顶且不许取消 */
+      const activeSource = String(cfgTts?.provider || 'openai')
+      const ordered = (() => {
+        const top = [...new Set([activeSource, ...pins])].slice(0, 4)
+        return [...PROVIDERS].sort((a, b) => {
+          const ai = top.indexOf(a.id), bi = top.indexOf(b.id)
+          return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi)
+        })
+      })()
+      const visibleSources = moreSources ? ordered : ordered.slice(0, 4)
+      const togglePin = (id) => {
+        if (id === activeSource) return toast('正在使用的声音默认置顶')
+        const next = pins.includes(id) ? pins.filter((x) => x !== id) : [...pins, id].slice(-4)
+        setPins(next)
+        try { localStorage.setItem(PIN_KEY, JSON.stringify(next)) } catch {}
+      }
 
       /**
        * 微软音色清单。
@@ -14851,7 +14949,179 @@ window.__ModuleLoader__.load({
       const probeGpt = async () => {
         const r = await post('/tts/gpt-probe', { dir: v('gptSovits.installDir') })
         setProbeInfo(r)
+        await probeFeatures()
         toast(r?.ok ? '目录认出来了' : (r?.message || '这个目录不像 GPT-SoVITS 的根目录'))
+      }
+
+      /**
+       * 探服务的真实能力：语义复用只有带适配器的服务才有。
+       * 不支持就把「复用上次语义」开关禁掉——从根上避免对着原版
+       * api_v2.py 勾了之后每次合成都 404（对齐扩展面板的做法）。
+       */
+      const [gptFeatures, setGptFeatures] = useState(null)
+
+      /**
+       * 音色方案（对齐扩展「语音回复」）：清单/应用落后端，草稿改动只在本页。
+       * 保存 ≠ 应用：改个名字不该把正在用的音色换掉；选方案只载入草稿，
+       * 点「应用方案」才写当前配置。语速跟着方案走，但仍是全局那一份。
+       */
+      const [gptProfiles, setGptProfiles] = useState([])
+      const [gptActiveProfileId, setGptActiveProfileId] = useState('')
+      const [profileId, setProfileId] = useState('')
+      const [profileName, setProfileName] = useState('')
+      const [profileBaseline, setProfileBaseline] = useState(null)
+      const [profileBusy, setProfileBusy] = useState(false)
+      const pnum = (x, fallback) => { const n = Number(x); return Number.isFinite(n) ? n : fallback }
+      const pclamp = (x, fallback, min, max, integer = false) => {
+        const n = Math.max(min, Math.min(max, pnum(x, fallback)))
+        return integer ? Math.round(n) : n
+      }
+      /** 键顺序和 src/gpt-profiles.js 的 normalizeProfileValues 保持一致，脏值判断才不会假阳性 */
+      const profileSnapshot = () => ({
+        speed: pclamp(v('speed', 1), 1, 0.5, 2),
+        baseUrl: String(v('gptSovits.baseUrl') || ''),
+        model: String(v('gptSovits.model') || ''),
+        gptWeights: String(v('gptSovits.gptWeights') || ''),
+        sovitsWeights: String(v('gptSovits.sovitsWeights') || ''),
+        referWavPath: String(v('gptSovits.referWavPath') || ''),
+        promptText: String(v('gptSovits.promptText') || ''),
+        promptLanguage: String(v('gptSovits.promptLanguage', 'zh') || 'zh'),
+        textLanguage: String(v('gptSovits.textLanguage', 'zh') || 'zh'),
+        textSplitMethod: String(v('gptSovits.textSplitMethod', 'cut5') || 'cut5'),
+        fragmentInterval: pclamp(v('gptSovits.fragmentInterval', 0.3), 0.3, 0.01, 1),
+        topK: pclamp(v('gptSovits.topK', 15), 15, 1, 100, true),
+        topP: pclamp(v('gptSovits.topP', 1), 1, 0, 1),
+        temperature: pclamp(v('gptSovits.temperature', 1), 1, 0.01, 2),
+        batchSize: pclamp(v('gptSovits.batchSize', 1), 1, 1, 8, true),
+        freeze: v('gptSovits.freeze') === true,
+      })
+      const PROFILE_DRAFT_PATHS = {
+        speed: 'speed',
+        baseUrl: 'gptSovits.baseUrl',
+        model: 'gptSovits.model',
+        gptWeights: 'gptSovits.gptWeights',
+        sovitsWeights: 'gptSovits.sovitsWeights',
+        referWavPath: 'gptSovits.referWavPath',
+        promptText: 'gptSovits.promptText',
+        promptLanguage: 'gptSovits.promptLanguage',
+        textLanguage: 'gptSovits.textLanguage',
+        textSplitMethod: 'gptSovits.textSplitMethod',
+        fragmentInterval: 'gptSovits.fragmentInterval',
+        topK: 'gptSovits.topK',
+        topP: 'gptSovits.topP',
+        temperature: 'gptSovits.temperature',
+        batchSize: 'gptSovits.batchSize',
+        freeze: 'gptSovits.freeze',
+      }
+      const applyProfileDraft = (values) => {
+        /**
+         * 只写方案里**真的有值**的键。
+         *
+         * 以前无脑 `put(path, values?.[key])`：方案缺某个键（老方案、或「新建」
+         * 传进来的默认值对象没带 baseUrl/权重路径）就把当前草稿对应字段写成
+         * undefined。用户接着点保存，`saveConfig` 以 DEFAULTS 为基线合并，
+         * undefined 回落成空串——**已填好的权重/参考音频路径当场被清空**。
+         * 载入方案只该动方案覆盖的那些字段，没给的保持现状。
+         */
+        for (const [key, path] of Object.entries(PROFILE_DRAFT_PATHS)) {
+          const val = values?.[key]
+          if (val === undefined || val === null) continue
+          put(path, val)
+        }
+      }
+      const loadProfiles = async (pick) => {
+        const r = await get('/tts/gpt-profiles')
+        if (r?.ok === false) return toast(r.message || '音色方案读不出来')
+        const items = Array.isArray(r.items) ? r.items : []
+        setGptProfiles(items)
+        setGptActiveProfileId(String(r.activeId || ''))
+        const chosen = pick || String(r.activeId || '')
+        const found = items.find((p) => p.id === chosen)
+        if (found) {
+          setProfileId(found.id)
+          setProfileName(found.name)
+          setProfileBaseline({ id: found.id, name: found.name, values: found.values })
+        }
+        return r
+      }
+      useEffect(() => { if (provider === 'gpt-sovits') loadProfiles() }, [provider])
+      const profileDirty = Boolean(profileBaseline) && (
+        profileName !== profileBaseline.name
+        || JSON.stringify(profileSnapshot()) !== JSON.stringify(profileBaseline.values)
+      )
+      const chooseProfile = (id) => {
+        setProfileId(String(id || ''))
+        const found = gptProfiles.find((p) => p.id === id)
+        setProfileName(found?.name || '')
+        setProfileBaseline(found ? { id: found.id, name: found.name, values: found.values } : null)
+        if (found) {
+          applyProfileDraft(found.values)
+          toast('已载入草稿；点「应用方案」才会切换当前音色')
+        }
+      }
+      const saveProfile = async () => {
+        const name = String(profileName || '').trim()
+        if (!name) return toast('给方案起个名字')
+        setProfileBusy(true)
+        try {
+          const r = await post('/tts/gpt-profiles', {
+            op: 'save', id: profileId, name, values: profileSnapshot(),
+          })
+          if (r?.ok === false) return toast(r.message || '没存上')
+          setGptProfiles(Array.isArray(r.items) ? r.items : [])
+          setProfileId(String(r.id || ''))
+          setProfileName(String(r.name || name))
+          setProfileBaseline({ id: r.id, name: r.name || name, values: profileSnapshot() })
+          toast(r.message || '方案已保存')
+        } finally { setProfileBusy(false) }
+      }
+      const applyProfile = async () => {
+        if (!profileId) return toast('先选一套方案')
+        setProfileBusy(true)
+        try {
+          const r = await post('/tts/gpt-profiles', { op: 'apply', id: profileId })
+          if (r?.ok === false) return toast(r.message || '应用失败')
+          setDirty(false)
+          await reload?.()
+          await loadProfiles(profileId)
+          toast(r.message || '方案已应用')
+        } finally { setProfileBusy(false) }
+      }
+      const removeProfile = async () => {
+        const found = gptProfiles.find((p) => p.id === profileId)
+        if (!found) return toast('先选一套方案')
+        if (!window.confirm(`删除音色方案「${found.name}」？当前音色会保留。`)) return
+        setProfileBusy(true)
+        try {
+          const r = await post('/tts/gpt-profiles', { op: 'remove', id: profileId })
+          if (r?.ok === false) return toast(r.message || '没删掉')
+          setGptProfiles(Array.isArray(r.items) ? r.items : [])
+          setProfileId(''); setProfileName(''); setProfileBaseline(null)
+          toast(r.message || '方案已删除')
+        } finally { setProfileBusy(false) }
+      }
+      const newProfile = () => {
+        setProfileId(''); setProfileName(''); setProfileBaseline(null)
+        const d = { speed: 1, promptLanguage: 'zh', textLanguage: 'zh', textSplitMethod: 'cut5', fragmentInterval: 0.3, topK: 15, topP: 1, temperature: 1, batchSize: 1, freeze: false }
+        applyProfileDraft(d)
+        toast('已新建空白方案：填好参考音频、参考文本和权重后保存')
+      }
+
+      const probeFeatures = async () => {
+        const base = String(v('gptSovits.baseUrl') || '').trim()
+        if (!base) return null
+        const r = await post('/tts/gpt-features', { baseUrl: base })
+        setGptFeatures(r)
+        return r
+      }
+      useEffect(() => { if (provider === 'gpt-sovits') probeFeatures() }, [provider, v('gptSovits.baseUrl')])
+      /** 手动检查服务：和目录探测分开，对齐扩展面板的「检查 GPT-SoVITS 服务」 */
+      const checkGptFeatures = async () => {
+        const r = await probeFeatures()
+        if (!r) return toast('先填服务地址，或点「一键启动」让它自动写入')
+        toast(r.ok === false
+          ? (r.message || '服务检查没过')
+          : (r.semanticFreeze ? '服务正常，支持语义复用' : '服务正常，原版接口不支持语义复用'))
       }
 
       const startGpt = async () => {
@@ -14862,6 +15132,8 @@ window.__ModuleLoader__.load({
           /** 手填的权重路径优先于自动配对；留空 = 用扫描结果 */
           gptWeights: v('gptSovits.gptWeights'),
           sovitsWeights: v('gptSovits.sovitsWeights'),
+          /** 勾选后跑带语义缓存的适配器；原版 api_v2.py 没有这个路由 */
+          semanticCache: v('gptSovits.semanticCache') === true,
         })
         if (r?.ok === false) toast(r.message || '起不来')
         else toast('正在启动，加载模型要一两分钟')
@@ -14871,6 +15143,28 @@ window.__ModuleLoader__.load({
       const stopGpt = async () => {
         await post('/tts/gpt-stop', {})
         toast('已停止')
+        await loadStatus()
+      }
+
+      /**
+       * 换角色不用重启服务：选完下拉直接切权重。
+       *
+       * 模型加载实测一两分钟，所以这里不做假「立即生效」——toast 明说要等。
+       * 服务还没跑 / 选的就是当前生效角色时都不发请求，免得白等一遍。
+       */
+      const switchGptModel = async (name) => {
+        if (!gptRunning) {
+          toast('先点「一键启动」，再换角色')
+          return
+        }
+        if (name && name === st?.gpt?.activeModel) return
+        const r = await post('/tts/gpt-switch', {
+          model: name,
+          gptWeights: v('gptSovits.gptWeights'),
+          sovitsWeights: v('gptSovits.sovitsWeights'),
+        })
+        if (r?.ok === false) toast(r.message || '切换失败')
+        else toast(name ? `正在加载「${r.name || name}」的权重，一两分钟后生效` : '已切回服务启动时的角色')
         await loadStatus()
       }
 
@@ -14921,33 +15215,82 @@ window.__ModuleLoader__.load({
        */
       const [pvText, setPvText] = useState('你好，这是一条语音试听。')
       const [pvBusy, setPvBusy] = useState(false)
+      const [pvJob, setPvJob] = useState(null)
       const [pvAudio, setPvAudio] = useState(null)
       const pvUrl = useRef('')
+      const pvTimer = useRef(null)
+      const pvGeneration = useRef(0)
       useEffect(() => () => {
+        pvGeneration.current += 1
+        if (pvTimer.current) clearInterval(pvTimer.current)
         if (pvUrl.current) URL.revokeObjectURL(pvUrl.current)
       }, [])
+      /** 停止等待只清前端轮询和音频，后台合成可能还会跑完（对齐扩展面板） */
+      const stopPreview = (notify = true) => {
+        pvGeneration.current += 1
+        if (pvTimer.current) { clearInterval(pvTimer.current); pvTimer.current = null }
+        if (pvUrl.current) { URL.revokeObjectURL(pvUrl.current); pvUrl.current = '' }
+        setPvBusy(false)
+        setPvJob(null)
+        setPvAudio(null)
+        if (notify) toast('已停止等待；后台合成可能还会跑完。')
+      }
+      const showPreviewAudio = (r) => {
+        const bin = atob(String(r?.audio || ''))
+        const bytes = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+        if (pvUrl.current) URL.revokeObjectURL(pvUrl.current)
+        const url = URL.createObjectURL(new Blob([bytes], { type: r.contentType || 'audio/mpeg' }))
+        pvUrl.current = url
+        setPvAudio({
+          url, bytes: Number(r.bytes) || bytes.length,
+          provider: String(r.provider || ''),
+          silk: r.silk || { ok: false, reason: 'unchecked' },
+        })
+      }
+      const pollPvJob = async (id, gen) => {
+        if (gen !== pvGeneration.current) return
+        const r = await get('/tts/preview/job?id=' + encodeURIComponent(id))
+        if (gen !== pvGeneration.current) return
+        if (r?.ok === false) {
+          toast(r.message || '查不到试听任务')
+          stopPreview(false)
+          return
+        }
+        setPvJob({ id, phase: String(r.phase || ''), progress: Number(r.progress) || 0 })
+        if (r.status === 'running') return
+        if (pvTimer.current) { clearInterval(pvTimer.current); pvTimer.current = null }
+        setPvBusy(false)
+        if (r.status === 'error') {
+          setPvJob(null)
+          toast(r.error?.message || '试听失败')
+          return
+        }
+        if (r.status === 'done' && r.result?.ok) showPreviewAudio(r.result)
+        else toast('试听没拿到音频')
+        setPvJob(null)
+      }
       const previewVoice = async () => {
         const t = String(pvText || '').trim()
         if (!t) return toast('写一句要试听的话')
+        const gen = ++pvGeneration.current
+        if (pvTimer.current) { clearInterval(pvTimer.current); pvTimer.current = null }
+        if (pvUrl.current) { URL.revokeObjectURL(pvUrl.current); pvUrl.current = '' }
+        setPvAudio(null)
         setPvBusy(true)
+        setPvJob({ id: '', phase: '提交中', progress: 0 })
         try {
-          const r = await post('/tts/preview', { text: t, draft: draft || {} })
-          if (r?.ok === false) return toast(r.message || '试听失败')
-          const bin = atob(String(r.audio || ''))
-          const bytes = new Uint8Array(bin.length)
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-          if (pvUrl.current) URL.revokeObjectURL(pvUrl.current)
-          const url = URL.createObjectURL(new Blob([bytes], { type: r.contentType || 'audio/mpeg' }))
-          pvUrl.current = url
-          setPvAudio({
-            url, bytes: Number(r.bytes) || bytes.length,
-            provider: String(r.provider || ''),
-            silk: r.silk || { ok: false, reason: 'unchecked' },
-          })
+          const r = await post('/tts/preview/start', { text: t, draft: draft || {} })
+          if (r?.ok === false) throw new Error(r.message || '试听提交失败')
+          if (gen !== pvGeneration.current) return
+          setPvJob({ id: r.id, phase: '排队中', progress: 5 })
+          pvTimer.current = setInterval(() => pollPvJob(r.id, gen), 1000)
+          await pollPvJob(r.id, gen)
         } catch (e) {
-          toast('试听失败：' + (e?.message || e))
-        } finally {
+          if (gen !== pvGeneration.current) return
           setPvBusy(false)
+          setPvJob(null)
+          toast('试听失败：' + (e?.message || e))
         }
       }
 
@@ -14975,12 +15318,46 @@ window.__ModuleLoader__.load({
            * 输入框给的永远是字符串，直接存进去 `Number(cfg.timeoutSec)` 虽然也能用，
            * 但配置全文里会变成 `"30"`，和默认值的类型不一致，看的人会以为坏了。
            */
+          /** 数字字段统一转回 number：输入框给的永远是字符串 */
+          const num = (x, fallback) => (String(x ?? '').trim() === '' ? fallback : Number(x) || fallback)
           const next = {
             ...src,
-            timeoutSec: Number(src?.timeoutSec) || 30,
-            maxChars: Number(src?.maxChars) || 300,
+            timeoutSec: num(src?.timeoutSec, 30),
+            maxChars: num(src?.maxChars, 300),
             /** 语速夹在 0.5–2，和 `speedOf()` 同一套范围；空值回原速 */
-            speed: Math.max(0.5, Math.min(2, Number(src?.speed) || 1)),
+            speed: Math.max(0.5, Math.min(2, num(src?.speed, 1))),
+            /** GPT-SoVITS v2 参数：和扩展的 RANGE_FIELDS 同一套边界 */
+            ...(src?.gptSovits ? {
+              gptSovits: {
+                ...src.gptSovits,
+                fragmentInterval: Math.max(0.01, Math.min(1, num(src.gptSovits.fragmentInterval, 0.3))),
+                topK: Math.max(1, Math.min(100, Math.round(num(src.gptSovits.topK, 15)))),
+                topP: Math.max(0, Math.min(1, num(src.gptSovits.topP, 1))),
+                temperature: Math.max(0.01, Math.min(2, num(src.gptSovits.temperature, 1))),
+                batchSize: Math.max(1, Math.min(8, Math.round(num(src.gptSovits.batchSize, 1)))),
+              },
+            } : {}),
+            /** 新声音来源的数字参数（不填就回各自默认值） */
+            ...(src?.volcano ? {
+              volcano: {
+                ...src.volcano,
+                speedRatio: Math.max(0.5, Math.min(2, num(src.volcano.speedRatio, 1))),
+              },
+            } : {}),
+            ...(src?.breeze ? {
+              breeze: {
+                ...src.breeze,
+                sampleRate: num(src.breeze.sampleRate, 24000),
+                guidanceScale: num(src.breeze.guidanceScale, 0),
+              },
+            } : {}),
+            ...(src?.minimax ? {
+              minimax: {
+                ...src.minimax,
+                speed: Math.max(0.5, Math.min(2, num(src.minimax.speed, 1))),
+                pitch: num(src.minimax.pitch, 0),
+              },
+            } : {}),
             ...(src?.sherpa
               ? {
                   sherpa: {
@@ -15010,18 +15387,22 @@ window.__ModuleLoader__.load({
             type: opts.type || 'text',
             value: v(path),
             placeholder: opts.placeholder || '',
+            ...(opts.min !== undefined ? { min: opts.min } : {}),
+            ...(opts.max !== undefined ? { max: opts.max } : {}),
+            ...(opts.step !== undefined ? { step: opts.step } : {}),
             spellCheck: false,
             onChange: (e) => put(path, e.target.value),
           }),
         )
 
-      const select = (label, path, options) =>
-        h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 240px' } },
+      const select = (label, path, options, opts = {}) =>
+        h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: opts.flex || '1 1 240px' } },
           h('span', { className: 'roost-note', style: { margin: 0 } }, label),
           h(Dropdown, {
             className: 'roost-input',
             value: v(path),
-            onChange: (e) => put(path, e.target.value),
+            /** onPick 只给需要「选完立刻生效」的地方用（GPT 角色切换），其余调用行为不变 */
+            onChange: (e) => { put(path, e.target.value); opts.onPick?.(e.target.value) },
           }, options.map((o) => h('option', { key: o.id, value: o.id }, o.label))),
         )
 
@@ -15053,8 +15434,8 @@ window.__ModuleLoader__.load({
         ),
       },
         h('div', { className: 'roost-note', style: { marginTop: 2 } },
-          '默认关闭。开启后，模型可以用 <<say: 内容>> 让这句话变成语音条；'
-          + '合成在这里做，转成 QQ 要的 silk 和发送由框架外接协议完成。'),
+          '默认关闭。开启后，模型可以用 <voice>要念的内容</voice> 让这句话变成语音条；'
+          + '合成、按人限次在这里做，转成 QQ 要的 silk 和发送由框架外接协议完成（失败会自动改发文字）。'),
         dirty
           ? h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)' } },
               '有未保存的改动。')
@@ -15068,21 +15449,153 @@ window.__ModuleLoader__.load({
                 onToggle: (next) => put('enabled', next),
               }),
             '启用语音合成'),
-          select('provider', 'provider', PROVIDERS),
+          h('div', { style: { flex: '1 1 100%' } },
+            h('div', { className: 'roost-note', style: { margin: '0 0 6px' } },
+              '选好声音可以先试听，保存后用于聊天。'),
+            h('div', { className: 'voice-choices', role: 'radiogroup', 'aria-label': '声音来源' },
+              visibleSources.map((o) => {
+                const on = provider === o.id
+                return h('div', {
+                  key: o.id,
+                  className: 'voice-choice' + (on ? ' on' : ''),
+                  role: 'radio',
+                  tabIndex: 0,
+                  'aria-checked': on,
+                  title: o.label,
+                  onClick: () => put('provider', o.id),
+                  onKeyDown: (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); put('provider', o.id) }
+                  },
+                },
+                  h('button', {
+                    type: 'button',
+                    className: 'voice-choice-pin' + (pins.includes(o.id) || o.id === activeSource ? ' on' : ''),
+                    title: pins.includes(o.id) || o.id === activeSource ? '取消置顶' : '置顶这个声音',
+                    'aria-label': '置顶 ' + o.label,
+                    onClick: (e) => { e.stopPropagation(); togglePin(o.id) },
+                  },
+                    h('svg', { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+                      h('circle', { cx: 8, cy: 5.6, r: 2.4, stroke: 'currentColor', strokeWidth: 1.3 }),
+                      h('path', { d: 'M8 8v5.4M5.4 13.4h5.2', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round' }),
+                    ),
+                  ),
+                  h('span', { className: 'vc-name' }, (o.icon ? o.icon + ' ' : '') + o.label),
+                  h('span', { className: 'vc-desc' }, o.desc),
+                )
+              }),
+              !moreSources ? h('button', {
+                type: 'button', className: 'voice-choice-more',
+                onClick: () => setMoreSources(true),
+              }, '更多', `还有 ${ordered.length - visibleSources.length} 个来源`) : h('button', {
+                type: 'button', className: 'voice-choice-more',
+                onClick: () => setMoreSources(false),
+              }, '收起', '只看常用接口'),
+            ),
+          ),
           /**
-           * 语速放在 provider 旁边，**四个 provider 共用这一个**。
+           * 语速放在 provider 旁边，**内置五家共用这一个**。
            * 以前只有本地模型有语速，而且输入框埋在它自己的分区里——
            * 切到云端之后那个框还在，改了却完全没反应。
            */
           h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '0 0 110px' } },
             h('span', { className: 'roost-note', style: { margin: 0 } }, '语速（0.5–2）'),
             h('input', {
-              className: 'roost-input', type: 'number', step: '0.1', min: '0.5', max: '2',
+              className: 'roost-input', type: 'number', step: '0.05', min: '0.5', max: '2',
               value: v('speed', 1),
               onChange: (e) => put('speed', e.target.value),
             }),
           ),
         ),
+
+        /** 自动：先微软朗读，失败退 Windows 声音；配置沿用 edge 的音色 */
+        provider === 'auto'
+          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+              '不用填地址和 Key：先用微软朗读，失败时（仅 Windows）自动改用系统自带声音。'
+              + '音色可在「微软 edge-tts」里调。')
+          : null,
+
+        provider === 'windows'
+          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+              '用系统自带的朗读声音，完全离线、机械感重一些；只在 Windows 上可用，挑的是系统里第一个中文语音。')
+          : null,
+
+        provider === 'cosyvoice'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('服务地址', 'cosyvoice.url', { placeholder: 'http://127.0.0.1:50000' }),
+                select('模式', 'cosyvoice.mode', [{ id: 'sft', label: 'sft（音色 ID）' }, { id: 'instruct', label: 'instruct（语气指令）' }]),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('音色 ID', 'cosyvoice.spkId', { placeholder: '中文女' }),
+                select('采样率', 'cosyvoice.sampleRate', [{ id: '22050', label: '22050（CosyVoice 1）' }, { id: '24000', label: '24000（CosyVoice 2）' }]),
+              ),
+              v('cosyvoice.mode') === 'instruct'
+                ? h('div', { style: { marginTop: 8 } }, field('语气指令', 'cosyvoice.instruct', { placeholder: '用轻声、亲切的语气朗读' }))
+                : null,
+              h('div', { className: 'roost-note' }, '要自己先跑起 CosyVoice 的 FastAPI 服务；文本发给本地服务，不出本机。'),
+            )
+          : null,
+
+        provider === 'volcano'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('API Key', 'volcano.apiKey', { type: 'password' }),
+                field('音色', 'volcano.voiceType', { placeholder: 'zh_female_vv_uranus_bigtts' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('模型资源 ID（一般留空，按音色自动配）', 'volcano.resourceId', { placeholder: 'seed-tts-2.0 / seed-tts-1.0' }),
+                field('语速（0.5–2）', 'volcano.speedRatio', { type: 'number' }),
+              ),
+              h('div', { className: 'roost-note' }, '豆包音色分 1.0 / 2.0 两代模型，混用会报「音色没权限」；留空资源 ID 会按音色名自动配。'),
+            )
+          : null,
+
+        provider === 'fish-free'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('API Key', 'fishApiKey', { type: 'password' }),
+                field('音色 ID（32 位十六进制，留空用默认）', 'fishReferenceId', { placeholder: '可选' }),
+              ),
+              h('div', { className: 'roost-note' }, 'Fish Audio 的 S2.1 Pro Free；免费额度用完会明确报错，不会静默换声。'),
+            )
+          : null,
+
+        provider === 'breeze'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                select('模式', 'breeze.mode', [{ id: 'cloud', label: '云端' }, { id: 'local', label: '自建服务' }]),
+                field('服务地址', 'breeze.url', { placeholder: v('breeze.mode') === 'local' ? 'http://127.0.0.1:7860' : 'https://api.breeze.blue' }),
+              ),
+              v('breeze.mode') === 'local'
+                ? h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                    field('语气指令（可选）', 'breeze.instructions', { placeholder: '轻声、亲切' }),
+                    field('引导强度（可选）', 'breeze.guidanceScale', { type: 'number' }),
+                  )
+                : h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                    field('API Key（brz_ 开头）', 'breeze.key', { type: 'password' }),
+                    field('音色 ID', 'breeze.voiceId', { placeholder: '' }),
+                  ),
+              h('div', { className: 'roost-note' }, '云端要填 Key 和音色 ID；自建填本地地址即可免 Key。'),
+            )
+          : null,
+
+        provider === 'minimax'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('API Key', 'minimax.apiKey', { type: 'password' }),
+                field('Voice ID', 'minimax.voiceId', { placeholder: 'Chinese (Mandarin)_Soft_Girl' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('模型', 'minimax.model', { placeholder: 'speech-2.8-turbo' }),
+                field('情绪（auto = 自动判断）', 'minimax.emotion', { placeholder: 'auto' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('语速（0.5–2）', 'minimax.speed', { type: 'number' }),
+                field('语调（-12 到 12）', 'minimax.pitch', { type: 'number' }),
+                field('服务地址（海外账号改 .io）', 'minimax.baseUrl', { placeholder: 'https://api.minimax.cn' }),
+              ),
+            )
+          : null,
 
         provider === 'openai'
           ? h('div', null,
@@ -15152,6 +15665,7 @@ window.__ModuleLoader__.load({
                 }),
                 h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 2 } },
                   h('button', { type: 'button', className: 'roost-btn', onClick: probeGpt }, '探测'),
+                  h('button', { type: 'button', className: 'roost-btn', onClick: checkGptFeatures }, '检查服务'),
                   gptRunning || gptStarting
                     ? h('button', { type: 'button', className: 'roost-btn', onClick: stopGpt }, '停止')
                     : h('button', {
@@ -15159,6 +15673,23 @@ window.__ModuleLoader__.load({
                         onClick: startGpt,
                       }, '一键启动'),
                 ),
+              ),
+
+              /**
+               * 随 DSH 自启动。
+               *
+               * 这是「下次启动 DSH 时」才生效的开关，所以明确写清时机，
+               * 免得用户开了之后盯着当前进程等它自己起来——不会，得重启。
+               */
+              h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', marginTop: 8 } },
+                h(Switch, {
+                  on: v('gptSovits.autoStart') === true,
+                  label: '随 DSH 启动 GPT 进程',
+                  title: '重启 DSH 后自动拉起 GPT-SoVITS；关掉后重启才不再自动启动',
+                  onToggle: (on) => put('gptSovits.autoStart', on),
+                }),
+                h('span', { className: 'roost-note', style: { margin: 0 } },
+                  '随 DSH 启动 GPT 进程（重启 DSH 后生效；需要已填安装目录）'),
               ),
 
               /** 探测结果：认出了什么，一眼看明白 */
@@ -15189,6 +15720,68 @@ window.__ModuleLoader__.load({
                 : null,
 
               /**
+               * 音色方案（扩展面板同款两步走）：
+               * 选方案 = 把那套值载入草稿看/改；保存 = 只写方案库；
+               * 应用 = 才写当前配置。语速跟着方案走，但仍是最上面那个全局框。
+               */
+              h('div', { style: { marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--line-soft)' } },
+                h('div', { style: { fontWeight: 650, fontSize: 12.5, marginBottom: 6 } }, '音色方案'),
+                h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+                  '保存只存草稿，点「应用方案」才会切换当前音色；最多 50 套，不存密钥。'
+                  + (gptActiveProfileId && gptProfiles.some((p) => p.id === gptActiveProfileId)
+                    ? ` 正在用：${gptProfiles.find((p) => p.id === gptActiveProfileId).name}。` : '')),
+                h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' } },
+                  h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 220px' } },
+                    h('span', { className: 'roost-note', style: { margin: 0 } }, '已有方案'),
+                    h(Dropdown, {
+                      className: 'roost-input',
+                      value: profileId,
+                      onChange: (e) => chooseProfile(e.target.value),
+                    },
+                      h('option', { value: '' }, '新建方案'),
+                      ...gptProfiles.map((p) => h('option', { key: p.id, value: p.id }, p.name)),
+                    ),
+                  ),
+                  h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 220px' } },
+                    h('span', { className: 'roost-note', style: { margin: 0 } }, '方案名'),
+                    h('input', {
+                      className: 'roost-input',
+                      value: profileName,
+                      maxLength: 40,
+                      placeholder: '例如：日语角色 · 轻声',
+                      onChange: (e) => setProfileName(e.target.value),
+                    }),
+                  ),
+                ),
+                h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 } },
+                  h('button', { type: 'button', className: 'roost-btn', disabled: profileBusy, onClick: newProfile }, '新建'),
+                  h('button', {
+                    type: 'button', className: 'roost-primary', disabled: profileBusy || !String(profileName || '').trim(),
+                    onClick: saveProfile,
+                  }, profileBusy ? '处理中…' : '保存方案'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: profileBusy || !profileId,
+                    onClick: applyProfile,
+                  }, '应用方案'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: profileBusy || !profileDirty,
+                    onClick: () => {
+                      if (profileBaseline) applyProfileDraft(profileBaseline.values)
+                      setProfileName(profileBaseline?.name || '')
+                    },
+                  }, '还原修改'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: profileBusy || !profileId,
+                    onClick: removeProfile,
+                  }, '删除方案'),
+                ),
+                profileDirty
+                  ? h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)', marginTop: 6 } },
+                      '方案有未保存的草稿改动，保存前别切走。')
+                  : null,
+              ),
+
+              /**
                * 扫描结果做成下拉。
                *
                * 用户不用知道「GPT_weights_v2ProPlus/角色A-e15.ckpt」这种路径，
@@ -15203,7 +15796,7 @@ window.__ModuleLoader__.load({
                         id: m.name,
                         label: m.name + (m.version ? ` · ${m.version}` : ''),
                       })),
-                    ]),
+                    ], { onPick: switchGptModel }),
                     refOptions.length
                       ? h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 240px' } },
                           h('span', { className: 'roost-note', style: { margin: 0 } }, `参考音频（扫描到 ${refOptions.length} 个）`),
@@ -15262,8 +15855,8 @@ window.__ModuleLoader__.load({
                 field('参考文本（须与音频逐字一致）', 'gptSovits.promptText', { flex: '2 1 320px' }),
               ),
               h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
-                field('参考音频语种', 'gptSovits.promptLanguage', { placeholder: '中文 / 日文 / 英文' }),
-                field('合成文本语种', 'gptSovits.textLanguage', { placeholder: '中文 / 日文 / 英文' }),
+                langSelect('参考音频语种', 'gptSovits.promptLanguage'),
+                langSelect('合成文本语种', 'gptSovits.textLanguage'),
                 select('接口版本', 'gptSovits.apiVersion', [
                   { id: 'v1', label: 'v1（api.py）' },
                   { id: 'v2', label: 'v2（api_v2.py）' },
@@ -15273,11 +15866,65 @@ window.__ModuleLoader__.load({
                 field('接口路由', 'gptSovits.endpointPath', { placeholder: '/tts' }),
                 field('Bearer 密钥（可选）', 'gptSovits.apiKey', { placeholder: '本地原生 API 通常留空' }),
               ),
+
+              /** v2 推理参数：对齐扩展市场「语音回复」，v1 的 api.py 不认这些字段 */
+              h('div', { className: 'roost-note', style: { marginTop: 10 } }, 'v2 推理参数（v1 忽略）：'),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 6 } },
+                select('怎么切句', 'gptSovits.textSplitMethod', [
+                  { id: 'cut0', label: '不切' },
+                  { id: 'cut1', label: '四句' },
+                  { id: 'cut2', label: '50 字' },
+                  { id: 'cut3', label: '中文句号' },
+                  { id: 'cut4', label: '英文句号' },
+                  { id: 'cut5', label: '标点（推荐）' },
+                ], { flex: '1 1 200px' }),
+                field('句间停顿（秒）', 'gptSovits.fragmentInterval', { type: 'number', placeholder: '0.3', min: 0.01, max: 1, step: 0.01 }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('top_k', 'gptSovits.topK', { type: 'number', placeholder: '15', min: 1, max: 100, step: 1 }),
+                field('top_p', 'gptSovits.topP', { type: 'number', placeholder: '1', min: 0, max: 1, step: 0.05 }),
+                field('temperature', 'gptSovits.temperature', { type: 'number', placeholder: '1', min: 0.01, max: 2, step: 0.05 }),
+                field('batch_size', 'gptSovits.batchSize', { type: 'number', placeholder: '1', min: 1, max: 8, step: 1 }),
+              ),
+
+              /**
+               * 语义复用分两个开关：
+               *   · 语义缓存 = 一键启动时换用适配器（服务侧能力）
+               *   · 复用上次语义 = 合成时走 /voice-reply/tts（使用侧开关）
+               * 只勾第二个而服务没适配器，会在合成时收到明确的「去重新启动」提示。
+               */
+              h('label', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' } },
+                h('input', {
+                  type: 'checkbox',
+                  checked: v('gptSovits.semanticCache') === true,
+                  onChange: (e) => put('gptSovits.semanticCache', e.target.checked),
+                }),
+                h('span', { className: 'roost-note', style: { margin: 0 } },
+                  '一键启动时启用语义缓存（改语速 / 换音色时复用同一段语义，省一遍 GPT 采样）'),
+              ),
+              h('label', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
+                h('input', {
+                  type: 'checkbox',
+                  checked: v('gptSovits.freeze') === true,
+                  disabled: gptFeatures?.semanticFreeze === false,
+                  onChange: (e) => put('gptSovits.freeze', e.target.checked),
+                }),
+                h('span', { className: 'roost-note', style: { margin: 0 } },
+                  gptFeatures?.semanticFreeze === false
+                    ? '复用上次语义：当前服务不支持（原版 api_v2.py 没这个接口），要用就勾上面的语义缓存并重启服务'
+                    : '复用上次语义结果（需服务带语义缓存适配器；同一段文本才命中）'),
+              ),
+              gptFeatures?.semanticFreeze === false
+                ? h('div', { className: 'roost-note', style: { marginTop: 4 } },
+                    gptFeatures.message || '服务检查：不支持语义复用。')
+                : null,
+
               h('div', { className: 'roost-note' },
                 '语种填「中文」「日文」就行，会自动转成 API 要的 zh / ja。'
                 + '参考音频路径是「GPT-SoVITS 服务进程」要能读到的路径，不是 DSH 这边的。'
                 + '一键启动会自动挑一个没被系统保留的端口，就绪后把地址和路由填好——'
-                + '加载模型要一两分钟，这期间可以先干别的。'),
+                + '加载模型要一两分钟，这期间可以先干别的。'
+                + 'v2 合成固定要 WAV，避开 mp3 二次有损；SILK 由框架外接协议编码。'),
             )
           : null,
 
@@ -15395,10 +16042,10 @@ window.__ModuleLoader__.load({
           field('单次最多多少字', 'maxChars', { placeholder: '300' }),
         ),
         h('div', { className: 'roost-note' },
-          '最多字数要配合 QQ 语音条时长：太长的会被截断，不如直接发文字。'),
+          '超过这个字数不会合成，这句会改发文字。语音条本身还有 60 秒时长上限。'),
 
         /**
-         * 5.3 试听：不另起一张卡片（主人不要卡片背景），用一条分隔线接在本节末尾。
+         * 5.3 试听：不另起一张卡片（沿用外层 .roost-sec 的卡片底），用一条分隔线接在本节末尾。
          * A3 保留这个形态，只补一个锚点，让「试听」能被找到、能被跳过来。
          */
         h('div', {
@@ -15408,7 +16055,8 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontWeight: 650, fontSize: 13 } }, '试听'),
           h('div', { className: 'roost-note', style: { marginTop: 4 } },
             '走和 QQ 语音条同一条合成链路，音频只在内存里，不落盘、不占次数；'
-            + '改了配置不用先保存，点试听就按当前草稿来。'),
+            + '改了配置不用先保存，点试听就按当前草稿来。'
+            + '合成在后台跑，期间可以停止等待（后台任务可能仍会跑完）。'),
           h('div', {
             style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' },
           },
@@ -15420,8 +16068,17 @@ window.__ModuleLoader__.load({
             h('button', {
               type: 'button', className: 'roost-btn', disabled: pvBusy,
               onClick: previewVoice,
-            }, pvBusy ? '合成中…' : '试听'),
+            }, pvBusy ? '生成中…' : '试听'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: !pvBusy,
+              onClick: () => stopPreview(true),
+            }, '停止等待'),
           ),
+          pvJob
+            ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
+                `${pvJob.phase || '处理中'} · ${pvJob.progress}%`
+                + (pvJob.id ? '（每秒查一次，最多等 150 秒）' : ''))
+            : null,
           dirty
             ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
                 '当前用的是未保存的草稿配置。')
@@ -17436,7 +18093,15 @@ window.__ModuleLoader__.load({
                   value: drafts[x.id] ?? '', spellCheck: false, disabled: x.foreign,
                   onChange: (e) => setDrafts({ ...drafts, [x.id]: e.target.value }),
                 }),
-                h('div', { style: { display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' } },
+                /**
+                 * 停用 / 卸载也放在已安装页（主人 2026-11-24 反馈这里没有入口）。
+                 *
+                 * 以前只有市场页的条目带这两个按钮：市场索引拉不到、或装的是
+                 * 索引外的手写目录时，这一页就只剩「保存 usage」，根本管不了它。
+                 * 卸载走同一个 `extensions.market.remove`（手写目录带 force 先备份），
+                 * 停用走 `setRevokeAsk()` 的确认弹窗——两个 ask 互斥，不会叠遮罩。
+                 */
+                h('div', { style: { display: 'flex', gap: 6, marginTop: 6, alignItems: 'center', flexWrap: 'wrap' } },
                   h('button', {
                     type: 'button', className: 'roost-btn',
                     disabled: saving === x.id || x.foreign, onClick: () => save(x.id),
@@ -17447,6 +18112,17 @@ window.__ModuleLoader__.load({
                         disabled: cfgBusy, onClick: () => openCfg(x.id),
                       }, cfgFor === x.id ? '收起设置' : '设置')
                     : null,
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
+                    onClick: () => setRevokeAsk(x.id),
+                  }, '停用'),
+                  h(ConfirmLink, {
+                    label: x.foreign ? '删除' : '卸载',
+                    confirmLabel: x.foreign ? '确认删除（先备份）' : '确认卸载',
+                    disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
+                    onConfirm: () => marketAct('extensions.market.remove', x.id, x.foreign ? { force: true } : {}),
+                  }),
                 ),
                 cfgFor === x.id && cfgData
                   ? h('div', {
@@ -20251,10 +20927,21 @@ window.__ModuleLoader__.load({
      * log 一行一条。**不给扩展自定义样式的能力**——那等于让它控制面板外观，
      * 而面板上还有主人的记忆和配置。
      */
-    function ExtUiPage({ id, toast }) {
+    function ExtUiPage({ id, toast, themeVars = null }) {
       const [d, setD] = useState(null)
       /** 沙箱 iframe 的句柄：既要拿 `contentWindow` 校验来源，也要回消息 */
       const frameRef = useRef(null)
+      /**
+       * 把面板主题递给扩展页面（个性化页开关控制，默认 null = 不发）。
+       * 必须在 iframe load 之后发：页面文档这时才建好，垫片的消息监听才挂上。
+       * 沙箱页面是 opaque origin，postMessage 的 targetOrigin 只能用 '*'，
+       * 但 contentWindow 是从 ref 拿的，不会发到别的 frame。
+       */
+      const sendTheme = () => {
+        const f = frameRef.current
+        if (!themeVars || !f || !f.contentWindow) return
+        try { f.contentWindow.postMessage({ type: 'roost:theme', vars: themeVars }, '*') } catch { /* 页面已走 */ }
+      }
 
       /**
        * 沙箱页面的**唯一通道**。
@@ -20455,6 +21142,7 @@ window.__ModuleLoader__.load({
       if (d.page) {
         return h('iframe', {
           ref: frameRef,
+          onLoad: sendTheme,
           src: API + '/ext-pages?id=' + encodeURIComponent(id) + '&file=' + encodeURIComponent(d.page),
           title: d.nav?.label || id,
           /**
@@ -21009,6 +21697,14 @@ window.__ModuleLoader__.load({
       'ch-member': 'member',
     }
     const ALL_TABS = TABS.map(([id]) => id).concat(HIDDEN_TABS)
+    /**
+     * 偏好校验专用：扩展页 `ext:<id>` 是运行时注册的，静态清单里没有，
+     * 但隐藏/排序要能存住。只放行「形如 ext:xxx」的安全 key——不接受任意
+     * 字符串，免得手改 JSON 塞一堆垃圾进 localStorage。真正存在哪些扩展页
+     * 由渲染层的 `extPages` 决定：卸载后偏好里的残留 key 不会显示，也没危害。
+     */
+    const isPrefTabId = (id) => typeof id === 'string'
+      && (ALL_TABS.includes(id) || /^ext:[A-Za-z0-9_-]+$/.test(id))
     /** 深链校验用：老 key 也放行，否则老书签会被当成无效值、静默退回概览 */
     const KNOWN_TABS = ALL_TABS.concat(Object.keys(LEGACY_CH_TABS))
 
@@ -21058,19 +21754,37 @@ window.__ModuleLoader__.load({
      * 不整份拒绝的理由：用户手改 JSON 时最容易错一个逗号或一个引号，
      * 整份拒掉等于「我改个颜色，顺序和隐藏全没了」。
      */
+    /**
+     * 卡片背景偏好：颜色与透明度分开存。
+     *
+     * 颜色只收 `#rgb` / `#rrggbb`——这段值会拼进 CSS，收别的字符串等于给偏好
+     * JSON 开了个 CSS 注入口。透明度限制在 0–100 的整数，默认 50（与改动前的
+     * 卡片底一致）：0 = 完全不透明，100 = 全透明——越高越透明，符合直觉。
+     * 空颜色 = 跟随主题底色 + 强调色淡混。
+     */
+    function readCardBg(v) {
+      const raw = String(v?.color ?? '').trim()
+      const color = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(raw) ? raw : ''
+      const n = Number(v?.alpha)
+      const alpha = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : 50
+      return { color, alpha }
+    }
+
+    /** 扩展自带页面是否跟随面板主题：默认关，存量页面样式一个不动 */
+    const readExtTheme = (v) => v === true
+
     function readUiPref() {
-      const empty = { hidden: [], order: {}, accent: 'host', anim: true }
+      const empty = { hidden: [], order: {}, accent: 'host', anim: true, cardBg: { color: '', alpha: 50 }, extTheme: false }
       let raw = null
       try { raw = JSON.parse(localStorage.getItem(UI_PREF_KEY) || 'null') } catch { return empty }
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return empty
-      const ids = new Set(ALL_TABS)
       const hidden = Array.isArray(raw.hidden)
-        ? raw.hidden.filter((id) => typeof id === 'string' && ids.has(id) && !PROTECTED_TABS.includes(id))
+        ? raw.hidden.filter((id) => isPrefTabId(id) && !PROTECTED_TABS.includes(id))
         : []
       const order = {}
       if (raw.order && typeof raw.order === 'object' && !Array.isArray(raw.order)) {
         for (const [g, list] of Object.entries(raw.order)) {
-          if (Array.isArray(list)) order[g] = list.filter((id) => typeof id === 'string' && ids.has(id))
+          if (Array.isArray(list)) order[g] = list.filter(isPrefTabId)
         }
       }
       const accents = ['host', 'blue', 'teal', 'green', 'purple', 'orange', 'magenta']
@@ -21079,6 +21793,8 @@ window.__ModuleLoader__.load({
         order,
         accent: accents.includes(raw.accent) ? raw.accent : 'host',
         anim: raw.anim !== false,
+        cardBg: readCardBg(raw.cardBg),
+        extTheme: readExtTheme(raw.extTheme),
       }
     }
 
@@ -21142,7 +21858,7 @@ window.__ModuleLoader__.load({
      */
     const TAB_ALIAS = {
       overview: '概览 首页 总览 现在 状态 卡在哪',
-      personalize: '个性化 外观 主题 颜色 强调色 菜单 页签 顺序 隐藏 显示 布局 自定义 动画',
+      personalize: '个性化 外观 主题 颜色 强调色 卡片 背景 透明度 菜单 页签 顺序 隐藏 显示 布局 自定义 动画',
       her: '人格 人设 角色 名字 自称',
       profile: '资料 改资料 昵称 头像 简介 签名 菜单 换名字 换头像 自我表达 她能不能自己改',
       mood: '心情 情绪 状态 衰减',
@@ -21334,11 +22050,26 @@ window.__ModuleLoader__.load({
      * 所有状态都在 `RoostPage`（`uiPref` / `setPrefs`），本组件只负责画和改——
      * 放自己 state 里会出现「本页变了、导航和颜色没变」。
      */
-    function PersonalizeTab({ uiPref, setPrefs, toast }) {
+    function PersonalizeTab({ uiPref, setPrefs, toast, extPages = [] }) {
       const [editGroup, setEditGroup] = useState('self')
       const [draft, setDraft] = useState(null)
       const g = NAV_GROUPS.find((x) => x.id === editGroup) || NAV_GROUPS[1]
       const hidden = new Set(uiPref.hidden || [])
+      const cardBg = readCardBg(uiPref.cardBg)
+      /**
+       * 当前的扩展页：按 `nav.group` 归到所属分组，和静态页一起排/一起藏。
+       * 只认这一刻真实存在的扩展——偏好里卸载后残留的 `ext:*` 不会出现在列表里。
+       */
+      const groupExt = (Array.isArray(extPages) ? extPages : [])
+        .filter((p) => p && p.id && (navGroupOf(`ext:${p.id}`, extPages)?.id || '') === g.id)
+        .map((p) => [`ext:${p.id}`, String(p.nav?.label || p.name || p.id)])
+      /** tab key → 显示名：扩展页用它自己声明的 label，不显示 `ext:xxx` 裸 key */
+      const labelOf = (id) => {
+        const hit = groupExt.find(([x]) => x === id)
+        return hit ? hit[1] : tabLabel(id)
+      }
+      /** 本组全部页签：静态声明 + 扩展页；扩展页接在后面 */
+      const groupIds = g.tabs.concat(groupExt.map(([id]) => id))
 
       /** 每次改动都清掉 04 的草稿：否则先编辑过 textarea、再动 01/02/03，
        *  下面那段 JSON 会停在改之前的样子，用户以为没生效 */
@@ -21349,21 +22080,21 @@ window.__ModuleLoader__.load({
         setDraft(null)
         setPrefs((prev) => {
           const h = new Set(prev.hidden || [])
-          const vis = orderTabs(g, g.tabs.filter((x) => !h.has(x)), prev)
+          const vis = orderTabs(g, groupIds.filter((x) => !h.has(x)), prev)
           const i = vis.indexOf(id)
           const j = i + dir
           if (i < 0 || j < 0 || j >= vis.length) return prev
           const next = vis.slice()
           next.splice(i, 1)
           next.splice(j, 0, id)
-          const rest = g.tabs.filter((x) => !next.includes(x))
+          const rest = groupIds.filter((x) => !next.includes(x))
           return { ...prev, order: { ...(prev.order || {}), [g.id]: next.concat(rest) } }
         })
       }
 
       const toggleHidden = (id) => {
         if (PROTECTED_TABS.includes(id)) {
-          toast(`「${tabLabel(id)}」是恢复入口，不能隐藏`)
+          toast(`「${labelOf(id)}」是恢复入口，不能隐藏`)
           return
         }
         const wasHidden = hidden.has(id)
@@ -21374,14 +22105,14 @@ window.__ModuleLoader__.load({
         })
         /** 当前页不跳走（与深链口径一致），只说去哪找 */
         toast(wasHidden
-          ? `「${tabLabel(id)}」回到导航`
-          : `「${tabLabel(id)}」已从导航隐藏，Alt+K 还能找到`)
+          ? `「${labelOf(id)}」回到导航`
+          : `「${labelOf(id)}」已从导航隐藏，Alt+K 还能找到`)
       }
 
       const resetAll = () => {
         setDraft(null)
-        setPrefs({ hidden: [], order: {}, accent: 'host', anim: true })
-        toast('已恢复默认（只重置这一页的四项）')
+        setPrefs({ hidden: [], order: {}, accent: 'host', anim: true, cardBg: { color: '', alpha: 50 }, extTheme: false })
+        toast('已恢复默认（只重置这一页的五项）')
       }
 
       /** 导入：**逐字段校验，坏字段丢字段**，不整份拒绝 */
@@ -21390,18 +22121,19 @@ window.__ModuleLoader__.load({
         const text = draft === null ? JSON.stringify(uiPref) : draft
         try { raw = JSON.parse(text) } catch (e) { toast('这段不是合法 JSON：' + e.message); return }
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { toast('要一段对象 JSON'); return }
-        const ids = new Set(ALL_TABS)
         const next = {
           hidden: Array.isArray(raw.hidden)
-            ? raw.hidden.filter((x) => typeof x === 'string' && ids.has(x) && !PROTECTED_TABS.includes(x))
+            ? raw.hidden.filter((x) => isPrefTabId(x) && !PROTECTED_TABS.includes(x))
             : [],
           order: {},
           accent: ACCENT_PRESETS.some((a) => a.id === raw.accent) ? raw.accent : 'host',
           anim: raw.anim !== false,
+          cardBg: readCardBg(raw.cardBg),
+          extTheme: readExtTheme(raw.extTheme),
         }
         if (raw.order && typeof raw.order === 'object' && !Array.isArray(raw.order)) {
           for (const [k, list] of Object.entries(raw.order)) {
-            if (Array.isArray(list)) next.order[k] = list.filter((x) => typeof x === 'string' && ids.has(x))
+            if (Array.isArray(list)) next.order[k] = list.filter(isPrefTabId)
           }
         }
         setPrefs(next)
@@ -21410,15 +22142,15 @@ window.__ModuleLoader__.load({
       }
 
       /* 组内列表：先按用户顺序排，再渲染每一行 */
-      const ids = orderTabs(g, g.tabs, uiPref)
-      const visibleIds = orderTabs(g, g.tabs.filter((x) => !hidden.has(x)), uiPref)
+      const ids = orderTabs(g, groupIds, uiPref)
+      const visibleIds = orderTabs(g, groupIds.filter((x) => !hidden.has(x)), uiPref)
 
       return h('div', null,
         /* 01 菜单顺序与显示 */
         h(Sec, { n: '01', title: '菜单顺序与显示' },
           h('div', { className: 'roost-note' },
             '隐藏只是从这里拿掉入口，功能照常运行；要真关某个功能，去「权限」页改开关。'
-            + '顺序只影响组内，一级分组不跟着变。扩展页不在这里排，也不在这里藏。'),
+            + '顺序只影响组内，一级分组不跟着变。扩展页跟着它声明的分组一起排、一起藏。'),
           h('div', { className: 'roost-pf-grp' },
             NAV_GROUPS.map((x) => h('button', {
               key: x.id, type: 'button',
@@ -21429,24 +22161,26 @@ window.__ModuleLoader__.load({
           ids.map((id) => {
             const prot = PROTECTED_TABS.includes(id)
             const vi = visibleIds.indexOf(id)
+            const isExt = id.startsWith('ext:')
+            const name = labelOf(id)
             return h(GRow, {
               key: id,
-              label: tabLabel(id) + (prot ? '（固定）' : ''),
+              label: name + (prot ? '（固定）' : '') + (isExt ? '（扩展）' : ''),
               hint: id === 'personalize'
                 ? '本页自己：藏了就再也进不来，所以锁着'
                 : (id === 'express' ? '含「听语音」唯一入口，关语音也不藏' : ''),
             },
               h('span', { className: 'roost-pf-order' },
                 h('button', {
-                  type: 'button', title: '上移', 'aria-label': `把${tabLabel(id)}上移`,
+                  type: 'button', title: '上移', 'aria-label': `把${name}上移`,
                   disabled: vi <= 0, onClick: () => move(id, -1),
                 }, '↑'),
                 h('button', {
-                  type: 'button', title: '下移', 'aria-label': `把${tabLabel(id)}下移`,
+                  type: 'button', title: '下移', 'aria-label': `把${name}下移`,
                   disabled: vi < 0 || vi >= visibleIds.length - 1, onClick: () => move(id, 1),
                 }, '↓')),
               h(Switch, {
-                on: !hidden.has(id), label: `${tabLabel(id)}显示`, disabled: prot,
+                on: !hidden.has(id), label: `${name}显示`, disabled: prot,
                 title: prot ? '受保护，不能隐藏' : (hidden.has(id) ? '已隐藏' : '显示中'),
                 onToggle: () => toggleHidden(id),
               }),
@@ -21473,8 +22207,48 @@ window.__ModuleLoader__.load({
             + (uiPref.accent === 'host' ? '（跟随 DSH 主题）' : `（${accentOf(uiPref.accent).dark}）`)),
         ),
 
-        /* 03 动效 */
-        h(Sec, { n: '03', title: '动效' },
+        /* 03 卡片背景 */
+        h(Sec, { n: '03', title: '卡片背景' },
+          h('div', { className: 'roost-note' },
+            '所有页的分节共用这一张卡片底（含本页）。颜色与透明度分开设：'
+            + '「跟随主题」沿用宿主底色 + 强调色淡混，默认透明度 50%。'),
+          h(GRow, {
+            label: '背景颜色',
+            hint: '只改卡片底，不动文字与主题；选完立刻生效',
+          },
+            h('input', {
+              type: 'color', className: 'roost-pf-color',
+              value: /^#[0-9a-f]{6}$/i.test(cardBg.color) ? cardBg.color : '#ffffff',
+              'aria-label': '卡片背景颜色',
+              onChange: (e) => patch({ cardBg: { ...cardBg, color: e.target.value } }),
+            }),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => patch({ cardBg: { ...cardBg, color: '' } }),
+            }, '跟随主题')),
+          h(GRow, {
+            label: '透明度',
+            hint: '0% 完全不透明，100% 全透明；默认 50%',
+          },
+            h('input', {
+              type: 'range', min: 0, max: 100, step: 5, className: 'roost-pf-alpha',
+              value: cardBg.alpha, 'aria-label': '卡片背景透明度',
+              onChange: (e) => patch({ cardBg: { ...cardBg, alpha: Number(e.target.value) } }),
+            }),
+            h('span', { className: 'roost-g-unit' }, `${cardBg.alpha}%`)),
+          h(GRow, {
+            label: '扩展页面跟随主题',
+            hint: '打开后，扩展自带的页面会收到面板的强调色与卡片底色；扩展自己的 CSS 要用这些变量才会变',
+          },
+            h(Switch, {
+              on: uiPref.extTheme === true, label: '扩展页面跟随主题',
+              title: uiPref.extTheme === true ? '已跟随' : '关闭（扩展用自己原来的样式）',
+              onToggle: () => patch({ extTheme: uiPref.extTheme !== true }),
+            })),
+        ),
+
+        /* 04 动效 */
+        h(Sec, { n: '04', title: '动效' },
           h(GRow, {
             label: '界面动画',
             hint: '分节入场、切页淡入、指示呼吸圈、按钮回弹；关掉之后全部静止',
@@ -21485,8 +22259,8 @@ window.__ModuleLoader__.load({
             })),
         ),
 
-        /* 04 导出与导入 */
-        h(Sec, { n: '04', title: '导出与导入' },
+        /* 05 导出与导入 */
+        h(Sec, { n: '05', title: '导出与导入' },
           h('div', { className: 'roost-note' },
             '偏好只存在这台浏览器。换电脑时把下面这段复制走，粘回来点「导入」。'),
           h('textarea', {
@@ -21662,18 +22436,20 @@ window.__ModuleLoader__.load({
        * `NAV_GROUPS.system` 把 `connect` 排在首位，实际渲染成倒数第二，
        * `SYSTEM_SEG` 的分段标记跟着错位（第三轮 A1）。
        *
-       * 扩展页（`ext:*`）不在静态声明里，按 `extPages` 顺序接在组内末尾，
-       * 且**不参与用户排序**（它们的 id 不稳定，排了也是白排）。
+       * 扩展页（`ext:*`）不在静态声明里，和静态页一起参与组内排序
+       * （2026-11-24：个性化页已能排/藏扩展页，这里得跟着用同一份顺序，
+       *  否则「排了没反应」）。卸载后偏好里的残留 id 不在 dynamicTabs 里，
+       *  自然被 filter 掉。
        */
       const tabsOfGroup = (g) => {
         if (!g) return []
-        const declaredIds = g.tabs.filter((id) => dynamicTabs.some(([tid]) => tid === id))
-        const ordered = orderTabs(g, declaredIds, uiPref)
+        const extIds = dynamicTabs
+          .filter(([id]) => id.startsWith('ext:') && (navGroupOf(id, extPages)?.id || '') === g.id)
+          .map(([id]) => id)
+        const ids = g.tabs.filter((id) => dynamicTabs.some(([tid]) => tid === id)).concat(extIds)
+        return orderTabs(g, ids, uiPref)
           .map((id) => dynamicTabs.find(([tid]) => tid === id))
           .filter(Boolean)
-        const ext = dynamicTabs.filter(([id]) =>
-          id.startsWith('ext:') && (navGroupOf(id, extPages)?.id || '') === g.id)
-        return ordered.concat(ext)
       }
 
       /**
@@ -22227,16 +23003,36 @@ window.__ModuleLoader__.load({
       const groupTabs = tabsOfGroup(curGroup)
 
       /**
-       * 根节点的外观：强调色 + 关动效。
+       * 根节点的外观：强调色 + 关动效 + 卡片底。
        *
-       * 写在 `.roost-root` 的 inline style 上——CSS 里的 `--accent` 读的就是
-       * 这两个变量（见 CSS 里那段注释）。空对象就别传，免得渲染出空的 style。
+       * 写在 `.roost-root` 的 inline style 上——CSS 里的 `--accent` 与
+       * `--roost-card-fill` 读的就是这几个变量（见顶部 CSS）。
        */
       const accent = accentOf(uiPref.accent)
-      const rootStyle = accent.dark
-        ? { '--roost-accent': accent.dark, '--roost-accent-light': accent.light }
-        : undefined
-      const rootClass = 'roost-root' + (uiPref.anim === false ? ' no-anim' : '')
+      const cardPref = readCardBg(uiPref.cardBg)
+      /** 偏好存的是「透明度」（越高越透明），CSS 拼色要的是「不透明度」 */
+      const opacity = 100 - cardPref.alpha
+      /**
+       * 颜色已在 readCardBg 里限定为 hex，这里只拼进 color-mix，不留注入口。
+       * 跟随主题时强调色以默认 50% 不透明度时的 4% 为基准按比例缩放：
+       * 不缩放则拉到透明仍留一层色，缩错基准又和默认值对不上。
+       * 全透明直接给 transparent，不走 color-mix，避免任何浮点残留。
+       */
+      const cardFill = cardPref.alpha === 100
+        ? 'transparent'
+        : cardPref.color
+          ? `color-mix(in srgb, ${cardPref.color} ${opacity}%, transparent)`
+          : `color-mix(in srgb,var(--accent) ${Math.round(8 * opacity) / 100}%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) ${opacity}%,transparent))`
+      /** 默认值（跟随主题 + 50%）不注入，让顶部 CSS 的 --card-fill 独自兜底 */
+      const rootStyle = {
+        ...(accent.dark ? { '--roost-accent': accent.dark, '--roost-accent-light': accent.light } : {}),
+        ...((cardPref.color || cardPref.alpha !== 50) ? { '--roost-card-fill': cardFill } : {}),
+      }
+      const finalStyle = Object.keys(rootStyle).length ? rootStyle : undefined
+      /** 全透明时连描边和投影也撤掉，否则只剩一圈边框，看着像没透明 */
+      const rootClass = 'roost-root'
+        + (uiPref.anim === false ? ' no-anim' : '')
+        + (cardPref.alpha === 100 ? ' card-transparent' : '')
 
       /**
        * 首次接入向导：新装 / 升级后 `needed=true`，整棵面板树都不挂，
@@ -22245,7 +23041,7 @@ window.__ModuleLoader__.load({
        * 跳过后后端仍返回 needed=false，但概览页会把未接入状态一直显示着。
        */
       if (st?.wizard?.needed) {
-        return h('div', { className: rootClass, style: rootStyle },
+        return h('div', { className: rootClass, style: finalStyle },
           h(SetupWizard, {
             st,
             toast,
@@ -22255,7 +23051,7 @@ window.__ModuleLoader__.load({
         )
       }
 
-      return h('div', { className: rootClass, style: rootStyle },
+      return h('div', { className: rootClass, style: finalStyle },
         h('div', { className: 'roost-head' },
           h('div', { className: 'roost-head-inner' },
           /**
@@ -22385,7 +23181,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'roost-body-inner' + (['overview', 'memory', 'people'].includes(tab) ? ' is-data-view' : '') },
             tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
           /** 个性化：偏好状态在 RoostPage（`uiPref`），这里只传下去 */
-          tab === 'personalize' ? h(PersonalizeTab, { uiPref, setPrefs, toast }) : null,
+          tab === 'personalize' ? h(PersonalizeTab, { uiPref, setPrefs, toast, extPages }) : null,
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }) : null,
           /** A6：接入提成正门；隐藏页 setup 与 ?tab=setup 深链原样保留，两边同一份内容 */
           tab === 'connect'
@@ -22413,7 +23209,21 @@ window.__ModuleLoader__.load({
           tab === 'ext-market' ? h(ExtMarketTab, { toast }) : null,
           tab === 'ext-api' ? h(ExtApiTab, { toast }) : null,
           /** 6.1：扩展声明的页面。tab key 形如 `ext:<id>`，不在静态 TABS 里 */
-          String(tab).startsWith('ext:') ? h(ExtUiPage, { id: String(tab).slice(4), toast }) : null,
+          String(tab).startsWith('ext:')
+            ? h(ExtUiPage, {
+                id: String(tab).slice(4), toast,
+                /**
+                 * 扩展页面跟随主题：把已经算好的强调色/卡片底递过去。
+                 * cardFill 里的 `var(--accent)` 在 iframe 里取不到宿主变量，
+                 * 这里换成实际 hex；`--dsw-alias-bg-l1` 自带 fallback 链，留着即可。
+                 */
+                themeVars: uiPref.extTheme === true ? {
+                  '--accent': accent.dark,
+                  '--accent-light': accent.light,
+                  '--card-fill': cardFill.replace(/var\(--accent\)/g, accent.dark),
+                } : null,
+              })
+            : null,
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat, setTab, config, saveCfg }) : null,
           /** 2.3：与记忆页并列的两个入口，同一份 mem，不复制状态 */
           tab === 'people' ? h(PeopleTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,

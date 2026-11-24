@@ -69,7 +69,8 @@ export const DEFAULTS = {
     enabled: false,
     /**
      * openai = OpenAI 兼容 /audio/speech；gpt-sovits = 原生 API；sherpa = 本地 ONNX（离线）；
-     * edge = 微软在线朗读；mimo = 小米 MiMo（音频从 chat/completions 里以 base64 回）
+     * edge = 微软在线朗读；mimo = 小米 MiMo（音频从 chat/completions 里以 base64 回）；
+     * auto / windows / cosyvoice / volcano / fish-free / breeze / minimax 见 src/tts-providers.js
      */
     provider: 'openai',
     /** OpenAI-compatible API 根地址，需包含版本前缀（例如 /v1） */
@@ -80,7 +81,8 @@ export const DEFAULTS = {
     timeoutSec: 30,
     maxChars: 300,
     /**
-     * 语速倍率，四个 provider **共用这一个**。1 是原速。
+     * 语速倍率，内置五家 **共用这一个**。1 是原速。
+     * 新来源里火山 / MiniMax 用自己的 speedRatio / speed，其余没有语速字段。
      *
      * 范围 0.5–2：各家上限不同（OpenAI 到 4、微软 rate 到 +200%），
      * 取交集最保守，面板上一个输入框切换 provider 时不用重填。
@@ -93,6 +95,13 @@ export const DEFAULTS = {
     gptSovits: {
       /** GPT-SoVITS 安装目录（含 api_v2.py 和 runtime 的那层）。填了就能在面板一键启动 */
       installDir: '',
+      /**
+       * 随 DSH 启动自动拉起 GPT-SoVITS 进程（默认关）。
+       *
+       * 只在 provider 选了 gpt-sovits、且 installDir 已填时才生效；
+       * 进程归 gptLauncher 管，插件卸载/HMR 时由它的 dispose 带走，不留孤儿。
+       */
+      autoStart: false,
       /** 要用的角色名（面板扫描出来的下拉）。留空 = 用 tts_infer.yaml 里已经加载的那个 */
       model: '',
       /**
@@ -118,6 +127,38 @@ export const DEFAULTS = {
       apiVersion: 'v1',
       /** 原生 API 默认根路由；兼容 fork 可指定其固定相对路由 */
       endpointPath: '/',
+      /**
+       * v2 推理参数（对齐扩展市场的「语音回复」）。
+       *
+       * 只作用于 v2，v1 的 api.py 没有这些字段，硬塞会被请求校验拒掉。
+       * 默认值和 GPT-SoVITS WebUI / voice-reply 一致：用户不用重新调一遍。
+       */
+      textSplitMethod: 'cut5',
+      fragmentInterval: 0.3,
+      topK: 15,
+      topP: 1,
+      temperature: 1,
+      batchSize: 1,
+      /**
+       * 复用上次语义结果：同一段文本改语速/换音色时跳过 GPT 采样。
+       * 需要一键启动的服务（带语义缓存适配器），原版 api_v2.py 没有这个路由。
+       */
+      freeze: false,
+      /** 一键启动时是否启用语义缓存适配器（默认关，兼容原版服务） */
+      semanticCache: false,
+      /**
+       * 一键启动后写入的扫描结果（角色名 → 权重相对路径）。
+       * 不是用户要填的字段：合成路径靠它在运行时按角色切权重，
+       * 面板重启后会被 onReady 重新覆盖。
+       */
+      models: [],
+      /**
+       * 音色方案库（对齐扩展「语音回复」）。只存音色字段与全局语速的快照，
+       * **不存密钥**；最多 50 套，由 src/gpt-profiles.js 校验与裁剪。
+       */
+      profiles: [],
+      /** 当前正在使用的方案 id；删掉方案时清空，但当前音色配置不动 */
+      activeProfileId: '',
     },
     /**
      * 微软在线朗读（Edge TTS）。
@@ -151,6 +192,51 @@ export const DEFAULTS = {
       prompt: '请用自然、亲切的语气朗读下面这句话。',
     },
     /**
+     * 下面几段是「声音来源」里除内置五家之外的来源（对标 aurabot）。
+     * 有本地（cosyvoice）也有云端；云端密钥只由主人配置填，模型只给文本。
+     */
+    /** 本地 CosyVoice 官方 FastAPI：裸 PCM 或 WAV，采样率用于给裸 PCM 包头 */
+    cosyvoice: {
+      url: 'http://127.0.0.1:50000',
+      mode: 'sft',
+      spkId: '中文女',
+      instruct: '',
+      sampleRate: 22050,
+    },
+    /** 豆包语音（火山引擎）：音色决定 1.0/2.0 模型，resourceId 留空按音色自动配 */
+    volcano: {
+      apiKey: '',
+      resourceId: '',
+      voiceType: 'zh_female_vv_uranus_bigtts',
+      speedRatio: 1,
+    },
+    /** Fish Audio S2.1 Pro Free：音色 ID 是 32 位十六进制 */
+    fishApiKey: '',
+    fishReferenceId: '',
+    /** Breeze：cloud 填 key + 音色 id；local 填自建服务地址 */
+    breeze: {
+      mode: 'cloud',
+      url: 'https://api.breeze.blue',
+      key: '',
+      voiceId: '',
+      model: 'breeze-tts-2',
+      languageCode: 'zh',
+      instructions: '',
+      outputFormat: 'mp3_24000_128',
+      sampleRate: 24000,
+      guidanceScale: 0,
+    },
+    /** MiniMax：海外账号把 baseUrl 改成 https://api.minimax.io */
+    minimax: {
+      apiKey: '',
+      baseUrl: 'https://api.minimax.cn',
+      voiceId: 'Chinese (Mandarin)_Soft_Girl',
+      model: 'speech-2.8-turbo',
+      emotion: 'auto',
+      speed: 1,
+      pitch: 0,
+    },
+    /**
      * 本地 ONNX 推理（sherpa-onnx-node）。
      *
      * 引擎和模型都不进插件目录，放在数据目录里：
@@ -167,7 +253,7 @@ export const DEFAULTS = {
       /** 说话人编号（aishell3 是 0-173），换一个就是换一个音色 */
       sid: 88,
       /**
-       * 语速已经统一到 `tts.speed`（四个 provider 共用一份）。
+       * 语速已经统一到 `tts.speed`（内置五家共用一份）。
        * 这里**不再有** `speed` 字段：留着一个改了不生效的同名字段，
        * 比没有更让人困惑——「我明明改了语速」却听不出区别。
        */
@@ -1532,6 +1618,11 @@ const SECRET_PATHS = [
   ['tts', 'apiKey'],
   ['tts', 'gptSovits', 'apiKey'],
   ['tts', 'mimo', 'apiKey'],
+  /** 新声音来源的凭证：不列进来的话 GET /v1/config 会把明文 Key 回给任意扩展 */
+  ['tts', 'volcano', 'apiKey'],
+  ['tts', 'breeze', 'key'],
+  ['tts', 'minimax', 'apiKey'],
+  ['tts', 'fishApiKey'],
   /**
    * 备份的远端凭据（2026-11 补）。
    *

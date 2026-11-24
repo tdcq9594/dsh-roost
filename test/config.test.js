@@ -177,7 +177,12 @@ test('配置全文：所有 secret 路径遮罩，保存掩码不会覆盖真值
   saveConfig({
     server: { token: 'server-secret' },
     memory: { embedding: { model: 'embed', baseUrl: 'http://localhost/v1', apiKey: 'embed-secret' } },
-    tts: { enabled: true, apiKey: 'tts-secret', gptSovits: { apiKey: 'gpt-secret' }, mimo: { apiKey: 'mimo-secret' } },
+    tts: {
+      enabled: true, apiKey: 'tts-secret',
+      gptSovits: { apiKey: 'gpt-secret' }, mimo: { apiKey: 'mimo-secret' },
+      volcano: { apiKey: 'volcano-secret' }, breeze: { key: 'breeze-secret' },
+      minimax: { apiKey: 'minimax-secret' }, fishApiKey: 'fish-secret',
+    },
   });
 
   const view = publicConfig(loadConfig());
@@ -186,6 +191,10 @@ test('配置全文：所有 secret 路径遮罩，保存掩码不会覆盖真值
   assert.equal(view.tts.apiKey, '******');
   assert.equal(view.tts.gptSovits.apiKey, '******');
   assert.equal(view.tts.mimo.apiKey, '******');
+  assert.equal(view.tts.volcano.apiKey, '******', '豆包 Key 不能回给扩展');
+  assert.equal(view.tts.breeze.key, '******', 'Breeze Key 不能回给扩展');
+  assert.equal(view.tts.minimax.apiKey, '******', 'MiniMax Key 不能回给扩展');
+  assert.equal(view.tts.fishApiKey, '******', 'Fish Key 不能回给扩展');
 
   saveConfig(view);
   const disk = JSON.parse(readFileSync(join(process.env.DSH_ROOST_DATA, 'config.json'), 'utf8'));
@@ -194,6 +203,10 @@ test('配置全文：所有 secret 路径遮罩，保存掩码不会覆盖真值
   assert.equal(disk.tts.apiKey, 'tts-secret');
   assert.equal(disk.tts.gptSovits.apiKey, 'gpt-secret');
   assert.equal(disk.tts.mimo.apiKey, 'mimo-secret', 'MiMo 的 Key 也要落盘且不被掩码覆盖');
+  assert.equal(disk.tts.volcano.apiKey, 'volcano-secret');
+  assert.equal(disk.tts.breeze.key, 'breeze-secret');
+  assert.equal(disk.tts.minimax.apiKey, 'minimax-secret');
+  assert.equal(disk.tts.fishApiKey, 'fish-secret');
 });
 
 test('局部配置保存：掩码保留旧值，显式空串能清除 TTS key', () => {
@@ -227,6 +240,29 @@ test('密钥：数组/对象这类非字符串值不会写进磁盘', () => {
    */
   saveConfig({ tts: { gptSovits: { apiKey: 12345 } } });
   assert.equal(loadConfig().tts.gptSovits.apiKey, '12345', '数字要保留成字符串');
+});
+
+test('配置：GPT 音色方案字段不会被 pruneTo 裁掉', () => {
+  freshDir();
+  saveConfig({
+    tts: {
+      gptSovits: {
+        profiles: [{ id: 'p1', name: '轻声角色', values: { speed: 1.1 } }],
+        activeProfileId: 'p1',
+      },
+    },
+  });
+  const g = loadConfig().tts.gptSovits;
+  assert.equal(g.activeProfileId, 'p1');
+  assert.equal(g.profiles.length, 1, '方案列表必须留得住，否则保存后刷新就没了');
+  assert.equal(g.profiles[0].name, '轻声角色');
+});
+
+test('配置：GPT autoStart 默认关，且存得下去（随 DSH 自启动开关）', () => {
+  freshDir();
+  assert.equal(loadConfig().tts.gptSovits.autoStart, false, '默认是关，不能装上就偷偷起服务');
+  saveConfig({ tts: { gptSovits: { autoStart: true } } });
+  assert.equal(loadConfig().tts.gptSovits.autoStart, true, '开了要能存住，重启 DSH 才拉得起服务');
 });
 
 test('配置：阶段 2 新增的开关字段存得下去（pruneTo 不会把它们裁掉）', () => {

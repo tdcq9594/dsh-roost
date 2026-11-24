@@ -14,6 +14,10 @@ _tmp/
 .mutate-bak.json
 .mutate-bak.json.tmp
 
+# 语义缓存适配器是随仓库分发的 Python 脚本；本地 py_compile 的缓存不入库
+__pycache__/
+*.pyc
+
 # 开发过程文档统一不进仓库（2026-11-19 定）：设计方案、调研、与其它项目的对照、
 # 阶段进度、交接记录、原型稿。全部归档在开发机
 # `D:\WorkBuddy\_archive\<日期>-开发过程文档\<仓库>\`，需要时查 git 历史。

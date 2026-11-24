@@ -241,3 +241,56 @@ test('垫片：/ext-pages 的 id 被强制成自己，读不到别人的文件',
 test('垫片：XHR 也要管（不补就只是防君子）', () => {
   assert.match(PAGE_SHIM, /XMLHttpRequest\.prototype\.open/, '要覆写 XHR.open');
 });
+
+/**
+ * 扩展页面跟随面板主题：父窗口 postMessage 变量，垫片写进页面根。
+ * 真跑一遍，确认白名单、注入拒绝、来源校验都生效。
+ */
+test('垫片：只接收父窗口的白名单主题变量，拒绝注入与别的 frame', () => {
+  const code = PAGE_SHIM.replace(/^<script>/, '').replace(/<\/script>$/, '');
+  const listeners = [];
+  const setCalls = [];
+  const classes = [];
+  const win = {
+    addEventListener: (t, fn) => { if (t === 'message') listeners.push(fn); },
+    document: {
+      documentElement: {
+        style: { setProperty: (k, v) => setCalls.push([k, v]) },
+        classList: { add: (c) => classes.push(c) },
+      },
+    },
+  };
+  const parentWin = { postMessage: () => {} };
+  // eslint-disable-next-line no-new-func
+  new Function('window', 'parent', 'location', 'Response', 'setTimeout', 'clearTimeout', 'URL', 'URLSearchParams', 'XMLHttpRequest', 'Promise', code)(
+    win, parentWin,
+    { href: 'http://p/roost/api/ext-pages?id=bili&file=ui/index.html', search: '?id=bili' },
+    Response, setTimeout, clearTimeout, URL, URLSearchParams, undefined, Promise,
+  );
+
+  const fire = (data, source) => { for (const fn of listeners) fn({ data, source }); };
+
+  /** 别的 frame 发来的不许采信 */
+  fire({ type: 'roost:theme', vars: { '--accent': '#ff0000' } }, {});
+  assert.equal(setCalls.length, 0, '来源不是父窗口就丢掉');
+
+  /** 白名单内的变量生效，并打上标记类 */
+  fire({ type: 'roost:theme', vars: {
+    '--accent': '#a371f7',
+    '--card-fill': 'color-mix(in srgb, #a371f7 65%, transparent)',
+    '--evil': '#000',
+    '--accent2': '#000',
+  } }, parentWin);
+  assert.deepEqual(setCalls, [
+    ['--accent', '#a371f7'],
+    ['--card-fill', 'color-mix(in srgb, #a371f7 65%, transparent)'],
+  ], '只接受白名单变量，嵌套 color-mix 要放行');
+  assert.deepEqual(classes, ['roost-themed']);
+
+  /** 危险值注入要挡掉 */
+  fire({ type: 'roost:theme', vars: {
+    '--accent': 'red;background:url(http://evil)',
+    '--accent-light': 'url(http://evil)',
+  } }, parentWin);
+  assert.equal(setCalls.length, 2, '带分号 / url() 的值一个都不许写进 CSS');
+});

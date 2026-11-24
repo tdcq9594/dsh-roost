@@ -114,12 +114,25 @@ test('orderTabs：用户排过的在前，没排过的按声明顺序接后', ()
   )
 })
 
+test('readUiPref：扩展页 ext:<id> 的隐藏/排序能存住，垃圾 key 仍被过滤', () => {
+  resetStore()
+  store['roost.ui.v1'] = JSON.stringify({
+    hidden: ['ext:imagegen', 'ext:../evil', 'ext:', 'ext:a b', 'nope'],
+    order: { mods: ['ext:imagegen', 'ext:bad<script>', 'ext:gpt-voice'] },
+  })
+  const p = mod.readUiPref()
+  assert.deepEqual(p.hidden, ['ext:imagegen'], '只放行形如 ext:xxx 的安全 key')
+  assert.deepEqual(p.order.mods, ['ext:imagegen', 'ext:gpt-voice'], '排序同理，恶意 key 丢掉')
+  const s = mod.hiddenTabIds(null, null, false, p)
+  assert.ok(s.has('ext:imagegen'), '隐藏扩展页要真的生效')
+})
+
 test('readUiPref：坏 JSON / 错字段一律回落默认，不整份丢', () => {
   resetStore()
-  assert.deepEqual(mod.readUiPref(), { hidden: [], order: {}, accent: 'host', anim: true })
+  assert.deepEqual(mod.readUiPref(), { hidden: [], order: {}, accent: 'host', anim: true, cardBg: { color: '', alpha: 50 }, extTheme: false })
 
   store['roost.ui.v1'] = '{oops'
-  assert.deepEqual(mod.readUiPref(), { hidden: [], order: {}, accent: 'host', anim: true })
+  assert.deepEqual(mod.readUiPref(), { hidden: [], order: {}, accent: 'host', anim: true, cardBg: { color: '', alpha: 50 }, extTheme: false })
 
   store['roost.ui.v1'] = JSON.stringify({
     hidden: ['mood', 'nope', 42, 'config'],
@@ -132,6 +145,18 @@ test('readUiPref：坏 JSON / 错字段一律回落默认，不整份丢', () =>
   assert.deepEqual(p.order, { self: ['people'] }, '非数组的组直接丢')
   assert.equal(p.accent, 'host', '不认识的强调色回落宿主')
   assert.equal(p.anim, false)
+  assert.deepEqual(p.cardBg, { color: '', alpha: 50 }, '缺卡片背景字段时补默认值，不整份丢')
+  assert.equal(p.extTheme, false, '扩展页跟随主题默认关，存量页面样式不动')
+})
+
+test('readUiPref：extTheme 只认布尔 true，字符串 / 数字一律回落默认', () => {
+  resetStore()
+  store['roost.ui.v1'] = JSON.stringify({ extTheme: 'true' })
+  assert.equal(mod.readUiPref().extTheme, false)
+  store['roost.ui.v1'] = JSON.stringify({ extTheme: 1 })
+  assert.equal(mod.readUiPref().extTheme, false)
+  store['roost.ui.v1'] = JSON.stringify({ extTheme: true })
+  assert.equal(mod.readUiPref().extTheme, true)
 })
 
 test('渲染：隐藏的页从导航消失，但不影响 TABS 本身', () => {
@@ -196,7 +221,10 @@ test('渲染：强调色注入根节点，未选时不注入', () => {
   {
     const { mod: m, rt } = loadClient()
     const tree = expand(m.RoostPage(), rt)
-    assert.equal(tree.props.style, undefined, '跟随宿主时不写 style，让 CSS 回落宿主令牌')
+    assert.equal(tree.props.style?.['--roost-accent'], undefined, '跟随宿主时不写强调色，让 CSS 回落宿主令牌')
+    assert.equal(tree.props.style?.['--roost-accent-light'], undefined, '浅色值同样不注入')
+    assert.equal(tree.props.style?.['--roost-card-fill'], undefined,
+      '卡片背景也留空，由 CSS 的 50% 默认值接管')
   }
 })
 

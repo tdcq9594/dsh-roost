@@ -275,6 +275,8 @@ import { sessionTitle, nextTitle } from './chat-name.js';
 import { createSwitchNote } from './switch-note.js';
 import { createTts, SHERPA_MODELS } from './tts.js';
 import { runPreview, PREVIEW_TEXT_LIMIT } from './tts-preview.js';
+import { createPreviewJobs } from './tts-preview-jobs.js';
+import { applyProfileOp, profileValuesFrom, normalizeProfiles } from './gpt-profiles.js';
 import { workspaceTitleFor } from './workspace-title.js';
 import { splitPersonaText, joinPersonaText, joinPersonaBlocks } from './persona-sections.js';
 import { simulate, SIM_PERSONAS } from './simulate.js';
@@ -299,7 +301,8 @@ import { createLocalEmbedder } from './local-embed.js';
 import { createLocalReranker } from './local-rerank.js';
 import { parseTemporal } from './temporal.js';
 import { createTurnScenes } from './turn-scene.js';
-import { createGptSovits } from './gpt-sovits.js';
+import { applyWeights, createGptSovits, shouldAutoStartGpt, startOptsFromConfig, weightReadyConfig } from './gpt-sovits.js';
+import { probeGptFeatures } from './tts-providers.js';
 import {
   applyPendingRestore, cancelRestore, createBackup, isFullBackupName, listBackups,
   pendingRestore, restoreRetentionRows, stageRestore, versionGapText,
@@ -956,6 +959,8 @@ export function apply(ctx) {
     dataDir,
     log: (m) => log.warn(m),
   });
+  /** 试听任务：内存态，重启即丢；结果 TTL 后自清，不写配置、不占 quota */
+  const previewJobs = createPreviewJobs();
   /**
    * 本地语音的一键安装。
    *
@@ -1022,15 +1027,16 @@ export function apply(ctx) {
    */
   const gptLauncher = createGptSovits({
     log: (m) => log.info(m),
-    onReady: ({ port, dir }) => {
+    onReady: ({ port, dir, models = [], adapter = false, weightsApplied = true }) => {
       const info = gptLauncher.probe(dir);
       if (!info.ok) return;
       const g = cfg.tts?.gptSovits || {};
+      const baseUrl = `http://127.0.0.1:${port}/`;
       cfg = patchConfig({
         tts: {
           gptSovits: {
             installDir: dir,
-            baseUrl: `http://127.0.0.1:${port}/`,
+            baseUrl,
             endpointPath: info.endpointPath,
             apiVersion: info.apiVersion,
             /**
@@ -1039,10 +1045,21 @@ export function apply(ctx) {
              * 我们猜出来的候选（训练切片）未必是同一个。
              */
             ...(String(g.referWavPath || '').trim() ? {} : { referWavPath: info.refCandidates[0] || '' }),
+            /** 运行时换角色按角色名配对权重要用；不是用户填的字段 */
+            models,
           },
         },
       });
-      log.info(`GPT-SoVITS 就绪，配置已自动填好：127.0.0.1:${port}（${info.weightVersion || info.apiVersion}）`);
+      /**
+       * 只有权重**真的切成功**才标记就绪，让合成跳过那次 110 秒加载。
+       * 切换失败时服务仍在跑（用配置文件里的默认模型），这里要是也标记，
+       * 合成就按指纹跳过重试——用户会一直听到别人的声音且不会自愈。
+       * 留空指纹，下一句合成会按配置里的角色重新切。
+       */
+      tts.markGptWeightsReady(
+        weightReadyConfig({ weightsApplied, cfg: cfg.tts?.gptSovits || {}, baseUrl }) || {},
+      );
+      log.info(`GPT-SoVITS 就绪，配置已自动填好：127.0.0.1:${port}（${info.weightVersion || info.apiVersion}）${adapter ? ' + 语义缓存' : ''}`);
     },
   });
   /**
@@ -8530,6 +8547,31 @@ export function apply(ctx) {
   ctx.effect(() => {
     startServer();
     /**
+     * 随 DSH 启动 GPT-SoVITS（tts.gptSovits.autoStart）。
+     *
+     * 延迟 5 秒：模型加载要一两分钟、吃几 GB 显存，别跟宿主启动时的
+     * 其它初始化（roost 连接、预热）抢资源。开关/来源/目录任一不满足
+     * 就不动，见 shouldAutoStartGpt()。启动失败只记日志、不拦插件——
+     * 用户照样能在面板里手动点「一键启动」重试。
+     * 进程生命周期归 gptLauncher：本 effect 返回的 cleanup 和
+     * 「收消息服务」那处都会调它的 dispose，不留占显存的孤儿。
+     */
+    if (shouldAutoStartGpt(cfg)) {
+      const t = setTimeout(() => { // timer-ok: 一次性自启动，5 秒后自然触发；unref 不挡退出，卸载后 disposed 守卫拦住回调
+
+        if (disposed) return;
+        const { dir, opts } = startOptsFromConfig(cfg);
+        try {
+          log.info('gptSovits.autoStart 已开，正在拉起 GPT-SoVITS…');
+          const r = gptLauncher.start(dir, opts);
+          if (r?.ok === false) log.warn(`自动启动 GPT-SoVITS 未完成：${r.message || r.reason || '未知原因'}`);
+        } catch (e) {
+          log.warn(`自动启动 GPT-SoVITS 失败（不影响插件）：${e?.message ?? e}`);
+        }
+      }, 5000); // timer-ok: 一次性自启动，5 秒后自然触发
+      t.unref?.();
+    }
+    /**
      * 外接协议在收消息服务之后启动：先保证本地面板能开，再去连框架。
      * 连不上会按退避重试，不影响插件本体（和 DSH 里其它能力一致）。
      *
@@ -8884,6 +8926,14 @@ export function apply(ctx) {
         message: `已暂存 ${r.files} 个文件，重启 DSH 后生效。`
           + '现有数据一个字节没动；真换上去时旧文件会留在 backups/pre-restore-*/。',
       };
+    };
+
+    /** 试听草稿还原掩码：同步/异步两条路共用，避免修了一边漏另一边 */
+    const draftForPreview = (raw) => {
+      const draft = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+      return draft
+        ? restoreMaskedSecrets({ tts: draft }, { tts: cfg.tts || {} }).tts
+        : (cfg.tts || {});
     };
 
     const offs = [
@@ -13919,20 +13969,7 @@ export function apply(ctx) {
         if (text.length > PREVIEW_TEXT_LIMIT) {
           return send(res, 413, { ok: false, error: 'text_too_long', message: `试听最多 ${PREVIEW_TEXT_LIMIT} 字` });
         }
-        const raw = body?.draft;
-        const draft = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
-        /**
-         * 草稿里的密钥是**打过码的 `******`**（面板拿的是 `publicConfig()`）。
-         *
-         * 以前这里直接把草稿交给合成：上游收到 `Authorization: Bearer ******`
-         * 回 401，面板显示「语音服务鉴权失败」。而 Key 其实好好躺在磁盘上
-         * （`saveConfig` 有还原、这条路没有），用户只会怀疑「保存后 Key 丢了」。
-         *
-         * 只还原 `******`：用户手填的新 Key、或故意清空的空串，都按原样用。
-         */
-        const draftForSynth = draft
-          ? restoreMaskedSecrets({ tts: draft }, { tts: cfg.tts || {} }).tts
-          : (cfg.tts || {});
+        const draftForSynth = draftForPreview(body?.draft);
         try {
           const r = await runPreview({
             text,
@@ -13947,6 +13984,56 @@ export function apply(ctx) {
           const code = String(e?.code || 'tts_failed').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'tts_failed';
           return send(res, status, { ok: false, error: code, message: String(e?.message || '试听失败') });
         }
+      }),
+
+      /**
+       * 异步试听：对齐扩展「语音回复」的交互——点下立刻拿任务 id，
+       * 前端每秒轮询进度，完成再取 base64 音频。老的 `/tts/preview`
+       * 保留给还没更新的调用方，行为逐字不变。
+       */
+      route('/tts/preview/start', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const text = String(body?.text ?? '').trim();
+        if (!text) return send(res, 400, { ok: false, error: 'empty_text', message: '写一句要试听的话' });
+        if (text.length > PREVIEW_TEXT_LIMIT) {
+          return send(res, 413, { ok: false, error: 'text_too_long', message: `试听最多 ${PREVIEW_TEXT_LIMIT} 字` });
+        }
+        const draftForSynth = draftForPreview(body?.draft);
+        const job = previewJobs.start(async ({ update }) => {
+          update({ phase: '合成中', progress: 20 });
+          return runPreview({
+            text,
+            draft: draftForSynth,
+            synth: async (t, o) => {
+              update({ phase: '合成中', progress: 45 });
+              const out = await tts.synthesize(t, o);
+              update({ phase: '校验语音条', progress: 75 });
+              return out;
+            },
+            convert: async (p) => {
+              update({ phase: '校验语音条', progress: 85 });
+              const r = await roost.rpc('media.convert', p, { timeout: 30_000 });
+              update({ phase: '即将完成', progress: 92 });
+              return r;
+            },
+          });
+        });
+        return send(res, 200, { ok: true, id: job.id });
+      }),
+
+      route('/tts/preview/job', async (req, res) => {
+        const id = new URL(req.url || '/', 'http://localhost').searchParams.get('id') || '';
+        const job = previewJobs.get(id);
+        if (!job) {
+          return send(res, 404, { ok: false, error: 'job_not_found', message: '试听任务不存在或已过期' });
+        }
+        if (job.status === 'running') {
+          /** 合成本身没有细粒度回调，用时间给一个「还在动」的粗进度，封顶 92 等真结果 */
+          const elapsed = Math.max(0, Date.now() - job.startedAt);
+          job.progress = Math.min(92, Math.max(job.progress, 20 + Math.floor(elapsed / 1500)));
+          if (job.phase === '排队中') job.phase = '合成中';
+        }
+        return send(res, 200, { ok: true, ...job });
       }),
 
       /**
@@ -14007,18 +14094,88 @@ export function apply(ctx) {
        * 一键启动。立刻返回，不等模型加载（实测 110 秒，HTTP 等不起）。
        * 就绪后 `onReady` 会把 baseUrl / 路由 / 版本写进配置。
        */
+      /**
+       * 探服务的真实能力（语义复用 etc.）。和 /tts/gpt-probe 的区别：
+       * 那个探本地安装目录，这个探**跑起来的服务**的 openapi.json。
+       * 面板据此自动禁用 freeze 开关，避免对着原版 api_v2.py 勾了却每次 404。
+       */
+      route('/tts/gpt-features', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const base = String(body?.baseUrl || cfg.tts?.gptSovits?.baseUrl || '').trim();
+        if (!base) return send(res, 200, { ok: false, semanticFreeze: false, message: '还没配服务地址' });
+        return send(res, 200, await probeGptFeatures(base));
+      }),
+
+      /**
+       * 音色方案库。GET 给面板清单 + 当前音色快照；POST 的 op 只有
+       * new / save / apply / remove 四种，纯函数在 gpt-profiles.js 里测。
+       * 应用方案走 patchConfig；每次合成仍会确认权重，所以方案里的角色
+       * 不需要额外预热，服务端重启也能自愈。
+       */
+      route('/tts/gpt-profiles', async (req, res) => {
+        if (req.method === 'GET') {
+          const g = cfg.tts?.gptSovits || {};
+          return send(res, 200, {
+            ok: true,
+            items: normalizeProfiles(g.profiles),
+            activeId: String(g.activeProfileId || ''),
+            values: profileValuesFrom(cfg),
+          });
+        }
+        const body = await readBody(req).catch(() => ({}));
+        const r = applyProfileOp(cfg, body);
+        if (!r.ok) return send(res, Number(r.status) || 400, r);
+        if (r.patch) cfg = patchConfig(r.patch);
+        const g = cfg.tts?.gptSovits || {};
+        return send(res, 200, {
+          ...r,
+          items: normalizeProfiles(g.profiles),
+          activeId: String(g.activeProfileId || ''),
+          values: profileValuesFrom(cfg),
+        });
+      }),
+
       route('/tts/gpt-start', async (req, res) => {
         const body = await readBody(req).catch(() => ({}));
-        const g = cfg.tts?.gptSovits || {};
-        const dir = String(body?.dir || g.installDir || '');
-        const model = String(body?.model || g.model || '');
-        /** 手填的权重路径优先于按角色名自动配对，见 gpt-sovits.js 的 switchModel */
-        const r = gptLauncher.start(dir, {
-          model,
-          gptWeights: String(body?.gptWeights || g.gptWeights || ''),
-          sovitsWeights: String(body?.sovitsWeights || g.sovitsWeights || ''),
-        });
+        /** 和随 DSH 自启动共用同一套取值，改字段不会只改一边 */
+        const { dir, opts } = startOptsFromConfig(cfg, body);
+        const r = gptLauncher.start(dir, opts);
         return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      /**
+       * 运行时换角色：不用重启服务，也不用等第一句语音才生效。
+       *
+       * 只接收角色名 / 权重路径，**不接收 baseUrl**——地址永远从配置取，
+       * 免得面板被诱导去访问内网别的地址。成功才写回配置：切权重失败时
+       * 配置保持原样，下次合成还会重试，不会把用户锁死在一个坏角色上。
+       */
+      route('/tts/gpt-switch', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const g = cfg.tts?.gptSovits || {};
+        if (!String(g.baseUrl || '').trim()) {
+          return send(res, 409, { ok: false, message: '还没启动服务，先点「一键启动」' });
+        }
+        const model = String(body?.model ?? g.model ?? '');
+        const gptWeights = String(body?.gptWeights ?? g.gptWeights ?? '');
+        const sovitsWeights = String(body?.sovitsWeights ?? g.sovitsWeights ?? '');
+        if (!model && !gptWeights && !sovitsWeights) {
+          return send(res, 400, { ok: false, message: '选一个角色，或填权重路径' });
+        }
+        try {
+          const applied = await applyWeights({
+            baseUrl: String(g.baseUrl),
+            model,
+            models: Array.isArray(g.models) ? g.models : [],
+            gptWeights,
+            sovitsWeights,
+          });
+          cfg = patchConfig({ tts: { gptSovits: { model, gptWeights, sovitsWeights } } });
+          tts.markGptWeightsReady({ ...g, model, gptWeights, sovitsWeights });
+          return send(res, 200, { ok: true, ...applied });
+        } catch (e) {
+          return send(res, 502, { ok: false, message: String(e?.message || e) });
+        }
       }),
 
       route('/tts/gpt-stop', async (req, res) => send(res, 200, gptLauncher.stop())),

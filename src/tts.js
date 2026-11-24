@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { applyWeights } from './gpt-sovits.js';
+import { EXTRA_PROVIDERS, extraSpeech, extraConfigured } from './tts-providers.js';
 
 const AUDIO_TYPES = new Set([
   'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave',
@@ -302,7 +304,7 @@ function timeoutSignal(seconds) {
 }
 
 /**
- * 语速倍率。四个 provider **共用 `tts.speed` 这一份**。
+ * 语速倍率。内置五家 **共用 `tts.speed` 这一份**；新来源各有自己的字段或不支持。
  *
  * 范围夹在 0.5–2：各家上限不一样（OpenAI 到 4、微软 rate 到 +200%、
  * GPT-SoVITS 没写上限），取交集最保守，用户切换 provider 时不用重填。
@@ -376,8 +378,9 @@ function publicError(error) {
  * sherpa 只给了 `writeWave(路径, ...)`，那要落一次盘再读回来。语音每次都是
  * 一次性的小文件，为了几十 KB 走两趟磁盘不值当，所以直接编码成 Buffer。
  *
- * 采样率取模型自己的（aishell3 是 8000Hz），不重采样——重采样只会更慢、
- * 更糊，而且 ai-chat 那边转 silk 时还会再处理一次。
+ * 采样率取模型自己的（aishell3 是 8000Hz），这里不重采样——重采样只会更慢、
+ * 更糊；转成 SILK 由框架外接协议负责，它按采样率白名单直编或重采样，
+ * QQ 接口只认 SILK 容器、不限采样率。
  */
 export function encodeWav(samples, sampleRate) {
   const rate = Number(sampleRate) || 16000;
@@ -479,7 +482,7 @@ export function createTts({
    *
    * 用法照搬 `bot/plugins/ai-chat/tts.js` 里已经跑通的那两行
    * （`synthesize(text, voice)` → `toBuffer()`），不自己猜 API。
-   * ai-chat 那边还要把 mp3 转 silk 给 QQ，这里宿主直接收 mp3 就行，
+   * 转成 QQ 要的 silk 由框架外接协议负责，这里宿主直接收 mp3 就行，
    * 所以不需要 mpg123-decoder / silk-wasm。
    */
   async function edgeSpeech(text, cfg) {
@@ -599,6 +602,18 @@ export function createTts({
     const enabled = cfg.enabled === true;
     const provider = String(cfg.provider || 'openai');
     if (!enabled) return { enabled: false, provider, configured: false };
+    /** 额外 provider（对标 aurabot 的声音来源）走各自的「填没填完」判定 */
+    if (EXTRA_PROVIDERS.includes(provider)) {
+      /** windows 在非 Windows 上、auto 的 edge 依赖没装时，都要明确告诉面板 */
+      if (provider === 'windows' && process.platform !== 'win32') {
+        return { enabled: true, provider, configured: false, reason: 'unsupported_platform' };
+      }
+      if (!extraConfigured(provider, cfg)) {
+        return { enabled: true, provider, configured: false, reason: 'configuration_incomplete' };
+      }
+      if (cooling(provider)) return { enabled: true, provider, configured: false, reason: 'upstream_unreachable' };
+      return { enabled: true, provider, configured: true };
+    }
     if (!['openai', 'gpt-sovits', 'sherpa', 'edge', 'mimo'].includes(provider)) {
       return { enabled: true, provider, configured: false, reason: 'unsupported_provider' };
     }
@@ -669,6 +684,11 @@ export function createTts({
       else if (provider === 'sherpa') result = await sherpaSpeech(input, cfg);
       else if (provider === 'edge') result = await edgeSpeech(input, cfg);
       else if (provider === 'mimo') result = await mimoSpeech(input, cfg);
+      else if (EXTRA_PROVIDERS.includes(provider)) {
+        result = await extraSpeech(provider, input, cfg, fetchImpl, {
+          edgeSpeech, dataDir,
+        });
+      }
       else throw new TtsError('unsupported_provider', '未支持这个语音 provider', 400);
       /** 成功一次就把冷却清掉，服务恢复了不用等满一分钟 */
       lastFail = { at: 0, provider: '', code: '' };
@@ -752,7 +772,7 @@ export function createTts({
           { role: 'user', content: m.prompt },
           { role: 'assistant', content: String(text) },
         ],
-        /** 显式要 mp3：上游默认 wav，体积差一倍；ai-chat 那边两种都能转 silk */
+        /** 显式要 mp3：上游默认 wav，体积差一倍；框架两种音频都能转成 silk */
         audio: { format: 'mp3', voice: m.voice },
       }),
       signal: timeoutSignal(cfg.timeoutSec),
@@ -810,6 +830,15 @@ function langCode(value) {
   return LANG_CODES[raw] || LANG_CODES[raw.toLowerCase()] || raw;
 }
 
+  /**
+   * v2 推理参数兜底。配置来自面板，可能被手改成字符串 / 越界值；
+   * 上游对这类值有的 400、有的直接合成出静音，所以在这里统一夹一遍。
+   */
+  function gptParam(value, fallback, min, max) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
+  }
+
   async function gptSovitsSpeech(text, cfg) {
     const gpt = cfg.gptSovits && typeof cfg.gptSovits === 'object' ? cfg.gptSovits : {};
     if (!gpt.baseUrl || !gpt.referWavPath || !gpt.promptText || !gpt.promptLanguage || !gpt.textLanguage) {
@@ -817,10 +846,46 @@ function langCode(value) {
     }
     const version = String(gpt.apiVersion || 'v1').toLowerCase();
     if (!['v1', 'v2'].includes(version)) throw new TtsError('invalid_config', 'GPT-SoVITS apiVersion 只支持 v1 或 v2', 400);
-    const url = gptEndpoint(gpt.baseUrl, gpt.endpointPath || '/');
     const headers = { 'content-type': 'application/json', accept: 'audio/*' };
     const key = String(gpt.apiKey || cfg.apiKey || '');
     if (key) headers.authorization = `Bearer ${key}`;
+
+    const wantModel = String(gpt.model || '').trim();
+    const wantGpt = String(gpt.gptWeights || '').trim();
+    const wantSovits = String(gpt.sovitsWeights || '').trim();
+
+    /**
+     * v2 才支持运行时换角色。
+     *
+     * 关键一：**没选角色也没手填权重时一次都不切**。老配置就是这种形状，
+     * 服务启动时 already 按 tts_infer.yaml 加载好了；在这里发 `/set_*_weights`
+     * 既白等 110 秒，还会因为「目录里没有『』的权重」直接把合成打断。
+     *
+     * 关键二：**选了角色就每次合成都确认一遍权重**，不做客户端去重。
+     * 2026-11-24 对齐扩展市场「语音回复」的做法：它的注释明确写
+     * 「不复用易在服务重启后失效的缓存」。我们之前的指纹去重有两个漏洞：
+     *   · 服务在同端口重启后权重回到 tts_infer.yaml 的默认，指纹却没变，
+     *     于是合成一直用错音色、不会自愈（和启动失败锁死是同一类 bug）；
+     *   · 启动切权重失败时标记了就绪，合成也跟着跳过重试。
+     * GPT-SoVITS 服务端对**同一路径**有权重缓存，重复确认不会真等 110 秒，
+     * 所以每次都调的代价可接受；换来的是重启/失败后下一句就能自愈。
+     */
+    if (version === 'v2' && (wantModel || wantGpt || wantSovits)) {
+      try {
+        const applied = await applyWeights({
+          baseUrl: String(gpt.baseUrl),
+          model: wantModel,
+          models: Array.isArray(gpt.models) ? gpt.models : [],
+          gptWeights: wantGpt,
+          sovitsWeights: wantSovits,
+          fetchImpl,
+        });
+        log(`GPT-SoVITS 权重已确认：「${applied.name}」`);
+      } catch (e) {
+        throw new TtsError('weight_switch_failed', `切换语音角色失败：${e?.message || e}`, 502);
+      }
+    }
+
     /**
      * v1 和 v2 的字段名**不一样**，这不是命名风格问题：
      *   · v1（api.py）：`refer_wav_path` + `prompt_language` / `text_language`
@@ -838,9 +903,26 @@ function langCode(value) {
           text,
           text_lang: langCode(gpt.textLanguage),
           /**
-           * 只有 v2 有语速参数。`api.py`（v1）的接口签名里根本没有 speed，
-           * 硬塞一个字段可能被它的请求体校验拒掉——v1 就不支持调语速。
+           * 只有 v2 有这些参数。对齐扩展市场「语音回复」的默认值，
+           * 用户不用再在两块面板里各调一遍。v1 的 api.py 签名里没有，
+           * 硬塞可能被请求校验拒掉——v1 就不支持。
            */
+          text_split_method: /^cut[0-5]$/.test(gpt.textSplitMethod) ? gpt.textSplitMethod : 'cut5',
+          fragment_interval: gptParam(gpt.fragmentInterval, 0.3, 0.01, 1),
+          top_k: gptParam(gpt.topK, 15, 1, 100),
+          top_p: gptParam(gpt.topP, 1, 0, 1),
+          temperature: gptParam(gpt.temperature, 1, 0.01, 2),
+          batch_size: gptParam(gpt.batchSize, 1, 1, 8),
+          /**
+           * 主动要 WAV：避开 mp3 的有损二次编码。
+           *
+           * 采样率不用我们管：GPT-SoVITS 出多少就是多少（常见 32k），SILK 码流
+           * 自带采样率，QQ 接口只认 SILK 容器、不检查采样率。2026-11-24 实测
+           * silk-wasm 对 8/12/16/24/32/44.1/48k 都能编出有声码流；只有
+           * 11025/22050 这类非标准档会静音（框架的 toSilk 会把它们重采样）。
+           */
+          media_type: 'wav',
+          streaming_mode: false,
           ...(speed !== 1 ? { speed_factor: speed } : {}),
         }
       : {
@@ -850,12 +932,30 @@ function langCode(value) {
           text,
           text_language: langCode(gpt.textLanguage),
         };
+
+    /**
+     * 语义复用：同一段文本改语速 / 换音色时跳过 GPT 采样。
+     * 只有带适配器的服务（一键启动勾选「语义缓存」）才有这个路由；
+     * 原版 api_v2.py 没有，404/405 时给出能照着做的提示，而不是「HTTP 404」。
+     */
+    const freeze = version === 'v2' && gpt.freeze === true;
+    const url = freeze
+      ? gptEndpoint(gpt.baseUrl, '/voice-reply/tts')
+      : gptEndpoint(gpt.baseUrl, gpt.endpointPath || '/');
     const res = await fetchImpl(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify(freeze ? { ...body, if_freeze: true } : body),
       signal: timeoutSignal(cfg.timeoutSec),
     });
+    if (freeze && [404, 405, 501].includes(Number(res?.status))) {
+      await res.body?.cancel().catch(() => {});
+      throw new TtsError(
+        'freeze_unsupported',
+        '当前服务不支持语义复用：在「语音 → GPT-SoVITS」里重新一键启动并勾选语义缓存，或关掉这个开关',
+        400,
+      );
+    }
     return readResponse(res);
   }
 
@@ -1036,5 +1136,15 @@ function langCode(value) {
     }
   }
 
-  return { status, synthesize, warmup };
+  /**
+   * 兼容旧调用：以前用来标记「启动已切过、合成别再切」。
+   *
+   * 2026-11-24 起合成改成**每次都确认权重**（服务端对同路径有缓存，
+   * 重复确认很快），这个指纹机制连同它两个自愈漏洞一起退役：
+   * 服务重启后旧指纹还在、启动切失败还会锁死。留个空函数只是不破坏
+   * host.js 的调用点，它不再影响任何行为。
+   */
+  function markGptWeightsReady() {}
+
+  return { status, synthesize, warmup, markGptWeightsReady };
 }

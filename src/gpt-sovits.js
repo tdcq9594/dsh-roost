@@ -21,6 +21,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { basename, extname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** 起服务的默认端口。9880 是官方默认，但大概率被系统保留，所以从 17860 试起 */
 const PORT_FROM = 17860;
@@ -288,6 +289,17 @@ async function pickPort() {
  * 选的正好是 `tts_infer.yaml` 里已经加载的角色、又没手填路径时，
  * 服务起来就已经是那个模型了，再切一次纯属浪费。
  */
+/**
+ * 启动就绪后，要不要告诉 TTS「这一组权重已切好、合成时别再切」。
+ *
+ * 切权重失败时服务照样 running、照样能出声（跑的是 tts_infer.yaml 里的
+ * 默认模型），只是音色不是用户选的。这时若也标记就绪，合成会按指纹跳过
+ * 重试，用户就永远听着错音色。返回 null 让调用方**清空**指纹，下一句重试。
+ */
+export function weightReadyConfig({ weightsApplied = true, cfg = {}, baseUrl = '' } = {}) {
+  return weightsApplied ? { ...cfg, baseUrl } : null;
+}
+
 export function decideSwitch({ wanted = '', character = '', hasManual = false } = {}) {
   const w = String(wanted || '').trim();
   const c = String(character || '').trim();
@@ -310,7 +322,11 @@ export function buildWeightUrls(port, name, models = [], opts = {}) {
   if (!m && !manualGpt && !manualSovits) throw new Error(`目录里没有「${name}」的权重`);
   const gptPath = manualGpt || m?.gpt || '';
   const sovitsPath = manualSovits || m?.sovits || '';
-  const base = `http://127.0.0.1:${port}`;
+  /**
+   * 运行时切换传的是面板里那个 baseUrl（可能带反代前缀）；
+   * 一键启动仍按 port 拼本机地址。两种调用都走这里，避免两套 URL 逻辑。
+   */
+  const base = String(opts.baseUrl || '').trim().replace(/\/+$/, '') || `http://127.0.0.1:${port}`;
   const urls = [];
   if (gptPath) urls.push(`${base}/set_gpt_weights?weights_path=${encodeURIComponent(gptPath)}`);
   if (sovitsPath) urls.push(`${base}/set_sovits_weights?weights_path=${encodeURIComponent(sovitsPath)}`);
@@ -325,6 +341,90 @@ export function buildWeightUrls(port, name, models = [], opts = {}) {
   const partial = Boolean(manualGpt) !== Boolean(manualSovits);
   return { urls, gptPath, sovitsPath, matched: m || null, partial };
 }
+
+/**
+ * 运行时切换权重：给合成路径和面板「换角色」共用。
+ *
+ * 和启动时的 `switchModel` 区别在于：
+ *   · 不杀进程、不重跑 probe——服务已经在跑，只发两个 `/set_*_weights`
+ *   · baseUrl 从配置来（可能是反代），不是拼死的 127.0.0.1
+ *   · **确认返回体**：原版 api_v2.py 回 `{"message":"success"}`。扩展市场
+ *     的「语音回复」实测过「HTTP 200 但模型没换」的情况，只看 status 会
+ *     静默用错音色。兼容性上做软校验：非 JSON 放行（fork 可能只回文本），
+ *     是 JSON 但明确报失败就挡下来。
+ *
+ * 权重加载实测要 110 秒，所以调用方**必须自己做去重**（见 tts.js 的
+ * `gptWeightState`），不能每次合成都调一遍。
+ */
+export async function applyWeights({ baseUrl = '', model = '', models = [], gptWeights = '', sovitsWeights = '', fetchImpl = (...args) => fetch(...args) } = {}) {
+  if (!String(baseUrl || '').trim()) throw new Error('先配置 GPT-SoVITS 服务地址');
+  const built = buildWeightUrls(0, model, models, { gptWeights, sovitsWeights, baseUrl });
+  for (const url of built.urls) {
+    /** 只填一个路径时 urls 可能只有 SoVITS，按 URL 本身判断才不会报错时报错名字 */
+    const kind = url.includes('set_gpt_weights') ? 'GPT' : 'SoVITS';
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(180_000) });
+    if (!res.ok) throw new Error(`切换 ${kind} 权重失败（HTTP ${res.status}）`);
+    let body = '';
+    try {
+      body = await res.text();
+      const json = JSON.parse(body);
+      if (json?.error || (json?.message && json.message !== 'success')) {
+        throw new Error(json.error || json.message);
+      }
+    } catch (e) {
+      if (e instanceof SyntaxError) continue; // fork 只回文本，放行
+      throw new Error(`切换 ${kind} 权重失败：${e?.message || e}`);
+    }
+  }
+  return {
+    name: model || '(手动权重)',
+    version: built.matched?.version || '',
+    gptPath: built.gptPath,
+    sovitsPath: built.sovitsPath,
+    partial: built.partial,
+  };
+}
+
+/**
+ * 从配置（可带请求体覆盖）里取一键启动参数。
+ *
+ * 面板的「一键启动」和「随 DSH 自启动」必须走同一套取值：
+ * 以前只有路由里内联一份，自启动再抄一遍，改了一个字段就漂。
+ * `||` 而非 `??` 是刻意沿用原路由语义——前端传空串时回落到已保存配置。
+ */
+export function startOptsFromConfig(cfg = {}, body = {}) {
+  const g = cfg?.tts?.gptSovits || {};
+  return {
+    dir: String(body?.dir || g.installDir || ''),
+    opts: {
+      model: String(body?.model || g.model || ''),
+      gptWeights: String(body?.gptWeights || g.gptWeights || ''),
+      sovitsWeights: String(body?.sovitsWeights || g.sovitsWeights || ''),
+      semanticCache: body?.semanticCache === undefined
+        ? g.semanticCache === true
+        : body.semanticCache === true,
+    },
+  };
+}
+
+/**
+ * 要不要随 DSH 启动把 GPT-SoVITS 拉起来。
+ *
+ * 四个条件全满足才启动：语音总开关开、当前来源就是 gpt-sovits、
+ * 用户开了自启动、安装目录已填。少一个都不动——尤其不能在用户换了
+ * 别的 provider 后还偷偷占着几 GB 显存起一个用不上的服务。
+ */
+export function shouldAutoStartGpt(cfg = {}) {
+  const tts = cfg?.tts || {};
+  const g = tts.gptSovits || {};
+  return tts.enabled === true
+    && tts.provider === 'gpt-sovits'
+    && g.autoStart === true
+    && Boolean(String(g.installDir || '').trim());
+}
+
+/** 语义缓存适配器的脚本路径（随 dsh-roost 分发，ISC，见文件头） */
+export const SEMANTIC_ADAPTER = new URL('../scripts/gpt-semantic-adapter.py', import.meta.url);
 
 export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl = (...args) => fetch(...args) } = {}) {
   let child = null;
@@ -360,6 +460,8 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
     activeModel: '',
     /** 服务能跑但角色没切过去之类的软故障 */
     warning: '',
+    /** 本次是否带了语义缓存适配器（面板据此显示「可复用语义」） */
+    adapter: false,
   };
   const lines = [];
 
@@ -451,6 +553,13 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
 
     lines.length = 0;
     const myRun = (runId += 1);
+    /**
+     * 权重是否真的切到了用户选的角色。**不能只看 phase=running**：
+     * 切权重失败时服务照样能出声（跑的是 tts_infer.yaml 的默认模型）。
+     * 这个标志经 onReady 带给宿主，决定要不要标记「合成时不必再切」——
+     * 失败却标记了，合成就会按指纹跳过重试，用户永远听着错音色。
+     */
+    let weightsApplied = true;
     set({
       phase: 'starting',
       dir: p.dir,
@@ -461,6 +570,7 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
       readyAt: 0,
       activeModel: '',
       warning: '',
+      adapter: false,
     });
     push(`—— 启动 ${p.dir} ——`);
 
@@ -470,12 +580,29 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
       if (myRun !== runId) return;
       if (!port) throw new Error('连续 40 个端口都绑不上，可能被系统保留或被占用');
 
-      const args = [
-        p.apiScript,
-        '-a', '127.0.0.1',
-        '-p', String(port),
-        ...(p.configFile ? ['-c', p.configFile] : []),
-      ];
+      /**
+       * 语义缓存适配器：只在 v2 + 用户明确勾选时启用。
+       *
+       * 脚本随 dsh-roost 分发（不是用户请求给的路径），安全边界不变——
+       * 仍然只执行 `<目录>/runtime/python.exe` 和我们自己的一个 .py。
+       * 适配器内部 runpy 加载用户目录里的 api_v2.py，等同于原来的启动方式。
+       */
+      const useAdapter = opts.semanticCache === true && p.apiVersion === 'v2';
+      const args = useAdapter
+        ? [
+            fileURLToPath(SEMANTIC_ADAPTER),
+            '--app-dir', p.dir,
+            '--host', '127.0.0.1',
+            '--port', String(port),
+            ...(p.configFile ? ['--config', p.configFile] : []),
+          ]
+        : [
+            p.apiScript,
+            '-a', '127.0.0.1',
+            '-p', String(port),
+            ...(p.configFile ? ['-c', p.configFile] : []),
+          ];
+      if (useAdapter) push('已启用语义缓存适配器（可复用上次 GPT 语义结果）');
       push(`$ ${basename(p.python)} ${args.join(' ')}`);
 
       const proc = spawn(p.python, args, {
@@ -578,7 +705,7 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
         if (stillFree) return;
         clearInterval(timer);
         timer = null;
-        set({ phase: 'running', readyAt: Date.now(), activeModel: p.character || '' });
+        set({ phase: 'running', readyAt: Date.now(), activeModel: p.character || '', adapter: useAdapter });
         push(`—— 就绪：http://127.0.0.1:${port} ——`);
         log(`GPT-SoVITS 已就绪：127.0.0.1:${port}`);
 
@@ -634,15 +761,24 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
               const warning = `权重没切过去（${why}）。现在跑的是配置文件里的`
                 + (p.character ? `「${p.character}」` : '默认模型')
                 + `，音色会和你选的不一样`;
+              weightsApplied = false;
               set({ activeModel: p.character || '', warning });
               log(`GPT-SoVITS 切换权重失败：${why}`);
             }
           }
         }
 
-        /** 就绪后通知宿主把配置填好（baseUrl / 路由 / 版本），用户不用再手抄端口 */
+        /**
+         * 就绪后通知宿主把配置填好（baseUrl / 路由 / 版本），用户不用再手抄端口。
+         * 额外带出 models / character / adapter：合成路径要靠它们做运行时
+         * 权重切换和语义缓存，否则用户换个角色还得重启服务。
+         */
         try {
-          onReady({ port, dir: p.dir, warning: state.warning });
+          onReady({
+            port, dir: p.dir, warning: state.warning,
+            models: p.models || [], character: p.character || '', adapter: useAdapter,
+            weightsApplied,
+          });
         } catch (e) {
           log(`就绪回调失败：${e?.message || e}`);
         }
