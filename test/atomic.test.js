@@ -131,12 +131,18 @@ test('原子写：多进程同时写同一文件，落盘的永远是某一次�
   const dir = tmpDir();
   const f = join(dir, 'race.json');
   /**
-   * 4 个进程各紧循环写 700ms、每次 256KB。
+   * 4 个进程各写满固定次数（TARGET=30）、每次 256KB。
+   *
+   * **为什么用次数驱动而不是时间窗口**：旧版是「各写 700ms，断言写入次数 >20」，
+   * 那个断言实际测的是 CPU 速度——全量并发跑时 4 个子进程抢 CPU，700ms 只写到
+   * 19 次就超时，于是「没真跑到并发」的假失败。改成写满固定次数后，无论机器多忙
+   * 每个进程都会写满（只是慢一点花的时间长一点），不再依赖时序。
    *
    * **不断言「零失败」**：Windows 上多进程 `rename` 抢同一个目标本来就会偶发
-   * EPERM/EBUSY（目标正被另一个进程替换），那是 OS 行为，不是命名能解决的。
-   * 这里要证的是另外两件更重要的：落盘内容**永远是完整的一次写入**（不会
-   * 截断 / 拼接），以及**不留 tmp**。tmp 名唯一性由上一条用例直接钉。
+   * EPERM/EBUSY（目标正被另一个进程替换），那是 OS 行为。失败不计入 n，靠
+   * attempts 上限重试；能写满 TARGET 次就说明并发窗口里确实反复抢到了。
+   * 这里真正要证的是两件事：落盘内容**永远是完整的一次写入**（不会截断 / 拼接），
+   * 以及**不留 tmp**。tmp 名唯一性由上一条用例直接钉。
    *
    * 参数走环境变量：`node -e` 下 `process.argv` 是 `[execPath, ...args]`，
    * 没有脚本路径那一位，按下标取很容易错位（错位会写到 cwd 里一个叫 `p1` 的文件）。
@@ -146,17 +152,20 @@ test('原子写：多进程同时写同一文件，落盘的永远是某一次�
     const file = process.env.RACE_FILE;
     const tag = process.env.RACE_TAG;
     if (!file || !tag) throw new Error('缺少 RACE_FILE / RACE_TAG');
+    const TARGET = 30;
+    const MAX_ATTEMPTS = TARGET * 5;
     let n = 0;
     let fails = 0;
-    const end = Date.now() + 700;
-    while (Date.now() < end) {
+    let attempts = 0;
+    while (n < TARGET && attempts < MAX_ATTEMPTS) {
+      attempts++;
       try {
         writeFileAtomic(file, tag + '#' + n++ + '#' + 'x'.repeat(262144));
       } catch {
         fails += 1;
       }
     }
-    console.log(JSON.stringify({ tag, n, fails }));
+    console.log(JSON.stringify({ tag, n, fails, attempts }));
   `;
   const run = (tag) => new Promise((resolve) => {
     const p = spawn(process.execPath, ['--input-type=module', '-e', script], {
@@ -173,7 +182,12 @@ test('原子写：多进程同时写同一文件，落盘的永远是某一次�
   for (const r of results) {
     assert.equal(r.code, 0, `子进程异常退出：${r.err.slice(0, 300)}`);
     const stat = JSON.parse(r.out.trim().split('\n').pop());
-    assert.ok(stat.n > 20, `写得太少（${stat.n} 次），这条用例没真跑到并发`);
+    /**
+     * 写满固定次数才算出结果有效——比旧的「>20 次」更严格（每个进程必须写满 30 次）。
+     * 若某个进程一直抢不到 rename，attempts 会先到上限、n 不足 30，这里就会报出来，
+     * 并附上 fails/attempts 便于诊断是并发太凶还是写盘本身有问题。
+     */
+    assert.equal(stat.n, 30, `进程 ${stat.tag} 只写了 ${stat.n}/30 次（失败 ${stat.fails} 次，尝试 ${stat.attempts} 次）`);
   }
   /** 落盘内容必须是某一次**完整**的写入：截断 / 拼接都会在这里露出来 */
   const got = readFileSync(f, 'utf8');
