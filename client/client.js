@@ -589,6 +589,7 @@ select.roost-input{color-scheme:dark}
 .cap-row > input.cap-num,.cap-row > .cap-ctl{width:96px;flex:0 0 96px}
 .cap-row > .cap-ctl{display:flex;flex-direction:column;gap:4px}
 .cap-row > .cap-ctl select,.cap-row > .cap-ctl input{width:100%;min-width:0}
+.cap-row > .cap-ctl .roost-dropdown,.cap-row > .cap-ctl .roost-dropdown-btn{width:100%;min-width:0}
 /* 档位卡：标题一行、按钮一行、摘要一行。
    原来整块塞进 .roost-item 的 .t 里，兄弟 .d 是 flex:0 0 auto 不换行，
    工具名一长就把整行撑出屏幕（截图里右侧被切掉）。 */
@@ -1172,8 +1173,9 @@ select.roost-input{color-scheme:dark}
 .roost-tab[data-on="1"]::after{background:var(--tone-deep)}
 .is-data-view .roost-sec{margin-top:14px;padding:14px 16px 16px;
   border:1px solid var(--line-soft);border-radius:var(--radius-card);
-  /* 卡片底吃两层：宿主主题底色 + 自选强调色的极淡混入，换色/换主题都跟 */
-  background:color-mix(in srgb,var(--accent) 4%,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)));
+  /* 卡片底吃两层：宿主主题底色 + 自选强调色的极淡混入，再让底色本身透一点。
+     只给 background 做 alpha，不用 opacity——里面的文字和数据要保持不透明。 */
+  background:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) 88%,transparent));
   box-shadow:var(--shadow-card)}
 .is-data-view .roost-sec:first-child{margin-top:2px}
 .is-data-view .roost-sec-h{border-bottom:0;margin-bottom:10px;padding-bottom:6px}
@@ -1228,6 +1230,7 @@ select.roost-input{color-scheme:dark}
   font:inherit;font-size:11.5px;cursor:pointer}
 .roost-dropdown-opt:hover,.roost-dropdown-opt.active{background:var(--tone-foam)}
 .roost-dropdown-opt.on{color:var(--tone-deep);font-weight:600}
+.roost-dropdown-opt.disabled,.roost-dropdown-opt.disabled:hover{opacity:.42;cursor:not-allowed;background:transparent}
 .roost-people-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
 .roost-people-grid .roost-item{transition:border-color .15s,background .15s,transform .15s}
 .roost-people-grid .roost-item:hover{transform:translateY(-2px);box-shadow:var(--shadow-card)}
@@ -1316,7 +1319,7 @@ select.roost-input{color-scheme:dark}
       return { left: rect.left, top: rect.bottom + 4, width: rect.width }
     }
 
-    function Dropdown({ value, onChange, title, disabled, className, style, children }) {
+    function Dropdown({ value, onChange, title, disabled, className, style, children, ...rest }) {
       const [open, setOpen] = useState(false)
       const [active, setActive] = useState(0)
       const [pos, setPos] = useState(null)
@@ -1329,6 +1332,7 @@ select.roost-input{color-scheme:dark}
           label: String(Array.isArray(o.props?.children)
             ? o.props.children.join('')
             : (o.props?.children ?? o.props?.value ?? '')),
+          disabled: Boolean(o.props?.disabled),
         }))
       const current = list.find((o) => String(o.value) === String(value)) || list[0]
       const emit = (v) => { if (typeof onChange === 'function') onChange({ target: { value: v } }) }
@@ -1340,8 +1344,9 @@ select.roost-input{color-scheme:dark}
         setOpen(true)
       }
       const pick = (o) => {
+        if (!o || o.disabled) return
         setOpen(false)
-        if (o && String(o.value) !== String(value)) emit(o.value)
+        if (String(o.value) !== String(value)) emit(o.value)
       }
       useEffect(() => {
         if (!open) return
@@ -1372,7 +1377,14 @@ select.roost-input{color-scheme:dark}
         if (k === 'ArrowDown' || k === 'ArrowUp') {
           if (typeof e.preventDefault === 'function') e.preventDefault()
           if (!open) { openIt(); return }
-          setActive((i) => (i + (k === 'ArrowDown' ? 1 : -1) + list.length) % list.length)
+          setActive((i) => {
+            const dir = k === 'ArrowDown' ? 1 : -1
+            for (let n = 1; n <= list.length; n++) {
+              const j = ((i + dir * n) % list.length + list.length) % list.length
+              if (!list[j].disabled) return j
+            }
+            return i
+          })
           return
         }
         if (!open && (k === 'Enter' || k === ' ')) {
@@ -1387,6 +1399,7 @@ select.roost-input{color-scheme:dark}
       }
       return h('div', { className: 'roost-dropdown', ref: box, style },
         h('button', {
+          ...rest,
           type: 'button',
           className: 'roost-input roost-dropdown-btn' + (className ? ' ' + className : ''),
           disabled: Boolean(disabled), title,
@@ -1407,9 +1420,11 @@ select.roost-input{color-scheme:dark}
               key: String(o.value), type: 'button', role: 'option',
               'aria-selected': String(o.value) === String(value) ? 'true' : 'false',
               className: 'roost-dropdown-opt'
+                + (o.disabled ? ' disabled' : '')
                 + (i === active ? ' active' : '')
                 + (String(o.value) === String(value) ? ' on' : ''),
-              onMouseEnter: () => setActive(i),
+              'aria-disabled': o.disabled ? 'true' : undefined,
+              onMouseEnter: () => { if (!o.disabled) setActive(i) },
               onClick: () => pick(o),
             }, o.label)))
           : null,
@@ -2363,7 +2378,7 @@ select.roost-input{color-scheme:dark}
               value: qText,
               onChange: (e) => { setQText(e.target.value); setQPage(0) },
             }),
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input ov-cover', value: qRange,
               onChange: (e) => { setQRange(e.target.value); setQPage(0) },
             },
@@ -3442,7 +3457,7 @@ select.roost-input{color-scheme:dark}
                       },
                     }, polishFor === b.key ? '收起润色' : '润色'),
                     polishFor === b.key && polishPresets.length
-                      ? h('select', {
+                      ? h(Dropdown, {
                         className: 'roost-input', style: { width: 'auto' },
                         value: polishPreset, onChange: (e) => setPolishPreset(e.target.value),
                       }, polishPresets.map((x) => h('option', { key: x.id, value: x.id }, x.label)))
@@ -3922,7 +3937,7 @@ select.roost-input{color-scheme:dark}
           sd.policy === 'owner'
             ? h('div', { style: { marginBottom: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
                 h('span', { className: 'roost-muted', style: { fontSize: 11.5 } }, '旧记忆归：'),
-                h('select', {
+                h(Dropdown, {
                   className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
                   value: sd.owner, onChange: (e) => setSD({ owner: e.target.value }),
                 },
@@ -3937,7 +3952,7 @@ select.roost-input{color-scheme:dark}
                   key: k, style: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 3 },
                 },
                   h('span', { className: 'roost-mono', style: { fontSize: 11, flex: '1 1 auto' } }, k.slice(0, 12) + '…'),
-                  h('select', {
+                  h(Dropdown, {
                     className: 'roost-input', style: { width: 130, padding: '2px 6px', fontSize: 11 },
                     value: sd.byChat[k] || '',
                     onChange: (e) => {
@@ -4032,7 +4047,7 @@ select.roost-input{color-scheme:dark}
                   h('span', { className: 'pv-sel-k' }, '全局默认'),
                   h('span', { className: 'pv-sel-d' }, '没单独指定的群都用这个'),
                 ),
-                h('select', {
+                h(Dropdown, {
                   className: 'roost-input', value: globalId, 'aria-label': '全局当前人格',
                   onChange: async (e) => {
                     const id = e.target.value
@@ -4055,7 +4070,7 @@ select.roost-input{color-scheme:dark}
                       h('span', { className: 'pv-sel-k' }, '这个群'),
                       h('span', { className: 'pv-sel-d' }, '只影响本群，别的群不变'),
                     ),
-                    h('select', {
+                    h(Dropdown, {
                       className: 'roost-input', value: chatPick || '', 'aria-label': '本群使用的人格',
                       title: '只对最近说话的这个会话生效；换会话后这里跟着变',
                       onChange: async (e) => {
@@ -4569,7 +4584,7 @@ select.roost-input{color-scheme:dark}
               value: senderNew,
               onChange: (e) => setSenderNew(e.target.value.trim()),
             }),
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input',
               value: senderPick,
               onChange: (e) => setSenderPick(e.target.value),
@@ -8108,7 +8123,7 @@ select.roost-input{color-scheme:dark}
           h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' } },
             h('label', { className: 'roost-note', style: { margin: 0, display: 'flex', gap: 6, alignItems: 'center' } },
               '远端：',
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-input', style: { width: 150 },
                 value: remote.kind || '',
                 onChange: (e) => saveCfg && putBackup({ remote: { ...remote, kind: e.target.value } }),
@@ -8746,7 +8761,7 @@ select.roost-input{color-scheme:dark}
                 className: 'roost-input', placeholder: '群 chatId（可从「会话」页复制）',
                 value: authChat, onChange: (e) => setAuthChat(e.target.value), style: { flex: 1, minWidth: 200 },
               }),
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-input', value: authScope, onChange: (e) => setAuthScope(e.target.value),
                 style: { width: 130, flex: '0 0 130px' },
               },
@@ -10018,10 +10033,10 @@ select.roost-input{color-scheme:dark}
 
         const addPick = kind === 'tool' && pool.length
           ? h('div', { key: '__add', style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' } },
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-input',
                 style: { flex: '1 1 auto', padding: '3px 6px' },
-                defaultValue: '',
+                value: '',
                 disabled: busy,
                 onChange: (e) => {
                   const v = e.target.value
@@ -10346,7 +10361,7 @@ select.roost-input{color-scheme:dark}
                             : []),
                         ]
                         control = h('div', { className: 'cap-ctl' },
-                          h('select', {
+                          h(Dropdown, {
                             className: 'roost-input',
                             style: { width: '100%', padding: '3px 8px', fontSize: 11.5 },
                             value: draft !== undefined ? String(draft)
@@ -10653,7 +10668,7 @@ select.roost-input{color-scheme:dark}
         h(Sec, { n: '06', title: '次数限制',
           right: h('span', { className: 'roost-note', style: { margin: 0, display: 'inline-flex', alignItems: 'center', gap: '6px' } },
             '按',
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input',
               style: { width: 'auto', padding: '2px 6px' },
               value: quotaBucket,
@@ -11010,7 +11025,7 @@ select.roost-input{color-scheme:dark}
           desc: '只对群里没被 @ 的消息生效。私聊、被 @、命令永远直接接——这些是明确在叫她，不该被策略拦。',
         },
           h(GRow, { label: '接话方式', hint: '选了之后她每条群消息都会先过这一道，再去问模型' },
-            h('select', {
+            h(Dropdown, {
               className: 'roost-g-sel', value: decide.mode || 'ai', disabled: busy,
               onChange: (e) => setDecide('mode', e.target.value),
             }, DECIDE_MODES.map(([v, t]) => h('option', { key: v, value: v }, t)))),
@@ -11162,7 +11177,7 @@ select.roost-input{color-scheme:dark}
           ),
           h(GRow, { label: '给哪个群设', hint: '群只能从它待过的会话里选；官方没有群列表接口' },
             groups.length
-              ? h('select', {
+              ? h(Dropdown, {
                   className: 'roost-g-sel', value: pickOv, disabled: busy,
                   onChange: (e) => setOvGid(e.target.value),
                 }, groups.map((g) => h('option', {
@@ -11179,7 +11194,7 @@ select.roost-input{color-scheme:dark}
                   onSave: (v) => setOv(f.key, v),
                 })
               : f.kind === 'select'
-                ? h('select', {
+                ? h(Dropdown, {
                     className: 'roost-g-sel', value: ov[f.key] || '', disabled: busy,
                     onChange: (e) => setOv(f.key, e.target.value || undefined),
                   }, [
@@ -11387,7 +11402,7 @@ select.roost-input{color-scheme:dark}
                 onToggle: (v) => put({ guild: { enabled: v } }),
               })),
             h(GRow, { label: '会话粒度', hint: 'guild = 一个频道一个会话；channel = 一个子频道一个' },
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-g-num', value: g.sessionMode || 'guild', disabled: busy || !on,
                 onChange: (e) => put({ guild: { sessionMode: e.target.value } }),
               },
@@ -11622,7 +11637,7 @@ select.roost-input{color-scheme:dark}
               ? h('p', { className: 'roost-note' }, '正在问 QQ 要频道列表…')
               : (guilds.length || Object.keys(overrides).length)
                 ? h(GRow, { label: '频道', hint: '机器人加入的频道（直接问 QQ 要，不要求有人说过话）' },
-                    h('select', {
+                    h(Dropdown, {
                       className: 'roost-g-sel', value: key, disabled: busy,
                       onChange: (e) => setPick(e.target.value),
                     },
@@ -11638,7 +11653,7 @@ select.roost-input{color-scheme:dark}
             key
               ? OV_FIELDS.map((f) => h(GRow, { key: f.key, label: f.label, hint: '留空 = 跟随全局' },
                   f.kind === 'select'
-                    ? h('select', {
+                    ? h(Dropdown, {
                         className: 'roost-g-sel', value: ov[f.key] ?? '', disabled: busy,
                         onChange: (e) => setOv(f.key, e.target.value || undefined),
                       },
@@ -11855,7 +11870,7 @@ select.roost-input{color-scheme:dark}
               : null,
             list.length
               ? h(GRow, { label: '接口', hint: '只列本段的方法；非只读要二次确认' },
-                  h('select', {
+                  h(Dropdown, {
                     className: 'roost-g-sel', value: cur, disabled: busy,
                     onChange: (e) => { setSel(e.target.value); setOut(null) },
                   },
@@ -11872,7 +11887,7 @@ select.roost-input{color-scheme:dark}
                         label: '填入已知频道',
                         hint: '从会话映射里挑一个，自动填 guild_id / channel_id 骨架',
                       },
-                        h('select', {
+                        h(Dropdown, {
                           className: 'roost-g-sel', value: '', disabled: busy,
                           onChange: (e) => { if (e.target.value) fillFrom(e.target.value) },
                         },
@@ -12386,7 +12401,7 @@ select.roost-input{color-scheme:dark}
                   h('summary', { style: { cursor: 'pointer', fontSize: 12 } },
                     '高级：直接调接口（给开发者）'),
                   h(GRow, { label: '接口', hint: '非只读要二次确认；带 <> 的参数是占位符' },
-                    h('select', {
+                    h(Dropdown, {
                       className: 'roost-g-sel', value: cur, disabled: busy,
                       onChange: (e) => pick(e.target.value),
                     },
@@ -12685,7 +12700,7 @@ select.roost-input{color-scheme:dark}
         if (!s || s.id !== 'channel') return null
         if (!cfg.guildId) {
           if (!guildChoices.length) return null
-          return h('select', {
+          return h(Dropdown, {
             className: 'roost-g-sel', style: { maxWidth: 180, flex: '0 0 auto' }, value: '', disabled: busy,
             onChange: async (e) => {
               const v = e.target.value
@@ -12701,7 +12716,7 @@ select.roost-input{color-scheme:dark}
         if (!cfg.channelId) {
           const list = (subs || []).filter((c) => c.isForum)
           if (!list.length) return null
-          return h('select', {
+          return h(Dropdown, {
             className: 'roost-g-sel', style: { maxWidth: 180, flex: '0 0 auto' }, value: '', disabled: busy,
             onChange: async (e) => {
               const v = e.target.value
@@ -12992,7 +13007,7 @@ select.roost-input{color-scheme:dark}
               h(GNum, { value: cfg.minChars ?? 80, min: 20, max: 1000, unit: '字起', disabled: busy, onSave: (v) => save({ minChars: v }) }),
               h(GNum, { value: cfg.maxChars ?? 600, min: 20, max: 2000, unit: '字止', disabled: busy, onSave: (v) => save({ maxChars: v }) }))),
           h(GRow, { label: '正文格式', hint: 'Markdown 能分段；纯文本最不容易出错' },
-            h('select', {
+            h(Dropdown, {
               className: 'roost-g-sel', value: String(cfg.format || 3), disabled: busy,
               onChange: (e) => save({ format: Number(e.target.value) }),
             },
@@ -13009,7 +13024,7 @@ select.roost-input{color-scheme:dark}
         },
           h(GRow, { label: '频道', hint: '机器人加入的频道（直接问 QQ 要，不要求先在频道里说过话）' },
             guildChoices.length
-              ? h('select', {
+              ? h(Dropdown, {
                   className: 'roost-g-sel', value: cfg.guildId || '', disabled: busy,
                   onChange: async (e) => {
                     await save({ guildId: e.target.value, channelId: '' }, '已切换频道')
@@ -13025,7 +13040,7 @@ select.roost-input{color-scheme:dark}
                   : '拉不到频道列表：确认机器人已经被拉进频道，然后点右上角「重新体检」')),
           h(GRow, { label: '子频道', hint: '选了就能发到它里面；非论坛类型会标注原因' },
             subs.length
-              ? h('select', {
+              ? h(Dropdown, {
                   className: 'roost-g-sel', value: cfg.channelId || '', disabled: busy,
                   onChange: async (e) => {
                     const id = e.target.value
@@ -13219,7 +13234,7 @@ select.roost-input{color-scheme:dark}
       }
 
       const roleText = { owner: '群主', admin: '管理员', member: '普通成员' }
-      const picker = h('select', {
+      const picker = h(Dropdown, {
         value: pick,
         onChange: (e) => setGid(e.target.value),
         className: 'roost-btn',
@@ -13269,7 +13284,7 @@ select.roost-input{color-scheme:dark}
             style: { width: '100%', marginTop: 6, marginBottom: 8 },
           }),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
-            h('select', {
+            h(Dropdown, {
               value: String(seconds),
               onChange: (e) => setSeconds(Number(e.target.value)),
               className: 'roost-btn',
@@ -13596,7 +13611,7 @@ select.roost-input{color-scheme:dark}
                     h('div', { className: 'acc-num' }, String(item.facts ?? 0)),
                     h('div', { className: 'acc-num' }, item.journal == null ? '—' : String(item.journal)),
                     h('div', { className: 'acc-num' }, item.edges == null ? '—' : String(item.edges)),
-                    h('select', {
+                    h(Dropdown, {
                       className: 'roost-input acc-uin',
                       value: k,
                       // 会话记录里已有类型就锁住：那是**事实**，不是可选项
@@ -13637,7 +13652,7 @@ select.roost-input{color-scheme:dark}
                   bots.length
                     ? h('span', { style: { marginLeft: 'auto' } },
                         h('span', { className: 'roost-note', style: { margin: 0 } }, '记到 '),
-                        h('select', {
+                        h(Dropdown, {
                           className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
                           value: botPick,
                           onChange: (e) => setBotPick(e.target.value),
@@ -13686,7 +13701,7 @@ select.roost-input{color-scheme:dark}
                       ),
                     ),
                     h('span', { className: 'd', style: { display: 'flex', gap: '6px', alignItems: 'center' } },
-                      h('select', {
+                      h(Dropdown, {
                         className: 'roost-input',
                         style: { width: '132px', padding: '3px 6px', fontSize: '11px' },
                         value: appendDraft[id] || '',
@@ -13908,7 +13923,7 @@ select.roost-input{color-scheme:dark}
             : null,
 
           h('div', { className: 'acc-tools' },
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input', style: { width: 'auto', minWidth: 220, padding: '5px 9px' },
               value: batchUin, onChange: (e) => setBatchUin(e.target.value),
             },
@@ -14215,7 +14230,7 @@ select.roost-input{color-scheme:dark}
            * 5.8 测试版通道：稳定版 / 测试版（npm dist-tag `beta`）。
            * 切换只改「比哪个版本」，不改安装方式；存 localStorage 免得每次进来都要选。
            */
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '更新通道：稳定版（latest）/ 测试版（beta）',
             style: { width: 'auto', padding: '2px 6px', fontSize: 11.5 },
             value: channel,
@@ -14484,7 +14499,7 @@ select.roost-input{color-scheme:dark}
             '每一版改了什么都在这里，往回翻得到。只列有说明的版本——很早的版本可能没写。'),
           versions.length
             ? h(GRow, { label: '版本', hint: '新的在前' },
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-g-sel', value: sel,
                 onChange: (e) => load(e.target.value),
               },
@@ -14968,7 +14983,7 @@ select.roost-input{color-scheme:dark}
       const select = (label, path, options) =>
         h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 240px' } },
           h('span', { className: 'roost-note', style: { margin: 0 } }, label),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input',
             value: v(path),
             onChange: (e) => put(path, e.target.value),
@@ -15055,7 +15070,7 @@ select.roost-input{color-scheme:dark}
               h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-end' } },
                 h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 260px' } },
                   h('span', { className: 'roost-note', style: { margin: 0 } }, '音色'),
-                  h('select', {
+                  h(Dropdown, {
                     className: 'roost-input',
                     value: v('edge.voice') || 'zh-CN-XiaoxiaoNeural',
                     onChange: (e) => put('edge.voice', e.target.value),
@@ -15157,7 +15172,7 @@ select.roost-input{color-scheme:dark}
                     refOptions.length
                       ? h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 240px' } },
                           h('span', { className: 'roost-note', style: { margin: 0 } }, `参考音频（扫描到 ${refOptions.length} 个）`),
-                          h('select', {
+                          h(Dropdown, {
                             className: 'roost-input',
                             value: refPath,
                             onChange: (e) => put('gptSovits.referWavPath', e.target.value),
@@ -15240,7 +15255,7 @@ select.roost-input{color-scheme:dark}
               h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-end' } },
                 h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 200px' } },
                   h('span', { className: 'roost-note', style: { margin: 0 } }, '音色'),
-                  h('select', {
+                  h(Dropdown, {
                     className: 'roost-input',
                     value: mimoVoice,
                     onChange: (e) => put('mimo.voice', e.target.value),
@@ -15637,7 +15652,7 @@ select.roost-input{color-scheme:dark}
             },
           }),
           h('strong', null, '偷表情'),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input',
             style: { width: 'auto', fontSize: 12 },
             value: steal.scope || 'all',
@@ -16121,7 +16136,7 @@ select.roost-input{color-scheme:dark}
         return out
       }
 
-      const select = (value, opts, onChange, width) => h('select', {
+      const select = (value, opts, onChange, width) => h(Dropdown, {
         className: 'roost-input',
         style: { width: width || 260 },
         value: value || '',
@@ -16686,7 +16701,7 @@ select.roost-input{color-scheme:dark}
         h('div', { className: 'roost-note', style: { marginTop: 8 } },
           'dry-run 预览：选一个扩展先试算，确认后才写进 forceDeny。',
           h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input', value: pick,
               onChange: (e) => { setPick(e.target.value); setDry(null) },
             }, list.map((x) => h('option', { key: x.id, value: x.id },
@@ -17049,7 +17064,7 @@ select.roost-input{color-scheme:dark}
           const cur = val === undefined ? '' : String(val)
           /** 没有值又没默认值时补一个占位项：否则浏览器默认显示第一项，看着像已经选了。 */
           const known = (f.options || []).some((o) => o.value === cur)
-          control = h('select', {
+          control = h(Dropdown, {
             className: 'roost-input', value: cur,
             onChange: (e) => cfgSet(path, e.target.value),
           },
@@ -17147,7 +17162,7 @@ select.roost-input{color-scheme:dark}
           '从插件市场安装或更新扩展。',
           h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
             h('span', { className: 'roost-faint' }, '数据源'),
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input',
               value: marketSrc,
               onChange: (e) => setMarketSrc(e.target.value),
@@ -17194,7 +17209,7 @@ select.roost-input{color-scheme:dark}
               placeholder: '搜名字 / id / 描述 / 标签 / 作者',
               value: marketQuery, onChange: (e) => setMarketQuery(e.target.value),
             }),
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input', style: { flex: '0 1 170px' },
               value: marketCategory, onChange: (e) => setMarketCategory(e.target.value),
             },
@@ -18609,7 +18624,7 @@ select.roost-input{color-scheme:dark}
                 },
               },
                 h('span', null, '起名用的模型'),
-                h('select', {
+                h(Dropdown, {
                   className: 'roost-input', style: { width: 'auto', maxWidth: 280 },
                   value: cmKey,
                   disabled: Boolean(job?.running),
@@ -18686,7 +18701,7 @@ select.roost-input{color-scheme:dark}
               : null,
 
             h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' } },
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-input', style: { width: 'auto' }, value: cat,
                 onChange: (e) => { setCat(e.target.value); setPage(1) },
               },
@@ -18698,7 +18713,7 @@ select.roost-input{color-scheme:dark}
                 onKeyDown: (e) => { if (e.key === 'Enter') { setPage(1); load(1) } },
               }),
               h('button', { type: 'button', className: 'roost-btn', onClick: () => { setPage(1); load(1) } }, '搜'),
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-input', style: { width: 'auto' }, value: size,
                 onChange: (e) => { setSize(Number(e.target.value)); setPage(1) },
               }, [12, 24, 48, 96].map((v) => h('option', { key: v, value: v }, `每页 ${v}`))),
@@ -19963,7 +19978,7 @@ select.roost-input{color-scheme:dark}
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '假扮一个人发一句话，看框架会怎么处理。**不会真的发出去**，也不会写投递账本、不动冷却和配额。'),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-start' } },
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input', style: { width: 'auto', minWidth: 140 },
               value: persona, onChange: (e) => setPersona(e.target.value),
             }, SIM_PERSONAS.map((p) => h('option', { key: p.id, value: p.id }, p.label))),
@@ -20099,7 +20114,7 @@ select.roost-input{color-scheme:dark}
                   onChange: (e) => set('description', e.target.value),
                 })),
               h('label', { style: { fontSize: 11.5 } }, '形态',
-                h('select', {
+                h(Dropdown, {
                   className: 'roost-input', value: f.transport,
                   onChange: (e) => set('transport', e.target.value),
                 },
@@ -20316,7 +20331,7 @@ select.roost-input{color-scheme:dark}
         }
         if (f.type === 'select') {
           return h('div', { key: k, style: { marginTop: 10 } }, label,
-            h('select', {
+            h(Dropdown, {
               style: inputStyle, value: val(f) ?? '',
               onChange: (e) => setVal(k, e.target.value),
             }, (f.options || []).map((o) => {
@@ -20579,7 +20594,7 @@ select.roost-input{color-scheme:dark}
       return h(Sec, {
         n: '01', title: '最近的动静',
         right: h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '按级别筛', style: { width: 'auto', padding: '2px 6px', fontSize: 11.5 },
             value: lv, onChange: (e) => setLv(e.target.value),
           },
@@ -20588,7 +20603,7 @@ select.roost-input{color-scheme:dark}
             h('option', { value: 'info' }, '信息'),
             h('option', { value: 'warn' }, '警告'),
             h('option', { value: 'error' }, '错误')),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '按模块筛', style: { width: 'auto', padding: '2px 6px', fontSize: 11.5 },
             value: area, onChange: (e) => setArea(e.target.value),
           },
@@ -20656,7 +20671,7 @@ select.roost-input{color-scheme:dark}
             className: 'roost-input', placeholder: '操作名，如 memory.clear（留空=全部）',
             value: op, onChange: (e) => setOp(e.target.value), style: { flex: '1 1 200px' },
           }),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', value: limit, onChange: (e) => setLimit(Number(e.target.value)), style: { width: 'auto' },
           }, [20, 50, 100, 200].map((n) => h('option', { key: n, value: n }, `${n} 条`)))),
         err
@@ -22066,6 +22081,15 @@ select.roost-input{color-scheme:dark}
        * 与 `staged` 都是 409 + 原因，吞掉就会出现「显示开着、实际没开」。
        */
       const toggleHeadFeat = useCallback(async (id, on) => {
+        /**
+         * 试运行开着 = 照常回、照常记，但一条消息都不会真发到 QQ。
+         * 这是「看起来还在正常工作、其实全静默」的开关，打开前必须让人点头；
+         * 关掉不需要拦——那是恢复正常行为。
+         */
+        if (id === 'dryRun' && on === true
+          && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+          if (!window.confirm('打开试运行后，她照常回复和记录，但不会再真的发送消息到 QQ。确定打开吗？')) return
+        }
         /** 先加序号：在途的 `features.get` 快照一律作废（见上面的注释） */
         featSeq.current += 1
         const r = await quick('features.patch', { id, on })

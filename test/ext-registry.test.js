@@ -254,6 +254,28 @@ test('problems()：清单正常时为空', (t) => {
   assert.deepEqual(r.problems(), []);
 });
 
+test('problems()：卸载残留的空目录不算坏清单，扫描时顺手清掉', (t) => {
+  const home = tmpHome(t);
+  const extRoot = join(home, 'extensions');
+  const leftover = join(extRoot, 'voice-reply');
+  fs.mkdirSync(leftover, { recursive: true });
+  /** Windows 上 rmSync 删内容留空壳的现场：没有 plugin.json，却被当成「清单不是对象」 */
+  const r = createExtRegistry({ dir: home, log: () => {} });
+  assert.deepEqual(r.problems(), [], '空残留不该报「plugin.json 不是对象」');
+  assert.deepEqual(r.list(), [], '空残留不该进已装列表');
+  assert.equal(fs.existsSync(leftover), false, '句柄释放后应把空壳目录清掉');
+});
+
+test('problems()：无清单但有其它文件的目录跳过，不误删用户文件', (t) => {
+  const home = tmpHome(t);
+  const leftover = join(home, 'extensions', 'voice-reply');
+  fs.mkdirSync(leftover, { recursive: true });
+  fs.writeFileSync(join(leftover, 'notes.txt'), 'user data', 'utf8');
+  const r = createExtRegistry({ dir: home, log: () => {} });
+  assert.deepEqual(r.problems(), []);
+  assert.equal(fs.existsSync(join(leftover, 'notes.txt')), true, '不是扩展目录就不能删');
+});
+
 /**
  * `.old` 残留恢复 × foreign 保护。
  *

@@ -253,6 +253,26 @@ function rmrf(p) {
   fs.rmSync(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
 }
 
+/**
+ * 卸载残留的空目录不是扩展。
+ *
+ * Windows 上扩展进程把自己的 cwd 占在扩展目录里，`rmSync({recursive:true})`
+ * 能删光内容却删不掉目录本身。下次扫描时 `readJson(plugin.json)` 拿到 null，
+ * 旧 `problems()` 就报「plugin.json 不是对象」——用户刚卸完还看见一条红字。
+ * 这里顺手 rmdir 空壳（句柄释放后就能删），非空残留也只当普通目录跳过，
+ * 不伪造一份坏清单出来。
+ */
+function pruneLeftoverDir(p) {
+  try {
+    if (fs.existsSync(join(p, MANIFEST_FILE))) return false;
+    if (!fs.existsSync(p) || fs.readdirSync(p).length !== 0) return true;
+    fs.rmdirSync(p);
+  } catch {
+    /** 句柄还没退干净：这一轮先跳过，下一轮扫描再试 */
+  }
+  return true;
+}
+
 export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = null, clientStore = null } = {}) {
   const root = extensionsDir(dir);
 
@@ -359,7 +379,9 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
     for (const ent of names) {
       if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
       if (!EXT_ID_RE.test(ent.name)) continue;
-      const v = validateManifest(readJson(join(root, ent.name, MANIFEST_FILE)), { expectedId: ent.name });
+      const dir = join(root, ent.name);
+      if (pruneLeftoverDir(dir)) continue;
+      const v = validateManifest(readJson(join(dir, MANIFEST_FILE)), { expectedId: ent.name });
       if (!v.ok) out.push({ id: ent.name, errors: v.errors.map(String) });
     }
     return out;
@@ -401,7 +423,9 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
     for (const ent of names) {
       if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
       if (!EXT_ID_RE.test(ent.name)) continue;
-      const v = validateManifest(readJson(join(root, ent.name, MANIFEST_FILE)), { expectedId: ent.name });
+      const dir = join(root, ent.name);
+      if (pruneLeftoverDir(dir)) continue;
+      const v = validateManifest(readJson(join(dir, MANIFEST_FILE)), { expectedId: ent.name });
       if (!v.ok) {
         log.warn?.(`扩展 ${ent.name} 清单无效，跳过：${v.errors.join('；')}`);
         continue;

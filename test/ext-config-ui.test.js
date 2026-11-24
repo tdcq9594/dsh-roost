@@ -189,14 +189,16 @@ test('扩展页：点「设置」后展开表单，字段与类型齐全', async
   // 类型对应的控件
   const tags = []
   const inputTypes = []
+  let hasDropdown = false
   walk(filled, (n) => {
     tags.push(n.type)
+    if (typeof n.props?.className === 'string' && n.props.className.includes('roost-dropdown')) hasDropdown = true
     if (n.type === 'input' && n.props?.type) inputTypes.push(n.props.type)
   })
   assert.ok(inputTypes.includes('number'), 'number 字段应渲染数字输入框')
   assert.ok(inputTypes.includes('checkbox'), 'boolean 字段应渲染复选框')
   assert.ok(inputTypes.includes('password'), 'secret 字段应渲染密码框')
-  assert.ok(tags.includes('select'), 'select 字段应渲染下拉框')
+  assert.ok(hasDropdown, 'select 字段应渲染成自定义下拉框')
   assert.ok(tags.includes('textarea'), 'array 字段应渲染逐行文本域')
   // 已设置的密钥不给明文，只显示状态
   assert.ok(txt.includes('已设置'), '密钥状态应显示「已设置」')

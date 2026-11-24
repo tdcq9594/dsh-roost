@@ -73,7 +73,14 @@ function expand(node, rt) {
   if (Array.isArray(node)) return node.map((n) => expand(n, rt))
   if (typeof node.type === 'function') {
     rt.reset()
-    return expand(node.type(node.props || {}), rt)
+    const out = expand(node.type(node.props || {}), rt)
+    /**
+     * 自定义下拉（Dropdown）把 option 留在 props.children 里、点开才画弹层；
+     * 展开后的树看不到这些标签。测试用的摊平函数把原始 children 也带上，
+     * 这样「下拉里能选到某项」仍可断言，又不改生产代码去渲染隐藏 option。
+     */
+    if (out && typeof out === 'object' && !Array.isArray(out)) out.__sourceProps = node.props
+    return out
   }
   return { ...node, props: { ...node.props, children: expand(node.props?.children, rt) } }
 }
@@ -84,7 +91,11 @@ function textOf(node) {
   if (typeof node === 'string' || typeof node === 'number') return String(node)
   if (Array.isArray(node)) return node.map(textOf).join('')
   const kids = node.props?.children
-  return kids ? (Array.isArray(kids) ? kids.map(textOf).join('') : textOf(kids)) : ''
+  const sourceKids = node.__sourceProps?.children
+  return [kids, sourceKids]
+    .filter(Boolean)
+    .map((k) => (Array.isArray(k) ? k.map(textOf).join('') : textOf(k)))
+    .join('')
 }
 
 const store = {}
@@ -2552,6 +2563,8 @@ test('页头开关：走 features.get / features.patch，id 与后端注册的�
   assert.match(src, /quick\('features\.patch'/, '点击要走 features.patch')
   assert.match(src, /'botEnabled'/, '总开关的 id 是 botEnabled（避开顶层 enabled 撞名）')
   assert.match(src, /'dryRun'/, '试运行的 id 是 dryRun')
+  assert.match(src, /id === 'dryRun' && on === true[\s\S]{0,260}window\.confirm/,
+    '打开试运行前要弹窗警告「不会再真的发消息」')
 });
 
 test('前端渲染：图库页有「批量选择」入口，不再靠缩略图上的小复选框', () => {
@@ -2701,8 +2714,10 @@ test('视觉升级：竖线与卡片底只走自选强调色，不落对方配�
   assert.ok(!visual.includes('#3d7fd6') && !visual.includes('--ab-'), '新样式不该引用 aurabot 的蓝色或变量')
   assert.ok(src.includes('background:linear-gradient(180deg,var(--tone-foam-2),var(--accent))'),
     '标题竖线两端都要来自 --accent，不能掺白色或固定色')
-  assert.ok(src.includes('background:color-mix(in srgb,var(--accent) 4%,var(--dsw-alias-bg-l1,'),
+  assert.ok(src.includes('background:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1,'),
     '卡片底要在宿主主题底色上混入自选强调色，不能写死')
+  assert.ok(src.includes(')) 88%,transparent))'),
+    '卡片底只让背景透一点，不用 opacity 把里面的文字数据一起透明掉')
   assert.ok(src.includes('--tone-foam-2:color-mix(in srgb,var(--accent) 20%,transparent)'),
     '淡色令牌必须从 --accent 派生')
 })
@@ -2761,8 +2776,9 @@ test('G8 面板：星图有批量入口且真调用 reviewMany/tierMany', () => 
   }
 })
 
-test('视觉升级：记忆页筛选控件用圆角自定义下拉，弹层也圆角', () => {
+test('视觉升级：所有下拉栏用圆角自定义下拉，弹层也圆角', () => {
   const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(!/h\('select'|<select\b/.test(src), '面板里不该再留原生下拉')
   assert.match(src, /\.roost-dropdown-pop\{[^}]*border-radius:10px/, '弹出层自己画且圆角')
   assert.match(src, /\.roost-dropdown-pop\{[\s\S]*?background:color-mix\(in srgb,var\(--accent\)/, '弹层底色跟自选强调色')
   assert.ok(!src.includes('currentColor 8%,#000'), '弹层回退不能落到黑底黑字')
@@ -2808,6 +2824,7 @@ test('Dropdown：弹层能打开、选项回调 e.target.value、Esc 关闭', ()
     children: [
       { type: 'option', props: { value: '', children: ['全部类型'] } },
       { type: 'option', props: { value: 'digest', children: ['每日摘要'] } },
+      { type: 'option', props: { value: 'off', disabled: true, children: ['不可选'] } },
     ],
   }
   const render = () => { cursor = 0; return mod.Dropdown(props) }
@@ -2817,7 +2834,10 @@ test('Dropdown：弹层能打开、选项回调 e.target.value、Esc 关闭', ()
   const opened = render()
   assert.equal(opened.props.children[1]?.props?.className, 'roost-dropdown-pop', '点开要画出自己的弹层')
   const opts = opened.props.children[1].props.children.flat()
-  assert.equal(opts.length, 2)
+  assert.equal(opts.length, 3)
+  assert.equal(opts[2].props['aria-disabled'], 'true', '原生 option 的 disabled 要跟到自定义弹层')
+  opts[2].props.onClick()
+  assert.deepEqual(calls, [], '禁用的选项不该触发回调')
   opts[1].props.onClick()
   assert.deepEqual(calls, ['digest'], '回调必须给 e.target.value，保持原生 select 的契约')
   btn.props.onKeyDown({ key: 'Escape' })
