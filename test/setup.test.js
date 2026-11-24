@@ -6,11 +6,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { createSetup } from '../src/setup.js';
+import { createSetup, healthDirHash, instanceAlive } from '../src/setup.js';
 
 /** 造一份「看起来像 Roost」的目录，够 looksLikeRoost() 认就行 */
 function makeRoost({ port = 15210 } = {}) {
@@ -285,4 +285,102 @@ test('启动: 机器人报错时立刻返回并带上真实原因（不再空转
   } finally {
     await setup.stop().catch(() => {});
   }
+});
+
+/* ---------- 身份校验：端口上那份 Roost 必须属于配置目录 ---------- */
+
+test('身份指纹：与框架同口径（sha256 前 12 位），路径写法不干扰', () => {
+  const p = join(tmpdir(), 'roost-identity-a');
+  const h = healthDirHash(p);
+  assert.match(h, /^[a-f0-9]{12}$/);
+  assert.equal(h, healthDirHash(p + '/'), '尾斜杠不该改变身份');
+  assert.equal(h, healthDirHash(join(p, '.')), '/. 不该改变身份');
+  assert.notEqual(h, healthDirHash(join(tmpdir(), 'roost-identity-b')), '不同目录必须不同');
+  if (process.platform === 'win32') {
+    const lower = p.replace(/^([A-Z]):/, (_, drive) => drive.toLowerCase() + ':');
+    assert.equal(h, healthDirHash(lower), '盘符大小写不该改变身份');
+  }
+});
+
+test('探活: 另一目录的 Roost 占着端口，不算本目录在跑', async () => {
+  const dir = makeRoost();
+  const setup = makeSetup(dir);
+  const foreignHash = healthDirHash(join(dir, 'another-roost'));
+  await withFetch(
+    async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ok: true, bots: [{ id: 'main', state: 'online' }], online: 1, total: 1,
+          pid: 424242, dirHash: foreignHash,
+        }),
+    }),
+    async () => {
+      assert.equal(await setup.isRunning(), false, 'dirHash 不匹配必须判没跑');
+    },
+  );
+});
+
+test('探活: 本目录的 Roost 带正确 dirHash，算在跑', async () => {
+  const dir = makeRoost();
+  const setup = makeSetup(dir);
+  await withFetch(
+    async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ok: true, bots: [{ id: 'main', state: 'online' }], online: 1, total: 1,
+          pid: 424242, dirHash: healthDirHash(dir),
+        }),
+    }),
+    async () => {
+      assert.equal(await setup.isRunning(), true);
+    },
+  );
+});
+
+test('探活: 老框架没有 dirHash，pid 不在本目录实例表里就不认', async () => {
+  const dir = makeRoost();
+  mkdirSync(join(dir, 'data'), { recursive: true });
+  writeFileSync(
+    join(dir, 'data', 'instances.json'),
+    JSON.stringify({ 1: { pid: 999999999, at: Date.now() } }),
+    'utf8',
+  );
+  const setup = makeSetup(dir);
+  await withFetch(
+    async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ok: true, bots: [{ id: 'main', state: 'online' }], online: 1, total: 1,
+          pid: 123456789, // 不在实例表里 —— 端口上是别家的老框架
+        }),
+    }),
+    async () => {
+      assert.equal(await setup.isRunning(), false);
+    },
+  );
+});
+
+test('实例判活: 心跳停跳时 PID 被复用也不认', () => {
+  const dir = makeRoost();
+  const beat = 'a'.repeat(20) + '.beat';
+  const rec = { pid: 424242, beat, at: Date.now() };
+  /** 没心跳文件 = 明确停跳；PID 就算还在（被复用）也不认 */
+  assert.equal(instanceAlive(rec, dir, () => true), false);
+
+  const file = join(dir, 'data', 'instance-beats', beat);
+  mkdirSync(join(dir, 'data', 'instance-beats'), { recursive: true });
+  writeFileSync(file, '{}', 'utf8');
+  assert.equal(instanceAlive(rec, dir, () => true), true, '心跳新鲜 + PID 在 = 活');
+
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(file, old, old);
+  assert.equal(instanceAlive(rec, dir, () => true), false, '心跳过期，PID 在也不认');
+
+  assert.equal(instanceAlive({ pid: 424242 }, dir, () => true), true, '老记录没有 beat，退回 PID 判活');
 });
