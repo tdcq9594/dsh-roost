@@ -969,7 +969,15 @@ export function createExtMarket({
       }
       try { syncBlock(); }
       catch (e) { warnings.push(`受管块未同步：${e?.message ?? e}`); }
-      return { ok: true, id: key, warnings, backup, message: warnings.length ? `已卸载，但有 ${warnings.length} 项没清干净` : (backup ? `已卸载（原目录备份在 ${backup}）` : '已卸载') };
+      /**
+       * `registry.remove()` 在 Windows 上可能回 `partial`：文件已删、目录被扩展
+       * 进程占着。那个提示必须原样透到面板，不能在这里被一句「已卸载」盖掉——
+       * 用户得知道目录还在、以及令牌其实已经吊销了。
+       */
+      const backupNote = backup ? `（原目录备份在 ${backup}）` : '';
+      const base = r.partial ? `${r.message}${backupNote}` : (backup ? `已卸载${backupNote}` : '已卸载');
+      const message = warnings.length ? `${base}；另有 ${warnings.length} 项没清干净` : base;
+      return { ok: true, id: key, warnings, backup, partial: Boolean(r.partial), message };
     } finally {
       running.delete(key);
     }
