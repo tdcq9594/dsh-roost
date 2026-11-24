@@ -84,6 +84,7 @@ import { searchWithShortContext, recallRow } from './recall.js';
 import { projectRecallPreview } from './recall-preview.js';
 import { vectorStatus } from './vector-status.js';
 import { TEST_TEXT, testResult, rebuildBatch } from './vector-ops.js';
+import { projectTimeline } from './timeline-view.js';
 import { rerankHits } from './rerank.js';
 import { isDangerousCommand, createConfirmGate, dangerScanArgs } from './safety.js';
 import { createClosing, shouldNotePending } from './closing.js';
@@ -8963,7 +8964,9 @@ export function apply(ctx) {
           /* §1.10：印象列表是纯读翻看，不记审计噪音；generate/crystallize/clear 是写入意图，保留 */
           && op !== 'gist.impression.list'
           /* G10：来源统计纯读，不记审计噪音 */
-          && op !== 'stats.sources') audit({ op, chatId, peer: who.kind, peerId: who.id });
+          && op !== 'stats.sources'
+          /* G4：时间轴纯读，不记审计噪音 */
+          && op !== 'memory.timeline') audit({ op, chatId, peer: who.kind, peerId: who.id });
 
         try {
           switch (op) {
@@ -10433,6 +10436,32 @@ export function apply(ctx) {
                 });
               } catch (e) {
                 return send(res, 200, { ok: false, message: `来源统计读不出来：${e?.message ?? e}` });
+              }
+            }
+
+            /**
+             * G4 时间轴：journal 的 digest（每日摘要 ≈ 对方 level1 梗概）
+             * + impressions.json 的印象（≈ 对方 level2）按 at 降序，带 facets + 分页。
+             * 纯读投影，不写盘、不注入。我方无 seen/platform 数据，facets 只有 chats/levels/kinds。
+             */
+            case 'memory.timeline': {
+              try {
+                const all = journal.listChat('', 0) || [];
+                const digestRows = all.filter((r) => r?.kind === 'digest' && !r?.invalidAt);
+                const r = projectTimeline(
+                  { digestRows, impressions: impressionStore.list() },
+                  {
+                    kind: arg?.kind, chatId: arg?.chatId, level: arg?.level,
+                    q: arg?.q, limit: arg?.limit, offset: arg?.offset,
+                  },
+                );
+                return send(res, 200, {
+                  ok: true,
+                  list: r.list, total: r.total, hasMore: r.hasMore, facets: r.facets,
+                  note: '每日摘要 + 印象沉淀按时间倒序；已结晶印象不再显示。我方无「看过的内容」和平台来源维度。',
+                });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: `时间轴读不出来：${e?.message ?? e}` });
               }
             }
 

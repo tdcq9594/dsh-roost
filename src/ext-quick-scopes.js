@@ -51,6 +51,8 @@ const STATE_READ_OPS = Object.freeze([
   /** A2 记忆统计快照：只读聚合，和 `/v1/state` 同口径 */
   'stats.snapshot',
   'stats.sources',
+  /** G4 时间轴：digest + 印象的只读投影，不写盘不注入 */
+  'memory.timeline',
 ]);
 
 /** 调教类：改模型 / 配额 / 能力档位 / 保留策略。 */

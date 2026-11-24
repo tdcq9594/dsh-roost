@@ -4634,6 +4634,30 @@ select.roost-input{color-scheme:dark}
       }
 
       /**
+       * G4 时间轴：digest（每日摘要）+ 印象按时间倒序，带筛选/facets/分页。
+       * 纯读，点「看时间轴」才拉；facets 选项基于完整轴，不受当前筛选影响。
+       */
+      const [tlData, setTlData] = useState(null)
+      const [tlKind, setTlKind] = useState('')
+      const [tlChat, setTlChat] = useState('')
+      const [tlQuery, setTlQuery] = useState('')
+      const [tlOffset, setTlOffset] = useState(0)
+      const [tlBusy, setTlBusy] = useState(false)
+      const TL_PAGE = 10
+      const loadTimeline = async (offset = 0) => {
+        setTlBusy(true)
+        try {
+          const r = await quick('memory.timeline', {
+            kind: tlKind, chatId: tlChat, q: tlQuery, limit: TL_PAGE, offset,
+          })
+          if (r?.ok === false) { toast(r.message || '时间轴读不出来'); return }
+          setTlData(r)
+          setTlOffset(offset)
+        } catch (e) { toast(e.message) }
+        finally { setTlBusy(false) }
+      }
+
+      /**
        * B2 心智模型快照：读现有投影 / 读落盘快照 / 刷新 / 清空。
        * 都按需拉；刷新默认纯投影不调模型，模型改写是双重开关（默认关）。
        */
@@ -5227,6 +5251,44 @@ select.roost-input{color-scheme:dark}
                     ))),
                 )
               : h('div', { className: 'roost-empty' }, '还没有可统计的记忆来源'),
+        ),
+
+        h(Sec, { title: '时间轴', right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: tlBusy, onClick: () => loadTimeline(0),
+        }, tlBusy ? '读…' : '看时间轴') },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '每日摘要 + 印象沉淀按时间倒序。已结晶的印象不再显示（它已成为永久记忆）。',
+            '我方没有「看过的内容」和平台来源维度，所以筛选只有类型/群/关键词。'),
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
+            h('select', { value: tlKind, onChange: (e) => setTlKind(e.target.value), title: '类型' },
+              h('option', { value: '' }, '全部类型'),
+              h('option', { value: 'digest' }, '每日摘要'),
+              h('option', { value: 'impression' }, '印象')),
+            h('select', { value: tlChat, onChange: (e) => setTlChat(e.target.value), title: '群' },
+              h('option', { value: '' }, '全部群'),
+              ...(tlData?.facets?.chats || []).map((c) => h('option', { key: c, value: c }, c))),
+            h('input', {
+              type: 'text', value: tlQuery, placeholder: '搜摘要文字',
+              onChange: (e) => setTlQuery(e.target.value),
+              onKeyDown: (e) => { if (e.key === 'Enter') loadTimeline(0) },
+              style: { flex: '1 1 120px', minWidth: 100 },
+            }),
+            h('button', { type: 'button', className: 'roost-btn', disabled: tlBusy, onClick: () => loadTimeline(0) }, '筛选')),
+          !tlData
+            ? h('div', { className: 'roost-empty' }, '点「看时间轴」拉一页（只读，不改记忆）')
+            : (tlData.list || []).length
+              ? h('div', {},
+                  h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 6 } },
+                    `共 ${tlData.total} 条${(tlData.facets?.kinds || []).length ? ` · 类型 ${tlData.facets.kinds.join('/')}` : ''}`),
+                  ...(tlData.list || []).map((x) => h('div', { key: `${x.kind}:${x.id}`, className: 'roost-item', style: { marginBottom: 4 } },
+                    h('div', { style: { fontSize: 12 } }, x.text),
+                    h('div', { className: 'roost-muted', style: { fontSize: 10.5 } },
+                      `${x.kind === 'digest' ? '每日摘要' : '印象'}${x.chatId ? ` · ${x.chatId}` : ''} · ${new Date(x.at).toLocaleDateString()}`))),
+                  h('div', { style: { display: 'flex', gap: 6, marginTop: 8, alignItems: 'center' } },
+                    h('button', { type: 'button', className: 'roost-btn', disabled: tlBusy || tlOffset <= 0, onClick: () => loadTimeline(Math.max(0, tlOffset - TL_PAGE)) }, '上一页'),
+                    h('span', { className: 'roost-muted', style: { fontSize: 11 } }, `${tlOffset + 1}–${tlOffset + (tlData.list || []).length} / ${tlData.total}`),
+                    h('button', { type: 'button', className: 'roost-btn', disabled: tlBusy || !tlData.hasMore, onClick: () => loadTimeline(tlOffset + TL_PAGE) }, '下一页')))
+              : h('div', { className: 'roost-empty' }, '这个筛选下没有条目'),
         ),
 
         /**
