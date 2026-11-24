@@ -190,11 +190,13 @@ export function instanceAlive(rec, dir, alive = alivePid) {
 }
 
 /**
- * 老框架降级校验：`/healthz` 没有 dirHash 时，pid 必须出现在本目录实例表里。
+ * 老框架降级校验：`/healthz` 没有 dirHash 时，用 pid 核对本目录实例表。
  *
- * 全新安装还没配机器人时实例表是空的，这时无从判断身份，保持旧行为放过——
- * 否则「刚装好、还没填 AppID」会被判成没在跑，用户卡在第一步。
- * 新框架一律走 dirHash 严格校验，不进这条降级路。
+ * 无从判断身份就放过，不误判：① 全新安装实例表是空的（刚装好还没填 AppID，
+ * 判成没在跑会让用户卡在第一步）；② 真框架 1.1.12 的 healthz 连 pid 都不带
+ * （这时「没在跑」是错的，会让面板永远显示未启动）。只有明确带了 pid 却不在
+ * 本目录实例表里，才判「端口上是别家的 Roost」并拒绝。
+ * 新框架带 dirHash 时走严格校验，不进这条降级路。
  */
 function pidInLocalInstances(pid, dir) {
   let data;
@@ -205,7 +207,17 @@ function pidInLocalInstances(pid, dir) {
   }
   const recs = data && typeof data === 'object' ? Object.values(data) : [];
   if (!recs.length) return true;
-  /** 实例表里有记录了才需要 pid；老框架的探活响应可能压根不带 pid */
+  /**
+   * pid 缺失 = 无从校验身份，放过。
+   *
+   * 真框架 1.1.12 的 `/healthz` 只回 {ok,bots,online,total,uptime}，**不带 pid 也不带
+   * dirHash**。以前这里在「实例表非空 + pid 缺失」时返回 false，于是 Roost 明明
+   * online，面板却永远判「没在跑」——一键启动按钮变不成关闭、接入进度绿灯不亮，
+   * 还会诱导重复启动。没有身份证据时应与「没有实例表」同口径放过；只有确实带了
+   * pid 却对不上实例表，才拒绝（那才是「端口上是别家的 Roost」）。
+   */
+  /** 只有「压根没给身份」才放过；给了却不是合法整数，当成无效身份拒绝 */
+  if (pid === undefined || pid === null) return true;
   if (!Number.isInteger(pid) || pid <= 0) return false;
   return recs.some((rec) => {
     if (Number(rec?.pid) !== pid) return false;
