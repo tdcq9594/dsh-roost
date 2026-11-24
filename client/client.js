@@ -14800,6 +14800,7 @@ window.__ModuleLoader__.load({
         { id: 'edge', label: '微软 edge-tts', desc: '在线，音色自然（免 Key）', icon: '🌐' },
         { id: 'sherpa', label: '本地模型', desc: '离线可装，不联网、不花钱', icon: '📦' },
         { id: 'gpt-sovits', label: '本地 GPT-SoVITS', desc: '用自己准备的录音定音色', icon: '🎙' },
+        { id: 'cosyvoice', label: '本地 CosyVoice', desc: '自己部署的 CosyVoice 服务，可克隆音色', icon: '🗣️' },
         { id: 'volcano', label: '豆包语音（火山）', desc: '只填 API Key，选个音色就行', icon: '🔥' },
         { id: 'fish-free', label: 'Fish Audio', desc: 'S2.1 Pro Free，可选音色', icon: '🐟' },
         { id: 'breeze', label: 'Breeze 语音', desc: '云端或自建，填 Key + 音色 id', icon: '🌬' },

@@ -2941,7 +2941,7 @@ test('语音页把所有声音来源做成卡片，且不分「发语音/听语�
   const end = src.indexOf('function ', start + 20)
   const card = src.slice(start, end === -1 ? src.length : end)
   // 十一个来源都在卡片表里（内置五家 + 新补的六家；windows 也列出来）
-  for (const id of ['auto', 'edge', 'sherpa', 'volcano', 'fish-free', 'breeze', 'minimax', 'openai', 'mimo', 'windows', 'gpt-sovits']) {
+  for (const id of ['auto', 'edge', 'sherpa', 'gpt-sovits', 'cosyvoice', 'volcano', 'fish-free', 'breeze', 'minimax', 'openai', 'mimo', 'windows']) {
     assert.ok(card.includes(`id: '${id}'`), `卡片表缺少来源 ${id}`)
   }
   assert.ok(card.includes("className: 'voice-choices'"), '要有卡片网格容器')
