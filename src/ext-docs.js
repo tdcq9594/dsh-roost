@@ -60,6 +60,7 @@ const ROUTE_NOTES = {
   'POST /v1/group/kick': '移出群成员：`{ groupId, targets:[openid], addToBlacklist?, confirm:true }`；主人自己在本地就被挡住',
   'POST /v1/tts': '把一句话合成语音，**只返回字节不发出去**：`{ text }`（≤500 字）→ `{ audio(base64), contentType, bytes, provider, silk }`',
   'POST /v1/proactive': '排一条主动消息（受清醒时段与频次约束）',
+  'GET /v1/proactive/status': '只读查询现在能不能主动开口与今日额度，不发送消息：`{ canFire, why, todayCount, maxPerDay, nextAt }`',
   'POST /v1/proactive/submit': '扩展投递一条素材；宿主过门闸后让模型自己组织语言主动发出',
   'GET /v1/ext-ui/actions': '取走面板上点过的按钮动作（读即消费，只返回本扩展的）',
   'POST /v1/session.ensure': '确保会话存在',

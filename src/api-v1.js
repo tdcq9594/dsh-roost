@@ -156,6 +156,13 @@ export const V1_ROUTES = {
   'POST /v1/tts': { scope: 'say:write', hook: 'tts.speak' },
   'POST /v1/proactive': { scope: 'proactive:write', hook: 'proactive' },
   /**
+   * 只读的主动搭话状态（阶段 2）：扩展想知道「宿主现在能不能主动开口、
+   * 今天用了几次」，不必再靠发送失败的回执反推。复用 `state:read`——
+   * 读不改变状态，新开 scope 只会让所有存量扩展重走一遍授权。
+   * 只暴露状态，不含 /v1/proactive 那种写能力。
+   */
+  'GET /v1/proactive/status': { scope: 'state:read', hook: 'proactive.status' },
+  /**
    * 扩展投递一条**素材**，由宿主排队、过门闸、让模型组织语言后主动发出。
    * 不新开 scope：`proactive:write` 本来就是「主动开口」的敏感权限，装扩展时
    * 主人已经确认过；再开一个只会让所有存量扩展重新走一遍授权，收益为零。
@@ -226,7 +233,7 @@ export const V1_ROUTES = {
 export const V1_IMPLEMENTED_HOOKS = Object.freeze([
   'agent', 'memory.ext.add', 'llm.vision',
   'message', 'send', 'say', 'state', 'mood', 'context',
-  'memory.read', 'memory.write', 'proactive', 'proactive.submit', 'session.ensure',
+  'memory.read', 'memory.write', 'proactive', 'proactive.submit', 'proactive.status', 'session.ensure',
   'session.configure',
   'memory.facts', 'memory.edit', 'journal.read', 'usage.read', 'self.read', 'stickers.list',
   'stickers.file', 'self.propose', 'group.info', 'group.mute', 'group.kick', 'tts.speak',
