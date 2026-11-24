@@ -903,10 +903,12 @@ function langCode(value) {
           temperature: gptParam(gpt.temperature, 1, 0.01, 2),
           batch_size: gptParam(gpt.batchSize, 1, 1, 8),
           /**
-           * 主动要 WAV：
-           *   · 避开 mp3 的有损二次编码
-           *   · 框架的 toSilk() 见 WAV 会按 24kHz 归一（非 24k 走 ffmpeg 重采样），
-           *     而不是像扩展那样把 32k 语义码流直接编成 SILK、绕过 QQ 的 24k 解码约束
+           * 主动要 WAV：避开 mp3 的有损二次编码。
+           *
+           * 采样率不用我们管：GPT-SoVITS 出多少就是多少（常见 32k），SILK 码流
+           * 自带采样率，QQ 接口只认 SILK 容器、不检查采样率。2026-11-24 实测
+           * silk-wasm 对 8/12/16/24/32/44.1/48k 都能编出有声码流；只有
+           * 11025/22050 这类非标准档会静音（框架的 toSilk 会把它们重采样）。
            */
           media_type: 'wav',
           streaming_mode: false,
