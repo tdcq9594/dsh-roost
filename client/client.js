@@ -1199,6 +1199,14 @@ select.roost-input{color-scheme:dark}
 .roost-tl-row.impression .t{font-size:13.5px;font-weight:600;color:var(--tone-deep)}
 .roost-tl-chip{display:inline-flex;padding:1px 8px;border-radius:999px;font-size:10.5px;
   background:var(--tone-foam-2);color:var(--tone-deep)}
+.roost-batch{margin-top:10px;padding:10px 12px;border:1px solid var(--tone-foam-2);
+  border-radius:10px;background:var(--tone-foam)}
+.roost-batch-h{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.roost-batch-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+  gap:2px;max-height:180px;overflow:auto;overscroll-behavior:contain}
+.roost-batch-row{display:flex;gap:6px;align-items:flex-start;padding:3px 4px;
+  border-radius:6px;font-size:11.5px;line-height:1.5}
+.roost-batch-row:hover{background:var(--tone-foam-2)}
 .roost-people-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
 .roost-people-grid .roost-item{transition:border-color .15s,background .15s,transform .15s}
 .roost-people-grid .roost-item:hover{transform:translateY(-2px);box-shadow:var(--shadow-card)}
@@ -6677,6 +6685,29 @@ select.roost-input{color-scheme:dark}
      * 点星出详情；写操作只调**已经存在**的 `memory.remove` / `/memory/add`，
      * 不新造后端能力（编辑文字 / 改重要度 / 复习 / 层级这些我们没有，见文档）。
      */
+    /**
+     * G8 批量复习/改档：把选中的星点拆成服务端能寻址的 op 列表。
+     * 服务端 reviewMany/tierMany 只吃单一 scope，所以 global / chat 必须分开调；
+     * chatId 由面板 quick() 统一注入，这里绝不自己拼。
+     * 没有 factId 的老数据直接跳过，不用正文当 id（会误改别的群的同名事实）。
+     */
+    function batchPlan(stars, kind, tier) {
+      const ids = { global: [], chat: [] }
+      for (const s of (Array.isArray(stars) ? stars : [])) {
+        if (!s || s.kind !== 'fact' || !s.factId) continue
+        const scope = s.scope === 'chat' ? 'chat' : 'global'
+        if (ids[scope].length < 200) ids[scope].push(String(s.factId))
+      }
+      const out = []
+      for (const scope of ['global', 'chat']) {
+        if (!ids[scope].length) continue
+        const arg = { ids: ids[scope], scope }
+        if (kind === 'tier') arg.tier = ['short', 'long', 'core'].includes(tier) ? tier : 'long'
+        out.push({ op: kind === 'tier' ? 'memory.tierMany' : 'memory.reviewMany', arg })
+      }
+      return out
+    }
+
     function StarMap({ mem, toast, reload, quick, busy }) {
       const ref = useRef(null)
       const hits = useRef([])
@@ -6708,6 +6739,11 @@ select.roost-input{color-scheme:dark}
       const [addImp, setAddImp] = useState(0.5)
       const [addTier, setAddTier] = useState('long')
       const [addBusy, setAddBusy] = useState(false)
+      /** G8：服务端早有 reviewMany/tierMany，面板一直没入口 */
+      const [batchOn, setBatchOn] = useState(false)
+      const [picked, setPicked] = useState([])
+      const [batchTier, setBatchTier] = useState('long')
+      const [batchBusy, setBatchBusy] = useState(false)
 
       const built = buildStarMap(mem)
       const shown = filterStars(built.stars, { q, group, quick: quickF, tier: tierFilter })
@@ -6947,6 +6983,31 @@ select.roost-input{color-scheme:dark}
         }
       }
 
+      /** 批量复习/改档：按 scope 拆开走 quick，chatId 由 quick 自己注入 */
+      const batchAct = async (kind) => {
+        if (batchBusy) return
+        const stars = picked.map((id) => byId.get(id)).filter(Boolean)
+        const plan = batchPlan(stars, kind, batchTier)
+        if (!plan.length) { toast('先勾几条有 id 的事实'); return }
+        setBatchBusy(true)
+        try {
+          let done = 0
+          const failed = []
+          for (const call of plan) {
+            const r = await quick(call.op, call.arg)
+            if (r?.ok === false) { failed.push(...call.arg.ids); continue }
+            done += Number(r?.done || 0)
+            if (Array.isArray(r?.failed)) failed.push(...r.failed)
+          }
+          toast(done ? `已处理 ${done} 条${failed.length ? `，${failed.length} 条没找到` : ''}` : '一条都没改上')
+          if (done && reload) reload()
+        } catch (e) {
+          toast('没做成：' + e.message)
+        } finally {
+          setBatchBusy(false)
+        }
+      }
+
       return h('div', null,
         h('div', { className: 'roost-note', style: { marginBottom: 8 } },
           '把记忆画成星空：越亮记得越牢（亮度 = 权重 × 时间衰减，和淘汰用的是同一条公式）。位置按真实来源分星团：跨群事实 / 本会话 / 人物与实体 / 重要片段 / 熟人档案 / 已被取代。',
@@ -7094,6 +7155,57 @@ select.roost-input{color-scheme:dark}
                 }, st.text.slice(0, 14)))),
             )
           : null,
+        /* G8 批量入口：服务端 reviewMany/tierMany 已有，面板之前没有调用处 */
+        h('div', { className: 'roost-batch' },
+          h('div', { className: 'roost-batch-h' },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: Boolean(busy),
+              onClick: () => { setBatchOn((v) => !v); setPicked([]) },
+            }, batchOn ? '收起批量' : '批量复习 / 改档'),
+            batchOn
+              ? h('span', { className: 'roost-muted', style: { fontSize: 11 } },
+                  `已选 ${picked.length} 条 · 只处理有 id 的事实，每类最多 200 条`)
+              : null,
+          ),
+          batchOn
+            ? h('div', null,
+                h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: () => setPicked(shown.stars.filter((s) => s.kind === 'fact' && s.factId).map((s) => s.id)),
+                  }, '全选事实'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', onClick: () => setPicked([]),
+                  }, '清空'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: batchBusy,
+                    onClick: () => batchAct('review'),
+                  }, `批量复习（${picked.length}）`),
+                  h('select', {
+                    className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+                    value: batchTier, onChange: (e) => setBatchTier(e.target.value),
+                  },
+                    h('option', { value: 'short' }, '临时'),
+                    h('option', { value: 'long' }, '长期'),
+                    h('option', { value: 'core' }, '永久')),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: batchBusy,
+                    onClick: () => batchAct('tier'),
+                  }, '批量改档'),
+                ),
+                h('div', { className: 'roost-batch-list' },
+                  shown.stars.filter((s) => s.kind === 'fact').map((s) => h('label', {
+                    key: s.id, className: 'roost-batch-row',
+                  },
+                    h('input', {
+                      type: 'checkbox', checked: picked.includes(s.id), disabled: !s.factId,
+                      onChange: () => setPicked((v) => v.includes(s.id) ? v.filter((x) => x !== s.id) : [...v, s.id]),
+                    }),
+                    h('span', { style: { minWidth: 0, overflowWrap: 'anywhere' } },
+                      (s.scope === 'chat' ? '本会话 · ' : '跨群 · ') + (s.text || ''))))),
+              )
+            : null,
+        ),
         /* 点星后的详情：事实可以逐条编辑；其它来源只读，去对应分节操作 */
         detail
           ? h('div', { style: { marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 8 } },
@@ -22395,6 +22507,7 @@ select.roost-input{color-scheme:dark}
     exports.starScoreOf = starScoreOf
     exports.mergeClientPage = mergeClientPage
     exports.buildStarMap = buildStarMap
+    exports.batchPlan = batchPlan
     exports.filterStars = filterStars
     exports.projectStars = projectStars
     exports.wheelZoom = wheelZoom

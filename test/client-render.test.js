@@ -2695,3 +2695,57 @@ test('视觉升级：竖线与卡片底只走自选强调色，不落对方配�
   assert.ok(src.includes('--tone-foam-2:color-mix(in srgb,var(--accent) 20%,transparent)'),
     '淡色令牌必须从 --accent 派生')
 })
+
+test('G8 面板批量计划：按 scope 拆开、跳过无 id 事实、tier 白名单与 200 上限', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const stars = [
+    { kind: 'fact', scope: 'global', factId: '甲' },
+    { kind: 'fact', scope: 'chat', factId: '乙' },
+    { kind: 'fact', scope: 'chat', factId: '' },
+    { kind: 'entity', scope: 'global', factId: '不该进' },
+  ]
+  assert.deepEqual(mod.batchPlan(stars, 'review'), [
+    { op: 'memory.reviewMany', arg: { ids: ['甲'], scope: 'global' } },
+    { op: 'memory.reviewMany', arg: { ids: ['乙'], scope: 'chat' } },
+  ], '跨群和本会话必须拆成两次调用，chatId 由 quick 注入')
+  const tier = mod.batchPlan(stars, 'tier', 'bogus')
+  assert.equal(tier[0].op, 'memory.tierMany')
+  assert.equal(tier[0].arg.tier, 'long', '非法层级要兜到 long，别把 400 丢给用户')
+  const many = Array.from({ length: 250 }, (_, i) => ({ kind: 'fact', scope: 'global', factId: `f${i}` }))
+  assert.equal(mod.batchPlan(many, 'review')[0].arg.ids.length, 200, '与服务端上限一致')
+  assert.deepEqual(mod.batchPlan([], 'review'), [])
+})
+
+test('G8 面板：星图有批量入口且真调用 reviewMany/tierMany', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.match(src, /const plan = batchPlan\(stars, kind, batchTier\)/, '按钮不能是死代码')
+  assert.match(src, /await quick\(call\.op, call\.arg\)/, '必须真走 quick 通道')
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const props = {
+    mem: {
+      factsDetail: { global: [{ id: '甲', text: '事实甲', w: 1, at: 1 }], chat: [] },
+      journal: { top: [] }, graph: { entities: [], edges: [] }, profiles: [],
+    },
+    toast: () => {}, reload: () => {}, quick: async () => ({ ok: true, done: 0 }), busy: false,
+  }
+  const findBtn = (n, label) => {
+    if (n == null || typeof n !== 'object') return null
+    if (Array.isArray(n)) {
+      for (const c of n) { const r = findBtn(c, label); if (r) return r }
+      return null
+    }
+    if (n.type === 'button' && textOf(n).includes(label)) return n
+    return findBtn(n.props?.children, label)
+  }
+  rt.reset()
+  const first = mod.StarMap(props, rt)
+  const toggle = findBtn(first, '批量复习 / 改档')
+  assert.ok(toggle, '星图应该有批量入口')
+  assert.doesNotThrow(() => toggle.props.onClick(), '点批量入口不能抛')
+  /** 假 React 的 useState 不保留 state 重渲染，这里只验源码分支真在，不造 state 假装测过 */
+  for (const label of ['全选事实', '批量复习（', '批量改档', 'roost-batch-list']) {
+    assert.ok(src.includes(label), `批量面板缺少 ${label}`)
+  }
+})
