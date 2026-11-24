@@ -137,6 +137,37 @@ test('工具：都有 parameters 和 execute', () => {
 });
 
 /**
+ * 2026-11-24 事故护栏。
+ *
+ * DSH 的 `defineTool` 对扁平参数表的要求是「`required` 要么不写、出现就必须
+ * 是 true」。写 `required:false` 会抛
+ *   `unsupported JSON schema: parameters.openid.required must be true when present`
+ * 注册器遇到**第一个失败就整组返回 `{ok:false}`**（`registerQqTools` 的 catch
+ * 立即 return），连带 `buildOutputPrompt` 因为 `!mounted.ok` 整段【发言方式】
+ * 都不注入——模型于是既不知道能发语音、也不知道怎么用 qq_send 说话。
+ *
+ * 这条断言把「可选参数一律不写 required 键」钉死，别再让可选参数变可选工具。
+ */
+test('工具：扁平参数表里绝不出现 required:false（否则整组注册失败）', () => {
+  const { defs } = make({
+    fileOf: async () => ({ ok: true }),
+    infoOf: async () => ({ ok: true }),
+    searchOf: async () => ({ ok: true }),
+    postThreadOf: async () => ({ ok: true }),
+  });
+  assert.ok(defs.some((d) => d.name === 'qq_who'), 'qq_who 要在这次构造里');
+  assert.ok(defs.some((d) => d.name === 'qq_search'), 'qq_search 要在这次构造里');
+  for (const d of defs) {
+    for (const [k, v] of Object.entries(d.parameters || {})) {
+      assert.notEqual(
+        v?.required, false,
+        `${d.name}.${k} 写了 required:false——defineTool 会拒，整组工具连带提示词全丢；可选参数应省略该键`,
+      );
+    }
+  }
+});
+
+/**
  * `output.render` 必须返回**内容块数组**。
  *
  * 返回字符串会让 DSH 的 `content.some()` 炸成
@@ -617,7 +648,12 @@ test('qq_who：没传 infoOf 时清单里没有它', () => {
 test('qq_who：传了就注册，openid 是可选参数（不传就查当前说话人）', () => {
   const { who } = make({ infoOf: async () => ({ ok: true }) });
   assert.equal(typeof who.execute, 'function');
-  assert.equal(who.parameters.openid?.required, false);
+  /**
+   * 可选 = **不写 `required` 键**，不是 `required:false`。
+   * DSH 的 defineTool 见到 `required:false` 直接抛错、整组注册失败，
+   * 连带【发言方式】提示词都不注入（2026-11-24 事故）。
+   */
+  assert.equal(who.parameters.openid?.required, undefined, '可选参数不能写 required:false');
   assert.equal(who.parameters.type, undefined, 'parameters 必须是扁平表，不能是 JSON Schema');
 });
 

@@ -243,10 +243,15 @@ function buildWhoDef({ caller, infoOf }) {
       + '每次调用都会刷新头像缓存，拿最新的那张。'
       + '要在回复里用他的头像（发图）、或者拿不准「这个人在群里是谁」时用它；'
       + '昵称不可靠（重名、能随便改），身份以 QQ 号 / openid 为准。',
+    /**
+     * 可选参数**不写 `required` 键**——写 `required:false` 会让 DSH 的
+     * `defineTool` 抛 `parameters.openid.required must be true when present`：
+     * 注册一个失败就整组 `{ok:false}`，连带【发言方式】提示词都不注入。
+     * 2026-11-24 实测事故，详见 `test/qq-tools.test.js` 的护栏。
+     */
     parameters: {
       openid: {
         type: 'string',
-        required: false,
         description: '要查的人的 openid（消息头括号里那串）。不传就是当前说话的人。',
       },
     },
@@ -293,52 +298,44 @@ function buildSearchDef({ caller, searchOf }) {
       + '返回按时间倒序，每条带 seq / 会话名 / 发言人 / 时间 / 正文 / openid。'
       + '想看「那条消息前后到底怎么聊的」，把它的 seq 传给 `around`，会返回前后几条（普通成员只能看自己发的那条）。'
       + '适合「上次说的那个东西叫什么」「我之前答应过什么」这类回溯；一次给准关键词比反复换词有用。',
+    /** 这一组全是可选参数，一律不写 `required`（理由见 `qq_who` 上方注释） */
     parameters: {
       q: {
         type: 'string',
-        required: false,
         description: '关键词，空格分隔多个词（例如「杭州 天气」）。疑问词会被自动剥掉。',
       },
       person: {
         type: 'string',
-        required: false,
         description: '发言人：昵称 / QQ 号 / openid。只有主人和管理员有效，其他人传了也会被忽略。',
       },
       kind: {
         type: 'string',
-        required: false,
         description: 'group（群聊）/ c2c（私聊）；不填=全部。',
       },
       days: {
         type: 'number',
-        required: false,
         description: '只看最近几天；不填=全部时间。',
       },
       chatId: {
         type: 'string',
-        required: false,
         description: '限定某个会话的 openid。只有主人和管理员有效。',
       },
       limit: {
         type: 'number',
-        required: false,
         description: '返回条数，默认 20，最多 50。',
       },
       around: {
         type: 'number',
-        required: false,
         description:
           '看某条消息的**前后文**：传搜索结果里那条的 seq。'
           + '普通成员只能围绕自己发的消息看前后（别人发的会被拒）。',
       },
       before: {
         type: 'number',
-        required: false,
         description: '配合 around：往前取几条，默认 3，最多 20。',
       },
       after: {
         type: 'number',
-        required: false,
         description: '配合 around：往后取几条，默认 3，最多 20。',
       },
     },
