@@ -376,8 +376,8 @@ function publicError(error) {
  * sherpa 只给了 `writeWave(路径, ...)`，那要落一次盘再读回来。语音每次都是
  * 一次性的小文件，为了几十 KB 走两趟磁盘不值当，所以直接编码成 Buffer。
  *
- * 采样率取模型自己的（aishell3 是 8000Hz），不重采样——重采样只会更慢、
- * 更糊，而且 ai-chat 那边转 silk 时还会再处理一次。
+ * 采样率取模型自己的（aishell3 是 8000Hz），这里不重采样——重采样只会更慢、
+ * 更糊；转成 QQ 语音条要的 24kHz SILK 是框架外接协议那边的事。
  */
 export function encodeWav(samples, sampleRate) {
   const rate = Number(sampleRate) || 16000;
@@ -479,7 +479,7 @@ export function createTts({
    *
    * 用法照搬 `bot/plugins/ai-chat/tts.js` 里已经跑通的那两行
    * （`synthesize(text, voice)` → `toBuffer()`），不自己猜 API。
-   * ai-chat 那边还要把 mp3 转 silk 给 QQ，这里宿主直接收 mp3 就行，
+   * 转成 QQ 要的 silk 由框架外接协议负责，这里宿主直接收 mp3 就行，
    * 所以不需要 mpg123-decoder / silk-wasm。
    */
   async function edgeSpeech(text, cfg) {
@@ -752,7 +752,7 @@ export function createTts({
           { role: 'user', content: m.prompt },
           { role: 'assistant', content: String(text) },
         ],
-        /** 显式要 mp3：上游默认 wav，体积差一倍；ai-chat 那边两种都能转 silk */
+        /** 显式要 mp3：上游默认 wav，体积差一倍；框架两种音频都能转成 silk */
         audio: { format: 'mp3', voice: m.voice },
       }),
       signal: timeoutSignal(cfg.timeoutSec),
