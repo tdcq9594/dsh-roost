@@ -8458,10 +8458,21 @@ window.__ModuleLoader__.load({
                 preview.followUps.map((f) => h('div', { key: f.id, className: 'roost-item' },
                   h('span', { className: 't' }, `${f.text}：${f.question}`),
                   h('span', { className: 'd' }, `已问 ${f.tries} 次`))))
-              : null)
+              : h('div', { className: 'roost-muted', style: { fontSize: 11 } },
+                preview.followUpEnabled === false ? '主动提起到期的事关着（去自驱面板打开）' : '没有到期该问的事——正常，别硬找话。'))
           : null,
-        h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 6 } },
-          '九维驱力：' + Object.entries(driveRows).map(([k, v]) => `${k} ${v}`).join(' · ')),
+        /** 九维驱力条（阶段 6 第 6 项）：数值可视化，哪项高一眼看出来 */
+        h('div', { style: { marginTop: 8 } },
+          h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 4 } }, '九维驱力（越高越惦记）'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            Object.entries(driveRows).map(([k, v]) => {
+              const pct = Math.max(0, Math.min(100, Math.round(Number(v) * 100)))
+              return h('div', { key: k, style: { width: 84, fontSize: 10.5 } },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between' } },
+                  h('span', null, k), h('span', { className: 'roost-muted' }, `${pct}%`)),
+                h('div', { style: { height: 4, background: 'var(--line)', borderRadius: 2, overflow: 'hidden' } },
+                  h('div', { style: { height: '100%', width: `${pct}%`, background: 'var(--accent, #4a9)', transition: 'width .2s' } })))
+            }))),
       )
     }
 
@@ -8496,6 +8507,37 @@ window.__ModuleLoader__.load({
         const r = await saveCfg({ autotelic: p })
         if (r?.ok === false) return toast(r.message || '没存上')
         await load()
+      }
+
+      /**
+       * 数字输入 clamp（阶段 6 第 1 项）：HTML 的 min/max 只是软约束，用户仍能
+       * 输入越界值（或粘进来一串数字）。这里钳到合法区间并 toast 说明范围，
+       * 不把坏值写进配置——「保存成功却越界」比直接拒绝更糟。
+       */
+      const clampNum = (raw, min, max, label) => {
+        const n = Number(raw)
+        if (!Number.isFinite(n)) { toast(`${label}要填数字（${min}–${max}）`); return min }
+        const v = Math.min(max, Math.max(min, Math.round(n)))
+        if (v !== n) toast(`${label}已按 ${min}–${max} 调整`)
+        return v
+      }
+
+      /**
+       * 节奏预设（阶段 6 第 2 项）：只用本仓真实存在的 autotelic 键，
+       * 不抄对方 PRESETS（它们的排程键 quietFrom/quietTo 与 v5 的 quietStartHour 不对齐，
+       * 套用后作息静默不生效——那是对方的坑，不是要对齐的能力）。
+       */
+      const RHYTHM_PRESETS = {
+        conservative: { label: '保守', maxPerDay: 1, heartbeatMin: 0, stuckHours: 24, failLimit: 1, allowAct: false },
+        normal: { label: '默认', maxPerDay: 2, heartbeatMin: 0, stuckHours: 12, failLimit: 2, allowAct: false },
+        active: { label: '活跃', maxPerDay: 4, heartbeatMin: 30, stuckHours: 6, failLimit: 3, allowAct: false },
+      }
+      const applyPreset = async (key) => {
+        const p = RHYTHM_PRESETS[key]
+        if (!p) return
+        const r = await saveCfg({ autotelic: { ...(config?.autotelic || {}), ...p } })
+        toast(r?.ok === false ? (r.message || '没存上') : `已套用「${p.label}」预设，记得点保存种子才生效于立项`)
+        if (r?.ok !== false) await load()
       }
 
       const saveSeeds = async () => {
@@ -8541,7 +8583,15 @@ window.__ModuleLoader__.load({
       const actPending = async (id, approve) => {
         const r = await post('/autotelic/confirm', { id, approve })
         if (r?.ok === false) return toast(r.message || '没成')
-        toast(approve ? '已确认，正在执行' : '已取消这张单')
+        /** 回显后端真实终态（阶段 6 第 9/14 项）：不拿固定文案假装执行成功 */
+        const result = r.result || {}
+        const status = String(result.status || '').toLowerCase()
+        const why = String(result.why || '')
+        const label = status === 'done' ? '执行完成'
+          : status === 'aborted' ? '已作废'
+            : status === 'queued' ? '仍排队等确认'
+              : status === 'unknown' ? '这张单已不在队列' : (approve ? '已确认' : '已取消')
+        toast(why ? `${label}：${why.slice(0, 60)}` : label)
         const fresh = await get('/autotelic/pending')
         setPending(fresh?.rows || [])
         await load()
@@ -8552,7 +8602,11 @@ window.__ModuleLoader__.load({
         if (text.length < 2) return toast('先写点内容（如「别再做这种发链接的事」）')
         const r = await post('/autotelic/correct', { text })
         if (r?.ok === false) return toast(r.message || '没成')
-        toast('纠偏已记下')
+        /** 回显实际入表结果（阶段 6 第 9 项）：抑制/偏好各记了什么 */
+        const changes = []
+        if (Array.isArray(r.suppressed) && r.suppressed.length) changes.push(`抑制 ${r.suppressed.length} 条`)
+        if (Array.isArray(r.preferred) && r.preferred.length) changes.push(`偏好 ${r.preferred.length} 条`)
+        toast(changes.length ? `纠偏已记下：${changes.join('、')}` : '纠偏已记下')
         setCorrection('')
         showFeedback()
       }
@@ -8636,13 +8690,49 @@ window.__ModuleLoader__.load({
               type: 'checkbox', checked: c.followUpCandidate !== false,
               onChange: (e) => patch({ followUpCandidate: Boolean(e.target.checked) }),
             }), '到期的事可主动提起（默认开）'),
+          h('span', { className: 'roost-muted', style: { fontSize: 11 } }, '节奏：'),
+          ...Object.entries(RHYTHM_PRESETS).map(([k, p]) => h('button', {
+            type: 'button', className: 'roost-btn', key: k,
+            title: `一键套用${p.label}节奏（maxPerDay=${p.maxPerDay}、心跳=${p.heartbeatMin}分、卡住=${p.stuckHours}时）`,
+            onClick: () => applyPreset(k),
+          }, p.label)),
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
             '一天最多',
+            /** 滑块 + 数字双联（阶段 6 第 4 项）：拖滑块或直接填数，同一处落盘 */
             h('input', {
-              className: 'roost-input', type: 'number', min: 0, max: 24,
-              style: { width: 60 }, value: c.maxPerDay ?? 2,
+              type: 'range', min: 0, max: 12, step: 1,
+              style: { width: 80 }, value: Math.min(12, c.maxPerDay ?? 2),
               onChange: (e) => patch({ maxPerDay: Number(e.target.value) }),
+            }),
+            h('input', {
+              className: 'roost-input', type: 'number', min: 0, max: 12,
+              style: { width: 60 }, value: c.maxPerDay ?? 2,
+              onChange: (e) => patch({ maxPerDay: clampNum(e.target.value, 0, 12, '一天最多次数') }),
             }), '次')),
+
+        /**
+         * 安静时段（阶段 6 第 5 项）：我方语义「起止相同 = 不设」，等价对方的
+         * 「清空=关」；两个数字输入钳到 0–23 点。显示出来而不藏在 JSON 全文组里。
+         */
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8, fontSize: 12 } },
+          h('span', { className: 'roost-muted' }, '安静时段：'),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            '从',
+            h('input', {
+              className: 'roost-input', type: 'number', min: 0, max: 23, style: { width: 52 },
+              value: c.quietStartHour ?? 0,
+              onChange: (e) => patch({ quietStartHour: clampNum(e.target.value, 0, 23, '安静起始小时') }),
+            }), '点'),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+            '到',
+            h('input', {
+              className: 'roost-input', type: 'number', min: 0, max: 23, style: { width: 52 },
+              value: c.quietEndHour ?? 0,
+              onChange: (e) => patch({ quietEndHour: clampNum(e.target.value, 0, 23, '安静结束小时') }),
+            }), '点',
+          ),
+          h('span', { className: 'roost-muted', style: { fontSize: 11 } },
+            c.quietStartHour === c.quietEndHour ? '（起止相同 = 不设安静时段）' : '（这段时间不自己琢磨事）')),
 
         h('div', { style: { fontSize: 11.5, marginBottom: 6 } }, '她想琢磨的方向（一行一个，空着就不立项）：'),
         h('textarea', {
@@ -8735,7 +8825,12 @@ window.__ModuleLoader__.load({
         feedbackState
           ? h('div', { className: 'roost-note', style: { marginTop: 8, fontSize: 11 } },
             h('div', null, `抑制 ${Object.keys(feedbackState.suppress || {}).length} 条 · 偏好 ${Object.keys(feedbackState.prefer || {}).length} 条 · park ${Object.keys(feedbackState.park || {}).length} 条`),
-            feedbackState.breaker?.needsReview ? h('div', { style: { color: 'var(--warn)' } }, '⚠ 熔断待检视：她连续全灭或被叫停，先看看是不是规矩太紧') : null)
+            !Object.keys(feedbackState.suppress || {}).length
+              && !Object.keys(feedbackState.prefer || {}).length
+              && !Object.keys(feedbackState.park || {}).length
+              ? h('div', { className: 'roost-muted', style: { marginTop: 4 } }, '还没立过规矩——上面写「别做 X」或「多干这种」就会记在这里。')
+              : null,
+            feedbackState.breaker?.needsReview ? h('div', { style: { color: 'var(--warn)', marginTop: 4 } }, '⚠ 熔断待检视：她连续全灭或被叫停，先看看是不是规矩太紧') : null)
           : null,
 
         pending
@@ -8795,6 +8890,22 @@ window.__ModuleLoader__.load({
        */
       const spReady = sp?.ready !== false
       const spWhy = sp?.why || '不知道发给谁'
+
+      /**
+       * 采纳为自驱种子（阶段 6 第 12 项）：把「这一轮算出来的机会」变成她自己
+       * 可以琢磨的方向，不复制粘贴。写进 autotelic.seeds（去重、上限 20 条），
+       * 用现成 saveCfg 落盘，重启仍在。
+       */
+      const adoptAsSeed = async (text) => {
+        const seed = String(text || '').trim().slice(0, 200)
+        if (!seed) return
+        const cur = Array.isArray(config?.autotelic?.seeds) ? config.autotelic.seeds : []
+        if (cur.some((x) => String(x).trim() === seed)) return toast('这条已经是种子了')
+        if (cur.length >= 20) return toast('种子已满 20 条，先删几条再加')
+        const r = await saveCfg({ autotelic: { ...(config?.autotelic || {}), seeds: [...cur, seed] } })
+        toast(r?.ok === false ? (r.message || '没存上') : '已采纳为自驱种子')
+        if (r?.ok !== false) reload()
+      }
       /** 扩展素材队列：装了扩展才会有人往里投，所以默认 null（还没读到）也算正常 */
       const [extQ, setExtQ] = useState(null)
       const reloadExtQ = async () => {
@@ -8897,7 +9008,14 @@ window.__ModuleLoader__.load({
                       ' ',
                       o.reason,
                     ),
-                    h('span', { className: 'd' }, o.score.toFixed(2)),
+                    h('span', { className: 'd' },
+                      o.score.toFixed(2),
+                      h('button', {
+                        type: 'button', className: 'roost-btn', style: { marginLeft: 6 },
+                        title: '把她可能想开口的事变成她自己琢磨的种子',
+                        onClick: () => adoptAsSeed(o.reason),
+                      }, '当种子'),
+                    ),
                   ),
                 ),
               )
@@ -9001,16 +9119,20 @@ window.__ModuleLoader__.load({
               h('button', {
                 type: 'button', className: 'roost-btn',
                 onClick: async () => {
-                  await get('/ext-proactive/decide?index=' + (i + 1) + '&action=approve')
-                  toast('已批准，正在走门闸')
+                  /** 回显后端真实结果（阶段 6 第 12 项）：不拿固定文案假装批准成功 */
+                  const r = await get('/ext-proactive/decide?index=' + (i + 1) + '&action=approve')
+                  if (r?.ok === false) return toast(r.message || '批准没成')
+                  const why = String(r?.why || r?.message || '')
+                  toast(why ? `已批准，走门闸：${why.slice(0, 60)}` : '已批准，正在走门闸')
                   reloadExtQ()
                 },
               }, '发'),
               h('button', {
                 type: 'button', className: 'roost-btn',
                 onClick: async () => {
-                  await get('/ext-proactive/decide?index=' + (i + 1) + '&action=reject')
-                  toast('已放弃这条')
+                  const r = await get('/ext-proactive/decide?index=' + (i + 1) + '&action=reject')
+                  if (r?.ok === false) return toast(r.message || '放弃没成')
+                  toast(r?.why ? `已放弃：${String(r.why).slice(0, 60)}` : '已放弃这条')
                   reloadExtQ()
                 },
               }, '不发'),
