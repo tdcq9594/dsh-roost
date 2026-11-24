@@ -378,7 +378,8 @@ function publicError(error) {
  * 一次性的小文件，为了几十 KB 走两趟磁盘不值当，所以直接编码成 Buffer。
  *
  * 采样率取模型自己的（aishell3 是 8000Hz），这里不重采样——重采样只会更慢、
- * 更糊；转成 QQ 语音条要的 24kHz SILK 是框架外接协议那边的事。
+ * 更糊；转成 SILK 由框架外接协议负责，它按采样率白名单直编或重采样，
+ * QQ 接口只认 SILK 容器、不限采样率。
  */
 export function encodeWav(samples, sampleRate) {
   const rate = Number(sampleRate) || 16000;

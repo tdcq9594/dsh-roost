@@ -289,6 +289,17 @@ async function pickPort() {
  * 选的正好是 `tts_infer.yaml` 里已经加载的角色、又没手填路径时，
  * 服务起来就已经是那个模型了，再切一次纯属浪费。
  */
+/**
+ * 启动就绪后，要不要告诉 TTS「这一组权重已切好、合成时别再切」。
+ *
+ * 切权重失败时服务照样 running、照样能出声（跑的是 tts_infer.yaml 里的
+ * 默认模型），只是音色不是用户选的。这时若也标记就绪，合成会按指纹跳过
+ * 重试，用户就永远听着错音色。返回 null 让调用方**清空**指纹，下一句重试。
+ */
+export function weightReadyConfig({ weightsApplied = true, cfg = {}, baseUrl = '' } = {}) {
+  return weightsApplied ? { ...cfg, baseUrl } : null;
+}
+
 export function decideSwitch({ wanted = '', character = '', hasManual = false } = {}) {
   const w = String(wanted || '').trim();
   const c = String(character || '').trim();
@@ -504,6 +515,13 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
 
     lines.length = 0;
     const myRun = (runId += 1);
+    /**
+     * 权重是否真的切到了用户选的角色。**不能只看 phase=running**：
+     * 切权重失败时服务照样能出声（跑的是 tts_infer.yaml 的默认模型）。
+     * 这个标志经 onReady 带给宿主，决定要不要标记「合成时不必再切」——
+     * 失败却标记了，合成就会按指纹跳过重试，用户永远听着错音色。
+     */
+    let weightsApplied = true;
     set({
       phase: 'starting',
       dir: p.dir,
@@ -705,6 +723,7 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
               const warning = `权重没切过去（${why}）。现在跑的是配置文件里的`
                 + (p.character ? `「${p.character}」` : '默认模型')
                 + `，音色会和你选的不一样`;
+              weightsApplied = false;
               set({ activeModel: p.character || '', warning });
               log(`GPT-SoVITS 切换权重失败：${why}`);
             }
@@ -720,6 +739,7 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
           onReady({
             port, dir: p.dir, warning: state.warning,
             models: p.models || [], character: p.character || '', adapter: useAdapter,
+            weightsApplied,
           });
         } catch (e) {
           log(`就绪回调失败：${e?.message || e}`);

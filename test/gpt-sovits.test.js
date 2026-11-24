@@ -18,6 +18,7 @@ import {
   decideSwitch,
   buildWeightUrls,
   applyWeights,
+  weightReadyConfig,
 } from '../src/gpt-sovits.js';
 
 /** 真实 tts_infer.yaml 的形状（含 `\uXXXX` 转义，GPT-SoVITS 就是这么写的） */
@@ -312,4 +313,21 @@ test('运行时切权重：没选角色也没填路径时明确报错，不发�
 
 test('运行时切权重：没配 baseUrl 直接拒，不拿空地址发请求', async () => {
   await assert.rejects(applyWeights({ model: '角色A', models: MODELS }), /服务地址/);
+});
+
+// ── 启动失败不该锁死音色 ─────────────────────────────────────────────
+
+test('权重切成功：就绪指纹带完整配置，合成时跳过重复加载', () => {
+  const r = weightReadyConfig({
+    weightsApplied: true,
+    cfg: { model: '角色A', baseUrl: 'http://old' },
+    baseUrl: 'http://new',
+  });
+  assert.equal(r.model, '角色A');
+  assert.equal(r.baseUrl, 'http://new', 'baseUrl 以就绪回调的端口为准');
+});
+
+test('权重切失败：返回 null，调用方清空指纹让下一句合成重试', () => {
+  assert.equal(weightReadyConfig({ weightsApplied: false, cfg: { model: '角色A' }, baseUrl: 'http://x' }), null);
+  assert.equal(weightReadyConfig({ weightsApplied: false }), null);
 });

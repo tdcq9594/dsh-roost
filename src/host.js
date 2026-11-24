@@ -299,7 +299,7 @@ import { createLocalEmbedder } from './local-embed.js';
 import { createLocalReranker } from './local-rerank.js';
 import { parseTemporal } from './temporal.js';
 import { createTurnScenes } from './turn-scene.js';
-import { applyWeights, createGptSovits } from './gpt-sovits.js';
+import { applyWeights, createGptSovits, weightReadyConfig } from './gpt-sovits.js';
 import {
   applyPendingRestore, cancelRestore, createBackup, isFullBackupName, listBackups,
   pendingRestore, restoreRetentionRows, stageRestore, versionGapText,
@@ -1022,7 +1022,7 @@ export function apply(ctx) {
    */
   const gptLauncher = createGptSovits({
     log: (m) => log.info(m),
-    onReady: ({ port, dir, models = [], adapter = false }) => {
+    onReady: ({ port, dir, models = [], adapter = false, weightsApplied = true }) => {
       const info = gptLauncher.probe(dir);
       if (!info.ok) return;
       const g = cfg.tts?.gptSovits || {};
@@ -1046,10 +1046,14 @@ export function apply(ctx) {
         },
       });
       /**
-       * 启动器已经把权重切到用户选的角色了。告诉 TTS 这一组已生效，
-       * 下一句别再等一次 110 秒的模型加载（面板改角色时指纹会变，仍会切）。
+       * 只有权重**真的切成功**才标记就绪，让合成跳过那次 110 秒加载。
+       * 切换失败时服务仍在跑（用配置文件里的默认模型），这里要是也标记，
+       * 合成就按指纹跳过重试——用户会一直听到别人的声音且不会自愈。
+       * 留空指纹，下一句合成会按配置里的角色重新切。
        */
-      tts.markGptWeightsReady({ ...(cfg.tts?.gptSovits || {}), baseUrl });
+      tts.markGptWeightsReady(
+        weightReadyConfig({ weightsApplied, cfg: cfg.tts?.gptSovits || {}, baseUrl }) || {},
+      );
       log.info(`GPT-SoVITS 就绪，配置已自动填好：127.0.0.1:${port}（${info.weightVersion || info.apiVersion}）${adapter ? ' + 语义缓存' : ''}`);
     },
   });
