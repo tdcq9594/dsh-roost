@@ -143,6 +143,13 @@ export const DEFAULTS = {
        * 面板重启后会被 onReady 重新覆盖。
        */
       models: [],
+      /**
+       * 音色方案库（对齐扩展「语音回复」）。只存音色字段与全局语速的快照，
+       * **不存密钥**；最多 50 套，由 src/gpt-profiles.js 校验与裁剪。
+       */
+      profiles: [],
+      /** 当前正在使用的方案 id；删掉方案时清空，但当前音色配置不动 */
+      activeProfileId: '',
     },
     /**
      * 微软在线朗读（Edge TTS）。

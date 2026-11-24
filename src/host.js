@@ -275,6 +275,8 @@ import { sessionTitle, nextTitle } from './chat-name.js';
 import { createSwitchNote } from './switch-note.js';
 import { createTts, SHERPA_MODELS } from './tts.js';
 import { runPreview, PREVIEW_TEXT_LIMIT } from './tts-preview.js';
+import { createPreviewJobs } from './tts-preview-jobs.js';
+import { applyProfileOp, profileValuesFrom, normalizeProfiles } from './gpt-profiles.js';
 import { workspaceTitleFor } from './workspace-title.js';
 import { splitPersonaText, joinPersonaText, joinPersonaBlocks } from './persona-sections.js';
 import { simulate, SIM_PERSONAS } from './simulate.js';
@@ -957,6 +959,8 @@ export function apply(ctx) {
     dataDir,
     log: (m) => log.warn(m),
   });
+  /** 试听任务：内存态，重启即丢；结果 TTL 后自清，不写配置、不占 quota */
+  const previewJobs = createPreviewJobs();
   /**
    * 本地语音的一键安装。
    *
@@ -8899,6 +8903,14 @@ export function apply(ctx) {
       };
     };
 
+    /** 试听草稿还原掩码：同步/异步两条路共用，避免修了一边漏另一边 */
+    const draftForPreview = (raw) => {
+      const draft = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+      return draft
+        ? restoreMaskedSecrets({ tts: draft }, { tts: cfg.tts || {} }).tts
+        : (cfg.tts || {});
+    };
+
     const offs = [
       /**
        * 用量汇总：按天 + 按会话。
@@ -13932,20 +13944,7 @@ export function apply(ctx) {
         if (text.length > PREVIEW_TEXT_LIMIT) {
           return send(res, 413, { ok: false, error: 'text_too_long', message: `试听最多 ${PREVIEW_TEXT_LIMIT} 字` });
         }
-        const raw = body?.draft;
-        const draft = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
-        /**
-         * 草稿里的密钥是**打过码的 `******`**（面板拿的是 `publicConfig()`）。
-         *
-         * 以前这里直接把草稿交给合成：上游收到 `Authorization: Bearer ******`
-         * 回 401，面板显示「语音服务鉴权失败」。而 Key 其实好好躺在磁盘上
-         * （`saveConfig` 有还原、这条路没有），用户只会怀疑「保存后 Key 丢了」。
-         *
-         * 只还原 `******`：用户手填的新 Key、或故意清空的空串，都按原样用。
-         */
-        const draftForSynth = draft
-          ? restoreMaskedSecrets({ tts: draft }, { tts: cfg.tts || {} }).tts
-          : (cfg.tts || {});
+        const draftForSynth = draftForPreview(body?.draft);
         try {
           const r = await runPreview({
             text,
@@ -13960,6 +13959,56 @@ export function apply(ctx) {
           const code = String(e?.code || 'tts_failed').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'tts_failed';
           return send(res, status, { ok: false, error: code, message: String(e?.message || '试听失败') });
         }
+      }),
+
+      /**
+       * 异步试听：对齐扩展「语音回复」的交互——点下立刻拿任务 id，
+       * 前端每秒轮询进度，完成再取 base64 音频。老的 `/tts/preview`
+       * 保留给还没更新的调用方，行为逐字不变。
+       */
+      route('/tts/preview/start', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const text = String(body?.text ?? '').trim();
+        if (!text) return send(res, 400, { ok: false, error: 'empty_text', message: '写一句要试听的话' });
+        if (text.length > PREVIEW_TEXT_LIMIT) {
+          return send(res, 413, { ok: false, error: 'text_too_long', message: `试听最多 ${PREVIEW_TEXT_LIMIT} 字` });
+        }
+        const draftForSynth = draftForPreview(body?.draft);
+        const job = previewJobs.start(async ({ update }) => {
+          update({ phase: '合成中', progress: 20 });
+          return runPreview({
+            text,
+            draft: draftForSynth,
+            synth: async (t, o) => {
+              update({ phase: '合成中', progress: 45 });
+              const out = await tts.synthesize(t, o);
+              update({ phase: '校验语音条', progress: 75 });
+              return out;
+            },
+            convert: async (p) => {
+              update({ phase: '校验语音条', progress: 85 });
+              const r = await roost.rpc('media.convert', p, { timeout: 30_000 });
+              update({ phase: '即将完成', progress: 92 });
+              return r;
+            },
+          });
+        });
+        return send(res, 200, { ok: true, id: job.id });
+      }),
+
+      route('/tts/preview/job', async (req, res) => {
+        const id = new URL(req.url || '/', 'http://localhost').searchParams.get('id') || '';
+        const job = previewJobs.get(id);
+        if (!job) {
+          return send(res, 404, { ok: false, error: 'job_not_found', message: '试听任务不存在或已过期' });
+        }
+        if (job.status === 'running') {
+          /** 合成本身没有细粒度回调，用时间给一个「还在动」的粗进度，封顶 92 等真结果 */
+          const elapsed = Math.max(0, Date.now() - job.startedAt);
+          job.progress = Math.min(92, Math.max(job.progress, 20 + Math.floor(elapsed / 1500)));
+          if (job.phase === '排队中') job.phase = '合成中';
+        }
+        return send(res, 200, { ok: true, ...job });
       }),
 
       /**
@@ -14030,6 +14079,35 @@ export function apply(ctx) {
         const base = String(body?.baseUrl || cfg.tts?.gptSovits?.baseUrl || '').trim();
         if (!base) return send(res, 200, { ok: false, semanticFreeze: false, message: '还没配服务地址' });
         return send(res, 200, await probeGptFeatures(base));
+      }),
+
+      /**
+       * 音色方案库。GET 给面板清单 + 当前音色快照；POST 的 op 只有
+       * new / save / apply / remove 四种，纯函数在 gpt-profiles.js 里测。
+       * 应用方案走 patchConfig；每次合成仍会确认权重，所以方案里的角色
+       * 不需要额外预热，服务端重启也能自愈。
+       */
+      route('/tts/gpt-profiles', async (req, res) => {
+        if (req.method === 'GET') {
+          const g = cfg.tts?.gptSovits || {};
+          return send(res, 200, {
+            ok: true,
+            items: normalizeProfiles(g.profiles),
+            activeId: String(g.activeProfileId || ''),
+            values: profileValuesFrom(cfg),
+          });
+        }
+        const body = await readBody(req).catch(() => ({}));
+        const r = applyProfileOp(cfg, body);
+        if (!r.ok) return send(res, Number(r.status) || 400, r);
+        if (r.patch) cfg = patchConfig(r.patch);
+        const g = cfg.tts?.gptSovits || {};
+        return send(res, 200, {
+          ...r,
+          items: normalizeProfiles(g.profiles),
+          activeId: String(g.activeProfileId || ''),
+          values: profileValuesFrom(cfg),
+        });
       }),
 
       route('/tts/gpt-start', async (req, res) => {

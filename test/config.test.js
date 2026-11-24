@@ -242,6 +242,22 @@ test('密钥：数组/对象这类非字符串值不会写进磁盘', () => {
   assert.equal(loadConfig().tts.gptSovits.apiKey, '12345', '数字要保留成字符串');
 });
 
+test('配置：GPT 音色方案字段不会被 pruneTo 裁掉', () => {
+  freshDir();
+  saveConfig({
+    tts: {
+      gptSovits: {
+        profiles: [{ id: 'p1', name: '轻声角色', values: { speed: 1.1 } }],
+        activeProfileId: 'p1',
+      },
+    },
+  });
+  const g = loadConfig().tts.gptSovits;
+  assert.equal(g.activeProfileId, 'p1');
+  assert.equal(g.profiles.length, 1, '方案列表必须留得住，否则保存后刷新就没了');
+  assert.equal(g.profiles[0].name, '轻声角色');
+});
+
 test('配置：阶段 2 新增的开关字段存得下去（pruneTo 不会把它们裁掉）', () => {
   /**
    * `saveConfig()` 按 DEFAULTS 的形状裁剪，DEFAULTS 里没有的键一律丢。

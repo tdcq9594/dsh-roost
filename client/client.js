@@ -380,15 +380,16 @@ window.__ModuleLoader__.load({
   background:color-mix(in srgb,var(--accent) 8%,var(--field));
   box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent);
 }
-.voice-choice .vc-name{font-size:12.5px;font-weight:650;padding-right:22px}
+.voice-choice .vc-name{font-size:12.5px;font-weight:650;padding-right:18px}
 .voice-choice .vc-desc{font-size:11px;line-height:1.45;color:var(--dsw-alias-label-secondary,inherit);opacity:.92}
 .voice-choice-pin{
-  position:absolute;right:6px;top:6px;width:22px;height:22px;padding:3px;
-  border:1px solid transparent;border-radius:6px;background:transparent;cursor:pointer;
-  color:inherit;opacity:.5;font-size:13px;line-height:1;
+  position:absolute;right:5px;top:5px;width:18px;height:18px;padding:2px;
+  border:0;border-radius:5px;background:transparent;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  color:inherit;opacity:.45;line-height:0;
 }
-.voice-choice-pin:hover{opacity:.9;background:var(--hover)}
-.voice-choice-pin.on{opacity:1;color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.voice-choice-pin:hover{opacity:.85}
+.voice-choice-pin.on{opacity:1;color:var(--accent)}
 .voice-choice-more{
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
   min-height:74px;padding:10px;border-radius:12px;border:1px dashed var(--line);
@@ -14809,6 +14810,30 @@ window.__ModuleLoader__.load({
         { id: 'mimo', label: '小米 MiMo', desc: 'chat/completions 出音频', icon: '💡' },
         { id: 'windows', label: 'Windows 自带', desc: '离线可用，机械感重一些', icon: '🖥' },
       ]
+      /**
+       * GPT-SoVITS 语种选项：对齐扩展「语音回复」。
+       * 老配置存的是「中文 / 日语」这类中文词，下拉值统一折算成 API 码，
+       * 但**不改草稿里已有的值**——保存时原样交回服务端，langCode() 两边都认。
+       */
+      const GPT_LANGS = [
+        { id: 'zh', label: '中文' },
+        { id: 'ja', label: '日语' },
+        { id: 'en', label: '英语' },
+        { id: 'auto', label: '自动识别' },
+        { id: 'yue', label: '粤语' },
+        { id: 'ko', label: '韩语' },
+      ]
+      const GPT_LANG_ALIAS = { 中文: 'zh', 汉语: 'zh', 普通话: 'zh', 日文: 'ja', 日语: 'ja', 英文: 'en', 英语: 'en', 自动: 'auto', 粤语: 'yue', 韩语: 'ko' }
+      const gptLang = (x) => GPT_LANG_ALIAS[String(x ?? '').trim()] || String(x ?? 'zh')
+      const langSelect = (label, path, opts = {}) =>
+        h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: opts.flex || '1 1 200px' } },
+          h('span', { className: 'roost-note', style: { margin: 0 } }, label),
+          h(Dropdown, {
+            className: 'roost-input',
+            value: gptLang(v(path, 'zh')),
+            onChange: (e) => put(path, e.target.value),
+          }, GPT_LANGS.map((o) => h('option', { key: o.id, value: o.id }, o.label))),
+        )
       /** 卡片右上角图钉：置顶存本地偏好，不进配置草稿（切声音不丢置顶） */
       const PIN_KEY = 'roost.tts.pinnedProviders'
       const [pins, setPins] = useState(() => {
@@ -14926,13 +14951,157 @@ window.__ModuleLoader__.load({
        * api_v2.py 勾了之后每次合成都 404（对齐扩展面板的做法）。
        */
       const [gptFeatures, setGptFeatures] = useState(null)
+
+      /**
+       * 音色方案（对齐扩展「语音回复」）：清单/应用落后端，草稿改动只在本页。
+       * 保存 ≠ 应用：改个名字不该把正在用的音色换掉；选方案只载入草稿，
+       * 点「应用方案」才写当前配置。语速跟着方案走，但仍是全局那一份。
+       */
+      const [gptProfiles, setGptProfiles] = useState([])
+      const [gptActiveProfileId, setGptActiveProfileId] = useState('')
+      const [profileId, setProfileId] = useState('')
+      const [profileName, setProfileName] = useState('')
+      const [profileBaseline, setProfileBaseline] = useState(null)
+      const [profileBusy, setProfileBusy] = useState(false)
+      const pnum = (x, fallback) => { const n = Number(x); return Number.isFinite(n) ? n : fallback }
+      const pclamp = (x, fallback, min, max, integer = false) => {
+        const n = Math.max(min, Math.min(max, pnum(x, fallback)))
+        return integer ? Math.round(n) : n
+      }
+      /** 键顺序和 src/gpt-profiles.js 的 normalizeProfileValues 保持一致，脏值判断才不会假阳性 */
+      const profileSnapshot = () => ({
+        speed: pclamp(v('speed', 1), 1, 0.5, 2),
+        baseUrl: String(v('gptSovits.baseUrl') || ''),
+        model: String(v('gptSovits.model') || ''),
+        gptWeights: String(v('gptSovits.gptWeights') || ''),
+        sovitsWeights: String(v('gptSovits.sovitsWeights') || ''),
+        referWavPath: String(v('gptSovits.referWavPath') || ''),
+        promptText: String(v('gptSovits.promptText') || ''),
+        promptLanguage: String(v('gptSovits.promptLanguage', 'zh') || 'zh'),
+        textLanguage: String(v('gptSovits.textLanguage', 'zh') || 'zh'),
+        textSplitMethod: String(v('gptSovits.textSplitMethod', 'cut5') || 'cut5'),
+        fragmentInterval: pclamp(v('gptSovits.fragmentInterval', 0.3), 0.3, 0.01, 1),
+        topK: pclamp(v('gptSovits.topK', 15), 15, 1, 100, true),
+        topP: pclamp(v('gptSovits.topP', 1), 1, 0, 1),
+        temperature: pclamp(v('gptSovits.temperature', 1), 1, 0.01, 2),
+        batchSize: pclamp(v('gptSovits.batchSize', 1), 1, 1, 8, true),
+        freeze: v('gptSovits.freeze') === true,
+      })
+      const PROFILE_DRAFT_PATHS = {
+        speed: 'speed',
+        baseUrl: 'gptSovits.baseUrl',
+        model: 'gptSovits.model',
+        gptWeights: 'gptSovits.gptWeights',
+        sovitsWeights: 'gptSovits.sovitsWeights',
+        referWavPath: 'gptSovits.referWavPath',
+        promptText: 'gptSovits.promptText',
+        promptLanguage: 'gptSovits.promptLanguage',
+        textLanguage: 'gptSovits.textLanguage',
+        textSplitMethod: 'gptSovits.textSplitMethod',
+        fragmentInterval: 'gptSovits.fragmentInterval',
+        topK: 'gptSovits.topK',
+        topP: 'gptSovits.topP',
+        temperature: 'gptSovits.temperature',
+        batchSize: 'gptSovits.batchSize',
+        freeze: 'gptSovits.freeze',
+      }
+      const applyProfileDraft = (values) => {
+        for (const [key, path] of Object.entries(PROFILE_DRAFT_PATHS)) put(path, values?.[key])
+      }
+      const loadProfiles = async (pick) => {
+        const r = await get('/tts/gpt-profiles')
+        if (r?.ok === false) return toast(r.message || '音色方案读不出来')
+        const items = Array.isArray(r.items) ? r.items : []
+        setGptProfiles(items)
+        setGptActiveProfileId(String(r.activeId || ''))
+        const chosen = pick || String(r.activeId || '')
+        const found = items.find((p) => p.id === chosen)
+        if (found) {
+          setProfileId(found.id)
+          setProfileName(found.name)
+          setProfileBaseline({ id: found.id, name: found.name, values: found.values })
+        }
+        return r
+      }
+      useEffect(() => { if (provider === 'gpt-sovits') loadProfiles() }, [provider])
+      const profileDirty = Boolean(profileBaseline) && (
+        profileName !== profileBaseline.name
+        || JSON.stringify(profileSnapshot()) !== JSON.stringify(profileBaseline.values)
+      )
+      const chooseProfile = (id) => {
+        setProfileId(String(id || ''))
+        const found = gptProfiles.find((p) => p.id === id)
+        setProfileName(found?.name || '')
+        setProfileBaseline(found ? { id: found.id, name: found.name, values: found.values } : null)
+        if (found) {
+          applyProfileDraft(found.values)
+          toast('已载入草稿；点「应用方案」才会切换当前音色')
+        }
+      }
+      const saveProfile = async () => {
+        const name = String(profileName || '').trim()
+        if (!name) return toast('给方案起个名字')
+        setProfileBusy(true)
+        try {
+          const r = await post('/tts/gpt-profiles', {
+            op: 'save', id: profileId, name, values: profileSnapshot(),
+          })
+          if (r?.ok === false) return toast(r.message || '没存上')
+          setGptProfiles(Array.isArray(r.items) ? r.items : [])
+          setProfileId(String(r.id || ''))
+          setProfileName(String(r.name || name))
+          setProfileBaseline({ id: r.id, name: r.name || name, values: profileSnapshot() })
+          toast(r.message || '方案已保存')
+        } finally { setProfileBusy(false) }
+      }
+      const applyProfile = async () => {
+        if (!profileId) return toast('先选一套方案')
+        setProfileBusy(true)
+        try {
+          const r = await post('/tts/gpt-profiles', { op: 'apply', id: profileId })
+          if (r?.ok === false) return toast(r.message || '应用失败')
+          setDirty(false)
+          await reload?.()
+          await loadProfiles(profileId)
+          toast(r.message || '方案已应用')
+        } finally { setProfileBusy(false) }
+      }
+      const removeProfile = async () => {
+        const found = gptProfiles.find((p) => p.id === profileId)
+        if (!found) return toast('先选一套方案')
+        if (!window.confirm(`删除音色方案「${found.name}」？当前音色会保留。`)) return
+        setProfileBusy(true)
+        try {
+          const r = await post('/tts/gpt-profiles', { op: 'remove', id: profileId })
+          if (r?.ok === false) return toast(r.message || '没删掉')
+          setGptProfiles(Array.isArray(r.items) ? r.items : [])
+          setProfileId(''); setProfileName(''); setProfileBaseline(null)
+          toast(r.message || '方案已删除')
+        } finally { setProfileBusy(false) }
+      }
+      const newProfile = () => {
+        setProfileId(''); setProfileName(''); setProfileBaseline(null)
+        const d = { speed: 1, promptLanguage: 'zh', textLanguage: 'zh', textSplitMethod: 'cut5', fragmentInterval: 0.3, topK: 15, topP: 1, temperature: 1, batchSize: 1, freeze: false }
+        applyProfileDraft(d)
+        toast('已新建空白方案：填好参考音频、参考文本和权重后保存')
+      }
+
       const probeFeatures = async () => {
         const base = String(v('gptSovits.baseUrl') || '').trim()
-        if (!base) return
+        if (!base) return null
         const r = await post('/tts/gpt-features', { baseUrl: base })
         setGptFeatures(r)
+        return r
       }
       useEffect(() => { if (provider === 'gpt-sovits') probeFeatures() }, [provider, v('gptSovits.baseUrl')])
+      /** 手动检查服务：和目录探测分开，对齐扩展面板的「检查 GPT-SoVITS 服务」 */
+      const checkGptFeatures = async () => {
+        const r = await probeFeatures()
+        if (!r) return toast('先填服务地址，或点「一键启动」让它自动写入')
+        toast(r.ok === false
+          ? (r.message || '服务检查没过')
+          : (r.semanticFreeze ? '服务正常，支持语义复用' : '服务正常，原版接口不支持语义复用'))
+      }
 
       const startGpt = async () => {
         const r = await post('/tts/gpt-start', {
@@ -15025,33 +15194,82 @@ window.__ModuleLoader__.load({
        */
       const [pvText, setPvText] = useState('你好，这是一条语音试听。')
       const [pvBusy, setPvBusy] = useState(false)
+      const [pvJob, setPvJob] = useState(null)
       const [pvAudio, setPvAudio] = useState(null)
       const pvUrl = useRef('')
+      const pvTimer = useRef(null)
+      const pvGeneration = useRef(0)
       useEffect(() => () => {
+        pvGeneration.current += 1
+        if (pvTimer.current) clearInterval(pvTimer.current)
         if (pvUrl.current) URL.revokeObjectURL(pvUrl.current)
       }, [])
+      /** 停止等待只清前端轮询和音频，后台合成可能还会跑完（对齐扩展面板） */
+      const stopPreview = (notify = true) => {
+        pvGeneration.current += 1
+        if (pvTimer.current) { clearInterval(pvTimer.current); pvTimer.current = null }
+        if (pvUrl.current) { URL.revokeObjectURL(pvUrl.current); pvUrl.current = '' }
+        setPvBusy(false)
+        setPvJob(null)
+        setPvAudio(null)
+        if (notify) toast('已停止等待；后台合成可能还会跑完。')
+      }
+      const showPreviewAudio = (r) => {
+        const bin = atob(String(r?.audio || ''))
+        const bytes = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+        if (pvUrl.current) URL.revokeObjectURL(pvUrl.current)
+        const url = URL.createObjectURL(new Blob([bytes], { type: r.contentType || 'audio/mpeg' }))
+        pvUrl.current = url
+        setPvAudio({
+          url, bytes: Number(r.bytes) || bytes.length,
+          provider: String(r.provider || ''),
+          silk: r.silk || { ok: false, reason: 'unchecked' },
+        })
+      }
+      const pollPvJob = async (id, gen) => {
+        if (gen !== pvGeneration.current) return
+        const r = await get('/tts/preview/job?id=' + encodeURIComponent(id))
+        if (gen !== pvGeneration.current) return
+        if (r?.ok === false) {
+          toast(r.message || '查不到试听任务')
+          stopPreview(false)
+          return
+        }
+        setPvJob({ id, phase: String(r.phase || ''), progress: Number(r.progress) || 0 })
+        if (r.status === 'running') return
+        if (pvTimer.current) { clearInterval(pvTimer.current); pvTimer.current = null }
+        setPvBusy(false)
+        if (r.status === 'error') {
+          setPvJob(null)
+          toast(r.error?.message || '试听失败')
+          return
+        }
+        if (r.status === 'done' && r.result?.ok) showPreviewAudio(r.result)
+        else toast('试听没拿到音频')
+        setPvJob(null)
+      }
       const previewVoice = async () => {
         const t = String(pvText || '').trim()
         if (!t) return toast('写一句要试听的话')
+        const gen = ++pvGeneration.current
+        if (pvTimer.current) { clearInterval(pvTimer.current); pvTimer.current = null }
+        if (pvUrl.current) { URL.revokeObjectURL(pvUrl.current); pvUrl.current = '' }
+        setPvAudio(null)
         setPvBusy(true)
+        setPvJob({ id: '', phase: '提交中', progress: 0 })
         try {
-          const r = await post('/tts/preview', { text: t, draft: draft || {} })
-          if (r?.ok === false) return toast(r.message || '试听失败')
-          const bin = atob(String(r.audio || ''))
-          const bytes = new Uint8Array(bin.length)
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-          if (pvUrl.current) URL.revokeObjectURL(pvUrl.current)
-          const url = URL.createObjectURL(new Blob([bytes], { type: r.contentType || 'audio/mpeg' }))
-          pvUrl.current = url
-          setPvAudio({
-            url, bytes: Number(r.bytes) || bytes.length,
-            provider: String(r.provider || ''),
-            silk: r.silk || { ok: false, reason: 'unchecked' },
-          })
+          const r = await post('/tts/preview/start', { text: t, draft: draft || {} })
+          if (r?.ok === false) throw new Error(r.message || '试听提交失败')
+          if (gen !== pvGeneration.current) return
+          setPvJob({ id: r.id, phase: '排队中', progress: 5 })
+          pvTimer.current = setInterval(() => pollPvJob(r.id, gen), 1000)
+          await pollPvJob(r.id, gen)
         } catch (e) {
-          toast('试听失败：' + (e?.message || e))
-        } finally {
+          if (gen !== pvGeneration.current) return
           setPvBusy(false)
+          setPvJob(null)
+          toast('试听失败：' + (e?.message || e))
         }
       }
 
@@ -15087,6 +15305,17 @@ window.__ModuleLoader__.load({
             maxChars: num(src?.maxChars, 300),
             /** 语速夹在 0.5–2，和 `speedOf()` 同一套范围；空值回原速 */
             speed: Math.max(0.5, Math.min(2, num(src?.speed, 1))),
+            /** GPT-SoVITS v2 参数：和扩展的 RANGE_FIELDS 同一套边界 */
+            ...(src?.gptSovits ? {
+              gptSovits: {
+                ...src.gptSovits,
+                fragmentInterval: Math.max(0.01, Math.min(1, num(src.gptSovits.fragmentInterval, 0.3))),
+                topK: Math.max(1, Math.min(100, Math.round(num(src.gptSovits.topK, 15)))),
+                topP: Math.max(0, Math.min(1, num(src.gptSovits.topP, 1))),
+                temperature: Math.max(0.01, Math.min(2, num(src.gptSovits.temperature, 1))),
+                batchSize: Math.max(1, Math.min(8, Math.round(num(src.gptSovits.batchSize, 1)))),
+              },
+            } : {}),
             /** 新声音来源的数字参数（不填就回各自默认值） */
             ...(src?.volcano ? {
               volcano: {
@@ -15137,6 +15366,9 @@ window.__ModuleLoader__.load({
             type: opts.type || 'text',
             value: v(path),
             placeholder: opts.placeholder || '',
+            ...(opts.min !== undefined ? { min: opts.min } : {}),
+            ...(opts.max !== undefined ? { max: opts.max } : {}),
+            ...(opts.step !== undefined ? { step: opts.step } : {}),
             spellCheck: false,
             onChange: (e) => put(path, e.target.value),
           }),
@@ -15220,7 +15452,12 @@ window.__ModuleLoader__.load({
                     title: pins.includes(o.id) || o.id === activeSource ? '取消置顶' : '置顶这个声音',
                     'aria-label': '置顶 ' + o.label,
                     onClick: (e) => { e.stopPropagation(); togglePin(o.id) },
-                  }, '📌'),
+                  },
+                    h('svg', { width: 13, height: 13, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+                      h('circle', { cx: 8, cy: 5.6, r: 2.4, stroke: 'currentColor', strokeWidth: 1.3 }),
+                      h('path', { d: 'M8 8v5.4M5.4 13.4h5.2', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round' }),
+                    ),
+                  ),
                   h('span', { className: 'vc-name' }, (o.icon ? o.icon + ' ' : '') + o.label),
                   h('span', { className: 'vc-desc' }, o.desc),
                 )
@@ -15242,7 +15479,7 @@ window.__ModuleLoader__.load({
           h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '0 0 110px' } },
             h('span', { className: 'roost-note', style: { margin: 0 } }, '语速（0.5–2）'),
             h('input', {
-              className: 'roost-input', type: 'number', step: '0.1', min: '0.5', max: '2',
+              className: 'roost-input', type: 'number', step: '0.05', min: '0.5', max: '2',
               value: v('speed', 1),
               onChange: (e) => put('speed', e.target.value),
             }),
@@ -15407,6 +15644,7 @@ window.__ModuleLoader__.load({
                 }),
                 h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 2 } },
                   h('button', { type: 'button', className: 'roost-btn', onClick: probeGpt }, '探测'),
+                  h('button', { type: 'button', className: 'roost-btn', onClick: checkGptFeatures }, '检查服务'),
                   gptRunning || gptStarting
                     ? h('button', { type: 'button', className: 'roost-btn', onClick: stopGpt }, '停止')
                     : h('button', {
@@ -15442,6 +15680,68 @@ window.__ModuleLoader__.load({
               gptWarning
                 ? h('div', { className: 'roost-note', style: { color: 'var(--bad)', marginTop: 6 } }, '⚠ ' + gptWarning)
                 : null,
+
+              /**
+               * 音色方案（扩展面板同款两步走）：
+               * 选方案 = 把那套值载入草稿看/改；保存 = 只写方案库；
+               * 应用 = 才写当前配置。语速跟着方案走，但仍是最上面那个全局框。
+               */
+              h('div', { style: { marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--line-soft)' } },
+                h('div', { style: { fontWeight: 650, fontSize: 12.5, marginBottom: 6 } }, '音色方案'),
+                h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+                  '保存只存草稿，点「应用方案」才会切换当前音色；最多 50 套，不存密钥。'
+                  + (gptActiveProfileId && gptProfiles.some((p) => p.id === gptActiveProfileId)
+                    ? ` 正在用：${gptProfiles.find((p) => p.id === gptActiveProfileId).name}。` : '')),
+                h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' } },
+                  h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 220px' } },
+                    h('span', { className: 'roost-note', style: { margin: 0 } }, '已有方案'),
+                    h(Dropdown, {
+                      className: 'roost-input',
+                      value: profileId,
+                      onChange: (e) => chooseProfile(e.target.value),
+                    },
+                      h('option', { value: '' }, '新建方案'),
+                      ...gptProfiles.map((p) => h('option', { key: p.id, value: p.id }, p.name)),
+                    ),
+                  ),
+                  h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 220px' } },
+                    h('span', { className: 'roost-note', style: { margin: 0 } }, '方案名'),
+                    h('input', {
+                      className: 'roost-input',
+                      value: profileName,
+                      maxLength: 40,
+                      placeholder: '例如：日语角色 · 轻声',
+                      onChange: (e) => setProfileName(e.target.value),
+                    }),
+                  ),
+                ),
+                h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 } },
+                  h('button', { type: 'button', className: 'roost-btn', disabled: profileBusy, onClick: newProfile }, '新建'),
+                  h('button', {
+                    type: 'button', className: 'roost-primary', disabled: profileBusy || !String(profileName || '').trim(),
+                    onClick: saveProfile,
+                  }, profileBusy ? '处理中…' : '保存方案'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: profileBusy || !profileId,
+                    onClick: applyProfile,
+                  }, '应用方案'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: profileBusy || !profileDirty,
+                    onClick: () => {
+                      if (profileBaseline) applyProfileDraft(profileBaseline.values)
+                      setProfileName(profileBaseline?.name || '')
+                    },
+                  }, '还原修改'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: profileBusy || !profileId,
+                    onClick: removeProfile,
+                  }, '删除方案'),
+                ),
+                profileDirty
+                  ? h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)', marginTop: 6 } },
+                      '方案有未保存的草稿改动，保存前别切走。')
+                  : null,
+              ),
 
               /**
                * 扫描结果做成下拉。
@@ -15517,8 +15817,8 @@ window.__ModuleLoader__.load({
                 field('参考文本（须与音频逐字一致）', 'gptSovits.promptText', { flex: '2 1 320px' }),
               ),
               h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
-                field('参考音频语种', 'gptSovits.promptLanguage', { placeholder: '中文 / 日文 / 英文' }),
-                field('合成文本语种', 'gptSovits.textLanguage', { placeholder: '中文 / 日文 / 英文' }),
+                langSelect('参考音频语种', 'gptSovits.promptLanguage'),
+                langSelect('合成文本语种', 'gptSovits.textLanguage'),
                 select('接口版本', 'gptSovits.apiVersion', [
                   { id: 'v1', label: 'v1（api.py）' },
                   { id: 'v2', label: 'v2（api_v2.py）' },
@@ -15532,21 +15832,21 @@ window.__ModuleLoader__.load({
               /** v2 推理参数：对齐扩展市场「语音回复」，v1 的 api.py 不认这些字段 */
               h('div', { className: 'roost-note', style: { marginTop: 10 } }, 'v2 推理参数（v1 忽略）：'),
               h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 6 } },
-                select('切句方式', 'gptSovits.textSplitMethod', [
-                  { id: 'cut0', label: 'cut0（不切）' },
-                  { id: 'cut1', label: 'cut1' },
-                  { id: 'cut2', label: 'cut2' },
-                  { id: 'cut3', label: 'cut3' },
-                  { id: 'cut4', label: 'cut4' },
-                  { id: 'cut5', label: 'cut5（推荐）' },
+                select('怎么切句', 'gptSovits.textSplitMethod', [
+                  { id: 'cut0', label: '不切' },
+                  { id: 'cut1', label: '四句' },
+                  { id: 'cut2', label: '50 字' },
+                  { id: 'cut3', label: '中文句号' },
+                  { id: 'cut4', label: '英文句号' },
+                  { id: 'cut5', label: '标点（推荐）' },
                 ], { flex: '1 1 200px' }),
-                field('句间停顿（秒）', 'gptSovits.fragmentInterval', { type: 'number', placeholder: '0.3' }),
+                field('句间停顿（秒）', 'gptSovits.fragmentInterval', { type: 'number', placeholder: '0.3', min: 0.01, max: 1, step: 0.01 }),
               ),
               h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
-                field('top_k', 'gptSovits.topK', { type: 'number', placeholder: '15' }),
-                field('top_p', 'gptSovits.topP', { type: 'number', placeholder: '1' }),
-                field('temperature', 'gptSovits.temperature', { type: 'number', placeholder: '1' }),
-                field('batch_size', 'gptSovits.batchSize', { type: 'number', placeholder: '1' }),
+                field('top_k', 'gptSovits.topK', { type: 'number', placeholder: '15', min: 1, max: 100, step: 1 }),
+                field('top_p', 'gptSovits.topP', { type: 'number', placeholder: '1', min: 0, max: 1, step: 0.05 }),
+                field('temperature', 'gptSovits.temperature', { type: 'number', placeholder: '1', min: 0.01, max: 2, step: 0.05 }),
+                field('batch_size', 'gptSovits.batchSize', { type: 'number', placeholder: '1', min: 1, max: 8, step: 1 }),
               ),
 
               /**
@@ -15717,7 +16017,8 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontWeight: 650, fontSize: 13 } }, '试听'),
           h('div', { className: 'roost-note', style: { marginTop: 4 } },
             '走和 QQ 语音条同一条合成链路，音频只在内存里，不落盘、不占次数；'
-            + '改了配置不用先保存，点试听就按当前草稿来。'),
+            + '改了配置不用先保存，点试听就按当前草稿来。'
+            + '合成在后台跑，期间可以停止等待（后台任务可能仍会跑完）。'),
           h('div', {
             style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' },
           },
@@ -15729,8 +16030,17 @@ window.__ModuleLoader__.load({
             h('button', {
               type: 'button', className: 'roost-btn', disabled: pvBusy,
               onClick: previewVoice,
-            }, pvBusy ? '合成中…' : '试听'),
+            }, pvBusy ? '生成中…' : '试听'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: !pvBusy,
+              onClick: () => stopPreview(true),
+            }, '停止等待'),
           ),
+          pvJob
+            ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
+                `${pvJob.phase || '处理中'} · ${pvJob.progress}%`
+                + (pvJob.id ? '（每秒查一次，最多等 150 秒）' : ''))
+            : null,
           dirty
             ? h('div', { className: 'roost-note', style: { marginTop: 6 } },
                 '当前用的是未保存的草稿配置。')

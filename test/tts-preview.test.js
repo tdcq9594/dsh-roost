@@ -136,7 +136,9 @@ test('真实 synthesize：草稿覆盖 provider 参数，且不碰已保存配�
 
 test('接线：面板路由 / 前端按钮 / 不碰 quota / 走同一个 synthesize', () => {
   const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
-  assert.ok(host.includes("route('/tts/preview'"), '面板要有试听路由');
+  assert.ok(host.includes("route('/tts/preview'"), '老同步接口要留给还没更新的调用方');
+  assert.ok(host.includes("route('/tts/preview/start'"), '面板改走后台任务');
+  assert.ok(host.includes("route('/tts/preview/job'"), '要有任务轮询');
   assert.ok(host.includes('tts.synthesize(t, o)'), '必须复用同一个合成入口');
   assert.ok(host.includes("roost.rpc('media.convert'"), 'SILK 校验接跨仓方法');
   const block = host.slice(host.indexOf("route('/tts/preview'"), host.indexOf("route('/tts/install'"));
@@ -147,12 +149,17 @@ test('接线：面板路由 / 前端按钮 / 不碰 quota / 走同一个 synthes
    * 草稿来自面板，密钥是 `publicConfig()` 打过的 `******`。
    * 少了这一步，上游收到的就是 `Bearer ******` → 401 →「鉴权失败」，
    * 而用户刚填的 Key 明明在磁盘上（2026-11-18 实测）。
+   * 同步/异步两条路共用这个 helper，不能只修一边。
    */
-  assert.ok(block.includes('restoreMaskedSecrets'), '试听草稿必须先把 ****** 还原成已保存的密钥');
+  assert.ok(host.includes('const draftForPreview = (raw) =>'), '还原掩码要抽成共用 helper');
+  assert.ok(host.includes('restoreMaskedSecrets({ tts: draft }'), '试听草稿必须先把 ****** 还原成已保存的密钥');
+  assert.ok(block.includes('draftForPreview(body?.draft)'), '两条试听路都要过掩码还原');
 
   const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
-  assert.ok(client.includes("post('/tts/preview'"), '前端要调试听');
+  assert.ok(client.includes("post('/tts/preview/start'"), '前端要提交后台试听任务');
+  assert.ok(client.includes("get('/tts/preview/job?id='"), '前端要轮询任务进度');
   assert.ok(client.includes('试验') === false, '别把「试听」写成错别字');
-  assert.ok(client.includes("}, pvBusy ? '合成中…' : '试听')"), '试听按钮要在');
+  assert.ok(client.includes("}, pvBusy ? '生成中…' : '试听')"), '试听按钮要在');
   assert.ok(client.includes('draft: draft || {}'), '未保存草稿要一起送过去');
+  assert.ok(client.includes('停止等待'), '要能中途停止轮询');
 });

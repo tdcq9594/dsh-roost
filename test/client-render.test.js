@@ -2948,9 +2948,32 @@ test('语音页把所有声音来源做成卡片，且不分「发语音/听语�
   assert.ok(card.includes("className: 'voice-choices'"), '要有卡片网格容器')
   assert.ok(card.includes("role: 'radio'"), '卡片要能当单选按钮用')
   assert.ok(card.includes('voice-choice-pin'), '卡片要有置顶图钉')
+  assert.equal(card.includes('📌'), false, '置顶图标用简洁 SVG，不再是 emoji 图钉')
   assert.ok(card.includes("'roost.tts.pinnedProviders'"), '置顶要独立存本地，不进配置草稿')
   assert.ok(card.includes('setMoreSources'), '要有更多/收起切换')
   // 明确没有 aurabot 那三个小页
   assert.equal(card.includes('听语音'), false, '我方不分小页')
   assert.equal(card.includes('扩展服务'), false, '我方不分小页')
+})
+
+test('GPT 语音面板按扩展页面收敛字段与交互，但仍保持单页', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  // 语种从自由文本改成友好下拉（值和后端 langCode 对得上）
+  assert.ok(src.includes('const GPT_LANGS = ['), '缺少语种清单')
+  for (const id of ['zh', 'ja', 'en', 'auto', 'yue', 'ko']) {
+    assert.ok(src.includes(`{ id: '${id}', label:`), `语种缺少 ${id}`)
+  }
+  // 切句不再露 cut0–cut5 这种原始值；数字框带范围
+  assert.ok(src.includes("{ id: 'cut5', label: '标点（推荐）' }"), '切句要给人看的标签')
+  assert.equal(src.includes("{ id: 'cut5', label: 'cut5（推荐）' }"), false, '不该再露 cut5')
+  assert.ok(src.includes('min: 0.01, max: 1, step: 0.01'))
+  assert.ok(src.includes('min: 1, max: 100, step: 1'))
+  assert.ok(src.includes("step: '0.05'"), '语速步长和扩展一致')
+  // 音色方案与异步试听：接口要接上，且不开新页
+  assert.ok(src.includes("'/tts/gpt-profiles'"), '音色方案没接到后端')
+  assert.ok(src.includes("'/tts/preview/start'"), '试听没有走后台任务')
+  assert.ok(src.includes("'/tts/preview/job?id='"), '试听没有轮询')
+  for (const label of ['音色方案', '保存方案', '应用方案', '删除方案', '检查服务', '停止等待']) {
+    assert.ok(src.includes(`'${label}'`), `面板缺少「${label}」`)
+  }
 })
