@@ -8470,6 +8470,19 @@ window.__ModuleLoader__.load({
             chain?.ok ? `账本 ${st?.ledger?.total ?? 0} 条，链完整` : `账本断在第 ${st?.ledger?.brokenAt} 条`),
           st?.stuck ? h('span', { style: { color: 'var(--warn)' } }, '连续失败后卡住了') : null),
 
+        /** 能力状态条：被拦原因直接可见，别让人点了按钮才知道为什么没反应（阶段 0） */
+        st?.capability
+          ? h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            h('div', { style: { color: st.capability.ok ? 'var(--ok)' : 'var(--warn)' } },
+              st.capability.headline),
+            h('div', null, st.capability.tool),
+            h('div', { className: 'roost-muted', style: { fontSize: 11 } }, st.capability.note),
+            Array.isArray(st.constraints) && st.constraints.length
+              ? h('div', { style: { fontSize: 11, marginTop: 4 } },
+                `主人约束 ${st.constraints.length} 条（候选阶段硬否决，不由模型自判）：${st.constraints.map((x) => x.slice(0, 40)).join('；')}`)
+              : null)
+          : null,
+
         st?.project
           ? h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             `当前在想：${st.project.text}（已推进 ${st.project.steps ?? 0} 次）`)
@@ -8530,6 +8543,19 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'd' }, `#${r.seq}`),
                 h('span', { className: 't' },
                   h('span', { className: 'roost-muted', style: { fontSize: 10.5, marginRight: 6 } }, r.kind),
+                  /** 阶段 1：会话 / 证据 / verdict 有值才显示，旧账本没有这些字段也不会空出一片 */
+                  r.sessionId
+                    ? h('span', { className: 'roost-muted', style: { fontSize: 10, marginRight: 6 } },
+                      `会话 ${String(r.sessionId).replace(/^autotelic-/, '').slice(0, 12)}`)
+                    : null,
+                  r.verdict
+                    ? h('span', { style: { fontSize: 10, marginRight: 6, color: r.verdict === 'pass' ? 'var(--ok)' : 'var(--warn)' } },
+                      r.verdict)
+                    : null,
+                  Array.isArray(r.evidence) && r.evidence.length
+                    ? h('span', { className: 'roost-muted', style: { fontSize: 10, marginRight: 6 } },
+                      `证据 ${r.evidence.length}`)
+                    : null,
                   String(r.note || '').slice(0, 120)))))
           : null,
       )
@@ -8696,9 +8722,31 @@ window.__ModuleLoader__.load({
            * 不显示的话，主人不回她、她停下来，看起来就跟坏了一样。
            */
           h(Row, { k: '追问' },
-            Number(state.unanswered || 0) > 0
-              ? `连着 ${state.unanswered} 条没被回（上限 ${spCfg.followUps ?? 1} 次追问）`
-              : '没有欠着的'),
+            h('span', null,
+              Number(state.unanswered || 0) > 0
+                ? `连着 ${state.unanswered} 条没被回（上限 ${spCfg.followUps ?? 1} 次追问）`
+                : '没有欠着的'),
+            /**
+             * 追问上限可配：过去面板读 `followUps ?? 1`，但 DEFAULTS 没这个键，
+             * pruneTo 存盘就裁掉——显示的 1 是假的，主人改不了。阶段 1 修了形状，
+             * 这里补上真正的输入口，改完刷新 speakup 状态。
+             */
+            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, marginLeft: 10, fontSize: 11.5 } },
+              '上限',
+              h('input', {
+                className: 'roost-input', type: 'number', min: 0, max: 5,
+                style: { width: 52 }, value: spCfg.followUps ?? 1,
+                title: '连着没被回时，最多再追几次（0 = 不追）',
+                onChange: async (e) => {
+                  /** 空串是「正在重输」，Number('')=0 会被误存成「不追」——必须先挡 */
+                  if (String(e.target.value ?? '').trim() === '') return;
+                  const v = Number(e.target.value);
+                  if (!Number.isFinite(v) || v < 0 || v > 5) return toast('追问上限填 0–5 之间的整数');
+                  const r = await saveCfg({ speakUp: { followUps: Math.round(v) } });
+                  if (r?.ok === false) return toast(r.message || '没存上');
+                  await reloadSp();
+                },
+              }), '次')),
           h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
             h('button', {
               type: 'button', className: 'roost-btn',

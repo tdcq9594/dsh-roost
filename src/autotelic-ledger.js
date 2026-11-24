@@ -70,11 +70,36 @@ export const KINDS = Object.freeze([
   'review',    // 每日复盘
   'tune',      // 她自己调参数（必须进账本）
   'manual',    // 面板上手动触发
+  // 阶段 1 新增（对齐 aurabot v5 的五类证据 / 身份字段）：
+  'dream',     // 梦种子入账（此前只读梦种子、账本无 kind，来源不可追溯）
+  'ticket',    // 行动单：意图 / tag / 三级执行分级
+  'evidence',  // 证据硬校验：出处 id + 文本，无出处不得立项
+  'skill',     // 技能沉淀 / 晋升 / 归档
+  'verdict',   // 四态把关：pass / rework / reject / park
 ]);
 
-export function makeEntry({ seq = 1, at = Date.now(), kind = 'step', prev = GENESIS, payload = {}, note = '' } = {}) {
+/**
+ * 造一条记录（纯函数，不写盘）。
+ *
+ * `sessionId` / `tag` / `evidence` / `verdict` / `source` 是阶段 1 新增的**可选顶层字段**：
+ * 只在真有值时才写进 body，缺字段的旧账本按同样的 body 重算哈希仍然通过
+ * （`verifyChain` 逐条取这些字段，没有就跳过）——保证老账本不会因为升级而断链。
+ */
+export function makeEntry({
+  seq = 1, at = Date.now(), kind = 'step', prev = GENESIS, payload = {}, note = '',
+  sessionId = '', tag = '', evidence = null, verdict = '', source = '',
+} = {}) {
   const k = KINDS.includes(kind) ? kind : 'step';
   const body = { seq: Number(seq) || 1, at: Number(at) || 0, kind: k, note: String(note ?? '').slice(0, 2000), payload };
+  if (sessionId) body.sessionId = String(sessionId).slice(0, 120);
+  if (tag) body.tag = String(tag).slice(0, 80);
+  if (Array.isArray(evidence)) body.evidence = evidence.slice(0, 20).map((x) => ({
+    id: String(x?.id ?? '').slice(0, 120),
+    text: String(x?.text ?? '').slice(0, 300),
+    source: String(x?.source ?? '').slice(0, 40),
+  }));
+  if (verdict) body.verdict = String(verdict).slice(0, 40);
+  if (source) body.source = String(source).slice(0, 80);
   return { ...body, prev, hash: hashOf(prev, body) };
 }
 
@@ -100,7 +125,13 @@ export function verifyChain(rows = []) {
     if (String(r?.prev ?? '') !== prev) {
       return { ok: false, total: list.length, brokenAt: i + 1, reason: `第 ${i + 1} 条的前序哈希对不上（被改过或中间缺了一条）` };
     }
+    /** 与 makeEntry 同样的字段集：可选字段只在真有值时纳入，旧账本没有这些字段就跳过 */
     const body = { seq: r.seq, at: r.at, kind: r.kind, note: r.note, payload: r.payload };
+    if (r.sessionId) body.sessionId = r.sessionId;
+    if (r.tag) body.tag = r.tag;
+    if (Array.isArray(r.evidence)) body.evidence = r.evidence;
+    if (r.verdict) body.verdict = r.verdict;
+    if (r.source) body.source = r.source;
     if (hashOf(prev, body) !== String(r?.hash ?? '')) {
       return { ok: false, total: list.length, brokenAt: i + 1, reason: `第 ${i + 1} 条的内容与哈希不符（被改过）` };
     }
@@ -143,7 +174,10 @@ export function readLedger(file, { limit = MAX_READ } = {}) {
  *
  * @returns {{ok:boolean, entry?:object, reason?:string}}
  */
-export function appendLedger(file, { kind, payload = {}, note = '', at = Date.now() } = {}) {
+export function appendLedger(file, {
+  kind, payload = {}, note = '', at = Date.now(),
+  sessionId = '', tag = '', evidence = null, verdict = '', source = '',
+} = {}) {
   try {
     mkdirSync(dirname(file), { recursive: true });
     const { rows } = readLedger(file, { limit: 0 });
@@ -169,6 +203,11 @@ export function appendLedger(file, { kind, payload = {}, note = '', at = Date.no
       prev: last ? String(last.hash) : GENESIS,
       payload,
       note,
+      sessionId,
+      tag,
+      evidence,
+      verdict,
+      source,
     });
     appendFileSync(file, `${JSON.stringify(entry)}\n`, 'utf8');
     return { ok: true, entry };

@@ -366,6 +366,53 @@ test('探活: 老框架没有 dirHash，pid 不在本目录实例表里就不认
   );
 });
 
+/**
+ * 真框架（1.1.12）的 `/healthz` 只有 {ok,bots,online,total,uptime}——**既不带 pid
+ * 也不带 dirHash**。以前 pidInLocalInstances 在「实例表非空 + pid 缺失」时返回 false，
+ * 于是明明 online 也被判「没在跑」：面板永远不显示已启动，一键启动按钮也变不成关闭。
+ * 这两条把「无 pid 放过」钉死，同时保住「带了 pid 但对不上就不认」的旧行为。
+ */
+test('探活: 真框架 healthz 无 pid 无 dirHash + 实例表有记录，机器人 online 必须算在跑', async () => {
+  const dir = makeRoost();
+  mkdirSync(join(dir, 'data'), { recursive: true });
+  writeFileSync(
+    join(dir, 'data', 'instances.json'),
+    JSON.stringify({ 102056878: { pid: 41840, at: Date.now() } }),
+    'utf8',
+  );
+  const setup = makeSetup(dir);
+  /** 真框架的响应体：刻意不放 pid / dirHash（照 web/server.js:1214 的形状） */
+  await withFetch(async () => okRes({ bots: [{ id: 'main', state: 'online' }], online: 1, total: 1, uptime: 42 }), async () => {
+    assert.equal(await setup.isRunning(), true, '无 pid 无从校验身份时必须放过，不能误判没跑');
+  });
+});
+
+test('探活: 带了 pid 但不在本目录实例表里，仍然不认', async () => {
+  const dir = makeRoost();
+  mkdirSync(join(dir, 'data'), { recursive: true });
+  writeFileSync(
+    join(dir, 'data', 'instances.json'),
+    JSON.stringify({ 102056878: { pid: 999999999, at: Date.now() } }),
+    'utf8',
+  );
+  const setup = makeSetup(dir);
+  await withFetch(async () => okRes({ bots: [{ id: 'main', state: 'online' }], online: 1, total: 1, pid: 123456789 }), async () => {
+    assert.equal(await setup.isRunning(), false, '明确带了对不上的 pid 仍要拒绝');
+  });
+});
+
+test('探活: pid 给了但不是合法整数，不能当成「缺失」放过', async () => {
+  const dir = makeRoost();
+  mkdirSync(join(dir, 'data'), { recursive: true });
+  writeFileSync(join(dir, 'data', 'instances.json'), JSON.stringify({ 1: { pid: 999999999, at: Date.now() } }), 'utf8');
+  const setup = makeSetup(dir);
+  for (const bad of ['123456789', 0, -1, 1.5]) {
+    await withFetch(async () => okRes({ bots: [{ id: 'main', state: 'online' }], online: 1, total: 1, pid: bad }), async () => {
+      assert.equal(await setup.isRunning(), false, `pid=${JSON.stringify(bad)} 是无效身份，不能放过`);
+    });
+  }
+});
+
 test('实例判活: 心跳停跳时 PID 被复用也不认', () => {
   const dir = makeRoost();
   const beat = 'a'.repeat(20) + '.beat';

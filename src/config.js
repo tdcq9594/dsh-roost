@@ -1095,6 +1095,11 @@ export const DEFAULTS = {
     minIntervalMinutes: 180,
     maxIntervalMinutes: 480,
     maxPerDay: 3,
+    /**
+     * 追问上限：面板一直在读 `spCfg.followUps ?? 1`，但 DEFAULTS 过去没有这个键，
+     * `pruneTo` 按 DEFAULTS 裁剪 → 存盘永远被丢，面板显示的是假值。补进形状才真可配。
+     */
+    followUps: 1,
     prompt: '',
   },
   /**
@@ -1155,6 +1160,29 @@ export const DEFAULTS = {
     maxOutputChars: 1200,
     /** 她想琢磨的方向。空数组 = 不立项 */
     seeds: [],
+    /**
+     * 阶段 1：对齐 aurabot v5 的约束 / 反馈 / 预算字段。
+     * 默认全是「不放松」：约束空、要确认、无出处不立项、动手只按现有全局守卫。
+     */
+    /** 主人强制约束：一行一条，触发则候选直接否决（约束前置，不由模型自己判） */
+    constraintRules: '',
+    /** 主观题：碰主人侧要不要先确认。默认要（与无人在场不擅动一致） */
+    autoConfirmOwner: false,
+    /** 确认等待分钟数，超时自动取消 */
+    confirmWindowMinutes: 720,
+    /** 主动投递后多久没人回 = 负反馈（小时） */
+    responseWindowHours: 48,
+    /** 冷度到多少 park 一段时间 */
+    chillParkThreshold: 3,
+    /** 单行动单步数上限 */
+    maxSteps: 8,
+    /** 四组 token 预算：只约束输入规模，不是「花多少钱」的承诺 */
+    intentMaxInputTokens: 8192,
+    intentMaxOutputTokens: 1024,
+    gateMaxInputTokens: 4096,
+    gateMaxOutputTokens: 512,
+    reviewMaxInputTokens: 4096,
+    reviewMaxOutputTokens: 512,
   },
   /**
    * 表情包库：往目录里丢图就行，文件名当标签（`开心_猫.png` → 开心、猫）。

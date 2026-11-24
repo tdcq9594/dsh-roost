@@ -11,7 +11,7 @@ import {
 } from '../src/autotelic-ledger.js';
 import {
   normalizeCfg, inQuietHours, scoreCuriosity, pickProject, buildStepPrompt,
-  createAutotelic, AUTOTELIC_DEFAULTS, STATE_FILE,
+  createAutotelic, AUTOTELIC_DEFAULTS, STATE_FILE, describeCapability, sessionIdFor, constraintLines,
 } from '../src/autotelic.js';
 
 const cleanup = (dir) => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 80 }); } catch { /* 系统回收 */ } };
@@ -326,4 +326,134 @@ test('引擎：预览列出候选与被否决项，不写账本', () => {
     assert.ok(['A', 'B'].includes(p.project.text));
     assert.deepEqual(readLedger(ledgerPath(dir)).rows, [], '预览不该写账');
   } finally { cleanup(dir); }
+});
+
+/* ---------------- 能力状态条（阶段 0） ---------------- */
+
+test('能力状态条：四种状态都说实话，allowAct 不谎称授权闸门', () => {
+  const off = describeCapability({ enabled: false, allowAct: false, canRun: { ok: false, reason: '自驱引擎没开（默认关）' } });
+  assert.equal(off.ok, false);
+  assert.match(off.headline, /总开关关着/);
+  assert.match(off.tool, /禁止用工具/);
+  assert.match(off.note, /不是授权闸门/);
+
+  const blocked = describeCapability({ enabled: true, canRun: { ok: false, reason: '现在是安静时段' } });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.headline, '现在是安静时段', '被拦原因要原样显示，别吞掉');
+
+  const ready = describeCapability({ enabled: true, canRun: { ok: true } });
+  assert.equal(ready.ok, true);
+  assert.match(ready.headline, /可以立项/);
+
+  const acting = describeCapability({ enabled: true, allowAct: true, canRun: { ok: true } });
+  assert.match(acting.tool, /prompt 允许用工具/);
+  assert.match(acting.tool, /全局守卫/, '开了 allowAct 也要说清危险命令仍被全局守卫拦');
+  assert.equal(acting.lines.length, 3, '三条：能不能跑 / 工具措辞 / 闸门真相');
+});
+
+test('能力状态条：status() 带出 capability，与 canRun 一致', () => {
+  const dir = tmp();
+  try {
+    const e = createAutotelic({ dir, cfgOf: () => ({ enabled: true, allowAct: false, seeds: ['A'] }) });
+    const s = e.status();
+    assert.ok(s.capability, 'status 必须带 capability 供面板渲染');
+    assert.equal(s.capability.ok, s.canRun.ok);
+    /** canRun.ok=true 时没有 reason：headline 就走「可以立项」；否则原样带出拦截原因 */
+    if (s.canRun.ok === false) assert.equal(s.capability.headline, s.canRun.reason);
+    else assert.match(s.capability.headline, /可以立项/);
+  } finally { cleanup(dir); }
+});
+
+/* ---------------- 账本新字段：向后兼容（阶段 1） ---------------- */
+
+test('账本：新增五类 kind，五类可选字段都能记且验链过', () => {
+  const dir = tmp();
+  try {
+    const f = ledgerPath(dir);
+    for (const kind of ['dream', 'ticket', 'evidence', 'skill', 'verdict']) {
+      assert.equal(KINDS.includes(kind), true, `${kind} 必须进闭集，否则会被悄悄改成 step`);
+    }
+    const e = makeEntry({
+      kind: 'ticket', payload: { intent: '试一件事' }, note: '带全字段',
+      sessionId: 'autotelic-abc', tag: '学习', verdict: 'pass', source: 'preview',
+      evidence: [{ id: 'w-1', text: '主人说过想学', source: 'owner' }],
+    });
+    assert.equal(e.kind, 'ticket');
+    assert.equal(e.sessionId, 'autotelic-abc');
+    assert.equal(e.evidence[0].id, 'w-1');
+    assert.equal(verifyChain([e]).ok, true, '带新字段的记录自己要验得过');
+
+    const r = appendLedger(f, {
+      kind: 'evidence', note: '证据入账', sessionId: 's-1', verdict: 'reject',
+      evidence: [{ id: 'x', text: '无出处', source: '' }],
+    });
+    assert.equal(r.ok, true);
+    const rows = readLedger(f, { limit: 0 }).rows;
+    assert.equal(rows[0].verdict, 'reject');
+    assert.equal(verifyChain(rows).ok, true, '新字段落盘后验链要过');
+
+    const tampered = [{ ...rows[0], verdict: 'pass' }];
+    assert.equal(verifyChain(tampered).ok, false, '改 verdict 必须断链，否则字段只是装饰');
+  } finally { cleanup(dir); }
+});
+
+test('账本：旧账本没有新字段，升级后验链仍过（兼容）', () => {
+  const dir = tmp();
+  try {
+    const f = ledgerPath(dir);
+    /** 模拟升级前的记录：只有 seq / at / kind / note / payload / prev / hash */
+    const old = makeEntry({ seq: 1, kind: 'project', payload: { project: 'A' }, note: '老记录' });
+    assert.equal('sessionId' in old, false);
+    writeFileSync(f, `${JSON.stringify(old)}\n`, 'utf8');
+    assert.equal(verifyChain(readLedger(f, { limit: 0 }).rows).ok, true);
+    /** 往老账本后面追加带新字段的记录，链要接得上 */
+    const r = appendLedger(f, { kind: 'dream', note: '梦种子', sessionId: 's-2' });
+    assert.equal(r.ok, true);
+    assert.equal(verifyChain(readLedger(f, { limit: 0 }).rows).ok, true);
+  } finally { cleanup(dir); }
+});
+
+/* ---------------- 会话隔离 / 约束前置（阶段 1） ---------------- */
+
+test('会话隔离：项目 id 派生 sessionId，老项目回落固定会话', () => {
+  assert.equal(sessionIdFor('p-abc'), 'autotelic-p-abc');
+  assert.notEqual(sessionIdFor('p-1'), sessionIdFor('p-2'), '两个项目不能共用会话');
+  assert.equal(sessionIdFor(''), 'autotelic-main', '老项目/无 id 回落，避免断片');
+});
+
+test('step 把派生的 sessionId 传给 run，并把 sid / verdict 记进账本', async () => {
+  const dir = tmp();
+  try {
+    const seen = [];
+    const e = createAutotelic({
+      dir,
+      cfgOf: () => ({ enabled: true, seeds: ['琢磨一件事'], allowAct: false }),
+      run: async (prompt, opts) => { seen.push(opts?.sessionId); return '想到一点东西'; },
+    });
+    const r = await e.step({ manual: true });
+    assert.equal(r.ok, true, r.reason || '');
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /^autotelic-p-/, '必须按项目派生，不再是写死的 autotelic-main');
+    const rows = readLedger(ledgerPath(dir), { limit: 0 }).rows;
+    assert.ok(rows.some((x) => x.kind === 'step' && x.sessionId === seen[0] && x.verdict === 'pass'));
+    assert.ok(rows.some((x) => x.kind === 'manual' && x.evidence?.[0]?.source === 'seed'));
+  } finally { cleanup(dir); }
+});
+
+test('约束前置：constraintLines 逐行拆、去空、限长，不做模型自判', () => {
+  assert.deepEqual(constraintLines('不许半夜发消息\n\n 不许花钱 \n'), ['不许半夜发消息', '不许花钱']);
+  assert.deepEqual(constraintLines(123), ['123'], '非字符串按文本容错，不静默吞掉');
+  assert.equal(constraintLines('x\n'.repeat(100)).length, 50);
+  const s = createAutotelic({ dir: tmp(), cfgOf: () => ({ constraintRules: '不许半夜发消息' }) }).status();
+  assert.deepEqual(s.constraints, ['不许半夜发消息']);
+});
+
+test('配置默认值两处一致：config.DEFAULTS 与 autotelic.AUTOTELIC_DEFAULTS 不能漂移', async () => {
+  const { DEFAULTS } = await import('../src/config.js');
+  const D = DEFAULTS.autotelic;
+  const A = AUTOTELIC_DEFAULTS;
+  const keys = Object.keys(A);
+  assert.deepEqual(Object.keys(D).sort(), keys.sort(), '两处键集必须完全相同，否则 normalizeCfg 会取到 undefined');
+  for (const k of keys) assert.deepEqual(D[k], A[k], `${k} 两处默认值不一致`);
+  assert.equal(DEFAULTS.speakUp.followUps, 1, 'followUps 必须在 DEFAULTS，否则面板存盘被裁');
 });
