@@ -1207,6 +1207,26 @@ select.roost-input{color-scheme:dark}
 .roost-batch-row{display:flex;gap:6px;align-items:flex-start;padding:3px 4px;
   border-radius:6px;font-size:11.5px;line-height:1.5}
 .roost-batch-row:hover{background:var(--tone-foam-2)}
+/* 自定义下拉：原生 select 的弹出层由系统绘制改不了圆角，这里自己画 */
+.roost-dropdown{position:relative;display:inline-flex;min-width:0}
+.roost-dropdown-btn{display:flex;align-items:center;gap:6px;justify-content:space-between;
+  white-space:nowrap;cursor:pointer;text-align:left}
+.roost-dropdown-btn:disabled{opacity:.4;cursor:not-allowed}
+.roost-dropdown-val{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.roost-dropdown-caret{flex:none;width:0;height:0;border-left:4px solid transparent;
+  border-right:4px solid transparent;border-top:5px solid currentColor;opacity:.6}
+.roost-dropdown-pop{position:fixed;z-index:80;max-height:240px;overflow:auto;
+  overscroll-behavior:contain;padding:4px;border:1px solid var(--line-soft);border-radius:10px;
+  color:var(--dsw-alias-label-primary, inherit);
+  /* 宿主没给 --dsw-alias-bg-l1 时，回退必须按当前文字色透明混，
+     不能落回 #000——浅色主题下会变成一块黑底黑字（截图事故） */
+  background:color-mix(in srgb,var(--accent) 4%,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 6%,transparent)));
+  box-shadow:var(--shadow-card)}
+.roost-dropdown-opt{display:block;width:100%;box-sizing:border-box;text-align:left;
+  padding:5px 9px;border:0;border-radius:7px;background:transparent;color:inherit;
+  font:inherit;font-size:11.5px;cursor:pointer}
+.roost-dropdown-opt:hover,.roost-dropdown-opt.active{background:var(--tone-foam)}
+.roost-dropdown-opt.on{color:var(--tone-deep);font-weight:600}
 .roost-people-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
 .roost-people-grid .roost-item{transition:border-color .15s,background .15s,transform .15s}
 .roost-people-grid .roost-item:hover{transform:translateY(-2px);box-shadow:var(--shadow-card)}
@@ -1276,6 +1296,122 @@ select.roost-input{color-scheme:dark}
         /* 常驻渲染，折叠只由 CSS 隐藏：收起时组件不卸载，
            输入框里没提交的内容、弹窗开关状态都还在，功能一条不少 */
         children,
+      )
+    }
+
+    /**
+     * 圆角下拉（数据页用）：形态兼容原生 select——照样收 `h('option')` 子节点，
+     * onChange 照样给 `{target:{value}}`，所以业务 handler 一行都不用改。
+     * 原生 select 的弹出菜单由系统绘制、无法圆角；这里自己画弹层，
+     * 用 fixed 定位避开滚动容器裁剪，颜色仍从 --accent 与宿主主题派生。
+     */
+    /**
+     * fixed 弹层坐标：用视口坐标。
+     * 实测 DSH 面板里 fixed 就是相对视口，扣 .roost-root 偏移会把侧栏里的
+     * 弹层整体推到左上角（2026-11-24 截图事故）。rootRect 仅为兼容调用保留。
+     */
+    function dropdownPos(rect, rootRect) {
+      if (!rect) return null
+      return { left: rect.left, top: rect.bottom + 4, width: rect.width }
+    }
+
+    function Dropdown({ value, onChange, title, disabled, className, style, children }) {
+      const [open, setOpen] = useState(false)
+      const [active, setActive] = useState(0)
+      const [pos, setPos] = useState(null)
+      const box = useRef(null)
+      const list = (Array.isArray(children) ? children : [children])
+        .flat(Infinity)
+        .filter((o) => o && o.type === 'option')
+        .map((o) => ({
+          value: String(o.props?.value ?? ''),
+          label: String(Array.isArray(o.props?.children)
+            ? o.props.children.join('')
+            : (o.props?.children ?? o.props?.value ?? '')),
+        }))
+      const current = list.find((o) => String(o.value) === String(value)) || list[0]
+      const emit = (v) => { if (typeof onChange === 'function') onChange({ target: { value: v } }) }
+      const openIt = () => {
+        if (disabled || !list.length) return
+        const r = box.current?.getBoundingClientRect?.()
+        setPos(dropdownPos(r))
+        setActive(Math.max(0, list.findIndex((o) => String(o.value) === String(value))))
+        setOpen(true)
+      }
+      const pick = (o) => {
+        setOpen(false)
+        if (o && String(o.value) !== String(value)) emit(o.value)
+      }
+      useEffect(() => {
+        if (!open) return
+        const onDown = (e) => {
+          if (typeof box.current?.contains === 'function' && box.current.contains(e.target)) return
+          setOpen(false)
+        }
+        /** 弹层自身滚动不算「页面滚走了」，否则选项一多就点不到下面的项 */
+        const onScroll = (e) => {
+          if (e?.target && typeof box.current?.contains === 'function' && box.current.contains(e.target)) return
+          setOpen(false)
+        }
+        if (typeof document !== 'undefined') {
+          document.addEventListener('mousedown', onDown)
+          document.addEventListener('scroll', onScroll, true)
+        }
+        return () => {
+          if (typeof document !== 'undefined') {
+            document.removeEventListener('mousedown', onDown)
+            document.removeEventListener('scroll', onScroll, true)
+          }
+        }
+      }, [open])
+      const onKey = (e) => {
+        if (disabled) return
+        const k = e?.key
+        if (k === 'Escape') { setOpen(false); return }
+        if (k === 'ArrowDown' || k === 'ArrowUp') {
+          if (typeof e.preventDefault === 'function') e.preventDefault()
+          if (!open) { openIt(); return }
+          setActive((i) => (i + (k === 'ArrowDown' ? 1 : -1) + list.length) % list.length)
+          return
+        }
+        if (!open && (k === 'Enter' || k === ' ')) {
+          if (typeof e.preventDefault === 'function') e.preventDefault()
+          openIt()
+          return
+        }
+        if (open && k === 'Enter') {
+          if (typeof e.preventDefault === 'function') e.preventDefault()
+          pick(list[active])
+        }
+      }
+      return h('div', { className: 'roost-dropdown', ref: box, style },
+        h('button', {
+          type: 'button',
+          className: 'roost-input roost-dropdown-btn' + (className ? ' ' + className : ''),
+          disabled: Boolean(disabled), title,
+          'aria-haspopup': 'listbox', 'aria-expanded': open ? 'true' : 'false',
+          onClick: () => { if (open) setOpen(false); else openIt() },
+          onKeyDown: onKey,
+        },
+          h('span', { className: 'roost-dropdown-val' }, current ? current.label : ''),
+          h('span', { className: 'roost-dropdown-caret', 'aria-hidden': 'true' })),
+        open
+          ? h('div', {
+              className: 'roost-dropdown-pop', role: 'listbox',
+              style: {
+                left: pos ? pos.left : 0, top: pos ? pos.top : 0,
+                minWidth: pos ? Math.max(pos.width, 110) : 110,
+              },
+            }, list.map((o, i) => h('button', {
+              key: String(o.value), type: 'button', role: 'option',
+              'aria-selected': String(o.value) === String(value) ? 'true' : 'false',
+              className: 'roost-dropdown-opt'
+                + (i === active ? ' active' : '')
+                + (String(o.value) === String(value) ? ' on' : ''),
+              onMouseEnter: () => setActive(i),
+              onClick: () => pick(o),
+            }, o.label)))
+          : null,
       )
     }
 
@@ -5192,7 +5328,7 @@ select.roost-input{color-scheme:dark}
              */
             h('b', { style: { flexShrink: 0 } }, canChat ? sceneName : '还没有会话'),
             chats.length > 1
-              ? h('select', {
+              ? h(Dropdown, {
                   className: 'roost-input',
                   value: mem.chatId || '',
                   /**
@@ -5323,18 +5459,27 @@ select.roost-input{color-scheme:dark}
             '每日摘要 + 印象沉淀按时间倒序。已结晶的印象不再显示（它已成为永久记忆）。',
             '我方没有「看过的内容」和平台来源维度，所以筛选只有类型/群/关键词。'),
           h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
-            h('select', { value: tlKind, onChange: (e) => setTlKind(e.target.value), title: '类型' },
+            h(Dropdown, {
+              className: 'roost-input', value: tlKind,
+              onChange: (e) => setTlKind(e.target.value), title: '类型',
+              style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+            },
               h('option', { value: '' }, '全部类型'),
               h('option', { value: 'digest' }, '每日摘要'),
               h('option', { value: 'impression' }, '印象')),
-            h('select', { value: tlChat, onChange: (e) => setTlChat(e.target.value), title: '群' },
+            h(Dropdown, {
+              className: 'roost-input', value: tlChat,
+              onChange: (e) => setTlChat(e.target.value), title: '群',
+              style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+            },
               h('option', { value: '' }, '全部群'),
               ...(tlData?.facets?.chats || []).map((c) => h('option', { key: c, value: c }, c))),
             h('input', {
+              className: 'roost-input',
               type: 'text', value: tlQuery, placeholder: '搜摘要文字',
               onChange: (e) => setTlQuery(e.target.value),
               onKeyDown: (e) => { if (e.key === 'Enter') loadTimeline(0) },
-              style: { flex: '1 1 120px', minWidth: 100 },
+              style: { flex: '1 1 120px', minWidth: 100, padding: '3px 8px', fontSize: 11.5 },
             }),
             h('button', { type: 'button', className: 'roost-btn', disabled: tlBusy, onClick: () => loadTimeline(0) }, '筛选')),
           !tlData
@@ -5745,7 +5890,7 @@ select.roost-input{color-scheme:dark}
               onKeyDown: (e) => { if (e.key === 'Enter') doAdd() },
               style: { flex: 1 },
             }),
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input', value: scope, onChange: (e) => setScope(e.target.value),
               style: { width: 92, flex: '0 0 92px' },
             },
@@ -7026,14 +7171,14 @@ select.roost-input{color-scheme:dark}
             placeholder: '搜星星：内容 / 分类', value: q,
             onChange: (e) => setQ(e.target.value),
           }),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
             value: group, onChange: (e) => setGroup(e.target.value),
           },
             h('option', { value: '' }, '全部区域'),
             built.stats.groups.map((g) => h('option', { key: g.id, value: g.id }, `${g.label}（${g.count}）`)),
           ),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '按层级筛（只作用于事实）',
             style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
             value: tierFilter, onChange: (e) => setTierFilter(e.target.value),
@@ -7043,7 +7188,7 @@ select.roost-input{color-scheme:dark}
             h('option', { value: 'long' }, '长期'),
             h('option', { value: 'core' }, '永久'),
           ),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
             value: quickF, onChange: (e) => setQuickF(e.target.value),
           },
@@ -7071,7 +7216,7 @@ select.roost-input{color-scheme:dark}
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
             h('input', { type: 'checkbox', checked: edgeOn, onChange: toggle(setEdgeOn, 'edgeOn') }), '关系线'),
           edgeOn
-            ? h('select', {
+            ? h(Dropdown, {
                 className: 'roost-input', title: '关系线显示方式',
                 style: { width: 'auto', padding: '2px 6px', fontSize: 11 },
                 value: edgeMode, onChange: (e) => setEdgeMode(e.target.value),
@@ -7181,7 +7326,7 @@ select.roost-input{color-scheme:dark}
                     type: 'button', className: 'roost-btn', disabled: batchBusy,
                     onClick: () => batchAct('review'),
                   }, `批量复习（${picked.length}）`),
-                  h('select', {
+                  h(Dropdown, {
                     className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
                     value: batchTier, onChange: (e) => setBatchTier(e.target.value),
                   },
@@ -7225,7 +7370,7 @@ select.roost-input{color-scheme:dark}
                       type: 'button', className: 'roost-btn', disabled: factBusy,
                       onClick: () => factAct('review'),
                     }, '还记得（复习）'),
-                    h('select', {
+                    h(Dropdown, {
                       className: 'roost-input', title: '改层级', disabled: factBusy,
                       style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
                       value: detail.tier || 'long',
@@ -7331,14 +7476,14 @@ select.roost-input{color-scheme:dark}
             style: { width: 74, padding: '3px 8px', fontSize: 11.5 },
             value: addImp, onChange: (e) => setAddImp(e.target.value),
           }),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '层级', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
             value: addTier, onChange: (e) => setAddTier(e.target.value),
           },
             h('option', { value: 'short' }, '临时'),
             h('option', { value: 'long' }, '长期'),
             h('option', { value: 'core' }, '永久')),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '记到哪一层', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
             value: addScope, onChange: (e) => setAddScope(e.target.value),
           },
@@ -10201,6 +10346,8 @@ select.roost-input{color-scheme:dark}
                         ]
                         control = h('div', { className: 'cap-ctl' },
                           h('select', {
+                            className: 'roost-input',
+                            style: { width: '100%', padding: '3px 8px', fontSize: 11.5 },
                             value: draft !== undefined ? String(draft)
                               : (known ? String(cur) : (f.custom ? '__custom' : String(cur))),
                             disabled: busy,
@@ -22513,6 +22660,8 @@ select.roost-input{color-scheme:dark}
     exports.wheelZoom = wheelZoom
     exports.placeLabels = placeLabels
     exports.StarMap = StarMap
+    exports.Dropdown = Dropdown
+    exports.dropdownPos = dropdownPos
     return module.exports
   },
 })

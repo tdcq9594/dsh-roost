@@ -585,33 +585,44 @@ test('前端渲染：会话下拉标出「群 / 私聊」，且标题旁不再�
   assert.ok(el, '滚动区里应该有 MemoryTab')
 
   rt.reset()
-  const tree = expand(
-    el.type({
-      ...el.props,
-      mem: {
-        chatId: 'g1',
-        chats: [
-          { chatId: 'g1', title: '倦飞之鸟', preset: 'roost-social', kind: 'group' },
-          { chatId: 'u1', title: '倦飞之鸟', preset: 'roost-private', kind: 'c2c' },
-        ],
-        scene: { chatId: 'g1', title: '倦飞之鸟', kind: 'group' },
-        global: [],
-        chat: [],
-        journal: null,
-        graph: null,
-      },
-      toast: () => {},
-      reload: () => {},
-      quick: () => {},
-      busy: false,
-      onPickChat: () => {},
-    }),
-    rt,
-  )
+  const rawTree = el.type({
+    ...el.props,
+    mem: {
+      chatId: 'g1',
+      chats: [
+        { chatId: 'g1', title: '倦飞之鸟', preset: 'roost-social', kind: 'group' },
+        { chatId: 'u1', title: '倦飞之鸟', preset: 'roost-private', kind: 'c2c' },
+      ],
+      scene: { chatId: 'g1', title: '倦飞之鸟', kind: 'group' },
+      global: [],
+      chat: [],
+      journal: null,
+      graph: null,
+    },
+    toast: () => {},
+    reload: () => {},
+    quick: () => {},
+    busy: false,
+    onPickChat: () => {},
+  })
+  const findDropdown = (n) => {
+    if (n == null || typeof n !== 'object') return null
+    if (Array.isArray(n)) {
+      for (const c of n) { const r = findDropdown(c); if (r) return r }
+      return null
+    }
+    if (typeof n.type === 'function' && n.type.name === 'Dropdown') return n
+    return findDropdown(n.props?.children)
+  }
+  const dd = findDropdown(rawTree)
+  assert.ok(dd, '会话下拉应该走圆角自定义组件')
+  const optionText = dd.props.children.flat().filter((o) => o?.type === 'option').map((o) => textOf(o)).join('')
+  assert.ok(optionText.includes('（群）'), '下拉里没有标出「群」')
+  assert.ok(optionText.includes('（私聊）'), '下拉里没有标出「私聊」')
 
+  rt.reset()
+  const tree = expand(rawTree, rt)
   const txt = textOf(tree)
-  assert.ok(txt.includes('（群）'), '下拉里没有标出「群」')
-  assert.ok(txt.includes('（私聊）'), '下拉里没有标出「私聊」')
   assert.ok(txt.includes('正在看'), '当前会话应有「正在看」标记')
   // 标题旁那个短码徽章已经删了——它和标题里的是同一个值，并排像两串不同的数字
   assert.ok(!txt.includes('g1'), '短码不该在正文里再出现一次（完整 openid 去会话页看）')
@@ -2748,4 +2759,65 @@ test('G8 面板：星图有批量入口且真调用 reviewMany/tierMany', () => 
   for (const label of ['全选事实', '批量复习（', '批量改档', 'roost-batch-list']) {
     assert.ok(src.includes(label), `批量面板缺少 ${label}`)
   }
+})
+
+test('视觉升级：记忆页筛选控件用圆角自定义下拉，弹层也圆角', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.match(src, /\.roost-dropdown-pop\{[^}]*border-radius:10px/, '弹出层自己画且圆角')
+  assert.match(src, /\.roost-dropdown-pop\{[\s\S]*?background:color-mix\(in srgb,var\(--accent\)/, '弹层底色跟自选强调色')
+  assert.ok(!src.includes('currentColor 8%,#000'), '弹层回退不能落到黑底黑字')
+  const lines = src.split(/\r?\n/)
+  for (const marker of ['value: tlKind', 'value: tlChat', 'value: mem.chatId ||', 'value: batchTier', 'value: addTier']) {
+    const i = lines.findIndex((l) => l.includes(marker))
+    assert.ok(i >= 0, `没找到 ${marker}`)
+    const near = lines.slice(Math.max(0, i - 3), i + 2).join(' ')
+    assert.match(near, /h\(Dropdown,/, `${marker} 应该用圆角自定义下拉`)
+  }
+  const qi = lines.findIndex((l) => l.includes("type: 'text', value: tlQuery"))
+  assert.ok(qi > 0)
+  assert.ok(lines.slice(qi - 2, qi + 3).join(' ').includes("className: 'roost-input'"), '搜索框仍走 roost-input')
+})
+
+test('Dropdown：弹层能打开、选项回调 e.target.value、Esc 关闭', () => {
+  const hooks = []
+  let cursor = 0
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: { ...(props || {}), children } }),
+    useState: (init) => {
+      const k = cursor++
+      if (!(k in hooks)) hooks[k] = typeof init === 'function' ? init() : init
+      return [hooks[k], (v) => { hooks[k] = v }]
+    },
+    useEffect: () => { cursor++ },
+    useCallback: (fn) => { cursor++; return fn },
+    useRef: (v) => { const k = cursor++; if (!(k in hooks)) hooks[k] = { current: v }; return hooks[k] },
+    Fragment: 'fragment',
+  }
+  const mod = loadClient(React)
+  assert.deepEqual(
+    mod.dropdownPos({ left: 120, bottom: 80, width: 110 }, { left: 40, top: 20 }),
+    { left: 120, top: 84, width: 110 },
+    'fixed 弹层用视口坐标；扣 root 偏移会让侧栏里的弹层飘到左上角',
+  )
+  const calls = []
+  const props = {
+    value: '', title: '类型',
+    onChange: (e) => calls.push(e.target.value),
+    children: [
+      { type: 'option', props: { value: '', children: ['全部类型'] } },
+      { type: 'option', props: { value: 'digest', children: ['每日摘要'] } },
+    ],
+  }
+  const render = () => { cursor = 0; return mod.Dropdown(props) }
+  const btn = render().props.children[0]
+  assert.equal(btn.type, 'button', '触发器是 button，不是原生 select')
+  btn.props.onClick()
+  const opened = render()
+  assert.equal(opened.props.children[1]?.props?.className, 'roost-dropdown-pop', '点开要画出自己的弹层')
+  const opts = opened.props.children[1].props.children.flat()
+  assert.equal(opts.length, 2)
+  opts[1].props.onClick()
+  assert.deepEqual(calls, ['digest'], '回调必须给 e.target.value，保持原生 select 的契约')
+  btn.props.onKeyDown({ key: 'Escape' })
+  assert.equal(render().props.children[1], null, 'Esc 应该关掉弹层')
 })
