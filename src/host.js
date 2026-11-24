@@ -287,6 +287,7 @@ import { polishText, POLISH_PRESETS } from './persona-polish.js';
 import { createAutotelic } from './autotelic.js';
 import { createPurposeState } from './purpose-state.js';
 import { createDecisionLog } from './autotelic-decisions.js';
+import { createPlanner } from './autotelic-planner.js';
 import { formGoalHypotheses, goalToCandidate, DEFAULT_DRIVES } from './purpose-engine.js';
 import { collectPurposeMaterials } from './purpose-collect.js';
 import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
@@ -2439,40 +2440,53 @@ export function apply(ctx) {
    */
   const autotelicDecisions = createDecisionLog({ file: join(dataDir(), 'decisions.jsonl') });
 
+  /**
+   * 自驱的统一 run 通道（阶段 4）：老 step() 与三段决策的 intent/gate/review
+   * 共用同一条独立会话通道——都走 agentV1.prompt，不碰 QQ 会话。
+   * `allowAct` 只影响 prompt 措辞，不是工具授权闸门（B3），真正门禁是宿主全局守卫。
+   */
+  const autotelicRun = async (prompt, { sessionId, allowAct = false } = {}) => {
+    if (allowAct) log.info('自驱：allowAct 开着——仅放宽 prompt 措辞，工具仍走宿主全局守卫');
+    const sid = String(sessionId || 'autotelic-main');
+    if (!agentV1.list().some((x) => x.sessionId === sid)) {
+      await agentV1.createOne({
+        sessionId: sid,
+        clientId: 'autotelic',
+        persist: true,
+        sections: [{
+          name: 'autotelic-self',
+          order: 901,
+          /**
+           * 这段只在这个会话里生效。写的是「你有自己的时间」，
+           * 不是「你是助手」——她在 QQ 里那套人格不该把这里也填满。
+           */
+          text: () => '这是你自己的时间，没人在跟你说话。你可以琢磨自己感兴趣的事，'
+            + '想清楚就说清楚；不要客套，不要汇报自己在做什么，也不要提到「用户」或「主人」。',
+        }],
+      });
+    }
+    return await agentV1.prompt(sid, prompt);
+  };
+
+  /**
+   * 三段决策运行时（阶段 4）：三个 turn 全走同一条 autotelicRun 通道，
+   * noTools 口径由 agentV1 会话自带的 clientId='autotelic' 限制（不是 prompt 措辞）。
+   */
+  const autotelicPlanner = createPlanner({
+    decisionFile: join(dataDir(), 'decisions.jsonl'),
+    intentTurn: (prompt) => autotelicRun(prompt, { sessionId: 'decide-intent' }),
+    gateTurn: (prompt) => autotelicRun(prompt, { sessionId: 'decide-gate' }),
+    reviewTurn: (prompt) => autotelicRun(prompt, { sessionId: 'decide-review' }),
+    log: (m, ...a) => log.info(`自驱决策：${m}`, ...a),
+  });
+
   const autotelic = createAutotelic({
     dir: dataDir(),
     cfgOf: () => cfg.autotelic || {},
     log: (m) => log.info(`自驱：${m}`),
     decisionLog: autotelicDecisions,
-    /**
-     * `allowAct` 必须由宿主显式接收（阶段 3 B3）：此前 autotelic.js 传了它，
-     * 这里只解构 sessionId，参数被静默丢弃，看起来像真开关其实没有消费者。
-     * 现在如实记下它——**它只影响 prompt 措辞，不是工具授权闸门**；真正的
-     * 工具门禁是全局 tools.guard（危险命令无 QQ 窗口直接拒）。阶段 4 建工具
-     * 沙箱后才谈"允许动手"的真实能力边界。
-     */
-    run: async (prompt, { sessionId, allowAct = false }) => {
-      if (allowAct) log.info('自驱：allowAct 开着——仅放宽 prompt 措辞，工具仍走宿主全局守卫');
-      const sid = String(sessionId || 'autotelic-main');
-      if (!agentV1.list().some((x) => x.sessionId === sid)) {
-        await agentV1.createOne({
-          sessionId: sid,
-          clientId: 'autotelic',
-          persist: true,
-          sections: [{
-            name: 'autotelic-self',
-            order: 901,
-            /**
-             * 这段只在这个会话里生效。写的是「你有自己的时间」，
-             * 不是「你是助手」——她在 QQ 里那套人格不该把这里也填满。
-             */
-            text: () => '这是你自己的时间，没人在跟你说话。你可以琢磨自己感兴趣的事，'
-              + '想清楚就说清楚；不要客套，不要汇报自己在做什么，也不要提到「用户」或「主人」。',
-          }],
-        });
-      }
-      return await agentV1.prompt(sid, prompt);
-    },
+    planner: autotelicPlanner,
+    run: autotelicRun,
   });
 
   /**
@@ -13941,6 +13955,18 @@ export function apply(ctx) {
       }),
 
       route('/autotelic/review', (req, res) => send(res, 200, autotelic.review())),
+
+      /**
+       * 三段决策（阶段 4）：跑一轮「意图→把关→行动单」，零写盘到账本（decision 审计
+       * 由 planner 自己写 decisions.jsonl）。总开关关时不许跑模型——同 think/step 的门。
+       */
+      route('/autotelic/decide', async (req, res) => {
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
+        const u = new URL(req.url || '/', 'http://local');
+        const round = Math.max(0, Number(u.searchParams.get('round')) || 0);
+        const r = await autotelic.decide({ round });
+        return send(res, r.ok ? 200 : 409, r);
+      }),
 
       /**
        * 存种子。

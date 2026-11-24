@@ -515,3 +515,22 @@ test('约束硬否决：不触犯的项目照常立项', () => {
     assert.ok(e.status().project);
   } finally { cleanup(dir); }
 });
+
+test('decide()：账本 recent().rows 正确喂进 planner，无 planner 明确报错', async () => {
+  const dir = tmp();
+  try {
+    const plain = createAutotelic({ dir, cfgOf: () => ({ enabled: true }), log: () => {} });
+    const noPlanner = await plain.decide();
+    assert.equal(noPlanner.ok, false);
+    assert.match(noPlanner.error, /未接线/);
+
+    let seen = null;
+    const planner = { decideRound: async (o) => { seen = o; return { outcome: 'all-dead', candidates: [], verdicts: [], tickets: [] }; } };
+    const e = createAutotelic({ dir, cfgOf: () => ({ enabled: true }), log: () => {}, planner });
+    e.think({ manual: true }); // 造一条账本行
+    const r = await e.decide({ round: 2 });
+    assert.equal(r.ok, true);
+    assert.ok(Array.isArray(seen.observations), 'observations 应是数组');
+    assert.ok(seen.observations.length > 0, '账本里那行要喂进观察窗');
+  } finally { cleanup(dir); }
+});

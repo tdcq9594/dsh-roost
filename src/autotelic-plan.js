@@ -42,6 +42,13 @@ export const TAG_VOCAB = makeTagVocab()
 
 export const TAG_SET = new Set(TAG_VOCAB.map((x) => x.tag))
 
+const VERDICTS = new Set(['pass', 'rework', 'reject', 'park'])
+
+/**
+ * ②回包解析。认 verdict/decision/result 字段名；整包解析失败 → 全部按 reject（保守，不默认放行）。
+ * @returns {{verdicts:(null|'pass'|'rework'|'reject'|'park')[], whys:string[], outcome:'ok'|'parse-fail'}}
+ */
+
 const OWNER_TAGS = new Set(TAG_VOCAB.filter((x) => x.owner).map((x) => x.tag))
 
 // ————— §3.3 把关判据（写死，不许模型自造指标） —————
@@ -63,6 +70,24 @@ export const DEFAULT_BUDGETS = Object.freeze({
 })
 
 /** token 估算口径（粗估即可，只用于预算裁剪；中文按 2 字符≈1 token）。 */
+
+function observationRank(o) {
+  if (o?.source === 'owner') return 2
+  if (o?.source === 'emotion') return 1
+  return 0
+}
+
+function renderObservation(o) {
+  const t = o?.at ? new Date(o.at).toISOString().slice(0, 16).replace('T', ' ') : '时间不详'
+  return `[${o?.id || '无id'}] ${t}（${o?.source || 'unknown'}）${String(o?.text || '').slice(0, 120)}`
+}
+
+/**
+ * 意图生成输入拼装 + 预算裁剪。段顺序：前缀段(保护) → 自身状态 → 技能索引 → 观察窗口 → 背景历史。
+ * 超预算时按 §9.3 顺序降级：①整段丢背景历史 → ②观察按显著度从低到高丢（证据裁剪）
+ * → ③只剩前缀段仍超时**不裁前缀**（裁了它整个系统回到 v3），照原样保留并在 dropped 里标注。
+ * @returns {{text:string, dropped:string[], keptObservations:object[]}}
+ */
 
 export function estimateTokens(s) {
   return Math.ceil(String(s ?? '').length / 2)

@@ -8462,6 +8462,7 @@ window.__ModuleLoader__.load({
       const [seeds, setSeeds] = useState('')
       const [seedsDirty, setSeedsDirty] = useState(false)
       const [preview, setPreview] = useState(null)
+      const [decision, setDecision] = useState(null)
       const [ledger, setLedger] = useState(null)
       const [review, setReview] = useState('')
       const [env, setEnv] = useState(null)
@@ -8498,11 +8499,14 @@ window.__ModuleLoader__.load({
           ? await post('/autotelic/review', {})
           : what === 'preview'
             ? await get('/autotelic/preview')
-            : what === 'think'
-              ? await post('/autotelic/think', {})
-              : await post('/autotelic/step', {})
+            : what === 'decide'
+              ? await post('/autotelic/decide', {})
+              : what === 'think'
+                ? await post('/autotelic/think', {})
+                : await post('/autotelic/step', {})
         setBusy('')
         if (r?.ok === false) return toast(r.reason || r.message || '没成')
+        if (what === 'decide') { setDecision(r); return }
         if (what === 'preview') { setPreview(r); return }
         if (what === 'review') { setReview(r.text || ''); await load(); return }
         if (what === 'think') toast(`立项：${r.project?.text || ''}`)
@@ -8590,6 +8594,8 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: () => run('step') },
             busy === 'step' ? '推进中…' : '推进一步'),
           h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: () => run('review') }, '今日复盘'),
+          h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: () => run('decide') },
+            busy === 'decide' ? '决策中…' : '三段决策'),
           h('button', { type: 'button', className: 'roost-btn', onClick: showLedger }, ledger ? '收起账本' : '看账本')),
 
         preview
@@ -8600,6 +8606,28 @@ window.__ModuleLoader__.load({
             (preview.rejected || []).length
               ? h('div', { style: { fontSize: 11, marginTop: 4 } },
                 '先放着：' + preview.rejected.map((x) => `${x.text}（${x.reason}）`).join('；'))
+              : null)
+          : null,
+
+        /** 三段决策结果：四态 verdict + 行动单 + 无出处作废原因，全链路可回查 */
+        decision
+          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            h('div', null, `三段决策：${decision.outcome === 'tickets' ? `立项 ${(decision.tickets || []).length} 张行动单` : decision.outcome === 'all-dead' ? '这一轮全灭（没立项）' : `出错：${decision.error || ''}`}`),
+            (decision.candidates || []).length
+              ? h('div', { style: { fontSize: 11, marginTop: 4 } },
+                '候选：' + decision.candidates.map((x) => `${x.title}（${x.tag}）`).join('；'))
+              : null,
+            (decision.verdicts || []).length
+              ? h('div', { style: { fontSize: 11, marginTop: 4 } },
+                '把关：' + decision.verdicts.map((v, i) => `${i + 1}:${v}`).join(' · '))
+              : null,
+            (decision.deadReasons || []).length
+              ? h('div', { style: { fontSize: 11, marginTop: 4, color: 'var(--warn)' } },
+                '无出处作废：' + decision.deadReasons.join('；'))
+              : null,
+            (decision.tickets || []).length
+              ? h('div', { style: { fontSize: 11, marginTop: 4 } },
+                '行动单：' + decision.tickets.map((t) => `${t.id}（${t.intent}）`).join('；'))
               : null)
           : null,
 

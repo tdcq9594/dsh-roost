@@ -303,6 +303,11 @@ export function createAutotelic({
    * 立项/推进会各落一行，模型回包作为 payload 原样进哈希链。
    */
   decisionLog = null,
+  /**
+   * 三段决策运行时（阶段 4，可选注入）：{ decideRound(opts) } = createPlanner()。
+   * 不注入就没有 decide() 能力，老调用方零影响。
+   */
+  planner = null,
 } = {}) {
   /** 决策阶段落账：写失败不阻断业务（审计是旁路，与主账本 appendLedger 的语义一致） */
   const noteDecision = async (phase, payload) => {
@@ -597,8 +602,36 @@ export function createAutotelic({
     return { ok: true, rows: rows.slice(-n).reverse() };
   }
 
+  /**
+   * 三段决策（阶段 4）：意图生成 → 四态把关 → 行动单。
+   * 观察窗来自我方账本 recent——每条带 id/at 的账本行就是一个观察，
+   * 喂给 parseIntents 做「无出处候选作废」的硬校验（阶段 3 已抽）。
+   * 没注入 planner 时明确说不可用，不静默退化成老立项（那会让人以为三段决策生效了）。
+   */
+  async function decide({ round = 0, maxObservations = 12 } = {}) {
+    if (!planner || typeof planner.decideRound !== 'function') {
+      return { ok: false, outcome: 'error', error: '三段决策未接线（planner 未注入）' };
+    }
+    const c = cfg();
+    /** recent() 返回 {ok, rows}，不是裸数组——面板 showLedger 也是取 .rows */
+    const rows = recent(maxObservations).rows.map((r) => ({
+      id: String(r.id ?? r.at),
+      at: Number(r.at) || 0,
+      source: r.kind === 'deny' ? 'constraint' : 'ledger',
+      text: String(r.note || r.payload?.project || r.payload?.text || '').slice(0, 200),
+    })).filter((o) => o.text);
+    const r = await planner.decideRound({
+      round,
+      persona: { summary: '', instinctExtra: '' },
+      constraintRulesText: constraintLines(c.constraintRules).map((x) => `- ${x}`).join('\n'),
+      observations: rows,
+      ticketBudget: { maxSteps: 4, timeoutMs: 120_000 },
+    });
+    return { ok: r.outcome !== 'error', ...r };
+  }
+
   return {
-    status, preview, think, step, tick, review, recent,
+    status, preview, think, step, tick, review, recent, decide,
     /** 测试与「重新读配置」用 */
     reload: () => { state = loadState(); return status(); },
     gate,
