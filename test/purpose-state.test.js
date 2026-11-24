@@ -1,7 +1,7 @@
 // 目的引擎状态层：四块形状、原子写、快照回滚、坏文件降级。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -61,5 +61,23 @@ test('坏文件降级为空状态，不让宿主启动失败', () => {
     const s = p.read();
     assert.equal(Object.keys(s.drives).length, 9);
     assert.deepEqual(s.goals, []);
+  } finally { cleanup(dir); }
+});
+
+test('只读接口的数据源：read 不改盘、不建快照（零副作用）', () => {
+  const dir = tmp();
+  try {
+    const p = createPurposeState({ dir });
+    p.write((s) => { s.drives.play = 0.7; s.goals.push({ id: 'g1', intent: '想学吉他' }); return s });
+    const before = {
+      main: readFileSync(join(dir, STATE_FILE), 'utf8'),
+      prevExists: existsSync(join(dir, `${STATE_FILE}.prev`)),
+    };
+    const a = p.read();
+    const b = p.read();
+    assert.deepEqual(a, b, '两次只读结果一致');
+    const after = readFileSync(join(dir, STATE_FILE), 'utf8');
+    assert.equal(after, before.main, 'read 不能写盘');
+    assert.equal(existsSync(join(dir, `${STATE_FILE}.prev`)), before.prevExists, 'read 不能建 .prev 快照');
   } finally { cleanup(dir); }
 });

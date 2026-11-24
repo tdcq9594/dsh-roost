@@ -8393,6 +8393,45 @@ window.__ModuleLoader__.load({
      *
      * 账本那栏是重点：它显示链是否完整、断在第几条。她可以骗人，但不能骗账本。
      */
+    /**
+     * 目的引擎状态（阶段 2，只读）：数据层已在，算法在阶段 3。
+     * 这里只如实展示「存了什么」，并明说算法未落地——不画空按钮骗人去点。
+     */
+    function PurposeStatusCard({ toast }) {
+      const [st, setSt] = useState(null)
+      const load = useCallback(async () => {
+        const r = await get('/purpose/status')
+        if (r?.ok === false) return toast(r.message || '读不到目的状态')
+        setSt(r)
+      }, [toast])
+      useEffect(() => { load() }, [load])
+
+      const counts = st?.counts || {}
+      const driveRows = st?.drives || {}
+      const goals = Array.isArray(st?.goals) ? st.goals : []
+      return h(Sec, { n: '08', title: '目的引擎（数据已就位）', right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新') },
+        h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+          '这里记着她「想做什么」的线索：驱力、观察到的迹象、目标假设、你的回应。'
+          + '这一层只负责把线索存稳；生成目标假设与自动挑选的算法还在做（阶段 3），'
+          + '现在没有可以点的动作，免得你点了没反应。'),
+        h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 12, marginBottom: 8 } },
+          h('span', null, `观察 ${counts.observations ?? 0} 条`),
+          h('span', null, `目标假设 ${counts.goals ?? 0} 个`),
+          h('span', null, `回应记录 ${counts.feedback ?? 0} 条`),
+          st?.algorithm === 'pending-stage-3'
+            ? h('span', { style: { color: 'var(--warn)' } }, '算法待阶段 3')
+            : null),
+        goals.length
+          ? h('div', { className: 'roost-list' },
+            goals.slice(-8).map((g) => h('div', { key: g.id || g.intent, className: 'roost-item' },
+              h('span', { className: 't' }, `${g.owner || 'self'} · ${g.status || 'hypothesis'}：${String(g.intent || '').slice(0, 60)}`),
+              h('span', { className: 'd' }, `置信 ${g.confidence ?? 0}`))))
+          : h('div', { className: 'roost-empty' }, '还没有目标假设——算法接上后会在这里长出来。'),
+        h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 6 } },
+          '九维驱力：' + Object.entries(driveRows).map(([k, v]) => `${k} ${v}`).join(' · ')),
+      )
+    }
+
     function AutotelicCard({ toast, config, saveCfg }) {
       const [st, setSt] = useState(null)
       const [busy, setBusy] = useState('')
@@ -8401,12 +8440,16 @@ window.__ModuleLoader__.load({
       const [preview, setPreview] = useState(null)
       const [ledger, setLedger] = useState(null)
       const [review, setReview] = useState('')
+      const [env, setEnv] = useState(null)
 
       const load = useCallback(async () => {
         const r = await get('/autotelic/status')
         if (r?.ok === false) return
         setSt(r)
         if (!seedsDirty) setSeeds((r.cfg?.seeds || []).join('\n'))
+        /** 只读环境 / 能力（阶段 2）：与 status 一起拉，不额外加按钮 */
+        const e = await get('/autotelic/env').catch(() => null)
+        if (e?.ok !== false) setEnv(e)
       }, [seedsDirty])
       useEffect(() => { load() }, [load])
 
@@ -8477,6 +8520,11 @@ window.__ModuleLoader__.load({
               st.capability.headline),
             h('div', null, st.capability.tool),
             h('div', { className: 'roost-muted', style: { fontSize: 11 } }, st.capability.note),
+            /** 阶段 2：只读环境接口带出真实闸门位置，让「允许动手」的边界可查 */
+            env?.toolGate
+              ? h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 4 } },
+                `工具闸门：${env.toolGate === 'host-global-guard' ? '宿主全局守卫（危险命令无确认窗口时直接拒）' : env.toolGate}`)
+              : null,
             Array.isArray(st.constraints) && st.constraints.length
               ? h('div', { style: { fontSize: 11, marginTop: 4 } },
                 `主人约束 ${st.constraints.length} 条（候选阶段硬否决，不由模型自判）：${st.constraints.map((x) => x.slice(0, 40)).join('；')}`)
@@ -8979,6 +9027,8 @@ window.__ModuleLoader__.load({
                 + '「不确定」不会自动重发——重发可能让对方收到两条，得你自己去 QQ 里看一眼。'
               : ''),
         ),
+        /** 08：目的引擎（只读数据层）。算法待阶段 3，先让人看见存了什么 */
+        h(PurposeStatusCard, { toast }),
         /** 07：自驱引擎（实验，默认关）。放在这一页最后——它不是日常操作 */
         h(AutotelicCard, { toast, config, saveCfg }),
       )

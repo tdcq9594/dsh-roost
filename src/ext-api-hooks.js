@@ -808,6 +808,37 @@ export function createExtApiHooks({
       }
     },
 
+    /**
+     * 只读的主动搭话状态（阶段 2）：扩展查「现在能不能主动开口 / 今天用了几次」，
+     * 不必靠发送失败的回执反推。只调 canFire()（纯判定）与 state()（读快照），
+     * **绝不调 fire()**——那是写、会真的发消息。scope 复用 state:read。
+     */
+    async 'proactive.status'() {
+      if (typeof speakUpOf !== 'function') return bad('主动消息模块不可用', 500, 'internal');
+      const sp = speakUpOf();
+      if (!sp?.state) return bad('主动消息模块不可用', 500, 'internal');
+      let decision = null;
+      try {
+        decision = typeof sp.canFire === 'function'
+          ? sp.canFire()
+          : shouldFire(sp.state?.() ?? {}, cfgOf()?.speakUp ?? {}, Date.now());
+      } catch (e) {
+        return bad(`判定主动消息状态失败：${e?.message ?? e}`, 500, 'internal');
+      }
+      const st = sp.state?.() ?? {};
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          canFire: Boolean(decision?.fire),
+          why: decision?.fire ? '' : String(decision?.why ?? '未到时间'),
+          todayCount: Number(st.todayCount) || 0,
+          maxPerDay: Number(cfgOf()?.speakUp?.maxPerDay) || 0,
+          nextAt: st.nextAt ? new Date(st.nextAt).toISOString() : null,
+        },
+      };
+    },
+
     /** 确保会话存在（建/复用 DSH 会话并挂好工具），不跑模型。 */
     async 'session.ensure'({ body, query }) {
       const chatId = targetOf(body, query);

@@ -444,3 +444,36 @@ test('能力表：readonly 与 callableOnly 两份清单都在', () => {
   assert.ok(callOnly.includes('identity.resolve'));
   assert.match(r.body.note, /roost\.read/, '说明里要点出两个端点');
 });
+
+/* ---------------- 只读主动状态（阶段 2） ---------------- */
+
+test('proactive.status 只读：返回能否开口与今日额度，绝不触发 fire', async () => {
+  const { hooks, calls } = rig({
+    speakState: { todayCount: 2, nextAt: 1_700_000_000_000 },
+    cfg: { speakUp: { enabled: true, chatId: 'u1', maxPerDay: 3 } },
+    canFire: () => ({ fire: false, why: '主人刚说过话' }),
+  });
+  const r = await hooks['proactive.status']({});
+  assert.equal(r.status, 200);
+  assert.equal(r.body.ok, true);
+  assert.equal(r.body.canFire, false);
+  assert.equal(r.body.why, '主人刚说过话', '被拦原因原样透出');
+  assert.equal(r.body.todayCount, 2);
+  assert.equal(r.body.maxPerDay, 3);
+  assert.equal(r.body.nextAt, new Date(1_700_000_000_000).toISOString());
+  assert.equal(calls.fire, 0, '只读查状态绝不能真的发消息');
+  assert.equal(calls.send.length, 0, '只读查状态也不能走发送通道');
+});
+
+test('proactive.status 在 canFire 为真时回 canFire=true，仍不发送', async () => {
+  const { hooks, calls } = rig({
+    speakState: { todayCount: 0 },
+    cfg: { speakUp: { enabled: true, chatId: 'u1', maxPerDay: 3 } },
+    canFire: () => ({ fire: true }),
+  });
+  const r = await hooks['proactive.status']({});
+  assert.equal(r.status, 200);
+  assert.equal(r.body.canFire, true);
+  assert.equal(r.body.why, '');
+  assert.equal(calls.fire, 0);
+});

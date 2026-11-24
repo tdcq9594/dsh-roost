@@ -153,6 +153,7 @@
 | POST | `/v1/personas/remove` | `prompt:write` | ✅ 可用 | 删除一份人格（必须传 `confirm: true`；默认人格不能删；删前自动备份，删后级联清 `byChat` 里的引用） |
 | POST | `/v1/personas/save` | `prompt:write` | ✅ 可用 | 改写一份**已存在**的人格正文（整份替换，不做分节合并）；不存在回 404 |
 | POST | `/v1/proactive` | `proactive:write` | ✅ 可用 | 排一条主动消息（受清醒时段与频次约束） |
+| GET | `/v1/proactive/status` | `state:read` | ✅ 可用 | 只读查询现在能不能主动开口与今日额度，不发送消息：`{ canFire, why, todayCount, maxPerDay, nextAt }` |
 | POST | `/v1/proactive/submit` | `proactive:write` | ✅ 可用 | 扩展投递一条素材；宿主过门闸后让模型自己组织语言主动发出 |
 | POST | `/v1/roost.call` | `message:write` | ✅ 可用 | 由宿主代转一次直连协议调用（只读能力 / 插件工具 / `msg.send`）；框架地址与令牌不出宿主，写与管理面不开放 |
 | GET | `/v1/roost.capabilities` | `state:read` | ✅ 可用 | 列框架直连协议（roost-host/1）里可扩展调用的能力：只读方法、框架插件注册的 `tool.*`、发消息；`?filter=` 可按名字筛 |

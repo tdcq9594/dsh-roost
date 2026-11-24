@@ -284,6 +284,7 @@ import { buildExtension, formatScaffold } from './ext-wizard.js';
 import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
 import { polishText, POLISH_PRESETS } from './persona-polish.js';
 import { createAutotelic } from './autotelic.js';
+import { createPurposeState } from './purpose-state.js';
 import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
 import { createUiActionQueue } from './ext-ui-actions.js';
 import { runInProcessAction } from './ext-inprocess.js';
@@ -2454,6 +2455,14 @@ export function apply(ctx) {
       return await agentV1.prompt(sid, prompt);
     },
   });
+
+  /**
+   * 目的引擎状态（阶段 2 只接只读）：阶段 1 建的数据层此前生产零使用，
+   * 这里让它第一次真正接上线——只读暴露四块状态给面板。算法（驱力计算、
+   * 目标假设生成）属阶段 3，本阶段不建 `/purpose/preview` 这类占位接口。
+   */
+  const purposeState = createPurposeState({ dir: dataDir(), log: (m) => log.info(`目的状态：${m}`) });
+
   /**
    * 阶段 4：每扩展一个 `ext-memory/<extId>.json`，不碰 `memory.json`（§5.1）。
    * `installedIds` 从清单实时取，ACL 的可见集跟着已装扩展走。
@@ -13809,6 +13818,46 @@ export function apply(ctx) {
       route('/autotelic/recent', (req, res) => {
         const u = new URL(req.url || '/', 'http://local');
         return send(res, 200, autotelic.recent(Number(u.searchParams.get('limit')) || 30));
+      }),
+
+      /**
+       * 环境 / 能力（只读）：从 status().capability 派生，不跑模型、不碰工具。
+       * 不叫 `/env` 那套 Python 探测——本仓刻意不做「自己写代码 / 跑 Python」，
+       * 这里只如实说明「能不能立项 / 工具措辞 / 闸门真相」。
+       */
+      route('/autotelic/env', (req, res) => {
+        const s = autotelic.status();
+        return send(res, 200, {
+          ok: true,
+          capability: s.capability,
+          constraints: s.constraints,
+          /** 供面板标注：allowAct 是 prompt 措辞，不是工具授权闸门 */
+          toolGate: 'host-global-guard',
+        });
+      }),
+
+      /**
+       * 目的引擎状态（只读，零副作用）：读 purpose-state 四块数据。
+       * 只暴露摘要与计数，不把整份目标假设倒给前端；`/purpose/preview` 等
+       * 算法接口留到阶段 3，现在建就是占位。
+       */
+      route('/purpose/status', (req, res) => {
+        const s = purposeState.read();
+        return send(res, 200, {
+          ok: true,
+          drives: s.drives,
+          counts: {
+            observations: s.observations.length,
+            goals: s.goals.length,
+            feedback: s.feedback.length,
+          },
+          goals: s.goals.slice(-20).map((g) => ({
+            id: g.id, owner: g.owner, status: g.status, intent: g.intent,
+            confidence: g.confidence, evidenceIds: g.evidenceIds,
+          })),
+          /** 阶段 3 才有算法；如实告诉面板，别让它画个空按钮 */
+          algorithm: 'pending-stage-3',
+        });
       }),
 
       route('/autotelic/think', async (req, res) => {
