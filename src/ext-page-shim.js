@@ -34,7 +34,34 @@ window.addEventListener("message", function (e) {
   /** 只认父窗口的回信：别的 frame 也能 postMessage 到我们 */
   if (e.source && e.source !== parent) return;
   var d = e.data;
-  if (!d || d.type !== "roost:reply" || !d.id) return;
+  if (!d) return;
+
+  /**
+   * 跟随面板主题（可选，个性化页开关）。
+   * 只接受白名单变量 + 安全值：这是从父窗口写进页面根的 CSS 变量，
+   * 不设防的话别人 postMessage 一段 url(...) 也能借我们的页面发起请求。
+   * 页面自己的 CSS 读不读这些变量由扩展决定——我们不改它的样式，只递值。
+   */
+  if (d.type === "roost:theme") {
+    var doc = window && window.document;
+    var root = doc && doc.documentElement;
+    if (!root || !root.style) return;
+    var vars = { "--accent": 1, "--accent-light": 1, "--card-fill": 1 };
+    var vals = d.vars && typeof d.vars === "object" ? d.vars : {};
+    var applied = 0;
+    for (var k in vals) {
+      if (!Object.prototype.hasOwnProperty.call(vars, k)) continue;
+      var v = String(vals[k] == null ? "" : vals[k]);
+      /** 只挡注入通道（多写声明 / url 外链 / 尖括号）；color-mix 嵌套括号放行 */
+      if (!v || /[;{}<>"']/.test(v) || /url|expression/i.test(v)) continue;
+      root.style.setProperty(k, v);
+      applied++;
+    }
+    if (applied && root.classList && root.classList.add) root.classList.add("roost-themed");
+    return;
+  }
+
+  if (d.type !== "roost:reply" || !d.id) return;
   var done = waiting[d.id];
   if (!done) return;
   delete waiting[d.id];

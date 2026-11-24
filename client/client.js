@@ -454,6 +454,11 @@ window.__ModuleLoader__.load({
   border:1px solid var(--line-soft);border-radius:var(--radius-card);
   background:var(--roost-card-fill,var(--card-fill));box-shadow:var(--shadow-card);
   animation:roost-sec-in .28s cubic-bezier(.2,.8,.2,1) backwards}
+/* 透明度拉满 = 全透明：连描边和投影一起撤掉。只把 background 放透明的话，
+   卡片仍留一圈边和一层阴影，看着就像没生效（主人 2026-11-24 反馈）。 */
+.roost-root.card-transparent .roost-sec:not(.roost-plain),
+.roost-root.card-transparent .roost-wizard-card{
+  background:transparent;border-color:transparent;box-shadow:none}
 .roost-sec:first-child{margin-top:2px}
 .roost-sec:nth-child(2){animation-delay:.04s}
 .roost-sec:nth-child(3){animation-delay:.08s}
@@ -1078,9 +1083,11 @@ window.__ModuleLoader__.load({
 .roost-fact-x:hover{opacity:1;color:var(--bad);background:var(--hover)}
 .roost-fact-x:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 @media (hover:none){.roost-fact-x{opacity:.65}}
-/* 危险动作：默认低饱和红，二次确认后实心红——和普通按钮明确区分 */
-/* 危险动作：平时和普通按钮一样（列表里挂一排红框非常吵），点一下才变红 */
-.roost-btn.danger{color:inherit;border-color:var(--line)}
+/* 危险动作：平时和普通按钮一样（列表里挂一排红框非常吵），点一下才变红。
+   这里只改边框、不要写 color:inherit——那会盖掉上面「能按的按钮用主文字色」，
+   继承到淡色父级后卸载/重装按钮看着像禁用（主人 2026-11-24 反馈）。
+   真禁用由 .roost-btn:disabled 的 opacity 负责，armed 由下面的白字负责。 */
+.roost-btn.danger{border-color:var(--line)}
 .roost-btn.armed{background:var(--bad);border-color:var(--bad);color:#fff}
 .roost-link{border:none;background:transparent;color:var(--accent);font:inherit;font-size:11.5px;
   cursor:pointer;padding:0 2px;text-decoration:underline;text-underline-offset:2px}
@@ -18086,7 +18093,15 @@ window.__ModuleLoader__.load({
                   value: drafts[x.id] ?? '', spellCheck: false, disabled: x.foreign,
                   onChange: (e) => setDrafts({ ...drafts, [x.id]: e.target.value }),
                 }),
-                h('div', { style: { display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' } },
+                /**
+                 * 停用 / 卸载也放在已安装页（主人 2026-11-24 反馈这里没有入口）。
+                 *
+                 * 以前只有市场页的条目带这两个按钮：市场索引拉不到、或装的是
+                 * 索引外的手写目录时，这一页就只剩「保存 usage」，根本管不了它。
+                 * 卸载走同一个 `extensions.market.remove`（手写目录带 force 先备份），
+                 * 停用走 `setRevokeAsk()` 的确认弹窗——两个 ask 互斥，不会叠遮罩。
+                 */
+                h('div', { style: { display: 'flex', gap: 6, marginTop: 6, alignItems: 'center', flexWrap: 'wrap' } },
                   h('button', {
                     type: 'button', className: 'roost-btn',
                     disabled: saving === x.id || x.foreign, onClick: () => save(x.id),
@@ -18097,6 +18112,17 @@ window.__ModuleLoader__.load({
                         disabled: cfgBusy, onClick: () => openCfg(x.id),
                       }, cfgFor === x.id ? '收起设置' : '设置')
                     : null,
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
+                    onClick: () => setRevokeAsk(x.id),
+                  }, '停用'),
+                  h(ConfirmLink, {
+                    label: x.foreign ? '删除' : '卸载',
+                    confirmLabel: x.foreign ? '确认删除（先备份）' : '确认卸载',
+                    disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
+                    onConfirm: () => marketAct('extensions.market.remove', x.id, x.foreign ? { force: true } : {}),
+                  }),
                 ),
                 cfgFor === x.id && cfgData
                   ? h('div', {
@@ -20901,10 +20927,21 @@ window.__ModuleLoader__.load({
      * log 一行一条。**不给扩展自定义样式的能力**——那等于让它控制面板外观，
      * 而面板上还有主人的记忆和配置。
      */
-    function ExtUiPage({ id, toast }) {
+    function ExtUiPage({ id, toast, themeVars = null }) {
       const [d, setD] = useState(null)
       /** 沙箱 iframe 的句柄：既要拿 `contentWindow` 校验来源，也要回消息 */
       const frameRef = useRef(null)
+      /**
+       * 把面板主题递给扩展页面（个性化页开关控制，默认 null = 不发）。
+       * 必须在 iframe load 之后发：页面文档这时才建好，垫片的消息监听才挂上。
+       * 沙箱页面是 opaque origin，postMessage 的 targetOrigin 只能用 '*'，
+       * 但 contentWindow 是从 ref 拿的，不会发到别的 frame。
+       */
+      const sendTheme = () => {
+        const f = frameRef.current
+        if (!themeVars || !f || !f.contentWindow) return
+        try { f.contentWindow.postMessage({ type: 'roost:theme', vars: themeVars }, '*') } catch { /* 页面已走 */ }
+      }
 
       /**
        * 沙箱页面的**唯一通道**。
@@ -21105,6 +21142,7 @@ window.__ModuleLoader__.load({
       if (d.page) {
         return h('iframe', {
           ref: frameRef,
+          onLoad: sendTheme,
           src: API + '/ext-pages?id=' + encodeURIComponent(id) + '&file=' + encodeURIComponent(d.page),
           title: d.nav?.label || id,
           /**
@@ -21659,6 +21697,14 @@ window.__ModuleLoader__.load({
       'ch-member': 'member',
     }
     const ALL_TABS = TABS.map(([id]) => id).concat(HIDDEN_TABS)
+    /**
+     * 偏好校验专用：扩展页 `ext:<id>` 是运行时注册的，静态清单里没有，
+     * 但隐藏/排序要能存住。只放行「形如 ext:xxx」的安全 key——不接受任意
+     * 字符串，免得手改 JSON 塞一堆垃圾进 localStorage。真正存在哪些扩展页
+     * 由渲染层的 `extPages` 决定：卸载后偏好里的残留 key 不会显示，也没危害。
+     */
+    const isPrefTabId = (id) => typeof id === 'string'
+      && (ALL_TABS.includes(id) || /^ext:[A-Za-z0-9_-]+$/.test(id))
     /** 深链校验用：老 key 也放行，否则老书签会被当成无效值、静默退回概览 */
     const KNOWN_TABS = ALL_TABS.concat(Object.keys(LEGACY_CH_TABS))
 
@@ -21713,7 +21759,8 @@ window.__ModuleLoader__.load({
      *
      * 颜色只收 `#rgb` / `#rrggbb`——这段值会拼进 CSS，收别的字符串等于给偏好
      * JSON 开了个 CSS 注入口。透明度限制在 0–100 的整数，默认 50（与改动前的
-     * 卡片底一致）；空颜色 = 跟随主题底色 + 强调色淡混。
+     * 卡片底一致）：0 = 完全不透明，100 = 全透明——越高越透明，符合直觉。
+     * 空颜色 = 跟随主题底色 + 强调色淡混。
      */
     function readCardBg(v) {
       const raw = String(v?.color ?? '').trim()
@@ -21723,19 +21770,21 @@ window.__ModuleLoader__.load({
       return { color, alpha }
     }
 
+    /** 扩展自带页面是否跟随面板主题：默认关，存量页面样式一个不动 */
+    const readExtTheme = (v) => v === true
+
     function readUiPref() {
-      const empty = { hidden: [], order: {}, accent: 'host', anim: true, cardBg: { color: '', alpha: 50 } }
+      const empty = { hidden: [], order: {}, accent: 'host', anim: true, cardBg: { color: '', alpha: 50 }, extTheme: false }
       let raw = null
       try { raw = JSON.parse(localStorage.getItem(UI_PREF_KEY) || 'null') } catch { return empty }
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return empty
-      const ids = new Set(ALL_TABS)
       const hidden = Array.isArray(raw.hidden)
-        ? raw.hidden.filter((id) => typeof id === 'string' && ids.has(id) && !PROTECTED_TABS.includes(id))
+        ? raw.hidden.filter((id) => isPrefTabId(id) && !PROTECTED_TABS.includes(id))
         : []
       const order = {}
       if (raw.order && typeof raw.order === 'object' && !Array.isArray(raw.order)) {
         for (const [g, list] of Object.entries(raw.order)) {
-          if (Array.isArray(list)) order[g] = list.filter((id) => typeof id === 'string' && ids.has(id))
+          if (Array.isArray(list)) order[g] = list.filter(isPrefTabId)
         }
       }
       const accents = ['host', 'blue', 'teal', 'green', 'purple', 'orange', 'magenta']
@@ -21745,6 +21794,7 @@ window.__ModuleLoader__.load({
         accent: accents.includes(raw.accent) ? raw.accent : 'host',
         anim: raw.anim !== false,
         cardBg: readCardBg(raw.cardBg),
+        extTheme: readExtTheme(raw.extTheme),
       }
     }
 
@@ -22000,12 +22050,26 @@ window.__ModuleLoader__.load({
      * 所有状态都在 `RoostPage`（`uiPref` / `setPrefs`），本组件只负责画和改——
      * 放自己 state 里会出现「本页变了、导航和颜色没变」。
      */
-    function PersonalizeTab({ uiPref, setPrefs, toast }) {
+    function PersonalizeTab({ uiPref, setPrefs, toast, extPages = [] }) {
       const [editGroup, setEditGroup] = useState('self')
       const [draft, setDraft] = useState(null)
       const g = NAV_GROUPS.find((x) => x.id === editGroup) || NAV_GROUPS[1]
       const hidden = new Set(uiPref.hidden || [])
       const cardBg = readCardBg(uiPref.cardBg)
+      /**
+       * 当前的扩展页：按 `nav.group` 归到所属分组，和静态页一起排/一起藏。
+       * 只认这一刻真实存在的扩展——偏好里卸载后残留的 `ext:*` 不会出现在列表里。
+       */
+      const groupExt = (Array.isArray(extPages) ? extPages : [])
+        .filter((p) => p && p.id && (navGroupOf(`ext:${p.id}`, extPages)?.id || '') === g.id)
+        .map((p) => [`ext:${p.id}`, String(p.nav?.label || p.name || p.id)])
+      /** tab key → 显示名：扩展页用它自己声明的 label，不显示 `ext:xxx` 裸 key */
+      const labelOf = (id) => {
+        const hit = groupExt.find(([x]) => x === id)
+        return hit ? hit[1] : tabLabel(id)
+      }
+      /** 本组全部页签：静态声明 + 扩展页；扩展页接在后面 */
+      const groupIds = g.tabs.concat(groupExt.map(([id]) => id))
 
       /** 每次改动都清掉 04 的草稿：否则先编辑过 textarea、再动 01/02/03，
        *  下面那段 JSON 会停在改之前的样子，用户以为没生效 */
@@ -22016,21 +22080,21 @@ window.__ModuleLoader__.load({
         setDraft(null)
         setPrefs((prev) => {
           const h = new Set(prev.hidden || [])
-          const vis = orderTabs(g, g.tabs.filter((x) => !h.has(x)), prev)
+          const vis = orderTabs(g, groupIds.filter((x) => !h.has(x)), prev)
           const i = vis.indexOf(id)
           const j = i + dir
           if (i < 0 || j < 0 || j >= vis.length) return prev
           const next = vis.slice()
           next.splice(i, 1)
           next.splice(j, 0, id)
-          const rest = g.tabs.filter((x) => !next.includes(x))
+          const rest = groupIds.filter((x) => !next.includes(x))
           return { ...prev, order: { ...(prev.order || {}), [g.id]: next.concat(rest) } }
         })
       }
 
       const toggleHidden = (id) => {
         if (PROTECTED_TABS.includes(id)) {
-          toast(`「${tabLabel(id)}」是恢复入口，不能隐藏`)
+          toast(`「${labelOf(id)}」是恢复入口，不能隐藏`)
           return
         }
         const wasHidden = hidden.has(id)
@@ -22041,13 +22105,13 @@ window.__ModuleLoader__.load({
         })
         /** 当前页不跳走（与深链口径一致），只说去哪找 */
         toast(wasHidden
-          ? `「${tabLabel(id)}」回到导航`
-          : `「${tabLabel(id)}」已从导航隐藏，Alt+K 还能找到`)
+          ? `「${labelOf(id)}」回到导航`
+          : `「${labelOf(id)}」已从导航隐藏，Alt+K 还能找到`)
       }
 
       const resetAll = () => {
         setDraft(null)
-        setPrefs({ hidden: [], order: {}, accent: 'host', anim: true, cardBg: { color: '', alpha: 50 } })
+        setPrefs({ hidden: [], order: {}, accent: 'host', anim: true, cardBg: { color: '', alpha: 50 }, extTheme: false })
         toast('已恢复默认（只重置这一页的五项）')
       }
 
@@ -22057,19 +22121,19 @@ window.__ModuleLoader__.load({
         const text = draft === null ? JSON.stringify(uiPref) : draft
         try { raw = JSON.parse(text) } catch (e) { toast('这段不是合法 JSON：' + e.message); return }
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { toast('要一段对象 JSON'); return }
-        const ids = new Set(ALL_TABS)
         const next = {
           hidden: Array.isArray(raw.hidden)
-            ? raw.hidden.filter((x) => typeof x === 'string' && ids.has(x) && !PROTECTED_TABS.includes(x))
+            ? raw.hidden.filter((x) => isPrefTabId(x) && !PROTECTED_TABS.includes(x))
             : [],
           order: {},
           accent: ACCENT_PRESETS.some((a) => a.id === raw.accent) ? raw.accent : 'host',
           anim: raw.anim !== false,
           cardBg: readCardBg(raw.cardBg),
+          extTheme: readExtTheme(raw.extTheme),
         }
         if (raw.order && typeof raw.order === 'object' && !Array.isArray(raw.order)) {
           for (const [k, list] of Object.entries(raw.order)) {
-            if (Array.isArray(list)) next.order[k] = list.filter((x) => typeof x === 'string' && ids.has(x))
+            if (Array.isArray(list)) next.order[k] = list.filter(isPrefTabId)
           }
         }
         setPrefs(next)
@@ -22078,15 +22142,15 @@ window.__ModuleLoader__.load({
       }
 
       /* 组内列表：先按用户顺序排，再渲染每一行 */
-      const ids = orderTabs(g, g.tabs, uiPref)
-      const visibleIds = orderTabs(g, g.tabs.filter((x) => !hidden.has(x)), uiPref)
+      const ids = orderTabs(g, groupIds, uiPref)
+      const visibleIds = orderTabs(g, groupIds.filter((x) => !hidden.has(x)), uiPref)
 
       return h('div', null,
         /* 01 菜单顺序与显示 */
         h(Sec, { n: '01', title: '菜单顺序与显示' },
           h('div', { className: 'roost-note' },
             '隐藏只是从这里拿掉入口，功能照常运行；要真关某个功能，去「权限」页改开关。'
-            + '顺序只影响组内，一级分组不跟着变。扩展页不在这里排，也不在这里藏。'),
+            + '顺序只影响组内，一级分组不跟着变。扩展页跟着它声明的分组一起排、一起藏。'),
           h('div', { className: 'roost-pf-grp' },
             NAV_GROUPS.map((x) => h('button', {
               key: x.id, type: 'button',
@@ -22097,24 +22161,26 @@ window.__ModuleLoader__.load({
           ids.map((id) => {
             const prot = PROTECTED_TABS.includes(id)
             const vi = visibleIds.indexOf(id)
+            const isExt = id.startsWith('ext:')
+            const name = labelOf(id)
             return h(GRow, {
               key: id,
-              label: tabLabel(id) + (prot ? '（固定）' : ''),
+              label: name + (prot ? '（固定）' : '') + (isExt ? '（扩展）' : ''),
               hint: id === 'personalize'
                 ? '本页自己：藏了就再也进不来，所以锁着'
                 : (id === 'express' ? '含「听语音」唯一入口，关语音也不藏' : ''),
             },
               h('span', { className: 'roost-pf-order' },
                 h('button', {
-                  type: 'button', title: '上移', 'aria-label': `把${tabLabel(id)}上移`,
+                  type: 'button', title: '上移', 'aria-label': `把${name}上移`,
                   disabled: vi <= 0, onClick: () => move(id, -1),
                 }, '↑'),
                 h('button', {
-                  type: 'button', title: '下移', 'aria-label': `把${tabLabel(id)}下移`,
+                  type: 'button', title: '下移', 'aria-label': `把${name}下移`,
                   disabled: vi < 0 || vi >= visibleIds.length - 1, onClick: () => move(id, 1),
                 }, '↓')),
               h(Switch, {
-                on: !hidden.has(id), label: `${tabLabel(id)}显示`, disabled: prot,
+                on: !hidden.has(id), label: `${name}显示`, disabled: prot,
                 title: prot ? '受保护，不能隐藏' : (hidden.has(id) ? '已隐藏' : '显示中'),
                 onToggle: () => toggleHidden(id),
               }),
@@ -22162,7 +22228,7 @@ window.__ModuleLoader__.load({
             }, '跟随主题')),
           h(GRow, {
             label: '透明度',
-            hint: '0% 全透明，100% 完全不透明；默认 50%',
+            hint: '0% 完全不透明，100% 全透明；默认 50%',
           },
             h('input', {
               type: 'range', min: 0, max: 100, step: 5, className: 'roost-pf-alpha',
@@ -22170,6 +22236,15 @@ window.__ModuleLoader__.load({
               onChange: (e) => patch({ cardBg: { ...cardBg, alpha: Number(e.target.value) } }),
             }),
             h('span', { className: 'roost-g-unit' }, `${cardBg.alpha}%`)),
+          h(GRow, {
+            label: '扩展页面跟随主题',
+            hint: '打开后，扩展自带的页面会收到面板的强调色与卡片底色；扩展自己的 CSS 要用这些变量才会变',
+          },
+            h(Switch, {
+              on: uiPref.extTheme === true, label: '扩展页面跟随主题',
+              title: uiPref.extTheme === true ? '已跟随' : '关闭（扩展用自己原来的样式）',
+              onToggle: () => patch({ extTheme: uiPref.extTheme !== true }),
+            })),
         ),
 
         /* 04 动效 */
@@ -22361,18 +22436,20 @@ window.__ModuleLoader__.load({
        * `NAV_GROUPS.system` 把 `connect` 排在首位，实际渲染成倒数第二，
        * `SYSTEM_SEG` 的分段标记跟着错位（第三轮 A1）。
        *
-       * 扩展页（`ext:*`）不在静态声明里，按 `extPages` 顺序接在组内末尾，
-       * 且**不参与用户排序**（它们的 id 不稳定，排了也是白排）。
+       * 扩展页（`ext:*`）不在静态声明里，和静态页一起参与组内排序
+       * （2026-11-24：个性化页已能排/藏扩展页，这里得跟着用同一份顺序，
+       *  否则「排了没反应」）。卸载后偏好里的残留 id 不在 dynamicTabs 里，
+       *  自然被 filter 掉。
        */
       const tabsOfGroup = (g) => {
         if (!g) return []
-        const declaredIds = g.tabs.filter((id) => dynamicTabs.some(([tid]) => tid === id))
-        const ordered = orderTabs(g, declaredIds, uiPref)
+        const extIds = dynamicTabs
+          .filter(([id]) => id.startsWith('ext:') && (navGroupOf(id, extPages)?.id || '') === g.id)
+          .map(([id]) => id)
+        const ids = g.tabs.filter((id) => dynamicTabs.some(([tid]) => tid === id)).concat(extIds)
+        return orderTabs(g, ids, uiPref)
           .map((id) => dynamicTabs.find(([tid]) => tid === id))
           .filter(Boolean)
-        const ext = dynamicTabs.filter(([id]) =>
-          id.startsWith('ext:') && (navGroupOf(id, extPages)?.id || '') === g.id)
-        return ordered.concat(ext)
       }
 
       /**
@@ -22933,17 +23010,29 @@ window.__ModuleLoader__.load({
        */
       const accent = accentOf(uiPref.accent)
       const cardPref = readCardBg(uiPref.cardBg)
-      /** 颜色已在 readCardBg 里限定为 hex，这里只拼进 color-mix，不留注入口 */
-      const cardFill = cardPref.color
-        ? `color-mix(in srgb, ${cardPref.color} ${cardPref.alpha}%, transparent)`
-        : `color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) ${cardPref.alpha}%,transparent))`
+      /** 偏好存的是「透明度」（越高越透明），CSS 拼色要的是「不透明度」 */
+      const opacity = 100 - cardPref.alpha
+      /**
+       * 颜色已在 readCardBg 里限定为 hex，这里只拼进 color-mix，不留注入口。
+       * 跟随主题时强调色以默认 50% 不透明度时的 4% 为基准按比例缩放：
+       * 不缩放则拉到透明仍留一层色，缩错基准又和默认值对不上。
+       * 全透明直接给 transparent，不走 color-mix，避免任何浮点残留。
+       */
+      const cardFill = cardPref.alpha === 100
+        ? 'transparent'
+        : cardPref.color
+          ? `color-mix(in srgb, ${cardPref.color} ${opacity}%, transparent)`
+          : `color-mix(in srgb,var(--accent) ${Math.round(8 * opacity) / 100}%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) ${opacity}%,transparent))`
       /** 默认值（跟随主题 + 50%）不注入，让顶部 CSS 的 --card-fill 独自兜底 */
       const rootStyle = {
         ...(accent.dark ? { '--roost-accent': accent.dark, '--roost-accent-light': accent.light } : {}),
         ...((cardPref.color || cardPref.alpha !== 50) ? { '--roost-card-fill': cardFill } : {}),
       }
       const finalStyle = Object.keys(rootStyle).length ? rootStyle : undefined
-      const rootClass = 'roost-root' + (uiPref.anim === false ? ' no-anim' : '')
+      /** 全透明时连描边和投影也撤掉，否则只剩一圈边框，看着像没透明 */
+      const rootClass = 'roost-root'
+        + (uiPref.anim === false ? ' no-anim' : '')
+        + (cardPref.alpha === 100 ? ' card-transparent' : '')
 
       /**
        * 首次接入向导：新装 / 升级后 `needed=true`，整棵面板树都不挂，
@@ -23092,7 +23181,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'roost-body-inner' + (['overview', 'memory', 'people'].includes(tab) ? ' is-data-view' : '') },
             tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
           /** 个性化：偏好状态在 RoostPage（`uiPref`），这里只传下去 */
-          tab === 'personalize' ? h(PersonalizeTab, { uiPref, setPrefs, toast }) : null,
+          tab === 'personalize' ? h(PersonalizeTab, { uiPref, setPrefs, toast, extPages }) : null,
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }) : null,
           /** A6：接入提成正门；隐藏页 setup 与 ?tab=setup 深链原样保留，两边同一份内容 */
           tab === 'connect'
@@ -23120,7 +23209,21 @@ window.__ModuleLoader__.load({
           tab === 'ext-market' ? h(ExtMarketTab, { toast }) : null,
           tab === 'ext-api' ? h(ExtApiTab, { toast }) : null,
           /** 6.1：扩展声明的页面。tab key 形如 `ext:<id>`，不在静态 TABS 里 */
-          String(tab).startsWith('ext:') ? h(ExtUiPage, { id: String(tab).slice(4), toast }) : null,
+          String(tab).startsWith('ext:')
+            ? h(ExtUiPage, {
+                id: String(tab).slice(4), toast,
+                /**
+                 * 扩展页面跟随主题：把已经算好的强调色/卡片底递过去。
+                 * cardFill 里的 `var(--accent)` 在 iframe 里取不到宿主变量，
+                 * 这里换成实际 hex；`--dsw-alias-bg-l1` 自带 fallback 链，留着即可。
+                 */
+                themeVars: uiPref.extTheme === true ? {
+                  '--accent': accent.dark,
+                  '--accent-light': accent.light,
+                  '--card-fill': cardFill.replace(/var\(--accent\)/g, accent.dark),
+                } : null,
+              })
+            : null,
           tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat, setTab, config, saveCfg }) : null,
           /** 2.3：与记忆页并列的两个入口，同一份 mem，不复制状态 */
           tab === 'people' ? h(PeopleTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,

@@ -2754,28 +2754,80 @@ test('卡片背景偏好：默认 50%，颜色与透明度分开校验，坏字�
   assert.equal(p.cardBg.color, '', '非 hex 颜色不能进 CSS，防偏好 JSON 注入')
   assert.equal(p.cardBg.alpha, 100, '超范围透明度夹到 100')
   assert.equal(p.accent, 'teal', '坏字段不能把别的偏好一起丢掉')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("hint: '0% 完全不透明，100% 全透明；默认 50%'"),
+    '滑杆文案必须是越高越透明，不能写成不透明度')
 })
 
 test('卡片背景：根节点注入 --roost-card-fill，自定义颜色与透明度都生效', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
-  const styleOf = (pref) => {
+  const viewOf = (pref) => {
     store['roost.ui.v1'] = JSON.stringify(pref)
     store['roost.tab'] = 'personalize'
     rt.reset()
-    return expand(mod.RoostPage(), rt).props.style
+    return expand(mod.RoostPage(), rt)
   }
+  const styleOf = (pref) => viewOf(pref).props.style
   const theme = styleOf({})
   assert.equal(theme?.['--roost-card-fill'], undefined,
     '默认偏好不注入覆盖值，交给 CSS 的 50% 默认值兜底')
 
+  /* 透明度 80 = 不透明度 20；强调色以默认 50% 时的 4% 为基准缩到 1.6% */
   const alphaOnly = styleOf({ cardBg: { alpha: 80 } })
-  assert.match(alphaOnly['--roost-card-fill'], /var\(--accent\).*80%,transparent\)\)$/,
-    '只改透明度时，颜色仍回落主题色')
+  assert.match(alphaOnly['--roost-card-fill'], /var\(--accent\) 1\.6%,/,
+    '强调色必须随不透明度一起缩，否则拉到透明仍留一层底色')
+  const backToDefault = styleOf({ cardBg: { alpha: 50 } })
+  assert.equal(backToDefault?.['--roost-card-fill'], undefined,
+    '手动拉回默认 50% 仍交给 CSS 兜底，不会和默认值对不上')
+  assert.match(alphaOnly['--roost-card-fill'], /20%,transparent\)\)$/,
+    '透明度越高，注入的不透明度越低')
 
   const custom = styleOf({ cardBg: { color: '#123456', alpha: 35 } })
-  assert.equal(custom['--roost-card-fill'], 'color-mix(in srgb, #123456 35%, transparent)',
+  assert.equal(custom['--roost-card-fill'], 'color-mix(in srgb, #123456 65%, transparent)',
     '自选颜色与透明度要独立生效，且不会写进文字样式')
+
+  const opaque = styleOf({ cardBg: { alpha: 0 } })
+  assert.match(opaque['--roost-card-fill'], /100%,transparent\)\)$/,
+    '透明度 0 应该是完全不透明')
+  assert.ok(!viewOf({ cardBg: { alpha: 0 } }).props.className.includes('card-transparent'),
+    '完全不透明时不能加全透明类')
+
+  const clear = viewOf({ cardBg: { alpha: 100 } })
+  assert.equal(clear.props.style['--roost-card-fill'], 'transparent',
+    '透明度 100 直接给 transparent，不留 color-mix 浮点残色')
+  assert.match(clear.props.className, /card-transparent/,
+    '全透明时加标记类，连边框和阴影一起撤掉')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.match(src, /\.roost-root\.card-transparent \.roost-sec:not\(\.roost-plain\),[\s\S]*?background:transparent;border-color:transparent;box-shadow:none\}/,
+    '全透明类必须同时清掉背景、描边与投影，否则看着仍像有卡片')
+})
+
+test('扩展页管理 + 跟随主题：偏好放行 ext key，个性化页能排/藏，iframe 收到主题', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  /** 偏好校验放行 ext:<id> 且只认安全 key */
+  assert.match(src, /const isPrefTabId = \(id\) =>[\s\S]*?\^ext:\[A-Za-z0-9_-\]\+\$/,
+    '偏好要放行形如 ext:xxx 的安全 key')
+  assert.equal(/new Set\(ALL_TABS\)/.test(src.slice(src.indexOf('function readUiPref'), src.indexOf('function writeUiPref'))), false,
+    'readUiPref 不能再拿静态清单卡掉扩展页')
+  /** PersonalizeTab 接 extPages，扩展页并进分组列表 */
+  assert.match(src, /function PersonalizeTab\(\{ uiPref, setPrefs, toast, extPages = \[\] \}\)/)
+  assert.match(src, /h\(PersonalizeTab, \{ uiPref, setPrefs, toast, extPages \}\)/,
+    '调用点要把 extPages 传进个性化页')
+  assert.match(src, /const groupIds = g\.tabs\.concat\(groupExt\.map\(\(\[id\]\) => id\)\)/,
+    '扩展页要和静态页一起参与组内排序/隐藏')
+  assert.equal(/扩展页不在这里排/.test(src), false, '旧口径注释要清掉')
+  /** 导航也按同一份顺序排扩展页，别"排了没反应" */
+  assert.match(src, /const tabsOfGroup = \(g\) => \{[\s\S]*?const extIds = dynamicTabs[\s\S]*?orderTabs\(g, ids, uiPref\)/,
+    '导航的扩展页顺序要跟个性化页用同一份 order')
+  /** iframe 主题发送：onLoad + 白名单变量 */
+  assert.match(src, /onLoad: sendTheme/, 'iframe 加载后才发主题，垫片监听这时才挂上')
+  assert.match(src, /type: 'roost:theme', vars: themeVars/, '主题消息走独立类型，不碰 quick 回信')
+  assert.match(src, /'--card-fill': cardFill\.replace\(\/var\\\(--accent\\\)\/g, accent\.dark\)/,
+    '卡片底里的 var(--accent) 要换成实际值，iframe 里取不到宿主变量')
+  /** 个性化页有开关 */
+  assert.match(src, /label: '扩展页面跟随主题'[\s\S]*?onToggle: \(\) => patch\(\{ extTheme: uiPref\.extTheme !== true \}\)/,
+    '个性化页要有扩展跟主题的开关')
 })
 
 test('G8 面板批量计划：按 scope 拆开、跳过无 id 事实、tier 白名单与 200 上限', () => {
@@ -3027,6 +3079,30 @@ test('GPT 语音面板按扩展页面收敛字段与交互，但仍保持单页'
   assert.ok(src.includes("put('gptSovits.autoStart', on)"), '自启动开关要写 gptSovits.autoStart')
   assert.ok(src.includes('随 DSH 启动 GPT 进程'), '面板缺少自启动开关文案')
   assert.ok(src.includes('重启 DSH 后生效'), '要说清是下次重启才生效，免得用户盯着当前进程等')
+})
+
+test('已安装页每行有停用/卸载入口；市场 danger 按钮文字不发淡', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  /* 已安装页：data.rows 那一段（从「已装扩展」到「合计预算」）必须带两个动作 */
+  const block = src.slice(src.indexOf("'已装扩展'"), src.indexOf('合计预算'))
+  assert.ok(block.includes("setRevokeAsk(x.id)"), '已安装页缺停用入口')
+  assert.ok(block.includes("marketAct('extensions.market.remove', x.id"), '已安装页缺卸载入口')
+  assert.ok(block.includes("x.foreign ? { force: true } : {}"), '手写目录卸载要带 force 先备份')
+  assert.ok(block.includes("x.foreign ? '删除' : '卸载'"), '手写目录应显示「删除」而非「卸载」')
+  /* 卸载/停用不能和市场页的 scope/revoke 弹窗叠成两层遮罩 */
+  assert.ok(block.includes('!!scopeAsk || !!revokeAsk'), '动作要被其它确认弹窗挡住')
+  /*
+   * danger 按钮：以前写 color:inherit 盖掉了「能按的按钮用主文字色」，
+   * 市场里卸载/重装继承到淡色父级就像禁用。现在只改边框，颜色交给
+   * .roost-btn:not(:disabled) 和 .roost-btn.armed。
+   */
+  assert.ok(/^\.roost-btn\.danger\{border-color:var\(--line\)\}$/m.test(src),
+    'danger 按钮只该改边框，不能写 color:inherit')
+  const dangerRules = src.split('\n').filter((l) => /^\s*\.roost-btn\.danger\{[^}]*\}\s*$/.test(l))
+  assert.deepEqual(dangerRules, ['.roost-btn.danger{border-color:var(--line)}'],
+    'danger 只剩一条规则、且不覆盖主文字色（以 * 开头的注释行不算）')
+  assert.ok(src.indexOf('.roost-btn:not(:disabled){color:var(--dsw-alias-label-primary,inherit)}') < src.indexOf('.roost-btn.danger'),
+    '主文字色规则要在 danger 之前，armed 白字在之后')
 })
 
 test('接入步骤：普通分节 + 状态徽章，不再有左侧圆圈和竖线轨道', () => {
