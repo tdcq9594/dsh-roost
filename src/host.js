@@ -3448,6 +3448,11 @@ export function apply(ctx) {
       rec: { ...rec, rerank: rerankMode },
       entities,
       temporal: temporal ? { label: temporal.label, from: temporal.from, to: temporal.to, rest: temporal.rest } : null,
+      /**
+       * G11：dry 预览才带出实体路权重——0.3=邻接联想（二跳），缺省=直接关联（一跳）。
+       * 正常轮次完全不带这个字段，零行为变化；仅给 recall-preview 精确标 hop 用。
+       */
+      ...(dry ? { entityWeights: Object.fromEntries(entityWeights) } : {}),
     };
   };
 
@@ -11079,9 +11084,9 @@ export function apply(ctx) {
             /**
              * 3.4 结构化投影（对齐 aurabot /memory/assoc/preview 的 hop/via/counts）。
              * 现有 hits 保持原样（面板已在用），另开一份给要"第几跳/从谁联想"的展示用。
-             * hop 只有 0（直接）/1（经实体联想）——我方实体路就一跳，不编造多跳。
+             * hop 0（直接）/1（实体直接关联）/2（实体邻接二跳，权重0.3）；不编造三跳。
              */
-            projection: projectRecallPreview(r),
+            projection: projectRecallPreview({ ...r, entityWeights: r.entityWeights || {} }),
           });
         } catch (e) {
           return send(res, 200, { ok: false, message: `预览失败：${e.message}` });

@@ -6064,7 +6064,8 @@ select.roost-input{color-scheme:dark}
                     : h('div', { className: 'roost-empty' }, '没命中。换个说法再试，或检查下面的参数。'),
                   pvResult.projection?.counts
                     ? h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginTop: 4 } },
-                        `直接命中 ${pvResult.projection.counts.direct} 条 · 联想带出 ${pvResult.projection.counts.hop1} 条（我方联想只有一跳）`)
+                        `直接命中 ${pvResult.projection.counts.direct} 条 · 一跳 ${pvResult.projection.counts.hop1} 条`
+                        + ` · 二跳 ${pvResult.projection.counts.hop2 || 0} 条（二跳=实体邻接联想，需开「关系联想」；最多两跳，不编造三跳）`)
                     : null,
                 )
               : null,
