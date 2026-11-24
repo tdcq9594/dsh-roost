@@ -847,3 +847,21 @@ test('qq_post_thread：宿主给的 say 原样回给模型，不能被吞掉', a
   assert.equal(r.say, say);
   assert.deepEqual(r.todo, ['勾论坛']);
 });
+
+test('模型可见文案：qq_send 描述与报错只教一套语音写法，且随 TTS 开关门控', async () => {
+  const on = make({ cfg: { tts: { enabled: true } } }).send;
+  assert.doesNotMatch(on.description, /<<say/i, '工具描述不要教旧语音写法');
+  assert.match(on.description, /<voice>要念的内容<\/voice>/);
+
+  const off = make({ cfg: { tts: { enabled: false } } }).send;
+  assert.doesNotMatch(off.description, /<voice>/, 'TTS 关着就不要教语音标记');
+
+  const r = await on.execute({ text: '<<say: 试一句>>' });
+  assert.equal(r.ok, false);
+  assert.doesNotMatch(r.message, /<<say/i, '报错也不要把旧写法再喂给模型');
+  assert.match(r.message, /<voice>要念的内容<\/voice>/);
+
+  const r2 = await off.execute({ text: '<<say: 试一句>>' });
+  assert.equal(r2.ok, false);
+  assert.doesNotMatch(r2.message, /<voice>/, 'TTS 关着连报错都别教语音写法');
+});

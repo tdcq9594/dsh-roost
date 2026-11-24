@@ -441,6 +441,12 @@ function buildSearchDef({ caller, searchOf }) {
  */
 export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null }) {
   const caller = () => callerOf?.() || { chatId: '', kind: '', said: '', hasPayload: false, bucket: '' };
+  /**
+   * 描述是模型唯一能看到的工具契约：TTS 关着就不能教它写语音标记，
+   * 否则它会写、出站层只能降级文字，看起来像「语音发了但文字又发一遍」。
+   * 900/907 两段提示词也按同一个开关门控。
+   */
+  const ttsOn = cfgOf?.()?.tts?.enabled === true;
 
   const send = {
     name: 'qq_send',
@@ -457,8 +463,10 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
        */
       + '这一段里可以带图片和语音标记：`<<image: 路径>>` 让图和这句话排在同一条，'
       + '`<<image-alone: 路径>>` 单独发一条图。'
-      + '发语音用 `<voice>要念的内容</voice>`（宿主 TTS 合成后发语音条）；'
-      + '只有已经有现成音频文件时才用 `<<voice: 路径>>`。'
+      + (ttsOn
+        ? '发语音用 `<voice>要念的内容</voice>`（宿主 TTS 合成后发语音条）；'
+          + '只有已经有现成音频文件时才用 `<<voice: 路径>>`。'
+        : '')
       + '分享视频 / 文章时写 `<<card: 标题|描述|https://链接|https://图片地址>>`：'
       + '卡片单独占一条消息，四项都要有、链接和图片地址必须是 https，一轮最多一张。',
     /** 扁平参数表（DSH defineTool 原生形状），普通注册时由 `shapeTool` 转换 */
@@ -509,11 +517,12 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
       if (DOWNSTREAM_RE.test(t) || INLINE_IMAGE_RE.test(t)) {
         return {
           ok: false,
-          message: '`<<say>>` / `<<button>>` / `<<silence>>` 不能通过 qq_send 发，'
-            + '标准 markdown 图片 `![](路径)` 也不行。'
-            + '图片用 `<<image: 路径>>`（和这句话同条）或 `<<image-alone: 路径>>`（单独一条），'
-            + '语音用 `<voice>要念的内容</voice>`（已有音频文件才用 `<<voice: 路径>>`）'
-            + '——这三个写在**同一次 qq_send 的 text 里**就行，'
+          message: '这个标记不能通过 qq_send 发，标准 markdown 图片 `![](路径)` 也不行。'
+            + '图片用 `<<image: 路径>>`（和这句话同条）或 `<<image-alone: 路径>>`（单独一条）'
+            + (ttsOn
+              ? '，语音用 `<voice>要念的内容</voice>`（已有音频文件才用 `<<voice: 路径>>`）'
+              : '')
+            + '——这些都写在**同一次 qq_send 的 text 里**就行，'
             + '不要改写成正文（调过 qq_send 之后正文不会发出去）。',
         };
       }

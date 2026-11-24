@@ -262,18 +262,51 @@ test('problems()：卸载残留的空目录不算坏清单，扫描时顺手清�
   /** Windows 上 rmSync 删内容留空壳的现场：没有 plugin.json，却被当成「清单不是对象」 */
   const r = createExtRegistry({ dir: home, log: () => {} });
   assert.deepEqual(r.problems(), [], '空残留不该报「plugin.json 不是对象」');
-  assert.deepEqual(r.list(), [], '空残留不该进已装列表');
   assert.equal(fs.existsSync(leftover), false, '句柄释放后应把空壳目录清掉');
 });
 
-test('problems()：无清单但有其它文件的目录跳过，不误删用户文件', (t) => {
+test('list()：没先调 problems 也能清掉卸载残留的空目录', (t) => {
+  const home = tmpHome(t);
+  const leftover = join(home, 'extensions', 'voice-reply');
+  fs.mkdirSync(leftover, { recursive: true });
+  const r = createExtRegistry({ dir: home, log: () => {} });
+  assert.deepEqual(r.list(), [], '空残留不该进已装列表');
+  assert.equal(fs.existsSync(leftover), false, 'list() 自己的 prune 分支真跑到');
+});
+
+test('problems()：无清单但有其它文件的目录报原因，不误删用户文件', (t) => {
+  const home = tmpHome(t);
+  const leftover = join(home, 'extensions', 'voice-reply');
+  fs.mkdirSync(leftover, { recursive: true });
+  fs.writeFileSync(join(leftover, 'notes.txt'), 'user data', 'utf8');
+  /** 市场装的才报坏：有 .source.json，说明这个目录本该有 manifest */
+  fs.writeFileSync(join(leftover, '.source.json'), JSON.stringify({ repo: 'm', version: '1.0.0' }));
+  const r = createExtRegistry({ dir: home, log: () => {} });
+  const p = r.problems();
+  assert.equal(p.length, 1, '面板要告诉用户这个目录为什么没出现');
+  assert.equal(p[0].id, 'voice-reply');
+  assert.match(p[0].errors.join(' '), /缺 plugin\.json/);
+  assert.deepEqual(r.list(), []);
+  assert.equal(fs.existsSync(join(leftover, 'notes.txt')), true, '不是扩展目录就不能删');
+});
+
+test('problems()：用户手建的半成品目录不刷红', (t) => {
   const home = tmpHome(t);
   const leftover = join(home, 'extensions', 'voice-reply');
   fs.mkdirSync(leftover, { recursive: true });
   fs.writeFileSync(join(leftover, 'notes.txt'), 'user data', 'utf8');
   const r = createExtRegistry({ dir: home, log: () => {} });
-  assert.deepEqual(r.problems(), []);
-  assert.equal(fs.existsSync(join(leftover, 'notes.txt')), true, '不是扩展目录就不能删');
+  assert.deepEqual(r.problems(), [], '没有 .source.json 就不是装坏的扩展');
+  assert.equal(fs.existsSync(join(leftover, 'notes.txt')), true);
+});
+
+test('isForeign()：非法 id 不是手写扩展', (t) => {
+  const home = tmpHome(t);
+  const dir = join(home, 'extensions', '.hidden-one');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(join(dir, 'plugin.json'), JSON.stringify(manifest('bili'), null, 2));
+  const r = createExtRegistry({ dir: home, log: () => {} });
+  assert.equal(r.isForeign('.hidden-one'), false, '与 problems()/list() 的 ID 判据一致');
 });
 
 /**

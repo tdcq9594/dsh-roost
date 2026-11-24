@@ -345,11 +345,28 @@ export function parseOutboundActions(raw, opts = {}) {
   const wantSkip = /<skip>/i.test(out);
   if (wantSkip) out = out.replace(/<skip>/gi, '');
 
+  /**
+   * 语音标记混写时只保留「要念的文字」：
+   * `<voice>` 里再套 `<<voice: 路径>>` 不能把路径念出来；成对 say 里再套 `<voice>`
+   * 会留下一条空 say（发一条 0 字节语音）。这里统一剥嵌套、丢空值。
+   */
+  const cleanSayValue = (v) => String(v ?? '')
+    .replace(/<voice>([\s\S]*?)<\/voice>/gi, '$1')
+    .replace(/<<voice[:：][\s\S]*?>>/gi, '')
+    .replace(/<<say[:：]\s*([\s\S]*?)>>/gi, '$1')
+    .trim();
+
   const take = (re, type, hasValue = true) => {
     const ranges = codeRanges(out);
     out = out.replace(re, (...args) => {
       const offset = args[args.length - 2];
       if (typeof offset === 'number' && inCode(offset, ranges)) return args[0];
+      if (type === 'say') {
+        const value = cleanSayValue(args[1]);
+        /** 空语音等价于没说，不能合成出一条空音频 */
+        if (value) actions.push({ type, value });
+        return '';
+      }
       actions.push(hasValue ? { type, value: String(args[1] ?? '').trim() } : { type });
       return '';
     });
@@ -952,24 +969,44 @@ export function createActionRunner({
            * 用户还能看到内容；静默丢弃会让她这一句凭空消失。
            */
           /**
+           * 按 aurabot 的口径：语音只是「这句话的发送形态」，失败/关掉都必须还能说话。
+           * 静默吞掉是最坏的分支——用户看到的是她明明回了、那句却凭空消失。
+           */
+          let q = null;
+          const sendAsText = async (why) => {
+            q?.undo?.();
+            log(`${why}，这句改发文字`);
+            const rt = await ch.send({ scene, kind, target, text: a.value, msgId, receivedAt, eventId, isWakeup });
+            if (rt?.ok) { mediaSent += 1; onSent(); }
+          };
+          /** TTS 关闭时连额度都不该扣；status 拿不到时保守当成开着 */
+          let enabled = true;
+          try {
+            const st = await tts.status?.();
+            enabled = !st || st.enabled !== false;
+          } catch {}
+          if (!enabled) { await sendAsText('语音合成没启用'); continue; }
+
+          /**
            * `bucket` 决定用哪一档额度（主人那档更松，见 `quota` 的 `byBucket`）。
            * 以前不传，面板上「主人单独一套额度」配了也不生效——静默失效。
            */
-          const q = quota && typeof quota.charge === 'function'
+          q = quota && typeof quota.charge === 'function'
             ? quota.charge(senderId
               ? { feature: 'voice', per: 'person', id: String(senderId), bucket }
               : { feature: 'voice', per: 'chat', id: String(target), bucket })
             : null;
-          if (q && q.ok === false) {
-            log(`语音条额度用完（${q.message}），这句改发文字`);
-            const rt = await ch.send({ scene, kind, target, text: a.value, msgId, receivedAt, eventId, isWakeup });
-            if (rt?.ok) { mediaSent += 1; onSent(); }
+          if (q && q.ok === false) { await sendAsText(`语音条额度用完（${q.message}）`); continue; }
+
+          let audio;
+          try {
+            audio = await tts.synthesize(a.value);
+          } catch (e) {
+            await sendAsText(`语音没合成出来（${e?.message ?? e}）`);
             continue;
           }
-          /** TTS 没启用时旧实现是「连请求都不发」，这里同样静默跳过 */
-          const audio = await tts.synthesize(a.value);
           const buf = Buffer.from(audio?.audio ?? []);
-          if (!buf.length) throw new Error('合成结果为空');
+          if (!buf.length) { await sendAsText('合成结果为空'); continue; }
           const ext = /\bwav\b/i.test(String(audio?.contentType ?? '')) ? '.wav' : '.mp3';
           const file = path.join(os.tmpdir(), `roost-say-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
           try {
@@ -978,8 +1015,20 @@ export function createActionRunner({
           } finally {
             await rm(file, { force: true }).catch(() => {});
           }
-          /** 合成成功但发失败了，把刚扣的额度退回去——那次语音并没有真的出去 */
-          if (sent && sent.ok === false && q?.undo) q.undo();
+          /** 合成成功但 QQ 没发出去：退额度并改发文字，和其余失败分支同一口径 */
+          if (sent && sent.ok === false) {
+            await sendAsText(`语音没发出去（${sent?.message ?? '未知原因'}）`);
+            continue;
+          }
+        } else if (a.type === 'say') {
+          /**
+           * 调用方没注入 TTS / 通道不支持语音时也不能闷声吞掉——那句话是用户真正要说的内容。
+           * 生产宿主总会注入 tts，这条是给旧调用方与测试替身的兜底。
+           */
+          log('没有语音合成通道，这句改发文字');
+          const rt = await ch.send({ scene, kind, target, text: a.value, msgId, receivedAt, eventId, isWakeup });
+          if (rt?.ok) { mediaSent += 1; onSent(); }
+          continue;
         }
         if (sent?.ok) { mediaSent += 1; onSent(); used(a); }
         else if (sent) log(`${a.type} 没发出去：${sent?.message ?? '未知原因'}`);

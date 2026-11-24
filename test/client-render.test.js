@@ -53,6 +53,8 @@ function loadClient(react) {
       },
     },
   }
+  /** 暴露给需要模拟视口的测试；client.js 拿到的是这个 win，不是 globalThis.window */
+  globalThis.__roostClientWindow = win
   // new Function 在全局作用域里跑，所以 localStorage / setInterval 从 globalThis 取
   // eslint-disable-next-line no-new-func
   new Function('window', src)(win)
@@ -75,9 +77,9 @@ function expand(node, rt) {
     rt.reset()
     const out = expand(node.type(node.props || {}), rt)
     /**
-     * 自定义下拉（Dropdown）把 option 留在 props.children 里、点开才画弹层；
-     * 展开后的树看不到这些标签。测试用的摊平函数把原始 children 也带上，
-     * 这样「下拉里能选到某项」仍可断言，又不改生产代码去渲染隐藏 option。
+     * 自定义下拉（Dropdown）把 option 留在 props.children 里、点开才画弹层。
+     * 这里只把原始 props 单独挂在 __sourceProps 上，供「选项数据存在」的窄断言使用；
+     * 不能并进 textOf，否则弹层根本没渲染也会让页面级文案断言假通过。
      */
     if (out && typeof out === 'object' && !Array.isArray(out)) out.__sourceProps = node.props
     return out
@@ -91,11 +93,16 @@ function textOf(node) {
   if (typeof node === 'string' || typeof node === 'number') return String(node)
   if (Array.isArray(node)) return node.map(textOf).join('')
   const kids = node.props?.children
+  return kids ? (Array.isArray(kids) ? kids.map(textOf).join('') : textOf(kids)) : ''
+}
+
+/** 只读 Dropdown 的原始 option 数据；用于「下拉里能不能选到某项」，不代表已渲染 */
+function dropdownOptionText(node) {
+  if (node == null || node === false) return ''
+  if (Array.isArray(node)) return node.map(dropdownOptionText).join('')
   const sourceKids = node.__sourceProps?.children
-  return [kids, sourceKids]
-    .filter(Boolean)
-    .map((k) => (Array.isArray(k) ? k.map(textOf).join('') : textOf(k)))
-    .join('')
+  const own = sourceKids ? (Array.isArray(sourceKids) ? sourceKids.map(textOf).join('') : textOf(sourceKids)) : ''
+  return own + dropdownOptionText(node.props?.children)
 }
 
 const store = {}
@@ -1189,7 +1196,7 @@ test('前端渲染：能力页要能显示四档结论，且缺数据不炸', ()
   assert.ok(txt.includes('工具（只填想限的）'), '缺工具配额组')
   assert.ok(txt.includes('web_search'), '已配的工具没渲染')
   // 未配的工具不铺在列表里（那样又变回一米长），但要能从下拉里选到
-  assert.ok(txt.includes('gh_search'), '没配过的工具也要能从下拉里选到')
+  assert.ok(dropdownOptionText(tree).includes('gh_search'), '没配过的工具也要能从下拉里选到')
   assert.ok(JSON.stringify(tree).includes('＋ 给某个工具加次数限制'), '缺「添加工具」下拉')
   assert.ok(txt.includes('不限'), '留空的含义要写出来')
   // 按档位设额度：下拉在、单独设过的档位要能看出来
@@ -1944,6 +1951,7 @@ test('2.3/4.3：备份页五节 01–05，导出 / 待生效 / 清单 / 不带�
   const tree = expand(mod.BackupTab(tabProps()), rt)
   assert.deepEqual(numsOf(tree), ['01', '02', '03', '04', '05'], '备份页编号应 01–05 连续')
   const txt = textOf(tree)
+  const options = dropdownOptionText(tree)
   for (const must of [
     '导出备份（zip）', 'config.json', '导入备份（zip）', '重启 DSH 才换上',
     '没有待生效的恢复', '定时备份', '还原这一份', '用它恢复',
@@ -1951,7 +1959,7 @@ test('2.3/4.3：备份页五节 01–05，导出 / 待生效 / 清单 / 不带�
     /** 4.3/4.4 第五节 */
     '每天自动备份', '留最近几份', '立即备份并推送', '口令没配就拒推', 'Gitee',
   ]) {
-    assert.ok(txt.includes(must), `备份页缺少「${must}」`)
+    assert.ok(txt.includes(must) || options.includes(must), `备份页缺少「${must}」`)
   }
 })
 
@@ -2415,7 +2423,7 @@ test('发帖页：频道 / 子频道两个下拉要真的列出东西，非论�
   const mod = loadClient(rt.React)
   const h = rt.React.createElement
   rt.reset()
-  const txt = textOf(expand(h(mod.ChannelPostTab, {
+  const tree = expand(h(mod.ChannelPostTab, {
     chats: [],
     toast: () => {},
     setTab: () => {},
@@ -2428,17 +2436,19 @@ test('发帖页：频道 / 子频道两个下拉要真的列出东西，非论�
         { id: '901', name: '日记本', type: 10007, isForum: true },
       ],
     },
-  }), rt))
+  }), rt)
+  const txt = textOf(tree)
+  const options = dropdownOptionText(tree)
 
   /**
    * 主人反馈过：「发在哪个频道、哪个子频道怎么都没有选项」。
    * 以前只列论坛版块，非论坛的子频道一个都不显示，看起来就像"我的子频道没被认出来"。
    */
-  assert.ok(txt.includes('我的频道'), '频道下拉要有频道名')
-  assert.ok(txt.includes('综合讨论'), '非论坛子频道也要列出来')
-  assert.ok(txt.includes('发不了'), '要标注为什么选不了')
-  assert.ok(txt.includes('日记本'), '论坛子频道要在列表里')
-  assert.ok(txt.includes('可以发'), '论坛子频道要标出可用')
+  assert.ok(options.includes('我的频道'), '频道下拉要有频道名')
+  assert.ok(options.includes('综合讨论'), '非论坛子频道也要列出来')
+  assert.ok(txt.includes('发不了') || options.includes('发不了'), '要标注为什么选不了')
+  assert.ok(options.includes('日记本'), '论坛子频道要在列表里')
+  assert.ok(txt.includes('可以发') || options.includes('可以发'), '论坛子频道要标出可用')
 })
 
 test('发帖页：体检没过时，界面上直接写清「点哪里」（不靠 hover）', () => {
@@ -2485,12 +2495,14 @@ test('5.2 排障页：级别 / 模块筛选与自动刷新开关', () => {
     { time: '10:00:01', level: 'info', area: 'turn', text: '正常一轮' },
   ]
   rt.reset()
-  const txt = textOf(expand(h(mod.LogsTab, {
+  const tree = expand(h(mod.LogsTab, {
     logs, auto: true, onToggleAuto: () => {}, onReload: () => {},
-  }), rt))
+  }), rt)
+  const txt = textOf(tree)
+  const options = dropdownOptionText(tree)
   for (const must of ['全部级别', '调试', '信息', '警告', '错误', '全部模块', '自动刷新', '刷新',
     '显示 2 / 2 条', '[update]', '[turn]']) {
-    assert.ok(txt.includes(must), `排障页缺「${must}」`)
+    assert.ok(txt.includes(must) || options.includes(must), `排障页缺「${must}」`)
   }
 
   /** 关掉自动刷新要有明确提示，不能让人以为还在刷 */
@@ -2563,8 +2575,10 @@ test('页头开关：走 features.get / features.patch，id 与后端注册的�
   assert.match(src, /quick\('features\.patch'/, '点击要走 features.patch')
   assert.match(src, /'botEnabled'/, '总开关的 id 是 botEnabled（避开顶层 enabled 撞名）')
   assert.match(src, /'dryRun'/, '试运行的 id 是 dryRun')
-  assert.match(src, /id === 'dryRun' && on === true[\s\S]{0,260}window\.confirm/,
-    '打开试运行前要弹窗警告「不会再真的发消息」')
+  assert.match(src, /id === 'dryRun' && on === true && !alreadyConfirmed/,
+    '打开试运行必须先过确认，不能绕开 UI')
+  assert.match(src, /dryRunConfirm[\s\S]{0,420}h\(ConfirmModal/,
+    '试运行开关用面板同款 ConfirmModal，不依赖 webview 的原生 confirm')
 });
 
 test('前端渲染：图库页有「批量选择」入口，不再靠缩略图上的小复选框', () => {
@@ -2716,7 +2730,7 @@ test('视觉升级：竖线与卡片底只走自选强调色，不落对方配�
     '标题竖线两端都要来自 --accent，不能掺白色或固定色')
   assert.ok(src.includes('background:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1,'),
     '卡片底要在宿主主题底色上混入自选强调色，不能写死')
-  assert.ok(src.includes(')) 88%,transparent))'),
+  assert.ok(src.includes(')) 50%,transparent))'),
     '卡片底只让背景透一点，不用 opacity 把里面的文字数据一起透明掉')
   assert.ok(src.includes('--tone-foam-2:color-mix(in srgb,var(--accent) 20%,transparent)'),
     '淡色令牌必须从 --accent 派生')
@@ -2782,8 +2796,8 @@ test('视觉升级：所有下拉栏用圆角自定义下拉，弹层也圆角',
   assert.match(src, /\.roost-dropdown-pop\{[^}]*border-radius:10px/, '弹出层自己画且圆角')
   assert.match(src, /\.roost-dropdown-pop\{[\s\S]*?background:color-mix\(in srgb,var\(--accent\)/, '弹层底色跟自选强调色')
   assert.ok(!src.includes('currentColor 8%,#000'), '弹层回退不能落到黑底黑字')
-  assert.ok(src.includes('var(--dsw-alias-bg-l1, var(--dsw-alias-bg-base, #16181c))'),
-    '弹层底色要退回宿主页面底色，不能靠透明透出背景')
+  assert.ok(src.includes('var(--dsw-alias-bg-l1, var(--dsw-alias-bg-base, var(--roost-pop-bg)))'),
+    '弹层底色要退回宿主页面底色/系统配色兜底，不能靠透明透出背景')
   const lines = src.split(/\r?\n/)
   for (const marker of ['value: tlKind', 'value: tlChat', 'value: mem.chatId ||', 'value: batchTier', 'value: addTier']) {
     const i = lines.findIndex((l) => l.includes(marker))
@@ -2817,9 +2831,21 @@ test('Dropdown：弹层能打开、选项回调 e.target.value、Esc 关闭', ()
     { left: 120, top: 84, width: 110 },
     'fixed 弹层用视口坐标；扣 root 偏移会让侧栏里的弹层飘到左上角',
   )
+  const win = globalThis.__roostClientWindow
+  const savedW = win.innerWidth, savedH = win.innerHeight
+  win.innerWidth = 320; win.innerHeight = 400
+  try {
+    assert.deepEqual(
+      mod.dropdownPos({ left: 300, top: 370, bottom: 390, width: 60 }, {}),
+      { left: 202, top: 126, width: 60 },
+      '靠右下角的按钮：弹层要向左收、翻到上方，不能被视口裁掉',
+    )
+  } finally { win.innerWidth = savedW; win.innerHeight = savedH }
   const calls = []
   const props = {
     value: '', title: '类型',
+    style: { padding: '3px 6px', fontSize: '11px', flex: '1 1 auto' },
+    wrapperStyle: { width: '132px' },
     onChange: (e) => calls.push(e.target.value),
     children: [
       { type: 'option', props: { value: '', children: ['全部类型'] } },
@@ -2828,13 +2854,18 @@ test('Dropdown：弹层能打开、选项回调 e.target.value、Esc 关闭', ()
     ],
   }
   const render = () => { cursor = 0; return mod.Dropdown(props) }
-  const btn = render().props.children[0]
+  const shell = render()
+  assert.equal(shell.props.style.flex, '1 1 auto', '布局键要挂外层，flex 才能伸展')
+  assert.equal(shell.props.style.width, '132px', 'wrapperStyle 挂外层')
+  const btn = shell.props.children[0]
   assert.equal(btn.type, 'button', '触发器是 button，不是原生 select')
+  assert.deepEqual(btn.props.style, { padding: '3px 6px', fontSize: '11px' }, '外观键挂按钮，布局键不混进来')
   btn.props.onClick()
   const opened = render()
   assert.equal(opened.props.children[1]?.props?.className, 'roost-dropdown-pop', '点开要画出自己的弹层')
   const opts = opened.props.children[1].props.children.flat()
   assert.equal(opts.length, 3)
+  assert.match(textOf(opts[1]), /每日摘要/, '弹层里真的渲染出选项文案，不只是 props 里有')
   assert.equal(opts[2].props['aria-disabled'], 'true', '原生 option 的 disabled 要跟到自定义弹层')
   opts[2].props.onClick()
   assert.deepEqual(calls, [], '禁用的选项不该触发回调')
@@ -2842,4 +2873,62 @@ test('Dropdown：弹层能打开、选项回调 e.target.value、Esc 关闭', ()
   assert.deepEqual(calls, ['digest'], '回调必须给 e.target.value，保持原生 select 的契约')
   btn.props.onKeyDown({ key: 'Escape' })
   assert.equal(render().props.children[1], null, 'Esc 应该关掉弹层')
+})
+
+test('Dropdown：当前值恰好是 disabled 项时，键盘 Enter 选中第一个可选', () => {
+  const hooks = []
+  let cursor = 0
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: { ...(props || {}), children } }),
+    useState: (init) => {
+      const k = cursor++
+      if (!(k in hooks)) hooks[k] = typeof init === 'function' ? init() : init
+      return [hooks[k], (v) => { hooks[k] = v }]
+    },
+    useEffect: () => { cursor++ },
+    useCallback: (fn) => { cursor++; return fn },
+    useRef: (v) => { const k = cursor++; if (!(k in hooks)) hooks[k] = { current: v }; return hooks[k] },
+    Fragment: 'fragment',
+  }
+  const mod = loadClient(React)
+  const calls = []
+  const render = () => { cursor = 0; return mod.Dropdown({
+    value: 'off',
+    onChange: (e) => calls.push(e.target.value),
+    children: [
+      { type: 'option', props: { value: '', children: ['全部'] } },
+      { type: 'option', props: { value: 'off', disabled: true, children: ['不可选'] } },
+    ],
+  }) }
+  render().props.children[0].props.onClick()
+  const opened = render()
+  assert.ok(opened.props.children[1], '弹层应打开')
+  opened.props.children[0].props.onKeyDown({ key: 'Enter', preventDefault() {} })
+  assert.deepEqual(calls, [''], '不能停在 disabled 项上让 Enter 变哑巴')
+})
+
+test('ConfirmModal：确认/取消回调可用（试运行弹窗依赖它）', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  let ok = 0, closed = 0
+  const tree = mod.ConfirmModal({
+    title: '打开试运行？',
+    message: '打开后不会再真的发送消息到 QQ',
+    onConfirm: () => { ok += 1 },
+    onClose: () => { closed += 1 },
+  })
+  const buttons = []
+  const visit = (n) => {
+    if (n == null || typeof n !== 'object') return
+    if (Array.isArray(n)) { n.forEach(visit); return }
+    if (n.type === 'button') buttons.push(n)
+    visit(n.props?.children)
+  }
+  visit(tree)
+  assert.ok(textOf(tree).includes('不会再真的发送消息到 QQ'))
+  const confirm = buttons.find((b) => textOf(b) === '确定')
+  const cancel = buttons.find((b) => textOf(b) === '取消')
+  assert.ok(confirm && cancel, '弹层要有确认/取消两个按钮')
+  confirm.props.onClick(); assert.equal(ok, 1)
+  cancel.props.onClick(); assert.equal(closed, 1)
 })

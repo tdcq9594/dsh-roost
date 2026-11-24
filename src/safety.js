@@ -11,6 +11,23 @@
  * 这里全是纯逻辑（不发消息、不读配置），host 只负责把 `send` 接进来。
  */
 
+/**
+ * 命令规则只适用于「能跑系统命令的工具」。
+ *
+ * 默认 quota={} 时安全门终于会每次调用都跑扫描；裸词 `format` / `shutdown` 出现在
+ * `chat_look` / `memory_search` 的普通文本参数里不该触发确认。能力页的 danger 名单
+ * 还包含 `qq_send_file` 这类重动作，那是「要标红」而不是「能跑 shell」，不能混用。
+ */
+const COMMAND_TOOLS = new Set([
+  'bash', 'sh', 'zsh', 'cmd', 'powershell', 'pwsh', 'exec', 'shell', 'shell.exec',
+  'ops_bash', 'run_command', 'terminal', 'system',
+]);
+export function isCommandTool(name) {
+  const n = String(name ?? '').toLowerCase();
+  if (COMMAND_TOOLS.has(n)) return true;
+  return /^mcp__[^_]+__(?:.*_)?(?:exec|bash|cmd|powershell|pwsh|shell)$/.test(n);
+}
+
 /** 规则按「宁可多问一次，不可漏放一条」写；误报的代价只是多回一句确认 */
 /** 递归/强制标记：rm 类规则共用，拆开写比一条巨型正则可靠 */
 const RECURSIVE_GUARD = /(?:^|[\s"'])(?:-[a-zA-Z]*[rRfF][a-zA-Z]*|--recursive|--force|-Recurse|-Force|-R)(?=[\s"']|$)/i;

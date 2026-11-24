@@ -264,13 +264,15 @@ function rmrf(p) {
  */
 function pruneLeftoverDir(p) {
   try {
-    if (fs.existsSync(join(p, MANIFEST_FILE))) return false;
-    if (!fs.existsSync(p) || fs.readdirSync(p).length !== 0) return true;
+    if (fs.existsSync(join(p, MANIFEST_FILE))) return { skip: false };
+    if (!fs.existsSync(p)) return { skip: true };
+    /** 有文件却没清单：可能是用户还没写完，不能删，但要在 problems() 里说清为什么看不见 */
+    if (fs.readdirSync(p).length !== 0) return { skip: true, noManifest: true };
     fs.rmdirSync(p);
   } catch {
     /** 句柄还没退干净：这一轮先跳过，下一轮扫描再试 */
   }
-  return true;
+  return { skip: true };
 }
 
 export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = null, clientStore = null } = {}) {
@@ -325,6 +327,8 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
    * 没有清单的目录不是任何人的作品，让安装直接接管即可。
    */
   function isForeign(id) {
+    /** 和 read()/remove() 同一判据：点开头或非法 id 不是扩展，别让它混入 foreign 判断 */
+    if (!EXT_ID_RE.test(id)) return false;
     const dest = pathOf(id);
     if (!exists(dest)) return false;
     if (exists(sourcePathOf(id))) return false;
@@ -380,7 +384,15 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
       if (!EXT_ID_RE.test(ent.name)) continue;
       const dir = join(root, ent.name);
-      if (pruneLeftoverDir(dir)) continue;
+      const pruned = pruneLeftoverDir(dir);
+      if (pruned.skip) {
+        /**
+         * 非空却没清单：市场装的（有 .source.json）才算坏，得告诉用户为什么没出现；
+         * 用户手工建目录还没写完的情况别刷红，等他写完 manifest 自然会好。
+         */
+        if (pruned.noManifest && exists(sourcePathOf(ent.name))) out.push({ id: ent.name, errors: ['缺 plugin.json'] });
+        continue;
+      }
       const v = validateManifest(readJson(join(dir, MANIFEST_FILE)), { expectedId: ent.name });
       if (!v.ok) out.push({ id: ent.name, errors: v.errors.map(String) });
     }
@@ -424,7 +436,7 @@ export function createExtRegistry({ dir = dataDir(), log = () => {}, secrets = n
       if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
       if (!EXT_ID_RE.test(ent.name)) continue;
       const dir = join(root, ent.name);
-      if (pruneLeftoverDir(dir)) continue;
+      if (pruneLeftoverDir(dir).skip) continue;
       const v = validateManifest(readJson(join(dir, MANIFEST_FILE)), { expectedId: ent.name });
       if (!v.ok) {
         log.warn?.(`扩展 ${ent.name} 清单无效，跳过：${v.errors.join('；')}`);

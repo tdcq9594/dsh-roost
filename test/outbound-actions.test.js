@@ -212,6 +212,16 @@ test('解析：<voice>内容</voice> 产出 say action，不当文字发出', ()
   assert.deepEqual(r.actions, [{ type: 'say', value: '最后一句，我都快没话说了' }]);
 });
 
+test('解析：语音标记嵌套/混写不念路径、不产生空语音', () => {
+  const nested = parseOutboundActions('<voice>先看 <<voice: /tmp/a.mp3>> 后念</voice>');
+  assert.equal(nested.actions.length, 1);
+  assert.doesNotMatch(nested.actions[0].value, /<<voice:/, '路径不能当要念的文字');
+  assert.match(nested.actions[0].value, /先看.*后念/);
+
+  const wrapped = parseOutboundActions('<<say: <voice>X</voice>>>');
+  assert.deepEqual(wrapped.actions, [{ type: 'say', value: 'X' }], '内层的 <voice> 被吃掉后不能留一条空 say');
+});
+
 test('执行：<voice>内容</voice> 走 TTS 合成发语音（与 say 同链路）', async () => {
   const ch = fakeChannel();
   let spoken = '';
@@ -366,6 +376,63 @@ test('配额：按档位给额度（主人那档更松），bucket 要传到 cha
   charged.length = 0;
   await run({ text: '<<say: 又一句>>', target: 'g1', senderId: 'u2' });
   assert.equal(charged[0].bucket, '');
+});
+
+test('TTS 关闭：语音标记改发文字，不合成也不扣额度', async () => {
+  const ch = fakeChannel();
+  let synth = 0, charged = 0;
+  const tts = {
+    status: async () => ({ enabled: false }),
+    synthesize: async () => { synth += 1; return { audio: Buffer.from('RIFFfake') }; },
+  };
+  const quota = { charge() { charged += 1; return { ok: true }; } };
+  const run = createActionRunner({ channel: () => ch, tts, quota, log: () => {} });
+  await run({ text: '<voice>这句不能凭空消失</voice>', target: 'g1', senderId: 'u1' });
+
+  assert.equal(synth, 0, '关掉就不该调云端 TTS');
+  assert.equal(charged, 0, '关掉更不该扣语音条额度');
+  assert.equal(ch.calls.filter((c) => c[0] === 'voice').length, 0);
+  assert.ok(ch.calls.filter((c) => c[0] === 'send').some((c) => c[1].text.includes('这句不能凭空消失')),
+    '按 aurabot 口径，关掉语音就发文字，内容不能吞');
+});
+
+test('TTS 合成失败：退额度并把那句话改成文字发出', async () => {
+  const ch = fakeChannel();
+  let undone = 0;
+  const tts = {
+    status: async () => ({ enabled: true }),
+    synthesize: async () => { throw new Error('上游 502'); },
+  };
+  const quota = { charge() { return { ok: true, undo: () => { undone += 1; } }; } };
+  const run = createActionRunner({ channel: () => ch, tts, quota, log: () => {} });
+  await run({ text: '<voice>合成挂了也要说</voice>', target: 'g1', senderId: 'u1' });
+
+  assert.equal(undone, 1, '合成失败要把预扣的额度退回去');
+  assert.ok(ch.calls.filter((c) => c[0] === 'send').some((c) => c[1].text.includes('合成挂了也要说')),
+    '合成失败不能只记日志把话吞掉');
+});
+
+test('语音发出失败：退额度并改发文字，不只记日志', async () => {
+  const ch = fakeChannel();
+  ch.sendVoice = async () => { ch.calls.push(['voice', {}]); return { ok: false, message: '上传失败' }; };
+  let undone = 0;
+  const quota = { charge() { return { ok: true, undo: () => { undone += 1; } }; } };
+  const tts = { status: async () => ({ enabled: true }), synthesize: async () => ({ audio: Buffer.from('RIFFfake') }) };
+  const run = createActionRunner({ channel: () => ch, tts, quota, log: () => {} });
+  await run({ text: '<voice>发不出去也要说</voice>', target: 'g1', senderId: 'u1' });
+
+  assert.equal(undone, 1);
+  assert.equal(ch.calls.filter((c) => c[0] === 'voice').length, 1, '确实尝试发过语音');
+  assert.ok(ch.calls.filter((c) => c[0] === 'send').some((c) => c[1].text.includes('发不出去也要说')),
+    '语音没发出去要降级文字');
+});
+
+test('没注入 TTS：语音标记改发文字，不静默吞掉', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch, log: () => {} });
+  await run({ text: '好啦 <voice>这句得出来</voice>', target: 'g1' });
+  assert.ok(ch.calls.filter((c) => c[0] === 'send').some((c) => c[1].text.includes('这句得出来')));
+  assert.equal(ch.calls.filter((c) => c[0] === 'voice').length, 0);
 });
 
 /* ---------------- 试运行：发送之前的副作用也要让开 ---------------- */

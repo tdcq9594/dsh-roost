@@ -1665,3 +1665,54 @@ test('面板 quick：配额的读 / 改 / 清零，以及非法值要拒', async
     else process.env.DSH_ROOST_DATA = oldEnv;
   }
 });
+
+test('危险确认：quota 默认空时危险命令仍被 guard 拦下', async () => {
+  /**
+   * 回归：`mountToolGuardInner` 以前先 `if (!Object.keys(cfg.quota).length) return`，
+   * 默认 quota={} 时整段危险确认被跳过。这里用真 apply 拿 tools.guard 回调，
+   * 不靠源码字符串，确认安全门在默认配置下真的接上了。
+   */
+  const host = await import('../src/host.js');
+  const dir = tmp();
+  const oldEnv = process.env.DSH_ROOST_DATA;
+  process.env.DSH_ROOST_DATA = join(dir, 'data');
+  const noop = () => () => {};
+  let guardFn = null;
+  const cleanups = [];
+  const ctx = {
+    agents: { get: () => null, list: () => [], create: async () => ({ id: 'a', ctx: {} }) },
+    sessions: { get: () => null, list: () => [], create: () => ({ id: 's' }) },
+    systemPrompt: { context: noop },
+    webServer: { register: () => noop },
+    config: {},
+    logger: { info: noop, warn: noop, error: noop, debug: noop },
+    effect: (cb) => {
+      const off = cb();
+      if (typeof off === 'function') cleanups.push(off);
+      return noop;
+    },
+    on: () => noop,
+    dataDir: join(dir, 'data'),
+    dir,
+    /** 捕获宿主注册的 tools.guard，直接驱动它 */
+    tools: { guard: (fn) => { guardFn = fn; return noop; } },
+  };
+
+  const off = host.apply(ctx);
+  try {
+    assert.equal(typeof guardFn, 'function', '宿主应该注册了 tools.guard');
+    const pseudo = { name: 'shell.exec', args: { script: 'rm -rf /' }, agent: { session: { id: 'system:test' } } };
+    assert.match(guardFn(pseudo), /已拒绝|需要确认/, '默认 quota={} 时危险命令也必须被拦');
+
+    const normal = { name: 'chat_look', args: { limit: 1 }, agent: { session: { id: 'system:test' } } };
+    assert.equal(guardFn(normal), undefined, '普通工具照常放行');
+    /** 回归：裸词 format/shutdown 出现在非命令工具的参数里，不该触发确认 */
+    const plainText = { name: 'chat_look', args: { text: 'please format the document; shutdown hook config' }, agent: { session: { id: 'system:test' } } };
+    assert.equal(guardFn(plainText), undefined, '非命令工具不做命令规则扫描');
+  } finally {
+    for (const c of cleanups) { try { c(); } catch {} }
+    if (typeof off === 'function') off();
+    if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;
+    else process.env.DSH_ROOST_DATA = oldEnv;
+  }
+});

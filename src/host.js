@@ -87,7 +87,7 @@ import { TEST_TEXT, testResult, rebuildBatch } from './vector-ops.js';
 import { projectTimeline } from './timeline-view.js';
 import { planHeat } from './memory-heat.js';
 import { rerankHits } from './rerank.js';
-import { isDangerousCommand, createConfirmGate, dangerScanArgs } from './safety.js';
+import { isDangerousCommand, createConfirmGate, dangerScanArgs, isCommandTool } from './safety.js';
 import { createClosing, shouldNotePending } from './closing.js';
 import { createAccount } from './account.js';
 import { createRewriter } from './rewrite.js';
@@ -1304,16 +1304,14 @@ export function apply(ctx) {
 
     const off = t.guard((exec) => {
       try {
-        const q = cfg.quota || {};
-        if (!Object.keys(q).length) return undefined;
-
         const name = String(exec?.name || '');
         if (!name) return undefined;
         /**
-         * 5.11：危险命令一次性确认。放在配额之前——没配配额也得拦，
-         * 且不依赖下面那段配额逻辑的 sid/chatId（用独立变量名，避免重复声明）。
+         * 5.11：危险命令一次性确认。必须放在配额早退之前——quota 默认 `{}`，
+         * 旧顺序让这道安全门在默认部署里永远跑不到（配置页开关也跟着失效）。
+         * 它只依赖会话/说话人，不依赖下面那段配额逻辑，变量名保持独立。
          */
-        if (cfg.security?.dangerousConfirm !== false) {
+        if (cfg.security?.dangerousConfirm !== false && isCommandTool(name)) {
           const dSid = String(exec?.agent?.session?.id || '');
           const dMine = dSid ? (sessions.list?.() || []).find((x) => x?.sessionId === dSid) : null;
           const dSp = dSid ? speaker.get(dSid) : null;
@@ -1341,6 +1339,12 @@ export function apply(ctx) {
             return `需要确认：${danger.reason}。已在 QQ 里问你，回复「确认」后这条命令才执行。`;
           }
         }
+        /**
+         * 配额早退只跳过次数限制，不能跳过上面的安全门。默认 cfg.quota = {}，
+         * 绝大多数部署到这里就返回，也不做多余的文件 IO。
+         */
+        const q = cfg.quota || {};
+        if (!Object.keys(q).length) return undefined;
         /**
          * 工具名 → 配额项。
          *

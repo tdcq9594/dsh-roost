@@ -362,19 +362,6 @@ window.__ModuleLoader__.load({
 }
 .roost-input::placeholder{opacity:.5}
 .roost-input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
-/* select 的原生弹层不跟深色主题走：--field 是半透明的（9% currentColor），
-   弹层里合成到系统白底上，再加 color:inherit（深色主题下是浅色字），
-   结果就是**选项文字隐形**——只能看见被系统高亮的那一条，其余是空白行。
-   弹层由系统绘制，拿不到我们的变量，必须给不透底的显式颜色。 */
-select.roost-input{color-scheme:dark}
-.roost-input option{background:#1c1d22;color:#e9eaee}
-/* 浅色主题下原生弹层也要跟着翻：上面那组深色是深色主题的兜底，
-   不翻就会在白底页面上弹出一块黑色下拉（2026-11-11 查弹窗时顺带发现）。
-   原生 option 拿不到 --dsw-alias-*，只能按系统配色偏好切换。 */
-@media (prefers-color-scheme: light){
-  select.roost-input{color-scheme:light}
-  .roost-input option{background:#fff;color:#1c1d22}
-}
 /* ── 两层导航（2026-11-12）─────────────────────────────────
    一级是分组（图标 + 名字，淡底药丸），二级是组内页面（下划线）。
    **两层必须用两种选中态**：都用底块会看成同一层，反而比原来那排更乱。
@@ -588,7 +575,7 @@ select.roost-input{color-scheme:dark}
 /* 「数值 / 下拉」型功能项：控件要窄且不被 flex 拉伸，否则会挤掉右边的说明文字 */
 .cap-row > input.cap-num,.cap-row > .cap-ctl{width:96px;flex:0 0 96px}
 .cap-row > .cap-ctl{display:flex;flex-direction:column;gap:4px}
-.cap-row > .cap-ctl select,.cap-row > .cap-ctl input{width:100%;min-width:0}
+.cap-row > .cap-ctl input{width:100%;min-width:0}
 .cap-row > .cap-ctl .roost-dropdown,.cap-row > .cap-ctl .roost-dropdown-btn{width:100%;min-width:0}
 /* 档位卡：标题一行、按钮一行、摘要一行。
    原来整块塞进 .roost-item 的 .t 里，兄弟 .d 是 flex:0 0 auto 不换行，
@@ -1175,7 +1162,7 @@ select.roost-input{color-scheme:dark}
   border:1px solid var(--line-soft);border-radius:var(--radius-card);
   /* 卡片底吃两层：宿主主题底色 + 自选强调色的极淡混入，再让底色本身透一点。
      只给 background 做 alpha，不用 opacity——里面的文字和数据要保持不透明。 */
-  background:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) 88%,transparent));
+  background:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) 50%,transparent));
   box-shadow:var(--shadow-card)}
 .is-data-view .roost-sec:first-child{margin-top:2px}
 .is-data-view .roost-sec-h{border-bottom:0;margin-bottom:10px;padding-bottom:6px}
@@ -1210,7 +1197,12 @@ select.roost-input{color-scheme:dark}
   border-radius:6px;font-size:11.5px;line-height:1.5}
 .roost-batch-row:hover{background:var(--tone-foam-2)}
 /* 自定义下拉：原生 select 的弹出层由系统绘制改不了圆角，这里自己画 */
-.roost-dropdown{position:relative;display:inline-flex;min-width:0}
+.roost-dropdown{position:relative;display:inline-flex;min-width:0;
+  /* 宿主没给主题变量时的兜底：系统浅色要白底深字，别回到早期的黑底深字 */
+  --roost-pop-bg:#16181c;--roost-pop-fg:inherit}
+@media (prefers-color-scheme: light){
+  .roost-dropdown{--roost-pop-bg:#fff;--roost-pop-fg:#1c1d22}
+}
 .roost-dropdown-btn{display:flex;align-items:center;gap:6px;justify-content:space-between;
   white-space:nowrap;cursor:pointer;text-align:left}
 .roost-dropdown-btn:disabled{opacity:.4;cursor:not-allowed}
@@ -1219,11 +1211,11 @@ select.roost-input{color-scheme:dark}
   border-right:4px solid transparent;border-top:5px solid currentColor;opacity:.6}
 .roost-dropdown-pop{position:fixed;z-index:80;max-height:240px;overflow:auto;
   overscroll-behavior:contain;padding:4px;border:1px solid var(--line-soft);border-radius:10px;
-  color:var(--dsw-alias-label-primary, inherit);
-  /* 宿主没给 --dsw-alias-bg-l1 时退回宿主页面底色，再叠一点文字色与自选色：
-     既不会透出背景内容，也不会在浅色主题落回 #000 变黑底黑字 */
+  color:var(--dsw-alias-label-primary, var(--roost-pop-fg));
+  /* 宿主没给 --dsw-alias-bg-l1 时退回系统配色对应的兜底，再叠一点文字色与自选色：
+     浅色主题不会落回黑底深字（2026-11-24 原生 select 换 Dropdown 后的回归） */
   background:color-mix(in srgb,var(--accent) 4%,
-    color-mix(in srgb,currentColor 4%,var(--dsw-alias-bg-l1, var(--dsw-alias-bg-base, #16181c))));
+    color-mix(in srgb,currentColor 4%,var(--dsw-alias-bg-l1, var(--dsw-alias-bg-base, var(--roost-pop-bg)))));
   box-shadow:var(--shadow-card)}
 .roost-dropdown-opt{display:block;width:100%;box-sizing:border-box;text-align:left;
   padding:5px 9px;border:0;border-radius:7px;background:transparent;color:inherit;
@@ -1316,10 +1308,35 @@ select.roost-input{color-scheme:dark}
      */
     function dropdownPos(rect, rootRect) {
       if (!rect) return null
-      return { left: rect.left, top: rect.bottom + 4, width: rect.width }
+      const vw = typeof window !== 'undefined' ? Number(window.innerWidth) || 0 : 0
+      const vh = typeof window !== 'undefined' ? Number(window.innerHeight) || 0 : 0
+      const w = Math.max(Number(rect.width) || 0, 110)
+      /** 视口右缘的窄按钮：弹层最窄 110px，不能让右侧溢出屏幕 */
+      const left = vw ? Math.max(4, Math.min(rect.left, vw - w - 8)) : rect.left
+      const below = rect.bottom + 4
+      const above = rect.top - 4 - 240
+      /** 下方放不下就翻到上方；上方也放不下才依旧向下（再由 max-height 截） */
+      const top = vh && below + 240 > vh && above > 4 ? above : below
+      return { left, top, width: rect.width }
     }
 
-    function Dropdown({ value, onChange, title, disabled, className, style, children, ...rest }) {
+    /**
+     * 调用点传的 style 既有「尺寸/布局」（外层要把 flex 伸展撑开）也有「外观」（按钮自己的
+     * padding/fontSize）。不能全给一边：之前全给外层，按钮字号被 .roost-input 吃掉；
+     * 现在全给按钮，外层 flex 又不伸展。这里按 key 分开。
+     */
+    const DROPDOWN_LAYOUT_KEYS = new Set([
+      'flex', 'flexGrow', 'flexShrink', 'flexBasis', 'width', 'minWidth', 'maxWidth',
+      'height', 'minHeight', 'maxHeight', 'display', 'alignSelf', 'margin',
+      'marginLeft', 'marginRight', 'marginTop', 'marginBottom',
+    ]);
+    function splitDropdownStyle(style) {
+      const wrapper = {}, button = {};
+      for (const [k, v] of Object.entries(style || {})) (DROPDOWN_LAYOUT_KEYS.has(k) ? wrapper : button)[k] = v;
+      return { wrapper, button };
+    }
+
+    function Dropdown({ value, onChange, title, disabled, className, style, wrapperStyle, children, ...rest }) {
       const [open, setOpen] = useState(false)
       const [active, setActive] = useState(0)
       const [pos, setPos] = useState(null)
@@ -1340,7 +1357,9 @@ select.roost-input{color-scheme:dark}
         if (disabled || !list.length) return
         const r = box.current?.getBoundingClientRect?.()
         setPos(dropdownPos(r))
-        setActive(Math.max(0, list.findIndex((o) => String(o.value) === String(value))))
+        /** 当前值恰好落在 disabled 项上时，KB Enter 会打不中；开局就把 active 放到可选首项 */
+        const hit = list.findIndex((o) => !o.disabled && String(o.value) === String(value))
+        setActive(hit >= 0 ? hit : Math.max(0, list.findIndex((o) => !o.disabled)))
         setOpen(true)
       }
       const pick = (o) => {
@@ -1354,20 +1373,33 @@ select.roost-input{color-scheme:dark}
           if (typeof box.current?.contains === 'function' && box.current.contains(e.target)) return
           setOpen(false)
         }
-        /** 弹层自身滚动不算「页面滚走了」，否则选项一多就点不到下面的项 */
+        /**
+         * 弹层自身滚动不算「页面滚走了」（选项一多要点下面的项）；页面滚动时
+         * 旧实现直接关弹层，用户想滚到下面的选项反而点不到。这里改成跟着按钮
+         * 重新定位，只有按钮真的滚出视口才关。
+         */
+        const reposition = () => {
+          const r = box.current?.getBoundingClientRect?.()
+          if (!r) return
+          const vh = typeof window !== 'undefined' ? Number(window.innerHeight) || 0 : 0
+          if (vh && (r.bottom < 0 || r.top > vh)) { setOpen(false); return }
+          setPos(dropdownPos(r))
+        }
         const onScroll = (e) => {
           if (e?.target && typeof box.current?.contains === 'function' && box.current.contains(e.target)) return
-          setOpen(false)
+          reposition()
         }
         if (typeof document !== 'undefined') {
           document.addEventListener('mousedown', onDown)
           document.addEventListener('scroll', onScroll, true)
         }
+        if (typeof window !== 'undefined') window.addEventListener('resize', reposition)
         return () => {
           if (typeof document !== 'undefined') {
             document.removeEventListener('mousedown', onDown)
             document.removeEventListener('scroll', onScroll, true)
           }
+          if (typeof window !== 'undefined') window.removeEventListener('resize', reposition)
         }
       }, [open])
       const onKey = (e) => {
@@ -1397,9 +1429,12 @@ select.roost-input{color-scheme:dark}
           pick(list[active])
         }
       }
-      return h('div', { className: 'roost-dropdown', ref: box, style },
+      const split = splitDropdownStyle(style)
+      return h('div', { className: 'roost-dropdown', ref: box, style: { ...split.wrapper, ...wrapperStyle } },
         h('button', {
           ...rest,
+          /** padding/fontSize 等外观给按钮；flex/width 等布局给外层，别互相吃掉 */
+          style: split.button,
           type: 'button',
           className: 'roost-input roost-dropdown-btn' + (className ? ' ' + className : ''),
           disabled: Boolean(disabled), title,
@@ -21541,6 +21576,8 @@ select.roost-input{color-scheme:dark}
       })
       /** 接入是整页弹窗：不占页签，也不写「上次停留」 */
       const [pageModal, setPageModal] = useState(null)
+      /** 打开试运行的二次确认：用面板同款 Modal，原生 confirm 在 webview 里常受限 */
+      const [dryRunConfirm, setDryRunConfirm] = useState(false)
       /** Alt+K 全局查找（5.1） */
       const [palette, setPalette] = useState({ open: false, q: '', idx: 0 })
       const setTab = useCallback((id) => {
@@ -22080,16 +22117,13 @@ select.roost-input{color-scheme:dark}
        * 失败时**不改本地状态**并把后端的原话 toast 出来——后端 `cannotEnable`
        * 与 `staged` 都是 409 + 原因，吞掉就会出现「显示开着、实际没开」。
        */
-      const toggleHeadFeat = useCallback(async (id, on) => {
+      const toggleHeadFeat = useCallback(async (id, on, alreadyConfirmed = false) => {
         /**
          * 试运行开着 = 照常回、照常记，但一条消息都不会真发到 QQ。
-         * 这是「看起来还在正常工作、其实全静默」的开关，打开前必须让人点头；
-         * 关掉不需要拦——那是恢复正常行为。
+         * 确认弹窗由页面上的 ConfirmModal 做（原生 confirm 在 webview 里可能没有）；
+         * 这里再挡一道，防止别的调用方绕开 UI 直接打开。
          */
-        if (id === 'dryRun' && on === true
-          && typeof window !== 'undefined' && typeof window.confirm === 'function') {
-          if (!window.confirm('打开试运行后，她照常回复和记录，但不会再真的发送消息到 QQ。确定打开吗？')) return
-        }
+        if (id === 'dryRun' && on === true && !alreadyConfirmed) return
         /** 先加序号：在途的 `features.get` 快照一律作废（见上面的注释） */
         featSeq.current += 1
         const r = await quick('features.patch', { id, on })
@@ -22253,7 +22287,10 @@ select.roost-input{color-scheme:dark}
                   'aria-label': label,
                   'data-on': featOn[id] ? '1' : '0',
                   title: hint,
-                  onClick: () => toggleHeadFeat(id, !featOn[id]),
+                  onClick: () => {
+                    if (id === 'dryRun' && !featOn[id]) setDryRunConfirm(true)
+                    else toggleHeadFeat(id, !featOn[id])
+                  },
                 }),
               )),
             ) : null,
@@ -22535,6 +22572,19 @@ select.roost-input{color-scheme:dark}
               h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }))
           : null,
 
+        dryRunConfirm
+          ? h(ConfirmModal, {
+              title: '打开试运行？',
+              message: '打开后她照常回复和记录，但不会再真的发送消息到 QQ。确认要打开吗？',
+              confirmText: '打开试运行',
+              onClose: () => setDryRunConfirm(false),
+              onConfirm: async () => {
+                setDryRunConfirm(false)
+                await toggleHeadFeat('dryRun', true, true)
+              },
+            })
+          : null,
+
         /**
          * Alt+K 查找面板。用 .cap-modal 那套遮罩（fixed + 点击关闭），
          * z-index 压过普通弹窗、低于 toast。
@@ -22687,6 +22737,7 @@ select.roost-input{color-scheme:dark}
     exports.StarMap = StarMap
     exports.Dropdown = Dropdown
     exports.dropdownPos = dropdownPos
+    exports.ConfirmModal = ConfirmModal
     return module.exports
   },
 })

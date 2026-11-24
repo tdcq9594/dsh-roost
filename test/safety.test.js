@@ -3,9 +3,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { isDangerousCommand, createConfirmGate, dangerScanArgs } from '../src/safety.js';
+import { isDangerousCommand, createConfirmGate, dangerScanArgs, isCommandTool } from '../src/safety.js';
 import { isPrivateIp, isLanIp, checkUrlSync, assertSafeUrl } from '../src/ssrf.js';
 import { marketGuardOpts } from '../src/ext-market.js';
+
+test('命令工具白名单：只给能跑 shell 的工具做命令扫描，普通工具不误判', () => {
+  for (const n of ['bash', 'cmd', 'powershell', 'pwsh', 'sh', 'exec', 'ops_bash', 'shell.exec', 'mcp__demo__demo_exec']) {
+    assert.equal(isCommandTool(n), true, `${n} 应该走命令扫描`);
+  }
+  for (const n of ['chat_look', 'memory_search', 'web_search', 'qq_send_file', 'gallery_save', '']) {
+    assert.equal(isCommandTool(n), false, `${n} 不是命令工具，普通参数里出现 format 也别拦`);
+  }
+});
 
 test('危险命令：删根/格式化/关机/下载后执行都能认出来', () => {
   const danger = [
@@ -196,6 +205,13 @@ test('接线：guard 拦危险命令、确认在 QQ 里回、出站 URL 有校�
   assert.ok(host.includes('confirmGate.ask(dChat, danger)'), 'guard 要问确认');
   assert.ok(host.includes('confirmGate.onMessage(chat.chatId, said)'), '要处理确认回复');
   assert.ok(host.includes('dangerousConfirm !== false'), '默认开、可关');
+  /**
+   * 默认 cfg.quota = {}，旧顺序让 1308 行的早退把整段安全门挡住。
+   * 这里锁死顺序：确认必须在 quota 早退之前，否则配置页开关也是假的。
+   */
+  const dangerAt = host.search(/if \(cfg\.security\?\.dangerousConfirm !== false/);
+  const quotaAt = host.indexOf('const q = cfg.quota || {};');
+  assert.ok(dangerAt > 0 && quotaAt > dangerAt, '危险确认必须排在 quota 早退之前');
   assert.ok(market.includes('await assertSafeUrl(url'), '出站前要校验');
   /**
    * 1.3.1 的 `config.security.ssrf` 是死配置：`allowPrivate` / `allowHosts`
