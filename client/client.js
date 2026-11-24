@@ -362,6 +362,39 @@ window.__ModuleLoader__.load({
 }
 .roost-input::placeholder{opacity:.5}
 .roost-input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+/* ── 语音 provider 卡片网格（对标 aurabot 的选声音交互）──────────
+   点整张卡=选中声音；右上角图钉=置顶（独立存 localStorage，不进配置草稿）。
+   只做「卡片 + 置顶 + 收起」，不分「发语音/听语音/扩展服务」小页——
+   选中后的字段仍在本卡下方原地展开，跟原来的单页结构保持一致。 */
+.voice-choices{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:8px;width:100%}
+.voice-choice{
+  position:relative;min-height:74px;padding:10px 12px;border-radius:12px;cursor:pointer;
+  border:1px solid var(--line);background:var(--field);text-align:left;
+  display:flex;flex-direction:column;gap:3px;font:inherit;color:inherit;
+  transition:border-color .16s ease,background .16s ease,box-shadow .16s ease;
+}
+.voice-choice:hover:not(:disabled){border-color:var(--accent)}
+.voice-choice:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.voice-choice.on{
+  border-color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 8%,var(--field));
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent);
+}
+.voice-choice .vc-name{font-size:12.5px;font-weight:650;padding-right:22px}
+.voice-choice .vc-desc{font-size:11px;line-height:1.45;color:var(--dsw-alias-label-secondary,inherit);opacity:.92}
+.voice-choice-pin{
+  position:absolute;right:6px;top:6px;width:22px;height:22px;padding:3px;
+  border:1px solid transparent;border-radius:6px;background:transparent;cursor:pointer;
+  color:inherit;opacity:.5;font-size:13px;line-height:1;
+}
+.voice-choice-pin:hover{opacity:.9;background:var(--hover)}
+.voice-choice-pin.on{opacity:1;color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.voice-choice-more{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  min-height:74px;padding:10px;border-radius:12px;border:1px dashed var(--line);
+  background:transparent;color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;font:inherit;font-size:11.5px;
+}
+.voice-choice-more:hover{border-color:var(--accent)}
 /* ── 两层导航（2026-11-12）─────────────────────────────────
    一级是分组（图标 + 名字，淡底药丸），二级是组内页面（下划线）。
    **两层必须用两种选中态**：都用底块会看成同一层，反而比原来那排更乱。
@@ -14763,12 +14796,43 @@ window.__ModuleLoader__.load({
        * 让对齐测试误报。对象写法没有这个歧义。
        */
       const PROVIDERS = [
-        { id: 'edge', label: '微软在线朗读（免费 · 不用 Key · 一键配好）' },
-        { id: 'sherpa', label: '本地模型（离线，可一键安装）' },
-        { id: 'openai', label: 'OpenAI 兼容（/audio/speech）' },
-        { id: 'gpt-sovits', label: 'GPT-SoVITS 原生 API（本地）' },
-        { id: 'mimo', label: '小米 MiMo（chat/completions 出音频）' },
+        { id: 'auto', label: '自动（先微软朗读，不行用 Windows 声音）', desc: '不用挑，先在线后本地', icon: '✨' },
+        { id: 'edge', label: '微软 edge-tts', desc: '在线，音色自然（免 Key）', icon: '🌐' },
+        { id: 'sherpa', label: '本地模型', desc: '离线可装，不联网、不花钱', icon: '📦' },
+        { id: 'gpt-sovits', label: '本地 GPT-SoVITS', desc: '用自己准备的录音定音色', icon: '🎙' },
+        { id: 'volcano', label: '豆包语音（火山）', desc: '只填 API Key，选个音色就行', icon: '🔥' },
+        { id: 'fish-free', label: 'Fish Audio', desc: 'S2.1 Pro Free，可选音色', icon: '🐟' },
+        { id: 'breeze', label: 'Breeze 语音', desc: '云端或自建，填 Key + 音色 id', icon: '🌬' },
+        { id: 'minimax', label: 'MiniMax 语音', desc: '在线，音色多，支持情绪', icon: '🎭' },
+        { id: 'openai', label: '其他 HTTP 接口', desc: 'OpenAI 兼容 /audio/speech', icon: '🔌' },
+        { id: 'mimo', label: '小米 MiMo', desc: 'chat/completions 出音频', icon: '💡' },
+        { id: 'windows', label: 'Windows 自带', desc: '离线可用，机械感重一些', icon: '🖥' },
       ]
+      /** 卡片右上角图钉：置顶存本地偏好，不进配置草稿（切声音不丢置顶） */
+      const PIN_KEY = 'roost.tts.pinnedProviders'
+      const [pins, setPins] = useState(() => {
+        try {
+          const v = JSON.parse(localStorage.getItem(PIN_KEY) || '[]')
+          return Array.isArray(v) ? v.filter((x) => PROVIDERS.some((p) => p.id === x)).slice(0, 4) : []
+        } catch { return [] }
+      })
+      const [moreSources, setMoreSources] = useState(false)
+      /** 当前真正生效的声音（已保存的），默认置顶且不许取消 */
+      const activeSource = String(cfgTts?.provider || 'openai')
+      const ordered = (() => {
+        const top = [...new Set([activeSource, ...pins])].slice(0, 4)
+        return [...PROVIDERS].sort((a, b) => {
+          const ai = top.indexOf(a.id), bi = top.indexOf(b.id)
+          return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi)
+        })
+      })()
+      const visibleSources = moreSources ? ordered : ordered.slice(0, 4)
+      const togglePin = (id) => {
+        if (id === activeSource) return toast('正在使用的声音默认置顶')
+        const next = pins.includes(id) ? pins.filter((x) => x !== id) : [...pins, id].slice(-4)
+        setPins(next)
+        try { localStorage.setItem(PIN_KEY, JSON.stringify(next)) } catch {}
+      }
 
       /**
        * 微软音色清单。
@@ -14999,12 +15063,35 @@ window.__ModuleLoader__.load({
            * 输入框给的永远是字符串，直接存进去 `Number(cfg.timeoutSec)` 虽然也能用，
            * 但配置全文里会变成 `"30"`，和默认值的类型不一致，看的人会以为坏了。
            */
+          /** 数字字段统一转回 number：输入框给的永远是字符串 */
+          const num = (x, fallback) => (String(x ?? '').trim() === '' ? fallback : Number(x) || fallback)
           const next = {
             ...src,
-            timeoutSec: Number(src?.timeoutSec) || 30,
-            maxChars: Number(src?.maxChars) || 300,
+            timeoutSec: num(src?.timeoutSec, 30),
+            maxChars: num(src?.maxChars, 300),
             /** 语速夹在 0.5–2，和 `speedOf()` 同一套范围；空值回原速 */
-            speed: Math.max(0.5, Math.min(2, Number(src?.speed) || 1)),
+            speed: Math.max(0.5, Math.min(2, num(src?.speed, 1))),
+            /** 新声音来源的数字参数（不填就回各自默认值） */
+            ...(src?.volcano ? {
+              volcano: {
+                ...src.volcano,
+                speedRatio: Math.max(0.5, Math.min(2, num(src.volcano.speedRatio, 1))),
+              },
+            } : {}),
+            ...(src?.breeze ? {
+              breeze: {
+                ...src.breeze,
+                sampleRate: num(src.breeze.sampleRate, 24000),
+                guidanceScale: num(src.breeze.guidanceScale, 0),
+              },
+            } : {}),
+            ...(src?.minimax ? {
+              minimax: {
+                ...src.minimax,
+                speed: Math.max(0.5, Math.min(2, num(src.minimax.speed, 1))),
+                pitch: num(src.minimax.pitch, 0),
+              },
+            } : {}),
             ...(src?.sherpa
               ? {
                   sherpa: {
@@ -15093,7 +15180,44 @@ window.__ModuleLoader__.load({
                 onToggle: (next) => put('enabled', next),
               }),
             '启用语音合成'),
-          select('provider', 'provider', PROVIDERS),
+          h('div', { style: { flex: '1 1 100%' } },
+            h('div', { className: 'roost-note', style: { margin: '0 0 6px' } },
+              '选好声音可以先试听，保存后用于聊天。'),
+            h('div', { className: 'voice-choices', role: 'radiogroup', 'aria-label': '声音来源' },
+              visibleSources.map((o) => {
+                const on = provider === o.id
+                return h('div', {
+                  key: o.id,
+                  className: 'voice-choice' + (on ? ' on' : ''),
+                  role: 'radio',
+                  tabIndex: 0,
+                  'aria-checked': on,
+                  title: o.label,
+                  onClick: () => put('provider', o.id),
+                  onKeyDown: (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); put('provider', o.id) }
+                  },
+                },
+                  h('button', {
+                    type: 'button',
+                    className: 'voice-choice-pin' + (pins.includes(o.id) || o.id === activeSource ? ' on' : ''),
+                    title: pins.includes(o.id) || o.id === activeSource ? '取消置顶' : '置顶这个声音',
+                    'aria-label': '置顶 ' + o.label,
+                    onClick: (e) => { e.stopPropagation(); togglePin(o.id) },
+                  }, '📌'),
+                  h('span', { className: 'vc-name' }, (o.icon ? o.icon + ' ' : '') + o.label),
+                  h('span', { className: 'vc-desc' }, o.desc),
+                )
+              }),
+              !moreSources ? h('button', {
+                type: 'button', className: 'voice-choice-more',
+                onClick: () => setMoreSources(true),
+              }, '更多', `还有 ${ordered.length - visibleSources.length} 个来源`) : h('button', {
+                type: 'button', className: 'voice-choice-more',
+                onClick: () => setMoreSources(false),
+              }, '收起', '只看常用接口'),
+            ),
+          ),
           /**
            * 语速放在 provider 旁边，**四个 provider 共用这一个**。
            * 以前只有本地模型有语速，而且输入框埋在它自己的分区里——
@@ -15108,6 +15232,98 @@ window.__ModuleLoader__.load({
             }),
           ),
         ),
+
+        /** 自动：先微软朗读，失败退 Windows 声音；配置沿用 edge 的音色 */
+        provider === 'auto'
+          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+              '不用填地址和 Key：先用微软朗读，失败时（仅 Windows）自动改用系统自带声音。'
+              + '音色可在「微软 edge-tts」里调。')
+          : null,
+
+        provider === 'windows'
+          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+              process.platform === 'win32'
+                ? '用系统自带的朗读声音，完全离线、机械感重一些。挑的是系统里第一个中文语音。'
+                : '这个声音只支持 Windows。')
+          : null,
+
+        provider === 'cosyvoice'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('服务地址', 'cosyvoice.url', { placeholder: 'http://127.0.0.1:50000' }),
+                select('模式', 'cosyvoice.mode', [{ id: 'sft', label: 'sft（音色 ID）' }, { id: 'instruct', label: 'instruct（语气指令）' }]),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('音色 ID', 'cosyvoice.spkId', { placeholder: '中文女' }),
+                select('采样率', 'cosyvoice.sampleRate', [{ id: '22050', label: '22050（CosyVoice 1）' }, { id: '24000', label: '24000（CosyVoice 2）' }]),
+              ),
+              v('cosyvoice.mode') === 'instruct'
+                ? h('div', { style: { marginTop: 8 } }, field('语气指令', 'cosyvoice.instruct', { placeholder: '用轻声、亲切的语气朗读' }))
+                : null,
+              h('div', { className: 'roost-note' }, '要自己先跑起 CosyVoice 的 FastAPI 服务；文本发给本地服务，不出本机。'),
+            )
+          : null,
+
+        provider === 'volcano'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('API Key', 'volcano.apiKey', { type: 'password' }),
+                field('音色', 'volcano.voiceType', { placeholder: 'zh_female_vv_uranus_bigtts' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('模型资源 ID（一般留空，按音色自动配）', 'volcano.resourceId', { placeholder: 'seed-tts-2.0 / seed-tts-1.0' }),
+                field('语速（0.5–2）', 'volcano.speedRatio', { type: 'number' }),
+              ),
+              h('div', { className: 'roost-note' }, '豆包音色分 1.0 / 2.0 两代模型，混用会报「音色没权限」；留空资源 ID 会按音色名自动配。'),
+            )
+          : null,
+
+        provider === 'fish-free'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('API Key', 'fishApiKey', { type: 'password' }),
+                field('音色 ID（32 位十六进制，留空用默认）', 'fishReferenceId', { placeholder: '可选' }),
+              ),
+              h('div', { className: 'roost-note' }, 'Fish Audio 的 S2.1 Pro Free；免费额度用完会明确报错，不会静默换声。'),
+            )
+          : null,
+
+        provider === 'breeze'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                select('模式', 'breeze.mode', [{ id: 'cloud', label: '云端' }, { id: 'local', label: '自建服务' }]),
+                field('服务地址', 'breeze.url', { placeholder: v('breeze.mode') === 'local' ? 'http://127.0.0.1:7860' : 'https://api.breeze.blue' }),
+              ),
+              v('breeze.mode') === 'local'
+                ? h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                    field('语气指令（可选）', 'breeze.instructions', { placeholder: '轻声、亲切' }),
+                    field('引导强度（可选）', 'breeze.guidanceScale', { type: 'number' }),
+                  )
+                : h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                    field('API Key（brz_ 开头）', 'breeze.key', { type: 'password' }),
+                    field('音色 ID', 'breeze.voiceId', { placeholder: '' }),
+                  ),
+              h('div', { className: 'roost-note' }, '云端要填 Key 和音色 ID；自建填本地地址即可免 Key。'),
+            )
+          : null,
+
+        provider === 'minimax'
+          ? h('div', null,
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('API Key', 'minimax.apiKey', { type: 'password' }),
+                field('Voice ID', 'minimax.voiceId', { placeholder: 'Chinese (Mandarin)_Soft_Girl' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('模型', 'minimax.model', { placeholder: 'speech-2.8-turbo' }),
+                field('情绪（auto = 自动判断）', 'minimax.emotion', { placeholder: 'auto' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('语速（0.5–2）', 'minimax.speed', { type: 'number' }),
+                field('语调（-12 到 12）', 'minimax.pitch', { type: 'number' }),
+                field('服务地址（海外账号改 .io）', 'minimax.baseUrl', { placeholder: 'https://api.minimax.cn' }),
+              ),
+            )
+          : null,
 
         provider === 'openai'
           ? h('div', null,

@@ -2932,3 +2932,24 @@ test('ConfirmModal：确认/取消回调可用（试运行弹窗依赖它）', (
   confirm.props.onClick(); assert.equal(ok, 1)
   cancel.props.onClick(); assert.equal(closed, 1)
 })
+
+// ── 语音页：声音来源卡片网格（对标 aurabot，但保持单页） ──────────────
+
+test('语音页把所有声音来源做成卡片，且不分「发语音/听语音/扩展服务」小页', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const start = src.indexOf('function TtsCard(')
+  const end = src.indexOf('function ', start + 20)
+  const card = src.slice(start, end === -1 ? src.length : end)
+  // 十一个来源都在卡片表里（内置五家 + 新补的六家；windows 也列出来）
+  for (const id of ['auto', 'edge', 'sherpa', 'volcano', 'fish-free', 'breeze', 'minimax', 'openai', 'mimo', 'windows', 'gpt-sovits']) {
+    assert.ok(card.includes(`id: '${id}'`), `卡片表缺少来源 ${id}`)
+  }
+  assert.ok(card.includes("className: 'voice-choices'"), '要有卡片网格容器')
+  assert.ok(card.includes("role: 'radio'"), '卡片要能当单选按钮用')
+  assert.ok(card.includes('voice-choice-pin'), '卡片要有置顶图钉')
+  assert.ok(card.includes("'roost.tts.pinnedProviders'"), '置顶要独立存本地，不进配置草稿')
+  assert.ok(card.includes('setMoreSources'), '要有更多/收起切换')
+  // 明确没有 aurabot 那三个小页
+  assert.equal(card.includes('听语音'), false, '我方不分小页')
+  assert.equal(card.includes('扩展服务'), false, '我方不分小页')
+})

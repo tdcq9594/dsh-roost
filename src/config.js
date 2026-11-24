@@ -176,6 +176,51 @@ export const DEFAULTS = {
       prompt: '请用自然、亲切的语气朗读下面这句话。',
     },
     /**
+     * 下面几段是「声音来源」里除内置五家之外的来源（对标 aurabot）。
+     * 全是云端接口，密钥只由主人配置填，模型只给文本。
+     */
+    /** 本地 CosyVoice 官方 FastAPI：裸 PCM 或 WAV，采样率用于给裸 PCM 包头 */
+    cosyvoice: {
+      url: 'http://127.0.0.1:50000',
+      mode: 'sft',
+      spkId: '中文女',
+      instruct: '',
+      sampleRate: 22050,
+    },
+    /** 豆包语音（火山引擎）：音色决定 1.0/2.0 模型，resourceId 留空按音色自动配 */
+    volcano: {
+      apiKey: '',
+      resourceId: '',
+      voiceType: 'zh_female_vv_uranus_bigtts',
+      speedRatio: 1,
+    },
+    /** Fish Audio S2.1 Pro Free：音色 ID 是 32 位十六进制 */
+    fishApiKey: '',
+    fishReferenceId: '',
+    /** Breeze：cloud 填 key + 音色 id；local 填自建服务地址 */
+    breeze: {
+      mode: 'cloud',
+      url: 'https://api.breeze.blue',
+      key: '',
+      voiceId: '',
+      model: 'breeze-tts-2',
+      languageCode: 'zh',
+      instructions: '',
+      outputFormat: 'mp3_24000_128',
+      sampleRate: 24000,
+      guidanceScale: 0,
+    },
+    /** MiniMax：海外账号把 baseUrl 改成 https://api.minimax.io */
+    minimax: {
+      apiKey: '',
+      baseUrl: 'https://api.minimax.cn',
+      voiceId: 'Chinese (Mandarin)_Soft_Girl',
+      model: 'speech-2.8-turbo',
+      emotion: 'auto',
+      speed: 1,
+      pitch: 0,
+    },
+    /**
      * 本地 ONNX 推理（sherpa-onnx-node）。
      *
      * 引擎和模型都不进插件目录，放在数据目录里：
@@ -1557,6 +1602,11 @@ const SECRET_PATHS = [
   ['tts', 'apiKey'],
   ['tts', 'gptSovits', 'apiKey'],
   ['tts', 'mimo', 'apiKey'],
+  /** 新声音来源的凭证：不列进来的话 GET /v1/config 会把明文 Key 回给任意扩展 */
+  ['tts', 'volcano', 'apiKey'],
+  ['tts', 'breeze', 'key'],
+  ['tts', 'minimax', 'apiKey'],
+  ['tts', 'fishApiKey'],
   /**
    * 备份的远端凭据（2026-11 补）。
    *

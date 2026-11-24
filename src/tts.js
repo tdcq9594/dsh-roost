@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { applyWeights } from './gpt-sovits.js';
+import { EXTRA_PROVIDERS, extraSpeech, extraConfigured } from './tts-providers.js';
 
 const AUDIO_TYPES = new Set([
   'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave',
@@ -611,6 +612,18 @@ export function createTts({
     const enabled = cfg.enabled === true;
     const provider = String(cfg.provider || 'openai');
     if (!enabled) return { enabled: false, provider, configured: false };
+    /** 额外 provider（对标 aurabot 的声音来源）走各自的「填没填完」判定 */
+    if (EXTRA_PROVIDERS.includes(provider)) {
+      /** windows 在非 Windows 上、auto 的 edge 依赖没装时，都要明确告诉面板 */
+      if (provider === 'windows' && process.platform !== 'win32') {
+        return { enabled: true, provider, configured: false, reason: 'unsupported_platform' };
+      }
+      if (!extraConfigured(provider, cfg)) {
+        return { enabled: true, provider, configured: false, reason: 'configuration_incomplete' };
+      }
+      if (cooling(provider)) return { enabled: true, provider, configured: false, reason: 'upstream_unreachable' };
+      return { enabled: true, provider, configured: true };
+    }
     if (!['openai', 'gpt-sovits', 'sherpa', 'edge', 'mimo'].includes(provider)) {
       return { enabled: true, provider, configured: false, reason: 'unsupported_provider' };
     }
@@ -681,6 +694,11 @@ export function createTts({
       else if (provider === 'sherpa') result = await sherpaSpeech(input, cfg);
       else if (provider === 'edge') result = await edgeSpeech(input, cfg);
       else if (provider === 'mimo') result = await mimoSpeech(input, cfg);
+      else if (EXTRA_PROVIDERS.includes(provider)) {
+        result = await extraSpeech(provider, input, cfg, fetchImpl, {
+          edgeSpeech, dataDir,
+        });
+      }
       else throw new TtsError('unsupported_provider', '未支持这个语音 provider', 400);
       /** 成功一次就把冷却清掉，服务恢复了不用等满一分钟 */
       lastFail = { at: 0, provider: '', code: '' };
