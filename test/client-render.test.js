@@ -2981,4 +2981,8 @@ test('GPT 语音面板按扩展页面收敛字段与交互，但仍保持单页'
   const apply = src.slice(src.indexOf('const applyProfileDraft'), src.indexOf('const loadProfiles'))
   assert.ok(apply.includes('val === undefined || val === null'), '方案草稿必须跳过 undefined/null')
   assert.ok(apply.includes('continue'), '方案缺字段时应保持当前草稿，不清空')
+  // 随 DSH 自启动 GPT 的开关：绑到 gptSovits.autoStart，且明确写「重启后生效」
+  assert.ok(src.includes("put('gptSovits.autoStart', on)"), '自启动开关要写 gptSovits.autoStart')
+  assert.ok(src.includes('随 DSH 启动 GPT 进程'), '面板缺少自启动开关文案')
+  assert.ok(src.includes('重启 DSH 后生效'), '要说清是下次重启才生效，免得用户盯着当前进程等')
 })

@@ -15667,6 +15667,23 @@ window.__ModuleLoader__.load({
                 ),
               ),
 
+              /**
+               * 随 DSH 自启动。
+               *
+               * 这是「下次启动 DSH 时」才生效的开关，所以明确写清时机，
+               * 免得用户开了之后盯着当前进程等它自己起来——不会，得重启。
+               */
+              h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', marginTop: 8 } },
+                h(Switch, {
+                  on: v('gptSovits.autoStart') === true,
+                  label: '随 DSH 启动 GPT 进程',
+                  title: '重启 DSH 后自动拉起 GPT-SoVITS；关掉后重启才不再自动启动',
+                  onToggle: (on) => put('gptSovits.autoStart', on),
+                }),
+                h('span', { className: 'roost-note', style: { margin: 0 } },
+                  '随 DSH 启动 GPT 进程（重启 DSH 后生效；需要已填安装目录）'),
+              ),
+
               /** 探测结果：认出了什么，一眼看明白 */
               probeInfo
                 ? probeInfo.ok

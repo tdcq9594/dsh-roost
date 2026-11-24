@@ -385,6 +385,44 @@ export async function applyWeights({ baseUrl = '', model = '', models = [], gptW
   };
 }
 
+/**
+ * 从配置（可带请求体覆盖）里取一键启动参数。
+ *
+ * 面板的「一键启动」和「随 DSH 自启动」必须走同一套取值：
+ * 以前只有路由里内联一份，自启动再抄一遍，改了一个字段就漂。
+ * `||` 而非 `??` 是刻意沿用原路由语义——前端传空串时回落到已保存配置。
+ */
+export function startOptsFromConfig(cfg = {}, body = {}) {
+  const g = cfg?.tts?.gptSovits || {};
+  return {
+    dir: String(body?.dir || g.installDir || ''),
+    opts: {
+      model: String(body?.model || g.model || ''),
+      gptWeights: String(body?.gptWeights || g.gptWeights || ''),
+      sovitsWeights: String(body?.sovitsWeights || g.sovitsWeights || ''),
+      semanticCache: body?.semanticCache === undefined
+        ? g.semanticCache === true
+        : body.semanticCache === true,
+    },
+  };
+}
+
+/**
+ * 要不要随 DSH 启动把 GPT-SoVITS 拉起来。
+ *
+ * 四个条件全满足才启动：语音总开关开、当前来源就是 gpt-sovits、
+ * 用户开了自启动、安装目录已填。少一个都不动——尤其不能在用户换了
+ * 别的 provider 后还偷偷占着几 GB 显存起一个用不上的服务。
+ */
+export function shouldAutoStartGpt(cfg = {}) {
+  const tts = cfg?.tts || {};
+  const g = tts.gptSovits || {};
+  return tts.enabled === true
+    && tts.provider === 'gpt-sovits'
+    && g.autoStart === true
+    && Boolean(String(g.installDir || '').trim());
+}
+
 /** 语义缓存适配器的脚本路径（随 dsh-roost 分发，ISC，见文件头） */
 export const SEMANTIC_ADAPTER = new URL('../scripts/gpt-semantic-adapter.py', import.meta.url);
 

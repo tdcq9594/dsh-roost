@@ -258,6 +258,13 @@ test('配置：GPT 音色方案字段不会被 pruneTo 裁掉', () => {
   assert.equal(g.profiles[0].name, '轻声角色');
 });
 
+test('配置：GPT autoStart 默认关，且存得下去（随 DSH 自启动开关）', () => {
+  freshDir();
+  assert.equal(loadConfig().tts.gptSovits.autoStart, false, '默认是关，不能装上就偷偷起服务');
+  saveConfig({ tts: { gptSovits: { autoStart: true } } });
+  assert.equal(loadConfig().tts.gptSovits.autoStart, true, '开了要能存住，重启 DSH 才拉得起服务');
+});
+
 test('配置：阶段 2 新增的开关字段存得下去（pruneTo 不会把它们裁掉）', () => {
   /**
    * `saveConfig()` 按 DEFAULTS 的形状裁剪，DEFAULTS 里没有的键一律丢。

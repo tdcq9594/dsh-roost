@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,6 +19,8 @@ import {
   buildWeightUrls,
   applyWeights,
   weightReadyConfig,
+  shouldAutoStartGpt,
+  startOptsFromConfig,
 } from '../src/gpt-sovits.js';
 
 /** 真实 tts_infer.yaml 的形状（含 `\uXXXX` 转义，GPT-SoVITS 就是这么写的） */
@@ -330,4 +332,73 @@ test('权重切成功：就绪指纹带完整配置，合成时跳过重复加�
 test('权重切失败：返回 null，调用方清空指纹让下一句合成重试', () => {
   assert.equal(weightReadyConfig({ weightsApplied: false, cfg: { model: '角色A' }, baseUrl: 'http://x' }), null);
   assert.equal(weightReadyConfig({ weightsApplied: false }), null);
+});
+
+test('随 DSH 自启动：四个条件全满足才启动', () => {
+  const cfg = {
+    tts: {
+      enabled: true,
+      provider: 'gpt-sovits',
+      gptSovits: { autoStart: true, installDir: 'D:\\GPT-SoVITS' },
+    },
+  };
+  assert.equal(shouldAutoStartGpt(cfg), true);
+
+  assert.equal(shouldAutoStartGpt({ ...cfg, tts: { ...cfg.tts, enabled: false } }), false, '语音总开关关着不起');
+  assert.equal(shouldAutoStartGpt({ ...cfg, tts: { ...cfg.tts, provider: 'edge' } }), false, '换了别的来源不起');
+  assert.equal(shouldAutoStartGpt({
+    ...cfg,
+    tts: { ...cfg.tts, gptSovits: { ...cfg.tts.gptSovits, autoStart: false } },
+  }), false, '没开自启动开关不起');
+  assert.equal(shouldAutoStartGpt({
+    ...cfg,
+    tts: { ...cfg.tts, gptSovits: { ...cfg.tts.gptSovits, installDir: '  ' } },
+  }), false, '没填安装目录不起');
+  assert.equal(shouldAutoStartGpt({}), false, '空配置不起');
+  assert.equal(shouldAutoStartGpt(null), false, 'null 不抛错');
+});
+
+test('自启动参数从配置取，和一键启动同一套；body 可覆盖且空串回落配置', () => {
+  const cfg = {
+    tts: {
+      gptSovits: {
+        installDir: 'D:\\GPT',
+        model: '角色A',
+        gptWeights: 'C:\\a.ckpt',
+        sovitsWeights: 'C:\\a.pth',
+        semanticCache: true,
+      },
+    },
+  };
+  const fromCfg = startOptsFromConfig(cfg);
+  assert.equal(fromCfg.dir, 'D:\\GPT');
+  assert.equal(fromCfg.opts.model, '角色A');
+  assert.equal(fromCfg.opts.gptWeights, 'C:\\a.ckpt');
+  assert.equal(fromCfg.opts.sovitsWeights, 'C:\\a.pth');
+  assert.equal(fromCfg.opts.semanticCache, true);
+
+  // 前端传空串要回落到已保存配置（|| 语义，不是 ??）
+  const emptyBody = startOptsFromConfig(cfg, { dir: '', model: '', gptWeights: '' });
+  assert.equal(emptyBody.dir, 'D:\\GPT');
+  assert.equal(emptyBody.opts.model, '角色A');
+  assert.equal(emptyBody.opts.gptWeights, 'C:\\a.ckpt');
+
+  // body 有值时覆盖配置
+  const override = startOptsFromConfig(cfg, { model: '角色B', semanticCache: false });
+  assert.equal(override.opts.model, '角色B');
+  assert.equal(override.opts.semanticCache, false);
+
+  assert.equal(startOptsFromConfig().dir, '', '空配置不抛错');
+});
+
+test('host 接线：自启动走同一套参数，且只走 gptLauncher 一个入口', () => {
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.ok(host.includes('shouldAutoStartGpt, startOptsFromConfig'), 'host 要导入自启动判定与参数函数');
+  assert.ok(host.includes('if (shouldAutoStartGpt(cfg))'), '启动时要判定自启动开关');
+  assert.ok(host.includes('gptLauncher.start(dir, opts)'), '自启动必须走同一个启动器');
+  assert.ok(host.includes('gptLauncher.dispose()'), '卸载时要带走自启动的进程，别留孤儿');
+  /** 一键启动路由也要复用参数函数，不能自启动和手动各抄一份 */
+  const routeBlock = host.slice(host.indexOf("route('/tts/gpt-start'"), host.indexOf("route('/tts/gpt-switch'"));
+  assert.ok(routeBlock.includes('startOptsFromConfig(cfg, body)'), '手动启动要和自启动共用参数取值');
+  assert.equal(routeBlock.includes('gptLauncher.start(dir, {'), false, '手动启动不该再内联一份参数');
 });

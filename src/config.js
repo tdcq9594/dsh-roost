@@ -93,6 +93,13 @@ export const DEFAULTS = {
     gptSovits: {
       /** GPT-SoVITS 安装目录（含 api_v2.py 和 runtime 的那层）。填了就能在面板一键启动 */
       installDir: '',
+      /**
+       * 随 DSH 启动自动拉起 GPT-SoVITS 进程（默认关）。
+       *
+       * 只在 provider 选了 gpt-sovits、且 installDir 已填时才生效；
+       * 进程归 gptLauncher 管，插件卸载/HMR 时由它的 dispose 带走，不留孤儿。
+       */
+      autoStart: false,
       /** 要用的角色名（面板扫描出来的下拉）。留空 = 用 tts_infer.yaml 里已经加载的那个 */
       model: '',
       /**

@@ -301,7 +301,7 @@ import { createLocalEmbedder } from './local-embed.js';
 import { createLocalReranker } from './local-rerank.js';
 import { parseTemporal } from './temporal.js';
 import { createTurnScenes } from './turn-scene.js';
-import { applyWeights, createGptSovits, weightReadyConfig } from './gpt-sovits.js';
+import { applyWeights, createGptSovits, shouldAutoStartGpt, startOptsFromConfig, weightReadyConfig } from './gpt-sovits.js';
 import { probeGptFeatures } from './tts-providers.js';
 import {
   applyPendingRestore, cancelRestore, createBackup, isFullBackupName, listBackups,
@@ -8547,6 +8547,31 @@ export function apply(ctx) {
   ctx.effect(() => {
     startServer();
     /**
+     * 随 DSH 启动 GPT-SoVITS（tts.gptSovits.autoStart）。
+     *
+     * 延迟 5 秒：模型加载要一两分钟、吃几 GB 显存，别跟宿主启动时的
+     * 其它初始化（roost 连接、预热）抢资源。开关/来源/目录任一不满足
+     * 就不动，见 shouldAutoStartGpt()。启动失败只记日志、不拦插件——
+     * 用户照样能在面板里手动点「一键启动」重试。
+     * 进程生命周期归 gptLauncher：本 effect 返回的 cleanup 和
+     * 「收消息服务」那处都会调它的 dispose，不留占显存的孤儿。
+     */
+    if (shouldAutoStartGpt(cfg)) {
+      const t = setTimeout(() => { // timer-ok: 一次性自启动，5 秒后自然触发；unref 不挡退出，卸载后 disposed 守卫拦住回调
+
+        if (disposed) return;
+        const { dir, opts } = startOptsFromConfig(cfg);
+        try {
+          log.info('gptSovits.autoStart 已开，正在拉起 GPT-SoVITS…');
+          const r = gptLauncher.start(dir, opts);
+          if (r?.ok === false) log.warn(`自动启动 GPT-SoVITS 未完成：${r.message || r.reason || '未知原因'}`);
+        } catch (e) {
+          log.warn(`自动启动 GPT-SoVITS 失败（不影响插件）：${e?.message ?? e}`);
+        }
+      }, 5000); // timer-ok: 一次性自启动，5 秒后自然触发
+      t.unref?.();
+    }
+    /**
      * 外接协议在收消息服务之后启动：先保证本地面板能开，再去连框架。
      * 连不上会按退避重试，不影响插件本体（和 DSH 里其它能力一致）。
      *
@@ -14112,19 +14137,9 @@ export function apply(ctx) {
 
       route('/tts/gpt-start', async (req, res) => {
         const body = await readBody(req).catch(() => ({}));
-        const g = cfg.tts?.gptSovits || {};
-        const dir = String(body?.dir || g.installDir || '');
-        const model = String(body?.model || g.model || '');
-        /** 手填的权重路径优先于按角色名自动配对，见 gpt-sovits.js 的 switchModel */
-        const r = gptLauncher.start(dir, {
-          model,
-          gptWeights: String(body?.gptWeights || g.gptWeights || ''),
-          sovitsWeights: String(body?.sovitsWeights || g.sovitsWeights || ''),
-          /** 语义缓存适配器（仅 v2 生效，默认关；见 config.js） */
-          semanticCache: body?.semanticCache === undefined
-            ? g.semanticCache === true
-            : body.semanticCache === true,
-        });
+        /** 和随 DSH 自启动共用同一套取值，改字段不会只改一边 */
+        const { dir, opts } = startOptsFromConfig(cfg, body);
+        const r = gptLauncher.start(dir, opts);
         return send(res, r.ok ? 200 : 409, r);
       }),
 
