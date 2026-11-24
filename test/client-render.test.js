@@ -2653,3 +2653,30 @@ test('记忆页：证据趋势/条数/出处明细可见（阶段1 算出的不�
   assert.match(src, /原文 \$\{ev\.journalId\}/, '证据要能回查原文 id')
   assert.match(src, /ev\.quote/, '证据要显示引文')
 })
+
+test('视觉升级：卡片只给数据页，配置页保留分节标题 + 上边线', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const findInner = (n) => {
+    if (n == null || typeof n !== 'object') return null
+    if (Array.isArray(n)) {
+      for (const c of n) { const r = findInner(c); if (r) return r }
+      return null
+    }
+    if (String(n.props?.className || '').split(/\s+/).includes('roost-body-inner')) return n
+    return findInner(n.props?.children)
+  }
+  const clsOf = (tab) => {
+    store['roost.tab'] = tab
+    rt.reset()
+    const inner = findInner(expand(mod.RoostPage(), rt))
+    assert.ok(inner, `${tab} 页缺少正文容器`)
+    return String(inner.props.className || '')
+  }
+  for (const tab of ['overview', 'memory', 'people']) {
+    assert.match(clsOf(tab), /is-data-view/, `${tab} 是数据展示页，应该拿到卡片样式`)
+  }
+  for (const tab of ['config', 'groupchat', 'security', 'ext']) {
+    assert.ok(!clsOf(tab).includes('is-data-view'), `${tab} 是配置页，不该推翻 2026-11-13 的「不要卡片背景」`)
+  }
+})

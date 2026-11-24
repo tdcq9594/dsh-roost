@@ -223,6 +223,17 @@ window.__ModuleLoader__.load({
   --warn:var(--dsw-alias-state-warn-primary, #b45309);
   --bad:var(--dsw-alias-state-error-primary, #b42318);
   --accent:var(--roost-accent, var(--dsw-alias-brand-primary, #2563eb));
+  /* 全局视觉升级（2026-11-24）：从 --accent 单点派生一整套色阶，
+     不新增宿主变量、不写死深浅色——换强调色或切主题时全套自动跟。
+     只有「数据展示页」用这些令牌，配置页仍是分节标题 + 上边线。 */
+  --tone-deep:color-mix(in srgb,var(--accent) 62%,var(--dsw-alias-bg-base, #16181c));
+  --tone-sea:var(--accent);
+  --tone-sky:color-mix(in srgb,var(--accent) 55%,#fff);
+  --tone-foam:color-mix(in srgb,var(--accent) 10%,transparent);
+  --tone-foam-2:color-mix(in srgb,var(--accent) 20%,transparent);
+  --radius-card:14px;
+  --shadow-card:0 1px 2px color-mix(in srgb,currentColor 5%,transparent),
+    0 6px 18px color-mix(in srgb,currentColor 7%,transparent);
 }
 /**
  * 用户自选的强调色（个性化页）。
@@ -1148,10 +1159,53 @@ select.roost-input{color-scheme:dark}
   .roost-g-row{flex-direction:column;align-items:stretch;gap:6px}
   .roost-g-ctl{max-width:100%;justify-content:flex-start}
 }
+/* ── 全局视觉升级（2026-11-24）──────────────────────────────────
+   对面的好看来自统一色阶 + 卡片语言 + 微交互。这里只借手法不借配色：
+   令牌从 --accent 派生，深浅主题和用户自选强调色都自动跟。
+   卡片只给「数据展示页」（概览 / 记忆 / 人物）；配置 / 系统 / 群聊
+   仍保留 2026-11-13 定的「分节标题 + 上边线」，不翻旧决定。 */
+.roost-primary{border-radius:9px;box-shadow:0 2px 8px var(--tone-foam-2)}
+.roost-input:hover{border-color:var(--tone-foam-2)}
+.roost-item{border-radius:8px;padding-left:8px;padding-right:8px;transition:background .15s ease}
+.roost-item:hover{background:var(--tone-foam)}
+.roost-empty{padding:9px 12px;border-left:2px solid var(--tone-foam-2);
+  border-radius:0 8px 8px 0;background:var(--tone-foam)}
+.roost-tab[data-on="1"]::after{background:var(--tone-deep)}
+.is-data-view .roost-sec{margin-top:14px;padding:14px 16px 16px;
+  border:1px solid var(--line-soft);border-radius:var(--radius-card);
+  background:var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent));
+  box-shadow:var(--shadow-card)}
+.is-data-view .roost-sec:first-child{margin-top:2px}
+.is-data-view .roost-sec-h{border-bottom:0;margin-bottom:10px;padding-bottom:6px}
+.is-data-view .roost-sec-t{position:relative;padding-left:11px}
+.is-data-view .roost-sec-t::before{content:"";position:absolute;left:0;top:50%;
+  transform:translateY(-50%);width:3px;height:14px;border-radius:2px;
+  background:linear-gradient(180deg,var(--tone-sky),var(--tone-sea))}
+.is-data-view .roost-stat{background:var(--tone-foam);border-color:var(--tone-foam-2)}
+.roost-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.roost-metric{padding:10px 12px;border-radius:10px;min-width:0;
+  background:var(--tone-foam);border:1px solid var(--tone-foam-2)}
+.roost-metric .k{font-size:11px;color:var(--dsw-alias-label-secondary,inherit)}
+.roost-metric .v{font-size:20px;font-weight:600;line-height:1.25;
+  font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,inherit)}
+.roost-metric .s{font-size:10.5px;color:var(--dsw-alias-label-tertiary,inherit)}
+.roost-tl{position:relative;padding-left:16px;margin-left:4px;border-left:1px solid var(--line-soft)}
+.roost-tl-day{font-size:11.5px;color:var(--dsw-alias-label-tertiary,inherit);margin:10px 0 6px}
+.roost-tl-row{position:relative;margin:0 0 8px}
+.roost-tl-row::before{content:"";position:absolute;left:-20px;top:6px;width:7px;height:7px;
+  border-radius:50%;background:var(--tone-sea);box-shadow:0 0 0 3px var(--tone-foam-2)}
+.roost-tl-row.impression::before{left:-21px;width:9px;height:9px;background:var(--tone-deep)}
+.roost-tl-row.impression .t{font-size:13.5px;font-weight:600;color:var(--tone-deep)}
+.roost-tl-chip{display:inline-flex;padding:1px 8px;border-radius:999px;font-size:10.5px;
+  background:var(--tone-foam-2);color:var(--tone-deep)}
+.roost-people-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+.roost-people-grid .roost-item{transition:border-color .15s,background .15s,transform .15s}
+.roost-people-grid .roost-item:hover{transform:translateY(-2px);box-shadow:var(--shadow-card)}
 @media (prefers-reduced-motion:reduce){
   .roost-sec{animation:none}
-  .roost-stat,.roost-btn,.roost-primary,.roost-tab,.roost-sec-fold,.roost-input{transition:none}
-  .roost-stat:hover,.roost-primary:hover:not(:disabled){transform:none}
+  .roost-stat,.roost-btn,.roost-primary,.roost-tab,.roost-sec-fold,.roost-input,
+  .roost-item,.roost-people-grid .roost-item{transition:none}
+  .roost-stat:hover,.roost-primary:hover:not(:disabled),.roost-people-grid .roost-item:hover{transform:none}
 }
 `
 
@@ -5216,11 +5270,11 @@ select.roost-input{color-scheme:dark}
                   ]
                   const max = Math.max(1, ...(statsSnap.timeseries || []).map((d) => d.count || 0))
                   return h('div', {},
-                    h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10 } },
-                      cells.map(([k, v, hint]) => h('div', { key: k, className: 'roost-item', style: { flex: '1 1 120px' } },
-                        h('div', { className: 'roost-muted', style: { fontSize: 11 } }, k),
-                        h('div', { style: { fontSize: 16, fontWeight: 600 } }, v),
-                        hint ? h('div', { className: 'roost-muted', style: { fontSize: 10.5 } }, hint) : null))),
+                    h('div', { className: 'roost-metrics', style: { marginBottom: 10 } },
+                      cells.map(([k, v, hint]) => h('div', { key: k, className: 'roost-metric' },
+                        h('div', { className: 'k' }, k),
+                        h('div', { className: 'v' }, v),
+                        hint ? h('div', { className: 's' }, hint) : null))),
                     h('div', { className: 'roost-note', style: { marginBottom: 6 } }, '每天新增日记（近 7 天）'),
                     h('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 4, height: 64 } },
                       (statsSnap.timeseries || []).map((d) => h('div', {
@@ -5242,12 +5296,12 @@ select.roost-input{color-scheme:dark}
             ? h('div', { className: 'roost-empty' }, '点「看来源」拉一张统计（只读，不改记忆）')
             : (srcStats.sources || []).length
               ? h('div', {},
-                  h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                    (srcStats.sources || []).map((s) => h('div', { key: s.source, className: 'roost-item', style: { flex: '1 1 140px' } },
-                      h('div', { style: { fontWeight: 600 } }, s.label || s.source),
-                      h('div', { className: 'roost-muted', style: { fontSize: 11 } },
+                  h('div', { className: 'roost-metrics' },
+                    (srcStats.sources || []).map((s) => h('div', { key: s.source, className: 'roost-metric' },
+                      h('div', { className: 'v', style: { fontSize: 13 } }, s.label || s.source),
+                      h('div', { className: 's' },
                         `扩展记忆 ${s.extFacts ?? 0} · 流水 ${s.episodes ?? 0} · 摘要 ${s.digest ?? 0}`),
-                      h('div', { className: 'roost-muted', style: { fontSize: 10.5 } }, `合计 ${s.total ?? 0} 条`),
+                      h('div', { className: 'k' }, `合计 ${s.total ?? 0} 条`),
                     ))),
                 )
               : h('div', { className: 'roost-empty' }, '还没有可统计的记忆来源'),
@@ -5280,10 +5334,26 @@ select.roost-input{color-scheme:dark}
               ? h('div', {},
                   h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 6 } },
                     `共 ${tlData.total} 条${(tlData.facets?.kinds || []).length ? ` · 类型 ${tlData.facets.kinds.join('/')}` : ''}`),
-                  ...(tlData.list || []).map((x) => h('div', { key: `${x.kind}:${x.id}`, className: 'roost-item', style: { marginBottom: 4 } },
-                    h('div', { style: { fontSize: 12 } }, x.text),
-                    h('div', { className: 'roost-muted', style: { fontSize: 10.5 } },
-                      `${x.kind === 'digest' ? '每日摘要' : '印象'}${x.chatId ? ` · ${x.chatId}` : ''} · ${new Date(x.at).toLocaleDateString()}`))),
+                  (() => {
+                    const groups = []
+                    for (const x of (tlData.list || [])) {
+                      const day = new Date(x.at).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })
+                      let g = groups[groups.length - 1]
+                      if (!g || g.day !== day) { g = { day, rows: [] }; groups.push(g) }
+                      g.rows.push(x)
+                    }
+                    return h('div', { className: 'roost-tl' },
+                      groups.map((g) => h('div', { key: g.day },
+                        h('div', { className: 'roost-tl-day' }, g.day),
+                        g.rows.map((x) => h('div', {
+                          key: `${x.kind}:${x.id}`,
+                          className: 'roost-tl-row' + (x.kind === 'impression' ? ' impression' : ''),
+                        },
+                          h('div', { className: 't' }, x.text),
+                          h('div', { className: 'roost-muted', style: { fontSize: 10.5 } },
+                            `${x.kind === 'digest' ? '每日摘要' : '印象'}${x.chatId ? ` · ${x.chatId}` : ''} · ${new Date(x.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`),
+                        )))))
+                  })(),
                   h('div', { style: { display: 'flex', gap: 6, marginTop: 8, alignItems: 'center' } },
                     h('button', { type: 'button', className: 'roost-btn', disabled: tlBusy || tlOffset <= 0, onClick: () => loadTimeline(Math.max(0, tlOffset - TL_PAGE)) }, '上一页'),
                     h('span', { className: 'roost-muted', style: { fontSize: 11 } }, `${tlOffset + 1}–${tlOffset + (tlData.list || []).length} / ${tlData.total}`),
@@ -5385,7 +5455,7 @@ select.roost-input{color-scheme:dark}
           gistImps.length
             ? gistImps.map((x) => h('div', { key: x.id, className: 'roost-item', style: { marginBottom: 4 } },
                 h('span', { className: 't' }, x.text || '—'),
-                h('span', { className: 'd' }, `${x.hits || 0} 次想起${x.crystallizedAt ? ' · 已结晶' : ''}`),
+                h('span', { className: 'd roost-tl-chip' }, `${x.hits || 0} 次想起${x.crystallizedAt ? ' · 已结晶' : ''}`),
                 x.crystallizedAt ? null : h('button', {
                   type: 'button', className: 'roost-btn', disabled: gistBusy,
                   title: '印象不自动注入，只能靠你显式标记「又想起了」；攒够 3 次且够旧，才能结晶成永久记忆',
@@ -7292,7 +7362,7 @@ select.roost-input{color-scheme:dark}
                 onClick: () => setWallState(v),
               }, label))),
           wall.length
-            ? h('div', { style: { display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' } },
+            ? h('div', { className: 'roost-people-grid' },
                 wall.map((p, i) => h('div', {
                   key: i, className: 'roost-item',
                   style: { cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch', gap: 2,
@@ -21990,7 +22060,7 @@ select.roost-input{color-scheme:dark}
           key: tab,
         },
           h(RenderBoundary, { key: 'tab:' + tab },
-            h('div', { className: 'roost-body-inner' },
+            h('div', { className: 'roost-body-inner' + (['overview', 'memory', 'people'].includes(tab) ? ' is-data-view' : '') },
             tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
           /** 个性化：偏好状态在 RoostPage（`uiPref`），这里只传下去 */
           tab === 'personalize' ? h(PersonalizeTab, { uiPref, setPrefs, toast }) : null,
