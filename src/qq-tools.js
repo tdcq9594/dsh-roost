@@ -456,11 +456,11 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
        * 标记由出站动作层解析，不会原样进群，所以这里放开 image/voice。
        */
       + '这一段里可以带图片和语音标记：`<<image: 路径>>` 让图和这句话排在同一条，'
-      + '`<<image-alone: 路径>>` 单独发一条图，`<<voice: 路径>>` 发语音条。'
+      + '`<<image-alone: 路径>>` 单独发一条图。'
+      + '发语音用 `<voice>要念的内容</voice>`（宿主 TTS 合成后发语音条）；'
+      + '只有已经有现成音频文件时才用 `<<voice: 路径>>`。'
       + '分享视频 / 文章时写 `<<card: 标题|描述|https://链接|https://图片地址>>`：'
-      + '卡片单独占一条消息，四项都要有、链接和图片地址必须是 https，一轮最多一张。'
-      + '但 `<<say: …>>` 不要写在这里——宿主 TTS 关着时它会被丢掉，'
-      + '改用 setsuna-tts 合成后拿路径写 `<<voice: …>>`。',
+      + '卡片单独占一条消息，四项都要有、链接和图片地址必须是 https，一轮最多一张。',
     /** 扁平参数表（DSH defineTool 原生形状），普通注册时由 `shapeTool` 转换 */
     parameters: {
       text: {
@@ -512,7 +512,8 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
           message: '`<<say>>` / `<<button>>` / `<<silence>>` 不能通过 qq_send 发，'
             + '标准 markdown 图片 `![](路径)` 也不行。'
             + '图片用 `<<image: 路径>>`（和这句话同条）或 `<<image-alone: 路径>>`（单独一条），'
-            + '语音用 `<<voice: 路径>>`——这三个写在**同一次 qq_send 的 text 里**就行，'
+            + '语音用 `<voice>要念的内容</voice>`（已有音频文件才用 `<<voice: 路径>>`）'
+            + '——这三个写在**同一次 qq_send 的 text 里**就行，'
             + '不要改写成正文（调过 qq_send 之后正文不会发出去）。',
         };
       }

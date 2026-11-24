@@ -11,6 +11,7 @@ import { join } from 'node:path';
 
 import { createRoostHostChannel } from '../src/channel.js';
 import { stripUnknown, stripUnclosed, markerRe, VALUE_MARKERS } from '../src/markers.js';
+import { createMarkerApplier } from '../src/apply-markers.js';
 import {
   parseOutboundActions, parseDurationMs, parseButton, buildKeyboard,
   createActionRunner, looksLikeSource, normalizeSource,
@@ -198,6 +199,53 @@ test('执行：<<say>> 走 TTS 合成后发语音（base64 交给协议转码）
   assert.ok(v);
   assert.ok(v[1].dataBase64);
   assert.equal(v[1].fileType, undefined);
+});
+
+/**
+ * 2026-11-24：语音格式对齐 aurabot 的 `<voice>内容</voice>`。
+ * 它映射成和 `<<say:>>` 同一个 say action，所以走的是同一条 TTS 合成链路，
+ * 而不是「发已有音频文件」的 `<<voice: 路径>>`。
+ */
+test('解析：<voice>内容</voice> 产出 say action，不当文字发出', () => {
+  const r = parseOutboundActions('好啦 <voice>最后一句，我都快没话说了</voice>');
+  assert.equal(r.text.trim(), '好啦', '标签要从正文里摘掉，不能漏成文字');
+  assert.deepEqual(r.actions, [{ type: 'say', value: '最后一句，我都快没话说了' }]);
+});
+
+test('执行：<voice>内容</voice> 走 TTS 合成发语音（与 say 同链路）', async () => {
+  const ch = fakeChannel();
+  let spoken = '';
+  const tts = { synthesize: async (t) => { spoken = t; return { audio: Buffer.from('RIFFfake'), contentType: 'audio/wav' }; } };
+  const run = createActionRunner({ channel: () => ch, tts });
+  await run({ text: '<voice>你好呀，这句要念出来</voice>', target: 'g1' });
+  assert.equal(spoken, '你好呀，这句要念出来', 'TTS 念的是标签包住的内容');
+  const v = ch.calls.find((c) => c[0] === 'voice');
+  assert.ok(v, '应该发的是语音，不是文字');
+  assert.ok(v[1].dataBase64);
+  const texts = ch.calls.filter((c) => c[0] === 'text');
+  assert.equal(texts.length, 0, '标签内容不该再作为文字发一遍');
+});
+
+/**
+ * 正文是常用路径（qq_send 反而不常用）：模型直接写正文、不调任何工具时，
+ * 正文会先过 applyMemoryMarkers 再进出站层。voice 标签必须能穿过这层清洗，
+ * 否则又会像截图那样漏成文字。这里把正文路径的完整前置清洗也钉死。
+ */
+test('正文路径：applyMemoryMarkers 放过 <voice>，之后仍能解析成语音', () => {
+  const apply = createMarkerApplier({
+    memory: {}, journal: {}, self: {}, closing: {}, mood: {}, aliasesOf: () => [], log: () => {},
+  });
+  const cases = [
+    { raw: '好啦 <voice>最后一句</voice>', text: '好啦', voice: '最后一句' },
+    { raw: '<voice>只有语音</voice>', text: '', voice: '只有语音' },
+    { raw: '前 <voice>中间</voice> 后', text: '前  后', voice: '中间' },
+  ];
+  for (const { raw, text, voice } of cases) {
+    const cleaned = apply(raw, 'g1', '', 'group', 'owner');
+    const parsed = parseOutboundActions(cleaned.text);
+    assert.equal(parsed.text, text, `正文清洗后残留文字不对：${raw}`);
+    assert.deepEqual(parsed.actions, [{ type: 'say', value: voice }], `voice 没解析成语音：${raw}`);
+  }
 });
 
 /* ---------------- 通道：Markdown 与降级 ---------------- */

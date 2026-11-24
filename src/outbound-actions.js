@@ -362,6 +362,19 @@ export function parseOutboundActions(raw, opts = {}) {
   take(/<<pick[:：]\s*([\s\S]*?)>>/gi, 'pick');
   /** quote 的值允许留空：留空时用入站消息的 replyTo 自动补 */
   take(/<<quote[:：]\s*([\s\S]*?)>>/gi, 'quote');
+  /**
+   * `<voice>内容</voice>`：对面 aurabot 的语音格式，2026-11-24 对齐。
+   *
+   * 和 `<<voice: 路径>>`（发**已有音频文件**）不是一回事——这里包的是
+   * **要念的文字**，走 `say` 分支让宿主 TTS 合成。映射成 `say` 而不是新
+   * action type，是为了复用下面那条已经跑通的「按人扣语音条额度 →
+   * TTS 合成 → sendVoice → 失败退额度」完整链路。
+   *
+   * 必须在 `<<voice:>>` 之前摘：两者都叫 voice，但形状不同、语义也不同。
+   * `<voice>...</voice>` 是单尖括号成对标签，`stripUnknown` 只清 `<<...>>`，
+   * 所以它能原样活到这一层（已在 markers 上验证）。
+   */
+  take(/<voice>([\s\S]*?)<\/voice>/gi, 'say');
   take(/<<say[:：]\s*([\s\S]*?)>>/gi, 'say');
   take(/<<voice[:：]\s*([\s\S]*?)>>/gi, 'voice');
 

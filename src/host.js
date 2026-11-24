@@ -411,6 +411,29 @@ export function roostCardHintText() {
   ].join('\n');
 }
 
+/**
+ * 语音提示词：跟卡片一样挂在 `roost-plugin-prompt`（order 900）后面。
+ *
+ * 为什么不能只放在 907「发言方式」：907 只在 QQ 工具真挂上且没被收走时注入，
+ * 非工具模式下模型根本看不到，于是继续写旧的 `<<say:>>`（实测截图）。
+ * 900 每轮都在，和卡片并列教同一套写法：
+ *   · `<voice>要念的内容</voice>` —— 宿主 TTS 合成后发语音条；
+ *   · `<<voice: 本地音频路径>>` —— 发已经存在的音频文件，语义不同。
+ *
+ * 只讲写法、不重复 907 的工具细节；907 那句改成引用这里的写法。
+ * 开关由调用方按 `cfg.tts.enabled` 决定——关掉语音时整段不注入，
+ * 免得模型学了写法却发现发不出去。
+ */
+export function roostVoiceHintText() {
+  return [
+    '想让一句话被念出来时，用成对标签包住要念的文字：',
+    '<voice>要念的内容</voice>',
+    '语音内容就是标签里的文字；只想发语音时，别在标签外再重复一遍。宿主会合成后发成语音条。',
+    '只有已经有现成音频文件时才用 `<<voice: 本地音频路径>>`，那是发文件，不是合成语音。',
+    '语音条按人限次，别把一句话拆成好几条连着念。',
+  ].join('\n');
+}
+
 export const name = 'roost';
 
 /** agents / sessions 拿会话；systemPrompt 注人格；webServer 给面板接口 */
@@ -7264,9 +7287,11 @@ export function apply(ctx) {
      * 宿主自己另写一份人格就等于让这些标记全部失效。
      * 之前就是这个 bug——DSH 模式下模型完全不知道有标记可用。
      *
-     * 插件那份文本里没有宿主后来加的 `<<card:>>`，所以紧跟在后面补一段
-     * `roostCardHintText()`。挂在同一个 context 里（不另开 order）是为了
-     * 让模型把两段连着读：先看协议全貌，再看新能力。
+     * 插件那份文本里没有宿主后来加的 `<<card:>>` / `<voice>`，所以紧跟在后面补
+     * `roostCardHintText()` 和（语音开着时的）`roostVoiceHintText()`。
+     * 挂在同一个 context 里（不另开 order）是为了让模型把几段连着读：
+     * 先看协议全貌，再看新能力。语音必须放这里而不是只放 907——907 在工具
+     * 没挂上时不注入，模型就会退回旧的 `<<say:>>`。
      *
      * order 900：排在人格（905）前面，先立规矩再谈性格。
      */
@@ -7279,7 +7304,11 @@ export function apply(ctx) {
           text: () => {
             const cur = sid0 ? speaker.get(sid0) : null;
             const base = cur?.system ? String(cur.system) : '';
-            return [base, roostCardHintText()].filter(Boolean).join('\n');
+            return [
+              base,
+              roostCardHintText(),
+              cfg.tts?.enabled === true ? roostVoiceHintText() : '',
+            ].filter(Boolean).join('\n');
           },
         }),
       );
