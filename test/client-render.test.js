@@ -2766,6 +2766,8 @@ test('视觉升级：记忆页筛选控件用圆角自定义下拉，弹层也�
   assert.match(src, /\.roost-dropdown-pop\{[^}]*border-radius:10px/, '弹出层自己画且圆角')
   assert.match(src, /\.roost-dropdown-pop\{[\s\S]*?background:color-mix\(in srgb,var\(--accent\)/, '弹层底色跟自选强调色')
   assert.ok(!src.includes('currentColor 8%,#000'), '弹层回退不能落到黑底黑字')
+  assert.ok(src.includes('var(--dsw-alias-bg-l1, var(--dsw-alias-bg-base, #16181c))'),
+    '弹层底色要退回宿主页面底色，不能靠透明透出背景')
   const lines = src.split(/\r?\n/)
   for (const marker of ['value: tlKind', 'value: tlChat', 'value: mem.chatId ||', 'value: batchTier', 'value: addTier']) {
     const i = lines.findIndex((l) => l.includes(marker))

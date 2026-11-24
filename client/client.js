@@ -1218,9 +1218,10 @@ select.roost-input{color-scheme:dark}
 .roost-dropdown-pop{position:fixed;z-index:80;max-height:240px;overflow:auto;
   overscroll-behavior:contain;padding:4px;border:1px solid var(--line-soft);border-radius:10px;
   color:var(--dsw-alias-label-primary, inherit);
-  /* 宿主没给 --dsw-alias-bg-l1 时，回退必须按当前文字色透明混，
-     不能落回 #000——浅色主题下会变成一块黑底黑字（截图事故） */
-  background:color-mix(in srgb,var(--accent) 4%,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 6%,transparent)));
+  /* 宿主没给 --dsw-alias-bg-l1 时退回宿主页面底色，再叠一点文字色与自选色：
+     既不会透出背景内容，也不会在浅色主题落回 #000 变黑底黑字 */
+  background:color-mix(in srgb,var(--accent) 4%,
+    color-mix(in srgb,currentColor 4%,var(--dsw-alias-bg-l1, var(--dsw-alias-bg-base, #16181c))));
   box-shadow:var(--shadow-card)}
 .roost-dropdown-opt{display:block;width:100%;box-sizing:border-box;text-align:left;
   padding:5px 9px;border:0;border-radius:7px;background:transparent;color:inherit;
