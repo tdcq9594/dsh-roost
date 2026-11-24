@@ -66,6 +66,19 @@ export const AUTOTELIC_DEFAULTS = {
   maxOutputChars: 1200,
   /** 种子：她可以琢磨的方向。空 = 不立项 */
   seeds: [],
+  /** 阶段 1：与 config.js DEFAULTS 同形状；normalizeCfg 的 clamp 默认值从这里取 */
+  constraintRules: '',
+  autoConfirmOwner: false,
+  confirmWindowMinutes: 720,
+  responseWindowHours: 48,
+  chillParkThreshold: 3,
+  maxSteps: 8,
+  intentMaxInputTokens: 8192,
+  intentMaxOutputTokens: 1024,
+  gateMaxInputTokens: 4096,
+  gateMaxOutputTokens: 512,
+  reviewMaxInputTokens: 4096,
+  reviewMaxOutputTokens: 512,
 };
 
 /** 允许出现在 `tune` 里的键（现在没有自动调参，留给以后收口） */
@@ -98,6 +111,19 @@ export function normalizeCfg(raw = {}) {
     quietEndHour: clampInt(r.quietEndHour, 0, 23, 0),
     maxOutputChars: clampInt(r.maxOutputChars, 100, 4000, AUTOTELIC_DEFAULTS.maxOutputChars),
     seeds,
+    /** 阶段 1：约束 / 反馈 / 预算。默认仍全关，夹紧范围防止写坏配置让引擎跑飞 */
+    constraintRules: String(r.constraintRules ?? '').slice(0, 2000),
+    autoConfirmOwner: r.autoConfirmOwner === true,
+    confirmWindowMinutes: clampInt(r.confirmWindowMinutes, 5, 10080, AUTOTELIC_DEFAULTS.confirmWindowMinutes),
+    responseWindowHours: clampInt(r.responseWindowHours, 1, 168, AUTOTELIC_DEFAULTS.responseWindowHours),
+    chillParkThreshold: clampInt(r.chillParkThreshold, 1, 10, AUTOTELIC_DEFAULTS.chillParkThreshold),
+    maxSteps: clampInt(r.maxSteps, 1, 32, AUTOTELIC_DEFAULTS.maxSteps),
+    intentMaxInputTokens: clampInt(r.intentMaxInputTokens, 512, 65536, AUTOTELIC_DEFAULTS.intentMaxInputTokens),
+    intentMaxOutputTokens: clampInt(r.intentMaxOutputTokens, 128, 8192, AUTOTELIC_DEFAULTS.intentMaxOutputTokens),
+    gateMaxInputTokens: clampInt(r.gateMaxInputTokens, 512, 65536, AUTOTELIC_DEFAULTS.gateMaxInputTokens),
+    gateMaxOutputTokens: clampInt(r.gateMaxOutputTokens, 128, 8192, AUTOTELIC_DEFAULTS.gateMaxOutputTokens),
+    reviewMaxInputTokens: clampInt(r.reviewMaxInputTokens, 512, 65536, AUTOTELIC_DEFAULTS.reviewMaxInputTokens),
+    reviewMaxOutputTokens: clampInt(r.reviewMaxOutputTokens, 128, 8192, AUTOTELIC_DEFAULTS.reviewMaxOutputTokens),
   };
 }
 
@@ -109,6 +135,39 @@ export function inQuietHours(cfg, hour = new Date().getHours()) {
   const b = Number(cfg?.quietEndHour) || 0;
   if (a === b) return false;
   return a < b ? h >= a && h < b : h >= a || h < b;
+}
+
+/**
+ * 能力状态条（阶段 0）：把「为什么现在跑不了 / 能跑到哪一步」翻成人话。
+ *
+ * 口径必须是真的，不能写成「授权门放行」——核对过宿主接线：
+ *   · `allowAct` 只改 prompt 措辞（`buildStepPrompt`），不是工具闸门；
+ *     `run()` 收到它也没转交给任何围栏，真正的工具门禁是宿主全局
+ *     `tools.guard`（危险命令无 QQ 确认窗口时直接拒绝），那层不在本模块里。
+ *   · 所以这里只说「prompt 允不允许用工具」，外加一句全局守卫仍生效的提醒。
+ *   · 能否立项 / 推进看 `canRun`（总闸、卡住、时段、额度、种子）。
+ *
+ * @returns {{ok:boolean, headline:string, tool:string, note:string, lines:string[]}}
+ */
+export function describeCapability({ enabled = false, allowAct = false, canRun = {} } = {}) {
+  const g = canRun && typeof canRun === 'object' ? canRun : {};
+  const ready = Boolean(enabled && g.ok !== false);
+  const headline = !enabled
+    ? '总开关关着：这一轮不会跑'
+    : g.ok === false
+      ? String(g.reason || '现在不满足启动条件')
+      : '可以立项 / 推进';
+  const tool = allowAct
+    ? 'prompt 允许用工具，但危险命令仍由宿主全局守卫拦截'
+    : 'prompt 禁止用工具（只能想）';
+  const note = '「允许动手」只是措辞开关，不是授权闸门；无人轮次不会往主人私聊推。';
+  return {
+    ok: ready,
+    headline,
+    tool,
+    note,
+    lines: [headline, tool, note],
+  };
 }
 
 /**
@@ -194,6 +253,33 @@ export function buildStepPrompt({ project, allowAct = false, lastNote = '' } = {
 }
 
 /**
+ * 会话隔离（阶段 1）：每个项目一个独立会话，不再全挤在 `autotelic-main`。
+ *
+ * 为什么必须拆：同一个 sessionId 下，上一个项目的心得会污染下一个项目，
+ * 「她在想什么」变成一锅粥；账本记了不同的 project，会话却还是同一条，对不上账。
+ * 用项目 id 派生，稳定可复现（同一个项目重启后仍回到自己的会话）。
+ * 老项目没有 id 时回落到固定会话，保证旧 state 不会突然断片。
+ */
+export function sessionIdFor(projectId = '') {
+  const id = String(projectId || '').trim().slice(0, 80);
+  return id ? `autotelic-${id}` : 'autotelic-main';
+}
+
+/**
+ * 约束前置（阶段 1）：把主人写的强制规则拆成逐行，交调用方在候选生成前
+ * 做硬否决。这里只做**文本归一化**，不在 prompt 里让模型自己判断——
+ * 模型自判等于没约束。真正的否决点在阶段 4 的三段决策，本阶段先把数据与
+ * 入口备好，并让 gate 在约束存在时把它连同 canRun 一起报给面板。
+ */
+export function constraintLines(rules = '') {
+  return String(rules ?? '')
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 50);
+}
+
+/**
  * 引擎主体。
  *
  * `run(prompt, { sessionId })` 由宿主注入：建/复用独立会话跑一轮，返回文本。
@@ -267,11 +353,16 @@ export function createAutotelic({
     const { rows, badLines, total } = ledger();
     const chain = verifyChain(rows);
     const t = now();
+    const canRun = gate(t);
     return {
       ok: true,
       enabled: c.enabled,
       allowAct: c.allowAct,
       cfg: c,
+      /** 能力状态条：把「为什么现在跑不了 / 能跑到哪一步」说清楚，不谎称有授权闸门 */
+      capability: describeCapability({ enabled: c.enabled, allowAct: c.allowAct, canRun }),
+      /** 约束前置的数据已就位；真正的硬否决在阶段 4 的三段决策，这里先让条数可见 */
+      constraints: constraintLines(c.constraintRules),
       project: state.project,
       lastNote: state.lastNote,
       failures: state.failures,
@@ -288,7 +379,7 @@ export function createAutotelic({
         brokenAt: chain.ok ? 0 : chain.brokenAt,
         brokenReason: chain.ok ? '' : chain.reason,
       },
-      canRun: gate(t),
+      canRun,
     };
   }
 
@@ -327,6 +418,12 @@ export function createAutotelic({
       payload: { project: p.project.text, score: p.project.score, steps: p.project.steps },
       note: manual ? '面板手动立项' : '自动立项',
       at: now(),
+      /** 阶段 1：立项就能追到会话与出处，梦种子也进账（此前梦种子只读不记） */
+      sessionId: sessionIdFor(p.project.id),
+      tag: '立项',
+      verdict: 'pass',
+      source: manual ? 'panel' : 'auto',
+      evidence: [{ id: p.project.id, text: p.project.text, source: 'seed' }],
     });
     return { ok: true, project: p.project, rejected: p.rejected };
   }
@@ -354,9 +451,11 @@ export function createAutotelic({
     const prompt = buildStepPrompt({
       project: state.project.text, allowAct: c.allowAct, lastNote: state.lastNote,
     });
+    /** 每个项目一个会话：host.js 的 run() 已按传入的 sessionId 建/复用会话 */
+    const sid = sessionIdFor(state.project.id);
 
     try {
-      const text = await run(prompt, { sessionId: 'autotelic-main', allowAct: c.allowAct });
+      const text = await run(prompt, { sessionId: sid, allowAct: c.allowAct });
       const out = String(text ?? '').slice(0, c.maxOutputChars).trim();
       state.failures = 0;
       state.lastNote = out.slice(0, 400);
@@ -372,6 +471,10 @@ export function createAutotelic({
         },
         note: out,
         at: now(),
+        sessionId: sid,
+        tag: '推进',
+        verdict: 'pass',
+        source: manual ? 'panel' : 'tick',
       });
       return { ok: true, text: out, project: state.project };
     } catch (e) {
@@ -385,6 +488,10 @@ export function createAutotelic({
         payload: { project: state.project.text, failed: true, failures: state.failures, by: manual ? 'manual' : 'tick' },
         note: String(e?.message || e).slice(0, 500),
         at: now(),
+        sessionId: sid,
+        tag: '推进',
+        verdict: stuck ? 'park' : 'reject',
+        source: manual ? 'panel' : 'tick',
       });
       return {
         ok: false,
