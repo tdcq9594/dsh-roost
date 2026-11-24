@@ -375,6 +375,39 @@ export async function extraSpeech(provider, text, cfg, fetchImpl, deps = {}) {
   }
 }
 
+/**
+ * 探测 GPT-SoVITS 服务的真实能力。
+ *
+ * 语义复用适配器（scripts/gpt-semantic-adapter.py）会多注册一个
+ * POST /voice-reply/tts。原版 api_v2.py 没有——用户要是勾了 freeze，
+ * 每次合成都会拿到 404。对齐扩展「语音回复」的做法：读 openapi.json，
+ * 把 semanticFreeze 带出来让面板自动禁用开关，而不是等用户踩坑。
+ */
+export async function probeGptFeatures(base, fetchImpl = fetch) {
+  let root;
+  try { root = baseUrl(base, 'GPT-SoVITS'); } catch { return { ok: false, semanticFreeze: false, message: '服务地址不正确' }; }
+  const signal = AbortSignal.timeout(5000);
+  try {
+    const res = await fetchImpl(`${root}/openapi.json`, { signal, redirect: 'error' });
+    if (!res.ok) return { ok: false, semanticFreeze: false, message: `openapi.json HTTP ${res.status}` };
+    const json = await res.json();
+    const paths = json?.paths && typeof json.paths === 'object' ? json.paths : {};
+    const needed = ['/tts', '/set_sovits_weights', '/set_gpt_weights'];
+    const missing = needed.filter((p) => !Object.hasOwn(paths, p));
+    const semanticFreeze = Boolean(paths['/voice-reply/tts']?.post);
+    return {
+      ok: missing.length === 0,
+      semanticFreeze,
+      missing,
+      message: missing.length ? `缺少接口：${missing.join('、')}`
+        : semanticFreeze ? '已连接 v2 接口，支持语义复用'
+          : '已连接 v2 接口，不支持语义复用（原版 api_v2.py）',
+    };
+  } catch {
+    return { ok: false, semanticFreeze: false, message: '连不上服务，检查地址、端口和防火墙' };
+  }
+}
+
 /** 给 status() 用：这个 provider 的配置填完整了没有 */
 export function extraConfigured(provider, cfg) {
   switch (provider) {

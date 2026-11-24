@@ -13,6 +13,7 @@ import {
   extraConfigured,
   volcanoResourceFor,
   splitJsonObjects,
+  probeGptFeatures,
 } from '../src/tts-providers.js';
 
 const mp3 = () => Buffer.concat([Buffer.from('ID3'), Buffer.alloc(200, 0x61)]);
@@ -181,3 +182,39 @@ function volcanoStream() {
   return JSON.stringify({ header: { code: 0 }, data })
     + JSON.stringify({ header: { code: 20000000 } });
 }
+
+
+// ── GPT 服务能力探测：语义复用开关靠它自动禁用 ──────────────────────
+
+test('probe：带适配器的服务报 semanticFreeze=true', async () => {
+  const fetchImpl = async (url) => {
+    assert.ok(String(url).endsWith('/openapi.json'));
+    return res(JSON.stringify({ paths: {
+      '/tts': {}, '/set_sovits_weights': {}, '/set_gpt_weights': {}, '/voice-reply/tts': { post: {} },
+    } }), { contentType: 'application/json' });
+  };
+  const r = await probeGptFeatures('http://127.0.0.1:9880/', fetchImpl);
+  assert.equal(r.ok, true);
+  assert.equal(r.semanticFreeze, true);
+});
+
+test('probe：原版 api_v2.py 没有语义路由，报 false 让面板禁用开关', async () => {
+  const fetchImpl = async () => res(JSON.stringify({ paths: {
+    '/tts': {}, '/set_sovits_weights': {}, '/set_gpt_weights': {},
+  } }), { contentType: 'application/json' });
+  const r = await probeGptFeatures('http://127.0.0.1:9880', fetchImpl);
+  assert.equal(r.ok, true);
+  assert.equal(r.semanticFreeze, false);
+  assert.match(r.message, /不支持语义复用/);
+});
+
+test('probe：连不上 / 缺接口 / 地址不合法都不误报支持', async () => {
+  const down = await probeGptFeatures('http://x', async () => { throw new Error('ECONNREFUSED'); });
+  assert.equal(down.ok, false);
+  assert.equal(down.semanticFreeze, false);
+  const missing = await probeGptFeatures('http://x', async () => res('{}', { contentType: 'application/json' }));
+  assert.equal(missing.ok, false);
+  assert.match(missing.message, /缺少接口/);
+  const bad = await probeGptFeatures('not a url', async () => res('{}'));
+  assert.equal(bad.semanticFreeze, false);
+});

@@ -791,7 +791,7 @@ test('GPT-SoVITS v2：没选角色时不发 /set_*_weights（老配置服务已�
   assert.ok(calls[0].endsWith('/tts'));
 });
 
-test('GPT-SoVITS v2：选了角色先切权重再合成，第二句不重复切', async () => {
+test('GPT-SoVITS v2：选了角色，每次合成都先确认权重再合成', async () => {
   const calls = [];
   const tts = createTts({
     cfgOf: () => gptV2Cfg({ model: '角色A', models: WAV_MODELS }),
@@ -804,13 +804,13 @@ test('GPT-SoVITS v2：选了角色先切权重再合成，第二句不重复切'
   });
   await tts.synthesize('第一句');
   await tts.synthesize('第二句');
-  assert.equal(calls.filter((u) => u.includes('/set_')).length, 2, '首次切 GPT + SoVITS 两个权重');
-  assert.equal(calls.length, 4, '第二次合成不该再切一遍');
+  assert.equal(calls.filter((u) => u.includes('/set_')).length, 4, '两次合成各切 GPT + SoVITS 一遍');
+  assert.equal(calls.length, 6);
   assert.ok(calls[0].includes('set_gpt_weights'), '切权重发生在合成之前');
   assert.ok(calls[2].endsWith('/tts'));
 });
 
-test('GPT-SoVITS v2：markGptWeightsReady 让启动器已切过的角色不再重复切', async () => {
+test('GPT-SoVITS v2：启动器标记就绪不再跳过确认（服务重启后要能自愈）', async () => {
   const calls = [];
   const tts = createTts({
     cfgOf: () => gptV2Cfg({ model: '角色A', models: WAV_MODELS }),
@@ -820,10 +820,10 @@ test('GPT-SoVITS v2：markGptWeightsReady 让启动器已切过的角色不再�
     baseUrl: 'http://127.0.0.1:9880', model: '角色A', gptWeights: '', sovitsWeights: '',
   });
   await tts.synthesize('测试');
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 3, 'markGptWeightsReady 是兼容空操作，不该跳过权重确认');
 });
 
-test('GPT-SoVITS v2：换角色后指纹变化，下一次合成自动切过去', async () => {
+test('GPT-SoVITS v2：换角色后下一次合成切到新权重', async () => {
   const calls = [];
   let model = '角色A';
   const both = [...WAV_MODELS, { name: '角色B', gpt: 'GPT_weights/b.ckpt', sovits: 'SoVITS_weights/b.pth' }];
@@ -836,11 +836,11 @@ test('GPT-SoVITS v2：换角色后指纹变化，下一次合成自动切过去'
         : audioResponse();
     },
   });
-  tts.markGptWeightsReady({ baseUrl: 'http://127.0.0.1:9880', model: '角色A' });
   await tts.synthesize('第一句');
   model = '角色B';
   await tts.synthesize('第二句');
-  assert.equal(calls.filter((u) => u.includes('/set_')).length, 2, '新角色要真的切，不是沿用旧指纹');
+  assert.equal(calls.filter((u) => u.includes('/set_')).length, 4, '两次合成各切一遍');
+  assert.ok(calls.some((u) => u.includes(encodeURIComponent('GPT_weights/b.ckpt'))), '第二次要切到角色B');
 });
 
 test('GPT-SoVITS v2：切权重失败报明确错误码，不发合成请求', async () => {

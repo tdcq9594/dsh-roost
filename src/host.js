@@ -300,6 +300,7 @@ import { createLocalReranker } from './local-rerank.js';
 import { parseTemporal } from './temporal.js';
 import { createTurnScenes } from './turn-scene.js';
 import { applyWeights, createGptSovits, weightReadyConfig } from './gpt-sovits.js';
+import { probeGptFeatures } from './tts-providers.js';
 import {
   applyPendingRestore, cancelRestore, createBackup, isFullBackupName, listBackups,
   pendingRestore, restoreRetentionRows, stageRestore, versionGapText,
@@ -14019,6 +14020,18 @@ export function apply(ctx) {
        * 一键启动。立刻返回，不等模型加载（实测 110 秒，HTTP 等不起）。
        * 就绪后 `onReady` 会把 baseUrl / 路由 / 版本写进配置。
        */
+      /**
+       * 探服务的真实能力（语义复用 etc.）。和 /tts/gpt-probe 的区别：
+       * 那个探本地安装目录，这个探**跑起来的服务**的 openapi.json。
+       * 面板据此自动禁用 freeze 开关，避免对着原版 api_v2.py 勾了却每次 404。
+       */
+      route('/tts/gpt-features', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const base = String(body?.baseUrl || cfg.tts?.gptSovits?.baseUrl || '').trim();
+        if (!base) return send(res, 200, { ok: false, semanticFreeze: false, message: '还没配服务地址' });
+        return send(res, 200, await probeGptFeatures(base));
+      }),
+
       route('/tts/gpt-start', async (req, res) => {
         const body = await readBody(req).catch(() => ({}));
         const g = cfg.tts?.gptSovits || {};

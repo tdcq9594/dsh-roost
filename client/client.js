@@ -14915,8 +14915,23 @@ window.__ModuleLoader__.load({
       const probeGpt = async () => {
         const r = await post('/tts/gpt-probe', { dir: v('gptSovits.installDir') })
         setProbeInfo(r)
+        await probeFeatures()
         toast(r?.ok ? '目录认出来了' : (r?.message || '这个目录不像 GPT-SoVITS 的根目录'))
       }
+
+      /**
+       * 探服务的真实能力：语义复用只有带适配器的服务才有。
+       * 不支持就把「复用上次语义」开关禁掉——从根上避免对着原版
+       * api_v2.py 勾了之后每次合成都 404（对齐扩展面板的做法）。
+       */
+      const [gptFeatures, setGptFeatures] = useState(null)
+      const probeFeatures = async () => {
+        const base = String(v('gptSovits.baseUrl') || '').trim()
+        if (!base) return
+        const r = await post('/tts/gpt-features', { baseUrl: base })
+        setGptFeatures(r)
+      }
+      useEffect(() => { if (provider === 'gpt-sovits') probeFeatures() }, [provider, v('gptSovits.baseUrl')])
 
       const startGpt = async () => {
         const r = await post('/tts/gpt-start', {
@@ -15554,11 +15569,18 @@ window.__ModuleLoader__.load({
                 h('input', {
                   type: 'checkbox',
                   checked: v('gptSovits.freeze') === true,
+                  disabled: gptFeatures?.semanticFreeze === false,
                   onChange: (e) => put('gptSovits.freeze', e.target.checked),
                 }),
                 h('span', { className: 'roost-note', style: { margin: 0 } },
-                  '复用上次语义结果（需上面勾选并重启服务；同一段文本才命中）'),
+                  gptFeatures?.semanticFreeze === false
+                    ? '复用上次语义：当前服务不支持（原版 api_v2.py 没这个接口），要用就勾上面的语义缓存并重启服务'
+                    : '复用上次语义结果（需服务带语义缓存适配器；同一段文本才命中）'),
               ),
+              gptFeatures?.semanticFreeze === false
+                ? h('div', { className: 'roost-note', style: { marginTop: 4 } },
+                    gptFeatures.message || '服务检查：不支持语义复用。')
+                : null,
 
               h('div', { className: 'roost-note' },
                 '语种填「中文」「日文」就行，会自动转成 API 要的 zh / ja。'

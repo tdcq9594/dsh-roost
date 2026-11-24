@@ -430,16 +430,6 @@ export function createTts({
   let engineCache = null;
 
   /**
-   * 已生效的 GPT-SoVITS 权重指纹。
-   *
-   * 权重加载实测 110 秒，**不能每次合成都切一遍**。指纹里带上 baseUrl：
-   * 一键启动每次挑的端口可能不同，服务重启后必须重新切。
-   * 用户改了角色/手填权重也会改指纹，于是下一次合成自动生效——
-   * 面板不用重启服务，这正是扩展市场「语音回复」比我们强的地方。
-   */
-  let gptWeightKey = '';
-
-  /**
    * 上游刚刚失败过吗。
    *
    * 为什么要记：`status()` 只能看**配置填没填**，看不出服务在不在。
@@ -867,30 +857,32 @@ function langCode(value) {
     /**
      * v2 才支持运行时换角色。
      *
-     * 关键：**没选角色也没手填权重时一次都不切**。老配置就是这种形状，
+     * 关键一：**没选角色也没手填权重时一次都不切**。老配置就是这种形状，
      * 服务启动时 already 按 tts_infer.yaml 加载好了；在这里发 `/set_*_weights`
      * 既白等 110 秒，还会因为「目录里没有『』的权重」直接把合成打断。
      *
-     * 选了角色才切，且按指纹去重：一键启动刚切过的话，`markGptWeightsReady`
-     * 会把指纹置成当前值，不会为同一个角色再等一遍。
+     * 关键二：**选了角色就每次合成都确认一遍权重**，不做客户端去重。
+     * 2026-11-24 对齐扩展市场「语音回复」的做法：它的注释明确写
+     * 「不复用易在服务重启后失效的缓存」。我们之前的指纹去重有两个漏洞：
+     *   · 服务在同端口重启后权重回到 tts_infer.yaml 的默认，指纹却没变，
+     *     于是合成一直用错音色、不会自愈（和启动失败锁死是同一类 bug）；
+     *   · 启动切权重失败时标记了就绪，合成也跟着跳过重试。
+     * GPT-SoVITS 服务端对**同一路径**有权重缓存，重复确认不会真等 110 秒，
+     * 所以每次都调的代价可接受；换来的是重启/失败后下一句就能自愈。
      */
     if (version === 'v2' && (wantModel || wantGpt || wantSovits)) {
-      const fingerprint = [gpt.baseUrl, wantModel, wantGpt, wantSovits].join('|');
-      if (fingerprint !== gptWeightKey) {
-        try {
-          const applied = await applyWeights({
-            baseUrl: String(gpt.baseUrl),
-            model: wantModel,
-            models: Array.isArray(gpt.models) ? gpt.models : [],
-            gptWeights: wantGpt,
-            sovitsWeights: wantSovits,
-            fetchImpl,
-          });
-          gptWeightKey = fingerprint;
-          log(`GPT-SoVITS 权重已切到「${applied.name}」`);
-        } catch (e) {
-          throw new TtsError('weight_switch_failed', `切换语音角色失败：${e?.message || e}`, 502);
-        }
+      try {
+        const applied = await applyWeights({
+          baseUrl: String(gpt.baseUrl),
+          model: wantModel,
+          models: Array.isArray(gpt.models) ? gpt.models : [],
+          gptWeights: wantGpt,
+          sovitsWeights: wantSovits,
+          fetchImpl,
+        });
+        log(`GPT-SoVITS 权重已确认：「${applied.name}」`);
+      } catch (e) {
+        throw new TtsError('weight_switch_failed', `切换语音角色失败：${e?.message || e}`, 502);
       }
     }
 
@@ -1145,21 +1137,14 @@ function langCode(value) {
   }
 
   /**
-   * 标记「一键启动已经切过这一组权重」，避免合成时重复等 110 秒。
+   * 兼容旧调用：以前用来标记「启动已切过、合成别再切」。
    *
-   * 只在 host.js 的 onReady 里调；面板手动改角色时**不调**，
-   * 于是下一次合成会按新指纹真的切过去。
+   * 2026-11-24 起合成改成**每次都确认权重**（服务端对同路径有缓存，
+   * 重复确认很快），这个指纹机制连同它两个自愈漏洞一起退役：
+   * 服务重启后旧指纹还在、启动切失败还会锁死。留个空函数只是不破坏
+   * host.js 的调用点，它不再影响任何行为。
    */
-  function markGptWeightsReady(gpt = {}) {
-    const wantModel = String(gpt.model || '').trim();
-    const wantGpt = String(gpt.gptWeights || '').trim();
-    const wantSovits = String(gpt.sovitsWeights || '').trim();
-    if (!wantModel && !wantGpt && !wantSovits) {
-      gptWeightKey = '';
-      return;
-    }
-    gptWeightKey = [gpt.baseUrl, wantModel, wantGpt, wantSovits].join('|');
-  }
+  function markGptWeightsReady() {}
 
   return { status, synthesize, warmup, markGptWeightsReady };
 }
