@@ -103,6 +103,9 @@ const MEMORY_WRITE_OPS = Object.freeze([
   'memory.followUp',
   /** 做梦：跑一次（写 dreams/*.md + 自述，不碰 facts） */
   'memory.dream',
+  /** G8 批量复习/改档：写 meta，归 memory:write */
+  'memory.reviewMany',
+  'memory.tierMany',
   /** G2：重建向量索引（只改 journal 行 vec，不改正文），写操作 */
   'memory.vector.rebuild',
   /** E4：撤销某人雷区（改，不是清库） */

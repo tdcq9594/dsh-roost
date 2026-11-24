@@ -57,7 +57,7 @@ import { memoryLines, oneLine, followUpAllowed, followUpSection } from './memory
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { createGroupChatProfiles } from './group-chat-profile.js';
-import { createImpressionStore, buildImpressionPrompt, cleanImpression, crystallizeCandidates, IMPRESSION_MIN_HITS } from './gist-impression.js';
+import { createImpressionStore, buildImpressionPrompt, cleanImpression, crystallizeCandidates, IMPRESSION_MIN_HITS, DEFAULT_IMPRESSION_DAYS } from './gist-impression.js';
 import { sourceStats } from './source-stats.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
 import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
@@ -85,6 +85,7 @@ import { projectRecallPreview } from './recall-preview.js';
 import { vectorStatus } from './vector-status.js';
 import { TEST_TEXT, testResult, rebuildBatch } from './vector-ops.js';
 import { projectTimeline } from './timeline-view.js';
+import { planHeat } from './memory-heat.js';
 import { rerankHits } from './rerank.js';
 import { isDangerousCommand, createConfirmGate, dangerScanArgs } from './safety.js';
 import { createClosing, shouldNotePending } from './closing.js';
@@ -3136,6 +3137,19 @@ export function apply(ctx) {
     /** 读盘失败 / 坏文件隔离都要留痕：这类问题以前是静默的 */
     log: (m) => log.warn(m),
   }));
+  /**
+   * G8 一次性适配：老库 v1（无 schemaVersion）补注入热度字段并落盘为 v2。
+   * 不推算历史（没有 hitDays 记录，按 w 编造会让老记忆凭空抗遗忘），只补空值。
+   * 与 migratePersonaName 同款跳过开关；失败只留痕，不挡启动。
+   */
+  if (process.env.DSH_ROOST_SKIP_MIGRATE !== '1') {
+    try {
+      const mig = memory.migrateIfNeeded();
+      if (mig?.migrated) log.info(`记忆 schema 一次性适配 v2：补注入热度字段完成（不推算历史）`);
+    } catch (e) {
+      log.warn(`记忆 schema 适配跳过：${e?.message ?? e}`);
+    }
+  }
   const mood = createMood({ cfgOf: () => cfg.mood });
   /**
    * 两份行为日志（B4 / D3）。**不存消息正文**：心情历史只有数值和原因，
@@ -3280,6 +3294,13 @@ export function apply(ctx) {
    * text() 只负责读。
    */
   const memState = new Map();
+  /**
+   * G8 注入热度账：per-chat 的 {heat, recent}，纯内存派生数据不写盘。
+   * heat 的权威值最终落在 memory meta（hitDays/lastHitDay/lastHit）；
+   * 这里只记"最近几轮注入了哪些"用于第5层防霸榜 + 当日去重的快速判定。
+   * 重启后 recent 清空=防霸榜窗口重置，heat 从 memory meta 重建，可接受。
+   */
+  const heatState = new Map();
   /**
    * 这一轮真正注入给模型的待跟进（chatId → 事实原文）。
    *
@@ -5430,6 +5451,45 @@ export function apply(ctx) {
     const m = memory.listRanked(chatId, aliasesOf(chatId), {
       annotate: true, skipDirective: deep, skipStale: deep,
     });
+
+    /**
+     * G8 注入热度（五层防护）：只有 live:true（systemPrompt 真实注入）才记账，
+     * 面板预览 / leak-guard 调 memoryStatic 不传 live → 不涨热度（第1层：预览不加深）。
+     * planHeat 负责自然日去重/封顶40/最近4轮排除；写回 memory meta 供 retention/brightness 用。
+     * 热度账是内存派生数据，不写盘；权威值在 memory meta（hitDays/lastHitDay/lastHit）。
+     */
+    if (live === true && chatId) {
+      try {
+        /**
+         * 按 scope 分两批记账：global 与 chat 层分别精确定位，不跨群串场。
+         * 老库跨群同名 fact 很常见，混在一起按 text 找会把 A 群热度写到 B 群。
+         * recent 账也分层，避免一个群的注入占掉另一个群的防霸榜窗口。
+         */
+        const aliasList = aliasesOf(chatId);
+        const batches = [
+          { key: 'global', texts: [...new Set(m?.global || [])], scope: 'global', chatId: '', aliases: [] },
+          { key: 'chat', texts: [...new Set(m?.chat || [])], scope: 'chat', chatId, aliases: aliasList },
+        ];
+        for (const batch of batches) {
+          if (!batch.texts.length) continue;
+          const prev = heatState.get(`${chatId}:${batch.key}`) || { recent: [] };
+          /**
+           * 统一用剥掉 annotate 后缀的正文做记账 key——同一条 fact 的 status 变了
+           * （普通→听说）时仍能配上 recent，不会绕过防霸榜窗口。
+           */
+          const keys = batch.texts.map((t) => t.replace(/（听说的）$/, ''));
+          /** heat 从 memory meta 现读（重启后 heatState 空也不重复涨） */
+          const heat = memory.heatOf(batch.texts, { scope: batch.scope, chatId: batch.chatId, aliases: batch.aliases });
+          const plan = planHeat({ injected: keys, heat, recent: prev.recent }, { now: Date.now() });
+          if (plan.updates.length) {
+            memory.bumpHeat(plan.updates, { scope: batch.scope, chatId: batch.chatId, aliases: batch.aliases });
+          }
+          heatState.set(`${chatId}:${batch.key}`, { recent: plan.recent });
+        }
+      } catch (e) {
+        log.debug(`注入热度记账跳过：${e?.message ?? e}`);
+      }
+    }
 
     /**
      * 认人认群的顺序写在这里，是因为模型只从这一段知道「号码比 openid 稳」。
@@ -10319,6 +10379,43 @@ export function apply(ctx) {
             }
 
             /**
+             * G8 批量复习/改档（对齐对方 review-many/tier，上限 200）。
+             * 只包现有 editFact 的 reviewedAt/tier 写入，不改 w/tier 语义、
+             * 不引入 hitDays 升档——复习只拉回衰减起点（双信号分工）。
+             * 对方这两个路由自己面板都没接（HANDOFF.md:239），这里只提供 op 层给扩展/面板用。
+             */
+            case 'memory.reviewMany':
+            case 'memory.tierMany': {
+              const idsRaw = Array.isArray(arg?.ids) ? arg.ids : [];
+              const ids = idsRaw.map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 200);
+              if (!ids.length) return send(res, 400, { ok: false, message: '没有要处理的事实（ids 空）' });
+              const scope = arg?.scope === 'global' ? 'global' : 'chat';
+              let done = 0;
+              const failed = [];
+              for (const id of ids) {
+                try {
+                  const patch = op === 'memory.reviewMany'
+                    ? { reviewedAt: Date.now() }
+                    : { tier: String(arg?.tier || '') };
+                  if (op === 'memory.tierMany' && !['short', 'long', 'core'].includes(patch.tier)) {
+                    return send(res, 400, { ok: false, message: '层级只能是 short / long / core' });
+                  }
+                  const r = memory.editFact(chatId, scope, id, patch, aliasesOf(chatId));
+                  if (r?.ok) done += 1;
+                  else failed.push(id);
+                } catch (e) { failed.push(id); }
+              }
+              return send(res, 200, {
+                ok: done > 0,
+                done,
+                failed,
+                message: op === 'memory.reviewMany'
+                  ? `已复习 ${done} 条${failed.length ? `，${failed.length} 条没找到` : ''}`
+                  : `已改档 ${done} 条${failed.length ? `，${failed.length} 条没找到` : ''}`,
+              });
+            }
+
+            /**
              * 做梦：手动做一次（默认关，面板上点一下就能试）。
              * 和凌晨那条自动路径共用 `dream.run`，一天最多一次（看文件在不在）。
              */
@@ -10640,8 +10737,16 @@ export function apply(ctx) {
 
             case 'gist.impression.crystallize': {
               const minHits = Math.max(1, Number(arg?.minHits) || IMPRESSION_MIN_HITS);
-              const days = Math.max(0, Number(arg?.days) || 180);
-              const candidates = crystallizeCandidates(impressionStore.list(), Date.now(), { minHits, days });
+              /** G6：默认 365 对齐对方 impressionDays（原写死 180） */
+              const days = Math.max(0, Number(arg?.days) || DEFAULT_IMPRESSION_DAYS);
+              /**
+               * G6 尊重判据（对齐对方 rememberedItem）：这个会话已 memory.mute
+               * （「不记也不读」）的印象不结晶——用户明确不要这个来源的记忆。
+               */
+              const candidates = crystallizeCandidates(impressionStore.list(), Date.now(), {
+                minHits, days,
+                remembered: (x) => !memoryOff(String(x?.chatId || '')),
+              });
               const dry = arg?.dry === true;
               if (!candidates.length) return send(res, 200, { ok: true, candidates: [], added: 0, message: '还没有够旧且被反复想起的印象' });
               const results = [];
@@ -10655,7 +10760,17 @@ export function apply(ctx) {
                 }
                 results.push({ id: c.id, text: c.text, chatId: c.chatId, ok: true, dry });
               }
-              return send(res, 200, { ok: true, dry, results, added: results.filter((r) => r.ok).length });
+              /**
+               * G6：结晶后清掉到期印象（含未结晶的），防 impressions.json 无限增长（对齐对方 compressOld:3021）。
+               * 删除阈值固定用 impressionDays(365)，不受调用方 days（结晶候选阈值）影响——
+               * 否则 days=180 时会把 180~365 天、还没到期的印象误删。
+               */
+              const pruned = dry ? { removed: 0 } : impressionStore.pruneExpired({ at: Date.now() });
+              return send(res, 200, {
+                ok: true, dry, results,
+                added: results.filter((r) => r.ok).length,
+                pruned: pruned.removed || 0,
+              });
             }
 
             case 'gist.impression.clear': {

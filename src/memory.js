@@ -57,10 +57,32 @@ const FACTS_MAX = 40;
  *   · 文件版本 > 当前支持 → 隔离（quarantine）+ 空视图，绝不写回
  *   · 迁移函数从 v1 逐级跑上来，每级只做一件事
  */
-export const MEMORY_SCHEMA_VERSION = 1;
-/** v(n) → v(n+1)：入参是整份对象，返回迁移后的对象；保持纯函数便于单测 */
+export const MEMORY_SCHEMA_VERSION = 2;
+/**
+ * v(n) → v(n+1)：入参是整份对象，返回迁移后的对象；保持纯函数便于单测。
+ *
+ * v1→v2（2026-11-24，G8 衰减换 τ=20）：给每条 fact 的 meta 补注入热度字段。
+ * **不推算历史**（没有 hitDays 历史，按 w/accessed 编造会让老记忆凭空抗遗忘）——
+ * 一律给 0/空，行为就是 τ=20 的裸默认值，跟主人"接受老库衰减翻倍"的选择一致。
+ * 只补确实存在的正文（meta 里孤立的旧键不处理）；幂等：有 schemaVersion=2 就不再跑。
+ */
 const SCHEMA_MIGRATIONS = Object.freeze({
-  // 1: (raw) => ({ ...raw, newField: default }),  // 将来加字段时在这里追加
+  1: (raw) => {
+    const meta = raw?.meta && typeof raw.meta === 'object' ? raw.meta : {};
+    const fill = (list, mm) => {
+      if (!mm || typeof mm !== 'object') return;
+      for (const text of Array.isArray(list) ? list : []) {
+        const x = mm[text];
+        if (!x || typeof x !== 'object') continue;
+        if (x.hitDays === undefined) x.hitDays = 0;
+        if (x.lastHitDay === undefined) x.lastHitDay = '';
+        if (x.lastHit === undefined) x.lastHit = 0;
+      }
+    };
+    fill(raw.global, meta.global);
+    for (const [cid, list] of Object.entries(raw.chats || {})) fill(list, meta.chats?.[cid]);
+    return raw;
+  },
 });
 export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze(
   [1, ...Object.keys(SCHEMA_MIGRATIONS).map(Number)],
@@ -72,9 +94,32 @@ const W_MAX = 5;
 const W_BUMP = 0.5;
 /** 用户（或她自己）明确说「记住」的权重；巩固抽出来的按 1 算 */
 export const W_EXPLICIT = 2;
-/** 权重的时间半衰期（天）：30 天没被提到的，分量减半 */
+/**
+ * 遗忘曲线基数（天）——对齐 aurabot 的 RETENTION_BASE=20（对方 memory.js:603/615）。
+ * 2026-11-24 主人定：衰减机制整体换对方原生值 τ=20，接受老库衰减比原来 30 天半衰期快。
+ * τ = base × (1 + min(10, hitDays)) × (0.5 + importance)，R = exp(-age/τ)。
+ * 老数据无 hitDays/importance 时 τ=20×(1+0)×(0.5+0.5)=20，不崩。
+ */
+export const RETENTION_BASE = 20;
+/** 保留旧常量名兼容外部 import（若有人用）；新公式不再拿它做半衰期 */
 const HALF_LIFE_DAYS = 30;
 const DAY_MS = 86_400_000;
+
+/**
+ * G8：一条事实的保留度 R=e^(-age/τ)（对方 memory.js:615-622 同款）。
+ * hitDays 通过 strength 拉长 τ（封顶 10 天等效，防噪声记忆赖着不走）；
+ * importance 越高 τ 越长。双信号分工：这里只影响衰减，不改 tier（core 升档仍由 evidence 独占）。
+ */
+export function retentionOf(meta, now = Date.now(), base = RETENTION_BASE) {
+  const last = Math.max(Number(meta?.at) || 0, Number(meta?.reviewedAt) || 0, Number(meta?.lastHit) || 0);
+  /** 无任何时间戳（老库无 meta）时不衰减——保留旧的 start? days:0 语义 */
+  const days = last ? Math.max(0, (now - last) / DAY_MS) : 0;
+  const strength = 1 + Math.min(10, Math.max(0, Number(meta?.hitDays) || 0));
+  const imp = Number.isFinite(Number(meta?.importance)) ? Math.max(0, Math.min(1, Number(meta.importance))) : 0.5;
+  const b = Number.isFinite(Number(base)) && Number(base) > 0 ? Number(base) : RETENTION_BASE;
+  const tau = b * strength * (0.5 + imp);
+  return Math.exp(-days / tau);
+}
 
 /**
  * 待跟进（followUp）：一条事实到点了该问一句。
@@ -103,11 +148,14 @@ export function scoreOfFact(meta, now = Date.now()) {
   const autoW = Number(meta?.w) > 0 ? Number(meta.w) : 1;
   const pin = clamp01(meta?.pin);
   const w = Math.max(autoW, pin > 0 ? 1 + pin * (W_MAX - 1) : 0);
-  /** 复习把衰减起点拉回 reviewedAt；老数据没有这个字段时 start === at */
-  const start = Math.max(Number(meta?.at) || 0, Number(meta?.reviewedAt) || 0);
-  const days = start ? Math.max(0, (now - start) / DAY_MS) : 0;
+  /**
+   * 2026-11-24：衰减换成对方原生 e^(-age/τ)（见 retentionOf）。
+   * core 档保留我方语义——永不衰减（对方没有直接对应档，这是我方刻意保留的永久层）。
+   * hitDays/importance 老数据缺省时 τ=20，不崩；复习仍把起点拉回 reviewedAt。
+   */
   const tier = FACT_TIERS.includes(meta?.tier) ? meta.tier : 'long';
-  const base = tier === 'core' ? w : w * 0.5 ** (days / (HALF_LIFE_DAYS * (TIER_DECAY[tier] || 1)));
+  /** tier 倍率作用在 τ 上（short τ 减半→衰减更快），不是乘在结果上 */
+  const base = tier === 'core' ? w : w * retentionOf(meta, now, RETENTION_BASE * (TIER_DECAY[tier] || 1));
   let score = meta?.until ? base * HISTORY_WEIGHT : base;
   if (meta?.archivedAt) score *= ARCHIVE_WEIGHT;
   /** E3 条目级时效：过了 validUntil 不删、保留历史，但不再当硬事实注入 */
@@ -404,11 +452,12 @@ const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
 /** 面板星图用的清晰度：0.15–1，复习会把衰减起点拉回来 */
 export function brightnessOf(meta, now = Date.now()) {
   const w = Math.max(1, Number(meta?.w) || 1, 1 + (clamp01(meta?.pin) * (W_MAX - 1)));
-  const start = Math.max(Number(meta?.at) || 0, Number(meta?.reviewedAt) || 0);
-  const days = start ? Math.max(0, (now - start) / DAY_MS) : 0;
   const tier = FACT_TIERS.includes(meta?.tier) ? meta.tier : 'long';
-  const decay = tier === 'core' ? 1 : 0.5 ** (days / (HALF_LIFE_DAYS * (TIER_DECAY[tier] || 1)));
-  const b = 0.15 + 0.85 * Math.min(1, w / W_MAX) * decay;
+  /** 2026-11-24：衰减换对方 e^(-age/τ)；core 永不衰减保留我方语义 */
+  const retention = tier === 'core' ? 1 : retentionOf(meta, now, RETENTION_BASE * (TIER_DECAY[tier] || 1));
+  const imp = Number.isFinite(Number(meta?.importance)) ? Math.max(0, Math.min(1, Number(meta.importance))) : 0.5;
+  /** 保留我方 0.15 底噪 + 权重维度（对方是 R×(0.6+0.4×imp)，我方融入权重与底噪） */
+  const b = 0.15 + 0.85 * Math.min(1, w / W_MAX) * retention * (0.6 + 0.4 * imp);
   return Math.round(b * 1000) / 1000;
 }
 
@@ -577,19 +626,20 @@ function chatKeys(chatId, aliases) {
  * 老事实会以 1e-9 之差赢过刚说的话。所以给个**下限**而不是豁免：
  * 重要的老事（w 高）照样能浮上来，同权重的仍然让位给新的。
  */
+/** 别名事实的衰减封顶天数：2026-11-24 换 τ=20 后从 30 改为 20（一个 τ），保住「重要老事实仍浮上来」 */
+const ALIAS_DECAY_CAP_DAYS = 20;
+
 function scoreOfAliasFact(meta, now = Date.now()) {
   const at = Number(meta?.at) || 0;
   /**
    * **没有 `at` 的老数据按「很老」算，不能按「刚记的」算。**
    *
    * 早期版本的 facts 只有字符串、没有 meta。直接 `scoreOfFact(undefined)`
-   * 会返回 1，而刚记的那条是 `1 × 0.5^(几毫秒/30天) ≈ 0.999999999`——
-   * 于是「一条不知道多久以前的老事实」以 1e-9 之差压过刚说的话。
-   * 而老数据恰恰最可能没有 meta。
+   * 会以极小差距压过刚说的话，而老数据恰恰最可能没有 meta。
    */
-  if (!at) return scoreOfFact({ ...meta, at: now - HALF_LIFE_DAYS * DAY_MS }, now);
+  if (!at) return scoreOfFact({ ...meta, at: now - ALIAS_DECAY_CAP_DAYS * DAY_MS }, now);
   const days = Math.max(0, (now - at) / DAY_MS);
-  const capped = Math.min(days, HALF_LIFE_DAYS);
+  const capped = Math.min(days, ALIAS_DECAY_CAP_DAYS);
   return scoreOfFact({ ...meta, at: now - capped * DAY_MS }, now);
 }
 
@@ -610,6 +660,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
   /** 上次尝试重读的时刻：读失败后按 5 秒节流重试，别每次访问都去撞坏路径 */
   let lastRetryAt = 0;
   const RETRY_MS = 5_000;
+  /** G8 一次性适配：load 时若从旧 schema 迁移上来，置位等 migrateIfNeeded() 落盘 */
+  let schemaPendingWrite = false;
 
   /**
    * 坏文件先留一份再降级。
@@ -739,7 +791,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       return cache;
     }
     /** schema 版本校验：高版本/非法版本隔离，老库无版本按 v1 迁移上来 */
+    const rawV = raw.schemaVersion === undefined ? 1 : Number(raw.schemaVersion);
     const migrated = migrateSchema(raw);
+    /** G8：从旧版本迁上来的，记一笔等启动时一次性落盘（不推算历史，只补空字段） */
+    if (migrated && Number.isInteger(rawV) && rawV < MEMORY_SCHEMA_VERSION) schemaPendingWrite = true;
     if (!migrated) {
       quarantine(text, `schema 版本不认识（${String(raw.schemaVersion)}，支持 1..${MEMORY_SCHEMA_VERSION}）`);
       /**
@@ -1179,6 +1234,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
             pin: clamp01(x.pin),
             archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : null,
             reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : null,
+            /** G8 注入热度：老库缺省 0，不写回盘 */
+            hitDays: Math.max(0, Math.trunc(Number(x.hitDays) || 0)),
+            lastHitDay: String(x.lastHitDay || ''),
+            lastHit: Number(x.lastHit) > 0 ? Number(x.lastHit) : 0,
             brightness: brightnessOf(x, Date.now()),
             /** 证据账本：老库给默认（0 条 / 满信念），不写回盘 */
             ...evidenceOf(x),
@@ -1491,6 +1550,79 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
     },
 
     /**
+     * G8 一次性适配：老库（v1，无 schemaVersion）load 时已在内存补好热度字段，
+     * 这里把它落盘一次并打 schemaVersion=2，之后不再重跑。
+     * 返回 { migrated, ok }；读失败/写不进去时返回 migrated:false，不影响启动。
+     * 可被启动方用 DSH_ROOST_SKIP_MIGRATE 跳过（和 migratePersonaName 同款开关）。
+     */
+    migrateIfNeeded() {
+      /** 先 load 才会读盘、才会置 schemaPendingWrite（不能先检查再 load） */
+      load();
+      if (!schemaPendingWrite) return { migrated: false, ok: true };
+      if (ioFailed) return { migrated: false, ok: false, reason: 'io-failed' };
+      const ok = save();
+      if (ok) schemaPendingWrite = false;
+      return { migrated: ok, ok, reason: ok ? '' : 'save-failed' };
+    },
+
+    /**
+     * G8：只读取出若干正文的当前热度账，给 planHeat 做自然日去重/封顶判定。
+     * 返回 { [text]: {hitDays, lastHitDay, lastHit} }，只含热度过的事实。
+     */
+    heatOf(texts = [], { scope = 'global', chatId = '', aliases = [] } = {}) {
+      const want = Array.isArray(texts) ? texts.filter((x) => typeof x === 'string') : [];
+      if (!want.length) return {};
+      const m = load();
+      const out = {};
+      /**
+       * 精确寻址：按 scope/chatId 定位层，不跨群扫。
+       * 老库跨群同名 fact 很常见，按 text 全局找会把 A 群热度读到 B 群（串场）。
+       * annotate 后的"（听说的）"后缀也要剥掉再查（findFact 认原文/id）。
+       */
+      for (const raw of want) {
+        const key = raw.replace(/（听说的）$/, '');
+        const hit = findFact(m, chatId, scope, key, aliases);
+        if (!hit) continue;
+        const x = hit.mm[hit.text];
+        if (x && typeof x === 'object' && (Number(x.hitDays) > 0 || x.lastHitDay)) {
+          /** 用剥后缀的正文作 key，与 planHeat 的 injected（同样剥后缀）对齐 */
+          out[key] = {
+            hitDays: Math.max(0, Number(x.hitDays) || 0),
+            lastHitDay: String(x.lastHitDay || ''),
+            lastHit: Number(x.lastHit) || 0,
+          };
+        }
+      }
+      return out;
+    },
+
+    /**
+     * G8 注入热度批量写入：一次 load、一次 save，把 planHeat 的 updates 落到 fact meta。
+     * 只有真实存在的正文才写（防止已删/已取代的fact留下孤立热度）；返回实际写入条数。
+     * 与 editFact 不同：这里只碰 hitDays/lastHitDay/lastHit 三个热度字段，不碰 text/tier/pin。
+     */
+    bumpHeat(updates = [], { scope = 'global', chatId = '', aliases = [] } = {}) {
+      const list = Array.isArray(updates) ? updates.filter((u) => u && typeof u.text === 'string') : [];
+      if (!list.length) return 0;
+      const m = load();
+      let n = 0;
+      for (const u of list) {
+        /** 剥掉注入时的 annotate 后缀，再按 scope/chatId 精确定位（不跨群串场） */
+        const key = u.text.replace(/（听说的）$/, '');
+        const hit = findFact(m, chatId, scope, key, aliases);
+        if (!hit) continue;
+        const cur = hit.mm[hit.text] && typeof hit.mm[hit.text] === 'object' ? hit.mm[hit.text] : {};
+        cur.hitDays = Math.max(0, Math.trunc(Number(u.hitDays) || 0));
+        cur.lastHitDay = String(u.lastHitDay || '');
+        cur.lastHit = Number(u.lastHit) > 0 ? Number(u.lastHit) : now();
+        hit.mm[hit.text] = cur;
+        n += 1;
+      }
+      if (n) save();
+      return n;
+    },
+
+    /**
      * 待跟进：这条事实到点了该问一句（比如「他下周三考试」→ 周四问结果）。
      *
      * 为什么挂在 fact 的 meta 上、不另开一张提醒表：问的是"那条事实的结果"，
@@ -1761,6 +1893,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
               validUntil: Number(x.validUntil) > 0 ? Number(x.validUntil) : null,
               pin: clamp01(x.pin),
               reviewedAt: Number(x.reviewedAt) > 0 ? Number(x.reviewedAt) : 0,
+              /** G8 注入热度：漏一个，清理→还原就把抗遗忘记录抹掉（同 status 教训） */
+              hitDays: Math.max(0, Math.trunc(Number(x.hitDays) || 0)),
+              lastHitDay: String(x.lastHitDay || ''),
+              lastHit: Number(x.lastHit) > 0 ? Number(x.lastHit) : 0,
               archivedAt: Number(x.archivedAt) > 0 ? Number(x.archivedAt) : 0,
               /** 阶段8：被哪条事实顶替（新条目稳定 id）；清理→还原不能丢，否则真链断了 */
               supersededBy: String(x.supersededBy || ''),
@@ -1895,6 +2031,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (Number(row.validUntil) > 0) meta.validUntil = Number(row.validUntil);
       if (Number(row.pin) > 0) meta.pin = clamp01(row.pin);
       if (Number(row.reviewedAt) > 0) meta.reviewedAt = Number(row.reviewedAt);
+      /** G8 注入热度：空不落盘，老库还原逐字节一致 */
+      if (Number(row.hitDays) > 0) meta.hitDays = Math.max(0, Math.trunc(Number(row.hitDays)));
+      if (row.lastHitDay) meta.lastHitDay = String(row.lastHitDay);
+      if (Number(row.lastHit) > 0) meta.lastHit = Number(row.lastHit);
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);
       /** 阶段8：还原被取代指针（空不落盘，老库逐字节一致） */
       if (row.supersededBy) meta.supersededBy = String(row.supersededBy);

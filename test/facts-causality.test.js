@@ -96,3 +96,44 @@ test('四处白名单：entries/insertRaw/backup/dry-run 都保 supersededBy', (
     } finally { f2.done(); }
   } finally { f.done(); }
 });
+
+test('G8 四处白名单：entries/normalizeEntry/backup/insertRaw 都保注入热度字段', () => {
+  const f = fresh();
+  try {
+    const m = createMemory({ now: () => Date.parse('2026-11-24T12:00:00'), log: () => {} });
+    m.add('', '主人住在杭州', 'global', { status: 'fact' });
+    m.bumpHeat([{ text: '主人住在杭州', hitDays: 7, lastHitDay: '2026-11-24', lastHit: 1700000000000 }]);
+
+    // 1) retention.entries 导出
+    const row = m.retention.entries().find((e) => e.text === '主人住在杭州');
+    assert.equal(row.hitDays, 7, 'entries 导出 hitDays');
+    assert.equal(row.lastHitDay, '2026-11-24');
+    assert.equal(row.lastHit, 1700000000000);
+
+    // 2) dry-run normalizeEntry 保
+    const norm = normalizeEntry({ ...row }, 'facts');
+    assert.equal(norm.hitDays, 7, 'dry-run 白名单保 hitDays');
+    assert.equal(norm.lastHitDay, '2026-11-24');
+    assert.equal(norm.lastHit, 1700000000000);
+
+    // 3) backup restoreRetentionRows 保
+    let inserted = null;
+    const fakeMemory = { retention: { entries: () => [] }, insertRaw: (r) => { inserted = r; return true; } };
+    restoreRetentionRows({ payload: { facts: [row], journal: [] }, memory: fakeMemory, journal: {} });
+    assert.equal(inserted?.hitDays, 7, 'backup 白名单保 hitDays');
+    assert.equal(inserted?.lastHitDay, '2026-11-24');
+    assert.equal(inserted?.lastHit, 1700000000000);
+
+    // 4) insertRaw 落盘
+    const f2 = fresh();
+    try {
+      const m2 = createMemory({ now: () => 1000, log: () => {} });
+      m2.insertRaw(row);
+      const raw = JSON.parse(readFileSync(f2.file, 'utf8'));
+      const meta = raw.meta.global['主人住在杭州'];
+      assert.equal(meta.hitDays, 7, 'insertRaw 落盘 hitDays');
+      assert.equal(meta.lastHitDay, '2026-11-24');
+      assert.equal(meta.lastHit, 1700000000000);
+    } finally { f2.done(); }
+  } finally { f.done(); }
+});

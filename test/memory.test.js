@@ -1225,12 +1225,17 @@ test('facts：从旧版导入是幂等的（重复导入不翻倍）', () => {
  * 于是「主人对花生过敏」会因为今天记了 40 条杂事而消失。
  */
 
-test('facts：分数 = 权重 × 时间衰减（30 天减半）', () => {
+test('facts：分数 = 权重 × 时间衰减（G8 换 τ=20 的 e^(-age/τ)）', () => {
   const t0 = Date.parse('2026-01-01T00:00:00');
   assert.equal(scoreOfFact(null, t0), 1, '没元数据就按 1 算');
   assert.equal(scoreOfFact({ w: 2, at: t0 }, t0), 2);
-  assert.equal(scoreOfFact({ w: 2, at: t0 }, t0 + 30 * DAY), 1, '30 天减半');
-  assert.equal(scoreOfFact({ w: 2, at: t0 }, t0 + 60 * DAY), 0.5);
+  // 对方原生 τ=20：20 天 R=e^-1，40 天 R=e^-2（主人明确选完全照搬数值）
+  assert.ok(Math.abs(scoreOfFact({ w: 2, at: t0 }, t0 + 20 * DAY) - 2 * Math.exp(-1)) < 1e-9, 'τ=20 的 e^-1');
+  assert.ok(Math.abs(scoreOfFact({ w: 2, at: t0 }, t0 + 40 * DAY) - 2 * Math.exp(-2)) < 1e-9, '40 天 e^-2');
+  // hitDays 拉长 τ（常想起更抗衰减，封顶 10 天等效）
+  const noHit = scoreOfFact({ w: 2, at: t0 }, t0 + 20 * DAY);
+  const withHit = scoreOfFact({ w: 2, at: t0, hitDays: 5 }, t0 + 20 * DAY);
+  assert.ok(withHit > noHit, '常被想起的衰减更慢（hitDays 拉长 τ）');
   assert.ok(scoreOfFact({ w: 2 }, t0) > scoreOfFact({ w: 1 }, t0), '权重高的分高');
 });
 
@@ -1904,9 +1909,9 @@ test('别名：不参与时间衰减，重要的老事实还能挤进前 3 条',
    * 场景：换过机器人。旧键里有一条**被反复强调过**的事（w=3，60 天前），
    * 新键里已经有 3 条今天刚记的（w=1）。
    *
-   * 不做豁免的话：旧的那条分数 = 3 × 0.5^(60/30) = 0.75，
-   * 低于三条新的 1.0，`slice(0, 3)` 永远轮不到它——「记得牢」那半就断了。
-   * 做了下限之后：衰减最多打一次对折，它 = 3 × 0.5 = 1.5，稳稳排第一。
+   * G8 换 τ=20 后，别名衰减封顶同步改为 20 天（ALIAS_DECAY_CAP_DAYS）：
+   * 60 天按 20 天算，R=exp(-20/20)=0.368，旧条分数 = 3 × 0.368 ≈ 1.10，
+   * 仍高于三条新的 1.0，稳稳排第一——「记得牢」护栏在新公式下依然成立。
    */
   m.add('OLDKEY', '主人对花生过敏（严重）', 'chat', { w: 3, at: old });
   for (const f of ['新事一', '新事二', '新事三']) m.add('763366431', f, 'chat');

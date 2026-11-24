@@ -22,21 +22,27 @@ async function freshMemory() {
   return import(url.href);
 }
 
-test('老库逐字不变：没有扩展字段时 scoreOfFact 与扩展前一致', async () => {
-  const { scoreOfFact } = await freshMemory();
+test('G8 衰减换 τ=20：无扩展字段走默认不崩，命中对方 e^(-age/20) 数值', async () => {
+  const { scoreOfFact, RETENTION_BASE } = await freshMemory();
+  assert.equal(RETENTION_BASE, 20, '基数对齐对方 RETENTION_BASE');
   const now = Date.UTC(2026, 10, 13);
+  const DAY = 86400000;
+  const r20 = Math.exp(-1); // exp(-20/20)
   const cases = [
     [{ w: 1, at: now }, 1],
     [{ w: 3, at: now }, 3],
-    [{ w: 2, at: now - 30 * 86400000 }, 1],          // 30 天半衰期
-    [{ w: 4, at: now - 60 * 86400000 }, 1],
-    [{ w: 2, at: now - 30 * 86400000, until: now }, 0.5],
-    [{}, 1],                                          // 无元数据也不衰减
+    [{ w: 2, at: now - 20 * DAY }, 2 * r20],          // τ=20：20 天 R=e^-1
+    [{ w: 2, at: now - 20 * DAY, until: now }, 2 * r20 * 0.5], // 被取代再打对折
+    [{}, 1],                                          // 无 at → days=0 → 不衰减
   ];
   for (const [meta, want] of cases) {
     assert.ok(Math.abs(scoreOfFact(meta, now) - want) < 1e-9,
       `scoreOfFact(${JSON.stringify(meta)}) 应是 ${want}，实际 ${scoreOfFact(meta, now)}`);
   }
+  // 老库无 hitDays/importance 时不崩，且 tau 就是 20（不是旧 43）
+  const old = scoreOfFact({ w: 2, at: now - 20 * DAY }, now);
+  const withZero = scoreOfFact({ w: 2, at: now - 20 * DAY, hitDays: 0, importance: 0.5 }, now);
+  assert.ok(Math.abs(old - withZero) < 1e-9, 'hitDays=0/importance=0.5 与缺省等价');
 });
 
 test('扩展字段生效：pin / tier / 复习 / 归档都改变分数与亮度', async () => {

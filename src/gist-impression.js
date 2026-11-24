@@ -23,7 +23,8 @@ import { writeJsonAtomic } from './atomic.js';
 
 export const IMPRESSION_MAX = 120;
 export const IMPRESSION_MIN_HITS = 3;
-export const DEFAULT_IMPRESSION_DAYS = 180;
+/** 2026-11-24 对齐对方 impressionDays=365（原 180 太激进，旧印象还没被想起够就到期） */
+export const DEFAULT_IMPRESSION_DAYS = 365;
 export const MAX_BATCH = 40;
 
 /** 按码点截，别把 emoji 切成半个 surrogate（profiles.js clipChars 同款） */
@@ -86,8 +87,11 @@ export function crystallizeCandidates(imps = [], now = Date.now(), opts = {}) {
   const minHits = Math.max(1, Number(opts.minHits) || IMPRESSION_MIN_HITS);
   const days = Math.max(0, Number(opts.days) || DEFAULT_IMPRESSION_DAYS);
   const cutoff = now - days * 86400_000;
+  /** 对方 rememberedItem(g)：用户明确「不再记住」的来源不结晶（对齐尊重判据） */
+  const remembered = typeof opts.remembered === 'function' ? opts.remembered : () => true;
   return (Array.isArray(imps) ? imps : [])
-    .filter((x) => x && !Number(x.crystallizedAt) && Number(x.at) <= cutoff && Math.max(0, Number(x.hits) || 0) >= minHits)
+    .filter((x) => x && !Number(x.crystallizedAt) && Number(x.at) <= cutoff && Math.max(0, Number(x.hits) || 0) >= minHits
+      && remembered(x) !== false)
     .map((x) => ({
       id: String(x.id || ''),
       text: String(x.text || ''),
@@ -195,6 +199,22 @@ export function createImpressionStore({ file, log = () => {}, now = () => Date.n
       row.crystallizedAt = Number(at) > 0 ? Number(at) : now();
       if (!dry) save(state);
       return { ok: true, crystallizedAt: row.crystallizedAt, dry: Boolean(dry) };
+    },
+
+    /**
+     * G6：删掉到期印象（对齐对方 compressOld:3021 到期 level2 一律删，含未结晶的——
+     * 「想不起来就消失」）。否则 impressions.json 会无限增长。
+     * dry 时不写盘；返回实际删除条数。已结晶的也删（事实已写进 memory，不留重复）。
+     */
+    pruneExpired({ days = DEFAULT_IMPRESSION_DAYS, dry = false, at } = {}) {
+      const t = Number(at) > 0 ? Number(at) : now();
+      const cutoff = t - Math.max(0, Number(days) || DEFAULT_IMPRESSION_DAYS) * 86400_000;
+      const state = loadState(file);
+      const before = state.imps.length;
+      state.imps = state.imps.filter((x) => x && Number(x.at) > cutoff);
+      const removed = before - state.imps.length;
+      if (removed && !dry) save(state);
+      return { ok: true, removed, dry: Boolean(dry) };
     },
 
     /** 清空印象（独立文件，不误伤 memory/digest）。 */
