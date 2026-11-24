@@ -308,6 +308,18 @@ export function createAutotelic({
    * 不注入就没有 decide() 能力，老调用方零影响。
    */
   planner = null,
+  /**
+   * 行动单执行器（阶段 4，可选注入）：{ execute(ticket) } = createExecV5 实例。
+   * 不注入就没有 execute() 能力，老调用方零影响。
+   */
+  executor = null,
+  /**
+   * 反馈回路（阶段 4，可选注入）：createFeedback 实例。用于熔断静默、立项权重过滤、
+   * 主人纠偏入表。不注入就不启用，老调用方零影响。
+   */
+  feedback = null,
+  /** 技能层（阶段 4，可选注入）：createSkillStore 实例，面板展示索引/各层条目 */
+  skills = null,
 } = {}) {
   /** 决策阶段落账：写失败不阻断业务（审计是旁路，与主账本 appendLedger 的语义一致） */
   const noteDecision = async (phase, payload) => {
@@ -612,6 +624,10 @@ export function createAutotelic({
     if (!planner || typeof planner.decideRound !== 'function') {
       return { ok: false, outcome: 'error', error: '三段决策未接线（planner 未注入）' };
     }
+    /** 熔断静默期：一轮都不跑（对方 index.js:307 同款） */
+    if (feedback && typeof feedback.isSilent === 'function' && feedback.isSilent()) {
+      return { ok: false, outcome: 'silent', why: '反馈熔断静默期，先不琢磨事' };
+    }
     const c = cfg();
     /** recent() 返回 {ok, rows}，不是裸数组——面板 showLedger 也是取 .rows */
     const rows = recent(maxObservations).rows.map((r) => ({
@@ -619,7 +635,9 @@ export function createAutotelic({
       at: Number(r.at) || 0,
       source: r.kind === 'deny' ? 'constraint' : 'ledger',
       text: String(r.note || r.payload?.project || r.payload?.text || '').slice(0, 200),
-    })).filter((o) => o.text);
+    })).filter((o) => o.text)
+      /** 主人抑制/park 的 tag 权重 0 → 不进候选（对方 index.js:313 同款） */
+      .filter((o) => !feedback || typeof feedback.weightOf !== 'function' || feedback.weightOf(o.source) > 0);
     const r = await planner.decideRound({
       round,
       persona: { summary: '', instinctExtra: '' },
@@ -630,8 +648,54 @@ export function createAutotelic({
     return { ok: r.outcome !== 'error', ...r };
   }
 
+  /**
+   * 执行一张行动单（阶段 4）：走注入的 createExecV5，三级分级/硬禁区/确认队列在
+   * 执行器里机械判定。没注入就明确说不可用——不静默假装执行了。
+   */
+  /**
+   * 主人纠偏（阶段 4）：「别做 X」→ 抑制表，「多干这种」→ 偏好表。
+   * 走 feedback.ingestCorrection，tag 从文本里带出（可显式传）。
+   */
+  function correct(text, tags = []) {
+    if (!feedback || typeof feedback.ingestCorrection !== 'function') {
+      return { ok: false, reason: '反馈回路未接线（feedback 未注入）' };
+    }
+    const r = feedback.ingestCorrection(text, { tags: Array.isArray(tags) ? tags : [] });
+    return { ok: true, ...r };
+  }
+
+  /** 阶段 4：反馈状态快照，面板展示抑制/偏好/冷度/park/熔断 */
+  function feedbackStatus() {
+    if (!feedback || typeof feedback.snapshot !== 'function') return null;
+    return feedback.snapshot();
+  }
+
+  /** 阶段 4：技能层索引与各层条目，面板展示「她学会了什么」 */
+  function skillStatus() {
+    if (!skills || typeof skills.list !== 'function') return null;
+    return {
+      memory: (skills.list('memory') || []).map((d) => ({ id: d.id, title: d.meta?.title || '', score: d.meta?.score ?? 0.5 })),
+      skills: (skills.list('skills') || []).map((d) => ({ id: d.id, title: d.meta?.title || '', score: d.meta?.score ?? 0.5, uses: d.meta?.uses || 0 })),
+      instinct: (skills.list('instinct') || []).map((d) => ({ id: d.id, title: d.meta?.title || '', score: d.meta?.score ?? 0.5 })),
+    };
+  }
+
+  async function execute(ticket) {
+    if (!executor || typeof executor.run !== 'function') {
+      return { ok: false, status: 'aborted', why: '执行器未接线（executor 未注入）' };
+    }
+    const c = cfg();
+    /** 约束全文带进行动单，执行器把它放进每步上下文头部（§3.7 注入位置二） */
+    const withRules = {
+      ...ticket,
+      constraintRulesText: constraintLines(c.constraintRules).map((x) => `- ${x}`).join('\n'),
+    };
+    const r = await executor.run(withRules);
+    return { ok: r?.status === 'done', ...r };
+  }
+
   return {
-    status, preview, think, step, tick, review, recent, decide,
+    status, preview, think, step, tick, review, recent, decide, execute, correct, feedbackStatus, skillStatus,
     /** 测试与「重新读配置」用 */
     reload: () => { state = loadState(); return status(); },
     gate,

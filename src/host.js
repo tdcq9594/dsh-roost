@@ -288,6 +288,9 @@ import { createAutotelic } from './autotelic.js';
 import { createPurposeState } from './purpose-state.js';
 import { createDecisionLog } from './autotelic-decisions.js';
 import { createPlanner } from './autotelic-planner.js';
+import { createExecV5 } from './autotelic-exec.js';
+import { createFeedback } from './autotelic-feedback.js';
+import { createSkillStore } from './autotelic-skills.js';
 import { formGoalHypotheses, goalToCandidate, DEFAULT_DRIVES } from './purpose-engine.js';
 import { collectPurposeMaterials } from './purpose-collect.js';
 import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
@@ -2480,12 +2483,64 @@ export function apply(ctx) {
     log: (m, ...a) => log.info(`自驱决策：${m}`, ...a),
   });
 
+  /**
+   * 行动单执行器（阶段 4）：三级分级/硬禁区/确认队列/快照全在 createExecV5 里机械判定。
+   * execStep 接我方 autotelicRun（不是 hub.runSystemTurn）；终态回调 planner.reviewRound，
+   * 形成「执行→复盘」闭环。skills/feedback 暂不注入（工厂有内存降级），后续阶段接。
+   */
+  /**
+   * 反馈回路（阶段 4）：抑制/偏好/冷度/park/熔断 + 24h 同 tag 频控。
+   * 账在 feedback.json（跨重启不重置节流），熔断/恢复事件另写 feedback-events.jsonl。
+   */
+  const autotelicFeedback = createFeedback({
+    file: join(dataDir(), 'feedback.json'),
+    /**
+     * 熔断/恢复事件必须另写独立文件——decisions.jsonl 是三段决策的哈希链，
+     * 追加非链式行会直接断链（对方 index.js:181-183 踩过这个坑）。
+     */
+    decisionsFile: join(dataDir(), 'feedback-events.jsonl'),
+    settings: () => cfg.autotelic || {},
+    log: { warn: (...a) => log.warn('自驱反馈：', ...a) },
+  });
+
+  /**
+   * 技能层（阶段 4）：memory→skills→instinct 晋升 + 写前快照 + score 只锚真实终态。
+   * 人格卡路径与我方 personas.js 一致（dataDir()/personas/<id>.md），写前会快照。
+   */
+  const autotelicSkills = createSkillStore(join(dataDir(), 'autotelic-skills'), {
+    personaFile: join(dataDir(), 'personas', 'main.md'),
+    log: (...a) => log.info('自驱技能：', ...a),
+  });
+
+  const autotelicExecutor = createExecV5({
+    settings: () => cfg.autotelic || {},
+    dataDir: dataDir(),
+    /** 24h 同 tag 频控账挂 feedback.json，重启不重置 */
+    feedback: autotelicFeedback,
+    /** 终态 score 只锚这里：模型自评没有改分口子 */
+    skills: autotelicSkills,
+    auditNote: (entry) => log.info(`自驱执行：${entry?.kind || ''} ${entry?.args?.status || ''}`),
+    hooks: {
+      execStep: async (step) => {
+        const text = await autotelicRun(`执行这一步：${String(step?.desc || '').slice(0, 400)}`, {
+          sessionId: 'autotelic-act',
+        });
+        return { ok: true, observation: String(text || '').slice(0, 2000) };
+      },
+    },
+    now: () => Date.now(),
+    log: { info: (...a) => log.info('自驱v5：', ...a), warn: (...a) => log.warn('自驱v5：', ...a), debug: () => {} },
+  });
+
   const autotelic = createAutotelic({
     dir: dataDir(),
     cfgOf: () => cfg.autotelic || {},
     log: (m) => log.info(`自驱：${m}`),
     decisionLog: autotelicDecisions,
     planner: autotelicPlanner,
+    executor: autotelicExecutor,
+    feedback: autotelicFeedback,
+    skills: autotelicSkills,
     run: autotelicRun,
   });
 
@@ -13966,6 +14021,45 @@ export function apply(ctx) {
         const round = Math.max(0, Number(u.searchParams.get('round')) || 0);
         const r = await autotelic.decide({ round });
         return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      /**
+       * 执行一张行动单（阶段 4）：三级分级/硬禁区/确认队列在执行器里机械判定。
+       * touch-owner 类默认排队等确认（返回 queued），不会直接动手。
+       */
+      route('/autotelic/execute', async (req, res) => {
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
+        let ticket = null;
+        try { ticket = JSON.parse(String(req.body || '')); } catch { ticket = null; }
+        if (!ticket || !Array.isArray(ticket.steps)) return send(res, 400, { ok: false, message: '行动单格式不对（要 JSON 且带 steps）' });
+        const r = await autotelic.execute(ticket);
+        return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      /** 主人纠偏（阶段 4）：别做 X → 抑制；多干这种 → 偏好 */
+      route('/autotelic/correct', (req, res) => {
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
+        let body = {};
+        try { body = JSON.parse(String(req.body || '')); } catch {}
+        const text = String(body.text || '').trim();
+        if (text.length < 2) return send(res, 400, { ok: false, message: '纠偏内容太短' });
+        const r = autotelic.correct(text, body.tags);
+        return send(res, r.ok ? 200 : 409, r);
+      }),
+      route('/autotelic/feedback', (req, res) => send(res, 200, { ok: true, state: autotelic.feedbackStatus() })),
+      route('/autotelic/skills', (req, res) => send(res, 200, { ok: true, state: autotelic.skillStatus() })),
+
+      /** 待确认队列（touch-owner 类）：面板列出 + 确认/取消 */
+      route('/autotelic/pending', (req, res) => send(res, 200, { ok: true, rows: autotelicExecutor.pendingList() })),
+      route('/autotelic/confirm', async (req, res) => {
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
+        let body = {};
+        try { body = JSON.parse(String(req.body || '')); } catch {}
+        const id = String(body.id || '').slice(0, 80);
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        /** 拒绝 = 取消（不执行任何一步），确认才走 confirm */
+        const r = body.approve === false ? autotelicExecutor.cancel(id) : await autotelicExecutor.confirm(id);
+        return send(res, 200, { ok: true, result: r });
       }),
 
       /**

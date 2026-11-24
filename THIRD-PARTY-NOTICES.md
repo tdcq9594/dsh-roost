@@ -10,7 +10,12 @@
   - `src/purpose-engine.js`：目标假设生成闭包（归属判定、置信度、证据去重、观察账、主人反馈结算），抽自 `aurabot-beta/src/purpose/engine.js`。
   - `src/autotelic-constraint.js`：约束解析与前置否决硬校验，抽自 `aurabot-beta/src/autotelic/constraint.js` 的纯函数区。
   - `src/autotelic-plan.js` + `src/autotelic-tags.js`：三段决策的判据常量与解析层（parseIntents / parseGateVerdicts / GATE_CRITERIA / buildTicket / tag 词表），抽自 `aurabot-beta/src/autotelic/plan.js` 与 `tags.js`。
-  - `src/autotelic-exec.js`：执行三级分级与五类硬禁区检测（isForbidden / LEVELS），抽自 `aurabot-beta/src/autotelic/exec.js` 的纯函数区。
+  - `src/autotelic-exec.js`：行动单执行器 createExecV5 全文件（三级分级、五类硬禁区、确认队列、时间戳快照、终态回调），整文件抽自 `aurabot-beta/src/autotelic/exec.js`。
+  - `src/autotelic-planner.js`：三段决策运行时 createPlanner / reviewRound，抽自 `aurabot-beta/src/autotelic/plan.js`。
+  - `src/autotelic-decisions.js`：decisions.jsonl 哈希链决策审计，抽自 `aurabot-beta/src/autotelic/plan.js` 的 createDecisionLog / verifyDecisionLog。
+  - `src/autotelic-feedback.js`：反馈回路（抑制/偏好/冷度/park/熔断/24h 频控），整文件抽自 `aurabot-beta/src/autotelic/feedback.js`。
+  - `src/autotelic-skills.js`：三层技能体系 createSkillStore（晋升/快照/score 只锚真实终态），抽自 `aurabot-beta/src/autotelic/skills.js` 的 v5 接口区（文件尾 P3.1/P4.2 旧接口未移植，我方无消费方）。
+  - `src/autotelic-store.js`：readJson/writeJson 语义适配，对齐 `aurabot-beta/src/core/store.js`（BOM 处理 + 重试 + tmp/rename 原子写），写盘复用本仓 atomic.js。
 - 接线层 `src/purpose-collect.js`、`src/host.js`、`src/purpose-state.js`、`src/autotelic.js` 是我方为 dsh-roost 新写的，不属于移植范围。
 - 移植方式：按顶层声明边界原样抽取函数体（脚本配对），避免手抄走样；仅改文件头署名与模块语境。
 

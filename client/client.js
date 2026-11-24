@@ -8463,6 +8463,11 @@ window.__ModuleLoader__.load({
       const [seedsDirty, setSeedsDirty] = useState(false)
       const [preview, setPreview] = useState(null)
       const [decision, setDecision] = useState(null)
+      const [ticketDraft, setTicketDraft] = useState('')
+      const [correction, setCorrection] = useState('')
+      const [feedbackState, setFeedbackState] = useState(null)
+      const [skillState, setSkillState] = useState(null)
+      const [pending, setPending] = useState(null)
       const [ledger, setLedger] = useState(null)
       const [review, setReview] = useState('')
       const [env, setEnv] = useState(null)
@@ -8517,6 +8522,53 @@ window.__ModuleLoader__.load({
       const showLedger = async () => {
         const r = await get('/autotelic/recent?limit=20')
         setLedger(ledger ? null : (r?.rows || []))
+      }
+
+      const showPending = async () => {
+        const r = await get('/autotelic/pending')
+        setPending(pending ? null : (r?.rows || []))
+      }
+
+      const actPending = async (id, approve) => {
+        const r = await post('/autotelic/confirm', { id, approve })
+        if (r?.ok === false) return toast(r.message || '没成')
+        toast(approve ? '已确认，正在执行' : '已取消这张单')
+        const fresh = await get('/autotelic/pending')
+        setPending(fresh?.rows || [])
+        await load()
+      }
+
+      const submitCorrection = async () => {
+        const text = String(correction || '').trim()
+        if (text.length < 2) return toast('先写点内容（如「别再做这种发链接的事」）')
+        const r = await post('/autotelic/correct', { text })
+        if (r?.ok === false) return toast(r.message || '没成')
+        toast('纠偏已记下')
+        setCorrection('')
+        showFeedback()
+      }
+
+      const showFeedback = async () => {
+        const r = await get('/autotelic/feedback')
+        setFeedbackState(feedbackState ? null : (r?.state || null))
+      }
+
+      const showSkills = async () => {
+        const r = await get('/autotelic/skills')
+        setSkillState(skillState ? null : (r?.state || null))
+      }
+
+      const runTicket = async () => {
+        let ticket
+        try { ticket = JSON.parse(ticketDraft) } catch { return toast('行动单不是合法 JSON') }
+        setBusy('execute')
+        try {
+          const r = await post('/autotelic/execute', ticket)
+          if (r?.ok === false) return toast(r.message || r.why || '没成')
+          toast(`执行结果：${r.status || 'done'}`)
+          setTicketDraft('')
+          await showPending()
+        } finally { setBusy('') }
       }
 
       const c = config?.autotelic || {}
@@ -8596,6 +8648,9 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: () => run('review') }, '今日复盘'),
           h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: () => run('decide') },
             busy === 'decide' ? '决策中…' : '三段决策'),
+          h('button', { type: 'button', className: 'roost-btn', onClick: showSkills }, skillState ? '收起技能层' : '技能层'),
+          h('button', { type: 'button', className: 'roost-btn', onClick: showFeedback }, feedbackState ? '收起反馈表' : '反馈表'),
+          h('button', { type: 'button', className: 'roost-btn', onClick: showPending }, pending ? '收起确认队列' : '确认队列'),
           h('button', { type: 'button', className: 'roost-btn', onClick: showLedger }, ledger ? '收起账本' : '看账本')),
 
         preview
@@ -8629,6 +8684,54 @@ window.__ModuleLoader__.load({
               ? h('div', { style: { fontSize: 11, marginTop: 4 } },
                 '行动单：' + decision.tickets.map((t) => `${t.id}（${t.intent}）`).join('；'))
               : null)
+          : null,
+
+        /** 执行区：贴一张行动单 JSON，走三级分级/硬禁区/确认队列（阶段 4） */
+        h('div', { className: 'roost-note', style: { marginTop: 8 } },
+          h('div', { style: { fontSize: 12, marginBottom: 4 } }, '执行行动单（贴 JSON；touch-owner 类会先排队等确认）'),
+          h('textarea', {
+            value: ticketDraft,
+            onChange: (e) => setTicketDraft(e.target.value),
+            placeholder: '{"id":"t1","intent":"整理笔记","tag":"未完成","steps":[{"desc":"读一遍","level":"read-only"}],"budget":{"maxSteps":4,"timeoutMs":120000},"ownerSide":false}',
+            rows: 3,
+            style: { width: '100%', fontFamily: 'monospace', fontSize: 11 },
+          }),
+          h('button', { type: 'button', className: 'roost-btn', disabled: busy === 'execute', onClick: runTicket, style: { marginTop: 4 } },
+            busy === 'execute' ? '执行中…' : '执行这张单')),
+
+        /** 主人纠偏（阶段 4）：别做 X → 抑制表；多干这种 → 偏好表 */
+        h('div', { className: 'roost-note', style: { marginTop: 8 } },
+          h('div', { style: { fontSize: 12, marginBottom: 4 } }, '给她立规矩（「别再做…」会硬拦；「多干这种…」会加权）'),
+          h('input', {
+            type: 'text', value: correction,
+            onChange: (e) => setCorrection(e.target.value),
+            placeholder: '别再做这种发链接的事了',
+            style: { width: '70%', fontSize: 12 },
+          }),
+          h('button', { type: 'button', className: 'roost-btn', style: { marginLeft: 6 }, onClick: submitCorrection }, '记下'),),
+
+        skillState
+          ? h('div', { className: 'roost-note', style: { marginTop: 8, fontSize: 11 } },
+            h('div', null, `技能层：记忆 ${(skillState.memory || []).length} · 技能 ${(skillState.skills || []).length} · 本能 ${(skillState.instinct || []).length}`),
+            (skillState.instinct || []).length
+              ? h('div', { style: { marginTop: 4 } }, '本能：' + skillState.instinct.map((x) => `${x.title}（${x.score}）`).join('；'))
+              : h('div', { className: 'roost-muted', style: { marginTop: 4 } }, '还没有晋升到本能层的技能——真实复用攒够才会晋升'))
+          : null,
+
+        feedbackState
+          ? h('div', { className: 'roost-note', style: { marginTop: 8, fontSize: 11 } },
+            h('div', null, `抑制 ${Object.keys(feedbackState.suppress || {}).length} 条 · 偏好 ${Object.keys(feedbackState.prefer || {}).length} 条 · park ${Object.keys(feedbackState.park || {}).length} 条`),
+            feedbackState.breaker?.needsReview ? h('div', { style: { color: 'var(--warn)' } }, '⚠ 熔断待检视：她连续全灭或被叫停，先看看是不是规矩太紧') : null)
+          : null,
+
+        pending
+          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            pending.length
+              ? pending.map((x) => h('div', { key: x.ticketId || x.id, className: 'roost-item', style: { marginBottom: 4 } },
+                h('span', null, `${x.ticketId || x.id} · ${x.ticket?.intent || ''}（等主人确认）`),
+                h('button', { type: 'button', className: 'roost-btn', style: { marginLeft: 6 }, onClick: () => actPending(x.ticketId || x.id, true) }, '确认'),
+                h('button', { type: 'button', className: 'roost-btn', style: { marginLeft: 4 }, onClick: () => actPending(x.ticketId || x.id, false) }, '取消')))
+              : h('div', { className: 'roost-muted', style: { fontSize: 11 } }, '确认队列是空的。'))
           : null,
 
         review
