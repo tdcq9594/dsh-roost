@@ -35,6 +35,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { writeJsonAtomic } from './atomic.js';
+import { parseConstraintRules, check as constraintCheck } from './autotelic-constraint.js';
 
 import {
   appendLedger, readLedger, verifyChain, dayStats, ledgerPath, GENESIS,
@@ -236,12 +237,21 @@ export function pickProject(seeds = [], { history = [], now = Date.now() } = {})
 }
 
 /** 立项后的推进 prompt。**明确禁止动手**（除非 allowAct） */
-export function buildStepPrompt({ project, allowAct = false, lastNote = '' } = {}) {
+export function buildStepPrompt({ project, allowAct = false, lastNote = '', constraints = [] } = {}) {
   const lines = [
     '这是你自己的时间。没人跟你说话，你也不需要回谁。',
     `你在琢磨这件事：${String(project ?? '').trim()}`,
   ];
   if (lastNote) lines.push(`上一轮你想到了：${String(lastNote).slice(0, 400)}`);
+  /**
+   * 主人约束真正注入 prompt（阶段 3 B2）：此前 constraintLines 只被 status 展示，
+   * 写了约束不拦任何东西。这里是**软约束**（模型应遵循），代码硬否决在阶段 4
+   * 的三段决策里做——面板文案已如实标注，不再谎称「硬否决已生效」。
+   */
+  if (Array.isArray(constraints) && constraints.length) {
+    lines.push('主人定下的硬规矩（违反即为错，宁可不做也别碰）：');
+    for (const c of constraints.slice(0, 50)) lines.push(`- ${String(c).slice(0, 200)}`);
+  }
   lines.push('');
   if (allowAct) {
     lines.push('可以动手：需要查资料就用工具查，但**不要发任何 QQ 消息**，不要改主人的任何配置或记忆。');
@@ -287,7 +297,19 @@ export function constraintLines(rules = '') {
  */
 export function createAutotelic({
   dir = '', cfgOf = () => ({}), run = null, log = () => {}, now = () => Date.now(),
+  /**
+   * 决策审计日志（阶段 4，可选注入）：{ append(phase, round, payload) }。
+   * 不注入就不写——老调用方/测试零影响；宿主注入 createDecisionLog 后，
+   * 立项/推进会各落一行，模型回包作为 payload 原样进哈希链。
+   */
+  decisionLog = null,
 } = {}) {
+  /** 决策阶段落账：写失败不阻断业务（审计是旁路，与主账本 appendLedger 的语义一致） */
+  const noteDecision = async (phase, payload) => {
+    if (!decisionLog || typeof decisionLog.append !== 'function') return;
+    try { await decisionLog.append(phase, Number(payload.round) || 0, payload); }
+    catch (e) { log(`决策审计写入失败（不影响本轮）：${e?.message || e}`); }
+  };
   const stateFile = () => join(dir, STATE_FILE);
   const file = () => ledgerPath(dir);
 
@@ -409,6 +431,24 @@ export function createAutotelic({
       appendLedger(file(), { kind: 'deny', payload: { by: manual ? 'manual' : 'tick' }, note: p.reason, at: now() });
       return { ok: false, reason: p.reason };
     }
+    /**
+     * 约束前置硬否决（阶段 4）：主人写的强制规则在代码层机械核对，触犯即 reject，
+     * 不交给模型自判（§3.7 裁决二）。constraintCheck 读 title/reason/tag/want，
+     * 这里把立项候选的 text 映射成 title。B2 的「硬否决」至此真正落地。
+     */
+    const c = cfg();
+    const rules = parseConstraintRules(c.constraintRules || '').rules;
+    if (rules.length) {
+      const verdict = constraintCheck(rules, { title: p.project.text, reason: p.project.text, tag: '立项' });
+      if (verdict.vetoed) {
+        const why = `触犯主人约束：${verdict.hits.map((h) => h.text).join('；')}`;
+        appendLedger(file(), {
+          kind: 'deny', payload: { by: manual ? 'manual' : 'tick', constraint: true },
+          note: why, at: now(), verdict: 'reject', tag: '立项',
+        });
+        return { ok: false, reason: why };
+      }
+    }
     state.project = p.project;
     state.lastNote = '';
     state.lastTickAt = now();
@@ -424,6 +464,11 @@ export function createAutotelic({
       verdict: 'pass',
       source: manual ? 'panel' : 'auto',
       evidence: [{ id: p.project.id, text: p.project.text, source: 'seed' }],
+    });
+    /** 决策审计：立项这一阶段原样落账（哈希链由注入方保证，模型改不了） */
+    void noteDecision('intent', {
+      project: p.project.text, score: p.project.score,
+      rejected: p.rejected?.length || 0, round: Number(state.project?.steps) || 0,
     });
     return { ok: true, project: p.project, rejected: p.rejected };
   }
@@ -450,6 +495,7 @@ export function createAutotelic({
     const c = cfg();
     const prompt = buildStepPrompt({
       project: state.project.text, allowAct: c.allowAct, lastNote: state.lastNote,
+      constraints: constraintLines(c.constraintRules),
     });
     /** 每个项目一个会话：host.js 的 run() 已按传入的 sessionId 建/复用会话 */
     const sid = sessionIdFor(state.project.id);
@@ -475,6 +521,10 @@ export function createAutotelic({
         tag: '推进',
         verdict: 'pass',
         source: manual ? 'panel' : 'tick',
+      });
+      void noteDecision('review', {
+        project: state.project.text, chars: out.length, verdict: 'pass',
+        round: Number(state.project.steps) || 0,
       });
       return { ok: true, text: out, project: state.project };
     } catch (e) {

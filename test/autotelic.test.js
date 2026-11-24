@@ -457,3 +457,61 @@ test('配置默认值两处一致：config.DEFAULTS 与 autotelic.AUTOTELIC_DEFA
   for (const k of keys) assert.deepEqual(D[k], A[k], `${k} 两处默认值不一致`);
   assert.equal(DEFAULTS.speakUp.followUps, 1, 'followUps 必须在 DEFAULTS，否则面板存盘被裁');
 });
+
+test('约束真注入 prompt：不再只展示不生效（阶段3 B2）', () => {
+  const p = buildStepPrompt({ project: '琢磨一件事', constraints: ['不许半夜发消息', '不许碰主人配置'] });
+  assert.match(p, /主人定下的硬规矩/);
+  assert.match(p, /不许半夜发消息/);
+  assert.match(p, /不许碰主人配置/);
+  const empty = buildStepPrompt({ project: '琢磨一件事' });
+  assert.doesNotMatch(empty, /硬规矩/, '没约束时不该出现空段');
+});
+
+test('step 把配置的约束传进 prompt（端到端，不是只测函数）', async () => {
+  const dir = tmp();
+  try {
+    let seenPrompt = '';
+    const e = createAutotelic({
+      dir,
+      cfgOf: () => ({ enabled: true, seeds: ['琢磨一件事'], constraintRules: '不许半夜发消息' }),
+      run: async (prompt) => { seenPrompt = prompt; return 'ok'; },
+    });
+    await e.step({ manual: true });
+    assert.match(seenPrompt, /不许半夜发消息/, '主人写的约束必须真到达模型');
+  } finally { cleanup(dir); }
+});
+
+test('约束硬否决：触犯规则的项目不立项，记 deny 账（阶段4）', () => {
+  const dir = tmp();
+  try {
+    const e = createAutotelic({
+      dir,
+      cfgOf: () => ({
+        enabled: true, seeds: ['半夜给主人发消息'],
+        constraintRules: '不要半夜说话',
+      }),
+    });
+    const r = e.think({ manual: true });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /触犯主人约束/);
+    assert.equal(e.status().project, null, '被否决就不该立项');
+    const rows = readLedger(ledgerPath(dir), { limit: 0 }).rows;
+    const deny = rows.find((x) => x.kind === 'deny');
+    assert.ok(deny, '否决要进账本');
+    assert.equal(deny.verdict, 'reject');
+    assert.equal(deny.payload.constraint, true);
+  } finally { cleanup(dir); }
+});
+
+test('约束硬否决：不触犯的项目照常立项', () => {
+  const dir = tmp();
+  try {
+    const e = createAutotelic({
+      dir,
+      cfgOf: () => ({ enabled: true, seeds: ['想想怎么把话说得像人'], constraintRules: '不要半夜说话' }),
+    });
+    const r = e.think({ manual: true });
+    assert.equal(r.ok, true, r.reason || '');
+    assert.ok(e.status().project);
+  } finally { cleanup(dir); }
+});

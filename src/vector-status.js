@@ -32,6 +32,11 @@ export function vectorStatus(s = {}) {
   if (s.rerankEnabled === true && s.localRerankReady !== true) {
     warnings.push('重排想要本地模型，但 hs-rerank-1 没装好；现在回落规则重排。');
   }
+  /** 跟进 #527：有失败记录就把「什么时候、哪条路失败」说出来，不让用户瞎猜 */
+  if (s.lastError) {
+    const when = Number(s.lastErrorAt) > 0 ? new Date(Number(s.lastErrorAt)).toLocaleString('zh-CN') : '最近';
+    warnings.push(`向量最近一次失败（${s.lastErrorSource || '未知来源'}，${when}）：${String(s.lastError).slice(0, 120)}`);
+  }
   const rerankMode = s.rerankEnabled !== true ? 'off' : (s.localRerankReady === true ? 'local' : 'rule');
   return {
     vector: {
@@ -46,6 +51,9 @@ export function vectorStatus(s = {}) {
       indexed: Math.max(0, Number(s.indexed) || 0),
       total: Math.max(0, Number(s.total) || 0),
       lastError: String(s.lastError || ''),
+      /** 跟进 #527：最近一次向量失败的时间与来源，面板可显示「什么时候失败的」 */
+      lastErrorAt: Math.max(0, Number(s.lastErrorAt) || 0),
+      lastErrorSource: String(s.lastErrorSource || '').slice(0, 20),
     },
     rerank: {
       enabled: s.rerankEnabled === true,

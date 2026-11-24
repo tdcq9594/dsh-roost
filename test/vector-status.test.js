@@ -66,3 +66,16 @@ test('G2：索引进度四字段（dims/indexed/total/lastError），缺省为 0
   assert.equal(old.vector.indexed, 0);
   assert.equal(old.vector.lastError, '');
 });
+
+test('跟进 #527：最近失败要透传到面板并给 warning', () => {
+  const r = vectorStatus({
+    embedEnabled: true,
+    lastError: '向量接口 500：服务暂不可用',
+    lastErrorAt: 1_700_000_000_000,
+    lastErrorSource: 'remote',
+  });
+  assert.equal(r.vector.lastError, '向量接口 500：服务暂不可用');
+  assert.equal(r.vector.lastErrorAt, 1_700_000_000_000);
+  assert.equal(r.vector.lastErrorSource, 'remote');
+  assert.ok(r.warnings.some((w) => w.includes('向量最近一次失败') && w.includes('remote')), '失败要在 warnings 里可见');
+});

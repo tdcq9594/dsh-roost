@@ -8399,6 +8399,8 @@ window.__ModuleLoader__.load({
      */
     function PurposeStatusCard({ toast }) {
       const [st, setSt] = useState(null)
+      const [preview, setPreview] = useState(null)
+      const [busy, setBusy] = useState(false)
       const load = useCallback(async () => {
         const r = await get('/purpose/status')
         if (r?.ok === false) return toast(r.message || '读不到目的状态')
@@ -8406,27 +8408,49 @@ window.__ModuleLoader__.load({
       }, [toast])
       useEffect(() => { load() }, [load])
 
+      /** 预览零副作用：不写状态、不投递，只让她「算一遍会想什么」 */
+      const runPreview = async () => {
+        setBusy(true)
+        try {
+          const r = await get('/purpose/preview')
+          if (r?.ok === false) return toast(r.message || '预览失败')
+          setPreview(r)
+        } finally { setBusy(false) }
+      }
+
       const counts = st?.counts || {}
       const driveRows = st?.drives || {}
       const goals = Array.isArray(st?.goals) ? st.goals : []
-      return h(Sec, { n: '08', title: '目的引擎（数据已就位）', right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新') },
+      return h(Sec, { n: '08', title: '目的引擎', right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新') },
         h('div', { className: 'roost-note', style: { marginBottom: 8 } },
           '这里记着她「想做什么」的线索：驱力、观察到的迹象、目标假设、你的回应。'
-          + '这一层只负责把线索存稳；生成目标假设与自动挑选的算法还在做（阶段 3），'
-          + '现在没有可以点的动作，免得你点了没反应。'),
-        h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 12, marginBottom: 8 } },
+          + '点「预览会想什么」拿本地聊天现算一轮——只看不存、不发言；'
+          + '自动投递与策略档位在后面的阶段接。'),
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 } },
+          h('button', { type: 'button', className: 'roost-btn', disabled: busy, onClick: runPreview },
+            busy ? '算着…' : '预览会想什么'),
           h('span', null, `观察 ${counts.observations ?? 0} 条`),
           h('span', null, `目标假设 ${counts.goals ?? 0} 个`),
           h('span', null, `回应记录 ${counts.feedback ?? 0} 条`),
-          st?.algorithm === 'pending-stage-3'
-            ? h('span', { style: { color: 'var(--warn)' } }, '算法待阶段 3')
-            : null),
+          st?.algorithm === 'ready'
+            ? h('span', { style: { color: 'var(--ok)' } }, '算法已就位')
+            : h('span', { style: { color: 'var(--warn)' } }, '算法未就位')),
         goals.length
           ? h('div', { className: 'roost-list' },
             goals.slice(-8).map((g) => h('div', { key: g.id || g.intent, className: 'roost-item' },
               h('span', { className: 't' }, `${g.owner || 'self'} · ${g.status || 'hypothesis'}：${String(g.intent || '').slice(0, 60)}`),
               h('span', { className: 'd' }, `置信 ${g.confidence ?? 0}`))))
-          : h('div', { className: 'roost-empty' }, '还没有目标假设——算法接上后会在这里长出来。'),
+          : h('div', { className: 'roost-empty' }, '还没有目标假设——点上面「预览会想什么」用本地聊天算一轮。'),
+        preview
+          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            h('div', null, `从 ${preview.materials ?? 0} 条本地素材算出 ${(preview.goals || []).length} 个候选（没写进账本、没发消息）：`),
+            (preview.goals || []).length
+              ? h('div', { className: 'roost-list' },
+                preview.goals.slice(0, 8).map((g, i) => h('div', { key: g.id || i, className: 'roost-item' },
+                  h('span', { className: 't' }, `${g.goalOwnerLabel || g.goalOwner || '我'} · ${g.need || ''}：${String(g.text || g.intent || '').slice(0, 60)}`),
+                  h('span', { className: 'd' }, `置信 ${g.confidence ?? 0}`))))
+              : h('div', { className: 'roost-muted', style: { fontSize: 11 } }, '这批素材还没形成目标假设——正常，别硬找话。'))
+          : null,
         h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 6 } },
           '九维驱力：' + Object.entries(driveRows).map(([k, v]) => `${k} ${v}`).join(' · ')),
       )
@@ -8527,7 +8551,7 @@ window.__ModuleLoader__.load({
               : null,
             Array.isArray(st.constraints) && st.constraints.length
               ? h('div', { style: { fontSize: 11, marginTop: 4 } },
-                `主人约束 ${st.constraints.length} 条（候选阶段硬否决，不由模型自判）：${st.constraints.map((x) => x.slice(0, 40)).join('；')}`)
+                `主人约束 ${st.constraints.length} 条（立项时代码硬校验，触犯直接否决，不靠模型自判）：${st.constraints.map((x) => x.slice(0, 40)).join('；')}`)
               : null)
           : null,
 

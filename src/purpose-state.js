@@ -48,21 +48,55 @@ export function normalizeDrives(raw = {}) {
   return out;
 }
 
-const normalizeGoal = (g = {}) => ({
-  id: String(g?.id ?? '').slice(0, 120),
-  owner: GOAL_OWNERS.includes(g?.owner) ? g.owner : 'self',
-  status: GOAL_STATUSES.includes(g?.status) ? g.status : 'hypothesis',
-  intent: String(g?.intent ?? '').slice(0, 300),
-  confidence: num01(g?.confidence),
-  value: num01(g?.value),
-  urgency: num01(g?.urgency),
-  risk: num01(g?.risk),
-  at: Number(g?.at) || 0,
-  /** 证据 id 列表：阶段 3 用它做「无出处不立项」的硬校验 */
-  evidenceIds: Array.isArray(g?.evidenceIds)
+/**
+ * 目标假设形状。**必须与 purpose-engine 的 normalizeGoal 同口径**——
+ * 之前这里缺 `domain`，而引擎 `normalizeGoal` 硬要求 domain+intent 否则 return null，
+ * 导致本模块存的目标喂进引擎全被静默丢弃（阶段 3 B1）。字段对齐，老数据缺 domain
+ * 时兜底为 `connect` 并标 `legacyDomain:true`，不静默丢失。
+ */
+const normalizeGoal = (g = {}) => {
+  const domain = DRIVE_KEYS.includes(g?.domain) ? g.domain : 'connect';
+  const legacyDomain = !DRIVE_KEYS.includes(g?.domain);
+  const evidenceIds = Array.isArray(g?.evidenceIds)
     ? g.evidenceIds.map((x) => String(x ?? '').slice(0, 120)).filter(Boolean).slice(0, 50)
-    : [],
-});
+    : [];
+  return {
+    id: String(g?.id ?? '').slice(0, 120),
+    owner: GOAL_OWNERS.includes(g?.owner) ? g.owner : 'self',
+    status: GOAL_STATUSES.includes(g?.status) ? g.status : 'hypothesis',
+    /** 引擎必需：domain 缺失会让 normalizeGoal 丢弃整条目标 */
+    domain,
+    object: g?.object && typeof g.object === 'object'
+      ? { type: String(g.object.type ?? 'topic').slice(0, 12), name: String(g.object.name ?? '').slice(0, 32) }
+      : { type: 'topic', name: String(g?.object ?? '').slice(0, 32) },
+    intent: String(g?.intent ?? '').slice(0, 300),
+    confidence: num01(g?.confidence),
+    value: num01(g?.value),
+    urgency: num01(g?.urgency),
+    risk: num01(g?.risk),
+    action: String(g?.action ?? 'share').slice(0, 16),
+    nextStep: String(g?.nextStep ?? '').slice(0, 80),
+    /** 引擎 evidence 是 {id,text,source,at}[]；本地 evidenceIds 转成它，双向保留 */
+    evidence: Array.isArray(g?.evidence)
+      ? g.evidence.slice(-4).map((e) => ({
+        id: String(e?.id ?? '').slice(0, 80),
+        text: String(e?.text ?? '').slice(0, 120),
+        source: String(e?.source ?? '').slice(0, 12),
+        at: Number(e?.at) || 0,
+      }))
+      : evidenceIds.slice(-4).map((id) => ({ id, text: '', source: '', at: 0 })),
+    evidenceIds,
+    createdAt: Number(g?.createdAt) || 0,
+    lastSeenAt: Number(g?.lastSeenAt) || 0,
+    expiresAt: Number(g?.expiresAt) || 0,
+    attempts: Math.min(20, Math.max(0, Number(g?.attempts) || 0)),
+    sightings: Math.min(99, Math.max(1, Number(g?.sightings) || 1)),
+    source: String(g?.source ?? 'event').slice(0, 12),
+    at: Number(g?.at) || 0,
+    /** 老数据缺 domain 时的标记，面板可提示「这条是升级前存的」 */
+    ...(legacyDomain ? { legacyDomain: true } : {}),
+  };
+};
 
 /** 归一化整份状态：无论磁盘上是什么，出去都是四块合法结构 */
 export function normalizeState(raw = {}) {

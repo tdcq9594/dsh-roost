@@ -83,6 +83,7 @@ import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { projectRecallPreview } from './recall-preview.js';
 import { vectorStatus } from './vector-status.js';
+import { lastVectorFailure } from './vector-failures.js';
 import { TEST_TEXT, testResult, rebuildBatch } from './vector-ops.js';
 import { projectTimeline } from './timeline-view.js';
 import { planHeat } from './memory-heat.js';
@@ -285,6 +286,9 @@ import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
 import { polishText, POLISH_PRESETS } from './persona-polish.js';
 import { createAutotelic } from './autotelic.js';
 import { createPurposeState } from './purpose-state.js';
+import { createDecisionLog } from './autotelic-decisions.js';
+import { formGoalHypotheses, goalToCandidate, DEFAULT_DRIVES } from './purpose-engine.js';
+import { collectPurposeMaterials } from './purpose-collect.js';
 import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
 import { createUiActionQueue } from './ext-ui-actions.js';
 import { runInProcessAction } from './ext-inprocess.js';
@@ -2429,11 +2433,26 @@ export function apply(ctx) {
    *
    * 会话按需创建（第一次推进时才建），没开引擎就永远不会建。
    */
+  /**
+   * 自驱决策审计（阶段 4）：decisions.jsonl 哈希链，立项/推进原样落账。
+   * 与 autotelic-ledger 的事件流水是两份账——这里记「决策」，那边记「发生了什么」。
+   */
+  const autotelicDecisions = createDecisionLog({ file: join(dataDir(), 'decisions.jsonl') });
+
   const autotelic = createAutotelic({
     dir: dataDir(),
     cfgOf: () => cfg.autotelic || {},
     log: (m) => log.info(`自驱：${m}`),
-    run: async (prompt, { sessionId }) => {
+    decisionLog: autotelicDecisions,
+    /**
+     * `allowAct` 必须由宿主显式接收（阶段 3 B3）：此前 autotelic.js 传了它，
+     * 这里只解构 sessionId，参数被静默丢弃，看起来像真开关其实没有消费者。
+     * 现在如实记下它——**它只影响 prompt 措辞，不是工具授权闸门**；真正的
+     * 工具门禁是全局 tools.guard（危险命令无 QQ 窗口直接拒）。阶段 4 建工具
+     * 沙箱后才谈"允许动手"的真实能力边界。
+     */
+    run: async (prompt, { sessionId, allowAct = false }) => {
+      if (allowAct) log.info('自驱：allowAct 开着——仅放宽 prompt 措辞，工具仍走宿主全局守卫');
       const sid = String(sessionId || 'autotelic-main');
       if (!agentV1.list().some((x) => x.sessionId === sid)) {
         await agentV1.createOne({
@@ -10301,6 +10320,11 @@ export function apply(ctx) {
               try {
                 /** G2：索引进度用 journal 现成统计（withVec=已索引，total=总量），语义等价对方的 indexed/total */
                 const js = journal.stats();
+                /**
+                 * 跟进 aurabot #527：过去 lastError 写死空串，向量失败只落在日志里，
+                 * 面板看不出「开关开着却静默回落关键词」。现在读最近一次失败记录。
+                 */
+                const vf = lastVectorFailure();
                 return send(res, 200, {
                   ok: true,
                   ...vectorStatus({
@@ -10314,7 +10338,9 @@ export function apply(ctx) {
                     dims: 0, // 维度靠 test 实测（status 不额外读向量行，避免 IO）
                     indexed: js.withVec || 0,
                     total: js.total || 0,
-                    lastError: '',
+                    lastError: vf?.message || '',
+                    lastErrorAt: vf?.at || 0,
+                    lastErrorSource: vf?.source || '',
                   }),
                 });
               } catch (err) {
@@ -13855,8 +13881,48 @@ export function apply(ctx) {
             id: g.id, owner: g.owner, status: g.status, intent: g.intent,
             confidence: g.confidence, evidenceIds: g.evidenceIds,
           })),
-          /** 阶段 3 才有算法；如实告诉面板，别让它画个空按钮 */
-          algorithm: 'pending-stage-3',
+          /** 阶段 3：目标假设生成已接上，预览走 /purpose/preview（零副作用） */
+          algorithm: 'ready',
+        });
+      }),
+
+      /**
+       * 目的预览（阶段 3）：从本地 journal 真实素材跑一轮目标假设，**零副作用**——
+       * 不写 purpose-state、不写账本、不投递。主人可先看「她会想什么」再决定要不要
+       * 让它进长期账本。素材源：主人私聊（ownerId() 权威口径）+ 请求里传的 chatIds。
+       */
+      route('/purpose/preview', (req, res) => {
+        const u = new URL(req.url || '/', 'http://local');
+        const extra = (u.searchParams.get('chatIds') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 10);
+        /**
+         * B4：用宿主权威口径 ownerId()（含显式 speakUp.chatId / roost / 学到的主人），
+         * 不用窄口径 setup.roostOwner()——显式配了主人时会取空、素材全丢。
+         */
+        const owner = String(ownerId() || '').trim();
+        const ids = [...new Set([owner, ...extra].filter(Boolean))];
+        /**
+         * B5：listChat 已返回该会话全部 kind（含 proactive），再拼一次 recent('proactive')
+         * 会把同一行取两遍、素材计数虚高。这里只取一次。
+         */
+        const rows = ids.flatMap((cid) => journal.listChat(cid, 60));
+        const materials = collectPurposeMaterials({ journalRows: rows, ownerChatId: owner, limit: 36 });
+        const s = purposeState.read();
+        const r = formGoalHypotheses({
+          materials,
+          goals: s.goals,
+          observations: s.observations,
+          drives: s.drives,
+          now: Date.now(),
+          lastMasterAt: 0,
+          roleName: '',
+          persona: null,
+        });
+        return send(res, 200, {
+          ok: true,
+          materials: materials.length,
+          goals: r.goals.slice(-12).map((g) => goalToCandidate(g)).filter(Boolean),
+          observations: r.observations.length,
+          needFeedback: r.needFeedback || {},
         });
       }),
 
