@@ -31,6 +31,9 @@ import { oneLine } from './memory-line.js';
 export const PROFILE_MAX = 50;
 export const IMPRESSION_MAX = 80;
 export const TIPS_MAX = 120;
+/** G7：说话方式/性格（对齐 aurabot profileFieldChars=40；handle 沿用我方 tips=怎么相处） */
+export const STYLE_MAX = 40;
+export const PERSONA_MAX = 40;
 /** E4：讨厌/雷区。比印象更敏感——只在模型明确提炼到才写，渲染时单独标"别踩" */
 export const DISLIKES_MAX = 80;
 export const PROFILE_LINES_MAX = 3;
@@ -151,7 +154,7 @@ export function createProfiles({
   }
 
   function render(limit) {
-    const list = load().filter((r) => r.impression || r.tips || r.dislikes);
+    const list = load().filter((r) => r.impression || r.tips || r.dislikes || r.style || r.persona);
     const picked = limit > 0 ? list.slice(-limit).reverse() : [...list].reverse();
     if (!picked.length) return '';
     const lines = picked.map((r) => {
@@ -159,7 +162,13 @@ export function createProfiles({
       const imp = clipChars(r.impression || '', IMPRESSION_MAX);
       const tips = clipChars(r.tips || '', TIPS_MAX);
       const bad = clipChars(r.dislikes || '', DISLIKES_MAX);
-      return `· ${name}：${oneLine(imp)}${tips ? `（相处：${oneLine(tips)}）` : ''}${bad ? `（别踩：${oneLine(bad)}）` : ''}`;
+      const style = clipChars(r.style || '', STYLE_MAX);
+      const persona = clipChars(r.persona || '', PERSONA_MAX);
+      return `· ${name}：${oneLine(imp)}`
+        + (persona ? `（性格：${oneLine(persona)}）` : '')
+        + (style ? `（说话方式：${oneLine(style)}）` : '')
+        + (tips ? `（相处：${oneLine(tips)}）` : '')
+        + (bad ? `（别踩：${oneLine(bad)}）` : '');
     });
     return `${HEADER}\n${lines.join('\n')}`;
   }
@@ -169,14 +178,16 @@ export function createProfiles({
      * 记一笔。`openid` 优先于显示名当键；`aliases` 传 aliasesOf(chatId)。
      * 开关关着时由调用方决定不调这里——本模块不偷偷读配置（单一真相在 config）。
      */
-    note({ who = '', openid = '', impression = '', tips = '', dislikes = '', aliases = [], current = '' } = {}) {
+    note({ who = '', openid = '', impression = '', tips = '', dislikes = '', style = '', persona = '', aliases = [], current = '' } = {}) {
       const key = canonicalKey(openid || who, aliases, current);
       if (!key) return 0;
       const all = load();
       const imp = accumulate('', impression, IMPRESSION_MAX);
       const tip = accumulate('', tips, TIPS_MAX);
       const bad = accumulate('', dislikes, DISLIKES_MAX);
-      if (!imp && !tip && !bad) return 0;
+      const sty = accumulate('', style, STYLE_MAX);
+      const per = accumulate('', persona, PERSONA_MAX);
+      if (!imp && !tip && !bad && !sty && !per) return 0;
       const name = clipChars(String(who || openid || key).trim(), 24) || key;
       const cur = all.find((r) => r.key === key);
       if (cur) {
@@ -185,10 +196,12 @@ export function createProfiles({
         cur.tips = accumulate(cur.tips, tips, TIPS_MAX);
         /** E4：只有真的提炼到讨厌项才写，空串不覆盖已有的 */
         if (bad) cur.dislikes = accumulate(cur.dislikes, dislikes, DISLIKES_MAX);
+        if (sty) cur.style = accumulate(cur.style || '', style, STYLE_MAX);
+        if (per) cur.persona = accumulate(cur.persona || '', persona, PERSONA_MAX);
         cur.at = now();
         cur.hits = Number(cur.hits || 0) + 1;
       } else {
-        all.push({ key, name, impression: imp, tips: tip, dislikes: bad, at: now(), hits: 1 });
+        all.push({ key, name, impression: imp, tips: tip, dislikes: bad, style: sty, persona: per, at: now(), hits: 1 });
       }
       if (all.length > max) all.splice(0, all.length - max);
       /** 当天注入文本保持不变；新增的明天才进稳定段 */
@@ -239,7 +252,8 @@ export function createProfiles({
       const all = load();
       const row = all.find((r) => String(r.key ?? '').trim().toLowerCase() === k);
       if (!row) return { ok: false, message: '还没有这个人的档案' };
-      const fields = ['alias', 'impression', 'tips', 'dislikes'];
+      /** G7：style 说话方式 / persona 性格 独立维度；handle 沿用 tips（怎么相处） */
+      const fields = ['alias', 'impression', 'tips', 'dislikes', 'style', 'persona'];
       const has = (f) => Object.prototype.hasOwnProperty.call(patch, f);
       if (!fields.some(has) && !has('tags') && !has('name')) return { ok: false, message: '没有要保存的内容' };
       let tags;
@@ -250,7 +264,12 @@ export function createProfiles({
       }
       for (const f of fields) {
         if (!has(f)) continue;
-        const max = f === 'impression' ? IMPRESSION_MAX : f === 'tips' ? TIPS_MAX : f === 'dislikes' ? DISLIKES_MAX : 24;
+        const max = f === 'impression' ? IMPRESSION_MAX
+          : f === 'tips' ? TIPS_MAX
+          : f === 'dislikes' ? DISLIKES_MAX
+          : f === 'style' ? STYLE_MAX
+          : f === 'persona' ? PERSONA_MAX
+          : 24;
         const v = clipChars(String(patch[f] ?? '').trim(), max);
         if (f === 'impression' || f === 'tips' || f === 'dislikes') row[f] = accumulate('', v, max);
         else row[f] = v;

@@ -11551,6 +11551,9 @@ export function apply(ctx) {
               alias: row?.alias || '',
               openid: row?.openid || (row?.key !== name ? row?.key : '') || '',
               impression: row?.impression || '',
+              /** G7：说话方式/性格独立维度（handle 沿用 tips） */
+              style: row?.style || '',
+              persona: row?.persona || '',
               tips: row?.tips || '',
               dislikes: row?.dislikes || '',
               tags: Array.isArray(row?.tags) ? row.tags : [],

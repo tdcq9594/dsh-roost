@@ -7143,6 +7143,8 @@ select.roost-input{color-scheme:dark}
           name: p?.name || '',
           alias: p?.alias || '',
           impression: p?.impression || '',
+          style: p?.style || '',
+          persona: p?.persona || '',
           tips: p?.tips || '',
           dislikes: p?.dislikes || '',
           tags: [...(p?.tags || [])],
@@ -7271,7 +7273,9 @@ select.roost-input{color-scheme:dark}
                           editForm
                             ? h('div', null,
                                 ...[
-                                  ['impression', '印象'], ['alias', '称呼'], ['tips', '相处建议'], ['dislikes', '雷区（别踩）'],
+                                  ['impression', '印象'], ['alias', '称呼'],
+                                  ['persona', '性格'], ['style', '说话方式'],
+                                  ['tips', '怎么相处'], ['dislikes', '雷区（别踩）'],
                                 ].map(([k, label]) => h('label', { key: k, style: { display: 'block', marginBottom: 6, fontSize: 12 } },
                                   label,
                                   h('input', {
@@ -7317,10 +7321,12 @@ select.roost-input{color-scheme:dark}
                                   '不再记住这个人（撤回来档案还在）'),
                               )
                             : h('div', null,
-                                detail.person?.impression || detail.person?.tips || detail.person?.dislikes || detail.person?.alias || (detail.person?.tags || []).length
+                                detail.person?.impression || detail.person?.tips || detail.person?.dislikes || detail.person?.alias || detail.person?.style || detail.person?.persona || (detail.person?.tags || []).length
                                   ? h('div', { className: 'roost-note' },
                                       (detail.person.alias ? `称呼：${detail.person.alias}；` : '')
                                       + (detail.person.impression || '（没有印象）')
+                                      + (detail.person.persona ? `（性格：${detail.person.persona}）` : '')
+                                      + (detail.person.style ? `（说话方式：${detail.person.style}）` : '')
                                       + (detail.person.tips ? `（相处：${detail.person.tips}）` : '')
                                       + (detail.person.dislikes ? `（别踩：${detail.person.dislikes}）` : '')
                                       + ((detail.person.tags || []).length ? ` [${detail.person.tags.join('、')}]` : ''))
