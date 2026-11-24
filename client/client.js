@@ -233,6 +233,9 @@ window.__ModuleLoader__.load({
   --radius-card:14px;
   --shadow-card:0 1px 2px color-mix(in srgb,currentColor 5%,transparent),
     0 6px 18px color-mix(in srgb,currentColor 7%,transparent);
+  /** 卡片底默认口径：宿主主题底色 + 强调色淡混，再让底色半透（50%）。
+      个性化页选了颜色/透明度后，根节点会注入 --roost-card-fill 覆盖它。 */
+  --card-fill:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) 50%,transparent));
 }
 /**
  * 用户自选的强调色（个性化页）。
@@ -251,9 +254,8 @@ window.__ModuleLoader__.load({
 /**
  * 关动效（个性化页的开关）。
  *
- * 用一条通配规则兜住全部：分节入场、切页淡入、.roost-node.current::after
- * 那个 2.4s 无限呼吸、以及所有按钮/选项卡过渡。逐条列会漏——现有三段
- * prefers-reduced-motion 就漏了呼吸圈和 .roost-fade。
+ * 用一条通配规则兜住全部：分节入场、切页淡入、以及所有按钮/选项卡过渡。
+ * 逐条列会漏——早期按类名列举就漏过 .roost-fade。
  */
 .roost-root.no-anim *,
 .roost-root.no-anim *::before,
@@ -281,10 +283,14 @@ window.__ModuleLoader__.load({
 .roost-swatch.host span{background:linear-gradient(135deg,#39404d 50%,#24272e 50%)}
 .roost-swatch[data-on="1"]{border-color:var(--dsw-alias-label-primary,#e6e7eb)}
 .roost-swatch:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* 卡片背景设置：颜色块与透明度滑杆 */
+.roost-pf-color{width:44px;height:30px;padding:2px;border:1px solid var(--line);border-radius:8px;
+  background:var(--field);cursor:pointer}
+.roost-pf-alpha{width:150px;accent-color:var(--accent);cursor:pointer}
 /* 首次接入向导：全屏遮罩，窄侧栏里也要能滚、不能把按钮挤出屏幕 */
 /* 垂直也居中：卡片贴顶会在大屏上留下半屏空白，看着像没加载完 */
 .roost-wizard{display:flex;align-items:center;justify-content:center;width:100%;height:100%;overflow:auto;padding:20px;box-sizing:border-box}
-.roost-wizard-card{width:100%;max-width:720px;padding:24px 28px;border:1px solid var(--line);border-radius:14px;background:var(--surface);box-shadow:0 12px 40px color-mix(in srgb, currentColor 8%, transparent);box-sizing:border-box}
+.roost-wizard-card{width:100%;max-width:720px;padding:24px 28px;border:1px solid var(--line);border-radius:14px;background:var(--roost-card-fill,var(--card-fill));box-shadow:0 12px 40px color-mix(in srgb, currentColor 8%, transparent);box-sizing:border-box}
 .roost-wizard-card .roost-pill.on{border-color:var(--accent);color:var(--accent)}
 .roost-wiz-body{min-height:260px;margin-top:16px}
 /* 链路对比：旧版划掉、新版高亮，一眼看出少了哪一层 */
@@ -438,7 +444,16 @@ window.__ModuleLoader__.load({
   background:color-mix(in srgb,var(--accent) 14%,transparent)}
 /* 分节头：编号徽标 + 标题 + 操作槽 + 折叠开关，下边框代替原先标题右侧的细线。
    整页按 8pt 网格走，标题/正文/说明只留三级字阶。 */
-.roost-sec{margin:24px 0 0;animation:roost-sec-in .28s cubic-bezier(.2,.8,.2,1) backwards}
+/* 2026-11-24 主人改口径：所有页的「分节卡片」都用同一张底，不再只给数据页。
+   范围刻意收窄：只加在 .roost-sec 这一层真正的卡片容器上；
+   按钮、输入框、导航、内联标签，以及嵌在卡片里的 .roost-g-card / .roost-stat /
+   .roost-metric 都不硬套——它们已有自己的底色或本就该透明。
+   个别不适合做卡片的分节可以加 .roost-plain 显式退出。
+   卡片只作用在 background 层，不用 opacity——里面文字和数据保持不透明。 */
+.roost-sec:not(.roost-plain){margin:24px 0 0;padding:14px 16px 16px;
+  border:1px solid var(--line-soft);border-radius:var(--radius-card);
+  background:var(--roost-card-fill,var(--card-fill));box-shadow:var(--shadow-card);
+  animation:roost-sec-in .28s cubic-bezier(.2,.8,.2,1) backwards}
 .roost-sec:first-child{margin-top:2px}
 .roost-sec:nth-child(2){animation-delay:.04s}
 .roost-sec:nth-child(3){animation-delay:.08s}
@@ -446,7 +461,7 @@ window.__ModuleLoader__.load({
 .roost-sec:nth-child(n+5){animation-delay:.16s}
 @keyframes roost-sec-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .roost-sec-h{display:flex;align-items:center;gap:10px;margin-bottom:12px;min-height:26px;
-  padding-bottom:8px;border-bottom:1px solid var(--line-soft)}
+  padding-bottom:0}
 /* 排障页把 日志 / 上下文 / 会话 三块拼一页：后两块原本各自从 01 起编号，
    一屏出现三个「01」像渲染坏了。用分区标题代替编号。 */
 .roost-diag-part{margin-top:16px;border-top:1px solid var(--line-soft);padding-top:10px}
@@ -512,33 +527,15 @@ window.__ModuleLoader__.load({
 .roost-mood-k{flex:0 0 42px;font-size:11.5px;color:var(--dsw-alias-label-secondary, inherit)}
 .roost-mood-w{flex:0 0 46px;text-align:right;font-size:11.5px;font-variant-numeric:tabular-nums}
 
-.roost-node{
-  position:relative;flex:0 0 26px;height:26px;border-radius:50%;display:flex;
-  align-items:center;justify-content:center;font-family:ui-monospace,Menlo,Consolas,monospace;
-  font-size:11px;font-weight:700;
-  transition:transform .18s cubic-bezier(.2,.8,.2,1),background .18s,border-color .18s;
-}
-.roost-node.done{background:var(--ok);border:1px solid var(--ok);color:#04150e}
-.roost-node.todo{border:1px dashed var(--line);opacity:.55}
-.roost-node.current{border:1px solid var(--warn);color:var(--warn)}
-.roost-node.bad{border:1px solid var(--bad);color:var(--bad)}
-.roost-node.current::after{
-  content:'';position:absolute;inset:-4px;border-radius:50%;
-  border:1px solid var(--warn);opacity:.5;
-  animation:roost-breathe 2.4s cubic-bezier(.4,0,.6,1) infinite;
-}
-@keyframes roost-breathe{
-  0%{transform:scale(.92);opacity:.5}
-  50%{transform:scale(1.14);opacity:0}
-  100%{transform:scale(.92);opacity:0}
-}
-.roost-step{display:flex;gap:14px;padding:0 0 20px;position:relative}
-.roost-step:last-child{padding-bottom:2px}
-.roost-rail{position:absolute;left:12.5px;top:28px;bottom:2px;width:1px;background:var(--line-soft)}
-.roost-step:last-child .roost-rail{display:none}
-.roost-step.done .roost-rail{background:var(--ok);opacity:.4}
-.roost-body{flex:1;min-width:0;padding-top:2px}
-.roost-title{font-weight:600;font-size:13px}
+/* 接入步骤：普通分节 + 标题行状态徽章，不再有左侧圆圈和竖线轨道。
+   省掉轨道是因为长步骤会把线拉断，视觉上比没有更乱。 */
+.roost-step{padding:14px 0 16px;border-top:1px solid var(--line-soft)}
+.roost-step:first-child{padding-top:2px;border-top:0}
+.roost-step-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.roost-step-n{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;
+  color:var(--dsw-alias-label-secondary, inherit);opacity:.6;font-variant-numeric:tabular-nums}
+.roost-title{font-weight:600;font-size:13.5px}
+.roost-step-actions{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
 .roost-fade{animation:roost-in .22s cubic-bezier(.2,.8,.2,1)}
 @keyframes roost-in{from{opacity:0}to{opacity:1}}
 @keyframes roost-in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
@@ -1141,8 +1138,8 @@ window.__ModuleLoader__.load({
  */
 .roost-g-card{
   --g-tint:color-mix(in srgb, var(--accent) 9%, transparent);
-  /* 2026-11-13 主人：卡片背景不好看，去掉。群聊页与其它页统一成
-     「分节标题 + 上边线分隔」，不再套一层带边框的灰底方块。
+  /* 卡片底由外层 .roost-sec 统一提供：2026-11-24 主人恢复所有页的卡片背景，
+     群聊页不再单独套一层，免得「卡片里再套卡片」。
      --g-tint 仍保留：下面的提示块/日志行还要用它。 */
   border:0;border-radius:0;background:transparent;padding:0;
 }
@@ -1192,12 +1189,8 @@ window.__ModuleLoader__.load({
 .roost-empty{padding:9px 12px;border-left:2px solid var(--tone-foam-2);
   border-radius:0 8px 8px 0;background:var(--tone-foam)}
 .roost-tab[data-on="1"]::after{background:var(--tone-deep)}
-.is-data-view .roost-sec{margin-top:14px;padding:14px 16px 16px;
-  border:1px solid var(--line-soft);border-radius:var(--radius-card);
-  /* 卡片底吃两层：宿主主题底色 + 自选强调色的极淡混入，再让底色本身透一点。
-     只给 background 做 alpha，不用 opacity——里面的文字和数据要保持不透明。 */
-  background:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) 50%,transparent));
-  box-shadow:var(--shadow-card)}
+/* 卡片底已在 .roost-sec 上全局生效（2026-11-24 主人改为所有页统一），
+   数据页的不同只在下面这些展示令牌：竖线、指标块、星图。 */
 .is-data-view .roost-sec:first-child{margin-top:2px}
 .is-data-view .roost-sec-h{border-bottom:0;margin-bottom:10px;padding-bottom:6px}
 .is-data-view .roost-sec-t{position:relative;padding-left:11px}
@@ -1846,21 +1839,29 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 分步：编号节点 + 竖线 + 标题说明 + 右侧动作 */
-    const Step = ({ n, state, title, desc, children, extra }) =>
-      h('div', { className: 'roost-step ' + (state || 'todo') },
-        h('div', { className: 'roost-node ' + (state || 'todo') },
-          state === 'done' ? '✓' : state === 'bad' ? '!' : n),
-        h('div', { className: 'roost-rail' }),
-        h('div', { className: 'roost-body' },
-          h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' } },
-            h('div', { className: 'roost-title' }, title),
-            children ? h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 6, flexWrap: 'wrap' } }, children) : null,
-          ),
-          h('div', { className: 'roost-note', style: { marginTop: 2 } }, desc),
-          extra || null,
+    /**
+     * 接入步骤：普通分节 + 标题行状态徽章。
+     * 主人 2026-11-24 明确不要左侧圆圈 + 竖线那套进度条：长步骤会把线拉断，反而乱。
+     */
+    const STEP_STATE = {
+      done: { cls: 'ok', label: '已完成' },
+      current: { cls: 'warn', label: '进行中' },
+      bad: { cls: 'bad', label: '待处理' },
+      todo: { cls: '', label: '待完成' },
+    }
+    const Step = ({ n, state, title, desc, children, extra }) => {
+      const st = STEP_STATE[state] || STEP_STATE.todo
+      return h('div', { className: 'roost-step ' + (state || 'todo') },
+        h('div', { className: 'roost-step-h' },
+          h('span', { className: 'roost-step-n' }, String(n).padStart(2, '0')),
+          h('span', { className: 'roost-title' }, title),
+          h('span', { className: 'roost-pill' + (st.cls ? ' ' + st.cls : '') }, st.label),
+          children ? h('div', { className: 'roost-step-actions' }, children) : null,
         ),
+        h('div', { className: 'roost-note', style: { marginTop: 4 } }, desc),
+        extra || null,
       )
+    }
 
     /**
      * 二次确认的行内按钮：删/清这类不可逆动作都要过一次。
@@ -3041,7 +3042,7 @@ window.__ModuleLoader__.load({
                 }, '安装'),
           ),
             pathOpen
-              ? h('div', { style: { marginTop: -6, marginBottom: 16, paddingLeft: 40 } },
+              ? h('div', { style: { marginTop: 6, marginBottom: 4 } },
                   h('div', { className: 'roost-note', style: { marginBottom: 6 } },
                     s.installed
                       ? '换到别的目录（里面要有 src/main.js）。改完要重启 Roost 才生效'
@@ -3099,14 +3100,14 @@ window.__ModuleLoader__.load({
             desc: hasCreds ? '已配置' : '推荐扫码；扫码用不了就在下面手动填',
           }),
             hasCreds
-              ? h('div', { style: { marginTop: -6, marginBottom: 16, paddingLeft: 40, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              ? h('div', { style: { marginTop: 6, marginBottom: 4, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
                   h('div', { className: 'roost-mono' },
                     (s.bots || []).map((b) => `${b.name || b.id}（${b.appId || '无 AppID'}）`).join('、')),
                   h('button', { type: 'button', className: 'roost-link', onClick: () => copy((s.bots || []).map((b) => b.appId).filter(Boolean).join(' ')) }, '复制 AppID'),
                   switchHint(),
                 )
               : mode === 'manual'
-                ? h('div', { style: { marginTop: -6, marginBottom: 16, paddingLeft: 40, maxWidth: 470 } },
+                ? h('div', { style: { marginTop: 6, marginBottom: 4, maxWidth: 470 } },
                     h('input', { className: 'roost-input', placeholder: 'AppID', value: appId, onChange: (e) => setAppId(e.target.value), onKeyDown: enter(saveBot), style: { marginBottom: 8 } }),
                     h('input', { className: 'roost-input', placeholder: 'AppSecret', type: 'password', value: secret, onChange: (e) => setSecret(e.target.value), onKeyDown: enter(saveBot), style: { marginBottom: 8 } }),
                     h('button', {
@@ -16037,7 +16038,7 @@ window.__ModuleLoader__.load({
           '超过这个字数不会合成，这句会改发文字。语音条本身还有 60 秒时长上限。'),
 
         /**
-         * 5.3 试听：不另起一张卡片（主人不要卡片背景），用一条分隔线接在本节末尾。
+         * 5.3 试听：不另起一张卡片（沿用外层 .roost-sec 的卡片底），用一条分隔线接在本节末尾。
          * A3 保留这个形态，只补一个锚点，让「试听」能被找到、能被跳过来。
          */
         h('div', {
@@ -21707,8 +21708,23 @@ window.__ModuleLoader__.load({
      * 不整份拒绝的理由：用户手改 JSON 时最容易错一个逗号或一个引号，
      * 整份拒掉等于「我改个颜色，顺序和隐藏全没了」。
      */
+    /**
+     * 卡片背景偏好：颜色与透明度分开存。
+     *
+     * 颜色只收 `#rgb` / `#rrggbb`——这段值会拼进 CSS，收别的字符串等于给偏好
+     * JSON 开了个 CSS 注入口。透明度限制在 0–100 的整数，默认 50（与改动前的
+     * 卡片底一致）；空颜色 = 跟随主题底色 + 强调色淡混。
+     */
+    function readCardBg(v) {
+      const raw = String(v?.color ?? '').trim()
+      const color = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(raw) ? raw : ''
+      const n = Number(v?.alpha)
+      const alpha = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : 50
+      return { color, alpha }
+    }
+
     function readUiPref() {
-      const empty = { hidden: [], order: {}, accent: 'host', anim: true }
+      const empty = { hidden: [], order: {}, accent: 'host', anim: true, cardBg: { color: '', alpha: 50 } }
       let raw = null
       try { raw = JSON.parse(localStorage.getItem(UI_PREF_KEY) || 'null') } catch { return empty }
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return empty
@@ -21728,6 +21744,7 @@ window.__ModuleLoader__.load({
         order,
         accent: accents.includes(raw.accent) ? raw.accent : 'host',
         anim: raw.anim !== false,
+        cardBg: readCardBg(raw.cardBg),
       }
     }
 
@@ -21791,7 +21808,7 @@ window.__ModuleLoader__.load({
      */
     const TAB_ALIAS = {
       overview: '概览 首页 总览 现在 状态 卡在哪',
-      personalize: '个性化 外观 主题 颜色 强调色 菜单 页签 顺序 隐藏 显示 布局 自定义 动画',
+      personalize: '个性化 外观 主题 颜色 强调色 卡片 背景 透明度 菜单 页签 顺序 隐藏 显示 布局 自定义 动画',
       her: '人格 人设 角色 名字 自称',
       profile: '资料 改资料 昵称 头像 简介 签名 菜单 换名字 换头像 自我表达 她能不能自己改',
       mood: '心情 情绪 状态 衰减',
@@ -21988,6 +22005,7 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = useState(null)
       const g = NAV_GROUPS.find((x) => x.id === editGroup) || NAV_GROUPS[1]
       const hidden = new Set(uiPref.hidden || [])
+      const cardBg = readCardBg(uiPref.cardBg)
 
       /** 每次改动都清掉 04 的草稿：否则先编辑过 textarea、再动 01/02/03，
        *  下面那段 JSON 会停在改之前的样子，用户以为没生效 */
@@ -22029,8 +22047,8 @@ window.__ModuleLoader__.load({
 
       const resetAll = () => {
         setDraft(null)
-        setPrefs({ hidden: [], order: {}, accent: 'host', anim: true })
-        toast('已恢复默认（只重置这一页的四项）')
+        setPrefs({ hidden: [], order: {}, accent: 'host', anim: true, cardBg: { color: '', alpha: 50 } })
+        toast('已恢复默认（只重置这一页的五项）')
       }
 
       /** 导入：**逐字段校验，坏字段丢字段**，不整份拒绝 */
@@ -22047,6 +22065,7 @@ window.__ModuleLoader__.load({
           order: {},
           accent: ACCENT_PRESETS.some((a) => a.id === raw.accent) ? raw.accent : 'host',
           anim: raw.anim !== false,
+          cardBg: readCardBg(raw.cardBg),
         }
         if (raw.order && typeof raw.order === 'object' && !Array.isArray(raw.order)) {
           for (const [k, list] of Object.entries(raw.order)) {
@@ -22122,8 +22141,39 @@ window.__ModuleLoader__.load({
             + (uiPref.accent === 'host' ? '（跟随 DSH 主题）' : `（${accentOf(uiPref.accent).dark}）`)),
         ),
 
-        /* 03 动效 */
-        h(Sec, { n: '03', title: '动效' },
+        /* 03 卡片背景 */
+        h(Sec, { n: '03', title: '卡片背景' },
+          h('div', { className: 'roost-note' },
+            '所有页的分节共用这一张卡片底（含本页）。颜色与透明度分开设：'
+            + '「跟随主题」沿用宿主底色 + 强调色淡混，默认透明度 50%。'),
+          h(GRow, {
+            label: '背景颜色',
+            hint: '只改卡片底，不动文字与主题；选完立刻生效',
+          },
+            h('input', {
+              type: 'color', className: 'roost-pf-color',
+              value: /^#[0-9a-f]{6}$/i.test(cardBg.color) ? cardBg.color : '#ffffff',
+              'aria-label': '卡片背景颜色',
+              onChange: (e) => patch({ cardBg: { ...cardBg, color: e.target.value } }),
+            }),
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: () => patch({ cardBg: { ...cardBg, color: '' } }),
+            }, '跟随主题')),
+          h(GRow, {
+            label: '透明度',
+            hint: '0% 全透明，100% 完全不透明；默认 50%',
+          },
+            h('input', {
+              type: 'range', min: 0, max: 100, step: 5, className: 'roost-pf-alpha',
+              value: cardBg.alpha, 'aria-label': '卡片背景透明度',
+              onChange: (e) => patch({ cardBg: { ...cardBg, alpha: Number(e.target.value) } }),
+            }),
+            h('span', { className: 'roost-g-unit' }, `${cardBg.alpha}%`)),
+        ),
+
+        /* 04 动效 */
+        h(Sec, { n: '04', title: '动效' },
           h(GRow, {
             label: '界面动画',
             hint: '分节入场、切页淡入、指示呼吸圈、按钮回弹；关掉之后全部静止',
@@ -22134,8 +22184,8 @@ window.__ModuleLoader__.load({
             })),
         ),
 
-        /* 04 导出与导入 */
-        h(Sec, { n: '04', title: '导出与导入' },
+        /* 05 导出与导入 */
+        h(Sec, { n: '05', title: '导出与导入' },
           h('div', { className: 'roost-note' },
             '偏好只存在这台浏览器。换电脑时把下面这段复制走，粘回来点「导入」。'),
           h('textarea', {
@@ -22876,15 +22926,23 @@ window.__ModuleLoader__.load({
       const groupTabs = tabsOfGroup(curGroup)
 
       /**
-       * 根节点的外观：强调色 + 关动效。
+       * 根节点的外观：强调色 + 关动效 + 卡片底。
        *
-       * 写在 `.roost-root` 的 inline style 上——CSS 里的 `--accent` 读的就是
-       * 这两个变量（见 CSS 里那段注释）。空对象就别传，免得渲染出空的 style。
+       * 写在 `.roost-root` 的 inline style 上——CSS 里的 `--accent` 与
+       * `--roost-card-fill` 读的就是这几个变量（见顶部 CSS）。
        */
       const accent = accentOf(uiPref.accent)
-      const rootStyle = accent.dark
-        ? { '--roost-accent': accent.dark, '--roost-accent-light': accent.light }
-        : undefined
+      const cardPref = readCardBg(uiPref.cardBg)
+      /** 颜色已在 readCardBg 里限定为 hex，这里只拼进 color-mix，不留注入口 */
+      const cardFill = cardPref.color
+        ? `color-mix(in srgb, ${cardPref.color} ${cardPref.alpha}%, transparent)`
+        : `color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) ${cardPref.alpha}%,transparent))`
+      /** 默认值（跟随主题 + 50%）不注入，让顶部 CSS 的 --card-fill 独自兜底 */
+      const rootStyle = {
+        ...(accent.dark ? { '--roost-accent': accent.dark, '--roost-accent-light': accent.light } : {}),
+        ...((cardPref.color || cardPref.alpha !== 50) ? { '--roost-card-fill': cardFill } : {}),
+      }
+      const finalStyle = Object.keys(rootStyle).length ? rootStyle : undefined
       const rootClass = 'roost-root' + (uiPref.anim === false ? ' no-anim' : '')
 
       /**
@@ -22894,7 +22952,7 @@ window.__ModuleLoader__.load({
        * 跳过后后端仍返回 needed=false，但概览页会把未接入状态一直显示着。
        */
       if (st?.wizard?.needed) {
-        return h('div', { className: rootClass, style: rootStyle },
+        return h('div', { className: rootClass, style: finalStyle },
           h(SetupWizard, {
             st,
             toast,
@@ -22904,7 +22962,7 @@ window.__ModuleLoader__.load({
         )
       }
 
-      return h('div', { className: rootClass, style: rootStyle },
+      return h('div', { className: rootClass, style: finalStyle },
         h('div', { className: 'roost-head' },
           h('div', { className: 'roost-head-inner' },
           /**

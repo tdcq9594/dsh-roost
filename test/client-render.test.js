@@ -2692,7 +2692,7 @@ test('记忆页：证据趋势/条数/出处明细可见（阶段1 算出的不�
   assert.match(src, /ev\.quote/, '证据要显示引文')
 })
 
-test('视觉升级：卡片只给数据页，配置页保留分节标题 + 上边线', () => {
+test('视觉升级：所有页统一卡片底，数据页只多一层展示令牌', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   const findInner = (n) => {
@@ -2704,19 +2704,20 @@ test('视觉升级：卡片只给数据页，配置页保留分节标题 + 上�
     if (String(n.props?.className || '').split(/\s+/).includes('roost-body-inner')) return n
     return findInner(n.props?.children)
   }
-  const clsOf = (tab) => {
+  for (const tab of ['overview', 'memory', 'people', 'config', 'groupchat', 'security', 'ext']) {
     store['roost.tab'] = tab
     rt.reset()
-    const inner = findInner(expand(mod.RoostPage(), rt))
-    assert.ok(inner, `${tab} 页缺少正文容器`)
-    return String(inner.props.className || '')
+    assert.ok(findInner(expand(mod.RoostPage(), rt)), `${tab} 页缺少正文容器`)
   }
-  for (const tab of ['overview', 'memory', 'people']) {
-    assert.match(clsOf(tab), /is-data-view/, `${tab} 是数据展示页，应该拿到卡片样式`)
-  }
-  for (const tab of ['config', 'groupchat', 'security', 'ext']) {
-    assert.ok(!clsOf(tab).includes('is-data-view'), `${tab} 是配置页，不该推翻 2026-11-13 的「不要卡片背景」`)
-  }
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.match(src, /\.roost-sec:not\(\.roost-plain\)\{[^}]*background:var\(--roost-card-fill,var\(--card-fill\)\)/,
+    '卡片底只挂在真正的分节卡片上，.roost-plain 可显式退出')
+  assert.equal(/\.is-data-view \.roost-sec\{/.test(src), false,
+    '数据页不该再留一份自己的卡片底，免得两份口径打架')
+  assert.ok(/\.roost-g-card\{[\s\S]*?background:transparent/.test(src),
+    '嵌在分节里的群聊卡片保持透明，不能在卡片里再套卡片')
+  assert.equal(/\.roost-root\s+\*\s*\{[^}]*--roost-card-fill/.test(src), false,
+    '不许用通配规则把卡片底硬塞给按钮、输入框和内联标签')
 })
 
 test('视觉升级：竖线与卡片底只走自选强调色，不落对方配色', () => {
@@ -2728,12 +2729,53 @@ test('视觉升级：竖线与卡片底只走自选强调色，不落对方配�
   assert.ok(!visual.includes('#3d7fd6') && !visual.includes('--ab-'), '新样式不该引用 aurabot 的蓝色或变量')
   assert.ok(src.includes('background:linear-gradient(180deg,var(--tone-foam-2),var(--accent))'),
     '标题竖线两端都要来自 --accent，不能掺白色或固定色')
-  assert.ok(src.includes('background:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1,'),
-    '卡片底要在宿主主题底色上混入自选强调色，不能写死')
+  assert.ok(src.includes('--card-fill:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1,'),
+    '默认卡片底要在宿主主题底色上混入自选强调色，不能写死')
   assert.ok(src.includes(')) 50%,transparent))'),
-    '卡片底只让背景透一点，不用 opacity 把里面的文字数据一起透明掉')
+    '默认卡片底只让背景透一点，不用 opacity 把里面的文字数据一起透明掉')
+  assert.ok(src.includes('background:var(--roost-card-fill,var(--card-fill))'),
+    '卡片底走个性化注入的变量，没设置时回落到 50% 默认值')
   assert.ok(src.includes('--tone-foam-2:color-mix(in srgb,var(--accent) 20%,transparent)'),
     '淡色令牌必须从 --accent 派生')
+})
+
+test('卡片背景偏好：默认 50%，颜色与透明度分开校验，坏字段只丢字段', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  delete store['roost.ui.v1']
+  assert.deepEqual(mod.readUiPref().cardBg, { color: '', alpha: 50 },
+    '默认颜色跟随主题、透明度 50%，与改动前卡片底一致')
+
+  store['roost.ui.v1'] = JSON.stringify({ cardBg: { color: '#123456', alpha: 73 } })
+  assert.deepEqual(mod.readUiPref().cardBg, { color: '#123456', alpha: 73 })
+
+  store['roost.ui.v1'] = JSON.stringify({ cardBg: { color: 'red;background:black', alpha: 999 }, accent: 'teal' })
+  const p = mod.readUiPref()
+  assert.equal(p.cardBg.color, '', '非 hex 颜色不能进 CSS，防偏好 JSON 注入')
+  assert.equal(p.cardBg.alpha, 100, '超范围透明度夹到 100')
+  assert.equal(p.accent, 'teal', '坏字段不能把别的偏好一起丢掉')
+})
+
+test('卡片背景：根节点注入 --roost-card-fill，自定义颜色与透明度都生效', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const styleOf = (pref) => {
+    store['roost.ui.v1'] = JSON.stringify(pref)
+    store['roost.tab'] = 'personalize'
+    rt.reset()
+    return expand(mod.RoostPage(), rt).props.style
+  }
+  const theme = styleOf({})
+  assert.equal(theme?.['--roost-card-fill'], undefined,
+    '默认偏好不注入覆盖值，交给 CSS 的 50% 默认值兜底')
+
+  const alphaOnly = styleOf({ cardBg: { alpha: 80 } })
+  assert.match(alphaOnly['--roost-card-fill'], /var\(--accent\).*80%,transparent\)\)$/,
+    '只改透明度时，颜色仍回落主题色')
+
+  const custom = styleOf({ cardBg: { color: '#123456', alpha: 35 } })
+  assert.equal(custom['--roost-card-fill'], 'color-mix(in srgb, #123456 35%, transparent)',
+    '自选颜色与透明度要独立生效，且不会写进文字样式')
 })
 
 test('G8 面板批量计划：按 scope 拆开、跳过无 id 事实、tier 白名单与 200 上限', () => {
@@ -2985,4 +3027,24 @@ test('GPT 语音面板按扩展页面收敛字段与交互，但仍保持单页'
   assert.ok(src.includes("put('gptSovits.autoStart', on)"), '自启动开关要写 gptSovits.autoStart')
   assert.ok(src.includes('随 DSH 启动 GPT 进程'), '面板缺少自启动开关文案')
   assert.ok(src.includes('重启 DSH 后生效'), '要说清是下次重启才生效，免得用户盯着当前进程等')
+})
+
+test('接入步骤：普通分节 + 状态徽章，不再有左侧圆圈和竖线轨道', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  // 主人 2026-11-24 明确不要这套进度条：长步骤会把 rail 拉断，反而更乱
+  for (const gone of ['roost-node', 'roost-rail', 'roost-breathe', 'paddingLeft: 40']) {
+    assert.equal(src.includes(gone), false, `不该再残留 ${gone}`)
+  }
+  assert.ok(src.includes('.roost-step{padding:14px 0 16px;border-top:1px solid var(--line-soft)}'),
+    '步骤应该是普通分节，靠上边线分隔')
+  assert.ok(src.includes('.roost-step-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap}'),
+    '标题行要有独立的头部容器')
+  const states = src.slice(src.indexOf('const STEP_STATE'), src.indexOf('const Step ='))
+  for (const [state, label] of [['done', '已完成'], ['current', '进行中'], ['bad', '待处理'], ['todo', '待完成']]) {
+    assert.ok(states.includes(`${state}: {`), `状态 ${state} 缺少定义`)
+    assert.ok(states.includes(`'${label}'`), `状态 ${state} 缺少徽章文案「${label}」`)
+  }
+  const step = src.slice(src.indexOf('const Step ='), src.indexOf('const Step =') + 900)
+  assert.ok(step.includes("h('span', { className: 'roost-step-n' }"), '序号只在标题行里做淡色前缀')
+  assert.ok(step.includes("h('span', { className: 'roost-pill'"), '状态靠徽章表达')
 })
