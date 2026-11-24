@@ -293,6 +293,7 @@ import { createFeedback } from './autotelic-feedback.js';
 import { createSkillStore } from './autotelic-skills.js';
 import { formGoalHypotheses, goalToCandidate, DEFAULT_DRIVES } from './purpose-engine.js';
 import { collectPurposeMaterials } from './purpose-collect.js';
+import { buildFollowUpCandidates } from './followup-candidate.js';
 import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
 import { createUiActionQueue } from './ext-ui-actions.js';
 import { runInProcessAction } from './ext-inprocess.js';
@@ -13986,12 +13987,31 @@ export function apply(ctx) {
           roleName: '',
           persona: null,
         });
+        /**
+         * 到期跟进独立候选（阶段 5）：从真实 memory.dueFollowUps 取，不在预览里塞假数据。
+         * 开关 autotelic.followUpCandidate 默认开，面板可一键关回；与 memory.followUp
+         * 的 prompt 注入开关互不联动。
+         */
+        const followUpOn = cfg.autotelic?.followUpCandidate !== false;
+        let followUps = [];
+        if (followUpOn) {
+          try {
+            const owner = String(ownerId() || '').trim();
+            const followIds = [...new Set([owner, ...extra].filter(Boolean))];
+            const due = followIds.flatMap((cid) => memory.dueFollowUps(cid, aliasesOf(cid), { limit: 0 }));
+            followUps = buildFollowUpCandidates(due).slice(0, 8);
+          } catch (e) {
+            log.debug(`到期跟进候选预览失败：${e?.message || e}`);
+          }
+        }
         return send(res, 200, {
           ok: true,
           materials: materials.length,
           goals: r.goals.slice(-12).map((g) => goalToCandidate(g)).filter(Boolean),
           observations: r.observations.length,
           needFeedback: r.needFeedback || {},
+          followUps,
+          followUpEnabled: followUpOn,
         });
       }),
 

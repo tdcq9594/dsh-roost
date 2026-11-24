@@ -52,6 +52,8 @@ export const AUTOTELIC_DEFAULTS = {
   enabled: false,
   /** 允许调工具。false = 只能想（prompt 里也明确禁止动手） */
   allowAct: false,
+  /** 到期跟进作独立主动候选（阶段 5），默认开；与 memory.followUp 的 prompt 注入开关互不联动 */
+  followUpCandidate: true,
   /** 一天最多推进几次（立项不算次数，推进才算） */
   maxPerDay: 2,
   /** 连续失败几次自动卡住 */

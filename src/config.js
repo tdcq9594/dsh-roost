@@ -1147,6 +1147,12 @@ export const DEFAULTS = {
   autotelic: {
     enabled: false,
     allowAct: false,
+    /**
+     * 到期跟进作为独立主动候选（阶段 5）。默认开——有该问的事就能主动开口；
+     * 注意这与 `memory.followUp.enabled`（往常规 prompt 注入提示，默认关）是
+     * 两件事，互不联动。想关主动候选只关这一个即可（面板一键关回）。
+     */
+    followUpCandidate: true,
     /** 一天最多推进几次（立项不算次数） */
     maxPerDay: 2,
     /** 连续失败几次自动卡住 */

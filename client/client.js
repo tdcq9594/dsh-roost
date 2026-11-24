@@ -8449,7 +8449,16 @@ window.__ModuleLoader__.load({
                 preview.goals.slice(0, 8).map((g, i) => h('div', { key: g.id || i, className: 'roost-item' },
                   h('span', { className: 't' }, `${g.goalOwnerLabel || g.goalOwner || '我'} · ${g.need || ''}：${String(g.text || g.intent || '').slice(0, 60)}`),
                   h('span', { className: 'd' }, `置信 ${g.confidence ?? 0}`))))
-              : h('div', { className: 'roost-muted', style: { fontSize: 11 } }, '这批素材还没形成目标假设——正常，别硬找话。'))
+              : h('div', { className: 'roost-muted', style: { fontSize: 11 } }, '这批素材还没形成目标假设——正常，别硬找话。'),
+            /** 到期跟进独立候选（阶段 5）：真实 memory 数据，不是塞进去的假数据 */
+            h('div', { style: { fontSize: 11, marginTop: 6 } },
+              `到期跟进候选：${(preview.followUps || []).length} 条${preview.followUpEnabled === false ? '（已关）' : ''}`),
+            (preview.followUps || []).length
+              ? h('div', { className: 'roost-list' },
+                preview.followUps.map((f) => h('div', { key: f.id, className: 'roost-item' },
+                  h('span', { className: 't' }, `${f.text}：${f.question}`),
+                  h('span', { className: 'd' }, `已问 ${f.tries} 次`))))
+              : null)
           : null,
         h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 6 } },
           '九维驱力：' + Object.entries(driveRows).map(([k, v]) => `${k} ${v}`).join(' · ')),
@@ -8622,6 +8631,11 @@ window.__ModuleLoader__.load({
               type: 'checkbox', checked: c.allowAct === true,
               onChange: (e) => patch({ allowAct: Boolean(e.target.checked) }),
             }), '允许动手（关着只能想）'),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+            h('input', {
+              type: 'checkbox', checked: c.followUpCandidate !== false,
+              onChange: (e) => patch({ followUpCandidate: Boolean(e.target.checked) }),
+            }), '到期的事可主动提起（默认开）'),
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
             '一天最多',
             h('input', {
