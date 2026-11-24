@@ -15258,9 +15258,7 @@ window.__ModuleLoader__.load({
 
         provider === 'windows'
           ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
-              process.platform === 'win32'
-                ? '用系统自带的朗读声音，完全离线、机械感重一些。挑的是系统里第一个中文语音。'
-                : '这个声音只支持 Windows。')
+              '用系统自带的朗读声音，完全离线、机械感重一些；只在 Windows 上可用，挑的是系统里第一个中文语音。')
           : null,
 
         provider === 'cosyvoice'

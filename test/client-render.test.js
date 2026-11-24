@@ -2940,10 +2940,11 @@ test('语音页把所有声音来源做成卡片，且不分「发语音/听语�
   const start = src.indexOf('function TtsCard(')
   const end = src.indexOf('function ', start + 20)
   const card = src.slice(start, end === -1 ? src.length : end)
-  // 十一个来源都在卡片表里（内置五家 + 新补的六家；windows 也列出来）
+  // 十二个来源都在卡片表里（内置五家 + 新补的七家；windows 也列出来）
   for (const id of ['auto', 'edge', 'sherpa', 'gpt-sovits', 'cosyvoice', 'volcano', 'fish-free', 'breeze', 'minimax', 'openai', 'mimo', 'windows']) {
     assert.ok(card.includes(`id: '${id}'`), `卡片表缺少来源 ${id}`)
   }
+  assert.equal(src.includes('process.'), false, '浏览器前端不能引用 Node 全局 process（点 Windows 声音会崩）')
   assert.ok(card.includes("className: 'voice-choices'"), '要有卡片网格容器')
   assert.ok(card.includes("role: 'radio'"), '卡片要能当单选按钮用')
   assert.ok(card.includes('voice-choice-pin'), '卡片要有置顶图钉')
