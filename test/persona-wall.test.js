@@ -94,3 +94,48 @@ test('edit 写盘持久化（新 store 实例读回）', () => {
     assert.equal(raw[0].tagsBy, 'owner');
   } finally { f.done(); }
 });
+
+test('G7：edit 支持 style/persona 独立维度，字数上限对齐对方 40', () => {
+  const f = fresh([{ key: 'u1', name: '小明', impression: '爱打球', at: 1 }]);
+  try {
+    const p = f.store();
+    const r = p.edit('u1', { style: '说话直来直去', persona: '急性子但热心' });
+    assert.equal(r.ok, true, r.message);
+    const row = p.recent()[0];
+    assert.equal(row.style, '说话直来直去');
+    assert.equal(row.persona, '急性子但热心');
+    // 超长截断到 40 码点
+    const long = '字'.repeat(60);
+    p.edit('u1', { style: long });
+    assert.equal(Array.from(p.recent()[0].style).length, 40);
+    // 只改 style 不丢 persona
+    assert.equal(p.recent()[0].persona, '急性子但热心');
+  } finally { f.done(); }
+});
+
+test('G7：note 可记 style/persona，空串不覆盖；render 注入稳定段', () => {
+  const f = fresh();
+  try {
+    const p = f.store();
+    p.note({ who: '小明', openid: 'u2', impression: '爱打球', style: '话少', persona: '沉稳' });
+    let row = p.recent()[0];
+    assert.equal(row.style, '话少');
+    assert.equal(row.persona, '沉稳');
+    p.note({ who: '小明', openid: 'u2', style: '' }); // 空串不覆盖
+    row = p.recent()[0];
+    assert.equal(row.style, '话少');
+    assert.match(p.text(), /性格：沉稳/);
+    assert.match(p.text(), /说话方式：话少/);
+  } finally { f.done(); }
+});
+
+test('G7：handle 沿用 tips，不另造同义字段（对方 handle≈我方 tips）', () => {
+  const f = fresh([{ key: 'u3', name: '小红', tips: '先给结论', at: 1 }]);
+  try {
+    const p = f.store();
+    assert.equal(p.recent()[0].tips, '先给结论');
+    // edit 里 tips 仍可改（handle 语义由它承载）
+    assert.equal(p.edit('u3', { tips: '喜欢被夸' }).ok, true);
+    assert.equal(p.recent()[0].tips, '喜欢被夸');
+  } finally { f.done(); }
+});

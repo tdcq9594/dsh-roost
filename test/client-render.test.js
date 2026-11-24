@@ -73,7 +73,14 @@ function expand(node, rt) {
   if (Array.isArray(node)) return node.map((n) => expand(n, rt))
   if (typeof node.type === 'function') {
     rt.reset()
-    return expand(node.type(node.props || {}), rt)
+    const out = expand(node.type(node.props || {}), rt)
+    /**
+     * 自定义下拉（Dropdown）把 option 留在 props.children 里、点开才画弹层；
+     * 展开后的树看不到这些标签。测试用的摊平函数把原始 children 也带上，
+     * 这样「下拉里能选到某项」仍可断言，又不改生产代码去渲染隐藏 option。
+     */
+    if (out && typeof out === 'object' && !Array.isArray(out)) out.__sourceProps = node.props
+    return out
   }
   return { ...node, props: { ...node.props, children: expand(node.props?.children, rt) } }
 }
@@ -84,7 +91,11 @@ function textOf(node) {
   if (typeof node === 'string' || typeof node === 'number') return String(node)
   if (Array.isArray(node)) return node.map(textOf).join('')
   const kids = node.props?.children
-  return kids ? (Array.isArray(kids) ? kids.map(textOf).join('') : textOf(kids)) : ''
+  const sourceKids = node.__sourceProps?.children
+  return [kids, sourceKids]
+    .filter(Boolean)
+    .map((k) => (Array.isArray(k) ? k.map(textOf).join('') : textOf(k)))
+    .join('')
 }
 
 const store = {}
@@ -585,33 +596,44 @@ test('前端渲染：会话下拉标出「群 / 私聊」，且标题旁不再�
   assert.ok(el, '滚动区里应该有 MemoryTab')
 
   rt.reset()
-  const tree = expand(
-    el.type({
-      ...el.props,
-      mem: {
-        chatId: 'g1',
-        chats: [
-          { chatId: 'g1', title: '倦飞之鸟', preset: 'roost-social', kind: 'group' },
-          { chatId: 'u1', title: '倦飞之鸟', preset: 'roost-private', kind: 'c2c' },
-        ],
-        scene: { chatId: 'g1', title: '倦飞之鸟', kind: 'group' },
-        global: [],
-        chat: [],
-        journal: null,
-        graph: null,
-      },
-      toast: () => {},
-      reload: () => {},
-      quick: () => {},
-      busy: false,
-      onPickChat: () => {},
-    }),
-    rt,
-  )
+  const rawTree = el.type({
+    ...el.props,
+    mem: {
+      chatId: 'g1',
+      chats: [
+        { chatId: 'g1', title: '倦飞之鸟', preset: 'roost-social', kind: 'group' },
+        { chatId: 'u1', title: '倦飞之鸟', preset: 'roost-private', kind: 'c2c' },
+      ],
+      scene: { chatId: 'g1', title: '倦飞之鸟', kind: 'group' },
+      global: [],
+      chat: [],
+      journal: null,
+      graph: null,
+    },
+    toast: () => {},
+    reload: () => {},
+    quick: () => {},
+    busy: false,
+    onPickChat: () => {},
+  })
+  const findDropdown = (n) => {
+    if (n == null || typeof n !== 'object') return null
+    if (Array.isArray(n)) {
+      for (const c of n) { const r = findDropdown(c); if (r) return r }
+      return null
+    }
+    if (typeof n.type === 'function' && n.type.name === 'Dropdown') return n
+    return findDropdown(n.props?.children)
+  }
+  const dd = findDropdown(rawTree)
+  assert.ok(dd, '会话下拉应该走圆角自定义组件')
+  const optionText = dd.props.children.flat().filter((o) => o?.type === 'option').map((o) => textOf(o)).join('')
+  assert.ok(optionText.includes('（群）'), '下拉里没有标出「群」')
+  assert.ok(optionText.includes('（私聊）'), '下拉里没有标出「私聊」')
 
+  rt.reset()
+  const tree = expand(rawTree, rt)
   const txt = textOf(tree)
-  assert.ok(txt.includes('（群）'), '下拉里没有标出「群」')
-  assert.ok(txt.includes('（私聊）'), '下拉里没有标出「私聊」')
   assert.ok(txt.includes('正在看'), '当前会话应有「正在看」标记')
   // 标题旁那个短码徽章已经删了——它和标题里的是同一个值，并排像两串不同的数字
   assert.ok(!txt.includes('g1'), '短码不该在正文里再出现一次（完整 openid 去会话页看）')
@@ -2541,6 +2563,8 @@ test('页头开关：走 features.get / features.patch，id 与后端注册的�
   assert.match(src, /quick\('features\.patch'/, '点击要走 features.patch')
   assert.match(src, /'botEnabled'/, '总开关的 id 是 botEnabled（避开顶层 enabled 撞名）')
   assert.match(src, /'dryRun'/, '试运行的 id 是 dryRun')
+  assert.match(src, /id === 'dryRun' && on === true[\s\S]{0,260}window\.confirm/,
+    '打开试运行前要弹窗警告「不会再真的发消息」')
 });
 
 test('前端渲染：图库页有「批量选择」入口，不再靠缩略图上的小复选框', () => {
@@ -2652,4 +2676,170 @@ test('记忆页：证据趋势/条数/出处明细可见（阶段1 算出的不�
   assert.match(src, /看证据（\$\{detail\.evidence\.length\}）/, '星点详情要有看证据按钮')
   assert.match(src, /原文 \$\{ev\.journalId\}/, '证据要能回查原文 id')
   assert.match(src, /ev\.quote/, '证据要显示引文')
+})
+
+test('视觉升级：卡片只给数据页，配置页保留分节标题 + 上边线', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const findInner = (n) => {
+    if (n == null || typeof n !== 'object') return null
+    if (Array.isArray(n)) {
+      for (const c of n) { const r = findInner(c); if (r) return r }
+      return null
+    }
+    if (String(n.props?.className || '').split(/\s+/).includes('roost-body-inner')) return n
+    return findInner(n.props?.children)
+  }
+  const clsOf = (tab) => {
+    store['roost.tab'] = tab
+    rt.reset()
+    const inner = findInner(expand(mod.RoostPage(), rt))
+    assert.ok(inner, `${tab} 页缺少正文容器`)
+    return String(inner.props.className || '')
+  }
+  for (const tab of ['overview', 'memory', 'people']) {
+    assert.match(clsOf(tab), /is-data-view/, `${tab} 是数据展示页，应该拿到卡片样式`)
+  }
+  for (const tab of ['config', 'groupchat', 'security', 'ext']) {
+    assert.ok(!clsOf(tab).includes('is-data-view'), `${tab} 是配置页，不该推翻 2026-11-13 的「不要卡片背景」`)
+  }
+})
+
+test('视觉升级：竖线与卡片底只走自选强调色，不落对方配色', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const from = src.indexOf('/* ── 全局视觉升级')
+  const to = src.indexOf('@media (prefers-reduced-motion:reduce){', from)
+  assert.ok(from > 0 && to > from, '视觉升级样式块应该还在')
+  const visual = src.slice(from, to)
+  assert.ok(!visual.includes('#3d7fd6') && !visual.includes('--ab-'), '新样式不该引用 aurabot 的蓝色或变量')
+  assert.ok(src.includes('background:linear-gradient(180deg,var(--tone-foam-2),var(--accent))'),
+    '标题竖线两端都要来自 --accent，不能掺白色或固定色')
+  assert.ok(src.includes('background:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1,'),
+    '卡片底要在宿主主题底色上混入自选强调色，不能写死')
+  assert.ok(src.includes(')) 88%,transparent))'),
+    '卡片底只让背景透一点，不用 opacity 把里面的文字数据一起透明掉')
+  assert.ok(src.includes('--tone-foam-2:color-mix(in srgb,var(--accent) 20%,transparent)'),
+    '淡色令牌必须从 --accent 派生')
+})
+
+test('G8 面板批量计划：按 scope 拆开、跳过无 id 事实、tier 白名单与 200 上限', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const stars = [
+    { kind: 'fact', scope: 'global', factId: '甲' },
+    { kind: 'fact', scope: 'chat', factId: '乙' },
+    { kind: 'fact', scope: 'chat', factId: '' },
+    { kind: 'entity', scope: 'global', factId: '不该进' },
+  ]
+  assert.deepEqual(mod.batchPlan(stars, 'review'), [
+    { op: 'memory.reviewMany', arg: { ids: ['甲'], scope: 'global' } },
+    { op: 'memory.reviewMany', arg: { ids: ['乙'], scope: 'chat' } },
+  ], '跨群和本会话必须拆成两次调用，chatId 由 quick 注入')
+  const tier = mod.batchPlan(stars, 'tier', 'bogus')
+  assert.equal(tier[0].op, 'memory.tierMany')
+  assert.equal(tier[0].arg.tier, 'long', '非法层级要兜到 long，别把 400 丢给用户')
+  const many = Array.from({ length: 250 }, (_, i) => ({ kind: 'fact', scope: 'global', factId: `f${i}` }))
+  assert.equal(mod.batchPlan(many, 'review')[0].arg.ids.length, 200, '与服务端上限一致')
+  assert.deepEqual(mod.batchPlan([], 'review'), [])
+})
+
+test('G8 面板：星图有批量入口且真调用 reviewMany/tierMany', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.match(src, /const plan = batchPlan\(stars, kind, batchTier\)/, '按钮不能是死代码')
+  assert.match(src, /await quick\(call\.op, call\.arg\)/, '必须真走 quick 通道')
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const props = {
+    mem: {
+      factsDetail: { global: [{ id: '甲', text: '事实甲', w: 1, at: 1 }], chat: [] },
+      journal: { top: [] }, graph: { entities: [], edges: [] }, profiles: [],
+    },
+    toast: () => {}, reload: () => {}, quick: async () => ({ ok: true, done: 0 }), busy: false,
+  }
+  const findBtn = (n, label) => {
+    if (n == null || typeof n !== 'object') return null
+    if (Array.isArray(n)) {
+      for (const c of n) { const r = findBtn(c, label); if (r) return r }
+      return null
+    }
+    if (n.type === 'button' && textOf(n).includes(label)) return n
+    return findBtn(n.props?.children, label)
+  }
+  rt.reset()
+  const first = mod.StarMap(props, rt)
+  const toggle = findBtn(first, '批量复习 / 改档')
+  assert.ok(toggle, '星图应该有批量入口')
+  assert.doesNotThrow(() => toggle.props.onClick(), '点批量入口不能抛')
+  /** 假 React 的 useState 不保留 state 重渲染，这里只验源码分支真在，不造 state 假装测过 */
+  for (const label of ['全选事实', '批量复习（', '批量改档', 'roost-batch-list']) {
+    assert.ok(src.includes(label), `批量面板缺少 ${label}`)
+  }
+})
+
+test('视觉升级：所有下拉栏用圆角自定义下拉，弹层也圆角', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(!/h\('select'|<select\b/.test(src), '面板里不该再留原生下拉')
+  assert.match(src, /\.roost-dropdown-pop\{[^}]*border-radius:10px/, '弹出层自己画且圆角')
+  assert.match(src, /\.roost-dropdown-pop\{[\s\S]*?background:color-mix\(in srgb,var\(--accent\)/, '弹层底色跟自选强调色')
+  assert.ok(!src.includes('currentColor 8%,#000'), '弹层回退不能落到黑底黑字')
+  assert.ok(src.includes('var(--dsw-alias-bg-l1, var(--dsw-alias-bg-base, #16181c))'),
+    '弹层底色要退回宿主页面底色，不能靠透明透出背景')
+  const lines = src.split(/\r?\n/)
+  for (const marker of ['value: tlKind', 'value: tlChat', 'value: mem.chatId ||', 'value: batchTier', 'value: addTier']) {
+    const i = lines.findIndex((l) => l.includes(marker))
+    assert.ok(i >= 0, `没找到 ${marker}`)
+    const near = lines.slice(Math.max(0, i - 3), i + 2).join(' ')
+    assert.match(near, /h\(Dropdown,/, `${marker} 应该用圆角自定义下拉`)
+  }
+  const qi = lines.findIndex((l) => l.includes("type: 'text', value: tlQuery"))
+  assert.ok(qi > 0)
+  assert.ok(lines.slice(qi - 2, qi + 3).join(' ').includes("className: 'roost-input'"), '搜索框仍走 roost-input')
+})
+
+test('Dropdown：弹层能打开、选项回调 e.target.value、Esc 关闭', () => {
+  const hooks = []
+  let cursor = 0
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: { ...(props || {}), children } }),
+    useState: (init) => {
+      const k = cursor++
+      if (!(k in hooks)) hooks[k] = typeof init === 'function' ? init() : init
+      return [hooks[k], (v) => { hooks[k] = v }]
+    },
+    useEffect: () => { cursor++ },
+    useCallback: (fn) => { cursor++; return fn },
+    useRef: (v) => { const k = cursor++; if (!(k in hooks)) hooks[k] = { current: v }; return hooks[k] },
+    Fragment: 'fragment',
+  }
+  const mod = loadClient(React)
+  assert.deepEqual(
+    mod.dropdownPos({ left: 120, bottom: 80, width: 110 }, { left: 40, top: 20 }),
+    { left: 120, top: 84, width: 110 },
+    'fixed 弹层用视口坐标；扣 root 偏移会让侧栏里的弹层飘到左上角',
+  )
+  const calls = []
+  const props = {
+    value: '', title: '类型',
+    onChange: (e) => calls.push(e.target.value),
+    children: [
+      { type: 'option', props: { value: '', children: ['全部类型'] } },
+      { type: 'option', props: { value: 'digest', children: ['每日摘要'] } },
+      { type: 'option', props: { value: 'off', disabled: true, children: ['不可选'] } },
+    ],
+  }
+  const render = () => { cursor = 0; return mod.Dropdown(props) }
+  const btn = render().props.children[0]
+  assert.equal(btn.type, 'button', '触发器是 button，不是原生 select')
+  btn.props.onClick()
+  const opened = render()
+  assert.equal(opened.props.children[1]?.props?.className, 'roost-dropdown-pop', '点开要画出自己的弹层')
+  const opts = opened.props.children[1].props.children.flat()
+  assert.equal(opts.length, 3)
+  assert.equal(opts[2].props['aria-disabled'], 'true', '原生 option 的 disabled 要跟到自定义弹层')
+  opts[2].props.onClick()
+  assert.deepEqual(calls, [], '禁用的选项不该触发回调')
+  opts[1].props.onClick()
+  assert.deepEqual(calls, ['digest'], '回调必须给 e.target.value，保持原生 select 的契约')
+  btn.props.onKeyDown({ key: 'Escape' })
+  assert.equal(render().props.children[1], null, 'Esc 应该关掉弹层')
 })

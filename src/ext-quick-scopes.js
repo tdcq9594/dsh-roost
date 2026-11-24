@@ -44,12 +44,15 @@ const STATE_READ_OPS = Object.freeze([
   'capabilities.get', 'capabilities.preview',
   'features.get', 'features.preview',
   'recall.log',
-  /** 3.4 向量/重排状态：只读状态查询 */
+  /** 3.4 向量/重排状态：只读状态查询；test 真发请求但不写盘，也是只读 */
   'memory.vector.status',
+  'memory.vector.test',
   'backup.list',
   /** A2 记忆统计快照：只读聚合，和 `/v1/state` 同口径 */
   'stats.snapshot',
   'stats.sources',
+  /** G4 时间轴：digest + 印象的只读投影，不写盘不注入 */
+  'memory.timeline',
 ]);
 
 /** 调教类：改模型 / 配额 / 能力档位 / 保留策略。 */
@@ -100,6 +103,11 @@ const MEMORY_WRITE_OPS = Object.freeze([
   'memory.followUp',
   /** 做梦：跑一次（写 dreams/*.md + 自述，不碰 facts） */
   'memory.dream',
+  /** G8 批量复习/改档：写 meta，归 memory:write */
+  'memory.reviewMany',
+  'memory.tierMany',
+  /** G2：重建向量索引（只改 journal 行 vec，不改正文），写操作 */
+  'memory.vector.rebuild',
   /** E4：撤销某人雷区（改，不是清库） */
   'profiles.clearDislikes',
   'graph.suppress', 'graph.unsuppress', 'graph.close',

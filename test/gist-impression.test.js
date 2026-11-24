@@ -65,13 +65,26 @@ test('crystallizeCandidates：够旧+够多次+未结晶才入选，已结晶排
     { id: 'd', text: '印象D', hits: IMPRESSION_MIN_HITS, at: old, crystallizedAt: now - 1 },
     { id: '', text: '无 id', hits: 9, at: old, crystallizedAt: 0 },
   ];
-  const got = crystallizeCandidates(imps, now, {});
+  /** 显式 days=180 保持原场景（默认已改 365，200 天不够旧） */
+  const got = crystallizeCandidates(imps, now, { days: 180 });
   assert.deepEqual(got.map((x) => x.id), ['a']);
   assert.equal(got[0].chatId, 'g1', '候选要带出来源会话，结晶才能写回原群不污染全局');
 
   // 全局印象（chatId 空）要带出空串，host 才写 global scope 而非 m.chats['global'] 伪会话
   const globalOne = [{ id: 'g', text: '全局印象', hits: 9, at: old, crystallizedAt: 0, chatId: '' }];
-  assert.equal(crystallizeCandidates(globalOne, now, {})[0].chatId, '');
+  assert.equal(crystallizeCandidates(globalOne, now, { days: 180 })[0].chatId, '');
+  assert.equal(crystallizeCandidates(imps, now, {}).length, 0, '默认 365 天：200 天的印象还不够旧');
+});
+
+test('G6：remembered 回调尊重「不再记住」，到期 prune 删除未结晶', () => {
+  const now = Date.UTC(2026, 10, 24);
+  const old = now - 400 * 86400_000; // 默认 365 天阈值下已到期
+  const imps = [
+    { id: 'kept', text: '可结晶', hits: 9, at: old, crystallizedAt: 0, chatId: 'g1' },
+    { id: 'muted', text: '不再记住的来源', hits: 9, at: old, crystallizedAt: 0, chatId: 'g2' },
+  ];
+  const got = crystallizeCandidates(imps, now, { remembered: (x) => x.chatId !== 'g2' });
+  assert.deepEqual(got.map((x) => x.id), ['kept'], 'mute 的来源不结晶');
 });
 
 test('store：upsert 幂等 + done 幂等 + 空文本拒绝', () => {
@@ -125,5 +138,26 @@ test('store：坏文件容错，不当崩', () => {
     writeFileSync(f.file, '{坏文件', 'utf8');
     const s = createImpressionStore({ file: f.file });
     assert.deepEqual(s.list(), []);
+  } finally { f.done(); }
+});
+
+test('G6：pruneExpired 删到期印象（含未结晶），dry 不写盘', () => {
+  const f = fresh();
+  try {
+    const now = Date.UTC(2026, 10, 24);
+    writeFileSync(f.file, JSON.stringify({
+      imps: [
+        { id: 'old', text: '旧印象', at: now - 400 * 86400_000, hits: 1 },
+        { id: 'fresh', text: '新印象', at: now - 10 * 86400_000, hits: 0 },
+      ],
+      done: {},
+    }), 'utf8');
+    const s = createImpressionStore({ file: f.file });
+    const dry = s.pruneExpired({ at: now, dry: true });
+    assert.equal(dry.removed, 1);
+    assert.equal(JSON.parse(readFileSync(f.file, 'utf8')).imps.length, 2, 'dry 不写盘');
+    const real = s.pruneExpired({ at: now });
+    assert.equal(real.removed, 1);
+    assert.deepEqual(s.list().map((x) => x.id), ['fresh']);
   } finally { f.done(); }
 });

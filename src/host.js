@@ -57,7 +57,7 @@ import { memoryLines, oneLine, followUpAllowed, followUpSection } from './memory
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { createGroupChatProfiles } from './group-chat-profile.js';
-import { createImpressionStore, buildImpressionPrompt, cleanImpression, crystallizeCandidates, IMPRESSION_MIN_HITS } from './gist-impression.js';
+import { createImpressionStore, buildImpressionPrompt, cleanImpression, crystallizeCandidates, IMPRESSION_MIN_HITS, DEFAULT_IMPRESSION_DAYS } from './gist-impression.js';
 import { sourceStats } from './source-stats.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
 import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
@@ -83,6 +83,9 @@ import { createModelCatalog, pingModel } from './model-catalog.js';
 import { searchWithShortContext, recallRow } from './recall.js';
 import { projectRecallPreview } from './recall-preview.js';
 import { vectorStatus } from './vector-status.js';
+import { TEST_TEXT, testResult, rebuildBatch } from './vector-ops.js';
+import { projectTimeline } from './timeline-view.js';
+import { planHeat } from './memory-heat.js';
 import { rerankHits } from './rerank.js';
 import { isDangerousCommand, createConfirmGate, dangerScanArgs } from './safety.js';
 import { createClosing, shouldNotePending } from './closing.js';
@@ -405,6 +408,29 @@ export function roostCardHintText() {
     '四项都要有，链接和图片地址必须是 https 开头；标题不超过 50 字、描述不超过 200 字。',
     '卡片会单独占一条消息，你说的那句话照常发；一轮最多一张，别连着发好几张。',
     '没有真实的 https 链接和图片地址就不要写它——拿占位词拼出来的卡片发不出去。',
+  ].join('\n');
+}
+
+/**
+ * 语音提示词：跟卡片一样挂在 `roost-plugin-prompt`（order 900）后面。
+ *
+ * 为什么不能只放在 907「发言方式」：907 只在 QQ 工具真挂上且没被收走时注入，
+ * 非工具模式下模型根本看不到，于是继续写旧的 `<<say:>>`（实测截图）。
+ * 900 每轮都在，和卡片并列教同一套写法：
+ *   · `<voice>要念的内容</voice>` —— 宿主 TTS 合成后发语音条；
+ *   · `<<voice: 本地音频路径>>` —— 发已经存在的音频文件，语义不同。
+ *
+ * 只讲写法、不重复 907 的工具细节；907 那句改成引用这里的写法。
+ * 开关由调用方按 `cfg.tts.enabled` 决定——关掉语音时整段不注入，
+ * 免得模型学了写法却发现发不出去。
+ */
+export function roostVoiceHintText() {
+  return [
+    '想让一句话被念出来时，用成对标签包住要念的文字：',
+    '<voice>要念的内容</voice>',
+    '语音内容就是标签里的文字；只想发语音时，别在标签外再重复一遍。宿主会合成后发成语音条。',
+    '只有已经有现成音频文件时才用 `<<voice: 本地音频路径>>`，那是发文件，不是合成语音。',
+    '语音条按人限次，别把一句话拆成好几条连着念。',
   ].join('\n');
 }
 
@@ -3134,6 +3160,19 @@ export function apply(ctx) {
     /** 读盘失败 / 坏文件隔离都要留痕：这类问题以前是静默的 */
     log: (m) => log.warn(m),
   }));
+  /**
+   * G8 一次性适配：老库 v1（无 schemaVersion）补注入热度字段并落盘为 v2。
+   * 不推算历史（没有 hitDays 记录，按 w 编造会让老记忆凭空抗遗忘），只补空值。
+   * 与 migratePersonaName 同款跳过开关；失败只留痕，不挡启动。
+   */
+  if (process.env.DSH_ROOST_SKIP_MIGRATE !== '1') {
+    try {
+      const mig = memory.migrateIfNeeded();
+      if (mig?.migrated) log.info(`记忆 schema 一次性适配 v2：补注入热度字段完成（不推算历史）`);
+    } catch (e) {
+      log.warn(`记忆 schema 适配跳过：${e?.message ?? e}`);
+    }
+  }
   const mood = createMood({ cfgOf: () => cfg.mood });
   /**
    * 两份行为日志（B4 / D3）。**不存消息正文**：心情历史只有数值和原因，
@@ -3278,6 +3317,13 @@ export function apply(ctx) {
    * text() 只负责读。
    */
   const memState = new Map();
+  /**
+   * G8 注入热度账：per-chat 的 {heat, recent}，纯内存派生数据不写盘。
+   * heat 的权威值最终落在 memory meta（hitDays/lastHitDay/lastHit）；
+   * 这里只记"最近几轮注入了哪些"用于第5层防霸榜 + 当日去重的快速判定。
+   * 重启后 recent 清空=防霸榜窗口重置，heat 从 memory meta 重建，可接受。
+   */
+  const heatState = new Map();
   /**
    * 这一轮真正注入给模型的待跟进（chatId → 事实原文）。
    *
@@ -3447,6 +3493,11 @@ export function apply(ctx) {
       rec: { ...rec, rerank: rerankMode },
       entities,
       temporal: temporal ? { label: temporal.label, from: temporal.from, to: temporal.to, rest: temporal.rest } : null,
+      /**
+       * G11：dry 预览才带出实体路权重——0.3=邻接联想（二跳），缺省=直接关联（一跳）。
+       * 正常轮次完全不带这个字段，零行为变化；仅给 recall-preview 精确标 hop 用。
+       */
+      ...(dry ? { entityWeights: Object.fromEntries(entityWeights) } : {}),
     };
   };
 
@@ -5425,6 +5476,45 @@ export function apply(ctx) {
     });
 
     /**
+     * G8 注入热度（五层防护）：只有 live:true（systemPrompt 真实注入）才记账，
+     * 面板预览 / leak-guard 调 memoryStatic 不传 live → 不涨热度（第1层：预览不加深）。
+     * planHeat 负责自然日去重/封顶40/最近4轮排除；写回 memory meta 供 retention/brightness 用。
+     * 热度账是内存派生数据，不写盘；权威值在 memory meta（hitDays/lastHitDay/lastHit）。
+     */
+    if (live === true && chatId) {
+      try {
+        /**
+         * 按 scope 分两批记账：global 与 chat 层分别精确定位，不跨群串场。
+         * 老库跨群同名 fact 很常见，混在一起按 text 找会把 A 群热度写到 B 群。
+         * recent 账也分层，避免一个群的注入占掉另一个群的防霸榜窗口。
+         */
+        const aliasList = aliasesOf(chatId);
+        const batches = [
+          { key: 'global', texts: [...new Set(m?.global || [])], scope: 'global', chatId: '', aliases: [] },
+          { key: 'chat', texts: [...new Set(m?.chat || [])], scope: 'chat', chatId, aliases: aliasList },
+        ];
+        for (const batch of batches) {
+          if (!batch.texts.length) continue;
+          const prev = heatState.get(`${chatId}:${batch.key}`) || { recent: [] };
+          /**
+           * 统一用剥掉 annotate 后缀的正文做记账 key——同一条 fact 的 status 变了
+           * （普通→听说）时仍能配上 recent，不会绕过防霸榜窗口。
+           */
+          const keys = batch.texts.map((t) => t.replace(/（听说的）$/, ''));
+          /** heat 从 memory meta 现读（重启后 heatState 空也不重复涨） */
+          const heat = memory.heatOf(batch.texts, { scope: batch.scope, chatId: batch.chatId, aliases: batch.aliases });
+          const plan = planHeat({ injected: keys, heat, recent: prev.recent }, { now: Date.now() });
+          if (plan.updates.length) {
+            memory.bumpHeat(plan.updates, { scope: batch.scope, chatId: batch.chatId, aliases: batch.aliases });
+          }
+          heatState.set(`${chatId}:${batch.key}`, { recent: plan.recent });
+        }
+      } catch (e) {
+        log.debug(`注入热度记账跳过：${e?.message ?? e}`);
+      }
+    }
+
+    /**
      * 认人认群的顺序写在这里，是因为模型只从这一段知道「号码比 openid 稳」。
      *
      * openid 是每个 AppID 一套的，换机器人就全变；QQ号 / 群号不变。
@@ -7197,9 +7287,11 @@ export function apply(ctx) {
      * 宿主自己另写一份人格就等于让这些标记全部失效。
      * 之前就是这个 bug——DSH 模式下模型完全不知道有标记可用。
      *
-     * 插件那份文本里没有宿主后来加的 `<<card:>>`，所以紧跟在后面补一段
-     * `roostCardHintText()`。挂在同一个 context 里（不另开 order）是为了
-     * 让模型把两段连着读：先看协议全貌，再看新能力。
+     * 插件那份文本里没有宿主后来加的 `<<card:>>` / `<voice>`，所以紧跟在后面补
+     * `roostCardHintText()` 和（语音开着时的）`roostVoiceHintText()`。
+     * 挂在同一个 context 里（不另开 order）是为了让模型把几段连着读：
+     * 先看协议全貌，再看新能力。语音必须放这里而不是只放 907——907 在工具
+     * 没挂上时不注入，模型就会退回旧的 `<<say:>>`。
      *
      * order 900：排在人格（905）前面，先立规矩再谈性格。
      */
@@ -7212,7 +7304,11 @@ export function apply(ctx) {
           text: () => {
             const cur = sid0 ? speaker.get(sid0) : null;
             const base = cur?.system ? String(cur.system) : '';
-            return [base, roostCardHintText()].filter(Boolean).join('\n');
+            return [
+              base,
+              roostCardHintText(),
+              cfg.tts?.enabled === true ? roostVoiceHintText() : '',
+            ].filter(Boolean).join('\n');
           },
         }),
       );
@@ -8957,7 +9053,9 @@ export function apply(ctx) {
           /* §1.10：印象列表是纯读翻看，不记审计噪音；generate/crystallize/clear 是写入意图，保留 */
           && op !== 'gist.impression.list'
           /* G10：来源统计纯读，不记审计噪音 */
-          && op !== 'stats.sources') audit({ op, chatId, peer: who.kind, peerId: who.id });
+          && op !== 'stats.sources'
+          /* G4：时间轴纯读，不记审计噪音 */
+          && op !== 'memory.timeline') audit({ op, chatId, peer: who.kind, peerId: who.id });
 
         try {
           switch (op) {
@@ -10138,6 +10236,8 @@ export function apply(ctx) {
             case 'memory.vector.status': {
               const e = cfg.memory?.embedding || null;
               try {
+                /** G2：索引进度用 journal 现成统计（withVec=已索引，total=总量），语义等价对方的 indexed/total */
+                const js = journal.stats();
                 return send(res, 200, {
                   ok: true,
                   ...vectorStatus({
@@ -10148,10 +10248,67 @@ export function apply(ctx) {
                     remoteConfigured: Boolean(e?.model && e?.baseUrl && e?.apiKey),
                     rerankEnabled: cfg.recall?.rerank?.enabled === true || cfg.recall?.rerank?.useLocal === true,
                     localRerankReady: typeof localReranker?.ready === 'function' ? localReranker.ready() : false,
+                    dims: 0, // 维度靠 test 实测（status 不额外读向量行，避免 IO）
+                    indexed: js.withVec || 0,
+                    total: js.total || 0,
+                    lastError: '',
                   }),
                 });
               } catch (err) {
                 return send(res, 200, { ok: false, message: `状态读取失败：${err?.message || err}` });
+              }
+            }
+
+            /**
+             * G2 vectorTest：真发一条短文本到 embedding，返回 dims/ms，不写索引。
+             * 对齐对方 `/memory/vector/test`——连通性测试必须真发请求，不能 mock。
+             */
+            case 'memory.vector.test': {
+              try {
+                if (typeof embedder?.one !== 'function' || !embedder.enabled()) {
+                  return send(res, 200, { ok: false, message: '向量没启用或模型未就绪，测试不了；先看状态' });
+                }
+                const text = String(arg?.text || TEST_TEXT).slice(0, 200);
+                const t = Date.now();
+                const vec = await embedder.one(text);
+                return send(res, 200, { ok: true, ...testResult(vec, Date.now() - t), text });
+              } catch (err) {
+                return send(res, 200, { ok: false, message: `向量测试失败：${err?.message || err}` });
+              }
+            }
+
+            /**
+             * G2 vectorRebuild：分批重算向量索引（只改 journal 行 vec，不碰正文/assoc）。
+             * 对齐对方 reset+sync；我方没有独立索引表，所以是"按模型指纹补算"。
+             * 传 model 指纹给 noVec，连"有向量但换过模型"的一起重算。
+             */
+            case 'memory.vector.rebuild': {
+              try {
+                if (typeof embedder?.enabled !== 'function' || !embedder.enabled()) {
+                  return send(res, 200, { ok: false, message: '向量没启用或模型未就绪，无法重建索引' });
+                }
+                const model = String(embedder.modelId?.() || '');
+                const batchSize = Math.max(1, Math.min(100, Number(arg?.batchSize) || 20));
+                const maxBatches = Math.max(1, Math.min(500, Number(arg?.maxBatches) || 50));
+                let done = 0, failed = 0, batches = 0;
+                for (let i = 0; i < maxBatches; i++) {
+                  const pending = typeof journal.noVec === 'function' ? journal.noVec(batchSize, { model }) : [];
+                  if (!pending.length) break;
+                  const r = await rebuildBatch({
+                    rows: pending,
+                    embed: embedder,
+                    setVec: (id, vec, m) => journal.setVec(id, vec, m),
+                    model,
+                  });
+                  done += r.done; failed += r.failed; batches++;
+                  if (r.done === 0) break; // 整批失败（模型挂了），别空转
+                }
+                return send(res, 200, {
+                  ok: true, done, failed, batches, model,
+                  message: `重建完成：补算 ${done} 条，失败 ${failed} 条（只动向量，不改正文/联想）`,
+                });
+              } catch (err) {
+                return send(res, 200, { ok: false, message: `重建失败：${err?.message || err}` });
               }
             }
 
@@ -10248,6 +10405,43 @@ export function apply(ctx) {
               } catch (e) {
                 return send(res, 500, { ok: false, message: `设待跟进失败：${e?.message ?? e}` });
               }
+            }
+
+            /**
+             * G8 批量复习/改档（对齐对方 review-many/tier，上限 200）。
+             * 只包现有 editFact 的 reviewedAt/tier 写入，不改 w/tier 语义、
+             * 不引入 hitDays 升档——复习只拉回衰减起点（双信号分工）。
+             * 对方这两个路由自己面板都没接（HANDOFF.md:239），这里只提供 op 层给扩展/面板用。
+             */
+            case 'memory.reviewMany':
+            case 'memory.tierMany': {
+              const idsRaw = Array.isArray(arg?.ids) ? arg.ids : [];
+              const ids = idsRaw.map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 200);
+              if (!ids.length) return send(res, 400, { ok: false, message: '没有要处理的事实（ids 空）' });
+              const scope = arg?.scope === 'global' ? 'global' : 'chat';
+              let done = 0;
+              const failed = [];
+              for (const id of ids) {
+                try {
+                  const patch = op === 'memory.reviewMany'
+                    ? { reviewedAt: Date.now() }
+                    : { tier: String(arg?.tier || '') };
+                  if (op === 'memory.tierMany' && !['short', 'long', 'core'].includes(patch.tier)) {
+                    return send(res, 400, { ok: false, message: '层级只能是 short / long / core' });
+                  }
+                  const r = memory.editFact(chatId, scope, id, patch, aliasesOf(chatId));
+                  if (r?.ok) done += 1;
+                  else failed.push(id);
+                } catch (e) { failed.push(id); }
+              }
+              return send(res, 200, {
+                ok: done > 0,
+                done,
+                failed,
+                message: op === 'memory.reviewMany'
+                  ? `已复习 ${done} 条${failed.length ? `，${failed.length} 条没找到` : ''}`
+                  : `已改档 ${done} 条${failed.length ? `，${failed.length} 条没找到` : ''}`,
+              });
             }
 
             /**
@@ -10368,6 +10562,32 @@ export function apply(ctx) {
                 });
               } catch (e) {
                 return send(res, 200, { ok: false, message: `来源统计读不出来：${e?.message ?? e}` });
+              }
+            }
+
+            /**
+             * G4 时间轴：journal 的 digest（每日摘要 ≈ 对方 level1 梗概）
+             * + impressions.json 的印象（≈ 对方 level2）按 at 降序，带 facets + 分页。
+             * 纯读投影，不写盘、不注入。我方无 seen/platform 数据，facets 只有 chats/levels/kinds。
+             */
+            case 'memory.timeline': {
+              try {
+                const all = journal.listChat('', 0) || [];
+                const digestRows = all.filter((r) => r?.kind === 'digest' && !r?.invalidAt);
+                const r = projectTimeline(
+                  { digestRows, impressions: impressionStore.list() },
+                  {
+                    kind: arg?.kind, chatId: arg?.chatId, level: arg?.level,
+                    q: arg?.q, limit: arg?.limit, offset: arg?.offset,
+                  },
+                );
+                return send(res, 200, {
+                  ok: true,
+                  list: r.list, total: r.total, hasMore: r.hasMore, facets: r.facets,
+                  note: '每日摘要 + 印象沉淀按时间倒序；已结晶印象不再显示。我方无「看过的内容」和平台来源维度。',
+                });
+              } catch (e) {
+                return send(res, 200, { ok: false, message: `时间轴读不出来：${e?.message ?? e}` });
               }
             }
 
@@ -10546,8 +10766,16 @@ export function apply(ctx) {
 
             case 'gist.impression.crystallize': {
               const minHits = Math.max(1, Number(arg?.minHits) || IMPRESSION_MIN_HITS);
-              const days = Math.max(0, Number(arg?.days) || 180);
-              const candidates = crystallizeCandidates(impressionStore.list(), Date.now(), { minHits, days });
+              /** G6：默认 365 对齐对方 impressionDays（原写死 180） */
+              const days = Math.max(0, Number(arg?.days) || DEFAULT_IMPRESSION_DAYS);
+              /**
+               * G6 尊重判据（对齐对方 rememberedItem）：这个会话已 memory.mute
+               * （「不记也不读」）的印象不结晶——用户明确不要这个来源的记忆。
+               */
+              const candidates = crystallizeCandidates(impressionStore.list(), Date.now(), {
+                minHits, days,
+                remembered: (x) => !memoryOff(String(x?.chatId || '')),
+              });
               const dry = arg?.dry === true;
               if (!candidates.length) return send(res, 200, { ok: true, candidates: [], added: 0, message: '还没有够旧且被反复想起的印象' });
               const results = [];
@@ -10561,7 +10789,17 @@ export function apply(ctx) {
                 }
                 results.push({ id: c.id, text: c.text, chatId: c.chatId, ok: true, dry });
               }
-              return send(res, 200, { ok: true, dry, results, added: results.filter((r) => r.ok).length });
+              /**
+               * G6：结晶后清掉到期印象（含未结晶的），防 impressions.json 无限增长（对齐对方 compressOld:3021）。
+               * 删除阈值固定用 impressionDays(365)，不受调用方 days（结晶候选阈值）影响——
+               * 否则 days=180 时会把 180~365 天、还没到期的印象误删。
+               */
+              const pruned = dry ? { removed: 0 } : impressionStore.pruneExpired({ at: Date.now() });
+              return send(res, 200, {
+                ok: true, dry, results,
+                added: results.filter((r) => r.ok).length,
+                pruned: pruned.removed || 0,
+              });
             }
 
             case 'gist.impression.clear': {
@@ -11019,9 +11257,9 @@ export function apply(ctx) {
             /**
              * 3.4 结构化投影（对齐 aurabot /memory/assoc/preview 的 hop/via/counts）。
              * 现有 hits 保持原样（面板已在用），另开一份给要"第几跳/从谁联想"的展示用。
-             * hop 只有 0（直接）/1（经实体联想）——我方实体路就一跳，不编造多跳。
+             * hop 0（直接）/1（实体直接关联）/2（实体邻接二跳，权重0.3）；不编造三跳。
              */
-            projection: projectRecallPreview(r),
+            projection: projectRecallPreview({ ...r, entityWeights: r.entityWeights || {} }),
           });
         } catch (e) {
           return send(res, 200, { ok: false, message: `预览失败：${e.message}` });
@@ -11491,6 +11729,9 @@ export function apply(ctx) {
               alias: row?.alias || '',
               openid: row?.openid || (row?.key !== name ? row?.key : '') || '',
               impression: row?.impression || '',
+              /** G7：说话方式/性格独立维度（handle 沿用 tips） */
+              style: row?.style || '',
+              persona: row?.persona || '',
               tips: row?.tips || '',
               dislikes: row?.dislikes || '',
               tags: Array.isArray(row?.tags) ? row.tags : [],

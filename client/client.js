@@ -223,6 +223,16 @@ window.__ModuleLoader__.load({
   --warn:var(--dsw-alias-state-warn-primary, #b45309);
   --bad:var(--dsw-alias-state-error-primary, #b42318);
   --accent:var(--roost-accent, var(--dsw-alias-brand-primary, #2563eb));
+  /* 全局视觉升级（2026-11-24）：从 --accent 单点派生一整套色阶，
+     不新增宿主变量、不写死深浅色——换强调色或切主题时全套自动跟。
+     只有「数据展示页」用这些令牌，配置页仍是分节标题 + 上边线。 */
+  --tone-deep:color-mix(in srgb,var(--accent) 62%,var(--dsw-alias-bg-base, #16181c));
+  --tone-sea:var(--accent);
+  --tone-foam:color-mix(in srgb,var(--accent) 10%,transparent);
+  --tone-foam-2:color-mix(in srgb,var(--accent) 20%,transparent);
+  --radius-card:14px;
+  --shadow-card:0 1px 2px color-mix(in srgb,currentColor 5%,transparent),
+    0 6px 18px color-mix(in srgb,currentColor 7%,transparent);
 }
 /**
  * 用户自选的强调色（个性化页）。
@@ -579,6 +589,7 @@ select.roost-input{color-scheme:dark}
 .cap-row > input.cap-num,.cap-row > .cap-ctl{width:96px;flex:0 0 96px}
 .cap-row > .cap-ctl{display:flex;flex-direction:column;gap:4px}
 .cap-row > .cap-ctl select,.cap-row > .cap-ctl input{width:100%;min-width:0}
+.cap-row > .cap-ctl .roost-dropdown,.cap-row > .cap-ctl .roost-dropdown-btn{width:100%;min-width:0}
 /* 档位卡：标题一行、按钮一行、摘要一行。
    原来整块塞进 .roost-item 的 .t 里，兄弟 .d 是 flex:0 0 auto 不换行，
    工具名一长就把整行撑出屏幕（截图里右侧被切掉）。 */
@@ -1148,10 +1159,86 @@ select.roost-input{color-scheme:dark}
   .roost-g-row{flex-direction:column;align-items:stretch;gap:6px}
   .roost-g-ctl{max-width:100%;justify-content:flex-start}
 }
+/* ── 全局视觉升级（2026-11-24）──────────────────────────────────
+   对面的好看来自统一色阶 + 卡片语言 + 微交互。这里只借手法不借配色：
+   令牌从 --accent 派生，深浅主题和用户自选强调色都自动跟。
+   卡片只给「数据展示页」（概览 / 记忆 / 人物）；配置 / 系统 / 群聊
+   仍保留 2026-11-13 定的「分节标题 + 上边线」，不翻旧决定。 */
+.roost-primary{border-radius:9px;box-shadow:0 2px 8px var(--tone-foam-2)}
+.roost-input:hover{border-color:var(--tone-foam-2)}
+.roost-item{border-radius:8px;padding-left:8px;padding-right:8px;transition:background .15s ease}
+.roost-item:hover{background:var(--tone-foam)}
+.roost-empty{padding:9px 12px;border-left:2px solid var(--tone-foam-2);
+  border-radius:0 8px 8px 0;background:var(--tone-foam)}
+.roost-tab[data-on="1"]::after{background:var(--tone-deep)}
+.is-data-view .roost-sec{margin-top:14px;padding:14px 16px 16px;
+  border:1px solid var(--line-soft);border-radius:var(--radius-card);
+  /* 卡片底吃两层：宿主主题底色 + 自选强调色的极淡混入，再让底色本身透一点。
+     只给 background 做 alpha，不用 opacity——里面的文字和数据要保持不透明。 */
+  background:color-mix(in srgb,var(--accent) 4%,color-mix(in srgb,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)) 88%,transparent));
+  box-shadow:var(--shadow-card)}
+.is-data-view .roost-sec:first-child{margin-top:2px}
+.is-data-view .roost-sec-h{border-bottom:0;margin-bottom:10px;padding-bottom:6px}
+.is-data-view .roost-sec-t{position:relative;padding-left:11px}
+.is-data-view .roost-sec-t::before{content:"";position:absolute;left:0;top:50%;
+  transform:translateY(-50%);width:3px;height:14px;border-radius:2px;
+  /* 竖线两端都取自 --accent，不掺白色、不借 aurabot 的海蓝 */
+  background:linear-gradient(180deg,var(--tone-foam-2),var(--accent))}
+.is-data-view .roost-stat{background:var(--tone-foam);border-color:var(--tone-foam-2)}
+.roost-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.roost-metric{padding:10px 12px;border-radius:10px;min-width:0;
+  background:var(--tone-foam);border:1px solid var(--tone-foam-2)}
+.roost-metric .k{font-size:11px;color:var(--dsw-alias-label-secondary,inherit)}
+.roost-metric .v{font-size:20px;font-weight:600;line-height:1.25;
+  font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,inherit)}
+.roost-metric .s{font-size:10.5px;color:var(--dsw-alias-label-tertiary,inherit)}
+.roost-tl{position:relative;padding-left:16px;margin-left:4px;border-left:1px solid var(--line-soft)}
+.roost-tl-day{font-size:11.5px;color:var(--dsw-alias-label-tertiary,inherit);margin:10px 0 6px}
+.roost-tl-row{position:relative;margin:0 0 8px}
+.roost-tl-row::before{content:"";position:absolute;left:-20px;top:6px;width:7px;height:7px;
+  border-radius:50%;background:var(--tone-sea);box-shadow:0 0 0 3px var(--tone-foam-2)}
+.roost-tl-row.impression::before{left:-21px;width:9px;height:9px;background:var(--tone-deep)}
+.roost-tl-row.impression .t{font-size:13.5px;font-weight:600;color:var(--tone-deep)}
+.roost-tl-chip{display:inline-flex;padding:1px 8px;border-radius:999px;font-size:10.5px;
+  background:var(--tone-foam-2);color:var(--tone-deep)}
+.roost-batch{margin-top:10px;padding:10px 12px;border:1px solid var(--tone-foam-2);
+  border-radius:10px;background:var(--tone-foam)}
+.roost-batch-h{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.roost-batch-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+  gap:2px;max-height:180px;overflow:auto;overscroll-behavior:contain}
+.roost-batch-row{display:flex;gap:6px;align-items:flex-start;padding:3px 4px;
+  border-radius:6px;font-size:11.5px;line-height:1.5}
+.roost-batch-row:hover{background:var(--tone-foam-2)}
+/* 自定义下拉：原生 select 的弹出层由系统绘制改不了圆角，这里自己画 */
+.roost-dropdown{position:relative;display:inline-flex;min-width:0}
+.roost-dropdown-btn{display:flex;align-items:center;gap:6px;justify-content:space-between;
+  white-space:nowrap;cursor:pointer;text-align:left}
+.roost-dropdown-btn:disabled{opacity:.4;cursor:not-allowed}
+.roost-dropdown-val{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.roost-dropdown-caret{flex:none;width:0;height:0;border-left:4px solid transparent;
+  border-right:4px solid transparent;border-top:5px solid currentColor;opacity:.6}
+.roost-dropdown-pop{position:fixed;z-index:80;max-height:240px;overflow:auto;
+  overscroll-behavior:contain;padding:4px;border:1px solid var(--line-soft);border-radius:10px;
+  color:var(--dsw-alias-label-primary, inherit);
+  /* 宿主没给 --dsw-alias-bg-l1 时退回宿主页面底色，再叠一点文字色与自选色：
+     既不会透出背景内容，也不会在浅色主题落回 #000 变黑底黑字 */
+  background:color-mix(in srgb,var(--accent) 4%,
+    color-mix(in srgb,currentColor 4%,var(--dsw-alias-bg-l1, var(--dsw-alias-bg-base, #16181c))));
+  box-shadow:var(--shadow-card)}
+.roost-dropdown-opt{display:block;width:100%;box-sizing:border-box;text-align:left;
+  padding:5px 9px;border:0;border-radius:7px;background:transparent;color:inherit;
+  font:inherit;font-size:11.5px;cursor:pointer}
+.roost-dropdown-opt:hover,.roost-dropdown-opt.active{background:var(--tone-foam)}
+.roost-dropdown-opt.on{color:var(--tone-deep);font-weight:600}
+.roost-dropdown-opt.disabled,.roost-dropdown-opt.disabled:hover{opacity:.42;cursor:not-allowed;background:transparent}
+.roost-people-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+.roost-people-grid .roost-item{transition:border-color .15s,background .15s,transform .15s}
+.roost-people-grid .roost-item:hover{transform:translateY(-2px);box-shadow:var(--shadow-card)}
 @media (prefers-reduced-motion:reduce){
   .roost-sec{animation:none}
-  .roost-stat,.roost-btn,.roost-primary,.roost-tab,.roost-sec-fold,.roost-input{transition:none}
-  .roost-stat:hover,.roost-primary:hover:not(:disabled){transform:none}
+  .roost-stat,.roost-btn,.roost-primary,.roost-tab,.roost-sec-fold,.roost-input,
+  .roost-item,.roost-people-grid .roost-item{transition:none}
+  .roost-stat:hover,.roost-primary:hover:not(:disabled),.roost-people-grid .roost-item:hover{transform:none}
 }
 `
 
@@ -1213,6 +1300,134 @@ select.roost-input{color-scheme:dark}
         /* 常驻渲染，折叠只由 CSS 隐藏：收起时组件不卸载，
            输入框里没提交的内容、弹窗开关状态都还在，功能一条不少 */
         children,
+      )
+    }
+
+    /**
+     * 圆角下拉（数据页用）：形态兼容原生 select——照样收 `h('option')` 子节点，
+     * onChange 照样给 `{target:{value}}`，所以业务 handler 一行都不用改。
+     * 原生 select 的弹出菜单由系统绘制、无法圆角；这里自己画弹层，
+     * 用 fixed 定位避开滚动容器裁剪，颜色仍从 --accent 与宿主主题派生。
+     */
+    /**
+     * fixed 弹层坐标：用视口坐标。
+     * 实测 DSH 面板里 fixed 就是相对视口，扣 .roost-root 偏移会把侧栏里的
+     * 弹层整体推到左上角（2026-11-24 截图事故）。rootRect 仅为兼容调用保留。
+     */
+    function dropdownPos(rect, rootRect) {
+      if (!rect) return null
+      return { left: rect.left, top: rect.bottom + 4, width: rect.width }
+    }
+
+    function Dropdown({ value, onChange, title, disabled, className, style, children, ...rest }) {
+      const [open, setOpen] = useState(false)
+      const [active, setActive] = useState(0)
+      const [pos, setPos] = useState(null)
+      const box = useRef(null)
+      const list = (Array.isArray(children) ? children : [children])
+        .flat(Infinity)
+        .filter((o) => o && o.type === 'option')
+        .map((o) => ({
+          value: String(o.props?.value ?? ''),
+          label: String(Array.isArray(o.props?.children)
+            ? o.props.children.join('')
+            : (o.props?.children ?? o.props?.value ?? '')),
+          disabled: Boolean(o.props?.disabled),
+        }))
+      const current = list.find((o) => String(o.value) === String(value)) || list[0]
+      const emit = (v) => { if (typeof onChange === 'function') onChange({ target: { value: v } }) }
+      const openIt = () => {
+        if (disabled || !list.length) return
+        const r = box.current?.getBoundingClientRect?.()
+        setPos(dropdownPos(r))
+        setActive(Math.max(0, list.findIndex((o) => String(o.value) === String(value))))
+        setOpen(true)
+      }
+      const pick = (o) => {
+        if (!o || o.disabled) return
+        setOpen(false)
+        if (String(o.value) !== String(value)) emit(o.value)
+      }
+      useEffect(() => {
+        if (!open) return
+        const onDown = (e) => {
+          if (typeof box.current?.contains === 'function' && box.current.contains(e.target)) return
+          setOpen(false)
+        }
+        /** 弹层自身滚动不算「页面滚走了」，否则选项一多就点不到下面的项 */
+        const onScroll = (e) => {
+          if (e?.target && typeof box.current?.contains === 'function' && box.current.contains(e.target)) return
+          setOpen(false)
+        }
+        if (typeof document !== 'undefined') {
+          document.addEventListener('mousedown', onDown)
+          document.addEventListener('scroll', onScroll, true)
+        }
+        return () => {
+          if (typeof document !== 'undefined') {
+            document.removeEventListener('mousedown', onDown)
+            document.removeEventListener('scroll', onScroll, true)
+          }
+        }
+      }, [open])
+      const onKey = (e) => {
+        if (disabled) return
+        const k = e?.key
+        if (k === 'Escape') { setOpen(false); return }
+        if (k === 'ArrowDown' || k === 'ArrowUp') {
+          if (typeof e.preventDefault === 'function') e.preventDefault()
+          if (!open) { openIt(); return }
+          setActive((i) => {
+            const dir = k === 'ArrowDown' ? 1 : -1
+            for (let n = 1; n <= list.length; n++) {
+              const j = ((i + dir * n) % list.length + list.length) % list.length
+              if (!list[j].disabled) return j
+            }
+            return i
+          })
+          return
+        }
+        if (!open && (k === 'Enter' || k === ' ')) {
+          if (typeof e.preventDefault === 'function') e.preventDefault()
+          openIt()
+          return
+        }
+        if (open && k === 'Enter') {
+          if (typeof e.preventDefault === 'function') e.preventDefault()
+          pick(list[active])
+        }
+      }
+      return h('div', { className: 'roost-dropdown', ref: box, style },
+        h('button', {
+          ...rest,
+          type: 'button',
+          className: 'roost-input roost-dropdown-btn' + (className ? ' ' + className : ''),
+          disabled: Boolean(disabled), title,
+          'aria-haspopup': 'listbox', 'aria-expanded': open ? 'true' : 'false',
+          onClick: () => { if (open) setOpen(false); else openIt() },
+          onKeyDown: onKey,
+        },
+          h('span', { className: 'roost-dropdown-val' }, current ? current.label : ''),
+          h('span', { className: 'roost-dropdown-caret', 'aria-hidden': 'true' })),
+        open
+          ? h('div', {
+              className: 'roost-dropdown-pop', role: 'listbox',
+              style: {
+                left: pos ? pos.left : 0, top: pos ? pos.top : 0,
+                minWidth: pos ? Math.max(pos.width, 110) : 110,
+              },
+            }, list.map((o, i) => h('button', {
+              key: String(o.value), type: 'button', role: 'option',
+              'aria-selected': String(o.value) === String(value) ? 'true' : 'false',
+              className: 'roost-dropdown-opt'
+                + (o.disabled ? ' disabled' : '')
+                + (i === active ? ' active' : '')
+                + (String(o.value) === String(value) ? ' on' : ''),
+              'aria-disabled': o.disabled ? 'true' : undefined,
+              onMouseEnter: () => { if (!o.disabled) setActive(i) },
+              onClick: () => pick(o),
+            }, o.label)))
+          : null,
       )
     }
 
@@ -2163,7 +2378,7 @@ select.roost-input{color-scheme:dark}
               value: qText,
               onChange: (e) => { setQText(e.target.value); setQPage(0) },
             }),
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input ov-cover', value: qRange,
               onChange: (e) => { setQRange(e.target.value); setQPage(0) },
             },
@@ -3242,7 +3457,7 @@ select.roost-input{color-scheme:dark}
                       },
                     }, polishFor === b.key ? '收起润色' : '润色'),
                     polishFor === b.key && polishPresets.length
-                      ? h('select', {
+                      ? h(Dropdown, {
                         className: 'roost-input', style: { width: 'auto' },
                         value: polishPreset, onChange: (e) => setPolishPreset(e.target.value),
                       }, polishPresets.map((x) => h('option', { key: x.id, value: x.id }, x.label)))
@@ -3722,7 +3937,7 @@ select.roost-input{color-scheme:dark}
           sd.policy === 'owner'
             ? h('div', { style: { marginBottom: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
                 h('span', { className: 'roost-muted', style: { fontSize: 11.5 } }, '旧记忆归：'),
-                h('select', {
+                h(Dropdown, {
                   className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
                   value: sd.owner, onChange: (e) => setSD({ owner: e.target.value }),
                 },
@@ -3737,7 +3952,7 @@ select.roost-input{color-scheme:dark}
                   key: k, style: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 3 },
                 },
                   h('span', { className: 'roost-mono', style: { fontSize: 11, flex: '1 1 auto' } }, k.slice(0, 12) + '…'),
-                  h('select', {
+                  h(Dropdown, {
                     className: 'roost-input', style: { width: 130, padding: '2px 6px', fontSize: 11 },
                     value: sd.byChat[k] || '',
                     onChange: (e) => {
@@ -3832,7 +4047,7 @@ select.roost-input{color-scheme:dark}
                   h('span', { className: 'pv-sel-k' }, '全局默认'),
                   h('span', { className: 'pv-sel-d' }, '没单独指定的群都用这个'),
                 ),
-                h('select', {
+                h(Dropdown, {
                   className: 'roost-input', value: globalId, 'aria-label': '全局当前人格',
                   onChange: async (e) => {
                     const id = e.target.value
@@ -3855,7 +4070,7 @@ select.roost-input{color-scheme:dark}
                       h('span', { className: 'pv-sel-k' }, '这个群'),
                       h('span', { className: 'pv-sel-d' }, '只影响本群，别的群不变'),
                     ),
-                    h('select', {
+                    h(Dropdown, {
                       className: 'roost-input', value: chatPick || '', 'aria-label': '本群使用的人格',
                       title: '只对最近说话的这个会话生效；换会话后这里跟着变',
                       onChange: async (e) => {
@@ -4369,7 +4584,7 @@ select.roost-input{color-scheme:dark}
               value: senderNew,
               onChange: (e) => setSenderNew(e.target.value.trim()),
             }),
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input',
               value: senderPick,
               onChange: (e) => setSenderPick(e.target.value),
@@ -4634,6 +4849,30 @@ select.roost-input{color-scheme:dark}
       }
 
       /**
+       * G4 时间轴：digest（每日摘要）+ 印象按时间倒序，带筛选/facets/分页。
+       * 纯读，点「看时间轴」才拉；facets 选项基于完整轴，不受当前筛选影响。
+       */
+      const [tlData, setTlData] = useState(null)
+      const [tlKind, setTlKind] = useState('')
+      const [tlChat, setTlChat] = useState('')
+      const [tlQuery, setTlQuery] = useState('')
+      const [tlOffset, setTlOffset] = useState(0)
+      const [tlBusy, setTlBusy] = useState(false)
+      const TL_PAGE = 10
+      const loadTimeline = async (offset = 0) => {
+        setTlBusy(true)
+        try {
+          const r = await quick('memory.timeline', {
+            kind: tlKind, chatId: tlChat, q: tlQuery, limit: TL_PAGE, offset,
+          })
+          if (r?.ok === false) { toast(r.message || '时间轴读不出来'); return }
+          setTlData(r)
+          setTlOffset(offset)
+        } catch (e) { toast(e.message) }
+        finally { setTlBusy(false) }
+      }
+
+      /**
        * B2 心智模型快照：读现有投影 / 读落盘快照 / 刷新 / 清空。
        * 都按需拉；刷新默认纯投影不调模型，模型改写是双重开关（默认关）。
        */
@@ -4841,6 +5080,19 @@ select.roost-input{color-scheme:dark}
       const loadVecStatus = async () => {
         const r = await quick('memory.vector.status')
         setVecStatus(r?.ok === false ? { err: r.message || '状态读取失败' } : r)
+      }
+      /** G2：test 真发请求看 dims/ms，rebuild 只重算向量不改正文；都是显式点才跑 */
+      const [vecOp, setVecOp] = useState(null)
+      const doVecOp = async (op) => {
+        setVecOp({ busy: true, op })
+        try {
+          const r = await quick(op)
+          setVecOp({ op, result: r })
+          toast(r?.ok === false ? (r.message || '没成功') : (op === 'memory.vector.test'
+            ? `连通：${r.dims} 维 / ${r.ms}ms`
+            : `重建完成：补算 ${r.done || 0} 条`))
+          if (op === 'memory.vector.rebuild' && r?.ok) loadVecStatus()
+        } catch (e) { toast(e.message); setVecOp(null) }
       }
       const [q, setQ] = useState('')
       const [hits, setHits] = useState(null)
@@ -5092,7 +5344,7 @@ select.roost-input{color-scheme:dark}
              */
             h('b', { style: { flexShrink: 0 } }, canChat ? sceneName : '还没有会话'),
             chats.length > 1
-              ? h('select', {
+              ? h(Dropdown, {
                   className: 'roost-input',
                   value: mem.chatId || '',
                   /**
@@ -5179,11 +5431,11 @@ select.roost-input{color-scheme:dark}
                   ]
                   const max = Math.max(1, ...(statsSnap.timeseries || []).map((d) => d.count || 0))
                   return h('div', {},
-                    h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10 } },
-                      cells.map(([k, v, hint]) => h('div', { key: k, className: 'roost-item', style: { flex: '1 1 120px' } },
-                        h('div', { className: 'roost-muted', style: { fontSize: 11 } }, k),
-                        h('div', { style: { fontSize: 16, fontWeight: 600 } }, v),
-                        hint ? h('div', { className: 'roost-muted', style: { fontSize: 10.5 } }, hint) : null))),
+                    h('div', { className: 'roost-metrics', style: { marginBottom: 10 } },
+                      cells.map(([k, v, hint]) => h('div', { key: k, className: 'roost-metric' },
+                        h('div', { className: 'k' }, k),
+                        h('div', { className: 'v' }, v),
+                        hint ? h('div', { className: 's' }, hint) : null))),
                     h('div', { className: 'roost-note', style: { marginBottom: 6 } }, '每天新增日记（近 7 天）'),
                     h('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 4, height: 64 } },
                       (statsSnap.timeseries || []).map((d) => h('div', {
@@ -5205,15 +5457,78 @@ select.roost-input{color-scheme:dark}
             ? h('div', { className: 'roost-empty' }, '点「看来源」拉一张统计（只读，不改记忆）')
             : (srcStats.sources || []).length
               ? h('div', {},
-                  h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                    (srcStats.sources || []).map((s) => h('div', { key: s.source, className: 'roost-item', style: { flex: '1 1 140px' } },
-                      h('div', { style: { fontWeight: 600 } }, s.label || s.source),
-                      h('div', { className: 'roost-muted', style: { fontSize: 11 } },
+                  h('div', { className: 'roost-metrics' },
+                    (srcStats.sources || []).map((s) => h('div', { key: s.source, className: 'roost-metric' },
+                      h('div', { className: 'v', style: { fontSize: 13 } }, s.label || s.source),
+                      h('div', { className: 's' },
                         `扩展记忆 ${s.extFacts ?? 0} · 流水 ${s.episodes ?? 0} · 摘要 ${s.digest ?? 0}`),
-                      h('div', { className: 'roost-muted', style: { fontSize: 10.5 } }, `合计 ${s.total ?? 0} 条`),
+                      h('div', { className: 'k' }, `合计 ${s.total ?? 0} 条`),
                     ))),
                 )
               : h('div', { className: 'roost-empty' }, '还没有可统计的记忆来源'),
+        ),
+
+        h(Sec, { title: '时间轴', right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: tlBusy, onClick: () => loadTimeline(0),
+        }, tlBusy ? '读…' : '看时间轴') },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '每日摘要 + 印象沉淀按时间倒序。已结晶的印象不再显示（它已成为永久记忆）。',
+            '我方没有「看过的内容」和平台来源维度，所以筛选只有类型/群/关键词。'),
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
+            h(Dropdown, {
+              className: 'roost-input', value: tlKind,
+              onChange: (e) => setTlKind(e.target.value), title: '类型',
+              style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+            },
+              h('option', { value: '' }, '全部类型'),
+              h('option', { value: 'digest' }, '每日摘要'),
+              h('option', { value: 'impression' }, '印象')),
+            h(Dropdown, {
+              className: 'roost-input', value: tlChat,
+              onChange: (e) => setTlChat(e.target.value), title: '群',
+              style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+            },
+              h('option', { value: '' }, '全部群'),
+              ...(tlData?.facets?.chats || []).map((c) => h('option', { key: c, value: c }, c))),
+            h('input', {
+              className: 'roost-input',
+              type: 'text', value: tlQuery, placeholder: '搜摘要文字',
+              onChange: (e) => setTlQuery(e.target.value),
+              onKeyDown: (e) => { if (e.key === 'Enter') loadTimeline(0) },
+              style: { flex: '1 1 120px', minWidth: 100, padding: '3px 8px', fontSize: 11.5 },
+            }),
+            h('button', { type: 'button', className: 'roost-btn', disabled: tlBusy, onClick: () => loadTimeline(0) }, '筛选')),
+          !tlData
+            ? h('div', { className: 'roost-empty' }, '点「看时间轴」拉一页（只读，不改记忆）')
+            : (tlData.list || []).length
+              ? h('div', {},
+                  h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 6 } },
+                    `共 ${tlData.total} 条${(tlData.facets?.kinds || []).length ? ` · 类型 ${tlData.facets.kinds.join('/')}` : ''}`),
+                  (() => {
+                    const groups = []
+                    for (const x of (tlData.list || [])) {
+                      const day = new Date(x.at).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })
+                      let g = groups[groups.length - 1]
+                      if (!g || g.day !== day) { g = { day, rows: [] }; groups.push(g) }
+                      g.rows.push(x)
+                    }
+                    return h('div', { className: 'roost-tl' },
+                      groups.map((g) => h('div', { key: g.day },
+                        h('div', { className: 'roost-tl-day' }, g.day),
+                        g.rows.map((x) => h('div', {
+                          key: `${x.kind}:${x.id}`,
+                          className: 'roost-tl-row' + (x.kind === 'impression' ? ' impression' : ''),
+                        },
+                          h('div', { className: 't' }, x.text),
+                          h('div', { className: 'roost-muted', style: { fontSize: 10.5 } },
+                            `${x.kind === 'digest' ? '每日摘要' : '印象'}${x.chatId ? ` · ${x.chatId}` : ''} · ${new Date(x.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`),
+                        )))))
+                  })(),
+                  h('div', { style: { display: 'flex', gap: 6, marginTop: 8, alignItems: 'center' } },
+                    h('button', { type: 'button', className: 'roost-btn', disabled: tlBusy || tlOffset <= 0, onClick: () => loadTimeline(Math.max(0, tlOffset - TL_PAGE)) }, '上一页'),
+                    h('span', { className: 'roost-muted', style: { fontSize: 11 } }, `${tlOffset + 1}–${tlOffset + (tlData.list || []).length} / ${tlData.total}`),
+                    h('button', { type: 'button', className: 'roost-btn', disabled: tlBusy || !tlData.hasMore, onClick: () => loadTimeline(tlOffset + TL_PAGE) }, '下一页')))
+              : h('div', { className: 'roost-empty' }, '这个筛选下没有条目'),
         ),
 
         /**
@@ -5310,7 +5625,7 @@ select.roost-input{color-scheme:dark}
           gistImps.length
             ? gistImps.map((x) => h('div', { key: x.id, className: 'roost-item', style: { marginBottom: 4 } },
                 h('span', { className: 't' }, x.text || '—'),
-                h('span', { className: 'd' }, `${x.hits || 0} 次想起${x.crystallizedAt ? ' · 已结晶' : ''}`),
+                h('span', { className: 'd roost-tl-chip' }, `${x.hits || 0} 次想起${x.crystallizedAt ? ' · 已结晶' : ''}`),
                 x.crystallizedAt ? null : h('button', {
                   type: 'button', className: 'roost-btn', disabled: gistBusy,
                   title: '印象不自动注入，只能靠你显式标记「又想起了」；攒够 3 次且够旧，才能结晶成永久记忆',
@@ -5591,7 +5906,7 @@ select.roost-input{color-scheme:dark}
               onKeyDown: (e) => { if (e.key === 'Enter') doAdd() },
               style: { flex: 1 },
             }),
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input', value: scope, onChange: (e) => setScope(e.target.value),
               style: { width: 92, flex: '0 0 92px' },
             },
@@ -5940,9 +6255,24 @@ select.roost-input{color-scheme:dark}
               : vecStatus
                 ? h('span', { className: 'roost-muted', style: { fontSize: 11.5 } },
                     vecStatus.summary
-                    + (vecStatus.rerank?.mode !== 'off' ? ` · 重排：${vecStatus.rerank.mode === 'local' ? '本地模型' : '规则'}` : ''),
+                    + (vecStatus.rerank?.mode !== 'off' ? ` · 重排：${vecStatus.rerank.mode === 'local' ? '本地模型' : '规则'}` : '')
+                    + ` · 索引 ${vecStatus.vector?.indexed ?? 0}/${vecStatus.vector?.total ?? 0}`,
                     ...(vecStatus.warnings || []).map((w, i) => h('div', { key: i, style: { color: 'var(--warn, #d9a441)', fontSize: 11.5 } }, '⚠ ' + w)))
                 : null),
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 } },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: vecOp?.busy,
+              title: '真发一条短文本到向量模型，看维度与耗时；不写进索引',
+              onClick: () => doVecOp('memory.vector.test'),
+            }, vecOp?.busy && vecOp.op === 'memory.vector.test' ? '测试中…' : '测试向量'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: vecOp?.busy,
+              title: '按当前模型指纹重新补算日记向量；只改向量列，不改正文/联想',
+              onClick: () => doVecOp('memory.vector.rebuild'),
+            }, vecOp?.busy && vecOp.op === 'memory.vector.rebuild' ? '重建中…' : '重建索引'),
+            vecOp?.result && !vecOp.result.ok
+              ? h('span', { style: { color: 'var(--bad)', fontSize: 11.5 } }, vecOp.result.message || '失败')
+              : null),
           /**
            * 重排候选（Reranker）：默认关。配了向量就按语义相似度重排，
            * 没配就按「关键词命中 + 新鲜度」确定性重排。开关放这里，
@@ -6036,7 +6366,8 @@ select.roost-input{color-scheme:dark}
                     : h('div', { className: 'roost-empty' }, '没命中。换个说法再试，或检查下面的参数。'),
                   pvResult.projection?.counts
                     ? h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginTop: 4 } },
-                        `直接命中 ${pvResult.projection.counts.direct} 条 · 联想带出 ${pvResult.projection.counts.hop1} 条（我方联想只有一跳）`)
+                        `直接命中 ${pvResult.projection.counts.direct} 条 · 一跳 ${pvResult.projection.counts.hop1} 条`
+                        + ` · 二跳 ${pvResult.projection.counts.hop2 || 0} 条（二跳=实体邻接联想，需开「关系联想」；最多两跳，不编造三跳）`)
                     : null,
                 )
               : null,
@@ -6515,6 +6846,29 @@ select.roost-input{color-scheme:dark}
      * 点星出详情；写操作只调**已经存在**的 `memory.remove` / `/memory/add`，
      * 不新造后端能力（编辑文字 / 改重要度 / 复习 / 层级这些我们没有，见文档）。
      */
+    /**
+     * G8 批量复习/改档：把选中的星点拆成服务端能寻址的 op 列表。
+     * 服务端 reviewMany/tierMany 只吃单一 scope，所以 global / chat 必须分开调；
+     * chatId 由面板 quick() 统一注入，这里绝不自己拼。
+     * 没有 factId 的老数据直接跳过，不用正文当 id（会误改别的群的同名事实）。
+     */
+    function batchPlan(stars, kind, tier) {
+      const ids = { global: [], chat: [] }
+      for (const s of (Array.isArray(stars) ? stars : [])) {
+        if (!s || s.kind !== 'fact' || !s.factId) continue
+        const scope = s.scope === 'chat' ? 'chat' : 'global'
+        if (ids[scope].length < 200) ids[scope].push(String(s.factId))
+      }
+      const out = []
+      for (const scope of ['global', 'chat']) {
+        if (!ids[scope].length) continue
+        const arg = { ids: ids[scope], scope }
+        if (kind === 'tier') arg.tier = ['short', 'long', 'core'].includes(tier) ? tier : 'long'
+        out.push({ op: kind === 'tier' ? 'memory.tierMany' : 'memory.reviewMany', arg })
+      }
+      return out
+    }
+
     function StarMap({ mem, toast, reload, quick, busy }) {
       const ref = useRef(null)
       const hits = useRef([])
@@ -6546,6 +6900,11 @@ select.roost-input{color-scheme:dark}
       const [addImp, setAddImp] = useState(0.5)
       const [addTier, setAddTier] = useState('long')
       const [addBusy, setAddBusy] = useState(false)
+      /** G8：服务端早有 reviewMany/tierMany，面板一直没入口 */
+      const [batchOn, setBatchOn] = useState(false)
+      const [picked, setPicked] = useState([])
+      const [batchTier, setBatchTier] = useState('long')
+      const [batchBusy, setBatchBusy] = useState(false)
 
       const built = buildStarMap(mem)
       const shown = filterStars(built.stars, { q, group, quick: quickF, tier: tierFilter })
@@ -6785,6 +7144,31 @@ select.roost-input{color-scheme:dark}
         }
       }
 
+      /** 批量复习/改档：按 scope 拆开走 quick，chatId 由 quick 自己注入 */
+      const batchAct = async (kind) => {
+        if (batchBusy) return
+        const stars = picked.map((id) => byId.get(id)).filter(Boolean)
+        const plan = batchPlan(stars, kind, batchTier)
+        if (!plan.length) { toast('先勾几条有 id 的事实'); return }
+        setBatchBusy(true)
+        try {
+          let done = 0
+          const failed = []
+          for (const call of plan) {
+            const r = await quick(call.op, call.arg)
+            if (r?.ok === false) { failed.push(...call.arg.ids); continue }
+            done += Number(r?.done || 0)
+            if (Array.isArray(r?.failed)) failed.push(...r.failed)
+          }
+          toast(done ? `已处理 ${done} 条${failed.length ? `，${failed.length} 条没找到` : ''}` : '一条都没改上')
+          if (done && reload) reload()
+        } catch (e) {
+          toast('没做成：' + e.message)
+        } finally {
+          setBatchBusy(false)
+        }
+      }
+
       return h('div', null,
         h('div', { className: 'roost-note', style: { marginBottom: 8 } },
           '把记忆画成星空：越亮记得越牢（亮度 = 权重 × 时间衰减，和淘汰用的是同一条公式）。位置按真实来源分星团：跨群事实 / 本会话 / 人物与实体 / 重要片段 / 熟人档案 / 已被取代。',
@@ -6803,14 +7187,14 @@ select.roost-input{color-scheme:dark}
             placeholder: '搜星星：内容 / 分类', value: q,
             onChange: (e) => setQ(e.target.value),
           }),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
             value: group, onChange: (e) => setGroup(e.target.value),
           },
             h('option', { value: '' }, '全部区域'),
             built.stats.groups.map((g) => h('option', { key: g.id, value: g.id }, `${g.label}（${g.count}）`)),
           ),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '按层级筛（只作用于事实）',
             style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
             value: tierFilter, onChange: (e) => setTierFilter(e.target.value),
@@ -6820,7 +7204,7 @@ select.roost-input{color-scheme:dark}
             h('option', { value: 'long' }, '长期'),
             h('option', { value: 'core' }, '永久'),
           ),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
             value: quickF, onChange: (e) => setQuickF(e.target.value),
           },
@@ -6848,7 +7232,7 @@ select.roost-input{color-scheme:dark}
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
             h('input', { type: 'checkbox', checked: edgeOn, onChange: toggle(setEdgeOn, 'edgeOn') }), '关系线'),
           edgeOn
-            ? h('select', {
+            ? h(Dropdown, {
                 className: 'roost-input', title: '关系线显示方式',
                 style: { width: 'auto', padding: '2px 6px', fontSize: 11 },
                 value: edgeMode, onChange: (e) => setEdgeMode(e.target.value),
@@ -6932,6 +7316,57 @@ select.roost-input{color-scheme:dark}
                 }, st.text.slice(0, 14)))),
             )
           : null,
+        /* G8 批量入口：服务端 reviewMany/tierMany 已有，面板之前没有调用处 */
+        h('div', { className: 'roost-batch' },
+          h('div', { className: 'roost-batch-h' },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: Boolean(busy),
+              onClick: () => { setBatchOn((v) => !v); setPicked([]) },
+            }, batchOn ? '收起批量' : '批量复习 / 改档'),
+            batchOn
+              ? h('span', { className: 'roost-muted', style: { fontSize: 11 } },
+                  `已选 ${picked.length} 条 · 只处理有 id 的事实，每类最多 200 条`)
+              : null,
+          ),
+          batchOn
+            ? h('div', null,
+                h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 } },
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: () => setPicked(shown.stars.filter((s) => s.kind === 'fact' && s.factId).map((s) => s.id)),
+                  }, '全选事实'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', onClick: () => setPicked([]),
+                  }, '清空'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: batchBusy,
+                    onClick: () => batchAct('review'),
+                  }, `批量复习（${picked.length}）`),
+                  h(Dropdown, {
+                    className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
+                    value: batchTier, onChange: (e) => setBatchTier(e.target.value),
+                  },
+                    h('option', { value: 'short' }, '临时'),
+                    h('option', { value: 'long' }, '长期'),
+                    h('option', { value: 'core' }, '永久')),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', disabled: batchBusy,
+                    onClick: () => batchAct('tier'),
+                  }, '批量改档'),
+                ),
+                h('div', { className: 'roost-batch-list' },
+                  shown.stars.filter((s) => s.kind === 'fact').map((s) => h('label', {
+                    key: s.id, className: 'roost-batch-row',
+                  },
+                    h('input', {
+                      type: 'checkbox', checked: picked.includes(s.id), disabled: !s.factId,
+                      onChange: () => setPicked((v) => v.includes(s.id) ? v.filter((x) => x !== s.id) : [...v, s.id]),
+                    }),
+                    h('span', { style: { minWidth: 0, overflowWrap: 'anywhere' } },
+                      (s.scope === 'chat' ? '本会话 · ' : '跨群 · ') + (s.text || ''))))),
+              )
+            : null,
+        ),
         /* 点星后的详情：事实可以逐条编辑；其它来源只读，去对应分节操作 */
         detail
           ? h('div', { style: { marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 8 } },
@@ -6951,7 +7386,7 @@ select.roost-input{color-scheme:dark}
                       type: 'button', className: 'roost-btn', disabled: factBusy,
                       onClick: () => factAct('review'),
                     }, '还记得（复习）'),
-                    h('select', {
+                    h(Dropdown, {
                       className: 'roost-input', title: '改层级', disabled: factBusy,
                       style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
                       value: detail.tier || 'long',
@@ -7057,14 +7492,14 @@ select.roost-input{color-scheme:dark}
             style: { width: 74, padding: '3px 8px', fontSize: 11.5 },
             value: addImp, onChange: (e) => setAddImp(e.target.value),
           }),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '层级', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
             value: addTier, onChange: (e) => setAddTier(e.target.value),
           },
             h('option', { value: 'short' }, '临时'),
             h('option', { value: 'long' }, '长期'),
             h('option', { value: 'core' }, '永久')),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '记到哪一层', style: { width: 'auto', padding: '3px 8px', fontSize: 11.5 },
             value: addScope, onChange: (e) => setAddScope(e.target.value),
           },
@@ -7115,6 +7550,8 @@ select.roost-input{color-scheme:dark}
           name: p?.name || '',
           alias: p?.alias || '',
           impression: p?.impression || '',
+          style: p?.style || '',
+          persona: p?.persona || '',
           tips: p?.tips || '',
           dislikes: p?.dislikes || '',
           tags: [...(p?.tags || [])],
@@ -7199,7 +7636,7 @@ select.roost-input{color-scheme:dark}
                 onClick: () => setWallState(v),
               }, label))),
           wall.length
-            ? h('div', { style: { display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' } },
+            ? h('div', { className: 'roost-people-grid' },
                 wall.map((p, i) => h('div', {
                   key: i, className: 'roost-item',
                   style: { cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch', gap: 2,
@@ -7243,7 +7680,9 @@ select.roost-input{color-scheme:dark}
                           editForm
                             ? h('div', null,
                                 ...[
-                                  ['impression', '印象'], ['alias', '称呼'], ['tips', '相处建议'], ['dislikes', '雷区（别踩）'],
+                                  ['impression', '印象'], ['alias', '称呼'],
+                                  ['persona', '性格'], ['style', '说话方式'],
+                                  ['tips', '怎么相处'], ['dislikes', '雷区（别踩）'],
                                 ].map(([k, label]) => h('label', { key: k, style: { display: 'block', marginBottom: 6, fontSize: 12 } },
                                   label,
                                   h('input', {
@@ -7289,10 +7728,12 @@ select.roost-input{color-scheme:dark}
                                   '不再记住这个人（撤回来档案还在）'),
                               )
                             : h('div', null,
-                                detail.person?.impression || detail.person?.tips || detail.person?.dislikes || detail.person?.alias || (detail.person?.tags || []).length
+                                detail.person?.impression || detail.person?.tips || detail.person?.dislikes || detail.person?.alias || detail.person?.style || detail.person?.persona || (detail.person?.tags || []).length
                                   ? h('div', { className: 'roost-note' },
                                       (detail.person.alias ? `称呼：${detail.person.alias}；` : '')
                                       + (detail.person.impression || '（没有印象）')
+                                      + (detail.person.persona ? `（性格：${detail.person.persona}）` : '')
+                                      + (detail.person.style ? `（说话方式：${detail.person.style}）` : '')
                                       + (detail.person.tips ? `（相处：${detail.person.tips}）` : '')
                                       + (detail.person.dislikes ? `（别踩：${detail.person.dislikes}）` : '')
                                       + ((detail.person.tags || []).length ? ` [${detail.person.tags.join('、')}]` : ''))
@@ -7682,7 +8123,7 @@ select.roost-input{color-scheme:dark}
           h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' } },
             h('label', { className: 'roost-note', style: { margin: 0, display: 'flex', gap: 6, alignItems: 'center' } },
               '远端：',
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-input', style: { width: 150 },
                 value: remote.kind || '',
                 onChange: (e) => saveCfg && putBackup({ remote: { ...remote, kind: e.target.value } }),
@@ -8320,7 +8761,7 @@ select.roost-input{color-scheme:dark}
                 className: 'roost-input', placeholder: '群 chatId（可从「会话」页复制）',
                 value: authChat, onChange: (e) => setAuthChat(e.target.value), style: { flex: 1, minWidth: 200 },
               }),
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-input', value: authScope, onChange: (e) => setAuthScope(e.target.value),
                 style: { width: 130, flex: '0 0 130px' },
               },
@@ -9592,10 +10033,10 @@ select.roost-input{color-scheme:dark}
 
         const addPick = kind === 'tool' && pool.length
           ? h('div', { key: '__add', style: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' } },
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-input',
                 style: { flex: '1 1 auto', padding: '3px 6px' },
-                defaultValue: '',
+                value: '',
                 disabled: busy,
                 onChange: (e) => {
                   const v = e.target.value
@@ -9920,7 +10361,9 @@ select.roost-input{color-scheme:dark}
                             : []),
                         ]
                         control = h('div', { className: 'cap-ctl' },
-                          h('select', {
+                          h(Dropdown, {
+                            className: 'roost-input',
+                            style: { width: '100%', padding: '3px 8px', fontSize: 11.5 },
                             value: draft !== undefined ? String(draft)
                               : (known ? String(cur) : (f.custom ? '__custom' : String(cur))),
                             disabled: busy,
@@ -10225,7 +10668,7 @@ select.roost-input{color-scheme:dark}
         h(Sec, { n: '06', title: '次数限制',
           right: h('span', { className: 'roost-note', style: { margin: 0, display: 'inline-flex', alignItems: 'center', gap: '6px' } },
             '按',
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input',
               style: { width: 'auto', padding: '2px 6px' },
               value: quotaBucket,
@@ -10582,7 +11025,7 @@ select.roost-input{color-scheme:dark}
           desc: '只对群里没被 @ 的消息生效。私聊、被 @、命令永远直接接——这些是明确在叫她，不该被策略拦。',
         },
           h(GRow, { label: '接话方式', hint: '选了之后她每条群消息都会先过这一道，再去问模型' },
-            h('select', {
+            h(Dropdown, {
               className: 'roost-g-sel', value: decide.mode || 'ai', disabled: busy,
               onChange: (e) => setDecide('mode', e.target.value),
             }, DECIDE_MODES.map(([v, t]) => h('option', { key: v, value: v }, t)))),
@@ -10734,7 +11177,7 @@ select.roost-input{color-scheme:dark}
           ),
           h(GRow, { label: '给哪个群设', hint: '群只能从它待过的会话里选；官方没有群列表接口' },
             groups.length
-              ? h('select', {
+              ? h(Dropdown, {
                   className: 'roost-g-sel', value: pickOv, disabled: busy,
                   onChange: (e) => setOvGid(e.target.value),
                 }, groups.map((g) => h('option', {
@@ -10751,7 +11194,7 @@ select.roost-input{color-scheme:dark}
                   onSave: (v) => setOv(f.key, v),
                 })
               : f.kind === 'select'
-                ? h('select', {
+                ? h(Dropdown, {
                     className: 'roost-g-sel', value: ov[f.key] || '', disabled: busy,
                     onChange: (e) => setOv(f.key, e.target.value || undefined),
                   }, [
@@ -10959,7 +11402,7 @@ select.roost-input{color-scheme:dark}
                 onToggle: (v) => put({ guild: { enabled: v } }),
               })),
             h(GRow, { label: '会话粒度', hint: 'guild = 一个频道一个会话；channel = 一个子频道一个' },
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-g-num', value: g.sessionMode || 'guild', disabled: busy || !on,
                 onChange: (e) => put({ guild: { sessionMode: e.target.value } }),
               },
@@ -11194,7 +11637,7 @@ select.roost-input{color-scheme:dark}
               ? h('p', { className: 'roost-note' }, '正在问 QQ 要频道列表…')
               : (guilds.length || Object.keys(overrides).length)
                 ? h(GRow, { label: '频道', hint: '机器人加入的频道（直接问 QQ 要，不要求有人说过话）' },
-                    h('select', {
+                    h(Dropdown, {
                       className: 'roost-g-sel', value: key, disabled: busy,
                       onChange: (e) => setPick(e.target.value),
                     },
@@ -11210,7 +11653,7 @@ select.roost-input{color-scheme:dark}
             key
               ? OV_FIELDS.map((f) => h(GRow, { key: f.key, label: f.label, hint: '留空 = 跟随全局' },
                   f.kind === 'select'
-                    ? h('select', {
+                    ? h(Dropdown, {
                         className: 'roost-g-sel', value: ov[f.key] ?? '', disabled: busy,
                         onChange: (e) => setOv(f.key, e.target.value || undefined),
                       },
@@ -11427,7 +11870,7 @@ select.roost-input{color-scheme:dark}
               : null,
             list.length
               ? h(GRow, { label: '接口', hint: '只列本段的方法；非只读要二次确认' },
-                  h('select', {
+                  h(Dropdown, {
                     className: 'roost-g-sel', value: cur, disabled: busy,
                     onChange: (e) => { setSel(e.target.value); setOut(null) },
                   },
@@ -11444,7 +11887,7 @@ select.roost-input{color-scheme:dark}
                         label: '填入已知频道',
                         hint: '从会话映射里挑一个，自动填 guild_id / channel_id 骨架',
                       },
-                        h('select', {
+                        h(Dropdown, {
                           className: 'roost-g-sel', value: '', disabled: busy,
                           onChange: (e) => { if (e.target.value) fillFrom(e.target.value) },
                         },
@@ -11958,7 +12401,7 @@ select.roost-input{color-scheme:dark}
                   h('summary', { style: { cursor: 'pointer', fontSize: 12 } },
                     '高级：直接调接口（给开发者）'),
                   h(GRow, { label: '接口', hint: '非只读要二次确认；带 <> 的参数是占位符' },
-                    h('select', {
+                    h(Dropdown, {
                       className: 'roost-g-sel', value: cur, disabled: busy,
                       onChange: (e) => pick(e.target.value),
                     },
@@ -12257,7 +12700,7 @@ select.roost-input{color-scheme:dark}
         if (!s || s.id !== 'channel') return null
         if (!cfg.guildId) {
           if (!guildChoices.length) return null
-          return h('select', {
+          return h(Dropdown, {
             className: 'roost-g-sel', style: { maxWidth: 180, flex: '0 0 auto' }, value: '', disabled: busy,
             onChange: async (e) => {
               const v = e.target.value
@@ -12273,7 +12716,7 @@ select.roost-input{color-scheme:dark}
         if (!cfg.channelId) {
           const list = (subs || []).filter((c) => c.isForum)
           if (!list.length) return null
-          return h('select', {
+          return h(Dropdown, {
             className: 'roost-g-sel', style: { maxWidth: 180, flex: '0 0 auto' }, value: '', disabled: busy,
             onChange: async (e) => {
               const v = e.target.value
@@ -12564,7 +13007,7 @@ select.roost-input{color-scheme:dark}
               h(GNum, { value: cfg.minChars ?? 80, min: 20, max: 1000, unit: '字起', disabled: busy, onSave: (v) => save({ minChars: v }) }),
               h(GNum, { value: cfg.maxChars ?? 600, min: 20, max: 2000, unit: '字止', disabled: busy, onSave: (v) => save({ maxChars: v }) }))),
           h(GRow, { label: '正文格式', hint: 'Markdown 能分段；纯文本最不容易出错' },
-            h('select', {
+            h(Dropdown, {
               className: 'roost-g-sel', value: String(cfg.format || 3), disabled: busy,
               onChange: (e) => save({ format: Number(e.target.value) }),
             },
@@ -12581,7 +13024,7 @@ select.roost-input{color-scheme:dark}
         },
           h(GRow, { label: '频道', hint: '机器人加入的频道（直接问 QQ 要，不要求先在频道里说过话）' },
             guildChoices.length
-              ? h('select', {
+              ? h(Dropdown, {
                   className: 'roost-g-sel', value: cfg.guildId || '', disabled: busy,
                   onChange: async (e) => {
                     await save({ guildId: e.target.value, channelId: '' }, '已切换频道')
@@ -12597,7 +13040,7 @@ select.roost-input{color-scheme:dark}
                   : '拉不到频道列表：确认机器人已经被拉进频道，然后点右上角「重新体检」')),
           h(GRow, { label: '子频道', hint: '选了就能发到它里面；非论坛类型会标注原因' },
             subs.length
-              ? h('select', {
+              ? h(Dropdown, {
                   className: 'roost-g-sel', value: cfg.channelId || '', disabled: busy,
                   onChange: async (e) => {
                     const id = e.target.value
@@ -12791,7 +13234,7 @@ select.roost-input{color-scheme:dark}
       }
 
       const roleText = { owner: '群主', admin: '管理员', member: '普通成员' }
-      const picker = h('select', {
+      const picker = h(Dropdown, {
         value: pick,
         onChange: (e) => setGid(e.target.value),
         className: 'roost-btn',
@@ -12841,7 +13284,7 @@ select.roost-input{color-scheme:dark}
             style: { width: '100%', marginTop: 6, marginBottom: 8 },
           }),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
-            h('select', {
+            h(Dropdown, {
               value: String(seconds),
               onChange: (e) => setSeconds(Number(e.target.value)),
               className: 'roost-btn',
@@ -13168,7 +13611,7 @@ select.roost-input{color-scheme:dark}
                     h('div', { className: 'acc-num' }, String(item.facts ?? 0)),
                     h('div', { className: 'acc-num' }, item.journal == null ? '—' : String(item.journal)),
                     h('div', { className: 'acc-num' }, item.edges == null ? '—' : String(item.edges)),
-                    h('select', {
+                    h(Dropdown, {
                       className: 'roost-input acc-uin',
                       value: k,
                       // 会话记录里已有类型就锁住：那是**事实**，不是可选项
@@ -13209,7 +13652,7 @@ select.roost-input{color-scheme:dark}
                   bots.length
                     ? h('span', { style: { marginLeft: 'auto' } },
                         h('span', { className: 'roost-note', style: { margin: 0 } }, '记到 '),
-                        h('select', {
+                        h(Dropdown, {
                           className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: '11.5px' },
                           value: botPick,
                           onChange: (e) => setBotPick(e.target.value),
@@ -13258,7 +13701,7 @@ select.roost-input{color-scheme:dark}
                       ),
                     ),
                     h('span', { className: 'd', style: { display: 'flex', gap: '6px', alignItems: 'center' } },
-                      h('select', {
+                      h(Dropdown, {
                         className: 'roost-input',
                         style: { width: '132px', padding: '3px 6px', fontSize: '11px' },
                         value: appendDraft[id] || '',
@@ -13480,7 +13923,7 @@ select.roost-input{color-scheme:dark}
             : null,
 
           h('div', { className: 'acc-tools' },
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input', style: { width: 'auto', minWidth: 220, padding: '5px 9px' },
               value: batchUin, onChange: (e) => setBatchUin(e.target.value),
             },
@@ -13787,7 +14230,7 @@ select.roost-input{color-scheme:dark}
            * 5.8 测试版通道：稳定版 / 测试版（npm dist-tag `beta`）。
            * 切换只改「比哪个版本」，不改安装方式；存 localStorage 免得每次进来都要选。
            */
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '更新通道：稳定版（latest）/ 测试版（beta）',
             style: { width: 'auto', padding: '2px 6px', fontSize: 11.5 },
             value: channel,
@@ -14056,7 +14499,7 @@ select.roost-input{color-scheme:dark}
             '每一版改了什么都在这里，往回翻得到。只列有说明的版本——很早的版本可能没写。'),
           versions.length
             ? h(GRow, { label: '版本', hint: '新的在前' },
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-g-sel', value: sel,
                 onChange: (e) => load(e.target.value),
               },
@@ -14540,7 +14983,7 @@ select.roost-input{color-scheme:dark}
       const select = (label, path, options) =>
         h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 240px' } },
           h('span', { className: 'roost-note', style: { margin: 0 } }, label),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input',
             value: v(path),
             onChange: (e) => put(path, e.target.value),
@@ -14627,7 +15070,7 @@ select.roost-input{color-scheme:dark}
               h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-end' } },
                 h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 260px' } },
                   h('span', { className: 'roost-note', style: { margin: 0 } }, '音色'),
-                  h('select', {
+                  h(Dropdown, {
                     className: 'roost-input',
                     value: v('edge.voice') || 'zh-CN-XiaoxiaoNeural',
                     onChange: (e) => put('edge.voice', e.target.value),
@@ -14729,7 +15172,7 @@ select.roost-input{color-scheme:dark}
                     refOptions.length
                       ? h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 240px' } },
                           h('span', { className: 'roost-note', style: { margin: 0 } }, `参考音频（扫描到 ${refOptions.length} 个）`),
-                          h('select', {
+                          h(Dropdown, {
                             className: 'roost-input',
                             value: refPath,
                             onChange: (e) => put('gptSovits.referWavPath', e.target.value),
@@ -14812,7 +15255,7 @@ select.roost-input{color-scheme:dark}
               h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-end' } },
                 h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 200px' } },
                   h('span', { className: 'roost-note', style: { margin: 0 } }, '音色'),
-                  h('select', {
+                  h(Dropdown, {
                     className: 'roost-input',
                     value: mimoVoice,
                     onChange: (e) => put('mimo.voice', e.target.value),
@@ -15209,7 +15652,7 @@ select.roost-input{color-scheme:dark}
             },
           }),
           h('strong', null, '偷表情'),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input',
             style: { width: 'auto', fontSize: 12 },
             value: steal.scope || 'all',
@@ -15693,7 +16136,7 @@ select.roost-input{color-scheme:dark}
         return out
       }
 
-      const select = (value, opts, onChange, width) => h('select', {
+      const select = (value, opts, onChange, width) => h(Dropdown, {
         className: 'roost-input',
         style: { width: width || 260 },
         value: value || '',
@@ -16258,7 +16701,7 @@ select.roost-input{color-scheme:dark}
         h('div', { className: 'roost-note', style: { marginTop: 8 } },
           'dry-run 预览：选一个扩展先试算，确认后才写进 forceDeny。',
           h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input', value: pick,
               onChange: (e) => { setPick(e.target.value); setDry(null) },
             }, list.map((x) => h('option', { key: x.id, value: x.id },
@@ -16621,7 +17064,7 @@ select.roost-input{color-scheme:dark}
           const cur = val === undefined ? '' : String(val)
           /** 没有值又没默认值时补一个占位项：否则浏览器默认显示第一项，看着像已经选了。 */
           const known = (f.options || []).some((o) => o.value === cur)
-          control = h('select', {
+          control = h(Dropdown, {
             className: 'roost-input', value: cur,
             onChange: (e) => cfgSet(path, e.target.value),
           },
@@ -16719,7 +17162,7 @@ select.roost-input{color-scheme:dark}
           '从插件市场安装或更新扩展。',
           h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
             h('span', { className: 'roost-faint' }, '数据源'),
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input',
               value: marketSrc,
               onChange: (e) => setMarketSrc(e.target.value),
@@ -16766,7 +17209,7 @@ select.roost-input{color-scheme:dark}
               placeholder: '搜名字 / id / 描述 / 标签 / 作者',
               value: marketQuery, onChange: (e) => setMarketQuery(e.target.value),
             }),
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input', style: { flex: '0 1 170px' },
               value: marketCategory, onChange: (e) => setMarketCategory(e.target.value),
             },
@@ -18181,7 +18624,7 @@ select.roost-input{color-scheme:dark}
                 },
               },
                 h('span', null, '起名用的模型'),
-                h('select', {
+                h(Dropdown, {
                   className: 'roost-input', style: { width: 'auto', maxWidth: 280 },
                   value: cmKey,
                   disabled: Boolean(job?.running),
@@ -18258,7 +18701,7 @@ select.roost-input{color-scheme:dark}
               : null,
 
             h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' } },
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-input', style: { width: 'auto' }, value: cat,
                 onChange: (e) => { setCat(e.target.value); setPage(1) },
               },
@@ -18270,7 +18713,7 @@ select.roost-input{color-scheme:dark}
                 onKeyDown: (e) => { if (e.key === 'Enter') { setPage(1); load(1) } },
               }),
               h('button', { type: 'button', className: 'roost-btn', onClick: () => { setPage(1); load(1) } }, '搜'),
-              h('select', {
+              h(Dropdown, {
                 className: 'roost-input', style: { width: 'auto' }, value: size,
                 onChange: (e) => { setSize(Number(e.target.value)); setPage(1) },
               }, [12, 24, 48, 96].map((v) => h('option', { key: v, value: v }, `每页 ${v}`))),
@@ -19535,7 +19978,7 @@ select.roost-input{color-scheme:dark}
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '假扮一个人发一句话，看框架会怎么处理。**不会真的发出去**，也不会写投递账本、不动冷却和配额。'),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-start' } },
-            h('select', {
+            h(Dropdown, {
               className: 'roost-input', style: { width: 'auto', minWidth: 140 },
               value: persona, onChange: (e) => setPersona(e.target.value),
             }, SIM_PERSONAS.map((p) => h('option', { key: p.id, value: p.id }, p.label))),
@@ -19671,7 +20114,7 @@ select.roost-input{color-scheme:dark}
                   onChange: (e) => set('description', e.target.value),
                 })),
               h('label', { style: { fontSize: 11.5 } }, '形态',
-                h('select', {
+                h(Dropdown, {
                   className: 'roost-input', value: f.transport,
                   onChange: (e) => set('transport', e.target.value),
                 },
@@ -19888,7 +20331,7 @@ select.roost-input{color-scheme:dark}
         }
         if (f.type === 'select') {
           return h('div', { key: k, style: { marginTop: 10 } }, label,
-            h('select', {
+            h(Dropdown, {
               style: inputStyle, value: val(f) ?? '',
               onChange: (e) => setVal(k, e.target.value),
             }, (f.options || []).map((o) => {
@@ -20151,7 +20594,7 @@ select.roost-input{color-scheme:dark}
       return h(Sec, {
         n: '01', title: '最近的动静',
         right: h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '按级别筛', style: { width: 'auto', padding: '2px 6px', fontSize: 11.5 },
             value: lv, onChange: (e) => setLv(e.target.value),
           },
@@ -20160,7 +20603,7 @@ select.roost-input{color-scheme:dark}
             h('option', { value: 'info' }, '信息'),
             h('option', { value: 'warn' }, '警告'),
             h('option', { value: 'error' }, '错误')),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', title: '按模块筛', style: { width: 'auto', padding: '2px 6px', fontSize: 11.5 },
             value: area, onChange: (e) => setArea(e.target.value),
           },
@@ -20228,7 +20671,7 @@ select.roost-input{color-scheme:dark}
             className: 'roost-input', placeholder: '操作名，如 memory.clear（留空=全部）',
             value: op, onChange: (e) => setOp(e.target.value), style: { flex: '1 1 200px' },
           }),
-          h('select', {
+          h(Dropdown, {
             className: 'roost-input', value: limit, onChange: (e) => setLimit(Number(e.target.value)), style: { width: 'auto' },
           }, [20, 50, 100, 200].map((n) => h('option', { key: n, value: n }, `${n} 条`)))),
         err
@@ -21638,6 +22081,15 @@ select.roost-input{color-scheme:dark}
        * 与 `staged` 都是 409 + 原因，吞掉就会出现「显示开着、实际没开」。
        */
       const toggleHeadFeat = useCallback(async (id, on) => {
+        /**
+         * 试运行开着 = 照常回、照常记，但一条消息都不会真发到 QQ。
+         * 这是「看起来还在正常工作、其实全静默」的开关，打开前必须让人点头；
+         * 关掉不需要拦——那是恢复正常行为。
+         */
+        if (id === 'dryRun' && on === true
+          && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+          if (!window.confirm('打开试运行后，她照常回复和记录，但不会再真的发送消息到 QQ。确定打开吗？')) return
+        }
         /** 先加序号：在途的 `features.get` 快照一律作废（见上面的注释） */
         featSeq.current += 1
         const r = await quick('features.patch', { id, on })
@@ -21893,7 +22345,7 @@ select.roost-input{color-scheme:dark}
           key: tab,
         },
           h(RenderBoundary, { key: 'tab:' + tab },
-            h('div', { className: 'roost-body-inner' },
+            h('div', { className: 'roost-body-inner' + (['overview', 'memory', 'people'].includes(tab) ? ' is-data-view' : '') },
             tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
           /** 个性化：偏好状态在 RoostPage（`uiPref`），这里只传下去 */
           tab === 'personalize' ? h(PersonalizeTab, { uiPref, setPrefs, toast }) : null,
@@ -22227,11 +22679,14 @@ select.roost-input{color-scheme:dark}
     exports.starScoreOf = starScoreOf
     exports.mergeClientPage = mergeClientPage
     exports.buildStarMap = buildStarMap
+    exports.batchPlan = batchPlan
     exports.filterStars = filterStars
     exports.projectStars = projectStars
     exports.wheelZoom = wheelZoom
     exports.placeLabels = placeLabels
     exports.StarMap = StarMap
+    exports.Dropdown = Dropdown
+    exports.dropdownPos = dropdownPos
     return module.exports
   },
 })

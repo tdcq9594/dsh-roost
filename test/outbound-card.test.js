@@ -12,7 +12,7 @@ import { tuwenProblem as hookTuwenProblem } from '../src/ext-api-hooks.js';
 import { DOWNSTREAM_MARKERS, stripUnknown, stripUnclosed, markerRe, VALUE_MARKERS } from '../src/markers.js';
 import { parseOutboundActions, createActionRunner, MAX_CARDS } from '../src/outbound-actions.js';
 import { cleanBotText } from '../src/journal-bridge.js';
-import { roostCardHintText } from '../src/host.js';
+import { roostCardHintText, roostVoiceHintText } from '../src/host.js';
 
 const GOOD = '一只猫|窗台上打盹，很治愈|https://b23.tv/abc|https://i0.hdslb.com/cover.jpg';
 
@@ -222,4 +222,12 @@ test('提示词：宿主补的那段真把 card 写法教给模型', () => {
   assert.match(hint, /<<card: 标题\|描述\|https:\/\/链接\|https:\/\/图片地址>>/);
   assert.match(hint, /https/);
   assert.match(hint, /一轮最多一张/);
+});
+
+test('提示词：语音段教 <voice> 新写法、明确弃用 say，且不混同已有音频文件', () => {
+  const hint = roostVoiceHintText();
+  assert.match(hint, /<voice>要念的内容<\/voice>/);
+  assert.match(hint, /<<voice: 本地音频路径>>/);
+  assert.match(hint, /按人限次/);
+  assert.doesNotMatch(hint, /say/i, '语音提示词里不再提旧写法');
 });

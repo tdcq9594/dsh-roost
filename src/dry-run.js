@@ -131,6 +131,10 @@ export function normalizeEntry(raw, target, chatId = '') {
     tier: String(e.tier || 'long'),
     pin: Number(e.pin) || 0,
     reviewedAt: Number(e.reviewedAt) || 0,
+    /** G8 注入热度：跟着 retention.entries() 走，漏了还原就丢抗遗忘记录 */
+    hitDays: Math.max(0, Math.trunc(Number(e.hitDays) || 0)),
+    lastHitDay: String(e.lastHitDay || ''),
+    lastHit: Number(e.lastHit) || 0,
     archivedAt: Number(e.archivedAt) || 0,
     /** 阶段8：被取代指针，白名单漏了就在 dry-run→还原链上断链 */
     supersededBy: String(e.supersededBy || ''),

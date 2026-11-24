@@ -76,8 +76,8 @@ test('/memory/recall-preview 返回结构化 projection（对齐对面 assoc/pre
     assert.equal(r.ok, true, `预览失败：${r.message}`);
     assert.ok(r.projection, '缺结构化投影字段');
     assert.ok(Array.isArray(r.projection.items));
-    assert.ok(r.projection.counts && 'direct' in r.projection.counts && 'hop1' in r.projection.counts);
-    assert.equal(r.projection.counts.direct + r.projection.counts.hop1, r.projection.items.length);
+    assert.ok(r.projection.counts && 'direct' in r.projection.counts && 'hop1' in r.projection.counts && 'hop2' in r.projection.counts);
+    assert.equal(r.projection.counts.direct + r.projection.counts.hop1 + r.projection.counts.hop2, r.projection.items.length);
   } finally {
     b.done();
   }

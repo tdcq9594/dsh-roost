@@ -115,3 +115,31 @@ test('scopeOfOp 认得两个新 op（fail-closed 不误伤）', async () => {
     assert.equal(s.scope, 'prompt:write');
   }
 });
+
+test('G7：quick(persona.edit) 真 host 写 style/persona，40 字上限', async () => {
+  const b = await boot();
+  try {
+    const r = await b.quick('persona.edit', { key: 'u123', patch: { style: '说话直', persona: '急性子' } });
+    assert.equal(r.ok, true, `编辑失败：${r.message}`);
+    let row = b.profiles()[0];
+    assert.equal(row.style, '说话直');
+    assert.equal(row.persona, '急性子');
+    assert.equal(row.impression, '爱打球', '没给的字段保留');
+    // 超长截断
+    await b.quick('persona.edit', { key: 'u123', patch: { style: '字'.repeat(60) } });
+    row = b.profiles()[0];
+    assert.equal(Array.from(row.style).length, 40);
+    assert.equal(row.persona, '急性子', '改 style 不丢 persona');
+  } finally { b.done(); }
+});
+
+test('G7：/person 详情带出 style/persona（真 host）', async () => {
+  const b = await boot();
+  try {
+    await b.quick('persona.edit', { key: 'u123', patch: { style: '说话直', persona: '急性子' } });
+    const r = await b.call('/roost/api/person?key=u123', null, 'GET');
+    assert.equal(r.ok !== false, true, r.message || '详情失败');
+    assert.equal(r.person.style, '说话直');
+    assert.equal(r.person.persona, '急性子');
+  } finally { b.done(); }
+});

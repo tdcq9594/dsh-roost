@@ -1,7 +1,8 @@
 /**
  * 3.4 召回预览投影（只读纯函数）。
- * 对齐 aurabot /memory/assoc/preview 的返回口径，但不吹多跳：
- * 我方实体路只有一跳邻接，counts 只有 direct/hop1。
+ * 对齐 aurabot /memory/assoc/preview 的返回口径：
+ * G11 升级后 hop 0（直接）/1（实体直接关联）/2（实体邻接二跳，权重0.3），
+ * 不编造三跳。二跳的图 SQL 是 entity→邻居→episode 真两跳遍历。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -53,7 +54,7 @@ test('projectRecallPreview：脏输入不炸，空结果 counts 全 0', () => {
   assert.equal(r.total, 1);
   assert.equal(r.counts.direct, 1);
   assert.equal(r.items[0].score, 0);
-  assert.deepEqual(projectRecallPreview(null).counts, { direct: 0, hop1: 0 });
+  assert.deepEqual(projectRecallPreview(null).counts, { direct: 0, hop1: 0, hop2: 0 });
   assert.deepEqual(projectRecallPreview({ hits: 'not-array' }).items, []);
 });
 
@@ -63,4 +64,41 @@ test('projectRecallPreview：纯函数不改入参', () => {
   const snap = JSON.stringify(preview);
   projectRecallPreview(preview);
   assert.equal(JSON.stringify(preview), snap);
+});
+
+test('G11：权重0.3的实体联想标 hop2，via 仍是起点实体，why 加「2 跳」', () => {
+  const preview = {
+    hits: [
+      { id: 'a', text: '直接', why: '关键词', score: 0.9 },
+      { id: 'b', text: '一跳实体', why: '经「小明」联想', score: 0.7 },
+      { id: 'c', text: '二跳邻接', why: '经「小明」联想', score: 0.5 },
+    ],
+    /** 只有 c 是邻接二跳（graph.adjacentJournalIds 打的 0.3 权重） */
+    entityWeights: { b: 0.5, c: 0.3 },
+  };
+  const r = projectRecallPreview(preview);
+  assert.equal(r.counts.direct, 1);
+  assert.equal(r.counts.hop1, 1);
+  assert.equal(r.counts.hop2, 1);
+  assert.equal(r.items[0].hop, 0);
+  assert.equal(r.items[1].hop, 1);
+  assert.equal(r.items[2].hop, 2);
+  assert.equal(r.items[2].via, '小明');
+  assert.ok(r.items[2].why.some((x) => x.includes('2 跳')), 'why 标出二跳');
+  assert.ok(!r.items[1].why.some((x) => x.includes('2 跳')), '一跳不误标');
+});
+
+test('G11：没有 entityWeights 时全部按旧口径（via→hop1），向后兼容', () => {
+  const r = projectRecallPreview({ hits: [{ id: 'x', text: '联想', why: '经「小红」联想', score: 0.6 }] });
+  assert.equal(r.items[0].hop, 1);
+  assert.equal(r.counts.hop1, 1);
+  assert.equal(r.counts.hop2, 0);
+});
+
+test('G11：权重接近0.3才算二跳，脏权重不误判', () => {
+  const preview = {
+    hits: [{ id: 'x', text: 'x', why: '经「X」联想', score: 0.5 }],
+    entityWeights: { x: '0.3' }, // 字符串 '0.3' 转成数字也该识别
+  };
+  assert.equal(projectRecallPreview(preview).items[0].hop, 2);
 });

@@ -303,7 +303,7 @@ export const FEATURES = [
     path: ['tts', 'enabled'],
     requires: NONE,
     affects: NONE,
-    offHint: '不再念语音，提示词里也不会教它写 `<<say:>>`（否则会漏出标记）。',
+    offHint: '不再念语音，提示词里也不会教它写 `<voice>…</voice>`（否则会漏出标记）。',
   },
   {
     id: 'compact',
