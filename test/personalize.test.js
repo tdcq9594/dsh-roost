@@ -86,11 +86,13 @@ test('hiddenTabIds：关表情包只多藏 stickers', () => {
   assert.equal(mod.hiddenTabIds({ stickers: true }, null, false, null).size, 0)
 })
 
-test('hiddenTabIds：扩展清单「读成功且为空」才藏 ext', () => {
-  assert.ok(mod.hiddenTabIds(null, [], true, null).has('ext'))
-  assert.ok(!mod.hiddenTabIds(null, [], false, null).has('ext'), '还没读到就藏会把卸载入口丢掉')
+test('hiddenTabIds：已安装页常驻，空清单也不自动藏 ext', () => {
+  assert.ok(!mod.hiddenTabIds(null, [], true, null).has('ext'), '读成功且为空也不能藏')
+  assert.ok(!mod.hiddenTabIds(null, [], false, null).has('ext'), '还没读到更不能藏')
   assert.ok(!mod.hiddenTabIds(null, [{ id: 'a' }], true, null).has('ext'))
   assert.ok(!mod.hiddenTabIds(null, null, true, null).has('ext'), 'null 不是空清单')
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(!/out\.add\('ext'\)/.test(src), '源码里不许再有自动藏 ext 的分支')
 })
 
 test('hiddenTabIds：用户隐藏生效，但保护名单不许藏', () => {

@@ -1474,6 +1474,7 @@ test('扩展独立成组：已安装 / 市场 / 接口三页各管一件事', ()
   assert.ok(installed.includes('已装扩展'), '已安装页缺已装清单')
   assert.ok(installed.includes('扩展能力分组'), '已安装页缺档位矩阵')
   assert.ok(!installed.includes('检查更新'), '已安装页不该再有市场操作')
+  assert.ok(installed.includes('还没装扩展'), '没装扩展时要有空态和去市场的路标，而不是把整页藏掉')
 
   /* 市场：能装什么、装/更新 */
   const market = at('ext-market')

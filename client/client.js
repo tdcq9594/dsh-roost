@@ -18156,7 +18156,7 @@ window.__ModuleLoader__.load({
                   : null,
               )),
             )
-          : h('div', { className: 'roost-empty' }, '还没有扩展写过记忆（装好的扩展会出现在左侧导航；这里只列它们进提示词的说明）。'),
+          : h('div', { className: 'roost-empty' }, '还没装扩展。去「扩展 → 市场」装一个，装好后会列在这里并出现在左侧导航；这里只列它们进提示词的说明。'),
         h('div', {
           className: 'roost-note',
           /** 合计预算 2048 字节（与 `ext-usage.js` 的 USAGE_TOTAL_BYTE_LIMIT 对齐）。超了进提示词会被截，必须当场说。 */
@@ -21810,15 +21810,19 @@ window.__ModuleLoader__.load({
      * `visibleTabIds` 却返回隐藏集，容易写反，这里改掉）。
      *
      * 两个来源，都 fail-open：
-     *   · 自动型 —— 功能关了 / 一个扩展都没装（§11 白名单：只藏 `stickers`、`ext`）；
+     *   · 自动型 —— 功能关了（§11 白名单：只藏 `stickers`）；
      *   · 用户型 —— 个性化页里手动关掉的（保护名单除外）。
-     * `featOn === null`（还没读到 / 接口失败）一律不藏；扩展清单同理，必须
-     * 「读成功且确实为空」才藏。
+     * `featOn === null`（还没读到 / 接口失败）一律不藏。
+     *
+     * 已安装页（`ext`）不再自动藏（主人 2026-11-24 反馈）：以前一个扩展都没装
+     * 时它直接消失，用户想找「怎么装 / 装到哪了」反而找不到入口。空列表时页面
+     * 自己有空态说明，留着它才看得见「一个都没装」并顺着去市场。仍可在个性化
+     * 页里手动隐藏。
      */
     function hiddenTabIds(featOn, installedRows, installedReady, prefs) {
       const out = new Set()
       if (featOn && featOn.stickers === false) out.add('stickers')
-      if (installedReady === true && Array.isArray(installedRows) && installedRows.length === 0) out.add('ext')
+      /** 保留 installedRows / installedReady 两个参数只为兼容调用签名与测试夹具 */
       for (const id of (prefs && prefs.hidden) || []) {
         if (!PROTECTED_TABS.includes(id)) out.add(id)
       }
