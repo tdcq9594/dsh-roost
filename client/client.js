@@ -14862,6 +14862,8 @@ window.__ModuleLoader__.load({
           /** 手填的权重路径优先于自动配对；留空 = 用扫描结果 */
           gptWeights: v('gptSovits.gptWeights'),
           sovitsWeights: v('gptSovits.sovitsWeights'),
+          /** 勾选后跑带语义缓存的适配器；原版 api_v2.py 没有这个路由 */
+          semanticCache: v('gptSovits.semanticCache') === true,
         })
         if (r?.ok === false) toast(r.message || '起不来')
         else toast('正在启动，加载模型要一两分钟')
@@ -14871,6 +14873,28 @@ window.__ModuleLoader__.load({
       const stopGpt = async () => {
         await post('/tts/gpt-stop', {})
         toast('已停止')
+        await loadStatus()
+      }
+
+      /**
+       * 换角色不用重启服务：选完下拉直接切权重。
+       *
+       * 模型加载实测一两分钟，所以这里不做假「立即生效」——toast 明说要等。
+       * 服务还没跑 / 选的就是当前生效角色时都不发请求，免得白等一遍。
+       */
+      const switchGptModel = async (name) => {
+        if (!gptRunning) {
+          toast('先点「一键启动」，再换角色')
+          return
+        }
+        if (name && name === st?.gpt?.activeModel) return
+        const r = await post('/tts/gpt-switch', {
+          model: name,
+          gptWeights: v('gptSovits.gptWeights'),
+          sovitsWeights: v('gptSovits.sovitsWeights'),
+        })
+        if (r?.ok === false) toast(r.message || '切换失败')
+        else toast(name ? `正在加载「${r.name || name}」的权重，一两分钟后生效` : '已切回服务启动时的角色')
         await loadStatus()
       }
 
@@ -15015,13 +15039,14 @@ window.__ModuleLoader__.load({
           }),
         )
 
-      const select = (label, path, options) =>
-        h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 240px' } },
+      const select = (label, path, options, opts = {}) =>
+        h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: opts.flex || '1 1 240px' } },
           h('span', { className: 'roost-note', style: { margin: 0 } }, label),
           h(Dropdown, {
             className: 'roost-input',
             value: v(path),
-            onChange: (e) => put(path, e.target.value),
+            /** onPick 只给需要「选完立刻生效」的地方用（GPT 角色切换），其余调用行为不变 */
+            onChange: (e) => { put(path, e.target.value); opts.onPick?.(e.target.value) },
           }, options.map((o) => h('option', { key: o.id, value: o.id }, o.label))),
         )
 
@@ -15203,7 +15228,7 @@ window.__ModuleLoader__.load({
                         id: m.name,
                         label: m.name + (m.version ? ` · ${m.version}` : ''),
                       })),
-                    ]),
+                    ], { onPick: switchGptModel }),
                     refOptions.length
                       ? h('label', { style: { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 240px' } },
                           h('span', { className: 'roost-note', style: { margin: 0 } }, `参考音频（扫描到 ${refOptions.length} 个）`),
@@ -15273,11 +15298,58 @@ window.__ModuleLoader__.load({
                 field('接口路由', 'gptSovits.endpointPath', { placeholder: '/tts' }),
                 field('Bearer 密钥（可选）', 'gptSovits.apiKey', { placeholder: '本地原生 API 通常留空' }),
               ),
+
+              /** v2 推理参数：对齐扩展市场「语音回复」，v1 的 api.py 不认这些字段 */
+              h('div', { className: 'roost-note', style: { marginTop: 10 } }, 'v2 推理参数（v1 忽略）：'),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 6 } },
+                select('切句方式', 'gptSovits.textSplitMethod', [
+                  { id: 'cut0', label: 'cut0（不切）' },
+                  { id: 'cut1', label: 'cut1' },
+                  { id: 'cut2', label: 'cut2' },
+                  { id: 'cut3', label: 'cut3' },
+                  { id: 'cut4', label: 'cut4' },
+                  { id: 'cut5', label: 'cut5（推荐）' },
+                ], { flex: '1 1 200px' }),
+                field('句间停顿（秒）', 'gptSovits.fragmentInterval', { type: 'number', placeholder: '0.3' }),
+              ),
+              h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 } },
+                field('top_k', 'gptSovits.topK', { type: 'number', placeholder: '15' }),
+                field('top_p', 'gptSovits.topP', { type: 'number', placeholder: '1' }),
+                field('temperature', 'gptSovits.temperature', { type: 'number', placeholder: '1' }),
+                field('batch_size', 'gptSovits.batchSize', { type: 'number', placeholder: '1' }),
+              ),
+
+              /**
+               * 语义复用分两个开关：
+               *   · 语义缓存 = 一键启动时换用适配器（服务侧能力）
+               *   · 复用上次语义 = 合成时走 /voice-reply/tts（使用侧开关）
+               * 只勾第二个而服务没适配器，会在合成时收到明确的「去重新启动」提示。
+               */
+              h('label', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' } },
+                h('input', {
+                  type: 'checkbox',
+                  checked: v('gptSovits.semanticCache') === true,
+                  onChange: (e) => put('gptSovits.semanticCache', e.target.checked),
+                }),
+                h('span', { className: 'roost-note', style: { margin: 0 } },
+                  '一键启动时启用语义缓存（改语速 / 换音色时复用同一段语义，省一遍 GPT 采样）'),
+              ),
+              h('label', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
+                h('input', {
+                  type: 'checkbox',
+                  checked: v('gptSovits.freeze') === true,
+                  onChange: (e) => put('gptSovits.freeze', e.target.checked),
+                }),
+                h('span', { className: 'roost-note', style: { margin: 0 } },
+                  '复用上次语义结果（需上面勾选并重启服务；同一段文本才命中）'),
+              ),
+
               h('div', { className: 'roost-note' },
                 '语种填「中文」「日文」就行，会自动转成 API 要的 zh / ja。'
                 + '参考音频路径是「GPT-SoVITS 服务进程」要能读到的路径，不是 DSH 这边的。'
                 + '一键启动会自动挑一个没被系统保留的端口，就绪后把地址和路由填好——'
-                + '加载模型要一两分钟，这期间可以先干别的。'),
+                + '加载模型要一两分钟，这期间可以先干别的。'
+                + 'v2 合成固定要 WAV（避开 mp3 二次有损），由框架按 QQ 语音的 24kHz 归一。'),
             )
           : null,
 

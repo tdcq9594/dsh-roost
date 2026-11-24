@@ -118,6 +118,31 @@ export const DEFAULTS = {
       apiVersion: 'v1',
       /** 原生 API 默认根路由；兼容 fork 可指定其固定相对路由 */
       endpointPath: '/',
+      /**
+       * v2 推理参数（对齐扩展市场的「语音回复」）。
+       *
+       * 只作用于 v2，v1 的 api.py 没有这些字段，硬塞会被请求校验拒掉。
+       * 默认值和 GPT-SoVITS WebUI / voice-reply 一致：用户不用重新调一遍。
+       */
+      textSplitMethod: 'cut5',
+      fragmentInterval: 0.3,
+      topK: 15,
+      topP: 1,
+      temperature: 1,
+      batchSize: 1,
+      /**
+       * 复用上次语义结果：同一段文本改语速/换音色时跳过 GPT 采样。
+       * 需要一键启动的服务（带语义缓存适配器），原版 api_v2.py 没有这个路由。
+       */
+      freeze: false,
+      /** 一键启动时是否启用语义缓存适配器（默认关，兼容原版服务） */
+      semanticCache: false,
+      /**
+       * 一键启动后写入的扫描结果（角色名 → 权重相对路径）。
+       * 不是用户要填的字段：合成路径靠它在运行时按角色切权重，
+       * 面板重启后会被 onReady 重新覆盖。
+       */
+      models: [],
     },
     /**
      * 微软在线朗读（Edge TTS）。

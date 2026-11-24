@@ -299,7 +299,7 @@ import { createLocalEmbedder } from './local-embed.js';
 import { createLocalReranker } from './local-rerank.js';
 import { parseTemporal } from './temporal.js';
 import { createTurnScenes } from './turn-scene.js';
-import { createGptSovits } from './gpt-sovits.js';
+import { applyWeights, createGptSovits } from './gpt-sovits.js';
 import {
   applyPendingRestore, cancelRestore, createBackup, isFullBackupName, listBackups,
   pendingRestore, restoreRetentionRows, stageRestore, versionGapText,
@@ -1022,15 +1022,16 @@ export function apply(ctx) {
    */
   const gptLauncher = createGptSovits({
     log: (m) => log.info(m),
-    onReady: ({ port, dir }) => {
+    onReady: ({ port, dir, models = [], adapter = false }) => {
       const info = gptLauncher.probe(dir);
       if (!info.ok) return;
       const g = cfg.tts?.gptSovits || {};
+      const baseUrl = `http://127.0.0.1:${port}/`;
       cfg = patchConfig({
         tts: {
           gptSovits: {
             installDir: dir,
-            baseUrl: `http://127.0.0.1:${port}/`,
+            baseUrl,
             endpointPath: info.endpointPath,
             apiVersion: info.apiVersion,
             /**
@@ -1039,10 +1040,17 @@ export function apply(ctx) {
              * 我们猜出来的候选（训练切片）未必是同一个。
              */
             ...(String(g.referWavPath || '').trim() ? {} : { referWavPath: info.refCandidates[0] || '' }),
+            /** 运行时换角色按角色名配对权重要用；不是用户填的字段 */
+            models,
           },
         },
       });
-      log.info(`GPT-SoVITS 就绪，配置已自动填好：127.0.0.1:${port}（${info.weightVersion || info.apiVersion}）`);
+      /**
+       * 启动器已经把权重切到用户选的角色了。告诉 TTS 这一组已生效，
+       * 下一句别再等一次 110 秒的模型加载（面板改角色时指纹会变，仍会切）。
+       */
+      tts.markGptWeightsReady({ ...(cfg.tts?.gptSovits || {}), baseUrl });
+      log.info(`GPT-SoVITS 就绪，配置已自动填好：127.0.0.1:${port}（${info.weightVersion || info.apiVersion}）${adapter ? ' + 语义缓存' : ''}`);
     },
   });
   /**
@@ -14017,8 +14025,47 @@ export function apply(ctx) {
           model,
           gptWeights: String(body?.gptWeights || g.gptWeights || ''),
           sovitsWeights: String(body?.sovitsWeights || g.sovitsWeights || ''),
+          /** 语义缓存适配器（仅 v2 生效，默认关；见 config.js） */
+          semanticCache: body?.semanticCache === undefined
+            ? g.semanticCache === true
+            : body.semanticCache === true,
         });
         return send(res, r.ok ? 200 : 409, r);
+      }),
+
+      /**
+       * 运行时换角色：不用重启服务，也不用等第一句语音才生效。
+       *
+       * 只接收角色名 / 权重路径，**不接收 baseUrl**——地址永远从配置取，
+       * 免得面板被诱导去访问内网别的地址。成功才写回配置：切权重失败时
+       * 配置保持原样，下次合成还会重试，不会把用户锁死在一个坏角色上。
+       */
+      route('/tts/gpt-switch', async (req, res) => {
+        const body = await readBody(req).catch(() => ({}));
+        const g = cfg.tts?.gptSovits || {};
+        if (!String(g.baseUrl || '').trim()) {
+          return send(res, 409, { ok: false, message: '还没启动服务，先点「一键启动」' });
+        }
+        const model = String(body?.model ?? g.model ?? '');
+        const gptWeights = String(body?.gptWeights ?? g.gptWeights ?? '');
+        const sovitsWeights = String(body?.sovitsWeights ?? g.sovitsWeights ?? '');
+        if (!model && !gptWeights && !sovitsWeights) {
+          return send(res, 400, { ok: false, message: '选一个角色，或填权重路径' });
+        }
+        try {
+          const applied = await applyWeights({
+            baseUrl: String(g.baseUrl),
+            model,
+            models: Array.isArray(g.models) ? g.models : [],
+            gptWeights,
+            sovitsWeights,
+          });
+          cfg = patchConfig({ tts: { gptSovits: { model, gptWeights, sovitsWeights } } });
+          tts.markGptWeightsReady({ ...g, model, gptWeights, sovitsWeights });
+          return send(res, 200, { ok: true, ...applied });
+        } catch (e) {
+          return send(res, 502, { ok: false, message: String(e?.message || e) });
+        }
       }),
 
       route('/tts/gpt-stop', async (req, res) => send(res, 200, gptLauncher.stop())),

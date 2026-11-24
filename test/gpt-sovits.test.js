@@ -17,6 +17,7 @@ import {
   scanModels,
   decideSwitch,
   buildWeightUrls,
+  applyWeights,
 } from '../src/gpt-sovits.js';
 
 /** 真实 tts_infer.yaml 的形状（含 `\uXXXX` 转义，GPT-SoVITS 就是这么写的） */
@@ -249,4 +250,66 @@ test('权重：只填一个路径时标出「另一半仍是自动配对」', ()
     '两个都填了就不是 partial',
   );
   assert.equal(buildWeightUrls(1, '角色A', models, {}).partial, false, '都不填走自动配对，不算 partial');
+});
+
+// ── 运行时换角色：合成前 / 面板下拉共用 ────────────────────────────────
+
+const MODELS = [{ name: '角色A', gpt: 'GPT_weights/角色A-e15.ckpt', sovits: 'SoVITS_weights/角色A_e8_s200.pth' }];
+
+test('运行时切权重：baseUrl 优先，两个接口都发，JSON success 才算成功', async () => {
+  const urls = [];
+  const r = await applyWeights({
+    baseUrl: 'https://relay.example/gpt/', model: '角色A', models: MODELS,
+    fetchImpl: async (url) => {
+      urls.push(String(url));
+      return new Response(JSON.stringify({ message: 'success' }), { status: 200 });
+    },
+  });
+  assert.equal(r.name, '角色A');
+  assert.equal(r.version, '');
+  assert.equal(urls.length, 2, 'GPT + SoVITS 两个权重都要切');
+  assert.ok(urls[0].startsWith('https://relay.example/gpt/set_gpt_weights?'), '用配置的 baseUrl，不拼死 127.0.0.1');
+  assert.ok(urls[1].startsWith('https://relay.example/gpt/set_sovits_weights?'));
+  assert.ok(urls[0].includes(encodeURIComponent('GPT_weights/角色A-e15.ckpt')));
+});
+
+test('运行时切权重：HTTP 200 但 JSON 明确失败时要挡下来', async () => {
+  await assert.rejects(
+    applyWeights({
+      baseUrl: 'http://127.0.0.1:9880', model: '角色A', models: MODELS,
+      fetchImpl: async () => new Response(JSON.stringify({ message: '权重文件不存在' }), { status: 200 }),
+    }),
+    /权重文件不存在/,
+    '不能只看 HTTP 200——扩展实测过「200 但没换成」的情况',
+  );
+});
+
+test('运行时切权重：fork 只回文本时放行，非 2xx 仍要挡', async () => {
+  await applyWeights({
+    baseUrl: 'http://127.0.0.1:9880', model: '角色A', models: MODELS,
+    fetchImpl: async () => new Response('ok', { status: 200 }),
+  });
+  await assert.rejects(
+    applyWeights({
+      baseUrl: 'http://127.0.0.1:9880', model: '角色A', models: MODELS,
+      fetchImpl: async () => new Response('bad', { status: 500 }),
+    }),
+    /HTTP 500/,
+  );
+});
+
+test('运行时切权重：没选角色也没填路径时明确报错，不发请求', async () => {
+  let fetches = 0;
+  await assert.rejects(
+    applyWeights({
+      baseUrl: 'http://127.0.0.1:9880', model: '', models: MODELS,
+      fetchImpl: async () => { fetches += 1; return new Response('ok'); },
+    }),
+    /没有「」的权重/,
+  );
+  assert.equal(fetches, 0);
+});
+
+test('运行时切权重：没配 baseUrl 直接拒，不拿空地址发请求', async () => {
+  await assert.rejects(applyWeights({ model: '角色A', models: MODELS }), /服务地址/);
 });

@@ -728,3 +728,156 @@ test('MiMo：声明长度超上限时直接拒，不把整段收进内存', asyn
   });
   await assert.rejects(tts.synthesize('你好'), (e) => e.code === 'audio_too_large');
 });
+
+// ── GPT-SoVITS v2 增强（对齐扩展市场「语音回复」） ─────────────────────
+
+/** 一份能合成的 v2 配置，避免每个用例重复铺字段 */
+const gptV2Cfg = (patch = {}) => ({
+  tts: {
+    enabled: true, provider: 'gpt-sovits', timeoutSec: 10, maxChars: 300,
+    gptSovits: {
+      baseUrl: 'http://127.0.0.1:9880', apiVersion: 'v2', endpointPath: '/tts',
+      referWavPath: 'ref.wav', promptText: 'ref', promptLanguage: '中文', textLanguage: '中文',
+      ...patch,
+    },
+  },
+});
+
+const WAV_MODELS = [{ name: '角色A', gpt: 'GPT_weights/a.ckpt', sovits: 'SoVITS_weights/a.pth' }];
+
+test('GPT-SoVITS v2：补齐推理参数，固定要 WAV（不走 mp3 二次有损）', async () => {
+  let body;
+  const tts = createTts({
+    cfgOf: () => gptV2Cfg(),
+    fetchImpl: async (_url, init) => { body = JSON.parse(init.body); return audioResponse(); },
+  });
+  await tts.synthesize('测试');
+  assert.equal(body.media_type, 'wav');
+  assert.equal(body.streaming_mode, false);
+  assert.equal(body.text_split_method, 'cut5');
+  assert.equal(body.fragment_interval, 0.3);
+  assert.equal(body.top_k, 15);
+  assert.equal(body.top_p, 1);
+  assert.equal(body.temperature, 1);
+  assert.equal(body.batch_size, 1);
+});
+
+test('GPT-SoVITS v2：面板参数越界/手改字符串时回默认值，不把坏值丢给上游', async () => {
+  let body;
+  const tts = createTts({
+    cfgOf: () => gptV2Cfg({
+      textSplitMethod: 'evil', fragmentInterval: 99, topK: 999,
+      topP: -1, temperature: 0, batchSize: 100,
+    }),
+    fetchImpl: async (_url, init) => { body = JSON.parse(init.body); return audioResponse(); },
+  });
+  await tts.synthesize('测试');
+  assert.equal(body.text_split_method, 'cut5');
+  assert.equal(body.fragment_interval, 0.3);
+  assert.equal(body.top_k, 15);
+  assert.equal(body.top_p, 1);
+  assert.equal(body.temperature, 1);
+  assert.equal(body.batch_size, 1);
+});
+
+test('GPT-SoVITS v2：没选角色时不发 /set_*_weights（老配置服务已加载好）', async () => {
+  const calls = [];
+  const tts = createTts({
+    cfgOf: () => gptV2Cfg(),
+    fetchImpl: async (url) => { calls.push(String(url)); return audioResponse(); },
+  });
+  await tts.synthesize('第一句');
+  assert.equal(calls.length, 1, '只发合成请求，不能白等 110 秒的模型加载');
+  assert.ok(calls[0].endsWith('/tts'));
+});
+
+test('GPT-SoVITS v2：选了角色先切权重再合成，第二句不重复切', async () => {
+  const calls = [];
+  const tts = createTts({
+    cfgOf: () => gptV2Cfg({ model: '角色A', models: WAV_MODELS }),
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return String(url).includes('/set_')
+        ? new Response(JSON.stringify({ message: 'success' }), { status: 200 })
+        : audioResponse();
+    },
+  });
+  await tts.synthesize('第一句');
+  await tts.synthesize('第二句');
+  assert.equal(calls.filter((u) => u.includes('/set_')).length, 2, '首次切 GPT + SoVITS 两个权重');
+  assert.equal(calls.length, 4, '第二次合成不该再切一遍');
+  assert.ok(calls[0].includes('set_gpt_weights'), '切权重发生在合成之前');
+  assert.ok(calls[2].endsWith('/tts'));
+});
+
+test('GPT-SoVITS v2：markGptWeightsReady 让启动器已切过的角色不再重复切', async () => {
+  const calls = [];
+  const tts = createTts({
+    cfgOf: () => gptV2Cfg({ model: '角色A', models: WAV_MODELS }),
+    fetchImpl: async (url) => { calls.push(String(url)); return audioResponse(); },
+  });
+  tts.markGptWeightsReady({
+    baseUrl: 'http://127.0.0.1:9880', model: '角色A', gptWeights: '', sovitsWeights: '',
+  });
+  await tts.synthesize('测试');
+  assert.equal(calls.length, 1);
+});
+
+test('GPT-SoVITS v2：换角色后指纹变化，下一次合成自动切过去', async () => {
+  const calls = [];
+  let model = '角色A';
+  const both = [...WAV_MODELS, { name: '角色B', gpt: 'GPT_weights/b.ckpt', sovits: 'SoVITS_weights/b.pth' }];
+  const tts = createTts({
+    cfgOf: () => gptV2Cfg({ model, models: both }),
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return String(url).includes('/set_')
+        ? new Response(JSON.stringify({ message: 'success' }), { status: 200 })
+        : audioResponse();
+    },
+  });
+  tts.markGptWeightsReady({ baseUrl: 'http://127.0.0.1:9880', model: '角色A' });
+  await tts.synthesize('第一句');
+  model = '角色B';
+  await tts.synthesize('第二句');
+  assert.equal(calls.filter((u) => u.includes('/set_')).length, 2, '新角色要真的切，不是沿用旧指纹');
+});
+
+test('GPT-SoVITS v2：切权重失败报明确错误码，不发合成请求', async () => {
+  const calls = [];
+  const tts = createTts({
+    cfgOf: () => gptV2Cfg({ model: '角色A', models: WAV_MODELS }),
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ message: '加载失败' }), { status: 200 });
+    },
+  });
+  await assert.rejects(
+    tts.synthesize('测试'),
+    (e) => e instanceof TtsError && e.code === 'weight_switch_failed' && /加载失败/.test(e.message),
+  );
+  assert.equal(calls.length, 1);
+});
+
+test('GPT-SoVITS v2：语义复用走 /voice-reply/tts 并带 if_freeze', async () => {
+  let url;
+  let body;
+  const tts = createTts({
+    cfgOf: () => gptV2Cfg({ freeze: true }),
+    fetchImpl: async (u, init) => { url = String(u); body = JSON.parse(init.body); return audioResponse(); },
+  });
+  await tts.synthesize('测试');
+  assert.equal(new URL(url).pathname, '/voice-reply/tts');
+  assert.equal(body.if_freeze, true);
+});
+
+test('GPT-SoVITS v2：开了语义复用但服务没适配器时给可操作的提示', async () => {
+  const tts = createTts({
+    cfgOf: () => gptV2Cfg({ freeze: true }),
+    fetchImpl: async () => new Response('', { status: 404 }),
+  });
+  await assert.rejects(
+    tts.synthesize('测试'),
+    (e) => e instanceof TtsError && e.code === 'freeze_unsupported' && /语义缓存/.test(e.message),
+  );
+});

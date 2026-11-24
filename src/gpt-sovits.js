@@ -21,6 +21,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { basename, extname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** 起服务的默认端口。9880 是官方默认，但大概率被系统保留，所以从 17860 试起 */
 const PORT_FROM = 17860;
@@ -310,7 +311,11 @@ export function buildWeightUrls(port, name, models = [], opts = {}) {
   if (!m && !manualGpt && !manualSovits) throw new Error(`目录里没有「${name}」的权重`);
   const gptPath = manualGpt || m?.gpt || '';
   const sovitsPath = manualSovits || m?.sovits || '';
-  const base = `http://127.0.0.1:${port}`;
+  /**
+   * 运行时切换传的是面板里那个 baseUrl（可能带反代前缀）；
+   * 一键启动仍按 port 拼本机地址。两种调用都走这里，避免两套 URL 逻辑。
+   */
+  const base = String(opts.baseUrl || '').trim().replace(/\/+$/, '') || `http://127.0.0.1:${port}`;
   const urls = [];
   if (gptPath) urls.push(`${base}/set_gpt_weights?weights_path=${encodeURIComponent(gptPath)}`);
   if (sovitsPath) urls.push(`${base}/set_sovits_weights?weights_path=${encodeURIComponent(sovitsPath)}`);
@@ -325,6 +330,52 @@ export function buildWeightUrls(port, name, models = [], opts = {}) {
   const partial = Boolean(manualGpt) !== Boolean(manualSovits);
   return { urls, gptPath, sovitsPath, matched: m || null, partial };
 }
+
+/**
+ * 运行时切换权重：给合成路径和面板「换角色」共用。
+ *
+ * 和启动时的 `switchModel` 区别在于：
+ *   · 不杀进程、不重跑 probe——服务已经在跑，只发两个 `/set_*_weights`
+ *   · baseUrl 从配置来（可能是反代），不是拼死的 127.0.0.1
+ *   · **确认返回体**：原版 api_v2.py 回 `{"message":"success"}`。扩展市场
+ *     的「语音回复」实测过「HTTP 200 但模型没换」的情况，只看 status 会
+ *     静默用错音色。兼容性上做软校验：非 JSON 放行（fork 可能只回文本），
+ *     是 JSON 但明确报失败就挡下来。
+ *
+ * 权重加载实测要 110 秒，所以调用方**必须自己做去重**（见 tts.js 的
+ * `gptWeightState`），不能每次合成都调一遍。
+ */
+export async function applyWeights({ baseUrl = '', model = '', models = [], gptWeights = '', sovitsWeights = '', fetchImpl = (...args) => fetch(...args) } = {}) {
+  if (!String(baseUrl || '').trim()) throw new Error('先配置 GPT-SoVITS 服务地址');
+  const built = buildWeightUrls(0, model, models, { gptWeights, sovitsWeights, baseUrl });
+  for (const url of built.urls) {
+    /** 只填一个路径时 urls 可能只有 SoVITS，按 URL 本身判断才不会报错时报错名字 */
+    const kind = url.includes('set_gpt_weights') ? 'GPT' : 'SoVITS';
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(180_000) });
+    if (!res.ok) throw new Error(`切换 ${kind} 权重失败（HTTP ${res.status}）`);
+    let body = '';
+    try {
+      body = await res.text();
+      const json = JSON.parse(body);
+      if (json?.error || (json?.message && json.message !== 'success')) {
+        throw new Error(json.error || json.message);
+      }
+    } catch (e) {
+      if (e instanceof SyntaxError) continue; // fork 只回文本，放行
+      throw new Error(`切换 ${kind} 权重失败：${e?.message || e}`);
+    }
+  }
+  return {
+    name: model || '(手动权重)',
+    version: built.matched?.version || '',
+    gptPath: built.gptPath,
+    sovitsPath: built.sovitsPath,
+    partial: built.partial,
+  };
+}
+
+/** 语义缓存适配器的脚本路径（随 dsh-roost 分发，ISC，见文件头） */
+export const SEMANTIC_ADAPTER = new URL('../scripts/gpt-semantic-adapter.py', import.meta.url);
 
 export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl = (...args) => fetch(...args) } = {}) {
   let child = null;
@@ -360,6 +411,8 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
     activeModel: '',
     /** 服务能跑但角色没切过去之类的软故障 */
     warning: '',
+    /** 本次是否带了语义缓存适配器（面板据此显示「可复用语义」） */
+    adapter: false,
   };
   const lines = [];
 
@@ -461,6 +514,7 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
       readyAt: 0,
       activeModel: '',
       warning: '',
+      adapter: false,
     });
     push(`—— 启动 ${p.dir} ——`);
 
@@ -470,12 +524,29 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
       if (myRun !== runId) return;
       if (!port) throw new Error('连续 40 个端口都绑不上，可能被系统保留或被占用');
 
-      const args = [
-        p.apiScript,
-        '-a', '127.0.0.1',
-        '-p', String(port),
-        ...(p.configFile ? ['-c', p.configFile] : []),
-      ];
+      /**
+       * 语义缓存适配器：只在 v2 + 用户明确勾选时启用。
+       *
+       * 脚本随 dsh-roost 分发（不是用户请求给的路径），安全边界不变——
+       * 仍然只执行 `<目录>/runtime/python.exe` 和我们自己的一个 .py。
+       * 适配器内部 runpy 加载用户目录里的 api_v2.py，等同于原来的启动方式。
+       */
+      const useAdapter = opts.semanticCache === true && p.apiVersion === 'v2';
+      const args = useAdapter
+        ? [
+            fileURLToPath(SEMANTIC_ADAPTER),
+            '--app-dir', p.dir,
+            '--host', '127.0.0.1',
+            '--port', String(port),
+            ...(p.configFile ? ['--config', p.configFile] : []),
+          ]
+        : [
+            p.apiScript,
+            '-a', '127.0.0.1',
+            '-p', String(port),
+            ...(p.configFile ? ['-c', p.configFile] : []),
+          ];
+      if (useAdapter) push('已启用语义缓存适配器（可复用上次 GPT 语义结果）');
       push(`$ ${basename(p.python)} ${args.join(' ')}`);
 
       const proc = spawn(p.python, args, {
@@ -578,7 +649,7 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
         if (stillFree) return;
         clearInterval(timer);
         timer = null;
-        set({ phase: 'running', readyAt: Date.now(), activeModel: p.character || '' });
+        set({ phase: 'running', readyAt: Date.now(), activeModel: p.character || '', adapter: useAdapter });
         push(`—— 就绪：http://127.0.0.1:${port} ——`);
         log(`GPT-SoVITS 已就绪：127.0.0.1:${port}`);
 
@@ -640,9 +711,16 @@ export function createGptSovits({ log = () => {}, onReady = () => {}, fetchImpl 
           }
         }
 
-        /** 就绪后通知宿主把配置填好（baseUrl / 路由 / 版本），用户不用再手抄端口 */
+        /**
+         * 就绪后通知宿主把配置填好（baseUrl / 路由 / 版本），用户不用再手抄端口。
+         * 额外带出 models / character / adapter：合成路径要靠它们做运行时
+         * 权重切换和语义缓存，否则用户换个角色还得重启服务。
+         */
         try {
-          onReady({ port, dir: p.dir, warning: state.warning });
+          onReady({
+            port, dir: p.dir, warning: state.warning,
+            models: p.models || [], character: p.character || '', adapter: useAdapter,
+          });
         } catch (e) {
           log(`就绪回调失败：${e?.message || e}`);
         }

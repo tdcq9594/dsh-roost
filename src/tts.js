@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { applyWeights } from './gpt-sovits.js';
 
 const AUDIO_TYPES = new Set([
   'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave',
@@ -427,6 +428,16 @@ export function createTts({
   let engineCache = null;
 
   /**
+   * 已生效的 GPT-SoVITS 权重指纹。
+   *
+   * 权重加载实测 110 秒，**不能每次合成都切一遍**。指纹里带上 baseUrl：
+   * 一键启动每次挑的端口可能不同，服务重启后必须重新切。
+   * 用户改了角色/手填权重也会改指纹，于是下一次合成自动生效——
+   * 面板不用重启服务，这正是扩展市场「语音回复」比我们强的地方。
+   */
+  let gptWeightKey = '';
+
+  /**
    * 上游刚刚失败过吗。
    *
    * 为什么要记：`status()` 只能看**配置填没填**，看不出服务在不在。
@@ -810,6 +821,15 @@ function langCode(value) {
   return LANG_CODES[raw] || LANG_CODES[raw.toLowerCase()] || raw;
 }
 
+  /**
+   * v2 推理参数兜底。配置来自面板，可能被手改成字符串 / 越界值；
+   * 上游对这类值有的 400、有的直接合成出静音，所以在这里统一夹一遍。
+   */
+  function gptParam(value, fallback, min, max) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
+  }
+
   async function gptSovitsSpeech(text, cfg) {
     const gpt = cfg.gptSovits && typeof cfg.gptSovits === 'object' ? cfg.gptSovits : {};
     if (!gpt.baseUrl || !gpt.referWavPath || !gpt.promptText || !gpt.promptLanguage || !gpt.textLanguage) {
@@ -817,10 +837,44 @@ function langCode(value) {
     }
     const version = String(gpt.apiVersion || 'v1').toLowerCase();
     if (!['v1', 'v2'].includes(version)) throw new TtsError('invalid_config', 'GPT-SoVITS apiVersion 只支持 v1 或 v2', 400);
-    const url = gptEndpoint(gpt.baseUrl, gpt.endpointPath || '/');
     const headers = { 'content-type': 'application/json', accept: 'audio/*' };
     const key = String(gpt.apiKey || cfg.apiKey || '');
     if (key) headers.authorization = `Bearer ${key}`;
+
+    const wantModel = String(gpt.model || '').trim();
+    const wantGpt = String(gpt.gptWeights || '').trim();
+    const wantSovits = String(gpt.sovitsWeights || '').trim();
+
+    /**
+     * v2 才支持运行时换角色。
+     *
+     * 关键：**没选角色也没手填权重时一次都不切**。老配置就是这种形状，
+     * 服务启动时 already 按 tts_infer.yaml 加载好了；在这里发 `/set_*_weights`
+     * 既白等 110 秒，还会因为「目录里没有『』的权重」直接把合成打断。
+     *
+     * 选了角色才切，且按指纹去重：一键启动刚切过的话，`markGptWeightsReady`
+     * 会把指纹置成当前值，不会为同一个角色再等一遍。
+     */
+    if (version === 'v2' && (wantModel || wantGpt || wantSovits)) {
+      const fingerprint = [gpt.baseUrl, wantModel, wantGpt, wantSovits].join('|');
+      if (fingerprint !== gptWeightKey) {
+        try {
+          const applied = await applyWeights({
+            baseUrl: String(gpt.baseUrl),
+            model: wantModel,
+            models: Array.isArray(gpt.models) ? gpt.models : [],
+            gptWeights: wantGpt,
+            sovitsWeights: wantSovits,
+            fetchImpl,
+          });
+          gptWeightKey = fingerprint;
+          log(`GPT-SoVITS 权重已切到「${applied.name}」`);
+        } catch (e) {
+          throw new TtsError('weight_switch_failed', `切换语音角色失败：${e?.message || e}`, 502);
+        }
+      }
+    }
+
     /**
      * v1 和 v2 的字段名**不一样**，这不是命名风格问题：
      *   · v1（api.py）：`refer_wav_path` + `prompt_language` / `text_language`
@@ -838,9 +892,24 @@ function langCode(value) {
           text,
           text_lang: langCode(gpt.textLanguage),
           /**
-           * 只有 v2 有语速参数。`api.py`（v1）的接口签名里根本没有 speed，
-           * 硬塞一个字段可能被它的请求体校验拒掉——v1 就不支持调语速。
+           * 只有 v2 有这些参数。对齐扩展市场「语音回复」的默认值，
+           * 用户不用再在两块面板里各调一遍。v1 的 api.py 签名里没有，
+           * 硬塞可能被请求校验拒掉——v1 就不支持。
            */
+          text_split_method: /^cut[0-5]$/.test(gpt.textSplitMethod) ? gpt.textSplitMethod : 'cut5',
+          fragment_interval: gptParam(gpt.fragmentInterval, 0.3, 0.01, 1),
+          top_k: gptParam(gpt.topK, 15, 1, 100),
+          top_p: gptParam(gpt.topP, 1, 0, 1),
+          temperature: gptParam(gpt.temperature, 1, 0.01, 2),
+          batch_size: gptParam(gpt.batchSize, 1, 1, 8),
+          /**
+           * 主动要 WAV：
+           *   · 避开 mp3 的有损二次编码
+           *   · 框架的 toSilk() 见 WAV 会按 24kHz 归一（非 24k 走 ffmpeg 重采样），
+           *     而不是像扩展那样把 32k 语义码流直接编成 SILK、绕过 QQ 的 24k 解码约束
+           */
+          media_type: 'wav',
+          streaming_mode: false,
           ...(speed !== 1 ? { speed_factor: speed } : {}),
         }
       : {
@@ -850,12 +919,30 @@ function langCode(value) {
           text,
           text_language: langCode(gpt.textLanguage),
         };
+
+    /**
+     * 语义复用：同一段文本改语速 / 换音色时跳过 GPT 采样。
+     * 只有带适配器的服务（一键启动勾选「语义缓存」）才有这个路由；
+     * 原版 api_v2.py 没有，404/405 时给出能照着做的提示，而不是「HTTP 404」。
+     */
+    const freeze = version === 'v2' && gpt.freeze === true;
+    const url = freeze
+      ? gptEndpoint(gpt.baseUrl, '/voice-reply/tts')
+      : gptEndpoint(gpt.baseUrl, gpt.endpointPath || '/');
     const res = await fetchImpl(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify(freeze ? { ...body, if_freeze: true } : body),
       signal: timeoutSignal(cfg.timeoutSec),
     });
+    if (freeze && [404, 405, 501].includes(Number(res?.status))) {
+      await res.body?.cancel().catch(() => {});
+      throw new TtsError(
+        'freeze_unsupported',
+        '当前服务不支持语义复用：在「语音 → GPT-SoVITS」里重新一键启动并勾选语义缓存，或关掉这个开关',
+        400,
+      );
+    }
     return readResponse(res);
   }
 
@@ -1036,5 +1123,22 @@ function langCode(value) {
     }
   }
 
-  return { status, synthesize, warmup };
+  /**
+   * 标记「一键启动已经切过这一组权重」，避免合成时重复等 110 秒。
+   *
+   * 只在 host.js 的 onReady 里调；面板手动改角色时**不调**，
+   * 于是下一次合成会按新指纹真的切过去。
+   */
+  function markGptWeightsReady(gpt = {}) {
+    const wantModel = String(gpt.model || '').trim();
+    const wantGpt = String(gpt.gptWeights || '').trim();
+    const wantSovits = String(gpt.sovitsWeights || '').trim();
+    if (!wantModel && !wantGpt && !wantSovits) {
+      gptWeightKey = '';
+      return;
+    }
+    gptWeightKey = [gpt.baseUrl, wantModel, wantGpt, wantSovits].join('|');
+  }
+
+  return { status, synthesize, warmup, markGptWeightsReady };
 }
