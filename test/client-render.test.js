@@ -2976,4 +2976,9 @@ test('GPT 语音面板按扩展页面收敛字段与交互，但仍保持单页'
   for (const label of ['音色方案', '保存方案', '应用方案', '删除方案', '检查服务', '停止等待']) {
     assert.ok(src.includes(`'${label}'`), `面板缺少「${label}」`)
   }
+  // 载入/新建方案时，方案没覆盖的键不得把当前草稿路径写成 undefined
+  // （否则点保存会把权重/参考音频路径回落成空串——实测复现过，务必守住）
+  const apply = src.slice(src.indexOf('const applyProfileDraft'), src.indexOf('const loadProfiles'))
+  assert.ok(apply.includes('val === undefined || val === null'), '方案草稿必须跳过 undefined/null')
+  assert.ok(apply.includes('continue'), '方案缺字段时应保持当前草稿，不清空')
 })

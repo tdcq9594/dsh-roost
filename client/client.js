@@ -15006,7 +15006,20 @@ window.__ModuleLoader__.load({
         freeze: 'gptSovits.freeze',
       }
       const applyProfileDraft = (values) => {
-        for (const [key, path] of Object.entries(PROFILE_DRAFT_PATHS)) put(path, values?.[key])
+        /**
+         * 只写方案里**真的有值**的键。
+         *
+         * 以前无脑 `put(path, values?.[key])`：方案缺某个键（老方案、或「新建」
+         * 传进来的默认值对象没带 baseUrl/权重路径）就把当前草稿对应字段写成
+         * undefined。用户接着点保存，`saveConfig` 以 DEFAULTS 为基线合并，
+         * undefined 回落成空串——**已填好的权重/参考音频路径当场被清空**。
+         * 载入方案只该动方案覆盖的那些字段，没给的保持现状。
+         */
+        for (const [key, path] of Object.entries(PROFILE_DRAFT_PATHS)) {
+          const val = values?.[key]
+          if (val === undefined || val === null) continue
+          put(path, val)
+        }
       }
       const loadProfiles = async (pick) => {
         const r = await get('/tts/gpt-profiles')
