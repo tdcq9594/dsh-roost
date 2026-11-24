@@ -228,7 +228,6 @@ window.__ModuleLoader__.load({
      只有「数据展示页」用这些令牌，配置页仍是分节标题 + 上边线。 */
   --tone-deep:color-mix(in srgb,var(--accent) 62%,var(--dsw-alias-bg-base, #16181c));
   --tone-sea:var(--accent);
-  --tone-sky:color-mix(in srgb,var(--accent) 55%,#fff);
   --tone-foam:color-mix(in srgb,var(--accent) 10%,transparent);
   --tone-foam-2:color-mix(in srgb,var(--accent) 20%,transparent);
   --radius-card:14px;
@@ -1173,14 +1172,16 @@ select.roost-input{color-scheme:dark}
 .roost-tab[data-on="1"]::after{background:var(--tone-deep)}
 .is-data-view .roost-sec{margin-top:14px;padding:14px 16px 16px;
   border:1px solid var(--line-soft);border-radius:var(--radius-card);
-  background:var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent));
+  /* 卡片底吃两层：宿主主题底色 + 自选强调色的极淡混入，换色/换主题都跟 */
+  background:color-mix(in srgb,var(--accent) 4%,var(--dsw-alias-bg-l1, color-mix(in srgb,currentColor 5%,transparent)));
   box-shadow:var(--shadow-card)}
 .is-data-view .roost-sec:first-child{margin-top:2px}
 .is-data-view .roost-sec-h{border-bottom:0;margin-bottom:10px;padding-bottom:6px}
 .is-data-view .roost-sec-t{position:relative;padding-left:11px}
 .is-data-view .roost-sec-t::before{content:"";position:absolute;left:0;top:50%;
   transform:translateY(-50%);width:3px;height:14px;border-radius:2px;
-  background:linear-gradient(180deg,var(--tone-sky),var(--tone-sea))}
+  /* 竖线两端都取自 --accent，不掺白色、不借 aurabot 的海蓝 */
+  background:linear-gradient(180deg,var(--tone-foam-2),var(--accent))}
 .is-data-view .roost-stat{background:var(--tone-foam);border-color:var(--tone-foam-2)}
 .roost-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
 .roost-metric{padding:10px 12px;border-radius:10px;min-width:0;

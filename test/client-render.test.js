@@ -2680,3 +2680,18 @@ test('视觉升级：卡片只给数据页，配置页保留分节标题 + 上�
     assert.ok(!clsOf(tab).includes('is-data-view'), `${tab} 是配置页，不该推翻 2026-11-13 的「不要卡片背景」`)
   }
 })
+
+test('视觉升级：竖线与卡片底只走自选强调色，不落对方配色', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const from = src.indexOf('/* ── 全局视觉升级')
+  const to = src.indexOf('@media (prefers-reduced-motion:reduce){', from)
+  assert.ok(from > 0 && to > from, '视觉升级样式块应该还在')
+  const visual = src.slice(from, to)
+  assert.ok(!visual.includes('#3d7fd6') && !visual.includes('--ab-'), '新样式不该引用 aurabot 的蓝色或变量')
+  assert.ok(src.includes('background:linear-gradient(180deg,var(--tone-foam-2),var(--accent))'),
+    '标题竖线两端都要来自 --accent，不能掺白色或固定色')
+  assert.ok(src.includes('background:color-mix(in srgb,var(--accent) 4%,var(--dsw-alias-bg-l1,'),
+    '卡片底要在宿主主题底色上混入自选强调色，不能写死')
+  assert.ok(src.includes('--tone-foam-2:color-mix(in srgb,var(--accent) 20%,transparent)'),
+    '淡色令牌必须从 --accent 派生')
+})
