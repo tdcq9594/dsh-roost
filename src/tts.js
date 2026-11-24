@@ -304,7 +304,7 @@ function timeoutSignal(seconds) {
 }
 
 /**
- * 语速倍率。四个 provider **共用 `tts.speed` 这一份**。
+ * 语速倍率。内置五家 **共用 `tts.speed` 这一份**；新来源各有自己的字段或不支持。
  *
  * 范围夹在 0.5–2：各家上限不一样（OpenAI 到 4、微软 rate 到 +200%、
  * GPT-SoVITS 没写上限），取交集最保守，用户切换 provider 时不用重填。

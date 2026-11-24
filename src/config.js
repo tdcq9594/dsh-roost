@@ -69,7 +69,8 @@ export const DEFAULTS = {
     enabled: false,
     /**
      * openai = OpenAI 兼容 /audio/speech；gpt-sovits = 原生 API；sherpa = 本地 ONNX（离线）；
-     * edge = 微软在线朗读；mimo = 小米 MiMo（音频从 chat/completions 里以 base64 回）
+     * edge = 微软在线朗读；mimo = 小米 MiMo（音频从 chat/completions 里以 base64 回）；
+     * auto / windows / cosyvoice / volcano / fish-free / breeze / minimax 见 src/tts-providers.js
      */
     provider: 'openai',
     /** OpenAI-compatible API 根地址，需包含版本前缀（例如 /v1） */
@@ -80,7 +81,8 @@ export const DEFAULTS = {
     timeoutSec: 30,
     maxChars: 300,
     /**
-     * 语速倍率，四个 provider **共用这一个**。1 是原速。
+     * 语速倍率，内置五家 **共用这一个**。1 是原速。
+     * 新来源里火山 / MiniMax 用自己的 speedRatio / speed，其余没有语速字段。
      *
      * 范围 0.5–2：各家上限不同（OpenAI 到 4、微软 rate 到 +200%），
      * 取交集最保守，面板上一个输入框切换 provider 时不用重填。
@@ -191,7 +193,7 @@ export const DEFAULTS = {
     },
     /**
      * 下面几段是「声音来源」里除内置五家之外的来源（对标 aurabot）。
-     * 全是云端接口，密钥只由主人配置填，模型只给文本。
+     * 有本地（cosyvoice）也有云端；云端密钥只由主人配置填，模型只给文本。
      */
     /** 本地 CosyVoice 官方 FastAPI：裸 PCM 或 WAV，采样率用于给裸 PCM 包头 */
     cosyvoice: {
@@ -251,7 +253,7 @@ export const DEFAULTS = {
       /** 说话人编号（aishell3 是 0-173），换一个就是换一个音色 */
       sid: 88,
       /**
-       * 语速已经统一到 `tts.speed`（四个 provider 共用一份）。
+       * 语速已经统一到 `tts.speed`（内置五家共用一份）。
        * 这里**不再有** `speed` 字段：留着一个改了不生效的同名字段，
        * 比没有更让人困惑——「我明明改了语速」却听不出区别。
        */

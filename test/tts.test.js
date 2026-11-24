@@ -219,7 +219,7 @@ test('本地 sherpa：模型齐了才算可用，合成结果转成 16bit WAV', 
     cfgOf: () => ({
       tts: {
         enabled: true, provider: 'sherpa', maxChars: 300,
-        /** 语速已统一到 tts.speed（四个 provider 共用），不再是 sherpa.speed */
+        /** 语速已统一到 tts.speed（内置五家共用），不再是 sherpa.speed */
         speed: 1.5,
         sherpa: { model: 'aishell3', sid: 12, numThreads: 3 },
       },
@@ -459,7 +459,7 @@ test('微软朗读：超大音频要挡在宿主内存之外（其它 provider �
   await assert.rejects(tts.synthesize('你好'), (e) => e instanceof TtsError && e.code === 'audio_too_large');
 });
 
-/* ---------------- 语速：四个 provider 共用一份 ---------------- */
+/* ---------------- 语速：内置五家共用一份 ---------------- */
 
 test('语速：范围夹在 0.5–2，非法值回原速', () => {
   assert.equal(speedOf({ speed: 1.5 }), 1.5);
