@@ -131,6 +131,19 @@ async function bootHost(cfgPatch = {}, seed = {}) {
   }
   // 种子账本：测「缺口补齐」时当数据源
   if (seed.ledger?.length) seedLedger(dir, seed.ledger);
+  /**
+   * 种子「刚才说到」的水位线（`gap-mark.json`）。
+   *
+   * 传 `{ g1: 2 }` = 「这个会话已经露到账本 seq 2」。账本 seq 是 AUTOINCREMENT，
+   * 按 `seed.ledger` 的**数组顺序**从 1 开始，所以第 N 条就是 seq N。
+   */
+  if (seed.gapMark) {
+    const chats = {};
+    for (const [chatId, seq] of Object.entries(seed.gapMark)) {
+      chats[chatId] = { seq: Number(seq) || 0, at: Date.now() };
+    }
+    writeFileSync(join(dir, 'gap-mark.json'), JSON.stringify({ v: 1, chats }), 'utf8');
+  }
   // host 里的 dataDir() 读这个环境变量，必须在 import 之前设
   process.env.DSH_ROOST_DATA = dir;
 
@@ -435,7 +448,12 @@ test('缺口补齐：journal 记过的消息不算缺口，不再补一遍', asy
    * **故意让 `'e1'` ≠ `msgId 'm1'`**：哪天有人把对账键改回 `msgId`
    * （QQ 官方的 `ROBOT1.0_…`，和 `eventIds` 永不相交），这条立刻红。
    */
-  const { call, off } = await bootHost({}, {
+  /**
+   * **`recentLimit: 1` 是刻意的**：2026-11-25 之后「缺口不够数就用日记补足」，
+   * 默认 8 条会把 j1 那句也补进来（补足是设计，不是缺口重补）。压到 1 条
+   * 才能让这条测试只验「对账」这一件事：缺口只剩 e2，注入就只有 e2。
+   */
+  const { call, off } = await bootHost({ recall: { recentLimit: 1 } }, {
     journal: [
       { id: 'j1', at: NOW - 1000, chatId: 'g1', sender: '张三', text: '明天下雨吗', eventIds: ['e1'] },
     ],
@@ -446,7 +464,7 @@ test('缺口补齐：journal 记过的消息不算缺口，不再补一遍', asy
   });
   try {
     const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
-    assert.doesNotMatch(sec, /明天下雨吗/, '已经喂过的别再补');
+    assert.doesNotMatch(sec, /明天下雨吗/, '已经喂过的别再当缺口补');
     assert.match(sec, /预报说有雨/, '真缺口还是要补上');
   } finally { off?.(); }
 });
@@ -497,6 +515,53 @@ test('缺口补齐：自己发过的回复不再当缺口重补', async (t) => {
     const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
     assert.doesNotMatch(sec, /上次我说的是周三/, '处理前就发过的，它当然知道');
     assert.match(sec, /刚发出去还没进日记/, '晚于日记最新时刻的仍要补');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：水位线之上的才算缺口，露过的那段不再重念', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  /**
+   * 2026-11-25 主人报的现象：群里一路聊下去，注入块却一直卡在同一段。
+   *
+   * 原因是补出去的那几条**没有任何地方记成「已见」**——它们只是被拼进
+   * user message，不会回到日记的 `eventIds`。所以缺口永远合不上，那 8 条
+   * 每轮被重念一遍。水位线（`gapMark`）就是那个记账处：露过就算见过。
+   *
+   * 这里把水位种在 seq 2（前两条露过），断言：老的两条不再出现、
+   * 新的一条照补。
+   */
+  const { call, off } = await bootHost({}, {
+    ledger: [
+      { id: 'e1', msgId: 'm1', chatId: 'g1', userName: '张三', content: '已经露过的第一句' },
+      { id: 'e2', msgId: 'm2', chatId: 'g1', userName: '李四', content: '已经露过的第二句' },
+      { id: 'e3', msgId: 'm3', chatId: 'g1', userName: '张三', content: '新来的这一句' },
+    ],
+    gapMark: { g1: 2 },
+  });
+  try {
+    const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    assert.doesNotMatch(sec, /已经露过的第一句/, '水位线以下的别再念');
+    assert.doesNotMatch(sec, /已经露过的第二句/, '水位线以下的别再念');
+    assert.match(sec, /新来的这一句/, '水位线之上的才是缺口');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：面板预览不消费缺口（水位线只在真注入时推进）', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  /**
+   * `/mind` 是「看一眼接下来会注入什么」。要是预览也推水位线，
+   * 主人翻一次面板，真被叫到时那块就空了——等于把上下文吃掉。
+   */
+  const { call, off } = await bootHost({}, {
+    ledger: [
+      { id: 'e1', msgId: 'm1', chatId: 'g1', userName: '张三', content: '预览也不该吃掉的一句' },
+    ],
+  });
+  try {
+    const first = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    const second = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    assert.match(first, /预览也不该吃掉的一句/);
+    assert.equal(second, first, '连看两次结果必须一样，说明预览没推进水位');
   } finally { off?.(); }
 });
 

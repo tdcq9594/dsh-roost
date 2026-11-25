@@ -71,6 +71,33 @@ test('调用形状：createActionRunner 的结果要直接调用，不能取 .ru
 });
 
 /**
+ * 合并批的出处必须补全（2026-11-25 实机）。
+ *
+ * `deliverBatch` 用 `merged = {...last}` 造 payload，`roost-payload.js` 的
+ * `eventIds: [evt?.eventId]` 于是只带**最后一条**；而 `batchOf()` 明明手里
+ * 有整批 `items`（attachments / elements / senders 都合过了），出处却漏了。
+ *
+ * 后果不是「少记一个 id」这么轻：
+ *   · 「刚才说到」的缺口判据 = 账本 `id` 减日记 `event_ids`，同批其余几条被
+ *     判成「模型没见过」，每轮补进注入块、跟正文一字不差地重复；
+ *   · 事实的 `src.eventIds` 只剩一条，`/r/context` 追不回同批原文。
+ */
+test('合并批：payload.eventIds 要带上整批，不只是最后一条', () => {
+  const start = SRC.indexOf('if (batch.count > 1) {');
+  assert.ok(start > 0, '找不到 deliverBatch 里的合并批分支');
+  const end = SRC.indexOf('const quiet = guestQuietSkip', start);
+  assert.ok(end > start, '找不到合并批分支的结束位置');
+  const block = SRC.slice(start, end);
+  assert.match(block, /batch\.items/, '要从 batch.items 取整批的 eventId');
+  assert.match(block, /payload\.eventIds\s*=/, '要回写 payload.eventIds');
+  assert.doesNotMatch(
+    block,
+    /payload\.id\s*=/,
+    'payload.id 必须保持最后一条：被动回复窗口、日记主键、幂等都靠它',
+  );
+});
+
+/**
  * 字段名：框架推来的**原始事件**里发件人是 `sender.openid`，
  * 只有内部 payload 才拍平成 `sender.id`（roost-payload.js 造的）。
  *

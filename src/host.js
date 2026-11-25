@@ -44,6 +44,8 @@ import { queryAudit } from './audit-query.js';
 import { statsSnapshot, dayOf as localDayOf } from './stats-snapshot.js';
 import { createJournal } from './journal.js';
 import { createLedgerReader } from './ledger-read.js';
+import { createGapMark } from './gap-mark.js';
+import { mergeRecentRows } from './recent-rows.js';
 import { createChannelPost, normalizePostCfg, guide, humanError, pickErrorCode, shareUrlOf } from './channel-post.js';
 import { createGraph } from './graph.js';
 import { createSelf } from './self.js';
@@ -3923,6 +3925,16 @@ export function apply(ctx) {
   });
 
   /**
+   * 「刚才说到」的水位线：这个会话已经露到账本的哪一条。
+   *
+   * 缺口判据（账本有、日记 `eventIds` 没有）有个不动点问题：**补进去的那几条
+   * 没人记成「已见」**，于是下一轮还是缺口，被一遍遍重念——真实表现是注入块
+   * 卡在同一段旧消息上一个字都不变。水位线就是那个「已见」的记账处。
+   * 见 `gap-mark.js` 的注释。
+   */
+  const gapMark = createGapMark({ file: join(dataDir(), 'gap-mark.json') });
+
+  /**
    * 知识图谱：三表 + 双时态。
    *
    * 抽错不怕——原始片段在 episode 表里，能重建。
@@ -5447,6 +5459,29 @@ export function apply(ctx) {
       payload.rendered = buildRendered(merged, batch.text, { images: payload.images });
       /** 多条批次里每条已经自带 `名字(openid)：`，上层不要再套统一标签 */
       payload.batch = { count: batch.count, multi: batch.multi };
+      /**
+       * **合并批的出处必须补全**（2026-11-25 修）。
+       *
+       * `buildFromRoost(merged)` 造 payload，而 `merged` 是 `{...last}`——
+       * `roost-payload.js` 的 `eventIds: [evt?.eventId]` 于是只带了**最后一条**。
+       * `batchOf()` 把 `attachments` / `elements` / `senders` 都合过了，唯独
+       * 出处漏了，结果日记那行 `event_ids` 只有 1 个 id：
+       *
+       *   · 「刚才说到」的缺口判据是「账本 `id` 减日记 `event_ids`」，同批其余
+       *     几条被当成「模型没见过」，每轮补进注入块、与正文重复；
+       *   · 事实的 `src.eventIds` 也只剩一条，`/r/context` 追不回同批的原文。
+       *
+       * 实测：19:41:52 的「【表情: 惊讶】」与 19:41:53 的「【表情: OK】」合成
+       * 一轮，日记只记了后者，前者下一轮被当缺口重念一遍。
+       *
+       * `payload.id` **保持最后一条**：被动回复窗口、日记主键、幂等都靠它。
+       */
+      if (Array.isArray(batch.items)) {
+        const ids = batch.items
+          .map((it) => String(it?.eventId ?? '').trim())
+          .filter(Boolean);
+        if (ids.length) payload.eventIds = ids;
+      }
     }
     /**
      * 对外静默窗口：这段内**只有主人叫得醒她**，别人的 @ / 引用 / 唤醒词 /
@@ -6370,25 +6405,33 @@ export function apply(ctx) {
   }
 
   /**
-   * 「刚才说到」的缺口查询：账本里有、模型却没见过的那几条。
+   * 「刚才说到」的缺口查询：账本里有、模型却没见过的那些。
    *
-   * 对账靠 `journal` 的 `eventIds`——它记的是「这一轮真投喂过哪几条消息」
-   * （`journal-bridge.js:333`）。这些 id 是框架的 `msg.eventId`，而那个值
-   * 就是账本主键（`bot.js:1145` 的 `msg.eventId = rec.id`，
-   * `ledger.js:233` 的 `crypto.randomUUID()`）。所以拿 `gap()` 的
-   * **`eventId`** 去比，「账本里有、`eventIds` 里没有」就等于模型确实没见过，
-   * **不需要维护任何游标**，重启也不丢（内存游标重启就空，表现为「重启后
-   * 第一次不补」）。
+   * 对账靠两样东西，缺一不可：
    *
-   * 拿 `msgId`（QQ 官方的 `ROBOT1.0_…`）比会**永远对不上**，两个集合
-   * 永不相交——那样每一条都算「没见过」，每轮把最近几条账本当缺口重塞一遍。
+   *   ① **日记 `eventIds`**（`journal-bridge.js`）——记的是「这一轮真投喂过
+   *      哪几条消息」。这些 id 是框架的 `msg.eventId`，而那个值就是账本主键
+   *      （`bot.js:1145` 的 `msg.eventId = rec.id`，`ledger.js:233` 的
+   *      `crypto.randomUUID()`）。所以拿 `gap()` 的 **`eventId`** 去比。
+   *      拿 `msgId`（QQ 官方的 `ROBOT1.0_…`）比会**永远对不上**，两个集合
+   *      永不相交，那样每一条都算「没见过」。
+   *
+   *   ② **水位线 `gapMark`**——补出去的那几条不会回到日记的 `eventIds`，
+   *      光靠 ① 的话它们下一轮还是「没见过」，缺口永远合不上。真实表现
+   *      （2026-11-25）：群里聊到 seq 2067，注入块死死卡在 2048–2055 那 8 条。
+   *      所以「露过就算见过」，只取 `seq` 高于水位的行，拼出去后再推水位。
    *
    * 覆盖范围正是账本比日记多的那部分：群里没叫她的消息、机器人自己的回复。
    *
-   * 返回正序（老的在前），最多 `limit` 条。查不到一律空数组——这块是增强，
-   * 账本没开 / 没库不能影响正常回话。
+   * @param {string} chatId
+   * @param {number} limit 最多几条
+   * @param {string} [query] 这一句原话（开相关度闸门时用来挑）
+   * @param {boolean} [commit] 这批是否**真的拼进了上下文**。面板 `/mind` 预览
+   *   传 false——看一眼不该把缺口消费掉，否则主人翻一次面板，真注入时就空了。
+   * @returns {any[]} 正序（老的在前）。查不到一律空数组——这块是增强，
+   *   账本没开 / 没库不能影响正常回话。
    */
-  function recentGapRows(chatId, limit, query = '') {
+  function recentGapRows(chatId, limit, query = '', commit = false) {
     try {
       if (!ledgerRead.available()) return [];
       /**
@@ -6409,19 +6452,38 @@ export function apply(ctx) {
         for (const id of r.eventIds || []) if (id) seen.add(String(id));
         lastSeenAt = Math.max(lastSeenAt, Number(r.at) || 0);
       }
+      /** 上一次露到哪儿。**低于它的不用再看**，见函数头 ② */
+      const mark = gapMark.get(chatId);
       /**
        * 多取一些再筛：`seen` 很可能把最近几条全盖住，只取 `limit` 条会
        * 筛完一个不剩，而真实缺口其实在更早的位置。
        */
       const rows = ledgerRead.gap({ chatId, limit: 30 });
       const fresh = rows.filter((x) => {
+        if (Number(x.seq) <= mark) return false;
         if (x.eventId && seen.has(x.eventId)) return false;
         if (x.self && lastSeenAt && x.at <= lastSeenAt) return false;
         return true;
       });
-      if (fresh.length <= limit) return fresh.slice(-limit);
+      /**
+       * 挑完再推水位——**推的是挑中的最大值**，不是 `rows` 的最大值：
+       * 只在 `fresh` 非空时才推，缺口为空时水位原地不动（没露就别记）。
+       */
+      const commitMark = (picked) => {
+        if (!commit || !picked.length) return;
+        gapMark.set(chatId, Math.max(...picked.map((x) => Number(x.seq) || 0)));
+      };
+      if (fresh.length <= limit) {
+        const picked = fresh.slice(-limit);
+        commitMark(picked);
+        return picked;
+      }
       /** 缺口没多到要挑，或者用户没开闸门：直接取最近几条 */
-      if (cfg.recall?.recentRerank !== true) return fresh.slice(-limit);
+      if (cfg.recall?.recentRerank !== true) {
+        const picked = fresh.slice(-limit);
+        commitMark(picked);
+        return picked;
+      }
       /**
        * 缺口攒多了（比如一整夜没人叫她）才需要挑。
        *
@@ -6437,7 +6499,9 @@ export function apply(ctx) {
         .sort((a, b) => (b.s - a.s) || (a.i - b.i))
         .slice(0, Math.max(0, limit - keepRecent))
         .map((x) => x.r);
-      return [...picked, ...tail].sort((a, b) => a.seq - b.seq);
+      const out = [...picked, ...tail].sort((a, b) => a.seq - b.seq);
+      commitMark(out);
+      return out;
     } catch (e) {
       log.debug(`缺口查询失败：${e.message}`);
       return [];
@@ -6491,15 +6555,26 @@ export function apply(ctx) {
   }
 
   /**
-   * 【刚才说到】取哪一段：先对账，没有缺口才退回日记。
+   * 【刚才说到】取哪一段：缺口优先，不够用日记补足到 `recentLimit` 条。
    *
-   * 两条路都吃 `recentLimit` 条、共用 `recentMax` 预算：
-   *   · 有缺口 → 账本补齐（含未 @ 的群消息、含机器人自己的话）
-   *   · 无缺口 → 日记最近几条（模型本来就在上下文里，这段只是提醒）
+   * 两条路的分工（2026-11-25 修）：
+   *   · 缺口（账本有、日记 `eventIds` 没有）→ **优先**，模型上下文里确实没有；
+   *   · 日记最近几条 → 只用来把条数凑到 `recentLimit`，顺带给指代锚点。
    *
-   * `recentLimit = 0` 时整块不出现，用户想要「完全不要这一段」有这个开关。
+   * **以前是二选一**：`gap.length ? gap : journal.recent()`。于是缺口只有
+   * 1 条时，注入块就真的只给 1 条，`recentLimit: 8` 从来没兑现过——
+   * 模型看到一行「· 某某：【表情: 惊讶】」，「那个」「上面说的」全成了空指代。
+   *
+   * **两路都要按本轮正文去重**：写日记在前（`journalAdd`）、拼注入在后，
+   * 所以「日记最近 8 条」的第一条永远就是本轮刚写的那句；合并批更糟，
+   * 一次进来两条消息时日记只记到最后一条的 eventId，另一条被当成缺口
+   * 又补一遍，跟正文一字不差地重复。
+   *
+   * @param {boolean} [commit] 这一轮是否真注入（决定要不要推进水位线）。
+   *   面板 `/mind` 预览必须传 false：看一眼不该把缺口消费掉。
+   * @param {string} [bodyText] 本轮要投喂的正文，用来剔重复。
    */
-  function recentSection(chat, bucket = '', query = '') {
+  function recentSection(chat, bucket = '', query = '', commit = false, bodyText = '') {
     const chatId = chat?.chatId || '';
     const limit = Math.max(0, Math.min(Number(cfg.recall?.recentLimit ?? 8), 20));
     if (!limit) return '';
@@ -6511,10 +6586,16 @@ export function apply(ctx) {
      * **真实注入不会为空**：`onInbound` 一定有 chat；而且账本缺口查询
      * 在空 chatId 时直接返回空数组，不会跨群捞消息。
      */
-    const gap = chatId ? recentGapRows(chatId, limit, query) : [];
-    const body = gap.length
-      ? renderRecentSection(gap)
-      : renderRecentSection(journal.recent(chatId, limit, 'chat', aliasesOf(chatId)).reverse());
+    const gap = chatId ? recentGapRows(chatId, limit, query, commit) : [];
+    /**
+     * 缺口自己够数就不用查日记（`mergeRecentRows` 会在够数后直接返回）。
+     * 这条短路是常规路径：群里攒了一夜的缺口一次补齐，省一次全表扫描。
+     */
+    const journalRows = gap.length >= limit
+      ? []
+      : journal.recent(chatId, limit, 'chat', aliasesOf(chatId));
+    const rows = mergeRecentRows({ gap, journalRows, limit, bodyText });
+    const body = renderRecentSection(rows);
     if (!body) return '';
     /**
      * 只在真有工具的那一轮提示翻页。`next` 空串表示账本到头了——这句
@@ -6534,8 +6615,13 @@ export function apply(ctx) {
    * 走的是和压缩开场同一个位置（`onInbound` 里拼在正文前）。
    *
    * 「刚才说到」必须留着：上下文一压缩，`那个`/`上面第二个` 就没了指代对象。
+   *
+   * @param {boolean} [commit] 这一轮是否**真注入**。真注入才推进缺口水位线；
+   *   面板 `/mind` 预览、诊断接口一律 false（见 `recentGapRows`）。
+   * @param {string} [bodyText] 本轮要投喂的正文。透传给 `recentSection`
+   *   剔重复——**只有真注入那条路径有正文**，面板预览不传（它没有正文）。
    */
-  function memoryDynamic(bucket = lastBucket, chat = null, query = '') {
+  function memoryDynamic(bucket = lastBucket, chat = null, query = '', commit = false, bodyText = '') {
     /**
      * 同 `memoryStatic`：会话必须由调用方给。这一段里「刚才说到」是
      * 账本 / 日记的**原文**，读错会话等于把别的群的聊天记录
@@ -6547,7 +6633,7 @@ export function apply(ctx) {
 
     let recentSec = '';
     try {
-      recentSec = recentSection(chat, bucket, query);
+      recentSec = recentSection(chat, bucket, query, commit, bodyText);
     } catch {}
 
     let hitSec = '';
@@ -6598,9 +6684,18 @@ export function apply(ctx) {
    *
    * `query` 只给面板预览用：透传给近段的「相关度闸门」，让预览和真实注入
    * 排出来的顺序一致。不传 = 空串，退化成时间顺序（原有行为）。
+   *
+   * `commit` 透传给缺口水位线：面板预览传 false（看一眼不该消费缺口）；
+   * 唯一的例外是 `memory.freezeSystem === false` 那条老路径——它是真注入，
+   * 由调用方显式传 true。
    */
-  function memoryText(chat = null, deepOverride = null, opts = {}, query = '') {
-    return [memoryStatic(chat, deepOverride, opts), memoryDynamic(lastBucket, chat, query)].filter(Boolean).join('\n\n');
+  function memoryText(chat = null, deepOverride = null, opts = {}, query = '', commit = false) {
+    /**
+     * 这条路径（`memory.freezeSystem === false`）把易变段塞进 **system prompt**，
+     * 那一刻手里没有正文，所以不传 `bodyText`——去重对它是关的。
+     * 这是用户显式退回旧行为的配置，接受这块不做去重。
+     */
+    return [memoryStatic(chat, deepOverride, opts), memoryDynamic(lastBucket, chat, query, commit)].filter(Boolean).join('\n\n');
   }
 
   /**
@@ -8339,9 +8434,12 @@ export function apply(ctx) {
            * 易变段（刚才说到 / 命中 / 条数）走 `memoryDynamic()` 拼进用户消息，
            * 否则 system prompt 每轮都不一样，prompt cache 轮轮作废。
            * `freezeSystem: false` 可以退回旧行为（全塞 system prompt）。
+           *
+           * 这条老路径也是**真注入**（`text()` 每轮现算），所以末位传 `true`
+           * 推进缺口水位线；否则补过的老消息会一直算缺口，每轮重念一遍。
            */
           text: () => (cfg.memory?.freezeSystem === false
-            ? memoryText(chat, null, { live: true })
+            ? memoryText(chat, null, { live: true }, '', true)
             : memoryStatic(chat, null, { live: true })),
         }),
       );
@@ -8919,8 +9017,15 @@ export function apply(ctx) {
         /**
          * 第三个参数是这一句原话：缺口攒多了要靠它挑「相关的」，
          * 没开相关度闸门时用不上。
+         *
+         * 第四个参数是「真注入」：只有这条路径才能推进缺口水位线。
+         * 面板 `/mind` 走的是 `memoryText`，传 false——预览不该消费缺口。
+         *
+         * 第五个参数是正文本身：`recentSection` 拿它剔重复（写日记在本函数
+         * 之前，所以「日记最近几条」的第一条永远是本轮这句；合并批还会因
+         * 日记只记了一个 eventId 而把同批另一条当缺口重补一遍）。
          */
-        const dyn = memoryDynamic(bucket, chat, text);
+        const dyn = memoryDynamic(bucket, chat, text, true, text);
         if (dyn) text = `${dyn}\n\n${text}`;
       }
 
