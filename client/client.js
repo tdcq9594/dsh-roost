@@ -8472,7 +8472,7 @@ window.__ModuleLoader__.load({
           h('span', { style: { fontSize: 12.5, fontWeight: 600 } }, label),
           hint ? h('span', { className: 'roost-muted', style: { fontSize: 11, marginLeft: 8 } }, hint) : null),
         children)
-      return h(Sec, { n: '09', title: '她在琢磨什么', right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新') },
+      return h(Sec, { n: '10', title: '她在琢磨什么', right: h('button', { type: 'button', className: 'roost-btn', onClick: load }, '刷新') },
         h('div', { className: 'roost-note', style: { marginBottom: 14, lineHeight: 1.7 } },
           '这是主动搭话的「想法」一面：她从聊天和记忆里攒线索、立目标假设，到点了才找你开口。'
           + '点「预览会想什么」拿本地聊天现算一轮（零副作用）；「立即试一次」会真发消息。'),
@@ -9351,7 +9351,7 @@ window.__ModuleLoader__.load({
         } finally { setBusy(false) }
       }
       const tone = view?.tone === 'ok' ? 'var(--ok)' : view?.tone === 'bad' ? 'var(--danger)' : 'var(--warn)'
-      return h(Sec, { n: '10', title: '主动发言出站策略' },
+      return h(Sec, { n: '11', title: '主动发言出站策略' },
         h('div', { className: 'roost-note', style: { marginBottom: 12, lineHeight: 1.7 } },
           '决定扩展模块能不能直接私聊你。'
           + '不纳管 = 照旧直接发；门闸 = 发前先问目的引擎，它说不合适就不发。'),
@@ -9797,24 +9797,6 @@ window.__ModuleLoader__.load({
               },
             })),
           /**
-           * 朋友白名单（P3）：除主人外，她也可以主动搭话的私聊对象。
-           * 每人独立素材/目标/排程，不占主人的每日额度；空 = 只对主人开口。
-           */
-          h('label', { style: { display: 'block', marginTop: 10, fontSize: 12 } },
-            '也可以主动搭话的朋友（一行一个 openid，空 = 只找你）：',
-            h('textarea', {
-              className: 'roost-input', rows: 2, style: { width: '100%', marginTop: 4, resize: 'vertical', fontSize: 12 },
-              value: (Array.isArray(config?.speakUp?.allow) ? config.speakUp.allow : []).join('\n'),
-              placeholder: '比如：\n3F2A8C1D5E7B9F0A',
-              onBlur: async (e) => {
-                const list = String(e.target.value || '').split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 10)
-                const cur = (Array.isArray(config?.speakUp?.allow) ? config.speakUp.allow : []).join('\n')
-                if (list.join('\n') === cur) return
-                const r = await saveCfg({ speakUp: { ...(config?.speakUp || {}), allow: list } })
-                toast(r?.ok === false ? (r.message || '没存上') : (list.length ? `朋友名单存好了（${list.length} 人）` : '已清空，只找你'))
-              },
-            })),
-          /**
            * 主动节奏：下面这些键**后端真读**，只是以前只有只读文本、没控件。
            * 清醒时段/沉默时长/随性上限读 awake.*，一天上限与间隔读 speakUp.*
            * （speakup.js:91/149/150）。idleMinutes 在我方确实是死键，不补。
@@ -9891,7 +9873,31 @@ window.__ModuleLoader__.load({
           ),
         ),
 
-        h(Sec, { n: '06', title: '群聊主动（默认全关）' },
+        /**
+         * 朋友白名单（P3）：从「小闹钟与追问」里独立出来——它和闹钟/追问没关系，
+         * 是「除主人外还能主动找谁」。编号 05b 避免与现有 06/07/08 撞号。
+         */
+        h(Sec, { n: '06', title: '也可以主动搭话的朋友' },
+          h('div', { className: 'roost-note', style: { marginBottom: 10, lineHeight: 1.6 } },
+            '一行一个 QQ openid（不是群号、不是昵称）。' +
+            '每人独立的素材/目标/排程/每日额度，不占主人的额度；空 = 只找主人。' +
+            '要生效还得先打开「目的引擎」——朋友线跑在它的心跳里。'),
+          h('label', { style: { display: 'block', fontSize: 12 } },
+            '朋友名单（最多 10 人，失焦自动保存）：',
+            h('textarea', {
+              className: 'roost-input', rows: 3, style: { width: '100%', marginTop: 4, resize: 'vertical', fontSize: 12 },
+              value: (Array.isArray(config?.speakUp?.allow) ? config.speakUp.allow : []).join('\n'),
+              placeholder: '比如：\n3F2A8C1D5E7B9F0A',
+              onBlur: async (e) => {
+                const list = String(e.target.value || '').split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 10)
+                const cur = (Array.isArray(config?.speakUp?.allow) ? config.speakUp.allow : []).join('\n')
+                if (list.join('\n') === cur) return
+                const r = await saveCfg({ speakUp: { ...(config?.speakUp || {}), allow: list } })
+                toast(r?.ok === false ? (r.message || '没存上') : (list.length ? `朋友名单存好了（${list.length} 人）` : '已清空，只找主人'))
+              },
+            }))),
+
+        h(Sec, { n: '07', title: '群聊主动（默认全关）' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '群里主动说话极易被踢。四道门全过才会说：白名单显式开 → 有 group_push 授权 → 不在静默时段 → 当天没到上限且真冷场。'),
           groups.length
@@ -9953,7 +9959,7 @@ window.__ModuleLoader__.load({
           ),
         ),
 
-        h(Sec, { n: '07', title: '现在试一次' },
+        h(Sec, { n: '08', title: '现在试一次' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '私聊直接问一次要不要说；群里跑一遍四道门。真发出去会出现在 QQ 上。'),
           h('div', { style: { display: 'flex', gap: 8 } },
@@ -9981,7 +9987,7 @@ window.__ModuleLoader__.load({
             }, '跑一遍群白名单'),
           ),
         ),
-        h(Sec, { n: '08', title: '待确认的主动消息', right: h('button', { type: 'button', className: 'roost-btn', onClick: () => loadDeliv(true) }, '回查一次') },
+        h(Sec, { n: '09', title: '待确认的主动消息', right: h('button', { type: 'button', className: 'roost-btn', onClick: () => loadDeliv(true) }, '回查一次') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '主动消息要过内容审核。进审核时接口只回「待审核」——既不是送到也不是没送到，'
             + '而审核结果推给的是 Roost 那边（持有 QQ 连接那个进程），这边收不到。'
