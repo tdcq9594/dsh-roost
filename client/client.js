@@ -8416,6 +8416,39 @@ window.__ModuleLoader__.load({
      * 只看不写：预览拿本地聊天现算一轮，不落账本、不投递。
      * 展示手法对齐 aurabot 同款卡：链路小卡 → 分区 → 中文驱力条 → 目标两行 → 按钮组。
      */
+    /**
+     * 目的引擎总开关横条（页面最顶）：默认开，未显式 false 即开。
+     * 后端 purposeEnabled() 同口径——关着时 /purpose/fire 409、朋友线不动。
+     */
+    function PurposeEngineBanner({ config, saveCfg, toast, reload }) {
+      const raw = config?.ext?.purpose?.enabled
+      const on = raw !== false && String(raw).toLowerCase() !== 'false'
+      const accent = on ? 'var(--ok)' : 'var(--warn)'
+      return h('div', {
+        style: {
+          marginBottom: 14, padding: '12px 14px', borderRadius: 10,
+          border: `1px solid ${accent}`, borderLeft: `4px solid ${accent}`,
+        },
+      },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+          h('span', { style: { width: 10, height: 10, borderRadius: '50', background: accent } }),
+          h('b', { style: { fontSize: 14, color: accent } }, on ? '目的引擎：已开启（默认）' : '目的引擎：已关闭'),
+          h('button', {
+            type: 'button', className: 'roost-btn', style: { marginLeft: 'auto', fontWeight: 600 },
+            onClick: async () => {
+              const next = !on
+              const r = await saveCfg({
+                ext: { ...(config?.ext || {}), purpose: { ...(config?.ext?.purpose || {}), enabled: next } },
+              })
+              toast(r?.ok === false ? (r.message || '没存上') : (next ? '目的引擎开了' : '目的引擎关了'))
+              await reload()
+            },
+          }, on ? '关掉' : '开启目的引擎')),
+        h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 8, lineHeight: 1.7 } },
+          '这是主动搭话的总入口：开了她才会按自己的目的主动找你（到点跑一轮 → 选目的 → 生成 → 投递）。' +
+          '「也可以主动搭话的朋友」也要开这个才生效。'))
+    }
+
     function PurposeStatusCard({ toast, config, saveCfg }) {
       const [st, setSt] = useState(null)
       const [preview, setPreview] = useState(null)
@@ -8477,39 +8510,9 @@ window.__ModuleLoader__.load({
           '这是主动搭话的「想法」一面：她从聊天和记忆里攒线索、立目标假设，到点了才找你开口。'
           + '点「预览会想什么」拿本地聊天现算一轮（零副作用）；「立即试一次」会真发消息。'),
 
-        /**
-         * 启用目的引擎（P3 强调）：整条主链的入口开关，关着时 /purpose/fire 永远 409、
-         * 朋友线和日额度都不动。以前是个小 checkbox 埋在配置堆里，改成一眼可见的状态横条。
-         */
+        /** 每日上限 + 节奏预设（开关已提到页顶，这里留配置） */
         h('div', { style: { marginBottom: 12, padding: '11px 12px', border: '1px solid var(--line-soft)', borderRadius: 8 } },
-          (() => {
-            const on = config?.ext?.purpose?.enabled === true
-            const accent = on ? 'var(--ok)' : 'var(--warn)'
-            return [
-              h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
-                h('span', { style: { width: 10, height: 10, borderRadius: '50', background: accent } }),
-                h('b', { style: { fontSize: 13.5, color: accent } }, on ? '目的引擎：已开启' : '目的引擎：未开启'),
-                h('button', {
-                  type: 'button', className: 'roost-btn', style: { marginLeft: 'auto', fontWeight: 600 },
-                  onClick: async () => {
-                    const next = !on
-                    const r = await saveCfg({
-                      ext: { ...(config?.ext || {}), purpose: { ...(config?.ext?.purpose || {}), enabled: next } },
-                    })
-                    toast(r?.ok === false ? (r.message || '没存上') : (next ? '目的引擎开了' : '目的引擎关了'))
-                    await load()
-                  },
-                }, on ? '关掉' : '开启目的引擎')),
-              h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 7, lineHeight: 1.6 } },
-                '这是整条主链的入口：开了她才会按自己的目的主动找你。' +
-                '「也可以主动搭话的朋友」也要开这个才生效。'),
-            ]
-          })(),
-          /**
-           * 每日上限 + 节奏预设（前端对照补齐）：对方在目的卡上能直接调，
-           * 我方以前只能看。这里的修改落 ext.purpose，runner 的 cfg() 真读它。
-           */
-          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginTop: 8, fontSize: 12 } },
+          h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', fontSize: 12 } },
             h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 5 } },
               '每天最多',
               h('input', {
@@ -9505,6 +9508,11 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', null,
+        /**
+         * 目的引擎总开关（2026-11-25）：从底部 PurposeStatusCard 提到页面最顶，
+         * 默认开——未显式写 false 就是开，和后端 purposeEnabled() 同一口径。
+         */
+        h(PurposeEngineBanner, { config, saveCfg, toast, reload }),
         h(Sec, {
           title: '互动召回',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadWake }, '刷新'),

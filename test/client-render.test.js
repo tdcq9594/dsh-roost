@@ -3155,7 +3155,7 @@ test('接入步骤：普通分节 + 状态徽章，不再有左侧圆圈和竖�
 
 test('目的引擎每日上限控件写 dailyMax（不是后端不读的 maxPerDay）', () => {
   const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
-  const start = src.indexOf('启用目的引擎');
+  const start = src.indexOf('每日上限 + 节奏预设');
   const end = src.indexOf('链路计数', start);
   assert.ok(start > 0 && end > start, '没找到目的引擎设置区');
   const block = src.slice(start, end);
@@ -3232,16 +3232,33 @@ test('朋友白名单是独立 Sec，不埋在小闹钟与追问区里', () => {
   assert.match(block, /目的引擎/, '说明要点出生效前置条件');
 });
 
-test('目的引擎开关是显眼状态条，不是埋着的小 checkbox', () => {
+test('目的引擎开关是显眼状态条（独立 Banner 组件）', () => {
   const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
-  const start = src.indexOf('启用目的引擎（P3 强调）');
-  assert.ok(start > 0, '要找到强调版开关');
-  const end = src.indexOf('每日上限 + 节奏预设', start);
+  const start = src.indexOf('function PurposeEngineBanner');
+  assert.ok(start > 0, '要有独立 Banner 组件');
+  const end = src.indexOf('function PurposeStatusCard', start);
   const block = src.slice(start, end);
   assert.match(block, /目的引擎：已开启/, '开启态要有大字状态');
-  assert.match(block, /目的引擎：未开启/, '关闭态也要有状态');
+  assert.match(block, /已关闭/, '关闭态也要有状态');
   assert.match(block, /开启目的引擎/, '要有明显按钮');
   assert.match(block, /var\(--ok\).*var\(--warn\)/s, '状态色要区分开关');
   assert.match(block, /朋友.*也要开这个才生效/, '说明要点出朋友线前置条件');
   assert.ok(!/h\('input',\s*\{\s*type: 'checkbox'/.test(block), '不再是小 checkbox');
+});
+test('目的引擎横条在主动搭话页最顶，且默认开（未显式 false 即开）', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  const def = src.indexOf('function PurposeEngineBanner');
+  assert.ok(def > 0, '要有独立横条组件');
+  const banner = src.slice(def, src.indexOf('function PurposeStatusCard', def));
+  /** 默认开：只有显式 false 或字符串 "false" 才算关 */
+  assert.match(banner, /raw !== false && String\(raw\)\.toLowerCase\(\) !== 'false'/, '默认开口径');
+  assert.match(banner, /已开启（默认）/, '状态文案点明默认');
+  /** 位置：挂在 AwakeTab return 的第一个 child（互动召回 Sec 之前） */
+  const mount = src.indexOf('h(PurposeEngineBanner, { config, saveCfg, toast, reload })');
+  const wake = src.indexOf("title: '互动召回'", mount);
+  const firstSec = src.indexOf("h(Sec, { n: '01'", mount);
+  assert.ok(mount > 0 && wake > mount && firstSec > wake, '横条要在页顶、互动召回和 01 之前');
+  /** 老位置不该还留着开关 */
+  const status = src.slice(src.indexOf('function PurposeStatusCard'), src.indexOf('function AutotelicCard'));
+  assert.ok(!/h\(PurposeEngineBanner/.test(status), '底部卡不再重复挂开关');
 });

@@ -2760,3 +2760,22 @@ test('路由：/faces 已下线（不再发小黄脸，面板也没有入口）'
   assert.doesNotMatch(host, /route\('\/faces'/, '码表路由该删干净');
   assert.doesNotMatch(client, /get\('\/faces'/, '面板不该再去要码表');
 });
+
+test('目的引擎默认开：没写 ext.purpose.enabled 时不该报「没启用」', async () => {
+  const { call, off } = await bootHost();
+  try {
+    const r = await call('/purpose/fire', { method: 'POST' });
+    /** 没配主人→可能失败，但绝不能是「没启用」那道闸 */
+    assert.notEqual(r.json?.message, '目的引擎没启用（ext.purpose.enabled）', '默认该开');
+    assert.notEqual(r.status, 409, '不该被开关挡住');
+  } finally { off?.(); }
+});
+
+test('目的引擎显式关：ext.purpose.enabled=false 时 /purpose/fire 409', async () => {
+  const { call, off } = await bootHost({ ext: { purpose: { enabled: false } } });
+  try {
+    const r = await call('/purpose/fire', { method: 'POST' });
+    assert.equal(r.status, 409);
+    assert.match(r.json?.message || '', /没启用/);
+  } finally { off?.(); }
+});
