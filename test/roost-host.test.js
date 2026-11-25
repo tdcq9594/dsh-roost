@@ -888,19 +888,26 @@ test('事件通道：降级 SSE 是暂时的——WS 恢复后会切回去', asy
     token: () => 'tk',
     transport: 'auto',
     loadWs: async () => ({ WebSocket: FlakyWS }),
-    /**
-     * 把 5 分钟冷却压到 400ms，否则这条测试要等 5 分钟。
-     * 别压到几十毫秒：全量跑时测试文件是并发调度的，冷却在 SSE 建立之前
-     * 就过去的话，WS 会先重连成功，`sseHits` 永远是 0（2026-11-14 实测偶发）。
-     */
-    wsRetryCooldownMs: 400,
+  /**
+   * 把 5 分钟冷却压到 1.5s，否则这条测试要等 5 分钟。
+   * 别压到几十毫秒：全量跑时测试文件是并发调度的，冷却在 SSE 建立之前
+   * 就过去的话，WS 会先重连成功，`sseHits` 永远是 0（2026-11-14 实测偶发）。
+   * 留 1.5s 还为了慢机上「SSE 已命中 → 断言跑完」这段不被 WS 重试抢跑。
+   */
+  wsRetryCooldownMs: 1500,
     onState: () => {},
     log: () => {},
   });
   t.after(() => host.stop());
   host.start();
 
-  await waitFor(() => host.connected);
+  /**
+   * 不能只等 `host.connected`：第一次 WS 可能先收到 welcome 把 connected 置真，
+   * 随后 error 才把通道切到 SSE；这个窗口里 SSE 请求还没发出，`sseHits` 仍是 0。
+   * 全量并发跑时窗口被放大，就是 2026-11-14 注释里记的那次偶发。
+   * 等「已切 SSE 且真的打了一次 /events」再断言，才没有竞态。
+   */
+  await waitFor(() => host.status().transport === 'sse' && sseHits >= 1, 8000);
   assert.equal(host.status().transport, 'sse', '第一次 WS 失败应先落到 SSE');
   assert.ok(sseHits >= 1);
 

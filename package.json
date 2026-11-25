@@ -55,6 +55,7 @@
     "README.md",
     "docs",
     "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
     "examples",
     "scripts/build-ext-docs.mjs"
   ],

@@ -111,6 +111,34 @@ test('工具：两个都注册了，名字对', () => {
   assert.deepEqual(defs.map((d) => d.name).sort(), ['qq_close', 'qq_send']);
 });
 
+test('双手：没注入 handOf 就不注册，注入后注册并转调', async () => {
+  /** 高风险能力默认不出现；宿主没接线时不该给模型一个「调了必然失败」的壳子 */
+  const bare = buildQqToolDefs({});
+  assert.equal(bare.some((d) => d.name === 'autotelic_run_python'), false);
+  assert.equal(bare.some((d) => d.name === 'autotelic_write_module'), false);
+
+  const calls = [];
+  const defs = buildQqToolDefs({
+    handOf: {
+      python: async (code) => { calls.push(['python', code]); return { ok: true, message: '跑完了' }; },
+      module: (id, code) => { calls.push(['module', id, code]); return { ok: true, message: '写好了' }; },
+    },
+  });
+  const py = defs.find((d) => d.name === 'autotelic_run_python');
+  const mod = defs.find((d) => d.name === 'autotelic_write_module');
+  assert.ok(py, '接了就注册 autotelic_run_python');
+  assert.ok(mod, '接了就注册 autotelic_write_module');
+
+  const a = await py.execute({ code: 'print(1)' });
+  const b = await mod.execute({ id: 'ok-mod', code: 'export default {}' });
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  assert.deepEqual(calls, [
+    ['python', 'print(1)'],
+    ['module', 'ok-mod', 'export default {}'],
+  ], '参数原样交给宿主，工具不自己执行');
+});
+
 test('工具：都有 parameters 和 execute', () => {
   const { defs } = make();
   for (const d of defs) {
