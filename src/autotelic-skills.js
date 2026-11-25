@@ -523,12 +523,20 @@ export function createSkillStore(root, opts = {}) {
 /** 模块源码上限（与对方一致） */
 const MAX_MODULE_CODE = 256 * 1024
 const MODULE_ID_RE = /^[a-z][a-z0-9-]{1,39}$/
+/**
+ * 模块只写不加载：框架里没有 loader 会 import 它。所以不猜 import 路径，
+ * 而是禁掉一切模块加载语法——静态 import、动态 import()、export ... from、
+ * require / createRequire 全拒。宁可误拒（注释里出现这些词也拒），
+ * 不放越界口子。真要加载模块时，必须另做白名单 loader + 测试，不能只靠这条。
+ */
+const MODULE_LOADER_RE = /\b(?:import|require|createRequire)\b|\bexport\b(?!\s+default\b)|\bmodule\.exports\b/
 
 /**
  * 给她写一个用户模块。**安全边界**（改前必读）：
  *   · id 必须是「小写字母开头、小写字母/数字/-、2~40 字」；
- *   · 入口必须 `export default`（否则模块系统加载不了）；
- *   · **禁止 `../` 越级 import**——她写不到框架 src/，这是硬边界；
+ *   · 入口必须 `export default`（当前不加载，但契约先固定）；
+ *   · **禁止一切 import / require**——模块只写不加载，辅助代码只能写在同一个文件里；
+ *     这是静态门禁，不是运行时沙箱；将来真要加载模块，必须另做白名单 loader + 测试；
  *   · 只能落在传入的 dir（调用方给 `<数据目录>/modules`），不碰别处。
  * 写坏了只影响这个模块自己，不会动到框架。
  */
@@ -537,8 +545,9 @@ export function writeUserModule({ dir, id, code } = {}) {
   if (!MODULE_ID_RE.test(key)) return { ok: false, why: `模块 id「${key}」不对：小写字母开头，小写字母/数字/-，2~40 字` }
   if (typeof code !== 'string' || !code.includes('export default')) return { ok: false, why: '入口文件必须 export default 一个模块对象' }
   if (code.length > MAX_MODULE_CODE) return { ok: false, why: '模块太大（>256KB）' }
-  /** 越级 import 是唯一能摸到框架的路径，直接拒 */
-  if (/from\s+['"](\.\.\/)+/.test(code)) return { ok: false, why: '不许 import 用户模块目录外面的东西（src/ 对她锁死）' }
+  /** 模块只写不加载；任何加载语法都拒（见 MODULE_LOADER_RE 上方说明） */
+  const loader = MODULE_LOADER_RE.exec(code)
+  if (loader) return { ok: false, why: `模块里不许用 ${loader[0]}（模块只写不加载，辅助代码写在同一个文件里）` }
   if (!dir) return { ok: false, why: '拿不到用户模块目录' }
   const file = join(dir, key, 'index.mjs')
   try {

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSkillStore } from '../src/autotelic-skills.js';
+import { createSkillStore, writeUserModule } from '../src/autotelic-skills.js';
 
 const mk = (opts = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'skills-'));
@@ -62,4 +62,44 @@ test('同一终态重复记账幂等，不重复加分', async () => {
     const s2 = store.get('整理')?.score;
     assert.equal(s2, s1, '同一终态重放不该重复加分');
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('writeUserModule：只写不加载，任何 import/require 都拒', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'modules-'));
+  try {
+    /** 合法模块：只有一个 default 导出，不碰任何加载语法 */
+    const ok = writeUserModule({ dir, id: 'ok-mod', code: 'export default { name: "ok" }' });
+    assert.equal(ok.ok, true);
+    assert.ok(existsSync(join(dir, 'ok-mod', 'index.mjs')));
+    assert.ok(ok.file.startsWith(dir), '只能落在传入的模块目录');
+
+    /**
+     * 每一类都曾经能绕过旧的正则（只挡静态 `from '../'`）。
+     * 现在统一按「模块只写不加载」拒掉：不猜路径，直接禁加载语法。
+     */
+    const cases = [
+      ['静态相对', 'import h from "../../../src/host.js"; export default {}'],
+      ['动态 import', 'const m = await import("../../../src/host.js"); export default {}'],
+      ['绝对路径', 'import m from "C:/Windows/win.ini"; export default {}'],
+      ['node 内置', 'import fs from "node:fs"; export default {}'],
+      ['裸包', 'import x from "lodash"; export default {}'],
+      ['export from', 'export * from "../../src/host.js"; export default {}'],
+      ['require', 'const fs = require("fs"); export default {}'],
+      ['createRequire', 'const { createRequire } = process.getBuiltinModule("node:module"); export default {}'],
+      ['module.exports', 'module.exports = {}; export default {}'],
+    ];
+    cases.forEach(([label, code], i) => {
+      const r = writeUserModule({ dir, id: `bad-${i}`, code });
+      assert.equal(r.ok, false, `${label} 必须被拒`);
+    });
+
+    /** 原有边界不能因为换校验一起丢掉 */
+    assert.equal(writeUserModule({ dir, id: '../evil', code: 'export default {}' }).ok, false, '坏 id');
+    assert.equal(writeUserModule({ dir, id: 'no-def', code: 'const x = 1' }).ok, false, '缺 default 导出');
+    assert.equal(
+      writeUserModule({ dir, id: 'huge', code: `export default {}${'x'.repeat(256 * 1024)}` }).ok,
+      false,
+      '超过 256KB',
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
