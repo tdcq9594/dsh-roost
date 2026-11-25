@@ -960,6 +960,13 @@ export function apply(ctx) {
    */
   const masterOff = () => isOff(cfg.enabled);
   /**
+   * 目的引擎开关（2026-11-25 改成默认开）：
+   * 没写过 ext.purpose.enabled 的老配置 = 开；只有显式 false/"false" 才是关。
+   * 不写进 DEFAULTS.ext——那里必须是空对象，否则 pruneTo 会丢掉其他扩展的配置（历史 P0）。
+   * 判据复用 isOff：手改 config.json 写字符串 "false" 也能正确关掉。
+   */
+  const purposeEnabled = () => !isOff(cfg.ext?.purpose?.enabled);
+  /**
    * 断线冷却：最后一次 `NETWORK` 失败之后 2 分钟内，定时器先别试。
    *
    * **不用 `roost.status().connected` 当总闸**：那个只代表事件流（WS/SSE 收到
@@ -2990,7 +2997,7 @@ export function apply(ctx) {
     busy: () => {
       try { const o = String(ownerId() || ''); return Boolean(o && turnQueue?.isBusy(o)); } catch { return false; }
     },
-    enabled: () => cfg.ext?.purpose?.enabled === true,
+    enabled: purposeEnabled,
     paused,
     log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
   });
@@ -3025,7 +3032,7 @@ export function apply(ctx) {
   const purposePolicyEngine = {
     name: 'purpose',
     env: () => ({
-      enabled: cfg.ext?.purpose?.enabled === true,
+      enabled: purposeEnabled(),
       paused: typeof paused === 'function' ? paused() : false,
     }),
     state: () => {
@@ -3039,7 +3046,7 @@ export function apply(ctx) {
     }),
     markPurposeDelivered: (state, opts) => markPurposeDelivered(state, opts),
   };
-  if (cfg.ext?.purpose?.enabled === true) {
+  if (purposeEnabled()) {
     const purposeOutboundPolicy = createPurposePolicy({
       getConfig: outboundConfig,
       engine: purposePolicyEngine,
@@ -9402,7 +9409,7 @@ export function apply(ctx) {
        * 它自带 enabled 闸门（evaluatePurposeTick 里第一道），关着时只读状态不跑模型；
        * 独立 try：目的引擎出错不该影响自驱心跳。
        */
-      if (cfg.ext?.purpose?.enabled === true) {
+      if (purposeEnabled()) {
         purposeRunner.tick().catch((e) => log.warn(`目的心跳失败：${e?.message || e}`));
         /**
          * 朋友线（P3）：每人独立排程/额度/素材，串行跑（一次一个，避免同时开多个会话）。
@@ -14835,7 +14842,7 @@ export function apply(ctx) {
       route('/purpose/fire', async (req, res) => {
         if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再试' });
         if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
-        if (cfg.ext?.purpose?.enabled !== true) {
+        if (!purposeEnabled()) {
           return send(res, 409, { ok: false, message: '目的引擎没启用（ext.purpose.enabled）' });
         }
         try {
