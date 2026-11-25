@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   formGoalHypotheses, goalToCandidate, DEFAULT_DRIVES, PURPOSE_NEEDS,
-  updateObservations, applyGoalFeedback, GOAL_STATUSES,
+  updateObservations, applyGoalFeedback, GOAL_STATUSES, deriveDrives,
 } from '../src/purpose-engine.js';
 
 const persona = { hasText: false, traits: [], text: '', bias: {} };
@@ -88,4 +88,29 @@ test('主人反馈结算：确认/拒绝改变目标状态，不改状态词表'
   const next = applyGoalFeedback(made.goals, [], now, stats);
   assert.ok(Array.isArray(next));
   assert.ok(next.every((g) => GOAL_STATUSES.includes(g.status)), '状态仍在六态词表内');
+});
+
+test('deriveDrives（P0 第三批）：半衰回归默认、久不联系抬 connect、素材推高对应需要', () => {
+  const now = 1e12;
+  /** ① 半衰：极端值在长时间后回到默认附近 */
+  const far = deriveDrives({ drives: { ...DEFAULT_DRIVES, play: 1 }, drivesAt: now - 48 * 3600_000, now });
+  assert.ok(Math.abs(far.drives.play - DEFAULT_DRIVES.play) < 0.05, '48h 后应接近默认');
+
+  /** ② 久不联系：connect 抬高 */
+  const lonely = deriveDrives({ drives: { ...DEFAULT_DRIVES }, drivesAt: now, now, lastMasterAt: now - 48 * 3600_000 });
+  const fresh = deriveDrives({ drives: { ...DEFAULT_DRIVES }, drivesAt: now, now, lastMasterAt: now });
+  assert.ok(lonely.drives.connect > fresh.drives.connect, '久不联系 connect 更高');
+
+  /** ③ 素材刺激：游戏类素材推高 play */
+  const before = deriveDrives({ drives: { ...DEFAULT_DRIVES }, drivesAt: now, now });
+  const after = deriveDrives({
+    drives: { ...DEFAULT_DRIVES }, drivesAt: now, now,
+    materials: [{ title: '好玩的游戏推荐', text: '这个游戏超好玩' }],
+  });
+  assert.ok(after.drives.play > before.drives.play, '游戏素材推高 play');
+
+  /** ④ 全部钳在 0~1 */
+  for (const need of PURPOSE_NEEDS) {
+    assert.ok(after.drives[need] >= 0 && after.drives[need] <= 1, `${need} 越界`);
+  }
 });

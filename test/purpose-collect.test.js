@@ -1,7 +1,7 @@
 // 目的引擎素材接线：形状映射与归属标注。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { collectPurposeMaterials } from '../src/purpose-collect.js';
+import { collectPurposeMaterials, collectBiliMaterials } from '../src/purpose-collect.js';
 
 const T = 1_700_000_000_000;
 
@@ -33,4 +33,22 @@ test('素材映射：短文本丢弃、同 id 去重、按时间倒序、限条�
   assert.equal(out[0].id, 'z', '按时间倒序取最新');
   const all = collectPurposeMaterials({ journalRows: rows, now: T });
   assert.equal(all.length, 2, '短文本与重复 id 都被丢掉');
+});
+
+test('B 站素材：ui-data rows → materials，标题/作者/播放量拼成一句', () => {
+  const rows = [
+    { title: 'AI 续写爱情公寓', author: 'Nero', playText: '825.3万', area: '预告·资讯', url: 'https://www.bilibili.com/video/BV1atse6EEfx', at: 1000 },
+    { title: '', author: 'x', url: 'u', at: 2000 },
+    { title: 'AI 续写爱情公寓', author: 'Nero', playText: '825.3万', area: '预告·资讯', url: 'https://www.bilibili.com/video/BV1atse6EEfx', at: 1000 },
+  ];
+  const out = collectBiliMaterials({ rows, now: 3000 });
+  assert.equal(out.length, 1, '空标题丢弃 + 同 url 去重');
+  const m = out[0];
+  assert.equal(m.source, 'bili');
+  assert.equal(m.kind, 'media');
+  assert.match(m.text, /AI 续写爱情公寓/);
+  assert.match(m.text, /UP Nero/);
+  assert.match(m.text, /825\.3万播放/);
+  assert.equal(m.meta.url, 'https://www.bilibili.com/video/BV1atse6EEfx');
+  assert.deepEqual(collectBiliMaterials({ rows: null }), []);
 });

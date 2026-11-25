@@ -284,15 +284,25 @@ import { simulate, SIM_PERSONAS } from './simulate.js';
 import { buildExtension, formatScaffold } from './ext-wizard.js';
 import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
 import { polishText, POLISH_PRESETS } from './persona-polish.js';
-import { createAutotelic } from './autotelic.js';
+import { createAutotelic, TUNABLE } from './autotelic.js';
 import { createPurposeState } from './purpose-state.js';
-import { createDecisionLog } from './autotelic-decisions.js';
-import { createPlanner } from './autotelic-planner.js';
+import { createDecisionLog, verifyDecisionLog } from './autotelic-decisions.js';
+import { createPlanner, reviewRound } from './autotelic-planner.js';
 import { createExecV5 } from './autotelic-exec.js';
 import { createFeedback } from './autotelic-feedback.js';
 import { createSkillStore } from './autotelic-skills.js';
+import { createReminderStore } from './reminder-store.js';
+import { readdirSync } from 'node:fs';
+import { createNudgeStore, judgeNudge, nudgePrompt } from './nudge.js';
+import { createTakeoverStore } from './takeover.js';
+import { runPython, probePython, loadEnvCache, saveEnvCache, envUsable } from './autotelic-python.js';
+import { writeUserModule } from './autotelic-skills.js';
 import { formGoalHypotheses, goalToCandidate, DEFAULT_DRIVES } from './purpose-engine.js';
-import { collectPurposeMaterials } from './purpose-collect.js';
+import { collectPurposeMaterials, collectBiliMaterials } from './purpose-collect.js';
+import { createPurposeRunner } from './purpose-run.js';
+import { createObserve } from './autotelic-observe.js';
+import { createSchedule } from './autotelic-schedule.js';
+import { createBook } from './autotelic-book.js';
 import { buildFollowUpCandidates } from './followup-candidate.js';
 import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
 import { createUiActionQueue } from './ext-ui-actions.js';
@@ -1845,6 +1855,99 @@ export function apply(ctx) {
   timers.every(() => { if (paused()) return; speakUp.tick().catch(() => {}); }, 60_000, '主动搭话检查');
 
   /**
+   * 小闹钟（A1）：与主动搭话同一分钟心跳，但独立判定到点。
+   * paused() 在最前——总开关关着/刚断线失败过时不叫醒、不跑模型。
+   */
+  timers.every(() => { if (paused()) return; tickReminders().catch(() => {}); }, 60_000, '她的小闹钟');
+
+  /**
+   * 追问 nudge（A2）：她问了一句、主人 15–40 分钟没回，偶尔轻追一句。
+   * 老 speakUp 引擎开着时它自己有 3–8 小时的追问刹车，两条链不能并行——
+   * 这里只在老引擎关着时启用（对方 P1 后也是 purpose 取代 speakup 的口径）。
+   */
+  timers.every(() => {
+    if (paused() || cfg.speakUp?.enabled === true || cfg.speakUp?.nudge === false) return;
+    const owner = ownerId();
+    if (!owner) return;
+    const st = speakUp.state?.() || {};
+    const now = Date.now();
+    /**
+     * 数据源必须是**独立记录的真私聊投递**（nudgeStore.lastBot），不能用
+     * speakUp.state().lastBotAt —— 那只在老引擎 fire() 里写，而本心跳要求
+     * 老引擎关着，正常配置下恒 0，nudge 永不触发。
+     */
+    const lb = nudgeStore.lastBot();
+    /** 主人最后私聊发话用 awake 的现成计数（收到就记、不依赖配置对不对） */
+    const ownerAt = Number(awake.c2cLastUserAt?.() || 0);
+    /** 安静时段用 speakUp 的醒着窗口判（起止相同 = 全天不打扰，与本仓口径一致） */
+    const h = new Date(now).getHours();
+    const from = Number(cfg.speakUp?.awakeFrom ?? 8), to = Number(cfg.speakUp?.awakeTo ?? 23);
+    const inQuiet = from !== to && (h < from || h >= to);
+    const d = judgeNudge({
+      lastBot: lb,
+      lastOwnerAt: ownerAt,
+      now,
+      nudgedFor: nudgeStore.nudgedFor(),
+      gates: {
+        masterOn: true, speakUpOn: true, nudgeOn: true,
+        inQuiet,
+        dailyMax: cfg.speakUp?.maxPerDay || 0,
+        countToday: Number(st.todayCount) || 0,
+        cooling: nudgeStore.cooling(now),
+      },
+    });
+    if (!d.yes || Math.random() >= 0.5) return;
+    /** busy 让位必须在 mark 之前——先写标记再回滚会把机会白耗一轮 */
+    if (turnQueue?.isBusy(owner)) return;
+    /** 真决定要发了才落标记；这一条问句之后只追一次 */
+    nudgeStore.mark(lb.at);
+    /** 与小闹钟同款：真会话注入让她自己说，不能用只生成不投递的 awake.compose */
+    (async () => {
+      const chat = { kind: 'c2c', chatId: owner, sessionKey: owner, name: '追问', preset: 'roost-private' };
+      const { agent } = await agentFor(chat);
+      mount(agent, chat);
+      await qqToolRegistry.waitFor(agent);
+      const cut = restrictTurnTools(agent, {
+        mode: 'all', bucket: 'owner', chatId: chat.chatId,
+        personaTools: personaToolsFor(chat), noTools: true,
+      });
+      try {
+        /**
+         * 喂最近 2 条主人真话（P3 补齐）：追问时能看到上文，不会答非所问。
+         * 只取主人自己说的（排除 bot 行），按时间正序；取不到就空数组——
+         * nudgePrompt 会自然省掉那一段，不伪造。
+         */
+        let recentLines = [];
+        try {
+          recentLines = journal.listChat(owner, 20)
+            .filter((r) => r && r.role !== 'bot')
+            .map((r) => String(r.text || r.digest || '').trim())
+            .filter(Boolean)
+            .slice(-2);
+        } catch { recentLines = []; }
+        await withOwnerSpeaker(agent, () => turns.run(agent, nudgePrompt({
+          text: lb.text, quietMs: now - lb.at, owner: cfg.ownerName || '主人', recentLines,
+        }), { source: { kind: 'roost-nudge' } }));
+        return 'sent';
+      } finally { try { cut.off?.(); } catch {} }
+    })().then((state) => {
+      if (state === 'sent') {
+        /** 成功后推进标记到新的最后一句，防止同一句被连环追；失败退避由下面处理 */
+        const nowBot = nudgeStore.lastBot();
+        if (nowBot.at > lb.at) nudgeStore.mark(nowBot.at);
+      }
+    }).catch((e) => {
+      log.warn(`追问失败：${e?.message || e}`);
+      /**
+       * 只有「这一轮根本没发生」（busy/提交失败）才回滚；
+       * 超时/未知按已追过处理，否则下一分钟重追会双发。
+       */
+      nudgeStore.rollbackIfNotHappened(lb.at, /submit|busy|unsupported/i.test(String(e?.message)) ? 'submit-failed' : 'timeout');
+      nudgeStore.markCool(15);
+    });
+  }, 60_000, '追问检查');
+
+  /**
    * 4.6 互动召回：与主动搭话**两本账**。
    *
    * 主动搭话按天算（每日 3 次）；互动召回按官方口径算：用户最后一次主动
@@ -1860,6 +1963,173 @@ export function apply(ctx) {
     file: join(dataDir(), 'wakeup.json'),
     log: (m) => log.warn(m),
   });
+
+  /* =====================================================================
+   * 她的小闹钟（A1）+ 追问 nudge（A2）—— 对齐 aurabot purpose 的两条主动链。
+   * 共同口径：到点**叫醒她进真会话**，不替她发消息；总闸/安静时段/每日上限同主动搭话。
+   * ===================================================================== */
+  const reminderStore = createReminderStore({
+    file: join(dataDir(), 'reminders.json'),
+    legacyFile: join(dataDir(), 'speakup-reminders.json'),
+  });
+  const nudgeStore = createNudgeStore({ file: join(dataDir(), 'nudge.json') });
+  /** 收窄版接管（A4）：只让她改 seeds，带冷却+变更历史，不碰权限/配置/工具 */
+  const takeoverStore = createTakeoverStore({ file: join(dataDir(), 'takeover.json'), cooldownMin: 60 });
+
+  /** 自驱安静时段（起止相同 = 不设；跨午夜用取模判）。她说一句话前要判这个。 */
+  const autotelicQuietNow = () => {
+    try {
+      const c = cfg.autotelic || {};
+      const s = Number(c.quietStartHour ?? 0);
+      const e = Number(c.quietEndHour ?? 0);
+      if (!Number.isFinite(s) || !Number.isFinite(e) || s === e) return false;
+      const h = new Date().getHours();
+      return s < e ? (h >= s && h < e) : (h >= s || h < e);
+    } catch { return false; }
+  };
+
+  /**
+   * 她的手（批次3）：Python 解释器探测缓存 + 两个高风险操作的实现。
+   * 开关默认关；关着时工具如实拒绝。**这是本仓唯一会执行模型自写代码的路径**，
+   * 安全边界全在 autotelic-python.js（env 白名单/超时强杀/只写自己目录）。
+   */
+  const pyEnvFile = () => join(dataDir(), 'autotelic-env.json');
+  let pyEnv = null;
+  const pythonBin = async () => {
+    const c = cfg.autotelic || {};
+    /** 面板手填优先；缓存 24h 内直接用，过期或没缓存才探测 */
+    if (String(c.pythonBin || '').trim()) return String(c.pythonBin).trim();
+    if (pyEnv && envUsable(pyEnv)) return pyEnv.pythonBin;
+    pyEnv = pyEnv || loadEnvCache(pyEnvFile());
+    if (envUsable(pyEnv)) return pyEnv.pythonBin;
+    try {
+      const probed = await probePython({ configured: '' });
+      pyEnv = probed || { pythonBin: '', unavailable: true, probedAt: Date.now() };
+      saveEnvCache(pyEnvFile(), probed || null);
+      return pyEnv.pythonBin || '';
+    } catch { return ''; }
+  };
+  const handOf = {
+    async python(code) {
+      const c = cfg.autotelic || {};
+      if (c.allowPython !== true) return { ok: false, message: '「允许跑 Python」没开（主人关的）' };
+      if (masterOff()) return { ok: false, message: '插件总开关没开启' };
+      const bin = await pythonBin();
+      if (!bin) return { ok: false, message: '本机没探测到 Python；面板「自驱引擎」页可手填解释器路径' };
+      const r = runPython({ dir: dataDir(), pythonBin: bin, code, timeoutMs: Number(c.scriptTimeoutMs) || 120000 });
+      return {
+        ok: r.ok,
+        message: `${r.ok ? '跑完了' : '没跑成'}（${r.ms}ms）${r.error ? '：' + r.error : ''}${r.stdout ? '\n输出：' + String(r.stdout).slice(0, 3000) : ''}`,
+      };
+    },
+    module(id, code) {
+      const c = cfg.autotelic || {};
+      if (c.allowUserModules !== true) return { ok: false, message: '「允许写用户模块」没开（主人关的）' };
+      if (masterOff()) return { ok: false, message: '插件总开关没开启' };
+      /** 只能写数据目录下的 modules/，碰不到框架 src/ */
+      const r = writeUserModule({ dir: join(dataDir(), 'modules'), id, code });
+      return { ok: r.ok, message: r.ok ? `写好了 ${r.file}。${r.note}` : r.why };
+    },
+  };
+  /**
+   * 她自己写提案（A5 语义纠偏）：对方 `autotelic_propose` 同款口径——
+   * title/body 落 proposals/<safe>.md，永远写不到框架代码 src/。
+   * 工具与面板两条入口共用这一份，避免两处格式漂移。
+   */
+  function writeProposal(title, body) {
+    /** \x22 = 双引号：写成转义是为了不骗过定时器门禁的字符串掩码（它不认正则字符类） */
+    let safe = String(title || '无题').replace(/[\\/:*?\x22<>|\s]+/g, '-').slice(0, 40) || '无题';
+    /** `.`/`..` 清洗后仍是点号，拼进文件名语义可疑——直接回落，不让标题决定路径含义 */
+    if (safe === '.' || safe === '..') safe = '无题';
+    const text = String(body || '').trim().slice(0, 4000);
+    if (!text) return { ok: false, message: '提案正文不能为空' };
+    try {
+      const dir = join(dataDir(), 'proposals');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${safe}.md`), `# ${safe}\n\n${text}\n`, 'utf8');
+      return { ok: true, message: `提案「${safe}」写下了，主人能在面板看到` };
+    } catch (e) { return { ok: false, message: `写提案失败：${e?.message || e}` }; }
+  }
+  /** 小闹钟总闸：面板开关即生效，不额外要求老 speakUp 引擎开着（它与新链二选一） */
+  const remindersOn = () => cfg.speakUp?.reminderEnabled === true;
+  let reminderBusy = false;
+
+  /**
+   * 小闹钟到点：把系统提醒投进主人私聊的**真会话**，由她自己决定说不说。
+   * 走 awake.compose（内部已处理会话/工具/投递），不直接 sendOut。
+   * 成功/放弃由 store.remove / store.fail 收场；失败重试 15min 窗口 / 5min 间隔。
+   */
+  async function fireReminder(r) {
+    const owner = ownerId();
+    if (!owner) return { ok: false, why: '没配主人 openid' };
+    const text = `【系统提醒，不是主人说的话】你之前给自己定的小闹钟到时间了：${r.atText}「${r.note}」。现在可以主动找主人说这件事；如果觉得现在不适合打扰，就只回 <<skip>>。`;
+    /**
+     * 4 分钟兜底超时，会话轮 settle 后 clearTimeout 并 unref。
+     *
+     * **必须走真会话注入，不能用 awake.compose**：compose 只生成文本不投递，
+     * 拿完就丢等于闹钟白响。照主动搭话成熟范式（host.js:1720-1745）：
+     * agentFor → mount → waitFor → 收窄工具 → turns.run。她的回复由 turn/end
+     * 正常落地（她自己决定说不说），不是宿主替她发——正是对方 pushToSession 语义。
+     */
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, why: '等回复超时' }), 4 * 60_000); // timer-ok：finally 里 clearTimeout + unref
+      timer.unref?.();
+    });
+    let result;
+    try {
+      result = await Promise.race([
+        (async () => {
+          try {
+            if (turnQueue?.isBusy(owner)) return { ok: false, why: '主人会话正忙，这轮让位' };
+            const chat = { kind: 'c2c', chatId: owner, sessionKey: owner, name: '小闹钟', preset: 'roost-private' };
+            const { agent } = await agentFor(chat);
+            mount(agent, chat);
+            /** 工具异步挂载：等挂完再开轮，否则第一轮工具清单是空的 */
+            await qqToolRegistry.waitFor(agent);
+            /** 宿主发起的轮次必须同时收工具 + 套人格限制，别让 edit/write 从这条漏出去 */
+            const cut = restrictTurnTools(agent, {
+              mode: 'all', bucket: 'owner', chatId: chat.chatId,
+              personaTools: personaToolsFor(chat), denyExtra: AWAKE_DENY_TOOLS,
+            });
+            try {
+              const r = await withOwnerSpeaker(agent, () =>
+                turns.run(agent, text, { source: { kind: 'roost-reminder' } }));
+              return { ok: r !== false && r !== null };
+            } finally { try { cut.off?.(); } catch {} }
+          } catch (e) { return { ok: false, why: e?.message || String(e) }; }
+        })(),
+        timeout,
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (result.ok) {
+      reminderStore.remove(r.id);
+      log.info(`小闹钟触发：${r.atText} ${r.note}`);
+      return { ok: true };
+    }
+    if (cfg.speakUp?.reminderRetry === false) {
+      reminderStore.remove(r.id);
+      log.warn(`小闹钟放弃：${r.atText} ${result.why}`);
+      return { ok: false, why: result.why };
+    }
+    const step = reminderStore.fail(r.id, result.why);
+    if (step.drop) log.warn(`小闹钟放弃：${r.atText} ${result.why}`);
+    else log.warn(`小闹钟失败，5 分钟后重试：${r.atText}（${result.why}）`);
+    return { ok: false, why: step.message };
+  }
+
+  /** 每分钟由心跳调用：到点且不在忙/静默时触发一条（一次心跳最多一条，避免挤在一起） */
+  async function tickReminders() {
+    if (reminderBusy || !remindersOn()) return false;
+    const now = Date.now();
+    const due = reminderStore.list(now).find((r) => Number(r.nextAt) <= now);
+    if (!due) return false;
+    reminderBusy = true;
+    try { await fireReminder(due); return true; }
+    finally { reminderBusy = false; }
+  }
   /** 本轮窗口的锚点：主人私聊最后一次说话的时间 */
   const wakeAnchor = () => Number(speakUp.state?.().lastOwnerAt) || Number(lastActiveAt) || 0;
   const wakeState = () => {
@@ -2456,6 +2726,12 @@ export function apply(ctx) {
       await agentV1.createOne({
         sessionId: sid,
         clientId: 'autotelic',
+        /**
+         * presetIdOverride（P3 前端对照补齐）：默认不给 preset——后台会话只能用
+         * clientId='autotelic' 的只读工具集。主人显式开了这个开关，才按 preset 带工具。
+         * 这与 allowAct 是两回事：allowAct 只放宽 prompt 措辞，工具仍走宿主全局守卫。
+         */
+        preset: cfg.autotelic?.presetIdOverride === true ? cfg.autotelic?.presetId || null : null,
         persist: true,
         sections: [{
           name: 'autotelic-self',
@@ -2513,8 +2789,23 @@ export function apply(ctx) {
     log: (...a) => log.info('自驱技能：', ...a),
   });
 
+  /**
+   * 任务账本（P2）：同时几件事在办、每步到哪、这一小时动了多少次手。
+   * 注入给执行器后，settle 里的 addTask/close 才真的写账（以前 book 没注入，那段是死码）。
+   */
+  const autotelicBook = createBook({
+    file: join(dataDir(), 'autotelic-ledger.json'),
+    /** 活跃任务上限（P3）：接主人面板的 maxTasksActive，不再是硬编码 */
+    maxActive: Number(cfg.autotelic?.maxTasksActive) || 8,
+    maxSteps: Number(cfg.autotelic?.maxSteps) || 8,
+    actionsPerHour: Number(cfg.autotelic?.budgetActionsPerHour) || 12,
+    log: { warn: (...a) => log.warn('自驱账本：', ...a) },
+  });
+
   const autotelicExecutor = createExecV5({
     settings: () => cfg.autotelic || {},
+    /** 账本：终态写任务、动作记预算 */
+    book: autotelicBook,
     dataDir: dataDir(),
     /** 24h 同 tag 频控账挂 feedback.json，重启不重置 */
     feedback: autotelicFeedback,
@@ -2528,10 +2819,58 @@ export function apply(ctx) {
         });
         return { ok: true, observation: String(text || '').slice(0, 2000) };
       },
+      /**
+       * 发言自查（P0 修复）：以前 hooks.selfCheck 没注入，exec 里兜底 `pass:true`
+       * ——「她要对主人说的话」永远直接放行，是个安全口子。这里接真实模型判定：
+       * 「删掉这条消息主人会损失什么」，答不出具体损失就不该发（降级为只写日记）。
+       */
+      selfCheck: async ({ ticket, step, text }) => {
+        try {
+          const raw = await autotelicRun([
+            '你想对主人说下面这句话。回答一个问题：删掉这条消息，主人会损失什么？',
+            '答不出具体损失就输出 {"loss":""}（那就不该发）；答得出输出 {"loss":"一句话"}。只输出 JSON。',
+            `场景：${String(ticket?.intent || '').slice(0, 120)}；内容：${String(text || '').slice(0, 400)}`,
+          ].join('\n'), { sessionId: 'autotelic-selfcheck' });
+          const m = String(raw ?? '').match(/\{[\s\S]*\}/);
+          const loss = m ? String(JSON.parse(m[0]).loss || '').trim() : '';
+          return { pass: loss.length > 0, loss };
+        } catch (e) {
+          log.warn(`发言自查出错，按不放行处理：${e?.message || e}`);
+          return { pass: false, loss: '' };
+        }
+      },
     },
     now: () => Date.now(),
     log: { info: (...a) => log.info('自驱v5：', ...a), warn: (...a) => log.warn('自驱v5：', ...a), debug: () => {} },
   });
+
+  /**
+   * 观察层（P1）：她看到的/经历的写 observations.jsonl，decide 从这里取素材。
+   * 显著度门控 0.2：太淡的不入库；flushMs 防抖，避免每条消息都写盘。
+   */
+  const autotelicObserve = createObserve({
+    file: join(dataDir(), 'observations.jsonl'),
+  });
+
+  /**
+   * 复盘闭环（P0 修复）：exec 终态 → reviewRound → skills.ingestReflection。
+   * 以前 executor.run 没收到 plan，reviewRound 永不触发、ingestReflection 全仓零调用
+   * ——技能层看着有、其实永远是空的。这里把它接上。
+   * 返回 artifact 给执行器；ingest 失败只记日志，不阻断执行结果。
+   */
+  const autotelicReviewer = async (review) => {
+    const artifact = await reviewRound(review, {
+      decisionFile: join(dataDir(), 'decisions.jsonl'),
+      reviewTurn: (prompt) => autotelicRun(prompt, { sessionId: 'decide-review' }),
+      settings: () => cfg.autotelic || {},
+      log: { warn: (...a) => log.warn('自驱复盘：', ...a), debug: () => {} },
+    });
+    try {
+      const ing = await autotelicSkills.ingestReflection(artifact);
+      if (ing?.ok) log.info(`自驱沉淀：${ing.id || ''}`);
+    } catch (e) { log.warn(`自驱沉淀失败（不影响执行）：${e?.message || e}`); }
+    return artifact;
+  };
 
   const autotelic = createAutotelic({
     dir: dataDir(),
@@ -2542,7 +2881,21 @@ export function apply(ctx) {
     executor: autotelicExecutor,
     feedback: autotelicFeedback,
     skills: autotelicSkills,
+    reviewer: autotelicReviewer,
+    /** 观察层（P1）：decide 用真实观察而不是账本行 */
+    observe: autotelicObserve,
     run: autotelicRun,
+  });
+
+  /**
+   * 自驱排程（P1）：醒着窗口内随机间隔 + 回话时段轻推 + 当日额度。
+   * heartbeatMin > 0 才启用自动（沿用老语义：0 = 只能手动点）；间隔由 min/maxIntervalMinutes 决定。
+   */
+  const autotelicSchedule = createSchedule({
+    settings: () => cfg.autotelic || {},
+    file: join(dataDir(), 'autotelic-schedule.json'),
+    run: () => autotelic.tick(),
+    hooks: { onError: (e) => log.warn(`自驱排程出错：${e?.message || e}`) },
   });
 
   /**
@@ -2551,6 +2904,62 @@ export function apply(ctx) {
    * 目标假设生成）属阶段 3，本阶段不建 `/purpose/preview` 这类占位接口。
    */
   const purposeState = createPurposeState({ dir: dataDir(), log: (m) => log.info(`目的状态：${m}`) });
+
+  /**
+   * 目的引擎运行时（P0 第六批）：到点自己跑一轮 → 选目的 → 生成 → 投递 → 结算。
+   * 这是「她为了某个目的主动来找你」的主链——之前只有 preview，跑不起来。
+   * 素材源：主人私聊 journal + B站扩展（读不到就当没有）。
+   */
+  const collectPurposeAll = (friend = '') => {
+    /** friend 非空时取那个朋友的私聊；空则主人。素材源与主人完全独立。 */
+    const target = friend || String(ownerId() || '').trim();
+    const rows = target ? journal.listChat(target, 60) : [];
+    let biliRows = [];
+    try {
+      const biliDir = extRegistry.pathOf('bili');
+      if (biliDir) {
+        const raw = JSON.parse(readFileSync(join(biliDir, 'ui-data.json'), 'utf8'));
+        biliRows = Array.isArray(raw?.rows) ? raw.rows : [];
+      }
+    } catch { biliRows = []; }
+    return {
+      items: [
+        ...collectPurposeMaterials({ journalRows: rows, ownerChatId: target, limit: 36 }),
+        ...collectBiliMaterials({ rows: biliRows, limit: 8 }),
+      ],
+      stats: { journal: rows.length, bili: biliRows.length },
+    };
+  };
+  const purposeRunner = createPurposeRunner({
+    cfgOf: () => cfg.ext?.purpose || {},
+    stateStore: purposeState,
+    collect: collectPurposeAll,
+    /** 目的回合走独立会话；noTools：这一轮她只能说话，不能动手 */
+    runTurn: (prompt, opts = {}) => autotelicRun(prompt, {
+      sessionId: String(opts.key || 'purpose'),
+    }),
+    /** 投递：走 sendOut 的唯一出口（主人私聊）；字段用 scene/target，与既有调用一致 */
+    deliver: async (text, _purpose, friend = '') => {
+      const to = String(friend || ownerId() || '').trim();
+      if (!to) return 'failed';
+      try {
+        const r = await sendOut({ scene: 'c2c', target: to, text: String(text).slice(0, 1200) });
+        return r?.ok === false ? 'failed' : 'sent';
+      } catch (e) {
+        log.warn(`目的投递失败：${e?.message || e}`);
+        return 'failed';
+      }
+    },
+    lastOwnerAt: () => {
+      try { return Number(awake.c2cLastUserAt?.() || 0); } catch { return 0; }
+    },
+    busy: () => {
+      try { const o = String(ownerId() || ''); return Boolean(o && turnQueue?.isBusy(o)); } catch { return false; }
+    },
+    enabled: () => cfg.ext?.purpose?.enabled === true,
+    paused,
+    log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
+  });
 
   /**
    * 阶段 4：每扩展一个 `ext-memory/<extId>.json`，不碰 `memory.json`（§5.1）。
@@ -3733,6 +4142,16 @@ export function apply(ctx) {
     memory,
     self,
     generate: backgroundGenerate,
+    /**
+     * 做梦窗口：只在 autotelic.dreamFrom~dreamTo 内自动做（跨午夜可行）。
+     * 面板手动点会传 ignoreWindow 绕过窗口，仍守「一天最多一次」。
+     */
+    windowOf: () => {
+      try {
+        const c = cfg.autotelic || {};
+        return { from: c.dreamFrom ?? '', to: c.dreamTo ?? '' };
+      } catch { return { from: '', to: '' }; }
+    },
     /** 自驱账本的一天统计；没开自驱就给空串（梦不依赖它） */
     statsOf: () => {
       try {
@@ -5172,6 +5591,15 @@ export function apply(ctx) {
      */
     const delivered = Boolean(r?.ok) && r?.dryRun !== true;
     /**
+     * 追问 nudge（A2）的真实数据源：她发给主人的最后一句话。
+     * 对方 hub.js:2114 在每次真私聊投递后记 lastBotToOwner；我方老 speakUp
+     * 引擎关着时 state.lastBotAt 恒 0，nudge 永不触发，所以在这里独立记。
+     * pending（还没过审）/ dryRun（没真发）都不算说过。
+     */
+    if (delivered && !r?.pending && payload?.scene === 'c2c' && String(payload?.target || '') === ownerId()) {
+      try { nudgeStore.recordBot(String(payload?.text || '')); } catch {}
+    }
+    /**
      * D8：只记**明确送到了**的主动消息。pending 还不知道会不会过审，
      * 记了就是「她以为找过你、其实没人看见」——投递账本那套教训照搬。
      * 不存正文、不存 target，只留一个动作类型（见 events.js 白名单）。
@@ -6544,6 +6972,91 @@ export function apply(ctx) {
         callerOf: () => {
           const c = cur();
           return { ...c, openid: c.senderId, hasPayload: Boolean(c.payload) };
+        },
+        /**
+         * 小闹钟（A1）：只在主人私聊可用，且面板开关开着；关着如实拒绝。
+         * 传函数不传实例——开关随时可切，工具内部每次现取。
+         */
+        reminderOf: {
+          gate: (c) => {
+            const owner = ownerId();
+            const isOwnerPrivate = c?.kind === 'c2c' && !!owner && String(c.senderId || '') === owner;
+            if (!isOwnerPrivate) return { ok: false, message: '只有主人能在私聊里用小闹钟' };
+            if (masterOff()) return { ok: false, message: '插件总开关没开启' };
+            if (!remindersOn()) return { ok: false, message: '小闹钟没开启（去「主动搭话」页打开）' };
+            return { ok: true };
+          },
+          add: (at, note) => reminderStore.add(at, note, { limit: cfg.speakUp?.reminderLimit ?? 5 }),
+          close: (id) => reminderStore.close(id),
+        },
+        /** 她自己写提案（A5）：工具与面板共用 writeProposal，格式不漂移 */
+        proposeOf: (title, body) => (masterOff()
+          ? { ok: false, message: '插件总开关没开启' }
+          : writeProposal(title, body)),
+        /** 写笔记（P2）：只能写自己数据目录的 notes/，碰不到框架源码 */
+        noteOf: (title, text) => {
+          if (masterOff()) return { ok: false, message: '插件总开关没开启' };
+          const body = String(text || '').trim().slice(0, 20000);
+          if (!body) return { ok: false, message: '正文是空的' };
+          let safe = String(title || '无题').replace(/[\\/:*?\x22<>|\s]+/g, '-').slice(0, 40) || '无题';
+          if (safe === '.' || safe === '..') safe = '无题';
+          try {
+            const d = new Date();
+            const p2 = (n) => String(n).padStart(2, '0');
+            const dir = join(dataDir(), 'notes');
+            mkdirSync(dir, { recursive: true });
+            const file = join(dir, `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}-${safe}.md`);
+            writeFileSync(file, `# ${String(title || '无题')}\n\n${body}\n`, 'utf8');
+            return { ok: true, message: `写好了：${file}` };
+          } catch (e) {
+            return { ok: false, message: `写不了：${e?.message || e}` };
+          }
+        },
+        /** 列她自己的模块（P2）：只读目录清单，不加载不执行 */
+        modulesOf: () => {
+          const dir = join(dataDir(), 'modules');
+          try {
+            if (!existsSync(dir)) return { ok: true, modules: [], message: '还没写过模块' };
+            const list = readdirSync(dir, { withFileTypes: true })
+              .filter((d) => d.isDirectory())
+              .map((d) => ({
+                id: d.name,
+                hasEntry: existsSync(join(dir, d.name, 'index.mjs')),
+              }));
+            return { ok: true, modules: list, message: list.length ? `共 ${list.length} 个模块` : '还没写过模块' };
+          } catch (e) {
+            return { ok: false, message: `读不了模块目录：${e?.message || e}` };
+          }
+        },
+        /** 她的手（批次3）：跑 Python / 写用户模块，开关默认关，关着如实拒绝 */
+        handOf,
+        /**
+         * 她想说一句（P1）：**不直接发**，交给主动消息治理排队；安静时段先攒着。
+         * 这是自驱里「她主动开口」的唯一口子——没有它，自驱只能做事不能说话。
+         */
+        sayOf: async (text, reason) => {
+          if (masterOff()) return { ok: false, message: '插件总开关没开启' };
+          const body = String(text || '').trim().slice(0, 2000);
+          if (!body) return { ok: false, message: '想说的话是空的' };
+          /** 安静时段：先攒着，等安静结束由心跳转交治理（不丢） */
+          if (autotelicQuietNow()) {
+            const file = join(dataDir(), 'say-pending.json');
+            try {
+              const list = JSON.parse(readFileSync(file, 'utf8'));
+              const arr = Array.isArray(list) ? list : [];
+              arr.push({ at: Date.now(), text: body, reason: String(reason || '').slice(0, 200) });
+              writeFileSync(file, JSON.stringify(arr.slice(-20), null, 2), 'utf8');
+              return { ok: true, message: '现在是安静时段，这句先攒着（没丢，安静结束再交出去）' };
+            } catch {
+              writeFileSync(file, JSON.stringify([{ at: Date.now(), text: body, reason: String(reason || '').slice(0, 200) }], null, 2), 'utf8');
+              return { ok: true, message: '现在是安静时段，这句先攒着' };
+            }
+          }
+          const r = proactiveQueue.submit({
+            extId: 'autotelic', text: body, target: 'owner', cause: 'autotelic-say',
+          });
+          if (!r?.ok) return { ok: false, message: `治理没放行：${r?.why || 'unknown'}` };
+          return { ok: true, message: `交给主动消息治理了（${r.state}，队列 ${r.queued} 条）` };
         },
         /**
          * `qq_who`：按 openid 查昵称/头像/QQ号。
@@ -8618,22 +9131,187 @@ export function apply(ctx) {
    * 用「每分钟醒一次 + 内部判间隔」而不是直接 `setInterval(heartbeatMin)`：
    * 后者在用户改配置之后不会重排，得重启才生效。
    */
+  /**
+   * 每日一页（阶段 6 补）：到 dailyReviewHour 点，或攒够 minBatchForReview 条账本，
+   * 先到者为准。与 heartbeatMin 无关——手动模式下也该自动复盘。
+   * 按天去重：账本当天有 review 行就不再跑（同一天只一页）。
+   */
+  /**
+   * 主人回话扫描（P3）：观察窗里主人真回了没有。
+   * 只有「话头对得上这次行动」的私聊才算回应——主人在窗口里聊别的事不记 replied，
+   * 否则 ignored 信号会被稀释、冷度算不准。敷衍（「嗯」「好」）单独记 perfunctory。
+   */
+  const keywordsOf = (text) => String(text || '')
+    .split(/[，。！？、；：,.!?;:\s（）()「」『』—…]+/)
+    .map((s) => s.trim())
+    .filter((s) => [...s].length >= 2);
+
+  const scanOwnerReplies = () => {
+    try {
+      const windows = autotelicFeedback.snapshot().windows || [];
+      if (!windows.length) return;
+      const owner = String(ownerId() || '').trim();
+      if (!owner) return;
+      const rows = journal.listChat(owner, 40);
+      for (const w of windows) {
+        const replies = rows.filter((r) => r && r.role !== 'bot' && (Number(r.at) || 0) >= (Number(w.at) || 0));
+        if (!replies.length) continue;
+        const kws = keywordsOf(w.text || '');
+        const related = replies.filter((r) => {
+          const t = String(r.text || r.digest || '');
+          return kws.some((k) => t.includes(k));
+        });
+        /** 窗口继续开着：真无关就等它到点记 ignored */
+        if (!related.length) continue;
+        const last = related[related.length - 1];
+        const text = String(last.text || last.digest || '').trim();
+        const perfunctory = text.length < 6 || /^(嗯+|哦+|好+|行+|噢+|哈+|6+|666+)[。！~\s]*$/i.test(text);
+        autotelicFeedback.recordResponse(w.id, perfunctory ? 'perfunctory' : 'replied');
+      }
+    } catch (e) { log.warn(`回话扫描失败：${e?.message || e}`); }
+  };
+
+  /**
+   * 解封扫描（P3）：主人主动提到被 park 的那个话题 → 自动解封。
+   * 这是「她做错了被冷藏，但主人自己又提起」的恢复路径，不用主人手动点。
+   */
+  const scanParkMentions = () => {
+    try {
+      const park = autotelicFeedback.snapshot().park || {};
+      const tags = Object.keys(park);
+      if (!tags.length) return;
+      const owner = String(ownerId() || '').trim();
+      if (!owner) return;
+      const rows = journal.listChat(owner, 40).filter((r) => r && r.role !== 'bot');
+      for (const tag of tags) {
+        const sinceAt = Number(park[tag]?.at) || 0;
+        const hit = rows.find((r) => (Number(r.at) || 0) >= sinceAt && String(r.text || r.digest || '').includes(tag));
+        if (hit) {
+          autotelicFeedback.resume(tag, 'mention');
+          log.info(`主人主动提到「${tag}」，已解封`);
+        }
+      }
+    } catch (e) { log.warn(`解封扫描失败：${e?.message || e}`); }
+  };
+
+  const checkDailyReview = () => {
+    try {
+      const c = cfg.autotelic || {};
+      if (c.enabled !== true) return;
+      /**
+       * 观察同步（P1）：把主人最近说的话增量写进 observations.jsonl。
+       * 不改消息主流程（那会牵动投递/会话），改成每分钟从 journal 拉一次——
+       * 自驱本身就是分钟级节奏，这点延迟无所谓。已同步过的用「时刻+前 40 字」比对去重。
+       */
+      try {
+        const owner = String(ownerId() || '').trim();
+        if (owner) {
+          const rows = journal.listChat(owner, 20);
+          const seen = new Set(autotelicObserve.list({ limit: 60 }).map((r) => `${r.ts}|${String(r.text || '').slice(0, 40)}`));
+          for (const row of rows) {
+            const role = String(row?.role || '');
+            if (role !== 'user' && role !== 'member' && role !== 'bot') continue;
+            const text = String(row?.text || row?.digest || '').replace(/\s+/g, ' ').trim();
+            if (!text) continue;
+            const at = Number(row?.at) || Date.now();
+            if (seen.has(`${at}|${text.slice(0, 40)}`)) continue;
+            /** 主人纠偏单独走 observeCorrection（最高显著度 + 回调），其余按普通观察 */
+            if (role === 'user' && autotelicObserve.observeCorrection(text, { tag: '牵挂' })) continue;
+            autotelicObserve.append({
+              source: 'chat',
+              tag: role === 'user' ? '牵挂' : role === 'bot' ? '余韵' : '好奇',
+              text,
+              ts: at,
+            });
+          }
+        }
+      } catch (e) { log.warn(`观察同步失败：${e?.message || e}`); }
+      /**
+       * 回话/解封扫描（P3）：**必须在 feedback.tick 之前**——
+       * tick 会把到期窗口判 ignored，先扫一遍才不会把「主人其实回了」误记成没回。
+       */
+      try { scanOwnerReplies(); } catch (e) { log.warn(`回话扫描异常：${e?.message || e}`); }
+      try { scanParkMentions(); } catch (e) { log.warn(`解封扫描异常：${e?.message || e}`); }
+      /**
+       * 反馈心跳（P0 修复）：到期窗口记 ignored + 冷度半衰。
+       * 以前 feedback.tick 全仓零调用——观察窗永不过期、冷度永不衰减、
+       * park/熔断全死，整套反馈是空转的。这里每分钟走一次（幂等，无窗口时零开销）。
+       */
+      try { autotelicFeedback.tick(); } catch (e) { log.warn(`反馈心跳失败：${e?.message || e}`); }
+      const hour = Number(c.dailyReviewHour ?? 23);
+      const batch = Number(c.minBatchForReview ?? 3);
+      const now = Date.now();
+      const day = new Date(now).toLocaleDateString('sv-SE');
+      const rows = autotelic.recent(500).rows;
+      if (rows.some((r) => String(r?.kind) === 'review' && new Date(Number(r.at) || 0).toLocaleDateString('sv-SE') === day)) return;
+      const sinceLastReview = rows.findIndex((r) => String(r?.kind) === 'review');
+      const pending = sinceLastReview <= 0 ? rows.length : rows.slice(0, sinceLastReview).length;
+      const atHour = new Date(now).getHours() === hour;
+      if (!atHour && !(batch > 0 && pending >= batch)) return;
+      log.info(`自驱每日一页：${atHour ? '到点' : `攒够 ${pending} 条`}`);
+      autotelic.review().catch((e) => log.warn(`每日复盘失败：${e?.message || e}`));
+    } catch (e) { log.warn(`每日复盘检查异常：${e?.message || e}`); }
+  };
+
   ctx.effect(() => {
     const t = setInterval(() => { // timer-ok: 由本 effect 返回的 cleanup 清掉
+      if (paused()) return;
+      checkDailyReview();
+      /**
+       * 目的引擎心跳（P0 第六批）：每分钟判一次「到点没」。
+       * 它自带 enabled 闸门（evaluatePurposeTick 里第一道），关着时只读状态不跑模型；
+       * 独立 try：目的引擎出错不该影响自驱心跳。
+       */
+      if (cfg.ext?.purpose?.enabled === true) {
+        purposeRunner.tick().catch((e) => log.warn(`目的心跳失败：${e?.message || e}`));
+        /**
+         * 朋友线（P3）：每人独立排程/额度/素材，串行跑（一次一个，避免同时开多个会话）。
+         * 空名单 = 只对主人开口，零额外开销。
+         */
+        const friends = Array.isArray(cfg.speakUp?.allow) ? cfg.speakUp.allow.filter(Boolean).slice(0, 10) : [];
+        if (friends.length) {
+          (async () => {
+            for (const f of friends) {
+              try { await purposeRunner.tick({}, String(f)); }
+              catch (e) { log.warn(`朋友线 ${f} 心跳失败：${e?.message || e}`); }
+            }
+          })().catch(() => {});
+        }
+      }
+      /**
+       * 安静时段攒下的话（P1）：安静结束就转交主动消息治理，别让它们烂在文件里。
+       * 只在「有攒货 + 不在安静时段」时做一次，转交成功的从文件里摘掉。
+       */
+      if (!autotelicQuietNow()) {
+        try {
+          const f = join(dataDir(), 'say-pending.json');
+          if (existsSync(f)) {
+            const arr = JSON.parse(readFileSync(f, 'utf8'));
+            if (Array.isArray(arr) && arr.length) {
+              const left = [];
+              for (const item of arr) {
+                const r = proactiveQueue.submit({
+                  extId: 'autotelic', text: String(item?.text || ''), target: 'owner', cause: 'autotelic-say',
+                });
+                if (!r?.ok) left.push(item);
+              }
+              writeFileSync(f, JSON.stringify(left.slice(-20), null, 2), 'utf8');
+              if (left.length < arr.length) log.info(`安静结束：转交 ${arr.length - left.length} 条攒下的话`);
+            }
+          }
+        } catch (e) { log.warn(`转交攒下的话失败：${e?.message || e}`); }
+      }
       try {
         const c = cfg.autotelic || {};
         if (c.enabled !== true || Number(c.heartbeatMin) <= 0) return;
         /**
-         * 总开关关着 / 断线冷却中不跑（2026-11-19 自检补）。
-         *
-         * **这是最容易漏的一处**：`autotelic` 是唯一「没人叫她、她自己决定
-         * 要做事」的模块，`tick()` 里会建会话、跑模型，`allowAct` 开着时
-         * 还能真调工具。它自带 `enabled` 开关，看着像「已经管住了」——
-         * 但那是**另一个**开关，与总开关不是一回事；两个都开着时，
-         * 关掉总开关她照样在后台自己立项、自己推进。
+         * 到点判定交给排程层（P1）：醒着窗口内随机间隔 + 回话时段轻推 + 当日额度。
+         * heartbeatMin > 0 只作为「启用自动」的开关（沿用老语义：0 = 只能手动点），
+         * 真正的间隔由 min/maxIntervalMinutes 决定——不再是机械的固定心跳。
+         * 防重入在 schedule 内部（inFlight），这里不用再判。
          */
         if (paused()) return;
-        autotelic.tick().catch((e) => log.warn(`自驱心跳失败：${e?.message || e}`));
+        autotelicSchedule.tick().catch((e) => log.warn(`自驱排程 tick 失败：${e?.message || e}`));
       } catch (e) {
         log.warn(`自驱心跳异常：${e?.message || e}`);
       }
@@ -10610,7 +11288,8 @@ export function apply(ctx) {
             case 'memory.dream': {
               const day = String(arg?.day || '').trim() || yesterdayOf(Date.now());
               try {
-                const dm = await dream.run({ day });
+                /** 面板手动触发绕过做梦窗口，但仍守「一天最多一次」 */
+                const dm = await dream.run({ day, ignoreWindow: true });
                 return send(res, dm.ok ? 200 : 400, dm);
               } catch (e) {
                 return send(res, 500, { ok: false, message: `做梦失败：${e?.message ?? e}` });
@@ -13921,12 +14600,34 @@ export function apply(ctx) {
        * 不叫 `/env` 那套 Python 探测——本仓刻意不做「自己写代码 / 跑 Python」，
        * 这里只如实说明「能不能立项 / 工具措辞 / 闸门真相」。
        */
-      route('/autotelic/env', (req, res) => {
+      route('/autotelic/env', async (req, res) => {
         const s = autotelic.status();
+        /**
+         * 重新检测（P3 前端对照补齐）：面板点按钮时真探一次解释器，
+         * 结果写缓存（24h）——不用主人自己填路径猜。
+         * 平时 GET 只读缓存，不每次请求都起子进程。
+         */
+        let env = null;
+        if (req.method === 'POST') {
+          if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着' });
+          try {
+            const probed = await probePython({ configured: String(cfg.autotelic?.pythonBin || '') });
+            pyEnv = probed || { pythonBin: '', unavailable: true, probedAt: Date.now() };
+            saveEnvCache(pyEnvFile(), probed || null);
+            env = pyEnv;
+          } catch (e) {
+            return send(res, 500, { ok: false, message: `探测失败：${e?.message || e}` });
+          }
+        } else {
+          const configured = String(cfg.autotelic?.pythonBin || '').trim();
+          env = configured ? { pythonBin: configured, version: '（面板手填）', configured: true }
+            : (pyEnv || (pyEnv = loadEnvCache(pyEnvFile())));
+        }
         return send(res, 200, {
           ok: true,
           capability: s.capability,
           constraints: s.constraints,
+          env,
           /** 供面板标注：allowAct 是 prompt 措辞，不是工具授权闸门 */
           toolGate: 'host-global-guard',
         });
@@ -13939,6 +14640,9 @@ export function apply(ctx) {
        */
       route('/purpose/status', (req, res) => {
         const s = purposeState.read();
+        /** 运行时摘要（P0 第六批）：到点排程、今日次数、上次说了什么，面板直接能显示 */
+        let run = null;
+        try { run = purposeRunner.status(); } catch (e) { log.warn(`目的状态摘要失败：${e?.message || e}`); }
         return send(res, 200, {
           ok: true,
           drives: s.drives,
@@ -13946,14 +14650,35 @@ export function apply(ctx) {
             observations: s.observations.length,
             goals: s.goals.length,
             feedback: s.feedback.length,
+            pending: (s.pending || []).length,
+            history: (s.history || []).length,
           },
           goals: s.goals.slice(-20).map((g) => ({
             id: g.id, owner: g.owner, status: g.status, intent: g.intent,
             confidence: g.confidence, evidenceIds: g.evidenceIds,
           })),
-          /** 阶段 3：目标假设生成已接上，预览走 /purpose/preview（零副作用） */
+          /** 运行时摘要：面板显示「下次什么时候、今天说了几次、上轮结果」 */
+          run,
           algorithm: 'ready',
         });
+      }),
+
+      /**
+       * 手动跑一轮（P0 第六批）：绕过排程判定，但照样占次数、照样结算。
+       * 面板「立即试一次」用；也方便联调时确认整条链真的通。
+       */
+      route('/purpose/fire', async (req, res) => {
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再试' });
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        if (cfg.ext?.purpose?.enabled !== true) {
+          return send(res, 409, { ok: false, message: '目的引擎没启用（ext.purpose.enabled）' });
+        }
+        try {
+          const r = await purposeRunner.fire('手动');
+          return send(res, 200, { ok: true, ...r });
+        } catch (e) {
+          return send(res, 500, { ok: false, message: `跑一轮失败：${e?.message || e}` });
+        }
       }),
 
       /**
@@ -13975,7 +14700,23 @@ export function apply(ctx) {
          * 会把同一行取两遍、素材计数虚高。这里只取一次。
          */
         const rows = ids.flatMap((cid) => journal.listChat(cid, 60));
-        const materials = collectPurposeMaterials({ journalRows: rows, ownerChatId: owner, limit: 36 });
+        /**
+         * B 站素材（对齐对方 rss-reader 素材源）：bili 扩展把定时刷到的视频写在
+         * 自己目录的 ui-data.json 里，这里读它接进候选池——不新增采集、不额外请求。
+         * 读不到（没装/没开定时刷）就当没有，绝不影响主流程。
+         */
+        let biliRows = [];
+        try {
+          const biliDir = extRegistry.pathOf('bili');
+          if (biliDir) {
+            const raw = JSON.parse(readFileSync(join(biliDir, 'ui-data.json'), 'utf8'));
+            biliRows = Array.isArray(raw?.rows) ? raw.rows : [];
+          }
+        } catch { biliRows = []; }
+        const materials = [
+          ...collectPurposeMaterials({ journalRows: rows, ownerChatId: owner, limit: 36 }),
+          ...collectBiliMaterials({ rows: biliRows, limit: 8 }),
+        ];
         const s = purposeState.read();
         const r = formGoalHypotheses({
           materials,
@@ -14066,8 +14807,54 @@ export function apply(ctx) {
         const r = autotelic.correct(text, body.tags);
         return send(res, r.ok ? 200 : 409, r);
       }),
-      route('/autotelic/feedback', (req, res) => send(res, 200, { ok: true, state: autotelic.feedbackStatus() })),
-      route('/autotelic/skills', (req, res) => send(res, 200, { ok: true, state: autotelic.skillStatus() })),
+      /**
+       * 反馈回路（P2 加写口）：GET 看快照；POST 支持 resume（解除 park）/ clearReview（清熔断待审）。
+       * 这些是「主人手动救回来」的动作，必须留痕（走 feedback 自己的 noteDecision）。
+       */
+      route('/autotelic/feedback', async (req, res) => {
+        if (req.method === 'POST') {
+          if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着' });
+          const body = await readBody(req).catch(() => ({}));
+          if (body?.action === 'resume' && body.tag) {
+            const src = ['mention', 'explicit', 'panel'].includes(body.source) ? body.source : 'panel';
+            const r = autotelicFeedback.resume(String(body.tag), src);
+            return send(res, 200, { ok: true, ...r, snapshot: autotelicFeedback.snapshot() });
+          }
+          if (body?.action === 'clearReview') {
+            autotelicFeedback.clearReview();
+            return send(res, 200, { ok: true, snapshot: autotelicFeedback.snapshot() });
+          }
+          return send(res, 400, { ok: false, message: '不认识的操作' });
+        }
+        return send(res, 200, { ok: true, state: autotelic.feedbackStatus(), snapshot: autotelicFeedback.snapshot() });
+      }),
+
+      /**
+       * 技能层（P2 加写口）：GET 看索引/陈旧建议/快照；POST 支持 rollback/archive/revise。
+       * 回滚是「一键退回某个快照」，写坏了能救回来。
+       */
+      route('/autotelic/skills', async (req, res) => {
+        if (req.method === 'POST') {
+          if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着' });
+          const body = await readBody(req).catch(() => ({}));
+          if (body?.action === 'rollback' && body.stamp) {
+            const r = autotelicSkills.rollback(String(body.stamp));
+            return send(res, 200, {
+              ok: r?.ok !== false,
+              message: r?.ok !== false ? `回滚了快照 ${body.stamp}（${r?.restored || 0} 个文件）` : (r?.why || '回滚失败'),
+              ...r,
+            });
+          }
+          if (body?.action === 'archive' && body.id) {
+            return send(res, 200, { ok: true, ...autotelicSkills.archive(String(body.id)) });
+          }
+          if (body?.action === 'revise' && body.id) {
+            return send(res, 200, { ok: true, ...autotelicSkills.revise(String(body.id), { content: body.content, title: body.title }) });
+          }
+          return send(res, 400, { ok: false, message: '不认识的操作' });
+        }
+        return send(res, 200, { ok: true, state: autotelic.skillStatus() });
+      }),
 
       /** 待确认队列（touch-owner 类）：面板列出 + 确认/取消 */
       route('/autotelic/pending', (req, res) => send(res, 200, { ok: true, rows: autotelicExecutor.pendingList() })),
@@ -14097,6 +14884,153 @@ export function apply(ctx) {
           .slice(0, 20);
         applyCfg({ autotelic: { seeds } });
         return send(res, 200, { ok: true, seeds, message: `存了 ${seeds.length} 个种子` });
+      }),
+
+      /**
+       * 她的小闹钟（A1）：GET 待触发列表 / POST 面板代设 / DELETE 关一条。
+       * 工具路径（qq_set_reminder）走同一份 reminderStore，面板只是另一个入口。
+       */
+      route('/autotelic/reminders', async (req, res) => {
+        if (req.method === 'GET') return send(res, 200, { ok: true, rows: reminderStore.list() });
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
+        const body = await readBody(req).catch(() => ({}));
+        if (req.method === 'DELETE' || body?.action === 'close') {
+          const r = reminderStore.close(body.id);
+          return send(res, r.ok ? 200 : 400, r);
+        }
+        if (!remindersOn()) return send(res, 409, { ok: false, message: '小闹钟没开启（去「主动搭话」页打开）' });
+        const r = reminderStore.add(body?.at, body?.note, { limit: cfg.speakUp?.reminderLimit ?? 5 });
+        return send(res, r.ok ? 200 : 400, r);
+      }),
+
+      /**
+       * A4 收窄版接管：GET 状态 / POST on/open 或 propose（只准改 seeds）。
+       * 真要落盘仍走 applyCfg，pruneTo 会再裁一次非法键——双保险。
+       */
+      route('/autotelic/takeover', async (req, res) => {
+        if (req.method === 'GET') return send(res, 200, { ok: true, ...takeoverStore.status() });
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
+        const body = await readBody(req).catch(() => ({}));
+        if (typeof body?.on === 'boolean') return send(res, 200, { ok: true, ...takeoverStore.setOn(body.on) });
+        if (body?.key) {
+          const r = takeoverStore.propose(body.key, body.value);
+          if (r.ok) applyCfg({ autotelic: r.patch });
+          return send(res, r.ok ? 200 : 400, r);
+        }
+        return send(res, 400, { ok: false, message: '给 on 或 key+value' });
+      }),
+
+      /**
+       * A5 提案：列 proposals/*.md；POST 从某天做梦的「明天想做的事」段提一篇提案。
+       * 提案是她自己攒下的想法，只有真实梦文件能提出来——不手工塞假数据。
+       */
+      /**
+       * 决策链审计（P2）：校验哈希链完整性 + 尾部 20 行。
+       * 断点不等于坏——「这里开过新链段」也会记进 breaks（段内防篡改仍有效）。
+       */
+      route('/autotelic/decisions', async (req, res) => {
+        const file = join(dataDir(), 'decisions.jsonl');
+        let chain = { ok: true, total: 0, brokenAt: null, breaks: [] };
+        try { chain = await verifyDecisionLog(file); } catch (e) { chain = { ok: false, reason: String(e?.message || e) }; }
+        let tail = [];
+        try {
+          const lines = readFileSync(file, 'utf8').split('\n').filter((l) => l.trim());
+          tail = lines.slice(-20).map((l) => { try { return JSON.parse(l); } catch { return { phase: 'corrupt' }; } }).reverse();
+        } catch { /* 还没有决策日志 */ }
+        return send(res, 200, { ok: true, chain, tail });
+      }),
+
+      /**
+       * 她调节奏（P2）：只许动 TUNABLE 里的几个键，其余主人面板改。
+       * 调参动作本身进审计——她能动的东西必须留痕。
+       */
+      route('/autotelic/tune', async (req, res) => {
+        if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着' });
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        const body = await readBody(req).catch(() => ({}));
+        const patch = (body && typeof body === 'object' ? (body.patch || body) : {}) || {};
+        const applied = {};
+        const rejected = {};
+        for (const [k, v] of Object.entries(patch)) {
+          if (!TUNABLE.includes(k)) { rejected[k] = '不在可调清单'; continue; }
+          const n = Number(v);
+          if (!Number.isFinite(n)) { rejected[k] = '要数字'; continue; }
+          applied[k] = n;
+        }
+        if (Object.keys(applied).length) {
+          /** 走与 /config 同一条保存路径（applyConfigBody），不另写一套落盘逻辑 */
+          const out = applyConfigBody({ autotelic: { ...(cfg.autotelic || {}), ...applied } }, { mode: 'patch' });
+          if (out?.status >= 400) {
+            return send(res, out.status, { ok: false, message: out?.body?.message || '调参没存上' });
+          }
+        }
+        log.info(`自驱调参：${Object.entries(applied).map(([k, v]) => `${k}=${v}`).join('、') || '无'}`);
+        return send(res, 200, {
+          ok: true,
+          message: `调好了：${Object.entries(applied).map(([k, v]) => `${k}=${v}`).join('、') || '无'}${Object.keys(rejected).length ? `（拒了 ${Object.keys(rejected).length} 项）` : ''}`,
+          applied,
+          rejected,
+        });
+      }),
+
+      route('/autotelic/proposals', async (req, res) => {
+        const dir = join(dataDir(), 'proposals');
+        if (req.method === 'POST') {
+          if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
+          const body = await readBody(req).catch(() => ({}));
+          const date = String(body?.date || '').trim();
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return send(res, 400, { ok: false, message: '日期要 YYYY-MM-DD' });
+          const text = dream.text(date) || '';
+          const m = text.match(/明天想做的事[\s\S]*?(?=\n## |$)/);
+          const picks = (m ? m[0].split('\n').slice(1) : []).map((s) => String(s).replace(/^[-*]\s*/, '').trim()).filter(Boolean).slice(0, 10);
+          if (!picks.length) return send(res, 400, { ok: false, message: '那天的梦没有「明天想做的事」，提不出提案' });
+          try {
+            mkdirSync(dir, { recursive: true });
+            const file = join(dir, `${date}.md`);
+            writeFileSync(file, `# 提案 · ${date}\n\n${picks.map((x) => `- ${x}`).join('\n')}\n\n来源：${date} 的梦（真实调用链提取）\n`, 'utf8');
+            return send(res, 200, { ok: true, file: `${date}.md`, count: picks.length });
+          } catch (e) { return send(res, 500, { ok: false, message: `写提案失败：${e?.message || e}` }); }
+        }
+        let list = [];
+        try { list = readdirSync(dir).filter((f) => f.endsWith('.md')).sort().reverse().slice(0, 20); } catch {}
+        return send(res, 200, { ok: true, list });
+      }),
+
+      /**
+       * A3 单任务流水账：从自驱账本按 id 捞该任务的全部行 + 决策链里相关阶段，
+       * 数据全是现成的，这里只拼装。找不到 id 就如实说，不编条目。
+       */
+      route('/autotelic/task-detail', (req, res) => {
+        const id = String(new URL(req.url || '/', 'http://x').searchParams.get('id') || '').trim();
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        const rows = autotelic.recent(500).rows.filter((r) =>
+          String(r?.id || '') === id || String(r?.taskId || '') === id || String(r?.seq || '') === id);
+        if (!rows.length) return send(res, 404, { ok: false, message: '账本里没有这条任务（可能已被修剪）' });
+        const chain = verifyDecisionLog(join(dataDir(), 'decisions.jsonl'));
+        const decisions = Array.isArray(chain?.rows) ? chain.rows.filter((r) => String(r?.taskId || r?.id || '') === id) : [];
+        return send(res, 200, { ok: true, rows, decisions, chainOk: chain?.ok !== false });
+      }),
+
+      /**
+       * A6 某天复盘：梦全文 + 当天账本 + 决策链校验，按日期回看「她那天想过什么」。
+       * 只读取，不改任何状态。
+       */
+      route('/autotelic/day', (req, res) => {
+        const date = String(new URL(req.url || '/', 'http://x').searchParams.get('date') || '').trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return send(res, 400, { ok: false, message: '日期格式要 YYYY-MM-DD' });
+        const journal = typeof journalAdd?.byDay === 'function' ? journalAdd.byDay(date) : null;
+        const chain = verifyDecisionLog(join(dataDir(), 'decisions.jsonl'));
+        const rows = autotelic.recent(500).rows.filter((r) => {
+          const t = Number(r?.at || r?.ts) || 0;
+          return t > 0 && new Date(t).toISOString().slice(0, 10) === date;
+        });
+        return send(res, 200, {
+          ok: true, date,
+          dream: dream.text(date) || '',
+          journal: journal || null,
+          rows,
+          chainOk: chain?.ok !== false,
+        });
       }),
 
       /**

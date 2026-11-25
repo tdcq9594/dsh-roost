@@ -516,3 +516,36 @@ export function createSkillStore(root, opts = {}) {
 // =====================================================================
 // 以下为旧接口（P3.1/P4.2），模块壳与 autotelic-p3.test.js 仍在用——行为原样保留。
 // =====================================================================
+
+// =====================================================================
+// 用户模块写入（批次3 · 她的手的第二条路）——移植自 aurabot skills.js 尾部
+// =====================================================================
+/** 模块源码上限（与对方一致） */
+const MAX_MODULE_CODE = 256 * 1024
+const MODULE_ID_RE = /^[a-z][a-z0-9-]{1,39}$/
+
+/**
+ * 给她写一个用户模块。**安全边界**（改前必读）：
+ *   · id 必须是「小写字母开头、小写字母/数字/-、2~40 字」；
+ *   · 入口必须 `export default`（否则模块系统加载不了）；
+ *   · **禁止 `../` 越级 import**——她写不到框架 src/，这是硬边界；
+ *   · 只能落在传入的 dir（调用方给 `<数据目录>/modules`），不碰别处。
+ * 写坏了只影响这个模块自己，不会动到框架。
+ */
+export function writeUserModule({ dir, id, code } = {}) {
+  const key = String(id || '').trim()
+  if (!MODULE_ID_RE.test(key)) return { ok: false, why: `模块 id「${key}」不对：小写字母开头，小写字母/数字/-，2~40 字` }
+  if (typeof code !== 'string' || !code.includes('export default')) return { ok: false, why: '入口文件必须 export default 一个模块对象' }
+  if (code.length > MAX_MODULE_CODE) return { ok: false, why: '模块太大（>256KB）' }
+  /** 越级 import 是唯一能摸到框架的路径，直接拒 */
+  if (/from\s+['"](\.\.\/)+/.test(code)) return { ok: false, why: '不许 import 用户模块目录外面的东西（src/ 对她锁死）' }
+  if (!dir) return { ok: false, why: '拿不到用户模块目录' }
+  const file = join(dir, key, 'index.mjs')
+  try {
+    mkdirSync(join(dir, key), { recursive: true })
+    writeFileSync(file, code, 'utf8')
+  } catch (error) {
+    return { ok: false, why: `写不了：${error?.message || error}` }
+  }
+  return { ok: true, file, note: '写坏了只影响这个模块自己，不会动到框架；面板「已安装」看报错' }
+}

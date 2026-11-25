@@ -183,6 +183,8 @@ export function createDream({
   generate = null,
   /** 自驱账本的一天统计（没有就返回空串）：由 host 注入，避免这里依赖 autotelic */
   statsOf = null,
+  /** 做梦窗口（HH:MM），由 host 注入 autotelic.dreamFrom/To；空串=不限制 */
+  windowOf = () => ({ from: '', to: '' }),
   name = '她',
   now = () => Date.now(),
   log = () => {},
@@ -194,6 +196,22 @@ export function createDream({
   function due(day) {
     const d = safeDay(day);
     if (!d) return false;
+    /**
+     * 做梦窗口：只在 HH:MM 区间内允许自动做（跨午夜用取模判）。
+     * 面板手动触发也走 run()，所以这里挡的是"窗口外自动"——host 传的
+     * windowOf 为空时完全不限制（老行为，测试零影响）。
+     */
+    const w = windowOf() || {};
+    const from = String(w.from || ''), to = String(w.to || '');
+    if (/^\d{1,2}:\d{2}$/.test(from) && /^\d{1,2}:\d{2}$/.test(to) && from !== to) {
+      const [fh, fm] = from.split(':').map(Number);
+      const [th, tm] = to.split(':').map(Number);
+      const mins = fh * 60 + fm, end = th * 60 + tm;
+      const dt = new Date(now());
+      const cur = dt.getHours() * 60 + dt.getMinutes();
+      const inWindow = mins <= end ? (cur >= mins && cur < end) : (cur >= mins || cur < end);
+      if (!inWindow) return false;
+    }
     try { return !existsSync(dreamFile(d)); } catch { return true; }
   }
 
@@ -254,7 +272,7 @@ export function createDream({
    *
    * @param {{day?:string}} [o] 不给就做"昨天"（巩固跑的是昨天，梦跟着同一天）
    */
-  async function run({ day = '' } = {}) {
+  async function run({ day = '', ignoreWindow = false } = {}) {
     const d = safeDay(day);
     if (!d) return { ok: false, reason: '日期不合法（要 YYYY-MM-DD）' };
     /**
@@ -263,7 +281,9 @@ export function createDream({
      * 的掩码撤掉），也会白烧一次模型调用。这里直接挡住。
      */
     if (running) return { ok: false, reason: '上一次做梦还没跑完' };
-    if (!due(d)) return { ok: false, reason: '这天已经做过梦了' };
+    /** 手动触发（面板点）绕过窗口；自动路径守窗口 */
+    if (!ignoreWindow && !due(d)) return { ok: false, reason: '这天已经做过梦了，或不在做梦窗口内' };
+    if (ignoreWindow && existsSync(dreamFile(d))) return { ok: false, reason: '这天已经做过梦了' };
     running = true;
     try {
       return await runOnce(d);

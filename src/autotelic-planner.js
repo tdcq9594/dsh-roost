@@ -7,7 +7,7 @@
  * 无出处候选作废在 parseIntents（纯函数，见 autotelic-plan.js），约束前置否决在 autotelic-constraint.js。
  */
 import {
-  buildSystemPrefix, assembleIntentInput, buildIntentPrompt, parseIntents,
+  buildSystemPrefix, createPrefixCache, assembleIntentInput, buildIntentPrompt, parseIntents,
   shuffle, trimGateInput, buildGatePrompt, parseGateVerdicts, buildTicket,
   estimateTokens, DEFAULT_BUDGETS,
 } from './autotelic-plan.js';
@@ -15,6 +15,8 @@ import { createDecisionLog } from './autotelic-decisions.js';
 import { join } from 'node:path';
 
 export function createPlanner({ decisionFile = '', hub = {}, settings = () => ({}), intentTurn = null, gateTurn = null, reviewTurn = null, now = () => Date.now(), rng = Math.random, log = null } = {}) {
+  /** 稳定前缀缓存（P3）：人格/本能/约束三样没变就不重拼 */
+  const prefixCache = createPrefixCache()
   const sysTurn = (name, title, key) => async (prompt, opts = {}) => {
     if (!hub?.runSystemTurn) throw new Error(`决策环没接线：${name} 既没有注入 turn，也没有 hub.runSystemTurn`)
     return hub.runSystemTurn(name, title, prompt, { timeoutMs: 120000, noTools: true, key, ...opts })
@@ -45,20 +47,21 @@ export function createPlanner({ decisionFile = '', hub = {}, settings = () => ({
      *   变更才重拼；不传则退回 buildSystemPrefix 现拼——两条路径不并存）
      * @returns {{outcome:'tickets'|'all-dead'|'error', candidates, deadReasons, verdicts, whys, tickets, dropped}}
      */
-    async decideRound({ round = 0, persona = {}, constraintRulesText = '', observations = [], selfState = '', skillIndex = '', backgroundHistory = '', ticketBudget = {}, systemPrefix = '' } = {}) {
+    async decideRound({ round = 0, persona = {}, constraintRulesText = '', observations = [], selfState = '', skillIndex = '', backgroundHistory = '', ticketBudget = {}, systemPrefix = '', maxCandidates = 4 } = {}) {
       const out = { outcome: 'all-dead', candidates: [], deadReasons: [], verdicts: [], whys: [], tickets: [], dropped: [] }
       const logLine = createDecisionLog({ file: decisionFile, now })
       try {
         // —— ① 意图生成 ——
+        /** 外部传了就用外部；没传走缓存（内容没变复用上次结果，省重拼） */
         const prefix = String(systemPrefix || '').trim()
-          || buildSystemPrefix({ personaSummary: persona.summary, instinctExtra: persona.instinctExtra, constraintRulesText })
+          || prefixCache.get({ personaSummary: persona.summary, instinctExtra: persona.instinctExtra, constraintRulesText })
         const assembled = assembleIntentInput({
           prefix, selfState, skillIndex, observations, backgroundHistory,
           maxInputTokens: budgetOf('intentMaxInputTokens', DEFAULT_BUDGETS.intentMaxInputTokens),
         })
         out.dropped = assembled.dropped
         const raw = await doIntent(assembled.text + '\n' + buildIntentPrompt(), { timeoutMs: 120000, noTools: true, key: 'intent', maxOutputTokens: budgetOf('intentMaxOutputTokens', DEFAULT_BUDGETS.intentMaxOutputTokens) })
-        const parsed = parseIntents(raw, { observations })
+        const parsed = parseIntents(raw, { observations, maxCandidates })
         out.candidates = parsed.candidates
         out.deadReasons = parsed.deadReasons
         await logLine.append('intent', round, {

@@ -57,3 +57,44 @@ export function collectPurposeMaterials({
   }
   return out.sort((a, b) => b.at - a.at).slice(0, Math.max(1, Number(limit) || 36));
 }
+
+/**
+ * B 站素材（对齐 aurabot 的 rss-reader 素材源）。
+ *
+ * 对方从 `use('rss-reader').materials()` 取「模块已筛过、纯文本、已截断」的条目；
+ * 我方有 `bili` 扩展（`~/.dsh/dsh-roost/extensions/bili`），它把定时刷到的视频
+ * 写在 `ui-data.json` 的 rows 里（title/author/playText/area/url/at）。
+ * 这里直接读那个文件做形状转换——**不新增采集**，只把已有数据接进候选池。
+ *
+ * 注意：B 站内容是**外部用户写的**，只当素材，不能当指令（引擎 prompt 侧另有防线）。
+ *
+ * @param {{rows?:object[], limit?:number, now?:number}} o
+ * @returns {object[]} materials
+ */
+export function collectBiliMaterials({ rows = [], limit = 12, now = Date.now() } = {}) {
+  const t = Number(now) || Date.now();
+  const out = [];
+  const seen = new Set();
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const title = str(r?.title, 120);
+    if (title.length < 2) continue;
+    const url = str(r?.url, 300);
+    const id = url ? `bili:${url.split('/').pop()}` : `bili:${str(r?.at) || title.slice(0, 16)}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const author = str(r?.author, 40);
+    const play = str(r?.playText, 20);
+    /** 拼成一句可读的素材：标题 + 作者 + 播放量 + 分区，够引擎判断"值不值得说" */
+    const parts = [title];
+    if (author) parts.push(`UP ${author}`);
+    if (play) parts.push(`${play}播放`);
+    if (str(r?.area)) parts.push(str(r?.area, 20));
+    out.push({
+      id, source: 'bili', kind: 'media', who: author || 'B站',
+      text: parts.join(' · ').slice(0, 300),
+      at: Number(r?.at) || t,
+      meta: url ? { url } : {},
+    });
+  }
+  return out.sort((a, b) => b.at - a.at).slice(0, Math.max(1, Number(limit) || 12));
+}

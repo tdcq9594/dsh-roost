@@ -133,6 +133,10 @@ export function createExecV5({
       : outcome.status === 'failed' ? 'failed' : 'abandoned'
     if (book && typeof book.addTask === 'function' && typeof book.close === 'function') {
       try {
+        /** 面板改 maxTasksActive 后立即生效（book 实例是启动时建的，上限要运行时同步） */
+        if (typeof book.setMaxActive === 'function') {
+          book.setMaxActive(Number(settings()?.maxTasksActive) || 8)
+        }
         const added = book.addTask({ title: String(ticket.intent || ticket.id).slice(0, 80), reason: String(ticket.intent || ''), todos: ticket.steps })
         if (added?.ok) book.close(added.task.id, bookStatus, `[${outcome.status}] ${outcome.why}`.slice(0, 200))
       } catch (error) { log?.warn?.('自驱v5：终态写账本失败：', error?.message) }
@@ -142,6 +146,21 @@ export function createExecV5({
       args: { ticket: ticket.id, tag: ticket.tag, status: outcome.status },
       outcome: outcome.why,
     })
+    /**
+     * 开观察窗（P1/P2 修复）：**必须放在 settle 里**——settle 是所有终态的唯一出口，
+     * 包含 `confirm()` 放行后的执行。放在 autotelic.execute() 外侧会漏掉最核心的
+     * 「排队→主人确认→真发出」路径（那是默认 autoConfirmOwner=false 的常态）。
+     * 判据只看「**真有 touch-owner 步骤执行成功**」，与整单 status 解耦（P2-B）：
+     * 消息已真送到主人，后续步失败/预算耗尽导致整单 failed/aborted 时，
+     * 那条消息同样该有观察窗——否则无回应永不记 ignored，该 tag 冷度不涨、park 失效。
+     */
+    const ownerStepRan = Array.isArray(outcome.results) && outcome.results.some((r) =>
+      String(r?.level || 'touch-owner') === 'touch-owner' && !r?.skipped && r?.ok !== false);
+    if (ticket.ownerSide === true && ownerStepRan
+      && feedback && typeof feedback.recordDelivery === 'function') {
+      try { feedback.recordDelivery({ id: ticket.id, tag: ticket.tag, text: ticket.intent }); }
+      catch (error) { log?.warn?.('自驱v5：投递记账失败：', error?.message) }
+    }
     // 回调 B 的复盘环（reviewRound 入参契约，lead 裁决 2026-11-17 定稿）
     const review = {
       roundId: outcome.roundId || `round-${ticket.id}`,
@@ -183,8 +202,16 @@ export function createExecV5({
     if (typeof hooks.selfCheck !== 'function') return { pass: true, loss: '（未配置自查通道，跳过）' }
     try {
       const r = await hooks.selfCheck({ ticket, step, text: step.text || step.desc || '' })
-      const loss = String(r?.loss ?? r ?? '').trim()
-      return { pass: loss.length > 0, loss }
+      /**
+       * 契约（P1/P2 修复）：显式 `pass` 优先，两端都认——
+       *   · `pass === false` 一律不放行（以前只读 loss，`{pass:false,loss:'x'}` 会被反判成通过）；
+       *   · `pass === true` 一律放行（以前被「loss 必须非空」二次否决，与注释口径不符）；
+       *   · 没给 `pass` 才退回「loss 非空才算通过」（老调用方的字符串/`{loss}` 形状）。
+       */
+      if (r && typeof r === 'object' && r.pass === true) return { pass: true, loss: String(r.loss ?? '').trim() };
+      if (r && typeof r === 'object' && r.pass === false) return { pass: false, loss: String(r.loss ?? '').trim() };
+      const loss = String(r?.loss ?? (typeof r === 'string' ? r : '')).trim();
+      return { pass: loss.length > 0, loss };
     } catch (error) {
       log?.warn?.('自驱v5：自查调用出错，按不放行处理：', error?.message)
       return { pass: false, loss: '' }
@@ -358,13 +385,18 @@ export function createExecV5({
           results.push({ i, level, skipped: 'downgraded-diary', observation: `自查答不出「删掉主人会损失什么」（${check.loss || '无 loss'}），降级只写日记` })
           continue
         }
-        markSpoke(ticket.tag, now())
       }
 
       const r = await runOneStep(ticket, step, { index: i, level, ticket })
       doneCount++
       results.push({ i, level, ok: r.ok, observation: r.observation.slice(0, 300) })
       if (!r.ok) { status = 'failed'; why = `第 ${i + 1} 步失败（重试后仍失败）：${r.observation.slice(0, 120)}`; break }
+      /**
+       * 24h 频控记账（P2-A 修复）：**必须等真发出去之后才记**。
+       * 以前记在 runOneStep 之前——发送失败也算占额度，一天唯一一次主动机会
+       * 被自己吞掉（失败单既不开观察窗、又把频控额度吃满）。
+       */
+      if (level === 'touch-owner') markSpoke(ticket.tag, now())
     }
 
     if (status === 'done' && doneCount === 0 && results.every((r) => r.skipped)) {

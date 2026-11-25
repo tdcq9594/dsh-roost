@@ -242,7 +242,8 @@ test('渲染：整组都被隐藏时，一级分组不再出现', () => {
   resetStore('overview')
   /* 用人设组测整组消失：能力组的 `caps` 在保护名单里，永远藏不掉（开关总入口）。
      这条同时也钉住「保护页让所在组不会变成空壳」这个副作用。 */
-  store['roost.ui.v1'] = JSON.stringify({ hidden: ['her', 'profile', 'mood', 'awake', 'memory', 'people'] })
+  /** autotelic 已从 awake 页拆成独立 tab，也归人设组，整组隐藏测试要一起藏 */
+  store['roost.ui.v1'] = JSON.stringify({ hidden: ['her', 'profile', 'mood', 'awake', 'autotelic', 'memory', 'people'] })
   const { mod: m, rt } = loadClient()
   const tree = expand(m.RoostPage(), rt)
   const groups = []

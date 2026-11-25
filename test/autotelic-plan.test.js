@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isForbidden, LEVELS, TRANSIENT_RE } from '../src/autotelic-exec.js';
-import { TAG_SET, TAG_VOCAB, parseIntents, buildTicket, GATE_CRITERIA } from '../src/autotelic-plan.js';
+import { TAG_SET, TAG_VOCAB, parseIntents, buildTicket, GATE_CRITERIA, createPrefixCache } from '../src/autotelic-plan.js';
 import { parseConstraintRules, check as constraintCheck } from '../src/autotelic-constraint.js';
 
 test('执行分级：三级 LEVELS + 五类硬禁区命中/放行（对方原用例）', () => {
@@ -50,4 +50,21 @@ test('约束 hard-check：解析规则 + 触犯即否决（对方口径）', () 
   assert.equal(parsed.skipped, 0);
   assert.equal(constraintCheck(parsed.rules, { title: '半夜给主人发消息' }).vetoed, true);
   assert.equal(constraintCheck(parsed.rules, { title: '整理自己的笔记' }).vetoed, false);
+});
+
+test('createPrefixCache（P3）：输入不变复用，变了重拼', () => {
+  const cache = createPrefixCache();
+  const a = cache.get({ personaSummary: '她是栖', constraintRulesText: '别熬夜' });
+  const b = cache.get({ personaSummary: '她是栖', constraintRulesText: '别熬夜' });
+  assert.equal(a, b, '同样输入返回同一份');
+  assert.deepEqual(cache.stats(), { hits: 1, misses: 1 }, '第二次应命中');
+
+  const c = cache.get({ personaSummary: '她是栖', constraintRulesText: '别熬夜，也别刷B站' });
+  assert.notEqual(a, c, '约束改了要重拼');
+  assert.equal(cache.stats().misses, 2);
+  assert.match(c, /也别刷B站/);
+
+  cache.invalidate();
+  cache.get({ personaSummary: '她是栖', constraintRulesText: '别熬夜，也别刷B站' });
+  assert.equal(cache.stats().misses, 3, '失效后重拼');
 });

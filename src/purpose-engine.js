@@ -175,7 +175,7 @@ function hashId(text) {
   return (h >>> 0).toString(36);
 }
 
-function clamp01(value, fallback = 0) {
+export function clamp01(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : fallback;
 }
@@ -223,7 +223,7 @@ export function needAffinity(text, roleName = '', roleAliases = []) {
 
 // 人格卡里的「性格倾向」→ 引擎参数覆写。只认显式写的词，第一个命中的词生效。
 
-function topNeedOf(affinity, drives = DEFAULT_DRIVES) {
+export function topNeedOf(affinity, drives = DEFAULT_DRIVES) {
   let best = 'share';
   let bestScore = -1;
   for (const need of PURPOSE_NEEDS) {
@@ -260,7 +260,7 @@ export function extractTopic(text, title = '') {
   return cleanTopic(clip(raw, 18));
 }
 
-function emotionCues(text) {
+export function emotionCues(text) {
   const raw = String(text ?? '');
   return {
     positive: POSITIVE_RE.test(raw),
@@ -908,7 +908,7 @@ export function goalToCandidate(goal) {
  * 注意：这里给的是「想做什么」的方向，不是要她照读的句子；模型会改写成自己的话。
  */
 
-function kindForAction(action, need) {
+export function kindForAction(action, need) {
   if (action === 'ask' || action === 'invite') return 'ask';
   if (action === 'curiosity') return 'curiosity';
   if (action === 'follow') return 'follow-up';
@@ -917,7 +917,7 @@ function kindForAction(action, need) {
   return 'share';
 }
 
-function actionForNeed(need, topic, { emotion = '', hoursSinceMaster = 24 } = {}) {
+export function actionForNeed(need, topic, { emotion = '', hoursSinceMaster = 24 } = {}) {
   switch (need) {
     case 'play': return topic ? 'invite' : 'ask';
     case 'install': return 'ask';
@@ -965,3 +965,170 @@ function intentForNeed(need, topic, { emotion = '', hoursSinceMaster = 24, relat
  * 旧字段 `kind` 保留（兼容提示词/历史），新字段 `need/action/emotion/topic` 给提示词用。
  */
 
+
+/**
+ * 驱力推导（P0 第三批）——移植自 aurabot-beta `src/purpose/engine.js:1203-1258`。
+ * MIT License, Copyright (c) 2026 Aurabot contributors；本仓 AGPL-3.0，署名见 THIRD-PARTY-NOTICES.md。
+ *
+ * 回答：**她现在有多想玩/想学/想装/想陪…**
+ * 四层叠加，顺序不能乱：
+ *   ① 向默认值半衰（时间越久越回到出厂状态）
+ *   ② 长期反馈学习（主人吃哪套就抬地板，不吃就加速回落）
+ *   ③ 人格先验（用「地板」而非累加，否则几十轮后全被顶到 1）
+ *   ④ 素材刺激（最近反复看到的内容推高对应需要）
+ * 外加「多久没和主人说话」推高 connect——寂寞不是随机出现的。
+ */
+export function deriveDrives({
+  drives,
+  drivesAt = 0,
+  materials = [],
+  now = Date.now(),
+  lastMasterAt = 0,
+  personaBias = null,
+  needFeedback = null,
+  halfLifeHours = 8,
+  connectFloor = 0,
+} = {}) {
+  const next = normalizeDrives(drives);
+  const hours = drivesAt > 0 ? Math.min(72, Math.max(0, (now - drivesAt) / HOUR)) : 0;
+  const decay = Math.pow(0.5, hours / Math.max(1, Number(halfLifeHours) || 8));
+  for (const need of PURPOSE_NEEDS) {
+    next[need] = DEFAULT_DRIVES[need] + (next[need] - DEFAULT_DRIVES[need]) * decay;
+  }
+  /**
+   * 长期反馈学习：某需要的主动搭话攒够样本（≥5 次有回音），
+   * 正反馈率 ≥60% 的抬地板（主人吃这套），≤30% 的向默认值加速回落。
+   */
+  if (needFeedback && typeof needFeedback === 'object') {
+    for (const need of PURPOSE_NEEDS) {
+      const s = needFeedback[need];
+      const pos = Number(s?.positive) || 0;
+      const neg = Number(s?.negative) || 0;
+      if (pos + neg < 5) continue;
+      if (pos / (pos + neg) >= 0.6) {
+        next[need] = Math.min(1, Math.max(next[need], DEFAULT_DRIVES[need] + 0.08));
+      } else if (pos / (pos + neg) <= 0.3) {
+        next[need] = DEFAULT_DRIVES[need] + (next[need] - DEFAULT_DRIVES[need]) * 0.85;
+      }
+    }
+  }
+  /** 人格卡先验：用「地板」而不是累加，否则每轮 +bias，几十轮后所有驱动都会被顶到 1。 */
+  if (personaBias && typeof personaBias === 'object') {
+    for (const need of PURPOSE_NEEDS) {
+      const bias = Number(personaBias[need]);
+      if (Number.isFinite(bias) && bias > 0) {
+        next[need] = Math.min(1, Math.max(next[need], DEFAULT_DRIVES[need] + Math.min(0.3, bias)));
+      }
+    }
+  }
+  const hoursSinceMaster = lastMasterAt > 0 ? Math.max(0, (now - lastMasterAt) / HOUR) : 24;
+  /** 连接需求会随「多久没和主人说话」慢慢涨；这也是「寂寞/想陪」不是随机出现的原因。 */
+  next.connect = Math.min(0.95, next.connect + Math.min(0.5, (hoursSinceMaster / 24) * 0.4));
+  /** 黏人地板（人格覆写 connectFloor）。 */
+  const cFloor = Math.min(0.3, Math.max(0, Number(connectFloor) || 0));
+  if (cFloor > 0) next.connect = Math.min(0.95, Math.max(next.connect, DEFAULT_DRIVES.connect + cFloor));
+  /** 最近反复看到的内容，会把对应需求推高（看多了游戏会想玩，看多了工具会想装）。 */
+  for (const material of materials.slice(0, 24)) {
+    const affinity = material.needAffinity ?? needAffinity(`${material.title ?? ''} ${material.text ?? ''}`);
+    for (const need of PURPOSE_NEEDS) {
+      next[need] = Math.min(1, next[need] + affinity[need] * 0.045);
+    }
+  }
+  return { drives: next, drivesAt: now };
+}
+
+// =====================================================================
+// 情绪与选择辅助（P0 第四批）——移植自 aurabot-beta
+// `src/features/mood-emotions.js` 与 `src/purpose/engine.js` 相关段。
+// MIT License, Copyright (c) 2026 Aurabot contributors；本仓 AGPL-3.0。
+// =====================================================================
+
+/**
+ * 出厂十项情绪。**这是 purpose 模块自带的情绪表**，与我方全局 mood 的
+ * 三维（valence/energy/sociability）并行、互不改写——purpose 需要离散标签
+ * 才能让模型读懂「期待/羡慕/无聊」，三维向量给不出这个。
+ */
+export const DEFAULT_EMOTIONS = Object.freeze([
+  Object.freeze({ key: 'curious', label: '好奇', icon: '🤔', valence: 0.3, arousal: 0.6 }),
+  Object.freeze({ key: 'excited', label: '兴奋', icon: '🤩', valence: 0.8, arousal: 0.9 }),
+  Object.freeze({ key: 'lonely', label: '寂寞', icon: '😔', valence: -0.6, arousal: 0.3 }),
+  Object.freeze({ key: 'envious', label: '羡慕', icon: '😒', valence: -0.4, arousal: 0.5 }),
+  Object.freeze({ key: 'worried', label: '担心', icon: '😟', valence: -0.5, arousal: 0.6 }),
+  Object.freeze({ key: 'proud', label: '得意', icon: '😌', valence: 0.6, arousal: 0.5 }),
+  Object.freeze({ key: 'affectionate', label: '亲近', icon: '🥰', valence: 0.7, arousal: 0.4 }),
+  Object.freeze({ key: 'bored', label: '无聊', icon: '😐', valence: -0.2, arousal: 0.2 }),
+  Object.freeze({ key: 'amused', label: '好笑', icon: '😄', valence: 0.6, arousal: 0.7 }),
+  Object.freeze({ key: 'content', label: '平静', icon: '😊', valence: 0.2, arousal: 0.3 }),
+]);
+
+export const ACTION_LABELS = Object.freeze({
+  share: '分享', ask: '索取', invite: '邀请', confide: '倾诉', follow: '追问', curiosity: '好奇',
+});
+
+/** 情绪表归一化：只认合法形状，非法项丢弃；空则回出厂十项。 */
+export function normalizeEmotions(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const out = [];
+  for (const item of list) {
+    const key = String(item?.key ?? '').trim();
+    if (!/^[a-z][a-z0-9-]{0,23}$/.test(key)) continue;
+    if (out.some((x) => x.key === key)) continue;
+    out.push({
+      key,
+      label: String(item?.label ?? '').trim().slice(0, 8) || key,
+      icon: String(item?.icon ?? '').slice(0, 4),
+      valence: Math.min(1, Math.max(-1, Number(item?.valence) || 0)),
+      arousal: Math.min(1, Math.max(0, Number(item?.arousal) || 0)),
+    });
+  }
+  return out.length ? out : DEFAULT_EMOTIONS.map((x) => ({ ...x }));
+}
+
+/** 情绪键 → 标签表。 */
+export function emotionLabels(emotions) {
+  const out = {};
+  for (const item of normalizeEmotions(emotions)) out[item.key] = item.label;
+  return out;
+}
+
+/** 情绪键 → { valence, arousal }；未知回中性偏弱。 */
+export function emotionProfiles(emotions) {
+  const out = {};
+  for (const item of normalizeEmotions(emotions)) out[item.key] = { valence: item.valence, arousal: item.arousal };
+  return out;
+}
+
+export function profileOf(emotions, key) {
+  return emotionProfiles(emotions)[key] || { valence: 0, arousal: 0.3 };
+}
+
+export function emotionProfile(emotion, emotions = DEFAULT_EMOTIONS) {
+  return profileOf(emotions, emotion);
+}
+
+/** 情绪键 → 用户配的标签（删掉的项返回空串）。 */
+export function emotionLabelFor(emotions, emotion) {
+  if (!emotion) return '';
+  return emotionLabels(emotions)[emotion] || '';
+}
+
+/**
+ * 把写死的情绪键映射到「当前情绪表里最接近的一项」。
+ * 用户删掉「无聊」时，-0.2/0.2 会落到「平静」这类最接近的项上，而不是产出空标签。
+ */
+export function resolveEmotion(emotions, key) {
+  const list = normalizeEmotions(emotions);
+  const want = String(key || '');
+  if (!want) return '';
+  const exact = list.find((item) => item.key === want);
+  if (exact) return exact.key;
+  const target = DEFAULT_EMOTIONS.find((item) => item.key === want);
+  if (!target || !list.length) return '';
+  let best = '';
+  let bestScore = Infinity;
+  for (const item of list) {
+    const score = Math.abs(item.valence - target.valence) + Math.abs(item.arousal - target.arousal) * 0.5;
+    if (score < bestScore) { bestScore = score; best = item.key; }
+  }
+  return best;
+}

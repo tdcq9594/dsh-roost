@@ -62,13 +62,23 @@ export function createFeedback({ file = '', decisionsFile = '', settings = () =>
   }
 
   /** 半衰折算：把 tag 的冷度按 14 天半衰折算到当前时刻并落回状态。
-   *  小时级内的微小 dt 不折算——否则 1+1+1 会被浮点衰成 2.999…<3，park 阈值永远差一口气。 */
+   *  小时级内的微小 dt 不折算——否则 1+1+1 会被浮点衰成 2.999…<3，park 阈值永远差一口气。
+   *  **dt≤1h 时连 `at` 也不刷新**（P2 修复）：以前每次都写 `rec.at = at`，
+   *  导致 tick 每分钟都判定「状态变了」而无条件落盘；不刷新 `at` 反而让 dt 累积，
+   *  到 1 小时才真正折算一次——语义不变、写盘量降两个数量级。 */
   function decayChill(tag, at = now()) {
     const rec = state.chill[tag]
     if (!rec) return 0
     const dt = at - (rec.at || at)
-    const v = dt > HOUR ? rec.value * 0.5 ** (dt / halfLifeMs()) : rec.value
-    rec.value = Math.max(0, v)
+    if (dt <= HOUR) return rec.value
+    const v = Math.max(0, rec.value * 0.5 ** (dt / halfLifeMs()))
+    /**
+     * 值没变就不推进 `at`（P3 修复）：`value=0` 的条目折算永远是 0，
+     * 以前照样写 `rec.at = at` → 每小时落盘一次。不推进反而让 dt 继续累积，
+     * 语义不变（0 衰多少还是 0），稳态彻底静音。
+     */
+    if (v === rec.value) return rec.value
+    rec.value = v
     rec.at = at
     return rec.value
   }
@@ -172,8 +182,16 @@ export function createFeedback({ file = '', decisionsFile = '', settings = () =>
     let expired = 0
     const due = state.windows.filter((w) => at - w.at >= windowMs())
     for (const w of due) { recordResponse(w.id, 'ignored', at); expired++ }
-    for (const tag of Object.keys(state.chill)) decayChill(tag, at)
-    save()
+    const chillTags = Object.keys(state.chill)
+    /**
+     * 写放大（P2 修复）：先快照 chill，折算后比一次——**状态真变了才落盘**。
+     * 这条 tick 每分钟跑一次，无条件 save 等于每分钟重写 feedback.json；
+     * 配合 decayChill「dt≤1h 不动 at」，稳态下这里几乎永远不写。
+     */
+    const before = JSON.stringify(state.chill)
+    for (const tag of chillTags) decayChill(tag, at)
+    const chillChanged = JSON.stringify(state.chill) !== before
+    if (expired > 0 || chillChanged) save()
     return { expired }
   }
 

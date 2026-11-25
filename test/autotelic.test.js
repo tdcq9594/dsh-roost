@@ -534,3 +534,40 @@ test('decide()：账本 recent().rows 正确喂进 planner，无 planner 明确�
     assert.ok(seen.observations.length > 0, '账本里那行要喂进观察窗');
   } finally { cleanup(dir); }
 });
+
+test('节奏预算六键 + 同时任务上限：DEFAULTS 两处同步 + normalize 夹紧', () => {
+  const src = readFileSync(join(import.meta.dirname, '..', 'src', 'autotelic.js'), 'utf8')
+  const cfgSrc = readFileSync(join(import.meta.dirname, '..', 'src', 'config.js'), 'utf8')
+  for (const k of ['maxCandidates', 'budgetActionsPerHour', 'dailyReviewHour', 'minBatchForReview', 'dreamFrom', 'dreamTo']) {
+    assert.match(src, new RegExp(`${k}:`), `${k} 必须在 AUTOTELIC_DEFAULTS`)
+    assert.match(cfgSrc, new RegExp(`${k}:`), `${k} 必须在 config.DEFAULTS（两处同步）`)
+  }
+  assert.match(src, /clampTime\(r\.dreamFrom/, 'dreamFrom 要校验 HH:MM')
+  /** maxTasksActive（P3）：book 已移植，不是单 project 槽，真控件 */
+  assert.match(src, /^\s+maxTasksActive: 8,/m, 'maxTasksActive 要作为真配置键存在')
+  assert.match(cfgSrc, /^\s+maxTasksActive: 8,/m, '两处同步')
+})
+
+test('复盘闭环（P1）：reviewer 注入后 execute 把它作为 plan.reviewRound 传给执行器', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rev-'));
+  try {
+    let gotPlan = null;
+    const executor = { async run(_t, opts) { gotPlan = opts?.plan; return { status: 'done' }; } };
+    const reviewer = async () => ({ ok: true });
+    const at = createAutotelic({ dir, cfgOf: () => ({}), executor, reviewer, log: () => {} });
+    await at.execute({ id: 'x', intent: 'i', tag: 't', steps: [] });
+    assert.equal(typeof gotPlan?.reviewRound, 'function', 'plan.reviewRound 必须传下去');
+    await gotPlan.reviewRound({ ticketId: 'x' });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('复盘闭环（P1）：没注入 reviewer 时执行器第二参不含 plan（老行为零影响）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rev2-'));
+  try {
+    let gotOpts = 'unset';
+    const executor = { async run(_t, opts) { gotOpts = opts; return { status: 'done' }; } };
+    const at = createAutotelic({ dir, cfgOf: () => ({}), executor, log: () => {} });
+    await at.execute({ id: 'x', intent: 'i', tag: 't', steps: [] });
+    assert.deepEqual(gotOpts, {}, '不注入 reviewer 时传空对象');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

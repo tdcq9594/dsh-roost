@@ -351,3 +351,36 @@ export function buildTicket({ candidate, index = 0, budget = {}, id = '', now = 
 
 // ————— 决策审计：decisions.jsonl（dataDir 根，哈希链，不经模型手） —————
 
+
+/**
+ * 稳定前缀缓存（P3）——对齐 aurabot `src/autotelic/prefix.js:56 createPrefixCache`。
+ *
+ * 前缀段只在「本能晋升 / 约束修改 / 人格卡变更」时变化，属低频事件。
+ * 缓存按内容 hash 判断：hash 没变直接返回上次拼好的字符串，不必重拼。
+ * 拼装本身是确定性的（固定段顺序），所以同一输入永远同一输出——这是缓存命中的前提。
+ */
+export function createPrefixCache() {
+  let lastKey = '';
+  let lastText = '';
+  let hits = 0;
+  let misses = 0;
+  return {
+    /** 取前缀；输入没变就复用上次结果。 */
+    get(input = {}) {
+      const key = JSON.stringify([
+        String(input.personaSummary || ''),
+        String(input.instinctExtra || ''),
+        String(input.constraintRulesText || ''),
+      ]);
+      if (key === lastKey && lastText) { hits += 1; return lastText; }
+      misses += 1;
+      lastKey = key;
+      lastText = buildSystemPrefix(input);
+      return lastText;
+    },
+    /** 缓存命中统计（面板/测试用）。 */
+    stats: () => ({ hits, misses }),
+    /** 强制失效（人格卡/约束改了但调用方想立刻重拼时用）。 */
+    invalidate: () => { lastKey = ''; lastText = ''; },
+  };
+}

@@ -101,6 +101,13 @@ const normalizeGoal = (g = {}) => {
 /** 归一化整份状态：无论磁盘上是什么，出去都是四块合法结构 */
 export function normalizeState(raw = {}) {
   const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const int = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+  const str = (v, max = 120) => String(v ?? '').slice(0, max);
+  const counts = (v, len) => {
+    const out = new Array(len).fill(0);
+    if (Array.isArray(v)) for (let i = 0; i < len; i += 1) { const n = Number(v[i]); if (Number.isFinite(n) && n > 0) out[i] = Math.min(9999, Math.round(n)); }
+    return out;
+  };
   return {
     drives: normalizeDrives(r.drives),
     observations: Array.isArray(r.observations)
@@ -120,6 +127,65 @@ export function normalizeState(raw = {}) {
         at: Number(f?.at) || 0,
       }))
       : [],
+    /**
+     * 排程与历史（P0 第六批补）：早期 normalizeState 只存了上面 4 块，
+     * 运行时要的 day/countToday/nextFireAt/history/pending 全被洗掉——
+     * 状态根本存不住，tick 每轮都像第一次启动。这里与对方字段逐项对齐。
+     */
+    version: Number(r.version) || 1,
+    day: str(r.day, 10),
+    countToday: int(r.countToday),
+    lastRunAt: int(r.lastRunAt),
+    lastAttemptAt: int(r.lastAttemptAt),
+    lastSentAt: int(r.lastSentAt),
+    lastOutcome: str(r.lastOutcome, 24),
+    lastPurpose: str(r.lastPurpose, 120),
+    lastText: str(r.lastText, 200),
+    nextFireAt: int(r.nextFireAt),
+    attempts: int(r.attempts),
+    drivesAt: int(r.drivesAt),
+    replyHours: counts(r.replyHours, 24),
+    replyWeekday: counts(r.replyWeekday, 7),
+    replyHoursSeen: Array.isArray(r.replyHoursSeen) ? r.replyHoursSeen.map(String).slice(-200) : [],
+    needFeedback: r.needFeedback && typeof r.needFeedback === 'object' && !Array.isArray(r.needFeedback) ? r.needFeedback : {},
+    lastEmotion: str(r.lastEmotion, 24),
+    lastEmotionText: str(r.lastEmotionText, 30),
+    lastGoalId: str(r.lastGoalId, 24),
+    lastMaterialCount: int(r.lastMaterialCount),
+    lastCandidateCount: int(r.lastCandidateCount),
+    pending: Array.isArray(r.pending) ? r.pending.slice(-20).map((p) => ({
+      id: str(p?.id, 40), text: str(p?.text, 120), kind: str(p?.kind, 20),
+      need: str(p?.need, 20), action: str(p?.action, 20), emotion: str(p?.emotion, 20),
+      source: str(p?.source, 20), createdAt: int(p?.createdAt), expiresAt: int(p?.expiresAt), hits: int(p?.hits),
+    })) : [],
+    history: Array.isArray(r.history) ? r.history.slice(-60).map((h) => ({
+      at: int(h?.at), outcome: str(h?.outcome, 24), kind: str(h?.kind, 20),
+      need: str(h?.need, 20), action: str(h?.action, 20), emotion: str(h?.emotion, 20),
+      purpose: str(h?.purpose, 120), text: str(h?.text, 200), planned: str(h?.planned, 120),
+      sourceId: str(h?.sourceId, 80), goalId: str(h?.goalId, 24),
+      goalOwner: str(h?.goalOwner, 20), confidence: h?.confidence ?? null,
+    })) : [],
+    lastSkip: r.lastSkip && typeof r.lastSkip === 'object' ? { at: int(r.lastSkip.at), reason: str(r.lastSkip.reason, 80) } : null,
+    /**
+     * 朋友分区（P3）：每个朋友一套独立排程/历史/待续，互不影响、也不占主人额度。
+     * 结构 { [openid]: {同上面全部字段} }；这里只做浅归一化，深字段按需在 runner 里补。
+     */
+    friends: r.friends && typeof r.friends === 'object' && !Array.isArray(r.friends)
+      ? Object.fromEntries(Object.entries(r.friends).slice(0, 20).map(([k, v]) => [
+        str(k, 40),
+        {
+          day: str(v?.day, 10), countToday: int(v?.countToday), lastRunAt: int(v?.lastRunAt),
+          nextFireAt: int(v?.nextFireAt), attempts: int(v?.attempts), lastOutcome: str(v?.lastOutcome, 24),
+          lastPurpose: str(v?.lastPurpose, 120), lastText: str(v?.lastText, 200),
+          drives: normalizeDrives(v?.drives), drivesAt: int(v?.drivesAt),
+          goals: Array.isArray(v?.goals) ? v.goals.slice(-50).map(normalizeGoal) : [],
+          observations: Array.isArray(v?.observations) ? v.observations.slice(-200) : [],
+          pending: Array.isArray(v?.pending) ? v.pending.slice(-10) : [],
+          history: Array.isArray(v?.history) ? v.history.slice(-30) : [],
+          lastSkip: v?.lastSkip || null,
+        },
+      ]))
+      : {},
   };
 }
 

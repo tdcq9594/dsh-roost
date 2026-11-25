@@ -19,3 +19,9 @@ export const DEFAULT_TAGS = [
 ]
 
 /** 用户扩展文件的默认文件名（配合 api.dataDir 使用）。 */
+
+/** tag 是否在生效词表里（P1 · observe 层用；与对方 tags.js:73 同口径）。 */
+export function isValidTag(tag, tags = DEFAULT_TAGS) {
+  const s = String(tag ?? '').trim();
+  return Boolean(s) && tags.includes(s);
+}

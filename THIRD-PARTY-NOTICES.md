@@ -16,6 +16,9 @@
   - `src/autotelic-feedback.js`：反馈回路（抑制/偏好/冷度/park/熔断/24h 频控），整文件抽自 `aurabot-beta/src/autotelic/feedback.js`。
   - `src/autotelic-skills.js`：三层技能体系 createSkillStore（晋升/快照/score 只锚真实终态），抽自 `aurabot-beta/src/autotelic/skills.js` 的 v5 接口区（文件尾 P3.1/P4.2 旧接口未移植，我方无消费方）。
   - `src/autotelic-store.js`：readJson/writeJson 语义适配，对齐 `aurabot-beta/src/core/store.js`（BOM 处理 + 重试 + tmp/rename 原子写），写盘复用本仓 atomic.js。
+  - `src/reminder-store.js`：小闹钟数据层（时间解析 / normalize / prune / add / close / 失败重试状态机），移植自 `aurabot-beta/src/purpose/module.js` 的小闹钟段。
+  - `src/nudge.js`：追问判据 judgeNudge / 标记存储 / 提示词，移植自 `aurabot-beta/src/purpose/module.js` 的 maybeNudge 与 nudgePrompt 口径。
+  - `src/takeover.js`：收窄版接管——借鉴 `aurabot-beta/src/modules/autotelic/index.js` 的 takeover 思路，只保留白名单式 seeds 写入 + 冷却 + 变更历史，权限/配置/工具字段一律不接管（我方刻意收窄，非逐字移植）。
 - 接线层 `src/purpose-collect.js`、`src/host.js`、`src/purpose-state.js`、`src/autotelic.js` 是我方为 dsh-roost 新写的，不属于移植范围。
 - 移植方式：按顶层声明边界原样抽取函数体（脚本配对），避免手抄走样；仅改文件头署名与模块语境。
 

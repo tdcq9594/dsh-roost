@@ -75,7 +75,36 @@ export const AUTOTELIC_DEFAULTS = {
   confirmWindowMinutes: 720,
   responseWindowHours: 48,
   chillParkThreshold: 3,
+  /** 冷度半衰期（天）：多久忘掉一次「主人没理我」 */
+  chillHalfLifeDays: 14,
   maxSteps: 8,
+  /** 节奏预算（对齐 aurabot）：一轮最多立项 / 同时进行的任务数 / 动作数每小时。
+   *  maxTasksActive 已接进任务账本（book.js），不再是假控件。 */
+  maxCandidates: 3,
+  maxTasksActive: 8,
+  budgetActionsPerHour: 12,
+  /** 定时复盘：几点做每日一页 + 攒够几条先做（先到者为准） */
+  dailyReviewHour: 23,
+  minBatchForReview: 3,
+  /** 生活节奏（P1）：醒着窗口 + 随机间隔 + 点火冷却 */
+  awakeFrom: 8,
+  awakeTo: 23,
+  minIntervalMinutes: 90,
+  maxIntervalMinutes: 240,
+  igniteCooldownMinutes: 45,
+  /** 做梦窗口（HH:MM，安静时段最深处；空串=关） */
+  dreamFrom: '03:00',
+  dreamTo: '05:00',
+  /** 她的手（批次3）：默认全关，开了等于允许执行自写代码（详见 config.js 注释） */
+  /** 允许后台会话指定 preset 带工具（默认关，高风险） */
+  presetIdOverride: false,
+  allowPython: false,
+  pythonBin: '',
+  scriptTimeoutMs: 120000,
+  allowUserModules: false,
+  /** chat 组 token 预算（对话轮前缀段复用；对方 §9.3 四组之一） */
+  chatMaxInputTokens: 4096,
+  chatMaxOutputTokens: 1024,
   intentMaxInputTokens: 8192,
   intentMaxOutputTokens: 1024,
   gateMaxInputTokens: 4096,
@@ -85,7 +114,7 @@ export const AUTOTELIC_DEFAULTS = {
 };
 
 /** 允许出现在 `tune` 里的键（现在没有自动调参，留给以后收口） */
-export const TUNABLE = Object.freeze(['maxPerDay', 'heartbeatMin', 'quietStartHour', 'quietEndHour']);
+export const TUNABLE = Object.freeze(['awakeFrom', 'awakeTo', 'minIntervalMinutes', 'maxIntervalMinutes', 'maxPerDay', 'igniteCooldownMinutes']);
 
 const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
@@ -94,6 +123,16 @@ const clampInt = (v, min, max, dflt) => {
   const n = Number(v);
   if (!Number.isFinite(n)) return dflt;
   return Math.min(max, Math.max(min, Math.round(n)));
+};
+/** HH:MM 或空串（关）；非法值回落默认，不把坏配置排到错时刻 */
+const clampTime = (v, dflt) => {
+  const s = String(v ?? '').trim();
+  if (!s) return '';
+  const m = /^(\d{1,2}):(\d{2})$/.exec(s);
+  if (!m) return dflt;
+  const h = Number(m[1]), min = Number(m[2]);
+  if (h > 23 || min > 59) return dflt;
+  return `${String(h).padStart(2, '0')}:${m[2]}`;
 };
 
 /** 读配置段并夹紧到合法范围。配置写坏了不该让引擎崩，也不该让它跑飞 */
@@ -120,7 +159,28 @@ export function normalizeCfg(raw = {}) {
     confirmWindowMinutes: clampInt(r.confirmWindowMinutes, 5, 10080, AUTOTELIC_DEFAULTS.confirmWindowMinutes),
     responseWindowHours: clampInt(r.responseWindowHours, 1, 168, AUTOTELIC_DEFAULTS.responseWindowHours),
     chillParkThreshold: clampInt(r.chillParkThreshold, 1, 10, AUTOTELIC_DEFAULTS.chillParkThreshold),
+    chillHalfLifeDays: clampInt(r.chillHalfLifeDays, 1, 365, AUTOTELIC_DEFAULTS.chillHalfLifeDays),
     maxSteps: clampInt(r.maxSteps, 1, 32, AUTOTELIC_DEFAULTS.maxSteps),
+    maxTasksActive: clampInt(r.maxTasksActive, 1, 40, AUTOTELIC_DEFAULTS.maxTasksActive),
+    maxCandidates: clampInt(r.maxCandidates, 1, 5, AUTOTELIC_DEFAULTS.maxCandidates),
+    budgetActionsPerHour: clampInt(r.budgetActionsPerHour, 1, 120, AUTOTELIC_DEFAULTS.budgetActionsPerHour),
+    dailyReviewHour: clampInt(r.dailyReviewHour, 0, 23, AUTOTELIC_DEFAULTS.dailyReviewHour),
+    minBatchForReview: clampInt(r.minBatchForReview, 1, 20, AUTOTELIC_DEFAULTS.minBatchForReview),
+    /** HH:MM 严格校验，空串=关；非法回落默认，不让坏配置把做梦排到午夜 */
+    awakeFrom: clampInt(r.awakeFrom, 0, 24, AUTOTELIC_DEFAULTS.awakeFrom),
+    awakeTo: clampInt(r.awakeTo, 0, 24, AUTOTELIC_DEFAULTS.awakeTo),
+    minIntervalMinutes: clampInt(r.minIntervalMinutes, 5, 2880, AUTOTELIC_DEFAULTS.minIntervalMinutes),
+    maxIntervalMinutes: clampInt(r.maxIntervalMinutes, 5, 2880, AUTOTELIC_DEFAULTS.maxIntervalMinutes),
+    igniteCooldownMinutes: clampInt(r.igniteCooldownMinutes, 1, 720, AUTOTELIC_DEFAULTS.igniteCooldownMinutes),
+    dreamFrom: clampTime(r.dreamFrom, AUTOTELIC_DEFAULTS.dreamFrom),
+    dreamTo: clampTime(r.dreamTo, AUTOTELIC_DEFAULTS.dreamTo),
+    presetIdOverride: r.presetIdOverride === true,
+    allowPython: r.allowPython === true,
+    pythonBin: String(r.pythonBin ?? '').trim().slice(0, 500),
+    scriptTimeoutMs: clampInt(r.scriptTimeoutMs, 5000, 600000, AUTOTELIC_DEFAULTS.scriptTimeoutMs),
+    allowUserModules: r.allowUserModules === true,
+    chatMaxInputTokens: clampInt(r.chatMaxInputTokens, 512, 65536, AUTOTELIC_DEFAULTS.chatMaxInputTokens),
+    chatMaxOutputTokens: clampInt(r.chatMaxOutputTokens, 128, 8192, AUTOTELIC_DEFAULTS.chatMaxOutputTokens),
     intentMaxInputTokens: clampInt(r.intentMaxInputTokens, 512, 65536, AUTOTELIC_DEFAULTS.intentMaxInputTokens),
     intentMaxOutputTokens: clampInt(r.intentMaxOutputTokens, 128, 8192, AUTOTELIC_DEFAULTS.intentMaxOutputTokens),
     gateMaxInputTokens: clampInt(r.gateMaxInputTokens, 512, 65536, AUTOTELIC_DEFAULTS.gateMaxInputTokens),
@@ -322,6 +382,18 @@ export function createAutotelic({
   feedback = null,
   /** 技能层（阶段 4，可选注入）：createSkillStore 实例，面板展示索引/各层条目 */
   skills = null,
+  /**
+   * 复盘回调（P0 修复）：`async (review) => artifact`。宿主注入后，
+   * executor.run 终态会回调它 → reviewRound → skills.ingestReflection，
+   * 「执行→复盘→沉淀」才真正闭环。不注入则执行器不回调（老行为）。
+   */
+  reviewer = null,
+  /**
+   * 观察层（P1 修复）：createObserve 实例。注入后 decide() 用**真实观察**
+   * （她看到的/经历的）而不是账本行（她做过的）——立项依据才对。
+   * 不注入退回老行为（账本行冒充观察），老调用方零影响。
+   */
+  observe = null,
 } = {}) {
   /** 决策阶段落账：写失败不阻断业务（审计是旁路，与主账本 appendLedger 的语义一致） */
   const noteDecision = async (phase, payload) => {
@@ -631,23 +703,62 @@ export function createAutotelic({
       return { ok: false, outcome: 'silent', why: '反馈熔断静默期，先不琢磨事' };
     }
     const c = cfg();
-    /** recent() 返回 {ok, rows}，不是裸数组——面板 showLedger 也是取 .rows */
-    const rows = recent(maxObservations).rows.map((r) => ({
-      id: String(r.id ?? r.at),
-      at: Number(r.at) || 0,
-      source: r.kind === 'deny' ? 'constraint' : 'ledger',
-      text: String(r.note || r.payload?.project || r.payload?.text || '').slice(0, 200),
-    })).filter((o) => o.text)
-      /** 主人抑制/park 的 tag 权重 0 → 不进候选（对方 index.js:313 同款） */
-      .filter((o) => !feedback || typeof feedback.weightOf !== 'function' || feedback.weightOf(o.source) > 0);
+    /**
+     * 观察来源（P1 修复）：优先用**真实观察**（observe.list：她看到的/经历的），
+     * 没有观察层才退回账本行（她做过的）。这是立项依据对错的分水岭——
+     * 拿「做过的」当「看到的」，她会一直围绕已完成的事打转。
+     */
+    let rows;
+    if (observe && typeof observe.list === 'function') {
+      rows = observe.list({ limit: maxObservations }).map((o) => ({
+        id: String(o.id ?? o.ts),
+        at: Number(o.ts) || 0,
+        source: String(o.source || 'observe'),
+        text: String(o.text || '').slice(0, 200),
+        tag: String(o.tag || ''),
+      })).filter((o) => o.text);
+    } else {
+      /** recent() 返回 {ok, rows}，不是裸数组——面板 showLedger 也是取 .rows */
+      rows = recent(maxObservations).rows.map((r) => ({
+        id: String(r.id ?? r.at),
+        at: Number(r.at) || 0,
+        source: r.kind === 'deny' ? 'constraint' : 'ledger',
+        text: String(r.note || r.payload?.project || r.payload?.text || '').slice(0, 200),
+      })).filter((o) => o.text);
+    }
+    rows = rows
+      /**
+       * 主人抑制/park 的 **tag** 权重 0 → 不进候选（对方 index.js:313 同款）。
+       * 注意传的是 `tag` 不是 `source`：抑制表按 tag 记（「别再刷B站」抑制的是「B站」这类 tag），
+       * 传 source（'ledger'/'observe'）永远匹配不上，抑制等于没生效。
+       */
+      .filter((o) => !feedback || typeof feedback.weightOf !== 'function' || feedback.weightOf(o.tag || o.source) > 0);
     const r = await planner.decideRound({
       round,
       persona: { summary: '', instinctExtra: '' },
       constraintRulesText: constraintLines(c.constraintRules).map((x) => `- ${x}`).join('\n'),
       observations: rows,
-      ticketBudget: { maxSteps: 4, timeoutMs: 120_000 },
+      /** 一轮最多立项数透传给 parseIntents（它原来硬截 4，配 5 不生效） */
+      maxCandidates: c.maxCandidates ?? 3,
+      ticketBudget: { maxSteps: c.maxSteps ?? 4, timeoutMs: 120_000 },
     });
-    return { ok: r.outcome !== 'error', ...r };
+    /**
+     * 立项落账（多任务缺口的最小闭环）：planner 产出的每张 ticket 都进哈希链账本，
+     * 面板能逐条查/逐张执行；以前 tickets 只用于展示，重启即丢。
+     * 写失败不阻断业务——账本与决策链都是旁路审计，同 appendLedger 既有语义。
+     */
+    const tickets = Array.isArray(r.tickets) ? r.tickets : [];
+    for (const t of tickets) {
+      try {
+        appendLedger(file(), {
+          kind: 'ticket',
+          payload: { id: t.id, intent: t.intent, tag: t.tag, round, status: 'pending' },
+          note: String(t.intent || '').slice(0, 200),
+          at: now(),
+        });
+      } catch (e) { log(`行动单落账失败（不影响本轮）：${e?.message || e}`); }
+    }
+    return { ok: r.outcome !== 'error', ...r, persisted: tickets.length };
   }
 
   /**
@@ -687,12 +798,28 @@ export function createAutotelic({
       return { ok: false, status: 'aborted', why: '执行器未接线（executor 未注入）' };
     }
     const c = cfg();
+    /**
+     * 动作数/小时（budgetActionsPerHour）：执行器之外的一道 mechanistic 闸，
+     * 数账本近 1 小时的 ticket/step 行——面板手动触发也走这里，堵住绕过。
+     * 只数已落账的动作，pending 的确认队列不算（还没真动手）。
+     */
+    const cap = Number(c.budgetActionsPerHour) || 12;
+    const since = Date.now() - 3_600_000;
+    const used = recent(500).rows.filter((r) =>
+      ['ticket', 'step'].includes(String(r?.kind)) && Number(r?.at || 0) > since).length;
+    if (used >= cap) {
+      return { ok: false, status: 'rejected', why: `动作预算到顶（${used}/${cap}/小时），这一小时不再动手` };
+    }
     /** 约束全文带进行动单，执行器把它放进每步上下文头部（§3.7 注入位置二） */
     const withRules = {
       ...ticket,
       constraintRulesText: constraintLines(c.constraintRules).map((x) => `- ${x}`).join('\n'),
     };
-    const r = await executor.run(withRules);
+    const r = await executor.run(withRules, reviewer ? { plan: { reviewRound: reviewer } } : {});
+    /**
+     * 投递记账不在这里做——已下移到执行器 settle()（唯一终态出口），
+     * 否则「排队→主人确认→真发出」这条默认路径永远记不到。
+     */
     return { ok: r?.status === 'done', ...r };
   }
 
