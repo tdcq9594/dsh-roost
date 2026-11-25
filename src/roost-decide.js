@@ -49,11 +49,77 @@ export const OVERRIDE_KEYS = Object.freeze([
   'shortAskMustReply', 'silent', 'ignoreWords',
   /** group 层自己的键也允许按群覆写 */
   'interruptChance',
+  /** 话题与群活跃度（逐群可单独设） */
+  'interests', 'minRelevance', 'minRecentMessages', 'activeWindowSec', 'burstWindowSec',
 ]);
 
+/** 群响应模式：只决定「这个群让不让她说话」，不碰「说话时怎么判断该不该接」 */
+export const GROUP_RESPONSE_MODES = Object.freeze(['chat', 'observe', 'off']);
+
+/** 话题与群活跃度：全局值放在 `group` 段，可按群覆写（不走 roostHost.decide） */
+const TOPIC_KEYS = Object.freeze(['interests', 'minRelevance', 'minRecentMessages', 'activeWindowSec']);
+
+/**
+ * 最近这段群聊和她感兴趣的话题有多相关（0–1）。
+ *
+ * 只做**子串命中**：命中的词数 × 0.3，封顶 1。不做分词、不做向量——
+ * 这条路要的是「便宜且可解释」（决策链里能写出为什么），不是语义相似度。
+ * 词表为空返回 0，调用方靠「词表空就不启用门槛」来兜底。
+ *
+ * @param {string[]} recentTexts 最近若干条群消息正文
+ * @param {string[]} interests 感兴趣的话题词
+ */
+export function topicRelevance(recentTexts, interests) {
+  const words = (Array.isArray(interests) ? interests : []).filter((w) => w && String(w).trim());
+  if (!words.length) return 0;
+  const text = (Array.isArray(recentTexts) ? recentTexts : []).join(' ').toLowerCase();
+  let hits = 0;
+  for (const w of words) {
+    if (text.includes(String(w).trim().toLowerCase())) hits += 1;
+  }
+  return Math.min(1, hits * 0.3);
+}
+
+/**
+ * 某个群当前响应模式。缺省 / 配坏一律 `chat`——升级前所有群都能接话，
+ * 不能因为新增字段把老群弄哑。
+ */
+export function responseModeOf(cfg, chatId = '') {
+  const group = cfg?.group ?? {};
+  const id = String(chatId ?? '');
+  const modes = group.responseModes;
+  if (id && modes && typeof modes === 'object' && !Array.isArray(modes)) {
+    const mode = modes[id];
+    if (GROUP_RESPONSE_MODES.includes(mode)) return mode;
+  }
+  return GROUP_RESPONSE_MODES.includes(group.responseDefault) ? group.responseDefault : 'chat';
+}
+
+/**
+ * 不回应的人：按 openid 匹配，群范围可选「全部群 / 指定群」。
+ *
+ * 为什么不按 QQ 号：官方事件只给 openid；`uin` 是管理员在「身份」页
+ * 手动绑定后才有的反查值，不能拿它当默认键。主人永远豁免——主人被误加进
+ * 名单会让「她怎么不理我」变成最难查的一类问题。
+ */
+export function memberFiltered(cfg, chatId, sender, ownerIds = []) {
+  const filter = cfg?.group?.memberFilter;
+  if (!filter || filter.enabled !== true) return false;
+  const id = String(chatId ?? '');
+  const openid = String(sender?.openid ?? sender?.id ?? '').trim();
+  if (!id || !openid) return false;
+  const owners = (Array.isArray(ownerIds) ? ownerIds : [ownerIds])
+    .map((x) => String(x ?? '').trim())
+    .filter(Boolean);
+  if (owners.includes(openid)) return false;
+  const rules = Array.isArray(filter.rules) ? filter.rules : [];
+  return rules.some((rule) => rule?.openid === openid
+    && (rule.scope === 'all'
+      || (rule.scope === 'groups' && Array.isArray(rule.groups) && rule.groups.includes(id))));
+}
+
 /** 概率夹紧到 0–100；没配 / 配坏了都当 100（= 不拦，保持原行为） */
-function chanceOf(v) {
-  const n = Number(v);
+function chanceOf(v) {  const n = Number(v);
   if (!Number.isFinite(n)) return 100;
   return Math.min(100, Math.max(0, n));
 }
@@ -75,6 +141,14 @@ export function resolveGroupPolicy(cfg, chatId = '') {
   for (const k of OVERRIDE_KEYS) {
     if (k === 'interruptChance' || ov[k] === undefined) continue;
     decide[k] = ov[k];
+  }
+  /**
+   * 话题与群活跃度的全局值在 `group` 段（和 `interruptChance` 同一套路），
+   * 不在 `roostHost.decide` 里。单群覆写了就用覆写的，没覆写才落回全局。
+   */
+  for (const k of TOPIC_KEYS) {
+    if (ov[k] !== undefined) continue;
+    if (group[k] !== undefined) decide[k] = group[k];
   }
   const chance = chanceOf(ov.interruptChance === undefined
     ? group.interruptChance : ov.interruptChance);
@@ -160,10 +234,18 @@ export function guestQuietSkip(now, decide, bucket, kind = 'group') {
 }
 
 /** 这条消息的正文。纯语音要走 asrText（content 是空串） */
-function saidOf(evt) {
+/**
+ * 这条消息「说了什么」：正文优先，没有正文就取附件里的语音转写。
+ *
+ * 导出给 `roost-observe.js` 共用：旁听写日记的正文和判定用的正文必须是
+ * 同一份，否则「判定说有内容、日记写空」——纯语音消息会被悄悄漏记。
+ */
+export function saidOf(evt) {
   const said = String(evt?.content ?? '').trim();
   if (said) return said;
-  return (evt?.attachments ?? []).map((a) => String(a?.asrText ?? '').trim()).filter(Boolean).join(' ');
+  /** `?? []` 挡不住「attachments 是对象」——非数组直接 `.map` 会抛，判定这条路不能炸 */
+  const atts = Array.isArray(evt?.attachments) ? evt.attachments : [];
+  return atts.map((a) => String(a?.asrText ?? '').trim()).filter(Boolean).join(' ');
 }
 
 /**
@@ -172,7 +254,13 @@ function saidOf(evt) {
  * @param {() => number} [o.now]
  * @param {() => number} [o.random] 0–1 的随机数，注入给单测用
  */
-export function createDecider({ cfg, now = () => Date.now(), random = Math.random } = {}) {
+export function createDecider({
+  cfg,
+  now = () => Date.now(),
+  random = Math.random,
+  /** 主人 openid（含 ownerAliases）——不回应名单的豁免用；不传就只按配置豁免不了 */
+  ownerIds = () => [],
+} = {}) {
   /** chatId → 每会话运行时状态 */
   const state = new Map();
   /**
@@ -194,10 +282,40 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
         policyTimes: [],
         engagedAt: 0,
         engagedCount: 0,
+        /**
+         * 最近入站群消息（时间戳 / 截断正文），只给「群冷清」和「话题相关度」用。
+         * 只存内存、不落盘：重启后为空，冷清闸按「不知道就放行」处理。
+         */
+        msgTimes: [],
+        msgTexts: [],
+        /** 这个群第一条被记录的消息时间：观察窗口没走满之前不下「冷清」结论 */
+        msgFirstAt: 0,
       };
       state.set(chatId, s);
     }
     return s;
+  }
+
+  /**
+   * 记一条入站群消息，供「群冷清」和「话题相关度」判据使用。
+   *
+   * **在判定之前记**：当前这条也算「群里在聊」的一条，否则群里刚好第 3 条
+   * 触发门槛时会永远差一条。只记有正文的群消息——纯图/纯表情不算话题，
+   * 也不该把冷清计数灌满。
+   */
+  function noteInbound(evt) {
+    const chatId = String(evt?.chat?.chatId ?? '');
+    const k = evt?.chat?.kind;
+    if (!chatId || k === 'c2c' || k === 'dm') return;
+    const text = saidOf(evt).slice(0, 80);
+    if (!text) return;
+    const s = stOf(chatId);
+    const t = now();
+    if (!s.msgFirstAt) s.msgFirstAt = t;
+    s.msgTimes.push(t);
+    s.msgTexts.push(text);
+    if (s.msgTimes.length > 200) s.msgTimes = s.msgTimes.slice(-200);
+    if (s.msgTexts.length > 40) s.msgTexts = s.msgTexts.slice(-40);
   }
 
   /**
@@ -227,6 +345,25 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
       /** 四态投影：频道私信（dm）和普通单聊一样是「专门点开来跟你说话」 */
       const k = evt?.chat?.kind;
       const kind = (k === 'c2c' || k === 'dm') ? 'c2c' : 'group';
+
+      /**
+       * 不回应名单排在最前：被屏蔽的人 @、引用、喊名字都不该起一轮。
+       * 主人豁免在 memberFiltered 里做；私聊完全不参与。
+       */
+      if (kind === 'group' && memberFiltered(cfg(), chatId, evt?.sender, ownerIds())) {
+        return { go: false, reason: '不回应名单' };
+      }
+
+      /**
+       * 群响应模式：off 不接也不旁听；observe 只旁听（由宿主写日记）。
+       * `chat` 继续往下走原有策略，一行行为都不改。
+       */
+      if (kind === 'group') {
+        const mode = responseModeOf(cfg(), chatId);
+        if (mode === 'off') return { go: false, reason: '这个群设为不接话' };
+        if (mode === 'observe') return { go: false, reason: '这个群只旁听', observe: true };
+      }
+
       const s = stOf(chatId);
       const t = now();
 
@@ -294,9 +431,16 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
        * 插话概率也算「策略开着」：不加这一项，`chance < 100` 时会在下面
        * 提前 return「交给模型判断」，概率永远轮不到判（面板上改了没反应）。
        */
+      const minRecent = Math.max(0, Math.round(Number(c.minRecentMessages) || 0))
+      const topicWords = Array.isArray(c.interests)
+        ? c.interests.filter((w) => w && String(w).trim()) : []
+      const minRel = Math.min(1, Math.max(0, Number(c.minRelevance) || 0))
+      /** 话题闸只有在「门槛 > 0 且词表非空」时才启用：只调门槛不填词会整片沉默 */
+      const topicGate = minRel > 0 && topicWords.length > 0
       const policyOn = Number(c.burstMax) > 0 || Number(c.maxPerHour) > 0
         || Boolean(c.quietStartHour) || Boolean(c.quietEndHour)
-        || c.shortAskMustReply === true || c.silent === true || chance < 100;
+        || c.shortAskMustReply === true || c.silent === true || chance < 100
+        || minRecent > 0 || topicGate;
       if (!policyOn) return { go: true, reason: '交给模型判断' };
 
       if (c.silent === true) return { go: false, reason: '主人设了静默' };
@@ -309,8 +453,12 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
         const hour = new Date().getHours();
         if (inQuietHours(c, hour)) return { go: false, reason: '静默时段' };
         const burstMax = Number(c.burstMax) || 0;
-        if (burstMax > 0 && s.policyTimes.filter((x) => t - x < 120_000).length >= burstMax) {
-          return { go: false, reason: `两分钟内最多接 ${burstMax} 次` };
+        if (burstMax > 0) {
+          /** 窗口可调（默认 120 秒 = 以前写死的值），夹在 30–600 秒 */
+          const burstWinSec = Math.min(600, Math.max(30, Number(c.burstWindowSec) || 120));
+          if (s.policyTimes.filter((x) => t - x < burstWinSec * 1000).length >= burstMax) {
+            return { go: false, reason: `${burstWinSec} 秒内最多接 ${burstMax} 次` };
+          }
         }
         const perHour = Number(c.maxPerHour) || 0;
         if (perHour > 0 && s.policyTimes.length >= perHour) {
@@ -345,6 +493,47 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
       }
 
       /**
+       * 群冷清时不插话：最近 `activeWindowSec` 秒内群消息条数不够就不插。
+       *
+       * 只拦「主动插话」——被 @、短问、连聊、纯附件都在上面 return 了。
+       * **观察窗口没走满时放行**：刚启动 / 新群时环里没有历史，「不知道」
+       * 不能当成「冷清」，否则每次重启都会哑上几分钟；等窗口攒满（这时
+       * 群里真有话也早该有记录了）再开始判。
+       */
+      if (minRecent > 0) {
+        const winMs = Math.min(3600, Math.max(30, Number(c.activeWindowSec) || 300)) * 1000;
+        if (s.msgFirstAt && t - s.msgFirstAt >= winMs) {
+          const count = s.msgTimes.filter((x) => t - x < winMs).length;
+          if (count < minRecent) {
+            return {
+              go: false,
+              reason: `群里没在聊（近 ${Math.round(winMs / 1000)} 秒 ${count} 条 < ${minRecent} 条）`,
+            };
+          }
+        }
+      }
+
+      /**
+       * 话题相关度门槛：和她感兴趣的话题关系不大就不插嘴。
+       *
+       * 是**硬闸**（低于门槛直接不接），过了闸才走概率；概率为 100 时仍然
+       * 100（「100 = 不筛」是既有语义）。概率 < 100 时相关度会把概率放大
+       * 到 `chance × (1 + 4 × 相关度)`，最多 100。
+       */
+      let relevance = null;
+      let chanceEff = chance;
+      if (topicGate) {
+        relevance = topicRelevance(s.msgTexts, topicWords);
+        if (relevance < minRel) {
+          return {
+            go: false,
+            reason: `话题和她关系不大（相关度 ${relevance.toFixed(2)} < ${minRel}）`,
+          };
+        }
+        chanceEff = Math.min(100, chance * (1 + 4 * relevance));
+      }
+
+      /**
        * 插话概率：走到这里的是「群里普普通通一句、没人叫她、也不在连聊中」。
        *
        * 私聊、被 @、命令、短问、纯附件、engaged 连聊都在上面各自 return 了——
@@ -353,11 +542,16 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
        *
        * 没中时**不** push policyTimes：没接的话不该占掉刹车额度。
        */
-      if (chance < 100 && random() * 100 >= chance) {
-        return { go: false, reason: `插话概率 ${chance}%，这次没中` };
+      if (chanceEff < 100 && random() * 100 >= chanceEff) {
+        return {
+          go: false,
+          reason: relevance === null
+            ? `插话概率 ${chance}%，这次没中`
+            : `插话概率 ${Math.round(chanceEff)}%（相关度 ${relevance.toFixed(2)} 放大），这次没中`,
+        };
       }
       s.policyTimes.push(t);
-      return { go: true, reason: '交给模型判断' };
+      return { go: true, reason: relevance === null ? '交给模型判断' : `话题相关（${relevance.toFixed(2)}）` };
     },
   };
 
@@ -367,6 +561,8 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
      * @returns {{go:boolean, force?:boolean, cooling?:boolean, delayMs?:number, reason:string}}
      */
     check(evt) {
+      /** 先记账再判：话题/冷清看的是「含当前这条」的最近一段 */
+      if (!isOff(cfg()?.enabled)) noteInbound(evt);
       const v = impl.judge(evt);
       /** 决策链：每条都记，包括不接的那些（排障最想看的恰恰是「为什么没回」） */
       recent.push({
@@ -375,6 +571,7 @@ export function createDecider({ cfg, now = () => Date.now(), random = Math.rando
         kind: (evt?.chat?.kind === 'c2c' || evt?.chat?.kind === 'dm') ? 'c2c' : 'group',
         text: saidOf(evt).slice(0, 40),
         go: v.go === true,
+        observe: v.observe === true,
         reason: String(v.reason ?? ''),
       });
       if (recent.length > 40) recent.shift();

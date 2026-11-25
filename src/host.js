@@ -143,6 +143,7 @@ import { createCapabilityClient } from './roost-capabilities.js';
 import { registerRoostTools } from './roost-tools.js';
 import { createRoostHost, protocolAlive } from './roost-host.js';
 import { createPayloadBuilder, buildRendered } from './roost-payload.js';
+import { observeFieldsOf } from './roost-observe.js';
 import { shrinkImage } from './image-compress.js';
 import { interactionRouter } from './roost-interaction.js';
 import { createPickChannel } from './pick-channel.js';
@@ -1176,7 +1177,13 @@ export function apply(ctx) {
       log.warn('清掉一条 sessionKey 缺失的旧映射（键名 "undefined"），相关功能会各建各的窗口');
     }
   } catch {}
-  const turns = createTurnRunner({ ctx, log, timeoutSec: () => Number(cfg.chat?.turnTimeoutSec) || 150 });
+  const turns = createTurnRunner({
+    ctx,
+    log,
+    timeoutSec: () => Number(cfg.chat?.turnTimeoutSec) || 150,
+    /** 现读开关：面板改了立刻生效，不用重启 */
+    rescueEnabled: () => cfg.chat?.rescueFromThinking === true,
+  });
   /**
    * 同会话排队。**先声明后赋值**：主动搭话/觉醒的回调在文件里位置更靠前，
    * 但它们要等 apply() 跑完才可能触发，那时这里已经赋好值了。
@@ -5347,7 +5354,11 @@ export function apply(ctx) {
    * 走 ai-chat 时是它拦的；直连之后框架把**每条群消息**都推过来，
    * 没有这层就等于群里每句话都触发一轮模型调用。
    */
-  const roostDecider = createDecider({ cfg: () => cfg });
+  const roostDecider = createDecider({
+    cfg: () => cfg,
+    /** 不回应名单的主人豁免：主人 openid + 手动登记的其他渠道 id */
+    ownerIds: () => [ownerId(), ...(Array.isArray(cfg.ownerAliases) ? cfg.ownerAliases : [])],
+  });
 
   /**
    * 合并窗口：连着发的几句话攒成一段再回。
@@ -5399,12 +5410,32 @@ export function apply(ctx) {
   });
 
   /**
+   * 旁听：这个群设了「只旁听」时，消息不进模型、不建会话、不占轮次，
+   * 只把文字写进日记。
+   *
+   * 这里不能复用 `deliverBatch`：那条链路要等合并窗口、要建 payload、
+   * 要过配额，旁听只想要「记住这句话」。字段映射收在 `roost-observe.js`，
+   * 这里只负责写。记忆开关（memoryOff）和撤销句规则仍由 journalAdd 自己处理——
+   * 旁听不另造一套记忆语义。
+   */
+  function observeFromRoost(evt) {
+    const fields = observeFieldsOf(evt);
+    if (!fields) return;
+    journalAdd(fields.payload, fields.chat, fields.text, 'user');
+  }
+
+  /**
    * 外接协议收到一条消息。**只入队，不阻塞事件流**——这里 await 一下，
    * 后面所有消息都要跟着等。
    */
   function deliverFromRoost(evt) {
     const verdict = roostDecider.check(evt);
     if (!verdict.go) {
+      /**
+       * 只旁听：判定已经明确说「不回」，但记忆要留下。
+       * 其它不接理由（总开关、冷却、插话概率……）不写日记。
+       */
+      if (verdict.observe) observeFromRoost(evt);
       /**
        * 不接的理由要看得到：用户开了策略没效果时，这里是唯一的证据。
        *

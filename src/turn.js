@@ -51,6 +51,45 @@ export function textOf(message) {
 }
 
 /**
+ * 从 assistant 消息里把「思考」块拼起来。
+ *
+ * 推理型模型会把草稿写在 reasoning（有的版本叫 thinking）块里，正文块可能
+ * 整轮都是空的。这里只**采集**，要不要拿它当话发出去由 `rescueFromThinking`
+ * 和开关决定——采集本身不影响任何现有行为。
+ */
+export function reasoningOf(message) {
+  if (!message || !Array.isArray(message.content)) return '';
+  return message.content
+    .filter((b) => b && (b.type === 'reasoning' || b.type === 'thinking') && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('\n')
+    .trim();
+}
+
+/**
+ * 从思考里捞出「定稿」。
+ *
+ * 只认行数 / 定稿标记后面那段——模型常见的写法是「Reply: 起草 → Careful: 自检
+ * → 3 lines: 定稿」，只有最后那版才是过完自检、准备说出口的。**没有标记就
+ * 返回空**：宁可这一轮不发，也不能把草稿或内心独白当成她的话发到群里。
+ */
+const FINAL_MARK_RE = /(?:^|\n)[ \t]*(?:最终(?:回复)?|定稿|Final|(?:[0-9０-９]+|[一二三四五六七八九十两]+)[ \t]*(?:lines?|行))[ \t]*[:：]/gi;
+const TRAILING_RE = /\n[ \t]*(?:Careful|Note|Watch|Beware|自检|注意)[ \t]*[:：]/i;
+
+export function rescueFromThinking(thinking) {
+  const s = String(thinking || '').trim();
+  if (!s) return '';
+  /** 定稿可能改过几版，取最后一个标记之后的内容 */
+  let last = null;
+  for (const m of s.matchAll(FINAL_MARK_RE)) last = m;
+  if (!last) return '';
+  const body = s.slice(last.index + last[0].length);
+  /** 定稿后面又跟了一段自检/旁白时截掉：那不是要说的话 */
+  const cut = body.search(TRAILING_RE);
+  return (cut >= 0 ? body.slice(0, cut) : body).trim();
+}
+
+/**
  * 这一条 assistant 消息里有没有工具调用块。
  *
  * **只看结构，不猜语义**：DSH 的 `message.content` 是块数组，工具轮就是
@@ -131,7 +170,7 @@ export function statusOf(reason) {
   return classifyReason(reason).status || 0;
 }
 
-export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstreamRetry = null }) {
+export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstreamRetry = null, rescueEnabled = () => false }) {
   /**
    * 一轮时限允许传函数：host 传的是「现读 cfg 的箭头函数」。
    * 面板把 `chat.turnTimeoutSec` 露出来之后，只在插件启动时读一次的话，
@@ -160,7 +199,7 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
    * `text` 是这一轮**最后一条**正文，`merged` 是整轮拼接（见 `mergeStepText`），
    * `sawToolCall` 决定 turn/end 用哪一份（工具轮只认最后一条）。
    *
-   * @type {Map<string, {turn:number, text:string, merged:string, sawToolCall:boolean, afterToolCount:number, afterToolText:string, resolve:Function, reject:Function, timer:any}>}
+   * @type {Map<string, {turn:number, text:string, merged:string, sawToolCall:boolean, afterToolCount:number, afterToolText:string, thinking:string, resolve:Function, reject:Function, timer:any}>}
    */
   const waiters = new Map();
 
@@ -246,7 +285,11 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
           w.sawToolCall = false;
           w.afterToolCount = 0;
           w.afterToolText = '';
+          w.thinking = '';
         }
+        /** 思考块先收：纯思考、没正文的那条消息以前会在这里被 `if (!t) return` 丢掉 */
+        const th = reasoningOf(d.message);
+        if (th) w.thinking = th;
         const toolCall = hasToolCall(d.message);
         if (toolCall) {
           w.sawToolCall = true;
@@ -289,6 +332,20 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
           if (!w.sawToolCall) text = w.merged || w.text;
           else if ((w.afterToolCount || 0) > 1) text = w.afterToolText || w.text;
           else text = w.text;
+        }
+        /**
+         * 整轮一段正文都没有、但思考里写了定稿：开了开关就捞出来发。
+         * 捞不到仍走 `empty`（现有兜底：这一轮记日志、不再发消息）。
+         *
+         * `w.turn === d.turn` 不能少：`w.thinking` 是**按消息覆盖**的最后一份，
+         * 迟到的旧轮 end 事件如果不校验轮次，会把新一轮的思考当旧轮的定稿发出去。
+         */
+        if (!text && w.turn === d.turn && d.reason?.kind === 'completed' && rescueEnabled()) {
+          const rescued = rescueFromThinking(w.thinking);
+          if (rescued) {
+            logger.info(`正文为空，从思考里捞回 ${rescued.length} 字`);
+            text = rescued;
+          }
         }
         finish(sid, d.reason?.kind === 'completed', text, d.reason);
       }
@@ -347,7 +404,7 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
       timer.unref?.();
       waiters.set(sid, {
         turn: -1, text: '', merged: '', sawToolCall: false,
-        afterToolCount: 0, afterToolText: '', resolve, reject, timer,
+        afterToolCount: 0, afterToolText: '', thinking: '', resolve, reject, timer,
       });
     });
     /**
