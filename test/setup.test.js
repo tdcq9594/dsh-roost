@@ -6,11 +6,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { createSetup, healthDirHash, instanceAlive } from '../src/setup.js';
+import {
+  createSetup, healthDirHash, instanceAlive,
+  assertCanWipe, keepListOf, KEEPABLE,
+} from '../src/setup.js';
 
 /** 造一份「看起来像 Roost」的目录，够 looksLikeRoost() 认就行 */
 function makeRoost({ port = 15210 } = {}) {
@@ -24,10 +27,22 @@ function makeRoost({ port = 15210 } = {}) {
   return dir;
 }
 
-function makeSetup(dir, { token = '' } = {}) {
+function makeSetup(dir, { token = '', installer = null, dataDir = null, setCfg = null } = {}) {
   const cfg = { server: { port: 17321, token }, setup: { roostDir: dir, version: 'v0.8.6' } };
-  return createSetup({ cfgOf: () => cfg, setCfg: () => {}, dataDir: () => dir, log: () => {} });
+  return createSetup({
+    cfgOf: () => cfg,
+    setCfg: setCfg || (() => {}),
+    dataDir: dataDir ? () => dataDir : () => dir,
+    log: () => {},
+    installer,
+  });
 }
+
+/**
+ * 卸载要真删目录，所以测试里的 `dataDir` 必须**不是**被删的那个
+ * （assertCanWipe 明确拒绝「DSH 数据目录」）。给一份独立临时目录。
+ */
+const spareDataDir = () => mkdtempSync(join(tmpdir(), 'dsh-data-'));
 
 /** 换掉 globalThis.fetch，跑完还原 */
 async function withFetch(handler, fn) {
@@ -430,4 +445,176 @@ test('实例判活: 心跳停跳时 PID 被复用也不认', () => {
   assert.equal(instanceAlive(rec, dir, () => true), false, '心跳过期，PID 在也不认');
 
   assert.equal(instanceAlive({ pid: 424242 }, dir, () => true), true, '老记录没有 beat，退回 PID 判活');
+});
+
+/* ---------------- 卸载 / 卸载重装 ---------------- */
+
+/**
+ * 一份带全部数据块的 Roost：卸载逻辑要看的是「哪几块留下了」，
+ * 所以每个块都塞一个能认出来的文件。
+ */
+function makeFullRoost() {
+  const dir = makeRoost();
+  for (const [name, file] of [
+    ['config', 'bots/main.json'],
+    ['data', 'sessions.json'],
+    ['plugins', 'hello.js'],
+    ['logs', 'run.log'],
+  ]) {
+    const p = join(dir, name, file);
+    mkdirSync(join(p, '..'), { recursive: true });
+    writeFileSync(p, `kept:${name}`, 'utf8');
+  }
+  /** 纯程序文件：卸载后必须消失 */
+  mkdirSync(join(dir, 'docs'), { recursive: true });
+  writeFileSync(join(dir, 'docs', 'manual.md'), 'doc', 'utf8');
+  writeFileSync(join(dir, 'README.md'), '# roost', 'utf8');
+  return dir;
+}
+
+/** 假安装器：不联网，只写回「装好了」的最小结构 */
+function fakeInstaller({ version = '9.9.9' } = {}) {
+  return ({ dir }) => {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'main.js'), `// fresh ${version}\n`, 'utf8');
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'qq-bot-roost', version }), 'utf8');
+    return { ok: true };
+  };
+}
+
+const leftoversOf = (dir) => readdirSync(join(dir, '..'))
+  .filter((n) => n.startsWith(`${dir.split(/[\\/]/).pop()}.old-`));
+
+test('保留项: 不传 = 全保留，非法名一律拒', () => {
+  assert.deepEqual(keepListOf(undefined), KEEPABLE);
+  assert.deepEqual(keepListOf([]), [], '空数组 = 一项都不留');
+  assert.deepEqual(keepListOf(['data', 'data']), ['data'], '去重');
+  assert.deepEqual(keepListOf('config'), ['config'], '单个字符串也认');
+  assert.throws(() => keepListOf(['src']), /不认识/);
+  assert.throws(() => keepListOf(['..']), /不认识/);
+});
+
+test('删除闸门: 不像 Roost / 盘根 / 家目录 / DSH 数据目录 / .git 全部拒', () => {
+  const dir = makeRoost();
+  const data = spareDataDir();
+
+  assert.equal(assertCanWipe(dir, { dataDir: data, home: join(data, 'home') }), dir, '正常目录放过');
+
+  const empty = mkdtempSync(join(tmpdir(), 'not-roost-'));
+  assert.throws(() => assertCanWipe(empty, { dataDir: data }), /不像 Roost/);
+
+  assert.throws(() => assertCanWipe(process.platform === 'win32' ? 'C://' : '/', { dataDir: data }), /根目录|不存在|不像 Roost/);
+
+  /** 家目录本身：哪怕它碰巧长得像 Roost 也不许删 */
+  const fakeHome = makeRoost();
+  assert.throws(() => assertCanWipe(fakeHome, { dataDir: data, home: fakeHome }), /家目录/);
+
+  /** 家目录的上层：删了会把家目录一起带走 */
+  const parentRoost = makeRoost();
+  assert.throws(
+    () => assertCanWipe(parentRoost, { dataDir: data, home: join(parentRoost, 'sub', 'user') }),
+    /家目录/,
+  );
+
+  /** DSH 数据目录：删 Roost 不能顺手把插件自己的数据带走 */
+  const dshDir = makeRoost();
+  assert.throws(() => assertCanWipe(dshDir, { dataDir: dshDir }), /DSH/);
+  assert.throws(() => assertCanWipe(dshDir, { dataDir: join(dshDir, 'data') }), /DSH/, '数据目录在下层也算');
+
+  /** 源码检出：删了会丢本地提交 */
+  const gitDir = makeRoost();
+  mkdirSync(join(gitDir, '.git'), { recursive: true });
+  assert.throws(() => assertCanWipe(gitDir, { dataDir: data }), /\.git/);
+});
+
+test('卸载重装: 默认全保留，只换程序文件', async () => {
+  const dir = makeFullRoost();
+  const setup = makeSetup(dir, { installer: fakeInstaller(), dataDir: spareDataDir() });
+
+  const r = await setup.reinstall();
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.kept.sort(), [...KEEPABLE].sort(), '默认一项都不丢');
+  assert.equal(r.version, '9.9.9');
+
+  for (const [name, file] of [
+    ['config', 'bots/main.json'],
+    ['data', 'sessions.json'],
+    ['plugins', 'hello.js'],
+    ['logs', 'run.log'],
+  ]) {
+    assert.equal(readFileSync(join(dir, name, file), 'utf8'), `kept:${name}`, `${name} 必须原样还在`);
+  }
+  assert.equal(existsSync(join(dir, 'docs')), false, '旧程序文件要清掉');
+  assert.equal(existsSync(join(dir, 'README.md')), false);
+  assert.match(readFileSync(join(dir, 'src', 'main.js'), 'utf8'), /fresh 9\.9\.9/);
+  assert.deepEqual(leftoversOf(dir), [], '旧目录要删干净，别在桌面留一排 .old-');
+});
+
+test('卸载重装: 只勾 config 时 data / plugins / logs 一起没', async () => {
+  const dir = makeFullRoost();
+  const setup = makeSetup(dir, { installer: fakeInstaller(), dataDir: spareDataDir() });
+
+  const r = await setup.reinstall({ keep: ['config'] });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.kept, ['config']);
+  assert.equal(readFileSync(join(dir, 'config', 'bots', 'main.json'), 'utf8'), 'kept:config');
+  for (const name of ['data', 'plugins', 'logs']) {
+    assert.equal(existsSync(join(dir, name)), false, `${name} 没勾，必须删掉`);
+  }
+  assert.match(r.message, /凭证还在/, '留了 config 就是凭证还在，别吓得让人重扫码');
+
+  /** 反过来：不留 config 时必须明确说要重新扫码，不然用户装完发现机器人哑了 */
+  const dir2 = makeFullRoost();
+  const s2 = makeSetup(dir2, { installer: fakeInstaller(), dataDir: spareDataDir() });
+  const r2 = await s2.reinstall({ keep: ['data'] });
+  assert.match(r2.message, /重新扫码/);
+});
+
+test('卸载重装: 安装失败要回滚成原来那份，不能留半成品', async () => {
+  const dir = makeFullRoost();
+  const setup = makeSetup(dir, {
+    installer: () => { throw new Error('下载失败：HTTP 502'); },
+    dataDir: spareDataDir(),
+  });
+
+  await assert.rejects(() => setup.reinstall({ keep: ['data'] }), /重装失败.*旧安装已恢复/s);
+  assert.equal(readFileSync(join(dir, 'src', 'main.js'), 'utf8'), '// stub\n', '旧程序必须回来');
+  assert.equal(readFileSync(join(dir, 'config', 'bots', 'main.json'), 'utf8'), 'kept:config', '回滚后数据也在');
+  assert.deepEqual(leftoversOf(dir), [], '回滚后不留 .old-');
+});
+
+test('只卸载: 勾中的块留在原位，程序文件清掉，不留旧目录', async () => {
+  const dir = makeFullRoost();
+  const setup = makeSetup(dir, { dataDir: spareDataDir() });
+
+  const r = await setup.uninstall({ keep: ['data', 'plugins'] });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.kept, ['data', 'plugins']);
+  assert.equal(existsSync(join(dir, 'src', 'main.js')), false, '程序要卸掉');
+  assert.equal(readFileSync(join(dir, 'data', 'sessions.json'), 'utf8'), 'kept:data');
+  assert.equal(existsSync(join(dir, 'config')), false, '没勾 config 就不留');
+  assert.equal(existsSync(join(dir, 'logs')), false);
+  assert.deepEqual(leftoversOf(dir), []);
+});
+
+test('只卸载: 一项都不勾就是清空，目录还在（之后能原地装回去）', async () => {
+  const dir = makeFullRoost();
+  const setup = makeSetup(dir, { dataDir: spareDataDir() });
+
+  const r = await setup.uninstall({ keep: [] });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.kept, []);
+  assert.equal(existsSync(dir), true, '目录本身要留着，s.dir 还要能显示');
+  assert.deepEqual(readdirSync(dir), [], '里面什么都别剩');
+});
+
+test('卸载 / 重装: 关不掉 Roost 时一个文件都不动', async () => {
+  const dir = makeFullRoost();
+  /** 面板一直应答「在跑」，实例表里没有 pid → stopOnce 认为停不下来 */
+  const setup = makeSetup(dir, { dataDir: spareDataDir(), installer: fakeInstaller() });
+  await withFetch(async () => okRes({ bots: [], online: 0, total: 0 }), async () => {
+    await assert.rejects(() => setup.reinstall({ keep: [] }), /停不下来/);
+  });
+  assert.equal(readFileSync(join(dir, 'src', 'main.js'), 'utf8'), '// stub\n', '没停下就不能动文件');
+  assert.equal(readFileSync(join(dir, 'config', 'bots', 'main.json'), 'utf8'), 'kept:config');
 });

@@ -3298,3 +3298,58 @@ test('目的引擎横条在主动搭话页最顶，且默认开（未显式 fals
   const status = src.slice(src.indexOf('function PurposeStatusCard'), src.indexOf('function AutotelicCard'));
   assert.ok(!/h\(PurposeEngineBanner/.test(status), '底部卡不再重复挂开关');
 });
+
+/**
+ * 接入页的「卸载重装」入口。
+ *
+ * 只在装好之后出现：没装的时候点它只会得到一句「目录不存在」，
+ * 而且那时候用户该看的是「一键安装」。
+ */
+test('接入页：装好之后才有「卸载重装」入口', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'setup'
+  rt.reset()
+
+  /**
+   * 在**没展开**的树里按组件名找：`expand()` 会把组件节点换成它的渲染结果，
+   * SetupTab 这个节点本身就不在了。
+   */
+  const rawFind = (node, name) => {
+    if (!node || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const c of node) {
+        const r = rawFind(c, name)
+        if (r) return r
+      }
+      return null
+    }
+    if (typeof node.type === 'function' && node.type.name === name) return node
+    return rawFind(node.props?.children, name)
+  }
+
+  const el = rawFind(mod.RoostPage(), 'SetupTab')
+  assert.ok(el, '接入页组件要能定位到')
+
+  const installed = {
+    dir: 'D:////bots////qq-bot-roost',
+    dirOk: true,
+    installed: true,
+    version: '1.1.12',
+    running: false,
+    port: 15207,
+    hasCreds: true,
+    bots: [{ id: 'main', appId: 'x' }],
+    ownersConfigured: true,
+    ownerCount: 1,
+    parts: { config: true, data: true, plugins: true, logs: true },
+  }
+  rt.reset()
+  const text = textOf(expand({ type: el.type, props: { ...el.props, st: installed } }, rt))
+  assert.match(text, /卸载重装/, '装好之后要能看到入口')
+  assert.match(text, /更改路径/, '原有的路径入口不能被顶掉')
+
+  rt.reset()
+  const empty = textOf(expand({ type: el.type, props: { ...el.props, st: { installed: false } } }, rt))
+  assert.ok(!empty.includes('卸载重装'), '没装就别给卸载入口')
+})

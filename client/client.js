@@ -1089,6 +1089,16 @@ window.__ModuleLoader__.load({
    真禁用由 .roost-btn:disabled 的 opacity 负责，armed 由下面的白字负责。 */
 .roost-btn.danger{border-color:var(--line)}
 .roost-btn.armed{background:var(--bad);border-color:var(--bad);color:#fff}
+/* 2026-11-25（主人要求）：卸载重装要显眼——实心红，不能和普通按钮长一个样。
+   只给这一处用（另一处是「只卸载」的描边红），**不动 .roost-btn.danger
+   的默认口径**：列表里那些危险动作照样「点一下才变红」，
+   否则整页挂一排红按钮反而没人当真。
+   用 .roost-btn.roost-danger（0,2,0）才压得住上面那条
+   .roost-btn:not(:disabled) 的主文字色，否则白字会被它盖掉。 */
+.roost-btn.roost-danger,
+.roost-primary.roost-danger{background:var(--bad);border-color:var(--bad);color:#fff}
+.roost-danger:hover:not(:disabled){filter:brightness(1.1)}
+.roost-danger.armed{background:color-mix(in srgb,var(--bad) 78%,#000);border-color:var(--bad);color:#fff}
 .roost-link{border:none;background:transparent;color:var(--accent);font:inherit;font-size:11.5px;
   cursor:pointer;padding:0 2px;text-decoration:underline;text-underline-offset:2px}
 .roost-link:hover{filter:brightness(1.12)}
@@ -1894,7 +1904,7 @@ window.__ModuleLoader__.load({
      * 习惯上分三段：平时是灰底普通按钮 → 点一下变成红底「确认删除」→ 再点才执行。
      * 4 秒没点就自己退回，不会一直挂在「确认」状态等人误触。
      */
-    function ConfirmLink({ label, confirmLabel, onConfirm, disabled, danger = true, style = null }) {
+    function ConfirmLink({ label, confirmLabel, onConfirm, disabled, danger = true, style = null, primary = false, vivid = false }) {
       const [arm, setArm] = useState(false)
       useEffect(() => {
         if (!arm) return
@@ -1903,7 +1913,15 @@ window.__ModuleLoader__.load({
       }, [arm])
       return h('button', {
         type: 'button',
-        className: 'roost-btn' + (danger ? ' danger' : '') + (arm ? ' armed' : ''),
+        /**
+         * `primary` = 用主按钮的尺寸（动作是这块的主线）；
+         * `vivid` = 实心红（见 `.roost-danger`），只给「卸载重装」这种
+         * 一眼就该看出来是危险操作的地方用。
+         */
+        className: (primary ? 'roost-primary' : 'roost-btn')
+          + (danger ? ' danger' : '')
+          + (vivid ? ' roost-danger' : '')
+          + (arm ? ' armed' : ''),
         style,
         disabled,
         onClick: () => {
@@ -2707,6 +2725,20 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 「保留数据」能勾的几项。**key 必须和后端 `KEEPABLE` 一致**——
+     * 后端只认这四个目录名，多一个会被拒。
+     *
+     * 默认全勾：卸载重装最常见的诉求是「装坏了想重来」，
+     * 默认把数据带走才是对的那一边，要删必须自己取消。
+     */
+    const KEEP_ITEMS = [
+      ['config', '机器人凭证与主人', 'AppID / AppSecret、主人名单、群组与面板设置'],
+      ['data', '会话与消息记录', '每个机器人的会话、账本、端口与实例表'],
+      ['plugins', '框架插件', '装在这套 Roost 里的插件'],
+      ['logs', '日志', '排障用的运行日志，删了不影响使用'],
+    ]
+
     function SetupTab({ st, reload, toast, busy, run, reg, onSaved, saveCfg }) {
       const [qrSvg, setQrSvg] = useState('')
       const [qrTip, setQrTip] = useState('')
@@ -2722,6 +2754,10 @@ window.__ModuleLoader__.load({
       const [showManual, setShowManual] = useState(false)
       const [pathOpen, setPathOpen] = useState(false)
       const [dir, setDir] = useState('')
+      /** 卸载 / 卸载重装这块：折叠开关、勾选保留项、结果文案 */
+      const [wipeOpen, setWipeOpen] = useState(false)
+      const [keepSel, setKeepSel] = useState({ config: true, data: true, plugins: true, logs: true })
+      const [wipeMsg, setWipeMsg] = useState('')
       const [cfgMsg, setCfgMsg] = useState('')
       const [work, setWork] = useState('')
       const qrTimer = useRef(null)
@@ -2976,6 +3012,41 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 卸载 / 卸载重装。
+       *
+       * 传的是**勾中的目录名**；一项都不勾就是连数据一起删干净（后端也认
+       * 「空数组 = 什么都不留」）。成功后必须重读 `/setup` 和直连状态：
+       * 删了 config 的话第 4 步要立刻回到「未配对」，不能继续亮绿。
+       */
+      const doWipe = async (mode) => {
+        const keep = KEEP_ITEMS.map(([k]) => k).filter((k) => keepSel[k])
+        setWipeMsg('')
+        setWork(mode === 'uninstall' ? '卸载' : '卸载重装')
+        try {
+          /**
+           * 两条路径写成字面量，不拼字符串——`test/routes.test.js` 是按源码
+           * 扫描「前端调的每个接口后端都有」的，拼出来的路径它看不见，
+           * 于是会变成「前端在调不存在的接口 /setup/」。
+           */
+          const r = mode === 'uninstall'
+            ? await post('/setup/uninstall', { keep })
+            : await post('/setup/reinstall', { keep })
+          await reload()
+          onSaved?.()
+          await loadPair()
+          const bad = r?.ok === false
+          setWipeMsg(bad
+            ? `✗ ${r.message || '没成'}`
+            : `✓ ${r.message || '完成'}${r.warning ? `（${r.warning}）` : ''}`)
+          toast(bad ? (r.message || '没成') : mode === 'uninstall' ? '已卸载' : '已重装')
+        } catch (e) {
+          setWipeMsg(`✗ ${e?.message ?? e}`)
+        } finally {
+          setWork('')
+        }
+      }
+
+      /**
        * 六步的状态全部由 `/setup` 的真实字段推出来。
        *
        * 原来概览那套「4 步 / 0 完成」是读一个后端根本不返回的 `steps`，
@@ -3056,6 +3127,12 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', className: 'roost-btn', onClick: () => setPathOpen((v) => !v) },
               pathOpen ? '收起' : s.installed ? '更改路径' : '改路径'),
             s.installed
+              ? h('button', {
+                  type: 'button', className: 'roost-btn roost-danger',
+                  onClick: () => { setWipeOpen((v) => !v); setWipeMsg('') },
+                }, wipeOpen ? '收起卸载' : '卸载重装')
+              : null,
+            s.installed
               ? null
               : h('button', {
                   type: 'button', className: 'roost-btn', disabled: locked,
@@ -3066,6 +3143,79 @@ window.__ModuleLoader__.load({
                   },
                 }, '安装'),
           ),
+            /**
+             * 卸载 / 卸载重装（折叠，默认收起）。
+             *
+             * 放在第 1 步而不是单独的页面：会用到它的人此刻正卡在「装」这一步。
+             * 两个动作都走二次确认——它们会真的删文件，误点一次代价很大。
+             */
+            wipeOpen
+              ? h('div', { className: 'roost-banner', style: { marginTop: 10, marginBottom: 6 } },
+                  h('div', { style: { fontWeight: 600, marginBottom: 4 } }, '卸载重装 / 只卸载'),
+                  h('div', { className: 'roost-note' }, '只动 Roost 自己的目录：'),
+                  h('div', { className: 'roost-mono', style: { overflowWrap: 'anywhere', margin: '2px 0 6px' } }, String(s.dir || '')),
+                  h('div', { className: 'roost-note' },
+                    'DSH 这边的人格、记忆、设置、本插件配置一个都不动。重装是同盘改名 + 重新下载（装的是最新版），不复制数据。'),
+                  h('div', { className: 'roost-note', style: { marginTop: 4 } },
+                    '没勾的一律删掉——目录里的 README、docs、旧备份（.bak-*）这些也算在内。'),
+                  h('div', { className: 'roost-note', style: { fontWeight: 600, marginTop: 10 } }, '保留哪些'),
+                  ...KEEP_ITEMS.map(([key, label, note]) =>
+                    h('label', {
+                      key,
+                      style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 6, cursor: locked ? 'default' : 'pointer' },
+                    },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: Boolean(keepSel[key]),
+                        disabled: locked,
+                        onChange: (e) => setKeepSel((v) => ({ ...v, [key]: e.target.checked })),
+                        style: { marginTop: 2, flex: '0 0 auto' },
+                      }),
+                      h('span', { style: { minWidth: 0 } },
+                        h('b', null, label),
+                        h('span', { className: 'roost-note', style: { display: 'block', margin: 0 } },
+                          `${note}${s.parts && s.parts[key] === false ? '（当前没有这一项）' : ''}`),
+                      ),
+                    )),
+                  (!keepSel.config || !keepSel.data)
+                    ? h('div', { className: 'roost-note', style: { marginTop: 8, color: 'var(--bad)' } },
+                        !keepSel.config
+                          ? 'AppID / AppSecret、主人名单会没，装完要重新扫码或手填凭证。 '
+                          : '',
+                        !keepSel.data ? '会话和消息记录会没，删了就找不回来。' : '')
+                    : null,
+                  h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 } },
+                    h(ConfirmLink, {
+                      label: '卸载并重装',
+                      confirmLabel: '再点一次，确认重装',
+                      disabled: locked,
+                      primary: true,
+                      vivid: true,
+                      onConfirm: () => doWipe('reinstall'),
+                    }),
+                    h(ConfirmLink, {
+                      label: '只卸载',
+                      confirmLabel: '再点一次，确认卸载',
+                      disabled: locked,
+                      onConfirm: () => doWipe('uninstall'),
+                    }),
+                    s.running
+                      ? h('span', { className: 'roost-note', style: { alignSelf: 'center', margin: 0 } }, '会先自动停掉在跑的 Roost')
+                      : null,
+                  ),
+                  h('div', { className: 'roost-note', style: { marginTop: 8 } },
+                    '「只卸载」之后想装回来：点上面的「安装」/「一键安装」，留下的 config / data 会跟着新装的程序一起用。'),
+                  wipeMsg
+                    ? h('div', {
+                        className: 'roost-mono',
+                        style: {
+                          marginTop: 8,
+                          color: wipeMsg.startsWith('✗') ? 'var(--bad)' : wipeMsg.startsWith('✓') ? 'var(--ok)' : 'inherit',
+                        },
+                      }, wipeMsg)
+                    : null,
+                )
+              : null,
             pathOpen
               ? h('div', { style: { marginTop: 6, marginBottom: 4 } },
                   h('div', { className: 'roost-note', style: { marginBottom: 6 } },
