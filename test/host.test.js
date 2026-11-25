@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { renderInbound, chatOf } from '../src/inbound.js';
 import { createSessions } from '../src/sessions.js';
 import { createInboundServer } from '../src/server.js';
-import { createTurnRunner, textOf } from '../src/turn.js';
+import { createTurnRunner, textOf, mergeStepText, hasToolCall } from '../src/turn.js';
 import { DEFAULTS, publicConfig, saveConfig } from '../src/config.js';
 import { bucketOf, bucketOfLevel, modeFor, describeSpeaker, rulesFor } from '../src/permissions.js';
 import { createSetup } from '../src/setup.js';
@@ -234,7 +234,7 @@ test('跑一轮：时限支持现读函数（面板改了不用重启）', async
   runner.dispose();
 });
 
-test('跑一轮：多段 assistant/message 取最后一次', async () => {
+test('跑一轮：多段 assistant/message 要拼起来，不能只留最后一段', async () => {
   const { ctx, emit } = fakeDsh();
   const runner = createTurnRunner({ ctx, timeoutSec: 5 });
   const session = { id: 's2' };
@@ -242,12 +242,51 @@ test('跑一轮：多段 assistant/message 取最后一次', async () => {
 
   const p = runner.run(agent, '查一下');
   await new Promise((r) => setTimeout(r, 10));
-  emit(session, { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '我查查' }] } } });
-  emit(session, { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '查到了，是 42' }] } } });
+  // 纯对话轮：先问一句、再给结论。以前只返回后者，提问那段整段丢了。
+  emit(session, { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '你指的是 A 还是 B？' }] } } });
+  emit(session, { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '我想想……大概是 A。' }] } } });
   emit(session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
 
-  assert.equal(await p, '查到了，是 42');
+  const got = await p;
+  assert.match(got, /你指的是 A 还是 B？/, '提问那一段不能丢');
+  assert.match(got, /大概是 A/, '结论也要在');
   runner.dispose();
+});
+
+test('跑一轮：工具轮只认最后一条，过程话不当回复发出去', async () => {
+  const { ctx, emit } = fakeDsh();
+  const runner = createTurnRunner({ ctx, timeoutSec: 5 });
+  const session = { id: 's2b' };
+  const agent = { session, followup: async () => {} };
+
+  const p = runner.run(agent, '查一下天气');
+  await new Promise((r) => setTimeout(r, 10));
+  emit(session, {
+    type: 'assistant/message',
+    data: { turn: 1, message: { content: [{ type: 'text', text: '我先查一下' }, { type: 'tool-call', id: 't1', name: 'qq_send' }] } },
+  });
+  emit(session, { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '今天晴，26 度。' }] } } });
+  emit(session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
+
+  const got = await p;
+  assert.equal(got, '今天晴，26 度。', '工具轮的过程话（「我先查一下」）不能拼进回复');
+  runner.dispose();
+});
+
+test('mergeStepText：只去重拼接，不改措辞', () => {
+  assert.equal(mergeStepText('', '甲'), '甲');
+  assert.equal(mergeStepText('甲', ''), '甲');
+  assert.equal(mergeStepText('甲', '甲'), '甲', '完全一样不重复');
+  assert.equal(mergeStepText('甲乙丙', '丙'), '甲乙丙', '结尾已包含不重复');
+  assert.equal(mergeStepText('半截', '半截加完整版'), '半截加完整版', '新段是完整版就顶掉旧的');
+  assert.equal(mergeStepText('第一段', '第二段'), '第一段\n\n第二段', '真补充要都留着');
+});
+
+test('hasToolCall：认 tool-call 与 tool_use 两种块名', () => {
+  assert.equal(hasToolCall({ content: [{ type: 'text', text: 'x' }, { type: 'tool-call' }] }), true);
+  assert.equal(hasToolCall({ content: [{ type: 'tool_use' }] }), true);
+  assert.equal(hasToolCall({ content: [{ type: 'text', text: 'x' }] }), false);
+  assert.equal(hasToolCall(null), false);
 });
 
 test('跑一轮：没正常结束要报错', async () => {
