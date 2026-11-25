@@ -14389,6 +14389,25 @@ export function apply(ctx) {
 
       route('/setup/install', (req, res) => setup.install().then((r) => send(res, 200, r))),
 
+      /**
+       * 卸载 / 卸载重装。
+       *
+       * `keep` 是「要留下的子目录名」数组（config / data / plugins / logs，见
+       * `setup.js` 的 `KEEPABLE`），**不传 = 全留**。两条路都会先把 Roost 停掉，
+       * 停不掉就一个文件都不动——Windows 上占着的东西既改不了名也删不掉。
+       *
+       * 只碰 Roost 自己的目录：DSH 这边的人格、记忆、设置完全不经过这里。
+       */
+      route('/setup/uninstall', async (req, res) => {
+        const b = await readBody(req);
+        return send(res, 200, await setup.uninstall({ keep: b.keep }));
+      }),
+
+      route('/setup/reinstall', async (req, res) => {
+        const b = await readBody(req);
+        return send(res, 200, await setup.reinstall({ keep: b.keep }));
+      }),
+
       route('/setup/dir', async (req, res) => {
         const b = await readBody(req);
         return send(res, 200, setup.setDir(b.dir));

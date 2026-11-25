@@ -15,12 +15,12 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer as createNetServer } from 'node:net';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, renameSync, statSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createLease } from './lease.js';
 import { Readable } from 'node:stream';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { FW_REPO as REPO, GITEE_FW_REPO as GITEE_REPO } from './repo.js';
 
 /**
@@ -226,7 +226,108 @@ function pidInLocalInstances(pid, dir) {
   });
 }
 
-export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
+/**
+ * 这个目录是不是一份 Roost？
+ *
+ * 认三个特征，命中任意两个就算——只看 `package.json` 的话，
+ * 用户改过名字（或从压缩包解出来）就认不出了。
+ *
+ * 提到模块级是因为卸载前的闸门（`assertCanWipe`）也要用：判断「敢不敢删」
+ * 和判断「装没装」必须是同一个标准，各写一份迟早会分叉。
+ */
+export function looksLikeRoost(dir) {
+  if (!dir) return false;
+  try {
+    if (!existsSync(join(dir, 'src', 'main.js'))) return false;
+    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    return pkg?.name === 'qq-bot-roost' || existsSync(join(dir, 'plugins'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 「保留数据」能勾的那几块。
+ *
+ * 只认这四个目录名，**不接受任意路径**：卸载删的是整个目录，
+ * 任何「让用户自己填一个名字」的入口都可能把别的东西带进来。
+ * `logs` 也在里面——它可再生，但有人就是靠它排障，所以给勾、默认勾上。
+ */
+export const KEEPABLE = ['config', 'data', 'plugins', 'logs'];
+
+/**
+ * 勾选项 → 真正要保留的目录名列表。
+ *
+ * 默认（undefined / 没传）**全保留**：卸载重装最常见的诉求是「装坏了想重来」，
+ * 默认把数据带走才是对的那一边；要删必须显式不勾。
+ */
+export function keepListOf(input) {
+  if (input === undefined) return [...KEEPABLE];
+  if (input === null || input === false) return [];
+  const arr = Array.isArray(input) ? input : [input];
+  const out = [];
+  for (const raw of arr) {
+    const name = String(raw ?? '').trim();
+    if (!name) continue;
+    if (!KEEPABLE.includes(name)) {
+      throw new Error(`不认识要保留的「${name}」，只能选：${KEEPABLE.join(' / ')}`);
+    }
+    if (!out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+/**
+ * 卸载前的最后一道闸门。
+ *
+ * 这一步要删掉一整个目录，所以宁可多拒几次：
+ *   · 必须是一份 Roost（有 src/main.js + package.json）
+ *   · 不能是盘根、家目录、DSH 数据目录，也不能是它们的**祖先**
+ *     —— `C:\Users\q9079` 这类一旦删掉，桌面上的东西一起没
+ *   · 路径至少两级（`C:\roost` 太浅，出事没有缓冲区）
+ *   · 带 `.git` 的是源码检出：删了会丢本地提交，让人自己去处理
+ *
+ * 通过时返回规范化后的绝对路径，调用方直接用它，别再各自 resolve 一遍。
+ */
+export function assertCanWipe(dir, { dataDir = '', home = '' } = {}) {
+  const raw = String(dir ?? '').trim();
+  if (!raw) throw new Error('还没确定 Roost 装在哪，不敢动');
+  const abs = resolve(raw);
+  if (!existsSync(abs)) throw new Error(`目录不存在：${abs}`);
+  if (!looksLikeRoost(abs)) {
+    throw new Error(`这个目录不像 Roost（缺 src/main.js 或 package.json），不动它：${abs}`);
+  }
+  if (/^[a-z]:[\\/]?$/i.test(abs) || abs === resolve('/')) {
+    throw new Error(`这是磁盘根目录，不能整个删：${abs}`);
+  }
+
+  const norm = (p) => resolve(String(p ?? '')).replace(/[\\/]+$/, '').toLowerCase();
+  const n = norm(abs);
+  const same = (p) => {
+    const q = norm(p);
+    return Boolean(q) && q === n;
+  };
+  /** abs 是不是 p 的祖先（等于不算） */
+  const ancestorOf = (p) => {
+    const q = norm(p);
+    return Boolean(q) && q !== n && (q.startsWith(n + sep) || q.startsWith(n + '/'));
+  };
+
+  if (same(home) || ancestorOf(home)) throw new Error(`这是家目录（或它的上层），不能删：${abs}`);
+  if (same(dataDir) || ancestorOf(dataDir)) {
+    throw new Error(`这会连 DSH 自己的数据目录一起删掉：${abs}`);
+  }
+
+  const depth = n.split(/[\\/]/).filter(Boolean).length;
+  if (depth < 2) throw new Error(`路径太浅（${abs}），不敢在这里递归删`);
+
+  if (existsSync(join(abs, '.git'))) {
+    throw new Error('这个目录带 .git，是一份源码检出：删了会丢本地提交，请手动处理');
+  }
+  return abs;
+}
+
+export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer = null }) {
   /** 我们自己拉起来的那个进程。DSH 重启后为 null，但 Roost 可能还在跑 */
   let child = null;
   let busy = '';
@@ -459,23 +560,6 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
   /* ---------------- 定位 Roost 安装目录 ---------------- */
 
   /**
-   * 这个目录是不是一份 Roost？
-   *
-   * 认三个特征，命中任意两个就算——只看 `package.json` 的话，
-   * 用户改过名字（或从压缩包解出来）就认不出了。
-   */
-  function looksLikeRoost(dir) {
-    if (!dir) return false;
-    try {
-      if (!existsSync(join(dir, 'src', 'main.js'))) return false;
-      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-      return pkg?.name === 'qq-bot-roost' || existsSync(join(dir, 'plugins'));
-    } catch {
-      return false;
-    }
-  }
-
-  /**
    * 找到真正在用的那份 Roost。
    *
    * **只在没配的时候自动找。** 用户明确配了路径就认他配的——
@@ -681,6 +765,13 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       dir,
       dirHow: resolveRoostDir().how,
       dirOk: looksLikeRoost(dir),
+      /**
+       * 哪几块数据还在（卸载弹窗的勾选项据此渲染）。
+       *
+       * 只做 existsSync，不递归算大小：`data/` 实测能到 700MB+，
+       * 每次 `/setup` 都去遍历一遍目录会把面板拖慢。
+       */
+      parts: Object.fromEntries(KEEPABLE.map((name) => [name, existsSync(join(dir, name))])),
       version,
       installed,
       running,
@@ -733,7 +824,23 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
   async function install() {
     if (busy) throw new Error(`正在${busy}，等它完成`);
     busy = '安装';
-    const dir = dirOf();
+    try {
+      return await installOnce();
+    } finally {
+      busy = '';
+    }
+  }
+
+  /**
+   * 安装的实际动作。
+   *
+   * 抽出来给「卸载重装」复用：那条路自己已经把 busy 设成「卸载重装」，
+   * 再过一次 `install()` 的闸门会撞上自己的锁。`dir` 允许显式传入，
+   * 因为重装过程中目录被挪走过——这时 `dirOf()` 可能已经解析到别处
+   * （配的是自动发现的路径时尤其明显），必须认开始那一刻的那一份。
+   */
+  async function installOnce({ dir: target = '' } = {}) {
+    const dir = target || dirOf();
     const tmp = join(tmpdir(), `roost-${Date.now()}.zip`);
     const stage = join(tmpdir(), `roost-stage-${Date.now()}`);
 
@@ -741,6 +848,18 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       if (existsSync(join(dir, 'src', 'main.js'))) {
         return { ok: true, message: '已经装好了，跳过' };
       }
+
+      /**
+       * 测试注入口：本仓 `instanceAlive(rec, dir, alive)` 是同一套路。
+       * 真装要下载几十兆，单测里没法跑；注入一个「写两个文件」的假安装器
+       * 就能把「保留 / 删除 / 回滚」三条路全部走一遍。
+       */
+      if (installer) {
+        const r = await installer({ dir });
+        if (r?.ok === false) throw new Error(r.message || '安装失败');
+        return { ok: true, message: `装好了：${dir}` };
+      }
+
       mkdirSync(stage, { recursive: true });
 
       /**
@@ -789,11 +908,223 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
       log(`已安装到 ${dir}`);
       return { ok: true, message: `装好了：${dir}` };
     } finally {
-      busy = '';
+      /** busy 不在这里清：由 `install()` 统一管，否则重装中途会被提前解锁 */
       try {
         rmSync(tmp, { force: true });
         rmSync(stage, { recursive: true, force: true });
       } catch {}
+    }
+  }
+
+  /* ---------------- 卸载 / 卸载重装 ---------------- */
+
+  /**
+   * 把一个目录改成新名字。Windows 上刚结束的进程还会短暂占着文件，
+   * 所以重试几次再放弃——一次失败就报「删不掉」会让用户以为必须重启电脑。
+   */
+  async function renameWithRetry(from, to, tries = 6) {
+    let last = null;
+    for (let i = 0; i < tries; i++) {
+      try {
+        renameSync(from, to);
+        return;
+      } catch (e) {
+        last = e;
+        await new Promise((r) => setTimeout(r, 400));
+      }
+    }
+    throw new Error(`目录被占用，改不了名（${last?.code || last?.message || '未知'}）：${from}`);
+  }
+
+  /**
+   * 把整个目录改名挪到旁边，并在原位置留一个空目录。
+   *
+   * 为什么挪而不是复制：实测有的机器 `data/` 已经 700MB+，复制既慢又可能
+   * 把盘塞满；同盘 rename 是几毫秒的事，而且失败时原样还在。
+   *
+   * 返回 `aside`（旧目录）给调用方决定：重装成功才删，失败要拿它回滚。
+   */
+  async function detachDir(dir) {
+    const aside = `${dir}.old-${Date.now()}`;
+    await renameWithRetry(dir, aside);
+    /** 目录本身留着：卸完 `s.dir` 还要能显示「装在哪」，之后一键安装也原地装回去 */
+    mkdirSync(dir, { recursive: true });
+    return aside;
+  }
+
+  /**
+   * 把勾中的那几块从 `aside` 搬回 `dir`。
+   *
+   * **必须在装完之后搬**：包里也带 `config/`（`bot.example.json` 之类），
+   * 先搬数据再解压 = 让安装包覆盖用户配置，正好把要保的东西弄坏。
+   */
+  function restoreKept(dir, aside, keep) {
+    const kept = [];
+    const missing = [];
+    for (const name of keep) {
+      const src = join(aside, name);
+      if (!existsSync(src)) continue;
+      const dst = join(dir, name);
+      try {
+        rmSync(dst, { recursive: true, force: true });
+      } catch {}
+      /**
+       * 正常是同盘 rename；跨盘（外挂盘 / 网络盘）才会抛 EXDEV，
+       * 那时退回复制——慢，但总比「保留数据」静默失效强。
+       */
+      try {
+        renameSync(src, dst);
+      } catch {
+        try {
+          cpSync(src, dst, { recursive: true });
+        } catch (e) {
+          missing.push(`${name}（${e?.message || e}）`);
+          continue;
+        }
+      }
+      kept.push(name);
+    }
+    return { kept, missing };
+  }
+
+  /** 目录里那份 Roost 的版本号（重装完回报给面板） */
+  function versionOnDisk(dir) {
+    try {
+      return String(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).version ?? '');
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 卸载（只卸载，不重装）。
+   *
+   * `keep` 给的是**要留下的目录名**（见 `KEEPABLE`），不传=全留。
+   * 留了 config/data 的话，之后点「一键安装」就能原地恢复——这正是
+   * 「只想重装一下程序、别丢机器人」的人要的效果。
+   */
+  async function uninstall({ keep } = {}) {
+    if (busy) throw new Error(`正在${busy}，等它完成`);
+    busy = '卸载';
+    try {
+      const dir = assertCanWipe(dirOf(), { dataDir: dataDir(), home: homedir() });
+      const keepNames = keepListOf(keep);
+
+      const stopped = await stopOnce();
+      if (stopped?.ok === false) {
+        throw new Error(`停不下来：${stopped.message}。先手动关掉 Roost 再卸载，否则文件被占着删不动`);
+      }
+
+      const aside = await detachDir(dir);
+      const { kept, missing } = restoreKept(dir, aside, keepNames);
+      log(`已卸载 Roost：${dir}（保留 ${kept.join('/') || '无'}）`);
+
+      let warning = missing.length ? `这几块没搬回来：${missing.join('、')}，旧目录留在 ${aside}` : '';
+      if (!warning) {
+        try {
+          rmSync(aside, { recursive: true, force: true });
+        } catch (e) {
+          warning = `旧文件没删干净，残留 ${aside}（${e?.message || e}），可以手动删`;
+          log(warning);
+        }
+      }
+
+      return {
+        ok: true,
+        dir,
+        kept,
+        warning,
+        message: kept.length
+          ? `已卸载，保留了 ${kept.join(' / ')}。想装回来点「一键安装」`
+          : `已卸载，${dir} 已清空`,
+      };
+    } finally {
+      busy = '';
+    }
+  }
+
+  /**
+   * 卸载并重装。
+   *
+   * 触发场景：装坏了、版本乱了、升级卡在半路。比「让用户自己找到目录删干净」
+   * 可靠得多——那些人往往把别的东西一起删了，或者删到一半发现文件被占用。
+   *
+   * 顺序是**先停再动**：Windows 上开着的文件改不了名。
+   * 全程只碰 Roost 自己的目录；DSH 这边的人格、记忆、设置一个不动。
+   */
+  async function reinstall({ keep } = {}) {
+    if (busy) throw new Error(`正在${busy}，等它完成`);
+    busy = '卸载重装';
+    try {
+      const dir = assertCanWipe(dirOf(), { dataDir: dataDir(), home: homedir() });
+      const keepNames = keepListOf(keep);
+
+      const stopped = await stopOnce();
+      if (stopped?.ok === false) {
+        throw new Error(`停不下来：${stopped.message}。先手动关掉 Roost 再重装，否则文件被占着动不了`);
+      }
+
+      const aside = await detachDir(dir);
+      try {
+        /**
+         * 把目录钉进配置：自动发现来的路径在「目录刚被清空」的这几秒里
+         * 是解析不到的，不钉住，`installOnce` 会装到默认目录去。
+         */
+        setCfg({ setup: { roostDir: dir } });
+        await installOnce({ dir });
+      } catch (e) {
+        /**
+         * 回滚：新目录删掉，旧目录整个改回来。此刻**数据还没搬回来**，
+         * 所以旧目录是完整的——回滚就是一次 rename 的事。
+         * 宁可让用户看到「没装成，但原来的还能用」，也不能留一个半成品
+         * 目录（那才是最难受的状态：跑不起来，也不知道原来在哪）。
+         */
+        let rolled = false;
+        try {
+          rmSync(dir, { recursive: true, force: true });
+          renameSync(aside, dir);
+          rolled = true;
+        } catch (re) {
+          log(`回滚失败：${re?.message || re}；旧安装还留在 ${aside}`);
+        }
+        throw new Error(
+          `重装失败：${e?.message || e}。${rolled ? '旧安装已恢复，可以接着用' : `旧安装留在 ${aside}，需要手动改回 ${dir}`}`,
+        );
+      }
+
+      /** 装完再搬数据——反过来的话，包里的 config/ 会盖掉用户的 */
+      const restored = restoreKept(dir, aside, keepNames);
+      const kept = restored.kept;
+      if (restored.missing.length) {
+        log(`这几块没搬回来：${restored.missing.join('、')}；旧目录留在 ${aside}`);
+        const v = versionOnDisk(dir);
+        return {
+          ok: false,
+          dir,
+          kept,
+          version: v,
+          message: `程序已重装${v ? ` v${v}` : ''}，但数据没搬全：${restored.missing.join('、')}。旧数据还在 ${aside}，先别删那个目录`,
+        };
+      }
+
+      try {
+        rmSync(aside, { recursive: true, force: true });
+      } catch (e) {
+        log(`旧目录没删干净：${aside}（${e?.message || e}）`);
+      }
+
+      const version = versionOnDisk(dir);
+      log(`已重装 Roost${version ? ` v${version}` : ''}：${dir}（保留 ${kept.join('/') || '无'}）`);
+      return {
+        ok: true,
+        dir,
+        kept,
+        version,
+        message: `已重装${version ? ` v${version}` : ''}，保留 ${kept.join(' / ') || '无'}`
+          + (kept.includes('config') ? '；机器人凭证还在，点「测一下」确认直连' : '；数据清了，要重新扫码填凭证 + 一键直连'),
+      };
+    } finally {
+      busy = '';
     }
   }
 
@@ -1104,6 +1435,10 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {} }) {
     qrStart,
     qrPoll,
     install,
+    /** 只卸载（保留项见 `keep`）；不动 DSH 这边的任何配置 */
+    uninstall,
+    /** 卸载 + 重新下载最新版，保留项同样由 `keep` 决定 */
+    reinstall,
     setDir,
     createBot,
     start,
