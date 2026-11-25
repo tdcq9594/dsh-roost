@@ -49,14 +49,14 @@ test('治理范围外（群/别人）不纳管，直接放行', () => {
   }
 });
 
-test('gate 档无策略源：放行但不算纳管（没能力管）', () => {
+test('gate 档无策略源：deny，门闸开着但没人判定就不能直发', () => {
   const p = createOutboundPolicy({
     getConfig: () => ({ ownerQQ: OWNER, outboundPolicy: { tier: 'gate' } }),
     now: () => 1000,
   });
   const r = p.admit({ to: `private:${OWNER}` });
-  assert.equal(r.action, 'allow');
-  assert.equal(r.reason, 'no-policy-source');
+  assert.equal(r.action, 'deny');
+  assert.equal(r.reason, 'policy-error');
   assert.equal(r.managed, false);
 });
 
@@ -68,10 +68,10 @@ test('gate 档选了不存在的策略源：deny，绝不静默放行', () => {
   const set = p.setActivePolicy('missing');
   assert.equal(set.ok, false, '不能设置没注册过的策略源');
   assert.equal(set.reason, 'invalid-active');
-  /** 没有源时不纳管但放行——不是 policy-error */
+  /** 没有源同样是 policy-error——门闸不该因为「没能力判」就放行 */
   const r = p.admit({ to: `private:${OWNER}` });
-  assert.equal(r.action, 'allow');
-  assert.equal(r.reason, 'no-policy-source');
+  assert.equal(r.action, 'deny');
+  assert.equal(r.reason, 'policy-error');
 });
 
 test('策略源 reserve/commit/release 全流程', () => {

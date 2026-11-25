@@ -160,7 +160,7 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
    * `text` 是这一轮**最后一条**正文，`merged` 是整轮拼接（见 `mergeStepText`），
    * `sawToolCall` 决定 turn/end 用哪一份（工具轮只认最后一条）。
    *
-   * @type {Map<string, {turn:number, text:string, merged:string, sawToolCall:boolean, resolve:Function, reject:Function, timer:any}>}
+   * @type {Map<string, {turn:number, text:string, merged:string, sawToolCall:boolean, afterToolCount:number, afterToolText:string, resolve:Function, reject:Function, timer:any}>}
    */
   const waiters = new Map();
 
@@ -244,13 +244,29 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
           w.text = '';
           w.merged = '';
           w.sawToolCall = false;
+          w.afterToolCount = 0;
+          w.afterToolText = '';
         }
-        if (hasToolCall(d.message)) w.sawToolCall = true;
+        const toolCall = hasToolCall(d.message);
+        if (toolCall) {
+          w.sawToolCall = true;
+          /** 工具调用那条里带的文字是过程话（「我先查一下」），不算工具之后的正文 */
+          w.afterToolCount = 0;
+          w.afterToolText = '';
+        }
         const t = textOf(d.message);
         // 只有工具调用的消息没有正文：不算说话，但上面的 sawToolCall 已经记下
         if (!t) return;
         w.text = t;
         w.merged = mergeStepText(w.merged, t);
+        if (w.sawToolCall && !toolCall) {
+          /**
+           * 工具之后连着吐了几段正文（没走 qq_send）：这些才是最终答复，
+           * 只取最后一段又会丢前半截——与本轮修的纯对话轮丢段是同一类问题。
+           */
+          w.afterToolCount = (w.afterToolCount || 0) + 1;
+          w.afterToolText = mergeStepText(w.afterToolText || '', t);
+        }
         return;
       }
 
@@ -263,13 +279,17 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
          *
          *   · 纯对话轮（一轮里没出现工具调用）→ **合并后的全文**。模型先说
          *     一句、再说结论时两段都要发，这就是本轮修的那个丢段。
-         *   · 工具轮 → **只认最后一条**。工具调用前后的正文是过程话
-         *     （「我先查一下」），真正要说的话走 `qq_send` 逐段发
-         *     （`host.js` 用 `used.texts.join` 拼）；这份返回只是兜底，
-         *     把过程话一起拼进来，模型哪天不走工具就会把旁白发到群里。
-         *     这条是反向守卫，别为了「多发几句」把它拿掉。
+   *   · 工具轮 → 工具调用那条里的话是过程话（「我先查一下」），不算；
+   *     **工具之后只吐了一段**就取那一段，连着吐了几段才拼起来。
+   *     真正要说的话通常走 `qq_send` 逐段发（host.js 用 `used.texts.join`），
+   *     这份返回只是兜底：既不能把旁白发到群里，也不能再把最终答复的前半段丢掉。
          */
-        const text = w.turn === d.turn ? (w.sawToolCall ? w.text : w.merged || w.text) : '';
+        let text = '';
+        if (w.turn === d.turn) {
+          if (!w.sawToolCall) text = w.merged || w.text;
+          else if ((w.afterToolCount || 0) > 1) text = w.afterToolText || w.text;
+          else text = w.text;
+        }
         finish(sid, d.reason?.kind === 'completed', text, d.reason);
       }
     } catch (e) {
@@ -325,7 +345,10 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
         finish(sid, false, '', { kind: 'timeout' });
       }, attemptMs);
       timer.unref?.();
-      waiters.set(sid, { turn: -1, text: '', merged: '', sawToolCall: false, resolve, reject, timer });
+      waiters.set(sid, {
+        turn: -1, text: '', merged: '', sawToolCall: false,
+        afterToolCount: 0, afterToolText: '', resolve, reject, timer,
+      });
     });
     /**
      * 2026-11-14：一轮失败的 rejection 在被 `await` 接住之前，DSH 会把它当

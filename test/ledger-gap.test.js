@@ -435,7 +435,7 @@ test('recent：紧邻的插件回复其实答的是别人 → 这条命令留着
   });
 });
 
-test('recent：升级前的库没有 reply_to，仍按相邻剔命令', () => {
+test('recent：升级前的库没有 reply_to，相邻不足以剔命令（判不清一律留）', () => {
   if (!sqlite?.DatabaseSync) return;
   withDir((dir) => {
     seed(dir, [
@@ -444,7 +444,8 @@ test('recent：升级前的库没有 reply_to，仍按相邻剔命令', () => {
       { id: 'c2', msgId: 'm2', userName: '李四', content: '在吗', source: 'gateway', at: 2000 },
     ], { link: false });
     const reader = createLedgerReader({ roostDirOf: () => dir });
-    assert.deepEqual(reader.recent({ chatId: 'g1' }).map((r) => r.text), ['在吗']);
+    /** 没有 reply_to 就无法证明这条命令是给插件的；留着它，别误删真人发言 */
+    assert.deepEqual(reader.recent({ chatId: 'g1' }).map((r) => r.text), ['/help', '在吗']);
     reader.close();
   });
 });

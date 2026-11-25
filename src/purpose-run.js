@@ -30,6 +30,10 @@ import {
  * @param {()=>boolean} o.busy 会话是否正忙（忙则让位）
  * @param {()=>boolean} [o.enabled] 总开关（默认看 cfg.enabled）
  * @param {()=>boolean} [o.paused] 插件是否暂停
+ * @param {(friend:string)=>object[]|Promise<object[]>} [o.followUps] 到期跟进候选
+ *   （由宿主读真实 memory 并按开关过滤；不接就是没有这一类候选）
+ * @param {(fd:{chatId:string,fact:string})=>any} [o.onFollowUpAsked] 跟进真的发出去之后
+ *   回写一次 tries（宿主接到 memory.markFollowUpAsked）。不接就只靠历史去重兜着。
  * @param {object} [o.log]
  * @param {()=>number} [o.now]
  */
@@ -43,6 +47,8 @@ export function createPurposeRunner({
   busy = () => false,
   enabled = null,
   paused = () => false,
+  followUps = () => [],
+  onFollowUpAsked = null,
   log = {},
   now = () => Date.now(),
 } = {}) {
@@ -94,12 +100,24 @@ export function createPurposeRunner({
       materials, goals: s.goals, observations: s.observations,
       drives, now: t, lastMasterAt, config: c,
     });
+    /**
+     * 到期跟进是独立候选：以前只在 `/purpose/preview` 里展示，真实主链
+     * `selectPurpose()` 根本没收到它（发版前审查发现的假控件）。这里把宿主
+     * 按真实 memory + 开关算好的候选送进选择层，心跳 / 手动 fire 都能选中。
+     */
+    let extra = [];
+    try {
+      extra = await Promise.resolve(followUps(friend)) || [];
+    } catch (e) {
+      warn?.('到期跟进候选读取失败，这轮跳过这类候选', e?.message || e);
+      extra = [];
+    }
     return {
       materials, stats: collected.stats || {},
       drives, lastMasterAt,
       goals: formed.goals || [],
       observations: formed.observations || [],
-      seeds: [],
+      seeds: Array.isArray(extra) ? extra : [],
     };
   }
 
@@ -139,7 +157,9 @@ export function createPurposeRunner({
     const ctx = await prepare(t, friend);
     /** 素材太少就别硬找话——她只能瞎编由头。 */
     const minMaterials = Math.max(1, Number(c.minMaterials) || 2);
-    if (ctx.materials.length < minMaterials && !(Array.isArray(s.pending) && s.pending.length)) {
+    if (ctx.materials.length < minMaterials
+      && !(Array.isArray(s.pending) && s.pending.length)
+      && !ctx.seeds.length) {
       const nextFireAt = planNextFire({ now: t, config: c, lastRunAt: s.lastRunAt, countToday: s.countToday, replyHours: s.replyHours, replyWeekday: s.replyWeekday });
       writeState(friend, (cur) => {
         cur.drives = ctx.drives; cur.drivesAt = t;
@@ -204,6 +224,21 @@ export function createPurposeRunner({
         try {
           const where = await deliver(text, picked.purpose, friend);
           outcome = where === 'sent' ? 'sent' : where === 'silent' ? 'silent' : 'delivery-failed';
+          /**
+           * 跟进真的发出去了才回写 tries。不回写的话这条事实永远到期、永远被
+           * 选择层硬胜出，且每次生成都烧一次额度（发版复查发现）。
+           */
+          if (outcome === 'sent' && picked.purpose?.kind === 'memory-follow-up'
+            && typeof onFollowUpAsked === 'function') {
+            try {
+              await Promise.resolve(onFollowUpAsked({
+                chatId: String(picked.purpose.factChatId || '').trim() || 'global',
+                fact: String(picked.purpose.fact || '').trim(),
+              }));
+            } catch (e) {
+              warn('跟进记账失败（不影响这轮）', e?.message || e);
+            }
+          }
         } catch (e) {
           warn(`投递出错：${e?.message || e}`);
           outcome = 'delivery-failed';

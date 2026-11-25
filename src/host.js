@@ -45,7 +45,7 @@ import { statsSnapshot, dayOf as localDayOf } from './stats-snapshot.js';
 import { createJournal } from './journal.js';
 import { createLedgerReader } from './ledger-read.js';
 import { createGapMark } from './gap-mark.js';
-import { mergeRecentRows } from './recent-rows.js';
+import { mergeRecentRows, inBody, normText } from './recent-rows.js';
 import { createChannelPost, normalizePostCfg, guide, humanError, pickErrorCode, shareUrlOf } from './channel-post.js';
 import { createGraph } from './graph.js';
 import { createSelf } from './self.js';
@@ -143,6 +143,7 @@ import { createCapabilityClient } from './roost-capabilities.js';
 import { registerRoostTools } from './roost-tools.js';
 import { createRoostHost, protocolAlive } from './roost-host.js';
 import { createPayloadBuilder, buildRendered } from './roost-payload.js';
+import { shrinkImage } from './image-compress.js';
 import { interactionRouter } from './roost-interaction.js';
 import { createPickChannel } from './pick-channel.js';
 
@@ -2986,6 +2987,29 @@ export function apply(ctx) {
       stats: { journal: rows.length, bili: biliRows.length },
     };
   };
+  /**
+   * 到期跟进候选：预览和真实主链共用一份取数，避免「面板有、心跳没有」。
+   * 开关 autotelic.followUpCandidate 默认开，与 memory.followUp 的注入开关互不联动。
+   *
+   * @param {string[]} ids 要取哪些会话
+   * @param {{includeGlobal?:boolean}} [o] 朋友线必须传 `false`：
+   *   `memory.dueFollowUps()` **无条件带上 global 事实**，而 global 是主人那侧的，
+   *   并进朋友线就会把主人的私事当话题发给朋友（发版复查发现的泄漏）。
+   */
+  const followUpCandidatesFor = (ids = [], { includeGlobal = true } = {}) => {
+    if (cfg.autotelic?.followUpCandidate === false) return [];
+    try {
+      const uniq = [...new Set(ids.map((x) => String(x || '')).filter(Boolean))];
+      const due = uniq
+        .flatMap((cid) => memory.dueFollowUps(cid, aliasesOf(cid), { limit: 0 }))
+        .filter((r) => includeGlobal || r?.scope !== 'global');
+      return buildFollowUpCandidates(due).slice(0, 8);
+    } catch (e) {
+      log.debug(`到期跟进候选读取失败：${e?.message || e}`);
+      return [];
+    }
+  };
+
   const purposeRunner = createPurposeRunner({
     cfgOf: () => cfg.ext?.purpose || {},
     stateStore: purposeState,
@@ -3014,6 +3038,37 @@ export function apply(ctx) {
     },
     enabled: purposeEnabled,
     paused,
+    /**
+     * 到期的事进真正的选择层：kind 用 memory-follow-up。
+     *
+     * 朋友线**只取那个朋友自己的事实**（`includeGlobal:false`）：global 事实是
+     * 主人那边的，混进来就会把主人的私事当话题发给朋友。`fact` / `factChatId`
+     * 留给运行时回写 tries——`text` 是给模型看的问句，跟事实原文不是一回事。
+     */
+    followUps: (friend = '') => followUpCandidatesFor(
+      friend ? [friend] : [ownerId()],
+      { includeGlobal: !friend },
+    ).map((c) => ({
+      ...c,
+      text: c.question,
+      fact: c.text,
+      factChatId: c.chatId,
+      kind: 'memory-follow-up',
+      sourceId: c.id,
+      weight: 1.4,
+    })),
+    /** 跟进真发出去之后：tries + 1、按 1/3/7 天重排，问满次数就自然退出到期列表 */
+    onFollowUpAsked: (fd) => {
+      try {
+        const cid = String(fd?.chatId || '').trim() || 'global';
+        const fact = String(fd?.fact || '').trim();
+        if (!fact) return { ok: false, reason: 'no-fact' };
+        return memory.markFollowUpAsked(cid, fact, aliasesOf(cid));
+      } catch (e) {
+        log.debug(`跟进记账失败：${e?.message || e}`);
+        return { ok: false, reason: 'error' };
+      }
+    },
     log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
   });
 
@@ -3061,7 +3116,14 @@ export function apply(ctx) {
     }),
     markPurposeDelivered: (state, opts) => markPurposeDelivered(state, opts),
   };
-  if (purposeEnabled()) {
+  /**
+   * 策略源**常驻注册**，不再只在「启动时目的引擎开着」才注册（发版复查发现）：
+   * 启动时关着、之后在面板里打开，注册条件不会重新求值，于是 gate/broker 档
+   * 永远 deny(policy-error)，面板提示「去打开目的引擎」照做也没用——只能重启。
+   * 注册只是塞进 map，`enabled()` / `state()` 都读实时配置，所以关着时它自然
+   * 报 not-ready，打开后立刻生效。
+   */
+  {
     const purposeOutboundPolicy = createPurposePolicy({
       getConfig: outboundConfig,
       engine: purposePolicyEngine,
@@ -4960,6 +5022,16 @@ export function apply(ctx) {
      * 这里只是转手——回调和对话主流程必须解耦，偷不到不能影响回复。
      */
     onImageSaved: (o) => trySteal(o),
+    /**
+     * 超过上限（默认 5MB，面板可改）的图先用功能包里的 ffmpeg 压一轮再喂模型。
+     * 没装 ffmpeg / 压不下来就回 null，payload 那边会如实告诉模型「图太大」。
+     */
+    shrinkImage: async ({ buf, mime, maxBytes }) => {
+      if (cfg.roostHost?.compressImages === false) return null;
+      return shrinkImage({ buf, mime, maxBytes });
+    },
+    /** 单张上限热读：面板改成 10MB，下一轮就生效 */
+    maxImageMB: () => cfg.roostHost?.imageMaxMB,
   });
 
   /**
@@ -6440,10 +6512,13 @@ export function apply(ctx) {
    * @param {string} [query] 这一句原话（开相关度闸门时用来挑）
    * @param {boolean} [commit] 这批是否**真的拼进了上下文**。面板 `/mind` 预览
    *   传 false——看一眼不该把缺口消费掉，否则主人翻一次面板，真注入时就空了。
+   * @param {string} [bodyText] 本轮正文。去重必须在推进水位**之前**做：
+   *   先把和正文重复的行剔掉，否则被 mergeRecentRows 剔掉的那条已经算「露过」，
+   *   以后永远不会再补（发版前审查发现）。
    * @returns {any[]} 正序（老的在前）。查不到一律空数组——这块是增强，
    *   账本没开 / 没库不能影响正常回话。
    */
-  function recentGapRows(chatId, limit, query = '', commit = false) {
+  function recentGapRows(chatId, limit, query = '', commit = false, bodyText = '') {
     try {
       if (!ledgerRead.available()) return [];
       /**
@@ -6469,12 +6544,19 @@ export function apply(ctx) {
       /**
        * 多取一些再筛：`seen` 很可能把最近几条全盖住，只取 `limit` 条会
        * 筛完一个不剩，而真实缺口其实在更早的位置。
+       *
+       * 取 60 而不是 30：本轮新增的「与正文重复就不算缺口」会把**最新**的那几条
+       * 剔掉（它们一定在正文里），窗口太小时剩下的全是重复行，更早的真缺口
+       * 永远轮不到（发版复查发现）。
        */
-      const rows = ledgerRead.gap({ chatId, limit: 30 });
+      const rows = ledgerRead.gap({ chatId, limit: 60 });
+      const bodyNorm = normText(bodyText);
       const fresh = rows.filter((x) => {
         if (Number(x.seq) <= mark) return false;
         if (x.eventId && seen.has(x.eventId)) return false;
         if (x.self && lastSeenAt && x.at <= lastSeenAt) return false;
+        /** 与本轮正文重复的行不进缺口，也就不该推进水位 */
+        if (inBody(x.text, bodyNorm)) return false;
         return true;
       });
       /**
@@ -6598,7 +6680,7 @@ export function apply(ctx) {
      * **真实注入不会为空**：`onInbound` 一定有 chat；而且账本缺口查询
      * 在空 chatId 时直接返回空数组，不会跨群捞消息。
      */
-    const gap = chatId ? recentGapRows(chatId, limit, query, commit) : [];
+    const gap = chatId ? recentGapRows(chatId, limit, query, commit, bodyText) : [];
     /**
      * 缺口自己够数就不用查日记（`mergeRecentRows` 会在够数后直接返回）。
      * 这条短路是常规路径：群里攒了一夜的缺口一次补齐，省一次全表扫描。
@@ -9964,6 +10046,31 @@ export function apply(ctx) {
       } catch {
         return {};
       }
+    };
+
+    /**
+     * 统一的请求体解析：**先看宿主有没有替我们读完**（`req.body`），
+     * 没有再自己读流。
+     *
+     * 为什么要这个：这批 `/autotelic/*` 路由一半写 `req.body`、一半写
+     * `await readBody(req)`，而 `ctx.webServer` 到底预不预读请求体取决于宿主
+     * 实现——两种写法必有一半拿不到数据（表现是「按钮点了没反应 / 400 缺 id」）。
+     * 这里两种都兼容，别再分成两套写法。
+     */
+    const bodyOf = async (req) => {
+      const pre = req?.body;
+      if (pre !== undefined && pre !== null) {
+        /** Node 的 raw-body 中间件常把原始体挂成 Buffer：先转文本再解析，不能当对象返回 */
+        if (Buffer.isBuffer(pre) || pre instanceof Uint8Array) {
+          try { return JSON.parse(Buffer.from(pre).toString('utf8') || '{}'); } catch { return {}; }
+        }
+        /** 只认普通对象：数组 / Date 之类不是请求体，别让下游拿到奇怪形状 */
+        if (typeof pre === 'object' && !Array.isArray(pre)) return pre;
+        if (typeof pre === 'string') {
+          try { return JSON.parse(pre || '{}'); } catch { return {}; }
+        }
+      }
+      return readBody(req);
     };
 
     /**
@@ -15254,17 +15361,7 @@ export function apply(ctx) {
          * 的 prompt 注入开关互不联动。
          */
         const followUpOn = cfg.autotelic?.followUpCandidate !== false;
-        let followUps = [];
-        if (followUpOn) {
-          try {
-            const owner = String(ownerId() || '').trim();
-            const followIds = [...new Set([owner, ...extra].filter(Boolean))];
-            const due = followIds.flatMap((cid) => memory.dueFollowUps(cid, aliasesOf(cid), { limit: 0 }));
-            followUps = buildFollowUpCandidates(due).slice(0, 8);
-          } catch (e) {
-            log.debug(`到期跟进候选预览失败：${e?.message || e}`);
-          }
-        }
+        const followUps = followUpCandidatesFor([ownerId(), ...extra]);
         return send(res, 200, {
           ok: true,
           materials: materials.length,
@@ -15299,7 +15396,9 @@ export function apply(ctx) {
       route('/autotelic/decide', async (req, res) => {
         if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
         const u = new URL(req.url || '/', 'http://local');
-        const round = Math.max(0, Number(u.searchParams.get('round')) || 0);
+        /** 面板用 POST body 传 round，别只从 query 取——否则审计里轮次恒为 0 */
+        const body = await bodyOf(req);
+        const round = Math.max(0, Number(body.round ?? u.searchParams.get('round')) || 0);
         const r = await autotelic.decide({ round });
         return send(res, r.ok ? 200 : 409, r);
       }),
@@ -15311,17 +15410,16 @@ export function apply(ctx) {
       route('/autotelic/execute', async (req, res) => {
         if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
         let ticket = null;
-        try { ticket = JSON.parse(String(req.body || '')); } catch { ticket = null; }
+        try { ticket = await bodyOf(req); } catch { ticket = null; }
         if (!ticket || !Array.isArray(ticket.steps)) return send(res, 400, { ok: false, message: '行动单格式不对（要 JSON 且带 steps）' });
         const r = await autotelic.execute(ticket);
         return send(res, r.ok ? 200 : 409, r);
       }),
 
       /** 主人纠偏（阶段 4）：别做 X → 抑制；多干这种 → 偏好 */
-      route('/autotelic/correct', (req, res) => {
+      route('/autotelic/correct', async (req, res) => {
         if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
-        let body = {};
-        try { body = JSON.parse(String(req.body || '')); } catch {}
+        const body = await bodyOf(req);
         const text = String(body.text || '').trim();
         if (text.length < 2) return send(res, 400, { ok: false, message: '纠偏内容太短' });
         const r = autotelic.correct(text, body.tags);
@@ -15334,7 +15432,7 @@ export function apply(ctx) {
       route('/autotelic/feedback', async (req, res) => {
         if (req.method === 'POST') {
           if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着' });
-          const body = await readBody(req).catch(() => ({}));
+          const body = await bodyOf(req).catch(() => ({}));
           if (body?.action === 'resume' && body.tag) {
             const src = ['mention', 'explicit', 'panel'].includes(body.source) ? body.source : 'panel';
             const r = autotelicFeedback.resume(String(body.tag), src);
@@ -15356,7 +15454,7 @@ export function apply(ctx) {
       route('/autotelic/skills', async (req, res) => {
         if (req.method === 'POST') {
           if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着' });
-          const body = await readBody(req).catch(() => ({}));
+          const body = await bodyOf(req).catch(() => ({}));
           if (body?.action === 'rollback' && body.stamp) {
             const r = autotelicSkills.rollback(String(body.stamp));
             return send(res, 200, {
@@ -15380,8 +15478,7 @@ export function apply(ctx) {
       route('/autotelic/pending', (req, res) => send(res, 200, { ok: true, rows: autotelicExecutor.pendingList() })),
       route('/autotelic/confirm', async (req, res) => {
         if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着，先打开再手动触发' });
-        let body = {};
-        try { body = JSON.parse(String(req.body || '')); } catch {}
+        const body = await bodyOf(req);
         const id = String(body.id || '').slice(0, 80);
         if (!id) return send(res, 400, { ok: false, message: '缺 id' });
         /** 拒绝 = 取消（不执行任何一步），确认才走 confirm */

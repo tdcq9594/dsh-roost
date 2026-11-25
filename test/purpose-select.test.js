@@ -75,3 +75,35 @@ test('selectPurpose：驱动高的需要更容易被选中', () => {
   const highPlay = selectPurpose(base({ seeds, drives: { ...DEFAULT_DRIVES, play: 0.95, learn: 0.05 }, random: () => 0.01 }));
   assert.equal(highPlay.purpose.need, 'play', 'play 驱动高时选 play');
 });
+
+/**
+ * 跟进候选不再豁免去重（发版复查发现）。
+ *
+ * 以前 `kind === 'memory-follow-up'` 能跳过文本去重与 sourceId 历史比对，
+ * 又在末尾「惦记的事直接胜出」，结果同一件到期的事每轮心跳都会被选中；
+ * 而 tries 只有入站回复路径会加，主链不记账 → 它永远到期、永远重提。
+ */
+test('selectPurpose：同一件到期的事说过一次后不再进候选', () => {
+  const seed = {
+    id: 'follow:g1:上次说的面试', kind: 'memory-follow-up', kindLabel: '',
+    text: '上次说的面试怎么样了？', sourceId: 'follow:g1:上次说的面试', weight: 2,
+    fact: '面试', factChatId: 'g1',
+  };
+  const first = selectPurpose(base({ seeds: [seed] }));
+  assert.equal(first.purpose?.kind, 'memory-follow-up', '第一次该被选中');
+  assert.equal(first.purpose.fact, '面试', '事实原文要带到目的上，供投递后回写 tries');
+  assert.equal(first.purpose.factChatId, 'g1');
+
+  /** 把她真说过的那轮记进历史（applyPurposeOutcome 的形状） */
+  const history = [{ at: 1e12, outcome: 'sent', kind: 'memory-follow-up', sourceId: seed.sourceId, text: '面试那事后来怎么样啦' }];
+  const again = selectPurpose(base({ seeds: [seed], history }));
+  assert.notEqual(again.purpose?.sourceId, seed.sourceId, '刚说过，6 小时静默窗内不该再被选中');
+
+  /**
+   * 但静默窗不能变成永久封锁：`markFollowUpAsked` 按 1/3/7 天重排，到期后
+   * 必须还能再问一次。按「最近 10 条」去重会把 25 小时后的重问也挡掉，而它
+   * 又是唯一候选时，永远选不出来 → 永远不产生新历史 → 死锁（实测 72h 都挡）。
+   */
+  const dayLater = selectPurpose(base({ seeds: [seed], history: [{ ...history[0], at: 1e12 - 25 * 3600_000 }] }));
+  assert.equal(dayLater.purpose?.sourceId, seed.sourceId, '一天后到期必须能再问');
+});

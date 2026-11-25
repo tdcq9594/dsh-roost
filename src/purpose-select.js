@@ -26,6 +26,13 @@ const clip = (text, max = 120) => {
 };
 
 const HOUR = 3600_000;
+/**
+ * 同一条到期事实的静默窗：6 小时内不重复提。
+ *
+ * 比心跳间隔大得多（默认心跳是分钟级），又远小于 `markFollowUpAsked` 的
+ * 1 天重排——既不刷屏，也不会把「明天该再问一次」永久挡掉。
+ */
+const FOLLOW_UP_QUIET_MS = 6 * HOUR;
 
 /**
  * 选一个目的。
@@ -51,12 +58,30 @@ export function selectPurpose({
   const add = (item, weight, fromPending) => {
     const text = clip(item?.text, 120);
     if (!text) return;
+    /**
+     * 跟进类候选（到期的事）按**时间窗**去重，其余候选按「最近 10 条」。
+     *
+     * 为什么不能一视同仁（2026-11-25 实测）：`recent` 只看最后 10 条历史，
+     * 而 `memory.markFollowUpAsked` 是按 1/3/7 天重排的——一条跟进发出去之后
+     * 一天就该能再问，可它还在「最近 10 条」里，于是被永久挡住；如果它是唯一
+     * 候选，就永远选不出来、永远不产生新历史，形成死锁（实测 25h / 72h 都被挡）。
+     *
+     * 所以：跟进只挡「6 小时内刚说过」（防住心跳级别的重复，也兜住记账失败
+     * 的情况），真正多久再问交给 `markFollowUpAsked` 的 tries 重排。
+     */
     const followUp = item?.kind === 'memory-follow-up';
-    if (!followUp && isDuplicateText(text, recent)) return;
+    const sameSource = item?.sourceId
+      ? recent.filter((h) => h && h.sourceId && h.sourceId === item.sourceId).pop()
+      : null;
+    if (followUp) {
+      if (sameSource && now - Number(sameSource.at || 0) < FOLLOW_UP_QUIET_MS) return;
+    } else {
+      if (isDuplicateText(text, recent)) return;
+      /** 同一件 B站视频 / 同一条记忆已经用过：换一个，别复读。 */
+      if (sameSource) return;
+    }
     /** 同一个目标已经主动说过：就算换了措辞也不重复。 */
     if (item?.goalId && recent.some((h) => h && h.goalId === item.goalId)) return;
-    /** 同一件 B站视频 / 同一条记忆已经用过：换一个，别复读。 */
-    if (!followUp && item?.sourceId && recent.some((h) => h && h.sourceId && h.sourceId === item.sourceId)) return;
     if (candidates.some((c) => textSimilarity(c.text, text) >= 0.8)) return;
     const needAff = item.needAffinity || needAffinity(text);
     const need = PURPOSE_NEEDS.includes(item.need) ? item.need : topNeedOf(needAff, query);
@@ -85,6 +110,9 @@ export function selectPurpose({
       text,
       source: String(item.source || '').slice(0, 20),
       sourceId: String(item.sourceId || '').slice(0, 80),
+      /** 跟进候选的原事实文本与会话：投递成功后要回写 `markFollowUpAsked`（tries + 重排下次） */
+      fact: String(item.fact || '').slice(0, 200),
+      factChatId: String(item.factChatId || '').slice(0, 80),
       at: Number(item.at) || 0,
       weight: Math.max(0.1, Number(weight) || 1),
       evidence: clip(item.evidence || '', 120),

@@ -440,17 +440,20 @@ export function createProactiveDispatcher({
       }
     }
     /** 真实出口结算：发了记 committed，没发/试运行释放预占——不结算下次会一直 busy */
-    const settleOutbound = (outcome, release = false) => {
+    const settleOutbound = (outcome, release = false, reason = '') => {
       if (!outboundVerdict?.reserveId) return;
       try {
         const fn = release ? outboundRelease : outboundCommit;
         if (typeof fn !== 'function') return;
-        fn(outboundVerdict.reserveId, release ? { reason: 'dry-run' } : { outcome });
+        fn(outboundVerdict.reserveId, release ? { reason: reason || 'released' } : { outcome });
       } catch (e) { log(`出站策略结算失败：${e?.message || e}`); }
     };
 
     const item = queue.take(head.id);
-    if (!item) return { ok: false, sent: 0, why: '这条刚被别的轮次取走' };
+    if (!item) {
+      settleOutbound('failed', true, 'queue-taken');
+      return { ok: false, sent: 0, why: '这条刚被别的轮次取走' };
+    }
 
     /**
      * 「最近说话的群」：扩展只说了「发群」，没说发给哪个。
@@ -471,6 +474,7 @@ export function createProactiveDispatcher({
       }
       if (!g) {
         queue.settle(item.id, 'drop', '没有可发的群：最近没有群说过话，或者都没有 group_push 授权');
+        settleOutbound('failed', true, 'no-group');
         return { ok: false, sent: 0, why: '没有可发的群：最近没有群说过话，或者都没有 group_push 授权' };
       }
       item.target = g;
@@ -481,6 +485,7 @@ export function createProactiveDispatcher({
       hasGroupAuthz = groupAuthz(item.target);
       if (!hasGroupAuthz) {
         queue.settle(item.id, 'drop', '这个群没有 group_push 授权');
+        settleOutbound('failed', true, 'no-group-authz');
         return { ok: false, sent: 0, why: '群没有 group_push 授权（这条已丢，别一直撞）' };
       }
     }
@@ -488,6 +493,7 @@ export function createProactiveDispatcher({
     const owner = String(ownerOf() || '').trim();
     if (!owner && item.scene === 'c2c') {
       queue.settle(item.id, 'failed', '没配主人');
+      settleOutbound('failed', true, 'no-owner');
       return { ok: false, sent: 0, why: '没配主人，不知道发给谁' };
     }
 
@@ -502,6 +508,8 @@ export function createProactiveDispatcher({
     } catch (e) {
       /** 断线单独结算：不计 attempt，别让一次断网把攒的素材全丢掉 */
       queue.settle(item.id, e?.code === 'NETWORK' ? 'offline' : 'failed', String(e?.message ?? e).slice(0, 150));
+      /** 异常也必须释放出站预占，否则 sharedBudget 永远 busy（发版前审查发现） */
+      settleOutbound('failed', true, 'error');
       return { ok: false, sent: 0, why: String(e?.message ?? e) };
     }
     if (r?.ok && r.text && r.dryRun) {
@@ -514,7 +522,7 @@ export function createProactiveDispatcher({
        * 行为照跑」的一部分，换来的是「关掉试运行接着发」。
        */
       /** 试运行没真发：释放出站预占，别让额度白扣一次 */
-      settleOutbound('failed', true);
+      settleOutbound('failed', true, 'dry-run');
       queue.settle(item.id, 'dry', '试运行，没真发（素材留着）');
       return {
         ok: true, sent: 0, id: item.id, text: r.text, dryRun: true,

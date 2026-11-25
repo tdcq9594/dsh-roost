@@ -431,3 +431,77 @@ test('drain：试运行不消费素材、不占今日条数、不烧 attempt', a
   assert.ok(it, '状态仍是 pending');
   assert.equal(it.attempts || 0, 0, '试运行不计 attempt，别烧 MAX_ATTEMPTS');
 }));
+
+/**
+ * 出站预占必须每条路径都结算（发版前审查发现）。
+ *
+ * 以前只有「真发出去」和「最后一条兜底」结算，`speakUp.fire` 抛异常 / 抢不到
+ * 队列项 / 群没授权时都直接 return —— reserve 永远挂在 sharedBudget 上，
+ * 之后每次 admit 都判 busy，不重启进程不会恢复。
+ */
+function withOutbound(queue, over = {}) {
+  const released = [];
+  const committed = [];
+  const d = createProactiveDispatcher({
+    queue,
+    speakUp: over.sp || fakeSpeakUp(over.result),
+    shouldFire, DEFAULTS: SPEAKUP_DEFAULTS,
+    cfgOf: () => ({ speakUp: { ...SPEAKUP_DEFAULTS, awakeFrom: 8, awakeTo: 23 } }),
+    ownerOf: over.ownerOf || (() => 'owner-openid'),
+    channelOf: () => ({ get: () => ({ send: async () => ({ ok: true }) }) }),
+    memoryOf: () => ({ hasAuthz: () => over.groupAuthz !== false }),
+    aliasesOf: () => [],
+    now: () => T, notify: false,
+    outboundCheck: () => ({ action: 'allow', reserveId: 'rsv-1' }),
+    outboundCommit: (id, payload) => committed.push({ id, payload }),
+    outboundRelease: (id, payload) => released.push({ id, payload }),
+  });
+  return { d, released, committed };
+}
+
+test('drain：speakUp 抛异常 → 释放出站预占（否则预算永久 busy）', async () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item());
+  const sp = {
+    calls: [],
+    state: () => ({ silenceUntil: 0 }),
+    fire: async () => { throw new Error('模型挂了'); },
+  };
+  const { d, released, committed } = withOutbound(queue, { sp });
+  const r = await d.drain();
+  assert.equal(r.ok, false);
+  assert.deepEqual(released.map((x) => x.id), ['rsv-1'], '异常路径必须 release');
+  assert.equal(released[0].payload.reason, 'error', '原因别写成 dry-run');
+  assert.equal(committed.length, 0, '没发出去不能 commit');
+}));
+
+test('drain：没配主人 → 释放预占，不把额度扣死', async () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item());
+  const { d, released } = withOutbound(queue, { ownerOf: () => '' });
+  const r = await d.drain();
+  assert.equal(r.ok, false);
+  assert.deepEqual(released.map((x) => x.id), ['rsv-1']);
+  assert.equal(released[0].payload.reason, 'no-owner');
+}));
+
+test('drain：试运行释放预占，原因与真失败区分开', async () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item());
+  const { d, released } = withOutbound(queue, { result: { ok: true, text: '预览', dryRun: true } });
+  const r = await d.drain();
+  assert.equal(r.dryRun, true);
+  assert.deepEqual(released.map((x) => x.id), ['rsv-1']);
+  assert.equal(released[0].payload.reason, 'dry-run');
+}));
+
+test('drain：真发出去走 commit，不再 release', async () => withDir(async (dir) => {
+  const queue = q(dir);
+  queue.submit(item());
+  const { d, released, committed } = withOutbound(queue);
+  const r = await d.drain();
+  assert.equal(r.sent, 1);
+  assert.deepEqual(committed.map((x) => x.id), ['rsv-1']);
+  assert.equal(committed[0].payload.outcome, 'sent');
+  assert.equal(released.length, 0);
+}));

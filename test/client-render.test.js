@@ -1423,6 +1423,9 @@ test('后端缺口已接入：市场 / 模型 / 召回 / 心情历史 / 危险�
   assert.ok(modelTxt.includes('聊天用的模型'), '模型页缺「聊天用的模型」卡')
   assert.ok(modelTxt.includes('思考强度'), '模型页缺思考强度')
   assert.ok(modelTxt.includes('视觉能力'), '模型页缺视觉能力')
+  /** 单张读图上限与超大图压缩：两个都是本版新增的真实配置项，别只留在后端 */
+  assert.ok(modelTxt.includes('读图上限'), '模型页缺读图上限（imageMaxMB）')
+  assert.ok(modelTxt.includes('超大图压缩'), '模型页缺超大图压缩开关（compressImages）')
   assert.ok(modelTxt.includes('按聊天选模型'), '模型页缺按聊天选模型')
   assert.ok(modelTxt.includes('单个 QQ / 群的例外'), '模型页缺单个聊天的例外入口')
   assert.ok(modelTxt.includes('可用的模型'), '模型页缺可用模型清单')

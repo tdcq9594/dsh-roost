@@ -63,7 +63,8 @@ const RULES = [
      * `format` 后面紧跟 `C:` 或 `/Q` 这种目标时才算——`format-patch` 后面是 `-`，
      * `format.js` 后面是 `.`，都不沾。
      */
-    re: /\b(?:mkfs(?:\.\w+)?|diskpart|Format-Volume)\b|\bformat(?:\.com)?\s+(?:\/[A-Za-z]|[A-Za-z]:)/i },
+    /** JSON.stringify 会把参数里的引号转义成 \" / \'，两种写法都要拦 */
+    re: /\b(?:mkfs(?:\.\w+)?|diskpart|Format-Volume)\b|\bformat(?:\.com)?\s+(?:\\?"[^"]*\\?"|\\?'[^']*\\?'|\/[A-Za-z]|[A-Za-z]:)/i },
   { id: 'power', reason: '关机 / 重启',
     re: /\b(?:shutdown|poweroff|halt|reboot|init\s+[06]|Stop-Computer|Restart-Computer)\b/i },
   { id: 'dd', reason: '直接写块设备',

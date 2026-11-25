@@ -29,8 +29,13 @@ import { clipQuote, describeQuoteAttachments } from './inbound.js';
 /** 最多看几张。一张图几百到几千 token，不设上限能把上下文撑爆 */
 /** 没传配置时的兜底；真实上限由 `roostHost.maxImages` 热读 */
 const DEFAULT_MAX_IMAGES = 4;
-/** 单张上限。宁可看不见，也别把请求撑到几 MB */
-const MAX_BYTES = 2 * 1024 * 1024;
+/**
+ * 单张上限的兜底值。真实上限由 `roostHost.imageMaxMB` 热读（面板可改）。
+ *
+ * 定 5MB 的理由：主流模型（DeepSeek / Claude / GPT）单图上限基本在 5–20MB，
+ * 5MB 能覆盖绝大多数手机直出与截图；再大的先压缩（见 `image-compress.js`）。
+ */
+const MAX_BYTES = 5 * 1024 * 1024;
 /**
  * 下载重试：QQ 图片 CDN 偶发抖动 / 连接被重置时，一次失败不该让整轮
  * 消息变成「发来一张图，但没取到——可以让对方重发」。
@@ -156,6 +161,14 @@ function imageNote(got, images) {
       ? `（发来一张 ${String(got.mediaType || '').replace('image/', '').toUpperCase()} 图，这个格式我看不了，已存到本地 ${got.path}；可以说没看清，请对方转成 PNG / JPG 重发）`
       : '（发来一张 BMP 图，这个格式我看不了；可以说没看清，请对方转成 PNG / JPG 重发）';
   }
+  if (got?.failed) {
+    /** 确定性失败要说清原因：只说「没取到」，模型会以为对方没发图或链接坏了 */
+    if (got.reason === 'too-large') {
+      const capKB = Number(got.limitKB) > 0 ? Number(got.limitKB) : Math.round(MAX_BYTES / 1024);
+      return `（发来一张图，${got.sizeKB}KB，超过 ${capKB}KB 上限没能读取；可以让对方压缩或裁小重发）`;
+    }
+    return '（发来一张图，但没取到——可以让对方重发）';
+  }
   if (got?.path) return `（发来一张图，已存到本地：${got.path}）`;
   if (got) return '（发来一张图，能看到内容，但没存到本地）';
   return '（发来一张图，但没取到——可以让对方重发）';
@@ -174,8 +187,14 @@ export function describeAttachments(evt, images = null) {
         if (!a.asrText) out.push('（发来一条语音，但没转出文字——可以说没听清，请对方再说一遍）');
         break;
       case 'image': {
-        const got = list.find((x) => x.index === imgIdx);
-        imgIdx += 1;
+        /**
+         * 序号只给**真的会去下载**的附件加：`collectImages` 用 `isImageAttachment`
+         * 过滤掉了没有 url 的项，这里要是照附件位置自增，后面所有图都会错位
+         * （模型看到的是上一张的说明）。`images === 'off'` 时序号没意义，照样加。
+         */
+        const usable = Boolean(String(a?.url || '').trim());
+        const got = usable ? list.find((x) => x.index === imgIdx) : undefined;
+        if (usable) imgIdx += 1;
         out.push(imageNote(got, images));
         break;
       }
@@ -184,8 +203,10 @@ export function describeAttachments(evt, images = null) {
         break;
       case 'file':
         if (isImageAttachment(a)) {
-          const got = list.find((x) => x.index === imgIdx);
-          imgIdx += 1;
+          /** 同 `case 'image'`：没有 url 的不占序号，否则后面的图全错位 */
+          const usable = Boolean(String(a?.url || '').trim());
+          const got = usable ? list.find((x) => x.index === imgIdx) : undefined;
+          if (usable) imgIdx += 1;
           out.push(imageNote(got, images));
         } else {
           out.push(`（发了个文件：${a.filename || '未命名'}${a.size ? `，${Math.round(a.size / 1024)}KB` : ''}）`);
@@ -291,6 +312,17 @@ export function createPayloadBuilder({
    * 不算故障，把用户的正常聊天搞挂才是。
    */
   onImageSaved = null,
+  /**
+   * 超大图片的按需压缩（注入，默认不启用）。
+   * 宿主用功能包里的 ffmpeg 实现；这里只负责「超过上限时试一次，成功了按 jpeg 喂，
+   * 失败就如实告诉模型图太大」。压缩不能影响正常回话。
+   */
+  shrinkImage = null,
+  /**
+   * 单张图片的大小上限（**MB**，配置热读）。默认 5MB，面板可改。
+   * 超过就先用 `shrinkImage` 压一轮，压不下来才如实告诉模型「图太大」。
+   */
+  maxImageMB = MAX_BYTES / 1024 / 1024,
 } = {}) {
   /** 通道到底走不走 Markdown：@ 标签、图文同条、按钮都跟着它变 */
   const wantMarkdown = () => {
@@ -304,6 +336,15 @@ export function createPayloadBuilder({
   };
   /** key → { at, value } */
   const perms = new Map();
+  /**
+   * 单张上限热读：面板改成 10MB 下一轮就生效。
+   * 夹到 1MB–50MB——0 会把所有图都判超限，太大等于没上限（请求会被模型侧拒掉）。
+   */
+  const wantMaxBytes = () => {
+    const raw = typeof maxImageMB === 'function' ? maxImageMB() : maxImageMB;
+    const mb = Number(raw) > 0 ? Number(raw) : MAX_BYTES / 1024 / 1024;
+    return Math.round(Math.max(1, Math.min(50, mb)) * 1024 * 1024);
+  };
   const imgDir = join(dataDir(), 'images');
   /** 配置热读：面板上关掉看图，下一轮就该生效，不用重启 */
   const wantVision = () => (typeof vision === 'function' ? vision() : vision);
@@ -375,6 +416,12 @@ export function createPayloadBuilder({
   /** 下载图片：不走 roost 的 media.fetch，直接抓 QQ 的 URL，和 ai-chat 行为一致 */
   async function collectImages(evt) {
     if (!(await visionOn(evt))) return 'off';
+    /**
+     * `maxImages: 0` 是「一次都不看」，语义上等于关掉看图：要返回 `'off'`，
+     * 否则 `urls` 为空数组，模型会收到「发来一张图，但没取到」——把用户
+     * 主动关掉的行为说成抓取失败。
+     */
+    if (!wantMaxImages()) return 'off';
     const urls = (evt?.attachments ?? []).filter(isImageAttachment).map((a) => String(a.url)).slice(0, wantMaxImages());
     if (!urls.length) return [];
 
@@ -386,6 +433,9 @@ export function createPayloadBuilder({
     }
 
     const out = [];
+    /** 这一轮的上限（MB 配置热读，默认 5MB）。压缩目标也用同一个值。 */
+    const cap = wantMaxBytes();
+    const capKB = Math.round(cap / 1024);
     let failed = 0;
     for (let i = 0; i < urls.length; i++) {
       let saved = false;
@@ -409,10 +459,37 @@ export function createPayloadBuilder({
             await wait();
             continue;
           }
-          const buf = Buffer.from(await res.arrayBuffer());
-          if (buf.length > MAX_BYTES) {
-            log(`图片太大（${Math.round(buf.length / 1024)}KB），跳过`);
-            break;
+          let buf = Buffer.from(await res.arrayBuffer());
+          let shrunkMime = '';
+          if (buf.length > cap) {
+            const sizeKB = Math.round(buf.length / 1024);
+            let shrunk = null;
+            if (typeof shrinkImage === 'function') {
+              try {
+                /**
+                 * 用**嗅探出来的**类型判断 gif，别用声明的 content-type：
+                 * QQ 网关会把所有图统一标成 image/png（见下方 BMP 那段的老坑），
+                 * 拿声明判断等于永远认不出动图，压成静态 jpeg 就把动画丢了。
+                 */
+                shrunk = await shrinkImage({
+                  buf,
+                  mime: sniffImageType(buf) || res.headers.get('content-type') || '',
+                  maxBytes: cap,
+                });
+              } catch (e) {
+                log(`图片压缩失败（${e?.message ?? e}），按超限处理`);
+              }
+            }
+            if (shrunk?.buf?.length) {
+              log(`图片太大（${sizeKB}KB），已压到 ${Math.round(shrunk.buf.length / 1024)}KB`);
+              buf = shrunk.buf;
+              shrunkMime = shrunk.mediaType || 'image/jpeg';
+            } else {
+              /** 确定性失败：不重试，但要留一条带原因的占位给面板说明，模型才知道是「太大」不是「没发」 */
+              log(`图片太大（${sizeKB}KB，上限 ${capKB}KB），跳过${typeof shrinkImage === 'function' ? '（压缩没成功）' : '（没装图片压缩能力）'}`);
+              out.push({ index: i, failed: true, reason: 'too-large', sizeKB, limitKB: capKB });
+              break;
+            }
           }
           /**
            * 文件名只用「消息 id + 序号」。不拿 URL 里的东西拼——那串是外部输入，
@@ -451,7 +528,7 @@ export function createPayloadBuilder({
             break;
           }
 
-          const mime = guessMime(buf, declared);
+          const mime = shrunkMime || guessMime(buf, declared);
           if (!mime) {
             log('不是认识的图片格式，跳过');
             break;
@@ -493,7 +570,14 @@ export function createPayloadBuilder({
       if (!saved) failed += 1;
     }
     if (failed) {
-      log(`这一轮 ${failed}/${urls.length} 张图没取到（已重试 ${IMAGE_TRIES} 次），模型只看到文字提示`);
+      const tooLarge = out.filter((x) => x.failed && x.reason === 'too-large');
+      /** 超限是确定性失败、一次都没重试；别在日志里把它算进「已重试 3 次」 */
+      const retried = failed - tooLarge.length;
+      const reasons = tooLarge.map((x) => `第 ${x.index + 1} 张 ${x.sizeKB}KB 超限（上限 ${x.limitKB}KB）`);
+      log(`这一轮 ${failed}/${urls.length} 张图没取到`
+        + (retried > 0 ? `（其中 ${retried} 张已重试 ${IMAGE_TRIES} 次）` : '')
+        + '，模型只看到文字提示'
+        + (reasons.length ? `：${reasons.join('、')}（超限是确定性失败，不重试）` : ''));
     }
     return out;
   }

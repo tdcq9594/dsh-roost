@@ -147,13 +147,14 @@ test('图片链路：下载失败/非图片都不影响这一轮，消息照样�
  * 所以是**偶发下载失败**，而旧代码每张图只 fetch 一次、失败即跳过，没有重试。
  * 下面钉住「可恢复错误重试 / 确定性错误不重试」这条边界。
  */
-function retryHarness(fetchImpl, { vision = true } = {}) {
+function retryHarness(fetchImpl, { vision = true, maxImageMB = 5 } = {}) {
   const dir = freshDataDir();
   const logs = [];
   const build = createPayloadBuilder({
     rpc: async () => ({ bucket: 'member' }),
     vision: () => vision,
     maxImages: 4,
+    maxImageMB,
     fetchImpl,
     log: (m) => logs.push(String(m)),
     retryDelayMs: () => 0,
@@ -219,7 +220,7 @@ test('连续失败到上限就停：不会无限重试拖住这一轮消息', as
     assert.equal(fetches, 3, '最多 3 次');
     assert.deepEqual(p.images, []);
     assert.match(describeAttachments(evtOf(1), p.images).join(''), /没取到/, '仍要给模型一句人话说明');
-    assert.match(h.logs.join('\n'), /1\/1 张图没取到（已重试 3 次）/, '把失败张数写进日志，别甩锅给用户重发');
+    assert.match(h.logs.join('\n'), /1\/1 张图没取到（其中 1 张已重试 3 次）/, '把失败张数写进日志，别甩锅给用户重发');
   } finally { cleanup(h.dir); }
 });
 
@@ -239,12 +240,35 @@ test('确定性失败不重试：非图片格式 / 超大文件只请求一次',
   const h2 = retryHarness(async () => {
     big += 1;
     return okRes(Buffer.alloc(3 * 1024 * 1024, 0xff));
-  });
+  }, { maxImageMB: 2 });
   try {
     const p = await h2.build(evtOf(1), { send: async () => ({}) });
     assert.equal(big, 1, '3MB 的图每次都一样大，重试没有意义');
-    assert.deepEqual(p.images, []);
+    /** 留一条失败占位：describeAttachments 才能告诉模型「太大」，而不是「没取到」 */
+    assert.equal(p.images.length, 1);
+    assert.equal(p.images[0].reason, 'too-large');
+    assert.equal(p.images[0].limitKB, 2048, '上限要跟着配置走，不是写死');
   } finally { cleanup(h2.dir); }
+});
+
+test('读图上限默认 5MB：3MB 的图不需要压缩，直接喂给模型', async () => {
+  let shrinkCalls = 0;
+  const h = retryHarness(async () => okRes(Buffer.concat([PNG, Buffer.alloc(3 * 1024 * 1024)])));
+  try {
+    const build = createPayloadBuilder({
+      rpc: async () => ({ bucket: 'member' }),
+      vision: () => true,
+      fetchImpl: async () => ({
+        ok: true, status: 200, headers: { get: () => 'image/png' },
+        arrayBuffer: async () => Buffer.concat([PNG, Buffer.alloc(3 * 1024 * 1024)]),
+      }),
+      shrinkImage: async () => { shrinkCalls += 1; return null; },
+    });
+    const p = await build(evtOf(1), { send: async () => ({}) });
+    assert.equal(shrinkCalls, 0, '3MB 没超过默认 5MB，不该走压缩');
+    assert.equal(p.images.length, 1);
+    assert.equal(p.images[0].failed, undefined);
+  } finally { cleanup(h.dir); }
 });
 
 test('多张图各自独立重试：一张抖动不影响另一张', async () => {
@@ -264,10 +288,100 @@ test('多张图各自独立重试：一张抖动不影响另一张', async () =>
   } finally { cleanup(h.dir); }
 });
 
+test('超大图：压缩成功就照常喂给模型，日志说明压到多大', async () => {
+  const dir = freshDataDir();
+  try {
+    const big = Buffer.concat([PNG, Buffer.alloc(2 * 1024 * 1024)]);
+    let called = 0;
+    const logs = [];
+    const build = createPayloadBuilder({
+      rpc: async () => ({ bucket: 'member' }),
+      vision: () => true,
+      fetchImpl: async () => ({
+        ok: true, status: 200, headers: { get: () => 'image/png' }, arrayBuffer: async () => big,
+      }),
+      log: (m) => logs.push(m),
+      maxImageMB: 2,
+      shrinkImage: async ({ buf }) => {
+        called += 1;
+        assert.equal(buf.length, big.length);
+        return { buf: PNG, mediaType: 'image/png', shrunk: true };
+      },
+    });
+    const p = await build(evtOf(1), { send: async () => ({}) });
+    assert.equal(called, 1, '超限才调压缩，且只调一次');
+    assert.equal(p.images.length, 1);
+    assert.equal(p.images[0].mediaType, 'image/png');
+    assert.equal(p.rendered.includes('没取到'), false);
+    assert.match(logs.join('\n'), /已压到/);
+  } finally { cleanup(dir); }
+});
+
+test('超大图压不下来：模型看到的是「太大」，不是笼统的「没取到」', async () => {
+  const dir = freshDataDir();
+  try {
+    const big = Buffer.concat([PNG, Buffer.alloc(2 * 1024 * 1024)]);
+    const logs = [];
+    const build = createPayloadBuilder({
+      rpc: async () => ({ bucket: 'member' }),
+      vision: () => true,
+      fetchImpl: async () => ({
+        ok: true, status: 200, headers: { get: () => 'image/png' }, arrayBuffer: async () => big,
+      }),
+      log: (m) => logs.push(m),
+      maxImageMB: 2,
+      shrinkImage: async () => null,
+    });
+    const p = await build(evtOf(1), { send: async () => ({}) });
+    assert.equal(p.images.length, 1, '留一条失败占位，describeAttachments 才配得上序号');
+    assert.equal(p.images[0].failed, true);
+    assert.equal(p.images[0].data, undefined, '失败项不能被当图片喂给模型');
+    assert.match(p.rendered, /超过 2048KB 上限没能读取/);
+    assert.match(logs.join('\n'), /超限是确定性失败，不重试/);
+  } finally { cleanup(dir); }
+});
+
 test('附件判定：图片与「以文件形式发的图」都算，压缩包不算', () => {
   assert.equal(isImageAttachment({ type: 'image', url: 'u' }), true);
   assert.equal(isImageAttachment({ type: 'file', url: 'u', filename: 'a.PNG' }), true);
   assert.equal(isImageAttachment({ type: 'file', url: 'u', filename: 'a.zip' }), false);
   /** 没 url 的一律不下载：没有地址就抓不到 */
   assert.equal(isImageAttachment({ type: 'image', url: '' }), false);
+});
+
+/**
+ * 序号对齐（发版复查发现）：`collectImages` 会跳过没有 url 的图，但
+ * `describeAttachments` 以前按附件位置自增序号，于是第二张起全部错位——
+ * 模型看到的是上一张的说明。
+ */
+test('没有 url 的图不占序号：后面的图不会错位', async () => {
+  const h = retryHarness(async () => okRes());
+  try {
+    const evt = evtOf(0);
+    evt.attachments = [
+      { type: 'image', url: '', contentType: 'image/png' },
+      { type: 'image', url: 'http://img.local/ok.png', contentType: 'image/png' },
+    ];
+    const p = await h.build(evt, { send: async () => ({}) });
+    assert.equal(p.images.length, 1, '只有带 url 的那张会下载');
+    const notes = describeAttachments(evt, p.images);
+    assert.equal(notes.length, 2);
+    assert.match(notes[1], /已存到本地|能看到内容/, '第二张真下载到了，不能被说成没取到');
+  } finally { cleanup(h.dir); }
+});
+
+test('maxImages=0 是「这一轮不看图」，别报成没取到', async () => {
+  const dir = freshDataDir();
+  try {
+    const build = createPayloadBuilder({
+      rpc: async () => ({ bucket: 'member' }),
+      vision: () => true,
+      maxImages: 0,
+      fetchImpl: async () => { throw new Error('不该下载'); },
+    });
+    const p = await build(evtOf(2), { send: async () => ({}) });
+    /** payload.images 永远给数组（下游按数组用），'off' 只体现在渲染出来的说明里 */
+    assert.deepEqual(p.images, []);
+    assert.match(p.rendered, /没开看图/, '关掉看图要说清楚，而不是「没取到」');
+  } finally { cleanup(dir); }
 });

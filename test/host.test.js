@@ -273,6 +273,30 @@ test('跑一轮：工具轮只认最后一条，过程话不当回复发出去',
   runner.dispose();
 });
 
+test('跑一轮：工具之后连吐两段正文要都留着，只丢工具前的过程话', async () => {
+  const { ctx, emit } = fakeDsh();
+  const runner = createTurnRunner({ ctx, timeoutSec: 5 });
+  const session = { id: 's2c' };
+  const agent = { session, followup: async () => {} };
+
+  const p = runner.run(agent, '查一下');
+  await new Promise((r) => setTimeout(r, 10));
+  emit(session, {
+    type: 'assistant/message',
+    data: { turn: 1, message: { content: [{ type: 'text', text: '我先查一下' }, { type: 'tool-call', id: 't1', name: 'chat_look' }] } },
+  });
+  /** 工具之后才给答复，而且分了两段：以前只留最后一段，前半句丢掉 */
+  emit(session, { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '查到了，' }] } } });
+  emit(session, { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '结论是 A。' }] } } });
+  emit(session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
+
+  const got = await p;
+  assert.match(got, /查到了/, '工具后的第一段最终答复不能丢');
+  assert.match(got, /结论是 A/, '第二段也要在');
+  assert.equal(got.includes('我先查一下'), false, '工具前的过程话不能进回复');
+  runner.dispose();
+});
+
 test('mergeStepText：只去重拼接，不改措辞', () => {
   assert.equal(mergeStepText('', '甲'), '甲');
   assert.equal(mergeStepText('甲', ''), '甲');

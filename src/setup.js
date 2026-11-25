@@ -1107,10 +1107,12 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
         };
       }
 
+      let asideWarning = '';
       try {
         rmSync(aside, { recursive: true, force: true });
       } catch (e) {
-        log(`旧目录没删干净：${aside}（${e?.message || e}）`);
+        asideWarning = `旧目录没删干净，留在 ${aside}，确认新目录没问题后手动删除`;
+        log(`${asideWarning}（${e?.message || e}）`);
       }
 
       const version = versionOnDisk(dir);
@@ -1121,7 +1123,9 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
         kept,
         version,
         message: `已重装${version ? ` v${version}` : ''}，保留 ${kept.join(' / ') || '无'}`
-          + (kept.includes('config') ? '；机器人凭证还在，点「测一下」确认直连' : '；数据清了，要重新扫码填凭证 + 一键直连'),
+          + (kept.includes('config') ? '；机器人凭证还在，点「测一下」确认直连' : '；数据清了，要重新扫码填凭证 + 一键直连')
+          + (asideWarning ? `；${asideWarning}` : ''),
+        ...(asideWarning ? { warning: asideWarning } : {}),
       };
     } finally {
       busy = '';

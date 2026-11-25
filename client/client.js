@@ -15551,6 +15551,8 @@ window.__ModuleLoader__.load({
         + '端口是 6800+hash，每只鸟不一样）。url 形如 http://127.0.0.1:6801；'
         + 'vision 三态：true 总是发图 / false 只给文字提示 / "auto" 按 DSH 声明的模型能力决定；'
         + 'maxImages 是一次最多看几张（0 关，上限 8）；'
+        + 'imageMaxMB 是单张上限（默认 5，1–50），超过先压缩；'
+        + 'compressImages 默认开：超过上限的图先用功能包里的 ffmpeg 压一轮，压不下来就只给模型一句「图太大」；'
         + 'markdown 关掉后加粗列表和真 @ 都会退化成纯文字。'
         + '**只有 enabled 一个开关**：关了就不连，开着就连（`channel.current` 已废弃，'
         + '只剩 roost 一条通道，老配置里的 qq 会自动归一）。'
@@ -18280,6 +18282,28 @@ window.__ModuleLoader__.load({
         toast(r?.ok === false ? (r.message || '没存上') : '视觉能力已改（下一轮生效）')
       }
 
+      /**
+       * 超大图压缩：超过模型图片上限时先压一轮（靠功能包里的 ffmpeg）。
+       * 关掉就是旧行为——直接跳过、只给模型一行「图太大」。
+       */
+      const compressImages = config ? (config.roostHost?.compressImages !== false) : true
+      const setCompress = async (v) => {
+        if (typeof saveCfg !== 'function') return
+        const r = await saveCfg({ roostHost: { compressImages: v } })
+        toast(r?.ok === false ? (r.message || '没存上') : (v ? '超大图会先压缩再发' : '超大图直接跳过'))
+      }
+      /** 单张上限（MB）：默认 5，1–50 之间；超出先用 ffmpeg 压到这个值以下 */
+      const imageMaxMB = Number(config?.roostHost?.imageMaxMB) > 0 ? Number(config.roostHost.imageMaxMB) : 5
+      const setImageMaxMB = async (raw) => {
+        if (typeof saveCfg !== 'function') return
+        const s = String(raw ?? '').trim()
+        /** 空 = 默认 5；0 / 负数按 1（提示文案写的就是 1–50）；非数字回落 5 */
+        const n0 = s === '' ? 5 : Number(s)
+        const n = Math.round(Math.max(1, Math.min(50, Number.isFinite(n0) ? n0 : 5)))
+        const r = await saveCfg({ roostHost: { imageMaxMB: n } })
+        toast(r?.ok === false ? (r.message || '没存上') : `读图上限已设为 ${n}MB（下一轮生效）`)
+      }
+
       const kinds = info?.byKindAll || {}
       const exceptions = Object.entries(info?.byChat || {})
         .map(([id, sel]) => ({ id, sel }))
@@ -18308,6 +18332,35 @@ window.__ModuleLoader__.load({
                   { value: 'on', label: '总是发' },
                   { value: 'off', label: '不发' },
                 ], (v) => setVision(v))
+              : h('span', { className: 'roost-note', style: { margin: 0 } }, '读取配置…')),
+
+          row('读图上限', '单张图超过这个大小就先压缩（压不下来才跳过）。默认 5MB，1–50 之间；改小是给「模型只肯收小图」留的口子',
+            config
+              ? h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+                  h('input', {
+                    /**
+                     * 非受控输入必须带 key：保存成功后配置变了（7.6 存成 8），
+                     * 没有 key 就不会重挂，框里还停在旧值，再失焦又存一遍。
+                     */
+                    key: `imgmax-${imageMaxMB}`,
+                    type: 'number', min: 1, max: 50, step: 1,
+                    className: 'roost-input', style: { width: 84 },
+                    defaultValue: String(imageMaxMB),
+                    onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget?.blur?.() },
+                    onBlur: (e) => {
+                      const v = String(e.target?.value ?? '').trim()
+                      if (v && Number(v) !== imageMaxMB) setImageMaxMB(v)
+                    },
+                  }),
+                  h('span', { className: 'roost-note', style: { margin: 0 } }, 'MB'))
+              : h('span', { className: 'roost-note', style: { margin: 0 } }, '读取配置…')),
+
+          row('超大图压缩', '超过上限的图先压到能发再给模型看；压缩要用「功能包 → 媒体」里的 ffmpeg，没装就只回一句「图太大」',
+            config
+              ? seg(compressImages ? 'on' : 'off', [
+                  { value: 'on', label: '压缩后发' },
+                  { value: 'off', label: '直接跳过' },
+                ], (v) => setCompress(v === 'on'))
               : h('span', { className: 'roost-note', style: { margin: 0 } }, '读取配置…')),
 
           row('模型', '选了就用它当所有聊天的默认；「跟随 DSH 默认」= 用你在 DSH 里平时那个',

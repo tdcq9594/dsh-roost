@@ -265,9 +265,15 @@ function pickContextRows(rows, out, prefix, withLink = false) {
  * @param {boolean} withLink 行里带不带 `reply_to`
  */
 function triggeredByPlugin(rows, i, answered, withLink) {
+  /**
+   * 老库没有 msg_id / reply_to，无从判断「下一条回的是不是这一条」；
+   * 这时宁可把命令留在上下文里，也不能按相邻猜把并发的真人发言剔掉
+   * （发版前审查发现：`reply_to` 守卫在无列时被跳过，误删并发命令）。
+   */
+  if (!withLink) return false;
   const r = rows[i];
   const id = String(r.msg_id ?? '').trim();
-  if (withLink && id && answered.has(id)) return true;
+  if (id && answered.has(id)) return true;
   const next = rows[i + 1];
   if (!next || !isPluginReply(next)) return false;
   if (Number(next.at) - Number(r.at) > TRIGGER_WINDOW_MS) return false;

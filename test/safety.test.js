@@ -61,6 +61,8 @@ test('issue #73：format 只在带目标时才算格式化', () => {
     'format C: /Q',
     'format /FS:NTFS D:',
     'format d:',
+    'format "C:" /Q',
+    "format 'D:' /FS:NTFS",
     'mkfs.ext4 /dev/sdb1',
     'diskpart',
     'Format-Volume -DriveLetter D',

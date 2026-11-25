@@ -10,7 +10,7 @@
 
 /**
  * @param {object[]} dueRows memory.dueFollowUps(chatId, aliases, {limit:0}) 的结果
- * @returns {{id:string, kind:string, text:string, question:string, dueAt:number, tries:number}[]}
+ * @returns {{id:string, kind:string, chatId:string, text:string, question:string, dueAt:number, tries:number}[]}
  */
 export function buildFollowUpCandidates(dueRows = []) {
   const rows = Array.isArray(dueRows) ? dueRows : [];
@@ -21,12 +21,18 @@ export function buildFollowUpCandidates(dueRows = []) {
     /** 没有 question 的不算「可问的事」——和 followUpSection 的口径一致 */
     if (!question) continue;
     const text = String(r?.text ?? '').trim();
-    const id = `follow:${String(r?.chatId || 'global')}:${text.slice(0, 32)}`;
+    const chatId = String(r?.chatId || 'global');
+    const id = `follow:${chatId}:${text.slice(0, 32)}`;
     if (seen.has(id)) continue;
     seen.add(id);
     out.push({
       id,
       kind: 'follow-up',
+      /**
+       * 会话与事实原文要带上：投递成功后运行时按它们回写 `markFollowUpAsked`
+       * （tries + 1、重排下次）。只留 id 的话事实文本被截断到 32 字，回写对不上。
+       */
+      chatId,
       text,
       question,
       dueAt: Number(r?.at) || 0,

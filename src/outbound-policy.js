@@ -416,7 +416,8 @@ export function createOutboundPolicy(opts = {}) {
    *  1. delegation → 直接 allow，不可 defer/drop（最高优先级，且不参与治理计数）
    *  2. 目标不在治理范围（不是 owner 私聊）→ allow 且 managed:false
    *  3. 档位 pass → allow，managed:false（旧行为直发）
-   *  4. 档位 gate/broker 且完全没有策略源 → allow 且 managed:false（面板明示尚未纳管）
+   *  4. 档位 gate/broker 且完全没有策略源 → deny(policy-error)：门闸开着却没人判定，
+   *     不能当成「放行但不纳管」（2026-11-25 改；此前的 allow 与本节注释自相矛盾）
    *  5. 有策略源但非 ready → deny(policy-error)，绝不静默 pass
    *  6. 策略源 reserve → 失败按原因 deny（quiet/budget/cooldown/busy/error）
    *  7. 成功 → broker 档且 allowDefer 时 defer（进账本排队），否则 allow + reserveId/deliveryId
@@ -468,10 +469,10 @@ export function createOutboundPolicy(opts = {}) {
           stats.denied++
           return { action: 'deny', reason: 'policy-error', cause, managed: false }
         }
-        // 完全没有策略源（两引擎都没启用）→ allow 但未纳管
-        stats.allowed++
-        stats.passThrough++
-        return { action: 'allow', reason: 'no-policy-source', cause, managed: false }
+        // 完全没有策略源：门闸开着却没判定方，必须 deny，不能当成「放行但不纳管」
+        // （发版前审查发现：注释承诺 deny，代码却在静默直发）
+        stats.denied++
+        return { action: 'deny', reason: 'policy-error', cause, managed: false }
       }
       if (!picked.ready) {
         // 有策略源但非 ready → deny，绝不静默 pass（契约 L79）
