@@ -12,6 +12,72 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+const sqlite = process.getBuiltinModule?.('node:sqlite');
+
+/**
+ * 在临时 roost 目录里造一份账本。
+ *
+ * 路径必须是 `<dir>/roost/data/bots/main/events.db`：`cfg.setup.roostDir`
+ * 没配时 `resolveLedger` 走的就是 `dataDir()/roost`，而 `dataDir()` 读
+ * `DSH_ROOST_DATA`（`bootHost` 已设成临时目录）。
+ *
+ * 只建 `gap()` 会读的列，列的取舍和 `test/ledger-gap.test.js` 保持一致。
+ *
+ * @param {string} dir 临时 roost 目录
+ * @param {Array} rows 事件行；`self: true` 表示机器人自己发的（出站没有 user_name）
+ */
+function seedLedger(dir, rows) {
+  if (!sqlite) return ''; // 老 Node 没 sqlite：调用方自己 skip
+  const botsDir = join(dir, 'roost', 'data', 'bots', 'main');
+  mkdirSync(botsDir, { recursive: true });
+  const file = join(botsDir, 'events.db');
+  const db = new sqlite.DatabaseSync(file);
+  db.exec(`
+    CREATE TABLE events (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      bot_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      msg_id TEXT,
+      user_id TEXT,
+      user_name TEXT,
+      content TEXT NOT NULL DEFAULT '',
+      at INTEGER NOT NULL,
+      observed_at INTEGER NOT NULL,
+      time_basis TEXT NOT NULL,
+      dedupe TEXT NOT NULL UNIQUE,
+      msg_idx TEXT,
+      ref_msg_idx TEXT,
+      union_openid TEXT,
+      quoted TEXT,
+      payload TEXT NOT NULL,
+      plugin TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  const ins = db.prepare(
+    'INSERT INTO events (id,bot_id,kind,chat_id,msg_id,user_id,user_name,content,at,observed_at,time_basis,dedupe,payload,plugin,source)'
+    + ' VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+  );
+  for (const r of rows) {
+    const at = r.at ?? Date.now();
+    /**
+     * 自己发的行要和框架真账本一致：`plugin='host'` + `source='host'`
+     * （`host/dispatch.js` 的 `HOST_PLUGIN`）。`gap()` 只放行这一种出站，
+     * 随手编个 `'outbound'` 会被当成「别的插件说的」剔掉。
+     */
+    ins.run(
+      r.id, r.botId ?? 'main', r.kind ?? 'group_message', r.chatId ?? 'g1', r.msgId ?? r.id,
+      r.self ? '' : (r.userId ?? 'u1'), r.self ? '' : (r.userName ?? '群友'),
+      r.content ?? '', at, at, 'server', r.id, '{}',
+      r.self ? 'host' : (r.plugin ?? ''), r.self ? 'host' : (r.source ?? 'gateway'),
+    );
+  }
+  db.close();
+  return file;
+}
 import { Writable } from 'node:stream';
 
 const noop = () => () => {};
@@ -60,9 +126,11 @@ async function bootHost(cfgPatch = {}, seed = {}) {
       /** 种子里要「已作废」的行走真 invalidate，不手改库 */
       if (invalid) stale.push(rest.id);
     }
-    if (stale.length) j.invalidate(stale, { supersededBy: 'seed' });
+      if (stale.length) j.invalidate(stale, { supersededBy: 'seed' });
     j.close();
   }
+  // 种子账本：测「缺口补齐」时当数据源
+  if (seed.ledger?.length) seedLedger(dir, seed.ledger);
   // host 里的 dataDir() 读这个环境变量，必须在 import 之前设
   process.env.DSH_ROOST_DATA = dir;
 
@@ -317,6 +385,190 @@ test('注入分段：关掉记忆时两段都为空', async () => {
   assert.equal(r.json.memoryStaticText, '');
   assert.equal(r.json.memoryDynamicText, '');
   off?.();
+});
+
+/* ── 「刚才说到」的缺口补齐（`recentSection`）─────────────────────────
+ *
+ * 这一段是本次功能的**主逻辑**：先拿 journal 里记过的 eventIds 对账，
+ * 账本里模型没见过的才算缺口，有缺口用账本、没缺口回落日记。前面的
+ * `ledger-gap.test.js` 只测到 `gap()` 这一层查询，对账、渲染、「你：」、
+ * 预算截断全在这里才连得起来——所以必须是走 `/mind` 的端到端测试。
+ *
+ * 需要 node:sqlite 才能造账本；老 Node 上直接跳过，不假装通过。
+ */
+
+/** 从易变段里切出【刚才说到】那一段（后面还会拼「命中」「日记索引」） */
+function recentOf(dyn) {
+  const m = String(dyn || '').match(/【刚才说到】[\s\S]*?(?=\n【|$)/);
+  return m ? m[0] : '';
+}
+
+test('缺口补齐：账本里模型没见过的消息补进来，按时间正序', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  const { call, off } = await bootHost({}, {
+    ledger: [
+      { id: 'e1', msgId: 'm1', chatId: 'g1', userName: '张三', content: '明天下雨吗' },
+      { id: 'e2', msgId: 'm2', chatId: 'g1', userName: '李四', content: '预报说有雨' },
+    ],
+  });
+  try {
+    const r = await call('/mind?chatId=g1');
+    const sec = recentOf(r.json.memoryDynamicText);
+    assert.match(sec, /· 张三：明天下雨吗/);
+    assert.match(sec, /· 李四：预报说有雨/);
+    assert.ok(
+      sec.indexOf('张三') < sec.indexOf('李四'),
+      '早说的那句要排在前面，否则模型会把因果读反',
+    );
+  } finally { off?.(); }
+});
+
+test('缺口补齐：journal 记过的消息不算缺口，不再补一遍', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  /**
+   * j1 的 `eventIds:['m1']` 就是「m1 已经喂给模型了」的凭证。
+   * 这条断言锁的是「对账」，不是「查库」——少了它，功能会每轮把已经
+   * 在上下文里的消息再念一遍。
+   */
+  const { call, off } = await bootHost({}, {
+    journal: [
+      { id: 'j1', at: NOW - 1000, chatId: 'g1', sender: '张三', text: '明天下雨吗', eventIds: ['m1'] },
+    ],
+    ledger: [
+      { id: 'e1', msgId: 'm1', chatId: 'g1', userName: '张三', content: '明天下雨吗' },
+      { id: 'e2', msgId: 'm2', chatId: 'g1', userName: '李四', content: '预报说有雨' },
+    ],
+  });
+  try {
+    const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    assert.doesNotMatch(sec, /明天下雨吗/, '已经喂过的别再补');
+    assert.match(sec, /预报说有雨/, '真缺口还是要补上');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：机器人自己发的消息渲染成「你：」', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  const { call, off } = await bootHost({}, {
+    ledger: [
+      { id: 'e1', msgId: 'm1', chatId: 'g1', userName: '张三', content: '你昨天说的那个' },
+      { id: 'e2', msgId: 'm2', chatId: 'g1', self: true, content: '我说的是周三' },
+    ],
+  });
+  try {
+    const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    assert.match(sec, /· 你：我说的是周三/, '自己的话要标成「你」，否则她会当成对方说的');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：recentLimit=0 时整段不注入', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  const { call, off } = await bootHost({ recall: { recentLimit: 0 } }, {
+    journal: JOURNAL_SEED,
+    ledger: [{ id: 'e1', msgId: 'm1', chatId: 'g1', userName: '张三', content: '一句话' }],
+  });
+  try {
+    const dyn = (await call('/mind?chatId=g1')).json.memoryDynamicText;
+    assert.doesNotMatch(dyn, /刚才说到/, '0 就是完全不注入，两条路都不该出东西');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：账本空时回落日记，条数跟 recentLimit 走', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  const journal = [];
+  for (let i = 0; i < 12; i += 1) {
+    journal.push({ id: `k${i}`, at: NOW - (20 - i) * 1000, chatId: 'g1', sender: `群友${i}`, text: `第${i}句` });
+  }
+  const { call, off } = await bootHost({}, { journal });
+  try {
+    const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    const n = (sec.match(/^· /gm) || []).length;
+    assert.equal(n, 8, '没有缺口也该是 8 条，和补齐同一把尺子');
+    assert.match(sec, /第11句/, '最新的必须在');
+    assert.doesNotMatch(sec, /第0句/, '最早的要被挤掉');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：超长内容按 recentMax 预算截断，不会写爆每轮', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  const long = '啊'.repeat(500);
+  const ledger = [];
+  for (let i = 0; i < 20; i += 1) {
+    ledger.push({ id: `L${i}`, msgId: `lm${i}`, chatId: 'g1', userName: '群友', content: `第${i}段${long}` });
+  }
+  const { call, off } = await bootHost({}, { ledger });
+  try {
+    const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    assert.ok(sec.length < 2000, `段长 ${sec.length}，应该被 1800 字预算压住`);
+    assert.match(sec, /第19段/, '从最新往里填，最新的一定留得住');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：闸门打开时按当前这句挑相关的（?q= 和真实注入同源）', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  /**
+   * 缺口 20 条 > `recentLimit` 8，才会触发「更早那部分按相关度挑」。
+   * 关键词那条故意放在 index 9：既不在「最近一半必留」的尾巴里，
+   * 也不在空 query 退化成时间顺序时挑中的头几条——两种情况能区分开。
+   */
+  const ledger = [];
+  for (let i = 0; i < 20; i += 1) {
+    ledger.push({
+      id: `G${i}`, msgId: `gm${i}`, chatId: 'g1', userName: '群友',
+      content: i === 9 ? '今天搬家了' : `第${i}条闲聊`,
+    });
+  }
+  const { call, off } = await bootHost({ recall: { recentRerank: true } }, { ledger });
+  try {
+    const plain = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    assert.doesNotMatch(plain, /今天搬家了/, '不传当前这句时打分恒 0，退化成时间顺序，轮不到它');
+
+    const hit = recentOf(
+      (await call(`/mind?chatId=g1&q=${encodeURIComponent('搬家')}`)).json.memoryDynamicText,
+    );
+    assert.match(hit, /今天搬家了/, '闸门开着、又给了当前这句，就该挑中相关的，哪怕它更早');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：闸门关着时不做相关度打分，哪怕传了 q', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  const ledger = [];
+  for (let i = 0; i < 20; i += 1) {
+    ledger.push({
+      id: `H${i}`, msgId: `hm${i}`, chatId: 'g1', userName: '群友',
+      content: i === 9 ? '今天搬家了' : `第${i}条闲聊`,
+    });
+  }
+  /** 默认 `recentRerank: false` */
+  const { call, off } = await bootHost({}, { ledger });
+  try {
+    const sec = recentOf(
+      (await call(`/mind?chatId=g1&q=${encodeURIComponent('搬家')}`)).json.memoryDynamicText,
+    );
+    assert.doesNotMatch(sec, /今天搬家了/, '用户没开闸门，就不该自作主张按关键词挑');
+    assert.match(sec, /第19条闲聊/, '关着时老老实实取最近几条');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：别的插件和框架菜单的回复不进上下文', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  const ledger = [
+    { id: 'S1', msgId: 'sm1', chatId: 'g1', userName: '群友甲', content: '帮我开个菜单' },
+    { id: 'S2', msgId: 'sm2', chatId: 'g1', userName: '', content: '【菜单】掷骰 / 查询 / 帮助', plugin: 'menu', source: 'plugin' },
+    { id: 'S3', msgId: 'sm3', chatId: 'g1', userName: '', content: '回声插件把上一句复读了一遍', plugin: 'echo', source: 'plugin' },
+    { id: 'S4', msgId: 'sm4', chatId: 'g1', self: true, content: '她自己回的那句' },
+    { id: 'S5', msgId: 'sm5', chatId: 'g1', userName: '', content: '[事件] GUILD_CREATE 新成员', kind: 'notice', source: 'gateway' },
+    { id: 'S6', msgId: 'sm6', chatId: 'g1', userName: '群友乙', content: '后面这句是真人的' },
+  ];
+  const { call, off } = await bootHost({}, { ledger });
+  try {
+    const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    assert.match(sec, /帮我开个菜单/, '真人说的要留着');
+    assert.match(sec, /后面这句是真人的/, '真人说的要留着');
+    assert.match(sec, /她自己回的那句/, '自有协议说的话要留，渲染成「你」');
+    assert.doesNotMatch(sec, /【菜单】/, '框架菜单不是她说的，不能进上下文');
+    assert.doesNotMatch(sec, /回声插件/, '别的插件的回复不是她说的，不能进上下文');
+    assert.doesNotMatch(sec, /GUILD_CREATE/, '频道事件不是对话，不能进上下文');
+  } finally { off?.(); }
 });
 
 test('注入分段：freezeSystem=false 能退回旧行为（全部进 system）', async () => {

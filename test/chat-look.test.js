@@ -22,6 +22,8 @@ function rig({
   ledgerOk = true,
   sessions = {},
   cfg = {},
+  /** 这一轮的 `speaker` 记录（`lookCalls` 挂在上面）；null = 宿主轮次，不限次数 */
+  turnRef = null,
 } = {}) {
   const asked = [];
   const ledger = {
@@ -44,7 +46,7 @@ function rig({
   const defs = buildToolDefs({
     journal,
     graphOf: () => ({}),
-    callerOf: () => ({ bucket, chatId, kind, aliases: [] }),
+    callerOf: () => ({ bucket, chatId, kind, aliases: [], turnRef }),
     cfgOf: () => cfg,
     ledgerOf: () => ledger,
     sessionOf: (id) => sessions[id] ?? null,
@@ -156,6 +158,17 @@ test('chat_look：chats 给真名、给条数', async () => {
   assert.equal(r.chats[0].count, 97);
 });
 
+test('chat_look：账本说自己发的那些署名为「你」，别显示成「（未知）」', async () => {
+  const { look } = rig({
+    ledgerRows: [
+      { seq: 1, at: 1000, time: '10:00', who: '张三', text: '在吗', self: false },
+      { seq: 2, at: 2000, time: '10:01', who: '（未知）', text: '在的', self: true },
+    ],
+  });
+  const r = await look.execute({});
+  assert.deepEqual(r.items.map((x) => x.who), ['张三', '你']);
+});
+
 test('chat_look：journal 源只拿对话行，游标是上一页最早那条', async () => {
   const rows = [
     { at: 2000, role: 'bot', sender: '', text: '嗯', digest: null },
@@ -185,4 +198,56 @@ test('chat_look：功能开关关着时干脆不挂这个工具', () => {
     false,
     '关掉的工具不该出现在注册列表里——挂上去再在 execute 里拒，会让能力页上多一个假开关',
   );
+});
+
+/* ---------------- 默认条数 / 翻页次数（配置放的权） ---------------- */
+
+test('chat_look：不传 limit 就用配置的默认条数', async () => {
+  const { look, asked } = rig({ ledgerRows: [] });
+  await look.execute({});
+  assert.equal(asked[0].limit, 5, '默认 5 条（一次取 20 会把上下文挤满）');
+});
+
+test('chat_look：lookLimit 改了，默认条数跟着走', async () => {
+  const { look, asked } = rig({ cfg: { chat: { lookLimit: 12 } } });
+  await look.execute({});
+  assert.equal(asked[0].limit, 12);
+});
+
+test('chat_look：lookLimit 只是默认值，模型显式多要照给', async () => {
+  const { look, asked } = rig({ cfg: { chat: { lookLimit: 5 } } });
+  await look.execute({ limit: 30 });
+  assert.equal(asked[0].limit, 30, '用户设 5 不该把模型的手脚也捆在 5');
+});
+
+test('chat_look：翻到这一轮的上限就拒，而且不再碰库', async () => {
+  const turnRef = { lookCalls: 0 };
+  const { look, asked } = rig({ cfg: { chat: { lookMaxCalls: 2 } }, turnRef });
+  assert.equal((await look.execute({})).ok, true);
+  assert.equal((await look.execute({})).ok, true);
+  const third = await look.execute({});
+  assert.equal(third.ok, false);
+  assert.match(third.message, /已经翻过 2 次/);
+  assert.equal(asked.length, 2, '被拒那一次不该再查库');
+});
+
+test('chat_look：lookMaxCalls = 0 表示不限，也不去动计数', async () => {
+  const turnRef = { lookCalls: 0 };
+  const { look } = rig({ turnRef });
+  for (let i = 0; i < 8; i += 1) assert.equal((await look.execute({})).ok, true);
+  assert.equal(turnRef.lookCalls, 0, '不限次数时计数没有意义，别写它');
+});
+
+test('chat_look：宿主轮次没有 turnRef，次数限制退化为不限', async () => {
+  const { look } = rig({ cfg: { chat: { lookMaxCalls: 1 } }, turnRef: null });
+  assert.equal((await look.execute({})).ok, true);
+  assert.equal((await look.execute({})).ok, true, '主动搭话那类轮次不该被掐');
+});
+
+test('chat_look：what=chats 只是列会话，不占翻页额度', async () => {
+  const turnRef = { lookCalls: 0 };
+  const { look } = rig({ cfg: { chat: { lookMaxCalls: 1 } }, chatsRows: [], turnRef });
+  await look.execute({ what: 'chats' });
+  assert.equal(turnRef.lookCalls, 0, '列清单不算翻消息');
+  assert.equal((await look.execute({})).ok, true);
 });

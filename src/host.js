@@ -87,7 +87,7 @@ import { lastVectorFailure } from './vector-failures.js';
 import { TEST_TEXT, testResult, rebuildBatch } from './vector-ops.js';
 import { projectTimeline } from './timeline-view.js';
 import { planHeat } from './memory-heat.js';
-import { rerankHits } from './rerank.js';
+import { rerankHits, keywordScore } from './rerank.js';
 import { isDangerousCommand, createConfirmGate, dangerScanArgs, isCommandTool } from './safety.js';
 import { createClosing, shouldNotePending } from './closing.js';
 import { createAccount } from './account.js';
@@ -412,7 +412,8 @@ export function roostGuardText() {
       + '有就调它，能列哪些会话、能查哪些内容一律以它的返回为准'
       + '（列得出就挑一个 chatId 再查 recent，列不出就照它给的说法回答）。'
       + '它明确说不给就是不给，照实转述原因即可，'
-      + '别换参数或换个说法反复试、也别自己编内容。'
+      + '**被拒绝后**别换参数或换个说法反复试、也别自己编内容；'
+      + '但没被拒绝、只是想看更早的事不算「反复试」——带上它返回的 next 继续往前翻就行。'
       + '查到的用自己的话说、不贴原文，也只用来回答眼前这一问：'
       + '别存进本会话的记忆、别当成这里发生过的事、别主动把别的会话的事搬来这个群聊。',
   ].join('\n');
@@ -3804,6 +3805,18 @@ export function apply(ctx) {
   const MEMORY_DYN_MAX = 480;
 
   /**
+   * 「刚才说到」的独立预算（`config.recall.recentMax`）。
+   *
+   * **刻意不并进 `MEMORY_DYN_MAX`**：那 480 是「刚才说到 + 旧事命中 + 经历 +
+   * 日记索引」四块共享的。近段要补的是「模型没见过的群聊」，条数上限已经
+   * 放到 8 条，按一条两百多字算就是 1800——混在 480 里会被 `fitBudget`
+   * 一刀砍回，补了等于没补。
+   *
+   * 1800 对齐 aurabot 的 `conversationContext.recentMax`（8 条 / 1800 字）。
+   */
+  const MEMORY_RECENT_MAX = 1800;
+
+  /**
    * 3.3：三个预算改配置现读（`config.recall.*`），默认 = 原写死值。
    * 面板改完下一轮生效，不用重启；调坏了把键删掉就回默认。
    */
@@ -3811,6 +3824,7 @@ export function apply(ctx) {
     res: Number(cfg.recall?.residentMax) || MEMORY_MAX,
     deep: Number(cfg.recall?.deepMax) || MEMORY_DEEP_MAX,
     dyn: Number(cfg.recall?.dynMax) || MEMORY_DYN_MAX,
+    recent: Number(cfg.recall?.recentMax) || MEMORY_RECENT_MAX,
   });
 
   const memory = personaScope.wrapMemory(createMemory({
@@ -6356,6 +6370,140 @@ export function apply(ctx) {
   }
 
   /**
+   * 「刚才说到」的缺口查询：账本里有、模型却没见过的那几条。
+   *
+   * 对账靠 `journal` 的 `eventIds`——它记的是「这一轮真投喂过哪几条消息」
+   * （`journal-bridge.js:333`），和账本 `events.msg_id` 同源。所以「账本里有、
+   * `eventIds` 里没有」就等于模型确实没见过，**不需要维护任何游标**，
+   * 重启也不丢（内存游标重启就空，表现为「重启后第一次不补」）。
+   *
+   * 覆盖范围正是账本比日记多的那部分：群里没叫她的消息、机器人自己的回复。
+   *
+   * 返回正序（老的在前），最多 `limit` 条。查不到一律空数组——这块是增强，
+   * 账本没开 / 没库不能影响正常回话。
+   */
+  function recentGapRows(chatId, limit, query = '') {
+    try {
+      if (!ledgerRead.available()) return [];
+      /** 模型真处理过的消息 id。20 行够盖住最近几轮，合并批会一次带出多条 */
+      const seen = new Set();
+      for (const r of journal.recent(chatId, 20, 'chat', aliasesOf(chatId))) {
+        for (const id of r.eventIds || []) if (id) seen.add(String(id));
+      }
+      /**
+       * 多取一些再筛：`seen` 很可能把最近几条全盖住，只取 `limit` 条会
+       * 筛完一个不剩，而真实缺口其实在更早的位置。
+       */
+      const rows = ledgerRead.gap({ chatId, limit: 30 });
+      const fresh = rows.filter((x) => x.msgId && !seen.has(x.msgId));
+      if (fresh.length <= limit) return fresh.slice(-limit);
+      /** 缺口没多到要挑，或者用户没开闸门：直接取最近几条 */
+      if (cfg.recall?.recentRerank !== true) return fresh.slice(-limit);
+      /**
+       * 缺口攒多了（比如一整夜没人叫她）才需要挑。
+       *
+       * **最近一半必留**：紧挨着当前这句的消息一定是上下文，拿相关度去筛它，
+       * 只会把「她刚才说的是什么」筛掉，反而更糟。更早那部分才按当前这句的
+       * 字符二元组命中率排；同分保持时间顺序（`a.i - b.i`）。
+       */
+      const keepRecent = Math.max(1, Math.ceil(limit / 2));
+      const tail = fresh.slice(fresh.length - keepRecent);
+      const head = fresh.slice(0, fresh.length - keepRecent);
+      const picked = head
+        .map((r, i) => ({ r, i, s: keywordScore(query, r.text) }))
+        .sort((a, b) => (b.s - a.s) || (a.i - b.i))
+        .slice(0, Math.max(0, limit - keepRecent))
+        .map((x) => x.r);
+      return [...picked, ...tail].sort((a, b) => a.seq - b.seq);
+    } catch (e) {
+      log.debug(`缺口查询失败：${e.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * 把几行消息渲染成【刚才说到】。从**最新**往旧填，填满条数或字数预算就停。
+   *
+   * 为什么从新往旧：预算不够时该丢的是最早那几句（模型对「刚才」最敏感），
+   * 而不是把最新的砍掉。填完再反转回正序，读起来才是时间顺序。
+   *
+   * `r.self` 来自账本（出站），`r.role === 'bot'` 来自日记——两条路都渲染成
+   * 「你：」，这样她能看见自己刚才说了什么，不会把对方的话错当自己的。
+   */
+  function renderRecentSection(rows, budget = recallBudgets().recent) {
+    if (!rows?.length) return '';
+    const head = '【刚才说到】';
+    let used = head.length + 1;
+    const lines = [];
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const r = rows[i];
+      const body = oneLine(r.text || '');
+      if (!body) continue;
+      const who = r.self || r.role === 'bot' ? '你' : (r.sender || r.who || '对方');
+      const tag = `· ${who}：`;
+      /** 留一个换行的余量；剩下不够一句短语就停，别写出半截话 */
+      const room = budget - used - tag.length - 1;
+      if (room <= 8) break;
+      const line = tag + clip(body, Math.min(room, 400));
+      lines.push(line);
+      used += line.length + 1;
+    }
+    if (!lines.length) return '';
+    return `${head}\n${lines.reverse().join('\n')}`;
+  }
+
+  /**
+   * 这一轮模型手里有没有 `chat_look`——决定要不要提「可以翻更早的」。
+   *
+   * 判据和 `permissions.js` 的 `guestKeepTools` 保持一致：主人恒有；
+   * 其余档位要求 `chatLookForMembers === true`；`chat.tools === false`
+   * 时谁都没有。**这里只管说不说那句话**，真正的权限判定仍在工具 execute。
+   *
+   * 为什么要判：没工具却提示「可以翻」，模型调了必然失败，还得白烧一轮
+   * 去解释自己为什么失败——真机上这种空头支票比不提示更糟。
+   */
+  function canUseLook(bucket) {
+    if (cfg.chat?.tools === false) return false;
+    return bucket === 'owner' || cfg.chat?.chatLookForMembers === true;
+  }
+
+  /**
+   * 【刚才说到】取哪一段：先对账，没有缺口才退回日记。
+   *
+   * 两条路都吃 `recentLimit` 条、共用 `recentMax` 预算：
+   *   · 有缺口 → 账本补齐（含未 @ 的群消息、含机器人自己的话）
+   *   · 无缺口 → 日记最近几条（模型本来就在上下文里，这段只是提醒）
+   *
+   * `recentLimit = 0` 时整块不出现，用户想要「完全不要这一段」有这个开关。
+   */
+  function recentSection(chat, bucket = '', query = '') {
+    const chatId = chat?.chatId || '';
+    const limit = Math.max(0, Math.min(Number(cfg.recall?.recentLimit ?? 8), 20));
+    if (!limit) return '';
+    /**
+     * `chatId` 可能是空串——面板的 `/mind` 预览没有具体会话，这时按
+     * `journal.recent('')` 取全局最近几条（`chatKeys('')` 为空 → SQL 不带
+     * 会话过滤），这是这条路径原有的语义，别改成早退。
+     *
+     * **真实注入不会为空**：`onInbound` 一定有 chat；而且账本缺口查询
+     * 在空 chatId 时直接返回空数组，不会跨群捞消息。
+     */
+    const gap = chatId ? recentGapRows(chatId, limit, query) : [];
+    const body = gap.length
+      ? renderRecentSection(gap)
+      : renderRecentSection(journal.recent(chatId, limit, 'chat', aliasesOf(chatId)).reverse());
+    if (!body) return '';
+    /**
+     * 只在真有工具的那一轮提示翻页。`next` 空串表示账本到头了——这句
+     * 一并写清，免得模型把空串当失败去重试（提示词里另一处也说过
+     * 「被拒绝后才别换参数」，这里补的是「没被拒绝就可以继续翻」）。
+     */
+    return canUseLook(bucket)
+      ? `${body}\n（更早的用 chat_look 往前翻，它返回的 next 不为空就还能继续）`
+      : body;
+  }
+
+  /**
    * **易变段**：刚才说到 / 这一句命中 / 日记条数索引。拼进**用户消息**。
    *
    * 每轮都会变，所以不能进 system prompt——放用户消息里同样是注入，
@@ -6364,10 +6512,10 @@ export function apply(ctx) {
    *
    * 「刚才说到」必须留着：上下文一压缩，`那个`/`上面第二个` 就没了指代对象。
    */
-  function memoryDynamic(bucket = lastBucket, chat = null) {
+  function memoryDynamic(bucket = lastBucket, chat = null, query = '') {
     /**
      * 同 `memoryStatic`：会话必须由调用方给。这一段里「刚才说到」是
-     * `journal.recent(chatId)` 的**原文**，读错会话等于把别的群的聊天记录
+     * 账本 / 日记的**原文**，读错会话等于把别的群的聊天记录
      * 念给这一群听，比场景块写错严重得多。
      */
     const chatId = chat?.chatId || '';
@@ -6376,12 +6524,7 @@ export function apply(ctx) {
 
     let recentSec = '';
     try {
-      const recent = journal.recent(chatId, 3, 'chat', aliasesOf(chatId)).reverse();
-      if (recent.length) {
-        recentSec = `【刚才说到】\n${recent
-          .map((r) => `· ${r.role === 'bot' ? '你' : r.sender || '对方'}：${clip(oneLine(r.text), 40)}`)
-          .join('\n')}`;
-      }
+      recentSec = recentSection(chat, bucket, query);
     } catch {}
 
     let hitSec = '';
@@ -6415,14 +6558,26 @@ export function apply(ctx) {
       }
     }
 
-    // 优先级：指代 > 命中 > 经历 > 索引。前两块缺了会直接影响这一轮说得对不对，
-    // 经历只是「她最近忙了什么」的背景，索引最不疼
-    return fitBudget([recentSec, hitSec, eventsSec, idxSec], recallBudgets().dyn, '\n');
+    /**
+     * 优先级：指代 > 命中 > 经历 > 索引。前两块缺了会直接影响这一轮说得对不对，
+     * 经历只是「她最近忙了什么」的背景，索引最不疼。
+     *
+     * **近段单独算账**：`recentSec` 已经在 `renderRecentSection` 里按
+     * `recentMax`（默认 1800）填过了，不能再塞进 `dyn` 那 480 的字数池——
+     * 塞进去会被 `fitBudget` 一刀砍掉九成，补齐等于没补。剩下三块继续共享 `dyn`。
+     */
+    const dynBody = fitBudget([hitSec, eventsSec, idxSec], recallBudgets().dyn, '\n');
+    return [recentSec, dynBody].filter(Boolean).join('\n');
   }
 
-  /** 两段拼起来（调试接口和面板用；真正注入是分开走的，别在这里合并回去） */
-  function memoryText(chat = null, deepOverride = null, opts = {}) {
-    return [memoryStatic(chat, deepOverride, opts), memoryDynamic(lastBucket, chat)].filter(Boolean).join('\n\n');
+  /**
+   * 两段拼起来（调试接口和面板用；真正注入是分开走的，别在这里合并回去）。
+   *
+   * `query` 只给面板预览用：透传给近段的「相关度闸门」，让预览和真实注入
+   * 排出来的顺序一致。不传 = 空串，退化成时间顺序（原有行为）。
+   */
+  function memoryText(chat = null, deepOverride = null, opts = {}, query = '') {
+    return [memoryStatic(chat, deepOverride, opts), memoryDynamic(lastBucket, chat, query)].filter(Boolean).join('\n\n');
   }
 
   /**
@@ -6901,6 +7056,15 @@ export function apply(ctx) {
              * 「主人在群里说一句」变成「群友能查别群」。
              */
             kind: cur?.payload?.chat?.kind || chat.kind || '',
+            /**
+             * 这一轮的可变状态本体（就是 `speaker` 里那条）。
+             *
+             * `chat_look` 拿它记「这一轮翻了几次」——`lookCalls` 挂在这上面，
+             * 轮次结束 `speaker.delete(sid)` 时自动消失，不用单独清理。
+             * 宿主发起的轮次（主动搭话等）没有 speaker 条目，`turnRef` 为
+             * `undefined`，次数限制自然退化为不限。
+             */
+            turnRef: cur || null,
           };
         },
         ledgerOf: () => ledgerRead,
@@ -8406,7 +8570,14 @@ export function apply(ctx) {
       if (isPrivateKind(chat.kind) && bucket === 'owner') learnedOwner = chat.chatId;
 
       // 告诉 AI 谁在说话（软提醒，每轮现读）
-      speaker.set(sid, { payload, bucket, system: payload.system || '' });
+      /**
+       * `lookCalls`：这一轮 `chat_look` 已经翻了几次。
+       *
+       * 挂在 speaker 上是刻意的——这条记录每轮 `set`、`finally` 里 `delete`
+       * （见 `onInbound` 的收尾），计数**随轮次自动清零**，不用额外的清理逻辑，
+       * 也不会被上一轮污染。上限由 `chat.lookMaxCalls` 控制。
+       */
+      speaker.set(sid, { payload, bucket, system: payload.system || '', lookCalls: 0 });
       /**
        * 出站那一层（`resolveImage`）拿不到会话，记一份最近的给它算发图额度。
        * 和 `speaker` 是同一条假设：同一时刻只有一轮在跑。
@@ -8722,7 +8893,11 @@ export function apply(ctx) {
        * 为什么不放 system prompt：它每轮都变，会把 system 前缀的缓存废掉。
        */
       if (cfg.memory?.freezeSystem !== false) {
-        const dyn = memoryDynamic(bucket, chat);
+        /**
+         * 第三个参数是这一句原话：缺口攒多了要靠它挑「相关的」，
+         * 没开相关度闸门时用不上。
+         */
+        const dyn = memoryDynamic(bucket, chat, text);
         if (dyn) text = `${dyn}\n\n${text}`;
       }
 
@@ -12967,7 +13142,21 @@ export function apply(ctx) {
          * 当前那一轮拿到的是哪一档。
          */
         const forced = url.searchParams.get('deep') === '1' ? true : url.searchParams.get('light') === '1' ? false : null;
-        const mtext = memoryText(panelChat, forced);
+        /**
+         * `?q=`：面板拿「当前这一句」喂进预览。
+         *
+         * 为什么需要：缺口攒多了、且开了 `recall.recentRerank` 时，更早那
+         * 部分要按当前这句的字符二元组命中率挑（`keywordScore`）。预览不传
+         * 就成了空串打分——恒 0、退化成时间顺序，和真实注入不一致；调注入
+         * 的人会以为「闸门没生效」。
+         *
+         * **面板默认不传**：`/mind` 是「看某会话注入了什么」的预览，没有
+         * 「当前这句」的概念（`lastTurn` 只存了 chatId，没存原始正文）。
+         * 要按真实顺序看，得显式带 `?q=...`；不带就还是时间顺序，这是
+         * 原有语义，没变。
+         */
+        const q = String(url.searchParams.get('q') || '');
+        const mtext = memoryText(panelChat, forced, {}, q);
         const deep = forced === null ? Boolean(st.deep) : forced;
         send(res, 200, {
           ok: true,
@@ -12988,7 +13177,7 @@ export function apply(ctx) {
                * 调注入时最常见的误解是"记忆没生效"，其实是它搬到动态段去了。
                */
               staticLen: memoryStatic(panelChat, forced).length,
-              dynamicLen: memoryDynamic(scene?.bucket || lastBucket, panelChat).length,
+              dynamicLen: memoryDynamic(scene?.bucket || lastBucket, panelChat, q).length,
               freezeSystem: cfg.memory?.freezeSystem !== false,
               /**
                * 这一轮是"平时"还是"全量重注"，以及为什么。
@@ -13010,7 +13199,7 @@ export function apply(ctx) {
           qqTools: qqToolRegistry.summary(),
           /** 分开给：调注入时最常搞混的就是"这段到底进 system 还是进用户消息" */
           memoryStaticText: memoryStatic(panelChat, forced),
-          memoryDynamicText: memoryDynamic(scene?.bucket || lastBucket, panelChat),
+          memoryDynamicText: memoryDynamic(scene?.bucket || lastBucket, panelChat, q),
           memoryText: mtext,
           /**
            * D10 / 3.2：当前是峰还是谷，给排障和慢工具错峰用。

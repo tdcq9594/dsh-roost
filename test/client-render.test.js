@@ -1240,12 +1240,48 @@ test('拆分后每页分节编号都从 01 起、连续', () => {
     mood: null, reloadMood: () => {}, toast: () => {}, quick: async () => ({}),
   }), rt)), ['01', '02', '03'], '心情页编号应 01–03 连续')
 
-  /* 群聊策略页：2.2a 五张 + 2.2b 三张，01 起连续 */
+  /* 群聊策略页：2.2a 五张 + 2.2b 三张 + 翻聊天记录（弹窗入口），01 起连续 */
   rt.reset()
-  assert.deepEqual(ns(expand(mod.GroupChatTab({
+  const gs = sectionsOf(expand(mod.GroupChatTab({
     config: { roostHost: { decide: { mode: 'ai' }, merge: {} }, chat: {}, group: {} },
     saveCfg: () => {}, toast: () => {}, setTab: () => {},
-  }), rt)), ['01', '02', '03', '04', '05', '06', '07', '08'], '群聊策略页编号应 01–08 连续')
+  }), rt))
+  assert.deepEqual(gs.map((s) => s.n), ['01', '02', '03', '04', '05', '06', '07', '08', '09'], '群聊策略页编号应 01–09 连续')
+  /**
+   * 「翻聊天记录」必须排第二（2026-11-25 主人要求）。
+   *
+   * 它决定她「看到什么」，是接话方式之外最该先设的一项；原来在第 09 位，
+   * 要滚到页底才找得到。锁住位置，免得以后往中间插卡时被挤回去。
+   */
+  assert.equal(gs[1].title, '翻聊天记录', '翻聊天记录应是第 02 张卡')
+})
+
+test('群聊策略页：翻聊天记录那张卡的入口真能打开设置弹窗', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  // 弹窗分支必须真的挂上，不能只有按钮没有内容
+  assert.match(src, /lookOpen\s*\?\s*h\(PageModal, \{ title: '翻聊天记录'/, '弹窗分支要在')
+  assert.ok(src.includes('h(LookSettings, { config, put, busy })'), '弹窗内容要挂 LookSettings')
+
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const findBtn = (n, label) => {
+    if (n == null || typeof n !== 'object') return null
+    if (Array.isArray(n)) {
+      for (const c of n) { const r = findBtn(c, label); if (r) return r }
+      return null
+    }
+    if (n.type === 'button' && textOf(n).includes(label)) return n
+    return findBtn(n.props?.children, label)
+  }
+  rt.reset()
+  const tree = expand(mod.GroupChatTab({
+    config: { roostHost: { decide: { mode: 'ai' }, merge: {} }, chat: {}, group: {} },
+    saveCfg: () => {}, toast: () => {}, setTab: () => {},
+  }), rt)
+  const open = findBtn(tree, '打开设置')
+  assert.ok(open, '卡片上要有「打开设置」入口')
+  /** 假 React 不保留 state，只验点了不抛；弹窗内容由上面两条源码断言兜住 */
+  assert.doesNotThrow(() => open.props.onClick(), '点入口不能抛')
 })
 
 test('2.7 工作区挪进首次设置：设置页留链接，卡片本体控件一个不少', () => {

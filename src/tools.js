@@ -150,6 +150,15 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
        * 模型据此回一句「我不记得了」——用户以为她失忆了，实际是检索没合上。
        */
       aliases: Array.isArray(s.aliases) ? s.aliases : [],
+      /**
+       * 这一轮 `speaker` 记录的本体（可变对象）。目前只有 `chat_look` 用：
+       * `lookCalls` 挂在它上面，用来限制「一轮最多翻几次」，随轮次结束
+       * 被 `speaker.delete(sid)` 一起清掉。
+       *
+       * **必须透传引用，不能复制**——复制一份出去，计数写得回去才怪。
+       * 宿主发起的轮次没有这条记录，给 null，次数限制自然退化为不限。
+       */
+      turnRef: s.turnRef || null,
     };
   };
 
@@ -345,8 +354,11 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
          */
         description: '要查哪个会话。不传 = 当前会话；能不能查别处、能查哪些，以工具返回值为准',
       },
-      limit: { type: 'number', description: 'recent 取几条，默认 20，上限 50' },
-      cursor: { type: 'string', description: '翻页游标：用上一次返回的 next' },
+      limit: { type: 'number', description: 'recent 一次取几条。不传就用设置里的默认条数；上限 50' },
+      cursor: {
+        type: 'string',
+        description: '翻页游标：传上一次返回的 next，能一直翻到账本存的最早一条；next 是空串就表示已经到底了，不用再试',
+      },
       source: {
         type: 'string',
         enum: ['ledger', 'journal'],
@@ -358,8 +370,9 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
       /** 同 memory_search：必须是内容块数组，字符串会让 DSH 的 content.some 炸掉 */
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },
-    async execute({ what = 'recent', chatId, limit = 20, cursor = '', source = 'ledger' } = {}) {
-      if (cfgOf?.()?.chat?.tools === false) return { ok: false, message: '翻记录这个功能关着' };
+    async execute({ what = 'recent', chatId, limit, cursor = '', source = 'ledger' } = {}) {
+      const conf = cfgOf?.() || {};
+      if (conf.chat?.tools === false) return { ok: false, message: '翻记录这个功能关着' };
 
       const me = caller();
       const want = String(chatId || '').trim() || me.chatId;
@@ -420,7 +433,15 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
         }
       }
 
-      const lim = Math.min(Math.max(Number(limit) || 20, 1), 50);
+      /**
+       * 不传 `limit` 就用设置里的默认条数（`chat.lookLimit`，默认 5）。
+       *
+       * **这里只是默认值，不是上限**：模型显式多要（比如明确要翻一大段）
+       * 就按它说的来，「50」是硬安全阀。真要限流看下面的
+       * 「一轮最多翻几次」——那个才是用户手里的刹车。
+       */
+      const defLimit = Math.min(Math.max(Number(conf.chat?.lookLimit) || 5, 1), 50);
+      const lim = Math.min(Math.max(Number(limit) || defLimit, 1), 50);
       const nameOf = (id) => {
         const t = String(sessionOf?.(id)?.title ?? '').replace(/^QQ · /, '').trim();
         return t || `${String(id).slice(0, 8)}…`;
@@ -478,6 +499,31 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
           };
         }
 
+        /**
+         * 一轮最多翻几次（`chat.lookMaxCalls`，`0` = 不限）。
+         *
+         * 计数挂在 `speaker` 那条记录上（`callerOf` 暴露的 `turnRef`），
+         * 轮次结束随 `speaker.delete(sid)` 一起消失——不需要 TTL，也不会
+         * 串到下一轮。宿主发起的轮次没有那条记录，`turnRef` 为 null → 不限。
+         *
+         * 只管 `recent`：`chats` 只是列会话、不取正文，不该占额度。
+         */
+        const maxCalls = Math.max(0, Math.min(Number(conf.chat?.lookMaxCalls) || 0, 20));
+        if (maxCalls) {
+          const t = me.turnRef;
+          if (t) {
+            const used = Number(t.lookCalls) || 0;
+            if (used >= maxCalls) {
+              return {
+                ok: false,
+                message: `这一轮已经翻过 ${used} 次了（上限 ${maxCalls} 次）。先用已经拿到的内容回答；`
+                  + '要翻更多，让主人把设置里的「一轮最多翻几次」调大，或设成 0 表示不限。',
+              };
+            }
+            t.lookCalls = used + 1;
+          }
+        }
+
         const before = Number(String(cursor || '').replace(/[^\d]/g, '')) || 0;
 
         if (source === 'journal') {
@@ -518,7 +564,13 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
           items: items.map((x) => ({
             at: x.at,
             time: x.time,
-            who: x.who,
+            /**
+             * 自有协议发的（`ledger-recent` 标的 `self`）署名「你」。
+             * 账本里出站的 `user_name` 是空的，不替它署名就是一行
+             * 「（未知）：…」——模型会把自己刚说过的话当成群里某个人说的，
+             * 然后接着那句话往下编。
+             */
+            who: x.self ? '你' : x.who,
             text: String(x.text).slice(0, 200),
             ...(x.quoted ? { quoted: String(x.quoted).slice(0, 200) } : {}),
             ...(x.refMsgIdx ? { refMsgIdx: String(x.refMsgIdx) } : {}),
