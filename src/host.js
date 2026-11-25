@@ -267,6 +267,7 @@ export const SELF_CONFIG_METHODS = new Map([
   }],
 ]);
 import { createMerger } from './roost-merge.js';
+import { createInboundDedupe } from './inbound-dedupe.js';
 import { createDecider, guestQuietSkip, resolveGroupPolicy } from './roost-decide.js';
 import { createPairing } from './roost-pair.js';
 import { createSetupWizard } from './setup-wizard.js';
@@ -5410,6 +5411,15 @@ export function apply(ctx) {
   });
 
   /**
+   * 入站去重：官方重推 / 多连接 / 补拉重放的同一份消息只处理一次。
+   *
+   * **必须放在 decider 之前**：旁听会写日记、判定会推觉醒与统计，
+   * 重复进来会把同一句话记两遍、把「刚有人说话」的时间戳刷新两遍。
+   * 键的选法与边界见 `inbound-dedupe.js`。
+   */
+  const inboundDedupe = createInboundDedupe();
+
+  /**
    * 旁听：这个群设了「只旁听」时，消息不进模型、不建会话、不占轮次，
    * 只把文字写进日记。
    *
@@ -5429,6 +5439,20 @@ export function apply(ctx) {
    * 后面所有消息都要跟着等。
    */
   function deliverFromRoost(evt) {
+    /**
+     * 同一条消息重复投递：官方重推、多连接各收一份，或补拉与实时叠加。
+     *
+     * 以前这里没有闸，两份都会进攒批，`batch.text` 就成了两条一样的正文
+     * ——模型一次看到「你是谁」三遍（2026-11-26 排查）。
+     * 键优先用账本 `eventId`（重推不变），没有就退回 `chatId + msgId`；
+     * 两个都没有时不去重（`inbound-dedupe.js` 的 fail-open）。
+     */
+    if (inboundDedupe.isDuplicate(evt)) {
+      /** 纯图 / 纯语音没有正文，别让日志只剩一个冒号 */
+      const hint = String(evt?.content ?? '').trim() || '[非文本]';
+      log.info(`同一条消息重复投递，已忽略：${hint.slice(0, 30)}`);
+      return;
+    }
     const verdict = roostDecider.check(evt);
     if (!verdict.go) {
       /**
