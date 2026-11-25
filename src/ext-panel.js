@@ -781,7 +781,7 @@ export function createExtPanel({
           `private 双条件：kind==='c2c' 且档位为 owner/admin`,
         ]),
         layer('guard', [
-          `mountToolGuard() 的 ctx.tools.guard 执行期兜底（fail-closed）`,
+          `mountToolGuard() 的 ctx.tools.guard 执行期兜底（只对 Roost 会话生效，无窗口时 fail-closed）`,
           `命中规则时返回中文 reason，工具调用被拒`,
         ]),
       ],

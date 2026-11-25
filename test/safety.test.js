@@ -40,6 +40,35 @@ test('危险命令：删根/格式化/关机/下载后执行都能认出来', ()
   }
 });
 
+/**
+ * issue #73：裸词 `format` 把提交补丁、格式化脚本全判成格式化磁盘，
+ * 用户在自己 DSH 会话里连 `git format-patch` 都跑不了。
+ * 真正的格式化命令一定带目标（盘符 / 设备 / 开关），判定按这个收紧。
+ */
+test('issue #73：format 只在带目标时才算格式化', () => {
+  for (const c of [
+    'git format-patch -1 HEAD',
+    'git log --pretty=format:%H',
+    'npm run format',
+    'npx prettier --write src/format.js',
+    'node src/format.js',
+    'cat docs/format.md',
+    'git commit -m "chore: format code"',
+  ]) {
+    assert.equal(isDangerousCommand('bash', { command: c }).dangerous, false, `${c} 不该判危险`);
+  }
+  for (const c of [
+    'format C: /Q',
+    'format /FS:NTFS D:',
+    'format d:',
+    'mkfs.ext4 /dev/sdb1',
+    'diskpart',
+    'Format-Volume -DriveLetter D',
+  ]) {
+    assert.equal(isDangerousCommand('bash', { command: c }).dangerous, true, `${c} 仍要判危险`);
+  }
+});
+
 test('确认闸门：问一次、回确认只放一次，不吞正常聊天', () => {
   let now = 1000;
   const sent = [];

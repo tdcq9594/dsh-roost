@@ -1715,6 +1715,14 @@ test('危险确认：quota 默认空时危险命令仍被 guard 拦下', async (
   const dir = tmp();
   const oldEnv = process.env.DSH_ROOST_DATA;
   process.env.DSH_ROOST_DATA = join(dir, 'data');
+  /**
+   * 预置一个真实的 QQ 会话映射：用来验证「收紧到只管家里的会话」之后，
+   * Roost 自己的会话**仍然**被拦（这是 issue #73 修复不能破的那一半）。
+   */
+  mkdirSync(join(dir, 'data'), { recursive: true });
+  writeFileSync(join(dir, 'data', 'sessions.json'), JSON.stringify({
+    chats: { 'QQC2C:1001': { sessionId: 'qq-session-1', preset: 'roost-private', title: '测试', kind: 'c2c', at: 1 } },
+  }));
   const noop = () => () => {};
   let guardFn = null;
   const cleanups = [];
@@ -1742,6 +1750,22 @@ test('危险确认：quota 默认空时危险命令仍被 guard 拦下', async (
     assert.equal(typeof guardFn, 'function', '宿主应该注册了 tools.guard');
     const pseudo = { name: 'shell.exec', args: { script: 'rm -rf /' }, agent: { session: { id: 'system:test' } } };
     assert.match(guardFn(pseudo), /已拒绝|需要确认/, '默认 quota={} 时危险命令也必须被拦');
+
+    /**
+     * issue #73：guard 是全局的，用户自己在这个 DSH 里开的会话也会走到这里。
+     * 它不是 Roost 建的（sessions / speaker / agentV1 都查不到），没有 QQ 确认
+     * 窗口，以前被 fail-closed 一起拒掉。现在应当原样放行，交给 DSH 自己的权限
+     * 体系——否则用户在自己的编码会话里连 `git format-patch` 都跑不了。
+     */
+    const outsider = { name: 'shell.exec', args: { script: 'rm -rf /' }, agent: { session: { id: 'user-coding-session' } } };
+    assert.equal(guardFn(outsider), undefined, '非 Roost 会话不该被安全门拦');
+
+    /** 另一半不能破：登记在 sessions.json 里的 QQ 会话，危险命令照旧要问确认 */
+    const qq = { name: 'shell.exec', args: { script: 'rm -rf /' }, agent: { session: { id: 'qq-session-1' } } };
+    assert.match(guardFn(qq), /需要确认/, 'QQ 会话的危险命令仍要走确认');
+    /** 补丁在 QQ 会话里也不该被当成格式化磁盘（issue #73 的正题） */
+    const patch = { name: 'shell.exec', args: { script: 'git format-patch -1 HEAD' }, agent: { session: { id: 'qq-session-1' } } };
+    assert.equal(guardFn(patch), undefined, 'git format-patch 不是格式化磁盘');
 
     const normal = { name: 'chat_look', args: { limit: 1 }, agent: { session: { id: 'system:test' } } };
     assert.equal(guardFn(normal), undefined, '普通工具照常放行');

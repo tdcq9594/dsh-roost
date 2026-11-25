@@ -56,7 +56,14 @@ const RULES = [
   { id: 'del-tree', reason: '递归删除文件树',
     re: /\bdel\s+\/[sSqQ]/i },
   { id: 'format', reason: '格式化 / 重建文件系统',
-    re: /\b(?:mkfs(?:\.\w+)?|format|diskpart)\b/i },
+    /**
+     * issue #73：裸词 `format` 把 `git format-patch`、`git log --pretty=format:`、
+     * `npm run format`、`node src/format.js` 全判成格式化磁盘，用户在自己会话里
+     * 连补丁都跑不了。真正的格式化命令一定带目标（盘符 / 设备 / 开关），所以只在
+     * `format` 后面紧跟 `C:` 或 `/Q` 这种目标时才算——`format-patch` 后面是 `-`，
+     * `format.js` 后面是 `.`，都不沾。
+     */
+    re: /\b(?:mkfs(?:\.\w+)?|diskpart|Format-Volume)\b|\bformat(?:\.com)?\s+(?:\/[A-Za-z]|[A-Za-z]:)/i },
   { id: 'power', reason: '关机 / 重启',
     re: /\b(?:shutdown|poweroff|halt|reboot|init\s+[06]|Stop-Computer|Restart-Computer)\b/i },
   { id: 'dd', reason: '直接写块设备',
