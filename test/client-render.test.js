@@ -3202,3 +3202,19 @@ test('闹钟追问：配置在主动搭话页，操作在自驱页，标题不�
   assert.ok(!/下面 config 的 speakUp\.nudge/.test(opBlock), '过时指引要删');
   assert.match(opBlock, /主动搭话 → 05/, '要指向真正的配置页');
 });
+
+test('出站策略：不写我方没做的扩展名，不抄对方空下拉', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  const view = readFileSync(new URL('../src/outbound-panel-view.js', import.meta.url), 'utf8');
+  const start = src.indexOf('function OutboundPolicyCard');
+  const end = src.indexOf('function AwakeTab', start);
+  const card = src.slice(start, end);
+  for (const [name, text] of [['client 出站卡', card], ['面板视图', view]]) {
+    for (const word of ['抖音', '小黑盒', '热榜', '刷视频', '逛社区', 'api.proactive']) {
+      assert.ok(!text.includes(word), `${name} 不该写我方没做的「${word}」`);
+    }
+  }
+  /** 我方只注册 purpose 一个源，「谁来判」下拉是照抄的空控件，已改成只读状态 */
+  assert.ok(!/h\('span', null, '谁来判：'\)/.test(card), '不该有只有一个真选项的下拉');
+  assert.match(card, /判定方：目的引擎/, '改成只读说明');
+});

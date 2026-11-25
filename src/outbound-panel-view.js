@@ -4,9 +4,9 @@
  * 纯函数：后端给 status，前端直接渲染 view，不必自己维护翻译表。
  */
 const TIER_VIEW = {
-    pass: { label: '不纳管（旧行为直发）', hint: '模块想发就发，只记录不拦截。刷完东西仍会直接私聊你。' },
+    pass: { label: '不纳管（旧行为直发）', hint: '扩展想发就发，只记录不拦截，不经过主动发言决策。' },
     gate: { label: '门闸（该不该说由引擎定）', hint: '主动私聊主人要先过引擎判定；引擎说不发就不发，不会排队改约。' },
-    broker: { label: '门闸 + 代发（能改约）', hint: '引擎可以压后再说；模块可用 api.proactive 提交由宿主统筹投递。' },
+    broker: { label: '门闸 + 代发（能改约）', hint: '引擎可以压后再说；扩展提交的消息由宿主统筹投递。' },
   }
 const SOURCE_STATE_VIEW = {
     configured: { label: '已配置未启用', tone: 'warn' },
@@ -50,11 +50,11 @@ export function outboundPanelView(status) {
     let tone
     if (status.tier === 'pass') {
       headline = '尚未纳管'
-      summary = '当前档位是「不纳管」：刷抖音、逛小黑盒这类模块刷完仍会直接私聊你，不经过主动发言决策。想让它们守规矩，把档位改成「门闸」或「门闸 + 代发」。'
+      summary = '当前档位是「不纳管」：扩展模块想私聊你就直接发，不经过主动发言决策。想让它们守规矩，把档位改成「门闸」或「门闸 + 代发」。'
       tone = 'warn'
     } else if (!sources.length) {
       headline = '没有可用的策略源'
-      summary = '档位已经开了，但主动搭话和目的引擎都没启用，没有人来决定该不该说。先去把其中一个引擎打开。'
+      summary = '档位已经开了，但目的引擎还没启用，没有人来决定该不该说。先去把目的引擎打开。'
       tone = 'warn'
     } else if (status.managed) {
       headline = '已纳管'

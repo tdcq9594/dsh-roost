@@ -9331,8 +9331,8 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 主动发言出站策略（P3 完整移植）：决定扩展（刷抖音/小黑盒/热榜这类）
-     * 刷完之后能不能直接私聊主人。档位在后端真生效，不是只读展示。
+     * 主动发言出站策略（P3 对照补齐）：决定扩展模块能不能直接私聊主人。
+     * 档位在后端真生效，不是只读展示。
      */
     function OutboundPolicyCard({ toast }) {
       const [view, setView] = useState(null)
@@ -9353,7 +9353,7 @@ window.__ModuleLoader__.load({
       const tone = view?.tone === 'ok' ? 'var(--ok)' : view?.tone === 'bad' ? 'var(--danger)' : 'var(--warn)'
       return h(Sec, { n: '10', title: '主动发言出站策略' },
         h('div', { className: 'roost-note', style: { marginBottom: 12, lineHeight: 1.7 } },
-          '决定扩展（刷视频、逛社区、热榜巡游这类）刷完之后能不能直接私聊你。'
+          '决定扩展模块能不能直接私聊你。'
           + '不纳管 = 照旧直接发；门闸 = 发前先问目的引擎，它说不合适就不发。'),
         h('div', { className: 'roost-note', style: { marginBottom: 12, padding: '9px 10px', borderLeft: `3px solid ${tone}` } },
           h('b', { style: { color: tone } }, view?.headline || '读取中…'),
@@ -9366,13 +9366,12 @@ window.__ModuleLoader__.load({
             onChange: (e) => save({ tier: e.target.value }),
           }, ...(view?.tiers || [{ value: 'pass', label: '不纳管' }]).map((t) =>
             h('option', { key: t.value, value: t.value }, t.label))),
-          h('span', null, '谁来判：'),
-          h(Dropdown, {
-            className: 'roost-input', style: { minWidth: 150 }, disabled: busy,
-            value: view?.activeMode || 'auto',
-            onChange: (e) => save({ activePolicy: e.target.value }),
-          }, ...(view?.activeOptions || [{ value: 'auto', label: '自动' }]).map((o) =>
-            h('option', { key: o.value, value: o.value }, o.label)))),
+          /**
+           * 不抄对方的「谁来判」下拉：我方只注册 purpose 一个策略源，
+           * auto 与显式 purpose 行为完全一样，放个两选项下拉是空控件。
+           */
+          h('span', { className: 'roost-muted', style: { fontSize: 11 } },
+            '判定方：目的引擎' + (view?.sources?.some((x) => x.state === 'ready') ? '（就绪）' : '（未就绪，期间不放行）'))),
         view?.tierHint
           ? h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8 } }, view.tierHint)
           : null,
