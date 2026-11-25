@@ -1228,12 +1228,6 @@ export const DEFAULTS = {
      * **默认全关**——开了等于允许模型在这台机器上执行自己写的代码；
      * 沙箱只做 env 白名单 + 超时强杀 + 只写自己数据目录，不隔离运行时能力。
      */
-    /**
-     * 允许后台自驱会话指定 preset 带工具（P3 前端对照补齐）。
-     * 默认关——关着时后台会话只能用 clientId='autotelic' 的只读工具集；
-     * 开了才按 preset 放开，属于「她能不能自己动手」之外的更高一层授权。
-     */
-    presetIdOverride: false,
     allowPython: false,
     pythonBin: '',
     scriptTimeoutMs: 120000,

@@ -9043,16 +9043,7 @@ window.__ModuleLoader__.load({
                 } finally { setBusy('') }
               },
             }, busy === 'env' ? '检测中…' : '重新检测')),
-          /**
-           * presetIdOverride（P3 前端对照补齐）：默认关——后台会话只用只读工具集。
-           * 开了才按 preset 带工具；与 allowAct 不同，那是 prompt 措辞、这是工具授权。
-           */
-          h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 8 } },
-            h('input', {
-              type: 'checkbox', checked: c.presetIdOverride === true,
-              onChange: (e) => patch({ presetIdOverride: Boolean(e.target.checked) }),
-            }), '允许后台自驱会话指定 preset 带工具（默认关，高风险）')),
-        ),
+        )),
 
         h('div', { style: { fontSize: 11.5, marginBottom: 6 } }, '她想琢磨的方向（一行一个，空着就不立项）：'),
         h('textarea', {

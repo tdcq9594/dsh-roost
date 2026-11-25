@@ -96,8 +96,6 @@ export const AUTOTELIC_DEFAULTS = {
   dreamFrom: '03:00',
   dreamTo: '05:00',
   /** 她的手（批次3）：默认全关，开了等于允许执行自写代码（详见 config.js 注释） */
-  /** 允许后台会话指定 preset 带工具（默认关，高风险） */
-  presetIdOverride: false,
   allowPython: false,
   pythonBin: '',
   scriptTimeoutMs: 120000,
@@ -174,7 +172,6 @@ export function normalizeCfg(raw = {}) {
     igniteCooldownMinutes: clampInt(r.igniteCooldownMinutes, 1, 720, AUTOTELIC_DEFAULTS.igniteCooldownMinutes),
     dreamFrom: clampTime(r.dreamFrom, AUTOTELIC_DEFAULTS.dreamFrom),
     dreamTo: clampTime(r.dreamTo, AUTOTELIC_DEFAULTS.dreamTo),
-    presetIdOverride: r.presetIdOverride === true,
     allowPython: r.allowPython === true,
     pythonBin: String(r.pythonBin ?? '').trim().slice(0, 500),
     scriptTimeoutMs: clampInt(r.scriptTimeoutMs, 5000, 600000, AUTOTELIC_DEFAULTS.scriptTimeoutMs),

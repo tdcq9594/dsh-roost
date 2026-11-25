@@ -571,3 +571,15 @@ test('复盘闭环（P1）：没注入 reviewer 时执行器第二参不含 plan
     assert.deepEqual(gotOpts, {}, '不注入 reviewer 时传空对象');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('不做 presetIdOverride 假控件：我方 DSH 宿主没有 preset 机制', () => {
+  const src = readFileSync(join(import.meta.dirname, '..', 'src', 'autotelic.js'), 'utf8')
+  const cfgSrc = readFileSync(join(import.meta.dirname, '..', 'src', 'config.js'), 'utf8')
+  const host = readFileSync(join(import.meta.dirname, '..', 'src', 'host.js'), 'utf8')
+  const ui = readFileSync(join(import.meta.dirname, '..', 'client', 'client.js'), 'utf8')
+  for (const [name, text] of [['autotelic', src], ['config', cfgSrc], ['host', host], ['client', ui]]) {
+    assert.ok(!/presetIdOverride/.test(text), `${name} 不该有 presetIdOverride（preset 是 Cordis 的概念，我方 DSH 没有）`)
+  }
+  /** 我方后台会话工具收放走能力页那套，不是 preset */
+  assert.match(src, /ctx\.agents\.create\(\)/, '注释要说明我方走 DSH agents 服务')
+})

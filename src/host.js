@@ -2726,12 +2726,6 @@ export function apply(ctx) {
       await agentV1.createOne({
         sessionId: sid,
         clientId: 'autotelic',
-        /**
-         * presetIdOverride（P3 前端对照补齐）：默认不给 preset——后台会话只能用
-         * clientId='autotelic' 的只读工具集。主人显式开了这个开关，才按 preset 带工具。
-         * 这与 allowAct 是两回事：allowAct 只放宽 prompt 措辞，工具仍走宿主全局守卫。
-         */
-        preset: cfg.autotelic?.presetIdOverride === true ? cfg.autotelic?.presetId || null : null,
         persist: true,
         sections: [{
           name: 'autotelic-self',
