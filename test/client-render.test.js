@@ -3214,7 +3214,8 @@ test('出站策略：不写我方没做的扩展名，不抄对方空下拉', ()
       assert.ok(!text.includes(word), `${name} 不该写我方没做的「${word}」`);
     }
   }
-  /** 我方只注册 purpose 一个源，「谁来判」下拉是照抄的空控件，已改成只读状态 */
-  assert.ok(!/h\('span', null, '谁来判：'\)/.test(card), '不该有只有一个真选项的下拉');
-  assert.match(card, /判定方：目的引擎/, '改成只读说明');
+  /** 谁来判下拉要存在，但选项必须来自后端动态 activeOptions，不写死源名 */
+  assert.match(card, /谁来判：/, '下拉要在');
+  assert.match(card, /view\?\.activeOptions/, '选项来自后端动态列表');
+  assert.ok(!/判定方：目的引擎/.test(card), '不能写死单一源');
 });

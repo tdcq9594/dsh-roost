@@ -9367,11 +9367,16 @@ window.__ModuleLoader__.load({
           }, ...(view?.tiers || [{ value: 'pass', label: '不纳管' }]).map((t) =>
             h('option', { key: t.value, value: t.value }, t.label))),
           /**
-           * 不抄对方的「谁来判」下拉：我方只注册 purpose 一个策略源，
-           * auto 与显式 purpose 行为完全一样，放个两选项下拉是空控件。
+           * 谁来判：选项由后端从**实际注册的源**动态给出（auto + 每个源），
+           * 现在可能只有一个，以后注册新源会自动多一项——不写死在这里。
            */
-          h('span', { className: 'roost-muted', style: { fontSize: 11 } },
-            '判定方：目的引擎' + (view?.sources?.some((x) => x.state === 'ready') ? '（就绪）' : '（未就绪，期间不放行）'))),
+          h('span', null, '谁来判：'),
+          h(Dropdown, {
+            className: 'roost-input', style: { minWidth: 150 }, disabled: busy,
+            value: view?.activeMode || 'auto',
+            onChange: (e) => save({ activePolicy: e.target.value }),
+          }, ...(view?.activeOptions || [{ value: 'auto', label: '自动' }]).map((o) =>
+            h('option', { key: o.value, value: o.value }, o.label)))),
         view?.tierHint
           ? h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8 } }, view.tierHint)
           : null,

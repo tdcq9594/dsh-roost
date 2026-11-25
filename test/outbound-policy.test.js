@@ -155,3 +155,23 @@ test('P0 回归：c2c 素材 target 为空时仍要进治理（不是 out-of-sco
   assert.notEqual(fixed.reason, 'out-of-scope', '补全后必须进治理');
   p.dropModule?.('bili');
 });
+
+test('面板选项动态：注册新策略源后 activeOptions 自动多一项（不写死）', () => {
+  const p = createOutboundPolicy({
+    getConfig: () => ({ ownerQQ: OWNER, outboundPolicy: { tier: 'gate' } }),
+    now: () => 1000,
+  });
+  const mkSource = (name) => ({
+    name, state: () => 'ready', ready: () => true,
+    reserve: () => ({ ok: true, reserveId: `${name}-1` }),
+    commit: () => ({ ok: true }), release: () => ({ ok: true }),
+  });
+  p.registerPolicySource(mkSource('purpose'));
+  const before = outboundPanelView(p.status()).activeOptions.map((o) => o.value);
+  assert.deepEqual(before, ['auto', 'purpose']);
+
+  /** 以后注册第二个源：选项自动多出来，前端不用改 */
+  p.registerPolicySource({ ...mkSource('future-engine'), title: '未来的引擎' });
+  const after = outboundPanelView(p.status()).activeOptions.map((o) => o.value);
+  assert.deepEqual(after, ['auto', 'purpose', 'future-engine']);
+});

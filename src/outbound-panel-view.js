@@ -90,7 +90,17 @@ export function outboundPanelView(status) {
       activePolicy: status.activePolicy || null,
       activeMode: status.activeMode || 'auto',
       activeLabel: ACTIVE_VIEW[status.activeMode] || status.activeMode || '自动',
-      activeOptions: Object.entries(ACTIVE_VIEW).map(([value, label]) => ({ value, label, selected: value === (status.activeMode || 'auto') })),
+      /**
+       * 判定方选项：从实际注册的源动态生成，不写死 auto/purpose——
+       * 以后注册新策略源，下拉自动多一项，前后端都不用改。
+       */
+      activeOptions: [
+        { value: 'auto', label: ACTIVE_VIEW.auto || '自动（挑就绪的）' },
+        ...Object.entries(status.sources || {}).map(([name, src]) => ({
+          value: name,
+          label: POLICY_NAME_VIEW[name] || src?.title || name,
+        })),
+      ].map((o) => ({ ...o, selected: o.value === (status.activeMode || 'auto') })),
       readyCount,
       sourceCount: sources.length,
       sources,
