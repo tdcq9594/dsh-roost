@@ -9156,10 +9156,11 @@ window.__ModuleLoader__.load({
 
         /** 她的小闹钟（A1）：一次性提醒，到点叫醒她自己决定说不说，不替她发消息 */
         h('div', { className: 'roost-note', style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--line-soft)' } },
-          h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 5 } }, '她的小闹钟与追问'),
+          h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 5 } }, '小闹钟：代她设一条 / 看待触发'),
           h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8, lineHeight: 1.6 } },
-            '她在私聊里也能自己说「记得 X 点提醒我…」；到点系统会叫醒她，由她决定要不要找你，不会替她发。'
-            + '追问：她问了你一句、15–40 分钟没回，偶尔轻追一句（开关在下面 config 的 speakUp.nudge）。'),
+            '这里是**操作**：替她记一条、看哪些还没触发、关掉某条。'
+            + '开关（允许她自己设 / 问了没回会轻追 / 失败重试）和上限在「主动搭话 → 05 她的小闹钟与追问」页。'
+            + '到点系统会叫醒她，由她决定要不要找你，不会替她发。'),
           h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 } },
             h('input', {
               type: 'text', className: 'roost-input', value: remindAt,

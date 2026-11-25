@@ -3189,3 +3189,16 @@ test('OutboundPolicyCard 不引用 PurposeStatusCard 的局部 Block（运行时
   assert.match(block, /h\(Sec,/, 'Sec 是模块级组件，可用');
   assert.match(block, /h\(Dropdown,/, 'Dropdown 是模块级组件，可用');
 });
+
+test('闹钟追问：配置在主动搭话页，操作在自驱页，标题不重复且无过时指引', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  const sec = src.indexOf("title: '她的小闹钟与追问'");
+  const op = src.indexOf("'小闹钟：代她设一条 / 看待触发'");
+  assert.ok(sec > 0, '主动搭话页的配置区要在');
+  assert.ok(op > 0, '自驱页的操作区要是明确的操作标题');
+  assert.ok(op < sec, '操作区在自驱页（代码顺序靠前）');
+  /** 自驱卡里不能再指向不存在的「下面 config 的 speakUp.nudge」 */
+  const opBlock = src.slice(op, op + 1200);
+  assert.ok(!/下面 config 的 speakUp\.nudge/.test(opBlock), '过时指引要删');
+  assert.match(opBlock, /主动搭话 → 05/, '要指向真正的配置页');
+});
