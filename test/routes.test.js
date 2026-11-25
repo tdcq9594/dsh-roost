@@ -426,13 +426,18 @@ test('缺口补齐：账本里模型没见过的消息补进来，按时间正�
 test('缺口补齐：journal 记过的消息不算缺口，不再补一遍', async (t) => {
   if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
   /**
-   * j1 的 `eventIds:['m1']` 就是「m1 已经喂给模型了」的凭证。
+   * `eventIds:['e1']` 是「e1 已经喂给模型了」的凭证，`'e1'` 是**账本主键**
+   * （生产里是 `crypto.randomUUID()`，`bot.js:1145` 的 `msg.eventId = rec.id`）。
+   *
    * 这条断言锁的是「对账」，不是「查库」——少了它，功能会每轮把已经
    * 在上下文里的消息再念一遍。
+   *
+   * **故意让 `'e1'` ≠ `msgId 'm1'`**：哪天有人把对账键改回 `msgId`
+   * （QQ 官方的 `ROBOT1.0_…`，和 `eventIds` 永不相交），这条立刻红。
    */
   const { call, off } = await bootHost({}, {
     journal: [
-      { id: 'j1', at: NOW - 1000, chatId: 'g1', sender: '张三', text: '明天下雨吗', eventIds: ['m1'] },
+      { id: 'j1', at: NOW - 1000, chatId: 'g1', sender: '张三', text: '明天下雨吗', eventIds: ['e1'] },
     ],
     ledger: [
       { id: 'e1', msgId: 'm1', chatId: 'g1', userName: '张三', content: '明天下雨吗' },
@@ -443,6 +448,55 @@ test('缺口补齐：journal 记过的消息不算缺口，不再补一遍', asy
     const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
     assert.doesNotMatch(sec, /明天下雨吗/, '已经喂过的别再补');
     assert.match(sec, /预报说有雨/, '真缺口还是要补上');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：对账认账本主键，不认 QQ 的 msg_id', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  /**
+   * 生产里 `journal.event_ids` 存的是 `crypto.randomUUID()`（框架
+   * `msg.eventId = rec.id`），`events.msg_id` 是 `ROBOT1.0_…`，两个集合
+   * 永不相交。这里故意往 `eventIds` 里塞一个**等于某条 msg_id 的字符串**：
+   * 按 msgId 对账会把这条误判成「已喂过」而不补，按 eventId 对账才补。
+   */
+  const { call, off } = await bootHost({}, {
+    journal: [
+      { id: 'j1', at: NOW - 1000, chatId: 'g1', sender: '张三', text: '别的话', eventIds: ['ROBOT1.0_abc'] },
+    ],
+    ledger: [
+      { id: 'e1', msgId: 'ROBOT1.0_abc', chatId: 'g1', userName: '张三', content: '这句是缺口' },
+    ],
+  });
+  try {
+    const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    assert.match(sec, /这句是缺口/, 'id 与 msg_id 同形也不能混用');
+  } finally { off?.(); }
+});
+
+test('缺口补齐：自己发过的回复不再当缺口重补', async (t) => {
+  if (!sqlite) return t.skip('这条 Node 没有 node:sqlite');
+  /**
+   * 她的回复进不了 `seen`——`journal` 的 bot 行复用**入站**消息的
+   * `eventIds`，出站自己的 eventId 从不落日记。不补这一刀的话，最近
+   * 几条回复每轮都被当成「没见过的」重塞一遍，白吃 1800 字预算。
+   *
+   * 判据是时间：不晚于模型最后处理时刻的，是当着他的面发的，它知道；
+   * 晚于的（刚发的、还没进日记）才要补。
+   */
+  const { call, off } = await bootHost({}, {
+    journal: [
+      { id: 'j1', at: NOW, chatId: 'g1', sender: '张三', text: '他刚问的', eventIds: ['e1'] },
+    ],
+    ledger: [
+      { id: 'e1', at: NOW, chatId: 'g1', userName: '张三', content: '他刚问的' },
+      { id: 'e2', at: NOW - 500, chatId: 'g1', self: true, content: '上次我说的是周三' },
+      { id: 'e3', at: NOW + 500, chatId: 'g1', self: true, content: '刚发出去还没进日记' },
+    ],
+  });
+  try {
+    const sec = recentOf((await call('/mind?chatId=g1')).json.memoryDynamicText);
+    assert.doesNotMatch(sec, /上次我说的是周三/, '处理前就发过的，它当然知道');
+    assert.match(sec, /刚发出去还没进日记/, '晚于日记最新时刻的仍要补');
   } finally { off?.(); }
 });
 

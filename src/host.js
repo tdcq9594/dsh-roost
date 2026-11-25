@@ -6373,9 +6373,15 @@ export function apply(ctx) {
    * 「刚才说到」的缺口查询：账本里有、模型却没见过的那几条。
    *
    * 对账靠 `journal` 的 `eventIds`——它记的是「这一轮真投喂过哪几条消息」
-   * （`journal-bridge.js:333`），和账本 `events.msg_id` 同源。所以「账本里有、
-   * `eventIds` 里没有」就等于模型确实没见过，**不需要维护任何游标**，
-   * 重启也不丢（内存游标重启就空，表现为「重启后第一次不补」）。
+   * （`journal-bridge.js:333`）。这些 id 是框架的 `msg.eventId`，而那个值
+   * 就是账本主键（`bot.js:1145` 的 `msg.eventId = rec.id`，
+   * `ledger.js:233` 的 `crypto.randomUUID()`）。所以拿 `gap()` 的
+   * **`eventId`** 去比，「账本里有、`eventIds` 里没有」就等于模型确实没见过，
+   * **不需要维护任何游标**，重启也不丢（内存游标重启就空，表现为「重启后
+   * 第一次不补」）。
+   *
+   * 拿 `msgId`（QQ 官方的 `ROBOT1.0_…`）比会**永远对不上**，两个集合
+   * 永不相交——那样每一条都算「没见过」，每轮把最近几条账本当缺口重塞一遍。
    *
    * 覆盖范围正是账本比日记多的那部分：群里没叫她的消息、机器人自己的回复。
    *
@@ -6385,17 +6391,34 @@ export function apply(ctx) {
   function recentGapRows(chatId, limit, query = '') {
     try {
       if (!ledgerRead.available()) return [];
-      /** 模型真处理过的消息 id。20 行够盖住最近几轮，合并批会一次带出多条 */
+      /**
+       * 模型真处理过的消息 id。20 行够盖住最近几轮，合并批会一次带出多条。
+       *
+       * 顺手记下这批日记里**最新**的时间戳：她那几条自己发的回复进不了
+       * `seen`——`journal` 的 bot 行复用的是**入站**消息的 `eventIds`
+       * （同一轮的「他问」和「她答」共用一个 id），出站自己的 eventId
+       * 从来没落过日记。不补这一刀，她最近几句回复每轮都会被当成
+       * 「没见过的」重塞一遍，白吃 1800 字预算。
+       *
+       * 判据取时间：她的话只要**不晚于**模型最后处理的时刻，就是当着模型
+       * 的面发出去的，它知道；晚于的（刚发的、还没进日记）才需要补。
+       */
       const seen = new Set();
+      let lastSeenAt = 0;
       for (const r of journal.recent(chatId, 20, 'chat', aliasesOf(chatId))) {
         for (const id of r.eventIds || []) if (id) seen.add(String(id));
+        lastSeenAt = Math.max(lastSeenAt, Number(r.at) || 0);
       }
       /**
        * 多取一些再筛：`seen` 很可能把最近几条全盖住，只取 `limit` 条会
        * 筛完一个不剩，而真实缺口其实在更早的位置。
        */
       const rows = ledgerRead.gap({ chatId, limit: 30 });
-      const fresh = rows.filter((x) => x.msgId && !seen.has(x.msgId));
+      const fresh = rows.filter((x) => {
+        if (x.eventId && seen.has(x.eventId)) return false;
+        if (x.self && lastSeenAt && x.at <= lastSeenAt) return false;
+        return true;
+      });
       if (fresh.length <= limit) return fresh.slice(-limit);
       /** 缺口没多到要挑，或者用户没开闸门：直接取最近几条 */
       if (cfg.recall?.recentRerank !== true) return fresh.slice(-limit);

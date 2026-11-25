@@ -244,6 +244,16 @@ test('chat_look：宿主轮次没有 turnRef，次数限制退化为不限', asy
   assert.equal((await look.execute({})).ok, true, '主动搭话那类轮次不该被掐');
 });
 
+test('chat_look：查不到东西（账本没开）不吃额度', async () => {
+  const turnRef = { lookCalls: 0 };
+  const { look, asked } = rig({ cfg: { chat: { lookMaxCalls: 1 } }, ledgerOk: false, turnRef });
+  const fail = await look.execute({});
+  assert.equal(fail.ok, false);
+  assert.match(fail.message, /账本没开/);
+  assert.equal(asked.length, 0, '账本没开就别碰库');
+  assert.equal(turnRef.lookCalls, 0, '白跑一趟不该扣额度，否则几次就把一轮耗光');
+});
+
 test('chat_look：what=chats 只是列会话，不占翻页额度', async () => {
   const turnRef = { lookCalls: 0 };
   const { look } = rig({ cfg: { chat: { lookMaxCalls: 1 } }, chatsRows: [], turnRef });

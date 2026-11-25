@@ -427,14 +427,16 @@ export function createLedgerReader({ roostDirOf = () => '', log = () => {} } = {
       + (out.plugin ? ', plugin' : '')
       + (out.source ? ', source' : '');
     /**
-     * `msg_id` 两种场合要：`gap()` 拿它跟 journal 的 `eventIds` 对账，
-     * 精确命令剔除拿它跟别家出站的 `reply_to` 配对。
+     * `msg_id` 两种场合要：精确命令剔除拿它跟别家出站的 `reply_to` 配对。
      * **别无条件加**：`recent()` 的调用方有些跑在「极简假库」上
      * （`revocation.test.js` 只建了读正文必需的列），多查一列就是
      * `no such column`，被 catch 吞成空数组。
+     *
+     * `id` 只有 `gap()` 要（`withBot`），而且必须带着——见下面的说明。
      */
+    const extra = withBot ? 'seq, id, msg_id,' : 'seq, msg_id,';
     const selectCols = (withBot || withLink)
-      ? cols.replace('seq,', 'seq, msg_id,').concat(withLink ? ', reply_to' : '')
+      ? cols.replace('seq,', extra).concat(withLink ? ', reply_to' : '')
       : cols;
     const scope = withBot ? 'bot_id = ? AND chat_id = ?' : 'chat_id = ?';
     let before = Number(beforeSeq) || 0;
@@ -519,16 +521,23 @@ export function createLedgerReader({ roostDirOf = () => '', log = () => {} } = {
      *
      * 和 `recent()` 的差别：
      *   · 带 `bot_id` 走 `events_timeline` 索引（每轮都会跑，不能全表扫）；
-     *   · 带 `msgId` —— 调用方拿它跟 `journal` 的 `eventIds` 求差集，
+     *   · 带 `eventId` —— 调用方拿它跟 `journal` 的 `eventIds` 求差集，
      *     差出来的就是「模型没见过的」；
      *   · 带 `self` —— 自有协议发的那些也要算进上下文（渲染成「你：」），
      *     但它们同样是「缺口」的一部分，不能只补别人的话。
+     *
+     * **对账键是 `eventId`（`events.id`），不是 `msgId`**：`journal.event_ids`
+     * 里存的是框架给的 `msg.eventId`，而那个值来自
+     * `bot.js:1145` 的 `msg.eventId = rec.id`——即账本主键 `crypto.randomUUID()`
+     * （`ledger.js:233`）。`msg_id` 是 QQ 官方的 `ROBOT1.0_…`，两个集合
+     * 永不相交，拿 `msgId` 比会让每一条都算「没见过」，每轮把最近几条账本
+     * 当缺口重塞一遍（包括正在回的那句，账本在 dispatch 时就落了）。
      *
      * 来源白名单和命令剔除与 `recent()` **完全一致**（`pickContextRows`）：
      * 两条路要是判得不一样，同一个群在补齐块里和在翻记录里就是两个世界。
      *
      * 正序返回（老的在前），和 `recent()` 一致。**不做去重**：合并批、重投
-     * 的重复行由调用方按 `msgId` 排掉，这里只管把账本原样交出去。
+     * 的重复行由调用方按 `eventId` 排掉，这里只管把账本原样交出去。
      */
     gap({ chatId, limit = 30 } = {}) {
       const { rows, withRefs, out } = readContext({ chatId, limit, withBot: true });
@@ -542,6 +551,7 @@ export function createLedgerReader({ roostDirOf = () => '', log = () => {} } = {
         const self = Boolean(out.plugin && String(r.plugin ?? '') === 'host');
         return {
           seq: Number(r.seq),
+          eventId: String(r.id ?? ''),
           msgId: String(r.msg_id ?? ''),
           at: Number(r.at),
           time: hhmm(r.at),

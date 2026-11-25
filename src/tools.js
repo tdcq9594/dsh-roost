@@ -509,6 +509,12 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
          * 只管 `recent`：`chats` 只是列会话、不取正文，不该占额度。
          */
         const maxCalls = Math.max(0, Math.min(Number(conf.chat?.lookMaxCalls) || 0, 20));
+        /**
+         * 失败要**退回**这一次：账本没开、查库抛错属于「她压根没翻到东西」，
+         * 白跑一趟还吃掉一格额度，几次就把一轮的额度耗光了。
+         * 成功（含「翻到底了，返回空」）才真的算一次——那确实调了一次工具。
+         */
+        let refund = null;
         if (maxCalls) {
           const t = me.turnRef;
           if (t) {
@@ -521,6 +527,7 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
               };
             }
             t.lookCalls = used + 1;
+            refund = () => { t.lookCalls = used; };
           }
         }
 
@@ -547,7 +554,7 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
         }
 
         const src = ledgerOf?.();
-        if (!src?.available?.()) return { ok: false, message: '账本没开（或没找到库）' };
+        if (!src?.available?.()) { refund?.(); return { ok: false, message: '账本没开（或没找到库）' }; }
         const items = src.recent({ chatId: want, limit: lim, beforeSeq: before });
         return {
           ok: true,
@@ -579,6 +586,7 @@ export function buildToolDefs({ journal, graphOf, callerOf, cfgOf, contextOf = n
           hint: items.length ? '' : '这个会话在这段时间里没有记录',
         };
       } catch (e) {
+        refund?.();
         return { ok: false, message: `翻记录失败：${e.message}` };
       }
     },
