@@ -15,6 +15,18 @@ const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+/**
+ * 目的类别 → 中文标签。键与 `kindForAction()` 的返回值一一对应
+ * （share / ask / curiosity / follow-up / care），移植时漏了这一张，见 issue 回归测试。
+ */
+const KIND_LABEL = Object.freeze({
+  share: '分享',
+  ask: '索取',
+  care: '关心',
+  curiosity: '好奇',
+  'follow-up': '追问',
+});
+
 const clip = (text, max = 120) => {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim();
   return s.length > max ? s.slice(0, max) + '…' : s;
