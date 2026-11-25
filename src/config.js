@@ -298,6 +298,14 @@ export const DEFAULTS = {
     /** 一轮最多等多久（秒）：留余量给回话，别让用户干等 */
     turnTimeoutSec: 150,
     /**
+     * 整轮一段正文都没吐、但思考里其实写了定稿时，从思考里把那段捞出来发。
+     *
+     * 默认关：捞取只认「定稿 / 最终回复 / 最后 N 行」这类标记，没有标记就
+     * 什么都不发——宁可这一轮沉默，也不能把内心独白当话发出去。开之前
+     * 先确认模型确实会写这类标记（真机上常见于推理型模型）。
+     */
+    rescueFromThinking: false,
+    /**
      * 给不给她「翻聊天记录」的工具（`chat_look`）。
      *
      * 和 `memory.tools` 同一信任级别：都是只读，关掉不影响她说话。
@@ -1050,6 +1058,11 @@ export const DEFAULTS = {
       maxRepliesPerMin: 3,
       maxPerHour: 0,
       burstMax: 0,
+      /**
+       * 突发上限的观察窗口（秒）。以前写死 120 秒，现在可调；默认仍是 120，
+       * 所以升级前后判据完全一样。只有 `burstMax > 0` 时才用得上。
+       */
+      burstWindowSec: 120,
       quietStartHour: 0,
       quietEndHour: 0,
       /**
@@ -1099,6 +1112,33 @@ export const DEFAULTS = {
     briefMaxItems: 20,
     /** 按群覆写：{ [chatId]: { … } }。空 = 所有群都用同一套全局设置 */
     overrides: {},
+    /**
+     * ta 感兴趣的话题（一行一个词）。群里最近聊到这些词时更容易插话；
+     * 空 = 不看话题（默认），`minRelevance` 也就不会生效。
+     */
+    interests: [],
+    /**
+     * 话题相关度门槛 0–1：最近几条群消息算出来的相关度低于它就不插话。
+     * 0 = 不看话题、纯按概率（默认）。**词表是空的时候这个门槛不生效**，
+     * 否则用户只调门槛没填词，群里会整片沉默。
+     */
+    minRelevance: 0,
+    /**
+     * 群冷清时不插话：最近 `activeWindowSec` 秒内群消息少于这么多条就不插。
+     * 0 = 不判（默认）。刚启动 / 新群没有记录时**放行**，不把「不知道」当「冷清」。
+     */
+    minRecentMessages: 0,
+    /** 「群冷清」的观察窗口（秒），只在 minRecentMessages > 0 时用 */
+    activeWindowSec: 300,
+    /** 没单独设过的群怎么接话：chat 正常接、observe 只旁听、off 不接。默认 chat = 升级前行为 */
+    responseDefault: 'chat',
+    /** 按群响应模式：{ [chatId]: 'chat'|'observe'|'off' }，空 = 全部跟 responseDefault */
+    responseModes: {},
+    /**
+     * 不回应的人（按 openid，不按 QQ 号；官方事件只给 openid）。
+     * 默认关，关着时完全不进判定。
+     */
+    memberFilter: { enabled: false, rules: [] },
   },
   /**
    * 频道（`guild` 文字子频道 / `dm` 频道私信）。
@@ -1695,6 +1735,90 @@ function sleepSync(ms) {
   } catch { /* 环境不支持就当场不睡，最多多试两次 */ }
 }
 
+/** 群响应模式只有这三档；未知值一律回 chat，避免手改配置把群聊弄哑。 */
+const GROUP_RESPONSE_MODES = new Set(['chat', 'observe', 'off']);
+
+/**
+ * 群聊扩展配置的读盘/写盘归一化。
+ *
+ * 为什么不能只靠 pruneTo：它只裁键、不裁值，也不限制开放字典的长度。
+ * `responseModes` 和 `memberFilter.rules` 都是用户可编辑的开放结构，必须在
+ * 进出磁盘时夹紧，否则手写一个 10 万条的数组也能落盘、还能拖慢每条消息的判定。
+ */
+function normalizeChatGroup(group) {
+  if (!group || typeof group !== 'object' || Array.isArray(group)) return;
+  group.responseDefault = GROUP_RESPONSE_MODES.has(group.responseDefault)
+    ? group.responseDefault
+    : 'chat';
+
+  const modes = {};
+  if (group.responseModes && typeof group.responseModes === 'object' && !Array.isArray(group.responseModes)) {
+    for (const [chatId, mode] of Object.entries(group.responseModes)) {
+      const id = String(chatId ?? '').trim();
+      if (!id || id.length > 128 || typeof mode !== 'string' || !GROUP_RESPONSE_MODES.has(mode)) continue;
+      modes[id] = mode;
+      if (Object.keys(modes).length >= 500) break;
+    }
+  }
+  group.responseModes = modes;
+
+  const src = group.memberFilter && typeof group.memberFilter === 'object' && !Array.isArray(group.memberFilter)
+    ? group.memberFilter
+    : {};
+  const rules = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(src.rules) ? src.rules : []) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    /** 官方只给 openid，不承诺 QQ 号；长度按 openid 的常见范围夹紧，不做数字校验 */
+    const openid = String(raw.openid ?? '').trim();
+    if (!openid || openid.length > 128 || seen.has(openid)) continue;
+    const scope = raw.scope === 'groups' ? 'groups' : 'all';
+    const groups = [];
+    if (Array.isArray(raw.groups)) {
+      for (const value of raw.groups) {
+        const chatId = String(value ?? '').trim();
+        if (!chatId || chatId.length > 128 || groups.includes(chatId)) continue;
+        groups.push(chatId);
+        if (groups.length >= 100) break;
+      }
+    }
+    /** 指定群却一个群都没选，这条规则永远不会命中，不如不落盘 */
+    if (scope === 'groups' && !groups.length) continue;
+    seen.add(openid);
+    rules.push({
+      openid,
+      scope,
+      groups,
+      note: String(raw.note ?? '').trim().slice(0, 40),
+    });
+    if (rules.length >= 100) break;
+  }
+  group.memberFilter = { enabled: src.enabled === true, rules };
+
+  /**
+   * 话题与群活跃度。三条都默认关，读坏值一律退回「不生效」而不是退回
+   * 一个可能把群弄哑的值——这类判据的默认值只能是「放行」。
+   */
+  const words = [];
+  const seenWord = new Set();
+  for (const raw of Array.isArray(group.interests) ? group.interests : []) {
+    const word = String(raw ?? '').trim().slice(0, 24);
+    if (!word || seenWord.has(word)) continue;
+    seenWord.add(word);
+    words.push(word);
+    if (words.length >= 50) break;
+  }
+  group.interests = words;
+  const clamp = (value, min, max, fallback) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, n));
+  };
+  group.minRelevance = clamp(group.minRelevance, 0, 1, 0);
+  group.minRecentMessages = Math.round(clamp(group.minRecentMessages, 0, 50, 0));
+  group.activeWindowSec = Math.round(clamp(group.activeWindowSec, 30, 3600, 300));
+}
+
 export function loadConfig() {
   /**
    * 读配置要重试。
@@ -1732,6 +1856,7 @@ export function loadConfig() {
   migrateRetentionMode(saved);
   migrateChannel(saved);
   const cfg = upgradeOldDefaults(merge(structuredClone(DEFAULTS), saved));
+  normalizeChatGroup(cfg.group);
   /**
    * 小闹钟/追问四键的**读盘兜底**（对齐 aurabot core/config.js:738-740）。
    * pruneTo 只裁键不裁值：没有这层，config.json 里写 reminderLimit=100 就真允许
@@ -1900,6 +2025,7 @@ export function saveConfig(next) {
   const safeNext = restoreMaskedSecrets(next, readRawConfig() || {});
   const merged = merge(structuredClone(DEFAULTS), safeNext);
   const cfg = coerceSecrets(pruneTo(DEFAULTS, merged));
+  normalizeChatGroup(cfg.group);
   writeFileSync(FILE(), JSON.stringify(cfg, null, 2), 'utf8');
   /**
    * 权限收紧：这份文件里有 `roostHost.token`、`server.token`、几个 apiKey。

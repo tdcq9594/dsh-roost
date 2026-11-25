@@ -109,6 +109,7 @@ const CANNED = {
   '/closing': { ok: true, items: [] },
   '/chats': { ok: true, chats: [] },
   '/stickers': { ok: true, dir: '/x', items: [], chars: 0 },
+  '/group/decisions': { ok: true, items: [] },
   // 必须带 config 字段：loadConfig 读的是 r.config，缺了会 setConfig(undefined)，下一轮又拉
   '/config': { ok: true, config: { server: {}, persona: { current: 'default' } } },
 };
@@ -233,6 +234,27 @@ test('加载 effect：会话页只拉一轮，不会自激', async () => {
 
   assert.ok(renders <= 2, `会话页渲染了 ${renders} 次（>2 说明 effect 在自激）`);
   assert.equal(count(c, '/roost/api/chats'), 1, '/chats 只该拉一次');
+});
+
+test('加载 effect：群聊策略页同时拉配置、群列表与最近判定，各自只拉一次', async () => {
+  const s = session();
+  const { renders, calls: c } = await s.visit('groupchat');
+
+  /**
+   * 群列表是单群页签下拉的唯一来源：不预拉时下拉永远显示「还没有群会话」，
+   * 用户会以为机器人没进过群。
+   */
+  assert.equal(count(c, '/roost/api/config'), 1, '配置只该拉一次');
+  assert.equal(count(c, '/roost/api/chats'), 1, '群列表只该拉一次');
+
+  /**
+   * 「最近判定」页签的数据来自 `/group/decisions`。以前它挂在 `GroupChatTab`
+   * 内部 effect 上，这套夹具跑不到组件内部，只能退化成源码正则断言。
+   * 预拉提到 `RoostPage` 之后这里是真断言：请求没发出去就是 0。
+   */
+  assert.equal(count(c, '/roost/api/group/decisions'), 1, '最近判定只该拉一次');
+
+  assert.ok(renders <= 8, `群聊页渲染了 ${renders} 次（>8 说明 effect 在自激）`);
 });
 
 test('加载 effect：人格页也只拉一轮', async () => {

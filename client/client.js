@@ -1190,6 +1190,17 @@ window.__ModuleLoader__.load({
 .roost-g-log-row span:last-child{flex:1 1 160px;min-width:0;word-break:break-all}
 .roost-g-ov{margin-top:8px;border-top:1px solid var(--line-soft);padding-top:8px;
   display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:11.5px}
+/* 群聊页顶部快捷卡 / 页签 / 单群三态控件（2026-11-25） */
+.roost-quick{margin:18px 0 0;padding:14px 16px 16px;border:1px solid var(--line-soft);
+  border-radius:var(--radius-card);background:var(--roost-card-fill,var(--card-fill));
+  box-shadow:var(--shadow-card)}
+.roost-quick-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.roost-quick-h b{font-size:13px}
+.roost-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:16px 0 0}
+.roost-g-modes{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.roost-g-time{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.roost-g-time-pair{display:inline-flex;gap:6px;align-items:center}
+.roost-g-people-groups{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 @container (max-width:520px){
   .roost-g-row{flex-direction:column;align-items:stretch;gap:6px}
   .roost-g-ctl{max-width:100%;justify-content:flex-start}
@@ -11950,7 +11961,7 @@ window.__ModuleLoader__.load({
             '默认按档位。这里只配例外——**没有列出来的群，一律走上面的默认**。'),
           /** A2：同一份「按群」设置两个入口，把「谁管哪一半」和跳转写清楚 */
           h('div', { className: 'roost-note' },
-            '这半页只管「谁能用」（跟随默认 / 只能聊天）。接话频率、静默时段、插话概率这类细调在「群聊策略 → 按群覆写」，两边改的是同一份配置。',
+            '这半页只管「谁能用」（跟随默认 / 只能聊天）。接话频率、静默时段、插话概率这类细调在「群聊策略 → 单个群」，两边改的是同一份配置。',
             h('button', {
               type: 'button', className: 'roost-btn', style: { marginLeft: 8 },
               onClick: () => { if (setTab) setTab('groupchat') },
@@ -12226,20 +12237,47 @@ window.__ModuleLoader__.load({
       ['engaged', '聊开了就接下去'],
     ]
 
+    /** 群聊策略页的四个页签；默认「单个群」——日常最常调的就是某一个群 */
+    const PAGE_TABS = [
+      ['single', '单个群'],
+      ['all', '所有群默认'],
+      ['people', '不回应的人'],
+      ['decisions', '最近判定'],
+    ]
+
+    /** 群响应模式：只决定「让不让她说话」，与「接话方式」正交 */
+    const RESPONSE_MODE_OPTIONS = [
+      ['', '跟随默认'],
+      ['chat', '正常接话'],
+      ['observe', '只旁听'],
+      ['off', '不接话'],
+    ]
+    const RESPONSE_MODE_LABELS = { chat: '正常接话', observe: '只旁听', off: '不接话' }
+
     /**
      * 按群覆写能改的字段。键名必须和 `roost-decide.js` 的 OVERRIDE_KEYS 对齐——
      * 那边是白名单，这里写了个它不认的键，界面上改了也不会生效。
+     *
+     * 顺序与「所有群默认」那 8 张卡**同序**：
+     * 接话 → 活跃度 → 静默 → 刹车。从默认切到单群时眼睛不用重新找位置。
      */
     const OV_FIELDS = [
       { key: 'mode', label: '接话方式', kind: 'select', options: DECIDE_MODES },
+      { key: 'windowMin', label: '@ 之后接着聊多久', kind: 'num', min: 1, max: 60, unit: '分钟' },
+      { key: 'engagedMaxTurns', label: '连聊最多接几次', kind: 'num', min: 0, max: 30, unit: '次' },
       { key: 'interruptChance', label: '插话概率', kind: 'num', min: 0, max: 100, unit: '%' },
+      { key: 'minRelevance', label: '话题相关度门槛', kind: 'pct', min: 0, max: 100 },
+      { key: 'minRecentMessages', label: '群冷清：最少几条', kind: 'num', min: 0, max: 50, unit: '条' },
+      { key: 'activeWindowSec', label: '群冷清：观察窗口', kind: 'num', min: 30, max: 3600, unit: '秒' },
+      { key: 'quietStartHour', label: '安静从', kind: 'num', min: 0, max: 23, unit: '点' },
+      { key: 'quietEndHour', label: '安静到', kind: 'num', min: 0, max: 23, unit: '点' },
+      { key: 'silent', label: '这个群一键静默', kind: 'switch' },
       { key: 'cooldownSec', label: '两次至少隔', kind: 'num', min: 0, max: 600, unit: '秒' },
       { key: 'maxRepliesPerMin', label: '每分钟最多', kind: 'num', min: 0, max: 60, unit: '条' },
       { key: 'maxPerHour', label: '每小时最多', kind: 'num', min: 0, max: 500, unit: '条' },
-      { key: 'quietStartHour', label: '安静从', kind: 'num', min: 0, max: 23, unit: '点' },
-      { key: 'quietEndHour', label: '安静到', kind: 'num', min: 0, max: 23, unit: '点' },
+      { key: 'burstWindowSec', label: '突发窗口多长', kind: 'num', min: 30, max: 600, unit: '秒' },
+      { key: 'burstMax', label: '突发窗口内最多接几次', kind: 'num', min: 0, max: 50, unit: '次' },
       { key: 'shortAskMustReply', label: '短问必答', kind: 'switch' },
-      { key: 'silent', label: '这个群一键静默', kind: 'switch' },
     ]
 
     /**
@@ -12271,7 +12309,236 @@ window.__ModuleLoader__.load({
         unit ? h('span', { className: 'roost-g-unit' }, unit) : null)
     }
 
-    function GroupChatTab({ config, saveCfg, saveAll, toast, setTab, chats }) {
+    /**
+     * 单群「对外静默」三态。
+     *
+     * 后端的三个合法状态是：undefined（跟全局）/ ''（这个群关掉）/ HH:mm（自定义）。
+     * 不能用数值框：空串会被压成 0，永远表达不出「跟全局」和「显式关」的区别。
+     */
+    function OvGuestQuiet({ from, to, onSave, disabled }) {
+      const current = from === undefined && to === undefined
+        ? 'follow'
+        : (from === '' && to === '' ? 'off' : 'custom')
+      const [mode, setMode] = useState(current)
+      const [a, setA] = useState(from || '')
+      const [b, setB] = useState(to || '')
+      useEffect(() => {
+        setMode(current)
+        setA(from || '')
+        setB(to || '')
+      }, [from, to])
+
+      const pick = (next) => {
+        setMode(next)
+        if (next === 'follow') onSave(undefined, undefined)
+        else if (next === 'off') onSave('', '')
+        else if (a && b) onSave(a, b)
+      }
+      return h('span', { className: 'roost-g-time' },
+        h(Dropdown, {
+          className: 'roost-g-sel', value: mode, disabled: !!disabled,
+          onChange: (e) => pick(e.target.value),
+        }, [
+          h('option', { key: 'follow', value: 'follow' }, '跟全局'),
+          h('option', { key: 'off', value: 'off' }, '本群关掉'),
+          h('option', { key: 'custom', value: 'custom' }, '自定义'),
+        ]),
+        mode === 'custom' ? h('span', { className: 'roost-g-time-pair' },
+          h('input', {
+            type: 'time', className: 'roost-g-num', value: a, disabled: !!disabled,
+            onChange: (e) => setA(e.target.value),
+            onBlur: () => { if (a && b) onSave(a, b) },
+          }),
+          h('span', { className: 'roost-g-unit' }, '到'),
+          h('input', {
+            type: 'time', className: 'roost-g-num', value: b, disabled: !!disabled,
+            onChange: (e) => setB(e.target.value),
+            onBlur: () => { if (a && b) onSave(a, b) },
+          })) : null)
+    }
+
+    /**
+     * 单群忽略词。
+     *
+     * `undefined` = 跟全局；`[]` = 这个群明确不忽略任何词。两者必须分开，
+     * 不能像数值框那样「空 = 删键」，否则用户永远表达不出「本群不忽略」。
+     */
+    function OvIgnoreWords({ value, onSave, disabled, placeholder = '一行一个；留空 = 这个群不忽略任何词' }) {
+      const custom = value !== undefined
+      const [draft, setDraft] = useState(custom && Array.isArray(value) ? value.join('\n') : '')
+      useEffect(() => {
+        setDraft(custom && Array.isArray(value) ? value.join('\n') : '')
+      }, [value, custom])
+      if (!custom) {
+        return h('span', { className: 'roost-g-time' },
+          h('span', { className: 'roost-g-unit' }, '跟全局'),
+          h('button', {
+            type: 'button', className: 'roost-btn', disabled: !!disabled,
+            onClick: () => onSave([]),
+          }, '改为自定义'))
+      }
+      return h('span', { className: 'roost-g-time' },
+        h('textarea', {
+          className: 'roost-g-area', value: draft, disabled: !!disabled,
+          placeholder,
+          onChange: (e) => setDraft(e.target.value),
+          onBlur: () => onSave(draft.split('\n').map((s) => s.trim()).filter(Boolean)),
+        }),
+        h('button', {
+          type: 'button', className: 'roost-btn', disabled: !!disabled,
+          onClick: () => onSave(undefined),
+        }, '跟全局'))
+    }
+
+    /** 不回应的人：只按 openid；官方不提供 QQ 号 / 群成员列表。 */
+    function MemberFilterCard({ config, saveCfg, toast, chats }) {
+      const mf = config?.group?.memberFilter || { enabled: false, rules: [] }
+      const [enabled, setEnabled] = useState(mf.enabled === true)
+      const [rules, setRules] = useState(Array.isArray(mf.rules) ? mf.rules : [])
+      const [people, setPeople] = useState(null)
+      const [openid, setOpenid] = useState('')
+      const [note, setNote] = useState('')
+      const [scope, setScope] = useState('all')
+      const [groups, setGroups] = useState([])
+      const [busy, setBusy] = useState(false)
+      const groupChats = (chats || []).filter((c) => c.kind === 'group')
+
+      useEffect(() => {
+        let alive = true
+        get('/account/people').then((r) => {
+          if (alive) setPeople(r?.ok === false ? [] : (r?.users || []))
+        }).catch(() => { if (alive) setPeople([]) })
+        return () => { alive = false }
+      }, [])
+
+      const save = async (next) => {
+        if (!saveCfg) return
+        setBusy(true)
+        try {
+          const r = await saveCfg({ group: { memberFilter: next } })
+          if (r?.ok === false) {
+            /** 没写进去就把本地开关/规则退回盘上的值，别让面板显示一个假状态 */
+            setEnabled(mf.enabled === true)
+            setRules(Array.isArray(mf.rules) ? mf.rules : [])
+            toast(r.message || '没存上')
+          } else {
+            toast('已保存，下一句生效')
+          }
+        } finally { setBusy(false) }
+      }
+      const commit = (nextRules, nextEnabled = enabled) => {
+        setRules(nextRules)
+        setEnabled(nextEnabled)
+        save({ enabled: nextEnabled, rules: nextRules })
+      }
+      const add = () => {
+        const id = String(openid || '').trim()
+        if (!id) return toast('先选一个人，或粘贴 openid')
+        if (rules.some((r) => r.openid === id)) return toast('这个人已经在名单里')
+        if (scope === 'groups' && !groups.length) return toast('先选至少一个群')
+        commit([...rules, {
+          openid: id,
+          scope,
+          groups: scope === 'groups' ? [...groups] : [],
+          note: String(note || '').trim().slice(0, 40),
+        }])
+        setOpenid(''); setNote(''); setGroups([])
+      }
+      const nameOf = (id) => {
+        const u = (people || []).find((x) => x.openid === id)
+        return u?.name || ''
+      }
+      return h(GCard, {
+        n: '01', title: '不回应的人',
+        desc: '名单里的人 @、引用、喊名字都不起一轮。只按 openid 识别——官方接口不提供 QQ 号和群成员列表；主人永久豁免（主人 openid 还没识别时，先去私聊说一句再启用）。',
+      },
+        h(GRow, {
+          label: '开启名单', hint: '关着时完全不影响任何群；私聊永远不参与',
+        }, h(Switch, {
+          on: enabled, label: '开启名单', disabled: busy,
+          onToggle: (v) => commit(rules, v),
+        })),
+        h(GRow, { label: '从最近发言人里选', hint: '只列 Roost 见过的发言人；没出现的人可以直接在下面填 openid' },
+          h(Dropdown, {
+            className: 'roost-g-sel', value: openid, disabled: busy || !enabled,
+            onChange: (e) => setOpenid(e.target.value),
+          }, [
+            h('option', { key: '', value: '' }, people === null ? '读取中…' : '选一个人'),
+            ...(people || []).map((u) => h('option', {
+              key: u.openid, value: u.openid,
+            }, (u.name || u.openid.slice(0, 8)) + (u.chatId ? ` · ${String(u.chatId).slice(0, 6)}` : ''))),
+          ])),
+        h(GRow, { label: 'openid', hint: '官方事件里的发送者 openid；不是 QQ 号' },
+          h('input', {
+            className: 'roost-input', value: openid, disabled: busy || !enabled,
+            placeholder: '粘贴 openid', onChange: (e) => setOpenid(e.target.value),
+          })),
+        h(GRow, { label: '备注', hint: '只用于面板识别；不参与判定' },
+          h('input', {
+            className: 'roost-input', value: note, disabled: busy || !enabled,
+            placeholder: '比如：广告号', onChange: (e) => setNote(e.target.value),
+          })),
+        h(GRow, { label: '作用范围' },
+          h(Dropdown, {
+            className: 'roost-g-sel', value: scope, disabled: busy || !enabled,
+            onChange: (e) => setScope(e.target.value),
+          }, [
+            h('option', { key: 'all', value: 'all' }, '全部群'),
+            h('option', { key: 'groups', value: 'groups' }, '指定群'),
+          ]),
+          scope === 'groups' ? h('div', { className: 'roost-g-people-groups' },
+            groupChats.length ? groupChats.map((c) => h('button', {
+              key: c.chatId, type: 'button', className: 'roost-chip',
+              'data-on': groups.includes(c.chatId) ? '1' : '0',
+              disabled: busy || !enabled,
+              onClick: () => setGroups((prev) => (prev.includes(c.chatId)
+                ? prev.filter((x) => x !== c.chatId)
+                : [...prev, c.chatId])),
+            }, c.title || String(c.chatId).slice(0, 8))) : h('span', { className: 'roost-g-unit' }, '还没有群会话'))
+          : null),
+        h('div', { className: 'roost-g-ov' },
+          h('button', {
+            type: 'button', className: 'roost-btn', disabled: busy || !enabled,
+            onClick: add,
+          }, '加入名单')),
+        h('div', { className: 'roost-g-note' },
+          '名单只影响「回不回」，不抹掉历史记忆；要连话都不记，去记忆页把这个会话关掉。'),
+        rules.length
+          ? h('div', { className: 'roost-list roost-scroll' }, rules.map((r) => h('div', {
+              key: r.openid, className: 'roost-item',
+            },
+              h('span', { className: 't' },
+                nameOf(r.openid) || r.openid.slice(0, 10) + '…',
+                h('span', { className: 'd' }, ' · ' + (r.scope === 'groups' ? `指定 ${(r.groups || []).length} 个群` : '全部群')
+                  + (r.note ? ` · ${r.note}` : ''))),
+              h('button', {
+                type: 'button', className: 'roost-btn', disabled: busy || !enabled,
+                onClick: () => commit(rules.filter((x) => x.openid !== r.openid)),
+              }, '移出'))))
+          : h('div', { className: 'roost-empty' }, '名单还是空的。'),
+      )
+    }
+
+    /**
+     * 全局「忽略词」输入框 → 配置数组。
+     *
+     * **清空 = 恢复默认 `/`**，不是「什么都不忽略」：存 `[]` 会把默认的 `/` 一起关掉，
+     * 群里任何人发 `/xxx` 都会当普通聊天进模型。想要逐群「不忽略」用 09 的三态覆写。
+     * 抽成纯函数是为了能直接测——onBlur 里的分支在假 React 里跑不到。
+     */
+    function parseGlobalIgnoreWords(text) {
+      const arr = String(text ?? '').split('\n').map((s) => s.trim()).filter(Boolean)
+      return arr.length ? arr : ['/']
+    }
+
+    /**
+     * @param {object} props `decisions` / `loadDecisions` 由 `RoostPage` 预拉后传入。
+     *   给默认值是为了 `exports.GroupChatTab` 被单独渲染时不炸（点「刷新」会调它）。
+     */
+    function GroupChatTab({
+      config, saveCfg, saveAll, toast, setTab, chats,
+      decisions = null, loadDecisions = () => {},
+    }) {
       const decide = config?.roostHost?.decide || {}
       const merge = config?.roostHost?.merge || {}
       const chat = config?.chat || {}
@@ -12279,25 +12546,22 @@ window.__ModuleLoader__.load({
       /** 翻聊天记录 / 上下文补齐的那几个键（`recall.*`） */
       const recallCfg = config?.recall || {}
       const overrides = groupCfg.overrides || {}
+      const responseModes = groupCfg.responseModes || {}
+      const defaultResponse = groupCfg.responseDefault || 'chat'
       const groups = (chats || []).filter((c) => c.kind === 'group')
       const [busy, setBusy] = useState(false)
+      /** 页签只控制显示，状态不进 URL / localStorage */
+      const [pageTab, setPageTab] = useState('single')
       /** null = 跟随后端值；编辑中才有内容，失焦提交后清空 */
       const [wordsDraft, setWordsDraft] = useState(null)
+      /** 感兴趣的话题（一行一个），和忽略词同一套草稿语义 */
+      const [topicDraft, setTopicDraft] = useState(null)
       /** 按群覆写：选中的群 + 编辑草稿（null = 用盘上的值） */
       const [ovGid, setOvGid] = useState('')
       const [ovDraft, setOvDraft] = useState(null)
-      /** 决策链：null = 还没读到，[] = 读到了但还没有判定 */
-      const [decisions, setDecisions] = useState(null)
       /** 翻聊天记录设置弹窗：和「记忆星图」同范式，关掉就卸载 */
       const [lookOpen, setLookOpen] = useState(false)
 
-      const loadDecisions = useCallback(async () => {
-        try {
-          const r = await get('/group/decisions?limit=20')
-          setDecisions(Array.isArray(r?.items) ? r.items : [])
-        } catch { setDecisions([]) }
-      }, [])
-      useEffect(() => { loadDecisions() }, [loadDecisions])
       /** 换群要丢掉上一个群的草稿，别把它写到新群头上 */
       useEffect(() => { setOvDraft(null) }, [ovGid])
 
@@ -12308,11 +12572,13 @@ window.__ModuleLoader__.load({
       if (!config) return h('div', { className: 'roost-note' }, '读取配置…')
 
       const put = async (patch) => {
-        if (!saveCfg || busy) return
+        if (!saveCfg || busy) return undefined
         setBusy(true)
         try {
           const r = await saveCfg(patch)
           toast(r?.ok === false ? (r.message || '没存上') : '已保存，下一轮生效')
+          /** 返回结果给「存失败要留草稿」的输入框用（忽略词 / 话题） */
+          return r
         } finally { setBusy(false) }
       }
       const setDecide = (k, v) => put({ roostHost: { decide: { [k]: v } } })
@@ -12328,6 +12594,37 @@ window.__ModuleLoader__.load({
         else next[k] = v
         setOvDraft(next)
       }
+      /** 对外静默要同时改两个键，不能走单键 setOv */
+      const setOvPair = (from, to) => {
+        const next = { ...ov }
+        if (from === undefined) {
+          delete next.guestQuietFrom
+          delete next.guestQuietTo
+        } else {
+          next.guestQuietFrom = from
+          next.guestQuietTo = to
+        }
+        setOvDraft(next)
+      }
+      /**
+       * 群级字段（响应模式 / overrides）必须整份保存：局部 patch 删不掉键，
+       * 「跟随默认」「恢复全局」会静默失效。
+       */
+      const saveGroupFull = async (patch, okText) => {
+        if (!saveAll || !pickOv || busy) return null
+        setBusy(true)
+        try {
+          const r = await saveAll({ ...config, group: { ...groupCfg, ...patch } })
+          toast(r?.ok === false ? (r.message || '没存上') : okText)
+          return r
+        } finally { setBusy(false) }
+      }
+      const setResponseMode = async (value) => {
+        const next = { ...responseModes }
+        if (value) next[pickOv] = value
+        else delete next[pickOv]
+        await saveGroupFull({ responseModes: next }, '响应模式已保存')
+      }
       /**
        * 覆写的增改删必须走**整份保存**（saveAll / ?mode=full）。
        * 局部 patch 的 merge 只遍历提交的键，删掉一个键 / 一个群会静默失效：
@@ -12342,7 +12639,8 @@ window.__ModuleLoader__.load({
           else delete rest[pickOv]
           const r = await saveAll({ ...config, group: { ...groupCfg, overrides: rest } })
           toast(r?.ok === false ? (r.message || '没存上') : '已保存，下一句生效')
-          setOvDraft(null)
+          /** 409 时盘上已经变了，草稿必须留着让用户基于新配置重试 */
+          if (r?.httpStatus !== 409 && r?.ok !== false) setOvDraft(null)
         } finally { setBusy(false) }
       }
 
@@ -12359,6 +12657,47 @@ window.__ModuleLoader__.load({
         : (Array.isArray(decide.ignoreWords) ? decide.ignoreWords.join('\n') : '/')
 
       return h('div', null,
+        /**
+         * 顶部快捷卡：只放最常调的 4 项，改的是**所有群默认**。
+         * 单群有例外时仍按例外走，所以文案必须写清，别让人以为改这里就改了当前群。
+         */
+        h('div', { className: 'roost-quick' },
+          h('div', { className: 'roost-quick-h' },
+            h('b', null, '群聊通用设置'),
+            h('span', { className: 'roost-note' }, Object.keys(overrides).length
+              ? `所有群默认；${Object.keys(overrides).length} 个群有例外，仍按例外走`
+              : '所有群默认；单个群的例外见下面')),
+          h(GRow, { label: '接话方式', hint: '所有群默认；设了例外的群仍按例外' },
+            h(Dropdown, {
+              className: 'roost-g-sel', value: decide.mode || 'ai', disabled: busy,
+              onChange: (e) => setDecide('mode', e.target.value),
+            }, DECIDE_MODES.map(([v, t]) => h('option', { key: v, value: v }, t)))),
+          h(GRow, { label: '插话概率', hint: '100 = 句句都接；0 = 只在明确被叫到时才说话' },
+            h(GNum, {
+              value: groupCfg.interruptChance ?? 100, min: 0, max: 100, unit: '%', disabled: busy,
+              onSave: (v) => setGroup('interruptChance', v),
+            })),
+          h(GRow, { label: '连聊最多接几次', hint: '聊开了之后最多再连着接几次；默认 6' },
+            h(GNum, {
+              value: decide.engagedMaxTurns ?? 6, min: 0, max: 30, unit: '次', disabled: busy,
+              onSave: (v) => setDecide('engagedMaxTurns', v),
+            })),
+          h(GRow, { label: '一键静默', hint: '所有群默认；单群也可以在下面单独静默' },
+            h(Switch, {
+              on: decide.silent === true, label: '一键静默', disabled: busy,
+              onToggle: (v) => setDecide('silent', v),
+            }))),
+        h('div', { className: 'roost-tabs' },
+          PAGE_TABS.map(([id, label]) => h('button', {
+            key: id, type: 'button', className: 'roost-chip',
+            'data-on': pageTab === id ? '1' : '0',
+            onClick: () => setPageTab(id),
+          }, label))),
+        /**
+         * 页签只控制显示。编号与 DOM 都留着，避免把已有测试和深链全打乱；
+         * 隐藏用 display:none，控件不会进键盘 tab 顺序。
+         */
+        h('div', { style: { display: pageTab === 'all' ? '' : 'none' } },
         h(GCard, {
           n: '01', title: '什么时候接话',
           desc: '只对群里没被 @ 的消息生效。私聊、被 @、命令永远直接接——这些是明确在叫她，不该被策略拦。',
@@ -12368,6 +12707,21 @@ window.__ModuleLoader__.load({
               className: 'roost-g-sel', value: decide.mode || 'ai', disabled: busy,
               onChange: (e) => setDecide('mode', e.target.value),
             }, DECIDE_MODES.map(([v, t]) => h('option', { key: v, value: v }, t)))),
+          /**
+           * 群响应模式：「让不让她说话」这一层，和上面的「接话方式」（怎么判断）
+           * 正交。放在这里而不是 02 插话概率：它管的是**要不要开口**，
+           * 概率只在「正常接话」模式下才有意义。
+           */
+          h(GRow, {
+            label: '群响应模式默认',
+            hint: '没单独设过的群按这个来；设了例外的群在 09 里单独改',
+          },
+            h(Dropdown, {
+              className: 'roost-g-sel', value: defaultResponse, disabled: busy,
+              onChange: (e) => setGroup('responseDefault', e.target.value),
+            }, RESPONSE_MODE_OPTIONS.filter(([v]) => v).map(([v, t]) => h('option', {
+              key: v, value: v,
+            }, t)))),
           h(GRow, { label: '@ 之后接着聊多久', hint: '只在「@ 之后接着聊一阵」模式下有用；窗口只由真 @ 打开，命令不算' },
             h(GNum, { value: decide.windowMin ?? 3, min: 1, max: 60, unit: '分钟', disabled: busy,
               onSave: (v) => setDecide('windowMin', v) })),
@@ -12377,75 +12731,86 @@ window.__ModuleLoader__.load({
         ),
 
         /**
-         * 02：翻聊天记录。参数有 8 个，平铺会把这一页撑长，而且它们
-         * 「设一次就不动」——收进弹窗，入口只留一行摘要。
-         *
-         * 排在第二位（2026-11-25 主人要求）：它决定她「看到什么」，
-         * 是接话方式之外最该先设的一项；原来排在第 09 位，要滚到底才看得见。
+         * 02：插话概率。它决定她「在群里有多活跃」，是接话方式之外最常调的一项，
+         * 所以紧跟 01；群聊摘要回几条顺带放这里（只在主人私聊里用，改动频率很低）。
          */
+
         h(GCard, {
-          n: '02', title: '翻聊天记录',
-          desc: '她能不能翻历史消息、一次翻几条、一轮最多翻几次，以及被叫到时自动补几句上下文。这些只影响「看到什么」，不改变她说话的风格。',
+          n: '02', title: '插话概率',
+          desc: '只管「群里没人明确叫她」的普通一句：她有多大概率主动接。被 @、私聊、命令、喊「在吗」、已经聊开了，都不掷骰子。',
+        },
+          h(GRow, { label: '插话概率', hint: '100 = 句句都接（升级前的行为）；0 = 只在明确被叫到时才说话' },
+            h(GNum, {
+              value: groupCfg.interruptChance ?? 100, min: 0, max: 100, unit: '%', disabled: busy,
+              onSave: (v) => setGroup('interruptChance', v),
+            })),
+          h(GRow, { label: '群聊摘要回几条', hint: '主人在私聊里问「某群刚聊了什么」时最多带回几条时间线；只读，不记任何东西' },
+            h(GNum, {
+              value: groupCfg.briefMaxItems ?? 20, min: 1, max: 50, unit: '条', disabled: busy,
+              onSave: (v) => setGroup('briefMaxItems', v),
+            })),
+          h('div', { className: 'roost-g-note' },
+            '群聊摘要只在主人私聊里可用，且只能查群——群里的回复所有人都看得见；别人的私聊任何情况下都不查。'),
+        ),
+
+        h(GCard, {
+          n: '03', title: '话题与群活跃度',
+          desc: '两道「主动插话」的闸：群里没在聊、或者聊的事和她关系不大，就先不说话。'
+            + '被 @、私聊、命令、连聊都不受这两道闸限制——那是明确在叫她。',
         },
           h(GRow, {
-            label: '聊天记录与上下文',
-            hint: `每次 ${chat.lookLimit ?? 5} 条 · `
-              + `${Number(chat.lookMaxCalls) > 0 ? `一轮最多 ${chat.lookMaxCalls} 次` : '一轮不限次数'} · `
-              + `${Number(recallCfg.recentLimit ?? 8) > 0 ? `自动补 ${recallCfg.recentLimit ?? 8} 条 / ${recallCfg.recentMax ?? 1800} 字` : '不自动补上下文'}`,
+            label: 'ta 感兴趣的话题',
+            hint: '群里最近聊到这些词时更容易插话；一行一个，空着 = 不看话题',
           },
-            h('button', {
-              type: 'button', className: 'roost-btn', onClick: () => setLookOpen(true),
-            }, '打开设置'),
-          ),
-        ),
-
-        h(GCard, {
-          n: '03', title: '连发合并',
-          desc: '人常常一口气发好几句。等她说完再一起回，而不是一句一回，省调用也少刷屏。她正忙时来的消息会攒着，等这一轮结束合在一起回，不会逐条刷「还在想」。',
-        },
-          h(GRow, { label: '私聊停顿多久算说完', hint: '从最后一条消息算起；太短会把一句话劈成两半' },
-            h(GNum, { value: merge.waitSec ?? 1.5, min: 0.5, max: 10, step: 0.5, unit: '秒', disabled: busy,
-              onSave: (v) => setMerge('waitSec', v) })),
-          h(GRow, { label: '私聊最多等多久', hint: '对方一直在发，从第一条算也最多等这么久' },
-            h(GNum, { value: merge.maxSec ?? 6, min: 2, max: 30, unit: '秒', disabled: busy,
-              onSave: (v) => setMerge('maxSec', v) })),
-          h(GRow, { label: '群里停顿多久算一段', hint: '群里你一句我一句说得慢，多等一会儿攒齐再回；她正忙时新消息也先攒着' },
-            h(GNum, { value: merge.groupWaitSec ?? 5, min: 1, max: 20, unit: '秒', disabled: busy,
-              onSave: (v) => setMerge('groupWaitSec', v) })),
-          h(GRow, { label: '群里最多等多久', hint: '从这一段第一条算，一直有人发也最多等这么久' },
-            h(GNum, { value: merge.groupMaxSec ?? 15, min: 3, max: 60, unit: '秒', disabled: busy,
-              onSave: (v) => setMerge('groupMaxSec', v) })),
-        ),
-
-        h(GCard, {
-          n: '04', title: '安全刹车',
-          desc: '只防失控（比如和别的机器人聊起来停不下）。被 @、引用她、喊名字不算主动接话，不会被刹车拦；平时碰不到。填 0 = 不限。',
-          right: h(Switch, {
-            on: decide.silent === true, label: '一键静默', disabled: busy,
-            onToggle: (v) => setDecide('silent', v),
-          }),
-        },
-          h(GRow, { label: '两次接话至少隔多久', hint: '冷却期里的消息攒着，不丢；0 = 不冷却' },
-            h(GNum, { value: decide.cooldownSec ?? 20, min: 0, max: 600, unit: '秒', disabled: busy,
-              onSave: (v) => setDecide('cooldownSec', v) })),
-          h(GRow, { label: '每分钟最多接几条', hint: '0 = 不限；默认 3' },
-            h(GNum, { value: decide.maxRepliesPerMin ?? 3, min: 0, max: 60, unit: '条', disabled: busy,
-              onSave: (v) => setDecide('maxRepliesPerMin', v) })),
-          h(GRow, { label: '每小时最多接几条', hint: '0 = 不限（默认）' },
-            h(GNum, { value: decide.maxPerHour ?? 0, min: 0, max: 500, unit: '条', disabled: busy,
-              onSave: (v) => setDecide('maxPerHour', v) })),
-          h(GRow, { label: '两分钟内最多接几次', hint: '突发上限，0 = 不限（默认）' },
-            h(GNum, { value: decide.burstMax ?? 0, min: 0, max: 50, unit: '次', disabled: busy,
-              onSave: (v) => setDecide('burstMax', v) })),
-          h(GRow, { label: '短问必答', hint: '「在吗」「人呢」这类短问，刹车也不拦' },
-            h(Switch, {
-              on: decide.shortAskMustReply === true, label: '短问必答', disabled: busy,
-              onToggle: (v) => setDecide('shortAskMustReply', v),
+            h('textarea', {
+              className: 'roost-g-area',
+              value: topicDraft !== null
+                ? topicDraft
+                : (Array.isArray(groupCfg.interests) ? groupCfg.interests.join('\n') : ''),
+              disabled: busy,
+              placeholder: '白米饭\n游戏\n追剧',
+              onChange: (e) => setTopicDraft(e.target.value),
+              onBlur: async () => {
+                if (topicDraft === null) return
+                const arr = topicDraft.split('\n').map((s) => s.trim()).filter(Boolean)
+                /** 和忽略词一样：没存上就留着草稿，别让用户的输入凭空消失 */
+                const r = await setGroup('interests', arr)
+                if (r?.ok === false) return
+                setTopicDraft(null)
+              },
             })),
+          h(GRow, {
+            label: '话题相关度门槛',
+            hint: '和这些话题关系不大的就不插话；0 = 不看话题、纯随机。词表空着时这个门槛不生效',
+          },
+            h(GNum, {
+              value: Math.round((Number(groupCfg.minRelevance) || 0) * 100),
+              min: 0, max: 100, step: 5, unit: '%', disabled: busy,
+              onSave: (v) => setGroup('minRelevance', v / 100),
+            })),
+          h(GRow, {
+            label: '群冷清时不插话',
+            hint: '最近这段时间里群消息少于这个数就不插；条数填 0 = 不判',
+          },
+            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+              h('span', { className: 'roost-g-unit' }, '最近'),
+              h(GNum, {
+                value: groupCfg.activeWindowSec ?? 300, min: 30, max: 3600, unit: '秒', disabled: busy,
+                onSave: (v) => setGroup('activeWindowSec', v),
+              }),
+              h('span', { className: 'roost-g-unit' }, '少于'),
+              h(GNum, {
+                value: groupCfg.minRecentMessages ?? 0, min: 0, max: 50, unit: '条', disabled: busy,
+                onSave: (v) => setGroup('minRecentMessages', v),
+              }),
+              h('span', { className: 'roost-g-unit' }, '就不插'))),
+          h('div', { className: 'roost-g-note' },
+            '话题相关度只做词表命中（每个词算 0.3，封顶 1），不做语义相似度——决策链里能直接写出命中了什么。'
+            + '刚重启时观察窗口还没攒满，会先放行一段时间，不会一启动就哑。'),
         ),
 
         h(GCard, {
-          n: '05', title: '静默时段与忽略词',
+          n: '04', title: '静默时段与忽略词',
           desc: '两条静默各管一头：「她别插话」是这段内她不主动接话、但被叫到还会回；'
             + '「对外静默」是这段内**连别人 @ 她也不起轮次**，只有主人叫得醒。忽略词是别的插件靠前缀干活的，别抢。',
         },
@@ -12473,26 +12838,115 @@ window.__ModuleLoader__.load({
                 type: 'time', className: 'roost-g-num', value: decide.guestQuietTo || '', disabled: busy,
                 onChange: (e) => setDecide('guestQuietTo', e.target.value),
               }))),
-          h(GRow, { label: '忽略词', hint: '一行一个；以这些词开头的消息不接，也不会触发一轮模型调用' },
+          h(GRow, { label: '忽略词', hint: '一行一个；以这些词开头的消息不接，也不会触发一轮模型调用。清空 = 恢复默认（以 / 开头的命令不接）' },
             h('textarea', {
               className: 'roost-g-area', value: words, disabled: busy,
               onChange: (e) => setWordsDraft(e.target.value),
-              onBlur: () => {
+              onBlur: async () => {
                 if (wordsDraft === null) return
-                const arr = wordsDraft.split('\n').map((s) => s.trim()).filter(Boolean)
+                const blank = !wordsDraft.trim()
+                const arr = parseGlobalIgnoreWords(wordsDraft)
+                /**
+                 * 清空 = 恢复默认 `/`，**不是**「什么都不忽略」。
+                 *
+                 * 存 `[]` 会把默认的 `/` 一起关掉：任何人发 `/xxx`（别的机器人的命令、
+                 * 群里的斜杠接龙）都会当普通聊天进模型，白白起一轮。想要逐群「不忽略」，
+                 * 用 09 里的单群覆写——它有三态，语义清楚。
+                 */
+                const r = await setDecide('ignoreWords', arr)
+                /** 没存上就把草稿留着：打了十个词、网络抖一下全丢是最难受的一类 */
+                if (r?.ok === false) return
                 setWordsDraft(null)
-                setDecide('ignoreWords', arr)
+                if (blank) toast('已恢复默认：以 / 开头的命令不接')
               },
             })),
         ),
 
         h(GCard, {
-          n: '06', title: '一轮与队列',
+          n: '05', title: '安全刹车',
+          desc: '只防失控（比如和别的机器人聊起来停不下）。被 @、引用她、喊名字不算主动接话，不会被刹车拦；平时碰不到。填 0 = 不限。',
+          right: h(Switch, {
+            on: decide.silent === true, label: '一键静默', disabled: busy,
+            onToggle: (v) => setDecide('silent', v),
+          }),
+        },
+          h(GRow, { label: '两次接话至少隔多久', hint: '冷却期里的消息攒着，不丢；0 = 不冷却' },
+            h(GNum, { value: decide.cooldownSec ?? 20, min: 0, max: 600, unit: '秒', disabled: busy,
+              onSave: (v) => setDecide('cooldownSec', v) })),
+          h(GRow, { label: '每分钟最多接几条', hint: '0 = 不限；默认 3' },
+            h(GNum, { value: decide.maxRepliesPerMin ?? 3, min: 0, max: 60, unit: '条', disabled: busy,
+              onSave: (v) => setDecide('maxRepliesPerMin', v) })),
+          h(GRow, { label: '每小时最多接几条', hint: '0 = 不限（默认）' },
+            h(GNum, { value: decide.maxPerHour ?? 0, min: 0, max: 500, unit: '条', disabled: busy,
+              onSave: (v) => setDecide('maxPerHour', v) })),
+          h(GRow, { label: '突发上限', hint: '这段时间内最多接几次；次数填 0 = 不限（默认）' },
+            h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+              h(GNum, { value: decide.burstWindowSec ?? 120, min: 30, max: 600, unit: '秒', disabled: busy,
+                onSave: (v) => setDecide('burstWindowSec', v) }),
+              h('span', { className: 'roost-g-unit' }, '内最多'),
+              h(GNum, { value: decide.burstMax ?? 0, min: 0, max: 50, unit: '次', disabled: busy,
+                onSave: (v) => setDecide('burstMax', v) }))),
+          h(GRow, { label: '短问必答', hint: '「在吗」「人呢」这类短问，刹车也不拦' },
+            h(Switch, {
+              on: decide.shortAskMustReply === true, label: '短问必答', disabled: busy,
+              onToggle: (v) => setDecide('shortAskMustReply', v),
+            })),
+        ),
+
+        h(GCard, {
+          n: '06', title: '连发合并',
+          desc: '人常常一口气发好几句。等她说完再一起回，而不是一句一回，省调用也少刷屏。她正忙时来的消息会攒着，等这一轮结束合在一起回，不会逐条刷「还在想」。',
+        },
+          h(GRow, { label: '私聊停顿多久算说完', hint: '从最后一条消息算起；太短会把一句话劈成两半' },
+            h(GNum, { value: merge.waitSec ?? 1.5, min: 0.5, max: 10, step: 0.5, unit: '秒', disabled: busy,
+              onSave: (v) => setMerge('waitSec', v) })),
+          h(GRow, { label: '私聊最多等多久', hint: '对方一直在发，从第一条算也最多等这么久' },
+            h(GNum, { value: merge.maxSec ?? 6, min: 2, max: 30, unit: '秒', disabled: busy,
+              onSave: (v) => setMerge('maxSec', v) })),
+          h(GRow, { label: '群里停顿多久算一段', hint: '群里你一句我一句说得慢，多等一会儿攒齐再回；她正忙时新消息也先攒着' },
+            h(GNum, { value: merge.groupWaitSec ?? 5, min: 1, max: 20, unit: '秒', disabled: busy,
+              onSave: (v) => setMerge('groupWaitSec', v) })),
+          h(GRow, { label: '群里最多等多久', hint: '从这一段第一条算，一直有人发也最多等这么久' },
+            h(GNum, { value: merge.groupMaxSec ?? 15, min: 3, max: 60, unit: '秒', disabled: busy,
+              onSave: (v) => setMerge('groupMaxSec', v) })),
+        ),
+
+        /**
+         * 07：翻聊天记录。参数有 8 个，平铺会把这一页撑长，而且它们
+         * 「设一次就不动」——收进弹窗，入口只留一行摘要。
+         * 按常用程度排在这里：它只影响「看到什么」，配一次就不再动。
+         */
+        h(GCard, {
+          n: '07', title: '翻聊天记录',
+          desc: '她能不能翻历史消息、一次翻几条、一轮最多翻几次，以及被叫到时自动补几句上下文。这些只影响「看到什么」，不改变她说话的风格。',
+        },
+          h(GRow, {
+            label: '聊天记录与上下文',
+            hint: `每次 ${chat.lookLimit ?? 5} 条 · `
+              + `${Number(chat.lookMaxCalls) > 0 ? `一轮最多 ${chat.lookMaxCalls} 次` : '一轮不限次数'} · `
+              + `${Number(recallCfg.recentLimit ?? 8) > 0 ? `自动补 ${recallCfg.recentLimit ?? 8} 条 / ${recallCfg.recentMax ?? 1800} 字` : '不自动补上下文'}`,
+          },
+            h('button', {
+              type: 'button', className: 'roost-btn', onClick: () => setLookOpen(true),
+            }, '打开设置'),
+          ),
+        ),
+
+        h(GCard, {
+          n: '08', title: '一轮与队列',
           desc: '模型或工具卡住时，超过一轮时限就强制放开，后面的消息正常开新一轮；不然会一直哑着。',
         },
           h(GRow, { label: '一轮最多等多久', hint: '从这一轮开始算；太短会打断正常的长回复' },
             h(GNum, { value: chat.turnTimeoutSec ?? 150, min: 10, max: 900, unit: '秒', disabled: busy,
               onSave: (v) => setChat('turnTimeoutSec', v) })),
+          h(GRow, {
+            label: '空正文时从思考里捞定稿',
+            hint: '整轮没吐正文、但思考里写了「定稿 / 最后 N 行」时，把那段发出去；没有这个标记就不发。默认关',
+          },
+            h(Switch, {
+              on: chat.rescueFromThinking === true, label: '空正文时从思考里捞定稿', disabled: busy,
+              onToggle: (v) => setChat('rescueFromThinking', v),
+            })),
           h('div', { className: 'roost-g-note' },
             '她正忙时来的消息会攒着，等这一轮结束合在一起回，不会逐条刷「还在想」。私聊忙时直接插话进当前轮。',
             h('button', {
@@ -12506,29 +12960,26 @@ window.__ModuleLoader__.load({
               onClick: () => setTab && setTab('logs'),
             }, '去排障页')),
         ),
-
-        h(GCard, {
-          n: '07', title: '插话概率',
-          desc: '只管「群里没人明确叫她」的普通一句：她有多大概率主动接。被 @、私聊、命令、喊「在吗」、已经聊开了，都不掷骰子。',
-        },
-          h(GRow, { label: '插话概率', hint: '100 = 句句都接（升级前的行为）；0 = 只在明确被叫到时才说话' },
-            h(GNum, {
-              value: groupCfg.interruptChance ?? 100, min: 0, max: 100, unit: '%', disabled: busy,
-              onSave: (v) => setGroup('interruptChance', v),
-            })),
-          h(GRow, { label: '群聊摘要回几条', hint: '主人在私聊里问「某群刚聊了什么」时最多带回几条时间线；只读，不记任何东西' },
-            h(GNum, {
-              value: groupCfg.briefMaxItems ?? 20, min: 1, max: 50, unit: '条', disabled: busy,
-              onSave: (v) => setGroup('briefMaxItems', v),
-            })),
-          h('div', { className: 'roost-g-note' },
-            '群聊摘要只在主人私聊里可用，且只能查群——群里的回复所有人都看得见；别人的私聊任何情况下都不查。'),
         ),
-
+        h('div', { style: { display: pageTab === 'single' ? '' : 'none' } },
         h(GCard, {
-          n: '08', title: '按群覆写',
-          desc: '某个群想单独设（这个群安静点、那个群只在被 @ 时回），在这里给它一份例外。留空 = 跟上面的全局设置；没列的群一律不受影响。',
+          n: '09', title: '按群覆写',
+          desc: '某个群想单独设（这个群安静点、那个群只在被 @ 时回），在这里给它一份例外。'
+            + '改完要点下面的「保存这个群的例外」才生效（响应模式除外，它点了就存）；'
+            + '留空 = 跟上面的全局设置；没列的群一律不受影响。',
         },
+          h(GRow, {
+            label: '这个群的响应模式',
+            hint: '只决定让不让她说话；「上面的接话方式」决定说话时怎么判断。当前：'
+              + RESPONSE_MODE_LABELS[responseModes[pickOv] || defaultResponse],
+          },
+            h('div', { className: 'roost-g-modes' },
+              RESPONSE_MODE_OPTIONS.map(([value, label]) => h('button', {
+                key: value || 'follow', type: 'button', className: 'roost-chip',
+                'data-on': (responseModes[pickOv] || '') === value ? '1' : '0',
+                disabled: busy || !pickOv,
+                onClick: () => setResponseMode(value),
+              }, label)))),
           /** A2：这半页管「她怎么接话」，「谁能用」在权限页；双向都有入口 */
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '这里管接话行为；「权限 → 分群例外」管谁能用（跟随默认 / 只能聊天），两边是同一份配置的两个入口。',
@@ -12548,13 +12999,25 @@ window.__ModuleLoader__.load({
               : h('span', { className: 'roost-g-unit' }, '还没有群会话')),
           ...OV_FIELDS.map((f) => h(GRow, {
             key: f.key, label: f.label,
-            hint: f.kind === 'select' ? '选「跟全局」= 不覆写这一项' : '留空 / 不改 = 跟全局',
+            hint: f.kind === 'select'
+              ? '选「跟全局」= 不覆写这一项'
+              : f.kind === 'pct'
+                ? '留空 / 不改 = 跟全局；0 = 不看话题'
+                : '留空 / 不改 = 跟全局',
           },
             f.kind === 'num'
               ? h(GOvNum, {
                   value: ov[f.key], min: f.min, max: f.max, unit: f.unit, disabled: busy,
                   onSave: (v) => setOv(f.key, v),
                 })
+              : f.kind === 'pct'
+                /** 面板用百分数、配置存 0–1；换算只在这一处做，别散到各处 */
+                ? h(GOvNum, {
+                    value: ov[f.key] === undefined || ov[f.key] === null
+                      ? undefined : Math.round(Number(ov[f.key]) * 100),
+                    min: f.min, max: f.max, unit: '%', disabled: busy,
+                    onSave: (v) => setOv(f.key, v === undefined ? undefined : Math.round(v) / 100),
+                  })
               : f.kind === 'select'
                 ? h(Dropdown, {
                     className: 'roost-g-sel', value: ov[f.key] || '', disabled: busy,
@@ -12567,6 +13030,30 @@ window.__ModuleLoader__.load({
                     on: ov[f.key] === true, label: f.label, disabled: busy,
                     onToggle: (v) => setOv(f.key, v ? true : undefined),
                   }))),
+          h(GRow, {
+            label: '感兴趣的话题（这个群）',
+            hint: '跟全局 = 不覆写；自定义留空 = 这个群不看话题（相关度门槛也就不生效）',
+          }, h(OvIgnoreWords, {
+            value: ov.interests,
+            disabled: busy,
+            placeholder: '一行一个；留空 = 这个群不看话题',
+            onSave: (v) => setOv('interests', v),
+          })),
+          h(GRow, {
+            label: '对外静默（这个群）',
+            hint: '跟全局 / 本群关掉 / 自定义；这段内别人 @ 也起不来轮次，主人豁免',
+          }, h(OvGuestQuiet, {
+            from: ov.guestQuietFrom, to: ov.guestQuietTo,
+            disabled: busy, onSave: setOvPair,
+          })),
+          h(GRow, {
+            label: '忽略词（这个群）',
+            hint: '跟全局 = 不覆写；自定义留空 = 这个群不忽略任何词',
+          }, h(OvIgnoreWords, {
+            value: ov.ignoreWords,
+            disabled: busy,
+            onSave: (v) => setOv('ignoreWords', v),
+          })),
           h('div', { className: 'roost-g-ov' },
             h('button', {
               type: 'button', className: 'roost-btn', disabled: busy || !pickOv,
@@ -12576,6 +13063,11 @@ window.__ModuleLoader__.load({
               type: 'button', className: 'roost-btn', disabled: busy || !pickOv,
               onClick: () => saveOverride({}),
             }, '恢复成全局'),
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: busy || !pickOv,
+              onClick: () => setResponseMode(''),
+            }, '响应模式恢复默认'),
+            h('span', { className: 'roost-g-unit' }, '「恢复成全局」只清 20 项覆写，不清响应模式'),
             h('span', { className: 'roost-g-unit' },
               Object.keys(ov).length ? `这个群已覆写 ${Object.keys(ov).length} 项` : '这个群目前跟全局一致'),
           ),
@@ -12586,9 +13078,11 @@ window.__ModuleLoader__.load({
               : '目前没有群设了例外，所有群都用上面的全局设置。'),
         ),
 
+        ),
+        h('div', { style: { display: pageTab === 'decisions' ? '' : 'none' } },
         h(GCard, {
-          n: '09', title: '刚才为什么回 / 不回',
-          desc: '每条消息进来都会过一遍上面的规则，这里按时间列出最近 20 条的判定和原因。和排障页日志是同一份 reason，只是排好了队；只在内存里，不落盘。',
+          n: '10', title: '刚才为什么回 / 不回',
+          desc: '每条消息进来都会过一遍上面的规则，这里按时间列出最近 20 条的判定和原因。和排障页日志是同一份 reason，只是排好了队；只在内存里，不落盘。「旁听」= 这个群设成只旁听，她照样读、照样记，只是不说话。',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadDecisions }, '刷新'),
         },
           h('div', { className: 'roost-g-log' },
@@ -12601,13 +13095,18 @@ window.__ModuleLoader__.load({
                   },
                     h('b', null, hhmmss(d.at)),
                     h('span', { className: 'roost-g-tag' }, d.kind === 'c2c' ? '私聊' : '群'),
-                    h('span', { className: 'roost-g-tag' }, d.go ? '接' : '不接'),
+                    /** 「旁听」单独一态：go 也是 false，但和「不接」不是一回事——她还在读、还记账 */
+                    h('span', { className: 'roost-g-tag' }, d.observe ? '旁听' : d.go ? '接' : '不接'),
                     h('span', null, d.reason || '（没写原因）'),
                     h('span', { style: { opacity: 0.72 } },
                       d.text ? '「' + d.text + '」' : chatName(d.chatId))))),
           h('div', { className: 'roost-g-note' },
             '看不到变化就点一下刷新；改了设置后，下一句消息才会按新规则判定。'),
         ),
+        ),
+        pageTab === 'people'
+          ? h(MemberFilterCard, { config, saveCfg, toast, chats })
+          : null,
 
         lookOpen
           ? h(PageModal, { title: '翻聊天记录', onClose: () => setLookOpen(false) },
@@ -13109,7 +13608,7 @@ window.__ModuleLoader__.load({
 
         h(Sec, { n: '02', title: '接话与节奏（全局）', right: h('button', {
           type: 'button', className: 'roost-btn',
-          onClick: () => { setTab('groupchat'); toast('已切到「群聊策略」，那边的 01–03 卡改的是同一份配置') },
+          onClick: () => { setTab('groupchat'); toast('已切到「群聊策略」，那边的接话 / 插话 / 刹车卡改的是同一份配置') },
         }, '去群聊策略改') },
           h('div', { className: 'roost-g-card' },
             h('p', { className: 'roost-g-desc' },
@@ -15564,9 +16063,13 @@ window.__ModuleLoader__.load({
         + '数值 0 和起止相同都表示关。接话策略、防吵、冷却都在这里设'],
       ['group', '群聊补充', 'interruptChance：群里没人明确叫她时的插话概率（100 = 句句都接，升级前的行为）；'
         + 'briefMaxItems：主人私聊问「某群刚聊了什么」回几条；'
-        + 'overrides：按群 openid 覆写，可改 mode / 冷却 / 每分钟 / 每小时上限 / 静默时段 / 插话概率等'
+        + 'responseDefault / responseModes：群响应模式（chat 正常接 / observe 只旁听 / off 不接），'
+        + 'responseModes 按群 openid 覆写；memberFilter：不回应名单（只按 openid，主人豁免）；'
+        + 'interests / minRelevance：感兴趣的话题词表与相关度门槛（0 = 不看话题）；'
+        + 'minRecentMessages / activeWindowSec：群冷清时不插话（条数 0 = 不判）；'
+        + 'overrides：按群 openid 覆写，可改 mode / 冷却 / 每分钟 / 每小时上限 / 静默时段 / 插话概率 / 话题门槛等'
         + '（白名单在 roost-decide.js 的 OVERRIDE_KEYS，空对象当开放字典）。'
-        + '日常在「群聊 → 群聊策略」06、07 两张卡里改'],
+        + '日常在「群聊 → 群聊策略」的「单个群 / 所有群默认」页签里改'],
       ['chat', '会话', '一轮最多等多久；上游 502/429 时的补重试（attempts 是「补几次」，budgetSec 是整轮总预算）'],
       ['workspace', '工作区', '机器人会话挂哪个工作区：dir 留空单开、__default__ 用默认'],
       ['server', '服务', '端口与密钥'],
@@ -23302,7 +23805,7 @@ window.__ModuleLoader__.load({
       ext: '扩展 已安装 插件',
       'ext-market': '市场 扩展市场 插件市场 安装',
       'ext-api': '接口 api 扩展接口 协议',
-      groupchat: '群聊 群聊策略 接话 连发 安全刹车',
+      groupchat: '群聊 群聊策略 接话 插话 话题 静默 连发 安全刹车 覆写 不回应 旁听 响应模式',
       groupadmin: '群管 禁言 审批 群信息 入群',
       'ch-home': '频道 频道总览 总开关 订阅 intents 额度 会话 审核',
       'ch-policy': '频道策略 会话粒度 子频道 接话 覆写 富媒体',
@@ -24005,6 +24508,14 @@ window.__ModuleLoader__.load({
       const [usageInfo, setUsageInfo] = useState(null)
       const [mind, setMind] = useState(null)
       const [chats, setChats] = useState(null)
+      /**
+       * 群聊页「最近判定」的数据。
+       *
+       * 放在这里而不是 `GroupChatTab` 内部：组件内 effect 测不到（夹具只渲染
+       * `RoostPage`，函数组件不会被递归展开），只能靠源码正则兜底——那种断言
+       * 「代码里还有这行」的测试拦不住「请求发出去了但没人渲染」。
+       */
+      const [decisions, setDecisions] = useState(null)
       /** 能力页：策略 + 本次观察到的变化 */
       const [caps, setCaps] = useState(null)
       /** 能力页：四个档位的试算结果（服务端 resolvePolicy 算的，前端只渲染） */
@@ -24136,6 +24647,13 @@ window.__ModuleLoader__.load({
         setChats(r.ok === false ? null : r.chats || [])
       }, [])
 
+      const loadDecisions = useCallback(async () => {
+        try {
+          const r = await get('/group/decisions?limit=20')
+          setDecisions(Array.isArray(r?.items) ? r.items : [])
+        } catch { setDecisions([]) }
+      }, [])
+
       /** 首屏 + 切页时按需拉，不一次性全打一遍 */
       useEffect(() => {
         loadStatus()
@@ -24204,7 +24722,13 @@ window.__ModuleLoader__.load({
          * 卡在这儿会连页签都切不动。
          */
         /** 群聊策略页整页读写 config，进来先拉一次；没拉到时页面只显示「读取配置…」 */
-        if (tab === 'groupchat' && !config) once('config', loadConfig)
+        if (tab === 'groupchat') {
+          if (!config) once('config', loadConfig)
+          /** 单群页签的群下拉来自 /chats；不预拉时永远只有「还没有群会话」 */
+          once('chats', loadChats)
+          /** 「最近判定」页签整页数据来自这里，进页就拉，别等用户点刷新 */
+          once('decisions', loadDecisions)
+        }
         if (tab === 'model' && !config) once('config', loadConfig)
         /**
          * 安全防护页整页读写 `config.security`。漏了这一步的后果不是「显示读不到」，
@@ -24247,7 +24771,7 @@ window.__ModuleLoader__.load({
          *
          * 需要读它们的地方用 `if (!her)` 这种判空即可——判空读的是当次渲染的闭包值，够用。
          */
-      }, [tab, loadMemory, loadHer, loadAwake, loadCtx, loadChats, loadConfig])
+      }, [tab, loadMemory, loadHer, loadAwake, loadCtx, loadChats, loadConfig, loadDecisions])
 
       /** 通用动作 runner：按钮点下去 → 跑接口 → 提示 → 刷新 */
       const run = useCallback(async (path, label, body) => {
@@ -24721,9 +25245,9 @@ window.__ModuleLoader__.load({
             : null,
           /** 「身份」：QQ 会话 ↔ DSH 会话的映射，现在有自己的页签，不再套一层「手动刷新」 */
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
-          /** 群聊策略：01–05 露已有参数，06–08 是 2.2b 的插话概率 / 按群覆写 / 决策链 */
+          /** 群聊策略：四个页签；默认页 01–08 按功能常用程度排，09 单群覆写、10 决策链 */
           tab === 'groupchat'
-            ? h(GroupChatTab, { config, saveCfg, saveAll, toast, setTab, chats })
+            ? h(GroupChatTab, { config, saveCfg, saveAll, toast, setTab, chats, decisions, loadDecisions })
             : null,
           /** 群管：禁言 / 踢人 / 入群审批。协议侧 group.* 是 message scope，装了就能用 */
           tab === 'groupadmin' ? h(GroupAdminTab, { chats, toast }) : null,
@@ -24960,6 +25484,10 @@ window.__ModuleLoader__.load({
     exports.SimTab = SimTab
     /** 群聊策略页：只露已有配置，测试直接渲染它，盯住「一个算法都没新增」 */
     exports.GroupChatTab = GroupChatTab
+    /** 忽略词输入 → 配置数组（清空 = 恢复默认 `/`），onBlur 分支太深，单独测 */
+    exports.parseGlobalIgnoreWords = parseGlobalIgnoreWords
+    /** 不回应名单独立页签，测试直接渲染它 */
+    exports.MemberFilterCard = MemberFilterCard
     /** 2.3：人物 / 备份与记忆页，测试直接渲染，盯住「并列入口，不是搬家」 */
     exports.PeopleTab = PeopleTab
     exports.BackupTab = BackupTab

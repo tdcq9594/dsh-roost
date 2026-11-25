@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { DEFAULTS, loadConfig, saveConfig } from '../src/config.js';
-import { createDecider, resolveGroupPolicy, OVERRIDE_KEYS } from '../src/roost-decide.js';
+import { createDecider, resolveGroupPolicy, OVERRIDE_KEYS, topicRelevance } from '../src/roost-decide.js';
 
 const group = (chatId = 'G', extra = {}) => ({
   chat: { kind: 'group', chatId }, content: '随便聊点什么', ...extra,
@@ -32,6 +32,41 @@ test('DEFAULTS.group：默认值等于升级前行为，overrides 是开放字�
   assert.ok(OVERRIDE_KEYS.includes('interruptChance'));
   assert.ok(OVERRIDE_KEYS.includes('maxPerHour'));
   assert.ok(OVERRIDE_KEYS.includes('quietStartHour'));
+});
+
+test('群聊扩展配置：默认 chat / 名单关闭，非法值与超长规则被夹紧', () => {
+  const d = mkdtempSync(join(tmpdir(), 'roost-group-extra-'));
+  process.env.DSH_ROOST_DATA = d;
+  const raw = {
+    responseDefault: 'bogus',
+    responseModes: {
+      G1: 'observe',
+      G2: 'off',
+      G3: 'not-a-mode',
+      '': 'off',
+    },
+    memberFilter: {
+      enabled: 'true',
+      rules: [
+        { openid: 'U1', scope: 'all', groups: [] },
+        { openid: 'U1', scope: 'groups', groups: ['G1'] },
+        { openid: 'U2', scope: 'groups', groups: [] },
+        { openid: '', scope: 'all', groups: [] },
+        { openid: 'U3', scope: 'weird', groups: [] },
+        { openid: 'U4', scope: 'groups', groups: ['G1', 'G1', 'G2'] },
+      ],
+    },
+  };
+  const cfg = saveConfig({ group: raw });
+  assert.equal(cfg.group.responseDefault, 'chat', '非法默认值回落到升级前行为');
+  assert.deepEqual(cfg.group.responseModes, { G1: 'observe', G2: 'off' });
+  assert.equal(cfg.group.memberFilter.enabled, false, '字符串 true 不算开启');
+  assert.deepEqual(cfg.group.memberFilter.rules, [
+    { openid: 'U1', scope: 'all', groups: [], note: '' },
+    { openid: 'U3', scope: 'all', groups: [], note: '' },
+    { openid: 'U4', scope: 'groups', groups: ['G1', 'G2'], note: '' },
+  ]);
+  assert.equal(loadConfig().group.responseDefault, 'chat');
 });
 
 test('按群覆写存得下去：pruneTo 不会把开放字典裁掉，也不会污染别处', () => {
@@ -252,4 +287,212 @@ test('总开关：没配这个键 / 显式 true 时行为完全不变', () => {
   const g = mk({}); 
   /** 群里那条走的是「模式收敛」，这里只确认没被总开关提前掐掉 */
   assert.doesNotMatch(g.check(group()).reason, /总开关/);
+});
+
+/* ------------------------------------------------------------------ */
+/* 群响应模式 / 不回应名单（2026-11-25）                                 */
+/* ------------------------------------------------------------------ */
+
+const mkOwners = (cfg, owners = []) => createDecider({
+  cfg: () => cfg,
+  ownerIds: () => owners,
+  random: () => 0.42,
+  now: () => 1_700_000_000_000,
+});
+
+test('响应模式：缺省 chat 完全走老逻辑，off 不接，observe 只旁听', () => {
+  const base = { roostHost: { decide: {} } };
+  assert.equal(mk(base).check(group()).go, true, '没配新模式时仍按老逻辑接');
+  assert.equal(mk({ ...base, group: { responseDefault: 'off' } }).check(group()).go, false);
+  const observe = mk({ ...base, group: { responseDefault: 'observe' } }).check(group());
+  assert.equal(observe.go, false);
+  assert.equal(observe.observe, true);
+  assert.match(observe.reason, /旁听/);
+  /** 私聊永远不受群响应模式影响 */
+  assert.equal(mk({ ...base, group: { responseDefault: 'off' } }).check(c2c).go, true);
+});
+
+test('响应模式：逐群覆写优先于默认，非法值回落到默认', () => {
+  const cfg = {
+    roostHost: { decide: {} },
+    group: {
+      responseDefault: 'chat',
+      responseModes: { G_OFF: 'off', G_OBS: 'observe', G_BAD: 'bogus' },
+    },
+  };
+  assert.equal(mk(cfg).check(group('G_OFF')).go, false);
+  assert.equal(mk(cfg).check(group('G_OBS')).observe, true);
+  assert.equal(mk(cfg).check(group('G_BAD')).go, true, '非法值不能把群弄哑');
+  assert.equal(mk(cfg).check(group('G_OTHER')).go, true);
+});
+
+test('不回应名单：按 openid 命中、按群范围生效，私聊不受影响', () => {
+  const cfg = {
+    roostHost: { decide: {} },
+    group: {
+      memberFilter: {
+        enabled: true,
+        rules: [
+          { openid: 'U_ALL', scope: 'all', groups: [] },
+          { openid: 'U_G2', scope: 'groups', groups: ['G2'] },
+        ],
+      },
+    },
+  };
+  const d = mk(cfg);
+  assert.equal(d.check(group('G1', { sender: { openid: 'U_ALL' } })).go, false);
+  assert.match(d.check(group('G1', { sender: { openid: 'U_ALL' } })).reason, /不回应名单/);
+  assert.equal(d.check(group('G1', { sender: { openid: 'U_G2' } })).go, true, '指定群之外不拦');
+  assert.equal(d.check(group('G2', { sender: { openid: 'U_G2' } })).go, false);
+  assert.equal(d.check({ ...c2c, sender: { openid: 'U_ALL' } }).go, true, '私聊不参与名单');
+});
+
+test('不回应名单：主人 openid / ownerAliases 永久豁免；关闭时完全不生效', () => {
+  const cfg = {
+    roostHost: { decide: {} },
+    group: {
+      memberFilter: { enabled: true, rules: [{ openid: 'OWNER', scope: 'all', groups: [] }] },
+    },
+  };
+  assert.equal(mkOwners(cfg, ['OWNER', 'OWNER_ALIAS']).check(group('G', { sender: { openid: 'OWNER' } })).go, true);
+  assert.equal(mkOwners(cfg, ['OWNER_ALIAS']).check(group('G', { sender: { openid: 'OWNER_ALIAS' } })).go, true);
+  assert.equal(mkOwners(cfg, []).check(group('G', { sender: { openid: 'OWNER' } })).go, false);
+
+  const off = {
+    ...cfg,
+    group: { ...cfg.group, memberFilter: { ...cfg.group.memberFilter, enabled: false } },
+  };
+  assert.equal(mk(off).check(group('G', { sender: { openid: 'OWNER' } })).go, true);
+});
+
+test('决策链：旁听写入 observe 标记，不接的其它理由不带', () => {
+  const d = mk({ roostHost: { decide: {} }, group: { responseDefault: 'observe' } });
+  d.check(group());
+  const row = d.recent(1)[0];
+  assert.equal(row.go, false);
+  assert.equal(row.observe, true);
+  assert.match(row.reason, /旁听/);
+});
+
+/* ------------------------------------------------------------------ */
+/* 话题与群活跃度（2.2c）                                              */
+/* ------------------------------------------------------------------ */
+
+test('话题与群活跃度：默认全关，等于升级前行为', () => {
+  assert.deepEqual(DEFAULTS.group.interests, []);
+  assert.equal(DEFAULTS.group.minRelevance, 0);
+  assert.equal(DEFAULTS.group.minRecentMessages, 0);
+  assert.equal(DEFAULTS.group.activeWindowSec, 300);
+  assert.equal(DEFAULTS.roostHost.decide.burstWindowSec, 120, '默认仍是写死那版的 120 秒');
+  for (const k of ['interests', 'minRelevance', 'minRecentMessages', 'activeWindowSec', 'burstWindowSec']) {
+    assert.ok(OVERRIDE_KEYS.includes(k), `${k} 要能按群覆写`);
+  }
+  const withDefaults = { roostHost: { decide: {} }, group: { ...DEFAULTS.group } };
+  assert.equal(mk(withDefaults).check(group()).go, true, '带着默认值也必须句句都接');
+});
+
+test('话题相关度：命中过闸、不命中被拦；@ 和私聊不受影响', () => {
+  const cfg = {
+    roostHost: { decide: {} },
+    group: { interests: ['游戏', '追剧'], minRelevance: 0.25 },
+  };
+  assert.equal(mk(cfg).check(group('G', { content: '今晚一起打游戏' })).go, true);
+  const miss = mk(cfg).check(group('G', { content: '今天股票又跌了' }));
+  assert.equal(miss.go, false);
+  assert.match(miss.reason, /话题和她关系不大/);
+  assert.equal(mk(cfg).check(group('G', { content: '今天股票又跌了', mentioned: true })).go, true, '@ 仍然必回');
+  assert.equal(mk(cfg).check({ ...c2c, content: '今天股票又跌了' }).go, true, '私聊不受影响');
+});
+
+test('话题相关度：只调门槛不填词表时不生效（防整片沉默）', () => {
+  const cfg = { roostHost: { decide: {} }, group: { interests: [], minRelevance: 0.8 } };
+  assert.equal(mk(cfg).check(group('G', { content: '随便说点什么' })).go, true);
+});
+
+test('话题相关度：过闸后把概率放大；prob=100 仍然不筛', () => {
+  /** 无话题闸：概率 50、random 0.6 → 不中 */
+  const plain = { roostHost: { decide: {} }, group: { interruptChance: 50 } };
+  assert.equal(mk(plain, () => 0.6).check(group('G', { content: '打游戏' })).go, false);
+  /** 有话题闸：相关度 0.30 → 50 × 2.2 = 110 → 夹到 100 → 必中 */
+  const gated = {
+    roostHost: { decide: {} },
+    group: { interruptChance: 50, interests: ['游戏'], minRelevance: 0.25 },
+  };
+  assert.equal(mk(gated, () => 0.6).check(group('G', { content: '打游戏' })).go, true);
+});
+
+test('群冷清：窗口攒满后条数不够就不插，够数就放行', () => {
+  let t = 1_700_000_000_000;
+  const cfg = { roostHost: { decide: {} }, group: { minRecentMessages: 3, activeWindowSec: 60 } };
+  const d = createDecider({ cfg: () => cfg, now: () => t, random: () => 0.42 });
+  /** 第一条：观察窗口还没走满 → 放行（刚启动不能哑） */
+  assert.equal(d.check(group('G', { content: '一' })).go, true);
+  t += 61_000;
+  const cold = d.check(group('G', { content: '二' }));
+  assert.equal(cold.go, false);
+  assert.match(cold.reason, /群里没在聊/);
+  /** 再补两条，窗口内到 3 条 → 放行 */
+  t += 5_000;
+  assert.equal(d.check(group('G', { content: '三' })).go, false);
+  t += 5_000;
+  assert.equal(d.check(group('G', { content: '四' })).go, true);
+});
+
+test('突发窗口：burstWindowSec 可调，默认仍是 120 秒', () => {
+  const run = (windowSec) => {
+    let t = 1_700_000_000_000;
+    const decide = windowSec ? { burstMax: 1, burstWindowSec: windowSec } : { burstMax: 1 };
+    const cfg = { roostHost: { decide } };
+    const d = createDecider({ cfg: () => cfg, now: () => t, random: () => 0.42 });
+    assert.equal(d.check(group('G')).go, true);
+    t += 90_000;
+    return d.check(group('G'));
+  };
+  const byDefault = run(0);
+  assert.equal(byDefault.go, false);
+  assert.match(byDefault.reason, /120 秒内最多接 1 次/);
+  assert.equal(run(60).go, true, '窗口缩到 60 秒后，90 秒前那次不再计入');
+});
+
+test('按群覆写：话题与活跃度只影响那一个群', () => {
+  const cfg = {
+    roostHost: { decide: {} },
+    group: {
+      interests: [],
+      minRelevance: 0,
+      overrides: { G_TALK: { interests: ['游戏'], minRelevance: 0.25 } },
+    },
+  };
+  assert.equal(mk(cfg).check(group('G_TALK', { content: '打游戏' })).go, true);
+  assert.equal(mk(cfg).check(group('G_TALK', { content: '股票' })).go, false, '该群启用了话题闸');
+  assert.equal(mk(cfg).check(group('G_OTHER', { content: '股票' })).go, true, '别的群不受影响');
+});
+
+test('topicRelevance：子串命中每个词算 0.3，封顶 1，空词表为 0', () => {
+  assert.equal(topicRelevance([], ['游戏']), 0);
+  assert.equal(topicRelevance(['打游戏'], []), 0);
+  assert.equal(topicRelevance(['打游戏'], ['游戏']), 0.3);
+  assert.ok(Math.abs(topicRelevance(['打游戏 追剧 吃饭'], ['游戏', '追剧', '吃饭']) - 0.9) < 1e-9, '三个词 = 0.9');
+  assert.equal(topicRelevance(['游戏 游戏 游戏'], ['游戏']), 0.3, '同一个词命中多次只算一次');
+  assert.equal(topicRelevance(['a b c d'], ['a', 'b', 'c', 'd']), 1, '四个词封顶到 1');
+});
+
+test('配置归一化：词表去重限长、门槛夹紧、坏值退回不生效', () => {
+  const d = mkdtempSync(join(tmpdir(), 'roost-group-topic-'));
+  process.env.DSH_ROOST_DATA = d;
+  const interests = ['游戏', ' 游戏 ', '', '追剧'];
+  for (let i = 0; i < 60; i += 1) interests.push(`词${i}`);
+  const cfg = saveConfig({
+    group: {
+      interests,
+      minRelevance: 5,
+      minRecentMessages: -3,
+      activeWindowSec: 5,
+    },
+  });
+  assert.deepEqual(cfg.group.interests.slice(0, 2), ['游戏', '追剧'], '去空、去重、保序');
+  assert.equal(cfg.group.interests.length, 50, '词表最多 50 条');
+  assert.equal(cfg.group.minRelevance, 1, '门槛夹到 0–1');
+  assert.equal(cfg.group.minRecentMessages, 0, '负数退回 0 = 不判');
+  assert.equal(cfg.group.activeWindowSec, 30, '窗口最小 30 秒');
 });

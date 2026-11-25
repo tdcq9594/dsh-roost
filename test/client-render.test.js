@@ -1246,14 +1246,18 @@ test('拆分后每页分节编号都从 01 起、连续', () => {
     config: { roostHost: { decide: { mode: 'ai' }, merge: {} }, chat: {}, group: {} },
     saveCfg: () => {}, toast: () => {}, setTab: () => {},
   }), rt))
-  assert.deepEqual(gs.map((s) => s.n), ['01', '02', '03', '04', '05', '06', '07', '08', '09'], '群聊策略页编号应 01–09 连续')
+  assert.deepEqual(gs.map((s) => s.n), ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10'], '群聊策略页编号应 01–10 连续')
   /**
-   * 「翻聊天记录」必须排第二（2026-11-25 主人要求）。
-   *
-   * 它决定她「看到什么」，是接话方式之外最该先设的一项；原来在第 09 位，
-   * 要滚到页底才找得到。锁住位置，免得以后往中间插卡时被挤回去。
+   * 顺序按**功能常用程度**排（2026-11-26 主人要求），不是按配置分类：
+   *   01 什么时候接话 → 02 插话概率 → 03 话题与群活跃度 → 04 静默时段与忽略词
+   *   → 05 安全刹车 → 06 连发合并 → 07 翻聊天记录 → 08 一轮与队列
+   * 前 4 张是日常会反复调的；后 4 张配一次就不动。锁住顺序，
+   * 免得以后往中间插卡时又被挤回「按分类排」。
    */
-  assert.equal(gs[1].title, '翻聊天记录', '翻聊天记录应是第 02 张卡')
+  assert.deepEqual(gs.slice(0, 8).map((s) => s.title), [
+    '什么时候接话', '插话概率', '话题与群活跃度', '静默时段与忽略词',
+    '安全刹车', '连发合并', '翻聊天记录', '一轮与队列',
+  ], '「所有群默认」的 8 张卡应按常用程度排')
 })
 
 test('群聊策略页：翻聊天记录那张卡的入口真能打开设置弹窗', () => {
@@ -1338,9 +1342,12 @@ test('群聊策略页：露的是已有配置键，配色走本项目令牌', ()
   const txt = textOf(tree)
   for (const must of [
     '什么时候接话', '连发合并', '安全刹车', '静默时段与忽略词', '一轮与队列',
-    '接话方式', '最多等多久', '两分钟内最多接几次', '去权限页', '去排障页',
+    '接话方式', '最多等多久', '突发上限', '去权限页', '去排障页',
     /** 2.2b 三张卡；2.2a 的十项一个都不能被顺手删掉 */
     '插话概率', '按群覆写', '刚才为什么回', '保存这个群的例外', '恢复成全局',
+    /** 2.2c 话题与群活跃度 */
+    '话题与群活跃度', 'ta 感兴趣的话题', '话题相关度门槛', '群冷清时不插话',
+    '空正文时从思考里捞定稿',
   ]) {
     assert.ok(txt.includes(must), `群聊策略页缺少「${must}」`)
   }
@@ -1403,6 +1410,145 @@ test('群聊页 v2：按群覆写 / 决策链都在，配色仍走本项目令�
   const classTxt = cls.join(' ')
   assert.ok(classTxt.includes('roost-g-card') && classTxt.includes('roost-g-ov'))
   assert.ok(!classTxt.includes('ab-card') && !classTxt.includes('ab-sea'), '不该残留 aurabot 的配色/类名')
+})
+
+test('群聊页四页签：通用设置、响应模式、15 键与恢复默认都在', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const cfg = {
+    roostHost: { decide: { mode: 'ai' }, merge: {}, chat: {} },
+    chat: {},
+    group: {
+      interruptChance: 60,
+      briefMaxItems: 12,
+      responseDefault: 'chat',
+      responseModes: { G_1: 'observe' },
+      overrides: {
+        G_1: { guestQuietFrom: '', guestQuietTo: '', ignoreWords: [] },
+      },
+      memberFilter: {
+        enabled: true,
+        rules: [{ openid: 'U_1', scope: 'all', groups: [], note: '广告号' }],
+      },
+    },
+  }
+  const tree = expand(mod.GroupChatTab({
+    config: cfg,
+    chats: [{ chatId: 'G_1', kind: 'group', title: 'QQ · 斗罗内测' }],
+    saveCfg: () => {}, saveAll: () => {}, toast: () => {}, setTab: () => {},
+  }), rt)
+  const txt = textOf(tree)
+  for (const must of [
+    '群聊通用设置', '所有群默认', '单个群', '不回应的人', '最近判定',
+    '这个群的响应模式', '跟随默认', '正常接话', '只旁听', '不接话',
+    '对外静默（这个群）', '忽略词（这个群）', '响应模式恢复默认',
+    '感兴趣的话题（这个群）',
+    '「恢复成全局」只清 20 项覆写，不清响应模式',
+  ]) {
+    assert.ok(txt.includes(must), `群聊页缺少「${must}」`)
+  }
+  assert.ok(txt.includes('突发窗口内最多接几次'), '逐群覆写里的 burstMax 要露出来')
+  assert.ok(txt.includes('突发窗口多长'), '逐群覆写里的 burstWindowSec 要露出来')
+  assert.ok(txt.includes('群冷清：最少几条'), '逐群覆写里的 minRecentMessages 要露出来')
+  assert.ok(txt.includes('连聊最多接几次'), '15 键里的 engagedMaxTurns 要露出来')
+})
+
+test('群聊页：群响应模式归 01 卡（和「说不说话」同层），最近判定的旁听单独一态', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const cfg = {
+    roostHost: { decide: { mode: 'ai' }, merge: {}, chat: {} },
+    chat: {},
+    group: { responseDefault: 'observe' },
+  }
+  rt.reset()
+  const tree = expand(mod.GroupChatTab({
+    config: cfg, chats: [],
+    decisions: [
+      { at: 1750000000000, kind: 'group', go: false, observe: true, reason: '这个群只旁听', chatId: 'G_1' },
+      { at: 1750000001000, kind: 'group', go: false, reason: '没被叫到', chatId: 'G_1' },
+    ],
+    loadDecisions: () => {},
+    saveCfg: () => {}, saveAll: () => {}, toast: () => {}, setTab: () => {},
+  }), rt)
+
+  /** 按卡片根节点取正文：`roost-sec` 是卡根，`roost-sec-h/-n/-t/-in/-acts/-fold` 是子块 */
+  const cardText = (title) => {
+    let out = ''
+    ;(function walk(n) {
+      if (out || !n || typeof n !== 'object') return
+      if (Array.isArray(n)) return n.forEach(walk)
+      /** 按空格分词比对，别用 includes：`roost-sec-h` 也含 `roost-sec` */
+      const isCard = String(n.props?.className || '').split(/\s+/).includes('roost-sec')
+      if (isCard) {
+        const t = textOf(n)
+        if (t.includes(title)) { out = t; return }
+      }
+      walk(n.props?.children)
+    })(tree)
+    return out
+  }
+
+  assert.ok(cardText('什么时候接话').includes('群响应模式默认'),
+    '响应模式管的是「让不让她说话」，该在 01')
+  assert.ok(!cardText('插话概率').includes('群响应模式默认'),
+    '02 只讲概率，概率在「不接话」模式下根本没意义，别混在一起')
+
+  /** 「旁听」必须单独成态：`go` 同样是 false，但和「不接」不是一回事 */
+  const tags = []
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (String(n.props?.className || '').includes('roost-g-tag')) tags.push(textOf(n))
+    walk(n.props?.children)
+  })(tree)
+  assert.ok(tags.includes('旁听'), '旁听要显示「旁听」，不能混成「不接」')
+  assert.ok(tags.includes('不接'), '真正的「不接」还要在')
+})
+
+test('忽略词清空 = 恢复默认 /，不是「什么都不忽略」', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+
+  assert.deepEqual(mod.parseGlobalIgnoreWords(''), ['/'], '清空要落回默认 /')
+  assert.deepEqual(mod.parseGlobalIgnoreWords('  \n\n '), ['/'], '只剩空白也算清空')
+  assert.deepEqual(mod.parseGlobalIgnoreWords('签到\n\n广告 '), ['签到', '广告'], '正常输入照旧解析')
+  assert.deepEqual(mod.parseGlobalIgnoreWords('/'), ['/'], '只填 / 就是默认值本身')
+
+  /**
+   * 存 `[]` 会把默认的 `/` 一起关掉：群里有人发 `/xxx` 就会当普通聊天进模型。
+   * 提示文案必须把这个语义说清，否则用户以为「清空 = 谁都不忽略」。
+   */
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes('清空 = 恢复默认'), '全局忽略词的提示要写明「清空 = 恢复默认」')
+})
+
+test('不回应的人：只按 openid、主人豁免、规则能显示和移出', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const cfg = {
+    group: {
+      memberFilter: {
+        enabled: true,
+        rules: [{ openid: 'U_1', scope: 'groups', groups: ['G_1'], note: '广告号' }],
+      },
+    },
+  }
+  const tree = expand(mod.MemberFilterCard({
+    config: cfg,
+    chats: [{ chatId: 'G_1', kind: 'group', title: 'QQ · 斗罗内测' }],
+    saveCfg: () => {}, toast: () => {},
+  }), rt)
+  const txt = textOf(tree)
+  for (const must of ['不回应的人', '只按 openid', '主人永久豁免', '广告号', '指定 1 个群', '移出']) {
+    assert.ok(txt.includes(must), `不回应的人缺少「${must}」`)
+  }
+})
+
+test('群聊页接线：进页预拉 /chats，409 不清草稿', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("once('chats', loadChats)"), '进群聊页要预拉会话列表')
+  assert.ok(src.includes('r?.httpStatus !== 409'), '409 时不能清掉覆写草稿')
 })
 
 test('后端缺口已接入：市场 / 模型 / 召回 / 心情历史 / 危险操作', () => {
