@@ -142,3 +142,16 @@ test('面板视图：pass/gate/无源三种状态各有中文文案', () => {
   const noSource = outboundPanelView({ tier: 'gate', managed: false, stats: {}, ledger: {}, sources: {} });
   assert.match(noSource.headline, /没有可用的策略源/);
 });
+
+test('P0 回归：c2c 素材 target 为空时仍要进治理（不是 out-of-scope）', () => {
+  const p = createOutboundPolicy({
+    getConfig: () => ({ ownerQQ: OWNER, outboundPolicy: { tier: 'gate' } }),
+    dataDir: mkdtempSync(join(tmpdir(), 'ob4-')), now: () => 1000,
+  });
+  /** 宿主会把空 target 补成 private:<owner>——这里验证补全后完整版确实识别为治理范围 */
+  const raw = p.admit({ to: '', moduleId: 'bili' });
+  assert.equal(raw.reason, 'out-of-scope', '空 target 裸传确实不治理（所以宿主必须补）');
+  const fixed = p.admit({ to: `private:${OWNER}`, moduleId: 'bili' });
+  assert.notEqual(fixed.reason, 'out-of-scope', '补全后必须进治理');
+  p.dropModule?.('bili');
+});

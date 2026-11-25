@@ -3175,14 +3175,26 @@ export function apply(ctx) {
      * 出站策略（P3 完整移植）：扩展私聊主人前先 admit；
      * 真实投递结果回来后 commit/uncertain 结算预占，不结算下次会一直 busy。
      */
-    outboundCheck: (ask) => outboundPolicy.admit({
-      to: ask.to,
-      moduleId: ask.sourceModule || '',
-      origin: ask.sourceModule ? 'module' : 'engine',
-      itemId: ask.itemId || null,
-      at: ask.at || Date.now(),
-    }),
+    outboundCheck: (ask) => {
+      /**
+       * 治理范围（P0 修复）：扩展提交的 c2c 素材 target 常常是空的（「发私聊」但没指定人），
+       * 直接 admit 会因为 to='' 被判 out-of-scope——门闸全失效但面板显示纳管中。
+       * 这里补成完整版认识的 `private:<ownerQQ>` 形状，才真进治理。
+       */
+      const owner = String(outboundConfig().ownerQQ || '').trim();
+      let to = String(ask?.to || '').trim();
+      if (!to && owner) to = `private:${owner}`;
+      return outboundPolicy.admit({
+        to,
+        moduleId: ask?.sourceModule || '',
+        origin: ask?.sourceModule ? 'module' : 'engine',
+        itemId: ask?.itemId || null,
+        at: ask?.at || Date.now(),
+      });
+    },
     outboundCommit: (reserveId, opts) => outboundPolicy.commit(reserveId, opts),
+    /** 试运行没真发：释放预占，别白扣额度 */
+    outboundRelease: (reserveId, opts) => outboundPolicy.release(reserveId, opts),
     log: (m) => log.info(m),
   });
 

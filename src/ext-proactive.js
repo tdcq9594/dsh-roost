@@ -348,8 +348,9 @@ export function createProactiveDispatcher({
   resolveRecentGroup = null,
   /** 出站策略（P3）：判「扩展能不能私聊主人」。不给 = 不过这一层（兼容旧调用） */
   outboundCheck = null,
-  /** 出站预占结算：发了 commit，没发 release（接口同完整移植的 outboundPolicy.commit） */
+  /** 出站预占结算：发了 commit，没发 release（接口同完整移植的 outboundPolicy.commit/release） */
   outboundCommit = null,
+  outboundRelease = null,
   now = () => Date.now(), log = () => {}, notify = true,
 } = {}) {
   let askedAt = 0;
@@ -438,12 +439,14 @@ export function createProactiveDispatcher({
         };
       }
     }
-    /** 真实出口结算：发了记 committed，没发释放预占——不结算下次会一直 busy */
-    const settleOutbound = (outcome) => {
-      if (outboundVerdict?.reserveId && typeof outboundCommit === 'function') {
-        try { outboundCommit(outboundVerdict.reserveId, { outcome }); }
-        catch (e) { log(`出站策略结算失败：${e?.message || e}`); }
-      }
+    /** 真实出口结算：发了记 committed，没发/试运行释放预占——不结算下次会一直 busy */
+    const settleOutbound = (outcome, release = false) => {
+      if (!outboundVerdict?.reserveId) return;
+      try {
+        const fn = release ? outboundRelease : outboundCommit;
+        if (typeof fn !== 'function') return;
+        fn(outboundVerdict.reserveId, release ? { reason: 'dry-run' } : { outcome });
+      } catch (e) { log(`出站策略结算失败：${e?.message || e}`); }
     };
 
     const item = queue.take(head.id);
@@ -510,6 +513,8 @@ export function createProactiveDispatcher({
        * 代价是下一轮定时 drain 还会再预览一次——这是 §5.4「试运行期间定时
        * 行为照跑」的一部分，换来的是「关掉试运行接着发」。
        */
+      /** 试运行没真发：释放出站预占，别让额度白扣一次 */
+      settleOutbound('failed', true);
       queue.settle(item.id, 'dry', '试运行，没真发（素材留着）');
       return {
         ok: true, sent: 0, id: item.id, text: r.text, dryRun: true,
