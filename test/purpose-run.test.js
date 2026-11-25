@@ -20,6 +20,8 @@ function mkRunner(dir, over = {}) {
     deliver: over.deliver || (async () => 'sent'),
     lastOwnerAt: over.lastOwnerAt || (() => now - 3 * 3600_000),
     busy: over.busy || (() => false),
+    followUps: over.followUps || (() => []),
+    onFollowUpAsked: over.onFollowUpAsked || null,
     now: () => now,
     log: {},
   });
@@ -36,6 +38,37 @@ test('runOnce：素材太少直接跳过，不调模型不投递', async () => {
     const out = await r.runOnce({ reason: '定时' });
     assert.equal(out.outcome, 'skipped-materials');
     assert.equal(called, 0, '素材不够不该花模型钱');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runOnce：到期跟进候选进真实选择层，不再只停在预览里', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-fu-'));
+  try {
+    let prompt = '';
+    let followCalls = 0;
+    const r = mkRunner(dir, {
+      /** 没有常规素材也必须能因为到期的事主动开口 */
+      items: [],
+      followUps: () => {
+        followCalls += 1;
+        return [{
+          id: 'follow:g1:上次说的那件事',
+          kind: 'memory-follow-up',
+          text: '上次说的那件事怎么样了？',
+          sourceId: 'follow:g1:上次说的那件事',
+          weight: 2,
+        }];
+      },
+      runTurn: async (p) => {
+        prompt = p;
+        return '上次那件事后来怎么样了？\n【目的】关心\n【状态】完成\n【需求】关心';
+      },
+      deliver: async () => 'sent',
+    });
+    const out = await r.runOnce();
+    assert.equal(followCalls, 1, '宿主注入的候选必须真的被读到');
+    assert.notEqual(out.outcome, 'skipped-materials', '有到期跟进就不该因素材少跳过');
+    assert.match(prompt, /上次说的那件事怎么样了/, '候选要进提示词，模型才知道问什么');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -206,5 +239,51 @@ test('防重入（P1）：同一 friend 并发 runOnce 只跑一次', async () =
     release();
     await p1;
     assert.equal(calls, 1, '模型只该跑一次');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+/**
+ * 跟进真的发出去之后必须回写一次 tries（发版复查发现）。
+ *
+ * 不回写的话这条事实永远到期、永远被选择层硬胜出，每分钟重提一次，
+ * 每次都烧一个模型回合；静默/失败则不该记——那说明还没真问到。
+ */
+test('runOnce：跟进发出去才回写 tries，静默不写', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-fu2-'));
+  try {
+    /** 宿主映射出来的形状：text 是给模型看的问句，fact / factChatId 是回写用的原文与会话 */
+    const seed = {
+      id: 'follow:g1:上次说的面试', kind: 'memory-follow-up',
+      chatId: 'g1', text: '上次说的面试怎么样了？', question: '上次说的面试怎么样了？',
+      fact: '面试', factChatId: 'g1',
+      sourceId: 'follow:g1:上次说的面试', weight: 2,
+    };
+    const asked = [];
+    const sent = mkRunner(dir, {
+      items: [],
+      followUps: () => [seed],
+      onFollowUpAsked: (fd) => { asked.push(fd); },
+      runTurn: async () => '面试那事后来怎么样啦？\n【目的】关心\n【状态】完成\n【需求】关心',
+      deliver: async () => 'sent',
+    });
+    const out = await sent.runOnce();
+    assert.equal(out.outcome, 'sent');
+    assert.deepEqual(asked, [{ chatId: 'g1', fact: '面试' }], '回写要用事实原文 + 会话，不是给模型看的问句');
+
+    /** 同一条事实在静默轮里不算问到，不能回写（否则 tries 被白白烧掉） */
+    const dir2 = mkdtempSync(join(tmpdir(), 'pr-fu3-'));
+    try {
+      const asked2 = [];
+      const silent = mkRunner(dir2, {
+        items: [],
+        followUps: () => [seed],
+        onFollowUpAsked: (fd) => { asked2.push(fd); },
+        runTurn: async () => '',
+        deliver: async () => 'sent',
+      });
+      const out2 = await silent.runOnce();
+      assert.equal(out2.outcome, 'silent');
+      assert.equal(asked2.length, 0, '没真发出去不记账');
+    } finally { rmSync(dir2, { recursive: true, force: true }); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

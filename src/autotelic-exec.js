@@ -172,7 +172,8 @@ export function createExecV5({
       finalStatus: outcome.status,
       ownerSide: ticket.ownerSide === true,
       ownerResponse: outcome.ownerResponse || '',
-      evidence: outcome.evidence || '',
+      evidence: Array.isArray(outcome.evidence) ? outcome.evidence
+        : (Array.isArray(ticket.evidence) ? ticket.evidence : []),
       lesson: outcome.lesson || '',
     }
     try {

@@ -15,6 +15,9 @@ import { patchForFeature, readFeatures } from '../src/features.js';
 test('配置形状：三个旧设置项都在 DEFAULTS 里（否则面板保存会被 pruneTo 裁掉）', () => {
   assert.equal(DEFAULTS.roostHost.decide.engagedMaxTurns, 6, '旧 ai-chat policyEngagedMaxTurns 默认 6');
   assert.equal(DEFAULTS.roostHost.maxImages, 4, '旧 ai-chat maxImages 默认 4');
+  /** 超大图压缩也必须在 DEFAULTS 里，否则面板关掉之后保存会被裁回默认开 */
+  assert.equal(DEFAULTS.roostHost.compressImages, true, '超过上限先压缩，默认开');
+  assert.equal(DEFAULTS.roostHost.imageMaxMB, 5, '单张读图上限默认 5MB，面板可改');
   assert.equal(DEFAULTS.roostHost.markdown, true, '旧 ai-chat markdown 默认开');
   assert.equal(DEFAULTS.roostHost.merge.waitSec, 1.5);
   assert.equal(DEFAULTS.roostHost.merge.maxSec, 6);

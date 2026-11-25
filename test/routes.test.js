@@ -185,7 +185,11 @@ async function bootHost(cfgPatch = {}, seed = {}) {
   const host = await import(url.href);
   const off = host.apply(fakeCtx);
 
-  const call = async (path, { method = 'GET', body = null, headers = {} } = {}) => {
+  /**
+   * `preBody` 模拟「宿主自己的 webServer 已经把请求体读完并挂到 req.body 上」。
+   * 我们不知道 DSH 到底预不预读，所以两种形态都要测（见文件末尾 /autotelic/* 那组）。
+   */
+  const call = async (path, { method = 'GET', body = null, headers = {}, preBody = undefined } = {}) => {
     const handler = routes.get('/roost/api' + path.split('?')[0]);
     if (!handler) throw new Error(`路由没注册：${path}`);
     /**
@@ -222,6 +226,7 @@ async function bootHost(cfgPatch = {}, seed = {}) {
     const req = {
       url: path,
       method,
+      ...(preBody !== undefined ? { body: preBody } : {}),
       /**
        * 真实面板请求就是这样：回环 Host + 同源标记。
        * 路由层现在统一过栅栏（`fence.js`），少了这两个头会被 403——
@@ -3149,4 +3154,62 @@ test('目的引擎显式关：ext.purpose.enabled=false 时 /purpose/fire 409', 
     assert.equal(r.status, 409);
     assert.match(r.json?.message || '', /没启用/);
   } finally { off?.(); }
+});
+
+/**
+ * `/autotelic/*` 的请求体（发版复查发现）。
+ *
+ * 四条路由读 `req.body`、两条读流，而 `ctx.webServer` 预不预读请求体取决于
+ * 宿主实现——两套写法必有一半拿不到数据，表现是「点了按钮没反应 / 400 缺 id」。
+ * 现在统一走 `bodyOf()`：读过就用，没读就自己读流。
+ */
+test('路由：/autotelic/correct 三种请求体形态都能拿到 text', async () => {
+  const h = await bootHost();
+  try {
+    const payload = { text: '别在群里提股票' };
+    /** ① 常规：宿主没预读，路由自己读流 */
+    const byStream = await h.call('/autotelic/correct', { method: 'POST', body: payload });
+    assert.equal(byStream.status, 200, `读流路径失败：${JSON.stringify(byStream.json)}`);
+
+    /** ② 宿主预读成对象 */
+    const byObject = await h.call('/autotelic/correct', { method: 'POST', preBody: payload });
+    assert.equal(byObject.status, 200, `预解析对象路径失败：${JSON.stringify(byObject.json)}`);
+
+    /** ③ 宿主预读成 Buffer（raw-body 中间件的常见形态） */
+    const byBuffer = await h.call('/autotelic/correct', {
+      method: 'POST',
+      preBody: Buffer.from(JSON.stringify(payload), 'utf8'),
+    });
+    assert.equal(byBuffer.status, 200, `Buffer 路径失败：${JSON.stringify(byBuffer.json)}`);
+  } finally { h.off?.(); }
+});
+
+test('路由：/autotelic/confirm 预解析的对象里能拿到 id（否则按钮永远 400 缺 id）', async () => {
+  const h = await bootHost();
+  try {
+    const missing = await h.call('/autotelic/confirm', { method: 'POST', preBody: {} });
+    assert.equal(missing.status, 400, '真的没 id 才 400');
+
+    const ok = await h.call('/autotelic/confirm', { method: 'POST', preBody: { id: 'tk_not_exist', approve: false } });
+    assert.equal(ok.status, 200, `有 id 就该进执行器：${JSON.stringify(ok.json)}`);
+    assert.equal(ok.json.ok, true);
+  } finally { h.off?.(); }
+});
+
+/**
+ * 策略源常驻注册（发版复查发现）。
+ *
+ * 以前只在「启动时目的引擎开着」才 `registerPolicySource`。用户在面板里把
+ * 引擎打开后，注册条件不会重新求值 → gate/broker 档一直 deny(policy-error)，
+ * 面板提示「去打开目的引擎」照做也没用，只能重启进程。
+ */
+test('路由：目的引擎关着也常驻注册策略源，打开后不必重启', async () => {
+  const h = await bootHost({ ext: { purpose: { enabled: false } } });
+  try {
+    const r = await h.call('/panel/outbound-policy');
+    assert.equal(r.status, 200);
+    const src = r.json.outbound?.sources?.purpose;
+    assert.ok(src, '启动时关着也必须注册，否则面板里打开后仍然 deny 到重启');
+    assert.notEqual(src.state, 'ready', '关着的时候不能报 ready');
+  } finally { h.off?.(); }
 });

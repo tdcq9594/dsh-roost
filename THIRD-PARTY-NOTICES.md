@@ -53,6 +53,16 @@ SOFTWARE.
 - 项目：`dsh-aurabot-qq`（beta 工作树）
 - 许可：MIT，Copyright (c) 2026 Aurabot contributors
 - 改写范围：把 surfcore 的 purpose-engine 按 Aurabot 模块与配置语境改写为我方抽取的 `src/purpose/engine.js`；本次从其生产版本抽取闭包到本仓。
+- 本次（v1.4.5）补齐的逐文件移植：
+  - `src/outbound-policy.js`：出站治理层 admit → reserve → commit/release，抽自 `aurabot-beta/src/chat/outbound-policy.js`。
+  - `src/outbound-purpose-policy.js`：目的引擎策略源与共享发言预算，抽自 `aurabot-beta/src/features/proactive-policy.js`。
+  - `src/outbound-time-window.js`：跨天时间窗判定，抽自 `aurabot-beta/src/core/time-window.js`。
+  - `src/outbound-panel-view.js`：出站策略面板中文视图 TIER_VIEW / outboundPanelView，抽自 `aurabot-beta/src/host.js`。
+  - `src/autotelic-book.js`：自驱任务账本（active 队列 / 每小时动手次数），抽自 `aurabot-beta/src/autotelic/book.js`。
+  - `src/autotelic-observe.js`：自驱观察层，抽自 `aurabot-beta/src/autotelic/observe.js`。
+  - `src/autotelic-reflect.js`：反思 / 每日一页 / 梦的刊物层，抽自 `aurabot-beta/src/autotelic/reflect.js`。
+  - `src/autotelic-schedule.js`：自驱排程层，抽自 `aurabot-beta/src/autotelic/schedule.js`。
+  - `src/autotelic-audit.js`：自驱会话审计与哈希链，抽自 `aurabot-beta/src/autotelic/audit.js`。
 
 原许可全文：
 

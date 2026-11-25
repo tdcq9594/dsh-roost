@@ -51,6 +51,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { inHourWindow, nextWindowStart } from './outbound-time-window.js'
+import { isOff } from './features.js'
 
 const MINUTE = 60_000
 const VERSION = 1
@@ -427,7 +428,13 @@ export function createPurposePolicy({ getConfig, engine, state, now, dataDir, lo
 
   function enabled() {
     const cfg = cfgOf()
-    return cfg.enabled !== false && cfg.ext?.purpose?.enabled === true
+    /**
+     * 与宿主 `purposeEnabled()` **逐字同口径**：没写过 = 开，只有显式 false / "false" 才关。
+     * 这里不能再叠一层 `cfg.enabled`（插件总开关）：宿主那侧不看它，两边判反时
+     * 会出现「策略源自报 configured、宿主却在跑引擎」的错位（发版复查发现）。
+     * 插件整体关掉时，出站这条路本来就不会被走到。
+     */
+    return !isOff(cfg.ext?.purpose?.enabled)
   }
 
   /** 配置 → 门闸参数（与 purpose/module.js 的 purposeConfig 同口径，这里自带一份）。 */
