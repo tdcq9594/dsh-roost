@@ -8640,6 +8640,8 @@ window.__ModuleLoader__.load({
       const [taskDetail, setTaskDetail] = useState(null)
       const [dayDetail, setDayDetail] = useState(null)
       const [dayDate, setDayDate] = useState('')
+      /** 自驱刊物（daily/dreams）列表 */
+      const [journal, setJournal] = useState(null)
       const [proposals, setProposals] = useState([])
       const [takeover, setTakeover] = useState(null)
       const [review, setReview] = useState('')
@@ -9266,7 +9268,15 @@ window.__ModuleLoader__.load({
               onChange: (e) => setDayDate(e.target.value), placeholder: 'YYYY-MM-DD', style: { width: 130, fontSize: 11 },
             }),
             h('button', { type: 'button', className: 'roost-btn', onClick: openDayDetail }, '看那天'),
-            h('button', { type: 'button', className: 'roost-btn', onClick: extractProposal }, '从那天的梦提提案')),
+            h('button', { type: 'button', className: 'roost-btn', onClick: extractProposal }, '从那天的梦提提案'),
+            /** 自驱刊物（P3）：每日一页 + 梦，与上面的聊天日记不是一回事 */
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: async () => {
+                const r = await get('/autotelic/journal').catch(() => null)
+                setJournal(r?.ok ? r : { daily: [], dreams: [], empty: true })
+              },
+            }, '翻自驱刊物')),
           h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 6 } },
             proposals.length ? `提案 ${proposals.length} 篇：${proposals.slice(0, 5).join('、')}` : '还没有提案——填个有梦的日期点「提提案」'),
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 4 } },
@@ -9274,6 +9284,23 @@ window.__ModuleLoader__.load({
               type: 'checkbox', checked: takeover?.on === true,
               onChange: (e) => toggleTakeover(e.target.checked),
             }), '让她自己调整「琢磨方向」（只 seeds，改完要过 1 小时冷却；碰不到权限/配置/工具）')),
+
+        /** 自驱刊物列表（P3）：平级独立块，与聊天日记分开 */
+        journal
+          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 } },
+              h('b', null, '她自己写的（每日一页 · 梦）'),
+              h('button', { type: 'button', className: 'roost-btn', onClick: () => setJournal(null) }, '收起')),
+            journal.empty
+              ? h('div', { className: 'roost-muted', style: { fontSize: 11 } }, '还没有刊物——每天一页到点会写；做了梦也会存这里。')
+              : h('div', { className: 'roost-list' },
+                [...(journal.daily || []).map((x) => ({ ...x, kind: '每日一页' })),
+                  ...(journal.dreams || []).map((x) => ({ ...x, kind: '梦' }))]
+                  .slice(0, 10)
+                  .map((x, i) => h('div', { key: `${x.kind}-${x.day}-${i}`, className: 'roost-item' },
+                    h('span', { className: 'd' }, `${x.kind} ${x.day}`),
+                    h('span', { className: 't', style: { whiteSpace: 'pre-wrap' } }, String(x.text || '').slice(0, 300))))))
+          : null,
 
         /** A3 任务详情弹窗 */
         taskDetail
@@ -9298,6 +9325,66 @@ window.__ModuleLoader__.load({
             h('div', { style: { whiteSpace: 'pre-wrap', fontSize: 11.5, marginTop: 6 } },
               dayDetail.dream || '这天没做梦。',
               h('div', { className: 'roost-muted', style: { marginTop: 6 } }, `当天账本 ${dayDetail.rows.length} 条`)))
+          : null,
+      )
+    }
+
+    /**
+     * 主动发言出站策略（P3 完整移植）：决定扩展（刷抖音/小黑盒/热榜这类）
+     * 刷完之后能不能直接私聊主人。档位在后端真生效，不是只读展示。
+     */
+    function OutboundPolicyCard({ toast }) {
+      const [view, setView] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const load = useCallback(async () => {
+        const r = await get('/panel/outbound-policy').catch(() => null)
+        setView(r?.view || null)
+      }, [])
+      useEffect(() => { load() }, [load])
+      const save = async (patch) => {
+        setBusy(true)
+        try {
+          const r = await post('/panel/outbound-policy', patch)
+          if (r?.ok === false) toast(r.message || '没存上')
+          else { setView(r.view || null); toast('出站策略存好了') }
+        } finally { setBusy(false) }
+      }
+      const tone = view?.tone === 'ok' ? 'var(--ok)' : view?.tone === 'bad' ? 'var(--danger)' : 'var(--warn)'
+      return h(Sec, { n: '10', title: '主动发言出站策略' },
+        h('div', { className: 'roost-note', style: { marginBottom: 12, lineHeight: 1.7 } },
+          '决定扩展（刷视频、逛社区、热榜巡游这类）刷完之后能不能直接私聊你。'
+          + '不纳管 = 照旧直接发；门闸 = 发前先问目的引擎，它说不合适就不发。'),
+        h('div', { className: 'roost-note', style: { marginBottom: 12, padding: '9px 10px', borderLeft: `3px solid ${tone}` } },
+          h('b', { style: { color: tone } }, view?.headline || '读取中…'),
+          h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 4, lineHeight: 1.6 } }, view?.summary || '')),
+        h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10, fontSize: 12 } },
+          h('span', null, '纳管档位：'),
+          h(Dropdown, {
+            className: 'roost-input', style: { minWidth: 190 }, disabled: busy,
+            value: view?.tier || 'pass',
+            onChange: (e) => save({ tier: e.target.value }),
+          }, ...(view?.tiers || [{ value: 'pass', label: '不纳管' }]).map((t) =>
+            h('option', { key: t.value, value: t.value }, t.label))),
+          h('span', null, '谁来判：'),
+          h(Dropdown, {
+            className: 'roost-input', style: { minWidth: 150 }, disabled: busy,
+            value: view?.activeMode || 'auto',
+            onChange: (e) => save({ activePolicy: e.target.value }),
+          }, ...(view?.activeOptions || [{ value: 'auto', label: '自动' }]).map((o) =>
+            h('option', { key: o.value, value: o.value }, o.label)))),
+        view?.tierHint
+          ? h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8 } }, view.tierHint)
+          : null,
+        view?.sources?.length
+          ? h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8 } },
+            '策略源：' + view.sources.map((x) => `${x.title}（${x.stateLabel}${x.reason ? '·' + x.reason : ''}）`).join('、'))
+          : h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8 } },
+            '还没有可用的引擎：先打开「目的引擎」，否则没人决定该不该说。'),
+        view?.stats?.length
+          ? h(Block, { label: '判定统计' },
+            h('div', { className: 'roost-grid' },
+              view.stats.map((x) => h('div', { key: x.label, className: 'roost-stat' },
+                h('b', null, x.value), h('span', null, x.label)))))
           : null,
       )
     }
@@ -9923,6 +10010,8 @@ window.__ModuleLoader__.load({
         ),
         /** 08：她在琢磨什么（主动搭话的想法面，只读展示层） */
         h(PurposeStatusCard, { toast, config, saveCfg }),
+        /** 09：主动发言出站策略（P3 完整移植，平级独立块） */
+        h(OutboundPolicyCard, { toast }),
         /** 自驱引擎已拆到独立 tab（人设组），不再塞在这一页末尾 */
       )
     }
@@ -15113,6 +15202,7 @@ window.__ModuleLoader__.load({
     /* ---------------- 设置 ---------------- */
 
     const JSON_SECTIONS = [
+      ['outboundPolicy', '出站策略', 'tier(pass/gate/broker) + activePolicy，决定扩展能不能直接私聊主人；主动搭话页有控件'],
       ['ext', '扩展配置', 'ext.purpose.*（目的引擎：enabled/carrier/pacing/nudge 等）与 ext.autotelic.*（自驱）都落这里；'
         + '这是唯一「原样保留」的段——写什么存什么，不会被裁剪掉。日常在「主动搭话」和「自驱引擎」页点，这里只给手改'],
       ['memory', '记忆', '日记寿命、注入条数、多少轮全量重注、记忆工具开关'],

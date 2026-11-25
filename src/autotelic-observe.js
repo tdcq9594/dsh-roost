@@ -193,3 +193,35 @@ export function createObserve({
 
   return { append, observeCorrection, flush, list, byTag, stats, dispose }
 }
+
+/**
+ * 情绪桥（P3 对照补齐）——移植自 aurabot-beta `src/autotelic/observe.js:215 createEmotionBridge`。
+ * MIT License, Copyright (c) 2026 Aurabot contributors；本仓 AGPL-3.0，署名见 THIRD-PARTY-NOTICES.md。
+ *
+ * 把心情接进观察层：fetchEmotions() 给出的情绪条目写成 source='emotion' 的观察，
+ * 默认 tag「牵挂」。**没接线就保持惰性（not-wired），不写任何观察**——宁缺毋假，
+ * 不能凭空替她编情绪。
+ */
+export function createEmotionBridge({ fetchEmotions = null, observe } = {}) {
+  function collect(now = Date.now()) {
+    if (typeof fetchEmotions !== 'function') return { ok: false, reason: 'not-wired' };
+    let items = [];
+    try { items = fetchEmotions() || []; } catch { return { ok: false, reason: 'fetch-failed' }; }
+    if (!Array.isArray(items)) return { ok: false, reason: 'fetch-failed' };
+    const written = [];
+    for (const it of items) {
+      const text = String(it?.text || '').trim();
+      if (!text) continue;
+      const r = observe?.append?.({
+        source: 'emotion',
+        tag: String(it?.tag || '牵挂'),
+        text,
+        salience: Number.isFinite(it?.salience) ? it.salience : 0.6,
+        ts: Number(it?.ts) || now,
+      });
+      if (r?.ok) written.push(r.row);
+    }
+    return { ok: true, written };
+  }
+  return { collect };
+}

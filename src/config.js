@@ -56,6 +56,12 @@ export const DEFAULTS = {
    */
   dryRun: false,
   /**
+   * 主动发言出站策略（P3 对照补齐）：管「扩展刷完东西能不能直接私聊主人」。
+   * pass=照旧直发（默认）/ gate=发前问引擎 / broker=由引擎决定时机。
+   * 开着门闸但没有可用引擎时一律不放行——绝不静默退回直发。
+   */
+  outboundPolicy: { tier: 'pass', activePolicy: 'auto' },
+  /**
    * 扩展级配置（`ext.<id>.*`）：目的引擎 `ext.purpose.*`、自驱 `ext.autotelic.*` 都落这里。
    *
    * **必须是空对象**：`pruneTo` 对空 shape 的语义是「保留整个值」，

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createObserve, matchCorrection, salienceOf, OBSERVE_SOURCES } from '../src/autotelic-observe.js';
+import { createObserve, createEmotionBridge, matchCorrection, salienceOf, OBSERVE_SOURCES } from '../src/autotelic-observe.js';
 
 test('matchCorrection：识别「别做X / 别再X / 别X了」', () => {
   assert.equal(matchCorrection('别再刷B站了')?.target, 'B站', '动词被正则吃掉，target 是对象');
@@ -74,4 +74,41 @@ test('createObserve：observeCorrection 写高显著度 note 并回调', () => {
 
 test('OBSERVE_SOURCES：四个来源闭集', () => {
   assert.deepEqual([...OBSERVE_SOURCES], ['chat', 'emotion', 'activity', 'note']);
+});
+
+test('createEmotionBridge（P3）：没接 fetchEmotions 就惰性，不写观察', () => {
+  let wrote = 0;
+  const observe = { append: () => { wrote++; return { ok: true, row: {} }; } };
+  const bridge = createEmotionBridge({ observe });
+  const r = bridge.collect();
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'not-wired');
+  assert.equal(wrote, 0, '没接线绝不写观察——宁缺毋假');
+});
+
+test('createEmotionBridge（P3）：情绪条目写成 source=emotion、默认 tag 牵挂', () => {
+  const got = [];
+  const observe = { append: (x) => { got.push(x); return { ok: true, row: x }; } };
+  const bridge = createEmotionBridge({
+    observe,
+    fetchEmotions: () => [
+      { text: '心情不错，想找人说话', salience: 0.7, ts: 1000 },
+      { text: '', tag: '忽略' }, // 空文本跳过
+    ],
+  });
+  const r = bridge.collect(2000);
+  assert.equal(r.ok, true);
+  assert.equal(r.written.length, 1);
+  assert.equal(got[0].source, 'emotion');
+  assert.equal(got[0].tag, '牵挂');
+  assert.equal(got[0].salience, 0.7);
+  assert.equal(got[0].ts, 1000);
+});
+
+test('createEmotionBridge：fetch 抛错如实返回，不写观察', () => {
+  const bridge = createEmotionBridge({
+    observe: { append: () => ({ ok: true, row: {} }) },
+    fetchEmotions: () => { throw new Error('mood 读不了'); },
+  });
+  assert.deepEqual(bridge.collect(), { ok: false, reason: 'fetch-failed' });
 });

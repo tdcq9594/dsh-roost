@@ -300,9 +300,14 @@ import { writeUserModule } from './autotelic-skills.js';
 import { formGoalHypotheses, goalToCandidate, DEFAULT_DRIVES } from './purpose-engine.js';
 import { collectPurposeMaterials, collectBiliMaterials } from './purpose-collect.js';
 import { createPurposeRunner } from './purpose-run.js';
-import { createObserve } from './autotelic-observe.js';
+import { createObserve, createEmotionBridge } from './autotelic-observe.js';
 import { createSchedule } from './autotelic-schedule.js';
 import { createBook } from './autotelic-book.js';
+import { evaluatePurposeTick, planNextFire, markPurposeDelivered } from './purpose-schedule.js';
+import { createJournal as createAutotelicJournal, buildDailyPage } from './autotelic-reflect.js';
+import { createOutboundPolicy } from './outbound-policy.js';
+import { outboundPanelView } from './outbound-panel-view.js';
+import { createPurposePolicy, createSharedBudget } from './outbound-purpose-policy.js';
 import { buildFollowUpCandidates } from './followup-candidate.js';
 import { normalizeUiSpec, readUiData, UI_KINDS, UI_GROUPS } from './ext-ui.js';
 import { createUiActionQueue } from './ext-ui-actions.js';
@@ -2847,6 +2852,41 @@ export function apply(ctx) {
   });
 
   /**
+   * 情绪桥（P3 对照补齐）：把心情接进观察层，让她「想事」时看得到自己现在的状态。
+   * 只在明显偏离中性时才产出条目（|valence-0.5| >= 0.2 或能量/社交高出基线），
+   * 且同一状态一小时内只写一次——不能让情绪把观察层刷屏。
+   */
+  let emotionLastAt = 0;
+  let emotionLastText = '';
+  const emotionBridge = createEmotionBridge({
+    observe: autotelicObserve,
+    fetchEmotions: () => {
+      try {
+        const now = Date.now();
+        if (now - emotionLastAt < 60 * 60_000) return [];
+        const m = typeof mood?.get === 'function' ? mood.get() : null;
+        if (!m) return [];
+        const v = Number(m.valence);
+        const e = Number(m.energy);
+        const s = Number(m.sociability);
+        if (![v, e, s].every(Number.isFinite)) return [];
+        const bits = [];
+        if (Math.abs(v - 0.5) >= 0.2) bits.push(v > 0.5 ? '心情不错' : '有点低落');
+        if (e >= 0.7) bits.push('精力挺足');
+        else if (e <= 0.3) bits.push('有点累');
+        if (s >= 0.7) bits.push('想找人说话');
+        else if (s <= 0.3) bits.push('想自己待着');
+        if (!bits.length) return [];
+        const text = bits.join('，') + (m.reason ? `（${String(m.reason).slice(0, 40)}）` : '');
+        if (text === emotionLastText) return [];
+        emotionLastAt = now;
+        emotionLastText = text;
+        return [{ text, tag: '牵挂', salience: 0.6, ts: now }];
+      } catch { return []; }
+    },
+  });
+
+  /**
    * 复盘闭环（P0 修复）：exec 终态 → reviewRound → skills.ingestReflection。
    * 以前 executor.run 没收到 plan，reviewRound 永不触发、ingestReflection 全仓零调用
    * ——技能层看着有、其实永远是空的。这里把它接上。
@@ -2954,6 +2994,71 @@ export function apply(ctx) {
     paused,
     log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
   });
+
+  /**
+   * 主动发言出站策略（P3 完整移植）：admit → reserve → commit/release 的统一判定与账本。
+   * 管「扩展刷完能不能直接私聊主人」；三档 pass/gate/broker，
+   * 有档位但没可用策略源时一律 deny，绝不静默退回直发。
+   *
+   * getConfig 要给完整 cfg（含 ownerQQ）——完整版从 cfg.ownerQQ 判治理范围。
+   * 我方主人 id 在 speakUp.chatId 上，这里补一个映射字段。
+   */
+  const outboundConfig = () => {
+    const base = cfg || {};
+    return {
+      ...base,
+      ownerQQ: base.ownerQQ || String(base.speakUp?.chatId || '').trim(),
+    };
+  };
+  const outboundPolicy = createOutboundPolicy({
+    getConfig: outboundConfig,
+    dataDir: dataDir(),
+    log: (m) => log.warn(`出站策略：${m}`),
+  });
+  /** 策略源：目的引擎（含按主人的共享发言预算：日额度/最小间隔，多气泡只扣一次） */
+  const outboundBudget = createSharedBudget({
+    ownerQQ: () => outboundConfig().ownerQQ,
+    dataDir: dataDir(),
+    log: (m) => log.warn(`出站预算：${m}`),
+  });
+  /** engine 适配器：我方纯函数名字带 Purpose 前缀，接口对齐对方的 evaluateTick/planNextFire/markDelivered */
+  const purposePolicyEngine = {
+    name: 'purpose',
+    env: () => ({
+      enabled: cfg.ext?.purpose?.enabled === true,
+      paused: typeof paused === 'function' ? paused() : false,
+    }),
+    state: () => {
+      try { return purposeRunner.status(); } catch { return null; }
+    },
+    evaluateTick: ({ now: t, config, state, env }) => evaluatePurposeTick({
+      now: t, config, state, env: env || {},
+    }),
+    planNextFire: ({ now: t, config, lastRunAt, countToday }) => planNextFire({
+      now: t, config, lastRunAt, countToday,
+    }),
+    markPurposeDelivered: (state, opts) => markPurposeDelivered(state, opts),
+  };
+  if (cfg.ext?.purpose?.enabled === true) {
+    const purposeOutboundPolicy = createPurposePolicy({
+      getConfig: outboundConfig,
+      engine: purposePolicyEngine,
+      state: () => purposePolicyEngine.state(),
+      dataDir: dataDir(),
+      log: (m) => log.warn(`出站目的策略：${m}`),
+      budget: outboundBudget,
+    });
+    outboundPolicy.registerPolicySource(purposeOutboundPolicy);
+  }
+  /** 主人换号：旧 pending 一律作废（接收人固定，不把发给旧号的东西发给新号） */
+  try { outboundPolicy.syncOwnerQQ?.(outboundConfig().ownerQQ); } catch {}
+
+  /**
+   * 自驱刊物（P3 对照补齐）：daily/ 每日一页 + dreams/ 梦，独立目录。
+   * **不碰 journal.js 的聊天日记**——两者名字像，东西完全不同：
+   * 聊天日记记「主人说了什么」，这里是「她自己写了什么」。
+   */
+  const autotelicJournal = createAutotelicJournal(() => join(dataDir(), 'autotelic-journal'));
 
   /**
    * 阶段 4：每扩展一个 `ext-memory/<extId>.json`，不碰 `memory.json`（§5.1）。
@@ -3066,6 +3171,18 @@ export function apply(ctx) {
     memoryOf: () => memory,
     aliasesOf: (t) => aliasesOf(t),
     resolveRecentGroup,
+    /**
+     * 出站策略（P3 完整移植）：扩展私聊主人前先 admit；
+     * 真实投递结果回来后 commit/uncertain 结算预占，不结算下次会一直 busy。
+     */
+    outboundCheck: (ask) => outboundPolicy.admit({
+      to: ask.to,
+      moduleId: ask.sourceModule || '',
+      origin: ask.sourceModule ? 'module' : 'engine',
+      itemId: ask.itemId || null,
+      at: ask.at || Date.now(),
+    }),
+    outboundCommit: (reserveId, opts) => outboundPolicy.commit(reserveId, opts),
     log: (m) => log.info(m),
   });
 
@@ -9219,6 +9336,8 @@ export function apply(ctx) {
             });
           }
         }
+        /** 情绪桥（P3）：心情明显偏离中性时写一条观察；内部有一小时节流，不会刷屏 */
+        emotionBridge.collect();
       } catch (e) { log.warn(`观察同步失败：${e?.message || e}`); }
       /**
        * 回话/解封扫描（P3）：**必须在 feedback.tick 之前**——
@@ -9243,7 +9362,22 @@ export function apply(ctx) {
       const atHour = new Date(now).getHours() === hour;
       if (!atHour && !(batch > 0 && pending >= batch)) return;
       log.info(`自驱每日一页：${atHour ? '到点' : `攒够 ${pending} 条`}`);
-      autotelic.review().catch((e) => log.warn(`每日复盘失败：${e?.message || e}`));
+      autotelic.review().then((r) => {
+        /** 每日一页刊物（P3）：机械口径的今天干了什么 + 强制「今天没敢说的」段 */
+        try {
+          if (r?.ok && r?.day) {
+            const tasks = autotelicBook.list().filter((t) => t.status !== 'active');
+            const page = buildDailyPage({
+              date: r.day,
+              tasks,
+              actionsToday: Number(r.stats?.total) || 0,
+              /** 「今天没敢说的」必须留给她自己写——不拿机械账本冒充主观自述 */
+              hushText: '',
+            });
+            autotelicJournal.write('daily', r.day, page);
+          }
+        } catch (e) { log.warn(`写每日一页刊物失败：${e?.message || e}`); }
+      }).catch((e) => log.warn(`每日复盘失败：${e?.message || e}`));
     } catch (e) { log.warn(`每日复盘检查异常：${e?.message || e}`); }
   };
 
@@ -13995,6 +14129,31 @@ export function apply(ctx) {
       }),
 
       /**
+       * 主动发言出站策略面板（P3 完整移植）：GET 看中文视图；POST 改档位/策略源。
+       * 档位只认 pass/gate/broker，activePolicy 只认 auto/purpose——坏值不改配置。
+       */
+      route('/panel/outbound-policy', async (req, res) => {
+        if (req.method === 'POST') {
+          if (masterOff()) return send(res, 409, { ok: false, message: '总开关关着' });
+          const body = await readBody(req).catch(() => ({}));
+          const patch = {};
+          if (['pass', 'gate', 'broker'].includes(body?.tier)) patch.tier = body.tier;
+          /** 存量 speakup 归一化到 purpose（不弹错，行为等价） */
+          const want = body?.activePolicy === 'speakup' ? 'purpose' : body?.activePolicy;
+          if (['auto', 'purpose'].includes(want)) patch.activePolicy = want;
+          if (!Object.keys(patch).length) {
+            return send(res, 400, { ok: false, message: '没有可保存的字段（tier 只认 pass/gate/broker，activePolicy 只认 auto/purpose）' });
+          }
+          cfg = patchConfig({ outboundPolicy: { ...(cfg.outboundPolicy || {}), ...patch } });
+          if (patch.activePolicy) { try { outboundPolicy.setActivePolicy(patch.activePolicy); } catch {} }
+          log.info(`面板已保存出站策略｜${Object.keys(patch).map((k) => `${k}=${patch[k]}`).join(' ')}`);
+        }
+        let status = null;
+        try { status = outboundPolicy.status(); } catch (e) { log.warn(`出站策略读状态失败：${e?.message || e}`); }
+        return send(res, 200, { ok: true, outbound: status, view: outboundPanelView(status) });
+      }),
+
+      /**
        * 觉醒状态：为什么说 / 为什么没说。
        *
        * "她怎么不主动"和"她怎么老说话"这两类问题，光看日志判断不了——
@@ -15021,9 +15180,26 @@ export function apply(ctx) {
         return send(res, 200, {
           ok: true, date,
           dream: dream.text(date) || '',
+          /** 聊天日记（主人那天说了什么）——保留旧字段，别覆盖 */
           journal: journal || null,
+          /** 自驱刊物（她那天自己写了什么）：daily/dreams 两本，与 journal 完全不同 */
+          autotelicDaily: autotelicJournal.read('daily', date) || '',
+          autotelicDream: autotelicJournal.read('dreams', date) || '',
           rows,
           chainOk: chain?.ok !== false,
+        });
+      }),
+
+      /**
+       * 自驱刊物列表（P3 对照补齐）：对方 /autotelic/journal 的同款能力。
+       * 返回 daily（每日一页）和 dreams（梦）各最近 N 天，按日期倒序。
+       */
+      route('/autotelic/journal', (req, res) => {
+        const n = Math.min(30, Math.max(1, Number(new URL(req.url || '/', 'http://x').searchParams.get('n')) || 7));
+        return send(res, 200, {
+          ok: true,
+          daily: autotelicJournal.list('daily', n),
+          dreams: autotelicJournal.list('dreams', n),
         });
       }),
 
