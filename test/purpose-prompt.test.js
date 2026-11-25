@@ -43,3 +43,27 @@ test('formatMaterialLine：主人素材标 QQ·主人', () => {
   const line = formatMaterialLine({ kind: 'owner', text: '在忙', at: now - 60000 }, now);
   assert.match(line, /QQ·主人/);
 });
+
+// 回归：移植时漏了 KIND_LABEL，pending 一有内容就抛 ReferenceError，
+// 被心跳的 catch 吞成「目的心跳失败：KIND_LABEL is not defined」，整轮 tick 白跑。
+test('buildPurposePrompt：带 pending 的目的标签不崩，且译成中文', () => {
+  const text = buildPurposePrompt({
+    now, config: CFG, mode: 'auto', drives: DEFAULT_DRIVES,
+    pending: [
+      { text: '想知道他今天吃了啥', kind: 'follow-up' },
+      { text: '想让他陪我玩会儿', kind: 'ask' },
+    ],
+  });
+  assert.match(text, /心里还惦记着/);
+  assert.match(text, /想知道他今天吃了啥（追问）/);
+  assert.match(text, /想让他陪我玩会儿（索取）/);
+});
+
+test('buildPurposePrompt：候选没有需求/动作时退回按 kind 打标签', () => {
+  const text = buildPurposePrompt({
+    now, config: CFG, mode: 'auto', drives: DEFAULT_DRIVES,
+    candidates: [{ text: '想问问他那条动态', kind: 'curiosity' }, { text: '想关心他一下', kind: 'care' }],
+  });
+  assert.match(text, /\[好奇\] 想问问他那条动态/);
+  assert.match(text, /\[关心\] 想关心他一下/);
+});

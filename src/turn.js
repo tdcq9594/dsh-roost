@@ -51,6 +51,42 @@ export function textOf(message) {
 }
 
 /**
+ * 这一条 assistant 消息里有没有工具调用块。
+ *
+ * **只看结构，不猜语义**：DSH 的 `message.content` 是块数组，工具轮就是
+ * text + tool-call 混排。`tool-call` / `tool_use` 两种写法都认（不同版本
+ * 的 DSH 用过不同名字）。
+ */
+export function hasToolCall(message) {
+  if (!message || !Array.isArray(message.content)) return false;
+  return message.content.some((b) => b && (b.type === 'tool-call' || b.type === 'tool_use'));
+}
+
+/**
+ * 同一轮里多条 assistant 消息的正文合并。
+ *
+ * DSH 的 `assistant/message` 在一轮里**可能来多次**：工具调用前后各一次，
+ * 纯对话轮也可能「先问一句、再给结论」。这里以前是无脑覆盖 `w.text = t`，
+ * 于是后一种情况只剩结论，提问那一段整段丢了（2026-11-25 用真实
+ * turn runner 复现：两段正文只返回后者，用户看到的就是「她答了但没接上话」）。
+ *
+ * 合并规则与 aurabot 的 `mergeStepText` 一致——**只去重拼接，不改措辞**：
+ *   · 新段为空 → 保留旧的（空消息不算说话）
+ *   · 相等 / 旧段以新段结尾 → 保留旧的（同一句话）
+ *   · 新段已包含旧段 → 用新段（模型重写了完整版，旧的是半截）
+ *   · 否则换行拼接
+ */
+export function mergeStepText(prev, next) {
+  const a = String(prev || '').trim();
+  const b = String(next || '').trim();
+  if (!b) return a;
+  if (!a) return b;
+  if (a === b || a.endsWith(b)) return a;
+  if (b.includes(a)) return b;
+  return `${a}\n\n${b}`;
+}
+
+/**
  * 把 turn/end 的 reason 归类成人能看懂的 kind。
  *
  * **为什么要多这一层分类。**
@@ -120,7 +156,12 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
     error: typeof rawLog.error === 'function' ? rawLog.error.bind(rawLog) : () => {},
   };
 
-  /** @type {Map<string, {turn:number, text:string, resolve:Function, reject:Function, timer:any}>} */
+  /**
+   * `text` 是这一轮**最后一条**正文，`merged` 是整轮拼接（见 `mergeStepText`），
+   * `sawToolCall` 决定 turn/end 用哪一份（工具轮只认最后一条）。
+   *
+   * @type {Map<string, {turn:number, text:string, merged:string, sawToolCall:boolean, resolve:Function, reject:Function, timer:any}>}
+   */
   const waiters = new Map();
 
   function finish(sid, ok, text, reason) {
@@ -192,12 +233,24 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
         const d = event.data || {};
         // 被打断的那条不算数
         if (d.interrupted) return;
-        const t = textOf(d.message);
-        if (!t) return;
         const w = waiters.get(sid);
         if (!w) return;
-        w.turn = d.turn;
+        /**
+         * 换轮了就清零。`waiters` 按会话复用，上一轮的累积不能混进来——
+         * 旧代码是 `w.text = t` 顺带覆盖，累积之后必须显式重置。
+         */
+        if (w.turn !== d.turn) {
+          w.turn = d.turn;
+          w.text = '';
+          w.merged = '';
+          w.sawToolCall = false;
+        }
+        if (hasToolCall(d.message)) w.sawToolCall = true;
+        const t = textOf(d.message);
+        // 只有工具调用的消息没有正文：不算说话，但上面的 sawToolCall 已经记下
+        if (!t) return;
         w.text = t;
+        w.merged = mergeStepText(w.merged, t);
         return;
       }
 
@@ -205,8 +258,18 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
         const d = event.data || {};
         const w = waiters.get(sid);
         if (!w) return;
-        // 只认「这一轮」的文本，上一轮残留的不要
-        const text = w.turn === d.turn ? w.text : '';
+        /**
+         * 只认「这一轮」的文本，上一轮残留的不要。取哪一份要看这一轮的形态：
+         *
+         *   · 纯对话轮（一轮里没出现工具调用）→ **合并后的全文**。模型先说
+         *     一句、再说结论时两段都要发，这就是本轮修的那个丢段。
+         *   · 工具轮 → **只认最后一条**。工具调用前后的正文是过程话
+         *     （「我先查一下」），真正要说的话走 `qq_send` 逐段发
+         *     （`host.js` 用 `used.texts.join` 拼）；这份返回只是兜底，
+         *     把过程话一起拼进来，模型哪天不走工具就会把旁白发到群里。
+         *     这条是反向守卫，别为了「多发几句」把它拿掉。
+         */
+        const text = w.turn === d.turn ? (w.sawToolCall ? w.text : w.merged || w.text) : '';
         finish(sid, d.reason?.kind === 'completed', text, d.reason);
       }
     } catch (e) {
@@ -262,7 +325,7 @@ export function createTurnRunner({ ctx, log = () => {}, timeoutSec = 150, upstre
         finish(sid, false, '', { kind: 'timeout' });
       }, attemptMs);
       timer.unref?.();
-      waiters.set(sid, { turn: -1, text: '', resolve, reject, timer });
+      waiters.set(sid, { turn: -1, text: '', merged: '', sawToolCall: false, resolve, reject, timer });
     });
     /**
      * 2026-11-14：一轮失败的 rejection 在被 `await` 接住之前，DSH 会把它当

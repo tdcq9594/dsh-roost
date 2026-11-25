@@ -12126,6 +12126,8 @@ window.__ModuleLoader__.load({
       const merge = config?.roostHost?.merge || {}
       const chat = config?.chat || {}
       const groupCfg = config?.group || {}
+      /** 翻聊天记录 / 上下文补齐的那几个键（`recall.*`） */
+      const recallCfg = config?.recall || {}
       const overrides = groupCfg.overrides || {}
       const groups = (chats || []).filter((c) => c.kind === 'group')
       const [busy, setBusy] = useState(false)
@@ -12136,6 +12138,8 @@ window.__ModuleLoader__.load({
       const [ovDraft, setOvDraft] = useState(null)
       /** 决策链：null = 还没读到，[] = 读到了但还没有判定 */
       const [decisions, setDecisions] = useState(null)
+      /** 翻聊天记录设置弹窗：和「记忆星图」同范式，关掉就卸载 */
+      const [lookOpen, setLookOpen] = useState(false)
 
       const loadDecisions = useCallback(async () => {
         try {
@@ -12222,8 +12226,31 @@ window.__ModuleLoader__.load({
               onSave: (v) => setDecide('engagedMaxTurns', v) })),
         ),
 
+        /**
+         * 02：翻聊天记录。参数有 8 个，平铺会把这一页撑长，而且它们
+         * 「设一次就不动」——收进弹窗，入口只留一行摘要。
+         *
+         * 排在第二位（2026-11-25 主人要求）：它决定她「看到什么」，
+         * 是接话方式之外最该先设的一项；原来排在第 09 位，要滚到底才看得见。
+         */
         h(GCard, {
-          n: '02', title: '连发合并',
+          n: '02', title: '翻聊天记录',
+          desc: '她能不能翻历史消息、一次翻几条、一轮最多翻几次，以及被叫到时自动补几句上下文。这些只影响「看到什么」，不改变她说话的风格。',
+        },
+          h(GRow, {
+            label: '聊天记录与上下文',
+            hint: `每次 ${chat.lookLimit ?? 5} 条 · `
+              + `${Number(chat.lookMaxCalls) > 0 ? `一轮最多 ${chat.lookMaxCalls} 次` : '一轮不限次数'} · `
+              + `${Number(recallCfg.recentLimit ?? 8) > 0 ? `自动补 ${recallCfg.recentLimit ?? 8} 条 / ${recallCfg.recentMax ?? 1800} 字` : '不自动补上下文'}`,
+          },
+            h('button', {
+              type: 'button', className: 'roost-btn', onClick: () => setLookOpen(true),
+            }, '打开设置'),
+          ),
+        ),
+
+        h(GCard, {
+          n: '03', title: '连发合并',
           desc: '人常常一口气发好几句。等她说完再一起回，而不是一句一回，省调用也少刷屏。她正忙时来的消息会攒着，等这一轮结束合在一起回，不会逐条刷「还在想」。',
         },
           h(GRow, { label: '私聊停顿多久算说完', hint: '从最后一条消息算起；太短会把一句话劈成两半' },
@@ -12241,7 +12268,7 @@ window.__ModuleLoader__.load({
         ),
 
         h(GCard, {
-          n: '03', title: '安全刹车',
+          n: '04', title: '安全刹车',
           desc: '只防失控（比如和别的机器人聊起来停不下）。被 @、引用她、喊名字不算主动接话，不会被刹车拦；平时碰不到。填 0 = 不限。',
           right: h(Switch, {
             on: decide.silent === true, label: '一键静默', disabled: busy,
@@ -12268,7 +12295,7 @@ window.__ModuleLoader__.load({
         ),
 
         h(GCard, {
-          n: '04', title: '静默时段与忽略词',
+          n: '05', title: '静默时段与忽略词',
           desc: '两条静默各管一头：「她别插话」是这段内她不主动接话、但被叫到还会回；'
             + '「对外静默」是这段内**连别人 @ 她也不起轮次**，只有主人叫得醒。忽略词是别的插件靠前缀干活的，别抢。',
         },
@@ -12310,7 +12337,7 @@ window.__ModuleLoader__.load({
         ),
 
         h(GCard, {
-          n: '05', title: '一轮与队列',
+          n: '06', title: '一轮与队列',
           desc: '模型或工具卡住时，超过一轮时限就强制放开，后面的消息正常开新一轮；不然会一直哑着。',
         },
           h(GRow, { label: '一轮最多等多久', hint: '从这一轮开始算；太短会打断正常的长回复' },
@@ -12331,7 +12358,7 @@ window.__ModuleLoader__.load({
         ),
 
         h(GCard, {
-          n: '06', title: '插话概率',
+          n: '07', title: '插话概率',
           desc: '只管「群里没人明确叫她」的普通一句：她有多大概率主动接。被 @、私聊、命令、喊「在吗」、已经聊开了，都不掷骰子。',
         },
           h(GRow, { label: '插话概率', hint: '100 = 句句都接（升级前的行为）；0 = 只在明确被叫到时才说话' },
@@ -12349,7 +12376,7 @@ window.__ModuleLoader__.load({
         ),
 
         h(GCard, {
-          n: '07', title: '按群覆写',
+          n: '08', title: '按群覆写',
           desc: '某个群想单独设（这个群安静点、那个群只在被 @ 时回），在这里给它一份例外。留空 = 跟上面的全局设置；没列的群一律不受影响。',
         },
           /** A2：这半页管「她怎么接话」，「谁能用」在权限页；双向都有入口 */
@@ -12410,7 +12437,7 @@ window.__ModuleLoader__.load({
         ),
 
         h(GCard, {
-          n: '08', title: '刚才为什么回 / 不回',
+          n: '09', title: '刚才为什么回 / 不回',
           desc: '每条消息进来都会过一遍上面的规则，这里按时间列出最近 20 条的判定和原因。和排障页日志是同一份 reason，只是排好了队；只在内存里，不落盘。',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadDecisions }, '刷新'),
         },
@@ -12430,6 +12457,86 @@ window.__ModuleLoader__.load({
                       d.text ? '「' + d.text + '」' : chatName(d.chatId))))),
           h('div', { className: 'roost-g-note' },
             '看不到变化就点一下刷新；改了设置后，下一句消息才会按新规则判定。'),
+        ),
+
+        lookOpen
+          ? h(PageModal, { title: '翻聊天记录', onClose: () => setLookOpen(false) },
+              h(LookSettings, { config, put, busy }))
+          : null,
+      )
+    }
+
+    /**
+     * 翻聊天记录设置（弹窗内容）。
+     *
+     * 三组、8 个键，全部直写配置——没有中间草稿，改一个存一个
+     * （和这一页其它控件一致，`put` 会 toast 并刷新回读值）。
+     *
+     * 为什么不做「保存 / 取消」：这些是开关和数字，用户期望点完立刻生效；
+     * 攒一批再提交反而会出现「改了没存」的错觉。
+     */
+    function LookSettings({ config, put, busy }) {
+      const chat = config?.chat || {}
+      const recall = config?.recall || {}
+      const setChat = (k, v) => put({ chat: { [k]: v } })
+      const setRecall = (k, v) => put({ recall: { [k]: v } })
+
+      const group = (title, hint, children) => h('div', { style: { marginBottom: 20 } },
+        h('div', { style: { fontWeight: 600, marginBottom: 3 } }, title),
+        hint ? h('div', { className: 'roost-muted', style: { fontSize: 11.5, marginBottom: 9, lineHeight: 1.6 } }, hint) : null,
+        children)
+
+      return h('div', null,
+        group('谁能翻',
+          '关掉工具之后她这一轮就没有 chat_look，但被叫到时自动补的上下文照旧——这两件事互不影响。',
+          h(GRow, { label: '给她翻聊天记录的工具', hint: '关掉不影响她说话，只是不能主动查' },
+            h(Switch, {
+              on: chat.tools !== false, label: '开启', disabled: busy,
+              onToggle: (v) => setChat('tools', v),
+            })),
+          h(GRow, { label: '群友也能翻', hint: '打开后群友只能翻当前会话；查别的群、查别人的私聊仍然一律拒绝' },
+            h(Switch, {
+              on: chat.chatLookForMembers === true, label: '允许', disabled: busy,
+              onToggle: (v) => setChat('chatLookForMembers', v),
+            })),
+          h(GRow, { label: '群里能查别的群', hint: '默认关：群里的回复大家都看得见，允许就等于把 B 群的话说给 A 群听' },
+            h(Switch, {
+              on: chat.crossChatInGroup === true, label: '允许', disabled: busy,
+              onToggle: (v) => setChat('crossChatInGroup', v),
+            })),
+        ),
+
+        group('一次翻几条',
+          '「每次取几条」只是默认值：模型明确要多也可以，硬上限 50。真要限流用下面那个。',
+          h(GRow, { label: '每次取几条', hint: '默认 5。设太大会一次把上下文挤满，它往往看前几条就下结论' },
+            h(GNum, {
+              value: chat.lookLimit ?? 5, min: 1, max: 50, unit: '条', disabled: busy,
+              onSave: (v) => setChat('lookLimit', v),
+            })),
+          h(GRow, { label: '一轮最多翻几次', hint: '0 = 不限，能一直翻到账本边界（默认保留 7 天）' },
+            h(GNum, {
+              value: chat.lookMaxCalls ?? 0, min: 0, max: 20, unit: '次', disabled: busy,
+              onSave: (v) => setChat('lookMaxCalls', v),
+            })),
+        ),
+
+        group('被叫到时自动补上下文',
+          '她每轮都会看到最近几条。有「群里说过但她没看到」的（潜水时刷的、之前没接话的），会从账本补齐；包括她自己的回复，渲染成「你：」。',
+          h(GRow, { label: '补几条', hint: '0 = 这一段整个不注入' },
+            h(GNum, {
+              value: recall.recentLimit ?? 8, min: 0, max: 20, unit: '条', disabled: busy,
+              onSave: (v) => setRecall('recentLimit', v),
+            })),
+          h(GRow, { label: '字数上限', hint: '这几条加起来最多占多少字；觉得每轮太重就调小' },
+            h(GNum, {
+              value: recall.recentMax ?? 1800, min: 200, max: 4000, step: 100, unit: '字', disabled: busy,
+              onSave: (v) => setRecall('recentMax', v),
+            })),
+          h(GRow, { label: '缺口多时按相关度筛', hint: '默认关。关着时只取最近几条；打开后更早那部分会挑跟当前这句有关的' },
+            h(Switch, {
+              on: recall.recentRerank === true, label: '开启', disabled: busy,
+              onToggle: (v) => setRecall('recentRerank', v),
+            })),
         ),
       )
     }
