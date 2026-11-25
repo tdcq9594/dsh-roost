@@ -1368,13 +1368,25 @@ export function apply(ctx) {
           const dMine = dSid ? (sessions.list?.() || []).find((x) => x?.sessionId === dSid) : null;
           const dSp = dSid ? speaker.get(dSid) : null;
           const dChat = String(dMine?.chatId || dSp?.payload?.chat?.chatId || '');
+          /**
+           * issue #73：guard 是进程级全局注册的，同一个 DSH 里用户自己开的编码
+           * 会话也会走到这个回调。它们不是 Roost 建的（`sessions` / `speaker` /
+           * `agentV1` 都查不到），也没有 QQ 确认窗口；旧版把它们和「自驱伪地址」
+           * 一起 fail-closed 直接拒绝，结果用户在自己会话里跑 `git format-patch`
+           * 都被拦。判据跟下面配额那段注释一致：**不是我们的会话就不管**，交回
+           * DSH 自己的权限体系。空会话 id 和 `system:*` / `consolidate` 仍算我们
+           * 的，保持「归属不明就拒」。
+           */
+          const dOurs = !dSid
+            || Boolean(dMine || dSp)
+            || /^(?:system:|consolidate)/i.test(dSid)
+            || (agentV1.list?.() || []).some((x) => x?.sessionId === dSid);
+          if (!dOurs) return undefined;
           /** 全字段扫：命令落在 script / query / payload 里也不能绕过（旧版只看 args/input） */
           const danger = isDangerousCommand(name, dangerScanArgs(exec));
           if (danger.dangerous) {
             /**
-             * 三段式，别全局 fail-closed（2026-11-14 兼容性核查）：
-             *   · 非危险  → 放行，autotelic / 旧 agent.prompt / 扩展 systemTurn
-             *               用这些伪地址跑正常工具，全拦会把「现在刷一轮」打断；
+             * 剩余两段式（会话归属已在上面筛过）：
              *   · 危险 + 真实 QQ 地址 → 走一次性确认；
              *   · 危险 + 空 / `system:*` / `consolidate` 伪地址 → **直接拒绝且不 ask**。
              *     ask 会把确认提示发往不存在的窗口，pending 永远消费不掉，
