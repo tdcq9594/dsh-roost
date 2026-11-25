@@ -3219,3 +3219,15 @@ test('出站策略：不写我方没做的扩展名，不抄对方空下拉', ()
   assert.match(card, /view\?\.activeOptions/, '选项来自后端动态列表');
   assert.ok(!/判定方：目的引擎/.test(card), '不能写死单一源');
 });
+
+test('朋友白名单是独立 Sec，不埋在小闹钟与追问区里', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  const start = src.indexOf("h(Sec, { n: '06', title: '也可以主动搭话的朋友' }");
+  assert.ok(start > 0, '朋友白名单要独立成 Sec');
+  const end = src.indexOf("h(Sec, { n: '07', title: '群聊主动", start);
+  assert.ok(end > start, '独立 Sec 要在群聊主动之前收尾');
+  assert.ok(!/也可以主动搭话的朋友/.test(src.slice(0, start)), '不能再藏在 05 区');
+  const block = src.slice(start, end);
+  assert.match(block, /config\?\.speakUp\?\.allow/, '写的是 speakUp.allow（后端真读）');
+  assert.match(block, /目的引擎/, '说明要点出生效前置条件');
+});
