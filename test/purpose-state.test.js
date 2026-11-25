@@ -81,3 +81,25 @@ test('只读接口的数据源：read 不改盘、不建快照（零副作用）
     assert.equal(existsSync(join(dir, `${STATE_FILE}.prev`)), before.prevExists, 'read 不能建 .prev 快照');
   } finally { cleanup(dir); }
 });
+
+test('契约对齐：purpose-state 存的 goal 必须能被 purpose-engine 的 normalizeGoal 接受', async () => {
+  const { normalizeGoals } = await import('../src/purpose-engine.js');
+  const dir = tmp();
+  try {
+    const p = createPurposeState({ dir });
+    // 老数据（缺 domain）+ 新数据（带 domain）都要能活着走出状态层
+    p.write((s) => {
+      s.goals.push(
+        { id: 'old', owner: 'self', status: 'active', intent: '想吃火锅', evidenceIds: ['e1'] },
+        { id: 'new', owner: 'owner', status: 'hypothesis', domain: 'care', intent: '明天去医院', object: { type: 'topic', name: '复查' } },
+      );
+      return s;
+    });
+    const stored = p.read().goals;
+    assert.equal(stored.length, 2);
+    assert.ok(stored.every((g) => g.domain && g.intent), '每条 goal 必须有 domain 与 intent');
+    const accepted = normalizeGoals(stored);
+    assert.equal(accepted.length, 2, '引擎不能再静默丢弃任何一条已存目标');
+    assert.equal(accepted[0].evidence[0].id, 'e1', 'evidenceIds 要转成引擎认识 evidence');
+  } finally { cleanup(dir); }
+});

@@ -20,6 +20,8 @@ const trimSlash = (s) => String(s ?? '').trim().replace(/\/+$/, '');
  * @param {() => object|null} o.cfgOf  返回 `{ model, baseUrl, apiKey, batch, minScore }`；空=不启用
  * @param {(m:string)=>void} [o.log]
  */
+import { recordVectorFailure } from './vector-failures.js';
+
 export function createEmbedder({ cfgOf, log = () => {}, localOf = null } = {}) {
   /** 本地 embedder 每轮现取（配置开关变了下一轮就生效），没注入就是 null */
   const localNow = () => (typeof localOf === 'function' ? localOf() : null);
@@ -134,7 +136,13 @@ export function createEmbedder({ cfgOf, log = () => {}, localOf = null } = {}) {
         return null;
       }
       if (!read()) return null;
-      return call(texts, opts.signal);
+      try {
+        return await call(texts, opts.signal);
+      } catch (e) {
+        /** 记一笔失败再重抛——调用方原本怎么处理就怎么处理，行为不变 */
+        recordVectorFailure('remote', e?.message || e);
+        throw e;
+      }
     },
 
     async one(text, opts = {}) {
@@ -145,6 +153,7 @@ export function createEmbedder({ cfgOf, log = () => {}, localOf = null } = {}) {
           return r ?? null;
         } catch (e) {
           log(`本地向量算不出来：${e.message}`);
+          recordVectorFailure('local', e?.message || e);
           return null;
         }
       }
@@ -154,6 +163,7 @@ export function createEmbedder({ cfgOf, log = () => {}, localOf = null } = {}) {
         return r?.[0] ?? null;
       } catch (e) {
         log(`向量算不出来：${e.message}`);
+        recordVectorFailure('remote', e?.message || e);
         return null;
       }
     },

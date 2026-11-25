@@ -55,6 +55,21 @@ export const DEFAULTS = {
    * 缺省 `false`：不做任何人的默认动作。
    */
   dryRun: false,
+  /**
+   * 主动发言出站策略（P3 对照补齐）：管「扩展刷完东西能不能直接私聊主人」。
+   * pass=照旧直发（默认）/ gate=发前问引擎 / broker=由引擎决定时机。
+   * 开着门闸但没有可用引擎时一律不放行——绝不静默退回直发。
+   */
+  outboundPolicy: { tier: 'pass', activePolicy: 'auto' },
+  /**
+   * 扩展级配置（`ext.<id>.*`）：目的引擎 `ext.purpose.*`、自驱 `ext.autotelic.*` 都落这里。
+   *
+   * **必须是空对象**：`pruneTo` 对空 shape 的语义是「保留整个值」，
+   * 所以用户写的任何 `ext.xxx` 都能存住。如果这里写成 `{ purpose: {...} }`，
+   * `pruneTo` 只保留 `purpose` 一个键——其他扩展的配置会在每次保存时被静默丢掉。
+   * 这也正是之前 `ext.purpose.enabled` 存不住、目的引擎永远开不起来的原因。
+   */
+  ext: {},
   server: {
     /** 固定服务的端口（/v1 控制面、TTS、健康检查）。端口被占会自动顺延 */
     port: 17321,
@@ -1101,6 +1116,21 @@ export const DEFAULTS = {
      */
     followUps: 1,
     prompt: '',
+    /**
+     * 小闹钟（A1）：她在主人私聊自己定一次性提醒，到点把她叫醒（不直发）。
+     * 键名冻结在 speakUp.* —— 借鉴项目多处直读这个命名空间，改键会连坐。
+     */
+    reminderEnabled: false,
+    reminderLimit: 5,
+    reminderRetry: true,
+    /** 追问 nudge（A2）：她问了一句、主人 15–40 分钟没回，偶尔轻追一句；与我方 followUps 刹车语义不同 */
+    nudge: true,
+    /**
+     * 朋友白名单（P3 补齐）：除主人之外，她也可以主动搭话的私聊对象（openid）。
+     * 每人独立素材/目标/排程；**朋友不是她的主人**——不吃主人的人格先验，
+     * 也不共享主人的每日额度。空 = 只对主人开口。
+     */
+    allow: [],
   },
   /**
    * 4.6 互动召回 `is_wakeup`：单聊。官方口径是「用户主动对话后 30 天内，
@@ -1147,6 +1177,12 @@ export const DEFAULTS = {
   autotelic: {
     enabled: false,
     allowAct: false,
+    /**
+     * 到期跟进作为独立主动候选（阶段 5）。默认开——有该问的事就能主动开口；
+     * 注意这与 `memory.followUp.enabled`（往常规 prompt 注入提示，默认关）是
+     * 两件事，互不联动。想关主动候选只关这一个即可（面板一键关回）。
+     */
+    followUpCandidate: true,
     /** 一天最多推进几次（立项不算次数） */
     maxPerDay: 2,
     /** 连续失败几次自动卡住 */
@@ -1174,9 +1210,38 @@ export const DEFAULTS = {
     responseWindowHours: 48,
     /** 冷度到多少 park 一段时间 */
     chillParkThreshold: 3,
+    /** 冷度半衰期（天） */
+    chillHalfLifeDays: 14,
     /** 单行动单步数上限 */
     maxSteps: 8,
+    /** 同时进行的任务上限（任务账本 active 队列，1–40） */
+    maxTasksActive: 8,
+    /** 节奏预算（与 autotelic.AUTOTELIC_DEFAULTS 两处同步，一致性测试钉死） */
+    maxCandidates: 3,
+    budgetActionsPerHour: 12,
+    dailyReviewHour: 23,
+    minBatchForReview: 3,
+    /** 生活节奏（P1 排程层）：醒着窗口 + 随机间隔 + 心念点火冷却 */
+    awakeFrom: 8,
+    awakeTo: 23,
+    minIntervalMinutes: 90,
+    maxIntervalMinutes: 240,
+    igniteCooldownMinutes: 45,
+    dreamFrom: '03:00',
+    dreamTo: '05:00',
+    /**
+     * 她的手（批次3）：允许她跑自己写的 Python / 写自己的用户模块。
+     * **默认全关**——开了等于允许模型在这台机器上执行自己写的代码；
+     * 沙箱只做 env 白名单 + 超时强杀 + 只写自己数据目录，不隔离运行时能力。
+     */
+    allowPython: false,
+    pythonBin: '',
+    scriptTimeoutMs: 120000,
+    allowUserModules: false,
     /** 四组 token 预算：只约束输入规模，不是「花多少钱」的承诺 */
+    /** chat 组 token 预算（对话轮前缀段复用） */
+    chatMaxInputTokens: 4096,
+    chatMaxOutputTokens: 1024,
     intentMaxInputTokens: 8192,
     intentMaxOutputTokens: 1024,
     gateMaxInputTokens: 4096,
@@ -1611,7 +1676,26 @@ export function loadConfig() {
   migrateTtsSpeed(saved);
   migrateRetentionMode(saved);
   migrateChannel(saved);
-  return upgradeOldDefaults(merge(structuredClone(DEFAULTS), saved));
+  const cfg = upgradeOldDefaults(merge(structuredClone(DEFAULTS), saved));
+  /**
+   * 小闹钟/追问四键的**读盘兜底**（对齐 aurabot core/config.js:738-740）。
+   * pruneTo 只裁键不裁值：没有这层，config.json 里写 reminderLimit=100 就真允许
+   * 100 条闹钟，写字符串 'false' 会让 `=== true` 判成关——面板看着对、行为不对。
+   * 放在 loadConfig 出口，patchConfig / 手写文件 / API 三条路都覆盖。
+   */
+  if (cfg.speakUp) {
+    const su = cfg.speakUp;
+    const bool = (v, d) => (typeof v === 'boolean' ? v : (v === 'false' ? false : (v === 'true' ? true : d)));
+    const num = (v, d, min, max) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : d;
+    };
+    su.reminderEnabled = bool(su.reminderEnabled, false);
+    su.reminderRetry = bool(su.reminderRetry, true);
+    su.nudge = bool(su.nudge, true);
+    su.reminderLimit = num(su.reminderLimit, 5, 1, 10);
+  }
+  return cfg;
 }
 
 /**

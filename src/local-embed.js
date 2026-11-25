@@ -21,6 +21,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { recordVectorFailure } from './vector-failures.js';
 
 /** e5 系列的非对称前缀：查询加 "query: "、文档加 "passage: "（Hindsight 默认） */
 export const QUERY_PREFIX = 'query: ';
@@ -134,6 +135,8 @@ export function createLocalEmbedder({
     } catch (e) {
       loadError = String(e?.message || e);
       log(`本地 embedding 加载失败：${loadError}`);
+      /** 跟进 #527：模型加载失败是静默回落的主因，落盘让面板看得见 */
+      recordVectorFailure('local-load', loadError);
       return false;
     }
   }

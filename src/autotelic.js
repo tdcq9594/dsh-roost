@@ -35,6 +35,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { writeJsonAtomic } from './atomic.js';
+import { parseConstraintRules, check as constraintCheck } from './autotelic-constraint.js';
 
 import {
   appendLedger, readLedger, verifyChain, dayStats, ledgerPath, GENESIS,
@@ -51,6 +52,8 @@ export const AUTOTELIC_DEFAULTS = {
   enabled: false,
   /** 允许调工具。false = 只能想（prompt 里也明确禁止动手） */
   allowAct: false,
+  /** 到期跟进作独立主动候选（阶段 5），默认开；与 memory.followUp 的 prompt 注入开关互不联动 */
+  followUpCandidate: true,
   /** 一天最多推进几次（立项不算次数，推进才算） */
   maxPerDay: 2,
   /** 连续失败几次自动卡住 */
@@ -72,7 +75,34 @@ export const AUTOTELIC_DEFAULTS = {
   confirmWindowMinutes: 720,
   responseWindowHours: 48,
   chillParkThreshold: 3,
+  /** 冷度半衰期（天）：多久忘掉一次「主人没理我」 */
+  chillHalfLifeDays: 14,
   maxSteps: 8,
+  /** 节奏预算（对齐 aurabot）：一轮最多立项 / 同时进行的任务数 / 动作数每小时。
+   *  maxTasksActive 已接进任务账本（book.js），不再是假控件。 */
+  maxCandidates: 3,
+  maxTasksActive: 8,
+  budgetActionsPerHour: 12,
+  /** 定时复盘：几点做每日一页 + 攒够几条先做（先到者为准） */
+  dailyReviewHour: 23,
+  minBatchForReview: 3,
+  /** 生活节奏（P1）：醒着窗口 + 随机间隔 + 点火冷却 */
+  awakeFrom: 8,
+  awakeTo: 23,
+  minIntervalMinutes: 90,
+  maxIntervalMinutes: 240,
+  igniteCooldownMinutes: 45,
+  /** 做梦窗口（HH:MM，安静时段最深处；空串=关） */
+  dreamFrom: '03:00',
+  dreamTo: '05:00',
+  /** 她的手（批次3）：默认全关，开了等于允许执行自写代码（详见 config.js 注释） */
+  allowPython: false,
+  pythonBin: '',
+  scriptTimeoutMs: 120000,
+  allowUserModules: false,
+  /** chat 组 token 预算（对话轮前缀段复用；对方 §9.3 四组之一） */
+  chatMaxInputTokens: 4096,
+  chatMaxOutputTokens: 1024,
   intentMaxInputTokens: 8192,
   intentMaxOutputTokens: 1024,
   gateMaxInputTokens: 4096,
@@ -82,7 +112,7 @@ export const AUTOTELIC_DEFAULTS = {
 };
 
 /** 允许出现在 `tune` 里的键（现在没有自动调参，留给以后收口） */
-export const TUNABLE = Object.freeze(['maxPerDay', 'heartbeatMin', 'quietStartHour', 'quietEndHour']);
+export const TUNABLE = Object.freeze(['awakeFrom', 'awakeTo', 'minIntervalMinutes', 'maxIntervalMinutes', 'maxPerDay', 'igniteCooldownMinutes']);
 
 const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
@@ -91,6 +121,16 @@ const clampInt = (v, min, max, dflt) => {
   const n = Number(v);
   if (!Number.isFinite(n)) return dflt;
   return Math.min(max, Math.max(min, Math.round(n)));
+};
+/** HH:MM 或空串（关）；非法值回落默认，不把坏配置排到错时刻 */
+const clampTime = (v, dflt) => {
+  const s = String(v ?? '').trim();
+  if (!s) return '';
+  const m = /^(\d{1,2}):(\d{2})$/.exec(s);
+  if (!m) return dflt;
+  const h = Number(m[1]), min = Number(m[2]);
+  if (h > 23 || min > 59) return dflt;
+  return `${String(h).padStart(2, '0')}:${m[2]}`;
 };
 
 /** 读配置段并夹紧到合法范围。配置写坏了不该让引擎崩，也不该让它跑飞 */
@@ -117,7 +157,27 @@ export function normalizeCfg(raw = {}) {
     confirmWindowMinutes: clampInt(r.confirmWindowMinutes, 5, 10080, AUTOTELIC_DEFAULTS.confirmWindowMinutes),
     responseWindowHours: clampInt(r.responseWindowHours, 1, 168, AUTOTELIC_DEFAULTS.responseWindowHours),
     chillParkThreshold: clampInt(r.chillParkThreshold, 1, 10, AUTOTELIC_DEFAULTS.chillParkThreshold),
+    chillHalfLifeDays: clampInt(r.chillHalfLifeDays, 1, 365, AUTOTELIC_DEFAULTS.chillHalfLifeDays),
     maxSteps: clampInt(r.maxSteps, 1, 32, AUTOTELIC_DEFAULTS.maxSteps),
+    maxTasksActive: clampInt(r.maxTasksActive, 1, 40, AUTOTELIC_DEFAULTS.maxTasksActive),
+    maxCandidates: clampInt(r.maxCandidates, 1, 5, AUTOTELIC_DEFAULTS.maxCandidates),
+    budgetActionsPerHour: clampInt(r.budgetActionsPerHour, 1, 120, AUTOTELIC_DEFAULTS.budgetActionsPerHour),
+    dailyReviewHour: clampInt(r.dailyReviewHour, 0, 23, AUTOTELIC_DEFAULTS.dailyReviewHour),
+    minBatchForReview: clampInt(r.minBatchForReview, 1, 20, AUTOTELIC_DEFAULTS.minBatchForReview),
+    /** HH:MM 严格校验，空串=关；非法回落默认，不让坏配置把做梦排到午夜 */
+    awakeFrom: clampInt(r.awakeFrom, 0, 24, AUTOTELIC_DEFAULTS.awakeFrom),
+    awakeTo: clampInt(r.awakeTo, 0, 24, AUTOTELIC_DEFAULTS.awakeTo),
+    minIntervalMinutes: clampInt(r.minIntervalMinutes, 5, 2880, AUTOTELIC_DEFAULTS.minIntervalMinutes),
+    maxIntervalMinutes: clampInt(r.maxIntervalMinutes, 5, 2880, AUTOTELIC_DEFAULTS.maxIntervalMinutes),
+    igniteCooldownMinutes: clampInt(r.igniteCooldownMinutes, 1, 720, AUTOTELIC_DEFAULTS.igniteCooldownMinutes),
+    dreamFrom: clampTime(r.dreamFrom, AUTOTELIC_DEFAULTS.dreamFrom),
+    dreamTo: clampTime(r.dreamTo, AUTOTELIC_DEFAULTS.dreamTo),
+    allowPython: r.allowPython === true,
+    pythonBin: String(r.pythonBin ?? '').trim().slice(0, 500),
+    scriptTimeoutMs: clampInt(r.scriptTimeoutMs, 5000, 600000, AUTOTELIC_DEFAULTS.scriptTimeoutMs),
+    allowUserModules: r.allowUserModules === true,
+    chatMaxInputTokens: clampInt(r.chatMaxInputTokens, 512, 65536, AUTOTELIC_DEFAULTS.chatMaxInputTokens),
+    chatMaxOutputTokens: clampInt(r.chatMaxOutputTokens, 128, 8192, AUTOTELIC_DEFAULTS.chatMaxOutputTokens),
     intentMaxInputTokens: clampInt(r.intentMaxInputTokens, 512, 65536, AUTOTELIC_DEFAULTS.intentMaxInputTokens),
     intentMaxOutputTokens: clampInt(r.intentMaxOutputTokens, 128, 8192, AUTOTELIC_DEFAULTS.intentMaxOutputTokens),
     gateMaxInputTokens: clampInt(r.gateMaxInputTokens, 512, 65536, AUTOTELIC_DEFAULTS.gateMaxInputTokens),
@@ -236,12 +296,21 @@ export function pickProject(seeds = [], { history = [], now = Date.now() } = {})
 }
 
 /** 立项后的推进 prompt。**明确禁止动手**（除非 allowAct） */
-export function buildStepPrompt({ project, allowAct = false, lastNote = '' } = {}) {
+export function buildStepPrompt({ project, allowAct = false, lastNote = '', constraints = [] } = {}) {
   const lines = [
     '这是你自己的时间。没人跟你说话，你也不需要回谁。',
     `你在琢磨这件事：${String(project ?? '').trim()}`,
   ];
   if (lastNote) lines.push(`上一轮你想到了：${String(lastNote).slice(0, 400)}`);
+  /**
+   * 主人约束真正注入 prompt（阶段 3 B2）：此前 constraintLines 只被 status 展示，
+   * 写了约束不拦任何东西。这里是**软约束**（模型应遵循），代码硬否决在阶段 4
+   * 的三段决策里做——面板文案已如实标注，不再谎称「硬否决已生效」。
+   */
+  if (Array.isArray(constraints) && constraints.length) {
+    lines.push('主人定下的硬规矩（违反即为错，宁可不做也别碰）：');
+    for (const c of constraints.slice(0, 50)) lines.push(`- ${String(c).slice(0, 200)}`);
+  }
   lines.push('');
   if (allowAct) {
     lines.push('可以动手：需要查资料就用工具查，但**不要发任何 QQ 消息**，不要改主人的任何配置或记忆。');
@@ -287,7 +356,48 @@ export function constraintLines(rules = '') {
  */
 export function createAutotelic({
   dir = '', cfgOf = () => ({}), run = null, log = () => {}, now = () => Date.now(),
+  /**
+   * 决策审计日志（阶段 4，可选注入）：{ append(phase, round, payload) }。
+   * 不注入就不写——老调用方/测试零影响；宿主注入 createDecisionLog 后，
+   * 立项/推进会各落一行，模型回包作为 payload 原样进哈希链。
+   */
+  decisionLog = null,
+  /**
+   * 三段决策运行时（阶段 4，可选注入）：{ decideRound(opts) } = createPlanner()。
+   * 不注入就没有 decide() 能力，老调用方零影响。
+   */
+  planner = null,
+  /**
+   * 行动单执行器（阶段 4，可选注入）：{ execute(ticket) } = createExecV5 实例。
+   * 不注入就没有 execute() 能力，老调用方零影响。
+   */
+  executor = null,
+  /**
+   * 反馈回路（阶段 4，可选注入）：createFeedback 实例。用于熔断静默、立项权重过滤、
+   * 主人纠偏入表。不注入就不启用，老调用方零影响。
+   */
+  feedback = null,
+  /** 技能层（阶段 4，可选注入）：createSkillStore 实例，面板展示索引/各层条目 */
+  skills = null,
+  /**
+   * 复盘回调（P0 修复）：`async (review) => artifact`。宿主注入后，
+   * executor.run 终态会回调它 → reviewRound → skills.ingestReflection，
+   * 「执行→复盘→沉淀」才真正闭环。不注入则执行器不回调（老行为）。
+   */
+  reviewer = null,
+  /**
+   * 观察层（P1 修复）：createObserve 实例。注入后 decide() 用**真实观察**
+   * （她看到的/经历的）而不是账本行（她做过的）——立项依据才对。
+   * 不注入退回老行为（账本行冒充观察），老调用方零影响。
+   */
+  observe = null,
 } = {}) {
+  /** 决策阶段落账：写失败不阻断业务（审计是旁路，与主账本 appendLedger 的语义一致） */
+  const noteDecision = async (phase, payload) => {
+    if (!decisionLog || typeof decisionLog.append !== 'function') return;
+    try { await decisionLog.append(phase, Number(payload.round) || 0, payload); }
+    catch (e) { log(`决策审计写入失败（不影响本轮）：${e?.message || e}`); }
+  };
   const stateFile = () => join(dir, STATE_FILE);
   const file = () => ledgerPath(dir);
 
@@ -409,6 +519,24 @@ export function createAutotelic({
       appendLedger(file(), { kind: 'deny', payload: { by: manual ? 'manual' : 'tick' }, note: p.reason, at: now() });
       return { ok: false, reason: p.reason };
     }
+    /**
+     * 约束前置硬否决（阶段 4）：主人写的强制规则在代码层机械核对，触犯即 reject，
+     * 不交给模型自判（§3.7 裁决二）。constraintCheck 读 title/reason/tag/want，
+     * 这里把立项候选的 text 映射成 title。B2 的「硬否决」至此真正落地。
+     */
+    const c = cfg();
+    const rules = parseConstraintRules(c.constraintRules || '').rules;
+    if (rules.length) {
+      const verdict = constraintCheck(rules, { title: p.project.text, reason: p.project.text, tag: '立项' });
+      if (verdict.vetoed) {
+        const why = `触犯主人约束：${verdict.hits.map((h) => h.text).join('；')}`;
+        appendLedger(file(), {
+          kind: 'deny', payload: { by: manual ? 'manual' : 'tick', constraint: true },
+          note: why, at: now(), verdict: 'reject', tag: '立项',
+        });
+        return { ok: false, reason: why };
+      }
+    }
     state.project = p.project;
     state.lastNote = '';
     state.lastTickAt = now();
@@ -424,6 +552,11 @@ export function createAutotelic({
       verdict: 'pass',
       source: manual ? 'panel' : 'auto',
       evidence: [{ id: p.project.id, text: p.project.text, source: 'seed' }],
+    });
+    /** 决策审计：立项这一阶段原样落账（哈希链由注入方保证，模型改不了） */
+    void noteDecision('intent', {
+      project: p.project.text, score: p.project.score,
+      rejected: p.rejected?.length || 0, round: Number(state.project?.steps) || 0,
     });
     return { ok: true, project: p.project, rejected: p.rejected };
   }
@@ -450,6 +583,7 @@ export function createAutotelic({
     const c = cfg();
     const prompt = buildStepPrompt({
       project: state.project.text, allowAct: c.allowAct, lastNote: state.lastNote,
+      constraints: constraintLines(c.constraintRules),
     });
     /** 每个项目一个会话：host.js 的 run() 已按传入的 sessionId 建/复用会话 */
     const sid = sessionIdFor(state.project.id);
@@ -475,6 +609,10 @@ export function createAutotelic({
         tag: '推进',
         verdict: 'pass',
         source: manual ? 'panel' : 'tick',
+      });
+      void noteDecision('review', {
+        project: state.project.text, chars: out.length, verdict: 'pass',
+        round: Number(state.project.steps) || 0,
       });
       return { ok: true, text: out, project: state.project };
     } catch (e) {
@@ -547,8 +685,143 @@ export function createAutotelic({
     return { ok: true, rows: rows.slice(-n).reverse() };
   }
 
+  /**
+   * 三段决策（阶段 4）：意图生成 → 四态把关 → 行动单。
+   * 观察窗来自我方账本 recent——每条带 id/at 的账本行就是一个观察，
+   * 喂给 parseIntents 做「无出处候选作废」的硬校验（阶段 3 已抽）。
+   * 没注入 planner 时明确说不可用，不静默退化成老立项（那会让人以为三段决策生效了）。
+   */
+  async function decide({ round = 0, maxObservations = 12 } = {}) {
+    if (!planner || typeof planner.decideRound !== 'function') {
+      return { ok: false, outcome: 'error', error: '三段决策未接线（planner 未注入）' };
+    }
+    /** 熔断静默期：一轮都不跑（对方 index.js:307 同款） */
+    if (feedback && typeof feedback.isSilent === 'function' && feedback.isSilent()) {
+      return { ok: false, outcome: 'silent', why: '反馈熔断静默期，先不琢磨事' };
+    }
+    const c = cfg();
+    /**
+     * 观察来源（P1 修复）：优先用**真实观察**（observe.list：她看到的/经历的），
+     * 没有观察层才退回账本行（她做过的）。这是立项依据对错的分水岭——
+     * 拿「做过的」当「看到的」，她会一直围绕已完成的事打转。
+     */
+    let rows;
+    if (observe && typeof observe.list === 'function') {
+      rows = observe.list({ limit: maxObservations }).map((o) => ({
+        id: String(o.id ?? o.ts),
+        at: Number(o.ts) || 0,
+        source: String(o.source || 'observe'),
+        text: String(o.text || '').slice(0, 200),
+        tag: String(o.tag || ''),
+      })).filter((o) => o.text);
+    } else {
+      /** recent() 返回 {ok, rows}，不是裸数组——面板 showLedger 也是取 .rows */
+      rows = recent(maxObservations).rows.map((r) => ({
+        id: String(r.id ?? r.at),
+        at: Number(r.at) || 0,
+        source: r.kind === 'deny' ? 'constraint' : 'ledger',
+        text: String(r.note || r.payload?.project || r.payload?.text || '').slice(0, 200),
+      })).filter((o) => o.text);
+    }
+    rows = rows
+      /**
+       * 主人抑制/park 的 **tag** 权重 0 → 不进候选（对方 index.js:313 同款）。
+       * 注意传的是 `tag` 不是 `source`：抑制表按 tag 记（「别再刷B站」抑制的是「B站」这类 tag），
+       * 传 source（'ledger'/'observe'）永远匹配不上，抑制等于没生效。
+       */
+      .filter((o) => !feedback || typeof feedback.weightOf !== 'function' || feedback.weightOf(o.tag || o.source) > 0);
+    const r = await planner.decideRound({
+      round,
+      persona: { summary: '', instinctExtra: '' },
+      constraintRulesText: constraintLines(c.constraintRules).map((x) => `- ${x}`).join('\n'),
+      observations: rows,
+      /** 一轮最多立项数透传给 parseIntents（它原来硬截 4，配 5 不生效） */
+      maxCandidates: c.maxCandidates ?? 3,
+      ticketBudget: { maxSteps: c.maxSteps ?? 4, timeoutMs: 120_000 },
+    });
+    /**
+     * 立项落账（多任务缺口的最小闭环）：planner 产出的每张 ticket 都进哈希链账本，
+     * 面板能逐条查/逐张执行；以前 tickets 只用于展示，重启即丢。
+     * 写失败不阻断业务——账本与决策链都是旁路审计，同 appendLedger 既有语义。
+     */
+    const tickets = Array.isArray(r.tickets) ? r.tickets : [];
+    for (const t of tickets) {
+      try {
+        appendLedger(file(), {
+          kind: 'ticket',
+          payload: { id: t.id, intent: t.intent, tag: t.tag, round, status: 'pending' },
+          note: String(t.intent || '').slice(0, 200),
+          at: now(),
+        });
+      } catch (e) { log(`行动单落账失败（不影响本轮）：${e?.message || e}`); }
+    }
+    return { ok: r.outcome !== 'error', ...r, persisted: tickets.length };
+  }
+
+  /**
+   * 执行一张行动单（阶段 4）：走注入的 createExecV5，三级分级/硬禁区/确认队列在
+   * 执行器里机械判定。没注入就明确说不可用——不静默假装执行了。
+   */
+  /**
+   * 主人纠偏（阶段 4）：「别做 X」→ 抑制表，「多干这种」→ 偏好表。
+   * 走 feedback.ingestCorrection，tag 从文本里带出（可显式传）。
+   */
+  function correct(text, tags = []) {
+    if (!feedback || typeof feedback.ingestCorrection !== 'function') {
+      return { ok: false, reason: '反馈回路未接线（feedback 未注入）' };
+    }
+    const r = feedback.ingestCorrection(text, { tags: Array.isArray(tags) ? tags : [] });
+    return { ok: true, ...r };
+  }
+
+  /** 阶段 4：反馈状态快照，面板展示抑制/偏好/冷度/park/熔断 */
+  function feedbackStatus() {
+    if (!feedback || typeof feedback.snapshot !== 'function') return null;
+    return feedback.snapshot();
+  }
+
+  /** 阶段 4：技能层索引与各层条目，面板展示「她学会了什么」 */
+  function skillStatus() {
+    if (!skills || typeof skills.list !== 'function') return null;
+    return {
+      memory: (skills.list('memory') || []).map((d) => ({ id: d.id, title: d.meta?.title || '', score: d.meta?.score ?? 0.5 })),
+      skills: (skills.list('skills') || []).map((d) => ({ id: d.id, title: d.meta?.title || '', score: d.meta?.score ?? 0.5, uses: d.meta?.uses || 0 })),
+      instinct: (skills.list('instinct') || []).map((d) => ({ id: d.id, title: d.meta?.title || '', score: d.meta?.score ?? 0.5 })),
+    };
+  }
+
+  async function execute(ticket) {
+    if (!executor || typeof executor.run !== 'function') {
+      return { ok: false, status: 'aborted', why: '执行器未接线（executor 未注入）' };
+    }
+    const c = cfg();
+    /**
+     * 动作数/小时（budgetActionsPerHour）：执行器之外的一道 mechanistic 闸，
+     * 数账本近 1 小时的 ticket/step 行——面板手动触发也走这里，堵住绕过。
+     * 只数已落账的动作，pending 的确认队列不算（还没真动手）。
+     */
+    const cap = Number(c.budgetActionsPerHour) || 12;
+    const since = Date.now() - 3_600_000;
+    const used = recent(500).rows.filter((r) =>
+      ['ticket', 'step'].includes(String(r?.kind)) && Number(r?.at || 0) > since).length;
+    if (used >= cap) {
+      return { ok: false, status: 'rejected', why: `动作预算到顶（${used}/${cap}/小时），这一小时不再动手` };
+    }
+    /** 约束全文带进行动单，执行器把它放进每步上下文头部（§3.7 注入位置二） */
+    const withRules = {
+      ...ticket,
+      constraintRulesText: constraintLines(c.constraintRules).map((x) => `- ${x}`).join('\n'),
+    };
+    const r = await executor.run(withRules, reviewer ? { plan: { reviewRound: reviewer } } : {});
+    /**
+     * 投递记账不在这里做——已下移到执行器 settle()（唯一终态出口），
+     * 否则「排队→主人确认→真发出」这条默认路径永远记不到。
+     */
+    return { ok: r?.status === 'done', ...r };
+  }
+
   return {
-    status, preview, think, step, tick, review, recent,
+    status, preview, think, step, tick, review, recent, decide, execute, correct, feedbackStatus, skillStatus,
     /** 测试与「重新读配置」用 */
     reload: () => { state = loadState(); return status(); },
     gate,

@@ -439,7 +439,7 @@ function buildSearchDef({ caller, searchOf }) {
  * @param {() => object} o.cfgOf
  * @param {() => {parts:number}} o.stateOf 本轮已发段数
  */
-export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null }) {
+export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null, reminderOf = null, proposeOf = null, sayOf = null, noteOf = null, modulesOf = null, handOf = null }) {
   const caller = () => callerOf?.() || { chatId: '', kind: '', said: '', hasPayload: false, bucket: '' };
   /**
    * 描述是模型唯一能看到的工具契约：TTS 关着就不能教它写语音标记，
@@ -616,9 +616,175 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
     },
   };
 
+  /**
+   * 她的小闹钟（A1）：只在主人私聊可用；面板开关关着时如实拒绝。
+   * 没注入 reminderOf 就不注册——不挂一个调了就炸的壳子（同 fileOf 口径）。
+   */
+  const setReminder = {
+    name: 'qq_set_reminder',
+    description: '给未来的自己定一个小闹钟。到点系统会提醒你主动找主人说话。at 必须是 yyyy-mm-dd HH:MM（本地时间），note 是到时要提醒自己的内容/由头。只用于主人私聊；面板里的小闹钟开关关着时不能用。',
+    parameters: {
+      at: { type: 'string', required: true, description: '时间，格式 yyyy-mm-dd HH:MM，例如 2026-11-26 17:30' },
+      note: { type: 'string', required: true, description: '到时要提醒自己的事' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ at, note } = {}) {
+      if (!reminderOf) return { ok: false, message: '小闹钟没接线' };
+      const c = caller();
+      const gate = reminderOf.gate?.(c) || { ok: false, message: '只有主人能用小闹钟' };
+      if (!gate.ok) return { ok: false, message: gate.message || gate.why };
+      return reminderOf.add(String(at || ''), String(note || ''));
+    },
+  };
+  const closeReminder = {
+    name: 'qq_close_reminder',
+    description: '关闭一个自己设的小闹钟。id 用面板「小闹钟与追问」里那张列表的编号。只用于主人私聊。',
+    parameters: {
+      id: { type: 'string', required: true, description: '要关闭的小闹钟 id' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ id } = {}) {
+      if (!reminderOf) return { ok: false, message: '小闹钟没接线' };
+      const c = caller();
+      const gate = reminderOf.gate?.(c) || { ok: false, message: '只有主人能用小闹钟' };
+      if (!gate.ok) return { ok: false, message: gate.message || gate.why };
+      return reminderOf.close(String(id || ''));
+    },
+  };
+
+  /**
+   * 她自己写提案（A5 语义纠偏）：对方 autotelic_propose 同款——给主人写提案，
+   * 想要新能力/想改框架/想加工具都写这，永远改不到框架代码 src/。
+   * 没注入 proposeOf 就不注册。
+   */
+  const propose = {
+    name: 'autotelic_propose',
+    description: '给主人写提案（proposals/）：想要新能力、想改框架、想加工具，都写在这里。你永远改不到框架代码（src/）。',
+    parameters: {
+      title: { type: 'string', required: true, description: '提案标题' },
+      body: { type: 'string', required: true, description: '提案正文' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ title, body } = {}) {
+      if (!proposeOf) return { ok: false, message: '提案没接线' };
+      return proposeOf(String(title || ''), String(body || ''));
+    },
+  };
+
+  /**
+   * 她的手（批次3）：跑 Python / 写用户模块。
+   * 两个都是**高风险**：执行她写的代码、往磁盘写模块。开关默认关，
+   * 关着时如实拒绝；安全边界在 autotelic-python.js / autotelic-skills.js 里。
+   */
+  const runPython = {
+    name: 'autotelic_run_python',
+    description: '跑一段 Python 脚本（子进程，超时会杀，不继承主程序的任何密钥环境变量）。stdout 会回给你；要留产物就写到你目录的 out/ 附近。',
+    parameters: {
+      code: { type: 'string', required: true, description: 'Python 3 源码' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ code } = {}) {
+      if (!handOf) return { ok: false, message: '跑 Python 没接线' };
+      return handOf.python(String(code || ''));
+    },
+  };
+  const writeModule = {
+    name: 'autotelic_write_module',
+    description: '给自己写一个用户模块（扩展能力，升级不丢）。只能写你自己的模块目录；框架代码永远写不到。',
+    parameters: {
+      id: { type: 'string', required: true, description: '模块 id（小写字母开头，小写字母/数字/-）' },
+      code: { type: 'string', required: true, description: 'index.mjs 完整内容，必须 export default 模块对象' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ id, code } = {}) {
+      if (!handOf) return { ok: false, message: '写用户模块没接线' };
+      return handOf.module(String(id || ''), String(code || ''));
+    },
+  };
+
+  /**
+   * 她想说一句（P1）：**不直接发**——交给主动消息治理排队，安静时段先攒着。
+   * 这是自驱引擎里「她主动开口」的唯一口子；没有它，自驱只能闷头做事、不能说话。
+   */
+  const proposeSay = {
+    name: 'autotelic_propose_say',
+    description: '你想对主人说一句话。不直接发：交给主动消息治理排队，安静时段先攒着。说不说由治理和你判断，但「想过要说」会留痕。',
+    parameters: {
+      text: { type: 'string', required: true, description: '想说的话' },
+      reason: { type: 'string', required: false, description: '为什么现在想说' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ text, reason } = {}) {
+      if (!sayOf) return { ok: false, message: '说话没接线' };
+      return sayOf(String(text || ''), String(reason || ''));
+    },
+  };
+
+  /**
+   * 写笔记（P2）：她自己的 notes/ 目录。用来记查到的东西、留给以后的想法。
+   * 只能写自己数据目录，碰不到框架源码。
+   */
+  const writeNote = {
+    name: 'autotelic_note',
+    description: '写一篇笔记到你自己的目录（notes/ 年月日-标题.md）。用于记录你查到的东西、想留给以后的想法。',
+    parameters: {
+      title: { type: 'string', required: true, description: '标题（做文件名用）' },
+      text: { type: 'string', required: true, description: '正文' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ title, text } = {}) {
+      if (!noteOf) return { ok: false, message: '写笔记没接线' };
+      return noteOf(String(title || ''), String(text || ''));
+    },
+  };
+
+  /** 列她自己的模块（P2）：只读清单，不加载、不执行 */
+  const listModules = {
+    name: 'autotelic_modules',
+    description: '列出你自己写过的用户模块（modules/<id>/index.mjs）。只读清单，不加载不执行。',
+    parameters: {},
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute() {
+      if (!modulesOf) return { ok: false, message: '列模块没接线' };
+      return modulesOf();
+    },
+  };
+
   return [
     send,
     close,
+    /** 小闹钟（没注入 reminderOf 就不注册） */
+    ...(reminderOf ? [setReminder, closeReminder] : []),
+    ...(proposeOf ? [propose] : []),
+    ...(sayOf ? [proposeSay] : []),
+    ...(noteOf ? [writeNote] : []),
+    ...(modulesOf ? [listModules] : []),
+    /** 她的手（批次3）：没注入 handOf 就不注册——高风险能力，默认关且要显式接线 */
+    ...(handOf ? [runPython, writeModule] : []),
     /**
      * 没给 `fileOf` 就**不注册**这个工具，而不是注册一个调了就炸的壳子。
      *
@@ -706,8 +872,8 @@ function buildPostThreadDef({ postThreadOf }) {
  *
  * @returns {Promise<{ok:boolean, names:string[], reason?:string, mode?:string, off?:Function}>}
  */
-export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null, log = () => {} }) {
-  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf, sessionOf, infoOf, searchOf, postThreadOf });
+export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null, reminderOf = null, proposeOf = null, sayOf = null, noteOf = null, modulesOf = null, handOf = null, log = () => {} }) {
+  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf, sessionOf, infoOf, searchOf, postThreadOf, reminderOf, proposeOf, sayOf, noteOf, modulesOf, handOf });
   const registry = agent?.ctx?.tools;
   if (!registry?.register) {
     /**

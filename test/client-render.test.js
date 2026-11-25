@@ -3152,3 +3152,70 @@ test('接入步骤：普通分节 + 状态徽章，不再有左侧圆圈和竖�
   assert.ok(step.includes("h('span', { className: 'roost-step-n' }"), '序号只在标题行里做淡色前缀')
   assert.ok(step.includes("h('span', { className: 'roost-pill'"), '状态靠徽章表达')
 })
+
+test('目的引擎每日上限控件写 dailyMax（不是后端不读的 maxPerDay）', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  const start = src.indexOf('启用目的引擎');
+  const end = src.indexOf('链路计数', start);
+  assert.ok(start > 0 && end > start, '没找到目的引擎设置区');
+  const block = src.slice(start, end);
+  assert.match(block, /dailyMax: n/, '每日上限输入必须写 dailyMax');
+  assert.ok(!/purpose: \{[^}]*maxPerDay: n/.test(block), '不能再写后端不读的 maxPerDay');
+  assert.match(block, /delete np\.maxPerDay/, '旧错键要清掉，避免残留误导');
+});
+
+test('账本筛选/分页（P3）：筛选栏是平级块，列表用过滤后的数据源', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.match(src, /const \[ledgerFilter, setLedgerFilter\] = useState\('all'\)/, '筛选 state 要在')
+  assert.match(src, /const \[ledgerPage, setLedgerPage\] = useState\(0\)/, '分页 state 要在')
+  assert.match(src, /ledgerPageRows\.map\(\(r\)/, '列表渲染必须用分页后的数据')
+  assert.ok(!/ledger\.map\(\(r\)/.test(src), '不能再直接渲染整个 ledger')
+  /** 筛选栏必须是 ledger ? h(...) 的独立块，不能嵌进列表 div——否则括号嵌套极易出错 */
+  const filterBar = src.indexOf("onClick: () => { setLedgerFilter('all')")
+  const listBlock = src.indexOf("ledgerPageRows.map((r)")
+  assert.ok(filterBar > 0 && listBlock > filterBar, '筛选栏要在列表之前')
+  const between = src.slice(filterBar, listBlock)
+  assert.ok(between.includes(': null,'), '筛选栏必须自己闭合（平级块），不能和列表共用 div')
+});
+
+test('OutboundPolicyCard 不引用 PurposeStatusCard 的局部 Block（运行时 ReferenceError 回归）', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  const start = src.indexOf('function OutboundPolicyCard');
+  const end = src.indexOf('function AwakeTab', start);
+  assert.ok(start > 0 && end > start, '没找到 OutboundPolicyCard');
+  const block = src.slice(start, end);
+  assert.ok(!/h\(Block,/.test(block), 'Block 是 PurposeStatusCard 内部的局部组件，这里引用会 ReferenceError');
+  /** 它用的必须是模块级组件 */
+  assert.match(block, /h\(Sec,/, 'Sec 是模块级组件，可用');
+  assert.match(block, /h\(Dropdown,/, 'Dropdown 是模块级组件，可用');
+});
+
+test('闹钟追问：配置在主动搭话页，操作在自驱页，标题不重复且无过时指引', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  const sec = src.indexOf("title: '她的小闹钟与追问'");
+  const op = src.indexOf("'小闹钟：代她设一条 / 看待触发'");
+  assert.ok(sec > 0, '主动搭话页的配置区要在');
+  assert.ok(op > 0, '自驱页的操作区要是明确的操作标题');
+  assert.ok(op < sec, '操作区在自驱页（代码顺序靠前）');
+  /** 自驱卡里不能再指向不存在的「下面 config 的 speakUp.nudge」 */
+  const opBlock = src.slice(op, op + 1200);
+  assert.ok(!/下面 config 的 speakUp\.nudge/.test(opBlock), '过时指引要删');
+  assert.match(opBlock, /主动搭话 → 05/, '要指向真正的配置页');
+});
+
+test('出站策略：不写我方没做的扩展名，不抄对方空下拉', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  const view = readFileSync(new URL('../src/outbound-panel-view.js', import.meta.url), 'utf8');
+  const start = src.indexOf('function OutboundPolicyCard');
+  const end = src.indexOf('function AwakeTab', start);
+  const card = src.slice(start, end);
+  for (const [name, text] of [['client 出站卡', card], ['面板视图', view]]) {
+    for (const word of ['抖音', '小黑盒', '热榜', '刷视频', '逛社区', 'api.proactive']) {
+      assert.ok(!text.includes(word), `${name} 不该写我方没做的「${word}」`);
+    }
+  }
+  /** 谁来判下拉要存在，但选项必须来自后端动态 activeOptions，不写死源名 */
+  assert.match(card, /谁来判：/, '下拉要在');
+  assert.match(card, /view\?\.activeOptions/, '选项来自后端动态列表');
+  assert.ok(!/判定方：目的引擎/.test(card), '不能写死单一源');
+});
