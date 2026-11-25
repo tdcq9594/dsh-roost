@@ -3177,3 +3177,15 @@ test('账本筛选/分页（P3）：筛选栏是平级块，列表用过滤后�
   const between = src.slice(filterBar, listBlock)
   assert.ok(between.includes(': null,'), '筛选栏必须自己闭合（平级块），不能和列表共用 div')
 });
+
+test('OutboundPolicyCard 不引用 PurposeStatusCard 的局部 Block（运行时 ReferenceError 回归）', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  const start = src.indexOf('function OutboundPolicyCard');
+  const end = src.indexOf('function AwakeTab', start);
+  assert.ok(start > 0 && end > start, '没找到 OutboundPolicyCard');
+  const block = src.slice(start, end);
+  assert.ok(!/h\(Block,/.test(block), 'Block 是 PurposeStatusCard 内部的局部组件，这里引用会 ReferenceError');
+  /** 它用的必须是模块级组件 */
+  assert.match(block, /h\(Sec,/, 'Sec 是模块级组件，可用');
+  assert.match(block, /h\(Dropdown,/, 'Dropdown 是模块级组件，可用');
+});

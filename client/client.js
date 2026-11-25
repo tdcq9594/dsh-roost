@@ -9380,8 +9380,10 @@ window.__ModuleLoader__.load({
             '策略源：' + view.sources.map((x) => `${x.title}（${x.stateLabel}${x.reason ? '·' + x.reason : ''}）`).join('、'))
           : h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8 } },
             '还没有可用的引擎：先打开「目的引擎」，否则没人决定该不该说。'),
+        /** 不用 Block：那是 PurposeStatusCard 内部的局部组件，这里作用域不可见 */
         view?.stats?.length
-          ? h(Block, { label: '判定统计' },
+          ? h('div', { style: { marginTop: 6 } },
+            h('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 6 } }, '判定统计'),
             h('div', { className: 'roost-grid' },
               view.stats.map((x) => h('div', { key: x.label, className: 'roost-stat' },
                 h('b', null, x.value), h('span', null, x.label)))))
