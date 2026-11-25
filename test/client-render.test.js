@@ -3226,8 +3226,22 @@ test('朋友白名单是独立 Sec，不埋在小闹钟与追问区里', () => {
   assert.ok(start > 0, '朋友白名单要独立成 Sec');
   const end = src.indexOf("h(Sec, { n: '07', title: '群聊主动", start);
   assert.ok(end > start, '独立 Sec 要在群聊主动之前收尾');
-  assert.ok(!/也可以主动搭话的朋友/.test(src.slice(0, start)), '不能再藏在 05 区');
+  assert.ok(!/h\(Sec, \{ n: '06', title: '也可以主动搭话的朋友'/.test(src.slice(0, start)), '不能再藏在 05 区');
   const block = src.slice(start, end);
   assert.match(block, /config\?\.speakUp\?\.allow/, '写的是 speakUp.allow（后端真读）');
   assert.match(block, /目的引擎/, '说明要点出生效前置条件');
+});
+
+test('目的引擎开关是显眼状态条，不是埋着的小 checkbox', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
+  const start = src.indexOf('启用目的引擎（P3 强调）');
+  assert.ok(start > 0, '要找到强调版开关');
+  const end = src.indexOf('每日上限 + 节奏预设', start);
+  const block = src.slice(start, end);
+  assert.match(block, /目的引擎：已开启/, '开启态要有大字状态');
+  assert.match(block, /目的引擎：未开启/, '关闭态也要有状态');
+  assert.match(block, /开启目的引擎/, '要有明显按钮');
+  assert.match(block, /var\(--ok\).*var\(--warn\)/s, '状态色要区分开关');
+  assert.match(block, /朋友.*也要开这个才生效/, '说明要点出朋友线前置条件');
+  assert.ok(!/h\('input',\s*\{\s*type: 'checkbox'/.test(block), '不再是小 checkbox');
 });

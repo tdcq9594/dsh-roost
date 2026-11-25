@@ -8478,26 +8478,33 @@ window.__ModuleLoader__.load({
           + '点「预览会想什么」拿本地聊天现算一轮（零副作用）；「立即试一次」会真发消息。'),
 
         /**
-         * 启用目的引擎（前端入口）：没有这个开关，用户只能去 JSON 段编辑器手改
-         * ext.purpose.enabled——否则 /purpose/fire 永远 409，整个运行时不可达。
+         * 启用目的引擎（P3 强调）：整条主链的入口开关，关着时 /purpose/fire 永远 409、
+         * 朋友线和日额度都不动。以前是个小 checkbox 埋在配置堆里，改成一眼可见的状态横条。
          */
-        h('div', { style: { marginBottom: 12, padding: '9px 10px', border: '1px solid var(--line-soft)', borderRadius: 8 } },
-          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, fontWeight: 600 } },
-            h('input', {
-              type: 'checkbox',
-              checked: config?.ext?.purpose?.enabled === true,
-              onChange: async (e) => {
-                const next = Boolean(e.target.checked)
-                const r = await saveCfg({
-                  ext: { ...(config?.ext || {}), purpose: { ...(config?.ext?.purpose || {}), enabled: next } },
-                })
-                toast(r?.ok === false ? (r.message || '没存上') : (next ? '目的引擎开了' : '目的引擎关了'))
-                await load()
-              },
-            }), '启用目的引擎'),
-          h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 5, lineHeight: 1.6 } },
-            '默认关。开了她才会按自己的目的主动找你（到点自己跑一轮 → 选目的 → 生成 → 投递）。'
-            + '与下面「主动搭话」的老引擎是两条路，别同时开。'),
+        h('div', { style: { marginBottom: 12, padding: '11px 12px', border: '1px solid var(--line-soft)', borderRadius: 8 } },
+          (() => {
+            const on = config?.ext?.purpose?.enabled === true
+            const accent = on ? 'var(--ok)' : 'var(--warn)'
+            return [
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+                h('span', { style: { width: 10, height: 10, borderRadius: '50', background: accent } }),
+                h('b', { style: { fontSize: 13.5, color: accent } }, on ? '目的引擎：已开启' : '目的引擎：未开启'),
+                h('button', {
+                  type: 'button', className: 'roost-btn', style: { marginLeft: 'auto', fontWeight: 600 },
+                  onClick: async () => {
+                    const next = !on
+                    const r = await saveCfg({
+                      ext: { ...(config?.ext || {}), purpose: { ...(config?.ext?.purpose || {}), enabled: next } },
+                    })
+                    toast(r?.ok === false ? (r.message || '没存上') : (next ? '目的引擎开了' : '目的引擎关了'))
+                    await load()
+                  },
+                }, on ? '关掉' : '开启目的引擎')),
+              h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 7, lineHeight: 1.6 } },
+                '这是整条主链的入口：开了她才会按自己的目的主动找你。' +
+                '「也可以主动搭话的朋友」也要开这个才生效。'),
+            ]
+          })(),
           /**
            * 每日上限 + 节奏预设（前端对照补齐）：对方在目的卡上能直接调，
            * 我方以前只能看。这里的修改落 ext.purpose，runner 的 cfg() 真读它。
